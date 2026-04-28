@@ -184,4 +184,18 @@ pub trait DeviceMemoryResource: Send + Sync {
     /// Bytes currently outstanding (live + retired-but-not-yet-freed).
     /// Used by tests and by the global budget adaptor.
     fn bytes_outstanding(&self) -> usize;
+
+    /// Drain any retired-but-not-yet-freed bytes whose underlying
+    /// CUDA work has completed. For synchronous backends this is a
+    /// no-op. For stream-ordered async backends this synchronizes
+    /// the streams that have queued `cuMemFreeAsync` calls and
+    /// re-counts `bytes_outstanding` accordingly.
+    ///
+    /// Callers that need an accurate budget reading after a burst
+    /// of asynchronous deallocations should call this before
+    /// reading `bytes_outstanding`. Calling on a synchronous backend
+    /// is harmless and free.
+    fn reap_pending(&self) -> ResourceResult<()> {
+        Ok(())
+    }
 }

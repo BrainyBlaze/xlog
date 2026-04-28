@@ -16,14 +16,18 @@
 //! ```
 //!
 //! Required resources:
-//!   * [`DirectCudaResource`] — cudarc direct allocation backend
-//!     (synchronous `CudaDevice::alloc::<u8>` / drop). Intended as
-//!     the candidate sanitizer/cert backend because pool suballocation
-//!     hides out-of-bounds access from Compute Sanitizer. The
-//!     sanitizer-visibility property is **unproven** until the M1
-//!     acceptance gate runs on a Compute-Sanitizer-supported host.
-//!   * `AsyncCudaResource` — `cuMemAllocAsync`/`cuMemFreeAsync` via the
-//!     stream pool; production default when supported.
+//!   * [`DirectCudaResource`] — cudarc default (non-pooled) allocation
+//!     backend (`CudaDeviceInner::alloc::<u8>` / drop, which on
+//!     async-alloc hosts forwards to `cuMemAllocAsync`). Candidate
+//!     for the sanitizer/cert role because there is no `xlog`-level
+//!     pool suballocation hiding out-of-bounds access from Compute
+//!     Sanitizer; the sanitizer-visibility property itself is
+//!     **unproven** until the M1 acceptance gate runs on a
+//!     Compute-Sanitizer-supported host. A genuine raw-driver
+//!     `cuMemAlloc`/`cuMemFree` backend is a separate future commit.
+//!   * `AsyncCudaResource` — `cuMemAllocAsync`/`cuMemFreeAsync`
+//!     bound to a caller-supplied stream via the stream pool;
+//!     production default when supported.
 //!   * `PoolResource` — performance tier, not part of this PR; gated
 //!     behind correctness certification of the direct/async backends.
 //!   * `DebugGuardResource` — optional canary/poison/quarantine layer.
@@ -52,4 +56,4 @@ pub use resource::{
     ResourceResult, StreamId,
 };
 pub use runtime::{XlogDeviceRuntime, MAX_DEVICE_ORDINALS};
-pub use stream_pool::{StreamPool, DEFAULT_MAX_STREAMS};
+pub use stream_pool::{StreamPool, StreamPoolError, DEFAULT_MAX_STREAMS};

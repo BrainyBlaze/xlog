@@ -1,26 +1,42 @@
-//! [`DirectCudaResource`] — cudarc direct allocation backend.
+//! [`DirectCudaResource`] — cudarc default (non-pooled) allocation
+//! backend.
 //!
 //! Each [`DeviceMemoryResource::allocate`] call goes through cudarc's
-//! synchronous `CudaDevice::alloc::<u8>(bytes)` (no pooling, no
-//! suballocation in this layer). Deallocate drops the underlying
-//! `CudaSlice<u8>`, which invokes `cuMemFree` via cudarc.
+//! `CudaDeviceInner::alloc::<u8>(bytes)`. cudarc itself routes that
+//! through `CudaStream::alloc` against the device's default stream,
+//! which forwards to **`cuMemAllocAsync` on contexts that support
+//! async-alloc** and falls back to a synchronous path otherwise.
+//! There is no `xlog`-level pooling or suballocation in this layer —
+//! every `allocate` is one cudarc call, every `deallocate` drops the
+//! resulting `CudaSlice<u8>` (which in turn invokes `cuMemFreeAsync`
+//! or the synchronous fallback that cudarc selected).
 //!
-//! **Sanitizer status: unproven.** The intent of keeping a
-//! non-pooled backend is that pool suballocation hides byte-level
-//! out-of-bounds access from Compute Sanitizer. This backend is the
-//! candidate for that role, but the **M1 acceptance gate** (manual,
-//! Compute-Sanitizer-supported host) has not been run yet. Do not
-//! describe this backend as "sanitizer-certified" until M1 has
-//! produced a captured negative-test pass.
+//! Earlier revisions described this backend as "raw `cuMemAlloc` /
+//! `cuMemFree`". That was wrong. A genuine raw-driver direct backend
+//! (bypassing cudarc entirely) is a separate work item; until that
+//! exists, this backend is the **non-pooled default** — not a synchronous
+//! `cuMemAlloc`/`cuMemFree` adaptor — and it does not by itself
+//! guarantee that pool suballocation is absent from the underlying
+//! call path on a given host.
 //!
-//! Stream-ordered semantics on the cudarc synchronous path are
-//! degenerate: `cuMemAlloc`/`cuMemFree` are device-wide and not
-//! stream-ordered, so reuse across streams is always safe assuming
-//! the caller has synchronized before deallocating. The backend
-//! records the `alloc_stream` field for downstream resources and
-//! tests; it does not enforce stream-ordering itself because the
-//! underlying API has none. That enforcement is `AsyncCudaResource`'s
-//! job (separate commit).
+//! **Sanitizer status: unproven.** The intent of having a non-pooled
+//! backend is that pool *suballocation* hides byte-level
+//! out-of-bounds access from Compute Sanitizer. The cudarc default
+//! path forwards to `cuMemAllocAsync`, which on async-alloc hosts is
+//! a stream-ordered allocator; whether that is sufficiently
+//! sanitizer-visible is exactly what the **M1 acceptance gate**
+//! (manual, Compute-Sanitizer-supported host) is supposed to
+//! confirm. Do not describe this backend as "sanitizer-certified"
+//! until M1 has produced a captured negative-test pass; until M1
+//! lands, treat the sanitizer role as "candidate, not certified".
+//!
+//! Stream-ordered semantics: the backend records the caller-supplied
+//! `alloc_stream` on the returned [`DeviceBlock`] but does **not**
+//! attempt to bind the underlying cudarc allocation to that stream —
+//! cudarc allocates against the device's default stream regardless.
+//! Stream-ordered allocation/free that honors a caller-supplied
+//! [`StreamId`] is `AsyncCudaResource`'s responsibility (separate
+//! commit).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -34,10 +50,12 @@ use super::resource::{
 };
 use crate::CudaDevice;
 
-/// Synchronous `cuMemAlloc` / `cuMemFree` adaptor. Holds the
+/// cudarc default (non-pooled) allocation adaptor. Holds the
 /// underlying `CudaSlice<u8>` allocations alive in an internal map so
 /// the runtime returns opaque [`DeviceBlock`]s to callers; on
-/// deallocate the slice is dropped, which invokes `cuMemFree`.
+/// deallocate the slice is dropped, which invokes whichever cudarc
+/// free path matches the alloc path (`cuMemFreeAsync` on async-alloc
+/// hosts, the synchronous fallback otherwise).
 ///
 /// Concurrency: `Send + Sync`. The internal map is protected by a
 /// `Mutex`. Allocate and deallocate are short-running map operations
@@ -89,15 +107,17 @@ impl DeviceMemoryResource for DirectCudaResource {
             ));
         }
 
-        // SAFETY: the device handle is valid for the lifetime of `self`,
-        // and `bytes > 0` is checked above. cudarc's `alloc::<u8>(bytes)`
-        // forwards to `cuMemAlloc(bytes)`. Failure is propagated as
+        // SAFETY: the device handle is valid for the lifetime of
+        // `self`, and `bytes > 0` is checked above. cudarc's
+        // `CudaDeviceInner::alloc::<u8>(bytes)` forwards to
+        // `cuMemAllocAsync` (against the device's default stream)
+        // when the context supports async-alloc, otherwise to the
+        // synchronous fallback. Failure is propagated as
         // `ResourceError::Driver`.
         let slice = unsafe {
-            self.device
-                .inner()
-                .alloc::<u8>(bytes)
-                .map_err(|e| ResourceError::Driver(format!("cuMemAlloc({}): {}", bytes, e)))?
+            self.device.inner().alloc::<u8>(bytes).map_err(|e| {
+                ResourceError::Driver(format!("cudarc alloc::<u8>({}): {}", bytes, e))
+            })?
         };
 
         // Extract the raw device pointer. The "sync" handle returned by
@@ -110,9 +130,10 @@ impl DeviceMemoryResource for DirectCudaResource {
 
         {
             let mut live = self.live.lock().expect("live map poisoned");
-            // Pointer collisions on a single CUDA driver are not
-            // possible while the prior allocation is still live;
-            // surface as a hard error if it ever happens.
+            // The CUDA driver does not return the same byte address
+            // for two simultaneously live allocations. If our map
+            // already has this pointer, it indicates a bookkeeping
+            // bug or driver behavior we want to surface loudly.
             if live.insert(ptr, slice).is_some() {
                 return Err(ResourceError::Driver(format!(
                     "DirectCudaResource: pointer collision on alloc ({:#x})",
@@ -153,10 +174,15 @@ impl DeviceMemoryResource for DirectCudaResource {
         self.bytes_outstanding
             .fetch_sub(block.bytes, Ordering::Relaxed);
 
-        // Dropping the CudaSlice<u8> calls `cuMemFree`. cuMemFree is
-        // device-wide and not stream-ordered; if the caller has work
-        // queued on a stream that touches this memory they were
-        // responsible for synchronizing before calling deallocate.
+        // Dropping the `CudaSlice<u8>` invokes whichever cudarc free
+        // path matches the alloc path: `cuMemFreeAsync` on the
+        // device's default stream when the context supports
+        // async-alloc, the synchronous fallback otherwise. Either
+        // way the caller-supplied `block.alloc_stream` is **not**
+        // honored here — only `AsyncCudaResource` does that. If the
+        // caller has work queued on a non-default stream that
+        // touches this memory they were responsible for
+        // synchronizing before calling deallocate.
         drop(slice);
         Ok(())
     }

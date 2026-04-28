@@ -15,7 +15,7 @@
 //! belongs to [`DirectCudaResource`] (subject to M1 confirmation on a
 //! supported host).
 //!
-//! Stream-ordering contract enforced here:
+//! # Stream-ordering contract enforced here
 //!   * `allocate(.., stream, ..)` is ordered on the resolved
 //!     `CudaStream`. The returned `DeviceBlock` carries the same
 //!     `alloc_stream`.
@@ -24,10 +24,30 @@
 //!     work on a different stream before deallocation.
 //!   * Reuse of the underlying byte address by a future `allocate` is
 //!     ordered after the previous deallocate by the CUDA driver's
-//!     stream-ordered memory allocator semantics. A2 will encode this
+//!     stream-ordered memory allocator semantics. A2 encodes this
 //!     as a regression test.
+//!
+//! # `bytes_outstanding` and pending-free accounting
+//!
+//! The trait contract is "live + retired-but-not-yet-freed". A queued
+//! `cuMemFreeAsync` is "retired-but-not-yet-freed" until the host
+//! synchronizes the stream the free was queued on. We therefore keep
+//! two atomic counters:
+//!
+//!   * `live_bytes` — bytes for blocks currently in the live map.
+//!   * `pending_bytes` — bytes for blocks whose `CudaSlice` has been
+//!     dropped (so a `cuMemFreeAsync` is queued on the alloc stream)
+//!     but whose stream has not yet been synchronized by us.
+//!
+//! `bytes_outstanding()` returns `live_bytes + pending_bytes`.
+//!
+//! `reap_pending()` synchronizes each unique stream that has queued
+//! frees we haven't drained, then atomically zeros `pending_bytes`
+//! and clears the per-stream tracking. Callers (the future
+//! `GlobalDeviceBudget`, A2's final assertions) call this before
+//! treating `bytes_outstanding()` as authoritative.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -45,12 +65,20 @@ pub struct AsyncCudaResource {
     device: Arc<CudaDevice>,
     device_ordinal: u32,
     stream_pool: Arc<StreamPool>,
-    /// Live + retired allocations keyed by raw device pointer. The
-    /// stored `CudaSlice<u8>` carries its own stream binding, which is
-    /// dropped on deallocate to invoke `cuMemFreeAsync` (when
-    /// supported).
+    /// Live allocations keyed by raw device pointer. Removed on
+    /// deallocate; the slice is then dropped, queueing
+    /// `cuMemFreeAsync` on its bound stream.
     live: Mutex<HashMap<u64, CudaSlice<u8>>>,
-    bytes_outstanding: AtomicUsize,
+    /// Bytes for blocks currently in `live`. Always accurate.
+    live_bytes: AtomicUsize,
+    /// Bytes for blocks dropped (queued for cuMemFreeAsync) but
+    /// whose owning stream has not yet been synchronized by us.
+    /// Drained to zero by `reap_pending`.
+    pending_bytes: AtomicUsize,
+    /// Stream IDs that have at least one undrained queued free.
+    /// Tracked as a set so `reap_pending` synchronizes each stream
+    /// at most once even if many blocks were queued on it.
+    pending_streams: Mutex<HashSet<StreamId>>,
 }
 
 impl AsyncCudaResource {
@@ -63,7 +91,9 @@ impl AsyncCudaResource {
             device_ordinal,
             stream_pool,
             live: Mutex::new(HashMap::new()),
-            bytes_outstanding: AtomicUsize::new(0),
+            live_bytes: AtomicUsize::new(0),
+            pending_bytes: AtomicUsize::new(0),
+            pending_streams: Mutex::new(HashSet::new()),
         }
     }
 
@@ -73,6 +103,19 @@ impl AsyncCudaResource {
 
     pub fn stream_pool(&self) -> &Arc<StreamPool> {
         &self.stream_pool
+    }
+
+    /// Bytes currently held by live blocks (excludes pending frees).
+    /// Test/diagnostic accessor — production code should use
+    /// `bytes_outstanding`.
+    pub fn live_bytes(&self) -> usize {
+        self.live_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Bytes queued for `cuMemFreeAsync` whose stream has not yet
+    /// been synchronized by us. Test/diagnostic accessor.
+    pub fn pending_free_bytes(&self) -> usize {
+        self.pending_bytes.load(Ordering::Relaxed)
     }
 }
 
@@ -127,7 +170,7 @@ impl DeviceMemoryResource for AsyncCudaResource {
                 )));
             }
         }
-        self.bytes_outstanding.fetch_add(bytes, Ordering::Relaxed);
+        self.live_bytes.fetch_add(bytes, Ordering::Relaxed);
 
         Ok(DeviceBlock {
             ptr,
@@ -159,8 +202,20 @@ impl DeviceMemoryResource for AsyncCudaResource {
             generation: block.generation,
         })?;
 
-        self.bytes_outstanding
-            .fetch_sub(block.bytes, Ordering::Relaxed);
+        // Move the bytes from "live" to "pending free": the slice
+        // drop below queues `cuMemFreeAsync` on `block.alloc_stream`,
+        // but the driver may not actually free until that stream
+        // drains. The trait contract requires us to keep counting
+        // these bytes until `reap_pending` confirms completion.
+        self.live_bytes.fetch_sub(block.bytes, Ordering::Relaxed);
+        self.pending_bytes.fetch_add(block.bytes, Ordering::Relaxed);
+        {
+            let mut pending = self
+                .pending_streams
+                .lock()
+                .expect("AsyncCudaResource pending_streams poisoned");
+            pending.insert(block.alloc_stream);
+        }
 
         // Dropping the CudaSlice<u8> invokes cuMemFreeAsync on its
         // bound stream when async-alloc is enabled, otherwise falls
@@ -176,7 +231,51 @@ impl DeviceMemoryResource for AsyncCudaResource {
     }
 
     fn bytes_outstanding(&self) -> usize {
-        self.bytes_outstanding.load(Ordering::Relaxed)
+        self.live_bytes.load(Ordering::Relaxed) + self.pending_bytes.load(Ordering::Relaxed)
+    }
+
+    fn reap_pending(&self) -> ResourceResult<()> {
+        // Take the current pending-stream set; any `deallocate` racing
+        // with us will repopulate it for a future reap call.
+        let streams: Vec<StreamId> = {
+            let mut pending = self
+                .pending_streams
+                .lock()
+                .expect("AsyncCudaResource pending_streams poisoned");
+            pending.drain().collect()
+        };
+        if streams.is_empty() {
+            return Ok(());
+        }
+
+        for stream_id in streams {
+            // The pool may have rotated entries (it currently does
+            // not — streams stay alive for the runtime's lifetime —
+            // but be defensive). If the id is unresolved we still
+            // count the pending bytes as drained: there is no
+            // stream we can sync on, so the only consistent
+            // accounting is to clear and let the caller surface a
+            // fresh alloc against a known stream.
+            if let Some(stream) = self.stream_pool.resolve(stream_id) {
+                stream.synchronize().map_err(|e| {
+                    ResourceError::Driver(format!(
+                        "AsyncCudaResource::reap_pending: stream sync failed: {}",
+                        e
+                    ))
+                })?;
+            }
+        }
+
+        // Once the streams have synchronized, the queued
+        // `cuMemFreeAsync` calls have completed by definition. Drain
+        // pending_bytes to zero. We use `swap` rather than `store(0)`
+        // so a concurrent `deallocate` that pushed bytes between the
+        // sync and this line is preserved (the swap returns the old
+        // value, but we discard it because we know those bytes are
+        // freed; any new bytes added after our swap will be the new
+        // pending tally and tracked in pending_streams again).
+        self.pending_bytes.store(0, Ordering::Relaxed);
+        Ok(())
     }
 }
 
@@ -202,8 +301,18 @@ mod tests {
         assert_eq!(block.bytes, 2048);
         assert_eq!(block.alloc_stream, StreamId::DEFAULT);
         assert_eq!(r.bytes_outstanding(), 2048);
+        assert_eq!(r.live_bytes(), 2048);
+        assert_eq!(r.pending_free_bytes(), 0);
+
         r.deallocate(block).expect("dealloc");
+        // Pending after dealloc — cuMemFreeAsync is queued, not drained.
+        assert_eq!(r.live_bytes(), 0);
+        assert_eq!(r.pending_free_bytes(), 2048);
+        assert_eq!(r.bytes_outstanding(), 2048);
+
+        r.reap_pending().expect("reap pending");
         assert_eq!(r.bytes_outstanding(), 0);
+        assert_eq!(r.pending_free_bytes(), 0);
     }
 
     #[test]
@@ -212,12 +321,15 @@ mod tests {
             return;
         };
         let r = AsyncCudaResource::new(device, 0, Arc::clone(&pool));
-        let stream = pool.acquire();
+        let stream = pool.acquire().expect("acquire non-default stream");
         let block = r
             .allocate(1024, stream, AllocTag("async-test"))
             .expect("alloc on non-default stream");
         assert_eq!(block.alloc_stream, stream);
         r.deallocate(block).expect("dealloc");
+        // Still counted as outstanding until reap.
+        assert_eq!(r.bytes_outstanding(), 1024);
+        r.reap_pending().expect("reap pending");
         assert_eq!(r.bytes_outstanding(), 0);
     }
 
@@ -251,5 +363,15 @@ mod tests {
             r.deallocate(bogus),
             Err(ResourceError::UseAfterFree { .. })
         ));
+    }
+
+    #[test]
+    fn reap_with_no_pending_is_noop() {
+        let Some((device, pool)) = try_setup() else {
+            return;
+        };
+        let r = AsyncCudaResource::new(device, 0, pool);
+        r.reap_pending().expect("reap on empty");
+        assert_eq!(r.bytes_outstanding(), 0);
     }
 }

@@ -10,6 +10,20 @@
 //! Singleton lifetime: leaked-Box, so the returned `&'static` borrows
 //! are valid for the process. No teardown on drop — appropriate for a
 //! GPU device runtime that should outlive any single executor.
+//!
+//! # Initialization race semantics
+//!
+//! Earlier revisions used `OnceLock::get_or_init(|| leaked_box)`
+//! after building the runtime outside the lock. That pattern leaked
+//! the loser's runtime (and its CUDA context handle) when two
+//! threads raced on the first access for an ordinal.
+//!
+//! This module now uses an explicit per-ordinal `Mutex` plus
+//! `OnceLock`: callers fast-path on `OnceLock::get()`, and on a miss
+//! take the per-ordinal mutex, double-check the `OnceLock`, and only
+//! the winner inside the mutex builds and stores the runtime. The
+//! mutex is held only across the build, so subsequent reads are still
+//! lock-free.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -28,27 +42,17 @@ use crate::CudaDevice;
 pub const MAX_DEVICE_ORDINALS: usize = 16;
 
 /// Per-ordinal singleton table. Each slot is initialized at most once
-/// via `OnceLock`. Slots are leaked Boxes — the runtime lives for the
-/// process's lifetime, mirroring how the underlying CUDA context
-/// behaves.
-static RUNTIMES: [OnceLock<&'static XlogDeviceRuntime>; MAX_DEVICE_ORDINALS] = [
-    OnceLock::new(),
-    OnceLock::new(),
-    OnceLock::new(),
-    OnceLock::new(),
-    OnceLock::new(),
-    OnceLock::new(),
-    OnceLock::new(),
-    OnceLock::new(),
-    OnceLock::new(),
-    OnceLock::new(),
-    OnceLock::new(),
-    OnceLock::new(),
-    OnceLock::new(),
-    OnceLock::new(),
-    OnceLock::new(),
-    OnceLock::new(),
-];
+/// via `OnceLock`, gated by [`INIT_LOCKS`] so failed initialization
+/// does not leak partial state.
+static RUNTIMES: [OnceLock<&'static XlogDeviceRuntime>; MAX_DEVICE_ORDINALS] =
+    [const { OnceLock::new() }; MAX_DEVICE_ORDINALS];
+
+/// Per-ordinal initialization mutex. Only the holder may build and
+/// store a runtime in [`RUNTIMES`]. Held across the device-open and
+/// resource-construction calls so concurrent first callers do not
+/// race-leak loser runtimes.
+static INIT_LOCKS: [Mutex<()>; MAX_DEVICE_ORDINALS] =
+    [const { Mutex::new(()) }; MAX_DEVICE_ORDINALS];
 
 /// Per-CUDA-ordinal device-runtime singleton.
 ///
@@ -71,6 +75,13 @@ impl XlogDeviceRuntime {
     /// Errors:
     ///   * `XlogError::Kernel` if `ordinal >= MAX_DEVICE_ORDINALS`.
     ///   * `XlogError::Kernel` if the CUDA device cannot be opened.
+    ///
+    /// Concurrency: at most one thread builds the runtime for a
+    /// given ordinal. Other concurrent first callers block on the
+    /// per-ordinal init mutex until the winner publishes via
+    /// `OnceLock::set`, after which they observe the published
+    /// runtime via the inside-mutex double-check or the lock-free
+    /// fast path on subsequent calls.
     pub fn try_get(ordinal: u32) -> Result<&'static XlogDeviceRuntime> {
         let idx = ordinal as usize;
         if idx >= MAX_DEVICE_ORDINALS {
@@ -79,16 +90,27 @@ impl XlogDeviceRuntime {
                 ordinal, MAX_DEVICE_ORDINALS
             )));
         }
+        // Fast path: another thread already initialized this slot.
         if let Some(rt) = RUNTIMES[idx].get() {
             return Ok(*rt);
         }
-        // First access for this ordinal: build the runtime and store
-        // it. `get_or_init` serializes initialization, but the device
-        // open and resource construction may fail. We use a
-        // build-then-store pattern: try to build, and only call
-        // `get_or_init` with the leaked reference. If the build fails,
-        // surface the error so the caller can retry on a different
-        // ordinal.
+
+        // Slow path: take the per-ordinal init mutex. Only one
+        // thread per ordinal builds the runtime; the rest wait here
+        // and observe the published value on the double-check below.
+        let _guard = INIT_LOCKS[idx]
+            .lock()
+            .expect("XlogDeviceRuntime init mutex poisoned");
+
+        // Double-check inside the lock: a previous holder may have
+        // initialized while we were waiting for the mutex.
+        if let Some(rt) = RUNTIMES[idx].get() {
+            return Ok(*rt);
+        }
+
+        // We are the first writer for this ordinal. Build the
+        // runtime; if any step fails, return the error and leave
+        // RUNTIMES[idx] uninitialized so the next caller can retry.
         let device = Arc::new(CudaDevice::new(ordinal as usize).map_err(|e| {
             XlogError::Kernel(format!(
                 "XlogDeviceRuntime: failed to open device {}: {}",
@@ -106,13 +128,15 @@ impl XlogDeviceRuntime {
         });
         let leaked: &'static XlogDeviceRuntime = Box::leak(runtime);
 
-        // Race: another thread may have initialized this slot between
-        // our `get` check and here. `get_or_init` returns the winner;
-        // if our box wasn't installed the leaked allocation becomes
-        // dead, but the device handle was the only resource cost and
-        // it survives via `Arc::clone` in our box's path.
-        let stored = RUNTIMES[idx].get_or_init(|| leaked);
-        Ok(*stored)
+        // We hold INIT_LOCKS[idx] and confirmed RUNTIMES[idx] is
+        // empty under that lock, so this `set` cannot fail. Fall
+        // through to a hard panic if it does — it indicates a
+        // process-internal bug we cannot recover from.
+        RUNTIMES[idx]
+            .set(leaked)
+            .map_err(|_| ())
+            .expect("XlogDeviceRuntime: OnceLock::set raced under INIT_LOCKS — bug");
+        Ok(leaked)
     }
 
     /// CUDA ordinal this runtime serves.
@@ -161,6 +185,17 @@ impl XlogDeviceRuntime {
             .expect("device-runtime resource poisoned")
             .bytes_outstanding()
     }
+
+    /// Drain pending async frees on the underlying resource. No-op
+    /// for synchronous backends. Callers that need an accurate
+    /// `bytes_outstanding` reading after a burst of asynchronous
+    /// deallocations should call this first.
+    pub fn reap_pending(&self) -> ResourceResult<()> {
+        self.resource
+            .lock()
+            .expect("device-runtime resource poisoned")
+            .reap_pending()
+    }
 }
 
 #[cfg(test)]
@@ -193,6 +228,7 @@ mod tests {
         assert_eq!(block.bytes, 2048);
         assert_eq!(rt.bytes_outstanding(), before + 2048);
         rt.deallocate(block).expect("dealloc");
+        rt.reap_pending().expect("reap pending");
         assert_eq!(rt.bytes_outstanding(), before);
     }
 

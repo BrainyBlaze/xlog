@@ -110,11 +110,14 @@ fn a2_alloc_write_free_realloc_no_host_sync_between_phases() {
     // Acquire a real non-default stream. If the pool falls back to
     // DEFAULT (e.g., fork failed on this host) the test cannot prove
     // stream-ordered reuse — bail rather than assert a falsehood.
-    let stream_id = pool.acquire();
-    if stream_id == StreamId::DEFAULT {
-        eprintln!("Skipping A2: StreamPool fell back to DEFAULT (fork unavailable)");
-        return;
-    }
+    let stream_id = match pool.acquire() {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("Skipping A2: StreamPool::acquire failed: {}", e);
+            return;
+        }
+    };
+    assert_ne!(stream_id, StreamId::DEFAULT);
     let stream = pool
         .resolve(stream_id)
         .expect("acquired StreamId must resolve");
@@ -136,9 +139,17 @@ fn a2_alloc_write_free_realloc_no_host_sync_between_phases() {
     }
 
     // Phase 3: deallocate A. Drop runs cuMemFreeAsync on the same
-    // stream — ordered after the queued write.
+    // stream — ordered after the queued write. The freed bytes
+    // remain counted in `bytes_outstanding` until the queued free
+    // drains (i.e., until we either sync the stream or call
+    // `reap_pending`); confirming this is the trait contract for
+    // async backends.
     resource.deallocate(block_a).expect("dealloc A");
-    assert_eq!(resource.bytes_outstanding(), 0);
+    assert_eq!(
+        resource.bytes_outstanding(),
+        BYTES,
+        "queued cuMemFreeAsync must remain counted as pending until reaped"
+    );
 
     // Phase 4: allocate B on the same stream. The driver may return
     // the same byte address as A; if so, reuse must be ordered
@@ -172,6 +183,10 @@ fn a2_alloc_write_free_realloc_no_host_sync_between_phases() {
     );
 
     resource.deallocate(block_b).expect("dealloc B");
+    // Final reap drains both A's and B's queued frees (their stream
+    // has already been synced once for the readback; reap re-syncs
+    // and clears the pending counter).
+    resource.reap_pending().expect("reap pending");
     assert_eq!(resource.bytes_outstanding(), 0);
 }
 
@@ -186,11 +201,17 @@ fn a2_repeated_alloc_free_realloc_on_same_stream_stays_stream_ordered() {
     };
     let resource = AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool));
 
-    let stream_id = pool.acquire();
-    if stream_id == StreamId::DEFAULT {
-        eprintln!("Skipping A2 reuse stress: no non-default stream");
-        return;
-    }
+    let stream_id = match pool.acquire() {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!(
+                "Skipping A2 reuse stress: StreamPool::acquire failed: {}",
+                e
+            );
+            return;
+        }
+    };
+    assert_ne!(stream_id, StreamId::DEFAULT);
     let stream = pool
         .resolve(stream_id)
         .expect("acquired StreamId must resolve");
@@ -240,5 +261,6 @@ fn a2_repeated_alloc_free_realloc_on_same_stream_stays_stream_ordered() {
     );
 
     resource.deallocate(current).expect("dealloc final");
+    resource.reap_pending().expect("reap pending");
     assert_eq!(resource.bytes_outstanding(), 0);
 }

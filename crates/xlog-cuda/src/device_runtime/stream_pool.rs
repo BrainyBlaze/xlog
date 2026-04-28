@@ -3,16 +3,20 @@
 //!
 //! The runtime hands out stable [`StreamId`]s to callers and resolves
 //! them to live `cudarc::driver::CudaStream` handles internally. The
-//! pool grows on demand: `acquire` returns an existing stream if one
-//! is available, otherwise creates and stores a new non-blocking
-//! stream on the device.
+//! pool grows on demand: `acquire` returns a fresh non-blocking stream
+//! up to `max_streams`. Streams are never returned to a free-list —
+//! they stay alive for the runtime's lifetime so [`StreamId`] handles
+//! remain valid for correlated allocate/launch/deallocate sequences.
 //!
-//! Streams are never returned to a free-list — they stay alive for
-//! the runtime's lifetime so [`StreamId`] handles remain valid for
-//! correlated allocate/launch/deallocate sequences. The pool's
-//! growth is bounded by `max_streams` (defaults to a small constant
-//! tuned for the v0.6 baseline; raise via the runtime config when
-//! the executor needs more concurrency).
+//! # Failure semantics
+//!
+//! `acquire` returns [`Result`]. On capacity exhaustion or
+//! `cudarc::driver::CudaStream::fork` failure the call returns
+//! [`StreamPoolError`] rather than silently collapsing onto the
+//! default stream — that fall-back was a footgun: it broke
+//! stream-ordered isolation (a "non-default" allocation could end up
+//! on the legacy default stream) without surfacing the failure to
+//! the caller.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -27,6 +31,34 @@ use crate::CudaDevice;
 /// so 16 leaves substantial headroom without burning device-state on
 /// idle streams.
 pub const DEFAULT_MAX_STREAMS: usize = 16;
+
+/// Errors returned by [`StreamPool::acquire`]. Both variants are hard
+/// failures; callers must not silently substitute [`StreamId::DEFAULT`].
+#[derive(Debug)]
+pub enum StreamPoolError {
+    /// Pool already holds `max` non-default streams. Caller should
+    /// either reuse an existing acquired id or raise the pool cap via
+    /// the runtime config.
+    Capacity { max: usize },
+    /// `CudaStream::fork` returned an error. Carries the wrapped
+    /// driver message.
+    ForkFailed(String),
+}
+
+impl std::fmt::Display for StreamPoolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Capacity { max } => {
+                write!(f, "stream pool at capacity (max={})", max)
+            }
+            Self::ForkFailed(msg) => {
+                write!(f, "stream fork failed: {}", msg)
+            }
+        }
+    }
+}
+
+impl std::error::Error for StreamPoolError {}
 
 /// Pool of owned non-blocking CUDA streams.
 pub struct StreamPool {
@@ -55,32 +87,36 @@ impl StreamPool {
     }
 
     /// Acquire a non-default stream id, growing the pool up to
-    /// `max_streams`. Each call returns a distinct [`StreamId`]
-    /// backed by an owned non-blocking `cudarc::driver::CudaStream`
-    /// forked from the device's default stream. When the pool is at
-    /// capacity, returns [`StreamId::DEFAULT`] (which resolves to
-    /// the device default stream) so callers can fall back without
-    /// failing.
+    /// `max_streams`. Each successful call returns a distinct
+    /// [`StreamId`] backed by an owned non-blocking
+    /// `cudarc::driver::CudaStream` forked from the device's default
+    /// stream.
+    ///
+    /// # Errors
+    ///   * [`StreamPoolError::Capacity`] if the pool already holds
+    ///     `max_streams` non-default streams.
+    ///   * [`StreamPoolError::ForkFailed`] if the underlying
+    ///     `CudaStream::fork` call failed.
     ///
     /// Streams are never returned to a free-list; they remain valid
-    /// for the runtime's lifetime so existing [`StreamId`] handles
-    /// keep resolving.
-    pub fn acquire(&self) -> StreamId {
+    /// for the runtime's lifetime so previously returned [`StreamId`]
+    /// handles keep resolving.
+    pub fn acquire(&self) -> Result<StreamId, StreamPoolError> {
         let mut streams = self.streams.lock().expect("stream pool poisoned");
         if streams.len() >= self.max_streams {
-            return StreamId::DEFAULT;
+            return Err(StreamPoolError::Capacity {
+                max: self.max_streams,
+            });
         }
-        // Fork a non-blocking stream from the device's default stream.
-        // On failure we fall back to the default-stream id.
         match self.device.inner().stream().fork() {
             Ok(handle) => {
                 streams.push(handle);
                 // Index 0 is reserved for DEFAULT; non-default
                 // streams start at id 1 and correspond to
                 // `streams[id - 1]`.
-                StreamId(streams.len() as u32)
+                Ok(StreamId(streams.len() as u32))
             }
-            Err(_) => StreamId::DEFAULT,
+            Err(e) => Err(StreamPoolError::ForkFailed(e.to_string())),
         }
     }
 
@@ -110,8 +146,7 @@ impl StreamPool {
         &self.device
     }
 
-    /// Maximum streams the pool will create on demand. Currently
-    /// advisory; enforcement lands with the async backend.
+    /// Maximum streams the pool will create on demand.
     pub fn max_streams(&self) -> usize {
         self.max_streams
     }
@@ -131,8 +166,8 @@ mod tests {
             return;
         };
         let pool = StreamPool::new(device, 4);
-        let a = pool.acquire();
-        let b = pool.acquire();
+        let a = pool.acquire().expect("first acquire");
+        let b = pool.acquire().expect("second acquire");
         assert_ne!(a, StreamId::DEFAULT);
         assert_ne!(b, StreamId::DEFAULT);
         assert_ne!(a, b, "consecutive acquire calls must yield distinct ids");
@@ -140,17 +175,17 @@ mod tests {
     }
 
     #[test]
-    fn acquire_falls_back_to_default_at_capacity() {
+    fn acquire_returns_capacity_error_at_max() {
         let Some(device) = try_device() else {
             return;
         };
         let pool = StreamPool::new(device, 1);
-        let _first = pool.acquire();
-        let second = pool.acquire();
-        assert_eq!(
-            second,
-            StreamId::DEFAULT,
-            "pool must fall back to DEFAULT once max_streams is hit"
+        let _first = pool.acquire().expect("first acquire under cap");
+        let err = pool.acquire();
+        assert!(
+            matches!(err, Err(StreamPoolError::Capacity { max: 1 })),
+            "expected Capacity error once max_streams hit, got {:?}",
+            err
         );
     }
 
@@ -169,7 +204,7 @@ mod tests {
             return;
         };
         let pool = StreamPool::new(device, 4);
-        let id = pool.acquire();
+        let id = pool.acquire().expect("acquire");
         assert_ne!(id, StreamId::DEFAULT);
         assert!(pool.resolve(id).is_some());
     }
