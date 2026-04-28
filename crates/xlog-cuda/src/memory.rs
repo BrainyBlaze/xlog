@@ -373,6 +373,42 @@ impl GpuMemoryManager {
         }
 
         if let Some(runtime) = &self.runtime {
+            // Zero-byte allocations (empty Vec, empty buffer) are
+            // legitimate in production code. The v0.6 resource
+            // stack rejects zero-byte requests by contract
+            // (DirectCudaResource and AsyncCudaResource both error
+            // on `bytes == 0` because `cuMemAlloc(0)` is undefined
+            // behavior in the CUDA driver). Cudarc's `alloc::<T>(0)`
+            // does the right thing — returns an empty CudaSlice<T>
+            // without calling the driver — so route zero-byte
+            // requests through the legacy path even when a runtime
+            // is attached. The resulting slice carries
+            // `Backing::Cudarc`; its drop is a no-op against
+            // cudarc's empty handle.
+            //
+            // `len == 0` and `bytes == 0` are equivalent here only
+            // if `T` has nonzero size (the common case). For
+            // zero-sized types (rare but valid in Rust) `bytes`
+            // would also be 0 regardless of `len`; the cudarc empty
+            // path handles both consistently.
+            if bytes == 0 {
+                let slice = unsafe {
+                    self.device.inner().alloc::<T>(len).map_err(|e| {
+                        self.allocated.fetch_sub(bytes, Ordering::SeqCst);
+                        XlogError::Kernel(format!("GPU allocation failed (zero-byte): {}", e))
+                    })?
+                };
+                let (raw_ptr, sync) = DevicePtr::device_ptr(&slice, slice.stream());
+                std::mem::forget(sync);
+                return Ok(TrackedCudaSlice {
+                    bytes,
+                    manager: Arc::clone(self),
+                    inner: ManuallyDrop::new(slice),
+                    raw_ptr,
+                    backing: Backing::Cudarc,
+                });
+            }
+
             // v0.6 path: route through the runtime resource stack.
             let bytes_usize = bytes as usize;
             let block = match runtime.allocate(bytes_usize, StreamId::DEFAULT, AllocTag::UNTAGGED) {

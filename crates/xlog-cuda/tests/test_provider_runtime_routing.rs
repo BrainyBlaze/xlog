@@ -388,6 +388,42 @@ fn legacy_alloc_path_unchanged_when_no_runtime_attached() {
 }
 
 #[test]
+fn zero_byte_alloc_with_runtime_attached_bypasses_runtime() {
+    // Production code makes zero-byte allocations (empty Vecs,
+    // empty buffers). The v0.6 resource stack rejects bytes == 0
+    // by contract because cuMemAlloc(0) is UB. Cudarc's
+    // alloc::<T>(0) is well-defined (returns an empty CudaSlice
+    // without calling the driver), so GpuMemoryManager routes
+    // zero-byte requests through the legacy path even when a
+    // runtime is attached. This test pins that bypass: the
+    // runtime sink and counter must remain at zero for an empty
+    // alloc, while the slice itself is still functional.
+    let Some((manager, runtime, sink)) = build_stack() else {
+        return;
+    };
+
+    let baseline_runtime = runtime.bytes_outstanding();
+    let baseline_local = manager.allocated_bytes();
+    let baseline_records = sink.len();
+
+    let empty = manager
+        .alloc::<u32>(0)
+        .expect("zero-byte alloc must succeed via runtime-attached manager");
+    assert_eq!(empty.len(), 0);
+
+    // No runtime activity, no log record. The local counter
+    // accounts for 0 bytes either way.
+    assert_eq!(runtime.bytes_outstanding(), baseline_runtime);
+    assert_eq!(manager.allocated_bytes(), baseline_local);
+    assert_eq!(sink.len(), baseline_records);
+
+    drop(empty);
+    assert_eq!(runtime.bytes_outstanding(), baseline_runtime);
+    assert_eq!(manager.allocated_bytes(), baseline_local);
+    assert_eq!(sink.len(), baseline_records);
+}
+
+#[test]
 fn alloc_raw_without_runtime_returns_kernel_error() {
     // Manager constructed via legacy `new` — no runtime attached.
     // alloc_raw must surface a clear error rather than silently

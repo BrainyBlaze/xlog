@@ -28,6 +28,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use xlog_core::{MemoryBudget, ScalarType, Schema};
+use xlog_cuda::device_runtime::{
+    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, InMemorySink, LoggingResource,
+    LoggingSink, StreamPool, XlogDeviceRuntime,
+};
 use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_logic::Compiler;
 use xlog_runtime::Executor;
@@ -36,11 +40,93 @@ use xlog_runtime::Executor;
 // Test Infrastructure
 // =============================================================================
 
+/// Default budget for both legacy and runtime fixtures. Sized to
+/// the same 1 GiB the legacy path has always used, applied to the
+/// local manager budget AND the runtime-side `GlobalDeviceBudget`.
+const TEST_BUDGET_BYTES: usize = 1024 * 1024 * 1024;
+
+/// Returns true when the test process should construct providers
+/// through the v0.6 device runtime instead of the legacy cudarc
+/// path. Controlled by `XLOG_USE_DEVICE_RUNTIME`: any non-empty
+/// value other than `"0"` / `"false"` enables the runtime fixture.
+///
+/// The default is **off** so behavior with the env var unset is
+/// bit-for-bit identical to pre-migration, matching the v0.6
+/// ground rule of not flipping `CudaKernelProvider` defaults
+/// globally.
+fn use_device_runtime_fixture() -> bool {
+    match std::env::var("XLOG_USE_DEVICE_RUNTIME") {
+        Ok(v) => {
+            let v = v.trim();
+            !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+        }
+        Err(_) => false,
+    }
+}
+
+/// Single fixture all tests in this file use. Branches on
+/// [`use_device_runtime_fixture`] so the entire test surface
+/// runs against either the legacy cudarc allocator or the v0.6
+/// runtime stack without per-test code changes.
 fn create_test_executor() -> Option<(Executor, Arc<CudaKernelProvider>)> {
+    if use_device_runtime_fixture() {
+        create_test_executor_with_runtime()
+    } else {
+        create_test_executor_legacy()
+    }
+}
+
+fn create_test_executor_legacy() -> Option<(Executor, Arc<CudaKernelProvider>)> {
     let device = Arc::new(CudaDevice::new(0).ok()?);
-    let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
+    let budget = MemoryBudget::with_limit(TEST_BUDGET_BYTES as u64);
     let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
     let provider = Arc::new(CudaKernelProvider::new(device, memory).ok()?);
+    let executor = Executor::new(provider.clone());
+    Some((executor, provider))
+}
+
+/// Opt-in v0.6 fixture: composes the recommended runtime stack —
+/// `GlobalDeviceBudget(LoggingResource(AsyncCudaResource))` — and
+/// builds the provider via `GpuMemoryManager::with_runtime` +
+/// `CudaKernelProvider::with_runtime`. Returns the same shape as
+/// [`create_test_executor_legacy`], so all call sites in this
+/// file route through the runtime when the env var is set without
+/// any per-test code change.
+///
+/// The `InMemorySink` is wired and immediately dropped at the end
+/// of construction — `real_world_tests` asserts on Datalog query
+/// results, not on allocation traces, so capturing records is
+/// unnecessary. The sink exists so the runtime stack matches the
+/// production-recommended composition the allocator is being
+/// certified against.
+fn create_test_executor_with_runtime() -> Option<(Executor, Arc<CudaKernelProvider>)> {
+    let device = Arc::new(CudaDevice::new(0).ok()?);
+    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+    let sink: Arc<InMemorySink> = Arc::new(InMemorySink::new());
+
+    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
+        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    );
+    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
+        async_resource,
+        sink as Arc<dyn LoggingSink>,
+    ));
+    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
+        Box::new(GlobalDeviceBudget::new(logging, TEST_BUDGET_BYTES));
+    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
+        Arc::clone(&device),
+        0,
+        Arc::clone(&pool),
+        budget,
+    ));
+
+    let memory = Arc::new(GpuMemoryManager::with_runtime(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(TEST_BUDGET_BYTES as u64),
+        Arc::clone(&runtime),
+    ));
+    let provider =
+        Arc::new(CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).ok()?);
     let executor = Executor::new(provider.clone());
     Some((executor, provider))
 }
