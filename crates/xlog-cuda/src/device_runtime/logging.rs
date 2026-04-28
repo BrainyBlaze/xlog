@@ -111,7 +111,17 @@ fn classify_error(e: &ResourceError) -> &'static str {
 
 fn truncate(mut s: String, cap: usize) -> String {
     if s.len() > cap {
-        s.truncate(cap);
+        // String::truncate panics if `cap` is not on a UTF-8 char
+        // boundary. Error messages can include non-ASCII payloads
+        // (driver strings, user tags, etc.), so walk back to the
+        // previous boundary before truncating. This preserves the
+        // decorator's "never panics" guarantee — the logging path
+        // must not crash the allocator.
+        let mut end = cap;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s.truncate(end);
         s.push_str("…");
     }
     s
@@ -244,6 +254,41 @@ impl LoggingSink for InMemorySink {
             .lock()
             .expect("InMemorySink poisoned")
             .push(record);
+        Ok(())
+    }
+}
+
+/// Discard sink: accepts every record and drops it. Use this when
+/// the test or production stack needs the runtime composition to
+/// match `LoggingResource(...)` shape but does **not** need to
+/// retain log records.
+///
+/// `InMemorySink` keeps every record alive for as long as the sink
+/// (and therefore the wrapping `LoggingResource`) lives. In long-
+/// running stress loops that compose
+/// `LoggingResource(InMemorySink)` once and reuse it across many
+/// iterations, that buffer grows unbounded — measurable memory and
+/// CPU overhead even if no test reads the records.
+/// `NullSink` solves that by discarding the record without
+/// allocating; the decorator still constructs the `LogRecord`
+/// (one stack-allocated value per call), but no per-record retention
+/// occurs.
+pub struct NullSink;
+
+impl NullSink {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for NullSink {
+    fn default() -> Self {
+        Self
+    }
+}
+
+impl LoggingSink for NullSink {
+    fn emit(&self, _record: LogRecord) -> Result<(), SinkError> {
         Ok(())
     }
 }
@@ -547,5 +592,55 @@ mod tests {
 
         assert_eq!(r.device_ordinal(), 3);
         assert_eq!(r.bytes_outstanding(), 0);
+    }
+
+    #[test]
+    fn truncate_handles_non_ascii_at_cap_without_panicking() {
+        // `String::truncate(cap)` would panic if `cap` lands inside
+        // a multibyte UTF-8 sequence; the boundary-safe `truncate`
+        // helper must walk back to the previous boundary and
+        // succeed instead. Regression for the logging-path
+        // panic the decorator's "never panics on telemetry"
+        // contract requires.
+        // "héllo": h, é (2 bytes), l, l, o = 6 bytes total. Cap=2
+        // would slice into é if naive.
+        let s = String::from("héllo");
+        let out = truncate(s, 2);
+        assert!(out.starts_with('h'));
+        assert!(out.ends_with('…'));
+
+        // Cap larger than string is a no-op.
+        let out = truncate(String::from("ok"), 100);
+        assert_eq!(out, "ok");
+
+        // Cap = 0 produces just the ellipsis.
+        let out = truncate(String::from("héllo"), 0);
+        assert_eq!(out, "…");
+
+        // Cap on a valid char boundary does not regress the simple
+        // path.
+        let out = truncate(String::from("abcdefgh"), 3);
+        assert_eq!(out, "abc…");
+    }
+
+    #[test]
+    fn null_sink_accepts_records_without_retention() {
+        let sink = NullSink::new();
+        let rec = LogRecord {
+            action: LogAction::Allocate,
+            device_ordinal: 0,
+            stream_id: Some(StreamId::DEFAULT),
+            ptr: Some(0xdead_beef),
+            bytes: Some(64),
+            tag: Some(AllocTag::UNTAGGED),
+            generation: Some(Generation::next()),
+            thread_id: 0,
+            order_counter: 1,
+            timestamp_nanos: 0,
+            result: LogResult::Ok,
+        };
+        sink.emit(rec).expect("NullSink never errors");
+        // No retention surface to inspect — the contract is that
+        // emit succeeded and nothing else happened.
     }
 }

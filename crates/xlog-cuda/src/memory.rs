@@ -410,7 +410,24 @@ impl GpuMemoryManager {
             }
 
             // v0.6 path: route through the runtime resource stack.
-            let bytes_usize = bytes as usize;
+            // Convert checked: `bytes` is u64 from
+            // `len * size_of::<T>()`, and the runtime trait surface
+            // uses `usize`. On 64-bit targets this is lossless; on
+            // 32-bit a stray `bytes as usize` would silently
+            // truncate and desync manager accounting (which still
+            // tracks the full u64) from the runtime's view. Surface
+            // the overflow as `XlogError::Kernel` and roll back the
+            // local reservation so the manager stays consistent.
+            let bytes_usize = match usize::try_from(bytes) {
+                Ok(v) => v,
+                Err(_) => {
+                    self.allocated.fetch_sub(bytes, Ordering::SeqCst);
+                    return Err(XlogError::Kernel(format!(
+                        "GPU allocation size {} bytes exceeds platform usize",
+                        bytes
+                    )));
+                }
+            };
             let block = match runtime.allocate(bytes_usize, StreamId::DEFAULT, AllocTag::UNTAGGED) {
                 Ok(b) => b,
                 Err(e) => {

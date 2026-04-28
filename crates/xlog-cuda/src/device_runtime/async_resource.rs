@@ -200,12 +200,21 @@ impl DeviceMemoryResource for AsyncCudaResource {
                 .live
                 .lock()
                 .expect("AsyncCudaResource live map poisoned");
-            if live.insert(ptr, slice).is_some() {
+            // Use `contains_key` then `insert` so a (theoretical)
+            // pointer collision returns `Err` without mutating the
+            // map. The `live.insert(ptr, slice).is_some()` pattern
+            // would replace the existing entry, drop the old slice
+            // (queueing cuMemFreeAsync on memory we still believe
+            // we own), and leave the new slice resident while we
+            // return Err — `live_bytes` would also not be updated.
+            // Avoid that here.
+            if live.contains_key(&ptr) {
                 return Err(ResourceError::Driver(format!(
                     "AsyncCudaResource: pointer collision on alloc ({:#x})",
                     ptr
                 )));
             }
+            live.insert(ptr, slice);
         }
         self.live_bytes.fetch_add(bytes, Ordering::Relaxed);
 

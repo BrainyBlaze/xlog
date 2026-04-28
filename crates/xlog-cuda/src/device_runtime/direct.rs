@@ -134,12 +134,20 @@ impl DeviceMemoryResource for DirectCudaResource {
             // for two simultaneously live allocations. If our map
             // already has this pointer, it indicates a bookkeeping
             // bug or driver behavior we want to surface loudly.
-            if live.insert(ptr, slice).is_some() {
+            // Use `contains_key` then `insert` so a (theoretical)
+            // collision returns `Err` without mutating the map —
+            // a `live.insert(ptr, slice).is_some()` pattern would
+            // replace the existing entry, drop the old slice (which
+            // calls cuMemFree on memory we still believe we own),
+            // and leave the new slice resident in `live` while we
+            // return Err. Avoid that here.
+            if live.contains_key(&ptr) {
                 return Err(ResourceError::Driver(format!(
                     "DirectCudaResource: pointer collision on alloc ({:#x})",
                     ptr
                 )));
             }
+            live.insert(ptr, slice);
         }
         self.bytes_outstanding.fetch_add(bytes, Ordering::Relaxed);
 

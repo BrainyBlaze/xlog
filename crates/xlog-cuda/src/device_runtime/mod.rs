@@ -55,7 +55,8 @@ pub use async_resource::AsyncCudaResource;
 pub use budget::GlobalDeviceBudget;
 pub use direct::DirectCudaResource;
 pub use logging::{
-    InMemorySink, LogAction, LogRecord, LogResult, LoggingResource, LoggingSink, SinkError,
+    InMemorySink, LogAction, LogRecord, LogResult, LoggingResource, LoggingSink, NullSink,
+    SinkError,
 };
 pub use resource::{
     AllocTag, BlockState, DeviceBlock, DeviceMemoryResource, Generation, ResourceError,

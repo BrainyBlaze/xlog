@@ -29,8 +29,8 @@ use std::sync::Arc;
 
 use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::device_runtime::{
-    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, InMemorySink, LoggingResource,
-    LoggingSink, StreamPool, XlogDeviceRuntime,
+    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LoggingResource, LoggingSink,
+    NullSink, StreamPool, XlogDeviceRuntime,
 };
 use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_logic::Compiler;
@@ -93,24 +93,24 @@ fn create_test_executor_legacy() -> Option<(Executor, Arc<CudaKernelProvider>)> 
 /// file route through the runtime when the env var is set without
 /// any per-test code change.
 ///
-/// The `InMemorySink` is wired and immediately dropped at the end
-/// of construction — `real_world_tests` asserts on Datalog query
-/// results, not on allocation traces, so capturing records is
-/// unnecessary. The sink exists so the runtime stack matches the
-/// production-recommended composition the allocator is being
-/// certified against.
+/// Uses `NullSink` rather than `InMemorySink`: this fixture is
+/// rebuilt many times per stress loop iteration and the runtime
+/// stack keeps the sink alive for as long as `LoggingResource`
+/// exists, so retaining records would grow memory unbounded over a
+/// 20× stress run with no test consuming them. `real_world_tests`
+/// asserts on Datalog query results, not on allocation traces; a
+/// discard sink keeps the runtime composition shape (`LoggingResource`
+/// is still in the stack) without paying retention cost.
 fn create_test_executor_with_runtime() -> Option<(Executor, Arc<CudaKernelProvider>)> {
     let device = Arc::new(CudaDevice::new(0).ok()?);
     let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
-    let sink: Arc<InMemorySink> = Arc::new(InMemorySink::new());
+    let sink: Arc<dyn LoggingSink> = Arc::new(NullSink::new());
 
     let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
         AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
     );
-    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
-        async_resource,
-        sink as Arc<dyn LoggingSink>,
-    ));
+    let logging: Box<dyn DeviceMemoryResource + Send + Sync> =
+        Box::new(LoggingResource::new(async_resource, sink));
     let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
         Box::new(GlobalDeviceBudget::new(logging, TEST_BUDGET_BYTES));
     let runtime = Arc::new(XlogDeviceRuntime::with_resource(
