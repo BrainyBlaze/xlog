@@ -45,12 +45,16 @@
 
 pub mod async_resource;
 pub mod direct;
+pub mod logging;
 pub mod resource;
 pub mod runtime;
 pub mod stream_pool;
 
 pub use async_resource::AsyncCudaResource;
 pub use direct::DirectCudaResource;
+pub use logging::{
+    InMemorySink, LogAction, LogRecord, LogResult, LoggingResource, LoggingSink, SinkError,
+};
 pub use resource::{
     AllocTag, BlockState, DeviceBlock, DeviceMemoryResource, Generation, ResourceError,
     ResourceResult, StreamId,
