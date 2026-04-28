@@ -701,10 +701,14 @@ execution.
       `groupby_agg_recorded` — narrow to U32 / Symbol keys + Count /
       Sum / Min / Max aggs; LogSumExp and >4 key-column GroupBy
       deferred.)
-- [ ] Migrate hash-join operator surfaces to recorded launches
-      against `launch_stream`. Prerequisite for retaking the
-      deferred GPU-resident binary-join materialization
-      prototype.
+- [x] Migrate hash-join operator surfaces to recorded launches
+      against `launch_stream`. (slices #7A / #7B / #7C / #7D —
+      `hash_join_v2_recorded` covers Inner / Semi / Anti /
+      LeftOuter, and `hash_join_v2_with_index_recorded` covers
+      the same four types over a cached `JoinIndexV2`.
+      Narrow to ≤4 key columns per the `pack_keys` constraint;
+      the deferred GPU-resident binary-join materialization
+      prototype now has its prerequisite operator coverage.)
 - [x] Wire `filter_recorded` / `filter_columns_recorded` into a
       runtime / provider opt-in selector so real callers can route
       filter operations through the recorded path. (slice #2,

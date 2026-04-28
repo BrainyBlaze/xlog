@@ -6706,36 +6706,111 @@ impl super::CudaKernelProvider {
         }
 
         // Step C: gather inner-left and inner-right on stream
-        // (only when there are inner matches).
+        // (only when there are inner matches). Wrap the
+        // gather kernels in a recorder so reads of
+        // `left.column[i]`, `right.column[i]`, and the index
+        // buffers `d_output_{left,right}` are registered on
+        // launch_stream — without it, dropping `left` /
+        // `right` after this method returns could race the
+        // still-pending gather reads.
         let inner_count_u32 = inner_count;
-        let inner_left_buf = if inner_count > 0 {
-            Some(self.gather_buffer_by_indices_on_stream(
+        let inner_left_buf;
+        let inner_right_buf;
+        if inner_count > 0 {
+            let mut rec_gather = LaunchRecorder::new_strict(launch_stream);
+            for col_idx in 0..left.columns.len() {
+                let c = left.column(col_idx).ok_or_else(|| {
+                    XlogError::Kernel(format!("Left column {} not found", col_idx))
+                })?;
+                rec_gather.read_column(c);
+            }
+            for col_idx in 0..right.columns.len() {
+                let c = right.column(col_idx).ok_or_else(|| {
+                    XlogError::Kernel(format!("Right column {} not found", col_idx))
+                })?;
+                rec_gather.read_column(c);
+            }
+            rec_gather.read(&d_output_left);
+            rec_gather.read(&d_output_right);
+            rec_gather.preflight(runtime).map_err(|e| {
+                XlogError::Kernel(format!(
+                    "hash_join_v2_recorded (left_outer): gather preflight failed: {}",
+                    e
+                ))
+            })?;
+            inner_left_buf = Some(self.gather_buffer_by_indices_on_stream(
                 left,
                 &d_output_left,
                 inner_count_u32,
                 &cu_stream,
                 launch_stream,
                 runtime,
-            )?)
-        } else {
-            None
-        };
-        let inner_right_buf = if inner_count > 0 {
-            Some(self.gather_buffer_by_indices_on_stream(
+            )?);
+            inner_right_buf = Some(self.gather_buffer_by_indices_on_stream(
                 right,
                 &d_output_right,
                 inner_count_u32,
                 &cu_stream,
                 launch_stream,
                 runtime,
-            )?)
+            )?);
+            rec_gather.commit(runtime).map_err(|e| {
+                XlogError::Kernel(format!(
+                    "hash_join_v2_recorded (left_outer): gather commit failed: {}",
+                    e
+                ))
+            })?;
         } else {
-            None
-        };
+            inner_left_buf = None;
+            inner_right_buf = None;
+        }
 
         // Step D: concatenate per-column on launch_stream.
         // Left columns: inner_left | unmatched_left.
         // Right columns: inner_right | zeros.
+        //
+        // The dtod copies queue AFTER the gather/compact
+        // commits, so the events those commits recorded on
+        // the source buffers (`unmatched_left.column[i]`,
+        // `inner_*_buf.column[i]`) do NOT cover the still-
+        // pending dtod copies. We open a new recorder around
+        // the entire concat block, record reads on every
+        // source column, preflight, run the dtod copies and
+        // zero-fills, and commit. The commit's event is
+        // recorded AFTER all dtod copies are queued — so a
+        // subsequent drop of `unmatched_left` /
+        // `inner_*_buf` correctly waits for the dtod copies
+        // to complete.
+        let mut rec_d = LaunchRecorder::new_strict(launch_stream);
+        for col_idx in 0..unmatched_left.columns.len() {
+            let c = unmatched_left.column(col_idx).ok_or_else(|| {
+                XlogError::Kernel(format!("unmatched_left col {} not found", col_idx))
+            })?;
+            rec_d.read_column(c);
+        }
+        if let Some(b) = inner_left_buf.as_ref() {
+            for col_idx in 0..b.columns.len() {
+                let c = b.column(col_idx).ok_or_else(|| {
+                    XlogError::Kernel(format!("inner_left col {} not found", col_idx))
+                })?;
+                rec_d.read_column(c);
+            }
+        }
+        if let Some(b) = inner_right_buf.as_ref() {
+            for col_idx in 0..b.columns.len() {
+                let c = b.column(col_idx).ok_or_else(|| {
+                    XlogError::Kernel(format!("inner_right col {} not found", col_idx))
+                })?;
+                rec_d.read_column(c);
+            }
+        }
+        rec_d.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "hash_join_v2_recorded (left_outer): step-D preflight failed: {}",
+                e
+            ))
+        })?;
+
         let mut result_columns: Vec<CudaColumn> = Vec::with_capacity(combined_schema.arity());
         let inner_rows = inner_count as u64;
 
@@ -6904,6 +6979,18 @@ impl super::CudaKernelProvider {
             }
             result_columns.push(out_col.into());
         }
+
+        // Commit the step-D recorder NOW that every dtod
+        // copy is queued. The recorded event captures up to
+        // commit time, so a subsequent drop of any source
+        // buffer (unmatched_left / inner_*_buf) correctly
+        // waits.
+        rec_d.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "hash_join_v2_recorded (left_outer): step-D commit failed: {}",
+                e
+            ))
+        })?;
 
         // d_num_rows scalar for the output buffer (uploaded
         // synchronously; no launch_stream work touches it).
@@ -7104,5 +7191,1080 @@ impl super::CudaKernelProvider {
         // method returns is correctly serialized through the
         // runtime's record-all + wait-all event chain.
         self.compact_buffer_by_device_mask_counted_recorded(left, &d_mask, launch_stream)
+    }
+
+    // ============== Recorded indexed hash join — slice #7D ==============
+    //
+    // Strict-recorder, launch_stream-routed sibling of
+    // `hash_join_v2_with_index`. Covers Inner, Semi, Anti, and
+    // LeftOuter via a single dispatcher. The build-side
+    // packed keys + hash table come from the cached
+    // `JoinIndexV2`; the probe (left) side is packed on
+    // launch_stream via `pack_keys_gpu_on_stream`. Recorded
+    // gather / compact / mask_not helpers from earlier slices
+    // are reused unchanged.
+    //
+    // Existing legacy `hash_join_v2_with_index*` paths are
+    // unchanged; runtime/planner wiring is NOT included.
+
+    /// Strict-recorder, launch_stream-routed variant of
+    /// `hash_join_v2_with_index`. Supports all four join
+    /// types — the indexed variants share the same
+    /// `(packed_keys, table)` shape, so a single recorded
+    /// surface covers them.
+    pub fn hash_join_v2_with_index_recorded(
+        &self,
+        left: &CudaBuffer,
+        right: &CudaBuffer,
+        left_keys: &[usize],
+        right_keys: &[usize],
+        join_type: JoinType,
+        index: &crate::provider::JoinIndexV2,
+        max_output: Option<usize>,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        let runtime = self.memory.runtime().ok_or_else(|| {
+            XlogError::Kernel(
+                "hash_join_v2_with_index_recorded requires a runtime-backed GpuMemoryManager"
+                    .to_string(),
+            )
+        })?;
+        // Resolve once; sub-helpers re-resolve as needed.
+        runtime
+            .stream_pool()
+            .resolve(launch_stream)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "hash_join_v2_with_index_recorded: launch_stream StreamId({}) does not resolve",
+                    launch_stream.0
+                ))
+            })?;
+
+        // Validate inputs (mirror legacy hash_join_v2_with_index).
+        let left_rows = self.device_row_count(left)?;
+        let right_rows = self.device_row_count(right)?;
+        if left_rows > u32::MAX as usize || right_rows > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "Join supports at most {} rows per side (left={}, right={})",
+                u32::MAX,
+                left_rows,
+                right_rows
+            )));
+        }
+        if left_rows == 0 {
+            return match join_type {
+                JoinType::Inner | JoinType::LeftOuter => {
+                    let combined_schema = self.combine_schemas(left.schema(), right.schema());
+                    self.create_empty_buffer(combined_schema)
+                }
+                JoinType::Semi | JoinType::Anti => self.create_empty_buffer(left.schema().clone()),
+            };
+        }
+        if right_rows == 0 {
+            return match join_type {
+                JoinType::Inner => {
+                    let combined_schema = self.combine_schemas(left.schema(), right.schema());
+                    self.create_empty_buffer(combined_schema)
+                }
+                JoinType::Semi => self.create_empty_buffer(left.schema().clone()),
+                JoinType::Anti => self.clone_buffer(left),
+                JoinType::LeftOuter => self.left_outer_with_nulls(left, right),
+            };
+        }
+        if left_keys.is_empty() || right_keys.is_empty() {
+            return Err(XlogError::Kernel(
+                "Join requires at least one key column".to_string(),
+            ));
+        }
+        if left_keys.len() != right_keys.len() {
+            return Err(XlogError::Kernel(
+                "Left and right key columns must have same length".to_string(),
+            ));
+        }
+        if left_keys.len() > 4 {
+            return Err(XlogError::Kernel(
+                "hash_join_v2_with_index_recorded: max 4 key columns supported \
+                 (pack_keys constraint)"
+                    .to_string(),
+            ));
+        }
+        for (&l, &r) in left_keys.iter().zip(right_keys.iter()) {
+            if l >= left.arity() {
+                return Err(XlogError::Kernel(format!(
+                    "Left key column index {} out of bounds (arity {})",
+                    l,
+                    left.arity()
+                )));
+            }
+            if r >= right.arity() {
+                return Err(XlogError::Kernel(format!(
+                    "Right key column index {} out of bounds (arity {})",
+                    r,
+                    right.arity()
+                )));
+            }
+            let lt = left.schema().column_type(l);
+            let rt = right.schema().column_type(r);
+            if lt != rt {
+                return Err(XlogError::Kernel(format!(
+                    "Key column type mismatch: left[{}]={:?}, right[{}]={:?}",
+                    l, lt, r, rt
+                )));
+            }
+        }
+        if index.right_num_rows() != right_rows as u32 {
+            return Err(XlogError::Kernel(
+                "Join index row count does not match right relation".to_string(),
+            ));
+        }
+        if index.right_keys() != right_keys {
+            return Err(XlogError::Kernel(
+                "Join index key columns do not match requested right_keys".to_string(),
+            ));
+        }
+
+        match join_type {
+            JoinType::Inner => self.hash_join_inner_v2_with_index_recorded(
+                left,
+                right,
+                left_keys,
+                index,
+                max_output,
+                launch_stream,
+            ),
+            JoinType::Semi => self.hash_join_semi_or_anti_v2_with_index_recorded(
+                left,
+                left_keys,
+                index,
+                false,
+                launch_stream,
+            ),
+            JoinType::Anti => self.hash_join_semi_or_anti_v2_with_index_recorded(
+                left,
+                left_keys,
+                index,
+                true,
+                launch_stream,
+            ),
+            JoinType::LeftOuter => self.hash_join_left_outer_v2_with_index_recorded(
+                left,
+                right,
+                left_keys,
+                index,
+                max_output,
+                launch_stream,
+            ),
+        }
+    }
+
+    /// Indexed-Inner recorded. Mirrors `hash_join_inner_v2_recorded`
+    /// minus the right-side pack + hash-table build (the
+    /// cached `JoinIndexV2` provides `index.packed_keys` and
+    /// `&index.table`). Probe count + materialize + gather all
+    /// run on `launch_stream`.
+    fn hash_join_inner_v2_with_index_recorded(
+        &self,
+        left: &CudaBuffer,
+        right: &CudaBuffer,
+        left_keys: &[usize],
+        index: &crate::provider::JoinIndexV2,
+        max_output: Option<usize>,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        use crate::launch::LaunchRecorder;
+
+        let runtime = self.memory.runtime().ok_or_else(|| {
+            XlogError::Kernel(
+                "hash_join_v2_with_index_recorded (inner) requires runtime-backed manager"
+                    .to_string(),
+            )
+        })?;
+        let cu_stream = runtime
+            .stream_pool()
+            .resolve(launch_stream)
+            .ok_or_else(|| {
+                XlogError::Kernel("indexed inner: launch_stream does not resolve".to_string())
+            })?;
+
+        let num_left = left.num_rows() as u32;
+        let table = &index.table;
+
+        // Pack left only on launch_stream.
+        let left_packed =
+            self.pack_keys_gpu_on_stream(left, left_keys, &cu_stream, launch_stream, runtime)?;
+        if left_packed.key_bytes != index.key_bytes {
+            return Err(XlogError::Kernel(
+                "Join key byte width mismatch between probe and cached index".to_string(),
+            ));
+        }
+
+        let probe_func = self
+            .device
+            .inner()
+            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_PROBE_V2)
+            .ok_or_else(|| XlogError::Kernel("hash_join_probe_v2 kernel not found".to_string()))?;
+        let block_size = 256u32;
+        let probe_grid = (num_left + block_size - 1) / block_size;
+        let probe_config = LaunchConfig {
+            grid_dim: (probe_grid, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        // Count pass.
+        let d_count_only = self.memory.alloc::<u32>(1)?;
+        let d_dummy_left = self.memory.alloc::<u32>(1)?;
+        let d_dummy_right = self.memory.alloc::<u32>(1)?;
+        // SAFETY: 4-byte runtime-backed buffer.
+        unsafe {
+            let res = cudarc::driver::sys::cuMemsetD8Async(
+                *d_count_only.device_ptr(),
+                0,
+                std::mem::size_of::<u32>(),
+                cu_stream.cu_stream(),
+            );
+            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "cuMemsetD8Async (indexed inner d_count_only) failed: {:?}",
+                    res
+                )));
+            }
+        }
+
+        let max_output_count_only = 0u32;
+        let mut rec_count = LaunchRecorder::new_strict(launch_stream);
+        rec_count.read(&left_packed.hashes);
+        rec_count.read(&left_packed.packed_keys);
+        rec_count.read(&index.packed_keys);
+        rec_count.read(&table.bucket_offsets);
+        rec_count.read(&table.bucket_counts);
+        rec_count.read(&table.bucket_entries);
+        rec_count.read(&table.bucket_entry_hashes);
+        rec_count.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!("indexed inner: count-pass preflight failed: {}", e))
+        })?;
+        // SAFETY: 14-arg probe via raw-param launch.
+        unsafe {
+            let mut params: Vec<*mut c_void> = vec![
+                (&left_packed.hashes).as_kernel_param(),
+                (&num_left).as_kernel_param(),
+                (&table.bucket_offsets).as_kernel_param(),
+                (&table.bucket_counts).as_kernel_param(),
+                (&table.bucket_entries).as_kernel_param(),
+                (&table.bucket_entry_hashes).as_kernel_param(),
+                (&table.bucket_mask).as_kernel_param(),
+                (&left_packed.packed_keys).as_kernel_param(),
+                (&index.packed_keys).as_kernel_param(),
+                (&index.key_bytes).as_kernel_param(),
+                (&d_dummy_left).as_kernel_param(),
+                (&d_dummy_right).as_kernel_param(),
+                (&d_count_only).as_kernel_param(),
+                (&max_output_count_only).as_kernel_param(),
+            ];
+            probe_func
+                .clone()
+                .launch_on_stream(&cu_stream, probe_config, &mut params)
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "hash_join_probe_v2 (indexed count, on_stream) failed: {}",
+                        e
+                    ))
+                })?;
+        }
+        rec_count.write_post_preflight_fresh(&d_count_only);
+        rec_count.write_post_preflight_fresh(&d_dummy_left);
+        rec_count.write_post_preflight_fresh(&d_dummy_right);
+        rec_count.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!("indexed inner: count-pass commit failed: {}", e))
+        })?;
+
+        cu_stream.synchronize().map_err(|e| {
+            XlogError::Kernel(format!("indexed inner: sync (count read) failed: {}", e))
+        })?;
+        let full_count = self.read_join_output_count_metadata(&d_count_only)? as u64;
+        let requested = max_output
+            .map(|limit| (limit as u64).min(full_count))
+            .unwrap_or(full_count);
+        if requested == 0 {
+            let combined_schema = self.combine_schemas(left.schema(), right.schema());
+            return self.create_empty_buffer(combined_schema);
+        }
+        if requested > u32::MAX as u64 {
+            return Err(XlogError::Kernel(format!(
+                "Join produced {} rows which exceeds the u32 index limit",
+                requested
+            )));
+        }
+        let max_output_u32 = requested as u32;
+
+        // Materialize pass.
+        let d_output_left = self.memory.alloc::<u32>(max_output_u32 as usize)?;
+        let d_output_right = self.memory.alloc::<u32>(max_output_u32 as usize)?;
+        let d_output_count = self.memory.alloc::<u32>(1)?;
+        // SAFETY: 4-byte runtime-backed buffer.
+        unsafe {
+            let res = cudarc::driver::sys::cuMemsetD8Async(
+                *d_output_count.device_ptr(),
+                0,
+                std::mem::size_of::<u32>(),
+                cu_stream.cu_stream(),
+            );
+            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "cuMemsetD8Async (indexed inner d_output_count) failed: {:?}",
+                    res
+                )));
+            }
+        }
+
+        let mut rec_mat = LaunchRecorder::new_strict(launch_stream);
+        rec_mat.read(&left_packed.hashes);
+        rec_mat.read(&left_packed.packed_keys);
+        rec_mat.read(&index.packed_keys);
+        rec_mat.read(&table.bucket_offsets);
+        rec_mat.read(&table.bucket_counts);
+        rec_mat.read(&table.bucket_entries);
+        rec_mat.read(&table.bucket_entry_hashes);
+        rec_mat.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "indexed inner: materialize preflight failed: {}",
+                e
+            ))
+        })?;
+        // SAFETY: 14-arg probe via raw-param launch.
+        unsafe {
+            let mut params: Vec<*mut c_void> = vec![
+                (&left_packed.hashes).as_kernel_param(),
+                (&num_left).as_kernel_param(),
+                (&table.bucket_offsets).as_kernel_param(),
+                (&table.bucket_counts).as_kernel_param(),
+                (&table.bucket_entries).as_kernel_param(),
+                (&table.bucket_entry_hashes).as_kernel_param(),
+                (&table.bucket_mask).as_kernel_param(),
+                (&left_packed.packed_keys).as_kernel_param(),
+                (&index.packed_keys).as_kernel_param(),
+                (&index.key_bytes).as_kernel_param(),
+                (&d_output_left).as_kernel_param(),
+                (&d_output_right).as_kernel_param(),
+                (&d_output_count).as_kernel_param(),
+                (&max_output_u32).as_kernel_param(),
+            ];
+            probe_func
+                .clone()
+                .launch_on_stream(&cu_stream, probe_config, &mut params)
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "hash_join_probe_v2 (indexed mat, on_stream) failed: {}",
+                        e
+                    ))
+                })?;
+        }
+        rec_mat.write_post_preflight_fresh(&d_output_left);
+        rec_mat.write_post_preflight_fresh(&d_output_right);
+        rec_mat.write_post_preflight_fresh(&d_output_count);
+        rec_mat.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!("indexed inner: materialize commit failed: {}", e))
+        })?;
+
+        cu_stream.synchronize().map_err(|e| {
+            XlogError::Kernel(format!("indexed inner: sync (mat read) failed: {}", e))
+        })?;
+        let result_count = (self.read_join_output_count_metadata(&d_output_count)? as u64)
+            .min(max_output_u32 as u64);
+        if result_count == 0 {
+            let combined_schema = self.combine_schemas(left.schema(), right.schema());
+            return self.create_empty_buffer(combined_schema);
+        }
+        let output_rows = result_count as u32;
+
+        // Gather both sides on launch_stream.
+        let mut rec_gather = LaunchRecorder::new_strict(launch_stream);
+        for col_idx in 0..left.columns.len() {
+            let c = left
+                .column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Left column {} not found", col_idx)))?;
+            rec_gather.read_column(c);
+        }
+        for col_idx in 0..right.columns.len() {
+            let c = right
+                .column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Right column {} not found", col_idx)))?;
+            rec_gather.read_column(c);
+        }
+        rec_gather.read(&d_output_left);
+        rec_gather.read(&d_output_right);
+        rec_gather.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!("indexed inner: gather preflight failed: {}", e))
+        })?;
+        let gathered_left = self.gather_buffer_by_indices_on_stream(
+            left,
+            &d_output_left,
+            output_rows,
+            &cu_stream,
+            launch_stream,
+            runtime,
+        )?;
+        let gathered_right = self.gather_buffer_by_indices_on_stream(
+            right,
+            &d_output_right,
+            output_rows,
+            &cu_stream,
+            launch_stream,
+            runtime,
+        )?;
+        rec_gather.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!("indexed inner: gather commit failed: {}", e))
+        })?;
+
+        let combined_schema = self.combine_schemas(left.schema(), right.schema());
+        let mut result_columns = Vec::with_capacity(combined_schema.arity());
+        result_columns.extend(gathered_left.columns.into_iter());
+        result_columns.extend(gathered_right.columns.into_iter());
+        self.buffer_from_columns(result_columns, result_count, combined_schema)
+    }
+
+    /// Indexed Semi/Anti recorded. Mirrors
+    /// `hash_join_semi_or_anti_v2_recorded` minus the
+    /// right-side pack + table build. Composes pack-left →
+    /// SEMI/ANTI kernel → recorded compact tail. Anti-empty-
+    /// right edge case is handled by the dispatcher.
+    fn hash_join_semi_or_anti_v2_with_index_recorded(
+        &self,
+        left: &CudaBuffer,
+        left_keys: &[usize],
+        index: &crate::provider::JoinIndexV2,
+        anti: bool,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        use crate::launch::LaunchRecorder;
+
+        let runtime = self.memory.runtime().ok_or_else(|| {
+            XlogError::Kernel(
+                "hash_join_v2_with_index_recorded (semi/anti) requires runtime-backed manager"
+                    .to_string(),
+            )
+        })?;
+        let cu_stream = runtime
+            .stream_pool()
+            .resolve(launch_stream)
+            .ok_or_else(|| {
+                XlogError::Kernel("indexed semi/anti: launch_stream does not resolve".to_string())
+            })?;
+
+        let num_left = left.num_rows() as u32;
+        let table = &index.table;
+
+        let left_packed =
+            self.pack_keys_gpu_on_stream(left, left_keys, &cu_stream, launch_stream, runtime)?;
+        if left_packed.key_bytes != index.key_bytes {
+            return Err(XlogError::Kernel(
+                "Join key byte width mismatch between probe and cached index".to_string(),
+            ));
+        }
+
+        let d_mask = self.memory.alloc::<u8>(num_left as usize)?;
+        let kernel_name = if anti {
+            join_kernels::HASH_JOIN_ANTI
+        } else {
+            join_kernels::HASH_JOIN_SEMI
+        };
+        let func = self
+            .device
+            .inner()
+            .get_func(JOIN_MODULE, kernel_name)
+            .ok_or_else(|| XlogError::Kernel(format!("{} kernel not found", kernel_name)))?;
+        let block_size = 256u32;
+        let grid_size = (num_left + block_size - 1) / block_size;
+        let cfg = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read(&left_packed.hashes);
+        rec.read(&left_packed.packed_keys);
+        rec.read(&index.packed_keys);
+        rec.read(&table.bucket_offsets);
+        rec.read(&table.bucket_counts);
+        rec.read(&table.bucket_entries);
+        rec.read(&table.bucket_entry_hashes);
+        rec.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!("indexed semi/anti: preflight failed: {}", e))
+        })?;
+        // SAFETY: 11-arg semi/anti.
+        unsafe {
+            func.clone().launch_on_stream(
+                &cu_stream,
+                cfg,
+                (
+                    &left_packed.hashes,
+                    num_left,
+                    &table.bucket_offsets,
+                    &table.bucket_counts,
+                    &table.bucket_entries,
+                    &table.bucket_entry_hashes,
+                    table.bucket_mask,
+                    &left_packed.packed_keys,
+                    &index.packed_keys,
+                    index.key_bytes,
+                    &d_mask,
+                ),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!(
+                "{} (on_stream, indexed) failed: {}",
+                kernel_name, e
+            ))
+        })?;
+        rec.write_post_preflight_fresh(&d_mask);
+        rec.commit(runtime)
+            .map_err(|e| XlogError::Kernel(format!("indexed semi/anti: commit failed: {}", e)))?;
+
+        self.compact_buffer_by_device_mask_counted_recorded(left, &d_mask, launch_stream)
+    }
+
+    /// Indexed LeftOuter recorded. Mirrors
+    /// `hash_join_left_outer_v2_recorded` minus the right-side
+    /// pack + table build. Same chain shape: SEMI mask + PROBE
+    /// count/materialize + mask_not + recorded compact for
+    /// unmatched + gather inner + per-column dtod-async concat.
+    fn hash_join_left_outer_v2_with_index_recorded(
+        &self,
+        left: &CudaBuffer,
+        right: &CudaBuffer,
+        left_keys: &[usize],
+        index: &crate::provider::JoinIndexV2,
+        max_output: Option<usize>,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        use crate::launch::LaunchRecorder;
+
+        let runtime = self.memory.runtime().ok_or_else(|| {
+            XlogError::Kernel(
+                "hash_join_v2_with_index_recorded (left_outer) requires runtime-backed manager"
+                    .to_string(),
+            )
+        })?;
+        let cu_stream = runtime
+            .stream_pool()
+            .resolve(launch_stream)
+            .ok_or_else(|| {
+                XlogError::Kernel("indexed left_outer: launch_stream does not resolve".to_string())
+            })?;
+
+        let num_left = left.num_rows() as u32;
+        let table = &index.table;
+
+        let left_packed =
+            self.pack_keys_gpu_on_stream(left, left_keys, &cu_stream, launch_stream, runtime)?;
+        if left_packed.key_bytes != index.key_bytes {
+            return Err(XlogError::Kernel(
+                "Join key byte width mismatch between probe and cached index".to_string(),
+            ));
+        }
+
+        let device = self.device.inner();
+        let block_size = 256u32;
+        let grid_size = (num_left + block_size - 1) / block_size;
+        let cfg = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        // Step A: SEMI mask + PROBE count.
+        let d_has_match = self.memory.alloc::<u8>(num_left as usize)?;
+        let d_count_only = self.memory.alloc::<u32>(1)?;
+        let d_dummy_left = self.memory.alloc::<u32>(1)?;
+        let d_dummy_right = self.memory.alloc::<u32>(1)?;
+        // SAFETY: 4-byte runtime-backed buffer.
+        unsafe {
+            let res = cudarc::driver::sys::cuMemsetD8Async(
+                *d_count_only.device_ptr(),
+                0,
+                std::mem::size_of::<u32>(),
+                cu_stream.cu_stream(),
+            );
+            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "cuMemsetD8Async (indexed left_outer d_count_only) failed: {:?}",
+                    res
+                )));
+            }
+        }
+
+        let semi_func = device
+            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_SEMI)
+            .ok_or_else(|| XlogError::Kernel("hash_join_semi kernel not found".to_string()))?;
+        let probe_func = device
+            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_PROBE_V2)
+            .ok_or_else(|| XlogError::Kernel("hash_join_probe_v2 kernel not found".to_string()))?;
+
+        let mut rec_a = LaunchRecorder::new_strict(launch_stream);
+        rec_a.read(&left_packed.hashes);
+        rec_a.read(&left_packed.packed_keys);
+        rec_a.read(&index.packed_keys);
+        rec_a.read(&table.bucket_offsets);
+        rec_a.read(&table.bucket_counts);
+        rec_a.read(&table.bucket_entries);
+        rec_a.read(&table.bucket_entry_hashes);
+        rec_a.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "indexed left_outer: semi/count preflight failed: {}",
+                e
+            ))
+        })?;
+        // SAFETY: hash_join_semi 11-arg.
+        unsafe {
+            semi_func.clone().launch_on_stream(
+                &cu_stream,
+                cfg,
+                (
+                    &left_packed.hashes,
+                    num_left,
+                    &table.bucket_offsets,
+                    &table.bucket_counts,
+                    &table.bucket_entries,
+                    &table.bucket_entry_hashes,
+                    table.bucket_mask,
+                    &left_packed.packed_keys,
+                    &index.packed_keys,
+                    index.key_bytes,
+                    &d_has_match,
+                ),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!(
+                "hash_join_semi (on_stream, indexed left_outer) failed: {}",
+                e
+            ))
+        })?;
+
+        let max_output_count_only = 0u32;
+        // SAFETY: hash_join_probe_v2 14-arg count pass.
+        unsafe {
+            let mut params: Vec<*mut c_void> = vec![
+                (&left_packed.hashes).as_kernel_param(),
+                (&num_left).as_kernel_param(),
+                (&table.bucket_offsets).as_kernel_param(),
+                (&table.bucket_counts).as_kernel_param(),
+                (&table.bucket_entries).as_kernel_param(),
+                (&table.bucket_entry_hashes).as_kernel_param(),
+                (&table.bucket_mask).as_kernel_param(),
+                (&left_packed.packed_keys).as_kernel_param(),
+                (&index.packed_keys).as_kernel_param(),
+                (&index.key_bytes).as_kernel_param(),
+                (&d_dummy_left).as_kernel_param(),
+                (&d_dummy_right).as_kernel_param(),
+                (&d_count_only).as_kernel_param(),
+                (&max_output_count_only).as_kernel_param(),
+            ];
+            probe_func
+                .clone()
+                .launch_on_stream(&cu_stream, cfg, &mut params)
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "hash_join_probe_v2 (count, on_stream, indexed left_outer) failed: {}",
+                        e
+                    ))
+                })?;
+        }
+        rec_a.write_post_preflight_fresh(&d_has_match);
+        rec_a.write_post_preflight_fresh(&d_count_only);
+        rec_a.write_post_preflight_fresh(&d_dummy_left);
+        rec_a.write_post_preflight_fresh(&d_dummy_right);
+        rec_a.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "indexed left_outer: semi/count commit failed: {}",
+                e
+            ))
+        })?;
+
+        cu_stream.synchronize().map_err(|e| {
+            XlogError::Kernel(format!(
+                "indexed left_outer: sync (count read) failed: {}",
+                e
+            ))
+        })?;
+        let full_inner = self.read_join_output_count_metadata(&d_count_only)? as u64;
+        let requested_inner = max_output
+            .map(|limit| (limit as u64).min(full_inner))
+            .unwrap_or(full_inner);
+        if requested_inner > u32::MAX as u64 {
+            return Err(XlogError::Kernel(format!(
+                "Join produced {} rows which exceeds the u32 index limit",
+                requested_inner
+            )));
+        }
+        let max_output_u32 = requested_inner as u32;
+        let alloc_len = (requested_inner.max(1)) as usize;
+
+        // PROBE materialize.
+        let d_output_left = self.memory.alloc::<u32>(alloc_len)?;
+        let d_output_right = self.memory.alloc::<u32>(alloc_len)?;
+        let d_output_count = self.memory.alloc::<u32>(1)?;
+        // SAFETY: 4-byte runtime-backed buffer.
+        unsafe {
+            let res = cudarc::driver::sys::cuMemsetD8Async(
+                *d_output_count.device_ptr(),
+                0,
+                std::mem::size_of::<u32>(),
+                cu_stream.cu_stream(),
+            );
+            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "cuMemsetD8Async (indexed left_outer d_output_count) failed: {:?}",
+                    res
+                )));
+            }
+        }
+
+        let mut rec_b = LaunchRecorder::new_strict(launch_stream);
+        rec_b.read(&left_packed.hashes);
+        rec_b.read(&left_packed.packed_keys);
+        rec_b.read(&index.packed_keys);
+        rec_b.read(&table.bucket_offsets);
+        rec_b.read(&table.bucket_counts);
+        rec_b.read(&table.bucket_entries);
+        rec_b.read(&table.bucket_entry_hashes);
+        rec_b.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "indexed left_outer: materialize preflight failed: {}",
+                e
+            ))
+        })?;
+        // SAFETY: hash_join_probe_v2 14-arg materialize.
+        unsafe {
+            let mut params: Vec<*mut c_void> = vec![
+                (&left_packed.hashes).as_kernel_param(),
+                (&num_left).as_kernel_param(),
+                (&table.bucket_offsets).as_kernel_param(),
+                (&table.bucket_counts).as_kernel_param(),
+                (&table.bucket_entries).as_kernel_param(),
+                (&table.bucket_entry_hashes).as_kernel_param(),
+                (&table.bucket_mask).as_kernel_param(),
+                (&left_packed.packed_keys).as_kernel_param(),
+                (&index.packed_keys).as_kernel_param(),
+                (&index.key_bytes).as_kernel_param(),
+                (&d_output_left).as_kernel_param(),
+                (&d_output_right).as_kernel_param(),
+                (&d_output_count).as_kernel_param(),
+                (&max_output_u32).as_kernel_param(),
+            ];
+            probe_func
+                .clone()
+                .launch_on_stream(&cu_stream, cfg, &mut params)
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "hash_join_probe_v2 (mat, on_stream, indexed left_outer) failed: {}",
+                        e
+                    ))
+                })?;
+        }
+        rec_b.write_post_preflight_fresh(&d_output_left);
+        rec_b.write_post_preflight_fresh(&d_output_right);
+        rec_b.write_post_preflight_fresh(&d_output_count);
+        rec_b.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "indexed left_outer: materialize commit failed: {}",
+                e
+            ))
+        })?;
+
+        cu_stream.synchronize().map_err(|e| {
+            XlogError::Kernel(format!("indexed left_outer: sync (mat read) failed: {}", e))
+        })?;
+        let inner_count = self
+            .read_join_output_count_metadata(&d_output_count)?
+            .min(max_output_u32);
+
+        // Step B: mask_not → unmatched filter via recorded compact tail.
+        let d_no_match = self.memory.alloc::<u8>(num_left as usize)?;
+        let mask_not_fn = device
+            .get_func(FILTER_MODULE, filter_kernels::MASK_NOT)
+            .ok_or_else(|| XlogError::Kernel("mask_not kernel not found".to_string()))?;
+        let mut rec_c = LaunchRecorder::new_strict(launch_stream);
+        rec_c.read(&d_has_match);
+        rec_c.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "indexed left_outer: mask_not preflight failed: {}",
+                e
+            ))
+        })?;
+        // SAFETY: mask_not(in, out, n).
+        unsafe {
+            mask_not_fn.clone().launch_on_stream(
+                &cu_stream,
+                cfg,
+                (&d_has_match, &d_no_match, num_left),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!(
+                "mask_not (on_stream, indexed left_outer) failed: {}",
+                e
+            ))
+        })?;
+        rec_c.write_post_preflight_fresh(&d_no_match);
+        rec_c.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!("indexed left_outer: mask_not commit failed: {}", e))
+        })?;
+
+        let unmatched_left =
+            self.compact_buffer_by_device_mask_counted_recorded(left, &d_no_match, launch_stream)?;
+        let unmatched_rows = self.device_row_count(&unmatched_left)? as u64;
+        let total_rows = (inner_count as u64) + unmatched_rows;
+
+        let combined_schema = self.combine_schemas(left.schema(), right.schema());
+        if total_rows == 0 {
+            return self.create_empty_buffer(combined_schema);
+        }
+
+        // Step C: gather inner sides. Same outer-recorder
+        // wrapping as the non-indexed LeftOuter — registers
+        // launch_stream reads on left/right columns and the
+        // probe-output index buffers so the caller's drop of
+        // those inputs is correctly serialized.
+        let inner_count_u32 = inner_count;
+        let inner_left_buf;
+        let inner_right_buf;
+        if inner_count > 0 {
+            let mut rec_gather = LaunchRecorder::new_strict(launch_stream);
+            for col_idx in 0..left.columns.len() {
+                let c = left.column(col_idx).ok_or_else(|| {
+                    XlogError::Kernel(format!("Left column {} not found", col_idx))
+                })?;
+                rec_gather.read_column(c);
+            }
+            for col_idx in 0..right.columns.len() {
+                let c = right.column(col_idx).ok_or_else(|| {
+                    XlogError::Kernel(format!("Right column {} not found", col_idx))
+                })?;
+                rec_gather.read_column(c);
+            }
+            rec_gather.read(&d_output_left);
+            rec_gather.read(&d_output_right);
+            rec_gather.preflight(runtime).map_err(|e| {
+                XlogError::Kernel(format!(
+                    "indexed left_outer: gather preflight failed: {}",
+                    e
+                ))
+            })?;
+            inner_left_buf = Some(self.gather_buffer_by_indices_on_stream(
+                left,
+                &d_output_left,
+                inner_count_u32,
+                &cu_stream,
+                launch_stream,
+                runtime,
+            )?);
+            inner_right_buf = Some(self.gather_buffer_by_indices_on_stream(
+                right,
+                &d_output_right,
+                inner_count_u32,
+                &cu_stream,
+                launch_stream,
+                runtime,
+            )?);
+            rec_gather.commit(runtime).map_err(|e| {
+                XlogError::Kernel(format!("indexed left_outer: gather commit failed: {}", e))
+            })?;
+        } else {
+            inner_left_buf = None;
+            inner_right_buf = None;
+        }
+
+        // Step D: concatenate per-column on launch_stream.
+        // Same step-D recorder discipline as the non-indexed
+        // LeftOuter: re-record source columns AFTER the dtod
+        // copies are queued, so a drop of `unmatched_left` /
+        // `inner_*_buf` waits on the correct event.
+        let mut rec_d = LaunchRecorder::new_strict(launch_stream);
+        for col_idx in 0..unmatched_left.columns.len() {
+            let c = unmatched_left.column(col_idx).ok_or_else(|| {
+                XlogError::Kernel(format!("unmatched_left col {} not found", col_idx))
+            })?;
+            rec_d.read_column(c);
+        }
+        if let Some(b) = inner_left_buf.as_ref() {
+            for col_idx in 0..b.columns.len() {
+                let c = b.column(col_idx).ok_or_else(|| {
+                    XlogError::Kernel(format!("inner_left col {} not found", col_idx))
+                })?;
+                rec_d.read_column(c);
+            }
+        }
+        if let Some(b) = inner_right_buf.as_ref() {
+            for col_idx in 0..b.columns.len() {
+                let c = b.column(col_idx).ok_or_else(|| {
+                    XlogError::Kernel(format!("inner_right col {} not found", col_idx))
+                })?;
+                rec_d.read_column(c);
+            }
+        }
+        rec_d.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "indexed left_outer: step-D preflight failed: {}",
+                e
+            ))
+        })?;
+
+        let mut result_columns: Vec<CudaColumn> = Vec::with_capacity(combined_schema.arity());
+        let inner_rows = inner_count as u64;
+
+        for col_idx in 0..left.arity() {
+            let elem_size = left
+                .schema()
+                .column_type(col_idx)
+                .map(|t| t.size_bytes())
+                .unwrap_or(4);
+            let inner_bytes = (inner_rows as usize)
+                .checked_mul(elem_size)
+                .ok_or_else(|| XlogError::Kernel("inner_bytes overflow".to_string()))?;
+            let unmatched_bytes = (unmatched_rows as usize)
+                .checked_mul(elem_size)
+                .ok_or_else(|| XlogError::Kernel("unmatched_bytes overflow".to_string()))?;
+            let total_bytes = inner_bytes
+                .checked_add(unmatched_bytes)
+                .ok_or_else(|| XlogError::Kernel("total_bytes overflow".to_string()))?;
+            let out_col = self.memory.alloc::<u8>(total_bytes)?;
+            let dst_ptr = *out_col.device_ptr();
+            if inner_bytes > 0 {
+                let src_col = inner_left_buf
+                    .as_ref()
+                    .expect("inner_count > 0")
+                    .column(col_idx)
+                    .ok_or_else(|| XlogError::Kernel("inner_left col missing".to_string()))?;
+                // SAFETY: dtod async on cu_stream.
+                unsafe {
+                    let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+                        dst_ptr,
+                        *src_col.device_ptr(),
+                        inner_bytes,
+                        cu_stream.cu_stream(),
+                    );
+                    if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                        return Err(XlogError::Kernel(format!(
+                            "indexed left_outer: dtod copy inner_left col {} failed: {:?}",
+                            col_idx, res
+                        )));
+                    }
+                }
+            }
+            if unmatched_bytes > 0 {
+                let src_col = unmatched_left
+                    .column(col_idx)
+                    .ok_or_else(|| XlogError::Kernel("unmatched col missing".to_string()))?;
+                // SAFETY: bounded by total_bytes.
+                unsafe {
+                    let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+                        dst_ptr + inner_bytes as u64,
+                        *src_col.device_ptr(),
+                        unmatched_bytes,
+                        cu_stream.cu_stream(),
+                    );
+                    if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                        return Err(XlogError::Kernel(format!(
+                            "indexed left_outer: dtod copy unmatched col {} failed: {:?}",
+                            col_idx, res
+                        )));
+                    }
+                }
+            }
+            if let Some(b) = out_col.runtime_block() {
+                runtime.record_block_use(b, launch_stream).map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "indexed left_outer: record_block_use (left col {}) failed: {}",
+                        col_idx, e
+                    ))
+                })?;
+            }
+            result_columns.push(out_col.into());
+        }
+
+        for col_idx in 0..right.arity() {
+            let elem_size = right
+                .schema()
+                .column_type(col_idx)
+                .map(|t| t.size_bytes())
+                .unwrap_or(4);
+            let inner_bytes = (inner_rows as usize)
+                .checked_mul(elem_size)
+                .ok_or_else(|| XlogError::Kernel("right inner_bytes overflow".to_string()))?;
+            let unmatched_bytes = (unmatched_rows as usize)
+                .checked_mul(elem_size)
+                .ok_or_else(|| XlogError::Kernel("right unmatched_bytes overflow".to_string()))?;
+            let total_bytes = inner_bytes
+                .checked_add(unmatched_bytes)
+                .ok_or_else(|| XlogError::Kernel("right total_bytes overflow".to_string()))?;
+            let out_col = self.memory.alloc::<u8>(total_bytes)?;
+            let dst_ptr = *out_col.device_ptr();
+            if total_bytes > 0 {
+                // SAFETY: zero-fill the whole column.
+                unsafe {
+                    let res = cudarc::driver::sys::cuMemsetD8Async(
+                        dst_ptr,
+                        0,
+                        total_bytes,
+                        cu_stream.cu_stream(),
+                    );
+                    if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                        return Err(XlogError::Kernel(format!(
+                            "indexed left_outer: zero-fill right col {} failed: {:?}",
+                            col_idx, res
+                        )));
+                    }
+                }
+            }
+            if inner_bytes > 0 {
+                let src_col = inner_right_buf
+                    .as_ref()
+                    .expect("inner_count > 0")
+                    .column(col_idx)
+                    .ok_or_else(|| XlogError::Kernel("inner_right col missing".to_string()))?;
+                // SAFETY: dtod async on cu_stream.
+                unsafe {
+                    let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+                        dst_ptr,
+                        *src_col.device_ptr(),
+                        inner_bytes,
+                        cu_stream.cu_stream(),
+                    );
+                    if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                        return Err(XlogError::Kernel(format!(
+                            "indexed left_outer: dtod copy inner_right col {} failed: {:?}",
+                            col_idx, res
+                        )));
+                    }
+                }
+            }
+            if let Some(b) = out_col.runtime_block() {
+                runtime.record_block_use(b, launch_stream).map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "indexed left_outer: record_block_use (right col {}) failed: {}",
+                        col_idx, e
+                    ))
+                })?;
+            }
+            result_columns.push(out_col.into());
+        }
+
+        // Commit step-D recorder; see non-indexed LeftOuter
+        // for the rationale.
+        rec_d.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!("indexed left_outer: step-D commit failed: {}", e))
+        })?;
+
+        let d_num_rows = self.upload_device_row_count(total_rows as u32)?;
+        Ok(CudaBuffer::from_columns_with_host_count(
+            result_columns,
+            total_rows,
+            d_num_rows,
+            combined_schema,
+            total_rows as u32,
+        ))
     }
 }
