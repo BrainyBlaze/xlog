@@ -532,6 +532,451 @@ fn provider_memset_column_recorded_accepts_xlog_owned_dlpack_column() {
     runtime.reap_pending().expect("reap");
 }
 
+/// Slice #5 sort: drop+reuse test for `sort_recorded` with
+/// u32 keys. The whole sort chain (init_indices → 8-pass radix
+/// sort → multi-column gather) runs on the explicit
+/// `launch_stream`. After the call returns, the gather
+/// kernels for every input column are still in flight on
+/// launch_stream — the test drops the input WITHOUT host sync,
+/// reuses+tramples the column slot on the default stream, and
+/// asserts the sorted output is bit-correct.
+///
+/// Input: column 0 is a reverse-sequence `[ROWS-1, ROWS-2,
+/// ..., 0]` of u32; column 1 is a payload identifying each
+/// row. Sorting by column 0 ascending must produce
+/// `[(0, payload_for(0)), (1, payload_for(1)), ...]`. Any
+/// mismatch implies the gather kernel read trampled bytes
+/// instead of the original column.
+#[test]
+fn provider_sort_recorded_survives_drop_and_reuse() {
+    use xlog_core::{ScalarType, Schema};
+    use xlog_cuda::CudaBuffer;
+
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
+        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    );
+    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
+        async_resource,
+        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
+    ));
+    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
+        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
+    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
+        Arc::clone(&device),
+        0,
+        Arc::clone(&pool),
+        budget,
+    ));
+    let memory = Arc::new(GpuMemoryManager::with_runtime(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(64 * 1024 * 1024),
+        Arc::clone(&runtime),
+    ));
+    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
+        .expect("provider with_runtime");
+    let launch_stream = pool.acquire().expect("acquire launch_stream");
+    assert_ne!(launch_stream, StreamId::DEFAULT);
+    let launch_handle = pool.resolve(launch_stream).expect("resolve");
+    let default_stream = device.inner().stream();
+
+    const ROWS: usize = 1024;
+    const ITERATIONS: usize = 16;
+    const TRAMPLE: u8 = 0xEE;
+    let schema = Schema::new(vec![
+        ("k".to_string(), ScalarType::U32),
+        ("v".to_string(), ScalarType::U32),
+    ]);
+
+    let mut reuse_observed = 0usize;
+    let mut bad_output = 0usize;
+
+    for iter in 0..ITERATIONS {
+        // Reverse-sequence keys, payload = row index.
+        let mut k_data = Vec::with_capacity(ROWS * 4);
+        let mut v_data = Vec::with_capacity(ROWS * 4);
+        for i in 0..ROWS {
+            k_data.extend_from_slice(&((ROWS - 1 - i) as u32).to_le_bytes());
+            v_data.extend_from_slice(&((ROWS - 1 - i) as u32).to_le_bytes());
+        }
+        let mut k_bytes = memory.alloc::<u8>(ROWS * 4).expect("alloc k");
+        device
+            .inner()
+            .htod_sync_copy_into(&k_data, &mut k_bytes)
+            .expect("htod k");
+        let k_ptr = k_bytes.device_ptr_value();
+        let mut v_bytes = memory.alloc::<u8>(ROWS * 4).expect("alloc v");
+        device
+            .inner()
+            .htod_sync_copy_into(&v_data, &mut v_bytes)
+            .expect("htod v");
+        let v_ptr = v_bytes.device_ptr_value();
+
+        let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc rowcount");
+        device
+            .inner()
+            .htod_sync_copy_into(&[ROWS as u32], &mut d_num_rows)
+            .expect("htod rows");
+        let input = CudaBuffer::from_columns(
+            vec![k_bytes.into(), v_bytes.into()],
+            ROWS as u64,
+            d_num_rows,
+            schema.clone(),
+        );
+
+        let sorted = provider
+            .sort_recorded(&input, &[0], launch_stream)
+            .expect("sort_recorded");
+
+        // Drop input WITHOUT host sync.
+        drop(input);
+
+        // Reuse + trample the original column slots.
+        let next_a = memory.alloc::<u8>(ROWS * 4).expect("alloc next_a");
+        let next_a_ptr = next_a.device_ptr_value();
+        let next_b = memory.alloc::<u8>(ROWS * 4).expect("alloc next_b");
+        let next_b_ptr = next_b.device_ptr_value();
+        let reused = next_a_ptr == k_ptr
+            || next_a_ptr == v_ptr
+            || next_b_ptr == k_ptr
+            || next_b_ptr == v_ptr;
+        if reused {
+            reuse_observed += 1;
+        }
+        unsafe {
+            memset_sync_default(next_a_ptr, TRAMPLE, ROWS * 4);
+            memset_sync_default(next_b_ptr, TRAMPLE, ROWS * 4);
+        }
+
+        launch_handle.synchronize().expect("sync launch");
+        default_stream.synchronize().expect("sync default");
+
+        // Verify sorted output: column 0 ascending [0, 1, ...,
+        // ROWS-1] and column 1 mirrors column 0 (payload was
+        // ROWS-1-i which is the same value on the same row).
+        let k_out = sorted.column(0).expect("out k");
+        let v_out = sorted.column(1).expect("out v");
+        let mut k_back = vec![0u8; ROWS * 4];
+        let mut v_back = vec![0u8; ROWS * 4];
+        unsafe {
+            dtoh_sync(&mut k_back, *k_out.device_ptr());
+            dtoh_sync(&mut v_back, *v_out.device_ptr());
+        }
+        let mut local_bad = 0usize;
+        for i in 0..ROWS {
+            let kb = &k_back[i * 4..i * 4 + 4];
+            let vb = &v_back[i * 4..i * 4 + 4];
+            let kv = u32::from_le_bytes([kb[0], kb[1], kb[2], kb[3]]);
+            let vv = u32::from_le_bytes([vb[0], vb[1], vb[2], vb[3]]);
+            let expected = i as u32;
+            if kv != expected || vv != expected {
+                local_bad += 1;
+                if iter == 0 && local_bad <= 4 {
+                    eprintln!(
+                        "[sort_recorded] iter=0 row={} k={}/{} v={}/{} reused={}",
+                        i, kv, expected, vv, expected, reused
+                    );
+                }
+            }
+        }
+        if local_bad > 0 {
+            bad_output += 1;
+        }
+
+        drop(sorted);
+        drop(next_a);
+        drop(next_b);
+        runtime.reap_pending().expect("reap");
+    }
+
+    eprintln!(
+        "[sort_recorded] iterations={} reuse_observed={} bad_output={}",
+        ITERATIONS, reuse_observed, bad_output
+    );
+    assert!(
+        reuse_observed > 0,
+        "address reuse never observed across {} iterations; cannot exercise \
+         the cross-stream lifetime safety path",
+        ITERATIONS
+    );
+    assert_eq!(
+        bad_output, 0,
+        "sort_recorded produced corrupted output in {}/{} iterations \
+         (reuse_observed={}). Either the LSD radix passes' reads of input.column[k] \
+         or the final apply_permutation_bytes gather raced an alloc-stream reuse \
+         + trample.",
+        bad_output, ITERATIONS, reuse_observed,
+    );
+}
+
+/// Slice #5 dedup: drop+reuse test for `dedup_full_row_recorded`.
+/// Composes `sort_recorded` (typed sort on launch_stream) →
+/// on-stream `mark_unique_full_row_bytewise` → recorded
+/// compact tail. After the call returns, multiple kernel
+/// chains are still in flight (gather, mark, scan, capture,
+/// per-column compact). Drop input WITHOUT host sync, reuse +
+/// trample, assert the deduped output is correct.
+///
+/// Input: 1024 rows where each `(k, v)` tuple appears
+/// duplicated four times in scrambled order (i.e. 256 unique
+/// tuples × 4). Expected output: 256 unique sorted
+/// `(k, v)` rows.
+#[test]
+fn provider_dedup_full_row_recorded_survives_drop_and_reuse() {
+    use xlog_core::{ScalarType, Schema};
+    use xlog_cuda::CudaBuffer;
+
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
+        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    );
+    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
+        async_resource,
+        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
+    ));
+    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
+        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
+    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
+        Arc::clone(&device),
+        0,
+        Arc::clone(&pool),
+        budget,
+    ));
+    let memory = Arc::new(GpuMemoryManager::with_runtime(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(64 * 1024 * 1024),
+        Arc::clone(&runtime),
+    ));
+    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
+        .expect("provider with_runtime");
+    let launch_stream = pool.acquire().expect("acquire launch_stream");
+    let launch_handle = pool.resolve(launch_stream).expect("resolve");
+    let default_stream = device.inner().stream();
+
+    const UNIQUE: usize = 256;
+    const REPS: usize = 4;
+    const ROWS: usize = UNIQUE * REPS;
+    // dedup_full_row_recorded allocates many intermediates
+    // (sort scratch + mark_unique buffers + compact tail), so
+    // freed input slots end up deeper in the pool free-list.
+    // 128 iterations + a per-iter drain (allocating 4 extra
+    // probe slots per iter) gives the pool enough pressure to
+    // observe reuse reliably.
+    const ITERATIONS: usize = 128;
+    const TRAMPLE: u8 = 0xEE;
+    let schema = Schema::new(vec![
+        ("k".to_string(), ScalarType::U32),
+        ("v".to_string(), ScalarType::U32),
+    ]);
+
+    let mut reuse_observed = 0usize;
+    let mut bad_output = 0usize;
+
+    for iter in 0..ITERATIONS {
+        // Build duplicated tuples in scrambled order: row i has
+        // unique tuple (i / REPS, i / REPS * 7) where the
+        // duplication count is REPS. Rotation per iteration
+        // randomizes the order.
+        let mut k_data = Vec::with_capacity(ROWS * 4);
+        let mut v_data = Vec::with_capacity(ROWS * 4);
+        for i in 0..ROWS {
+            let rot = (i + iter * 17) % ROWS;
+            let u = (rot / REPS) as u32;
+            k_data.extend_from_slice(&u.to_le_bytes());
+            v_data.extend_from_slice(&(u.wrapping_mul(7)).to_le_bytes());
+        }
+        let mut k_bytes = memory.alloc::<u8>(ROWS * 4).expect("alloc k");
+        device
+            .inner()
+            .htod_sync_copy_into(&k_data, &mut k_bytes)
+            .expect("htod k");
+        let k_ptr = k_bytes.device_ptr_value();
+        let mut v_bytes = memory.alloc::<u8>(ROWS * 4).expect("alloc v");
+        device
+            .inner()
+            .htod_sync_copy_into(&v_data, &mut v_bytes)
+            .expect("htod v");
+        let v_ptr = v_bytes.device_ptr_value();
+        let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc rowcount");
+        device
+            .inner()
+            .htod_sync_copy_into(&[ROWS as u32], &mut d_num_rows)
+            .expect("htod rows");
+        let input = CudaBuffer::from_columns(
+            vec![k_bytes.into(), v_bytes.into()],
+            ROWS as u64,
+            d_num_rows,
+            schema.clone(),
+        );
+
+        let deduped = provider
+            .dedup_full_row_recorded(&input, launch_stream)
+            .expect("dedup_full_row_recorded");
+
+        drop(input);
+
+        // Reuse + trample. Allocate four probe slots per iter
+        // to drain the pool's free-list and increase the
+        // chance of catching a reuse of the freed input slots.
+        let next_a = memory.alloc::<u8>(ROWS * 4).expect("alloc next_a");
+        let next_a_ptr = next_a.device_ptr_value();
+        let next_b = memory.alloc::<u8>(ROWS * 4).expect("alloc next_b");
+        let next_b_ptr = next_b.device_ptr_value();
+        let next_c = memory.alloc::<u8>(ROWS * 4).expect("alloc next_c");
+        let next_c_ptr = next_c.device_ptr_value();
+        let next_d = memory.alloc::<u8>(ROWS * 4).expect("alloc next_d");
+        let next_d_ptr = next_d.device_ptr_value();
+        let probe_ptrs = [next_a_ptr, next_b_ptr, next_c_ptr, next_d_ptr];
+        let reused = probe_ptrs.iter().any(|p| *p == k_ptr || *p == v_ptr);
+        if reused {
+            reuse_observed += 1;
+        }
+        unsafe {
+            for &p in &probe_ptrs {
+                memset_sync_default(p, TRAMPLE, ROWS * 4);
+            }
+        }
+        launch_handle.synchronize().expect("sync launch");
+        default_stream.synchronize().expect("sync default");
+
+        // Verify: UNIQUE rows kept, sorted ascending by k. Row
+        // i should be (i, i*7).
+        let mut host_rows = [0u32];
+        device
+            .inner()
+            .dtoh_sync_copy_into(deduped.num_rows_device(), &mut host_rows)
+            .expect("dtoh dedup count");
+        let actual_rows = host_rows[0] as usize;
+        if actual_rows != UNIQUE {
+            bad_output += 1;
+            if iter == 0 {
+                eprintln!(
+                    "[dedup_full_row_recorded] iter=0 actual_rows={} expected={} reused={}",
+                    actual_rows, UNIQUE, reused
+                );
+            }
+            drop(deduped);
+            drop(next_a);
+            drop(next_b);
+            drop(next_c);
+            drop(next_d);
+            runtime.reap_pending().expect("reap");
+            continue;
+        }
+
+        let k_out = deduped.column(0).expect("out k");
+        let v_out = deduped.column(1).expect("out v");
+        let mut k_back = vec![0u8; UNIQUE * 4];
+        let mut v_back = vec![0u8; UNIQUE * 4];
+        unsafe {
+            dtoh_sync(&mut k_back, *k_out.device_ptr());
+            dtoh_sync(&mut v_back, *v_out.device_ptr());
+        }
+        let mut local_bad = 0usize;
+        for i in 0..UNIQUE {
+            let kb = &k_back[i * 4..i * 4 + 4];
+            let vb = &v_back[i * 4..i * 4 + 4];
+            let kv = u32::from_le_bytes([kb[0], kb[1], kb[2], kb[3]]);
+            let vv = u32::from_le_bytes([vb[0], vb[1], vb[2], vb[3]]);
+            let k_e = i as u32;
+            let v_e = k_e.wrapping_mul(7);
+            if kv != k_e || vv != v_e {
+                local_bad += 1;
+                if iter == 0 && local_bad <= 4 {
+                    eprintln!(
+                        "[dedup_full_row_recorded] iter=0 row={} k={}/{} v={}/{} reused={}",
+                        i, kv, k_e, vv, v_e, reused
+                    );
+                }
+            }
+        }
+        if local_bad > 0 {
+            bad_output += 1;
+        }
+
+        drop(deduped);
+        drop(next_a);
+        drop(next_b);
+        drop(next_c);
+        drop(next_d);
+        runtime.reap_pending().expect("reap");
+    }
+
+    eprintln!(
+        "[dedup_full_row_recorded] iterations={} reuse_observed={} bad_output={}",
+        ITERATIONS, reuse_observed, bad_output
+    );
+    assert!(
+        reuse_observed > 0,
+        "address reuse never observed across {} iterations; cannot exercise \
+         the cross-stream lifetime safety path",
+        ITERATIONS
+    );
+    assert_eq!(
+        bad_output, 0,
+        "dedup_full_row_recorded produced corrupted output in {}/{} iterations \
+         (reuse_observed={}). Either sort_recorded, mark_unique_full_row_bytewise, \
+         or the recorded compact tail raced an alloc-stream reuse + trample.",
+        bad_output, ITERATIONS, reuse_observed,
+    );
+}
+
+/// Negative test: recorded sort against a no-runtime manager.
+#[test]
+fn provider_sort_recorded_rejects_legacy_manager() {
+    use xlog_core::{ScalarType, Schema};
+    use xlog_cuda::CudaBuffer;
+
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        return;
+    };
+    let memory = Arc::new(GpuMemoryManager::new(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(1024 * 1024),
+    ));
+    let provider =
+        CudaKernelProvider::new(Arc::clone(&device), Arc::clone(&memory)).expect("legacy provider");
+    let mut col = memory.alloc::<u8>(16).expect("alloc col");
+    let payload = [3u32, 1, 2, 0];
+    let bytes: Vec<u8> = payload.iter().flat_map(|v| v.to_le_bytes()).collect();
+    device
+        .inner()
+        .htod_sync_copy_into(&bytes, &mut col)
+        .expect("htod col");
+    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc rowcount");
+    device
+        .inner()
+        .htod_sync_copy_into(&[4u32], &mut d_num_rows)
+        .expect("htod rows");
+    let input = CudaBuffer::from_columns(
+        vec![col.into()],
+        4,
+        d_num_rows,
+        Schema::new(vec![("v".to_string(), ScalarType::U32)]),
+    );
+    let err = provider.sort_recorded(&input, &[0], StreamId::DEFAULT);
+    match err {
+        Err(XlogError::Kernel(msg)) => assert!(
+            msg.contains("requires") || msg.contains("with_runtime"),
+            "expected helpful Kernel error, got {:?}",
+            msg
+        ),
+        Err(other) => panic!(
+            "sort_recorded must reject legacy manager with XlogError::Kernel, got {:?}",
+            other
+        ),
+        Ok(_) => panic!("sort_recorded must reject legacy manager — unexpectedly returned Ok"),
+    }
+}
+
 /// Filter-class slice. Proves that the migrated
 /// `compare_const_mask_recorded` correctly threads the column
 /// READ through the runtime: the kernel runs on a non-default

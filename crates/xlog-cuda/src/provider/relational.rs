@@ -11,7 +11,9 @@ use super::{
     PackedKeyData, RadixSortScratch, DEDUP_MODULE, DEFAULT_JOIN_MAX_OUTPUT, FILTER_MODULE,
     ILP_MODULE, JOIN_MODULE, PACK_MODULE, SCAN_MODULE, SET_OPS_MODULE, SORT_MODULE,
 };
-use crate::memory::TrackedCudaSlice;
+use crate::device_runtime::StreamId;
+use crate::launch::LaunchRecorder;
+use crate::memory::{CudaColumn, TrackedCudaSlice};
 use crate::CudaBuffer;
 
 // Per-column scalar-type encoding used by the deterministic full-row
@@ -4959,5 +4961,631 @@ impl super::CudaKernelProvider {
         indices.truncate(max_active);
 
         Ok(indices.into_iter().map(|(_, i, j, k)| (i, j, k)).collect())
+    }
+
+    // ============== Recorded sort + dedup_full_row (v0.6 slice #5) ==============
+    //
+    // Strict-recorder, launch_stream-routed siblings of `sort` and
+    // `dedup_full_row`. Scope-narrow per the slice directive:
+    //   * `sort_recorded` accepts only u32 / Symbol key columns; multi-type
+    //     recorded sort is deferred. Other key types return XlogError::Kernel
+    //     before any kernel work is queued.
+    //   * `dedup_full_row_recorded` requires every column to be u32 / Symbol
+    //     (it composes sort_recorded internally). Mixed-type full-row dedup
+    //     remains on the legacy `dedup_full_row`.
+    //
+    // No legacy default-routed code is touched. Existing callers are
+    // unchanged. Runtime/provider opt-in wiring is NOT included in this
+    // slice — callers that want recorded sort/dedup must invoke the
+    // recorded methods directly with a launch_stream.
+
+    /// Stream-aware variant of
+    /// [`Self::radix_sort_u32_pairs_with_scratch`]. Same kernel
+    /// chain but every launch is `launch_on_stream` and there
+    /// are no internal `device.synchronize()` calls. Caller-owned
+    /// scratch (`keys_a/b`, `indices_a/b`, `hist`, `prefix`,
+    /// `ranks`) is recorded by the caller; intermediate
+    /// `block_sums` allocations created by the inner scan are
+    /// recorded directly inside
+    /// [`Self::multiblock_scan_u32_view_inplace_on_stream`].
+    fn radix_sort_u32_pairs_with_scratch_on_stream(
+        &self,
+        keys_a: &mut TrackedCudaSlice<u32>,
+        keys_b: &mut TrackedCudaSlice<u32>,
+        indices_a: &mut TrackedCudaSlice<u32>,
+        indices_b: &mut TrackedCudaSlice<u32>,
+        hist: &mut TrackedCudaSlice<u32>,
+        prefix: &mut TrackedCudaSlice<u32>,
+        ranks: &mut TrackedCudaSlice<u32>,
+        num_rows_device: &TrackedCudaSlice<u32>,
+        row_cap: u32,
+        cu_stream: &cudarc::driver::CudaStream,
+        launch_stream: StreamId,
+        runtime: &crate::device_runtime::XlogDeviceRuntime,
+    ) -> Result<()> {
+        if row_cap == 0 {
+            return Ok(());
+        }
+        let device = self.device.inner();
+        let block_size = Self::SORT_BLOCK_SIZE;
+        let grid_size = (row_cap + block_size - 1) / block_size;
+        let sort_config = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let histogram_fn = device
+            .get_func(SORT_MODULE, sort_kernels::RADIX_HISTOGRAM)
+            .ok_or_else(|| XlogError::Kernel("radix_histogram kernel not found".to_string()))?;
+        let prefix_fn = device
+            .get_func(SORT_MODULE, sort_kernels::COMPUTE_DIGIT_PREFIX_SUMS)
+            .ok_or_else(|| {
+                XlogError::Kernel("compute_digit_prefix_sums kernel not found".to_string())
+            })?;
+        let ranks_fn = device
+            .get_func(SORT_MODULE, sort_kernels::COMPUTE_RANKS)
+            .ok_or_else(|| XlogError::Kernel("compute_ranks kernel not found".to_string()))?;
+        let scatter_fn = device
+            .get_func(SORT_MODULE, sort_kernels::RADIX_SCATTER_STABLE)
+            .ok_or_else(|| {
+                XlogError::Kernel("radix_scatter_stable kernel not found".to_string())
+            })?;
+        let prefix_config = LaunchConfig {
+            grid_dim: (1, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let mut in_a = true;
+        for pass in 0..8u32 {
+            let shift = pass * 4;
+            let (keys_in, indices_in, keys_out, indices_out) = if in_a {
+                (&*keys_a, &*indices_a, &mut *keys_b, &mut *indices_b)
+            } else {
+                (&*keys_b, &*indices_b, &mut *keys_a, &mut *indices_a)
+            };
+
+            // SAFETY: radix_histogram(keys, num_rows_device, row_cap, histograms, shift)
+            unsafe {
+                histogram_fn.clone().launch_on_stream(
+                    cu_stream,
+                    sort_config,
+                    (keys_in, num_rows_device, row_cap, &mut *hist, shift),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("radix_histogram (on_stream) failed: {}", e)))?;
+
+            // SAFETY: compute_digit_prefix_sums(histograms, grid_size, prefix_sums)
+            unsafe {
+                prefix_fn.clone().launch_on_stream(
+                    cu_stream,
+                    prefix_config,
+                    (&*hist, grid_size, &mut *prefix),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "compute_digit_prefix_sums (on_stream) failed: {}",
+                    e
+                ))
+            })?;
+
+            // Per-digit per-block exclusive offsets — in-place
+            // scan on a 16-strided view of `hist`.
+            for digit in 0..16u32 {
+                let start = (digit * grid_size) as usize;
+                let end = start + (grid_size as usize);
+                let mut digit_slice = hist.slice_mut(start..end);
+                self.multiblock_scan_u32_view_inplace_on_stream(
+                    &mut digit_slice,
+                    grid_size,
+                    cu_stream,
+                    launch_stream,
+                    runtime,
+                )?;
+            }
+
+            // SAFETY: compute_ranks(keys, num_rows_device, row_cap, ranks, shift)
+            unsafe {
+                ranks_fn.clone().launch_on_stream(
+                    cu_stream,
+                    sort_config,
+                    (keys_in, num_rows_device, row_cap, &mut *ranks, shift),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("compute_ranks (on_stream) failed: {}", e)))?;
+
+            // SAFETY: radix_scatter_stable(keys_in, indices_in, ranks, keys_out,
+            // indices_out, prefix_sums, block_offsets, num_rows_device, row_cap, shift)
+            unsafe {
+                scatter_fn.clone().launch_on_stream(
+                    cu_stream,
+                    sort_config,
+                    (
+                        keys_in,
+                        indices_in,
+                        &*ranks,
+                        keys_out,
+                        indices_out,
+                        &*prefix,
+                        &*hist,
+                        num_rows_device,
+                        row_cap,
+                        shift,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("radix_scatter_stable (on_stream) failed: {}", e))
+            })?;
+
+            in_a = !in_a;
+        }
+
+        if !in_a {
+            return Err(XlogError::Kernel(
+                "Unexpected radix-sort buffer parity (expected even number of passes)".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Stream-aware variant of
+    /// [`Self::apply_permutation_gpu`]. Permutes every input
+    /// column on `launch_stream` into caller-allocated
+    /// `dst_cols`. No internal sync; caller records both the
+    /// permutation slice and `dst_cols`.
+    fn apply_permutation_gpu_on_stream(
+        &self,
+        input: &CudaBuffer,
+        permutation: &TrackedCudaSlice<u32>,
+        dst_cols: &mut [TrackedCudaSlice<u8>],
+        cu_stream: &cudarc::driver::CudaStream,
+    ) -> Result<()> {
+        let row_cap = input.num_rows() as u32;
+        let d_num_rows = input.num_rows_device();
+        let device = self.device.inner();
+
+        let grid_size = (row_cap + Self::SORT_BLOCK_SIZE - 1) / Self::SORT_BLOCK_SIZE;
+        let launch_config = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (Self::SORT_BLOCK_SIZE, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let apply_perm_fn = device
+            .get_func(SORT_MODULE, sort_kernels::APPLY_PERMUTATION_BYTES)
+            .ok_or_else(|| {
+                XlogError::Kernel("apply_permutation_bytes kernel not found".to_string())
+            })?;
+
+        if dst_cols.len() != input.columns.len() {
+            return Err(XlogError::Kernel(format!(
+                "apply_permutation_gpu_on_stream: dst_cols.len()={} mismatches input.cols={}",
+                dst_cols.len(),
+                input.columns.len()
+            )));
+        }
+
+        for (col_idx, dst_col) in dst_cols.iter_mut().enumerate() {
+            let src_col = input
+                .column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
+            let elem_size = input
+                .schema
+                .column_type(col_idx)
+                .ok_or_else(|| {
+                    XlogError::Kernel(format!("Schema type for column {} not found", col_idx))
+                })?
+                .size_bytes() as u32;
+            let output_bytes = (row_cap as usize) * (elem_size as usize);
+            if src_col.num_bytes() != output_bytes {
+                return Err(XlogError::Kernel(format!(
+                    "Column {} has {} bytes but expected {} (num_rows={}, elem_size={})",
+                    col_idx,
+                    src_col.num_bytes(),
+                    output_bytes,
+                    row_cap,
+                    elem_size
+                )));
+            }
+            // SAFETY: apply_permutation_bytes(input, output, permutation,
+            // num_rows_device, row_cap, elem_size)
+            unsafe {
+                apply_perm_fn.clone().launch_on_stream(
+                    cu_stream,
+                    launch_config,
+                    (
+                        src_col,
+                        &mut *dst_col,
+                        permutation,
+                        d_num_rows,
+                        row_cap,
+                        elem_size,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("apply_permutation_bytes (on_stream) failed: {}", e))
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Strict-recorder variant of [`Self::sort`] — narrow to
+    /// `u32` / `Symbol` key columns. The whole sort chain
+    /// (init → LSD radix passes → multi-column gather) runs on
+    /// the caller-supplied `launch_stream`; every input column
+    /// and the input row-count buffer are recorded as reads
+    /// before preflight; every fresh runtime-backed allocation
+    /// (scratch + output columns + output `d_num_rows`) is
+    /// recorded via `write_post_preflight_fresh` AFTER kernels
+    /// enqueue.
+    ///
+    /// # Errors
+    ///   * Manager not runtime-backed.
+    ///   * `launch_stream` does not resolve.
+    ///   * Empty `key_cols` or out-of-bounds index.
+    ///   * Any key column type other than `U32` / `Symbol`
+    ///     (multi-type recorded sort is deferred).
+    ///   * Preflight / kernel / commit failures.
+    pub fn sort_recorded(
+        &self,
+        input: &CudaBuffer,
+        key_cols: &[usize],
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        let runtime = self.memory.runtime().ok_or_else(|| {
+            XlogError::Kernel(
+                "sort_recorded requires a runtime-backed GpuMemoryManager (with_runtime)"
+                    .to_string(),
+            )
+        })?;
+        let cu_stream = runtime
+            .stream_pool()
+            .resolve(launch_stream)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "sort_recorded: launch_stream StreamId({}) does not resolve",
+                    launch_stream.0
+                ))
+            })?;
+
+        if input.num_rows() == 0 {
+            return self.create_empty_buffer(input.schema.clone());
+        }
+        if key_cols.is_empty() {
+            return Err(XlogError::Kernel(
+                "Sort requires at least one key column".to_string(),
+            ));
+        }
+        if input.num_rows() > u32::MAX as u64 {
+            return Err(XlogError::Kernel(format!(
+                "Sort supports at most {} rows, got {}",
+                u32::MAX,
+                input.num_rows()
+            )));
+        }
+        for &k in key_cols {
+            if k >= input.arity() {
+                return Err(XlogError::Kernel(format!(
+                    "Key column index {} out of bounds (arity {})",
+                    k,
+                    input.arity()
+                )));
+            }
+            let ty = input.schema.column_type(k).ok_or_else(|| {
+                XlogError::Kernel(format!("Key column {} type not found in schema", k))
+            })?;
+            if !matches!(ty, ScalarType::U32 | ScalarType::Symbol) {
+                return Err(XlogError::Kernel(format!(
+                    "sort_recorded supports only U32 / Symbol key columns; got {:?} for column {}",
+                    ty, k
+                )));
+            }
+        }
+
+        let n = input.num_rows() as u32;
+        let block_size = Self::SORT_BLOCK_SIZE;
+        let grid_size = (n + block_size - 1) / block_size;
+        let device = self.device.inner();
+        let launch_config = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        // Pre-allocate ALL fresh runtime-backed buffers BEFORE
+        // recorder construction (Rust drop order).
+        let mut indices_a = self.memory.alloc::<u32>(n as usize)?;
+        let mut indices_b = self.memory.alloc::<u32>(n as usize)?;
+        let mut keys_a = self.memory.alloc::<u32>(n as usize)?;
+        let mut keys_b = self.memory.alloc::<u32>(n as usize)?;
+        let mut d_hist = self.memory.alloc::<u32>((grid_size as usize) * 16)?;
+        let mut d_prefix = self.memory.alloc::<u32>(16)?;
+        let mut d_ranks = self.memory.alloc::<u32>(n as usize)?;
+        let mut output_d_num_rows = self.upload_device_row_count(n)?;
+
+        let mut dst_cols: Vec<TrackedCudaSlice<u8>> = Vec::with_capacity(input.columns.len());
+        for col_idx in 0..input.columns.len() {
+            let elem_size = input
+                .schema
+                .column_type(col_idx)
+                .ok_or_else(|| {
+                    XlogError::Kernel(format!("Schema type for column {} not found", col_idx))
+                })?
+                .size_bytes();
+            dst_cols.push(self.memory.alloc::<u8>((n as usize) * elem_size)?);
+        }
+
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read(input.num_rows_device());
+        for col_idx in 0..input.columns.len() {
+            let c = input
+                .column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
+            rec.read_column(c);
+        }
+        rec.preflight(runtime)
+            .map_err(|e| XlogError::Kernel(format!("sort_recorded: preflight failed: {}", e)))?;
+
+        // Step 1: init_indices.
+        let init_fn = device
+            .get_func(SORT_MODULE, sort_kernels::INIT_INDICES)
+            .ok_or_else(|| XlogError::Kernel("init_indices kernel not found".to_string()))?;
+        // SAFETY: init_indices(indices, num_rows_device, row_cap)
+        unsafe {
+            init_fn.clone().launch_on_stream(
+                &cu_stream,
+                launch_config,
+                (&mut indices_a, input.num_rows_device(), n),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("init_indices (on_stream) failed: {}", e)))?;
+
+        // Step 2: LSD radix passes per key column.
+        for &col_idx in key_cols.iter().rev() {
+            let col = input
+                .column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Key column {} not found", col_idx)))?;
+            let col_view = self.column_as_u32_view(col, n as usize)?;
+            let gather_fn = device
+                .get_func(SORT_MODULE, sort_kernels::APPLY_PERMUTATION_U32)
+                .ok_or_else(|| {
+                    XlogError::Kernel("apply_permutation_u32 kernel not found".to_string())
+                })?;
+            // SAFETY: apply_permutation_u32(input, output, permutation,
+            // num_rows_device, row_cap)
+            unsafe {
+                gather_fn.clone().launch_on_stream(
+                    &cu_stream,
+                    launch_config,
+                    (
+                        &col_view,
+                        &mut keys_a,
+                        &indices_a,
+                        input.num_rows_device(),
+                        n,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("apply_permutation_u32 (on_stream) failed: {}", e))
+            })?;
+
+            self.radix_sort_u32_pairs_with_scratch_on_stream(
+                &mut keys_a,
+                &mut keys_b,
+                &mut indices_a,
+                &mut indices_b,
+                &mut d_hist,
+                &mut d_prefix,
+                &mut d_ranks,
+                input.num_rows_device(),
+                n,
+                &cu_stream,
+                launch_stream,
+                runtime,
+            )?;
+        }
+
+        // Step 3: gather all input columns by the final permutation.
+        self.apply_permutation_gpu_on_stream(input, &indices_a, &mut dst_cols, &cu_stream)?;
+
+        // Step 4: record post-preflight fresh writes.
+        rec.write_post_preflight_fresh(&indices_a);
+        rec.write_post_preflight_fresh(&indices_b);
+        rec.write_post_preflight_fresh(&keys_a);
+        rec.write_post_preflight_fresh(&keys_b);
+        rec.write_post_preflight_fresh(&d_hist);
+        rec.write_post_preflight_fresh(&d_prefix);
+        rec.write_post_preflight_fresh(&d_ranks);
+        for dst_col in &dst_cols {
+            rec.write_post_preflight_fresh(dst_col);
+        }
+        // `output_d_num_rows` was populated synchronously via
+        // htod_sync_copy_into; no launch_stream kernel touches
+        // it. Recording would queue a wait-event for no
+        // reason. Leaving it unrecorded is correct — its drop
+        // races nothing.
+        let _ = &mut output_d_num_rows;
+
+        rec.commit(runtime)
+            .map_err(|e| XlogError::Kernel(format!("sort_recorded: commit failed: {}", e)))?;
+
+        let new_columns: Vec<CudaColumn> = dst_cols.into_iter().map(|s| s.into()).collect();
+        Ok(CudaBuffer::from_columns_with_host_count(
+            new_columns,
+            input.num_rows(),
+            output_d_num_rows,
+            input.schema.clone(),
+            n,
+        ))
+    }
+
+    /// Strict-recorder variant of [`Self::dedup_full_row`] —
+    /// narrow to all-`u32` / `Symbol` columns.
+    ///
+    /// Composes [`Self::sort_recorded`] (typed multi-column
+    /// sort) → on-stream `mark_unique_full_row_bytewise` →
+    /// [`Self::compact_buffer_by_device_mask_counted_recorded`]
+    /// (gather kept rows). All three primitives commit
+    /// independently; the runtime's record-all + wait-all
+    /// `last_use_events: Vec<CudaEvent>` semantics chain the
+    /// deallocate safety end-to-end.
+    pub fn dedup_full_row_recorded(
+        &self,
+        input: &CudaBuffer,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        let runtime = self.memory.runtime().ok_or_else(|| {
+            XlogError::Kernel(
+                "dedup_full_row_recorded requires a runtime-backed GpuMemoryManager".to_string(),
+            )
+        })?;
+        let cu_stream = runtime
+            .stream_pool()
+            .resolve(launch_stream)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "dedup_full_row_recorded: launch_stream StreamId({}) does not resolve",
+                    launch_stream.0
+                ))
+            })?;
+
+        let row_count = input.num_rows() as usize;
+        if row_count == 0 {
+            return self.create_empty_buffer(input.schema().clone());
+        }
+        if row_count == 1 {
+            return self.clone_buffer(input);
+        }
+        if row_count > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "dedup_full_row_recorded supports at most {} rows, got {}",
+                u32::MAX,
+                row_count
+            )));
+        }
+        let arity = input.arity();
+        if arity == 0 {
+            return self.buffer_from_columns(Vec::new(), 1, input.schema().clone());
+        }
+        for col_idx in 0..arity {
+            let ty = input.schema.column_type(col_idx).ok_or_else(|| {
+                XlogError::Kernel(format!("Column {} type not found in schema", col_idx))
+            })?;
+            if !matches!(ty, ScalarType::U32 | ScalarType::Symbol) {
+                return Err(XlogError::Kernel(format!(
+                    "dedup_full_row_recorded supports only U32 / Symbol columns; \
+                     got {:?} for column {}",
+                    ty, col_idx
+                )));
+            }
+        }
+
+        // Step 1: typed sort on launch_stream.
+        let all_cols: Vec<usize> = (0..arity).collect();
+        let sorted = self.sort_recorded(input, &all_cols, launch_stream)?;
+        let n = sorted.num_rows() as u32;
+        if n <= 1 {
+            return Ok(sorted);
+        }
+
+        // Step 2: bytewise adjacent-equality mask. Allocate
+        // d_col_ptrs / d_col_sizes / d_unique_mask up front
+        // before the recorder. col_ptrs/sizes are populated
+        // synchronously via htod_sync_copy_into (host data,
+        // ordered before the launch_stream kernel sees them).
+        let device = self.device.inner();
+        let mut col_ptrs_host: Vec<u64> = Vec::with_capacity(arity);
+        let mut col_sizes_host: Vec<u32> = Vec::with_capacity(arity);
+        for col_idx in 0..arity {
+            let c = sorted
+                .column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Sorted column {} not found", col_idx)))?;
+            let ty = sorted.schema().column_type(col_idx).ok_or_else(|| {
+                XlogError::Kernel(format!("Sorted column {} type missing", col_idx))
+            })?;
+            col_ptrs_host.push(*c.device_ptr() as u64);
+            col_sizes_host.push(ty.size_bytes() as u32);
+        }
+        let mut d_col_ptrs = self.memory.alloc::<u64>(arity)?;
+        let mut d_col_sizes = self.memory.alloc::<u32>(arity)?;
+        device
+            .htod_sync_copy_into(&col_ptrs_host, &mut d_col_ptrs)
+            .map_err(|e| {
+                XlogError::Kernel(format!("dedup_full_row_recorded col ptr upload: {}", e))
+            })?;
+        device
+            .htod_sync_copy_into(&col_sizes_host, &mut d_col_sizes)
+            .map_err(|e| {
+                XlogError::Kernel(format!("dedup_full_row_recorded col size upload: {}", e))
+            })?;
+        let d_unique_mask = self.memory.alloc::<u8>(n as usize)?;
+
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        for col_idx in 0..arity {
+            let c = sorted
+                .column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Sorted column {} not found", col_idx)))?;
+            rec.read_column(c);
+        }
+        rec.read(sorted.num_rows_device());
+        rec.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "dedup_full_row_recorded: mark_unique preflight failed: {}",
+                e
+            ))
+        })?;
+
+        let block_size = 256u32;
+        let grid = (n + block_size - 1) / block_size;
+        let cfg = LaunchConfig {
+            grid_dim: (grid, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mark_fn = device
+            .get_func(DEDUP_MODULE, dedup_kernels::MARK_UNIQUE_FULL_ROW_BYTEWISE)
+            .ok_or_else(|| {
+                XlogError::Kernel("mark_unique_full_row_bytewise kernel not found".to_string())
+            })?;
+        // SAFETY: mark_unique_full_row_bytewise(col_ptrs, col_sizes,
+        // num_cols, num_rows_device, row_cap, unique_mask)
+        unsafe {
+            mark_fn.clone().launch_on_stream(
+                &cu_stream,
+                cfg,
+                (
+                    &d_col_ptrs,
+                    &d_col_sizes,
+                    arity as u32,
+                    sorted.num_rows_device(),
+                    n,
+                    &d_unique_mask,
+                ),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!(
+                "mark_unique_full_row_bytewise (on_stream) failed: {}",
+                e
+            ))
+        })?;
+
+        rec.write_post_preflight_fresh(&d_col_ptrs);
+        rec.write_post_preflight_fresh(&d_col_sizes);
+        rec.write_post_preflight_fresh(&d_unique_mask);
+        rec.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "dedup_full_row_recorded: mark_unique commit failed: {}",
+                e
+            ))
+        })?;
+
+        // Step 3: gather kept rows via the recorded compact tail.
+        self.compact_buffer_by_device_mask_counted_recorded(&sorted, &d_unique_mask, launch_stream)
     }
 }

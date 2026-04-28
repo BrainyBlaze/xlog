@@ -1387,6 +1387,134 @@ impl CudaKernelProvider {
         Ok(())
     }
 
+    /// Stream-aware view-inplace variant of
+    /// [`Self::multiblock_scan_u32_view_inplace`]. Same shape
+    /// as [`Self::multiblock_scan_u32_inplace_on_stream`] but
+    /// over a `CudaViewMut` (used by recorded radix sort
+    /// digit loops that scan per-digit slices of the histogram
+    /// in place). Records intermediate `block_sums` against
+    /// the runtime before they drop at end-of-scope.
+    pub(crate) fn multiblock_scan_u32_view_inplace_on_stream(
+        &self,
+        data: &mut CudaViewMut<'_, u32>,
+        n: u32,
+        cu_stream: &cudarc::driver::CudaStream,
+        launch_stream: crate::device_runtime::StreamId,
+        runtime: &crate::device_runtime::XlogDeviceRuntime,
+    ) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        let device = self.device.inner();
+        let block_size = 256u32;
+
+        if n <= block_size {
+            let phase2_fn = device
+                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE2)
+                .ok_or_else(|| {
+                    XlogError::Kernel("Failed to get multiblock_scan_phase2 kernel".to_string())
+                })?;
+            // SAFETY: phase2 kernel signature.
+            unsafe {
+                phase2_fn.clone().launch_on_stream(
+                    cu_stream,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (data, n),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "multiblock_scan_phase2 (view on_stream) failed: {}",
+                    e
+                ))
+            })?;
+            return Ok(());
+        }
+
+        let num_blocks = (n + block_size - 1) / block_size;
+        let mut block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
+
+        let phase1_u32_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_U32_PHASE1)
+            .ok_or_else(|| {
+                XlogError::Kernel("Failed to get multiblock_scan_u32_phase1 kernel".to_string())
+            })?;
+        // SAFETY: phase1 kernel signature.
+        unsafe {
+            phase1_u32_fn.clone().launch_on_stream(
+                cu_stream,
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&mut *data, &mut block_sums, n),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!(
+                "multiblock_scan_u32_phase1 (view on_stream) failed: {}",
+                e
+            ))
+        })?;
+
+        if num_blocks > 1 {
+            self.multiblock_scan_u32_inplace_on_stream(
+                &mut block_sums,
+                num_blocks,
+                cu_stream,
+                launch_stream,
+                runtime,
+            )?;
+        }
+
+        let phase3_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE3)
+            .ok_or_else(|| {
+                XlogError::Kernel("Failed to get multiblock_scan_phase3 kernel".to_string())
+            })?;
+        // SAFETY: phase3 kernel signature.
+        unsafe {
+            phase3_fn.clone().launch_on_stream(
+                cu_stream,
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&mut *data, &block_sums, n),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!(
+                "multiblock_scan_phase3 (view on_stream) failed: {}",
+                e
+            ))
+        })?;
+
+        // Record block_sums use before end-of-scope drop.
+        if let Some(b) = block_sums.runtime_block() {
+            runtime.record_block_use(b, launch_stream).map_err(|e| {
+                XlogError::Kernel(format!(
+                    "multiblock_scan_u32_view_inplace_on_stream: record_block_use \
+                     for intermediate block_sums failed: {}",
+                    e
+                ))
+            })?;
+        } else {
+            return Err(XlogError::Kernel(
+                "multiblock_scan_u32_view_inplace_on_stream: intermediate block_sums has no \
+                 runtime block — caller must use a runtime-backed manager"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     fn multiblock_scan_u32_view_inplace(
         &self,
         data: &mut CudaViewMut<'_, u32>,
