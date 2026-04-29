@@ -131,8 +131,55 @@ impl DeviceMemoryResource for GlobalDeviceBudget {
         stream: StreamId,
         tag: AllocTag,
     ) -> ResourceResult<DeviceBlock> {
-        let mut state = self.state.lock().expect("GlobalDeviceBudget poisoned");
+        // First-pass reservation attempt under the budget lock.
+        // If the request fits, reserve and forward to the inner
+        // immediately.
+        {
+            let mut state = self.state.lock().expect("GlobalDeviceBudget poisoned");
+            let remaining = self.limit.saturating_sub(state.reserved);
+            if bytes <= remaining {
+                state.reserved = state.reserved.saturating_add(bytes);
+                drop(state);
+                return match self.inner.allocate(bytes, stream, tag) {
+                    Ok(block) => Ok(block),
+                    Err(e) => {
+                        let mut state = self.state.lock().expect("GlobalDeviceBudget poisoned");
+                        state.reserved = state.reserved.saturating_sub(bytes);
+                        Err(e)
+                    }
+                };
+            }
+            // Genuinely oversized requests can never fit even
+            // after a reap. Short-circuit before touching the
+            // inner stack so the rejection stays cheap and does
+            // not emit a reap log record.
+            if bytes > self.limit {
+                return Err(ResourceError::OutOfBudget {
+                    requested: bytes,
+                    remaining,
+                });
+            }
+        }
 
+        // Second pass: reservation didn't fit. With the
+        // stream-ordered async backend, dropped buffers transit
+        // through `pending_per_stream` until `reap_pending` runs;
+        // their bytes still count against `state.reserved`. Tight
+        // allocate-then-drop loops (cert hardware sustained
+        // tests; recursive Datalog inner loops without explicit
+        // reap) hit this even when the GPU has plenty of free
+        // memory. Drain pending frees once and retry. If the
+        // retry still fails, the budget is genuinely exhausted
+        // and the caller should see `OutOfBudget` as before.
+        //
+        // Reap is performed WITHOUT holding `state` so the inner
+        // resource's own locks can run; reap itself updates
+        // `state.reserved` via `Self::reap_pending` (which takes
+        // the lock) so a concurrent racing allocate sees the
+        // freed bytes.
+        let _ = self.reap_pending();
+
+        let mut state = self.state.lock().expect("GlobalDeviceBudget poisoned");
         let remaining = self.limit.saturating_sub(state.reserved);
         if bytes > remaining {
             return Err(ResourceError::OutOfBudget {
@@ -140,18 +187,13 @@ impl DeviceMemoryResource for GlobalDeviceBudget {
                 remaining,
             });
         }
-
-        // Reserve first so the next caller sees the claim even if
-        // we're about to call into a slow CUDA driver path.
         state.reserved = state.reserved.saturating_add(bytes);
+        drop(state);
 
         match self.inner.allocate(bytes, stream, tag) {
             Ok(block) => Ok(block),
             Err(e) => {
-                // Roll back the reservation on inner failure. The
-                // inner did not move any bytes from free to live,
-                // so our reserved must drop back to its prior
-                // value.
+                let mut state = self.state.lock().expect("GlobalDeviceBudget poisoned");
                 state.reserved = state.reserved.saturating_sub(bytes);
                 Err(e)
             }
