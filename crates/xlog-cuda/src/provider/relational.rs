@@ -7039,8 +7039,19 @@ impl super::CudaKernelProvider {
             }
         }
 
-        let probe_cap = left.num_rows() as u32;
-        let num_right_u32 = num_right as u32;
+        // Base `probe_cap` on the validated logical row count
+        // (`num_left`) with a checked cast — `left.num_rows()` is
+        // the row capacity and could over-allocate per-probe
+        // scratch when `row_cap > num_left`, and silently
+        // truncate if either exceeded `u32::MAX`. The earlier
+        // validation already rejects `num_left > u32::MAX as
+        // usize`, but make the cast explicit at the use site.
+        let probe_cap = u32::try_from(num_left).map_err(|_| {
+            XlogError::Kernel("csm left_outer: left row count exceeds u32::MAX".to_string())
+        })?;
+        let num_right_u32 = u32::try_from(num_right).map_err(|_| {
+            XlogError::Kernel("csm left_outer: right row count exceeds u32::MAX".to_string())
+        })?;
 
         // Steps 1+2: pack + table on launch_stream.
         let left_packed =
@@ -7616,13 +7627,28 @@ impl super::CudaKernelProvider {
             XlogError::Kernel(format!("csm left_outer: phase-E commit failed: {}", e))
         })?;
 
-        let d_num_rows = self.upload_device_row_count(total_rows as u32)?;
+        // Guard the u32 metadata cast: `inner_count_u32` is
+        // already u32, but `unmatched_rows` is read from the
+        // device row count of `unmatched_left` and could push
+        // `total_rows` past u32::MAX in pathological inputs.
+        // Truncating `total_rows as u32` would corrupt the
+        // host-side row-count cache and the device-side
+        // `d_num_rows` scalar, leading to OOB reads in
+        // downstream consumers.
+        if total_rows > u32::MAX as u64 {
+            return Err(XlogError::Kernel(format!(
+                "csm left_outer: output row count {} exceeds u32::MAX",
+                total_rows
+            )));
+        }
+        let total_rows_u32 = total_rows as u32;
+        let d_num_rows = self.upload_device_row_count(total_rows_u32)?;
         Ok(CudaBuffer::from_columns_with_host_count(
             result_columns,
             total_rows,
             d_num_rows,
             combined_schema,
-            total_rows as u32,
+            total_rows_u32,
         ))
     }
 
