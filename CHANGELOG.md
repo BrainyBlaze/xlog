@@ -4,8 +4,522 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased] — targeting v0.6.0
 
+<<<<<<< Updated upstream
 > **Note:** All items below are post-v0.5.0 work (42 commits since the `v0.5.0` tag). They are
 > not part of the v0.5.0 release.
+=======
+Stream-Safe GPU Runtime And Execution Discipline. Infrastructure
+hardening release: a stream-safe GPU runtime and recorded launch
+discipline so subsequent join / WCOJ work can be trusted under
+parallel execution. Default behaviour for legacy callers is
+unchanged; the new path is opt-in via
+`CudaKernelProvider::with_runtime` /
+`GpuMemoryManager::with_runtime` plus the
+`XLOG_USE_DEVICE_RUNTIME` / `XLOG_USE_RECORDED_OPS` env flags.
+
+### Added
+
+- **Access-aware stream dependency manager** (PR #72,
+  `26c2e429` + follow-ups). Replaces post-launch-only
+  `record_block_use` with `prepare_block_use(BlockId, stream,
+  Access)` / `finish_block_use(...)` and an `Access {Read,
+  Write, ReadWrite}` enum. `AsyncCudaResource::LiveEntry`
+  tracks `last_write: Option<(StreamId, CudaEvent)>` (seeded
+  with an allocation-ready event captured immediately after
+  `cuMemAllocAsync`) and `outstanding_reads:
+  Vec<(StreamId, CudaEvent)>`. Reads wait on `last_write`;
+  writes wait on `last_write` plus every cross-stream
+  outstanding read. Same-stream events are skipped. Closes
+  both the use-after-prior-write hazard and the
+  use-after-allocation hazard across streams.
+- **Lifetime-free `LaunchRecorder`**. Snapshots `BlockId` from
+  each registered slice at record time and drops the source
+  borrow immediately, so kernel `&mut` borrows after preflight
+  are unrestricted. `preflight(&runtime)` queues
+  `cuStreamWaitEvent` for every recorded use's cross-stream
+  dependency BEFORE the launch; `commit(self, &runtime)`
+  records new events via `finish_block_use` AFTER. Repeated
+  registrations of the same block dedup on
+  `(ptr, generation, device_ordinal)` to a single
+  prepare/finish call with the strongest access.
+- **`XlogDeviceRuntime::prepare_first_use(slice, stream, access)`
+  / `finish_first_use(...)`** for helper-internal scratch
+  whose first cross-stream consumer is a raw `cuMemsetD8Async`
+  / `cuMemcpyDtoDAsync_v2` / `kernel.launch_on_stream` call
+  ahead of any `LaunchRecorder::preflight`.
+- **Formal certification harness** (`3361785b`). The cert
+  `TestContext` builds the production decorator stack
+  (`AsyncCudaResource → LoggingResource → GlobalDeviceBudget
+  → XlogDeviceRuntime`) when `XLOG_USE_DEVICE_RUNTIME=1` is
+  set and uses `with_runtime` constructors; the env-gated
+  dispatchers in `provider::sort` / `filter_by_mask` /
+  `hash_join_v2` / etc. then route through the recorded path
+  when `XLOG_USE_RECORDED_*` is set. The harness reaps
+  pending async frees between categories, and
+  `GlobalDeviceBudget::allocate` retries once after a reap on
+  transient over-budget conditions.
+  Result: `XLOG_USE_DEVICE_RUNTIME=1 XLOG_USE_RECORDED_OPS=1
+  cargo test -p xlog-cuda-tests --test certification_suite
+  --release` passes **206/206**; legacy default still passes
+  206/206.
+- **A3/A4 cross-stream lifetime stress harness**
+  (`crates/xlog-integration/tests/test_a3_a4_stress.rs`,
+  `27ec3bd9` + `a01b51fa`). Two workloads (`friends`
+  sort+hash-join sensitive, `reach` recursive fixed-point +
+  joins). Stable FNV-1a checksums, fixed schedule + seeded
+  random tail. **A4 fork-isolated stress passes 16/16** in
+  every fixture mode and every env combination. A 5-mode
+  diagnostic matrix (`XLOG_A3_FIXTURE_MODE=per_iter |
+  per_thread | shared` × runtime-on/off × recorded-on/off
+  via `XLOG_A3_DIAGNOSTIC=1`) classifies the A3 thread-of-N
+  drift as pre-existing and not introduced by v0.6.0 — see
+  Known Issues below.
+- **Multi-threaded sort+hash-join regression**
+  (`crates/xlog-cuda/tests/test_mt_sort_hj_alloc_ordering.rs`,
+  PR #72). 8 threads × 128 iters × 3 rounds friend-of-friend
+  self-join. Was RED at baseline `8cc0882c` (~6/1024 failures
+  per run); 1024/1024 + 1024/1024 across 10 consecutive runs
+  on `b1560674`.
+- **Documentation**: `docs/architecture/device-runtime.md`
+  (runtime stack + access matrix + env-gated dispatch + cert
+  modes) and `docs/architecture/recorded-launch-migration.md`
+  (operator-author checklist + anti-patterns + four-gate
+  validation command sequence). Linked from
+  `docs/ARCHITECTURE.md` Memory Management section.
+
+### Changed
+
+- `record_block_use` retained as a backward-compat shim that
+  calls `finish_block_use(Read)` for the dealloc-wait surface;
+  production callers go through the recorder.
+- `write_post_preflight_fresh` removed. All 78 callers across
+  `provider/{relational,filter,groupby,mod}.rs` migrated to
+  pre-preflight `write` (the recorder snapshot drops the
+  borrow, so kernel `&mut` borrows after preflight are
+  unaffected).
+- 6 direct `runtime.record_block_use(b, launch_stream)` call
+  sites in provider code migrated to
+  `runtime.finish_block_use(BlockId::from_block(b),
+  launch_stream, Access::Write)` with semantically correct
+  Access kinds.
+- `prepare_first_use(Access::Write)` added at every
+  helper-internal scratch alloc site that subsequently writes
+  via raw CUDA work BEFORE its parent recorder's preflight:
+  `build_hash_table_v2_on_stream` (5 buffers),
+  `gather_buffer_by_indices_on_stream` (per-column
+  `dst_col`s), `multiblock_scan_u32_inplace_on_stream` /
+  `_view_inplace_on_stream` (`block_sums`), and every join
+  variant's `d_count_only` / `d_output_count` / `out_col`
+  zero-fills (Inner / LeftOuter / count-scan-materialize /
+  indexed Inner / indexed LeftOuter).
+- `gather_buffer_by_indices_on_stream`: local
+  `d_output_rows` scalar created via
+  `upload_device_row_count` + read on `launch_stream` is now
+  fenced via `Access::Write` at upload + `Access::Read`
+  prepare on `launch_stream` + `Access::Read` finish before
+  drop. Closed a review-finding from the PR.
+
+### Deferred to post-v0.6.0
+
+- **Host-mask `compact_buffer_by_mask` recorded migration**.
+  Re-opens when a runtime-backed recorded release path
+  consumes host-provided masks. Until then the legacy entry
+  is the supported path; the recorded
+  `compact_buffer_by_device_mask_counted_recorded` covers the
+  device-mask case for runtime-backed callers.
+- **ILP / ILP-exact view helpers + operators recorded
+  migration**. Re-opens when tensorized ILP /
+  exact-induction downstream consumer work resumes (v0.9.0
+  "Bounded Exact Induction" backlog) and requires
+  runtime-backed stream safety.
+- **Sub-slice 3 LeftOuter CSM** (commit `b90ae77f`, never
+  pushed; recovered into `.recovery/sub-slice-3-edits.md`).
+  Apply on a fresh post-v0.6.0 branch after auditing every
+  scratch alloc against the access-aware contract documented
+  in `docs/architecture/recorded-launch-migration.md`.
+
+### Known Issues (not release blockers)
+
+- **A3 in-process thread-of-N drift on
+  `test_a3_a4_stress`**: 8 threads × 32 iters produce ~3%
+  checksum drift on recursive Datalog workloads. The 5-mode
+  diagnostic matrix demonstrates this is **NOT v0.6.0
+  stream-safety regression** — drift fires identically on the
+  legacy default path (no `XLOG_USE_DEVICE_RUNTIME`, no
+  `XLOG_USE_RECORDED_OPS`, one runtime per thread, no v0.6
+  code in the call chain). Bug class: pre-existing
+  same-process multi-executor concurrency against one CUDA
+  primary context. Tracked under v0.7.0 "Concurrency
+  Hardening" in `ROADMAP.md`. The v0.6.0 release gate is
+  **A4 fork-isolated stress + cert suite + umbrella ×50**,
+  not "A3 zero drift".
+- **`test_provider_launch_recorder --test-threads=8`** shows
+  9/42 `*_survives_drop_and_reuse` failures (was 23/42 at
+  baseline `8cc0882c`). Pre-existing pattern from
+  cross-runtime mempool aliasing under intra-binary test
+  parallelism. Production gate spec is `--test-threads=1`,
+  which is clean.
+
+### Release Validation (gates green on `b1560674`)
+
+- `cargo fmt --check`: clean.
+- `git diff --check`: clean.
+- Legacy cert suite: 206/206 in 20.22s.
+- Runtime+recorded cert suite
+  (`XLOG_USE_DEVICE_RUNTIME=1 XLOG_USE_RECORDED_OPS=1`):
+  206/206 in 16.56s.
+- Umbrella ×50 (`real_world_tests --test-threads=8` under
+  recorded runtime): **50/50**.
+- Workspace `--tests --exclude pyxlog --release
+  --test-threads=1`: 142 result lines, no failures.
+
+> **Note:** All items below are post-v0.5.0 work. Items in
+> `[Unreleased]` between the v0.5.0 tag and the v0.6.0 tag are
+> reflected in the v0.6.0 release entry above.
+
+## [0.6.1] — 2026-04-29
+
+CSM Env Dispatch and Certification Mode Labeling. Small,
+focused release on top of v0.6.0: enables count-scan-materialize
+(CSM) hash-join methods for `Inner` / `LeftOuter` (indexed and
+non-indexed) under an env gate, closes a stream-safety gap in
+three earlier CSM siblings, and names the CSM cert mode
+explicitly so reports are unambiguous. No kernel changes, no
+algorithm changes, no eligibility relaxation. Default behaviour
+for legacy callers is unchanged; the new path is opt-in via
+`XLOG_USE_RECORDED_CSM=1` (or umbrella `XLOG_USE_RECORDED_OPS=1`).
+
+### Added
+
+- **Recorded CSM (count-scan-materialize) hash-join env
+  dispatch** (PR #91). The recorded hash-join dispatcher
+  routes `JoinType::Inner` and `JoinType::LeftOuter` through
+  CSM (count → exclusive scan → materialize) for both the
+  non-indexed and indexed entry points when
+  `XLOG_USE_RECORDED_CSM=1` (or umbrella
+  `XLOG_USE_RECORDED_OPS=1`) is set. `Semi` / `Anti` always
+  route through the existing legacy recorded methods — no
+  CSM implementation exists for them. Eligibility checks
+  preserved exactly: runtime-backed manager, ≤4 keys
+  (`pack_keys` constraint), key-type match, row-count caps,
+  indexed-path key-byte and shape checks. New env-dispatch
+  routing test suite
+  (`crates/xlog-cuda/tests/test_csm_env_dispatch.rs`)
+  proves selection across the Inner / LeftOuter × indexed /
+  non-indexed × env-on / env-off matrix plus Semi / Anti
+  and the >4-keys upstream short-circuit.
+- **Indexed LeftOuter CSM operator** (PR #87,
+  `hash_join_left_outer_v2_with_index_count_scan_materialize_recorded`).
+  Probe-only pack on `launch_stream` plus a cached
+  `JoinIndexV2` for the build side, sharing the
+  count → scan → materialize phase shape with the
+  non-indexed LeftOuter CSM (PR #84) and the indexed
+  Inner CSM. No new kernels; reuses the four already-
+  migrated CSM kernels plus `hash_join_csm_unmatched_mask`
+  from PR #84.
+- **Cert-mode labeling** (commit `bca1e373`). The
+  `certification_suite` header now prints
+  `Recorded-op dispatch (explicit):` (extended to include
+  `XLOG_USE_RECORDED_CSM`) and a synthesized `Cert mode:`
+  line keyed off the explicit env flags. The three intended
+  values match the v0.6.1 cert gate commands —
+  `legacy/default`, `runtime+recorded`,
+  `runtime+recorded+CSM` — so CSM-mode runs are
+  self-documenting in the cert evidence.
+
+### Fixed
+
+- **`d_overflow` lifetime in three CSM materialize
+  recorders** (PR #89). The Phase B materialize kernel
+  takes `d_overflow` as a kernel param (writes the
+  overflow flag). Three previously-shipped CSM siblings
+  (`hash_join_inner_v2_count_scan_materialize_recorded`,
+  `hash_join_left_outer_v2_count_scan_materialize_recorded`,
+  `hash_join_inner_v2_with_index_count_scan_materialize_recorded`)
+  did not register `d_overflow` on their materialize-phase
+  `LaunchRecorder`, so the runtime was free to release the
+  block once `rec_count.commit` resolved — a potential
+  use-after-free if pool reuse beat kernel completion. Each
+  site now registers
+  `rec_mat.write(&d_overflow);` before `rec_mat.preflight`,
+  matching the indexed-LeftOuter CSM site (PR #87) so all
+  four CSM materialize recorders are identical.
+
+### Deferred to post-v0.6.1
+
+- **Semi / Anti CSM**. No `count_scan_materialize_recorded`
+  variants exist for `JoinType::Semi` / `JoinType::Anti`;
+  the env dispatch leaves them on the legacy recorded
+  paths. **Trigger to re-open**: a benchmark or
+  correctness scenario forces it. The legacy paths are
+  correct today and adding CSM variants would be code
+  without a consumer.
+- **CSM default-on**. CSM remains opt-in via
+  `XLOG_USE_RECORDED_CSM` / umbrella
+  `XLOG_USE_RECORDED_OPS`. Re-evaluate flipping the
+  default once cert history accumulates a stable run of
+  CSM-mode passes; until then the env gate is the
+  migration boundary.
+
+### Release Validation (gates green at tag)
+
+- `cargo fmt --check`: clean.
+- `git diff --check`: clean.
+- Legacy cert
+  (`cargo test -p xlog-cuda-tests --test certification_suite --release`):
+  `Cert mode: legacy/default`, 1 outer test passing — 33
+  cert categories internal.
+- Runtime+recorded cert
+  (`XLOG_USE_DEVICE_RUNTIME=1 XLOG_USE_RECORDED_OPS=1 cargo test ...`):
+  `Cert mode: runtime+recorded`, 1 outer test passing —
+  same 33 categories.
+- Runtime+recorded+CSM cert
+  (`XLOG_USE_DEVICE_RUNTIME=1 XLOG_USE_RECORDED_OPS=1 XLOG_USE_RECORDED_CSM=1 cargo test ...`):
+  `Cert mode: runtime+recorded+CSM`, 1 outer test passing —
+  same 33 categories.
+- Umbrella ×20 (`real_world_tests --test-threads=8` under
+  `XLOG_USE_DEVICE_RUNTIME=1 XLOG_USE_RECORDED_OPS=1`):
+  20/20 (recorded across PR #87, #89, #91 prep).
+
+## [Unreleased] — targeting v0.6.2
+
+## [0.6.1](https://github.com/BrainyBlaze/xlog/compare/xlog-cli-v0.5.0...xlog-cli-v0.6.1) - 2026-04-29
+
+### Fixed
+
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+
+### Other
+
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+## [0.6.1](https://github.com/BrainyBlaze/xlog/compare/xlog-gpu-v0.5.0...xlog-gpu-v0.6.1) - 2026-04-29
+
+### Fixed
+
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+
+### Other
+
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+## [0.6.1](https://github.com/BrainyBlaze/xlog/compare/xlog-prob-v0.5.0...xlog-prob-v0.6.1) - 2026-04-29
+
+### Fixed
+
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+
+### Other
+
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Tighten workspace warning hygiene
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+## [0.6.1](https://github.com/BrainyBlaze/xlog/compare/xlog-solve-v0.5.0...xlog-solve-v0.6.1) - 2026-04-29
+
+### Fixed
+
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+
+### Other
+
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Tighten workspace warning hygiene
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+## [0.6.1](https://github.com/BrainyBlaze/xlog/compare/xlog-logic-v0.5.0...xlog-logic-v0.6.1) - 2026-04-29
+
+### Fixed
+
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+
+### Other
+
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Tighten workspace warning hygiene
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+## [0.6.1](https://github.com/BrainyBlaze/xlog/compare/xlog-runtime-v0.5.0...xlog-runtime-v0.6.1) - 2026-04-29
+
+### Added
+
+- *(runtime)* add strict deterministic D2H guard (v0.5.5) ([#49](https://github.com/BrainyBlaze/xlog/pull/49))
+
+### Fixed
+
+- *(logic)* restore deterministic recursive set evaluation
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+
+### Other
+
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Tighten workspace warning hygiene
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+## [0.6.1](https://github.com/BrainyBlaze/xlog/compare/xlog-stats-v0.5.0...xlog-stats-v0.6.1) - 2026-04-29
+
+### Fixed
+
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+
+### Other
+
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+## [0.6.1](https://github.com/BrainyBlaze/xlog/compare/xlog-cuda-v0.5.0...xlog-cuda-v0.6.1) - 2026-04-29
+
+### Added
+
+- *(cuda)* wire recorded CSM hash-join dispatch ([#91](https://github.com/BrainyBlaze/xlog/pull/91))
+- *(cuda)* add recorded indexed LeftOuter count-scan-materialize path ([#87](https://github.com/BrainyBlaze/xlog/pull/87))
+- *(cuda)* add recorded LeftOuter count-scan-materialize path ([#84](https://github.com/BrainyBlaze/xlog/pull/84))
+- *(cuda)* formal cert harness for runtime-backed recorded path
+- *(cuda)* GPU-resident binary-join indexed Inner CSM (sub-slice 2)
+- *(cuda)* GPU-resident binary-join Inner retake — count→scan→materialize (sub-slice 1)
+- *(cuda)* env-gated runtime dispatch for sort/dedup/GroupBy/hash-join + cert mode
+- *(cuda)* provider-level recorded indexed hash join (slice #7D) + LeftOuter step-D recorder fix
+- *(cuda)* provider-level recorded LeftOuter hash join (slice #7C)
+- *(cuda)* provider-level recorded Semi / Anti hash join (slice #7B)
+- *(cuda)* provider-level recorded inner hash join (slice #7A)
+- *(cuda)* provider-level recorded GroupBy multi-agg (U32 keys, count/sum/min/max)
+- *(cuda)* provider-level recorded sort + dedup_full_row (u32 / Symbol)
+- *(cuda)* preserve runtime identity for xlog-owned DLPack / Arrow columns
+- *(cuda)* migrate fused compare+scan+compact filter to recorded discipline
+- *(cuda)* env-gated recorded filter dispatch (XLOG_USE_RECORDED_FILTERS)
+- *(cuda)* v0.6 stream-safe runtime + LaunchRecorder + filter predicate matrix
+- *(cuda)* v0.6 device-runtime allocator (opt-in) + A3 stability ([#54](https://github.com/BrainyBlaze/xlog/pull/54))
+- *(cuda)* binary-join output counts as metadata reads (v0.5.5 PR 3) ([#52](https://github.com/BrainyBlaze/xlog/pull/52))
+- *(cuda)* GPU full-row dedup and set-difference (v0.5.5 PR 2) ([#50](https://github.com/BrainyBlaze/xlog/pull/50))
+- *(runtime)* add strict deterministic D2H guard (v0.5.5) ([#49](https://github.com/BrainyBlaze/xlog/pull/49))
+
+### Fixed
+
+- *(cuda)* record d_overflow on three CSM materialize recorders ([#89](https://github.com/BrainyBlaze/xlog/pull/89))
+- *(cuda)* access-aware stream dependency manager for cross-stream lifetime safety ([#72](https://github.com/BrainyBlaze/xlog/pull/72))
+- *(cuda)* clamp recorded compact mask domain
+- *(logic)* restore deterministic recursive set evaluation
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+
+### Other
+
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Fix validation regressions in release and examples
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+## [0.6.1](https://github.com/BrainyBlaze/xlog/compare/xlog-ir-v0.5.0...xlog-ir-v0.6.1) - 2026-04-29
+
+### Fixed
+
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+- unblock release publish verification
+
+### Other
+
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Tighten workspace warning hygiene
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+## [0.6.1](https://github.com/BrainyBlaze/xlog/compare/xlog-core-v0.5.0...xlog-core-v0.6.1) - 2026-04-29
+
+### Added
+
+- *(runtime)* add strict deterministic D2H guard (v0.5.5) ([#49](https://github.com/BrainyBlaze/xlog/pull/49))
+
+### Fixed
+
+- *(pyxlog)* install local wheels for explicit python
+- *(cuda)* embed portable PTX fallback
+- *(pyxlog)* ship kernels in wheels and document cubin path
+- *(ci)* repair main release automation ([#27](https://github.com/BrainyBlaze/xlog/pull/27))
+- *(ci)* keep README release metadata in sync ([#26](https://github.com/BrainyBlaze/xlog/pull/26))
+- unblock release publish verification
+
+### Other
+
+- *(v0.6.1)* version bump + roadmap cleanup + changelog
+- *(readme)* bump version badge + release-status line to v0.6.0
+- restore audit README framing with current release setup
+- Merge branch 'audit/v0.5.0-prerelease'
+- integrate prerelease audit docs
+- harden public release readiness
+
+> Empty: see post-v0.6.1 deferrals listed above.
+>>>>>>> Stashed changes
 
 ## [0.5.2](https://github.com/BrainyBlaze/xlog/compare/xlog-cli-v0.5.0...xlog-cli-v0.5.2) — 2026-04-20
 
