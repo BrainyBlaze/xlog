@@ -566,38 +566,16 @@ to v0.6.x — see "v0.6.x Deferred From v0.5.5" below.
 
 - [x] Replace host-side multi-column full-row dedup/difference fallback with GPU-native deterministic set algebra. (#50)
 - [x] Add strict D2H guardrails for deterministic Datalog evaluation. (#49)
-- [ ] Preserve deterministic mixed execution when binary joins,
-      recursive rules, and future WCOJ rules coexist. **Deferred
-      to v0.6.1** — the binary-join + recursive determinism part
-      is in place today (semi-naive + stratified evaluation in
-      `xlog-runtime`); the WCOJ side is a v0.6.1 prerequisite,
-      not a v0.5.5 closure item.
-- [ ] Add query progress reporting API.
 
 ### xlog-cuda
 
 - [x] Add GPU-native schema-aware full-row deduplication and set difference. (#50)
 - [x] Treat binary-join output counts as metadata reads (control-plane D2H exception, scoped to binary-join shape). (#52)
-- [ ] Add shared-memory optimization for small relations.
-- [ ] Add warp-level primitives for small-relation optimization.
 
-### Bounded Exact Induction
+### Tests and Certification
 
-- [ ] Integrate native exact-induction backend into the
-      downstream tensorized ILP consumer path. (Native CUDA
-      kernel `kernels/ilp_exact.cu`, manifest registration, and
-      Python wrapper `crates/pyxlog/src/ilp_exact.rs` exist; the
-      downstream tensorized consumer integration is the missing
-      piece.)
-- [ ] Reproduce the downstream 449/449 liveness benchmark with
-      native exact induction. (Referenced as a historical
-      Phase 0d baseline in `crates/pyxlog/python/pyxlog/ilp/exact_induce.py:111`;
-      no current reproduction harness.)
-- [ ] Add committed `kernels/ilp_exact.ptx` artifact once the
-      kernel packaging policy is finalized and aligned with the
-      existing ILP-family kernel convention. (The `.cu` is
-      committed; the `.ptx` is built but not checked in, unlike
-      the rest of the ILP-family.)
+- [x] Add deterministic Datalog D2H guardrail tests. (#49)
+- [x] Add downstream frozen replay certification for crash-window bundles.
 
 ### Python and CLI
 
@@ -605,50 +583,45 @@ to v0.6.x — see "v0.6.x Deferred From v0.5.5" below.
       (`crates/pyxlog/python/pyxlog/__init__.pyi`,
       `crates/pyxlog/python/pyxlog/_native.pyi`, plus
       `crates/pyxlog/python/pyxlog/py.typed` marker file.)
-- [ ] Add per-call Python memory limit configuration.
-      (`MemoryBudget::with_limit(config.memory_bytes)` is
-      applied at provider construction in
-      `crates/pyxlog/src/lib.rs:205`; per-call override on
-      individual `evaluate*` calls is not surfaced.)
-- [ ] Add CLI explain/plan visualization.
-
-### Tests and Certification
-
-- [x] Add deterministic Datalog D2H guardrail tests. (#49)
-- [x] Add downstream frozen replay certification for crash-window bundles.
-- [ ] Add Same Generation, triangle, skewed multi-way, and deep recursive-frontier benchmarks.
-- [ ] Add skewed multi-way benchmark suite.
-
-### Documentation
-
-- [ ] Add deterministic Datalog tuning guide.
-- [ ] Add general performance tuning guide.
-- [ ] Add getting-started tutorial.
-- [ ] Add deployment guide.
-- [ ] Add migration guide.
-- [ ] Update architecture and whitepaper docs to describe current binary-join execution separately from planned WCOJ execution.
 
 ### Release Gate
 
 - [x] Public release only after deterministic Datalog guardrails pass locally and in manual GPU certification.
 - [x] Public release only after crash-window frozen replay remains deterministic across 20 fresh subprocess replays.
-- [ ] Public release only after downstream widened-frontier stress replay is clean.
 - [x] Public release only after recursive deterministic set operations have zero data-plane D2H transfers. (#50, #52)
-- [ ] Public release only after binary-join and multi-way stress benchmark baselines are captured.
 - [x] Public release only after docs distinguish release,
       source-build, and development install paths. (See
       `README.md:115` Source install / `README.md:133` GitHub
       release binary install / `README.md:139` PyPI install.)
 
-### v0.6.x Deferred From v0.5.5
+### Items Originally Scoped to v0.5.5 — Re-Targeted
 
-Originally scoped to v0.5.5 as a deterministic-materialization prototype but
-blocked; moved out of v0.5.5 closure and re-targeted under v0.6.x once the
-recorded-launch operator coverage that the binary-join refactor depends on is
-in place.
+These were never v0.5.5 closure items in code; they have been
+relocated to the release where the work actually belongs:
 
-- [ ] Make binary hash-join materialization deterministic through count, prefix-scan, and materialize phases. (deferred — depends on recorded-launch operator coverage)
-- [ ] Add deterministic count-prefix-materialize binary join kernels. (deferred — same dependency)
+  * Operator-author docs, runtime-stack docs, deterministic-Datalog
+    + general perf tuning guides, getting-started tutorial,
+    deployment guide, migration guide, architecture/whitepaper
+    binary-vs-WCOJ separation → **v0.6.0 Documentation**.
+  * Binary hash-join count → prefix-scan → materialize prototype
+    + count-prefix-materialize kernels → **v0.6.0 Recorded Launch
+    Paths** (Inner CSM + indexed Inner CSM landed at `510dc33a` /
+    `8cc0882c`; sub-slice 3 LeftOuter CSM captured at
+    `.recovery/sub-slice-3-edits.md`).
+  * Shared-memory optimization for small relations + warp-level
+    primitives → **v0.6.1 xlog-cuda** (paired with WCOJ kernels).
+  * Mixed binary/recursive/WCOJ determinism + Same Generation /
+    triangle / skewed multi-way / recursive-frontier benchmarks +
+    multi-way stress baselines + widened-frontier stress replay →
+    **v0.6.1 Tests and Certification** (no target operator without
+    WCOJ).
+  * Native exact-induction tensorized integration + 449/449
+    liveness reproduction + committed `ilp_exact.ptx` →
+    **v0.9.0 Bounded Exact Induction** (gated on a named
+    downstream consumer materializing).
+  * Per-call Python memory limit + query progress API →
+    **v0.9.0 Python API**.
+  * CLI explain/plan visualization → **v0.9.0 CLI**.
 
 ## v0.6.0 - Stream-Safe GPU Runtime And Execution Discipline
 
@@ -793,6 +766,17 @@ execution.
       runtime / provider opt-in selector so real callers can route
       filter operations through the recorded path. (slice #2,
       `XLOG_USE_RECORDED_FILTERS` env gate.)
+- [ ] Make binary hash-join materialization deterministic
+      through count, prefix-scan, and materialize phases.
+      (Sub-slices 1+2 — Inner CSM + indexed Inner CSM — landed
+      at `510dc33a` and `8cc0882c`. Sub-slice 3 — non-indexed
+      LeftOuter CSM — captured at `.recovery/sub-slice-3-edits.md`,
+      ready to apply on a fresh branch off post-stream-safety
+      main. Sub-slice 4+ for indexed LeftOuter / dispatch wiring
+      remain.)
+- [ ] Add deterministic count-prefix-materialize binary join
+      kernels for the variants not yet covered by the CSM
+      slices above.
 - [x] Extend env-gated dispatch to recorded sort, dedup_full_row,
       GroupBy, and hash-join (Inner / Semi / Anti / LeftOuter,
       indexed and non-indexed). Per-operator env vars
@@ -890,6 +874,17 @@ blockers later.
       for helper scratch that runs raw CUDA work ahead of any
       recorder; `cu_stream.synchronize()` before host scalar
       reads; external-column rejection in strict mode.
+- [ ] Add deterministic Datalog tuning guide.
+- [ ] Add general performance tuning guide.
+- [ ] Add getting-started tutorial.
+- [ ] Add deployment guide.
+- [ ] Add migration guide (release/source-build/dev install
+      paths are already in `README.md:115/133/139`; the migration
+      guide covers operator-author API moves not the install
+      story).
+- [ ] Update architecture and whitepaper docs to describe
+      current binary-join execution separately from planned
+      WCOJ execution.
 
 ### Release Gate
 
@@ -972,6 +967,8 @@ the section above with deferral reasons.
 - [ ] Add general-arity WCOJ after 3-way and 4-way certification.
 - [ ] Add single-GPU skew detection and partitioning for WCOJ.
 - [ ] Add kernel fusion where benchmarks show materialization overhead dominates.
+- [ ] Add shared-memory optimization for small relations.
+- [ ] Add warp-level primitives for small-relation optimization.
 
 ### Adaptive Indexing
 
@@ -984,6 +981,21 @@ the section above with deferral reasons.
 - [ ] Add WCOJ CPU parity tests.
 - [ ] Add WCOJ K-run determinism tests.
 - [ ] Add public WCOJ certification gates for Same Generation, triangle, and skewed multiway workloads.
+- [ ] Add Same Generation, triangle, skewed multi-way, and deep
+      recursive-frontier benchmarks (these depend on the WCOJ
+      execution path landing first; they were previously
+      open in v0.5.5 but had no operator target without WCOJ).
+- [ ] Add skewed multi-way benchmark suite.
+- [ ] Capture binary-join and multi-way stress benchmark
+      baselines for the public release gate (paired with the
+      benchmark suite above).
+- [ ] Preserve deterministic mixed execution across WCOJ,
+      binary-join, and recursive rules under a single test
+      harness. (The binary-join + recursive determinism part
+      is already in `xlog-runtime`; the WCOJ side lands here.)
+- [ ] Add downstream widened-frontier stress replay clean gate.
+      (No replay harness is committed today; the harness needs
+      to be built alongside the benchmarks above.)
 
 ### Documentation
 
@@ -1105,16 +1117,38 @@ the section above with deferral reasons.
 
 - [ ] Add column-type dispatch beyond `U64`, including `U32` and `Symbol` callers when needed.
 - [ ] Add chain-topology shared-memory caching of L rows after profiling confirms it is a hot path.
+- [ ] Integrate native exact-induction backend into the
+      downstream tensorized ILP consumer path. (Native
+      `kernels/ilp_exact.cu` + manifest registration +
+      `crates/pyxlog/src/ilp_exact.rs` wrapper exist; the
+      downstream tensorized consumer integration is the missing
+      piece. Gated on a named consumer materializing.)
+- [ ] Reproduce the downstream 449/449 liveness benchmark with
+      native exact induction. (Referenced as a historical
+      Phase 0d baseline in `crates/pyxlog/python/pyxlog/ilp/exact_induce.py:111`;
+      no current reproduction harness.)
+- [ ] Add committed `kernels/ilp_exact.ptx` artifact once the
+      kernel packaging policy is finalized and aligned with the
+      existing ILP-family kernel convention. (The `.cu` is
+      committed; the `.ptx` is built but not checked in, unlike
+      the rest of the ILP-family.)
 
 ### Python API
 
 - [ ] Add async evaluation API.
 - [ ] Add streaming results API.
+- [ ] Add per-call Python memory limit configuration.
+      (`MemoryBudget::with_limit(config.memory_bytes)` is applied
+      at provider construction in `crates/pyxlog/src/lib.rs:205`;
+      per-call override on `evaluate*` calls is not surfaced.)
+- [ ] Add query progress reporting API. (No consumer; defer
+      until pyxlog or CLI has one.)
 
 ### CLI
 
 - [ ] Add interactive REPL.
 - [ ] Add watch mode.
+- [ ] Add CLI explain/plan visualization.
 
 ## Cross-Version Risk Register
 
