@@ -33,28 +33,79 @@ fn run_full_certification() {
                 "legacy (cudarc-backed GpuMemoryManager::new)"
             };
             println!("Allocator backend: {}", backend);
-            // List active recorded-op env flags so the report
-            // shows the dispatch surface the categories will
-            // actually exercise.
-            let env_flags: Vec<&str> = [
+            // List explicitly-set recorded-op env flags so the
+            // report shows the dispatch surface the categories
+            // will actually exercise. `XLOG_USE_RECORDED_CSM` is
+            // included so the cert evidence is unambiguous about
+            // CSM selection — even though `XLOG_USE_RECORDED_OPS`
+            // implies CSM, the explicit flag's presence shows up
+            // separately so a "runtime+recorded+CSM" run is
+            // visibly distinct from a "runtime+recorded" run.
+            let env_flag = |var: &str| {
+                std::env::var(var)
+                    .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
+                    .unwrap_or(false)
+            };
+            let explicit_flags: Vec<&str> = [
                 ("XLOG_USE_RECORDED_OPS", "all"),
                 ("XLOG_USE_RECORDED_FILTERS", "filters"),
                 ("XLOG_USE_RECORDED_SORT", "sort"),
                 ("XLOG_USE_RECORDED_DEDUP", "dedup"),
                 ("XLOG_USE_RECORDED_GROUPBY", "groupby"),
                 ("XLOG_USE_RECORDED_HASH_JOIN", "hash_join"),
+                ("XLOG_USE_RECORDED_CSM", "csm"),
             ]
             .iter()
-            .filter_map(|(var, label)| match std::env::var(var) {
-                Ok(v) if matches!(v.as_str(), "1" | "true" | "TRUE" | "True") => Some(*label),
-                _ => None,
-            })
+            .filter_map(|(var, label)| if env_flag(var) { Some(*label) } else { None })
             .collect();
-            if env_flags.is_empty() {
-                println!("Recorded-op dispatch: <none>");
+            if explicit_flags.is_empty() {
+                println!("Recorded-op dispatch (explicit): <none>");
             } else {
-                println!("Recorded-op dispatch: {}", env_flags.join(", "));
+                println!(
+                    "Recorded-op dispatch (explicit): {}",
+                    explicit_flags.join(", ")
+                );
             }
+            // Synthesize a single cert-mode label keyed off the
+            // EXPLICIT recorded-op env flags (not the implied
+            // umbrella unlock). The three intended modes are:
+            //
+            //   * legacy/default          — no XLOG_USE_DEVICE_RUNTIME
+            //   * runtime+recorded        — XLOG_USE_DEVICE_RUNTIME=1
+            //                               + at least one recorded-op
+            //                               flag (umbrella or specific)
+            //                               but no explicit
+            //                               XLOG_USE_RECORDED_CSM=1
+            //   * runtime+recorded+CSM    — same as above PLUS the
+            //                               explicit
+            //                               XLOG_USE_RECORDED_CSM=1
+            //
+            // CSM is also implicitly active in the dispatch when
+            // only the umbrella `XLOG_USE_RECORDED_OPS=1` is set
+            // (see `CudaKernelProvider::use_recorded_csm_env`), but
+            // the cert label keys off the EXPLICIT flag so the
+            // evidence trail is unambiguous: a "runtime+recorded+CSM"
+            // run is the one where the operator deliberately set
+            // `XLOG_USE_RECORDED_CSM=1`. Set the explicit flag to
+            // emit unambiguous CSM-mode evidence.
+            let any_recorded = env_flag("XLOG_USE_RECORDED_OPS")
+                || env_flag("XLOG_USE_RECORDED_FILTERS")
+                || env_flag("XLOG_USE_RECORDED_SORT")
+                || env_flag("XLOG_USE_RECORDED_DEDUP")
+                || env_flag("XLOG_USE_RECORDED_GROUPBY")
+                || env_flag("XLOG_USE_RECORDED_HASH_JOIN");
+            let csm_explicit = env_flag("XLOG_USE_RECORDED_CSM");
+            let cert_mode = match (ctx.uses_device_runtime(), any_recorded, csm_explicit) {
+                (false, false, false) => "legacy/default",
+                (true, true, true) => "runtime+recorded+CSM",
+                (true, true, false) => "runtime+recorded",
+                (true, false, false) => "runtime (no recorded-ops)",
+                (true, false, true) => "runtime+CSM (no other recorded-ops)",
+                (false, true, true) => "recorded+CSM (no device-runtime)",
+                (false, true, false) => "recorded (no device-runtime)",
+                (false, false, true) => "CSM-only (no device-runtime, no other recorded-ops)",
+            };
+            println!("Cert mode: {}", cert_mode);
             println!();
             ctx
         }
