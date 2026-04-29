@@ -32,6 +32,7 @@ pub mod ast;
 pub mod compile;
 pub mod expand;
 pub mod function;
+pub mod hypergraph;
 pub mod lower;
 pub mod module;
 pub mod optimizer;
