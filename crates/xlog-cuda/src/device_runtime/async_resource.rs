@@ -227,9 +227,8 @@ impl AsyncCudaResource {
             .live
             .lock()
             .expect("AsyncCudaResource live map poisoned");
-        live.get(&ptr).map(|e| {
-            e.outstanding_reads.len() + if e.last_write.is_some() { 1 } else { 0 }
-        })
+        live.get(&ptr)
+            .map(|e| e.outstanding_reads.len() + if e.last_write.is_some() { 1 } else { 0 })
     }
 }
 

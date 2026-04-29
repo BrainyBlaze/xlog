@@ -1439,13 +1439,19 @@ impl CudaKernelProvider {
         // without waiting for the launch_stream chain that's
         // still reading/writing block_sums to complete.
         if let Some(b) = block_sums.runtime_block() {
-            runtime.finish_block_use(crate::device_runtime::BlockId::from_block(b), launch_stream, crate::device_runtime::Access::Write).map_err(|e| {
-                XlogError::Kernel(format!(
-                    "multiblock_scan_u32_inplace_on_stream: record_block_use \
+            runtime
+                .finish_block_use(
+                    crate::device_runtime::BlockId::from_block(b),
+                    launch_stream,
+                    crate::device_runtime::Access::Write,
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "multiblock_scan_u32_inplace_on_stream: record_block_use \
                          for intermediate block_sums failed: {}",
-                    e
-                ))
-            })?;
+                        e
+                    ))
+                })?;
         } else {
             return Err(XlogError::Kernel(
                 "multiblock_scan_u32_inplace_on_stream: intermediate block_sums has no \
@@ -1582,13 +1588,19 @@ impl CudaKernelProvider {
 
         // Record block_sums use before end-of-scope drop.
         if let Some(b) = block_sums.runtime_block() {
-            runtime.finish_block_use(crate::device_runtime::BlockId::from_block(b), launch_stream, crate::device_runtime::Access::Write).map_err(|e| {
-                XlogError::Kernel(format!(
-                    "multiblock_scan_u32_view_inplace_on_stream: record_block_use \
+            runtime
+                .finish_block_use(
+                    crate::device_runtime::BlockId::from_block(b),
+                    launch_stream,
+                    crate::device_runtime::Access::Write,
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "multiblock_scan_u32_view_inplace_on_stream: record_block_use \
                      for intermediate block_sums failed: {}",
-                    e
-                ))
-            })?;
+                        e
+                    ))
+                })?;
         } else {
             return Err(XlogError::Kernel(
                 "multiblock_scan_u32_view_inplace_on_stream: intermediate block_sums has no \

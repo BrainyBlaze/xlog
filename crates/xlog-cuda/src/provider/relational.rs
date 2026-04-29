@@ -5934,12 +5934,14 @@ impl super::CudaKernelProvider {
             bucket_entry_hashes.runtime_block(),
         ] {
             if let Some(b) = blk {
-                runtime.finish_block_use(BlockId::from_block(b), launch_stream, Access::Write).map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "build_hash_table_v2_on_stream: record_block_use failed: {}",
-                        e
-                    ))
-                })?;
+                runtime
+                    .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "build_hash_table_v2_on_stream: record_block_use failed: {}",
+                            e
+                        ))
+                    })?;
             } else {
                 return Err(XlogError::Kernel(
                     "build_hash_table_v2_on_stream: buffer has no runtime block — \
@@ -5986,6 +5988,28 @@ impl super::CudaKernelProvider {
         }
 
         let d_output_rows = self.upload_device_row_count(output_rows)?;
+        // `upload_device_row_count` initializes this scalar on
+        // the manager/default stream. Publish that write into
+        // the runtime dependency state, then fence launch_stream
+        // before the gather kernels read it. The scalar is local
+        // scratch, so we also finish a read after the kernels so
+        // its drop/free waits for launch_stream completion.
+        runtime
+            .finish_first_use(&d_output_rows, StreamId::DEFAULT, Access::Write)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "gather_buffer_by_indices_on_stream: record d_output_rows upload failed: {}",
+                    e
+                ))
+            })?;
+        runtime
+            .prepare_first_use(&d_output_rows, launch_stream, Access::Read)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "gather_buffer_by_indices_on_stream: prepare d_output_rows failed: {}",
+                    e
+                ))
+            })?;
         let device = self.device.inner();
         let block_size = 256u32;
         let grid_size = (output_rows + block_size - 1) / block_size;
@@ -6054,19 +6078,30 @@ impl super::CudaKernelProvider {
             })?;
         }
 
+        runtime
+            .finish_first_use(&d_output_rows, launch_stream, Access::Read)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "gather_buffer_by_indices_on_stream: record d_output_rows read failed: {}",
+                    e
+                ))
+            })?;
+
         // Record uses on launch_stream for buffers we wrote
         // (the dst_cols escape via the returned CudaBuffer).
         // input.column[i] reads will be recorded by the
         // caller's outer LaunchRecorder.
         for dst_col in &dst_cols {
             if let Some(b) = dst_col.runtime_block() {
-                runtime.finish_block_use(BlockId::from_block(b), launch_stream, Access::Write).map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "gather_buffer_by_indices_on_stream: record_block_use \
+                runtime
+                    .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "gather_buffer_by_indices_on_stream: record_block_use \
                          (dst_col) failed: {}",
-                        e
-                    ))
-                })?;
+                            e
+                        ))
+                    })?;
             } else {
                 return Err(XlogError::Kernel(
                     "gather_buffer_by_indices_on_stream: dst_col has no runtime block".to_string(),
@@ -8001,13 +8036,15 @@ impl super::CudaKernelProvider {
             // (when result_columns goes out of scope down the
             // line via output buffer drop) defers correctly.
             if let Some(b) = out_col.runtime_block() {
-                runtime.finish_block_use(BlockId::from_block(b), launch_stream, Access::Write).map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "hash_join_v2_recorded (left_outer): record_block_use \
+                runtime
+                    .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "hash_join_v2_recorded (left_outer): record_block_use \
                          (left col {}) failed: {}",
-                        col_idx, e
-                    ))
-                })?;
+                            col_idx, e
+                        ))
+                    })?;
             }
             result_columns.push(out_col.into());
         }
@@ -8092,13 +8129,15 @@ impl super::CudaKernelProvider {
             }
 
             if let Some(b) = out_col.runtime_block() {
-                runtime.finish_block_use(BlockId::from_block(b), launch_stream, Access::Write).map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "hash_join_v2_recorded (left_outer): record_block_use \
+                runtime
+                    .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "hash_join_v2_recorded (left_outer): record_block_use \
                          (right col {}) failed: {}",
-                        col_idx, e
-                    ))
-                })?;
+                            col_idx, e
+                        ))
+                    })?;
             }
             result_columns.push(out_col.into());
         }
@@ -8543,10 +8582,7 @@ impl super::CudaKernelProvider {
         runtime
             .prepare_first_use(&d_count_only, launch_stream, Access::Write)
             .map_err(|e| {
-                XlogError::Kernel(format!(
-                    "indexed inner: prepare d_count_only failed: {}",
-                    e
-                ))
+                XlogError::Kernel(format!("indexed inner: prepare d_count_only failed: {}", e))
             })?;
         // SAFETY: 4-byte runtime-backed buffer.
         unsafe {
@@ -9347,12 +9383,14 @@ impl super::CudaKernelProvider {
                 }
             }
             if let Some(b) = out_col.runtime_block() {
-                runtime.finish_block_use(BlockId::from_block(b), launch_stream, Access::Write).map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "indexed left_outer: record_block_use (left col {}) failed: {}",
-                        col_idx, e
-                    ))
-                })?;
+                runtime
+                    .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "indexed left_outer: record_block_use (left col {}) failed: {}",
+                            col_idx, e
+                        ))
+                    })?;
             }
             result_columns.push(out_col.into());
         }
@@ -9423,12 +9461,14 @@ impl super::CudaKernelProvider {
                 }
             }
             if let Some(b) = out_col.runtime_block() {
-                runtime.finish_block_use(BlockId::from_block(b), launch_stream, Access::Write).map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "indexed left_outer: record_block_use (right col {}) failed: {}",
-                        col_idx, e
-                    ))
-                })?;
+                runtime
+                    .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "indexed left_outer: record_block_use (right col {}) failed: {}",
+                            col_idx, e
+                        ))
+                    })?;
             }
             result_columns.push(out_col.into());
         }

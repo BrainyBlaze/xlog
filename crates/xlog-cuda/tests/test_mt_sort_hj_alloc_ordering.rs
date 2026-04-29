@@ -120,9 +120,8 @@ fn build_provider() -> Option<(
         MemoryBudget::with_limit(TEST_BUDGET_BYTES as u64),
         Arc::clone(&runtime),
     ));
-    let provider = Arc::new(
-        CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).ok()?,
-    );
+    let provider =
+        Arc::new(CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).ok()?);
     Some((provider, runtime, pool))
 }
 
@@ -143,8 +142,9 @@ fn build_friend_buffer(provider: &CudaKernelProvider, edges: &[(u32, u32)]) -> C
 /// `(X, Y, Y, Z)` because the join concatenates the two
 /// schemas without projection — the recorded inner join
 /// returns the full 4-column row.
-fn expected_self_join(edges: &[(u32, u32)]) -> std::collections::HashMap<(u32, u32, u32, u32), usize>
-{
+fn expected_self_join(
+    edges: &[(u32, u32)],
+) -> std::collections::HashMap<(u32, u32, u32, u32), usize> {
     let mut out: std::collections::HashMap<(u32, u32, u32, u32), usize> = Default::default();
     for &(x, y) in edges {
         for &(yp, z) in edges {
