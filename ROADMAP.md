@@ -733,15 +733,26 @@ execution.
 - [x] Migrate the fused `compare+scan+compact` filter path
       (`u32`, `f64`) to the recorded discipline. (slice #3,
       `filter_fused_scan_recorded`)
-- [ ] **Decision pending for v0.6.0 scope.** Migrate
-      `compact_buffer_by_mask` (host-mask compact entry) to the
-      recorded discipline. Has no current consumer that requires
-      it; defer to v0.6.x unless a release consumer materializes.
-- [ ] **Decision pending for v0.6.0 scope.** Migrate ILP /
-      ILP-exact view helpers and operators to propagate runtime
-      block identity and use recorded launches. Required only
-      if downstream tensorized ILP integration (still v0.5.5
-      open item) becomes a v0.6.0 deliverable; otherwise defer.
+- [ ] **Deferred (post-v0.6.0).** Migrate `compact_buffer_by_mask`
+      (host-mask compact entry) to the recorded discipline.
+      No current v0.6.0 consumer; pulling this into v0.6.0
+      would add risk without improving the release evidence
+      chain. **Trigger to re-open**: a runtime-backed recorded
+      release path begins consuming host-provided masks.
+      Until then, the legacy `compact_buffer_by_mask` is the
+      supported entry point and the recorded
+      `compact_buffer_by_device_mask_counted_recorded`
+      (already in tree) covers the device-mask case for
+      runtime-backed callers.
+- [ ] **Deferred (post-v0.6.0).** Migrate ILP / ILP-exact view
+      helpers and operators to propagate runtime block identity
+      and use recorded launches. **Trigger to re-open**: the
+      tensorized ILP / exact-induction downstream consumer work
+      resumes (currently a v0.9.0 backlog item under
+      "Bounded Exact Induction") and requires runtime-backed
+      stream safety. Without that consumer, the current legacy
+      ILP / ILP-exact path is correct and migration adds
+      complexity for no observable gain.
 - [x] Migrate sort operator surface to recorded launches against
       `launch_stream`. (slice #5, `sort_recorded` — narrow to
       U32 / Symbol keys; multi-type recorded sort deferred.)
@@ -974,8 +985,7 @@ blockers later.
 
 ### v0.6.0 Release Blockers Remaining
 
-Distilled from the items above. Every other v0.6.0 box is
-either checked or scoped as deferred / non-blocking residual.
+**All four blockers closed. v0.6.0 has no outstanding gates.**
 
 1. ~~Formal cert harness for the recorded launch discipline.~~
    **DONE — commit `3361785b`.** `XLOG_USE_DEVICE_RUNTIME=1
@@ -989,15 +999,27 @@ either checked or scoped as deferred / non-blocking residual.
    gate is **A4 + cert suite + umbrella ×50**, not "A3 zero
    drift".
 3. ~~Operator-author migration docs + runtime-stack docs.~~
-   **DONE.** Both items in the v0.6.0 Documentation subsection
-   are now checked.
+   **DONE — commit `1b267dbf`.** Both items in the v0.6.0
+   Documentation subsection are checked.
    `docs/architecture/device-runtime.md` covers the runtime
    stack; `docs/architecture/recorded-launch-migration.md`
    covers the operator-author checklist. Linked from
    `docs/ARCHITECTURE.md`.
-4. **Decisions on host-mask compact migration and ILP /
-   ILP-exact recorded migration.** Either land them in v0.6.0
-   or formally defer to v0.6.x with named consumer triggers.
+4. ~~Decisions on host-mask compact migration and ILP /
+   ILP-exact recorded migration.~~
+   **DEFERRED with named consumer triggers (post-v0.6.0).**
+   Neither has a current v0.6.0 consumer; pulling either in
+   adds risk without improving the release evidence chain.
+     * Host-mask compact (`compact_buffer_by_mask` recorded
+       migration) re-opens **when a runtime-backed recorded
+       release path begins consuming host-provided masks**.
+     * ILP / ILP-exact recorded migration re-opens **when
+       the tensorized ILP / exact-induction downstream
+       consumer work resumes (v0.9.0 "Bounded Exact
+       Induction" backlog) and requires runtime-backed
+       stream safety**.
+   Both items are now annotated under Recorded Launch Paths
+   above with the same trigger language.
 
 Items NOT on the blocker list (deferred / out of scope):
 host-mask compact migration without a consumer, ILP-exact
