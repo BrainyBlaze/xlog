@@ -5712,11 +5712,14 @@ impl super::CudaKernelProvider {
     /// Stream-aware variant of `build_hash_table_v2`. Mirrors
     /// the legacy bucket-count → exclusive-scan → scatter chain
     /// on the caller-supplied `launch_stream` (no internal
-    /// `device.synchronize()`). Records every fresh runtime
-    /// allocation that escapes (the four returned bucket
-    /// buffers) AND the internal `bucket_cursors` scratch
-    /// directly via `runtime.record_block_use` so end-of-scope
-    /// drops are correctly serialized.
+    /// `device.synchronize()`). Each fresh scratch allocation is
+    /// fenced via `prepare_first_use(Access::Write)` immediately
+    /// after alloc so the first cross-stream consumer (memset /
+    /// dtod-copy / kernel) waits for cuMemAllocAsync to complete;
+    /// at exit, every block that escapes (the four returned
+    /// bucket buffers) plus the internal `bucket_cursors` scratch
+    /// is finalized with `finish_block_use(Access::Write)` so
+    /// end-of-scope drops are correctly serialized.
     fn build_hash_table_v2_on_stream(
         &self,
         hashes: &TrackedCudaSlice<u64>,
