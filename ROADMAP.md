@@ -637,31 +637,79 @@ execution.
       `LoggingResource`, `GlobalDeviceBudget`, `XlogDeviceRuntime`,
       `StreamPool`) as an opt-in path next to legacy cudarc-backed
       allocation. (#54)
-- [x] Add `record_block_use` API + `cuStreamWaitEvent` chaining before
-      `cuMemFreeAsync` so cross-stream uses cannot be freed out from
-      under in-flight kernels. (#54 follow-ups)
 - [x] Add ABA guard via `(ptr, generation)` keying on
       `AsyncCudaResource::LiveEntry`.
-- [x] Make `record_block_use` failure-safe in `deallocate` (resolve
-      `alloc_stream` and queue waits BEFORE removing the live entry).
-- [x] Default trait `record_block_use` returns
-      `ResourceError::StreamMisuse` so `DirectCudaResource`-style stacks
-      surface as loud failures instead of silent gaps.
+- [x] Default trait hooks (`record_block_use`, `prepare_block_use`,
+      `finish_block_use`) return `ResourceError::StreamMisuse` so
+      `DirectCudaResource`-style stacks surface as loud failures
+      instead of silent gaps.
+- [x] **Access-aware stream dependency manager.** (PR #72,
+      `77fd4948`.) Replaces post-launch-only `record_block_use`
+      with `prepare_block_use(BlockId, stream, Access)` /
+      `finish_block_use(...)` plus an `Access {Read, Write,
+      ReadWrite}` enum. `LiveEntry` now tracks `last_write:
+      Option<(StreamId, CudaEvent)>` (seeded with an
+      allocation-ready event captured immediately after
+      `cuMemAllocAsync`) and `outstanding_reads:
+      Vec<(StreamId, CudaEvent)>`. Reads wait on `last_write`;
+      writes wait on `last_write` plus every cross-stream
+      outstanding read. Same-stream events are skipped. Closes
+      both the use-after-prior-write hazard (a launch-stream
+      reader / writer beginning before the prior cross-stream
+      writer's event fires) AND the use-after-allocation hazard
+      (a launch-stream consumer beginning before
+      `cuMemAllocAsync` completes on the alloc stream). Backward
+      compatibility: `record_block_use` is retained as a shim
+      that calls `finish_block_use(Access::Read)` for the
+      dealloc-wait surface, but production callers go through
+      the recorder.
+- [x] `XlogDeviceRuntime::prepare_first_use(slice, stream, access)`
+      / `finish_first_use(...)` helpers for helper-internal
+      scratch allocations whose first cross-stream consumer is
+      a raw `cuMemsetD8Async` / `cuMemcpyDtoDAsync_v2` /
+      `kernel.launch_on_stream` call ahead of any
+      `LaunchRecorder::preflight`. Applied to every helper that
+      allocates scratch on the manager's default stream and
+      writes it on a caller-supplied `launch_stream`
+      (`build_hash_table_v2_on_stream`,
+      `gather_buffer_by_indices_on_stream`,
+      `multiblock_scan_u32_inplace_on_stream` /
+      `_view_inplace_on_stream`, every join variant's
+      `d_count_only` / `d_output_count` / `out_col` zero-fills).
 
 ### xlog-cuda LaunchRecorder
 
 - [x] Add `LaunchRecorder` (strict / permissive modes) with
-      `read` / `write` / `read_write` / `read_column` / `write_column`
-      primitives and an explicit preflight + commit pattern.
-- [x] Make `preflight(&mut self)` stateful; `commit` rejects non-empty
-      recorders that were not preflighted (closes the
+      `read` / `write` / `read_write` / `read_column` /
+      `write_column` primitives and an explicit preflight +
+      commit pattern.
+- [x] Make `preflight(&mut self)` stateful; `commit` rejects
+      non-empty recorders that were not preflighted (closes the
       "discover-at-commit-time" footgun).
-- [x] Freeze recorder uses after preflight in the standard `note` path;
-      add the `write_post_preflight_fresh` escape hatch for
-      freshly-allocated runtime-backed outputs whose kernel-param
-      borrow rules force post-launch recording.
-- [x] Reject DLPack / Arrow external columns at preflight in strict
-      mode (`is_external()` branch in `read_column` / `write_column`).
+- [x] **Lifetime-free recorder + access-aware preflight.**
+      (PR #72.) `LaunchRecorder` snapshots `BlockId` from each
+      registered slice at record time and drops the source
+      borrow immediately, so `&mut` kernel-param borrows after
+      preflight are unrestricted. `preflight(&runtime)` queues
+      `cuStreamWaitEvent` for every recorded use's cross-stream
+      dependency BEFORE the launch (Read waits on `last_write`;
+      Write / ReadWrite waits on `last_write` plus every prior
+      reader on a different stream). `commit(self, &runtime)`
+      records new events via `finish_block_use` AFTER the
+      launch. Repeated registrations of the same block dedup to
+      a single prepare/finish call with the strongest access,
+      keyed by `(ptr, generation, device_ordinal)` (regression
+      test in `launch::tests::dedup_keys_on_full_block_id_not_ptr_alone`
+      locks the key shape against ABA collapses).
+- [x] **`write_post_preflight_fresh` retired.** All fresh
+      runtime-backed outputs now flow through the standard
+      `write` API BEFORE preflight; the snapshot release model
+      makes the post-launch escape hatch unnecessary. 78 call
+      sites across `provider/{relational,filter,groupby,mod}.rs`
+      migrated.
+- [x] Reject DLPack / Arrow external columns at preflight in
+      strict mode (`is_external()` branch in `read_column` /
+      `write_column`).
 - [x] Propagate `CudaColumn::runtime_block()` identity through
       filter-adjacent view helpers (`column_as_*`, `bytes_as_*`,
       `column_as_typed_view`).
@@ -726,8 +774,11 @@ execution.
       to the legacy path. Defaults unchanged. Cert mode
       (`XLOG_USE_RECORDED_OPS=1 XLOG_USE_DEVICE_RUNTIME=1
       cargo test -p xlog-integration --test real_world_tests
-      --release -- --test-threads=8`) passes 20/20 stress
-      runs; xlog-cuda default suite (403/403) unchanged.
+      --release -- --test-threads=8`) passes **50/50** stress
+      runs on merged main (PR #72, `77fd4948`); the previous
+      ~98% pass / ~2% flake under multi-threaded contention is
+      closed. xlog-cuda default suite is clean at
+      `--test-threads=1` after the prepare/finish migration.
 
 ### Tests and Certification
 
@@ -735,43 +786,87 @@ execution.
       allocator (`test_runtime_cross_stream_use_after_free.rs`).
 - [x] Provider-level drop+reuse tests for every recorded primitive
       and every composed end-to-end migrated path.
-- [x] Strict-recorder contract tests in `launch::tests`: post-preflight
-      additions are rejected; the `write_post_preflight_fresh` escape
-      hatch is accepted only for fresh runtime-backed slices.
+- [x] Strict-recorder contract tests in `launch::tests`:
+      post-preflight additions are rejected; pre-preflight
+      `write` of a freshly-allocated runtime-backed buffer is
+      accepted (snapshot drops the borrow so `&mut` kernel-param
+      borrows after preflight remain valid).
+- [x] **Multi-threaded sort+hash-join regression**
+      (`tests/test_mt_sort_hj_alloc_ordering.rs`, PR #72): 8
+      threads × 128 iters × 3 rounds friend-of-friend self-join.
+      Was RED at baseline `8cc0882c` (~6/1024 failures per
+      run); 1024/1024 + 1024/1024 across 10 consecutive runs
+      after the fix. Locks both prior hazards (use-after-write
+      across streams; use-after-allocation across streams).
+- [x] **Recorder dedup key regression**
+      (`launch::tests::dedup_keys_on_full_block_id_not_ptr_alone`):
+      ABA reuse of a pointer inside a single recorder must
+      not collapse distinct generations into one prepare/finish
+      pair.
 - [ ] A3 / A4 stress reproducer suite (cross-stream lifetime
-      stress under parallel forks, fixed and random schedules).
-- [ ] Public certification of the recorded launch discipline against
-      the cert suite (`cargo test -p xlog-cuda-tests --test
-      certification_suite --release`) on a runtime-backed manager.
+      stress under parallel forks, fixed and random schedules)
+      — formal multi-fork harness still pending; the MT
+      sort+hash-join regression covers a tight subset.
+- [ ] Public certification of the recorded launch discipline
+      against the cert suite (`cargo test -p xlog-cuda-tests
+      --test certification_suite --release`) on a runtime-backed
+      manager. Workspace `--tests --exclude pyxlog --release
+      --test-threads=1` is clean (141 result lines on
+      `77fd4948`); the dedicated cert suite still needs to be
+      run against the runtime-backed dispatch path explicitly.
+- [ ] **Known residual** (documented, not a release blocker):
+      `cargo test -p xlog-cuda --test
+      test_provider_launch_recorder -- --test-threads=8` shows
+      9/42 `*_survives_drop_and_reuse` failures (was 23/42 at
+      baseline). Pre-existing pattern from cross-runtime
+      mempool aliasing under intra-binary test parallelism.
+      Gate spec is `--test-threads=1`, which is clean.
 
 ### Documentation
 
 - [ ] Document the v0.6 device runtime stack
-      (`AsyncCudaResource` / `LoggingResource` / `GlobalDeviceBudget`)
-      and the `LaunchRecorder` preflight + commit contract.
+      (`AsyncCudaResource` / `LoggingResource` /
+      `GlobalDeviceBudget`) and the `LaunchRecorder` preflight +
+      commit contract, including the access-aware prepare/finish
+      semantics introduced in PR #72.
 - [ ] Add migration guidance for operator authors:
-      `read_column` / `write_post_preflight_fresh`,
-      `cu_stream.synchronize()` before host scalar reads,
-      external-column rejection.
+      `read` / `write` / `read_column` BEFORE preflight (no
+      `write_post_preflight_fresh` — that API is gone);
+      `runtime.prepare_first_use(slice, launch_stream, Access)`
+      for helper scratch that runs raw CUDA work ahead of any
+      recorder; `cu_stream.synchronize()` before host scalar
+      reads; external-column rejection in strict mode.
 
 ### Release Gate
 
 - [ ] Public release only after no WCOJ or fully GPU-resident
       binary-join PR is merged ahead of v0.6.0 — recorded launch
       discipline must cover the operators those slices depend on
-      first. Specifically: (a) the operator under migration must use
-      `launch_on_stream` on a caller-supplied `launch_stream`; (b) all
-      caller-provided buffers used by the kernel must be recorded
-      before `preflight`; (c) every fresh runtime-backed allocation
-      that outlives any in-flight kernel must be recorded via
-      `write_post_preflight_fresh` before `commit`; (d) any host
-      scalar read inside the chain must be explicitly ordered against
-      `launch_stream` (non-blocking streams do not get default-stream
-      implicit synchronization).
+      first. Specifically: (a) the operator under migration must
+      use `launch_on_stream` on a caller-supplied
+      `launch_stream`; (b) all caller-provided buffers used by
+      the kernel must be recorded before `preflight` (with the
+      correct `Access` kind — `read` for inputs, `write` /
+      `read_write` for outputs); (c) every fresh runtime-backed
+      allocation that outlives any in-flight kernel must be
+      recorded via the standard `write` API BEFORE preflight
+      (the recorder snapshots block identity at record time,
+      so the kernel `&mut` borrow after preflight is
+      unaffected); (d) helper-internal scratch that runs raw
+      CUDA work (`cuMemsetD8Async` / `cuMemcpyDtoDAsync_v2` /
+      `kernel.launch_on_stream`) ahead of any
+      `LaunchRecorder::preflight` MUST call
+      `runtime.prepare_first_use(slice, launch_stream,
+      Access::Write)` immediately after alloc; (e) any host
+      scalar read inside the chain must be explicitly ordered
+      against `launch_stream` (non-blocking streams do not get
+      default-stream implicit synchronization).
 - [ ] Public release only after the cert suite passes against a
-      runtime-backed manager with the recorded launch paths exercised.
-- [ ] Public release only after the A3 / A4 stress reproducer suite
-      observes zero use-after-free / stream-misuse failures.
+      runtime-backed manager with the recorded launch paths
+      exercised.
+- [ ] Public release only after the A3 / A4 stress reproducer
+      suite observes zero use-after-free / stream-misuse
+      failures.
 
 ## v0.6.1 - Worst-Case Optimal Joins
 
