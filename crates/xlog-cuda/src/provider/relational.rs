@@ -8246,9 +8246,7 @@ impl super::CudaKernelProvider {
 
         // Base `probe_cap` on the validated logical row count.
         let probe_cap = u32::try_from(num_left).map_err(|_| {
-            XlogError::Kernel(
-                "indexed csm left_outer: left row count exceeds u32::MAX".to_string(),
-            )
+            XlogError::Kernel("indexed csm left_outer: left row count exceeds u32::MAX".to_string())
         })?;
 
         let table = &index.table;
@@ -8482,6 +8480,17 @@ impl super::CudaKernelProvider {
         rec_mat.read(left.num_rows_device());
         rec_mat.write(&d_output_left);
         rec_mat.write(&d_output_right);
+        // Phase B's materialize kernel takes `d_overflow` as
+        // its last kernel-param and writes it on overflow.
+        // `d_overflow` is a local scratch alloc that drops when
+        // this function returns; without recording it on
+        // `rec_mat`, the runtime can free the underlying block
+        // before the materialize kernel finishes on
+        // launch_stream — a potential use-after-free if the
+        // address recycles. Register as a write so preflight
+        // queues the alloc-ready wait and commit extends the
+        // block's lifetime through the kernel.
+        rec_mat.write(&d_overflow);
         rec_mat.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "indexed csm left_outer: materialize preflight failed: {}",
@@ -8686,11 +8695,9 @@ impl super::CudaKernelProvider {
                 .ok_or_else(|| {
                     XlogError::Kernel("indexed csm left_outer: unmatched_bytes overflow".into())
                 })?;
-            let total_bytes = inner_bytes
-                .checked_add(unmatched_bytes)
-                .ok_or_else(|| {
-                    XlogError::Kernel("indexed csm left_outer: total_bytes overflow".into())
-                })?;
+            let total_bytes = inner_bytes.checked_add(unmatched_bytes).ok_or_else(|| {
+                XlogError::Kernel("indexed csm left_outer: total_bytes overflow".into())
+            })?;
             let out_col = self.memory.alloc::<u8>(total_bytes)?;
             let dst_ptr = *out_col.device_ptr();
             runtime
@@ -8763,12 +8770,18 @@ impl super::CudaKernelProvider {
                 .column_type(col_idx)
                 .map(|t| t.size_bytes())
                 .unwrap_or(4);
-            let inner_bytes = (inner_rows as usize).checked_mul(elem_size).ok_or_else(
-                || XlogError::Kernel("indexed csm left_outer: right inner_bytes overflow".into()),
-            )?;
-            let unmatched_bytes = (unmatched_rows as usize).checked_mul(elem_size).ok_or_else(
-                || XlogError::Kernel("indexed csm left_outer: right unmatched_bytes overflow".into()),
-            )?;
+            let inner_bytes = (inner_rows as usize)
+                .checked_mul(elem_size)
+                .ok_or_else(|| {
+                    XlogError::Kernel("indexed csm left_outer: right inner_bytes overflow".into())
+                })?;
+            let unmatched_bytes = (unmatched_rows as usize)
+                .checked_mul(elem_size)
+                .ok_or_else(|| {
+                    XlogError::Kernel(
+                        "indexed csm left_outer: right unmatched_bytes overflow".into(),
+                    )
+                })?;
             let total_bytes = inner_bytes.checked_add(unmatched_bytes).ok_or_else(|| {
                 XlogError::Kernel("indexed csm left_outer: right total_bytes overflow".into())
             })?;

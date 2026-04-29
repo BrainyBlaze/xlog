@@ -7272,8 +7272,8 @@ fn provider_hash_join_left_outer_csm_v2_with_index_recorded_result_set_matches()
 /// recorded chain must keep result alive even when the cached
 /// index is freed before launch_stream completion.
 #[test]
-fn provider_hash_join_left_outer_csm_v2_with_index_recorded_partial_match_survives_drop_and_reuse(
-) {
+fn provider_hash_join_left_outer_csm_v2_with_index_recorded_partial_match_survives_drop_and_reuse()
+{
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
@@ -7508,8 +7508,8 @@ fn provider_hash_join_left_outer_csm_v2_with_index_recorded_partial_match_surviv
 /// Drop+reuse stress with ALL-UNMATCHED graphs. Disjoint key
 /// spaces; only the unmatched + zero-right branch is exercised.
 #[test]
-fn provider_hash_join_left_outer_csm_v2_with_index_recorded_all_unmatched_survives_drop_and_reuse(
-) {
+fn provider_hash_join_left_outer_csm_v2_with_index_recorded_all_unmatched_survives_drop_and_reuse()
+{
     use xlog_core::{ScalarType, Schema};
     use xlog_cuda::CudaBuffer;
 
@@ -7804,8 +7804,8 @@ fn provider_hash_join_left_outer_csm_v2_with_index_recorded_rejects_legacy_manag
             "indexed CSM left_outer must reject legacy manager with Kernel error, got {:?}",
             other
         ),
-        Ok(_) => panic!(
-            "indexed CSM left_outer must reject legacy manager — unexpectedly returned Ok"
-        ),
+        Ok(_) => {
+            panic!("indexed CSM left_outer must reject legacy manager — unexpectedly returned Ok")
+        }
     }
 }
