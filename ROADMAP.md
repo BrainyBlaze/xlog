@@ -906,18 +906,24 @@ blockers later.
 
 ### Documentation
 
-- [ ] Document the v0.6 device runtime stack
+- [x] Document the v0.6 device runtime stack
       (`AsyncCudaResource` / `LoggingResource` /
       `GlobalDeviceBudget`) and the `LaunchRecorder` preflight +
       commit contract, including the access-aware prepare/finish
       semantics introduced in PR #72.
-- [ ] Add migration guidance for operator authors:
+      → [`docs/architecture/device-runtime.md`](architecture/device-runtime.md);
+      linked from `docs/ARCHITECTURE.md` Memory Management
+      section.
+- [x] Add migration guidance for operator authors:
       `read` / `write` / `read_column` BEFORE preflight (no
       `write_post_preflight_fresh` — that API is gone);
       `runtime.prepare_first_use(slice, launch_stream, Access)`
       for helper scratch that runs raw CUDA work ahead of any
       recorder; `cu_stream.synchronize()` before host scalar
       reads; external-column rejection in strict mode.
+      → [`docs/architecture/recorded-launch-migration.md`](architecture/recorded-launch-migration.md);
+      linked from `docs/ARCHITECTURE.md` Memory Management
+      section.
 - [ ] Add deterministic Datalog tuning guide.
 - [ ] Add general performance tuning guide.
 - [ ] Add getting-started tutorial.
@@ -982,8 +988,13 @@ either checked or scoped as deferred / non-blocking residual.
    "Known Non-Blocking Residuals"). The v0.6.0 stream-safety
    gate is **A4 + cert suite + umbrella ×50**, not "A3 zero
    drift".
-3. **Operator-author migration docs + runtime-stack docs.**
-   Both items in the Documentation subsection.
+3. ~~Operator-author migration docs + runtime-stack docs.~~
+   **DONE.** Both items in the v0.6.0 Documentation subsection
+   are now checked.
+   `docs/architecture/device-runtime.md` covers the runtime
+   stack; `docs/architecture/recorded-launch-migration.md`
+   covers the operator-author checklist. Linked from
+   `docs/ARCHITECTURE.md`.
 4. **Decisions on host-mask compact migration and ILP /
    ILP-exact recorded migration.** Either land them in v0.6.0
    or formally defer to v0.6.x with named consumer triggers.
