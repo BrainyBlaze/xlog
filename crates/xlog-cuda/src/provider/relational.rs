@@ -1,6 +1,7 @@
 //! Relational operations: join, dedup, union, diff, sort, and related helpers.
 
 use std::ffi::c_void;
+use std::sync::atomic::Ordering;
 
 use crate::{AsKernelParam, DeviceSlice, LaunchAsync, LaunchConfig};
 use xlog_core::{Result, ScalarType, Schema, XlogError};
@@ -8870,12 +8871,19 @@ impl super::CudaKernelProvider {
     }
 
     /// Strict-recorder, launch_stream-routed variant of
-    /// `hash_join_v2`. **`JoinType::Inner` only** (slice #7A).
-    /// Other join types return a structured `XlogError::Kernel`
-    /// directing callers to the legacy `hash_join_v2` until
-    /// follow-up sub-slices land:
-    ///   * LeftOuter — slice #7C.
-    ///   * Indexed (`hash_join_v2_with_index`) — slice #7D.
+    /// `hash_join_v2`. Covers all four join types
+    /// (`Inner` / `Semi` / `Anti` / `LeftOuter`) via dedicated
+    /// per-type recorded methods.
+    ///
+    /// When [`Self::use_recorded_csm_env`] is on, `Inner` and
+    /// `LeftOuter` route through the CSM (count-scan-materialize)
+    /// methods; otherwise they route through the legacy recorded
+    /// methods. `Semi` / `Anti` always route through their
+    /// existing recorded methods — no CSM implementation exists
+    /// for them. All eligibility checks (runtime-backed manager,
+    /// ≤4 keys, key-type match, row-count caps) are validated
+    /// upstream by the public `hash_join_v2_with_limit` and inside
+    /// each per-type method.
     pub fn hash_join_v2_recorded(
         &self,
         left: &CudaBuffer,
@@ -8886,15 +8894,30 @@ impl super::CudaKernelProvider {
         max_output: Option<usize>,
         launch_stream: StreamId,
     ) -> Result<CudaBuffer> {
+        let csm_on = Self::use_recorded_csm_env();
         match join_type {
-            JoinType::Inner => self.hash_join_inner_v2_recorded(
-                left,
-                right,
-                left_keys,
-                right_keys,
-                max_output,
-                launch_stream,
-            ),
+            JoinType::Inner => {
+                if csm_on {
+                    self.csm_invocations.fetch_add(1, Ordering::Relaxed);
+                    self.hash_join_inner_v2_count_scan_materialize_recorded(
+                        left,
+                        right,
+                        left_keys,
+                        right_keys,
+                        max_output,
+                        launch_stream,
+                    )
+                } else {
+                    self.hash_join_inner_v2_recorded(
+                        left,
+                        right,
+                        left_keys,
+                        right_keys,
+                        max_output,
+                        launch_stream,
+                    )
+                }
+            }
             JoinType::Semi => self.hash_join_semi_or_anti_v2_recorded(
                 left,
                 right,
@@ -8911,14 +8934,28 @@ impl super::CudaKernelProvider {
                 true,
                 launch_stream,
             ),
-            JoinType::LeftOuter => self.hash_join_left_outer_v2_recorded(
-                left,
-                right,
-                left_keys,
-                right_keys,
-                max_output,
-                launch_stream,
-            ),
+            JoinType::LeftOuter => {
+                if csm_on {
+                    self.csm_invocations.fetch_add(1, Ordering::Relaxed);
+                    self.hash_join_left_outer_v2_count_scan_materialize_recorded(
+                        left,
+                        right,
+                        left_keys,
+                        right_keys,
+                        max_output,
+                        launch_stream,
+                    )
+                } else {
+                    self.hash_join_left_outer_v2_recorded(
+                        left,
+                        right,
+                        left_keys,
+                        right_keys,
+                        max_output,
+                        launch_stream,
+                    )
+                }
+            }
         }
     }
 
@@ -9847,6 +9884,13 @@ impl super::CudaKernelProvider {
     /// types — the indexed variants share the same
     /// `(packed_keys, table)` shape, so a single recorded
     /// surface covers them.
+    ///
+    /// When [`Self::use_recorded_csm_env`] is on, `Inner` and
+    /// `LeftOuter` route through the indexed CSM
+    /// (count-scan-materialize) methods; otherwise they route
+    /// through the legacy indexed recorded methods. `Semi` /
+    /// `Anti` always route through their existing indexed
+    /// recorded methods — no CSM implementation exists for them.
     pub fn hash_join_v2_with_index_recorded(
         &self,
         left: &CudaBuffer,
@@ -9958,15 +10002,31 @@ impl super::CudaKernelProvider {
             ));
         }
 
+        let csm_on = Self::use_recorded_csm_env();
         match join_type {
-            JoinType::Inner => self.hash_join_inner_v2_with_index_recorded(
-                left,
-                right,
-                left_keys,
-                index,
-                max_output,
-                launch_stream,
-            ),
+            JoinType::Inner => {
+                if csm_on {
+                    self.csm_invocations.fetch_add(1, Ordering::Relaxed);
+                    self.hash_join_inner_v2_with_index_count_scan_materialize_recorded(
+                        left,
+                        right,
+                        left_keys,
+                        right_keys,
+                        index,
+                        max_output,
+                        launch_stream,
+                    )
+                } else {
+                    self.hash_join_inner_v2_with_index_recorded(
+                        left,
+                        right,
+                        left_keys,
+                        index,
+                        max_output,
+                        launch_stream,
+                    )
+                }
+            }
             JoinType::Semi => self.hash_join_semi_or_anti_v2_with_index_recorded(
                 left,
                 left_keys,
@@ -9981,14 +10041,29 @@ impl super::CudaKernelProvider {
                 true,
                 launch_stream,
             ),
-            JoinType::LeftOuter => self.hash_join_left_outer_v2_with_index_recorded(
-                left,
-                right,
-                left_keys,
-                index,
-                max_output,
-                launch_stream,
-            ),
+            JoinType::LeftOuter => {
+                if csm_on {
+                    self.csm_invocations.fetch_add(1, Ordering::Relaxed);
+                    self.hash_join_left_outer_v2_with_index_count_scan_materialize_recorded(
+                        left,
+                        right,
+                        left_keys,
+                        right_keys,
+                        index,
+                        max_output,
+                        launch_stream,
+                    )
+                } else {
+                    self.hash_join_left_outer_v2_with_index_recorded(
+                        left,
+                        right,
+                        left_keys,
+                        index,
+                        max_output,
+                        launch_stream,
+                    )
+                }
+            }
         }
     }
 
