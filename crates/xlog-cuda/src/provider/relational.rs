@@ -8871,20 +8871,19 @@ impl super::CudaKernelProvider {
     }
 
     /// Strict-recorder, launch_stream-routed variant of
-    /// `hash_join_v2`. **`JoinType::Inner` only** (slice #7A).
-    /// Other join types return a structured `XlogError::Kernel`
-    /// directing callers to the legacy `hash_join_v2` until
-    /// follow-up sub-slices land:
-    ///   * LeftOuter — slice #7C.
-    ///   * Indexed (`hash_join_v2_with_index`) — slice #7D.
+    /// `hash_join_v2`. Covers all four join types
+    /// (`Inner` / `Semi` / `Anti` / `LeftOuter`) via dedicated
+    /// per-type recorded methods.
     ///
     /// When [`Self::use_recorded_csm_env`] is on, `Inner` and
     /// `LeftOuter` route through the CSM (count-scan-materialize)
-    /// methods. `Semi` / `Anti` are unaffected — no CSM
-    /// implementation exists for them. All eligibility checks
-    /// (runtime-backed manager, ≤4 keys, key-type match,
-    /// row-count caps) are validated upstream by the public
-    /// `hash_join_v2_with_limit` and inside each per-type method.
+    /// methods; otherwise they route through the legacy recorded
+    /// methods. `Semi` / `Anti` always route through their
+    /// existing recorded methods — no CSM implementation exists
+    /// for them. All eligibility checks (runtime-backed manager,
+    /// ≤4 keys, key-type match, row-count caps) are validated
+    /// upstream by the public `hash_join_v2_with_limit` and inside
+    /// each per-type method.
     pub fn hash_join_v2_recorded(
         &self,
         left: &CudaBuffer,
@@ -9885,6 +9884,13 @@ impl super::CudaKernelProvider {
     /// types — the indexed variants share the same
     /// `(packed_keys, table)` shape, so a single recorded
     /// surface covers them.
+    ///
+    /// When [`Self::use_recorded_csm_env`] is on, `Inner` and
+    /// `LeftOuter` route through the indexed CSM
+    /// (count-scan-materialize) methods; otherwise they route
+    /// through the legacy indexed recorded methods. `Semi` /
+    /// `Anti` always route through their existing indexed
+    /// recorded methods — no CSM implementation exists for them.
     pub fn hash_join_v2_with_index_recorded(
         &self,
         left: &CudaBuffer,

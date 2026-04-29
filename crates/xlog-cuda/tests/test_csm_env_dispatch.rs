@@ -19,7 +19,7 @@
 //! (`cargo test -p xlog-cuda --tests --release -- --test-threads=1`)
 //! already enforces this.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::device_runtime::{
@@ -32,14 +32,34 @@ const ENV_OPS: &str = "XLOG_USE_RECORDED_OPS";
 const ENV_HJ: &str = "XLOG_USE_RECORDED_HASH_JOIN";
 const ENV_CSM: &str = "XLOG_USE_RECORDED_CSM";
 
-/// RAII guard that clears the three env vars on construction
-/// and on Drop, so each test starts and ends from a known state
-/// regardless of the previous test's flow.
-struct EnvGuard;
+/// Process-wide lock that serializes env-var mutation across
+/// every test in this binary. Tests are also expected to run
+/// with `--test-threads=1` (the file header documents this and
+/// the workspace gate enforces it), but the lock makes the
+/// serialization explicit and defends against accidental
+/// concurrent execution (e.g. `cargo test --test
+/// test_csm_env_dispatch` without the threads flag).
+fn env_lock() -> &'static Mutex<()> {
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    ENV_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// RAII guard that holds the process-wide env lock and clears
+/// the three relevant env vars on construction and on Drop, so
+/// each test starts and ends from a known state regardless of
+/// the previous test's flow.
+struct EnvGuard {
+    _lock: MutexGuard<'static, ()>,
+}
 impl EnvGuard {
     fn new() -> Self {
+        // Recover from poisoning — a previous test panicking
+        // doesn't make env state unsafe; we just want exclusive
+        // access while we mutate it.
+        let lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let guard = Self { _lock: lock };
         clear_env();
-        Self
+        guard
     }
 }
 impl Drop for EnvGuard {
@@ -49,8 +69,13 @@ impl Drop for EnvGuard {
 }
 
 fn clear_env() {
-    // SAFETY: tests run with `--test-threads=1`; no other thread
-    // is concurrently reading the process environment.
+    // SAFETY: `EnvGuard` holds the process-wide `env_lock()` for
+    // the duration of every call site, so no other thread in
+    // this test binary is concurrently reading or writing the
+    // environment. The wrapping is required because
+    // `std::env::{set_var, remove_var}` are `unsafe fn` from
+    // edition 2024 onward (and already advisory-unsafe in 2021)
+    // due to data races with multi-threaded readers.
     unsafe {
         std::env::remove_var(ENV_OPS);
         std::env::remove_var(ENV_HJ);
@@ -59,8 +84,8 @@ fn clear_env() {
 }
 
 fn set_env(name: &str, value: &str) {
-    // SAFETY: tests run with `--test-threads=1`; no other thread
-    // is concurrently reading the process environment.
+    // SAFETY: same guarantee as `clear_env` — held under
+    // `env_lock()` via `EnvGuard`.
     unsafe {
         std::env::set_var(name, value);
     }
@@ -190,6 +215,34 @@ fn dispatch_routes_to_csm_for_inner_non_indexed_with_umbrella_env() {
         result.num_rows() > 0,
         "Inner join with overlap must produce some rows"
     );
+}
+
+#[test]
+fn dispatch_routes_to_csm_when_recorded_csm_env_is_set_directly() {
+    // Covers the specific `XLOG_USE_RECORDED_CSM` env var (not the
+    // umbrella). The recorded hash-join path itself still requires
+    // its own gate, so we set both. This test proves the file's
+    // header claim that CSM is selected when its dedicated env var
+    // is enabled — independent of the umbrella.
+    let _g = EnvGuard::new();
+    let Some(ctx) = build_ctx() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    set_env(ENV_HJ, "1");
+    set_env(ENV_CSM, "1");
+    let (left, right) = build_overlap_buffers(&ctx);
+    let before = ctx.provider.csm_invocations();
+    let result = ctx
+        .provider
+        .hash_join_v2_with_limit(&left, &right, &[0], &[0], JoinType::Inner, None)
+        .expect("inner join via CSM dispatch (specific env)");
+    assert_eq!(
+        ctx.provider.csm_invocations() - before,
+        1,
+        "CSM must be invoked when XLOG_USE_RECORDED_CSM=1 is set directly"
+    );
+    assert!(result.num_rows() > 0);
 }
 
 #[test]

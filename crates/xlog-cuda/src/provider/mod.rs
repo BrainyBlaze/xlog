@@ -1013,10 +1013,13 @@ impl CudaKernelProvider {
     /// non-indexed / indexed). Used by `test_csm_env_dispatch` to
     /// prove dispatch selection.
     ///
-    /// **Not part of any public stability guarantee.** Production
-    /// callers must not depend on this counter's existence, shape,
-    /// or increment semantics; it may be renamed, hidden, or removed
-    /// in any release without notice.
+    /// **Not part of any public stability guarantee.** Hidden from
+    /// rustdoc with `#[doc(hidden)]` so it does not appear in
+    /// generated API docs; the symbol remains callable from
+    /// integration tests within this crate but production callers
+    /// must not depend on it. May be renamed, gated behind a cargo
+    /// feature, or removed in any release without notice.
+    #[doc(hidden)]
     pub fn csm_invocations(&self) -> u64 {
         self.csm_invocations.load(Ordering::Relaxed)
     }
