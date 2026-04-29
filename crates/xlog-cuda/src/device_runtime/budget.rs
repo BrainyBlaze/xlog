@@ -69,7 +69,8 @@
 use std::sync::Mutex;
 
 use super::resource::{
-    AllocTag, DeviceBlock, DeviceMemoryResource, ResourceError, ResourceResult, StreamId,
+    Access, AllocTag, BlockId, DeviceBlock, DeviceMemoryResource, ResourceError, ResourceResult,
+    StreamId,
 };
 
 /// Internal state guarded by the budget mutex. Kept in its own
@@ -204,6 +205,27 @@ impl DeviceMemoryResource for GlobalDeviceBudget {
 
     fn supports_block_use_tracking(&self) -> bool {
         self.inner.supports_block_use_tracking()
+    }
+
+    fn prepare_block_use(
+        &self,
+        block: BlockId,
+        use_stream: StreamId,
+        access: Access,
+    ) -> ResourceResult<()> {
+        // Pass-through: cross-stream waits live in the
+        // stream-ordered backend; budget accounting is unaffected.
+        self.inner.prepare_block_use(block, use_stream, access)
+    }
+
+    fn finish_block_use(
+        &self,
+        block: BlockId,
+        use_stream: StreamId,
+        access: Access,
+    ) -> ResourceResult<()> {
+        // Pass-through: see prepare_block_use rationale above.
+        self.inner.finish_block_use(block, use_stream, access)
     }
 }
 

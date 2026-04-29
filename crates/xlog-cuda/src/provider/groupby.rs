@@ -786,6 +786,9 @@ impl super::CudaKernelProvider {
                 .ok_or_else(|| XlogError::Kernel(format!("Key column {} not found", col_idx)))?;
             rec.read_column(col);
         }
+        rec.write(&col_sizes_slice);
+        rec.write(&packed_slice);
+        rec.write(&hash_slice);
         rec.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "pack_keys_gpu_on_stream: launch recorder preflight failed: {}",
@@ -834,9 +837,6 @@ impl super::CudaKernelProvider {
         // all three because they were allocated by this helper
         // before preflight and first used by the queued pack
         // launch.
-        rec.write_post_preflight_fresh(&col_sizes_slice);
-        rec.write_post_preflight_fresh(&packed_slice);
-        rec.write_post_preflight_fresh(&hash_slice);
         rec.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "pack_keys_gpu_on_stream: launch recorder commit failed: {}",
@@ -1117,6 +1117,19 @@ impl super::CudaKernelProvider {
                 XlogError::Kernel(format!("Value column {} not found", value_col))
             })?;
             rec.read_column(c);
+        }
+        rec.write(&boundaries);
+        rec.write(&d_boundary_pos);
+        rec.write(&d_block_sums);
+        rec.write(&d_num_groups);
+        rec.write(&group_ids);
+        rec.write(&group_first_idx);
+        rec.write(&group_packed);
+        for o in &agg_outputs {
+            rec.write(o);
+        }
+        for k in &key_unpacked {
+            rec.write(k);
         }
         rec.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
@@ -1420,19 +1433,6 @@ impl super::CudaKernelProvider {
         }
 
         // Record fresh writes via post-preflight escape hatch.
-        rec.write_post_preflight_fresh(&boundaries);
-        rec.write_post_preflight_fresh(&d_boundary_pos);
-        rec.write_post_preflight_fresh(&d_block_sums);
-        rec.write_post_preflight_fresh(&d_num_groups);
-        rec.write_post_preflight_fresh(&group_ids);
-        rec.write_post_preflight_fresh(&group_first_idx);
-        rec.write_post_preflight_fresh(&group_packed);
-        for o in &agg_outputs {
-            rec.write_post_preflight_fresh(o);
-        }
-        for k in &key_unpacked {
-            rec.write_post_preflight_fresh(k);
-        }
         rec.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!("groupby_multi_agg_recorded: commit failed: {}", e))
         })?;

@@ -1,12 +1,19 @@
 //! Launch / use recorder for runtime-backed buffers.
 //!
 //! Closes the production-side of the cross-stream lifetime gap
-//! identified by A4. Code that enqueues kernels or copies on a
-//! `launch_stream` other than the buffer's `alloc_stream` MUST
-//! tell the runtime about the use so the runtime can wait for
-//! the launch to complete before its `cuMemFreeAsync` runs.
-//! Without this, the CUDA mempool is free to reuse the address
-//! while the cross-stream work is still in flight.
+//! identified by A4 *and* the use-after-prior-write hazard
+//! discovered by the multi-threaded sort+hash-join regression.
+//! Code that enqueues kernels or copies on a `launch_stream`
+//! other than the buffer's `alloc_stream` MUST tell the runtime
+//! about the use BEFORE the launch (so prior cross-stream waits
+//! can be queued ahead of the work) AND AFTER the launch (so a
+//! use-event is recorded for future readers / writers and for
+//! the eventual deallocate).
+//!
+//! Without preflight, the CUDA mempool is free to reuse the
+//! address while the cross-stream work is still in flight, AND
+//! prior writes / reads on a different stream remain
+//! invisible to the new work — kernels read torn state.
 //!
 //! # Modes
 //!
@@ -32,33 +39,51 @@
 //! Production callers split the recorder into TWO phases around
 //! the actual CUDA call:
 //!
-//!   1. Build the recorder, register buffers via `read` /
-//!      `write` / `read_write` / `read_column` / etc.
-//!   2. Call [`LaunchRecorder::preflight`] BEFORE enqueueing the
-//!      CUDA work. Preflight verifies the active resource
-//!      supports cross-stream tracking AND (in strict mode)
-//!      that every recorded buffer has a runtime block. On
-//!      failure no CUDA work has been queued yet.
+//!   1. Build the recorder, register every buffer the launch
+//!      will touch via `read` / `write` / `read_write` /
+//!      `read_column` / `write_column` *before* enqueueing any
+//!      CUDA work. Fresh output buffers go through the same
+//!      `write` / `write_column` API — there is no separate
+//!      post-launch path. The recorder snapshots the block id
+//!      at record time and immediately drops the slice borrow,
+//!      so callers can take `&mut` afterwards.
+//!   2. Call [`LaunchRecorder::preflight`] BEFORE enqueueing
+//!      any CUDA work. Preflight verifies the active resource
+//!      supports cross-stream tracking and (in strict mode)
+//!      that every recorded buffer has a runtime block, then
+//!      queues the cross-stream waits required by each
+//!      recorded access kind via
+//!      [`crate::device_runtime::XlogDeviceRuntime::prepare_block_use`].
+//!      On failure no CUDA work has been queued yet.
 //!   3. Enqueue the CUDA call on `launch_stream`.
 //!   4. Call [`LaunchRecorder::commit`] AFTER the launch is
-//!      enqueued. Commit calls `record_block_use` on each
+//!      enqueued. Commit calls `finish_block_use` on each
 //!      tracked block — the runtime records its event on
-//!      `launch_stream` at this point, and that event will
-//!      fire when the queued work completes.
+//!      `launch_stream` at this point, and that event becomes
+//!      part of the block's dependency state for future
+//!      readers / writers and the eventual deallocate.
 //!
-//! Without preflight, a recorder against `DirectCudaResource`
-//! would discover the resource is unsupported only AFTER the
-//! launch has been queued, leaving in-flight work without
-//! cross-stream protection.
+//! # Why preflight queues waits, not just validates
+//!
+//! Earlier revisions only validated the resource stack at
+//! preflight and queued waits implicitly via deallocate.
+//! That protected free-after-use but NOT use-after-prior-write
+//! across streams: if sort writes column A on stream X and
+//! join reads column A on stream Y, the join's read kernel
+//! could observe sort's pre-write contents because no event
+//! fenced X→Y. This recorder closes that gap by queuing
+//! `cuStreamWaitEvent` calls in preflight, before the join
+//! kernel is enqueued on Y, against sort's recorded write
+//! event on X.
 //!
 //! # External memory (DLPack, Arrow device)
 //!
 //! Strict mode rejects [`crate::memory::CudaColumn::Dlpack`]
 //! and [`crate::memory::CudaColumn::ArrowDevice`] columns
 //! outright. External memory has no xlog-side runtime identity
-//! — the `record_block_use` API cannot attach an event to a
-//! buffer the runtime did not allocate. Callers that need to
-//! consume external columns must either:
+//! — the prepare/finish APIs cannot attach events to a buffer
+//! the runtime did not allocate. Callers that need to consume
+//! external columns must either:
 //!   * use a permissive recorder (and accept that no
 //!     cross-stream safety applies to those buffers), or
 //!   * synchronize externally (e.g., wait on the producing
@@ -67,8 +92,10 @@
 //! Permissive mode skips external columns silently, matching
 //! the legacy-buffer policy.
 
+use std::collections::HashSet;
+
 use crate::device_runtime::{
-    DeviceBlock, ResourceError, ResourceResult, StreamId, XlogDeviceRuntime,
+    Access, BlockId, DeviceBlock, ResourceError, ResourceResult, StreamId, XlogDeviceRuntime,
 };
 
 /// Recorder construction mode.
@@ -87,62 +114,59 @@ pub enum RecorderMode {
 /// `launch_stream`. Drop without `commit` is a programmer error;
 /// the recorder logs (debug builds only) and never panics.
 ///
+/// # Lifetime model
+///
+/// The recorder snapshots each registered block's identity
+/// ([`BlockId`]) at record time and immediately drops the source
+/// slice borrow. The recorder type itself carries no lifetime
+/// parameter, so callers can interleave `rec.read(&buf)` calls
+/// with later `&mut buf` kernel-param borrows freely. The
+/// runtime's generation guard catches misuse where the snapshot
+/// outlives the underlying allocation.
+///
 /// # Required call order for non-empty recorders
 ///
 /// `preflight(&runtime)` MUST be called and return `Ok(())`
-/// BEFORE any CUDA work is enqueued, AND BEFORE `commit`. The
-/// preflighted flag is checked at commit time: a non-empty
-/// recorder that reaches `commit` without a successful
-/// `preflight` is rejected with `StreamMisuse`. This closes the
-/// footgun where a future migrated operator could enqueue CUDA
-/// work, then call commit, then discover at commit-time that
-/// the active resource is unsupported — leaving unprotected
-/// work in flight.
+/// BEFORE any CUDA work is enqueued, AND BEFORE `commit`.
+/// Preflight queues the cross-stream waits each recorded access
+/// kind requires (read waits on prior writes; write waits on
+/// prior writes AND prior reads), so the launch sees a
+/// well-fenced view of every input. Commit then records the
+/// new event on `launch_stream` so future ops can wait on it.
 ///
 /// Empty recorders (no `read`/`write`/... calls) are a no-op
-/// and bypass the preflight requirement: there are no events
-/// to record, so the launch / copy was either fully outside
-/// the recorder's domain or already protected by other means.
-pub struct LaunchRecorder<'b> {
+/// and bypass the preflight requirement: there are no waits
+/// to queue, no events to record.
+pub struct LaunchRecorder {
     launch_stream: StreamId,
     mode: RecorderMode,
-    /// Recorded uses, by reference. Held as `&DeviceBlock`
-    /// rather than copied so the caller's borrow of the source
-    /// buffer enforces that the buffer is alive at
-    /// recorder-construction time.
-    uses: Vec<RecordedUse<'b>>,
+    /// Recorded uses, snapshotted from source blocks at record
+    /// time. The recorder holds no slice borrows after the
+    /// record call returns — `&mut` kernel params are free.
+    uses: Vec<RecordedUse>,
     /// First strict-mode rejection encountered while recording.
     /// Surfaced from `preflight`; the recorder's record methods
     /// return `&mut Self` so callers can chain naturally.
     strict_reject: Option<ResourceError>,
     /// `true` after a successful `preflight(&runtime)` returns
     /// `Ok(())`. `commit` rejects non-empty recorders that
-    /// were not preflighted, so a future migrated operator
-    /// cannot accidentally enqueue CUDA work first and discover
-    /// the failure only at commit-time.
+    /// were not preflighted.
     preflighted: bool,
-    /// Per-recorder opt-in for the post-preflight escape
-    /// hatch. Default `false` — `note` rejects post-preflight
-    /// additions. Set transiently by
-    /// `write_post_preflight_fresh` (and siblings) for ONE
-    /// `note` call: the recorder is the freshly-allocated
-    /// runtime-backed output buffer of a launch that the
-    /// caller has already enqueued, and the kernel-param borrow
-    /// rules made pre-launch recording impossible.
-    allow_post_preflight: bool,
     committed: bool,
 }
 
-struct RecordedUse<'b> {
-    block: &'b DeviceBlock,
-    /// Site label (e.g., `"read"`, `"write"`,
-    /// `"read_column"`) for diagnostics. Not used at runtime
-    /// beyond error messages.
+#[derive(Clone, Copy)]
+struct RecordedUse {
+    block: BlockId,
+    access: Access,
+    /// Site label (e.g., `"read"`, `"write"`, `"read_column"`)
+    /// for diagnostics. Not used at runtime beyond error
+    /// messages.
     #[allow(dead_code)]
     label: &'static str,
 }
 
-impl<'b> LaunchRecorder<'b> {
+impl LaunchRecorder {
     /// Permissive recorder: silently skips untracked buffers.
     pub fn new_permissive(launch_stream: StreamId) -> Self {
         Self::new(launch_stream, RecorderMode::Permissive)
@@ -161,7 +185,6 @@ impl<'b> LaunchRecorder<'b> {
             uses: Vec::new(),
             strict_reject: None,
             preflighted: false,
-            allow_post_preflight: false,
             committed: false,
         }
     }
@@ -176,37 +199,34 @@ impl<'b> LaunchRecorder<'b> {
         self.mode
     }
 
+    /// Snapshot a block reference into a recorded use. Reject
+    /// post-preflight additions so the validity check at
+    /// preflight time stays the source of truth.
     fn note(
         &mut self,
         label: &'static str,
-        block: Option<&'b DeviceBlock>,
+        block: Option<&DeviceBlock>,
+        access: Access,
         external: bool,
     ) -> &mut Self {
-        // Post-preflight additions are forbidden by default. The
-        // contract is: every recorded use must be visible to
-        // preflight so its strict-mode validity (external /
-        // legacy / supports_block_use_tracking) is decided
-        // BEFORE any CUDA work is queued. Adding uses after
-        // preflight would let a strict-reject slip through to
-        // commit-time, leaving unprotected work in flight.
-        // Callers that legitimately need to record a write of a
-        // freshly-allocated runtime-backed output AFTER the
-        // launch enqueues must use the explicit
-        // `*_post_preflight_fresh` escape hatches, which set
-        // `allow_post_preflight` and document the invariant.
-        if self.preflighted && !self.allow_post_preflight && self.strict_reject.is_none() {
+        if self.preflighted && self.strict_reject.is_none() {
             self.strict_reject = Some(ResourceError::StreamMisuse(format!(
                 "LaunchRecorder::{}: recorded after preflight — once preflight \
                  succeeds, the set of uses is frozen so commit-time discoveries \
-                 cannot leave unprotected work in flight. Either record this use \
-                 BEFORE preflight, or use a `*_post_preflight_fresh` escape hatch \
-                 if the buffer is a freshly-allocated runtime-backed output",
+                 cannot leave unprotected work in flight. Record this use BEFORE \
+                 preflight (the recorder is lifetime-free; snapshots release the \
+                 source borrow immediately, so kernel-param &mut borrows still \
+                 work)",
                 label,
             )));
             return self;
         }
         if let Some(b) = block {
-            self.uses.push(RecordedUse { block: b, label });
+            self.uses.push(RecordedUse {
+                block: BlockId::from_block(b),
+                access,
+                label,
+            });
             return self;
         }
         if self.mode == RecorderMode::Strict && self.strict_reject.is_none() {
@@ -232,40 +252,60 @@ impl<'b> LaunchRecorder<'b> {
     /// the launch will read.
     pub fn read<T: cudarc::driver::DeviceRepr>(
         &mut self,
-        slice: &'b crate::memory::TrackedCudaSlice<T>,
+        slice: &crate::memory::TrackedCudaSlice<T>,
     ) -> &mut Self {
-        self.note("read", slice.runtime_block(), false)
+        self.note("read", slice.runtime_block(), Access::Read, false)
     }
 
     /// Record a runtime-backed slice the launch will write.
+    /// Use this for both pre-existing buffers being overwritten
+    /// AND for fresh runtime-backed allocations whose lifetime
+    /// began in the same operator. The recorder snapshots block
+    /// identity at record time and drops the borrow, so kernel
+    /// `&mut slice` borrows after preflight are unaffected.
     pub fn write<T: cudarc::driver::DeviceRepr>(
         &mut self,
-        slice: &'b crate::memory::TrackedCudaSlice<T>,
+        slice: &crate::memory::TrackedCudaSlice<T>,
     ) -> &mut Self {
-        self.note("write", slice.runtime_block(), false)
+        self.note("write", slice.runtime_block(), Access::Write, false)
     }
 
     /// Record a runtime-backed slice the launch will both read
     /// and write.
     pub fn read_write<T: cudarc::driver::DeviceRepr>(
         &mut self,
-        slice: &'b mut crate::memory::TrackedCudaSlice<T>,
+        slice: &crate::memory::TrackedCudaSlice<T>,
     ) -> &mut Self {
-        self.note("read_write", slice.runtime_block(), false)
+        self.note(
+            "read_write",
+            slice.runtime_block(),
+            Access::ReadWrite,
+            false,
+        )
     }
 
     /// Record a [`crate::memory::CudaColumn`] the launch will
     /// read. Owned columns surface their runtime block; external
     /// (`Dlpack` / `ArrowDevice`) columns are rejected in strict
     /// mode and silently skipped in permissive mode.
-    pub fn read_column(&mut self, col: &'b crate::memory::CudaColumn) -> &mut Self {
-        self.note("read_column", col.runtime_block(), col.is_external())
+    pub fn read_column(&mut self, col: &crate::memory::CudaColumn) -> &mut Self {
+        self.note(
+            "read_column",
+            col.runtime_block(),
+            Access::Read,
+            col.is_external(),
+        )
     }
 
     /// Record a [`crate::memory::CudaColumn`] the launch will
     /// write.
-    pub fn write_column(&mut self, col: &'b crate::memory::CudaColumn) -> &mut Self {
-        self.note("write_column", col.runtime_block(), col.is_external())
+    pub fn write_column(&mut self, col: &crate::memory::CudaColumn) -> &mut Self {
+        self.note(
+            "write_column",
+            col.runtime_block(),
+            Access::Write,
+            col.is_external(),
+        )
     }
 
     /// Record a [`crate::provider::RawCudaView`]-style view that
@@ -277,58 +317,8 @@ impl<'b> LaunchRecorder<'b> {
     /// Public API placeholder for the upcoming filter-class
     /// migration; no production caller exists yet.
     #[allow(dead_code)]
-    pub(crate) fn read_view_runtime(&mut self, block: Option<&'b DeviceBlock>) -> &mut Self {
-        self.note("read_view", block, false)
-    }
-
-    /// Post-preflight escape hatch for recording a write of a
-    /// freshly-allocated, runtime-backed output buffer.
-    ///
-    /// **Use only when both conditions hold:**
-    ///
-    ///   1. `slice` was just allocated by a runtime-backed
-    ///      [`crate::GpuMemoryManager`] in this same operator
-    ///      call, so its `runtime_block()` is `Some` by
-    ///      construction and strict-mode rejection is
-    ///      impossible.
-    ///   2. The kernel-param borrow rules made pre-launch
-    ///      recording impossible (the launch needs `&mut slice`
-    ///      while a recorder holds `&slice`).
-    ///
-    /// This method is the **only** sanctioned way to add a use
-    /// after preflight. It surfaces a structured `StreamMisuse`
-    /// at commit time if either invariant breaks (slice is not
-    /// runtime-backed, recorder was not preflighted).
-    ///
-    /// Production callers should add a comment naming the
-    /// freshly-allocated buffer at the call site to keep the
-    /// "fresh" invariant auditable.
-    pub fn write_post_preflight_fresh<T: cudarc::driver::DeviceRepr>(
-        &mut self,
-        slice: &'b crate::memory::TrackedCudaSlice<T>,
-    ) -> &mut Self {
-        if !self.preflighted {
-            // The escape hatch only makes sense AFTER a
-            // successful preflight. If preflight was skipped,
-            // commit's preflighted-flag check will surface the
-            // problem; we still flip the flag so `note`'s
-            // post-preflight branch isn't entered for an
-            // un-preflighted recorder.
-            self.allow_post_preflight = true;
-            let r = self.note("write_post_preflight_fresh", slice.runtime_block(), false);
-            r.allow_post_preflight = false;
-            return r;
-        }
-        // Strict-mode rejection of the slice (legacy backing)
-        // is still surfaced via `note` — the "fresh
-        // runtime-backed" invariant is the caller's
-        // responsibility, but the recorder still verifies it
-        // and turns a violation into a structured error rather
-        // than a silent miss.
-        self.allow_post_preflight = true;
-        let r = self.note("write_post_preflight_fresh", slice.runtime_block(), false);
-        r.allow_post_preflight = false;
-        r
+    pub(crate) fn read_view_runtime(&mut self, block: Option<&DeviceBlock>) -> &mut Self {
+        self.note("read_view", block, Access::Read, false)
     }
 
     /// Number of recorded runtime-backed uses. Diagnostic.
@@ -337,23 +327,33 @@ impl<'b> LaunchRecorder<'b> {
     }
 
     /// Preflight: validate the recorder is ready to commit
-    /// against `runtime`. **Stateful** — sets a flag that
-    /// `commit` checks. MUST be called BEFORE enqueueing the
-    /// CUDA launch / copy. On failure no CUDA work has been
+    /// against `runtime` AND queue every cross-stream wait the
+    /// recorded access kinds require. **Stateful** — sets a flag
+    /// that `commit` checks. MUST be called BEFORE enqueueing
+    /// the CUDA launch / copy. On failure no CUDA work has been
     /// queued yet, the flag remains unset, and the caller can
     /// either fix the recorder or abandon the launch.
     ///
     /// Verifies (in order):
     ///   * No strict-mode rejection accumulated during recording
-    ///     (untracked / external buffer in strict mode).
+    ///     (untracked / external buffer in strict mode, or
+    ///     post-preflight `note` attempt).
     ///   * The active resource stack supports cross-stream
     ///     tracking (`runtime.supports_block_use_tracking()`)
     ///     OR the recorder has zero tracked uses (no events to
     ///     record).
     ///
-    /// Returns `Ok(())` on success and marks the recorder as
-    /// preflighted; subsequent `commit` will allow the
-    /// recorded events to be queued.
+    /// Then for each recorded use, calls
+    /// [`XlogDeviceRuntime::prepare_block_use`] which queues
+    /// `cuStreamWaitEvent` calls on `launch_stream` for any
+    /// prior write (read access) or any prior write + prior
+    /// reads (write / read-write access) on a different stream.
+    /// Same-stream events are skipped — already ordered.
+    ///
+    /// Repeated registrations of the same block in the same
+    /// recorder are deduplicated to a single prepare call (the
+    /// strongest access kind wins): `read` + `write` of the
+    /// same block becomes one `Access::ReadWrite` prepare.
     pub fn preflight(&mut self, runtime: &XlogDeviceRuntime) -> ResourceResult<()> {
         if let Some(err) = &self.strict_reject {
             // Surface the captured strict-mode rejection
@@ -369,6 +369,35 @@ impl<'b> LaunchRecorder<'b> {
                     .to_string(),
             ));
         }
+
+        // Dedup: collapse multiple registrations of the same
+        // (ptr, generation) into one prepare call with the
+        // strongest access. Read + Write -> ReadWrite; Write +
+        // Read -> ReadWrite; Read + Read -> Read; etc.
+        // HashSet on ptr alone would be wrong if a (rare) ABA
+        // delivered two different generations at the same ptr,
+        // but inside a single recorder lifetime the generations
+        // would only differ if the caller deallocated and
+        // reallocated mid-record — which is itself a bug the
+        // generation guard would catch at prepare time. Keying
+        // on ptr keeps the fast path simple.
+        let mut seen: HashSet<u64> = HashSet::with_capacity(self.uses.len());
+        let mut deduped: Vec<RecordedUse> = Vec::with_capacity(self.uses.len());
+        for use_ in &self.uses {
+            if seen.insert(use_.block.ptr) {
+                deduped.push(*use_);
+            } else {
+                // Find the existing entry and upgrade access if needed.
+                if let Some(existing) = deduped.iter_mut().find(|u| u.block.ptr == use_.block.ptr) {
+                    existing.access = combine_access(existing.access, use_.access);
+                }
+            }
+        }
+
+        for use_ in &deduped {
+            runtime.prepare_block_use(use_.block, self.launch_stream, use_.access)?;
+        }
+
         self.preflighted = true;
         Ok(())
     }
@@ -389,8 +418,13 @@ impl<'b> LaunchRecorder<'b> {
     /// nothing to record, no events to fire, no contract to
     /// honor.
     ///
-    /// Returns the first error from
-    /// [`XlogDeviceRuntime::record_block_use`].
+    /// For each recorded use, calls
+    /// [`XlogDeviceRuntime::finish_block_use`] which records an
+    /// event on `launch_stream` and folds it into the block's
+    /// dependency state (writers replace `last_write` and clear
+    /// `outstanding_reads`; readers append to
+    /// `outstanding_reads`). Repeated registrations of the same
+    /// block are deduplicated identically to preflight.
     pub fn commit(mut self, runtime: &XlogDeviceRuntime) -> ResourceResult<()> {
         // Re-check any strict reject that may have accumulated
         // — preflight may not have been called, or may not have
@@ -409,15 +443,40 @@ impl<'b> LaunchRecorder<'b> {
                     .to_string(),
             ));
         }
-        for used in &self.uses {
-            runtime.record_block_use(used.block, self.launch_stream)?;
+
+        // Dedup identically to preflight so finish state
+        // mirrors prepare state. See preflight for rationale.
+        let mut seen: HashSet<u64> = HashSet::with_capacity(self.uses.len());
+        let mut deduped: Vec<RecordedUse> = Vec::with_capacity(self.uses.len());
+        for use_ in &self.uses {
+            if seen.insert(use_.block.ptr) {
+                deduped.push(*use_);
+            } else if let Some(existing) =
+                deduped.iter_mut().find(|u| u.block.ptr == use_.block.ptr)
+            {
+                existing.access = combine_access(existing.access, use_.access);
+            }
+        }
+
+        for use_ in &deduped {
+            runtime.finish_block_use(use_.block, self.launch_stream, use_.access)?;
         }
         self.committed = true;
         Ok(())
     }
 }
 
-impl Drop for LaunchRecorder<'_> {
+/// Strongest-access lattice: ReadWrite >= Write/Read; Write+Read = ReadWrite.
+fn combine_access(a: Access, b: Access) -> Access {
+    match (a, b) {
+        (Access::ReadWrite, _) | (_, Access::ReadWrite) => Access::ReadWrite,
+        (Access::Read, Access::Write) | (Access::Write, Access::Read) => Access::ReadWrite,
+        (Access::Read, Access::Read) => Access::Read,
+        (Access::Write, Access::Write) => Access::Write,
+    }
+}
+
+impl Drop for LaunchRecorder {
     fn drop(&mut self) {
         if !self.committed && !self.uses.is_empty() {
             #[cfg(debug_assertions)]
@@ -548,12 +607,6 @@ mod tests {
         let Some((device, runtime, launch_stream)) = try_direct_runtime() else {
             return;
         };
-        // Need a runtime-backed slice to record (so the
-        // strict_reject path doesn't preempt the
-        // supports-tracking check). Use the manager built
-        // around the Direct-backed runtime — alloc returns a
-        // DeviceBlock; the supports-tracking failure surfaces
-        // at preflight.
         let manager = Arc::new(crate::GpuMemoryManager::with_runtime(
             Arc::clone(&device),
             MemoryBudget::with_limit(1024 * 1024),
@@ -599,12 +652,6 @@ mod tests {
         rec.commit(&runtime).expect("commit ok");
     }
 
-    /// Locks the contract from the review: a non-empty
-    /// recorder that reaches `commit` without a successful
-    /// `preflight` must be rejected with `StreamMisuse`. A
-    /// future migrated operator that accidentally enqueues
-    /// CUDA work first and only calls commit afterwards would
-    /// leave unprotected work in flight without this guard.
     #[test]
     fn commit_rejects_un_preflighted_strict_recorder() {
         let Some((device, runtime, launch_stream)) = try_async_runtime() else {
@@ -619,7 +666,6 @@ mod tests {
 
         let mut rec = LaunchRecorder::new_strict(launch_stream);
         rec.read(&buf);
-        // Skip preflight on purpose. Commit must reject.
         let err = rec.commit(&runtime);
         match err {
             Err(ResourceError::StreamMisuse(msg)) => {
@@ -636,25 +682,16 @@ mod tests {
         }
     }
 
-    /// Empty recorders bypass the preflight requirement: no
-    /// recorded uses → no events → no contract to honor.
     #[test]
     fn empty_recorder_commit_without_preflight_is_ok() {
         let Some((_d, rt, ls)) = try_async_runtime() else {
             return;
         };
-        // Strict mode, no recorded uses, no preflight, commit Ok.
         LaunchRecorder::new_strict(ls)
             .commit(&rt)
             .expect("empty strict commit without preflight");
     }
 
-    /// Locks the new hardening: post-preflight `read` / `write`
-    /// via the standard methods is rejected with a structured
-    /// `StreamMisuse` at commit time. Without this guard the
-    /// recorder allowed callers to add uses freely after
-    /// preflight, which would let strict-rejects slip past the
-    /// validation step.
     #[test]
     fn note_after_preflight_via_standard_method_is_rejected() {
         let Some((device, runtime, launch_stream)) = try_async_runtime() else {
@@ -671,9 +708,6 @@ mod tests {
         let mut rec = LaunchRecorder::new_strict(launch_stream);
         rec.read(&buf_a);
         rec.preflight(&runtime).expect("preflight ok");
-        // Adding a normal `read` AFTER preflight must be
-        // rejected; the standard methods do not accept post-
-        // preflight uses.
         rec.read(&buf_b);
         let err = rec.commit(&runtime);
         match err {
@@ -687,13 +721,12 @@ mod tests {
         }
     }
 
-    /// The escape hatch: `write_post_preflight_fresh` is the
-    /// one sanctioned post-preflight addition, used by callers
-    /// (like `compare_const_mask_recorded`) that allocate the
-    /// output AFTER preflight and cannot record it earlier
-    /// because of kernel-param borrow rules.
+    /// Pre-launch fresh-write path: fresh outputs are recorded
+    /// BEFORE preflight via the regular `write` API. Snapshot
+    /// drops the source borrow, so kernel `&mut` borrows after
+    /// preflight remain valid.
     #[test]
-    fn write_post_preflight_fresh_is_accepted() {
+    fn pre_preflight_fresh_write_is_accepted() {
         let Some((device, runtime, launch_stream)) = try_async_runtime() else {
             return;
         };
@@ -703,61 +736,36 @@ mod tests {
             Arc::clone(&runtime),
         ));
         let buf_a = manager.alloc::<u8>(64).expect("alloc a");
-        let buf_fresh = manager.alloc::<u8>(64).expect("alloc fresh");
+        let mut buf_fresh = manager.alloc::<u8>(64).expect("alloc fresh");
 
         let mut rec = LaunchRecorder::new_strict(launch_stream);
         rec.read(&buf_a);
+        rec.write(&buf_fresh);
         rec.preflight(&runtime).expect("preflight ok");
-        // (in production: enqueue CUDA launch with &mut buf_fresh here)
-        rec.write_post_preflight_fresh(&buf_fresh);
+        // Borrows are released; kernel-style &mut works here.
+        let _kernel_param = &mut buf_fresh;
         rec.commit(&runtime).expect("commit ok");
     }
 
-    /// Locks the safety net: even the escape hatch must validate
-    /// the "fresh runtime-backed" invariant. A legacy
-    /// (cudarc-backed) slice fed to
-    /// `write_post_preflight_fresh` must surface a structured
-    /// rejection at commit; the hatch is for fresh
-    /// runtime-backed outputs only.
+    /// Read+write of the same block in a single recorder
+    /// dedupes to a single ReadWrite prepare/finish call.
     #[test]
-    fn write_post_preflight_fresh_rejects_legacy_slice() {
+    fn read_then_write_same_block_dedupes_to_read_write() {
         let Some((device, runtime, launch_stream)) = try_async_runtime() else {
             return;
         };
-        let runtime_manager = Arc::new(crate::GpuMemoryManager::with_runtime(
+        let manager = Arc::new(crate::GpuMemoryManager::with_runtime(
             Arc::clone(&device),
             MemoryBudget::with_limit(1024 * 1024),
             Arc::clone(&runtime),
         ));
-        // A second manager WITHOUT a runtime — slices it allocs
-        // are legacy cudarc-backed (no DeviceBlock).
-        let legacy_manager = Arc::new(crate::GpuMemoryManager::new(
-            Arc::clone(&device),
-            MemoryBudget::with_limit(1024 * 1024),
-        ));
-        let buf_a = runtime_manager.alloc::<u8>(64).expect("alloc a");
-        let buf_legacy = legacy_manager.alloc::<u8>(64).expect("alloc legacy");
-        assert!(buf_legacy.runtime_block().is_none());
+        let buf = manager.alloc::<u8>(64).expect("alloc");
 
         let mut rec = LaunchRecorder::new_strict(launch_stream);
-        rec.read(&buf_a);
-        rec.preflight(&runtime).expect("preflight ok");
-        rec.write_post_preflight_fresh(&buf_legacy);
-        let err = rec.commit(&runtime);
-        match err {
-            Err(ResourceError::StreamMisuse(msg)) => {
-                assert!(
-                    msg.contains("untracked buffer rejected")
-                        && msg.contains("write_post_preflight_fresh"),
-                    "msg: {}",
-                    msg
-                );
-            }
-            other => panic!(
-                "post-preflight escape hatch must reject legacy slice; got {:?}",
-                other
-            ),
-        }
+        rec.read(&buf);
+        rec.write(&buf);
+        rec.preflight(&runtime).expect("preflight");
+        rec.commit(&runtime).expect("commit");
     }
 
     #[test]

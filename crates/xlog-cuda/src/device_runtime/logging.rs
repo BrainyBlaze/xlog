@@ -51,8 +51,8 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::resource::{
-    AllocTag, DeviceBlock, DeviceMemoryResource, Generation, ResourceError, ResourceResult,
-    StreamId,
+    Access, AllocTag, BlockId, DeviceBlock, DeviceMemoryResource, Generation, ResourceError,
+    ResourceResult, StreamId,
 };
 
 /// Action recorded in a [`LogRecord`]. Distinct variants for the
@@ -426,6 +426,27 @@ impl DeviceMemoryResource for LoggingResource {
 
     fn supports_block_use_tracking(&self) -> bool {
         self.inner.supports_block_use_tracking()
+    }
+
+    fn prepare_block_use(
+        &self,
+        block: BlockId,
+        use_stream: StreamId,
+        access: Access,
+    ) -> ResourceResult<()> {
+        // Pass-through: same rationale as record_block_use.
+        // Pre-launch waits are an inner-backend concern.
+        self.inner.prepare_block_use(block, use_stream, access)
+    }
+
+    fn finish_block_use(
+        &self,
+        block: BlockId,
+        use_stream: StreamId,
+        access: Access,
+    ) -> ResourceResult<()> {
+        // Pass-through: see prepare_block_use rationale.
+        self.inner.finish_block_use(block, use_stream, access)
     }
 }
 
