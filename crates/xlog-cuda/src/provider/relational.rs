@@ -6842,6 +6842,8 @@ impl super::CudaKernelProvider {
         rec_mat.read(left.num_rows_device());
         rec_mat.write(&d_output_left);
         rec_mat.write(&d_output_right);
+        // d_overflow is consumed by the materialize kernel — recorder must own it through commit.
+        rec_mat.write(&d_overflow);
         rec_mat.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!("csm inner: materialize preflight failed: {}", e))
         })?;
@@ -7280,6 +7282,8 @@ impl super::CudaKernelProvider {
         rec_mat.read(left.num_rows_device());
         rec_mat.write(&d_output_left);
         rec_mat.write(&d_output_right);
+        // d_overflow is consumed by the materialize kernel — recorder must own it through commit.
+        rec_mat.write(&d_overflow);
         rec_mat.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "csm left_outer: materialize preflight failed: {}",
@@ -8008,6 +8012,8 @@ impl super::CudaKernelProvider {
         rec_mat.read(left.num_rows_device());
         rec_mat.write(&d_output_left);
         rec_mat.write(&d_output_right);
+        // d_overflow is consumed by the materialize kernel — recorder must own it through commit.
+        rec_mat.write(&d_overflow);
         rec_mat.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "indexed CSM inner: materialize preflight failed: {}",
@@ -8480,16 +8486,7 @@ impl super::CudaKernelProvider {
         rec_mat.read(left.num_rows_device());
         rec_mat.write(&d_output_left);
         rec_mat.write(&d_output_right);
-        // Phase B's materialize kernel takes `d_overflow` as
-        // its last kernel-param and writes it on overflow.
-        // `d_overflow` is a local scratch alloc that drops when
-        // this function returns; without recording it on
-        // `rec_mat`, the runtime can free the underlying block
-        // before the materialize kernel finishes on
-        // launch_stream — a potential use-after-free if the
-        // address recycles. Register as a write so preflight
-        // queues the alloc-ready wait and commit extends the
-        // block's lifetime through the kernel.
+        // d_overflow is consumed by the materialize kernel — recorder must own it through commit.
         rec_mat.write(&d_overflow);
         rec_mat.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
