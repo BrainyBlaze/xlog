@@ -2,12 +2,13 @@
 
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
 [![CUDA Tests](https://img.shields.io/badge/CUDA%20tests-206%2F206-brightgreen.svg)](docs/architecture/cuda-certification.md)
-[![Version](https://img.shields.io/badge/version-v0.5.2-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.6.0-blue.svg)](CHANGELOG.md)
 
-> **Release status:** `v0.5.2` - GPU-resident ILP credit/loss path (zero D2H), P2a term embeddings
-> (`register_embedding` / `forward_embedding` with device-aware autograd), P2b extended training
-> controls (gradient clipping, early stopping, lr management), P3 incremental verifier
-> (`GpuCdclWorkspace` arena reuse). See `ROADMAP.md` and `CHANGELOG.md`.
+> **Release status:** `v0.6.0` - Stream-Safe GPU Runtime And Execution Discipline.
+> Access-aware stream dependency manager, lifetime-free `LaunchRecorder`,
+> formal cert harness against runtime-backed recorded paths (206/206), A4
+> fork-isolated cross-stream stress, runtime-stack + recorded-launch
+> migration docs. See `ROADMAP.md` and `CHANGELOG.md`.
 
 **XLOG is a GPU-native logic programming language for unified symbolic reasoning.**
 Neural-symbolic systems today keep symbolic reasoning on the CPU while neural computation runs on
