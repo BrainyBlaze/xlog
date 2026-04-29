@@ -173,7 +173,17 @@ unchanged; the new path is opt-in via
 > `[Unreleased]` between the v0.5.0 tag and the v0.6.0 tag are
 > reflected in the v0.6.0 release entry above.
 
-## [Unreleased] — targeting v0.6.1
+## [0.6.1] — 2026-04-29
+
+CSM Env Dispatch and Certification Mode Labeling. Small,
+focused release on top of v0.6.0: enables count-scan-materialize
+(CSM) hash-join methods for `Inner` / `LeftOuter` (indexed and
+non-indexed) under an env gate, closes a stream-safety gap in
+three earlier CSM siblings, and names the CSM cert mode
+explicitly so reports are unambiguous. No kernel changes, no
+algorithm changes, no eligibility relaxation. Default behaviour
+for legacy callers is unchanged; the new path is opt-in via
+`XLOG_USE_RECORDED_CSM=1` (or umbrella `XLOG_USE_RECORDED_OPS=1`).
 
 ### Added
 
@@ -203,6 +213,15 @@ unchanged; the new path is opt-in via
   Inner CSM. No new kernels; reuses the four already-
   migrated CSM kernels plus `hash_join_csm_unmatched_mask`
   from PR #84.
+- **Cert-mode labeling** (commit `bca1e373`). The
+  `certification_suite` header now prints
+  `Recorded-op dispatch (explicit):` (extended to include
+  `XLOG_USE_RECORDED_CSM`) and a synthesized `Cert mode:`
+  line keyed off the explicit env flags. The three intended
+  values match the v0.6.1 cert gate commands —
+  `legacy/default`, `runtime+recorded`,
+  `runtime+recorded+CSM` — so CSM-mode runs are
+  self-documenting in the cert evidence.
 
 ### Fixed
 
@@ -237,6 +256,30 @@ unchanged; the new path is opt-in via
   default once cert history accumulates a stable run of
   CSM-mode passes; until then the env gate is the
   migration boundary.
+
+### Release Validation (gates green at tag)
+
+- `cargo fmt --check`: clean.
+- `git diff --check`: clean.
+- Legacy cert
+  (`cargo test -p xlog-cuda-tests --test certification_suite --release`):
+  `Cert mode: legacy/default`, 1 outer test passing — 33
+  cert categories internal.
+- Runtime+recorded cert
+  (`XLOG_USE_DEVICE_RUNTIME=1 XLOG_USE_RECORDED_OPS=1 cargo test ...`):
+  `Cert mode: runtime+recorded`, 1 outer test passing —
+  same 33 categories.
+- Runtime+recorded+CSM cert
+  (`XLOG_USE_DEVICE_RUNTIME=1 XLOG_USE_RECORDED_OPS=1 XLOG_USE_RECORDED_CSM=1 cargo test ...`):
+  `Cert mode: runtime+recorded+CSM`, 1 outer test passing —
+  same 33 categories.
+- Umbrella ×20 (`real_world_tests --test-threads=8` under
+  `XLOG_USE_DEVICE_RUNTIME=1 XLOG_USE_RECORDED_OPS=1`):
+  20/20 (recorded across PR #87, #89, #91 prep).
+
+## [Unreleased] — targeting v0.6.2
+
+> Empty: see post-v0.6.1 deferrals listed above.
 
 ## [0.5.2](https://github.com/BrainyBlaze/xlog/compare/xlog-cli-v0.5.0...xlog-cli-v0.5.2) — 2026-04-20
 

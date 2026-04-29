@@ -2,13 +2,16 @@
 
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
 [![CUDA Tests](https://img.shields.io/badge/CUDA%20tests-206%2F206-brightgreen.svg)](docs/architecture/cuda-certification.md)
-[![Version](https://img.shields.io/badge/version-v0.6.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.6.1-blue.svg)](CHANGELOG.md)
 
-> **Release status:** `v0.6.0` - Stream-Safe GPU Runtime And Execution Discipline.
-> Access-aware stream dependency manager, lifetime-free `LaunchRecorder`,
-> formal cert harness against runtime-backed recorded paths (206/206), A4
-> fork-isolated cross-stream stress, runtime-stack + recorded-launch
-> migration docs. See `ROADMAP.md` and `CHANGELOG.md`.
+> **Release status:** `v0.6.1` - CSM Env Dispatch and Certification Mode Labeling.
+> Env-gated count-scan-materialize hash-join dispatch for `Inner` / `LeftOuter`
+> (indexed and non-indexed) under `XLOG_USE_RECORDED_CSM` /
+> `XLOG_USE_RECORDED_OPS`, `d_overflow` recorder safety fix across the three
+> earlier CSM siblings, and explicit `Cert mode:` labelling in the cert harness
+> (`legacy/default` / `runtime+recorded` / `runtime+recorded+CSM`). Builds on
+> v0.6.0 stream-safe runtime; no kernel or algorithm changes. See `ROADMAP.md`
+> and `CHANGELOG.md`.
 
 **XLOG is a GPU-native logic programming language for unified symbolic reasoning.**
 Neural-symbolic systems today keep symbolic reasoning on the CPU while neural computation runs on

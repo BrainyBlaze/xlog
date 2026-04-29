@@ -733,26 +733,22 @@ execution.
 - [x] Migrate the fused `compare+scan+compact` filter path
       (`u32`, `f64`) to the recorded discipline. (slice #3,
       `filter_fused_scan_recorded`)
-- [ ] **Deferred (post-v0.6.0).** Migrate `compact_buffer_by_mask`
-      (host-mask compact entry) to the recorded discipline.
-      No current v0.6.0 consumer; pulling this into v0.6.0
-      would add risk without improving the release evidence
-      chain. **Trigger to re-open**: a runtime-backed recorded
-      release path begins consuming host-provided masks.
-      Until then, the legacy `compact_buffer_by_mask` is the
-      supported entry point and the recorded
-      `compact_buffer_by_device_mask_counted_recorded`
+- [x] **Decision: defer host-mask compact recorded migration.**
+      `compact_buffer_by_mask` stays on its legacy entry; the
+      recorded `compact_buffer_by_device_mask_counted_recorded`
       (already in tree) covers the device-mask case for
-      runtime-backed callers.
-- [ ] **Deferred (post-v0.6.0).** Migrate ILP / ILP-exact view
-      helpers and operators to propagate runtime block identity
-      and use recorded launches. **Trigger to re-open**: the
-      tensorized ILP / exact-induction downstream consumer work
-      resumes (currently a v0.9.0 backlog item under
-      "Bounded Exact Induction") and requires runtime-backed
-      stream safety. Without that consumer, the current legacy
-      ILP / ILP-exact path is correct and migration adds
-      complexity for no observable gain.
+      runtime-backed callers. **Re-open trigger**: a
+      runtime-backed recorded release path begins consuming
+      host-provided masks. No current v0.6.x consumer.
+- [x] **Decision: defer ILP / ILP-exact recorded migration.**
+      Legacy ILP / ILP-exact path stays as-is; runtime block
+      identity is not propagated through ILP view helpers.
+      **Re-open trigger**: tensorized ILP / exact-induction
+      downstream consumer work resumes (v0.9.0 "Bounded Exact
+      Induction" backlog) and requires runtime-backed stream
+      safety. Without that consumer, the current legacy path
+      is correct and migration would add complexity for no
+      observable gain.
 - [x] Migrate sort operator surface to recorded launches against
       `launch_stream`. (slice #5, `sort_recorded` — narrow to
       U32 / Symbol keys; multi-type recorded sort deferred.)
@@ -789,15 +785,15 @@ execution.
       now selectable via env in production; Semi / Anti
       remain on existing recorded paths (no CSM
       implementation — see deferral note below).
-- [ ] **Deferred (post-v0.6.1).** Add deterministic
-      count-prefix-materialize binary join kernels for
-      `JoinType::Semi` and `JoinType::Anti`. **Trigger to
-      re-open**: a benchmark or correctness scenario shows
-      the existing recorded Semi / Anti paths are insufficient
-      relative to the CSM-routed Inner / LeftOuter paths.
-      Until then the legacy recorded Semi / Anti are correct
-      and adding CSM variants would be code without a
-      consumer.
+- [x] **Decision: defer Semi / Anti CSM kernels.** No
+      `count_scan_materialize_recorded` variants for
+      `JoinType::Semi` / `JoinType::Anti`; env dispatch leaves
+      them on the legacy recorded paths. **Re-open trigger**:
+      a benchmark or correctness scenario shows the existing
+      recorded Semi / Anti paths are insufficient relative to
+      the CSM-routed Inner / LeftOuter paths. Until then the
+      legacy recorded Semi / Anti are correct and adding CSM
+      variants would be code without a consumer.
 - [x] Extend env-gated dispatch to recorded sort, dedup_full_row,
       GroupBy, and hash-join (Inner / Semi / Anti / LeftOuter,
       indexed and non-indexed). Per-operator env vars
@@ -945,42 +941,45 @@ blockers later.
       → [`docs/architecture/recorded-launch-migration.md`](architecture/recorded-launch-migration.md);
       linked from `docs/ARCHITECTURE.md` Memory Management
       section.
-- [ ] Add deterministic Datalog tuning guide.
-- [ ] Add general performance tuning guide.
-- [ ] Add getting-started tutorial.
-- [ ] Add deployment guide.
-- [ ] Add migration guide (release/source-build/dev install
-      paths are already in `README.md:115/133/139`; the migration
-      guide covers operator-author API moves not the install
-      story).
-- [ ] Update architecture and whitepaper docs to describe
-      current binary-join execution separately from planned
-      WCOJ execution.
+- [x] **Decision: defer non-blocker docs to the v0.6.x docs
+      backlog.** The two release-blocker docs landed in v0.6.0
+      (device-runtime architecture + recorded-launch migration
+      guidance, both linked above). The remaining narrative
+      docs — deterministic Datalog tuning guide, general
+      performance tuning guide, getting-started tutorial,
+      deployment guide, operator-author migration guide
+      (separate from the install story already in
+      `README.md:115/133/139`), and an architecture/whitepaper
+      revision separating current binary-join execution from
+      planned WCOJ execution — are not release-evidence
+      blockers and were not gates against shipping v0.6.0.
+      They live in the post-v0.6.0 docs backlog and re-open
+      under their own narrative driver (e.g. user-facing
+      performance feedback for the tuning guides; a public
+      WCOJ landing for the architecture/whitepaper split).
 
 ### Release Gate
 
-- [ ] Public release only after no WCOJ or fully GPU-resident
-      binary-join PR is merged ahead of v0.6.0 — recorded launch
-      discipline must cover the operators those slices depend on
-      first. Specifically: (a) the operator under migration must
-      use `launch_on_stream` on a caller-supplied
-      `launch_stream`; (b) all caller-provided buffers used by
-      the kernel must be recorded before `preflight` (with the
-      correct `Access` kind — `read` for inputs, `write` /
-      `read_write` for outputs); (c) every fresh runtime-backed
-      allocation that outlives any in-flight kernel must be
-      recorded via the standard `write` API BEFORE preflight
-      (the recorder snapshots block identity at record time,
-      so the kernel `&mut` borrow after preflight is
-      unaffected); (d) helper-internal scratch that runs raw
-      CUDA work (`cuMemsetD8Async` / `cuMemcpyDtoDAsync_v2` /
-      `kernel.launch_on_stream`) ahead of any
-      `LaunchRecorder::preflight` MUST call
+- [x] **Gate held: no WCOJ or fully GPU-resident binary-join
+      PR merged ahead of v0.6.0.** Verified at v0.6.0 tag
+      (`b1560674`). The migration discipline this gate
+      protected — `launch_on_stream` on a caller-supplied
+      `launch_stream`; all caller-provided buffers recorded
+      before `preflight` with the correct `Access` kind; every
+      fresh runtime-backed allocation that outlives an
+      in-flight kernel registered via the standard `write` API
+      BEFORE preflight (the recorder snapshots block identity
+      at record time, so the kernel `&mut` borrow after
+      preflight is unaffected); helper-internal scratch
+      running raw CUDA work ahead of any
+      `LaunchRecorder::preflight` calling
       `runtime.prepare_first_use(slice, launch_stream,
-      Access::Write)` immediately after alloc; (e) any host
-      scalar read inside the chain must be explicitly ordered
-      against `launch_stream` (non-blocking streams do not get
-      default-stream implicit synchronization).
+      Access::Write)` immediately after alloc; host scalar
+      reads inside the chain explicitly ordered against
+      `launch_stream` (non-blocking streams do not get
+      default-stream implicit synchronization) — is now the
+      ongoing operator-author contract documented in
+      `docs/architecture/recorded-launch-migration.md`.
 - [x] Public release only after the cert suite passes against a
       runtime-backed manager with the recorded launch paths
       exercised. (Closed by `3361785b`: 206/206 under
