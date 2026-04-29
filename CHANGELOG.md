@@ -173,9 +173,70 @@ unchanged; the new path is opt-in via
 > `[Unreleased]` between the v0.5.0 tag and the v0.6.0 tag are
 > reflected in the v0.6.0 release entry above.
 
-## [Unreleased] — targeting v0.6.0
+## [Unreleased] — targeting v0.6.1
 
-> Empty: v0.6.0 has been released, see entry above.
+### Added
+
+- **Recorded CSM (count-scan-materialize) hash-join env
+  dispatch** (PR #91). The recorded hash-join dispatcher
+  routes `JoinType::Inner` and `JoinType::LeftOuter` through
+  CSM (count → exclusive scan → materialize) for both the
+  non-indexed and indexed entry points when
+  `XLOG_USE_RECORDED_CSM=1` (or umbrella
+  `XLOG_USE_RECORDED_OPS=1`) is set. `Semi` / `Anti` always
+  route through the existing legacy recorded methods — no
+  CSM implementation exists for them. Eligibility checks
+  preserved exactly: runtime-backed manager, ≤4 keys
+  (`pack_keys` constraint), key-type match, row-count caps,
+  indexed-path key-byte and shape checks. New env-dispatch
+  routing test suite
+  (`crates/xlog-cuda/tests/test_csm_env_dispatch.rs`)
+  proves selection across the Inner / LeftOuter × indexed /
+  non-indexed × env-on / env-off matrix plus Semi / Anti
+  and the >4-keys upstream short-circuit.
+- **Indexed LeftOuter CSM operator** (PR #87,
+  `hash_join_left_outer_v2_with_index_count_scan_materialize_recorded`).
+  Probe-only pack on `launch_stream` plus a cached
+  `JoinIndexV2` for the build side, sharing the
+  count → scan → materialize phase shape with the
+  non-indexed LeftOuter CSM (PR #84) and the indexed
+  Inner CSM. No new kernels; reuses the four already-
+  migrated CSM kernels plus `hash_join_csm_unmatched_mask`
+  from PR #84.
+
+### Fixed
+
+- **`d_overflow` lifetime in three CSM materialize
+  recorders** (PR #89). The Phase B materialize kernel
+  takes `d_overflow` as a kernel param (writes the
+  overflow flag). Three previously-shipped CSM siblings
+  (`hash_join_inner_v2_count_scan_materialize_recorded`,
+  `hash_join_left_outer_v2_count_scan_materialize_recorded`,
+  `hash_join_inner_v2_with_index_count_scan_materialize_recorded`)
+  did not register `d_overflow` on their materialize-phase
+  `LaunchRecorder`, so the runtime was free to release the
+  block once `rec_count.commit` resolved — a potential
+  use-after-free if pool reuse beat kernel completion. Each
+  site now registers
+  `rec_mat.write(&d_overflow);` before `rec_mat.preflight`,
+  matching the indexed-LeftOuter CSM site (PR #87) so all
+  four CSM materialize recorders are identical.
+
+### Deferred to post-v0.6.1
+
+- **Semi / Anti CSM**. No `count_scan_materialize_recorded`
+  variants exist for `JoinType::Semi` / `JoinType::Anti`;
+  the env dispatch leaves them on the legacy recorded
+  paths. **Trigger to re-open**: a benchmark or
+  correctness scenario forces it. The legacy paths are
+  correct today and adding CSM variants would be code
+  without a consumer.
+- **CSM default-on**. CSM remains opt-in via
+  `XLOG_USE_RECORDED_CSM` / umbrella
+  `XLOG_USE_RECORDED_OPS`. Re-evaluate flipping the
+  default once cert history accumulates a stable run of
+  CSM-mode passes; until then the env gate is the
+  migration boundary.
 
 ## [0.5.2](https://github.com/BrainyBlaze/xlog/compare/xlog-cli-v0.5.0...xlog-cli-v0.5.2) — 2026-04-20
 

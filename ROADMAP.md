@@ -777,17 +777,27 @@ execution.
       runtime / provider opt-in selector so real callers can route
       filter operations through the recorded path. (slice #2,
       `XLOG_USE_RECORDED_FILTERS` env gate.)
-- [ ] Make binary hash-join materialization deterministic
+- [x] Make binary hash-join materialization deterministic
       through count, prefix-scan, and materialize phases.
-      (Sub-slices 1+2 — Inner CSM + indexed Inner CSM — landed
-      at `510dc33a` and `8cc0882c`. Sub-slice 3 — non-indexed
-      LeftOuter CSM — captured at `.recovery/sub-slice-3-edits.md`,
-      ready to apply on a fresh branch off post-stream-safety
-      main. Sub-slice 4+ for indexed LeftOuter / dispatch wiring
-      remain.)
-- [ ] Add deterministic count-prefix-materialize binary join
-      kernels for the variants not yet covered by the CSM
-      slices above.
+      Inner CSM (`510dc33a`), indexed Inner CSM (`8cc0882c`),
+      non-indexed LeftOuter CSM (PR #84), indexed LeftOuter
+      CSM (PR #87), `d_overflow`-recorder safety fix across
+      the three earlier CSM siblings (PR #89), and env-gated
+      dispatch through `XLOG_USE_RECORDED_CSM` / umbrella
+      `XLOG_USE_RECORDED_OPS` for Inner / LeftOuter (indexed
+      and non-indexed) (PR #91). Inner / LeftOuter CSM are
+      now selectable via env in production; Semi / Anti
+      remain on existing recorded paths (no CSM
+      implementation — see deferral note below).
+- [ ] **Deferred (post-v0.6.1).** Add deterministic
+      count-prefix-materialize binary join kernels for
+      `JoinType::Semi` and `JoinType::Anti`. **Trigger to
+      re-open**: a benchmark or correctness scenario shows
+      the existing recorded Semi / Anti paths are insufficient
+      relative to the CSM-routed Inner / LeftOuter paths.
+      Until then the legacy recorded Semi / Anti are correct
+      and adding CSM variants would be code without a
+      consumer.
 - [x] Extend env-gated dispatch to recorded sort, dedup_full_row,
       GroupBy, and hash-join (Inner / Semi / Anti / LeftOuter,
       indexed and non-indexed). Per-operator env vars
