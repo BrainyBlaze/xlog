@@ -839,13 +839,26 @@ execution.
       stress under parallel forks, fixed and random schedules)
       — formal multi-fork harness still pending; the MT
       sort+hash-join regression covers a tight subset.
-- [ ] Public certification of the recorded launch discipline
-      against the cert suite (`cargo test -p xlog-cuda-tests
-      --test certification_suite --release`) on a runtime-backed
-      manager. Workspace `--tests --exclude pyxlog --release
-      --test-threads=1` is clean (141 result lines on
-      `77fd4948`); the dedicated cert suite still needs to be
-      run against the runtime-backed dispatch path explicitly.
+- [x] Public certification of the recorded launch discipline
+      against the cert suite. (Commit `3361785b`.)
+      `XLOG_USE_DEVICE_RUNTIME=1 XLOG_USE_RECORDED_OPS=1 cargo
+      test -p xlog-cuda-tests --test certification_suite
+      --release` passes **206/206** in 16s; the legacy default
+      (`cargo test -p xlog-cuda-tests --test certification_suite
+      --release`) still passes 206/206 in 21s. The cert
+      `TestContext` now builds the production decorator stack
+      (`AsyncCudaResource → LoggingResource → GlobalDeviceBudget
+      → XlogDeviceRuntime`) when `XLOG_USE_DEVICE_RUNTIME=1` is
+      set and uses `GpuMemoryManager::with_runtime` +
+      `CudaKernelProvider::with_runtime`; the env-gated
+      dispatchers in `provider::sort` / `filter_by_mask` /
+      `hash_join_v2` / etc. then route through the recorded path
+      when `XLOG_USE_RECORDED_*` is set. The harness reaps
+      pending async frees between categories, and
+      `GlobalDeviceBudget::allocate` now retries once after a
+      reap on transient over-budget conditions so tight
+      allocate-then-drop loops do not exhaust the reservation
+      pool while real GPU memory is free.
 
 ### Known Non-Blocking Residuals
 
@@ -914,12 +927,10 @@ blockers later.
 Distilled from the items above. Every other v0.6.0 box is
 either checked or scoped as deferred / non-blocking residual.
 
-1. **Formal cert harness for the recorded launch discipline.**
-   Run `cargo test -p xlog-cuda-tests --test
-   certification_suite --release` against a runtime-backed
-   manager with `XLOG_USE_RECORDED_OPS=1`; the existing 50/50
-   umbrella covers the integration tests but the dedicated
-   cert suite is still pending.
+1. ~~Formal cert harness for the recorded launch discipline.~~
+   **DONE — commit `3361785b`.** `XLOG_USE_DEVICE_RUNTIME=1
+   XLOG_USE_RECORDED_OPS=1 cargo test -p xlog-cuda-tests --test
+   certification_suite --release` passes 206/206.
 2. **A3 / A4 multi-fork stress harness** beyond the focused
    MT sort+hash-join regression already merged.
 3. **Operator-author migration docs + runtime-stack docs.**
