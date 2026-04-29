@@ -11,7 +11,7 @@ use super::{
     PackedKeyData, RadixSortScratch, DEDUP_MODULE, DEFAULT_JOIN_MAX_OUTPUT, FILTER_MODULE,
     ILP_MODULE, JOIN_MODULE, PACK_MODULE, SCAN_MODULE, SET_OPS_MODULE, SORT_MODULE,
 };
-use crate::device_runtime::StreamId;
+use crate::device_runtime::{Access, BlockId, StreamId};
 use crate::launch::LaunchRecorder;
 use crate::memory::{CudaColumn, TrackedCudaSlice};
 use crate::CudaBuffer;
@@ -5295,7 +5295,7 @@ impl super::CudaKernelProvider {
     /// and the input row-count buffer are recorded as reads
     /// before preflight; every fresh runtime-backed allocation
     /// (scratch + output columns + output `d_num_rows`) is
-    /// recorded via `write_post_preflight_fresh` AFTER kernels
+    /// recorded via `write` BEFORE preflight (snapshot drops the borrow so kernel `&mut` borrows after preflight remain valid)
     /// enqueue.
     ///
     /// # Errors
@@ -5407,6 +5407,20 @@ impl super::CudaKernelProvider {
                 .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
             rec.read_column(c);
         }
+        // Pre-launch fresh writes: the recorder snapshots block
+        // identity at record time and drops the slice borrow,
+        // so kernel `&mut` borrows after preflight are unaffected.
+        rec.write(&indices_a);
+        rec.write(&indices_b);
+        rec.write(&keys_a);
+        rec.write(&keys_b);
+        rec.write(&d_hist);
+        rec.write(&d_prefix);
+        rec.write(&d_ranks);
+        rec.write(&output_d_num_rows);
+        for dst_col in &dst_cols {
+            rec.write(dst_col);
+        }
         rec.preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("sort_recorded: preflight failed: {}", e)))?;
 
@@ -5492,19 +5506,6 @@ impl super::CudaKernelProvider {
                     res
                 )));
             }
-        }
-
-        // Step 5: record post-preflight fresh writes.
-        rec.write_post_preflight_fresh(&indices_a);
-        rec.write_post_preflight_fresh(&indices_b);
-        rec.write_post_preflight_fresh(&keys_a);
-        rec.write_post_preflight_fresh(&keys_b);
-        rec.write_post_preflight_fresh(&d_hist);
-        rec.write_post_preflight_fresh(&d_prefix);
-        rec.write_post_preflight_fresh(&d_ranks);
-        rec.write_post_preflight_fresh(&output_d_num_rows);
-        for dst_col in &dst_cols {
-            rec.write_post_preflight_fresh(dst_col);
         }
 
         rec.commit(runtime)
@@ -5629,6 +5630,9 @@ impl super::CudaKernelProvider {
             rec.read_column(c);
         }
         rec.read(sorted.num_rows_device());
+        rec.write(&d_col_ptrs);
+        rec.write(&d_col_sizes);
+        rec.write(&d_unique_mask);
         rec.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "dedup_full_row_recorded: mark_unique preflight failed: {}",
@@ -5671,9 +5675,6 @@ impl super::CudaKernelProvider {
             ))
         })?;
 
-        rec.write_post_preflight_fresh(&d_col_ptrs);
-        rec.write_post_preflight_fresh(&d_col_sizes);
-        rec.write_post_preflight_fresh(&d_unique_mask);
         rec.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "dedup_full_row_recorded: mark_unique commit failed: {}",
@@ -5711,11 +5712,14 @@ impl super::CudaKernelProvider {
     /// Stream-aware variant of `build_hash_table_v2`. Mirrors
     /// the legacy bucket-count → exclusive-scan → scatter chain
     /// on the caller-supplied `launch_stream` (no internal
-    /// `device.synchronize()`). Records every fresh runtime
-    /// allocation that escapes (the four returned bucket
-    /// buffers) AND the internal `bucket_cursors` scratch
-    /// directly via `runtime.record_block_use` so end-of-scope
-    /// drops are correctly serialized.
+    /// `device.synchronize()`). Each fresh scratch allocation is
+    /// fenced via `prepare_first_use(Access::Write)` immediately
+    /// after alloc so the first cross-stream consumer (memset /
+    /// dtod-copy / kernel) waits for cuMemAllocAsync to complete;
+    /// at exit, every block that escapes (the four returned
+    /// bucket buffers) plus the internal `bucket_cursors` scratch
+    /// is finalized with `finish_block_use(Access::Write)` so
+    /// end-of-scope drops are correctly serialized.
     fn build_hash_table_v2_on_stream(
         &self,
         hashes: &TrackedCudaSlice<u64>,
@@ -5739,6 +5743,20 @@ impl super::CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("Join hash table size underflow".to_string()))?;
 
         let bucket_counts = self.memory.alloc::<u32>(num_buckets as usize)?;
+        // Fence the alloc-ready event from `bucket_counts`'s
+        // alloc_stream onto `launch_stream` BEFORE the memset
+        // below — the memset would otherwise execute against a
+        // stream that has not waited on cuMemAllocAsync's
+        // completion event, producing garbage / pool-recycled
+        // bytes when the alloc and use streams differ.
+        runtime
+            .prepare_first_use(&bucket_counts, launch_stream, Access::Write)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "build_hash_table_v2_on_stream: prepare bucket_counts failed: {}",
+                    e
+                ))
+            })?;
         // Async u32 zero-fill on launch_stream.
         if num_buckets > 0 {
             // SAFETY: bucket_counts is runtime-backed for
@@ -5789,6 +5807,16 @@ impl super::CudaKernelProvider {
         })?;
 
         let mut bucket_offsets = self.memory.alloc::<u32>(num_buckets as usize)?;
+        // See `bucket_counts` rationale above: fence
+        // alloc-ready → launch_stream before the dtod-copy.
+        runtime
+            .prepare_first_use(&bucket_offsets, launch_stream, Access::Write)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "build_hash_table_v2_on_stream: prepare bucket_offsets failed: {}",
+                    e
+                ))
+            })?;
         if num_buckets > 0 {
             // dtod copy bucket_counts → bucket_offsets on launch_stream.
             // SAFETY: both buffers are runtime-backed for the
@@ -5817,6 +5845,16 @@ impl super::CudaKernelProvider {
         }
 
         let bucket_cursors = self.memory.alloc::<u32>(num_buckets as usize)?;
+        // Fence alloc-ready → launch_stream for cursors before
+        // the dtod-copy.
+        runtime
+            .prepare_first_use(&bucket_cursors, launch_stream, Access::Write)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "build_hash_table_v2_on_stream: prepare bucket_cursors failed: {}",
+                    e
+                ))
+            })?;
         if num_buckets > 0 {
             // dtod copy bucket_offsets → bucket_cursors on launch_stream.
             // SAFETY: same shape and size constraints as above.
@@ -5838,6 +5876,24 @@ impl super::CudaKernelProvider {
 
         let bucket_entries = self.memory.alloc::<u32>(num_rows as usize)?;
         let bucket_entry_hashes = self.memory.alloc::<u64>(num_rows as usize)?;
+        // Fence alloc-ready → launch_stream for both before the
+        // scatter kernel writes them.
+        runtime
+            .prepare_first_use(&bucket_entries, launch_stream, Access::Write)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "build_hash_table_v2_on_stream: prepare bucket_entries failed: {}",
+                    e
+                ))
+            })?;
+        runtime
+            .prepare_first_use(&bucket_entry_hashes, launch_stream, Access::Write)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "build_hash_table_v2_on_stream: prepare bucket_entry_hashes failed: {}",
+                    e
+                ))
+            })?;
 
         let scatter_fn = device
             .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_SCATTER_V2)
@@ -5878,12 +5934,14 @@ impl super::CudaKernelProvider {
             bucket_entry_hashes.runtime_block(),
         ] {
             if let Some(b) = blk {
-                runtime.record_block_use(b, launch_stream).map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "build_hash_table_v2_on_stream: record_block_use failed: {}",
-                        e
-                    ))
-                })?;
+                runtime
+                    .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "build_hash_table_v2_on_stream: finish_block_use failed: {}",
+                            e
+                        ))
+                    })?;
             } else {
                 return Err(XlogError::Kernel(
                     "build_hash_table_v2_on_stream: buffer has no runtime block — \
@@ -5930,6 +5988,28 @@ impl super::CudaKernelProvider {
         }
 
         let d_output_rows = self.upload_device_row_count(output_rows)?;
+        // `upload_device_row_count` initializes this scalar on
+        // the manager/default stream. Publish that write into
+        // the runtime dependency state, then fence launch_stream
+        // before the gather kernels read it. The scalar is local
+        // scratch, so we also finish a read after the kernels so
+        // its drop/free waits for launch_stream completion.
+        runtime
+            .finish_first_use(&d_output_rows, StreamId::DEFAULT, Access::Write)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "gather_buffer_by_indices_on_stream: record d_output_rows upload failed: {}",
+                    e
+                ))
+            })?;
+        runtime
+            .prepare_first_use(&d_output_rows, launch_stream, Access::Read)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "gather_buffer_by_indices_on_stream: prepare d_output_rows failed: {}",
+                    e
+                ))
+            })?;
         let device = self.device.inner();
         let block_size = 256u32;
         let grid_size = (output_rows + block_size - 1) / block_size;
@@ -5955,7 +6035,18 @@ impl super::CudaKernelProvider {
                 })?
                 .size_bytes() as u32;
             let dst_bytes = (output_rows as usize) * (elem_size as usize);
-            dst_cols.push(self.memory.alloc::<u8>(dst_bytes)?);
+            let dst = self.memory.alloc::<u8>(dst_bytes)?;
+            // Fence alloc-ready → launch_stream for each fresh
+            // dst_col before the gather kernel writes it.
+            runtime
+                .prepare_first_use(&dst, launch_stream, Access::Write)
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "gather_buffer_by_indices_on_stream: prepare dst_col {} failed: {}",
+                        col_idx, e
+                    ))
+                })?;
+            dst_cols.push(dst);
         }
 
         for (col_idx, dst_col) in dst_cols.iter_mut().enumerate() {
@@ -5987,19 +6078,30 @@ impl super::CudaKernelProvider {
             })?;
         }
 
+        runtime
+            .finish_first_use(&d_output_rows, launch_stream, Access::Read)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "gather_buffer_by_indices_on_stream: record d_output_rows read failed: {}",
+                    e
+                ))
+            })?;
+
         // Record uses on launch_stream for buffers we wrote
         // (the dst_cols escape via the returned CudaBuffer).
         // input.column[i] reads will be recorded by the
         // caller's outer LaunchRecorder.
         for dst_col in &dst_cols {
             if let Some(b) = dst_col.runtime_block() {
-                runtime.record_block_use(b, launch_stream).map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "gather_buffer_by_indices_on_stream: record_block_use \
+                runtime
+                    .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "gather_buffer_by_indices_on_stream: finish_block_use \
                          (dst_col) failed: {}",
-                        e
-                    ))
-                })?;
+                            e
+                        ))
+                    })?;
             } else {
                 return Err(XlogError::Kernel(
                     "gather_buffer_by_indices_on_stream: dst_col has no runtime block".to_string(),
@@ -6122,26 +6224,12 @@ impl super::CudaKernelProvider {
         };
 
         // Step 4: count-only pass. Allocate count + dummy
-        // output buffers up front; zero-init via async memset
-        // on launch_stream.
+        // output buffers up front. The recorder's preflight will
+        // queue the alloc-ready waits before either the memset
+        // OR the kernel runs on launch_stream.
         let d_count_only = self.memory.alloc::<u32>(1)?;
         let d_dummy_left = self.memory.alloc::<u32>(1)?;
         let d_dummy_right = self.memory.alloc::<u32>(1)?;
-        // SAFETY: d_count_only is runtime-backed for 4 bytes.
-        unsafe {
-            let res = cudarc::driver::sys::cuMemsetD8Async(
-                *d_count_only.device_ptr(),
-                0,
-                std::mem::size_of::<u32>(),
-                cu_stream.cu_stream(),
-            );
-            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "cuMemsetD8Async (d_count_only) failed: {:?}",
-                    res
-                )));
-            }
-        }
 
         // Build the recorder for the probe / output stage.
         // Reads BEFORE preflight: hashes + packed_keys (already
@@ -6157,12 +6245,35 @@ impl super::CudaKernelProvider {
         rec_count.read(&table.bucket_counts);
         rec_count.read(&table.bucket_entries);
         rec_count.read(&table.bucket_entry_hashes);
+        rec_count.write(&d_count_only);
+        rec_count.write(&d_dummy_left);
+        rec_count.write(&d_dummy_right);
         rec_count.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "hash_join_inner_v2_recorded: count-pass preflight failed: {}",
                 e
             ))
         })?;
+
+        // Zero-init d_count_only via async memset on
+        // launch_stream — runs AFTER preflight has queued the
+        // alloc-ready waits, so the memset is correctly fenced
+        // behind cuMemAllocAsync's completion.
+        // SAFETY: d_count_only is runtime-backed for 4 bytes.
+        unsafe {
+            let res = cudarc::driver::sys::cuMemsetD8Async(
+                *d_count_only.device_ptr(),
+                0,
+                std::mem::size_of::<u32>(),
+                cu_stream.cu_stream(),
+            );
+            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "cuMemsetD8Async (d_count_only) failed: {:?}",
+                    res
+                )));
+            }
+        }
 
         // SAFETY: hash_join_probe_v2 14-arg signature — see
         // legacy hash_join_inner_v2 for the canonical
@@ -6196,9 +6307,6 @@ impl super::CudaKernelProvider {
                 })?;
         }
 
-        rec_count.write_post_preflight_fresh(&d_count_only);
-        rec_count.write_post_preflight_fresh(&d_dummy_left);
-        rec_count.write_post_preflight_fresh(&d_dummy_right);
         rec_count.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "hash_join_inner_v2_recorded: count-pass commit failed: {}",
@@ -6230,10 +6338,32 @@ impl super::CudaKernelProvider {
         let max_output_u32 = requested as u32;
 
         // Step 5: materialize pass. Allocate output index
-        // buffers + count; zero-init count async on stream.
+        // buffers + count. Memset runs AFTER preflight has
+        // queued the alloc-ready waits.
         let d_output_left = self.memory.alloc::<u32>(max_output_u32 as usize)?;
         let d_output_right = self.memory.alloc::<u32>(max_output_u32 as usize)?;
         let d_output_count = self.memory.alloc::<u32>(1)?;
+
+        let mut rec_mat = LaunchRecorder::new_strict(launch_stream);
+        rec_mat.read(&left_packed.hashes);
+        rec_mat.read(&left_packed.packed_keys);
+        rec_mat.read(&right_packed.packed_keys);
+        rec_mat.read(&table.bucket_offsets);
+        rec_mat.read(&table.bucket_counts);
+        rec_mat.read(&table.bucket_entries);
+        rec_mat.read(&table.bucket_entry_hashes);
+        rec_mat.write(&d_output_left);
+        rec_mat.write(&d_output_right);
+        rec_mat.write(&d_output_count);
+        rec_mat.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "hash_join_inner_v2_recorded: materialize-pass preflight failed: {}",
+                e
+            ))
+        })?;
+
+        // Zero-init d_output_count via async memset on
+        // launch_stream — fenced behind alloc-ready waits.
         // SAFETY: runtime-backed 4-byte buffer.
         unsafe {
             let res = cudarc::driver::sys::cuMemsetD8Async(
@@ -6249,21 +6379,6 @@ impl super::CudaKernelProvider {
                 )));
             }
         }
-
-        let mut rec_mat = LaunchRecorder::new_strict(launch_stream);
-        rec_mat.read(&left_packed.hashes);
-        rec_mat.read(&left_packed.packed_keys);
-        rec_mat.read(&right_packed.packed_keys);
-        rec_mat.read(&table.bucket_offsets);
-        rec_mat.read(&table.bucket_counts);
-        rec_mat.read(&table.bucket_entries);
-        rec_mat.read(&table.bucket_entry_hashes);
-        rec_mat.preflight(runtime).map_err(|e| {
-            XlogError::Kernel(format!(
-                "hash_join_inner_v2_recorded: materialize-pass preflight failed: {}",
-                e
-            ))
-        })?;
 
         // SAFETY: same 14-arg probe signature.
         unsafe {
@@ -6294,9 +6409,6 @@ impl super::CudaKernelProvider {
                 })?;
         }
 
-        rec_mat.write_post_preflight_fresh(&d_output_left);
-        rec_mat.write_post_preflight_fresh(&d_output_right);
-        rec_mat.write_post_preflight_fresh(&d_output_count);
         rec_mat.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "hash_join_inner_v2_recorded: materialize-pass commit failed: {}",
@@ -6509,6 +6621,29 @@ impl super::CudaKernelProvider {
         let mut per_probe_offsets = self.memory.alloc::<u32>(probe_cap as usize)?;
         let d_logical_count = self.memory.alloc::<u32>(1)?;
         let d_overflow = self.memory.alloc::<u8>(1)?;
+        // Fence alloc-ready → launch_stream for both before
+        // the memset writes them. The recorder below will
+        // attach further dependencies, but the memset runs
+        // ahead of the recorder's preflight so we need this
+        // direct fence.
+        runtime
+            .prepare_first_use(&d_overflow, launch_stream, Access::Write)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "hash_join_inner_v2_count_scan_materialize_recorded: prepare d_overflow \
+                     failed: {}",
+                    e
+                ))
+            })?;
+        runtime
+            .prepare_first_use(&d_logical_count, launch_stream, Access::Write)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "hash_join_inner_v2_count_scan_materialize_recorded: prepare d_logical_count \
+                     failed: {}",
+                    e
+                ))
+            })?;
         // Zero-init overflow + logical_count on launch_stream.
         // SAFETY: 1-byte and 4-byte runtime-backed buffers.
         unsafe {
@@ -6563,6 +6698,10 @@ impl super::CudaKernelProvider {
         rec_count.read(&table.bucket_entries);
         rec_count.read(&table.bucket_entry_hashes);
         rec_count.read(left.num_rows_device());
+        rec_count.write(&per_probe_count);
+        rec_count.write(&per_probe_offsets);
+        rec_count.write(&d_logical_count);
+        rec_count.write(&d_overflow);
         rec_count.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!("csm inner: count/scan preflight failed: {}", e))
         })?;
@@ -6655,10 +6794,6 @@ impl super::CudaKernelProvider {
             ))
         })?;
 
-        rec_count.write_post_preflight_fresh(&per_probe_count);
-        rec_count.write_post_preflight_fresh(&per_probe_offsets);
-        rec_count.write_post_preflight_fresh(&d_logical_count);
-        rec_count.write_post_preflight_fresh(&d_overflow);
         rec_count.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!("csm inner: count/scan commit failed: {}", e))
         })?;
@@ -6705,6 +6840,8 @@ impl super::CudaKernelProvider {
         rec_mat.read(&table.bucket_entry_hashes);
         rec_mat.read(&per_probe_offsets);
         rec_mat.read(left.num_rows_device());
+        rec_mat.write(&d_output_left);
+        rec_mat.write(&d_output_right);
         rec_mat.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!("csm inner: materialize preflight failed: {}", e))
         })?;
@@ -6746,8 +6883,6 @@ impl super::CudaKernelProvider {
                 })?;
         }
 
-        rec_mat.write_post_preflight_fresh(&d_output_left);
-        rec_mat.write_post_preflight_fresh(&d_output_right);
         rec_mat.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!("csm inner: materialize commit failed: {}", e))
         })?;
@@ -6948,6 +7083,23 @@ impl super::CudaKernelProvider {
         let mut per_probe_offsets = self.memory.alloc::<u32>(probe_cap as usize)?;
         let d_logical_count = self.memory.alloc::<u32>(1)?;
         let d_overflow = self.memory.alloc::<u8>(1)?;
+        // Fence alloc-ready → launch_stream for both before memset.
+        runtime
+            .prepare_first_use(&d_overflow, launch_stream, Access::Write)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "indexed CSM inner: prepare d_overflow failed: {}",
+                    e
+                ))
+            })?;
+        runtime
+            .prepare_first_use(&d_logical_count, launch_stream, Access::Write)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "indexed CSM inner: prepare d_logical_count failed: {}",
+                    e
+                ))
+            })?;
         // Zero-init both scalars on launch_stream.
         // SAFETY: 1-byte and 4-byte runtime-backed buffers.
         unsafe {
@@ -7001,6 +7153,10 @@ impl super::CudaKernelProvider {
         rec_count.read(&table.bucket_entries);
         rec_count.read(&table.bucket_entry_hashes);
         rec_count.read(left.num_rows_device());
+        rec_count.write(&per_probe_count);
+        rec_count.write(&per_probe_offsets);
+        rec_count.write(&d_logical_count);
+        rec_count.write(&d_overflow);
         rec_count.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "indexed CSM inner: count/scan preflight failed: {}",
@@ -7092,10 +7248,6 @@ impl super::CudaKernelProvider {
             ))
         })?;
 
-        rec_count.write_post_preflight_fresh(&per_probe_count);
-        rec_count.write_post_preflight_fresh(&per_probe_offsets);
-        rec_count.write_post_preflight_fresh(&d_logical_count);
-        rec_count.write_post_preflight_fresh(&d_overflow);
         rec_count.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "indexed CSM inner: count/scan commit failed: {}",
@@ -7139,6 +7291,8 @@ impl super::CudaKernelProvider {
         rec_mat.read(&table.bucket_entry_hashes);
         rec_mat.read(&per_probe_offsets);
         rec_mat.read(left.num_rows_device());
+        rec_mat.write(&d_output_left);
+        rec_mat.write(&d_output_right);
         rec_mat.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "indexed CSM inner: materialize preflight failed: {}",
@@ -7182,8 +7336,6 @@ impl super::CudaKernelProvider {
                 })?;
         }
 
-        rec_mat.write_post_preflight_fresh(&d_output_left);
-        rec_mat.write_post_preflight_fresh(&d_output_right);
         rec_mat.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "indexed CSM inner: materialize commit failed: {}",
@@ -7424,6 +7576,17 @@ impl super::CudaKernelProvider {
         let d_count_only = self.memory.alloc::<u32>(1)?;
         let d_dummy_left = self.memory.alloc::<u32>(1)?;
         let d_dummy_right = self.memory.alloc::<u32>(1)?;
+        // Fence alloc-ready → launch_stream for d_count_only
+        // before the memset writes it (the memset runs ahead
+        // of the recorder's preflight below).
+        runtime
+            .prepare_first_use(&d_count_only, launch_stream, Access::Write)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "left_outer recorded: prepare d_count_only failed: {}",
+                    e
+                ))
+            })?;
         // SAFETY: runtime-backed 4-byte buffer.
         unsafe {
             let res = cudarc::driver::sys::cuMemsetD8Async(
@@ -7455,6 +7618,10 @@ impl super::CudaKernelProvider {
         rec_a.read(&table.bucket_counts);
         rec_a.read(&table.bucket_entries);
         rec_a.read(&table.bucket_entry_hashes);
+        rec_a.write(&d_has_match);
+        rec_a.write(&d_count_only);
+        rec_a.write(&d_dummy_left);
+        rec_a.write(&d_dummy_right);
         rec_a.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "hash_join_v2_recorded (left_outer): semi/count preflight failed: {}",
@@ -7514,10 +7681,6 @@ impl super::CudaKernelProvider {
                 })?;
         }
 
-        rec_a.write_post_preflight_fresh(&d_has_match);
-        rec_a.write_post_preflight_fresh(&d_count_only);
-        rec_a.write_post_preflight_fresh(&d_dummy_left);
-        rec_a.write_post_preflight_fresh(&d_dummy_right);
         rec_a.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "hash_join_v2_recorded (left_outer): semi/count commit failed: {}",
@@ -7548,6 +7711,16 @@ impl super::CudaKernelProvider {
         let d_output_left = self.memory.alloc::<u32>(alloc_len)?;
         let d_output_right = self.memory.alloc::<u32>(alloc_len)?;
         let d_output_count = self.memory.alloc::<u32>(1)?;
+        // Fence alloc-ready → launch_stream for d_output_count
+        // before the memset (memset runs ahead of preflight).
+        runtime
+            .prepare_first_use(&d_output_count, launch_stream, Access::Write)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "left_outer recorded: prepare d_output_count failed: {}",
+                    e
+                ))
+            })?;
         // SAFETY: runtime-backed 4-byte buffer.
         unsafe {
             let res = cudarc::driver::sys::cuMemsetD8Async(
@@ -7572,6 +7745,9 @@ impl super::CudaKernelProvider {
         rec_b.read(&table.bucket_counts);
         rec_b.read(&table.bucket_entries);
         rec_b.read(&table.bucket_entry_hashes);
+        rec_b.write(&d_output_left);
+        rec_b.write(&d_output_right);
+        rec_b.write(&d_output_count);
         rec_b.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "hash_join_v2_recorded (left_outer): materialize preflight failed: {}",
@@ -7608,9 +7784,6 @@ impl super::CudaKernelProvider {
                 })?;
         }
 
-        rec_b.write_post_preflight_fresh(&d_output_left);
-        rec_b.write_post_preflight_fresh(&d_output_right);
-        rec_b.write_post_preflight_fresh(&d_output_count);
         rec_b.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "hash_join_v2_recorded (left_outer): materialize commit failed: {}",
@@ -7637,6 +7810,7 @@ impl super::CudaKernelProvider {
 
         let mut rec_c = LaunchRecorder::new_strict(launch_stream);
         rec_c.read(&d_has_match);
+        rec_c.write(&d_no_match);
         rec_c.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "hash_join_v2_recorded (left_outer): mask_not preflight failed: {}",
@@ -7652,7 +7826,6 @@ impl super::CudaKernelProvider {
             )
         }
         .map_err(|e| XlogError::Kernel(format!("mask_not (on_stream) failed: {}", e)))?;
-        rec_c.write_post_preflight_fresh(&d_no_match);
         rec_c.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "hash_join_v2_recorded (left_outer): mask_not commit failed: {}",
@@ -7802,6 +7975,16 @@ impl super::CudaKernelProvider {
 
             let out_col = self.memory.alloc::<u8>(total_bytes)?;
             let dst_ptr = *out_col.device_ptr();
+            // Fence alloc-ready → launch_stream for out_col
+            // before the dtod-copies write it.
+            runtime
+                .prepare_first_use(&out_col, launch_stream, Access::Write)
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "left_outer recorded: prepare left out_col {} failed: {}",
+                        col_idx, e
+                    ))
+                })?;
 
             if inner_bytes > 0 {
                 let src_col = inner_left_buf
@@ -7853,13 +8036,15 @@ impl super::CudaKernelProvider {
             // (when result_columns goes out of scope down the
             // line via output buffer drop) defers correctly.
             if let Some(b) = out_col.runtime_block() {
-                runtime.record_block_use(b, launch_stream).map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "hash_join_v2_recorded (left_outer): record_block_use \
+                runtime
+                    .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "hash_join_v2_recorded (left_outer): finish_block_use \
                          (left col {}) failed: {}",
-                        col_idx, e
-                    ))
-                })?;
+                            col_idx, e
+                        ))
+                    })?;
             }
             result_columns.push(out_col.into());
         }
@@ -7887,6 +8072,16 @@ impl super::CudaKernelProvider {
 
             let out_col = self.memory.alloc::<u8>(total_bytes)?;
             let dst_ptr = *out_col.device_ptr();
+            // Fence alloc-ready → launch_stream for out_col
+            // before the memset / dtod-copy write it.
+            runtime
+                .prepare_first_use(&out_col, launch_stream, Access::Write)
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "left_outer recorded: prepare right out_col {} failed: {}",
+                        col_idx, e
+                    ))
+                })?;
 
             // Zero whole column (unmatched portion will stay
             // zero; inner portion will be overwritten by the
@@ -7934,13 +8129,15 @@ impl super::CudaKernelProvider {
             }
 
             if let Some(b) = out_col.runtime_block() {
-                runtime.record_block_use(b, launch_stream).map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "hash_join_v2_recorded (left_outer): record_block_use \
+                runtime
+                    .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "hash_join_v2_recorded (left_outer): finish_block_use \
                          (right col {}) failed: {}",
-                        col_idx, e
-                    ))
-                })?;
+                            col_idx, e
+                        ))
+                    })?;
             }
             result_columns.push(out_col.into());
         }
@@ -8109,6 +8306,7 @@ impl super::CudaKernelProvider {
         rec.read(&table.bucket_counts);
         rec.read(&table.bucket_entries);
         rec.read(&table.bucket_entry_hashes);
+        rec.write(&d_mask);
         rec.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "hash_join_v2_recorded (semi/anti): preflight failed: {}",
@@ -8141,7 +8339,6 @@ impl super::CudaKernelProvider {
         }
         .map_err(|e| XlogError::Kernel(format!("{} (on_stream) failed: {}", kernel_name, e)))?;
 
-        rec.write_post_preflight_fresh(&d_mask);
         rec.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "hash_join_v2_recorded (semi/anti): commit failed: {}",
@@ -8380,6 +8577,13 @@ impl super::CudaKernelProvider {
         let d_count_only = self.memory.alloc::<u32>(1)?;
         let d_dummy_left = self.memory.alloc::<u32>(1)?;
         let d_dummy_right = self.memory.alloc::<u32>(1)?;
+        // Fence alloc-ready → launch_stream for d_count_only
+        // before the memset (memset runs ahead of preflight).
+        runtime
+            .prepare_first_use(&d_count_only, launch_stream, Access::Write)
+            .map_err(|e| {
+                XlogError::Kernel(format!("indexed inner: prepare d_count_only failed: {}", e))
+            })?;
         // SAFETY: 4-byte runtime-backed buffer.
         unsafe {
             let res = cudarc::driver::sys::cuMemsetD8Async(
@@ -8405,6 +8609,9 @@ impl super::CudaKernelProvider {
         rec_count.read(&table.bucket_counts);
         rec_count.read(&table.bucket_entries);
         rec_count.read(&table.bucket_entry_hashes);
+        rec_count.write(&d_count_only);
+        rec_count.write(&d_dummy_left);
+        rec_count.write(&d_dummy_right);
         rec_count.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!("indexed inner: count-pass preflight failed: {}", e))
         })?;
@@ -8436,9 +8643,6 @@ impl super::CudaKernelProvider {
                     ))
                 })?;
         }
-        rec_count.write_post_preflight_fresh(&d_count_only);
-        rec_count.write_post_preflight_fresh(&d_dummy_left);
-        rec_count.write_post_preflight_fresh(&d_dummy_right);
         rec_count.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!("indexed inner: count-pass commit failed: {}", e))
         })?;
@@ -8466,6 +8670,16 @@ impl super::CudaKernelProvider {
         let d_output_left = self.memory.alloc::<u32>(max_output_u32 as usize)?;
         let d_output_right = self.memory.alloc::<u32>(max_output_u32 as usize)?;
         let d_output_count = self.memory.alloc::<u32>(1)?;
+        // Fence alloc-ready → launch_stream for d_output_count
+        // before the memset.
+        runtime
+            .prepare_first_use(&d_output_count, launch_stream, Access::Write)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "indexed inner: prepare d_output_count failed: {}",
+                    e
+                ))
+            })?;
         // SAFETY: 4-byte runtime-backed buffer.
         unsafe {
             let res = cudarc::driver::sys::cuMemsetD8Async(
@@ -8490,6 +8704,9 @@ impl super::CudaKernelProvider {
         rec_mat.read(&table.bucket_counts);
         rec_mat.read(&table.bucket_entries);
         rec_mat.read(&table.bucket_entry_hashes);
+        rec_mat.write(&d_output_left);
+        rec_mat.write(&d_output_right);
+        rec_mat.write(&d_output_count);
         rec_mat.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "indexed inner: materialize preflight failed: {}",
@@ -8524,9 +8741,6 @@ impl super::CudaKernelProvider {
                     ))
                 })?;
         }
-        rec_mat.write_post_preflight_fresh(&d_output_left);
-        rec_mat.write_post_preflight_fresh(&d_output_right);
-        rec_mat.write_post_preflight_fresh(&d_output_count);
         rec_mat.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!("indexed inner: materialize commit failed: {}", e))
         })?;
@@ -8654,6 +8868,7 @@ impl super::CudaKernelProvider {
         rec.read(&table.bucket_counts);
         rec.read(&table.bucket_entries);
         rec.read(&table.bucket_entry_hashes);
+        rec.write(&d_mask);
         rec.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!("indexed semi/anti: preflight failed: {}", e))
         })?;
@@ -8683,7 +8898,6 @@ impl super::CudaKernelProvider {
                 kernel_name, e
             ))
         })?;
-        rec.write_post_preflight_fresh(&d_mask);
         rec.commit(runtime)
             .map_err(|e| XlogError::Kernel(format!("indexed semi/anti: commit failed: {}", e)))?;
 
@@ -8744,6 +8958,16 @@ impl super::CudaKernelProvider {
         let d_count_only = self.memory.alloc::<u32>(1)?;
         let d_dummy_left = self.memory.alloc::<u32>(1)?;
         let d_dummy_right = self.memory.alloc::<u32>(1)?;
+        // Fence alloc-ready → launch_stream for d_count_only
+        // before the memset.
+        runtime
+            .prepare_first_use(&d_count_only, launch_stream, Access::Write)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "indexed left_outer: prepare d_count_only failed: {}",
+                    e
+                ))
+            })?;
         // SAFETY: 4-byte runtime-backed buffer.
         unsafe {
             let res = cudarc::driver::sys::cuMemsetD8Async(
@@ -8775,6 +8999,10 @@ impl super::CudaKernelProvider {
         rec_a.read(&table.bucket_counts);
         rec_a.read(&table.bucket_entries);
         rec_a.read(&table.bucket_entry_hashes);
+        rec_a.write(&d_has_match);
+        rec_a.write(&d_count_only);
+        rec_a.write(&d_dummy_left);
+        rec_a.write(&d_dummy_right);
         rec_a.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "indexed left_outer: semi/count preflight failed: {}",
@@ -8837,10 +9065,6 @@ impl super::CudaKernelProvider {
                     ))
                 })?;
         }
-        rec_a.write_post_preflight_fresh(&d_has_match);
-        rec_a.write_post_preflight_fresh(&d_count_only);
-        rec_a.write_post_preflight_fresh(&d_dummy_left);
-        rec_a.write_post_preflight_fresh(&d_dummy_right);
         rec_a.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "indexed left_outer: semi/count commit failed: {}",
@@ -8871,6 +9095,16 @@ impl super::CudaKernelProvider {
         let d_output_left = self.memory.alloc::<u32>(alloc_len)?;
         let d_output_right = self.memory.alloc::<u32>(alloc_len)?;
         let d_output_count = self.memory.alloc::<u32>(1)?;
+        // Fence alloc-ready → launch_stream for d_output_count
+        // before the memset.
+        runtime
+            .prepare_first_use(&d_output_count, launch_stream, Access::Write)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "indexed left_outer: prepare d_output_count failed: {}",
+                    e
+                ))
+            })?;
         // SAFETY: 4-byte runtime-backed buffer.
         unsafe {
             let res = cudarc::driver::sys::cuMemsetD8Async(
@@ -8895,6 +9129,9 @@ impl super::CudaKernelProvider {
         rec_b.read(&table.bucket_counts);
         rec_b.read(&table.bucket_entries);
         rec_b.read(&table.bucket_entry_hashes);
+        rec_b.write(&d_output_left);
+        rec_b.write(&d_output_right);
+        rec_b.write(&d_output_count);
         rec_b.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "indexed left_outer: materialize preflight failed: {}",
@@ -8929,9 +9166,6 @@ impl super::CudaKernelProvider {
                     ))
                 })?;
         }
-        rec_b.write_post_preflight_fresh(&d_output_left);
-        rec_b.write_post_preflight_fresh(&d_output_right);
-        rec_b.write_post_preflight_fresh(&d_output_count);
         rec_b.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "indexed left_outer: materialize commit failed: {}",
@@ -8953,6 +9187,7 @@ impl super::CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("mask_not kernel not found".to_string()))?;
         let mut rec_c = LaunchRecorder::new_strict(launch_stream);
         rec_c.read(&d_has_match);
+        rec_c.write(&d_no_match);
         rec_c.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "indexed left_outer: mask_not preflight failed: {}",
@@ -8973,7 +9208,6 @@ impl super::CudaKernelProvider {
                 e
             ))
         })?;
-        rec_c.write_post_preflight_fresh(&d_no_match);
         rec_c.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!("indexed left_outer: mask_not commit failed: {}", e))
         })?;
@@ -9097,6 +9331,15 @@ impl super::CudaKernelProvider {
                 .ok_or_else(|| XlogError::Kernel("total_bytes overflow".to_string()))?;
             let out_col = self.memory.alloc::<u8>(total_bytes)?;
             let dst_ptr = *out_col.device_ptr();
+            // Fence alloc-ready → launch_stream for out_col.
+            runtime
+                .prepare_first_use(&out_col, launch_stream, Access::Write)
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "indexed left_outer: prepare left out_col {} failed: {}",
+                        col_idx, e
+                    ))
+                })?;
             if inner_bytes > 0 {
                 let src_col = inner_left_buf
                     .as_ref()
@@ -9140,12 +9383,14 @@ impl super::CudaKernelProvider {
                 }
             }
             if let Some(b) = out_col.runtime_block() {
-                runtime.record_block_use(b, launch_stream).map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "indexed left_outer: record_block_use (left col {}) failed: {}",
-                        col_idx, e
-                    ))
-                })?;
+                runtime
+                    .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "indexed left_outer: finish_block_use (left col {}) failed: {}",
+                            col_idx, e
+                        ))
+                    })?;
             }
             result_columns.push(out_col.into());
         }
@@ -9167,6 +9412,15 @@ impl super::CudaKernelProvider {
                 .ok_or_else(|| XlogError::Kernel("right total_bytes overflow".to_string()))?;
             let out_col = self.memory.alloc::<u8>(total_bytes)?;
             let dst_ptr = *out_col.device_ptr();
+            // Fence alloc-ready → launch_stream for out_col.
+            runtime
+                .prepare_first_use(&out_col, launch_stream, Access::Write)
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "indexed left_outer: prepare right out_col {} failed: {}",
+                        col_idx, e
+                    ))
+                })?;
             if total_bytes > 0 {
                 // SAFETY: zero-fill the whole column.
                 unsafe {
@@ -9207,12 +9461,14 @@ impl super::CudaKernelProvider {
                 }
             }
             if let Some(b) = out_col.runtime_block() {
-                runtime.record_block_use(b, launch_stream).map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "indexed left_outer: record_block_use (right col {}) failed: {}",
-                        col_idx, e
-                    ))
-                })?;
+                runtime
+                    .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "indexed left_outer: finish_block_use (right col {}) failed: {}",
+                            col_idx, e
+                        ))
+                    })?;
             }
             result_columns.push(out_col.into());
         }

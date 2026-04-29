@@ -49,6 +49,73 @@ impl Generation {
     }
 }
 
+/// Access kind for a single block use. Drives the cross-stream
+/// dependency edges the resource queues during
+/// [`DeviceMemoryResource::prepare_block_use`] and the events it
+/// records during [`DeviceMemoryResource::finish_block_use`].
+///
+///   * [`Access::Read`] — the work consumes the block's bytes.
+///     Must wait on any prior write on a different stream. The
+///     resulting event is appended to the block's outstanding-reads
+///     list so future writers (and the eventual deallocate) can
+///     wait on it.
+///   * [`Access::Write`] — the work overwrites the block's bytes
+///     unconditionally. Must wait on the block's prior write AND
+///     all outstanding reads on different streams. The resulting
+///     event becomes the block's new last-write event; the
+///     outstanding-reads list is cleared at finish time.
+///   * [`Access::ReadWrite`] — both. Same wait set as `Write`,
+///     and the resulting event likewise replaces last-write.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Access {
+    Read,
+    Write,
+    ReadWrite,
+}
+
+impl Access {
+    /// Whether work of this access kind reads the block's bytes.
+    pub fn reads(self) -> bool {
+        matches!(self, Access::Read | Access::ReadWrite)
+    }
+
+    /// Whether work of this access kind writes the block's bytes.
+    pub fn writes(self) -> bool {
+        matches!(self, Access::Write | Access::ReadWrite)
+    }
+}
+
+/// Compact identity of a [`DeviceBlock`] suitable for snapshotting
+/// into structures whose lifetime should not be tied to the source
+/// slice's borrow. The fields needed to validate `(ptr, generation)`
+/// against the resource's live map and to resolve `alloc_stream` for
+/// cross-stream waits / dealloc ordering.
+///
+/// Created via [`BlockId::from_block`]. Pure data; no resource
+/// handle, no `Drop`. Cheap to copy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BlockId {
+    pub ptr: u64,
+    pub generation: Generation,
+    pub alloc_stream: StreamId,
+    pub device_ordinal: u32,
+}
+
+impl BlockId {
+    /// Snapshot a [`DeviceBlock`]'s identity. The returned id is
+    /// independent of the original block's borrow lifetime; the
+    /// runtime's generation guard catches stale ids whose backing
+    /// allocation has been recycled.
+    pub fn from_block(block: &DeviceBlock) -> Self {
+        Self {
+            ptr: block.ptr,
+            generation: block.generation,
+            alloc_stream: block.alloc_stream,
+            device_ordinal: block.device_ordinal,
+        }
+    }
+}
+
 /// State of an outstanding [`DeviceBlock`] from the runtime's
 /// perspective. Adaptors flip blocks between these states; bug-detection
 /// resources reject operations on blocks in an unexpected state.
@@ -282,5 +349,82 @@ pub trait DeviceMemoryResource: Send + Sync {
     /// this to return `true`. Decorators forward to inner.
     fn supports_block_use_tracking(&self) -> bool {
         false
+    }
+
+    /// Pre-launch / pre-copy hook: queue any cross-stream waits
+    /// required for `use_stream` to safely access `block` with
+    /// `access` semantics. MUST be called BEFORE the GPU work is
+    /// enqueued on `use_stream`.
+    ///
+    /// Concretely, on [`Access::Read`] the resource must queue
+    /// `use_stream.wait(&last_write)` if a write on a different
+    /// stream is outstanding. On [`Access::Write`] /
+    /// [`Access::ReadWrite`] the resource must additionally queue
+    /// waits on every outstanding read recorded on a different
+    /// stream — the writer must observe completion of every prior
+    /// reader. Same-stream events are skipped (CUDA stream order
+    /// already covers them).
+    ///
+    /// **The default implementation returns
+    /// [`ResourceError::StreamMisuse`].** Same rationale as
+    /// `record_block_use`: a silent no-op default would let
+    /// callers paired against a non-tracking backend believe the
+    /// dependency edge was queued. Decorators forward; tracking
+    /// backends override.
+    ///
+    /// # Errors
+    ///   * [`ResourceError::StreamMisuse`] from the default impl
+    ///     when the resource cannot track cross-stream uses.
+    ///   * [`ResourceError::UseAfterFree`] if `block` is not the
+    ///     id currently live at `block.ptr`.
+    ///   * [`ResourceError::Driver`] for CUDA driver / event-wait
+    ///     failures.
+    fn prepare_block_use(
+        &self,
+        block: BlockId,
+        use_stream: StreamId,
+        access: Access,
+    ) -> ResourceResult<()> {
+        let _ = (block, use_stream, access);
+        Err(ResourceError::StreamMisuse(
+            "prepare_block_use unsupported by this resource (the active backend \
+             does not track cross-stream uses; route allocations through \
+             AsyncCudaResource or take responsibility for cross-stream \
+             synchronization explicitly)"
+                .to_string(),
+        ))
+    }
+
+    /// Post-launch / post-copy hook: record an event on
+    /// `use_stream` capturing the work just enqueued and update
+    /// `block`'s dependency state.
+    ///
+    /// Concretely, on [`Access::Read`] the new event is appended
+    /// to the block's outstanding-reads list (so future writers
+    /// and the eventual deallocate can wait on it). On
+    /// [`Access::Write`] / [`Access::ReadWrite`] the new event
+    /// **replaces** the block's last-write event and the
+    /// outstanding-reads list is cleared (any prior reader's
+    /// dependency was queued at prepare time and is now subsumed
+    /// by the new write event).
+    ///
+    /// **The default implementation returns
+    /// [`ResourceError::StreamMisuse`].** Same rationale as
+    /// `record_block_use`. Decorators forward; tracking backends
+    /// override.
+    fn finish_block_use(
+        &self,
+        block: BlockId,
+        use_stream: StreamId,
+        access: Access,
+    ) -> ResourceResult<()> {
+        let _ = (block, use_stream, access);
+        Err(ResourceError::StreamMisuse(
+            "finish_block_use unsupported by this resource (the active backend \
+             does not track cross-stream uses; route allocations through \
+             AsyncCudaResource or take responsibility for cross-stream \
+             synchronization explicitly)"
+                .to_string(),
+        ))
     }
 }

@@ -175,7 +175,10 @@ impl super::CudaKernelProvider {
     /// recorded as reads BEFORE preflight; every fresh
     /// runtime-backed allocation (`d_mask`, `d_prefix_sum`,
     /// `d_block_sums`, `d_out_count`, each `dst_col`) recorded
-    /// via `write_post_preflight_fresh` AFTER kernels enqueue.
+    /// via `write` BEFORE preflight; the recorder snapshots
+    /// block identity at record time and drops the source
+    /// borrow, so kernel `&mut` borrows after preflight remain
+    /// valid before the kernels enqueue.
     ///
     /// # Panics
     /// `T::filter_scan_phase1_kernel()` must be `Some` —
@@ -246,9 +249,10 @@ impl super::CudaKernelProvider {
         let col_view = Self::column_as_typed_view::<T>(col_data, n)?;
 
         // Allocate ALL fresh runtime-backed buffers BEFORE the
-        // recorder (Rust drop order — recorder's 'b lifetime
-        // must outlive every borrow it holds via
-        // write_post_preflight_fresh).
+        // recorder (Rust drop order — these are recorded as
+        // pre-launch writes via the standard `write` API; the
+        // recorder snapshots block identity at record time so
+        // the kernel `&mut` borrow after preflight is unaffected).
         let d_mask = self.memory.alloc::<u8>(n)?;
         let d_prefix_sum = self.memory.alloc::<u32>(n)?;
         let mut d_block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
@@ -272,6 +276,13 @@ impl super::CudaKernelProvider {
                 .column(col_idx)
                 .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
             rec.read_column(src_col);
+        }
+        rec.write(&d_mask);
+        rec.write(&d_prefix_sum);
+        rec.write(&d_block_sums);
+        rec.write(&d_out_count);
+        for dst_col in &dst_cols {
+            rec.write(dst_col);
         }
         rec.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
@@ -428,13 +439,6 @@ impl super::CudaKernelProvider {
 
         // Record fresh writes via the post-preflight escape
         // hatch and commit.
-        rec.write_post_preflight_fresh(&d_mask);
-        rec.write_post_preflight_fresh(&d_prefix_sum);
-        rec.write_post_preflight_fresh(&d_block_sums);
-        rec.write_post_preflight_fresh(&d_out_count);
-        for dst_col in &dst_cols {
-            rec.write_post_preflight_fresh(dst_col);
-        }
         rec.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "filter_fused_scan_recorded: launch recorder commit failed: {}",
@@ -707,6 +711,7 @@ impl super::CudaKernelProvider {
         // work in flight.
         let mut rec = LaunchRecorder::new_strict(launch_stream);
         rec.read_column(col_data);
+        rec.write(&d_mask);
         rec.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "compare_const_mask_recorded: launch recorder preflight failed: {}",
@@ -736,7 +741,6 @@ impl super::CudaKernelProvider {
         // runtime-backed output of THIS call; the kernel-param
         // borrow rules force this ordering. See the
         // "Strict-mode contract" on this method.
-        rec.write_post_preflight_fresh(&d_mask);
         rec.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "compare_const_mask_recorded: launch recorder commit failed: {}",
@@ -862,10 +866,10 @@ impl super::CudaKernelProvider {
     ///   Arrow) columns on either side are rejected at preflight,
     ///   before the kernel is enqueued.
     /// * `d_mask` is freshly allocated by the same runtime-backed
-    ///   manager; its write is recorded via the
-    ///   `write_post_preflight_fresh` escape hatch (the
-    ///   kernel-param borrow rules force this ordering — see
-    ///   `compare_const_mask_recorded` for the same pattern).
+    ///   manager; its write is recorded via the standard `write`
+    ///   API BEFORE preflight (the recorder snapshots block
+    ///   identity, so the kernel `&mut d_mask` borrow after
+    ///   preflight is unaffected).
     ///
     /// # Errors
     ///   * `XlogError::Kernel` if the manager has no runtime,
@@ -980,6 +984,7 @@ impl super::CudaKernelProvider {
         let mut rec = LaunchRecorder::new_strict(launch_stream);
         rec.read_column(left_col);
         rec.read_column(right_col);
+        rec.write(&d_mask);
         rec.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "compare_columns_mask_recorded: launch recorder preflight failed: {}",
@@ -1010,7 +1015,6 @@ impl super::CudaKernelProvider {
         // Record d_mask write AFTER the launch enqueues, via the
         // explicit escape hatch — d_mask is the freshly-allocated
         // runtime-backed output of THIS call.
-        rec.write_post_preflight_fresh(&d_mask);
         rec.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "compare_columns_mask_recorded: launch recorder commit failed: {}",
@@ -1389,7 +1393,7 @@ impl super::CudaKernelProvider {
     /// * Every fresh runtime-backed allocation that this
     ///   function makes (`d_mask_clamped`, `d_prefix_sum`,
     ///   `d_block_sums`, `d_out_count`, each `dst_col`) is
-    ///   recorded via `write_post_preflight_fresh` AFTER the
+    ///   recorded via `write` BEFORE the
     ///   kernel chain enqueues. Locals that drop at end-of-scope
     ///   (`d_mask_clamped`, `d_prefix_sum`, `d_block_sums`)
     ///   stay safe because the runtime's deallocate queues
@@ -1456,13 +1460,12 @@ impl super::CudaKernelProvider {
         let row_cap = u64::from(n);
 
         // Allocate ALL fresh runtime-backed buffers up front,
-        // BEFORE the recorder is constructed. This is required
-        // by the borrow checker: `rec` borrows each of these
-        // (via `write_post_preflight_fresh`) for its lifetime
-        // `'b`, which must outlive all its borrows. With Rust's
-        // reverse-of-declaration drop order, anything declared
-        // after `rec` cannot be borrowed by it. Output column
-        // sizes are known up front from `row_cap = n`, so this
+        // BEFORE the recorder is constructed. The recorder
+        // snapshots each block's identity at record time and
+        // drops the slice borrow, so the buffers can be
+        // mutably borrowed by kernel launches after preflight.
+        // Output column sizes are known up front from
+        // `row_cap = n`, so this
         // is sound — the host scalar read of `d_out_count` only
         // tells us `output_rows`, which we use as metadata, not
         // for sizing.
@@ -1491,6 +1494,13 @@ impl super::CudaKernelProvider {
                 .column(col_idx)
                 .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
             rec.read_column(src_col);
+        }
+        rec.write(&d_mask_clamped);
+        rec.write(&d_prefix_sum);
+        rec.write(&d_block_sums);
+        rec.write(&d_out_count);
+        for dst_col in &dst_cols {
+            rec.write(dst_col);
         }
         rec.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
@@ -1676,13 +1686,6 @@ impl super::CudaKernelProvider {
         // this function are recorded so that drops at
         // end-of-scope (or on the returned buffer's drop) are
         // correctly serialized with the launch_stream chain.
-        rec.write_post_preflight_fresh(&d_mask_clamped);
-        rec.write_post_preflight_fresh(&d_prefix_sum);
-        rec.write_post_preflight_fresh(&d_block_sums);
-        rec.write_post_preflight_fresh(&d_out_count);
-        for dst_col in &dst_cols {
-            rec.write_post_preflight_fresh(dst_col);
-        }
         rec.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "compact_buffer_by_device_mask_counted_recorded: launch recorder \

@@ -1318,7 +1318,7 @@ impl CudaKernelProvider {
     ///
     /// `data` is not recorded here: the caller already records
     /// its own write of `data` against the same launch_stream
-    /// (typically via `LaunchRecorder::write_post_preflight_fresh`).
+    /// (typically via `LaunchRecorder::write` BEFORE preflight).
     pub(crate) fn multiblock_scan_u32_inplace_on_stream(
         &self,
         data: &mut crate::memory::TrackedCudaSlice<u32>,
@@ -1359,6 +1359,24 @@ impl CudaKernelProvider {
 
         let num_blocks = (n + block_size - 1) / block_size;
         let mut block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
+        // Fence alloc-ready → launch_stream for block_sums
+        // before phase1 kernel writes it. The alloc was queued
+        // on the manager's default stream; without this wait,
+        // a launch_stream-queued kernel can begin before
+        // cuMemAllocAsync completes and read pool-recycled
+        // bytes when the streams differ.
+        runtime
+            .prepare_first_use(
+                &block_sums,
+                launch_stream,
+                crate::device_runtime::Access::Write,
+            )
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "multiblock_scan_u32_inplace_on_stream: prepare block_sums failed: {}",
+                    e
+                ))
+            })?;
 
         let phase1_u32_fn = device
             .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_U32_PHASE1)
@@ -1421,13 +1439,19 @@ impl CudaKernelProvider {
         // without waiting for the launch_stream chain that's
         // still reading/writing block_sums to complete.
         if let Some(b) = block_sums.runtime_block() {
-            runtime.record_block_use(b, launch_stream).map_err(|e| {
-                XlogError::Kernel(format!(
-                    "multiblock_scan_u32_inplace_on_stream: record_block_use \
+            runtime
+                .finish_block_use(
+                    crate::device_runtime::BlockId::from_block(b),
+                    launch_stream,
+                    crate::device_runtime::Access::Write,
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "multiblock_scan_u32_inplace_on_stream: finish_block_use \
                          for intermediate block_sums failed: {}",
-                    e
-                ))
-            })?;
+                        e
+                    ))
+                })?;
         } else {
             return Err(XlogError::Kernel(
                 "multiblock_scan_u32_inplace_on_stream: intermediate block_sums has no \
@@ -1488,6 +1512,21 @@ impl CudaKernelProvider {
 
         let num_blocks = (n + block_size - 1) / block_size;
         let mut block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
+        // Fence alloc-ready → launch_stream for block_sums
+        // before phase1 kernel writes it. See the inplace
+        // variant for the full rationale.
+        runtime
+            .prepare_first_use(
+                &block_sums,
+                launch_stream,
+                crate::device_runtime::Access::Write,
+            )
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "multiblock_scan_u32_view_inplace_on_stream: prepare block_sums failed: {}",
+                    e
+                ))
+            })?;
 
         let phase1_u32_fn = device
             .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_U32_PHASE1)
@@ -1549,13 +1588,19 @@ impl CudaKernelProvider {
 
         // Record block_sums use before end-of-scope drop.
         if let Some(b) = block_sums.runtime_block() {
-            runtime.record_block_use(b, launch_stream).map_err(|e| {
-                XlogError::Kernel(format!(
-                    "multiblock_scan_u32_view_inplace_on_stream: record_block_use \
+            runtime
+                .finish_block_use(
+                    crate::device_runtime::BlockId::from_block(b),
+                    launch_stream,
+                    crate::device_runtime::Access::Write,
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "multiblock_scan_u32_view_inplace_on_stream: finish_block_use \
                      for intermediate block_sums failed: {}",
-                    e
-                ))
-            })?;
+                        e
+                    ))
+                })?;
         } else {
             return Err(XlogError::Kernel(
                 "multiblock_scan_u32_view_inplace_on_stream: intermediate block_sums has no \

@@ -59,8 +59,8 @@ pub use logging::{
     SinkError,
 };
 pub use resource::{
-    AllocTag, BlockState, DeviceBlock, DeviceMemoryResource, Generation, ResourceError,
-    ResourceResult, StreamId,
+    Access, AllocTag, BlockId, BlockState, DeviceBlock, DeviceMemoryResource, Generation,
+    ResourceError, ResourceResult, StreamId,
 };
 pub use runtime::{XlogDeviceRuntime, MAX_DEVICE_ORDINALS};
 pub use stream_pool::{StreamPool, StreamPoolError, DEFAULT_MAX_STREAMS};

@@ -32,7 +32,9 @@ use std::sync::OnceLock;
 use xlog_core::{Result, XlogError};
 
 use super::direct::DirectCudaResource;
-use super::resource::{AllocTag, DeviceBlock, DeviceMemoryResource, ResourceResult, StreamId};
+use super::resource::{
+    Access, AllocTag, BlockId, DeviceBlock, DeviceMemoryResource, ResourceResult, StreamId,
+};
 use super::stream_pool::StreamPool;
 use crate::CudaDevice;
 
@@ -271,6 +273,89 @@ impl XlogDeviceRuntime {
             .lock()
             .expect("device-runtime resource poisoned")
             .supports_block_use_tracking()
+    }
+
+    /// Pre-launch hook: queue cross-stream waits required for
+    /// `use_stream` to safely access `block` with `access`
+    /// semantics. MUST be called BEFORE the GPU work is enqueued
+    /// on `use_stream`. Forwards to the resource stack; see
+    /// [`DeviceMemoryResource::prepare_block_use`] for the
+    /// underlying contract.
+    pub fn prepare_block_use(
+        &self,
+        block: BlockId,
+        use_stream: StreamId,
+        access: Access,
+    ) -> ResourceResult<()> {
+        self.resource
+            .lock()
+            .expect("device-runtime resource poisoned")
+            .prepare_block_use(block, use_stream, access)
+    }
+
+    /// Post-launch hook: record an event on `use_stream`
+    /// capturing the work just enqueued and update `block`'s
+    /// dependency state. MUST be called AFTER the launch /
+    /// copy is queued. Forwards to the resource stack; see
+    /// [`DeviceMemoryResource::finish_block_use`] for the
+    /// underlying contract.
+    pub fn finish_block_use(
+        &self,
+        block: BlockId,
+        use_stream: StreamId,
+        access: Access,
+    ) -> ResourceResult<()> {
+        self.resource
+            .lock()
+            .expect("device-runtime resource poisoned")
+            .finish_block_use(block, use_stream, access)
+    }
+
+    /// Convenience for helper-internal scratch allocations that
+    /// will be immediately written / read on `use_stream`.
+    ///
+    /// Looks up the [`BlockId`] from the slice's runtime block
+    /// and calls [`Self::prepare_block_use`] with `access`. Use
+    /// this directly after `GpuMemoryManager::alloc` when the
+    /// buffer's first cross-stream consumer is the same operator
+    /// (e.g., a hash-table bucket array memset on `launch_stream`
+    /// against a buffer freshly allocated on the manager's
+    /// default stream).
+    ///
+    /// Returns `Err(ResourceError::StreamMisuse)` if `slice` is
+    /// not runtime-backed — strict callers should ensure their
+    /// memory manager carries a runtime.
+    pub fn prepare_first_use<T: cudarc::driver::DeviceRepr>(
+        &self,
+        slice: &crate::memory::TrackedCudaSlice<T>,
+        use_stream: StreamId,
+        access: Access,
+    ) -> ResourceResult<()> {
+        let block = slice.runtime_block().ok_or_else(|| {
+            super::resource::ResourceError::StreamMisuse(
+                "prepare_first_use: slice is not runtime-backed (the helper's \
+                 GpuMemoryManager must be built via with_runtime)"
+                    .to_string(),
+            )
+        })?;
+        self.prepare_block_use(BlockId::from_block(block), use_stream, access)
+    }
+
+    /// Convenience for helper-internal scratch finish: looks up
+    /// the [`BlockId`] from the slice and forwards to
+    /// [`Self::finish_block_use`].
+    pub fn finish_first_use<T: cudarc::driver::DeviceRepr>(
+        &self,
+        slice: &crate::memory::TrackedCudaSlice<T>,
+        use_stream: StreamId,
+        access: Access,
+    ) -> ResourceResult<()> {
+        let block = slice.runtime_block().ok_or_else(|| {
+            super::resource::ResourceError::StreamMisuse(
+                "finish_first_use: slice is not runtime-backed".to_string(),
+            )
+        })?;
+        self.finish_block_use(BlockId::from_block(block), use_stream, access)
     }
 }
 
