@@ -7,8 +7,11 @@ discipline. v0.5.5 deterministic hardening is closed at PRs #49 (strict D2H
 guard), #50 (GPU full-row dedup / set-difference), #52 (binary-join output
 counts as metadata reads), plus crash-window frozen replay evidence; fully
 GPU-resident binary-join materialization (count → prefix → materialize) is
-explicitly deferred. WCOJ moves to v0.6.1 — it must not land before
-recorded launch discipline covers the operators it depends on.
+explicitly deferred. v0.6.1 (Recorded CSM Dispatch and Certification)
+ships the env-gated CSM hash-join dispatch and cert-mode labelling
+on top of the v0.6.0 stream-safe runtime; WCOJ has been re-targeted
+to v0.6.2 — it must not land before recorded launch discipline
+covers the operators it depends on.
 
 This roadmap is version-oriented so planned work is not hidden inside subsystem
 sections. Historical and current-main work uses checked boxes. Future work uses
@@ -609,11 +612,11 @@ relocated to the release where the work actually belongs:
     `8cc0882c`; sub-slice 3 LeftOuter CSM captured at
     `.recovery/sub-slice-3-edits.md`).
   * Shared-memory optimization for small relations + warp-level
-    primitives → **v0.6.1 xlog-cuda** (paired with WCOJ kernels).
+    primitives → **v0.6.2 xlog-cuda** (paired with WCOJ kernels).
   * Mixed binary/recursive/WCOJ determinism + Same Generation /
     triangle / skewed multi-way / recursive-frontier benchmarks +
     multi-way stress baselines + widened-frontier stress replay →
-    **v0.6.1 Tests and Certification** (no target operator without
+    **v0.6.2 Tests and Certification** (no target operator without
     WCOJ).
   * Native exact-induction tensorized integration + 449/449
     liveness reproduction + committed `ilp_exact.ptx` →
@@ -626,7 +629,7 @@ relocated to the release where the work actually belongs:
 ## v0.6.0 - Stream-Safe GPU Runtime And Execution Discipline
 
 The v0.6.0 release is the prerequisite layer for fully GPU-resident
-binary-join retake (deferred from v0.5.5) and for v0.6.1 WCOJ. It is
+binary-join retake (deferred from v0.5.5) and for v0.6.2 WCOJ. It is
 infrastructure hardening, not a join-algorithm feature: the goal is a
 stream-safe GPU runtime so subsequent work can be trusted under parallel
 execution.
@@ -1037,7 +1040,77 @@ recorded sort, key-based dedup recorded migration, LogSumExp
 GroupBy recorded migration, WCOJ. These were enumerated in
 the section above with deferral reasons.
 
-## v0.6.1 - Worst-Case Optimal Joins
+## v0.6.1 - Recorded CSM Dispatch And Certification
+
+Closed release on top of v0.6.0. Enables count-scan-materialize
+(CSM) hash-join methods for `Inner` / `LeftOuter` (indexed and
+non-indexed) under an env gate, closes a stream-safety gap in the
+three earlier CSM siblings, and names the CSM cert mode explicitly
+in the cert harness so reports are unambiguous. No kernel changes,
+no algorithm changes, no eligibility relaxation. Default behaviour
+for legacy callers is unchanged; the new path is opt-in via
+`XLOG_USE_RECORDED_CSM=1` (or umbrella `XLOG_USE_RECORDED_OPS=1`).
+
+### Recorded Launch Paths (xlog-cuda Provider)
+
+- [x] **Indexed LeftOuter CSM operator** (PR #87,
+      `hash_join_left_outer_v2_with_index_count_scan_materialize_recorded`).
+      Probe-only pack on `launch_stream` plus a cached
+      `JoinIndexV2` for the build side, sharing the
+      count → scan → materialize phase shape with the
+      non-indexed LeftOuter CSM (PR #84) and the indexed Inner
+      CSM. No new kernels; reuses the four already-migrated CSM
+      kernels plus `hash_join_csm_unmatched_mask` from PR #84.
+- [x] **`d_overflow` recorder safety fix in three CSM siblings**
+      (PR #89). Phase B's materialize kernel takes `d_overflow`
+      as a kernel param. The three earlier CSM methods
+      (`hash_join_inner_v2_count_scan_materialize_recorded`,
+      `hash_join_left_outer_v2_count_scan_materialize_recorded`,
+      `hash_join_inner_v2_with_index_count_scan_materialize_recorded`)
+      did not register `d_overflow` on their materialize-phase
+      `LaunchRecorder`, so the runtime was free to release the
+      block once `rec_count.commit` resolved — a potential
+      use-after-free if pool reuse beat kernel completion. Each
+      site now registers `rec_mat.write(&d_overflow);` before
+      `rec_mat.preflight`, matching the indexed-LeftOuter CSM
+      site (PR #87) so all four CSM materialize recorders are
+      identical.
+- [x] **Recorded CSM hash-join env dispatch** (PR #91). Routes
+      `JoinType::Inner` and `JoinType::LeftOuter` through CSM
+      for both the non-indexed and indexed entry points when
+      `XLOG_USE_RECORDED_CSM=1` (or umbrella
+      `XLOG_USE_RECORDED_OPS=1`) is set. `Semi` / `Anti` always
+      route through the existing legacy recorded methods — no
+      CSM implementation exists for them. Eligibility checks
+      preserved exactly: runtime-backed manager, ≤4 keys
+      (`pack_keys` constraint), key-type match, row-count caps,
+      indexed-path key-byte and shape checks. New env-dispatch
+      routing test suite
+      (`crates/xlog-cuda/tests/test_csm_env_dispatch.rs`) proves
+      selection across the Inner / LeftOuter × indexed /
+      non-indexed × env-on / env-off matrix plus Semi / Anti
+      and the >4-keys upstream short-circuit.
+
+### Tests and Certification
+
+- [x] **Cert-mode labeling** (commit `bca1e373`). The
+      `certification_suite` header now prints
+      `Recorded-op dispatch (explicit):` (extended to include
+      `XLOG_USE_RECORDED_CSM`) and a synthesized `Cert mode:`
+      line keyed off the explicit env flags. The three intended
+      values match the v0.6.1 cert gate commands —
+      `legacy/default`, `runtime+recorded`,
+      `runtime+recorded+CSM` — so CSM-mode runs are
+      self-documenting in the cert evidence.
+
+### Release Gate
+
+- [x] Three cert modes pass with explicit headers at tag time:
+      `legacy/default`, `runtime+recorded`,
+      `runtime+recorded+CSM`. Each runs the full 33-category
+      certification suite and reports `1 passed; 0 failed`.
+
+## v0.6.2 - Worst-Case Optimal Joins
 
 ### xlog-ir and Optimizer
 
@@ -1280,7 +1353,7 @@ the section above with deferral reasons.
 - [ ] Composing recorded primitives currently relies on the runtime's record-all + wait-all event semantics (`last_use_events: Vec<CudaEvent>` in `AsyncCudaResource`). If composition depth grows materially, a future event-coalescing optimization may be needed to keep `deallocate` cost bounded.
 - [ ] DLPack / Arrow external-memory consumers must coordinate cross-stream synchronization themselves; strict-mode rejection at preflight is loud, but downstream consumers depending on permissive recorders need explicit migration guidance.
 
-### v0.6.1 Risks
+### v0.6.2 Risks
 
 - [ ] WCOJ planner and kernel scope can expand beyond the release window without strict 3-way/4-way certification gates.
 - [ ] WCOJ kernels must not land before the operators they depend on are migrated to recorded launch discipline; otherwise multi-stream WCOJ execution would re-introduce the cross-stream use-after-free class v0.6.0 just closed.
