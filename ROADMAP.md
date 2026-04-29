@@ -819,10 +819,33 @@ execution.
       ABA reuse of a pointer inside a single recorder must
       not collapse distinct generations into one prepare/finish
       pair.
-- [ ] A3 / A4 stress reproducer suite (cross-stream lifetime
-      stress under parallel forks, fixed and random schedules)
-      — formal multi-fork harness still pending; the MT
-      sort+hash-join regression covers a tight subset.
+- [x] A3 / A4 stress reproducer suite (cross-stream lifetime
+      stress under parallel forks, fixed and random schedules).
+      (Commit `27ec3bd9` —
+      `crates/xlog-integration/tests/test_a3_a4_stress.rs`.)
+      Two workloads (`friends` sort+hash-join sensitive,
+      `reach` recursive fixed-point + joins). Stable FNV-1a
+      checksum over sorted rows; per-`GraphParams` reference
+      computed serially in the parent. **A4 (16 fresh
+      subprocess forks × 4 iters per child = 64 measurements):
+      16/16 PASS in every fixture mode and every env
+      combination tested.** Fork-isolated stream safety is
+      verified.
+
+      A3 (8 in-process threads × 32 iters = 256 measurements)
+      surfaces drift but a 5-mode diagnostic matrix
+      (`per_iter` / `per_thread` / `shared` × runtime+recorded
+      / runtime-only / legacy-default) shows the failing
+      condition is **NOT introduced by the v0.6.0 stream
+      runtime or recorded launches**: drift fires identically
+      in `legacy default + per_thread` (no
+      `XLOG_USE_DEVICE_RUNTIME`, no `XLOG_USE_RECORDED_OPS`,
+      one runtime per thread) — i.e., with no v0.6 code in the
+      call chain. The bug class is pre-existing
+      same-process multi-executor/provider concurrency against
+      one CUDA primary context. Re-scoped as a non-blocking
+      residual; see "Known Non-Blocking Residuals" below and
+      the future-version backlog item in v0.7.0.
 - [x] Public certification of the recorded launch discipline
       against the cert suite. (Commit `3361785b`.)
       `XLOG_USE_DEVICE_RUNTIME=1 XLOG_USE_RECORDED_OPS=1 cargo
@@ -859,6 +882,27 @@ blockers later.
   primary context). Production gate spec is `--test-threads=1`,
   which is clean. Full cross-runtime address coordination is
   out of scope for v0.6.0.
+
+- **A3 in-process thread-of-N drift on the
+  `test_a3_a4_stress` harness**: 8 threads × 32 iters each
+  produce ~3% checksum drift across two recursive Datalog
+  workloads (friends self-join, reach transitive closure).
+  The 5-mode diagnostic matrix (commit `27ec3bd9` plus the
+  `XLOG_A3_FIXTURE_MODE` / `XLOG_A3_DIAGNOSTIC` selectors)
+  demonstrates this is NOT a v0.6.0 stream-safety regression:
+  drift fires at comparable rates with `XLOG_USE_DEVICE_RUNTIME`
+  unset AND `XLOG_USE_RECORDED_OPS` unset (i.e., legacy
+  cudarc allocator + legacy operator dispatch + per-thread
+  runtime), which means no v0.6 code path is in the call
+  chain. The bug class is pre-existing same-process
+  multi-executor/provider concurrency against a shared CUDA
+  primary context. Tracked for v0.7.0+ under "Certify
+  same-process multi-executor concurrency against one CUDA
+  primary context".
+
+  v0.6.0 release gate is **A4 fork-isolated stress + the
+  cert suite + the umbrella ×50** — explicitly NOT "A3 must
+  be zero drift".
 
 ### Documentation
 
@@ -910,12 +954,17 @@ blockers later.
       scalar read inside the chain must be explicitly ordered
       against `launch_stream` (non-blocking streams do not get
       default-stream implicit synchronization).
-- [ ] Public release only after the cert suite passes against a
+- [x] Public release only after the cert suite passes against a
       runtime-backed manager with the recorded launch paths
-      exercised.
-- [ ] Public release only after the A3 / A4 stress reproducer
+      exercised. (Closed by `3361785b`: 206/206 under
+      `XLOG_USE_DEVICE_RUNTIME=1 XLOG_USE_RECORDED_OPS=1`.)
+- [x] Public release only after the A3 / A4 stress reproducer
       suite observes zero use-after-free / stream-misuse
-      failures.
+      failures. (Closed by `27ec3bd9`: A4 fork-isolated 16/16,
+      symptom tally `stream-misuse=0 uaf=0` in every matrix
+      mode. A3 thread-of-N drift is a documented pre-existing
+      residual confirmed against legacy default — see "Known
+      Non-Blocking Residuals" — not a v0.6.0 release blocker.)
 
 ### v0.6.0 Release Blockers Remaining
 
@@ -926,8 +975,13 @@ either checked or scoped as deferred / non-blocking residual.
    **DONE — commit `3361785b`.** `XLOG_USE_DEVICE_RUNTIME=1
    XLOG_USE_RECORDED_OPS=1 cargo test -p xlog-cuda-tests --test
    certification_suite --release` passes 206/206.
-2. **A3 / A4 multi-fork stress harness** beyond the focused
-   MT sort+hash-join regression already merged.
+2. ~~A3 / A4 multi-fork stress harness.~~
+   **DONE — commit `27ec3bd9`.** A4 fork-isolated stress passes
+   16/16; A3 thread-of-N drift confirmed pre-existing against
+   legacy default and re-scoped as non-blocking residual (see
+   "Known Non-Blocking Residuals"). The v0.6.0 stream-safety
+   gate is **A4 + cert suite + umbrella ×50**, not "A3 zero
+   drift".
 3. **Operator-author migration docs + runtime-stack docs.**
    Both items in the Documentation subsection.
 4. **Decisions on host-mask compact migration and ILP /
@@ -1031,6 +1085,27 @@ the section above with deferral reasons.
 
 - [ ] Add epistemic semantics guide.
 - [ ] Add solver-semantics certification tests.
+
+### Concurrency Hardening
+
+- [ ] **Certify same-process multi-executor concurrency
+      against one CUDA primary context.** Surfaced by the
+      v0.6.0 A3/A4 stress harness
+      (`crates/xlog-integration/tests/test_a3_a4_stress.rs`,
+      commit `27ec3bd9`): A3 in-process thread-of-N drift
+      (~3% on recursive Datalog workloads) is reproducible
+      against the legacy default path (no
+      `XLOG_USE_DEVICE_RUNTIME`, no `XLOG_USE_RECORDED_OPS`),
+      so it is NOT a v0.6.0 stream-safety bug — it is a
+      pre-existing same-process multi-executor /
+      multi-provider concurrency issue. Re-target candidates:
+      `xlog-runtime::Executor` mutability under thread
+      contention, `xlog-cuda::CudaKernelProvider` shared
+      kernel/index caches, cudarc primary-context module-load
+      semantics under concurrent first-launch. Pass criterion:
+      A3 thread-of-N drift drops to zero on the harness's
+      `per_thread` and `shared` fixture modes (matrix run
+      via `XLOG_A3_FIXTURE_MODE=...`).
 
 ## v0.8.0 - Multi-GPU and Out-of-Core Execution
 
