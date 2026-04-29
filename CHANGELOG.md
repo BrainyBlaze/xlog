@@ -2,10 +2,180 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.6.0] — 2026-04-29
+
+Stream-Safe GPU Runtime And Execution Discipline. Infrastructure
+hardening release: a stream-safe GPU runtime and recorded launch
+discipline so subsequent join / WCOJ work can be trusted under
+parallel execution. Default behaviour for legacy callers is
+unchanged; the new path is opt-in via
+`CudaKernelProvider::with_runtime` /
+`GpuMemoryManager::with_runtime` plus the
+`XLOG_USE_DEVICE_RUNTIME` / `XLOG_USE_RECORDED_OPS` env flags.
+
+### Added
+
+- **Access-aware stream dependency manager** (PR #72,
+  `26c2e429` + follow-ups). Replaces post-launch-only
+  `record_block_use` with `prepare_block_use(BlockId, stream,
+  Access)` / `finish_block_use(...)` and an `Access {Read,
+  Write, ReadWrite}` enum. `AsyncCudaResource::LiveEntry`
+  tracks `last_write: Option<(StreamId, CudaEvent)>` (seeded
+  with an allocation-ready event captured immediately after
+  `cuMemAllocAsync`) and `outstanding_reads:
+  Vec<(StreamId, CudaEvent)>`. Reads wait on `last_write`;
+  writes wait on `last_write` plus every cross-stream
+  outstanding read. Same-stream events are skipped. Closes
+  both the use-after-prior-write hazard and the
+  use-after-allocation hazard across streams.
+- **Lifetime-free `LaunchRecorder`**. Snapshots `BlockId` from
+  each registered slice at record time and drops the source
+  borrow immediately, so kernel `&mut` borrows after preflight
+  are unrestricted. `preflight(&runtime)` queues
+  `cuStreamWaitEvent` for every recorded use's cross-stream
+  dependency BEFORE the launch; `commit(self, &runtime)`
+  records new events via `finish_block_use` AFTER. Repeated
+  registrations of the same block dedup on
+  `(ptr, generation, device_ordinal)` to a single
+  prepare/finish call with the strongest access.
+- **`XlogDeviceRuntime::prepare_first_use(slice, stream, access)`
+  / `finish_first_use(...)`** for helper-internal scratch
+  whose first cross-stream consumer is a raw `cuMemsetD8Async`
+  / `cuMemcpyDtoDAsync_v2` / `kernel.launch_on_stream` call
+  ahead of any `LaunchRecorder::preflight`.
+- **Formal certification harness** (`3361785b`). The cert
+  `TestContext` builds the production decorator stack
+  (`AsyncCudaResource → LoggingResource → GlobalDeviceBudget
+  → XlogDeviceRuntime`) when `XLOG_USE_DEVICE_RUNTIME=1` is
+  set and uses `with_runtime` constructors; the env-gated
+  dispatchers in `provider::sort` / `filter_by_mask` /
+  `hash_join_v2` / etc. then route through the recorded path
+  when `XLOG_USE_RECORDED_*` is set. The harness reaps
+  pending async frees between categories, and
+  `GlobalDeviceBudget::allocate` retries once after a reap on
+  transient over-budget conditions.
+  Result: `XLOG_USE_DEVICE_RUNTIME=1 XLOG_USE_RECORDED_OPS=1
+  cargo test -p xlog-cuda-tests --test certification_suite
+  --release` passes **206/206**; legacy default still passes
+  206/206.
+- **A3/A4 cross-stream lifetime stress harness**
+  (`crates/xlog-integration/tests/test_a3_a4_stress.rs`,
+  `27ec3bd9` + `a01b51fa`). Two workloads (`friends`
+  sort+hash-join sensitive, `reach` recursive fixed-point +
+  joins). Stable FNV-1a checksums, fixed schedule + seeded
+  random tail. **A4 fork-isolated stress passes 16/16** in
+  every fixture mode and every env combination. A 5-mode
+  diagnostic matrix (`XLOG_A3_FIXTURE_MODE=per_iter |
+  per_thread | shared` × runtime-on/off × recorded-on/off
+  via `XLOG_A3_DIAGNOSTIC=1`) classifies the A3 thread-of-N
+  drift as pre-existing and not introduced by v0.6.0 — see
+  Known Issues below.
+- **Multi-threaded sort+hash-join regression**
+  (`crates/xlog-cuda/tests/test_mt_sort_hj_alloc_ordering.rs`,
+  PR #72). 8 threads × 128 iters × 3 rounds friend-of-friend
+  self-join. Was RED at baseline `8cc0882c` (~6/1024 failures
+  per run); 1024/1024 + 1024/1024 across 10 consecutive runs
+  on `b1560674`.
+- **Documentation**: `docs/architecture/device-runtime.md`
+  (runtime stack + access matrix + env-gated dispatch + cert
+  modes) and `docs/architecture/recorded-launch-migration.md`
+  (operator-author checklist + anti-patterns + four-gate
+  validation command sequence). Linked from
+  `docs/ARCHITECTURE.md` Memory Management section.
+
+### Changed
+
+- `record_block_use` retained as a backward-compat shim that
+  calls `finish_block_use(Read)` for the dealloc-wait surface;
+  production callers go through the recorder.
+- `write_post_preflight_fresh` removed. All 78 callers across
+  `provider/{relational,filter,groupby,mod}.rs` migrated to
+  pre-preflight `write` (the recorder snapshot drops the
+  borrow, so kernel `&mut` borrows after preflight are
+  unaffected).
+- 6 direct `runtime.record_block_use(b, launch_stream)` call
+  sites in provider code migrated to
+  `runtime.finish_block_use(BlockId::from_block(b),
+  launch_stream, Access::Write)` with semantically correct
+  Access kinds.
+- `prepare_first_use(Access::Write)` added at every
+  helper-internal scratch alloc site that subsequently writes
+  via raw CUDA work BEFORE its parent recorder's preflight:
+  `build_hash_table_v2_on_stream` (5 buffers),
+  `gather_buffer_by_indices_on_stream` (per-column
+  `dst_col`s), `multiblock_scan_u32_inplace_on_stream` /
+  `_view_inplace_on_stream` (`block_sums`), and every join
+  variant's `d_count_only` / `d_output_count` / `out_col`
+  zero-fills (Inner / LeftOuter / count-scan-materialize /
+  indexed Inner / indexed LeftOuter).
+- `gather_buffer_by_indices_on_stream`: local
+  `d_output_rows` scalar created via
+  `upload_device_row_count` + read on `launch_stream` is now
+  fenced via `Access::Write` at upload + `Access::Read`
+  prepare on `launch_stream` + `Access::Read` finish before
+  drop. Closed a review-finding from the PR.
+
+### Deferred to post-v0.6.0
+
+- **Host-mask `compact_buffer_by_mask` recorded migration**.
+  Re-opens when a runtime-backed recorded release path
+  consumes host-provided masks. Until then the legacy entry
+  is the supported path; the recorded
+  `compact_buffer_by_device_mask_counted_recorded` covers the
+  device-mask case for runtime-backed callers.
+- **ILP / ILP-exact view helpers + operators recorded
+  migration**. Re-opens when tensorized ILP /
+  exact-induction downstream consumer work resumes (v0.9.0
+  "Bounded Exact Induction" backlog) and requires
+  runtime-backed stream safety.
+- **Sub-slice 3 LeftOuter CSM** (commit `b90ae77f`, never
+  pushed; recovered into `.recovery/sub-slice-3-edits.md`).
+  Apply on a fresh post-v0.6.0 branch after auditing every
+  scratch alloc against the access-aware contract documented
+  in `docs/architecture/recorded-launch-migration.md`.
+
+### Known Issues (not release blockers)
+
+- **A3 in-process thread-of-N drift on
+  `test_a3_a4_stress`**: 8 threads × 32 iters produce ~3%
+  checksum drift on recursive Datalog workloads. The 5-mode
+  diagnostic matrix demonstrates this is **NOT v0.6.0
+  stream-safety regression** — drift fires identically on the
+  legacy default path (no `XLOG_USE_DEVICE_RUNTIME`, no
+  `XLOG_USE_RECORDED_OPS`, one runtime per thread, no v0.6
+  code in the call chain). Bug class: pre-existing
+  same-process multi-executor concurrency against one CUDA
+  primary context. Tracked under v0.7.0 "Concurrency
+  Hardening" in `ROADMAP.md`. The v0.6.0 release gate is
+  **A4 fork-isolated stress + cert suite + umbrella ×50**,
+  not "A3 zero drift".
+- **`test_provider_launch_recorder --test-threads=8`** shows
+  9/42 `*_survives_drop_and_reuse` failures (was 23/42 at
+  baseline `8cc0882c`). Pre-existing pattern from
+  cross-runtime mempool aliasing under intra-binary test
+  parallelism. Production gate spec is `--test-threads=1`,
+  which is clean.
+
+### Release Validation (gates green on `b1560674`)
+
+- `cargo fmt --check`: clean.
+- `git diff --check`: clean.
+- Legacy cert suite: 206/206 in 20.22s.
+- Runtime+recorded cert suite
+  (`XLOG_USE_DEVICE_RUNTIME=1 XLOG_USE_RECORDED_OPS=1`):
+  206/206 in 16.56s.
+- Umbrella ×50 (`real_world_tests --test-threads=8` under
+  recorded runtime): **50/50**.
+- Workspace `--tests --exclude pyxlog --release
+  --test-threads=1`: 142 result lines, no failures.
+
+> **Note:** All items below are post-v0.5.0 work. Items in
+> `[Unreleased]` between the v0.5.0 tag and the v0.6.0 tag are
+> reflected in the v0.6.0 release entry above.
+
 ## [Unreleased] — targeting v0.6.0
 
-> **Note:** All items below are post-v0.5.0 work (42 commits since the `v0.5.0` tag). They are
-> not part of the v0.5.0 release.
+> Empty: v0.6.0 has been released, see entry above.
 
 ## [0.5.2](https://github.com/BrainyBlaze/xlog/compare/xlog-cli-v0.5.0...xlog-cli-v0.5.2) — 2026-04-20
 
