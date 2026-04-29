@@ -566,7 +566,12 @@ to v0.6.x — see "v0.6.x Deferred From v0.5.5" below.
 
 - [x] Replace host-side multi-column full-row dedup/difference fallback with GPU-native deterministic set algebra. (#50)
 - [x] Add strict D2H guardrails for deterministic Datalog evaluation. (#49)
-- [ ] Preserve deterministic mixed execution when binary joins, recursive rules, and future WCOJ rules coexist.
+- [ ] Preserve deterministic mixed execution when binary joins,
+      recursive rules, and future WCOJ rules coexist. **Deferred
+      to v0.6.1** — the binary-join + recursive determinism part
+      is in place today (semi-naive + stratified evaluation in
+      `xlog-runtime`); the WCOJ side is a v0.6.1 prerequisite,
+      not a v0.5.5 closure item.
 - [ ] Add query progress reporting API.
 
 ### xlog-cuda
@@ -578,14 +583,33 @@ to v0.6.x — see "v0.6.x Deferred From v0.5.5" below.
 
 ### Bounded Exact Induction
 
-- [ ] Integrate native exact-induction backend into the downstream tensorized ILP consumer path.
-- [ ] Reproduce the downstream 449/449 liveness benchmark with native exact induction.
-- [ ] Add committed `kernels/ilp_exact.ptx` artifact once the kernel packaging policy is finalized and aligned with the existing ILP-family kernel convention.
+- [ ] Integrate native exact-induction backend into the
+      downstream tensorized ILP consumer path. (Native CUDA
+      kernel `kernels/ilp_exact.cu`, manifest registration, and
+      Python wrapper `crates/pyxlog/src/ilp_exact.rs` exist; the
+      downstream tensorized consumer integration is the missing
+      piece.)
+- [ ] Reproduce the downstream 449/449 liveness benchmark with
+      native exact induction. (Referenced as a historical
+      Phase 0d baseline in `crates/pyxlog/python/pyxlog/ilp/exact_induce.py:111`;
+      no current reproduction harness.)
+- [ ] Add committed `kernels/ilp_exact.ptx` artifact once the
+      kernel packaging policy is finalized and aligned with the
+      existing ILP-family kernel convention. (The `.cu` is
+      committed; the `.ptx` is built but not checked in, unlike
+      the rest of the ILP-family.)
 
 ### Python and CLI
 
-- [ ] Add Python type stubs for IDE support.
+- [x] Add Python type stubs for IDE support.
+      (`crates/pyxlog/python/pyxlog/__init__.pyi`,
+      `crates/pyxlog/python/pyxlog/_native.pyi`, plus
+      `crates/pyxlog/python/pyxlog/py.typed` marker file.)
 - [ ] Add per-call Python memory limit configuration.
+      (`MemoryBudget::with_limit(config.memory_bytes)` is
+      applied at provider construction in
+      `crates/pyxlog/src/lib.rs:205`; per-call override on
+      individual `evaluate*` calls is not surfaced.)
 - [ ] Add CLI explain/plan visualization.
 
 ### Tests and Certification
@@ -611,7 +635,10 @@ to v0.6.x — see "v0.6.x Deferred From v0.5.5" below.
 - [ ] Public release only after downstream widened-frontier stress replay is clean.
 - [x] Public release only after recursive deterministic set operations have zero data-plane D2H transfers. (#50, #52)
 - [ ] Public release only after binary-join and multi-way stress benchmark baselines are captured.
-- [ ] Public release only after docs distinguish release, source-build, and development install paths.
+- [x] Public release only after docs distinguish release,
+      source-build, and development install paths. (See
+      `README.md:115` Source install / `README.md:133` GitHub
+      release binary install / `README.md:139` PyPI install.)
 
 ### v0.6.x Deferred From v0.5.5
 
@@ -733,10 +760,15 @@ execution.
 - [x] Migrate the fused `compare+scan+compact` filter path
       (`u32`, `f64`) to the recorded discipline. (slice #3,
       `filter_fused_scan_recorded`)
-- [ ] Migrate `compact_buffer_by_mask` (host-mask compact entry) to the
-      recorded discipline.
-- [ ] Migrate ILP / ILP-exact view helpers and operators to propagate
-      runtime block identity and use recorded launches.
+- [ ] **Decision pending for v0.6.0 scope.** Migrate
+      `compact_buffer_by_mask` (host-mask compact entry) to the
+      recorded discipline. Has no current consumer that requires
+      it; defer to v0.6.x unless a release consumer materializes.
+- [ ] **Decision pending for v0.6.0 scope.** Migrate ILP /
+      ILP-exact view helpers and operators to propagate runtime
+      block identity and use recorded launches. Required only
+      if downstream tensorized ILP integration (still v0.5.5
+      open item) becomes a v0.6.0 deliverable; otherwise defer.
 - [x] Migrate sort operator surface to recorded launches against
       `launch_stream`. (slice #5, `sort_recorded` — narrow to
       U32 / Symbol keys; multi-type recorded sort deferred.)
@@ -814,13 +846,22 @@ execution.
       --test-threads=1` is clean (141 result lines on
       `77fd4948`); the dedicated cert suite still needs to be
       run against the runtime-backed dispatch path explicitly.
-- [ ] **Known residual** (documented, not a release blocker):
-      `cargo test -p xlog-cuda --test
-      test_provider_launch_recorder -- --test-threads=8` shows
-      9/42 `*_survives_drop_and_reuse` failures (was 23/42 at
-      baseline). Pre-existing pattern from cross-runtime
-      mempool aliasing under intra-binary test parallelism.
-      Gate spec is `--test-threads=1`, which is clean.
+
+### Known Non-Blocking Residuals
+
+These are documented limitations that do NOT gate v0.6.0
+release. They are tracked here so they cannot quietly become
+blockers later.
+
+- `cargo test -p xlog-cuda --test
+  test_provider_launch_recorder -- --test-threads=8` shows
+  9/42 `*_survives_drop_and_reuse` failures (was 23/42 at
+  baseline `8cc0882c`). Pre-existing pattern from cross-runtime
+  mempool aliasing under intra-binary test parallelism (each
+  test builds its own `XlogDeviceRuntime`; they share the CUDA
+  primary context). Production gate spec is `--test-threads=1`,
+  which is clean. Full cross-runtime address coordination is
+  out of scope for v0.6.0.
 
 ### Documentation
 
@@ -867,6 +908,32 @@ execution.
 - [ ] Public release only after the A3 / A4 stress reproducer
       suite observes zero use-after-free / stream-misuse
       failures.
+
+### v0.6.0 Release Blockers Remaining
+
+Distilled from the items above. Every other v0.6.0 box is
+either checked or scoped as deferred / non-blocking residual.
+
+1. **Formal cert harness for the recorded launch discipline.**
+   Run `cargo test -p xlog-cuda-tests --test
+   certification_suite --release` against a runtime-backed
+   manager with `XLOG_USE_RECORDED_OPS=1`; the existing 50/50
+   umbrella covers the integration tests but the dedicated
+   cert suite is still pending.
+2. **A3 / A4 multi-fork stress harness** beyond the focused
+   MT sort+hash-join regression already merged.
+3. **Operator-author migration docs + runtime-stack docs.**
+   Both items in the Documentation subsection.
+4. **Decisions on host-mask compact migration and ILP /
+   ILP-exact recorded migration.** Either land them in v0.6.0
+   or formally defer to v0.6.x with named consumer triggers.
+
+Items NOT on the blocker list (deferred / out of scope):
+host-mask compact migration without a consumer, ILP-exact
+without downstream tensorized integration, multi-type
+recorded sort, key-based dedup recorded migration, LogSumExp
+GroupBy recorded migration, WCOJ. These were enumerated in
+the section above with deferral reasons.
 
 ## v0.6.1 - Worst-Case Optimal Joins
 
