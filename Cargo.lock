@@ -2416,6 +2416,8 @@ name = "xlog-integration"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "rand 0.8.6",
+ "rand_chacha 0.3.1",
  "xlog-core",
  "xlog-cuda",
  "xlog-gpu",

@@ -14,6 +14,10 @@ xlog-logic.workspace = true
 xlog-runtime.workspace = true
 bytemuck = "1.14"
 
+[dev-dependencies]
+rand = "0.8"
+rand_chacha = "0.3"
+
 [[bin]]
 name = "xlog_run"
 path = "src/bin/xlog_run.rs"
@@ -36,4 +40,9 @@ harness = true
 [[test]]
 name = "real_world_tests"
 path = "tests/real_world_tests.rs"
+harness = true
+
+[[test]]
+name = "test_a3_a4_stress"
+path = "tests/test_a3_a4_stress.rs"
 harness = true
