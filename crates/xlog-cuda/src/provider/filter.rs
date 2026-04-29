@@ -175,7 +175,10 @@ impl super::CudaKernelProvider {
     /// recorded as reads BEFORE preflight; every fresh
     /// runtime-backed allocation (`d_mask`, `d_prefix_sum`,
     /// `d_block_sums`, `d_out_count`, each `dst_col`) recorded
-    /// via `write` BEFORE preflight (snapshot drops the borrow so kernel `&mut` borrows after preflight remain valid) enqueue.
+    /// via `write` BEFORE preflight; the recorder snapshots
+    /// block identity at record time and drops the source
+    /// borrow, so kernel `&mut` borrows after preflight remain
+    /// valid before the kernels enqueue.
     ///
     /// # Panics
     /// `T::filter_scan_phase1_kernel()` must be `Some` —

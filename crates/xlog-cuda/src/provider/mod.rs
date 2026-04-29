@@ -1447,7 +1447,7 @@ impl CudaKernelProvider {
                 )
                 .map_err(|e| {
                     XlogError::Kernel(format!(
-                        "multiblock_scan_u32_inplace_on_stream: record_block_use \
+                        "multiblock_scan_u32_inplace_on_stream: finish_block_use \
                          for intermediate block_sums failed: {}",
                         e
                     ))
@@ -1596,7 +1596,7 @@ impl CudaKernelProvider {
                 )
                 .map_err(|e| {
                     XlogError::Kernel(format!(
-                        "multiblock_scan_u32_view_inplace_on_stream: record_block_use \
+                        "multiblock_scan_u32_view_inplace_on_stream: finish_block_use \
                      for intermediate block_sums failed: {}",
                         e
                     ))

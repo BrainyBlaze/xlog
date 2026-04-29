@@ -5938,7 +5938,7 @@ impl super::CudaKernelProvider {
                     .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
                     .map_err(|e| {
                         XlogError::Kernel(format!(
-                            "build_hash_table_v2_on_stream: record_block_use failed: {}",
+                            "build_hash_table_v2_on_stream: finish_block_use failed: {}",
                             e
                         ))
                     })?;
@@ -6097,7 +6097,7 @@ impl super::CudaKernelProvider {
                     .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
                     .map_err(|e| {
                         XlogError::Kernel(format!(
-                            "gather_buffer_by_indices_on_stream: record_block_use \
+                            "gather_buffer_by_indices_on_stream: finish_block_use \
                          (dst_col) failed: {}",
                             e
                         ))
@@ -8040,7 +8040,7 @@ impl super::CudaKernelProvider {
                     .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
                     .map_err(|e| {
                         XlogError::Kernel(format!(
-                            "hash_join_v2_recorded (left_outer): record_block_use \
+                            "hash_join_v2_recorded (left_outer): finish_block_use \
                          (left col {}) failed: {}",
                             col_idx, e
                         ))
@@ -8133,7 +8133,7 @@ impl super::CudaKernelProvider {
                     .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
                     .map_err(|e| {
                         XlogError::Kernel(format!(
-                            "hash_join_v2_recorded (left_outer): record_block_use \
+                            "hash_join_v2_recorded (left_outer): finish_block_use \
                          (right col {}) failed: {}",
                             col_idx, e
                         ))
@@ -9387,7 +9387,7 @@ impl super::CudaKernelProvider {
                     .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
                     .map_err(|e| {
                         XlogError::Kernel(format!(
-                            "indexed left_outer: record_block_use (left col {}) failed: {}",
+                            "indexed left_outer: finish_block_use (left col {}) failed: {}",
                             col_idx, e
                         ))
                     })?;
@@ -9465,7 +9465,7 @@ impl super::CudaKernelProvider {
                     .finish_block_use(BlockId::from_block(b), launch_stream, Access::Write)
                     .map_err(|e| {
                         XlogError::Kernel(format!(
-                            "indexed left_outer: record_block_use (right col {}) failed: {}",
+                            "indexed left_outer: finish_block_use (right col {}) failed: {}",
                             col_idx, e
                         ))
                     })?;

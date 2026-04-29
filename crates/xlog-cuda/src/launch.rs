@@ -92,10 +92,11 @@
 //! Permissive mode skips external columns silently, matching
 //! the legacy-buffer policy.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use crate::device_runtime::{
-    Access, BlockId, DeviceBlock, ResourceError, ResourceResult, StreamId, XlogDeviceRuntime,
+    Access, BlockId, DeviceBlock, Generation, ResourceError, ResourceResult, StreamId,
+    XlogDeviceRuntime,
 };
 
 /// Recorder construction mode.
@@ -370,30 +371,7 @@ impl LaunchRecorder {
             ));
         }
 
-        // Dedup: collapse multiple registrations of the same
-        // (ptr, generation) into one prepare call with the
-        // strongest access. Read + Write -> ReadWrite; Write +
-        // Read -> ReadWrite; Read + Read -> Read; etc.
-        // HashSet on ptr alone would be wrong if a (rare) ABA
-        // delivered two different generations at the same ptr,
-        // but inside a single recorder lifetime the generations
-        // would only differ if the caller deallocated and
-        // reallocated mid-record — which is itself a bug the
-        // generation guard would catch at prepare time. Keying
-        // on ptr keeps the fast path simple.
-        let mut seen: HashSet<u64> = HashSet::with_capacity(self.uses.len());
-        let mut deduped: Vec<RecordedUse> = Vec::with_capacity(self.uses.len());
-        for use_ in &self.uses {
-            if seen.insert(use_.block.ptr) {
-                deduped.push(*use_);
-            } else {
-                // Find the existing entry and upgrade access if needed.
-                if let Some(existing) = deduped.iter_mut().find(|u| u.block.ptr == use_.block.ptr) {
-                    existing.access = combine_access(existing.access, use_.access);
-                }
-            }
-        }
-
+        let deduped = dedup_uses(&self.uses);
         for use_ in &deduped {
             runtime.prepare_block_use(use_.block, self.launch_stream, use_.access)?;
         }
@@ -444,26 +422,50 @@ impl LaunchRecorder {
             ));
         }
 
-        // Dedup identically to preflight so finish state
-        // mirrors prepare state. See preflight for rationale.
-        let mut seen: HashSet<u64> = HashSet::with_capacity(self.uses.len());
-        let mut deduped: Vec<RecordedUse> = Vec::with_capacity(self.uses.len());
-        for use_ in &self.uses {
-            if seen.insert(use_.block.ptr) {
-                deduped.push(*use_);
-            } else if let Some(existing) =
-                deduped.iter_mut().find(|u| u.block.ptr == use_.block.ptr)
-            {
-                existing.access = combine_access(existing.access, use_.access);
-            }
-        }
-
+        let deduped = dedup_uses(&self.uses);
         for use_ in &deduped {
             runtime.finish_block_use(use_.block, self.launch_stream, use_.access)?;
         }
         self.committed = true;
         Ok(())
     }
+}
+
+/// Collapse multiple registrations of the same block into one
+/// use with the strongest access.
+///
+/// The dedup key is `(ptr, generation, device_ordinal)` — NOT
+/// `ptr` alone. ABA reuse inside a single recorder is rare but
+/// possible (record use of buffer X, drop X, allocate a new
+/// block reusing X's address, record THAT) and a ptr-only key
+/// would incorrectly merge those two distinct uses. Keying by
+/// the full identity tuple lets the prepare/finish path see
+/// each generation's events independently; the runtime's
+/// generation guard then catches any stale id at the resource
+/// boundary.
+///
+/// Access combine: Read+Write → ReadWrite; otherwise the
+/// strongest of the two operands wins.
+fn dedup_uses(uses: &[RecordedUse]) -> Vec<RecordedUse> {
+    let mut by_id: HashMap<(u64, Generation, u32), usize> = HashMap::with_capacity(uses.len());
+    let mut deduped: Vec<RecordedUse> = Vec::with_capacity(uses.len());
+    for use_ in uses {
+        let key = (
+            use_.block.ptr,
+            use_.block.generation,
+            use_.block.device_ordinal,
+        );
+        match by_id.get(&key) {
+            Some(&idx) => {
+                deduped[idx].access = combine_access(deduped[idx].access, use_.access);
+            }
+            None => {
+                by_id.insert(key, deduped.len());
+                deduped.push(*use_);
+            }
+        }
+    }
+    deduped
 }
 
 /// Strongest-access lattice: ReadWrite >= Write/Read; Write+Read = ReadWrite.
@@ -766,6 +768,68 @@ mod tests {
         rec.write(&buf);
         rec.preflight(&runtime).expect("preflight");
         rec.commit(&runtime).expect("commit");
+    }
+
+    /// Locks the dedup key: `(ptr, generation, device_ordinal)`,
+    /// not `ptr` alone. Two `RecordedUse`s sharing a ptr but
+    /// differing in generation MUST be treated as distinct
+    /// entries — otherwise an ABA reuse inside a single recorder
+    /// would silently collapse an event for the new allocation
+    /// onto the old block's prepare/finish chain.
+    #[test]
+    fn dedup_keys_on_full_block_id_not_ptr_alone() {
+        // Construct two RecordedUses with the same ptr but
+        // distinct generations — directly drive `dedup_uses` so
+        // the test is deterministic and does not require ABA to
+        // actually occur on real CUDA.
+        let block_a = BlockId {
+            ptr: 0xdead_beef,
+            generation: Generation(1),
+            alloc_stream: StreamId::DEFAULT,
+            device_ordinal: 0,
+        };
+        let block_b = BlockId {
+            ptr: 0xdead_beef,
+            generation: Generation(2),
+            alloc_stream: StreamId::DEFAULT,
+            device_ordinal: 0,
+        };
+        let uses = vec![
+            RecordedUse {
+                block: block_a,
+                access: Access::Read,
+                label: "read",
+            },
+            RecordedUse {
+                block: block_b,
+                access: Access::Write,
+                label: "write",
+            },
+        ];
+        let deduped = dedup_uses(&uses);
+        assert_eq!(deduped.len(), 2, "ABA generations must NOT collapse");
+        assert_eq!(deduped[0].block.generation, Generation(1));
+        assert_eq!(deduped[0].access, Access::Read);
+        assert_eq!(deduped[1].block.generation, Generation(2));
+        assert_eq!(deduped[1].access, Access::Write);
+
+        // Same ptr + same generation + duplicate access must
+        // collapse into one entry with combined access.
+        let same_id = vec![
+            RecordedUse {
+                block: block_a,
+                access: Access::Read,
+                label: "read",
+            },
+            RecordedUse {
+                block: block_a,
+                access: Access::Write,
+                label: "write",
+            },
+        ];
+        let collapsed = dedup_uses(&same_id);
+        assert_eq!(collapsed.len(), 1);
+        assert_eq!(collapsed[0].access, Access::ReadWrite);
     }
 
     #[test]
