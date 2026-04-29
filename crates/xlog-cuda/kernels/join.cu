@@ -416,6 +416,31 @@ extern "C" __global__ void hash_join_total_from_scan(
 }
 
 /**
+ * Derive a u8 unmatched-probe-row mask from the CSM
+ * `per_probe_count` array. Used by the LeftOuter CSM path
+ * (`hash_join_left_outer_v2_count_scan_materialize_recorded`)
+ * to feed the recorded compact tail and produce
+ * `unmatched_left` deterministically.
+ *
+ * `mask[tid] = 1` if `tid < num_probe AND per_probe_count[tid] == 0`,
+ * else `0`. Slots in `[num_probe, probe_cap)` are zeroed
+ * (they don't correspond to logical probe rows).
+ */
+extern "C" __global__ void hash_join_csm_unmatched_mask(
+    const uint32_t* __restrict__ per_probe_count,
+    const uint32_t* __restrict__ num_probe_device,
+    uint32_t probe_cap,
+    uint8_t* __restrict__ out_unmatched_mask
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= probe_cap) return;
+    uint32_t num_probe = *num_probe_device;
+    if (num_probe > probe_cap) num_probe = probe_cap;
+    out_unmatched_mask[tid] =
+        (tid < num_probe && per_probe_count[tid] == 0u) ? (uint8_t)1u : (uint8_t)0u;
+}
+
+/**
  * Semi-join: mark probe rows that have any match.
  * @param probe_hashes Hash values for probe side
  * @param num_probe Number of probe rows

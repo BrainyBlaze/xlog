@@ -57,6 +57,7 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "hash_join_probe_v2_count_per_row",
             "hash_join_probe_v2_materialize",
             "hash_join_total_from_scan",
+            "hash_join_csm_unmatched_mask",
             "hash_join_semi",
             "hash_join_anti",
             "init_hash_table",
