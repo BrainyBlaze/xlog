@@ -415,9 +415,12 @@ fn compile_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|e| e.into_inner())
 }
 
-fn run_workload_once(p: GraphParams) -> Result<u64, String> {
-    let fx = build_runtime_fixture()
-        .ok_or_else(|| format!("build_runtime_fixture for {}", p.label()))?;
+/// Run one workload iter against a CALLER-PROVIDED fixture.
+/// The caller controls the fixture lifetime — fresh-per-iter,
+/// per-thread, or shared across threads — so the diagnostic
+/// matrix can isolate cross-runtime churn from shared-runtime
+/// concurrency.
+fn run_workload_in(fx: &RuntimeFixture, p: GraphParams) -> Result<u64, String> {
     let (program, fact_relation) = match p.workload {
         Workload::Friends => (FRIENDS_PROGRAM, "friend"),
         Workload::Reach => (REACH_PROGRAM, "edge"),
@@ -460,6 +463,55 @@ fn run_workload_once(p: GraphParams) -> Result<u64, String> {
         .ok_or_else(|| format!("derived {} missing for {}", derived, p.label()))?;
     let mut pairs = read_pairs(&fx.provider, dst);
     Ok(checksum_pairs(&mut pairs))
+}
+
+/// Original convenience: build a fresh runtime fixture for one
+/// iter. Equivalent to mode `per_iter` in the diagnostic
+/// matrix. Used by the reference-table builder and A4 children
+/// (where per-iter fresh is the desired semantics).
+fn run_workload_once(p: GraphParams) -> Result<u64, String> {
+    let fx = build_runtime_fixture()
+        .ok_or_else(|| format!("build_runtime_fixture for {}", p.label()))?;
+    run_workload_in(&fx, p)
+}
+
+/// Diagnostic-matrix fixture-mode selector for A3 only. Set via
+/// `XLOG_A3_FIXTURE_MODE` to one of:
+///   * `per_iter` (default) — every iter builds a fresh runtime
+///     fixture. Tests cross-runtime-churn under one CUDA primary
+///     context.
+///   * `per_thread` — each thread builds ONE fixture, reuses it
+///     across all iters. Isolates whether single-runtime
+///     thread-of-N usage is safe.
+///   * `shared` — one process-wide fixture shared across all
+///     threads. Isolates whether one runtime under N concurrent
+///     callers is safe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum A3FixtureMode {
+    PerIter,
+    PerThread,
+    Shared,
+}
+
+impl A3FixtureMode {
+    fn from_env() -> Self {
+        match std::env::var("XLOG_A3_FIXTURE_MODE")
+            .as_deref()
+            .map(str::trim)
+        {
+            Ok("per_thread") => A3FixtureMode::PerThread,
+            Ok("shared") => A3FixtureMode::Shared,
+            _ => A3FixtureMode::PerIter,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            A3FixtureMode::PerIter => "per_iter",
+            A3FixtureMode::PerThread => "per_thread",
+            A3FixtureMode::Shared => "shared",
+        }
+    }
 }
 
 // ---------------------------------------------------------------
@@ -544,18 +596,24 @@ fn run_a3(base_seed: u64, reference: &[(GraphParams, u64)]) -> Vec<StressFailure
     let reference_arc = Arc::new(reference_map);
 
     // Pre-warm CUDA kernel modules in the parent thread before
-    // spawning A3 workers. The first launch of a kernel module
-    // on the CUDA primary context is not concurrency-safe in
-    // cudarc / the underlying driver — concurrent first-launch
-    // attempts from N threads produce per-thread checksum drift
-    // that is NOT a recorded-launch / stream-safety issue. By
-    // running one of every workload in the parent before the
-    // spawn, all modules are already loaded into the primary
-    // context cache by the time worker threads launch their
-    // first kernel.
+    // spawning A3 workers. First-launch module load on the CUDA
+    // primary context is fragile under concurrent attempts.
     for &p in reference.iter().map(|(p, _)| p) {
         let _ = run_workload_once(p);
     }
+
+    let mode = A3FixtureMode::from_env();
+    eprintln!("[A3] fixture mode = {}", mode.name());
+
+    // For `Shared` mode, build the single fixture in the parent
+    // and clone its Arcs into each thread.
+    let shared_fixture: Option<Arc<RuntimeFixture>> = if mode == A3FixtureMode::Shared {
+        Some(Arc::new(
+            build_runtime_fixture().expect("build_runtime_fixture for Shared mode"),
+        ))
+    } else {
+        None
+    };
 
     let failures: Arc<Mutex<Vec<StressFailure>>> = Arc::new(Mutex::new(Vec::new()));
     let pass_counter = Arc::new(AtomicUsize::new(0));
@@ -566,10 +624,40 @@ fn run_a3(base_seed: u64, reference: &[(GraphParams, u64)]) -> Vec<StressFailure
         let reference = Arc::clone(&reference);
         let failures = Arc::clone(&failures);
         let pass_counter = Arc::clone(&pass_counter);
+        let shared = shared_fixture.as_ref().map(Arc::clone);
         handles.push(thread::spawn(move || {
             let schedule = schedule_for_worker(base_seed, tid, A3_ITERS_PER_THREAD);
+
+            // PerThread: each thread builds ONE fixture, reuses
+            // for every iter. PerIter / Shared: handled inside
+            // the loop.
+            let per_thread_fx: Option<RuntimeFixture> = match mode {
+                A3FixtureMode::PerThread => Some(match build_runtime_fixture() {
+                    Some(fx) => fx,
+                    None => {
+                        failures.lock().unwrap().push(StressFailure {
+                            worker_kind: "A3",
+                            worker_id: tid,
+                            iter: 0,
+                            params: schedule[0],
+                            base_seed,
+                            detail: "build_runtime_fixture for PerThread mode failed".to_string(),
+                        });
+                        return;
+                    }
+                }),
+                _ => None,
+            };
+
             for (it, p) in schedule.iter().enumerate() {
-                match run_workload_once(*p) {
+                let result = match mode {
+                    A3FixtureMode::PerIter => run_workload_once(*p),
+                    A3FixtureMode::PerThread => {
+                        run_workload_in(per_thread_fx.as_ref().unwrap(), *p)
+                    }
+                    A3FixtureMode::Shared => run_workload_in(shared.as_ref().unwrap(), *p),
+                };
+                match result {
                     Ok(cs) => {
                         let expected = reference
                             .get(p)
@@ -807,15 +895,25 @@ fn a4_child_marker() {
 // ---------------------------------------------------------------
 
 fn parent_env_check() -> Result<u64, String> {
-    let runtime = std::env::var("XLOG_USE_DEVICE_RUNTIME")
+    // Diagnostic-mode escape hatch: when set, the harness skips
+    // the recorded-runtime env-var gate so the same binary can
+    // be re-run in modes that explicitly turn one or both env
+    // vars OFF (e.g., to compare drift on the legacy path).
+    let diag = std::env::var("XLOG_A3_DIAGNOSTIC")
         .ok()
         .filter(|v| !v.trim().is_empty() && v != "0")
-        .ok_or_else(|| "XLOG_USE_DEVICE_RUNTIME not set".to_string())?;
-    let recorded = std::env::var("XLOG_USE_RECORDED_OPS")
-        .ok()
-        .filter(|v| !v.trim().is_empty() && v != "0")
-        .ok_or_else(|| "XLOG_USE_RECORDED_OPS not set".to_string())?;
-    let _ = (runtime, recorded);
+        .is_some();
+    if !diag {
+        let runtime = std::env::var("XLOG_USE_DEVICE_RUNTIME")
+            .ok()
+            .filter(|v| !v.trim().is_empty() && v != "0")
+            .ok_or_else(|| "XLOG_USE_DEVICE_RUNTIME not set".to_string())?;
+        let recorded = std::env::var("XLOG_USE_RECORDED_OPS")
+            .ok()
+            .filter(|v| !v.trim().is_empty() && v != "0")
+            .ok_or_else(|| "XLOG_USE_RECORDED_OPS not set".to_string())?;
+        let _ = (runtime, recorded);
+    }
     let base_seed: u64 = std::env::var(BASE_SEED_ENV)
         .ok()
         .and_then(|s| s.parse().ok())
