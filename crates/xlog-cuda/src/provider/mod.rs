@@ -786,6 +786,14 @@ pub struct CudaKernelProvider {
     /// sufficient because the recorder serializes work on it;
     /// multiple operations chain through commit-order events.
     recorded_op_stream: OnceLock<crate::device_runtime::StreamId>,
+    /// Test/diagnostic-only counter for CSM (count-scan-materialize)
+    /// invocations selected by the recorded hash-join dispatch.
+    /// **Not part of any public stability guarantee** — its existence,
+    /// shape, exposure, and increment semantics may change in any
+    /// release. Used by the env-dispatch test suite to prove that CSM
+    /// was actually selected for eligible Inner / LeftOuter cases (and
+    /// not selected for Semi / Anti or when the env gate is off).
+    csm_invocations: AtomicU64,
 }
 
 #[derive(Default)]
@@ -864,6 +872,7 @@ impl CudaKernelProvider {
             strict_deterministic_d2h: AtomicBool::new(false),
             deterministic_d2h_violations: AtomicU64::new(0),
             recorded_op_stream: OnceLock::new(),
+            csm_invocations: AtomicU64::new(0),
         })
     }
 
@@ -984,6 +993,32 @@ impl CudaKernelProvider {
     /// key columns.
     pub(crate) fn use_recorded_hash_join_env() -> bool {
         Self::env_flag("XLOG_USE_RECORDED_HASH_JOIN") || Self::env_flag("XLOG_USE_RECORDED_OPS")
+    }
+
+    /// Whether the recorded CSM (count-scan-materialize)
+    /// dispatch is enabled via env. Reads `XLOG_USE_RECORDED_CSM`
+    /// or `XLOG_USE_RECORDED_OPS`. CSM is a sub-strategy of the
+    /// recorded hash-join: it is consulted only after the
+    /// recorded path has already been selected, and only for
+    /// `JoinType::Inner` / `JoinType::LeftOuter` where a CSM
+    /// implementation exists. `Semi` / `Anti` are not affected.
+    pub(crate) fn use_recorded_csm_env() -> bool {
+        Self::env_flag("XLOG_USE_RECORDED_CSM") || Self::env_flag("XLOG_USE_RECORDED_OPS")
+    }
+
+    /// Test/diagnostic-only telemetry: number of times the recorded
+    /// hash-join dispatch routed through a CSM (count-scan-materialize)
+    /// method since this provider was created. Increments once per
+    /// dispatched call across all four CSM methods (Inner / LeftOuter,
+    /// non-indexed / indexed). Used by `test_csm_env_dispatch` to
+    /// prove dispatch selection.
+    ///
+    /// **Not part of any public stability guarantee.** Production
+    /// callers must not depend on this counter's existence, shape,
+    /// or increment semantics; it may be renamed, hidden, or removed
+    /// in any release without notice.
+    pub fn csm_invocations(&self) -> u64 {
+        self.csm_invocations.load(Ordering::Relaxed)
     }
 
     /// Lazily acquire one non-default launch stream from the
