@@ -298,6 +298,76 @@ fn wcoj_triangle_u64_legacy_manager_rejected() {
 }
 
 #[test]
+fn wcoj_triangle_u64_no_count_vector_d2h_under_strict_gate() {
+    // U64 sibling of the U32 device-scan gate test. Same
+    // contract: under the strict deterministic-D2H gate,
+    // `wcoj_triangle_u64_recorded` must succeed (the only
+    // device→host path is `dtoh_scalar_untracked` for the
+    // total scalar, which the gate explicitly whitelists)
+    // and trip zero violations. Any future regression that
+    // routes a column-sized D2H back through `download_column_*`
+    // or `dtoh_sync_copy_into_tracked` will trip the gate
+    // and fail this test.
+    let Some(fix) = make_runtime_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    // Mirror the multi-triangle correctness fixture, shifted
+    // into hi-half u64 space so the kernel does real count +
+    // scan + materialize work rather than the empty early-out.
+    let big = (u32::MAX as u64) + 1;
+    let e_xy: Vec<(u64, u64)> = vec![
+        (big + 1, big + 2),
+        (big + 1, big + 3),
+        (big + 1, big + 4),
+        (big + 2, big + 3),
+        (big + 2, big + 4),
+        (big + 3, big + 4),
+        (big + 5, big + 6),
+        (big + 5, big + 7),
+        (big + 6, big + 7),
+    ];
+    let e_yz: Vec<(u64, u64)> = vec![
+        (big + 2, big + 3),
+        (big + 2, big + 4),
+        (big + 3, big + 4),
+        (big + 6, big + 7),
+    ];
+    let e_xz: Vec<(u64, u64)> = vec![
+        (big + 1, big + 3),
+        (big + 1, big + 4),
+        (big + 2, big + 4),
+        (big + 3, big + 4),
+        (big + 5, big + 7),
+    ];
+
+    let buf_xy = upload_binary_u64(&fix.memory, &e_xy);
+    let buf_yz = upload_binary_u64(&fix.memory, &e_yz);
+    let buf_xz = upload_binary_u64(&fix.memory, &e_xz);
+
+    fix.provider.reset_deterministic_d2h_violations();
+    fix.provider.enable_strict_deterministic_d2h();
+    let launch_stream = fix.pool.acquire().expect("launch_stream");
+    let result = fix
+        .provider
+        .wcoj_triangle_u64_recorded(&buf_xy, &buf_yz, &buf_xz, launch_stream);
+    fix.provider.disable_strict_deterministic_d2h();
+
+    let buf = result.expect(
+        "wcoj_triangle_u64_recorded must succeed under strict deterministic-D2H gate \
+         (only the dtoh_scalar_untracked total is allowed)",
+    );
+    assert_eq!(buf.num_rows() as usize, 5, "expected 5 triangles");
+    let violations = fix.provider.deterministic_d2h_violation_count();
+    assert_eq!(
+        violations, 0,
+        "WCOJ U64 device-scan path must not trigger any deterministic-D2H gate violations; got {}",
+        violations
+    );
+}
+
+#[test]
 fn wcoj_triangle_u64_rejects_mixed_width_inputs() {
     // Negative shape: caller passes a U32-typed buffer to the U64
     // entry. The provider must reject rather than silently
