@@ -17,6 +17,11 @@ bytemuck = "1.14"
 [dev-dependencies]
 rand = "0.8"
 rand_chacha = "0.3"
+# cudarc::driver::sys is needed for raw column D2H in the
+# WCOJ dispatch test. Production code uses
+# `dtoh_scalar_untracked` and recorded column primitives;
+# the test downloads result columns for assertion.
+cudarc = { workspace = true }
 
 [[bin]]
 name = "xlog_run"
