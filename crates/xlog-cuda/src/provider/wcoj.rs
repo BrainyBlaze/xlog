@@ -4,8 +4,13 @@
 //! [`CudaKernelProvider::wcoj_triangle_u32_recorded`]. The slice is
 //! intentionally narrow:
 //!
-//!   * **U32 only.** Caller's three relations must each have
-//!     a 2-column [`xlog_core::Schema`] of `(U32, U32)`.
+//!   * **4-byte keys only.** Caller's three relations must each
+//!     have a 2-column [`xlog_core::Schema`]; each column may be
+//!     [`xlog_core::ScalarType::U32`] or
+//!     [`xlog_core::ScalarType::Symbol`] (both share the same
+//!     4-byte physical layout, and the kernel does
+//!     bit-equality joins). Cross-relation type compatibility
+//!     is enforced by the planner upstream.
 //!   * **Sorted, deduped inputs.** Caller-supplied:
 //!     - `e_xy` lex-sorted+deduped by (X, Y),
 //!     - `e_yz` lex-sorted+deduped by (Y, Z),
@@ -97,7 +102,10 @@ impl CudaKernelProvider {
     /// # Errors
     /// * `XlogError::Kernel` if the manager has no runtime
     ///   (`with_runtime` is required), the input is not 2-column,
-    ///   any column is not [`ScalarType::U32`], or any inner
+    ///   any column is not [`ScalarType::U32`] or
+    ///   [`ScalarType::Symbol`] (both share the same 4-byte
+    ///   physical layout, so the underlying sort/dedup primitives
+    ///   handle either with no kernel changes), or any inner
     ///   sort/dedup primitive fails.
     pub fn wcoj_layout_u32_recorded(
         &self,
@@ -114,7 +122,10 @@ impl CudaKernelProvider {
                     .to_string(),
             ));
         }
-        // 2-column u32 contract.
+        // 2-column 4-byte-key contract: U32 or Symbol per column.
+        // Both share the same 4-byte physical layout
+        // (`ScalarType::size_bytes` == 4); the sort+dedup
+        // primitives we delegate to already accept either.
         if input.arity() != 2 {
             return Err(XlogError::Kernel(format!(
                 "wcoj_layout_u32_recorded: input must be 2-column, got arity {}",
@@ -128,9 +139,9 @@ impl CudaKernelProvider {
                     col_idx
                 ))
             })?;
-            if !matches!(ty, ScalarType::U32) {
+            if !matches!(ty, ScalarType::U32 | ScalarType::Symbol) {
                 return Err(XlogError::Kernel(format!(
-                    "wcoj_layout_u32_recorded: column {} must be U32, got {:?}",
+                    "wcoj_layout_u32_recorded: column {} must be U32 or Symbol, got {:?}",
                     col_idx, ty
                 )));
             }
@@ -143,14 +154,28 @@ impl CudaKernelProvider {
     }
 
     /// Evaluate `tri(X, Y, Z) :- e_xy(X,Y), e_yz(Y,Z), e_xz(X,Z)`
-    /// on already-sorted, already-deduped binary u32 relations.
-    /// See module-level docs for the full contract.
+    /// on already-sorted, already-deduped binary 4-byte-key
+    /// relations. See module-level docs for the full contract.
+    ///
+    /// Each column may be [`ScalarType::U32`] or
+    /// [`ScalarType::Symbol`] — both share the same 4-byte
+    /// physical layout, so the kernel reads the bits unchanged.
+    /// Cross-relation type compatibility (e.g., that Y is the
+    /// same type in `e_xy.col1` and `e_yz.col0`) is the
+    /// planner's responsibility upstream; this entry only
+    /// enforces width.
+    ///
+    /// The output schema preserves per-head-position scalar types
+    /// from the inputs:
+    ///   * `out.col0` = `e_xy.col0` type (X)
+    ///   * `out.col1` = `e_xy.col1` type (Y)
+    ///   * `out.col2` = `e_yz.col1` type (Z)
     ///
     /// # Errors
     /// * `XlogError::Kernel` if the manager has no runtime
     ///   (`with_runtime` is required), the launch stream does
-    ///   not resolve, an input is not 2-column u32, or any kernel
-    ///   launch fails.
+    ///   not resolve, an input is not 2-column with U32/Symbol
+    ///   columns, or any kernel launch fails.
     pub fn wcoj_triangle_u32_recorded(
         &self,
         e_xy: &CudaBuffer,
@@ -176,7 +201,10 @@ impl CudaKernelProvider {
             })?;
 
         // ---------------------------------------------------------
-        // Validate input shape: every relation must be 2-column u32.
+        // Validate input shape: every relation must be 2-column
+        // with U32 or Symbol columns (both 4-byte physical).
+        // Cross-relation type compatibility is enforced upstream
+        // by the planner / hypergraph type inference.
         // ---------------------------------------------------------
         for (label, buf) in [("e_xy", e_xy), ("e_yz", e_yz), ("e_xz", e_xz)] {
             if buf.arity() != 2 {
@@ -193,20 +221,28 @@ impl CudaKernelProvider {
                         label, col_idx
                     ))
                 })?;
-                if !matches!(ty, ScalarType::U32) {
+                if !matches!(ty, ScalarType::U32 | ScalarType::Symbol) {
                     return Err(XlogError::Kernel(format!(
-                        "wcoj_triangle_u32_recorded: {} column {} must be U32, got {:?}",
+                        "wcoj_triangle_u32_recorded: {} column {} must be U32 or Symbol, got {:?}",
                         label, col_idx, ty
                     )));
                 }
             }
         }
 
-        // Output schema is fixed: (X: U32, Y: U32, Z: U32).
+        // Output schema mirrors the inputs' per-head-position
+        // scalar types: out.col0 = X = e_xy.col0; out.col1 = Y =
+        // e_xy.col1; out.col2 = Z = e_yz.col1. Cross-relation
+        // type compatibility (X type same in e_xz.col0, Y same
+        // in e_yz.col0, Z same in e_xz.col1) is the planner's
+        // job; we trust it here.
+        let x_type = e_xy.schema.column_type(0).expect("validated above");
+        let y_type = e_xy.schema.column_type(1).expect("validated above");
+        let z_type = e_yz.schema.column_type(1).expect("validated above");
         let out_schema = Schema::new(vec![
-            ("col0".to_string(), ScalarType::U32),
-            ("col1".to_string(), ScalarType::U32),
-            ("col2".to_string(), ScalarType::U32),
+            ("col0".to_string(), x_type),
+            ("col1".to_string(), y_type),
+            ("col2".to_string(), z_type),
         ]);
 
         // CudaBuffer::num_rows() returns `row_cap` (allocation
@@ -544,13 +580,18 @@ impl CudaKernelProvider {
     }
 }
 
-/// Borrow a u32 column out of a 2-column u32 [`CudaBuffer`] as a
-/// typed `TrackedCudaSlice<u32>` reference for kernel binding.
+/// Borrow a 4-byte-key column out of a 2-column [`CudaBuffer`] as
+/// a typed `TrackedCudaSlice<u32>` reference for kernel binding.
 ///
 /// Each `CudaColumn` is stored as raw bytes (`TrackedCudaSlice<u8>`
 /// for owned columns); the kernel signature expects `u32*`. This
 /// helper does the reinterpretation behind a single chokepoint
-/// so the unsafety is colocated.
+/// so the unsafety is colocated. Accepts U32 *or* Symbol columns
+/// — both share the same 4-byte physical layout, and the kernel
+/// performs equality joins on bit-identical values regardless of
+/// the logical scalar type. The cross-relation type-compatibility
+/// check (so symbol IDs only join symbol IDs, not raw u32s with
+/// the same bit pattern) is enforced by the planner upstream.
 fn column_u32<'a>(buf: &'a CudaBuffer, col_idx: usize) -> Result<&'a TrackedCudaSlice<u32>> {
     let col = buf.column(col_idx).ok_or_else(|| {
         XlogError::Kernel(format!(
@@ -560,18 +601,21 @@ fn column_u32<'a>(buf: &'a CudaBuffer, col_idx: usize) -> Result<&'a TrackedCuda
     })?;
     match col {
         CudaColumn::Owned(slice) => {
-            // SAFETY: The buffer was validated to have ScalarType::U32
-            // at this column; the byte slice's len is therefore a
-            // multiple of 4 and aligned. The transmute below
-            // changes the element type from u8 to u32 without
-            // touching the underlying raw_ptr / runtime_block,
-            // both of which are agnostic to the element type.
-            // The returned reference's lifetime is tied to `buf`,
-            // so the original column outlives every use.
+            // SAFETY: The buffer was validated to have either
+            // ScalarType::U32 or ScalarType::Symbol at this
+            // column. Both have `size_bytes() == 4`, so the
+            // byte slice's len is a multiple of 4 and aligned.
+            // The transmute below changes the element type
+            // from u8 to u32 without touching the underlying
+            // raw_ptr / runtime_block, both of which are
+            // agnostic to the element type. The returned
+            // reference's lifetime is tied to `buf`, so the
+            // original column outlives every use.
             unsafe { Ok(&*(slice as *const TrackedCudaSlice<u8> as *const TrackedCudaSlice<u32>)) }
         }
         _ => Err(XlogError::Kernel(
-            "wcoj_triangle_u32_recorded: u32 columns must be Owned-variant CudaColumns".to_string(),
+            "wcoj_triangle_u32_recorded: 4-byte-key columns must be Owned-variant CudaColumns"
+                .to_string(),
         )),
     }
 }

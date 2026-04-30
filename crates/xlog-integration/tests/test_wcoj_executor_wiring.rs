@@ -473,3 +473,104 @@ fn wiring_gate_on_legacy_manager_falls_back_silently() {
         "binary-join chain must produce some triangles"
     );
 }
+
+// ---------------------------------------------------------------
+// Symbol support — Symbol shares u32's 4-byte physical layout, so
+// the kernel + RIR matcher accept Symbol triangles unchanged.
+// ---------------------------------------------------------------
+
+/// Symbol-typed sibling of `upload_binary_u32`. Same on-device
+/// bytes; only the schema differs.
+fn upload_binary_symbol(memory: &Arc<GpuMemoryManager>, rows: &[(u32, u32)]) -> CudaBuffer {
+    let n = rows.len() as u32;
+    let col0_host: Vec<u32> = rows.iter().map(|(a, _)| *a).collect();
+    let col1_host: Vec<u32> = rows.iter().map(|(_, b)| *b).collect();
+    let bytes_per_col = (n as usize) * std::mem::size_of::<u32>();
+    let mut col0 = memory.alloc::<u8>(bytes_per_col).expect("alloc col0");
+    let mut col1 = memory.alloc::<u8>(bytes_per_col).expect("alloc col1");
+    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc d_num_rows");
+    let device = memory.device().inner();
+    if !col0_host.is_empty() {
+        let col0_bytes: Vec<u8> = col0_host.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let col1_bytes: Vec<u8> = col1_host.iter().flat_map(|v| v.to_le_bytes()).collect();
+        device
+            .htod_sync_copy_into(&col0_bytes, &mut col0)
+            .expect("htod col0");
+        device
+            .htod_sync_copy_into(&col1_bytes, &mut col1)
+            .expect("htod col1");
+    }
+    device
+        .htod_sync_copy_into(&[n], &mut d_num_rows)
+        .expect("htod d_num_rows");
+    let schema = Schema::new(vec![
+        ("col0".to_string(), ScalarType::Symbol),
+        ("col1".to_string(), ScalarType::Symbol),
+    ]);
+    CudaBuffer::from_columns_with_host_count(
+        vec![col0.into(), col1.into()],
+        n as u64,
+        d_num_rows,
+        schema,
+        n,
+    )
+}
+
+#[test]
+fn wiring_gate_on_symbol_triangle_dispatches_and_preserves_schema() {
+    // Same triangle topology + bits as the U32 wiring test, but
+    // the input buffers (registered via `put_relation`) carry
+    // Symbol-typed schemas. The executor's RIR matcher accepts
+    // Symbol via the widened `is_two_col_u32`, the WCOJ kernel
+    // reads the same 4-byte bits unchanged, and the output
+    // buffer's schema preserves Symbol per column (no silent
+    // widening to U32).
+    //
+    // We don't compare against a gate-off reference here — the
+    // existing binary-join chain may apply schema policies
+    // (Union, dedup) that are unrelated to this slice. The cert
+    // is narrower: gate-on dispatches, output schema is correct,
+    // row count is the expected 5.
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let inputs = triangle_fixture();
+
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile(TRIANGLE_SOURCE).expect("compile");
+    let config = RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(true));
+    let mut executor = Executor::new_with_config(Arc::clone(&fix.provider), config);
+    for (name, rel_id) in compiler.rel_ids() {
+        executor.register_relation(*rel_id, name);
+    }
+    for (name, rows) in &inputs {
+        let buf = upload_binary_symbol(&fix.memory, rows);
+        executor.put_relation(name, buf);
+    }
+    let _ = executor.execute_plan(&plan).expect("execute_plan");
+    let counter = executor.wcoj_triangle_dispatch_count();
+    assert_eq!(
+        counter, 1,
+        "gate=Some(true) on Symbol-typed triangle inputs must dispatch exactly once; \
+         got counter {counter}"
+    );
+
+    // Schema preservation: the kernel built its output schema
+    // from the inputs' per-column types, so Symbol-input → Symbol-output.
+    let tri_buf = executor.store().get("tri").expect("tri present");
+    assert_eq!(tri_buf.schema.column_type(0), Some(ScalarType::Symbol));
+    assert_eq!(tri_buf.schema.column_type(1), Some(ScalarType::Symbol));
+    assert_eq!(tri_buf.schema.column_type(2), Some(ScalarType::Symbol));
+
+    // Row count: the kernel's bit-equality joins produce the
+    // same 5 triangles as the U32 path on the same bit-pattern
+    // fixture.
+    let rows = download_triples(tri_buf);
+    assert_eq!(
+        rows.len(),
+        5,
+        "expected 5 triangles on this fixture; got {}",
+        rows.len()
+    );
+}

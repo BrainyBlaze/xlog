@@ -172,15 +172,24 @@ pub(super) fn match_triangle_rir(body: &RirNode) -> Option<TriangleRirMatch> {
     })
 }
 
-/// True when `buf` has 2 columns and both are
-/// [`xlog_core::ScalarType::U32`].
+/// True when `buf` has 2 columns and both are 4-byte keys
+/// ([`xlog_core::ScalarType::U32`] or
+/// [`xlog_core::ScalarType::Symbol`]). Both share the same 4-byte
+/// physical layout; the WCOJ kernel reads either identically.
+/// Cross-relation type compatibility (e.g., that a Symbol column
+/// doesn't accidentally join with a U32 column with the same bit
+/// pattern) is the planner's job — but the executor only sees
+/// the lowered RIR by this point. For v1 we trust that the
+/// existing pre-WCOJ binary-join path produces the same result
+/// either way, so any divergence is caught by the
+/// row-set-equality checks in the wiring/cert tests.
 fn is_two_col_u32(buf: &CudaBuffer) -> bool {
     if buf.arity() != 2 {
         return false;
     }
     for col_idx in 0..2 {
         match buf.schema.column_type(col_idx) {
-            Some(xlog_core::ScalarType::U32) => {}
+            Some(xlog_core::ScalarType::U32) | Some(xlog_core::ScalarType::Symbol) => {}
             _ => return false,
         }
     }

@@ -268,15 +268,20 @@ fn head_pos_of_var(head_vars: &[String], term: &Term) -> Option<usize> {
     }
 }
 
-/// True when `buf` has 2 columns and both columns are
-/// [`ScalarType::U32`].
+/// True when `buf` has 2 columns and both columns are 4-byte
+/// keys ([`ScalarType::U32`] or [`ScalarType::Symbol`]). Both
+/// share the same 4-byte physical layout, so the WCOJ kernel
+/// reads them identically; the cross-relation type-compatibility
+/// check (so symbol IDs don't accidentally join with raw u32s)
+/// is enforced by the planner upstream via
+/// `xlog_logic::hypergraph::analyze_typed`.
 fn is_two_col_u32(buf: &CudaBuffer) -> bool {
     if buf.arity() != 2 {
         return false;
     }
     for col_idx in 0..2 {
         match buf.schema.column_type(col_idx) {
-            Some(ScalarType::U32) => {}
+            Some(ScalarType::U32) | Some(ScalarType::Symbol) => {}
             _ => return false,
         }
     }
