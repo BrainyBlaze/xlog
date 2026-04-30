@@ -46,6 +46,7 @@ pub mod eligibility;
 pub mod explain;
 pub mod fixpoint;
 pub mod ir;
+pub mod plan;
 pub mod reference;
 pub mod scc;
 pub mod typed;
@@ -55,6 +56,7 @@ pub use eligibility::{analyze, analyze_typed, Boundary, Eligibility, WCOJ_SUPPOR
 pub use explain::explain;
 pub use fixpoint::{evaluate_fixpoint, FixpointConfig, FixpointError};
 pub use ir::{Hyperedge, HypergraphRule, Vertex, VertexId};
+pub use plan::{explain_plans, plan_rule, plan_rules, PlanError, RulePlan};
 pub use reference::{evaluate_rule, RefEvalError, RefRelation, RefRelationStore, RefValue};
 pub use scc::{evaluate_scc_fixpoint, SccFixpointError};
 pub use typed::{evaluate_fixpoint_typed, evaluate_rule_typed, evaluate_scc_fixpoint_typed};

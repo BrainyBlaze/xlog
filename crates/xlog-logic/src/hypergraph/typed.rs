@@ -209,7 +209,10 @@ fn typed_gate(rule: &Rule, relations: &RefRelationStore) -> Result<(), RefEvalEr
 /// atom that types the same variable to a *different* type
 /// surfaces as [`RefEvalError::ConflictingVariableType`] with both
 /// triples populated. Subsequent agreeing atoms are silent.
-fn derive_vertex_types(
+///
+/// `pub(super)` so [`super::plan`] can reuse the same conflict
+/// detection without duplicating the source-walk logic.
+pub(super) fn derive_vertex_types(
     rule: &Rule,
     relations: &RefRelationStore,
 ) -> Result<BTreeMap<String, ScalarType>, RefEvalError> {
