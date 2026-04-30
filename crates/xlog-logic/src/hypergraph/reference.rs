@@ -167,6 +167,36 @@ pub enum RefEvalError {
     /// `BodyIsExpr` boundary, so this is a defensive arm; if it
     /// fires the analyzer let an `IsExpr` rule through erroneously.
     IsExprNotSupported,
+    /// A variable appears in two body atoms whose relation schemas
+    /// disagree on the column type at the variable's position.
+    ///
+    /// Detected by [`super::evaluate_rule_typed`] (and the typed
+    /// fixpoint variants) at the typed-gate phase, before
+    /// evaluation. Without this check, an evaluator would either
+    /// silently coerce values across types or fail later with a
+    /// less precise error pointing at a row, not at the rule.
+    ///
+    /// The two `(predicate, position, type)` triples are recorded
+    /// in *first-encountered* order: walking body atoms in source
+    /// order, the first atom that types this variable wins
+    /// `first_*`; the second atom whose type differs gets
+    /// `second_*`. Subsequent agreeing atoms are silent.
+    ConflictingVariableType {
+        /// Variable name as it appears in the source rule.
+        var: String,
+        /// Predicate of the first atom that typed `var`.
+        first_predicate: String,
+        /// 0-based argument position within `first_predicate`.
+        first_position: usize,
+        /// Schema type at `(first_predicate, first_position)`.
+        first_type: ScalarType,
+        /// Predicate of the conflicting atom.
+        second_predicate: String,
+        /// 0-based argument position within `second_predicate`.
+        second_position: usize,
+        /// Schema type at `(second_predicate, second_position)`.
+        second_type: ScalarType,
+    },
 }
 
 /// Evaluate `rule` against `relations` using `order` for variable

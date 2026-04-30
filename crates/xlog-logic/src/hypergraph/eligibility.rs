@@ -110,12 +110,18 @@ pub enum Boundary {
     /// A join-key variable has a [`ScalarType`] not supported by
     /// the executor under consideration.
     ///
-    /// **Not yet produced by [`analyze`] in PR 1.** Variable types
-    /// are inferred by [`crate::typeinfer`] during lowering and are
-    /// not available at hypergraph construction. PR 2 introduces a
-    /// typed-analyze entry point that takes a per-variable type map
-    /// and emits this boundary; the variant is defined now so the
-    /// public surface is stable across PR boundaries.
+    /// Emitted by [`analyze_typed`] when a join-key vertex has a
+    /// known type (derived from a body atom's relation schema —
+    /// see [`crate::hypergraph::typed::evaluate_rule_typed`] and
+    /// the typed fixpoint variants) that is outside
+    /// [`WCOJ_SUPPORTED_KEY_TYPES`]. Structural [`analyze`] never
+    /// emits this variant.
+    ///
+    /// **Locked policy (PR 5):** unknown ≠ unsupported. A vertex
+    /// whose type cannot be derived from the supplied
+    /// [`crate::hypergraph::RefRelationStore`] is **not** flagged
+    /// here. Transitive type propagation across recursive SCC
+    /// predicates is a follow-up slice.
     UnsupportedKeyType {
         /// Source name of the variable whose type is unsupported.
         var: String,
@@ -214,10 +220,15 @@ pub const WCOJ_SUPPORTED_KEY_TYPES: &[ScalarType] =
 /// vertices (those appearing in exactly one hyperedge) are NOT
 /// checked — their types do not affect WCOJ planning.
 ///
-/// Vertices missing from `vertex_types` are NOT flagged; the typed
-/// analyzer treats absence as "type unknown, do not block on
-/// type", deferring the policy choice to PR 4+ when type inference
-/// is wired in. Tests construct fully-populated maps.
+/// **Locked policy (PR 5): unknown ≠ unsupported.** Vertices
+/// missing from `vertex_types` are NOT flagged. The
+/// [`crate::hypergraph::typed`] gate populates this map via
+/// schema-driven derivation from a
+/// [`crate::hypergraph::RefRelationStore`]; vertices anchored only
+/// through predicates absent from that store (e.g. an SCC
+/// predicate referenced recursively before its first iteration)
+/// stay absent and pass through. Transitive type propagation
+/// across recursive predicates is a follow-up slice.
 pub fn analyze_typed(
     hg: &HypergraphRule,
     vertex_types: &BTreeMap<String, ScalarType>,
