@@ -351,6 +351,7 @@ fn plan_rule_conflicting_types_returns_hard_error() {
             assert_eq!(second_predicate, "q");
             assert_eq!(second_type, ScalarType::Symbol);
         }
+        other => panic!("expected ConflictingVariableType, got {other:?}"),
     }
 }
 
@@ -446,6 +447,7 @@ fn plan_rules_short_circuits_on_first_plan_error() {
         PlanError::ConflictingVariableType { var, .. } => {
             assert_eq!(var, "X");
         }
+        other => panic!("expected ConflictingVariableType, got {other:?}"),
     }
 }
 

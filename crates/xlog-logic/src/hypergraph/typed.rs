@@ -14,16 +14,29 @@
 //!    join-key vertex becomes an [`RefEvalError::Ineligible`].
 //! 3. Delegate to the structural evaluator.
 //!
-//! ## Locked policy: unknown ≠ unsupported
+//! ## Locked policy: unknowable-after-inference ≠ unsupported
 //!
 //! A "missing vertex type" means *not derivable from base relation
-//! schemas in this slice*, **not** "supported." The typed gate
-//! rejects only known-unsupported join-key types. Vertices anchored
-//! solely through predicates absent from `base_relations` (e.g.
-//! SCC predicates derived during a fixpoint) carry no type at the
-//! gate; per the policy locked by `evaluate_*_recursive_only_*`
-//! tests, they pass through. Transitive SCC type propagation is a
-//! follow-up slice.
+//! schemas* AND *not derivable from PR 8 transitive SCC type
+//! inference*, **not** "supported." The typed gate rejects only
+//! known-unsupported join-key types.
+//!
+//! For the **single-rule** entry point ([`evaluate_rule_typed`]),
+//! types come from `base_relations` only — there is no group
+//! context for inference. A self-referencing or recursive rule
+//! used through this path therefore retains the original
+//! "unknown ≠ unsupported" behavior on its recursive body atoms;
+//! callers needing inference-aware typing should drive
+//! [`evaluate_fixpoint_typed`] or [`evaluate_scc_fixpoint_typed`].
+//!
+//! For the **group-aware** entry points ([`evaluate_fixpoint_typed`],
+//! [`evaluate_scc_fixpoint_typed`]), PR 8 inference runs at entry
+//! and feeds inferred SCC predicate schemas alongside
+//! `base_relations` into per-rule type derivation. Cyclic-only
+//! predicates (no base anchor anywhere in the rule graph) produce
+//! all-`None` inferred schemas and pass the gate; this is the
+//! narrowed policy now locked by
+//! `cyclic_only_predicate_still_passes_typed_gate_locked_policy`.
 //!
 //! ## Why a separate module
 //!
@@ -140,16 +153,23 @@ pub fn evaluate_fixpoint_typed(
     order: &dyn VariableOrder,
     config: &FixpointConfig,
 ) -> Result<RefRelation, FixpointError> {
+    // ### Structural precedence pre-flight (PR 9 contract repair)
+    //
+    // Inference back-propagates from each rule's head into its
+    // group key — if any rule in the input is misgrouped relative
+    // to `target_predicate`, that back-propagation could surface
+    // as `InferenceConflict` before structural validation has a
+    // chance to emit `RuleNotForTarget`. Defer to the structural
+    // evaluator BEFORE running inference, so the diagnostic order
+    // matches PR 5/PR 6 expectations.
+    if rules.iter().any(|r| r.head.predicate != target_predicate) {
+        return evaluate_fixpoint(rules, base_relations, target_predicate, order, config);
+    }
     // Inference treats target_predicate as a single-element SCC
     // group so the same machinery covers single-target fixpoint
     // and full SCC fixpoint.
     let mut group: BTreeMap<String, Vec<Rule>> = BTreeMap::new();
-    let target_rules: Vec<Rule> = rules
-        .iter()
-        .filter(|r| r.head.predicate == target_predicate)
-        .cloned()
-        .collect();
-    group.insert(target_predicate.to_string(), target_rules);
+    group.insert(target_predicate.to_string(), rules.to_vec());
     let inferred = match infer_scc_predicate_schemas(&group, base_relations) {
         Ok(s) => s,
         Err(InferenceError::ConflictingPredicateColumnType {
@@ -179,12 +199,7 @@ pub fn evaluate_fixpoint_typed(
         }
     };
     for (rule_index, rule) in rules.iter().enumerate() {
-        if rule.head.predicate != target_predicate {
-            // Defer to structural `evaluate_fixpoint` so the caller
-            // sees `RuleNotForTarget` for this rule, not a typed-gate
-            // verdict. See "Structural-error precedence" above.
-            continue;
-        }
+        // Pre-flight has guaranteed every rule heads target_predicate.
         if let Err(source) = typed_gate_with_inference(rule, base_relations, &inferred) {
             return Err(FixpointError::RuleEval { rule_index, source });
         }
@@ -232,6 +247,21 @@ pub fn evaluate_scc_fixpoint_typed(
     order: &dyn VariableOrder,
     config: &FixpointConfig,
 ) -> Result<RefRelationStore, SccFixpointError> {
+    // ### Structural precedence pre-flight (PR 9 contract repair)
+    //
+    // Inference back-propagates from each rule's head into its
+    // group key. If any rule is misgrouped (its head predicate
+    // doesn't equal its `BTreeMap` group key), the back-prop
+    // could surface as `InferenceConflict` before structural
+    // validation has a chance to emit `RuleHeadPredicateMismatch`.
+    // Defer to the structural evaluator BEFORE running inference,
+    // so the diagnostic order matches PR 5/PR 6 expectations.
+    if rules
+        .iter()
+        .any(|(predicate, group)| group.iter().any(|r| &r.head.predicate != predicate))
+    {
+        return evaluate_scc_fixpoint(rules, base_relations, order, config);
+    }
     let inferred = match infer_scc_predicate_schemas(rules, base_relations) {
         Ok(s) => s,
         Err(InferenceError::ConflictingPredicateColumnType {
@@ -258,12 +288,7 @@ pub fn evaluate_scc_fixpoint_typed(
     };
     for (predicate, group) in rules.iter() {
         for (rule_index, rule) in group.iter().enumerate() {
-            if &rule.head.predicate != predicate {
-                // Defer to structural `evaluate_scc_fixpoint` so
-                // `RuleHeadPredicateMismatch` wins. See
-                // "Structural-error precedence" above.
-                continue;
-            }
+            // Pre-flight has guaranteed every rule heads its group key.
             if let Err(source) = typed_gate_with_inference(rule, base_relations, &inferred) {
                 return Err(SccFixpointError::RuleEval {
                     predicate: predicate.clone(),
