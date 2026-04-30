@@ -50,6 +50,7 @@ cargo bench -- --baseline baseline_name
 |----------|-------------|---------|
 | `CUDA_VISIBLE_DEVICES` | GPU device ordinal | `0` |
 | `XLOG_BENCH_MEMORY_MB` | GPU memory budget | `4096` |
+| `WCOJ_BENCH_FULL` | Run the full WCOJ triangle matrix (adds 100K + 250K row sizes) | `0` |
 
 ---
 
@@ -104,6 +105,33 @@ Tests GROUP BY with COUNT aggregate.
 - 1M rows with 100K groups
 
 Aggregation throughput is tracked in groups/sec, but the repository does not currently publish a single public pass/fail threshold for this case.
+
+### WCOJ Triangle (env-gated, `xlog-integration`)
+
+**Location:** `crates/xlog-integration/benches/wcoj_triangle_bench.rs`
+
+Compares the GPU 3-way Worst-Case Optimal Join dispatch against the existing binary-join chain on identical fixtures, across `u32`, `u64`, and a Symbol sanity case. The dispatch gate is forced via `RuntimeConfig::with_wcoj_triangle_dispatch(Some(bool))` inside the bench (not the env var, to keep the measured path process-global-free). The env equivalent for production callers is `XLOG_USE_WCOJ_TRIANGLE_U32=1`.
+
+**Run:**
+```bash
+# Default matrix (~25 cells; few minutes)
+cargo bench -p xlog-integration --bench wcoj_triangle_bench
+
+# Full matrix adds 100K + 250K rows per relation (slow)
+WCOJ_BENCH_FULL=1 cargo bench -p xlog-integration --bench wcoj_triangle_bench
+```
+
+| Bench Group | Fixture | Targets |
+|-------------|---------|--------|
+| `wcoj_triangle/uniform` | Uniform Erdős-Rényi (key range = rows/10) | Average-case baseline |
+| `wcoj_triangle/superhub` | Deterministic super-hub (~50% of edges concentrated on one Y / one X) | Histogram-targetable per-thread workload imbalance |
+| `wcoj_triangle/empty` | Three relations over disjoint key ranges | Count→scan→empty fast path |
+| `wcoj_triangle/symbol_sanity` | One uniform 10K case for `Symbol` | Symbol shares u32's physical layout — sanity only |
+
+**Methodology:**
+- Timed region = `Executor::execute_plan` only. Fixture generation, GPU upload, and Compiler+Executor instantiation are in `iter_batched`'s setup closure.
+- Each `(width, fixture, size)` cell pre-runs an untimed correctness check: `gate=Some(false)` (binary-join) and `gate=Some(true)` (WCOJ) must produce identical row sets, and the dispatch counter must be 0 vs 1 respectively. Bench panics on any divergence.
+- Baseline numbers and the defensible target for the future skew/histogram scheduler are recorded in `docs/evidence/2026-05-01-wcoj-bench-baseline/`.
 
 ### Probabilistic Benchmarks (`xlog-prob`)
 

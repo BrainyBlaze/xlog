@@ -22,6 +22,13 @@ rand_chacha = "0.3"
 # `dtoh_scalar_untracked` and recorded column primitives;
 # the test downloads result columns for assertion.
 cudarc = { workspace = true }
+# Criterion drives the WCOJ triangle bench. Dev-dep only —
+# `cargo test --workspace` does not pull this in for tests.
+criterion = "0.5"
+
+[[bench]]
+name = "wcoj_triangle_bench"
+harness = false
 
 [[bin]]
 name = "xlog_run"

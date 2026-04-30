@@ -76,9 +76,8 @@ fn make_fix() -> Option<Fix> {
         MemoryBudget::with_limit(limit_bytes as u64),
         Arc::clone(&runtime),
     ));
-    let provider = Arc::new(
-        CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).ok()?,
-    );
+    let provider =
+        Arc::new(CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).ok()?);
     Some(Fix {
         device,
         runtime,
