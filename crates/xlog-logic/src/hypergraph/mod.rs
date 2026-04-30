@@ -52,6 +52,7 @@
 pub mod eligibility;
 pub mod explain;
 pub mod fixpoint;
+pub mod inference;
 pub mod ir;
 pub mod plan;
 pub mod reference;
@@ -62,6 +63,7 @@ pub mod var_order;
 pub use eligibility::{analyze, analyze_typed, Boundary, Eligibility, WCOJ_SUPPORTED_KEY_TYPES};
 pub use explain::explain;
 pub use fixpoint::{evaluate_fixpoint, FixpointConfig, FixpointError};
+pub use inference::{infer_scc_predicate_schemas, InferenceError, InferredSchemas};
 pub use ir::{Hyperedge, HypergraphRule, Vertex, VertexId};
 pub use plan::{explain_plans, plan_rule, plan_rules, PlanError, RulePlan};
 pub use reference::{evaluate_rule, RefEvalError, RefRelation, RefRelationStore, RefValue};

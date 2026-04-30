@@ -197,6 +197,39 @@ pub enum RefEvalError {
         /// Schema type at `(second_predicate, second_position)`.
         second_type: ScalarType,
     },
+    /// Two rules contributing to the same head predicate disagree
+    /// on the type of the same column under the PR 8 SCC type
+    /// inference pass.
+    ///
+    /// Distinct from [`Self::ConflictingVariableType`], which is a
+    /// within-rule body conflict (one rule, two body atoms typing
+    /// the same variable differently). This variant is a
+    /// cross-rule head-column conflict, detected by
+    /// [`super::infer_scc_predicate_schemas`] when back-propagating
+    /// from rule heads to head-predicate column types.
+    ///
+    /// Surfaced through the typed evaluators via
+    /// [`super::FixpointError::RuleEval`] /
+    /// [`super::SccFixpointError::RuleEval`]; their `rule_index`
+    /// field carries `second_rule_index` (the rule whose typing
+    /// caused the conflict to be detected; the first rule's typing
+    /// was already accepted by then).
+    InferenceConflict {
+        /// Head predicate name where the conflict was detected.
+        predicate: String,
+        /// 0-based column index where types disagree.
+        column: usize,
+        /// Rule index (within the predicate's group) that first
+        /// typed the column.
+        first_rule_index: usize,
+        /// Type derived from the first rule's body.
+        first_type: ScalarType,
+        /// Rule index (within the predicate's group) that
+        /// disagrees.
+        second_rule_index: usize,
+        /// Type derived from the conflicting rule's body.
+        second_type: ScalarType,
+    },
 }
 
 /// Evaluate `rule` against `relations` using `order` for variable
