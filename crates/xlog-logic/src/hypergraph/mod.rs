@@ -47,6 +47,7 @@ pub mod explain;
 pub mod fixpoint;
 pub mod ir;
 pub mod reference;
+pub mod scc;
 pub mod var_order;
 
 pub use eligibility::{analyze, analyze_typed, Boundary, Eligibility, WCOJ_SUPPORTED_KEY_TYPES};
@@ -54,4 +55,5 @@ pub use explain::explain;
 pub use fixpoint::{evaluate_fixpoint, FixpointConfig, FixpointError};
 pub use ir::{Hyperedge, HypergraphRule, Vertex, VertexId};
 pub use reference::{evaluate_rule, RefEvalError, RefRelation, RefRelationStore, RefValue};
+pub use scc::{evaluate_scc_fixpoint, SccFixpointError};
 pub use var_order::{AppearanceOrder, VariableOrder};
