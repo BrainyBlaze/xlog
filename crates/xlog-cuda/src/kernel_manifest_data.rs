@@ -444,7 +444,11 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
     KernelModuleSpec {
         cu_name: "wcoj",
         module_name: "xlog_wcoj",
-        kernels: &["wcoj_triangle_count", "wcoj_triangle_materialize"],
+        kernels: &[
+            "wcoj_triangle_count",
+            "wcoj_compute_total",
+            "wcoj_triangle_materialize",
+        ],
     },
 ];
 

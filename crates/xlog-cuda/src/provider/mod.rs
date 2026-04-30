@@ -261,6 +261,7 @@ const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 23);
 /// Kernel function names in the v0.6.2 GPU 3-way WCOJ triangle module.
 pub mod wcoj_kernels {
     pub const WCOJ_TRIANGLE_COUNT: &str = "wcoj_triangle_count";
+    pub const WCOJ_COMPUTE_TOTAL: &str = "wcoj_compute_total";
     pub const WCOJ_TRIANGLE_MATERIALIZE: &str = "wcoj_triangle_materialize";
 }
 

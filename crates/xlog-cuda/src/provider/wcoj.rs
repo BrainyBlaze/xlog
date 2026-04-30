@@ -12,19 +12,26 @@
 //!     - `e_xz` lex-sorted+deduped by (X, Z).
 //!     Physical layout construction is a separate slice — this
 //!     entry assumes the caller has already arranged input layout.
-//!   * **Two-phase count → host-scan → materialize.** Mirrors
+//!   * **Two-phase count → device-scan → materialize.** Mirrors
 //!     SRDatalog (Sun et al., arXiv 2604.20073) Section 4's
-//!     deterministic two-phase pipeline, simplified to a host-side
-//!     prefix sum for v1. Output offsets are computed before
-//!     materialization, so the kernel uses no runtime atomics on
-//!     the output.
-//!   * **Strict [`LaunchRecorder`] discipline.** Two recorders run
-//!     sequentially on the caller-supplied launch stream:
-//!     1. count recorder: reads `e_xy` / `e_yz` / `e_xz` columns
-//!        + their `d_num_rows`; writes the per-row count buffer.
-//!     2. materialize recorder: reads the same inputs + the
-//!        host-built offsets buffer; writes the three output
-//!        columns + output `d_num_rows`.
+//!     deterministic two-phase pipeline. Per-row counts are
+//!     prefix-summed *on device* via the existing recorded
+//!     `multiblock_scan_u32_inplace_on_stream` helper; the only
+//!     host visit between the two phases is a single 4-byte
+//!     `dtoh_scalar_untracked` of the inclusive total
+//!     (sanctioned metadata read, exempt from the strict
+//!     deterministic-D2H gate). The v1 count-vector D2H + host
+//!     prefix sum + offsets H2D round trip is gone.
+//!   * **Strict [`LaunchRecorder`] discipline.** Two recorders
+//!     run sequentially on the caller-supplied launch stream:
+//!     1. count+scan recorder: reads `e_xy` / `e_yz` / `e_xz`
+//!        columns + their `d_num_rows`; writes `count_buf`,
+//!        `offsets_buf`, `d_total`. Spans the count kernel,
+//!        the dtod copy `count_buf → offsets_buf`, the
+//!        device-side prefix-sum on `offsets_buf`, and
+//!        `wcoj_compute_total`.
+//!     2. materialize recorder: reads same inputs + `offsets_buf`;
+//!        writes the three output columns + output `d_num_rows`.
 //!   * **Output deterministic and lex-sorted by (X, Y, Z).** Locked
 //!     by [`tests/test_wcoj_triangle_u32.rs`].
 //!   * **Set semantics on deduped input.** If the caller violates
@@ -134,11 +141,21 @@ impl CudaKernelProvider {
         }
 
         // ---------------------------------------------------------
-        // Phase 1 (count). Pre-allocate count buffer BEFORE the
-        // recorder so kernel `&mut` borrows are unaffected by
-        // recorder lifetimes.
+        // Phase 1 (count + device scan + total). Pre-allocate
+        // every fresh buffer BEFORE the recorder so kernel `&mut`
+        // borrows are unaffected by recorder lifetimes.
+        //   * `count_buf`   — per-row triangle counts (preserved
+        //     for `wcoj_compute_total` to read counts[n-1]).
+        //   * `offsets_buf` — receives a dtod copy of `count_buf`,
+        //     then is exclusive-scanned in place to become the
+        //     per-row write offsets.
+        //   * `d_total`     — 1-element scalar holding the inclusive
+        //     total triangle count, written by `wcoj_compute_total`,
+        //     read by the host via `dtoh_scalar_untracked`.
         // ---------------------------------------------------------
         let mut count_buf = self.memory.alloc::<u32>(n_xy as usize)?;
+        let mut offsets_buf = self.memory.alloc::<u32>(n_xy as usize)?;
+        let d_total = self.memory.alloc::<u32>(1)?;
 
         let xy_col0 = column_u32(e_xy, 0)?;
         let xy_col1 = column_u32(e_xy, 1)?;
@@ -158,6 +175,8 @@ impl CudaKernelProvider {
         rec_count.read_column(e_xz.column(0).expect("xz.col0"));
         rec_count.read_column(e_xz.column(1).expect("xz.col1"));
         rec_count.write(&count_buf);
+        rec_count.write(&offsets_buf);
+        rec_count.write(&d_total);
         rec_count.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "wcoj_triangle_u32_recorded: count preflight failed: {}",
@@ -209,64 +228,87 @@ impl CudaKernelProvider {
                 })?;
         }
 
+        // dtod-async copy `count_buf → offsets_buf` on launch_stream.
+        // The scan helper runs in place; we keep `count_buf` intact
+        // so `wcoj_compute_total` can read counts[n-1] directly.
+        // SAFETY: both buffers are runtime-backed u32 slices of
+        // length `n_xy`, both sized `n_xy * 4` bytes.
+        let bytes_count = (n_xy as usize) * std::mem::size_of::<u32>();
+        unsafe {
+            let res = sys::cuMemcpyDtoDAsync_v2(
+                *offsets_buf.device_ptr(),
+                *count_buf.device_ptr(),
+                bytes_count,
+                cu_stream.cu_stream(),
+            );
+            if res != sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "wcoj_triangle_u32_recorded: dtod count_buf → offsets_buf failed: {:?}",
+                    res
+                )));
+            }
+        }
+
+        // Device-side exclusive prefix-sum on `offsets_buf` over
+        // `[0..n_xy)`. The helper is `pub(crate)` and recorded
+        // against `launch_stream` via the supplied `cu_stream` /
+        // `runtime` arguments — no host involvement.
+        self.multiblock_scan_u32_inplace_on_stream(
+            &mut offsets_buf,
+            n_xy,
+            &cu_stream,
+            launch_stream,
+            runtime,
+        )?;
+
+        // Reduce the two last elements into `d_total`.
+        // SAFETY: 4-arg signature
+        //   wcoj_compute_total(const u32* counts, const u32* offsets,
+        //                      u32 n, u32* total)
+        let total_kernel = device
+            .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_COMPUTE_TOTAL)
+            .ok_or_else(|| XlogError::Kernel("wcoj_compute_total kernel not found".to_string()))?;
+        unsafe {
+            total_kernel
+                .clone()
+                .launch_on_stream(
+                    &cu_stream,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (&count_buf, &offsets_buf, n_xy, &d_total),
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!("wcoj_compute_total launch failed: {}", e))
+                })?;
+        }
+
         rec_count.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
-                "wcoj_triangle_u32_recorded: count commit failed: {}",
+                "wcoj_triangle_u32_recorded: count+scan+total commit failed: {}",
                 e
             ))
         })?;
 
-        // ---------------------------------------------------------
-        // Host-side prefix sum + total. Drains the count kernel
-        // first so the host read is well-defined; the H2D of
-        // offsets is queued on launch_stream so the materialize
-        // kernel sees the correct offsets.
-        //
-        // For v1 we accept a control-plane D2H/H2D round trip on
-        // the count array. A device-side recorded scan is a later
-        // optimization slice.
-        // ---------------------------------------------------------
-        unsafe {
-            let res = sys::cuStreamSynchronize(cu_stream.cu_stream());
-            if res != sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "wcoj_triangle_u32_recorded: stream sync after count failed: {:?}",
-                    res
-                )));
-            }
-        }
-        let mut host_counts: Vec<u32> = vec![0; n_xy as usize];
-        unsafe {
-            let res = sys::cuMemcpyDtoH_v2(
-                host_counts.as_mut_ptr() as *mut c_void,
-                *count_buf.device_ptr(),
-                (n_xy as usize) * std::mem::size_of::<u32>(),
-            );
-            if res != sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "wcoj_triangle_u32_recorded: D2H counts failed: {:?}",
-                    res
-                )));
-            }
-        }
-        // Exclusive prefix sum + total.
-        let mut total: u64 = 0;
-        let mut host_offsets: Vec<u32> = Vec::with_capacity(n_xy as usize);
-        for &c in &host_counts {
-            if total > u32::MAX as u64 {
-                return Err(XlogError::Kernel(
-                    "wcoj_triangle_u32_recorded: total triangle count overflows u32".to_string(),
-                ));
-            }
-            host_offsets.push(total as u32);
-            total += c as u64;
-        }
-        if total > u32::MAX as u64 {
-            return Err(XlogError::Kernel(
-                "wcoj_triangle_u32_recorded: total triangle count overflows u32".to_string(),
-            ));
-        }
-        let total_rows = total as u32;
+        // Sync + sanctioned scalar D2H of the total.
+        // `dtoh_scalar_untracked` is the metadata-read path; the
+        // strict deterministic-D2H gate explicitly whitelists it.
+        cu_stream.synchronize().map_err(|e| {
+            XlogError::Kernel(format!(
+                "wcoj_triangle_u32_recorded: stream sync after total failed: {}",
+                e
+            ))
+        })?;
+        let total_rows = self
+            .dtoh_scalar_untracked::<u32>(&d_total, 0)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "wcoj_triangle_u32_recorded: read d_total failed: {}",
+                    e
+                ))
+            })?;
 
         if total_rows == 0 {
             return self.create_empty_buffer(out_schema);
@@ -274,11 +316,9 @@ impl CudaKernelProvider {
 
         // ---------------------------------------------------------
         // Phase 2 (materialize). Allocate output (now that
-        // total_rows is known on host) + offsets buf, build
-        // recorder, H2D offsets on launch_stream, launch
-        // materialize kernel on launch_stream.
+        // total_rows is known on host via the scalar metadata
+        // read), build recorder, launch materialize on launch_stream.
         // ---------------------------------------------------------
-        let offsets_buf = self.memory.alloc::<u32>(n_xy as usize)?;
         let bytes_per_col = (total_rows as usize) * std::mem::size_of::<u32>();
         let mut out_x = self.memory.alloc::<u8>(bytes_per_col)?;
         let mut out_y = self.memory.alloc::<u8>(bytes_per_col)?;
@@ -295,7 +335,7 @@ impl CudaKernelProvider {
         rec_mat.read_column(e_yz.column(1).expect("yz.col1"));
         rec_mat.read_column(e_xz.column(0).expect("xz.col0"));
         rec_mat.read_column(e_xz.column(1).expect("xz.col1"));
-        rec_mat.write(&offsets_buf);
+        rec_mat.read(&offsets_buf);
         rec_mat.write(&out_x);
         rec_mat.write(&out_y);
         rec_mat.write(&out_z);
@@ -307,25 +347,10 @@ impl CudaKernelProvider {
             ))
         })?;
 
-        // H2D offsets on launch_stream, ordered before the
-        // materialize kernel (same stream).
-        unsafe {
-            let res = sys::cuMemcpyHtoDAsync_v2(
-                *offsets_buf.device_ptr(),
-                host_offsets.as_ptr() as *const c_void,
-                (n_xy as usize) * std::mem::size_of::<u32>(),
-                cu_stream.cu_stream(),
-            );
-            if res != sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "wcoj_triangle_u32_recorded: H2D offsets failed: {:?}",
-                    res
-                )));
-            }
-        }
-        // H2D the output row count too, on launch_stream — the
-        // returned CudaBuffer's d_num_rows must reflect the
-        // host-known total.
+        // H2D the output row count on launch_stream — the returned
+        // CudaBuffer's d_num_rows must reflect the host-known total.
+        // This is a 4-byte H2D (the *only* host→device transfer in
+        // the path); it does not involve any column-sized data.
         unsafe {
             let res = sys::cuMemcpyHtoDAsync_v2(
                 *out_d_num_rows.device_ptr(),

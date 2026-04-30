@@ -486,3 +486,65 @@ fn wcoj_triangle_u32_legacy_manager_rejected() {
         msg
     );
 }
+
+#[test]
+fn wcoj_triangle_u32_no_count_vector_d2h_under_strict_gate() {
+    // Locks the device-scan slice contract: with the strict
+    // deterministic-D2H gate enabled, `wcoj_triangle_u32_recorded`
+    // must succeed and trip zero violations. The v1 (host scan)
+    // path used a raw `cuMemcpyDtoH_v2` over the count vector
+    // that bypassed the gate's chokepoints. The device-scan path
+    // replaces that with a recorded on-stream prefix-sum +
+    // a single 4-byte `dtoh_scalar_untracked` of the inclusive
+    // total — the latter is the sanctioned metadata-read path
+    // the gate explicitly whitelists.
+    //
+    // Future regressions that route a column-sized D2H back
+    // through `download_column_*` or `dtoh_sync_copy_into_tracked`
+    // will trip the gate and fail this test.
+    let Some(fix) = make_runtime_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    // Same fixture shape as the multi-triangle correctness test
+    // so the kernel does meaningful count + scan + materialize
+    // work, not the empty-input early return.
+    let e_xy: Vec<(u32, u32)> = vec![
+        (1, 2),
+        (1, 3),
+        (1, 4),
+        (2, 3),
+        (2, 4),
+        (3, 4),
+        (5, 6),
+        (5, 7),
+        (6, 7),
+    ];
+    let e_yz: Vec<(u32, u32)> = vec![(2, 3), (2, 4), (3, 4), (6, 7)];
+    let e_xz: Vec<(u32, u32)> = vec![(1, 3), (1, 4), (2, 4), (3, 4), (5, 7)];
+
+    let buf_xy = upload_binary_u32(&fix.memory, &e_xy);
+    let buf_yz = upload_binary_u32(&fix.memory, &e_yz);
+    let buf_xz = upload_binary_u32(&fix.memory, &e_xz);
+
+    fix.provider.reset_deterministic_d2h_violations();
+    fix.provider.enable_strict_deterministic_d2h();
+    let launch_stream = fix.pool.acquire().expect("launch_stream");
+    let result = fix
+        .provider
+        .wcoj_triangle_u32_recorded(&buf_xy, &buf_yz, &buf_xz, launch_stream);
+    fix.provider.disable_strict_deterministic_d2h();
+
+    let buf = result.expect(
+        "wcoj_triangle_u32_recorded must succeed under strict deterministic-D2H gate \
+         (the count-vector D2H from v1 is gone)",
+    );
+    assert_eq!(buf.num_rows() as usize, 5, "expected 5 triangles");
+    let violations = fix.provider.deterministic_d2h_violation_count();
+    assert_eq!(
+        violations, 0,
+        "WCOJ device-scan path must not trigger any deterministic-D2H gate violations; got {}",
+        violations
+    );
+}

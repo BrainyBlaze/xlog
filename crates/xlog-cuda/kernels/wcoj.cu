@@ -180,13 +180,37 @@ extern "C" __global__ void wcoj_triangle_count(
     out_counts[i] = cnt;
 }
 
+// Single-thread reducer: total = counts[n-1] + offsets[n-1].
+//
+// `offsets` is produced by an in-place exclusive prefix-sum over
+// the per-row counts (the device-side scan helper). The inclusive
+// total — i.e. the number of triangles to materialize — is
+// `offsets[n-1] + counts[n-1]`. Writing the scalar to device
+// memory means the host can use the sanctioned
+// `dtoh_scalar_untracked` chokepoint to read just the total,
+// avoiding the v1 count-vector D2H.
+extern "C" __global__ void wcoj_compute_total(
+    const uint32_t* __restrict__ counts,
+    const uint32_t* __restrict__ offsets,
+    uint32_t n,
+    uint32_t* __restrict__ total) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) {
+        return;
+    }
+    if (n == 0) {
+        *total = 0;
+        return;
+    }
+    *total = counts[n - 1] + offsets[n - 1];
+}
+
 // Per-thread materialize kernel: same lookups + intersection as
 // the count kernel, but emits (X, Y, Z) into the output columns
-// at positions derived from the host-prefix-sum of the count
-// array.
+// at positions derived from the device-side prefix-sum of the
+// count array (no host scan).
 //
 // Caller passes:
-//   * `out_offsets[i]` — exclusive-scan of `out_counts[i]`,
+//   * `out_offsets[i]` — exclusive-scan of the per-row counts,
 //     so thread `i` writes its `j`-th triangle at
 //     `out_offsets[i] + j`.
 //   * `total_rows`     — sum of all counts; the output column
