@@ -7,7 +7,7 @@
 // include!() in build.rs would interpret //! as documenting the wrong item.
 
 /// Module names matching the .cu filenames (without extension).
-/// Order matches provider/mod.rs load order. All 22 modules listed.
+/// Order matches provider/mod.rs load order. All 23 modules listed.
 pub const KERNEL_CU_NAMES: &[&str] = &[
     "join",
     "dedup",
@@ -31,6 +31,7 @@ pub const KERNEL_CU_NAMES: &[&str] = &[
     "ilp",
     "ilp_credit",
     "ilp_exact",
+    "wcoj",
 ];
 
 /// Describes a single CUDA module: the .cu file name, the runtime module name
@@ -440,6 +441,11 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
         module_name: "xlog_ilp_exact",
         kernels: &["ilp_exact_score"],
     },
+    KernelModuleSpec {
+        cu_name: "wcoj",
+        module_name: "xlog_wcoj",
+        kernels: &["wcoj_triangle_count", "wcoj_triangle_materialize"],
+    },
 ];
 
 #[cfg(test)]
@@ -465,8 +471,8 @@ mod tests {
     }
 
     #[test]
-    fn kernel_modules_count_is_22() {
-        assert_eq!(KERNEL_MODULES.len(), 22);
+    fn kernel_modules_count_is_23() {
+        assert_eq!(KERNEL_MODULES.len(), 23);
     }
 
     #[test]

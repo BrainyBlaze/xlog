@@ -32,6 +32,7 @@ mod launch_safe;
 mod probabilistic;
 mod relational;
 mod transfer;
+mod wcoj;
 
 /// Per-module PTX load timing (populated only when XLOG_WARMUP_PROFILE=1).
 #[derive(Debug, Clone, Default)]
@@ -252,9 +253,16 @@ pub const WEIGHTS_MODULE: &str = "xlog_weights";
 pub const ILP_MODULE: &str = "xlog_ilp";
 pub const ILP_CREDIT_MODULE: &str = "xlog_ilp_credit";
 pub const ILP_EXACT_MODULE: &str = "xlog_ilp_exact";
+pub const WCOJ_MODULE: &str = "xlog_wcoj";
 
-// Compile-time check: kernel manifest lists exactly 22 modules.
-const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 22);
+// Compile-time check: kernel manifest lists exactly 23 modules.
+const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 23);
+
+/// Kernel function names in the v0.6.2 GPU 3-way WCOJ triangle module.
+pub mod wcoj_kernels {
+    pub const WCOJ_TRIANGLE_COUNT: &str = "wcoj_triangle_count";
+    pub const WCOJ_TRIANGLE_MATERIALIZE: &str = "wcoj_triangle_materialize";
+}
 
 /// Kernel function names in the Monte Carlo sampling module
 pub mod mc_sample_kernels {
