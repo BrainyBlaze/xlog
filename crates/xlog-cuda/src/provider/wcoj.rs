@@ -64,6 +64,84 @@ use crate::{AsKernelParam, LaunchAsync, LaunchConfig};
 const BLOCK_SIZE: u32 = 256;
 
 impl CudaKernelProvider {
+    /// Build the sorted+deduped WCOJ physical layout for a 2-column
+    /// u32 relation.
+    ///
+    /// Output: a 2-column u32 [`CudaBuffer`] sorted lexicographically
+    /// by `(col0, col1)` and deduplicated. The output is suitable for
+    /// direct consumption by [`Self::wcoj_triangle_u32_recorded`] in
+    /// any of the three slot positions (`e_xy`, `e_yz`, `e_xz`); the
+    /// caller chooses which logical relation each input represents
+    /// by the slot it passes the layout into.
+    ///
+    /// Composes existing recorded primitives end-to-end:
+    /// [`Self::dedup_full_row_recorded`] internally invokes
+    /// [`Self::sort_recorded`] (typed multi-column radix sort on
+    /// `(col0, col1)`) followed by an on-stream
+    /// `mark_unique_full_row_bytewise` mask + counted compaction —
+    /// each primitive carries its own [`crate::launch::LaunchRecorder`]
+    /// commit and the runtime's record-all + wait-all
+    /// `last_use_events` chains the dealloc safety end-to-end.
+    ///
+    /// This entry exists for two reasons:
+    ///   1. Narrowing the input contract to 2-column u32 lets the
+    ///      WCOJ-specific call site fail fast with a clear error
+    ///      rather than the more generic dedup error if the caller
+    ///      passes the wrong arity / type.
+    ///   2. Naming the WCOJ pipeline boundary makes downstream
+    ///      callers (planner / executor wiring, cert harness)
+    ///      target the WCOJ-specific layout API rather than the
+    ///      general-purpose dedup primitive — separating concerns
+    ///      that may diverge as the WCOJ stack grows.
+    ///
+    /// # Errors
+    /// * `XlogError::Kernel` if the manager has no runtime
+    ///   (`with_runtime` is required), the input is not 2-column,
+    ///   any column is not [`ScalarType::U32`], or any inner
+    ///   sort/dedup primitive fails.
+    pub fn wcoj_layout_u32_recorded(
+        &self,
+        input: &CudaBuffer,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        // Manager must be runtime-backed — the inner
+        // dedup_full_row_recorded enforces the same constraint, but
+        // checking here gives a WCOJ-specific error message.
+        if self.memory().runtime().is_none() {
+            return Err(XlogError::Kernel(
+                "wcoj_layout_u32_recorded requires a runtime-backed \
+                 GpuMemoryManager (constructed via with_runtime)"
+                    .to_string(),
+            ));
+        }
+        // 2-column u32 contract.
+        if input.arity() != 2 {
+            return Err(XlogError::Kernel(format!(
+                "wcoj_layout_u32_recorded: input must be 2-column, got arity {}",
+                input.arity()
+            )));
+        }
+        for col_idx in 0..2 {
+            let ty = input.schema.column_type(col_idx).ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "wcoj_layout_u32_recorded: column {} type missing",
+                    col_idx
+                ))
+            })?;
+            if !matches!(ty, ScalarType::U32) {
+                return Err(XlogError::Kernel(format!(
+                    "wcoj_layout_u32_recorded: column {} must be U32, got {:?}",
+                    col_idx, ty
+                )));
+            }
+        }
+        // Delegate to the existing typed sort + full-row dedup.
+        // Both primitives are fully recorder-disciplined; the
+        // resulting CudaBuffer is sorted lex by (col0, col1) and
+        // deduplicated.
+        self.dedup_full_row_recorded(input, launch_stream)
+    }
+
     /// Evaluate `tri(X, Y, Z) :- e_xy(X,Y), e_yz(Y,Z), e_xz(X,Z)`
     /// on already-sorted, already-deduped binary u32 relations.
     /// See module-level docs for the full contract.
@@ -131,9 +209,18 @@ impl CudaKernelProvider {
             ("col2".to_string(), ScalarType::U32),
         ]);
 
-        let n_xy = e_xy.num_rows() as u32;
-        let n_yz = e_yz.num_rows() as u32;
-        let n_xz = e_xz.num_rows() as u32;
+        // CudaBuffer::num_rows() returns `row_cap` (allocation
+        // capacity), which can exceed the logical row count for
+        // primitives that compact in place (e.g. the deduped
+        // outputs of `wcoj_layout_u32_recorded`). The kernel must
+        // grid-dispatch over the LOGICAL row count, not the cap,
+        // so we prefer the host-cached count and fall back to a
+        // 4-byte `dtoh_scalar_untracked` of `d_num_rows`.
+        // `dtoh_scalar_untracked` is the sanctioned metadata-read
+        // path the strict deterministic-D2H gate whitelists.
+        let n_xy = self.logical_row_count_u32(e_xy)?;
+        let n_yz = self.logical_row_count_u32(e_yz)?;
+        let n_xz = self.logical_row_count_u32(e_xz)?;
 
         // Empty input on any side → empty result, no kernel launches.
         if n_xy == 0 || n_yz == 0 || n_xz == 0 {
@@ -433,6 +520,27 @@ impl CudaKernelProvider {
             out_schema,
             total_rows,
         ))
+    }
+}
+
+impl CudaKernelProvider {
+    /// Resolve a [`CudaBuffer`]'s logical row count to a `u32`.
+    ///
+    /// Prefers the cached host count when set (no host syscalls).
+    /// Falls back to a 4-byte `dtoh_scalar_untracked` of the
+    /// device-resident `d_num_rows` slot — the sanctioned
+    /// metadata-read path the strict deterministic-D2H gate
+    /// explicitly whitelists.
+    ///
+    /// `CudaBuffer::num_rows()` is intentionally not used here:
+    /// it returns `row_cap` (allocation capacity), which can
+    /// exceed the logical count for compact-in-place primitives
+    /// like `dedup_full_row_recorded` / `wcoj_layout_u32_recorded`.
+    fn logical_row_count_u32(&self, buf: &CudaBuffer) -> Result<u32> {
+        if let Some(c) = buf.cached_row_count() {
+            return Ok(c);
+        }
+        self.dtoh_scalar_untracked::<u32>(buf.num_rows_device(), 0)
     }
 }
 
