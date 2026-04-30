@@ -35,11 +35,12 @@
 //! [`plan_rule`] / [`plan_rules`] are pure functions of their
 //! inputs. [`explain_plans`] is **canonical**: plans are sorted
 //! by `head_predicate` (lexicographic), with same-head ties
-//! broken by the rendered line content itself — verdict tag
-//! (`multiway` < `binary-fallback`), then variable-order vector
-//! or boundary list. Input position is never the tie-breaker, so
-//! the output is identical for any permutation of the input,
-//! including reversal of same-head rules. Locked by
+//! broken by the rendered line content itself — string-lex on
+//! the verdict tag (so `binary-fallback` < `multiway`), then on
+//! the boundary list or variable-order vector. Input position is
+//! never the tie-breaker, so the output is identical for any
+//! permutation of the input, including reversal of same-head
+//! rules. Locked by
 //! `explain_plans_is_canonical_under_same_head_reorder`.
 
 use super::eligibility::{analyze_typed, Boundary, Eligibility};
@@ -191,10 +192,11 @@ pub fn plan_rules(
 ///
 /// Plans are sorted by `head_predicate` (lexicographic), with
 /// same-head ties broken by the **rendered line body** itself
-/// (verdict tag — `multiway` < `binary-fallback` — then the
-/// variable-order vector or boundary list). Input position is
-/// never consulted, so the output is identical for any
-/// permutation of the input, including reversal of same-head
+/// under string-lex ordering (so the verdict tag
+/// `binary-fallback` sorts before `multiway`; the boundary list
+/// or variable-order vector breaks remaining ties). Input
+/// position is never consulted, so the output is identical for
+/// any permutation of the input, including reversal of same-head
 /// rules. Locked by
 /// `explain_plans_is_canonical_under_same_head_reorder`.
 ///
@@ -235,9 +237,11 @@ pub fn explain_plans(plans: &[RulePlan]) -> String {
 /// line. Used both for output assembly and (importantly) as the
 /// same-head sort fingerprint in [`explain_plans`].
 ///
-/// The leading verdict tag `multiway` sorts before
-/// `binary-fallback` lexicographically, which gives a natural
-/// "successes first" cluster for any predicate that has a mix.
+/// Under string-lex ordering on rendered bodies, the verdict tag
+/// `binary-fallback` sorts before `multiway` — fallbacks
+/// surface first within a predicate, so a reader scanning the
+/// canonical explain can spot the dispatch obstacles before the
+/// successful candidates.
 fn render_body(plan: &RulePlan) -> String {
     match plan {
         RulePlan::MultiwayCandidate {
