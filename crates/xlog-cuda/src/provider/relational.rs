@@ -5354,9 +5354,10 @@ impl super::CudaKernelProvider {
             let ty = input.schema.column_type(k).ok_or_else(|| {
                 XlogError::Kernel(format!("Key column {} type not found in schema", k))
             })?;
-            if !matches!(ty, ScalarType::U32 | ScalarType::Symbol) {
+            if !matches!(ty, ScalarType::U32 | ScalarType::Symbol | ScalarType::U64) {
                 return Err(XlogError::Kernel(format!(
-                    "sort_recorded supports only U32 / Symbol key columns; got {:?} for column {}",
+                    "sort_recorded supports only U32 / Symbol / U64 key columns; \
+                     got {:?} for column {}",
                     ty, k
                 )));
             }
@@ -5439,50 +5440,115 @@ impl super::CudaKernelProvider {
         }
         .map_err(|e| XlogError::Kernel(format!("init_indices (on_stream) failed: {}", e)))?;
 
-        // Step 2: LSD radix passes per key column.
+        // Step 2: LSD radix passes per key column. U32 / Symbol
+        // are 4-byte → one radix pass per column. U64 keys use
+        // the hi/lo gather pair (mirrors legacy `sort()`'s
+        // strategy at line ~1691): one radix pass per half,
+        // lo-first then hi, so the stable LSD ordering is
+        // hi-most-significant.
         for &col_idx in key_cols.iter().rev() {
             let col = input
                 .column(col_idx)
                 .ok_or_else(|| XlogError::Kernel(format!("Key column {} not found", col_idx)))?;
-            let col_view = self.column_as_u32_view(col, n as usize)?;
-            let gather_fn = device
-                .get_func(SORT_MODULE, sort_kernels::APPLY_PERMUTATION_U32)
-                .ok_or_else(|| {
-                    XlogError::Kernel("apply_permutation_u32 kernel not found".to_string())
-                })?;
-            // SAFETY: apply_permutation_u32(input, output, permutation,
-            // num_rows_device, row_cap)
-            unsafe {
-                gather_fn.clone().launch_on_stream(
-                    &cu_stream,
-                    launch_config,
-                    (
-                        &col_view,
+            let ty = input.schema.column_type(col_idx).ok_or_else(|| {
+                XlogError::Kernel(format!("Key column {} type not found in schema", col_idx))
+            })?;
+            match ty {
+                ScalarType::U32 | ScalarType::Symbol => {
+                    let col_view = self.column_as_u32_view(col, n as usize)?;
+                    let gather_fn = device
+                        .get_func(SORT_MODULE, sort_kernels::APPLY_PERMUTATION_U32)
+                        .ok_or_else(|| {
+                            XlogError::Kernel("apply_permutation_u32 kernel not found".to_string())
+                        })?;
+                    // SAFETY: apply_permutation_u32(input, output, permutation,
+                    // num_rows_device, row_cap)
+                    unsafe {
+                        gather_fn.clone().launch_on_stream(
+                            &cu_stream,
+                            launch_config,
+                            (
+                                &col_view,
+                                &mut keys_a,
+                                &indices_a,
+                                input.num_rows_device(),
+                                n,
+                            ),
+                        )
+                    }
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "apply_permutation_u32 (on_stream) failed: {}",
+                            e
+                        ))
+                    })?;
+
+                    self.radix_sort_u32_pairs_with_scratch_on_stream(
                         &mut keys_a,
-                        &indices_a,
+                        &mut keys_b,
+                        &mut indices_a,
+                        &mut indices_b,
+                        &mut d_hist,
+                        &mut d_prefix,
+                        &mut d_ranks,
                         input.num_rows_device(),
                         n,
-                    ),
-                )
-            }
-            .map_err(|e| {
-                XlogError::Kernel(format!("apply_permutation_u32 (on_stream) failed: {}", e))
-            })?;
+                        &cu_stream,
+                        launch_stream,
+                        runtime,
+                    )?;
+                }
+                ScalarType::U64 => {
+                    let col_view = self.column_as_u64_view(col, n as usize)?;
+                    for &word in &[
+                        sort_kernels::GATHER_KEYS_U64_LO_U32,
+                        sort_kernels::GATHER_KEYS_U64_HI_U32,
+                    ] {
+                        let gather_fn = device.get_func(SORT_MODULE, word).ok_or_else(|| {
+                            XlogError::Kernel(format!("{} kernel not found", word))
+                        })?;
+                        // SAFETY: gather_keys_u64_*_u32(vals, permutation,
+                        // num_rows_device, row_cap, out_keys)
+                        unsafe {
+                            gather_fn.clone().launch_on_stream(
+                                &cu_stream,
+                                launch_config,
+                                (
+                                    &col_view,
+                                    &indices_a,
+                                    input.num_rows_device(),
+                                    n,
+                                    &mut keys_a,
+                                ),
+                            )
+                        }
+                        .map_err(|e| {
+                            XlogError::Kernel(format!("{} (on_stream) failed: {}", word, e))
+                        })?;
 
-            self.radix_sort_u32_pairs_with_scratch_on_stream(
-                &mut keys_a,
-                &mut keys_b,
-                &mut indices_a,
-                &mut indices_b,
-                &mut d_hist,
-                &mut d_prefix,
-                &mut d_ranks,
-                input.num_rows_device(),
-                n,
-                &cu_stream,
-                launch_stream,
-                runtime,
-            )?;
+                        self.radix_sort_u32_pairs_with_scratch_on_stream(
+                            &mut keys_a,
+                            &mut keys_b,
+                            &mut indices_a,
+                            &mut indices_b,
+                            &mut d_hist,
+                            &mut d_prefix,
+                            &mut d_ranks,
+                            input.num_rows_device(),
+                            n,
+                            &cu_stream,
+                            launch_stream,
+                            runtime,
+                        )?;
+                    }
+                }
+                other => {
+                    return Err(XlogError::Kernel(format!(
+                        "sort_recorded: column {} unexpected type {:?} after guard",
+                        col_idx, other
+                    )));
+                }
+            }
         }
 
         // Step 3: gather all input columns by the final permutation.
@@ -5574,9 +5640,9 @@ impl super::CudaKernelProvider {
             let ty = input.schema.column_type(col_idx).ok_or_else(|| {
                 XlogError::Kernel(format!("Column {} type not found in schema", col_idx))
             })?;
-            if !matches!(ty, ScalarType::U32 | ScalarType::Symbol) {
+            if !matches!(ty, ScalarType::U32 | ScalarType::Symbol | ScalarType::U64) {
                 return Err(XlogError::Kernel(format!(
-                    "dedup_full_row_recorded supports only U32 / Symbol columns; \
+                    "dedup_full_row_recorded supports only U32 / Symbol / U64 columns; \
                      got {:?} for column {}",
                     ty, col_idx
                 )));
