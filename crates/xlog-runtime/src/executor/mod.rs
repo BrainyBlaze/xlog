@@ -4,7 +4,7 @@
 //! to execute GPU-accelerated relational operations.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 #[cfg(test)]
 use xlog_core::ScalarType;
@@ -90,6 +90,17 @@ pub struct Executor {
     /// counter to assert that the WCOJ path actually fired vs. silently
     /// falling back to the binary-join chain with the same answer.
     wcoj_triangle_dispatch_count: u64,
+    /// Cached non-default stream for the WCOJ triangle dispatch hook.
+    /// Acquired lazily on first dispatch and reused thereafter — mirrors
+    /// [`xlog_cuda::CudaKernelProvider::recorded_op_stream`] for the
+    /// same reason: the device-runtime
+    /// [`xlog_cuda::device_runtime::StreamPool`] is grow-only with a
+    /// hard cap (default 16). Acquiring per-invocation would silently
+    /// drain the pool on long-lived runtimes (benchmarks, soak tests,
+    /// any program with >16 matching triangle rules) and route
+    /// subsequent dispatches through the binary-join fallback,
+    /// invalidating the dispatch counter and the gate-on path.
+    wcoj_triangle_stream: OnceLock<xlog_cuda::device_runtime::StreamId>,
 }
 
 impl Executor {
@@ -118,6 +129,7 @@ impl Executor {
             ilp_registry: IlpRegistry::new(),
             ilp_last_result: None,
             wcoj_triangle_dispatch_count: 0,
+            wcoj_triangle_stream: OnceLock::new(),
         }
     }
 

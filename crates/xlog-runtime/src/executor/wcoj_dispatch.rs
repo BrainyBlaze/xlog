@@ -62,8 +62,6 @@
 //! * Histogram-guided block dispatch.
 //! * Default-on behavior (env var must be explicitly set).
 
-use std::sync::Arc;
-
 use xlog_core::{RelId, Result};
 use xlog_cuda::device_runtime::StreamId;
 use xlog_cuda::CudaBuffer;
@@ -291,16 +289,22 @@ impl Executor {
             _ => return Ok(None),
         };
 
-        // 5. Acquire a launch stream from the runtime pool.
+        // 5. Resolve the cached executor WCOJ launch stream.
+        // Acquire-once / reuse-forever (mirrors
+        // `CudaKernelProvider::recorded_op_stream`). Acquiring
+        // per-invocation would silently drain the
+        // `StreamPool` (default cap 16, grow-only) on long-
+        // lived runtimes — once exhausted, subsequent
+        // dispatches would silently fall back to binary-join
+        // and the dispatch counter would stop incrementing.
         // Without a runtime-backed manager, the recorded WCOJ
         // primitives can't run — fall back silently.
-        let runtime = match self.provider.memory().runtime() {
-            Some(r) => Arc::clone(r),
+        if self.provider.memory().runtime().is_none() {
+            return Ok(None);
+        }
+        let launch_stream = match self.wcoj_triangle_stream_or_init() {
+            Some(s) => s,
             None => return Ok(None),
-        };
-        let launch_stream = match runtime.stream_pool().acquire() {
-            Ok(s) => s,
-            Err(_) => return Ok(None),
         };
 
         // 6. Run layout + triangle. Convert any kernel error to
@@ -376,5 +380,25 @@ impl Executor {
     /// answer).
     pub fn wcoj_triangle_dispatch_count(&self) -> u64 {
         self.wcoj_triangle_dispatch_count
+    }
+
+    /// Resolve the cached WCOJ launch stream, lazily initializing
+    /// it on first call by acquiring one stream from the runtime
+    /// pool. Subsequent calls reuse the same stream — mirrors
+    /// [`xlog_cuda::CudaKernelProvider::recorded_op_stream`]
+    /// (provider/mod.rs).
+    ///
+    /// Returns `None` only when (a) the manager has no runtime,
+    /// or (b) the very first acquisition fails (pool already
+    /// at cap from other consumers). After that first success
+    /// the cached id keeps resolving for the executor's lifetime.
+    fn wcoj_triangle_stream_or_init(&self) -> Option<StreamId> {
+        if let Some(s) = self.wcoj_triangle_stream.get() {
+            return Some(*s);
+        }
+        let runtime = self.provider.memory().runtime()?;
+        let stream = runtime.stream_pool().acquire().ok()?;
+        let _ = self.wcoj_triangle_stream.set(stream);
+        self.wcoj_triangle_stream.get().copied()
     }
 }
