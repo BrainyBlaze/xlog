@@ -64,11 +64,38 @@ impl Executor {
                 let is_recursive = scc.map(|s| s.is_recursive).unwrap_or(false);
 
                 if is_recursive {
-                    // Recursive SCC: use semi-naive fixpoint iteration
+                    // Recursive SCC: use semi-naive fixpoint iteration.
+                    // The WCOJ triangle hook intentionally does NOT
+                    // engage here — recursion is out of v1 scope.
                     self.execute_recursive_scc(rules)?;
                 } else {
-                    // Non-recursive SCC: execute rules once, union results for same predicate
+                    // Non-recursive SCC: execute rules once, union results for same predicate.
                     for rule in rules {
+                        // v0.6.2 WCOJ triangle dispatch — env-gated.
+                        // Try to short-circuit the rule via the GPU
+                        // 3-way kernel. On Some(_), install the
+                        // result and skip the binary-join path for
+                        // this rule. On None (gate off, shape
+                        // mismatch, missing input, kernel error),
+                        // fall through silently. See
+                        // `wcoj_dispatch::try_dispatch_wcoj_triangle`
+                        // for the full match contract.
+                        if let Some(wcoj_result) = self.try_dispatch_wcoj_triangle(rule)? {
+                            // Mirrors the binary-join arm below:
+                            // union with existing result if predicate
+                            // already has data; otherwise install
+                            // directly. WCOJ output is already
+                            // sorted+deduped, so the dedup pass on
+                            // the else branch is unnecessary here.
+                            if let Some(existing) = self.store.get(&rule.head) {
+                                let merged = self.provider.union_gpu(existing, &wcoj_result)?;
+                                self.store_put(&rule.head, merged);
+                            } else {
+                                self.store_put(&rule.head, wcoj_result);
+                            }
+                            continue;
+                        }
+
                         let result = self.execute_node(&rule.body)?;
 
                         // Union with existing result if predicate already has data

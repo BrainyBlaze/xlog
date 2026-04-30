@@ -76,6 +76,13 @@ pub struct RuntimeConfig {
     /// relational set difference and binary-join count/materialize that are
     /// scheduled for replacement before the default flips.
     pub strict_deterministic_d2h: bool,
+    /// Override the env-driven WCOJ triangle dispatch gate
+    /// (`XLOG_USE_WCOJ_TRIANGLE_U32`). `None` (default) consults
+    /// the env var; `Some(true)` / `Some(false)` force the
+    /// runtime to ignore the env and use the explicit value.
+    /// Test-only knob — production callers should leave this
+    /// `None` and configure via the env var.
+    pub wcoj_triangle_dispatch: Option<bool>,
 }
 
 impl Default for RuntimeConfig {
@@ -86,6 +93,7 @@ impl Default for RuntimeConfig {
             profile: false,
             max_iterations: 1_000_000,
             strict_deterministic_d2h: false,
+            wcoj_triangle_dispatch: None,
         }
     }
 }
@@ -106,6 +114,15 @@ impl RuntimeConfig {
     /// Enable the strict deterministic-Datalog D2H gate for this runtime.
     pub fn with_strict_deterministic_d2h(mut self) -> Self {
         self.strict_deterministic_d2h = true;
+        self
+    }
+
+    /// Override the env-driven WCOJ triangle dispatch gate. Pass
+    /// `Some(true)` / `Some(false)` to force the runtime to ignore
+    /// `XLOG_USE_WCOJ_TRIANGLE_U32`; `None` to consult the env var
+    /// (the production default). Test-only knob.
+    pub fn with_wcoj_triangle_dispatch(mut self, override_value: Option<bool>) -> Self {
+        self.wcoj_triangle_dispatch = override_value;
         self
     }
 }

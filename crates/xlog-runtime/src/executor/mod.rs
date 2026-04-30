@@ -26,6 +26,7 @@ mod join_cache;
 mod node_dispatch;
 mod recursive;
 mod rewrite;
+mod wcoj_dispatch;
 use join_cache::JoinIndexCache;
 
 /// Incremental update for a base relation.
@@ -83,6 +84,12 @@ pub struct Executor {
     ilp_registry: IlpRegistry,
     /// Last ILP tagged result metadata
     ilp_last_result: Option<IlpTaggedResult>,
+    /// Number of times the env-gated WCOJ triangle dispatch
+    /// (`XLOG_USE_WCOJ_TRIANGLE_U32` / `RuntimeConfig::wcoj_triangle_dispatch`)
+    /// produced a result and the executor installed it. Tests use this
+    /// counter to assert that the WCOJ path actually fired vs. silently
+    /// falling back to the binary-join chain with the same answer.
+    wcoj_triangle_dispatch_count: u64,
 }
 
 impl Executor {
@@ -110,6 +117,7 @@ impl Executor {
             profiler: Profiler::default(),
             ilp_registry: IlpRegistry::new(),
             ilp_last_result: None,
+            wcoj_triangle_dispatch_count: 0,
         }
     }
 
