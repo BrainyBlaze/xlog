@@ -1,6 +1,7 @@
 // kernels/wcoj.cu
 //
-// v0.6.2 GPU 3-way Worst-Case Optimal Join — triangle slice (u32).
+// v0.6.2 GPU 3-way Worst-Case Optimal Join — triangle slice
+// (u32 / Symbol via u32 path; u64 via parallel kernels).
 //
 // Implements
 //
@@ -117,6 +118,94 @@ __device__ __forceinline__ uint32_t intersect_emit_xyz(
     while (ia < na && ib < nb) {
         uint32_t va = a[ia];
         uint32_t vb = b[ib];
+        if (va == vb) {
+            uint32_t pos = out_base + emitted;
+            out_x[pos] = x;
+            out_y[pos] = y;
+            out_z[pos] = va;
+            emitted += 1;
+            ia += 1;
+            ib += 1;
+        } else if (va < vb) {
+            ia += 1;
+        } else {
+            ib += 1;
+        }
+    }
+    return emitted;
+}
+
+// ===============================================================
+// U64 helpers — parallel to the u32 set above. Counters / counts /
+// offsets / row_count stay u32 because they're bounded by
+// `u32::MAX` (the host-side row-count guard upstream of every
+// WCOJ entry), so only the join-key signatures change.
+// ===============================================================
+
+__device__ __forceinline__ uint32_t lower_bound_u64(
+    const uint64_t* __restrict__ col, uint32_t n, uint64_t target) {
+    uint32_t lo = 0;
+    uint32_t hi = n;
+    while (lo < hi) {
+        uint32_t mid = lo + ((hi - lo) >> 1);
+        if (col[mid] < target) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+__device__ __forceinline__ uint32_t upper_bound_u64(
+    const uint64_t* __restrict__ col, uint32_t n, uint64_t target) {
+    uint32_t lo = 0;
+    uint32_t hi = n;
+    while (lo < hi) {
+        uint32_t mid = lo + ((hi - lo) >> 1);
+        if (col[mid] <= target) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+__device__ __forceinline__ uint32_t intersect_count_u64(
+    const uint64_t* __restrict__ a, uint32_t na,
+    const uint64_t* __restrict__ b, uint32_t nb) {
+    uint32_t ia = 0, ib = 0;
+    uint32_t cnt = 0;
+    while (ia < na && ib < nb) {
+        uint64_t va = a[ia];
+        uint64_t vb = b[ib];
+        if (va == vb) {
+            cnt += 1;
+            ia += 1;
+            ib += 1;
+        } else if (va < vb) {
+            ia += 1;
+        } else {
+            ib += 1;
+        }
+    }
+    return cnt;
+}
+
+__device__ __forceinline__ uint32_t intersect_emit_xyz_u64(
+    uint64_t x, uint64_t y,
+    const uint64_t* __restrict__ a, uint32_t na,
+    const uint64_t* __restrict__ b, uint32_t nb,
+    uint32_t out_base,
+    uint64_t* __restrict__ out_x,
+    uint64_t* __restrict__ out_y,
+    uint64_t* __restrict__ out_z) {
+    uint32_t ia = 0, ib = 0;
+    uint32_t emitted = 0;
+    while (ia < na && ib < nb) {
+        uint64_t va = a[ia];
+        uint64_t vb = b[ib];
         if (va == vb) {
             uint32_t pos = out_base + emitted;
             out_x[pos] = x;
@@ -252,6 +341,85 @@ extern "C" __global__ void wcoj_triangle_materialize(
         return;
     }
     intersect_emit_xyz(
+        x, y,
+        yz_col1 + yz_lo, yz_hi - yz_lo,
+        xz_col1 + xz_lo, xz_hi - xz_lo,
+        base, out_x, out_y, out_z);
+}
+
+// ===============================================================
+// U64 entry kernels — same shape as the u32 pair above, with
+// 64-bit join-key buffers. `wcoj_compute_total` is reused as-is
+// (counters stay u32).
+// ===============================================================
+
+extern "C" __global__ void wcoj_triangle_count_u64(
+    const uint64_t* __restrict__ xy_col0,
+    const uint64_t* __restrict__ xy_col1,
+    uint32_t n_xy,
+    const uint64_t* __restrict__ yz_col0,
+    const uint64_t* __restrict__ yz_col1,
+    uint32_t n_yz,
+    const uint64_t* __restrict__ xz_col0,
+    const uint64_t* __restrict__ xz_col1,
+    uint32_t n_xz,
+    uint32_t* __restrict__ out_counts) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_xy) {
+        return;
+    }
+    uint64_t x = xy_col0[i];
+    uint64_t y = xy_col1[i];
+
+    uint32_t yz_lo = lower_bound_u64(yz_col0, n_yz, y);
+    uint32_t yz_hi = upper_bound_u64(yz_col0, n_yz, y);
+    uint32_t xz_lo = lower_bound_u64(xz_col0, n_xz, x);
+    uint32_t xz_hi = upper_bound_u64(xz_col0, n_xz, x);
+
+    uint32_t cnt = 0;
+    if (yz_hi > yz_lo && xz_hi > xz_lo) {
+        cnt = intersect_count_u64(
+            yz_col1 + yz_lo, yz_hi - yz_lo,
+            xz_col1 + xz_lo, xz_hi - xz_lo);
+    }
+    out_counts[i] = cnt;
+}
+
+extern "C" __global__ void wcoj_triangle_materialize_u64(
+    const uint64_t* __restrict__ xy_col0,
+    const uint64_t* __restrict__ xy_col1,
+    uint32_t n_xy,
+    const uint64_t* __restrict__ yz_col0,
+    const uint64_t* __restrict__ yz_col1,
+    uint32_t n_yz,
+    const uint64_t* __restrict__ xz_col0,
+    const uint64_t* __restrict__ xz_col1,
+    uint32_t n_xz,
+    const uint32_t* __restrict__ out_offsets,
+    uint32_t total_rows,
+    uint64_t* __restrict__ out_x,
+    uint64_t* __restrict__ out_y,
+    uint64_t* __restrict__ out_z) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_xy) {
+        return;
+    }
+    uint64_t x = xy_col0[i];
+    uint64_t y = xy_col1[i];
+    uint32_t base = out_offsets[i];
+    if (base >= total_rows) {
+        return;
+    }
+
+    uint32_t yz_lo = lower_bound_u64(yz_col0, n_yz, y);
+    uint32_t yz_hi = upper_bound_u64(yz_col0, n_yz, y);
+    uint32_t xz_lo = lower_bound_u64(xz_col0, n_xz, x);
+    uint32_t xz_hi = upper_bound_u64(xz_col0, n_xz, x);
+
+    if (yz_hi <= yz_lo || xz_hi <= xz_lo) {
+        return;
+    }
+    intersect_emit_xyz_u64(
         x, y,
         yz_col1 + yz_lo, yz_hi - yz_lo,
         xz_col1 + xz_lo, xz_hi - xz_lo,

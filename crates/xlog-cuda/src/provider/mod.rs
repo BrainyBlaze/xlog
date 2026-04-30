@@ -263,6 +263,8 @@ pub mod wcoj_kernels {
     pub const WCOJ_TRIANGLE_COUNT: &str = "wcoj_triangle_count";
     pub const WCOJ_COMPUTE_TOTAL: &str = "wcoj_compute_total";
     pub const WCOJ_TRIANGLE_MATERIALIZE: &str = "wcoj_triangle_materialize";
+    pub const WCOJ_TRIANGLE_COUNT_U64: &str = "wcoj_triangle_count_u64";
+    pub const WCOJ_TRIANGLE_MATERIALIZE_U64: &str = "wcoj_triangle_materialize_u64";
 }
 
 /// Kernel function names in the Monte Carlo sampling module

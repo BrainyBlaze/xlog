@@ -448,6 +448,8 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "wcoj_triangle_count",
             "wcoj_compute_total",
             "wcoj_triangle_materialize",
+            "wcoj_triangle_count_u64",
+            "wcoj_triangle_materialize_u64",
         ],
     },
 ];

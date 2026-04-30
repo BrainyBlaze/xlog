@@ -1,16 +1,23 @@
-//! v0.6.2 GPU 3-way Worst-Case Optimal Join — provider entry.
+//! v0.6.2 GPU 3-way Worst-Case Optimal Join — provider entries.
 //!
-//! Single public method:
-//! [`CudaKernelProvider::wcoj_triangle_u32_recorded`]. The slice is
-//! intentionally narrow:
+//! Public methods (parallel u32 and u64 entries — see
+//! [`CudaKernelProvider::wcoj_triangle_u32_recorded`] and
+//! [`CudaKernelProvider::wcoj_triangle_u64_recorded`]):
 //!
-//!   * **4-byte keys only.** Caller's three relations must each
-//!     have a 2-column [`xlog_core::Schema`]; each column may be
-//!     [`xlog_core::ScalarType::U32`] or
+//!   * **U32 / Symbol** entry takes 2-column inputs whose columns
+//!     may be [`xlog_core::ScalarType::U32`] or
 //!     [`xlog_core::ScalarType::Symbol`] (both share the same
-//!     4-byte physical layout, and the kernel does
-//!     bit-equality joins). Cross-relation type compatibility
-//!     is enforced by the planner upstream.
+//!     4-byte physical layout). The kernel does bit-equality
+//!     joins; cross-relation type compatibility is enforced by
+//!     the planner upstream.
+//!   * **U64** entry takes 2-column inputs whose columns are
+//!     [`xlog_core::ScalarType::U64`] only. Backed by parallel
+//!     `_u64` count + materialize kernels in `wcoj.cu`; counters
+//!     and the `wcoj_compute_total` reducer are reused unchanged
+//!     (they're bounded by `u32::MAX` rows).
+//!   * Mixed-width inputs in the same triangle are rejected at
+//!     the provider level — each entry's schema guard requires
+//!     all three relations match its width.
 //!   * **Sorted, deduped inputs.** Caller-supplied:
 //!     - `e_xy` lex-sorted+deduped by (X, Y),
 //!     - `e_yz` lex-sorted+deduped by (Y, Z),
@@ -46,13 +53,15 @@
 //!
 //! What this slice deliberately does NOT do:
 //!
-//!   * No executor integration, no planner dispatch wiring.
+//!   * No executor integration, no planner dispatch wiring (the
+//!     AST/RIR dispatch helpers live in `xlog-integration` and
+//!     `xlog-runtime` and gain U64 admission in commit 3 of this
+//!     slice).
 //!   * No recursion / fixpoint.
 //!   * No cost model.
-//!   * No u64 column variants.
 //!   * No histogram-guided block dispatch (SRDatalog §5 skew opt).
 //!     v1 is one thread per row of `e_xy`; sufficient for the
-//!     u32 cert tests, deferred for power-law inputs.
+//!     correctness cert tests, deferred for power-law inputs.
 
 use std::ffi::c_void;
 
@@ -580,6 +589,401 @@ impl CudaKernelProvider {
     }
 }
 
+// ===============================================================
+// U64 entries — parallel to the u32/Symbol pair above. Counters /
+// per-row counts / output offsets / total-rows scalar all remain
+// u32 (bounded by `u32::MAX` rows). Only the join-key reads and
+// output columns are 8-byte; the prefix-scan helper, the
+// total-reducer kernel, the dtoh-scalar fast-path, and the
+// strict-D2H gate all reuse the u32 plumbing unchanged.
+// ===============================================================
+
+impl CudaKernelProvider {
+    /// Build the sorted+deduped WCOJ physical layout for a 2-column
+    /// U64 relation. Output: a 2-column U64 [`CudaBuffer`] sorted
+    /// lexicographically by `(col0, col1)` and deduplicated. Suitable
+    /// for direct consumption by [`Self::wcoj_triangle_u64_recorded`].
+    ///
+    /// Composition mirrors [`Self::wcoj_layout_u32_recorded`]:
+    /// delegates to [`Self::dedup_full_row_recorded`], which
+    /// gained U64 admission in commit 1 of this slice (its
+    /// internal `sort_recorded` ports the legacy `sort()`'s hi/lo
+    /// radix-pass strategy into the recorded path).
+    ///
+    /// # Errors
+    /// * `XlogError::Kernel` if the manager has no runtime, the
+    ///   input is not 2-column, any column is not
+    ///   [`ScalarType::U64`], or any inner sort/dedup primitive
+    ///   fails.
+    pub fn wcoj_layout_u64_recorded(
+        &self,
+        input: &CudaBuffer,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        if self.memory().runtime().is_none() {
+            return Err(XlogError::Kernel(
+                "wcoj_layout_u64_recorded requires a runtime-backed \
+                 GpuMemoryManager (constructed via with_runtime)"
+                    .to_string(),
+            ));
+        }
+        if input.arity() != 2 {
+            return Err(XlogError::Kernel(format!(
+                "wcoj_layout_u64_recorded: input must be 2-column, got arity {}",
+                input.arity()
+            )));
+        }
+        for col_idx in 0..2 {
+            let ty = input.schema.column_type(col_idx).ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "wcoj_layout_u64_recorded: column {} type missing",
+                    col_idx
+                ))
+            })?;
+            if !matches!(ty, ScalarType::U64) {
+                return Err(XlogError::Kernel(format!(
+                    "wcoj_layout_u64_recorded: column {} must be U64, got {:?}",
+                    col_idx, ty
+                )));
+            }
+        }
+        // dedup_full_row_recorded internally invokes sort_recorded
+        // (U64-aware after commit 1) and the bytewise mask kernel
+        // (already width-generic via col_sizes upload).
+        self.dedup_full_row_recorded(input, launch_stream)
+    }
+
+    /// Evaluate `tri(X, Y, Z) :- e_xy(X,Y), e_yz(Y,Z), e_xz(X,Z)`
+    /// on already-sorted, already-deduped binary U64 relations.
+    /// Mirrors [`Self::wcoj_triangle_u32_recorded`]'s contract;
+    /// the only differences are the 8-byte join-key reads/writes
+    /// and the U64-specific count/materialize kernels. Counters
+    /// and the total reducer remain u32.
+    ///
+    /// # Errors
+    /// * `XlogError::Kernel` if the manager has no runtime, the
+    ///   launch stream does not resolve, an input is not 2-column
+    ///   with U64 columns, or any kernel launch fails.
+    pub fn wcoj_triangle_u64_recorded(
+        &self,
+        e_xy: &CudaBuffer,
+        e_yz: &CudaBuffer,
+        e_xz: &CudaBuffer,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        let runtime = self.memory().runtime().ok_or_else(|| {
+            XlogError::Kernel(
+                "wcoj_triangle_u64_recorded requires a runtime-backed \
+                 GpuMemoryManager (constructed via with_runtime)"
+                    .to_string(),
+            )
+        })?;
+        let cu_stream = runtime
+            .stream_pool()
+            .resolve(launch_stream)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "wcoj_triangle_u64_recorded: launch_stream StreamId({}) does not resolve",
+                    launch_stream.0
+                ))
+            })?;
+
+        // Validate: every relation 2-column U64.
+        for (label, buf) in [("e_xy", e_xy), ("e_yz", e_yz), ("e_xz", e_xz)] {
+            if buf.arity() != 2 {
+                return Err(XlogError::Kernel(format!(
+                    "wcoj_triangle_u64_recorded: {} must be 2-column, got arity {}",
+                    label,
+                    buf.arity()
+                )));
+            }
+            for col_idx in 0..2 {
+                let ty = buf.schema.column_type(col_idx).ok_or_else(|| {
+                    XlogError::Kernel(format!(
+                        "wcoj_triangle_u64_recorded: {} column {} type missing",
+                        label, col_idx
+                    ))
+                })?;
+                if !matches!(ty, ScalarType::U64) {
+                    return Err(XlogError::Kernel(format!(
+                        "wcoj_triangle_u64_recorded: {} column {} must be U64, got {:?}",
+                        label, col_idx, ty
+                    )));
+                }
+            }
+        }
+
+        // Output schema preserves per-head-position scalar types
+        // (all U64 by construction at this point).
+        let out_schema = Schema::new(vec![
+            ("col0".to_string(), ScalarType::U64),
+            ("col1".to_string(), ScalarType::U64),
+            ("col2".to_string(), ScalarType::U64),
+        ]);
+
+        let n_xy = self.logical_row_count_u32(e_xy)?;
+        let n_yz = self.logical_row_count_u32(e_yz)?;
+        let n_xz = self.logical_row_count_u32(e_xz)?;
+
+        if n_xy == 0 || n_yz == 0 || n_xz == 0 {
+            return self.create_empty_buffer(out_schema);
+        }
+
+        // Phase 1: count + scan + total. Counter buffers stay u32.
+        let mut count_buf = self.memory.alloc::<u32>(n_xy as usize)?;
+        let mut offsets_buf = self.memory.alloc::<u32>(n_xy as usize)?;
+        let d_total = self.memory.alloc::<u32>(1)?;
+
+        let xy_col0 = column_u64(e_xy, 0)?;
+        let xy_col1 = column_u64(e_xy, 1)?;
+        let yz_col0 = column_u64(e_yz, 0)?;
+        let yz_col1 = column_u64(e_yz, 1)?;
+        let xz_col0 = column_u64(e_xz, 0)?;
+        let xz_col1 = column_u64(e_xz, 1)?;
+
+        let mut rec_count = LaunchRecorder::new_strict(launch_stream);
+        rec_count.read(e_xy.num_rows_device());
+        rec_count.read(e_yz.num_rows_device());
+        rec_count.read(e_xz.num_rows_device());
+        rec_count.read_column(e_xy.column(0).expect("xy.col0"));
+        rec_count.read_column(e_xy.column(1).expect("xy.col1"));
+        rec_count.read_column(e_yz.column(0).expect("yz.col0"));
+        rec_count.read_column(e_yz.column(1).expect("yz.col1"));
+        rec_count.read_column(e_xz.column(0).expect("xz.col0"));
+        rec_count.read_column(e_xz.column(1).expect("xz.col1"));
+        rec_count.write(&count_buf);
+        rec_count.write(&offsets_buf);
+        rec_count.write(&d_total);
+        rec_count.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "wcoj_triangle_u64_recorded: count preflight failed: {}",
+                e
+            ))
+        })?;
+
+        let device = self.device.inner();
+        let count_kernel = device
+            .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_TRIANGLE_COUNT_U64)
+            .ok_or_else(|| {
+                XlogError::Kernel("wcoj_triangle_count_u64 kernel not found".to_string())
+            })?;
+        let grid = (n_xy + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+        // SAFETY: same 10-arg signature as the u32 count kernel
+        // but with u64 join-key buffers; counts stay u32.
+        unsafe {
+            count_kernel
+                .clone()
+                .launch_on_stream(
+                    &cu_stream,
+                    LaunchConfig {
+                        grid_dim: (grid, 1, 1),
+                        block_dim: (BLOCK_SIZE, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        xy_col0,
+                        xy_col1,
+                        n_xy,
+                        yz_col0,
+                        yz_col1,
+                        n_yz,
+                        xz_col0,
+                        xz_col1,
+                        n_xz,
+                        &mut count_buf,
+                    ),
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!("wcoj_triangle_count_u64 launch failed: {}", e))
+                })?;
+        }
+
+        // dtod-async copy `count_buf → offsets_buf` (u32-sized).
+        let bytes_count = (n_xy as usize) * std::mem::size_of::<u32>();
+        unsafe {
+            let res = sys::cuMemcpyDtoDAsync_v2(
+                *offsets_buf.device_ptr(),
+                *count_buf.device_ptr(),
+                bytes_count,
+                cu_stream.cu_stream(),
+            );
+            if res != sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "wcoj_triangle_u64_recorded: dtod count_buf → offsets_buf failed: {:?}",
+                    res
+                )));
+            }
+        }
+
+        // Device-side exclusive prefix-sum on offsets_buf — u32 plumbing
+        // unchanged from the u32 path.
+        self.multiblock_scan_u32_inplace_on_stream(
+            &mut offsets_buf,
+            n_xy,
+            &cu_stream,
+            launch_stream,
+            runtime,
+        )?;
+
+        // Reduce two last elements into d_total. Reused unchanged
+        // since counters stay u32.
+        let total_kernel = device
+            .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_COMPUTE_TOTAL)
+            .ok_or_else(|| XlogError::Kernel("wcoj_compute_total kernel not found".to_string()))?;
+        unsafe {
+            total_kernel
+                .clone()
+                .launch_on_stream(
+                    &cu_stream,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (&count_buf, &offsets_buf, n_xy, &d_total),
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!("wcoj_compute_total launch failed: {}", e))
+                })?;
+        }
+
+        rec_count.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "wcoj_triangle_u64_recorded: count+scan+total commit failed: {}",
+                e
+            ))
+        })?;
+
+        cu_stream.synchronize().map_err(|e| {
+            XlogError::Kernel(format!(
+                "wcoj_triangle_u64_recorded: stream sync after total failed: {}",
+                e
+            ))
+        })?;
+        let total_rows = self
+            .dtoh_scalar_untracked::<u32>(&d_total, 0)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "wcoj_triangle_u64_recorded: read d_total failed: {}",
+                    e
+                ))
+            })?;
+
+        if total_rows == 0 {
+            return self.create_empty_buffer(out_schema);
+        }
+
+        // Phase 2: materialize. Output columns are 8 bytes/row.
+        let bytes_per_col = (total_rows as usize) * std::mem::size_of::<u64>();
+        let mut out_x = self.memory.alloc::<u8>(bytes_per_col)?;
+        let mut out_y = self.memory.alloc::<u8>(bytes_per_col)?;
+        let mut out_z = self.memory.alloc::<u8>(bytes_per_col)?;
+        let out_d_num_rows = self.memory.alloc::<u32>(1)?;
+
+        let mut rec_mat = LaunchRecorder::new_strict(launch_stream);
+        rec_mat.read(e_xy.num_rows_device());
+        rec_mat.read(e_yz.num_rows_device());
+        rec_mat.read(e_xz.num_rows_device());
+        rec_mat.read_column(e_xy.column(0).expect("xy.col0"));
+        rec_mat.read_column(e_xy.column(1).expect("xy.col1"));
+        rec_mat.read_column(e_yz.column(0).expect("yz.col0"));
+        rec_mat.read_column(e_yz.column(1).expect("yz.col1"));
+        rec_mat.read_column(e_xz.column(0).expect("xz.col0"));
+        rec_mat.read_column(e_xz.column(1).expect("xz.col1"));
+        rec_mat.read(&offsets_buf);
+        rec_mat.write(&out_x);
+        rec_mat.write(&out_y);
+        rec_mat.write(&out_z);
+        rec_mat.write(&out_d_num_rows);
+        rec_mat.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "wcoj_triangle_u64_recorded: materialize preflight failed: {}",
+                e
+            ))
+        })?;
+
+        // 4-byte H2D of total_rows into out_d_num_rows. Identical
+        // to u32 path — d_num_rows is u32 regardless of key width.
+        unsafe {
+            let res = sys::cuMemcpyHtoDAsync_v2(
+                *out_d_num_rows.device_ptr(),
+                &total_rows as *const u32 as *const c_void,
+                std::mem::size_of::<u32>(),
+                cu_stream.cu_stream(),
+            );
+            if res != sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "wcoj_triangle_u64_recorded: H2D out_d_num_rows failed: {:?}",
+                    res
+                )));
+            }
+        }
+
+        let materialize_kernel = device
+            .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_TRIANGLE_MATERIALIZE_U64)
+            .ok_or_else(|| {
+                XlogError::Kernel("wcoj_triangle_materialize_u64 kernel not found".to_string())
+            })?;
+
+        let out_x_u64: &mut TrackedCudaSlice<u64> = unsafe { reinterpret_u8_as_u64(&mut out_x) };
+        let out_y_u64: &mut TrackedCudaSlice<u64> = unsafe { reinterpret_u8_as_u64(&mut out_y) };
+        let out_z_u64: &mut TrackedCudaSlice<u64> = unsafe { reinterpret_u8_as_u64(&mut out_z) };
+
+        // SAFETY: 14-arg materialize_u64 (u64* keys + u32 counters
+        // + u64* outputs). Same param-vec form as the u32 path —
+        // exceeds the LaunchAsync tuple bound (13).
+        let mat_config = LaunchConfig {
+            grid_dim: (grid, 1, 1),
+            block_dim: (BLOCK_SIZE, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe {
+            let mut params: Vec<*mut c_void> = vec![
+                xy_col0.as_kernel_param(),
+                xy_col1.as_kernel_param(),
+                n_xy.as_kernel_param(),
+                yz_col0.as_kernel_param(),
+                yz_col1.as_kernel_param(),
+                n_yz.as_kernel_param(),
+                xz_col0.as_kernel_param(),
+                xz_col1.as_kernel_param(),
+                n_xz.as_kernel_param(),
+                (&offsets_buf).as_kernel_param(),
+                total_rows.as_kernel_param(),
+                out_x_u64.as_kernel_param(),
+                out_y_u64.as_kernel_param(),
+                out_z_u64.as_kernel_param(),
+            ];
+            materialize_kernel
+                .clone()
+                .launch_on_stream(&cu_stream, mat_config, &mut params)
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "wcoj_triangle_materialize_u64 launch failed: {}",
+                        e
+                    ))
+                })?;
+        }
+
+        rec_mat.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "wcoj_triangle_u64_recorded: materialize commit failed: {}",
+                e
+            ))
+        })?;
+
+        let columns: Vec<CudaColumn> = vec![out_x.into(), out_y.into(), out_z.into()];
+        Ok(CudaBuffer::from_columns_with_host_count(
+            columns,
+            total_rows as u64,
+            out_d_num_rows,
+            out_schema,
+            total_rows,
+        ))
+    }
+}
+
 /// Borrow a 4-byte-key column out of a 2-column [`CudaBuffer`] as
 /// a typed `TrackedCudaSlice<u32>` reference for kernel binding.
 ///
@@ -625,4 +1029,39 @@ fn column_u32<'a>(buf: &'a CudaBuffer, col_idx: usize) -> Result<&'a TrackedCuda
 /// Mirrors [`column_u32`] but for the writable path.
 unsafe fn reinterpret_u8_as_u32(slice: &mut TrackedCudaSlice<u8>) -> &mut TrackedCudaSlice<u32> {
     &mut *(slice as *mut TrackedCudaSlice<u8> as *mut TrackedCudaSlice<u32>)
+}
+
+/// Borrow an 8-byte-key column out of a 2-column [`CudaBuffer`]
+/// as a typed `TrackedCudaSlice<u64>` reference for kernel
+/// binding. Mirrors [`column_u32`] but for U64 keys; the caller
+/// (`wcoj_triangle_u64_recorded`) has already validated that the
+/// schema is U64.
+fn column_u64<'a>(buf: &'a CudaBuffer, col_idx: usize) -> Result<&'a TrackedCudaSlice<u64>> {
+    let col = buf.column(col_idx).ok_or_else(|| {
+        XlogError::Kernel(format!(
+            "wcoj_triangle_u64_recorded: column {} not found",
+            col_idx
+        ))
+    })?;
+    match col {
+        CudaColumn::Owned(slice) => {
+            // SAFETY: Schema validated to be ScalarType::U64
+            // (size_bytes == 8). CUDA allocations are 256-byte
+            // aligned so u64 alignment is satisfied. The
+            // transmute changes element type from u8 to u64
+            // without touching raw_ptr / runtime_block. The
+            // returned reference's lifetime is tied to `buf`.
+            unsafe { Ok(&*(slice as *const TrackedCudaSlice<u8> as *const TrackedCudaSlice<u64>)) }
+        }
+        _ => Err(XlogError::Kernel(
+            "wcoj_triangle_u64_recorded: 8-byte-key columns must be Owned-variant CudaColumns"
+                .to_string(),
+        )),
+    }
+}
+
+/// `&mut` reinterpret of an owned u8 slice as a u64 slice for
+/// kernel binding. Mirrors [`reinterpret_u8_as_u32`].
+unsafe fn reinterpret_u8_as_u64(slice: &mut TrackedCudaSlice<u8>) -> &mut TrackedCudaSlice<u64> {
+    &mut *(slice as *mut TrackedCudaSlice<u8> as *mut TrackedCudaSlice<u64>)
 }
