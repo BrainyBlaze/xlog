@@ -17,6 +17,7 @@
 //! in *why* a rule fell back.
 
 use super::ir::{HypergraphRule, VertexId};
+use std::collections::BTreeMap;
 use xlog_core::ScalarType;
 
 /// The maximum number of distinct join-key variables supported by
@@ -187,4 +188,79 @@ fn count_join_keys(hg: &HypergraphRule) -> usize {
         }
     }
     occurrences.iter().filter(|c| **c >= 2).count()
+}
+
+/// Scalar types that the WCOJ reference evaluator supports as
+/// join-key types. Membership is checked by [`analyze_typed`] when
+/// emitting [`Boundary::UnsupportedKeyType`].
+///
+/// The set is intentionally narrow and not configurable in PR 2:
+/// only `U32`, `U64`, and `Symbol` are supported. Future PRs may
+/// widen the set as the reference evaluator and (later) GPU
+/// kernels grow type coverage; widening is a deliberate
+/// configuration change, not a parameter to this function.
+pub const WCOJ_SUPPORTED_KEY_TYPES: &[ScalarType] =
+    &[ScalarType::U32, ScalarType::U64, ScalarType::Symbol];
+
+/// Typed eligibility analysis.
+///
+/// Same as [`analyze`], but additionally consults `vertex_types` —
+/// a map from variable name to inferred [`ScalarType`] — to emit
+/// [`Boundary::UnsupportedKeyType`] for join-key vertices whose
+/// type is outside [`WCOJ_SUPPORTED_KEY_TYPES`].
+///
+/// "Join-key vertex" matches the same definition used by [`analyze`]:
+/// a vertex that appears in two or more hyperedges. Projection-only
+/// vertices (those appearing in exactly one hyperedge) are NOT
+/// checked — their types do not affect WCOJ planning.
+///
+/// Vertices missing from `vertex_types` are NOT flagged; the typed
+/// analyzer treats absence as "type unknown, do not block on
+/// type", deferring the policy choice to PR 4+ when type inference
+/// is wired in. Tests construct fully-populated maps.
+pub fn analyze_typed(
+    hg: &HypergraphRule,
+    vertex_types: &BTreeMap<String, ScalarType>,
+) -> Eligibility {
+    // Start from the structural verdict so structural boundaries
+    // (negation, aggregation, etc.) carry through.
+    let base = analyze(hg);
+    let mut boundaries: Vec<Boundary> = base.boundaries().to_vec();
+
+    let join_key_ids = join_key_vertex_ids(hg);
+    for vid in join_key_ids {
+        let name = &hg.vertex(vid).name;
+        if let Some(&ty) = vertex_types.get(name) {
+            if !WCOJ_SUPPORTED_KEY_TYPES.contains(&ty) {
+                boundaries.push(Boundary::UnsupportedKeyType {
+                    var: name.clone(),
+                    ty,
+                });
+            }
+        }
+    }
+
+    if boundaries.is_empty() {
+        Eligibility::Eligible
+    } else {
+        Eligibility::Ineligible(boundaries)
+    }
+}
+
+/// Return the [`VertexId`]s of vertices that appear in two or more
+/// hyperedges (the "join key" set), in vertex-id order.
+fn join_key_vertex_ids(hg: &HypergraphRule) -> Vec<VertexId> {
+    let mut occurrences: Vec<usize> = vec![0; hg.vertex_count()];
+    for edge in &hg.hyperedges {
+        for vid in edge.vertices() {
+            let VertexId(idx) = vid;
+            occurrences[idx] += 1;
+        }
+    }
+    occurrences
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| **c >= 2)
+        .map(|(i, _)| VertexId(i))
+        .collect()
 }
