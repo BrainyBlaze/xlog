@@ -1,6 +1,6 @@
-# xlog v0.5.0 Whitepaper (LaTeX)
+# xlog v0.6.1 Whitepaper (LaTeX)
 
-arxiv-style single-column LaTeX source for the xlog v0.5.0 technical whitepaper: *"xlog: A GPU-Native Logic Programming Language for Unified Symbolic Reasoning"*.
+arxiv-style single-column LaTeX source for the xlog v0.6.1 technical whitepaper: *"xlog: A GPU-Native Logic Programming Language for Unified Symbolic Reasoning"*.
 
 The rendered PDF is committed as `main.pdf`; rebuild only when sources change.
 

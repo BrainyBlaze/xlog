@@ -157,7 +157,7 @@ The CUDA kernel certification suite (\texttt{crates/xlog-cuda-tests/}) provides 
 
 \begin{table}[htbp]
   \centering
-  \caption{CUDA certification suite statistics (current \texttt{main}, April 2026).}
+  \caption{CUDA certification suite statistics (v0.6.1, April 2026).}
   \label{tab:cuda-cert}
   \small
   \begin{tabular}{@{}ll@{}}
@@ -166,7 +166,8 @@ The CUDA kernel certification suite (\texttt{crates/xlog-cuda-tests/}) provides 
     \midrule
     Total tests             & 206 \\
     Categories              & 33 (C01--C25 infrastructure + G01--G08 GPU-specific) \\
-    Latest full certification & 100\% (206/206) \\
+    Cert modes (v0.6.1)     & legacy/default; runtime+recorded; runtime+recorded+CSM \\
+    Latest full certification & 100\% (206/206) in each mode \\
     Kernel modules covered  & 22 \\
     \bottomrule
   \end{tabular}
