@@ -57,6 +57,17 @@ use xlog_core::ScalarType;
 /// Structural boundaries (negation, aggregation, ground fact, key
 /// limit) flow through `analyze_typed` unchanged.
 ///
+/// ## Within-gate precedence: conflict before boundaries
+///
+/// Variable-type derivation runs before [`analyze_typed`]. A rule
+/// that would fail *both* checks (e.g. a negated body **and** a
+/// cross-atom type conflict on a positive atom) surfaces as
+/// [`RefEvalError::ConflictingVariableType`], not as
+/// [`RefEvalError::Ineligible`]. Type conflicts indicate the
+/// fixture supplied a contradiction the analyzer cannot resolve;
+/// reporting that first guides the caller to a fixable input.
+/// Locked by `typed_gate_conflict_precedes_structural_boundary`.
+///
 /// On a successful gate, delegates to [`evaluate_rule`] for the
 /// actual computation. The structural analyzer there re-checks
 /// boundaries (cheap, defensive), and returns the same row set
@@ -80,6 +91,20 @@ pub fn evaluate_rule_typed(
 /// per-rule error wrapping the structural [`evaluate_fixpoint`]
 /// already uses, so callers do not need a separate error path for
 /// the typed gate.
+///
+/// ## Structural-error precedence
+///
+/// The typed gate is skipped for any rule whose head predicate
+/// does not equal `target_predicate`. Such a rule would be
+/// rejected by the structural [`evaluate_fixpoint`] with
+/// [`FixpointError::RuleNotForTarget`] — running the typed gate
+/// first would mask that more precise diagnostic. Other structural
+/// entry-validation errors (target-in-base, max-iterations,
+/// schema-indeterminable, head-arity mismatch) are surfaced by
+/// the delegation at the end of this function and so naturally
+/// take precedence over typed-gate failures on rules that survive
+/// the per-rule head-match filter.
+#[allow(clippy::result_large_err)]
 pub fn evaluate_fixpoint_typed(
     rules: &[Rule],
     base_relations: &RefRelationStore,
@@ -88,6 +113,12 @@ pub fn evaluate_fixpoint_typed(
     config: &FixpointConfig,
 ) -> Result<RefRelation, FixpointError> {
     for (rule_index, rule) in rules.iter().enumerate() {
+        if rule.head.predicate != target_predicate {
+            // Defer to structural `evaluate_fixpoint` so the caller
+            // sees `RuleNotForTarget` for this rule, not a typed-gate
+            // verdict. See "Structural-error precedence" above.
+            continue;
+        }
         if let Err(source) = typed_gate(rule, base_relations) {
             return Err(FixpointError::RuleEval { rule_index, source });
         }
@@ -104,6 +135,19 @@ pub fn evaluate_fixpoint_typed(
 /// where `source` is either [`RefEvalError::Ineligible`] or
 /// [`RefEvalError::ConflictingVariableType`]. Same wrapping
 /// pattern as [`evaluate_fixpoint_typed`].
+///
+/// ## Structural-error precedence
+///
+/// The typed gate is skipped for any rule whose head predicate
+/// does not equal its `BTreeMap` group key. Such a misgrouped
+/// rule would be rejected by the structural
+/// [`evaluate_scc_fixpoint`] with
+/// [`SccFixpointError::RuleHeadPredicateMismatch`] — running the
+/// typed gate first would mask that diagnostic. Other structural
+/// entry-validation errors (predicate-in-base, max-iterations,
+/// schema-indeterminable, head-arity mismatch) are surfaced by
+/// the delegation at the end of this function.
+#[allow(clippy::result_large_err)]
 pub fn evaluate_scc_fixpoint_typed(
     rules: &BTreeMap<String, Vec<Rule>>,
     base_relations: &RefRelationStore,
@@ -112,6 +156,12 @@ pub fn evaluate_scc_fixpoint_typed(
 ) -> Result<RefRelationStore, SccFixpointError> {
     for (predicate, group) in rules.iter() {
         for (rule_index, rule) in group.iter().enumerate() {
+            if &rule.head.predicate != predicate {
+                // Defer to structural `evaluate_scc_fixpoint` so
+                // `RuleHeadPredicateMismatch` wins. See
+                // "Structural-error precedence" above.
+                continue;
+            }
             if let Err(source) = typed_gate(rule, base_relations) {
                 return Err(SccFixpointError::RuleEval {
                     predicate: predicate.clone(),
@@ -130,6 +180,11 @@ pub fn evaluate_scc_fixpoint_typed(
 /// Returns `Ok(())` when the rule passes the typed gate (no
 /// cross-atom type conflict, no unsupported join-key types known
 /// from base relations). Returns `Err(RefEvalError::*)` otherwise.
+///
+/// **Within-gate precedence.** Type conflicts (from
+/// [`derive_vertex_types`]) are reported before
+/// [`super::Boundary`] verdicts (from [`analyze_typed`]); see the
+/// `evaluate_rule_typed` doc comment for the rationale.
 fn typed_gate(rule: &Rule, relations: &RefRelationStore) -> Result<(), RefEvalError> {
     let vertex_types = derive_vertex_types(rule, relations)?;
     let hg = HypergraphRule::from_rule(rule);

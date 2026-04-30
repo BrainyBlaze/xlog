@@ -545,3 +545,132 @@ fn evaluate_scc_fixpoint_typed_recursive_only_join_keys_pass_gate() {
     let even_actual = pairs_from_rel(result.get("even").expect("even present"));
     assert_eq!(even_actual, vec![(1u32, 5u32)]);
 }
+
+// ---------------------------------------------------------------
+// Error-precedence tests (advisor-locked)
+// ---------------------------------------------------------------
+
+#[test]
+fn typed_fixpoint_structural_wrong_target_wins_over_typed_gate() {
+    // A rule whose head predicate is NOT `target_predicate` AND
+    // whose body would also fail the typed gate (Bool join key).
+    // The typed wrapper must defer: structural
+    // `RuleNotForTarget` wins over typed `Ineligible`.
+    let bad_rule = rule_with(
+        atom("not_reach", vec![var("X"), var("Z")]),
+        vec![
+            pos("edge", vec![var("X"), var("Y")]),
+            pos("edge", vec![var("Y"), var("Z")]),
+        ],
+    );
+    let edge_bool = RefRelation {
+        schema: vec![ScalarType::Bool, ScalarType::Bool],
+        rows: vec![vec![RefValue::Bool(true), RefValue::Bool(false)]],
+    };
+    let store = store_with_one("edge", edge_bool);
+    let rules = vec![bad_rule];
+    let err = evaluate_fixpoint_typed(
+        &rules,
+        &store,
+        "reach",
+        &AppearanceOrder,
+        &FixpointConfig::default(),
+    )
+    .expect_err("wrong-target rule must surface structural error");
+    match err {
+        FixpointError::RuleNotForTarget {
+            rule_index,
+            observed,
+            expected,
+        } => {
+            assert_eq!(rule_index, 0);
+            assert_eq!(observed, "not_reach");
+            assert_eq!(expected, "reach");
+        }
+        other => {
+            panic!("expected structural RuleNotForTarget (typed gate must defer), got {other:?}")
+        }
+    }
+}
+
+#[test]
+fn typed_scc_structural_misgrouped_rule_wins_over_typed_gate() {
+    // A rule grouped under `"reach"` but whose head names `"sg"`
+    // AND whose body would fail the typed gate (Bool join key).
+    // Structural `RuleHeadPredicateMismatch` must win.
+    let misgrouped = rule_with(
+        atom("sg", vec![var("X"), var("Z")]),
+        vec![
+            pos("edge", vec![var("X"), var("Y")]),
+            pos("edge", vec![var("Y"), var("Z")]),
+        ],
+    );
+    let edge_bool = RefRelation {
+        schema: vec![ScalarType::Bool, ScalarType::Bool],
+        rows: vec![vec![RefValue::Bool(true), RefValue::Bool(false)]],
+    };
+    let store = store_with_one("edge", edge_bool);
+    let mut rules: BTreeMap<String, Vec<Rule>> = BTreeMap::new();
+    rules.insert("reach".into(), vec![misgrouped]);
+    let err =
+        evaluate_scc_fixpoint_typed(&rules, &store, &AppearanceOrder, &FixpointConfig::default())
+            .expect_err("misgrouped rule must surface structural error");
+    match err {
+        SccFixpointError::RuleHeadPredicateMismatch {
+            group_key,
+            rule_index,
+            observed,
+        } => {
+            assert_eq!(group_key, "reach");
+            assert_eq!(rule_index, 0);
+            assert_eq!(observed, "sg");
+        }
+        other => panic!(
+            "expected structural RuleHeadPredicateMismatch (typed gate must defer), got {other:?}"
+        ),
+    }
+}
+
+#[test]
+fn typed_gate_conflict_precedes_structural_boundary() {
+    // Single rule with BOTH a cross-atom type conflict (X is U32
+    // in p, Symbol in q) AND a structural boundary (negation
+    // emits Boundary::BodyNegation in analyze_typed). Per the
+    // within-gate precedence locked in typed.rs's docs,
+    // ConflictingVariableType wins because derive_vertex_types
+    // runs before analyze_typed.
+    let r = rule_with(
+        atom("tag", vec![var("X")]),
+        vec![
+            pos("p", vec![var("X"), var("Y")]),
+            pos("q", vec![var("X"), var("Z")]),
+            BodyLiteral::Negated(atom("forbidden", vec![var("X")])),
+        ],
+    );
+    let p = u32_relation(&[&[1, 2]]);
+    let q = RefRelation {
+        schema: vec![ScalarType::Symbol, ScalarType::U32],
+        rows: vec![vec![RefValue::Symbol("a".into()), RefValue::U32(0)]],
+    };
+    let mut store: RefRelationStore = BTreeMap::new();
+    store.insert("p".into(), p);
+    store.insert("q".into(), q);
+    store.insert(
+        "forbidden".into(),
+        RefRelation {
+            schema: vec![ScalarType::U32],
+            rows: vec![],
+        },
+    );
+    let err = evaluate_rule_typed(&r, &store, &AppearanceOrder)
+        .expect_err("rule with both conflict and negation must fail");
+    match err {
+        RefEvalError::ConflictingVariableType { var, .. } => {
+            assert_eq!(var, "X");
+        }
+        other => panic!(
+            "expected ConflictingVariableType (within-gate precedence: \
+             conflict before boundary), got {other:?}"
+        ),
+    }
+}
