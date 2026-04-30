@@ -5589,7 +5589,7 @@ impl super::CudaKernelProvider {
     }
 
     /// Strict-recorder variant of [`Self::dedup_full_row`] —
-    /// narrow to all-`u32` / `Symbol` columns.
+    /// narrow to U32 / Symbol / U64 columns.
     ///
     /// Composes [`Self::sort_recorded`] (typed multi-column
     /// sort) → on-stream `mark_unique_full_row_bytewise` →
