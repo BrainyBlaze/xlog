@@ -31,9 +31,16 @@
 //! ```
 //!
 //! Anything else (different shape, non-Inner join, recursive SCC,
-//! 2-arity heads, missing or non-4-byte-key input buffers, no
-//! runtime-backed memory manager) returns `Ok(None)` and the
-//! caller takes the existing binary-join path.
+//! 2-arity heads, missing input buffers, unsupported scalar types,
+//! mixed-width slots within the same triangle, or no runtime-backed
+//! memory manager) returns `Ok(None)` and the caller takes the
+//! existing binary-join path.
+//!
+//! Width branching: 4-byte (U32 / Symbol) inputs go to
+//! `wcoj_layout_u32_recorded` + `wcoj_triangle_u32_recorded`;
+//! 8-byte (U64) inputs go to the `_u64_recorded` siblings. All
+//! three slots must share a width — mixed-width triangles fall
+//! back to the binary-join path.
 //!
 //! ## Failure handling
 //!
@@ -50,7 +57,8 @@
 //! * Recursive / SCC mixed execution — the executor's recursive
 //!   branch is unchanged. We hook only the non-recursive branch.
 //! * Cost model.
-//! * u64 key types.
+//! * Mixed-width admission (a triangle with both U32 and U64
+//!   slots stays on the binary-join path).
 //! * Histogram-guided block dispatch.
 //! * Default-on behavior (env var must be explicitly set).
 
@@ -172,28 +180,48 @@ pub(super) fn match_triangle_rir(body: &RirNode) -> Option<TriangleRirMatch> {
     })
 }
 
-/// True when `buf` has 2 columns and both are 4-byte keys
-/// ([`xlog_core::ScalarType::U32`] or
-/// [`xlog_core::ScalarType::Symbol`]). Both share the same 4-byte
-/// physical layout; the WCOJ kernel reads either identically.
-/// Cross-relation type compatibility (e.g., that a Symbol column
-/// doesn't accidentally join with a U32 column with the same bit
-/// pattern) is the planner's job — but the executor only sees
-/// the lowered RIR by this point. For v1 we trust that the
-/// existing pre-WCOJ binary-join path produces the same result
-/// either way, so any divergence is caught by the
-/// row-set-equality checks in the wiring/cert tests.
-fn is_two_col_u32(buf: &CudaBuffer) -> bool {
+/// Physical key width for a WCOJ-eligible binary relation at
+/// the RIR-level dispatch. `FourByte` covers `U32` and `Symbol`
+/// (bit-identical layout); `EightByte` covers `U64`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WcojKeyWidth {
+    FourByte,
+    EightByte,
+}
+
+/// Classify a binary [`CudaBuffer`]'s key width for WCOJ
+/// dispatch, mirroring `xlog_integration::wcoj_dispatch`'s
+/// AST-level helper. Returns `Some(width)` for 2-column buffers
+/// whose columns are both 4-byte (U32/Symbol) or both 8-byte
+/// (U64); `None` for any other arity / type combination,
+/// including mixed-width within a single buffer.
+///
+/// Cross-relation type compatibility is enforced upstream by
+/// the planner via `analyze_typed`. The executor only sees
+/// lowered RIR at this point, so this classifier is the last
+/// width-uniformity check before the GPU launch — any
+/// divergence vs. the binary-join path is caught by the
+/// wiring/cert row-set-equality tests.
+fn classify_two_col_wcoj_width(buf: &CudaBuffer) -> Option<WcojKeyWidth> {
     if buf.arity() != 2 {
-        return false;
+        return None;
     }
-    for col_idx in 0..2 {
-        match buf.schema.column_type(col_idx) {
-            Some(xlog_core::ScalarType::U32) | Some(xlog_core::ScalarType::Symbol) => {}
-            _ => return false,
-        }
+    let c0 = buf.schema.column_type(0)?;
+    let c1 = buf.schema.column_type(1)?;
+    let w0 = scalar_wcoj_width(c0)?;
+    let w1 = scalar_wcoj_width(c1)?;
+    if w0 != w1 {
+        return None;
     }
-    true
+    Some(w0)
+}
+
+fn scalar_wcoj_width(ty: xlog_core::ScalarType) -> Option<WcojKeyWidth> {
+    match ty {
+        xlog_core::ScalarType::U32 | xlog_core::ScalarType::Symbol => Some(WcojKeyWidth::FourByte),
+        xlog_core::ScalarType::U64 => Some(WcojKeyWidth::EightByte),
+        _ => None,
+    }
 }
 
 impl Executor {
@@ -238,7 +266,10 @@ impl Executor {
             None => return Ok(None),
         };
 
-        // 4. Look up input buffers + validate 4-byte-key schemas.
+        // 4. Look up input buffers + classify their key widths.
+        // All three slots must be WCOJ-eligible AND share the
+        // same width — mixed-width triangles fall back here so
+        // the binary-join path handles them.
         let buf_xy = match self.store.get(&name_xy) {
             Some(b) => b,
             None => return Ok(None),
@@ -251,9 +282,14 @@ impl Executor {
             Some(b) => b,
             None => return Ok(None),
         };
-        if !is_two_col_u32(buf_xy) || !is_two_col_u32(buf_yz) || !is_two_col_u32(buf_xz) {
-            return Ok(None);
-        }
+        let width = match (
+            classify_two_col_wcoj_width(buf_xy),
+            classify_two_col_wcoj_width(buf_yz),
+            classify_two_col_wcoj_width(buf_xz),
+        ) {
+            (Some(a), Some(b), Some(c)) if a == b && b == c => a,
+            _ => return Ok(None),
+        };
 
         // 5. Acquire a launch stream from the runtime pool.
         // Without a runtime-backed manager, the recorded WCOJ
@@ -273,7 +309,7 @@ impl Executor {
         // to the store, so an error here only loses the work
         // we just did — the binary-join path picks it up.
         let dispatch_result =
-            self.run_wcoj_triangle_pipeline(buf_xy, buf_yz, buf_xz, launch_stream);
+            self.run_wcoj_triangle_pipeline(buf_xy, buf_yz, buf_xz, launch_stream, width);
         match dispatch_result {
             Ok(buf) => {
                 self.wcoj_triangle_dispatch_count += 1;
@@ -285,25 +321,52 @@ impl Executor {
 
     /// Inner pipeline: 3× layout construction + triangle kernel.
     /// Split out so [`try_dispatch_wcoj_triangle`] can map any
-    /// error to `Ok(None)` cleanly.
+    /// error to `Ok(None)` cleanly. Branches by `width` between
+    /// the parallel u32 and u64 provider entries.
     fn run_wcoj_triangle_pipeline(
         &self,
         buf_xy: &CudaBuffer,
         buf_yz: &CudaBuffer,
         buf_xz: &CudaBuffer,
         launch_stream: StreamId,
+        width: WcojKeyWidth,
     ) -> Result<CudaBuffer> {
-        let layout_xy = self
-            .provider
-            .wcoj_layout_u32_recorded(buf_xy, launch_stream)?;
-        let layout_yz = self
-            .provider
-            .wcoj_layout_u32_recorded(buf_yz, launch_stream)?;
-        let layout_xz = self
-            .provider
-            .wcoj_layout_u32_recorded(buf_xz, launch_stream)?;
-        self.provider
-            .wcoj_triangle_u32_recorded(&layout_xy, &layout_yz, &layout_xz, launch_stream)
+        match width {
+            WcojKeyWidth::FourByte => {
+                let layout_xy = self
+                    .provider
+                    .wcoj_layout_u32_recorded(buf_xy, launch_stream)?;
+                let layout_yz = self
+                    .provider
+                    .wcoj_layout_u32_recorded(buf_yz, launch_stream)?;
+                let layout_xz = self
+                    .provider
+                    .wcoj_layout_u32_recorded(buf_xz, launch_stream)?;
+                self.provider.wcoj_triangle_u32_recorded(
+                    &layout_xy,
+                    &layout_yz,
+                    &layout_xz,
+                    launch_stream,
+                )
+            }
+            WcojKeyWidth::EightByte => {
+                let layout_xy = self
+                    .provider
+                    .wcoj_layout_u64_recorded(buf_xy, launch_stream)?;
+                let layout_yz = self
+                    .provider
+                    .wcoj_layout_u64_recorded(buf_yz, launch_stream)?;
+                let layout_xz = self
+                    .provider
+                    .wcoj_layout_u64_recorded(buf_xz, launch_stream)?;
+                self.provider.wcoj_triangle_u64_recorded(
+                    &layout_xy,
+                    &layout_yz,
+                    &layout_xz,
+                    launch_stream,
+                )
+            }
+        }
     }
 
     /// Number of times the WCOJ triangle hook produced a result

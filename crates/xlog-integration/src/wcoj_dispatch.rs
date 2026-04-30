@@ -11,38 +11,45 @@
 //!     unconditionally — the caller takes the existing
 //!     binary-join path.
 //!   * **Recognizes exactly one shape.** A rule of the form
-//!     `tri(X, Y, Z) :- e1(X, Y), e2(Y, Z), e3(X, Z)` over u32
-//!     2-column relations: three positive 2-arity body atoms
-//!     covering the head's three distinct variables in
+//!     `tri(X, Y, Z) :- e1(X, Y), e2(Y, Z), e3(X, Z)` over
+//!     2-column WCOJ-eligible relations (U32, Symbol, or U64
+//!     keys — see `WcojKeyWidth`): three positive 2-arity body
+//!     atoms covering the head's three distinct variables in
 //!     head-position order. No negation, no comparison filters,
 //!     no recursion (head predicate not in body), no
 //!     reversed-axis atoms (e.g. `e1(Y, X)`), no constants in
 //!     atom args. The planner must also return
 //!     [`xlog_logic::hypergraph::RulePlan::MultiwayCandidate`].
+//!   * **Width uniformity.** All three slots must share a key
+//!     width. A mixed-width triangle (e.g. e1 U32, e2 U64) is
+//!     rejected at this dispatch level — the binary-join chain
+//!     handles it.
 //!   * **Silent fallback.** Any mismatch — gate off, shape
 //!     mismatch, planner verdict not multiway, missing input
-//!     buffer, non-4-byte-key schema — returns `Ok(None)` without an
-//!     error or log line. The caller is expected to silently
-//!     route to the existing binary-join path. This keeps the
-//!     env flag truly opt-in and prevents the helper from
-//!     accidentally diverting work it can't handle.
+//!     buffer, unsupported scalar type, mixed-width slots —
+//!     returns `Ok(None)` without an error or log line. The
+//!     caller is expected to silently route to the existing
+//!     binary-join path. This keeps the env flag truly opt-in
+//!     and prevents the helper from accidentally diverting
+//!     work it can't handle.
 //!   * **Strict GPU pipeline on dispatch.** When all checks pass,
-//!     the helper builds three sorted+deduped layouts via
-//!     [`xlog_cuda::CudaKernelProvider::wcoj_layout_u32_recorded`]
-//!     and runs
-//!     [`xlog_cuda::CudaKernelProvider::wcoj_triangle_u32_recorded`]
-//!     on the configured `launch_stream`. All
+//!     the helper builds three sorted+deduped layouts and runs
+//!     the matching WCOJ triangle kernel on the configured
+//!     `launch_stream` — `wcoj_layout_u32_recorded` /
+//!     `wcoj_triangle_u32_recorded` for 4-byte keys, the
+//!     `_u64_recorded` siblings for 8-byte keys. All
 //!     [`xlog_cuda::launch::LaunchRecorder`] discipline carries
 //!     through unchanged.
 //!
 //! What this slice deliberately does NOT do:
 //!
 //!   * No automatic detection at the executor level — callers
-//!     pass the rule + input buffers explicitly. Wiring this
-//!     into [`xlog_runtime::Executor`] is the next slice.
+//!     pass the rule + input buffers explicitly. Executor
+//!     wiring lives in `xlog-runtime`.
 //!   * No recursion / SCC mixed execution.
 //!   * No cost model.
-//!   * No u64 column variants.
+//!   * No mixed-width admission (U32+U64 triangle stays on the
+//!     binary-join path).
 //!   * No histogram-guided block dispatch.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -118,25 +125,54 @@ pub fn try_wcoj_triangle_u32_dispatch_with_gate(
     }
 
     // Construct sorted+deduped layouts for each slot and run
-    // the WCOJ triangle kernel.
-    let buf_xy = provider.wcoj_layout_u32_recorded(matched.e_xy, launch_stream)?;
-    let buf_yz = provider.wcoj_layout_u32_recorded(matched.e_yz, launch_stream)?;
-    let buf_xz = provider.wcoj_layout_u32_recorded(matched.e_xz, launch_stream)?;
-    let result = provider.wcoj_triangle_u32_recorded(&buf_xy, &buf_yz, &buf_xz, launch_stream)?;
+    // the WCOJ triangle kernel. Branch by width: 4-byte
+    // (U32 / Symbol) and 8-byte (U64) inputs go to parallel
+    // provider entries. Mixed-width triangles never reach this
+    // point — `match_triangle_shape` requires all three slots
+    // to share a width.
+    let result = match matched.width {
+        WcojKeyWidth::FourByte => {
+            let buf_xy = provider.wcoj_layout_u32_recorded(matched.e_xy, launch_stream)?;
+            let buf_yz = provider.wcoj_layout_u32_recorded(matched.e_yz, launch_stream)?;
+            let buf_xz = provider.wcoj_layout_u32_recorded(matched.e_xz, launch_stream)?;
+            provider.wcoj_triangle_u32_recorded(&buf_xy, &buf_yz, &buf_xz, launch_stream)?
+        }
+        WcojKeyWidth::EightByte => {
+            let buf_xy = provider.wcoj_layout_u64_recorded(matched.e_xy, launch_stream)?;
+            let buf_yz = provider.wcoj_layout_u64_recorded(matched.e_yz, launch_stream)?;
+            let buf_xz = provider.wcoj_layout_u64_recorded(matched.e_xz, launch_stream)?;
+            provider.wcoj_triangle_u64_recorded(&buf_xy, &buf_yz, &buf_xz, launch_stream)?
+        }
+    };
     Ok(Some(result))
 }
 
 /// Matched atom slots after pattern recognition. Each `&CudaBuffer`
-/// borrows from the caller's `inputs` map.
+/// borrows from the caller's `inputs` map. `width` is the key
+/// width shared by all three slots (mixed-width triangles never
+/// reach this struct — see `match_triangle_shape`).
 struct MatchedAtoms<'a> {
     atoms: Vec<MatchedAtom>,
     e_xy: &'a CudaBuffer,
     e_yz: &'a CudaBuffer,
     e_xz: &'a CudaBuffer,
+    width: WcojKeyWidth,
 }
 
 struct MatchedAtom {
     predicate: String,
+}
+
+/// Physical key width for a WCOJ-eligible binary relation.
+/// `FourByte` covers `U32` and `Symbol` (bit-identical layout);
+/// `EightByte` covers `U64`. Other scalar types are not
+/// WCOJ-eligible at this dispatch level (the planner upstream
+/// is the source of truth for cross-relation type compatibility;
+/// `analyze_typed` rejects them before we get here).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WcojKeyWidth {
+    FourByte,
+    EightByte,
 }
 
 /// Attempt to match the rule + inputs against the v1 triangle
@@ -209,15 +245,22 @@ fn match_triangle_shape<'a>(
     }
 
     // Look up each input buffer by predicate name. Validate
-    // every buffer is 2-column u32.
+    // every buffer is a 2-column WCOJ-eligible relation
+    // (4-byte U32/Symbol or 8-byte U64) AND that all three
+    // slots share the same width — mixed-width triangles fall
+    // back here so the binary-join chain handles them.
     let mut e_xy: Option<&CudaBuffer> = None;
     let mut e_yz: Option<&CudaBuffer> = None;
     let mut e_xz: Option<&CudaBuffer> = None;
     let mut atoms_out: Vec<MatchedAtom> = Vec::with_capacity(3);
+    let mut shared_width: Option<WcojKeyWidth> = None;
     for (pos0, pos1, atom) in &atom_specs {
         let buf = inputs.get(&atom.predicate)?;
-        if !is_two_col_u32(buf) {
-            return None;
+        let w = classify_two_col_wcoj_width(buf)?;
+        match shared_width {
+            None => shared_width = Some(w),
+            Some(prev) if prev == w => {}
+            Some(_) => return None,
         }
         atoms_out.push(MatchedAtom {
             predicate: atom.predicate.clone(),
@@ -234,6 +277,7 @@ fn match_triangle_shape<'a>(
         e_xy: e_xy?,
         e_yz: e_yz?,
         e_xz: e_xz?,
+        width: shared_width?,
     })
 }
 
@@ -268,24 +312,46 @@ fn head_pos_of_var(head_vars: &[String], term: &Term) -> Option<usize> {
     }
 }
 
-/// True when `buf` has 2 columns and both columns are 4-byte
-/// keys ([`ScalarType::U32`] or [`ScalarType::Symbol`]). Both
-/// share the same 4-byte physical layout, so the WCOJ kernel
-/// reads them identically; the cross-relation type-compatibility
-/// check (so symbol IDs don't accidentally join with raw u32s)
-/// is enforced by the planner upstream via
-/// `xlog_logic::hypergraph::analyze_typed`.
-fn is_two_col_u32(buf: &CudaBuffer) -> bool {
+/// Classify a binary [`CudaBuffer`]'s key width for WCOJ
+/// dispatch. Returns
+///
+/// * `Some(WcojKeyWidth::FourByte)` when both columns are
+///   `U32` or `Symbol` (bit-identical 4-byte physical layout —
+///   the WCOJ kernel reads them identically),
+/// * `Some(WcojKeyWidth::EightByte)` when both columns are
+///   `U64`,
+/// * `None` for any other arity / type combination, including
+///   mixed widths within a single buffer (e.g. one column U32
+///   and the other U64).
+///
+/// Cross-relation type-compatibility (so a Symbol column never
+/// joins with a U32 column with the same bit pattern, and a
+/// U32 column never joins with a U64 column) is enforced by
+/// the planner upstream via `xlog_logic::hypergraph::analyze_typed`;
+/// the dispatch helper additionally requires width-uniformity
+/// across the three slots in `match_triangle_shape`.
+fn classify_two_col_wcoj_width(buf: &CudaBuffer) -> Option<WcojKeyWidth> {
     if buf.arity() != 2 {
-        return false;
+        return None;
     }
-    for col_idx in 0..2 {
-        match buf.schema.column_type(col_idx) {
-            Some(ScalarType::U32) | Some(ScalarType::Symbol) => {}
-            _ => return false,
-        }
+    let c0 = buf.schema.column_type(0)?;
+    let c1 = buf.schema.column_type(1)?;
+    let width0 = scalar_wcoj_width(c0)?;
+    let width1 = scalar_wcoj_width(c1)?;
+    if width0 != width1 {
+        return None;
     }
-    true
+    Some(width0)
+}
+
+/// Map a single [`ScalarType`] to its WCOJ key width, or `None`
+/// if the type is not supported by any current WCOJ entry.
+fn scalar_wcoj_width(ty: ScalarType) -> Option<WcojKeyWidth> {
+    match ty {
+        ScalarType::U32 | ScalarType::Symbol => Some(WcojKeyWidth::FourByte),
+        ScalarType::U64 => Some(WcojKeyWidth::EightByte),
+        _ => None,
+    }
 }
 
 /// Build a synthetic schema-only [`RefRelation`] for the planner's

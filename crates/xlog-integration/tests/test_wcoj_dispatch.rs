@@ -486,3 +486,144 @@ fn dispatch_gate_on_non_u32_buffer_falls_back_silently() {
         "non-u32 input must fall back silently; got Some(_)"
     );
 }
+
+// ---------------------------------------------------------------
+// U64 + mixed-width dispatch surface (commit 3 of v0.6.2 u64 slice).
+//
+// The dispatch helper widens the shape gate to accept either
+// 4-byte (U32 / Symbol) or 8-byte (U64) inputs uniformly across
+// all three slots; mixed-width triangles must return Ok(None) so
+// the existing binary-join chain handles them.
+// ---------------------------------------------------------------
+
+/// Upload a host-side `Vec<(u64, u64)>` to a 2-column U64
+/// `CudaBuffer`. Mirror of `upload_binary_u32`.
+fn upload_binary_u64(memory: &Arc<GpuMemoryManager>, rows: &[(u64, u64)]) -> CudaBuffer {
+    let n = rows.len() as u32;
+    let col0_host: Vec<u64> = rows.iter().map(|(a, _)| *a).collect();
+    let col1_host: Vec<u64> = rows.iter().map(|(_, b)| *b).collect();
+    let bytes_per_col = (n as usize) * std::mem::size_of::<u64>();
+    let mut col0 = memory.alloc::<u8>(bytes_per_col).expect("alloc col0");
+    let mut col1 = memory.alloc::<u8>(bytes_per_col).expect("alloc col1");
+    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc d_num_rows");
+    let device = memory.device().inner();
+    if !col0_host.is_empty() {
+        let c0: Vec<u8> = col0_host.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let c1: Vec<u8> = col1_host.iter().flat_map(|v| v.to_le_bytes()).collect();
+        device.htod_sync_copy_into(&c0, &mut col0).expect("htod c0");
+        device.htod_sync_copy_into(&c1, &mut col1).expect("htod c1");
+    }
+    device
+        .htod_sync_copy_into(&[n], &mut d_num_rows)
+        .expect("htod d_num_rows");
+    let schema = Schema::new(vec![
+        ("col0".to_string(), ScalarType::U64),
+        ("col1".to_string(), ScalarType::U64),
+    ]);
+    CudaBuffer::from_columns_with_host_count(
+        vec![col0.into(), col1.into()],
+        n as u64,
+        d_num_rows,
+        schema,
+        n,
+    )
+}
+
+#[test]
+fn dispatch_gate_on_matching_u64_triangle_returns_some() {
+    // Gate on, U64-typed inputs across all three slots, valid
+    // triangle shape → dispatch must produce Some(buffer) with
+    // U64 output schema preserved per column.
+    let Some(fix) = make_runtime_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    // Shift the existing multi-triangle fixture into hi-half u64
+    // space so a buggy width-truncating dispatch (e.g. routing
+    // U64 to the U32 entry) would visibly fail.
+    let big = (u32::MAX as u64) + 1;
+    let raw_e1: Vec<(u64, u64)> = vec![
+        (big + 1, big + 2),
+        (big + 1, big + 3),
+        (big + 1, big + 4),
+        (big + 2, big + 3),
+        (big + 2, big + 4),
+        (big + 3, big + 4),
+        (big + 5, big + 6),
+        (big + 5, big + 7),
+        (big + 6, big + 7),
+    ];
+    let raw_e2: Vec<(u64, u64)> = vec![
+        (big + 2, big + 3),
+        (big + 2, big + 4),
+        (big + 3, big + 4),
+        (big + 6, big + 7),
+    ];
+    let raw_e3: Vec<(u64, u64)> = vec![
+        (big + 1, big + 3),
+        (big + 1, big + 4),
+        (big + 2, big + 4),
+        (big + 3, big + 4),
+        (big + 5, big + 7),
+    ];
+    let r = rule_with(
+        atom("tri", vec![var("X"), var("Y"), var("Z")]),
+        vec![
+            pos("e1", vec![var("X"), var("Y")]),
+            pos("e2", vec![var("Y"), var("Z")]),
+            pos("e3", vec![var("X"), var("Z")]),
+        ],
+    );
+    let mut inputs: BTreeMap<String, CudaBuffer> = BTreeMap::new();
+    inputs.insert("e1".into(), upload_binary_u64(&fix.memory, &raw_e1));
+    inputs.insert("e2".into(), upload_binary_u64(&fix.memory, &raw_e2));
+    inputs.insert("e3".into(), upload_binary_u64(&fix.memory, &raw_e3));
+    let stream = fix.pool.acquire().expect("stream");
+    let dispatched =
+        try_wcoj_triangle_u32_dispatch_with_gate(true, &r, &inputs, &fix.provider, stream)
+            .expect("must not error on U64 triangle")
+            .expect("must dispatch on U64 triangle");
+    // Output schema must be U64 × 3 (provider preserves it).
+    assert_eq!(dispatched.schema.column_type(0), Some(ScalarType::U64));
+    assert_eq!(dispatched.schema.column_type(1), Some(ScalarType::U64));
+    assert_eq!(dispatched.schema.column_type(2), Some(ScalarType::U64));
+    assert_eq!(
+        dispatched.num_rows() as usize,
+        5,
+        "U64 dispatch must produce same 5 triangles as U32 dispatch on identical-shape fixture"
+    );
+}
+
+#[test]
+fn dispatch_gate_on_mixed_u32_u64_triangle_falls_back_silently() {
+    // Gate on, valid triangle shape, but slot widths are mixed:
+    // e1 + e3 are U32, e2 is U64. Cross-relation type
+    // compatibility would have been rejected upstream by the
+    // planner via `analyze_typed`; this test locks that the
+    // dispatch helper itself also bails (returns Ok(None))
+    // rather than picking a width arbitrarily and running
+    // bit-equality joins across U32/U64 buffers.
+    let Some(fix) = make_runtime_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let r = rule_with(
+        atom("tri", vec![var("X"), var("Y"), var("Z")]),
+        vec![
+            pos("e1", vec![var("X"), var("Y")]),
+            pos("e2", vec![var("Y"), var("Z")]),
+            pos("e3", vec![var("X"), var("Z")]),
+        ],
+    );
+    let mut inputs: BTreeMap<String, CudaBuffer> = BTreeMap::new();
+    inputs.insert("e1".into(), upload_binary_u32(&fix.memory, &[(1, 2)]));
+    inputs.insert("e2".into(), upload_binary_u64(&fix.memory, &[(2, 3)]));
+    inputs.insert("e3".into(), upload_binary_u32(&fix.memory, &[(1, 3)]));
+    let stream = fix.pool.acquire().expect("stream");
+    let result = try_wcoj_triangle_u32_dispatch_with_gate(true, &r, &inputs, &fix.provider, stream)
+        .expect("must not error on mixed-width inputs");
+    assert!(
+        result.is_none(),
+        "mixed-width triangle (U32 + U64 slots) must fall back silently; got Some(_)"
+    );
+}

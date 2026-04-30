@@ -574,3 +574,154 @@ fn wiring_gate_on_symbol_triangle_dispatches_and_preserves_schema() {
         rows.len()
     );
 }
+
+// ---------------------------------------------------------------
+// U64 + mixed-width executor wiring (commit 3 of v0.6.2 u64 slice).
+// ---------------------------------------------------------------
+
+/// U64 sibling of `upload_binary_u32` / `upload_binary_symbol`.
+fn upload_binary_u64(memory: &Arc<GpuMemoryManager>, rows: &[(u64, u64)]) -> CudaBuffer {
+    let n = rows.len() as u32;
+    let col0_host: Vec<u64> = rows.iter().map(|(a, _)| *a).collect();
+    let col1_host: Vec<u64> = rows.iter().map(|(_, b)| *b).collect();
+    let bytes_per_col = (n as usize) * std::mem::size_of::<u64>();
+    let mut col0 = memory.alloc::<u8>(bytes_per_col).expect("alloc col0");
+    let mut col1 = memory.alloc::<u8>(bytes_per_col).expect("alloc col1");
+    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc d_num_rows");
+    let device = memory.device().inner();
+    if !col0_host.is_empty() {
+        let c0: Vec<u8> = col0_host.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let c1: Vec<u8> = col1_host.iter().flat_map(|v| v.to_le_bytes()).collect();
+        device.htod_sync_copy_into(&c0, &mut col0).expect("htod c0");
+        device.htod_sync_copy_into(&c1, &mut col1).expect("htod c1");
+    }
+    device
+        .htod_sync_copy_into(&[n], &mut d_num_rows)
+        .expect("htod d_num_rows");
+    let schema = Schema::new(vec![
+        ("col0".to_string(), ScalarType::U64),
+        ("col1".to_string(), ScalarType::U64),
+    ]);
+    CudaBuffer::from_columns_with_host_count(
+        vec![col0.into(), col1.into()],
+        n as u64,
+        d_num_rows,
+        schema,
+        n,
+    )
+}
+
+#[test]
+fn wiring_gate_on_u64_triangle_dispatches_and_preserves_schema() {
+    // U64-typed triangle inputs registered via `put_relation`.
+    // The executor's RIR matcher accepts U64 via the widened
+    // width admission, the WCOJ U64 entry runs, and the output
+    // buffer's schema preserves U64 per column.
+    //
+    // Fixture is the multi-triangle topology shifted into hi-half
+    // u64 space — a buggy width-truncating dispatch (e.g. routing
+    // U64 inputs through the U32 entry) would visibly fail.
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let big = (u32::MAX as u64) + 1;
+    let mut inputs: BTreeMap<&str, Vec<(u64, u64)>> = BTreeMap::new();
+    inputs.insert(
+        "e1",
+        vec![
+            (big + 1, big + 2),
+            (big + 1, big + 3),
+            (big + 1, big + 4),
+            (big + 2, big + 3),
+            (big + 2, big + 4),
+            (big + 3, big + 4),
+            (big + 5, big + 6),
+            (big + 5, big + 7),
+            (big + 6, big + 7),
+        ],
+    );
+    inputs.insert(
+        "e2",
+        vec![
+            (big + 2, big + 3),
+            (big + 2, big + 4),
+            (big + 3, big + 4),
+            (big + 6, big + 7),
+        ],
+    );
+    inputs.insert(
+        "e3",
+        vec![
+            (big + 1, big + 3),
+            (big + 1, big + 4),
+            (big + 2, big + 4),
+            (big + 3, big + 4),
+            (big + 5, big + 7),
+        ],
+    );
+
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile(TRIANGLE_SOURCE).expect("compile");
+    let config = RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(true));
+    let mut executor = Executor::new_with_config(Arc::clone(&fix.provider), config);
+    for (name, rel_id) in compiler.rel_ids() {
+        executor.register_relation(*rel_id, name);
+    }
+    for (name, rows) in &inputs {
+        let buf = upload_binary_u64(&fix.memory, rows);
+        executor.put_relation(name, buf);
+    }
+    let _ = executor.execute_plan(&plan).expect("execute_plan");
+    let counter = executor.wcoj_triangle_dispatch_count();
+    assert_eq!(
+        counter, 1,
+        "gate=Some(true) on U64-typed triangle inputs must dispatch exactly once; \
+         got counter {counter}"
+    );
+
+    // Schema preservation: output columns must remain U64.
+    let tri_buf = executor.store().get("tri").expect("tri present");
+    assert_eq!(tri_buf.schema.column_type(0), Some(ScalarType::U64));
+    assert_eq!(tri_buf.schema.column_type(1), Some(ScalarType::U64));
+    assert_eq!(tri_buf.schema.column_type(2), Some(ScalarType::U64));
+
+    // Same 5 triangles as the U32 path on the same fixture shape.
+    assert_eq!(tri_buf.num_rows() as usize, 5);
+}
+
+#[test]
+fn wiring_gate_on_mixed_u32_u64_triangle_falls_back_silently() {
+    // Mixed-width triangle: e1 + e3 are U32, e2 is U64. The
+    // RIR-level matcher must reject the dispatch (counter stays
+    // 0) so the binary-join chain handles the rule. Locks that
+    // a future schema-admission shortcut does not run bit-
+    // equality joins across U32 and U64 buffers.
+    //
+    // We don't assert on the binary-join chain's output here —
+    // the planner upstream would normally reject this fixture
+    // via `analyze_typed`, and even if it didn't, the binary
+    // executor's behavior on type-mixed inputs is out of scope.
+    // The narrow lock is that the dispatch counter == 0.
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile(TRIANGLE_SOURCE).expect("compile");
+    let config = RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(true));
+    let mut executor = Executor::new_with_config(Arc::clone(&fix.provider), config);
+    for (name, rel_id) in compiler.rel_ids() {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation("e1", upload_binary_u32(&fix.memory, &[(1, 2)]));
+    executor.put_relation("e2", upload_binary_u64(&fix.memory, &[(2, 3)]));
+    executor.put_relation("e3", upload_binary_u32(&fix.memory, &[(1, 3)]));
+    let _ = executor.execute_plan(&plan);
+    let counter = executor.wcoj_triangle_dispatch_count();
+    assert_eq!(
+        counter, 0,
+        "mixed-width triangle (U32 + U64 slots) must not dispatch the WCOJ path; \
+         got counter {counter}"
+    );
+}
