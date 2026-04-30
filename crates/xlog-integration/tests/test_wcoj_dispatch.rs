@@ -31,7 +31,7 @@
 //!   4. Compare the row sets (column-for-column, sorted lex).
 //!
 //! Out of scope per spec: recursion, SCC mixed execution, cost
-//! model, Symbol / u64, histogram dispatch.
+//! model, mixed-width admission, histogram dispatch.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
