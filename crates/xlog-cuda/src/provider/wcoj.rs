@@ -49,7 +49,7 @@
 //!   * No executor integration, no planner dispatch wiring.
 //!   * No recursion / fixpoint.
 //!   * No cost model.
-//!   * No Symbol or u64 column variants.
+//!   * No u64 column variants.
 //!   * No histogram-guided block dispatch (SRDatalog §5 skew opt).
 //!     v1 is one thread per row of `e_xy`; sufficient for the
 //!     u32 cert tests, deferred for power-law inputs.

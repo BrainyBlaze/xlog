@@ -31,7 +31,7 @@
 //! ```
 //!
 //! Anything else (different shape, non-Inner join, recursive SCC,
-//! 2-arity heads, missing or non-u32 input buffers, no
+//! 2-arity heads, missing or non-4-byte-key input buffers, no
 //! runtime-backed memory manager) returns `Ok(None)` and the
 //! caller takes the existing binary-join path.
 //!
@@ -50,7 +50,7 @@
 //! * Recursive / SCC mixed execution — the executor's recursive
 //!   branch is unchanged. We hook only the non-recursive branch.
 //! * Cost model.
-//! * u64 / Symbol key types.
+//! * u64 key types.
 //! * Histogram-guided block dispatch.
 //! * Default-on behavior (env var must be explicitly set).
 
@@ -201,7 +201,7 @@ impl Executor {
     /// GPU WCOJ triangle kernel. Returns `Ok(Some(buffer))` if
     /// the dispatch fires and produces a result; `Ok(None)`
     /// otherwise (gate off, shape mismatch, missing buffer,
-    /// non-u32 schema, missing runtime, or kernel error — every
+    /// non-4-byte-key schema, missing runtime, or kernel error — every
     /// failure mode is silent fallback).
     ///
     /// On `Ok(Some(_))`, the caller is responsible for installing
@@ -238,7 +238,7 @@ impl Executor {
             None => return Ok(None),
         };
 
-        // 4. Look up input buffers + validate u32 schemas.
+        // 4. Look up input buffers + validate 4-byte-key schemas.
         let buf_xy = match self.store.get(&name_xy) {
             Some(b) => b,
             None => return Ok(None),

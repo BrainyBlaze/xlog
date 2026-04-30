@@ -21,7 +21,7 @@
 //!     [`xlog_logic::hypergraph::RulePlan::MultiwayCandidate`].
 //!   * **Silent fallback.** Any mismatch — gate off, shape
 //!     mismatch, planner verdict not multiway, missing input
-//!     buffer, non-u32 schema — returns `Ok(None)` without an
+//!     buffer, non-4-byte-key schema — returns `Ok(None)` without an
 //!     error or log line. The caller is expected to silently
 //!     route to the existing binary-join path. This keeps the
 //!     env flag truly opt-in and prevents the helper from
@@ -42,7 +42,7 @@
 //!     into [`xlog_runtime::Executor`] is the next slice.
 //!   * No recursion / SCC mixed execution.
 //!   * No cost model.
-//!   * No Symbol or u64 column variants.
+//!   * No u64 column variants.
 //!   * No histogram-guided block dispatch.
 
 use std::collections::{BTreeMap, BTreeSet};
