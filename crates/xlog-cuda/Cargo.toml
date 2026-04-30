@@ -27,6 +27,10 @@ arrow = { version = "53", default-features = false, features = ["ffi", "ipc"] }
 
 [dev-dependencies]
 bytemuck = "1.14"
+# v0.6.2 plan→provider cert: tests that the pure-Rust hypergraph
+# planner and the GPU WCOJ provider agree on the same fixture.
+# Dev-only — no runtime coupling between xlog-cuda and xlog-logic.
+xlog-logic.workspace = true
 
 [features]
 default = []
