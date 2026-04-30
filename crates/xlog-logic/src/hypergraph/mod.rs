@@ -1,46 +1,53 @@
-//! Hypergraph IR for rule-body planning (v0.6.2 Foundation).
+//! Hypergraph IR + WCOJ oracle stack (v0.6.2).
 //!
-//! This module is a **parallel structure** to the existing AST-to-RIR
-//! lowering pipeline (see [`crate::lower`]). It does not modify how
-//! rules are executed today; instead, it provides a representation
-//! suitable for *future* multiway-join planning, plus an eligibility
-//! analyzer that decides whether a given rule could be planned as a
-//! multiway join or must fall back to the existing binary-join lowering.
+//! A **parallel structure** to the existing AST-to-RIR lowering pipeline
+//! (see [`crate::lower`]). The executor's consumed plan shape is
+//! untouched — every consumer here is opt-in and pure-Rust.
 //!
-//! ## Why a parallel structure
+//! ## What this stack ships (PRs 1–6, all on local main)
 //!
-//! PR 1's locked scope is "representation + boundaries + explain +
-//! tests". The CPU reference evaluator (PR 2), GPU kernels (PR 3),
-//! and integration into the executor (PR 4+) all build on top of
-//! this IR — but they don't need it to live inside the existing
-//! [`xlog_ir::rir`] tree to do their work. Keeping the hypergraph IR
-//! separate keeps PR 1 reviewable in isolation and avoids touching
-//! the executor's consumed plan shape until the planner is ready.
+//! * **PR 1 — Foundation.**
+//!   - [`ir::HypergraphRule`] — vertices = body variables, hyperedges =
+//!     positive body atoms.
+//!   - [`eligibility::analyze`] / [`eligibility::analyze_typed`] —
+//!     decide Eligible vs Ineligible with a structured
+//!     [`eligibility::Boundary`] list explaining why.
+//!   - [`var_order::VariableOrder`] / [`var_order::AppearanceOrder`] —
+//!     trait + trivial impl. Cost models slot in here later.
+//!   - [`explain::explain`] — stable textual representation.
+//! * **PR 2 — CPU reference evaluator.**
+//!   [`reference::evaluate_rule`] over [`reference::RefRelationStore`];
+//!   the WCOJ correctness oracle for all later kernels.
+//! * **PR 3 — Single-target fixpoint.**
+//!   [`fixpoint::evaluate_fixpoint`] for recursive single-predicate
+//!   rules (transitive closure shape).
+//! * **PR 4 — Multi-predicate SCC fixpoint.**
+//!   [`scc::evaluate_scc_fixpoint`] for mutually-recursive predicate
+//!   groups; correctness oracle for mixed-execution kernels.
+//! * **PR 5 — Typed oracle gate.**
+//!   [`typed::evaluate_rule_typed`] +
+//!   [`typed::evaluate_fixpoint_typed`] +
+//!   [`typed::evaluate_scc_fixpoint_typed`]: schema-driven type
+//!   derivation from [`reference::RefRelationStore`] feeds
+//!   [`eligibility::analyze_typed`] for join-key support gating.
+//!   Locked policy: unknown-from-base ≠ unsupported.
+//! * **PR 6 — Mixed plan contract.**
+//!   [`plan::plan_rule`] / [`plan::plan_rules`] dispatch each rule
+//!   into [`plan::RulePlan::MultiwayCandidate`] (ready for WCOJ) or
+//!   [`plan::RulePlan::BinaryFallback`] (carries every Boundary that
+//!   fired). [`plan::explain_plans`] renders a deterministic textual
+//!   summary for mixed rule sets.
 //!
-//! ## What this PR ships
+//! ## What this stack still does NOT ship
 //!
-//! * [`ir::HypergraphRule`] — vertices = body variables, hyperedges =
-//!   positive body atoms. Vertices currently carry source name only;
-//!   type / mode / selectivity metadata will attach to vertices in
-//!   later PRs (PR 2 introduces the typed-analyze entry point that
-//!   threads inferred [`xlog_core::ScalarType`]s through). Predicate
-//!   names + arities live on hyperedges.
-//! * [`eligibility::analyze`] — decides Eligible vs Ineligible with a
-//!   structured [`eligibility::Boundary`] list explaining why.
-//! * [`var_order::VariableOrder`] — trait with a single trivial
-//!   [`var_order::AppearanceOrder`] implementation. Cost models slot
-//!   in here later without breaking the trait shape.
-//! * [`explain::explain`] — stable textual representation of the
-//!   triple (hypergraph, eligibility verdict, variable order).
-//!
-//! ## What this PR explicitly does NOT ship
-//!
-//! * No CPU reference evaluator — that is PR 2.
-//! * No GPU code or CUDA touches.
-//! * No cost model beyond the trivial [`var_order::AppearanceOrder`].
+//! * No GPU / CUDA kernels — WCOJ kernel work is the next slice.
+//! * No cost model beyond [`var_order::AppearanceOrder`].
 //! * No integration into [`crate::lower`] or the executor — the
-//!   hypergraph IR is constructed on demand from a [`crate::ast::Rule`]
-//!   and consumed in tests + (later) the reference evaluator.
+//!   hypergraph stack is constructed on demand from
+//!   [`crate::ast::Rule`] values and consumed in tests, the reference
+//!   oracles, and (later) the planner / mixed-execution evaluator.
+//! * No transitive type inference across recursive SCC predicates —
+//!   PR 5 explicitly defers that to a follow-up slice.
 
 pub mod eligibility;
 pub mod explain;

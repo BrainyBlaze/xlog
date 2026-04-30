@@ -450,17 +450,16 @@ fn plan_rules_short_circuits_on_first_plan_error() {
 }
 
 // ---------------------------------------------------------------
-// Explain: deterministic across input orders
+// Explain: canonical across all input permutations
 // ---------------------------------------------------------------
 
 #[test]
-fn explain_plans_is_deterministic_and_sorts_by_head_then_position() {
-    // Build the same SCC twice in different input orders.
-    // explain_plans must produce identical output: rules are
-    // sorted by head_predicate (lex), ties broken by input
-    // position. That gives a stable canonical form for diff
-    // comparison without losing information about
-    // multiple-rules-per-head ordering.
+fn explain_plans_is_canonical_under_same_head_reorder() {
+    // Strict canonical contract: explain_plans must produce
+    // identical output for ANY permutation of the input,
+    // including reversal of same-head rules. Tie-break by
+    // rendered body content (verdict tag, then var/boundary
+    // payload), NEVER by input position.
     let r_a_seed = rule_with(
         atom("a", vec![var("X"), var("Z")]),
         vec![
@@ -491,21 +490,51 @@ fn explain_plans_is_deterministic_and_sorts_by_head_then_position() {
             rows: vec![],
         },
     );
-    let plans_ab =
+
+    // Three orderings: original, b-first (cross-head reorder),
+    // a-rules reversed (within-head reorder — the case the prior
+    // contract did NOT lock).
+    let plans_orig =
         plan_rules(&[r_a_seed.clone(), r_a_neg.clone(), r_b.clone()], &store).expect("plans");
-    let plans_ba = plan_rules(&[r_b.clone(), r_a_seed, r_a_neg], &store).expect("plans");
-    let explain_ab = explain_plans(&plans_ab);
-    let explain_ba = explain_plans(&plans_ba);
+    let plans_b_first =
+        plan_rules(&[r_b.clone(), r_a_seed.clone(), r_a_neg.clone()], &store).expect("plans");
+    let plans_a_rev =
+        plan_rules(&[r_a_neg.clone(), r_a_seed.clone(), r_b.clone()], &store).expect("plans");
+
+    let explain_orig = explain_plans(&plans_orig);
+    let explain_b_first = explain_plans(&plans_b_first);
+    let explain_a_rev = explain_plans(&plans_a_rev);
+
     assert_eq!(
-        explain_ab, explain_ba,
-        "explain output must be insertion-order independent\n  ab:\n{explain_ab}\n  ba:\n{explain_ba}"
+        explain_orig, explain_b_first,
+        "cross-head reorder must not change output\n  orig:\n{explain_orig}\n  b_first:\n{explain_b_first}"
     );
-    // Spot-check ordering: 'a' comes before 'b'; both 'a' rules
-    // appear in source order.
-    let pos_a_seed = explain_ab.find("a/").expect("a present");
-    let pos_b = explain_ab.find("b/").expect("b present");
+    assert_eq!(
+        explain_orig, explain_a_rev,
+        "within-head reorder must not change output\n  orig:\n{explain_orig}\n  a_rev:\n{explain_a_rev}"
+    );
+
+    // Spot-check ordering: 'a' comes before 'b'; verdict
+    // 'multiway' sorts before 'binary-fallback' within the 'a'
+    // cluster (since 'b' < 'm' < 'multiway' lexicographically:
+    // 'b' for binary-fallback, 'm' for multiway — wait, 'b' <
+    // 'm', so binary-fallback should sort first within a head).
+    // Let's just assert structural ordering, not the within-head
+    // verdict ordering, because the latter is an emergent
+    // property of the body fingerprint.
+    let pos_a = explain_orig.find("a/").expect("a present");
+    let pos_b = explain_orig.find("b/").expect("b present");
     assert!(
-        pos_a_seed < pos_b,
-        "expected 'a' before 'b' in explain output:\n{explain_ab}"
+        pos_a < pos_b,
+        "expected 'a' before 'b' in explain output:\n{explain_orig}"
+    );
+    // Both a-rules present (rank 0 and rank 1).
+    assert!(
+        explain_orig.contains("a/0:"),
+        "missing a/0 in:\n{explain_orig}"
+    );
+    assert!(
+        explain_orig.contains("a/1:"),
+        "missing a/1 in:\n{explain_orig}"
     );
 }

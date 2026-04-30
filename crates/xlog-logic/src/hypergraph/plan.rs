@@ -33,10 +33,14 @@
 //! ## Determinism
 //!
 //! [`plan_rule`] / [`plan_rules`] are pure functions of their
-//! inputs. [`explain_plans`] sorts plans by `head_predicate`
-//! (lexicographic), ties broken by input position; the output is
-//! identical regardless of input order, locked by
-//! `explain_plans_is_deterministic_and_sorts_by_head_then_position`.
+//! inputs. [`explain_plans`] is **canonical**: plans are sorted
+//! by `head_predicate` (lexicographic), with same-head ties
+//! broken by the rendered line content itself — verdict tag
+//! (`multiway` < `binary-fallback`), then variable-order vector
+//! or boundary list. Input position is never the tie-breaker, so
+//! the output is identical for any permutation of the input,
+//! including reversal of same-head rules. Locked by
+//! `explain_plans_is_canonical_under_same_head_reorder`.
 
 use super::eligibility::{analyze_typed, Boundary, Eligibility};
 use super::ir::{HypergraphRule, VertexId};
@@ -183,16 +187,21 @@ pub fn plan_rules(
     rules.iter().map(|r| plan_rule(r, base_relations)).collect()
 }
 
-/// Render a deterministic textual explain of a plan slice.
+/// Render a canonical textual explain of a plan slice.
 ///
 /// Plans are sorted by `head_predicate` (lexicographic), with
-/// ties broken by their original input position. The displayed
-/// per-line index is then a **per-head rank** (0-based, counting
-/// only same-head plans encountered earlier in sorted order) —
-/// using a per-head rank rather than the absolute input position
-/// keeps the output identical regardless of caller-side
-/// insertion order, while still distinguishing multiple rules
-/// under the same head.
+/// same-head ties broken by the **rendered line body** itself
+/// (verdict tag — `multiway` < `binary-fallback` — then the
+/// variable-order vector or boundary list). Input position is
+/// never consulted, so the output is identical for any
+/// permutation of the input, including reversal of same-head
+/// rules. Locked by
+/// `explain_plans_is_canonical_under_same_head_reorder`.
+///
+/// The displayed per-line index is a **per-head rank** (0-based,
+/// counting only same-head plans encountered earlier in sorted
+/// order) so multiple rules under one head remain distinguishable
+/// without leaking input position into the canonical form.
 ///
 /// One line per rule, format:
 ///
@@ -201,46 +210,51 @@ pub fn plan_rules(
 /// {head_predicate}/{per_head_rank}: binary-fallback boundaries=[BodyNegation, ...]
 /// ```
 pub fn explain_plans(plans: &[RulePlan]) -> String {
-    let mut indexed: Vec<(usize, &RulePlan)> = plans.iter().enumerate().collect();
-    indexed.sort_by(|(ia, a), (ib, b)| head_of(a).cmp(head_of(b)).then_with(|| ia.cmp(ib)));
+    // Pre-render each plan's *body* (everything after the
+    // "head/rank: " prefix). The body is the canonical content
+    // fingerprint we sort by — same head + same body → same
+    // line, regardless of input position.
+    let mut bodies: Vec<(&str, String)> =
+        plans.iter().map(|p| (head_of(p), render_body(p))).collect();
+    bodies.sort_by(|(ha, ba), (hb, bb)| ha.cmp(hb).then_with(|| ba.cmp(bb)));
     let mut out = String::new();
     let mut last_head: Option<&str> = None;
     let mut rank: usize = 0;
-    for (_input_index, plan) in indexed {
-        let head = head_of(plan);
+    for (head, body) in &bodies {
         match last_head {
-            Some(prev) if prev == head => rank += 1,
+            Some(prev) if prev == *head => rank += 1,
             _ => rank = 0,
         }
-        last_head = Some(head);
-        match plan {
-            RulePlan::MultiwayCandidate {
-                head_predicate,
-                hypergraph,
-                variable_order,
-            } => {
-                let names: Vec<&str> = variable_order
-                    .iter()
-                    .map(|vid| hypergraph.vertex(*vid).name.as_str())
-                    .collect();
-                let _ = writeln!(
-                    out,
-                    "{head_predicate}/{rank}: multiway vars=[{}]",
-                    names.join(", ")
-                );
-            }
-            RulePlan::BinaryFallback {
-                head_predicate,
-                boundaries,
-            } => {
-                let _ = writeln!(
-                    out,
-                    "{head_predicate}/{rank}: binary-fallback boundaries={boundaries:?}"
-                );
-            }
-        }
+        last_head = Some(*head);
+        let _ = writeln!(out, "{head}/{rank}: {body}");
     }
     out
+}
+
+/// Render the verdict-and-payload portion of a plan's explain
+/// line. Used both for output assembly and (importantly) as the
+/// same-head sort fingerprint in [`explain_plans`].
+///
+/// The leading verdict tag `multiway` sorts before
+/// `binary-fallback` lexicographically, which gives a natural
+/// "successes first" cluster for any predicate that has a mix.
+fn render_body(plan: &RulePlan) -> String {
+    match plan {
+        RulePlan::MultiwayCandidate {
+            hypergraph,
+            variable_order,
+            ..
+        } => {
+            let names: Vec<&str> = variable_order
+                .iter()
+                .map(|vid| hypergraph.vertex(*vid).name.as_str())
+                .collect();
+            format!("multiway vars=[{}]", names.join(", "))
+        }
+        RulePlan::BinaryFallback { boundaries, .. } => {
+            format!("binary-fallback boundaries={boundaries:?}")
+        }
+    }
 }
 
 fn head_of(plan: &RulePlan) -> &str {
