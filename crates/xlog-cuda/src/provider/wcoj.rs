@@ -1096,6 +1096,17 @@ impl CudaKernelProvider {
         let blocks_per_col = (max_n + BLOCK_SIZE - 1) / BLOCK_SIZE;
         let total_blocks = blocks_per_col.saturating_mul(3);
 
+        // Resolve the kernel handle BEFORE queueing any
+        // launch-stream work. If the kernel module isn't loaded,
+        // failing here drops `hist_buf` cleanly — no queued
+        // memset/launch is in flight.
+        let device = self.device.inner();
+        let kernel = device
+            .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_TRIANGLE_SKEW_HISTOGRAM_U32)
+            .ok_or_else(|| {
+                XlogError::Kernel("skew_score: histogram_u32 kernel not found".to_string())
+            })?;
+
         let mut rec = LaunchRecorder::new_strict(launch_stream);
         rec.read(e_xy.num_rows_device());
         rec.read(e_yz.num_rows_device());
@@ -1107,64 +1118,85 @@ impl CudaKernelProvider {
         rec.preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("skew_score: preflight failed: {e}")))?;
 
-        // Step 1: zero the histogram on launch_stream. CUDA does
-        // not provide a global barrier inside one regular kernel,
-        // so an in-kernel "zero pass + atomic merge" can race;
-        // the on-stream memset is the correctness-preserving
-        // sequencing primitive. Bytes = 192 * 4 = 768.
-        let hist_bytes = (hist_len * std::mem::size_of::<u32>()) as usize;
-        unsafe {
-            let res =
-                sys::cuMemsetD8Async(*hist_buf.device_ptr(), 0, hist_bytes, cu_stream.cu_stream());
-            if res != sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "skew_score: cuMemsetD8Async failed: {res:?}"
-                )));
+        // From here on, any error path before `rec.commit(runtime)`
+        // succeeds must drain the launch stream before returning,
+        // because `hist_buf` is about to drop and the runtime
+        // dealloc would otherwise race the queued memset/kernel.
+        // We capture the in-flight closure in a local helper and
+        // sync on the failure branch.
+        let queued_result: Result<()> = (|| {
+            // Step 1: zero the histogram on launch_stream. CUDA does
+            // not provide a global barrier inside one regular kernel,
+            // so an in-kernel "zero pass + atomic merge" can race;
+            // the on-stream memset is the correctness-preserving
+            // sequencing primitive. Bytes = 192 * 4 = 768.
+            let hist_bytes = hist_len * std::mem::size_of::<u32>();
+            unsafe {
+                let res = sys::cuMemsetD8Async(
+                    *hist_buf.device_ptr(),
+                    0,
+                    hist_bytes,
+                    cu_stream.cu_stream(),
+                );
+                if res != sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "skew_score: cuMemsetD8Async failed: {res:?}"
+                    )));
+                }
             }
+
+            // Step 2: combined histogram kernel.
+            // SAFETY: 8-arg signature
+            //   wcoj_triangle_skew_histogram_u32(
+            //     const u32* xy_col1, u32 n_xy,
+            //     const u32* yz_col0, u32 n_yz,
+            //     const u32* xz_col0, u32 n_xz,
+            //     u32 blocks_per_col,
+            //     u32* histograms)
+            unsafe {
+                kernel
+                    .clone()
+                    .launch_on_stream(
+                        &cu_stream,
+                        LaunchConfig {
+                            grid_dim: (total_blocks, 1, 1),
+                            block_dim: (BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            xy_col1,
+                            n_xy,
+                            yz_col0,
+                            n_yz,
+                            xz_col0,
+                            n_xz,
+                            blocks_per_col,
+                            &mut hist_buf,
+                        ),
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!("skew_score: histogram launch failed: {e}"))
+                    })?;
+            }
+            Ok(())
+        })();
+
+        // If the queued-work helper failed, best-effort sync the
+        // stream so any partially-issued memset / launch drains
+        // before `hist_buf` goes out of scope. Sync errors are
+        // swallowed — the original error is more informative for
+        // the caller, and Ok(None) wraps either way.
+        if let Err(e) = queued_result {
+            let _ = cu_stream.synchronize();
+            return Err(e);
         }
 
-        // Step 2: combined histogram kernel.
-        let device = self.device.inner();
-        let kernel = device
-            .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_TRIANGLE_SKEW_HISTOGRAM_U32)
-            .ok_or_else(|| {
-                XlogError::Kernel("skew_score: histogram_u32 kernel not found".to_string())
-            })?;
-        // SAFETY: 8-arg signature
-        //   wcoj_triangle_skew_histogram_u32(
-        //     const u32* xy_col1, u32 n_xy,
-        //     const u32* yz_col0, u32 n_yz,
-        //     const u32* xz_col0, u32 n_xz,
-        //     u32 blocks_per_col,
-        //     u32* histograms)
-        unsafe {
-            kernel
-                .clone()
-                .launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (total_blocks, 1, 1),
-                        block_dim: (BLOCK_SIZE, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (
-                        xy_col1,
-                        n_xy,
-                        yz_col0,
-                        n_yz,
-                        xz_col0,
-                        n_xz,
-                        blocks_per_col,
-                        &mut hist_buf,
-                    ),
-                )
-                .map_err(|e| {
-                    XlogError::Kernel(format!("skew_score: histogram launch failed: {e}"))
-                })?;
+        // commit() can also fail after queued work landed. Same
+        // sync-before-return discipline.
+        if let Err(e) = rec.commit(runtime) {
+            let _ = cu_stream.synchronize();
+            return Err(XlogError::Kernel(format!("skew_score: commit failed: {e}")));
         }
-
-        rec.commit(runtime)
-            .map_err(|e| XlogError::Kernel(format!("skew_score: commit failed: {e}")))?;
 
         // Step 3: sync before D2H — host must see the histogram
         // kernel's writes before reading them.
@@ -1234,6 +1266,15 @@ impl CudaKernelProvider {
         let blocks_per_col = (max_n + BLOCK_SIZE - 1) / BLOCK_SIZE;
         let total_blocks = blocks_per_col.saturating_mul(3);
 
+        // Resolve kernel BEFORE queuing any launch-stream work
+        // (mirror of the u32 path's failure-safety hygiene).
+        let device = self.device.inner();
+        let kernel = device
+            .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_TRIANGLE_SKEW_HISTOGRAM_U64)
+            .ok_or_else(|| {
+                XlogError::Kernel("skew_score: histogram_u64 kernel not found".to_string())
+            })?;
+
         let mut rec = LaunchRecorder::new_strict(launch_stream);
         rec.read(e_xy.num_rows_device());
         rec.read(e_yz.num_rows_device());
@@ -1245,51 +1286,62 @@ impl CudaKernelProvider {
         rec.preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("skew_score: preflight failed: {e}")))?;
 
-        let hist_bytes = (hist_len * std::mem::size_of::<u32>()) as usize;
-        unsafe {
-            let res =
-                sys::cuMemsetD8Async(*hist_buf.device_ptr(), 0, hist_bytes, cu_stream.cu_stream());
-            if res != sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "skew_score: cuMemsetD8Async failed: {res:?}"
-                )));
+        // Queued-work block. Any failure here must drain the
+        // launch stream before `hist_buf` drops, otherwise
+        // runtime dealloc may race in-flight memset/launch.
+        let queued_result: Result<()> = (|| {
+            let hist_bytes = hist_len * std::mem::size_of::<u32>();
+            unsafe {
+                let res = sys::cuMemsetD8Async(
+                    *hist_buf.device_ptr(),
+                    0,
+                    hist_bytes,
+                    cu_stream.cu_stream(),
+                );
+                if res != sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "skew_score: cuMemsetD8Async failed: {res:?}"
+                    )));
+                }
             }
+
+            unsafe {
+                kernel
+                    .clone()
+                    .launch_on_stream(
+                        &cu_stream,
+                        LaunchConfig {
+                            grid_dim: (total_blocks, 1, 1),
+                            block_dim: (BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (
+                            xy_col1,
+                            n_xy,
+                            yz_col0,
+                            n_yz,
+                            xz_col0,
+                            n_xz,
+                            blocks_per_col,
+                            &mut hist_buf,
+                        ),
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!("skew_score: histogram launch failed: {e}"))
+                    })?;
+            }
+            Ok(())
+        })();
+
+        if let Err(e) = queued_result {
+            let _ = cu_stream.synchronize();
+            return Err(e);
         }
 
-        let device = self.device.inner();
-        let kernel = device
-            .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_TRIANGLE_SKEW_HISTOGRAM_U64)
-            .ok_or_else(|| {
-                XlogError::Kernel("skew_score: histogram_u64 kernel not found".to_string())
-            })?;
-        unsafe {
-            kernel
-                .clone()
-                .launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (total_blocks, 1, 1),
-                        block_dim: (BLOCK_SIZE, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (
-                        xy_col1,
-                        n_xy,
-                        yz_col0,
-                        n_yz,
-                        xz_col0,
-                        n_xz,
-                        blocks_per_col,
-                        &mut hist_buf,
-                    ),
-                )
-                .map_err(|e| {
-                    XlogError::Kernel(format!("skew_score: histogram launch failed: {e}"))
-                })?;
+        if let Err(e) = rec.commit(runtime) {
+            let _ = cu_stream.synchronize();
+            return Err(XlogError::Kernel(format!("skew_score: commit failed: {e}")));
         }
-
-        rec.commit(runtime)
-            .map_err(|e| XlogError::Kernel(format!("skew_score: commit failed: {e}")))?;
 
         cu_stream
             .synchronize()
