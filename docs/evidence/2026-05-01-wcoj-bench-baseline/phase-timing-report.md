@@ -1,7 +1,7 @@
 # WCOJ Phase Timing Report — v0.6.2
 
 **Date**: 2026-05-01
-**Measured at**: head of `feat/v0.6.2-wcoj-phase-timing` (off `9c7c3fb0`)
+**Measured at**: validation head after `4a83ab4e` plus the diagnostic event-drain safety patch.
 **GPU**: NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU (SM120, driver 591.59)
 **Iters per cell**: 30 samples on a single long-lived `Executor` (default-on adaptive); first 5 discarded as warmup; median reported.
 
@@ -32,84 +32,84 @@ Buckets:
 
 | bucket | ms | % wall |
 |---|---:|---:|
-| classifier | 0.088 | 0.7% |
-| layout_xy | 4.698 | 35.5% |
-| layout_yz | 3.740 | 28.2% |
-| layout_xz | 4.987 | 37.7% |
-| **layout_total** | **12.776** | **96.5%** |
-| triangle_count | 0.076 | 0.6% |
+| classifier | 0.091 | 0.6% |
+| layout_xy | 5.079 | 34.7% |
+| layout_yz | 5.209 | 35.6% |
+| layout_xz | 5.097 | 34.8% |
+| **layout_total** | **14.147** | **96.7%** |
+| triangle_count | 0.076 | 0.5% |
 | triangle_scan | 0.014 | 0.1% |
 | triangle_total | 0.006 | 0.0% |
-| triangle_materialize | 0.100 | 0.8% |
-| **triangle_gpu_total** | **0.197** | **1.5%** |
-| residual_overhead | 0.171 | 1.3% |
-| **wall** | **13.238** | **100%** |
+| triangle_materialize | 0.100 | 0.7% |
+| **triangle_gpu_total** | **0.197** | **1.3%** |
+| residual_overhead | 0.158 | 1.1% |
+| **wall** | **14.630** | **100%** |
 
 ### `superhub-u32-50K`
 
 | bucket | ms | % wall |
 |---|---:|---:|
-| classifier | 0.115 | 0.8% |
-| layout_xy | 4.728 | 31.3% |
-| layout_yz | 4.838 | 32.1% |
-| layout_xz | 5.077 | 33.7% |
-| **layout_total** | **13.771** | **91.3%** |
+| classifier | 0.087 | 0.6% |
+| layout_xy | 5.181 | 33.8% |
+| layout_yz | 4.646 | 30.3% |
+| layout_xz | 5.240 | 34.2% |
+| **layout_total** | **14.102** | **92.0%** |
 | triangle_count | 0.412 | 2.7% |
 | triangle_scan | 0.014 | 0.1% |
 | triangle_total | 0.006 | 0.0% |
-| triangle_materialize | 0.505 | 3.3% |
-| **triangle_gpu_total** | **0.937** | **6.2%** |
-| residual_overhead | 0.227 | 1.5% |
-| **wall** | **15.082** | **100%** |
+| triangle_materialize | 0.506 | 3.3% |
+| **triangle_gpu_total** | **0.942** | **6.1%** |
+| residual_overhead | 0.194 | 1.3% |
+| **wall** | **15.325** | **100%** |
 
 ### `superhub-u64-10K`
 
 | bucket | ms | % wall |
 |---|---:|---:|
-| classifier | 0.088 | 0.4% |
-| layout_xy | 6.906 | 33.3% |
-| layout_yz | 6.738 | 32.4% |
-| layout_xz | 7.054 | 34.0% |
-| **layout_total** | **20.268** | **97.6%** |
-| triangle_count | 0.097 | 0.5% |
+| classifier | 0.090 | 0.4% |
+| layout_xy | 7.863 | 34.2% |
+| layout_yz | 7.612 | 33.1% |
+| layout_xz | 7.687 | 33.4% |
+| **layout_total** | **22.482** | **97.7%** |
+| triangle_count | 0.098 | 0.4% |
 | triangle_scan | 0.014 | 0.1% |
 | triangle_total | 0.006 | 0.0% |
-| triangle_materialize | 0.117 | 0.6% |
-| **triangle_gpu_total** | **0.236** | **1.1%** |
-| residual_overhead | 0.170 | 0.8% |
-| **wall** | **20.765** | **100%** |
+| triangle_materialize | 0.117 | 0.5% |
+| **triangle_gpu_total** | **0.236** | **1.0%** |
+| residual_overhead | 0.173 | 0.8% |
+| **wall** | **23.005** | **100%** |
 
 ### `superhub-u64-50K`
 
 | bucket | ms | % wall |
 |---|---:|---:|
-| classifier | 0.110 | 0.5% |
-| layout_xy | 7.641 | 33.7% |
-| layout_yz | 6.535 | 28.9% |
-| layout_xz | 6.837 | 30.2% |
-| **layout_total** | **21.222** | **93.7%** |
-| triangle_count | 0.509 | 2.2% |
+| classifier | 0.107 | 0.5% |
+| layout_xy | 6.953 | 29.7% |
+| layout_yz | 7.692 | 32.9% |
+| layout_xz | 7.475 | 32.0% |
+| **layout_total** | **21.955** | **93.9%** |
+| triangle_count | 0.507 | 2.2% |
 | triangle_scan | 0.014 | 0.1% |
 | triangle_total | 0.006 | 0.0% |
-| triangle_materialize | 0.594 | 2.6% |
-| **triangle_gpu_total** | **1.124** | **5.0%** |
-| residual_overhead | 0.227 | 1.0% |
-| **wall** | **22.644** | **100%** |
+| triangle_materialize | 0.593 | 2.5% |
+| **triangle_gpu_total** | **1.121** | **4.8%** |
+| residual_overhead | 0.212 | 0.9% |
+| **wall** | **23.393** | **100%** |
 
 ## Verdict (per locked decision rule)
 
 | Cell | Layout share | Triangle GPU share | Materialize share | Verdict |
 |---|---:|---:|---:|---|
-| superhub u32 10K | 96.5% | 1.5% | 0.8% | **`PipelineOverheadWarranted`** |
-| superhub u32 50K | 91.3% | 6.2% | 3.3% | **`PipelineOverheadWarranted`** |
-| superhub u64 10K | 97.6% | 1.1% | 0.6% | **`PipelineOverheadWarranted`** |
-| superhub u64 50K | 93.7% | 5.0% | 2.6% | **`PipelineOverheadWarranted`** |
+| superhub u32 10K | 96.7% | 1.3% | 0.7% | **`PipelineOverheadWarranted`** |
+| superhub u32 50K | 92.0% | 6.1% | 3.3% | **`PipelineOverheadWarranted`** |
+| superhub u64 10K | 97.7% | 1.0% | 0.5% | **`PipelineOverheadWarranted`** |
+| superhub u64 50K | 93.9% | 4.8% | 2.5% | **`PipelineOverheadWarranted`** |
 
 **Unanimous: 4/4 cells route to "optimize pipeline overhead before kernel scheduling".**
 
 ## Implications
 
-**B1 heavy-row offload is NOT warranted.** It targets the materialize bucket (0.6–3.3% of wall). A 10× speedup on materialize buys ~0.05–0.5 ms back, on a 13–23 ms wall. The slice spec's locked min for super-hub speedups (e.g. 1.6×) cannot be met by optimizing a 3% bucket.
+**B1 heavy-row offload is NOT warranted.** It targets the materialize bucket (0.5–3.3% of wall). A 10× speedup on materialize buys ~0.05–0.5 ms back, on a 14–23 ms wall. The slice spec's locked min for super-hub speedups (e.g. 1.6×) cannot be met by optimizing a 3% bucket.
 
 **Count/materialize work scheduling is also NOT warranted.** Same problem: count + scan + total combined are 0.6–6.2% of wall.
 

@@ -21,7 +21,9 @@ pub struct WcojDispatchPhaseTiming {
     /// Time spent in `wcoj_layout_*_recorded` for e_xy / e_yz /
     /// e_xz independently.
     pub layout_xy_ms: f32,
+    /// Time spent building the e_yz sorted/deduped WCOJ layout.
     pub layout_yz_ms: f32,
+    /// Time spent building the e_xz sorted/deduped WCOJ layout.
     pub layout_xz_ms: f32,
     /// Sum of the three layout calls (cached for the report).
     pub layout_total_ms: f32,
@@ -31,8 +33,11 @@ pub struct WcojDispatchPhaseTiming {
     /// dtoh_scalar, alloc, H2D, recorder setup) is NOT in any
     /// of these buckets — it lives in `residual_overhead_ms`.
     pub triangle_count_ms: f32,
+    /// GPU stream time spent in the device-side prefix scan.
     pub triangle_scan_ms: f32,
+    /// GPU stream time spent in the single-thread total reducer.
     pub triangle_total_ms: f32,
+    /// GPU stream time spent in the materialize kernel.
     pub triangle_materialize_ms: f32,
     /// Sum of the four GPU buckets (cached for the report).
     pub triangle_gpu_total_ms: f32,

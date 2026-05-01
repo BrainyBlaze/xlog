@@ -230,7 +230,7 @@ impl Executor {
 
     /// Targeted MC reset: preserve base/static relations and clear dynamic ones.
     ///
-    /// Unlike [`reset_for_mc`] which drops all relations, this method keeps the
+    /// Unlike [`Self::reset_for_mc`] which drops all relations, this method keeps the
     /// relations listed in `preserve` untouched, removes every other relation,
     /// then re-creates the relations specified in `clear_to_empty` as empty
     /// GPU buffers with the given schemas.  The join-index cache is fully

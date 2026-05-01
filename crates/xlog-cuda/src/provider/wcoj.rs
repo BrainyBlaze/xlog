@@ -130,6 +130,23 @@ impl PhaseTimer {
             .map_err(|e| XlogError::Kernel(format!("phase event record {idx}: {e}")))
     }
 
+    fn record_after_queued_work(
+        &self,
+        idx: usize,
+        stream: &cudarc::driver::CudaStream,
+    ) -> Result<()> {
+        if let Err(e) = self.events[idx].record(stream) {
+            // The event itself is diagnostic, but at this point
+            // CUDA work has already been queued against buffers
+            // owned by this call. Drain before returning so an
+            // event-record failure cannot turn into a diagnostic
+            // feature-only use-after-free.
+            let _ = stream.synchronize();
+            return Err(XlogError::Kernel(format!("phase event record {idx}: {e}")));
+        }
+        Ok(())
+    }
+
     fn finish(self) -> Result<crate::wcoj_phase_timing::WcojTrianglePhaseTiming> {
         let elapsed = |a: usize, b: usize| -> Result<f32> {
             self.events[a]
@@ -157,6 +174,14 @@ impl PhaseTimer {
     }
     #[inline(always)]
     fn record(&self, _idx: usize, _stream: &cudarc::driver::CudaStream) -> Result<()> {
+        Ok(())
+    }
+    #[inline(always)]
+    fn record_after_queued_work(
+        &self,
+        _idx: usize,
+        _stream: &cudarc::driver::CudaStream,
+    ) -> Result<()> {
         Ok(())
     }
 }
@@ -468,7 +493,7 @@ impl CudaKernelProvider {
                 )));
             }
         }
-        phase_timer.record(1, &cu_stream)?;
+        phase_timer.record_after_queued_work(1, &cu_stream)?;
 
         // Device-side exclusive prefix-sum on `offsets_buf` over
         // `[0..n_xy)`. The helper is `pub(crate)` and recorded
@@ -481,7 +506,7 @@ impl CudaKernelProvider {
             launch_stream,
             runtime,
         )?;
-        phase_timer.record(2, &cu_stream)?;
+        phase_timer.record_after_queued_work(2, &cu_stream)?;
 
         // Reduce the two last elements into `d_total`.
         // SAFETY: 4-arg signature
@@ -506,7 +531,7 @@ impl CudaKernelProvider {
                     XlogError::Kernel(format!("wcoj_compute_total launch failed: {}", e))
                 })?;
         }
-        phase_timer.record(3, &cu_stream)?;
+        phase_timer.record_after_queued_work(3, &cu_stream)?;
 
         rec_count.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
@@ -616,7 +641,7 @@ impl CudaKernelProvider {
             block_dim: (BLOCK_SIZE, 1, 1),
             shared_mem_bytes: 0,
         };
-        phase_timer.record(4, &cu_stream)?;
+        phase_timer.record_after_queued_work(4, &cu_stream)?;
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 xy_col0.as_kernel_param(),
@@ -641,7 +666,7 @@ impl CudaKernelProvider {
                     XlogError::Kernel(format!("wcoj_triangle_materialize launch failed: {}", e))
                 })?;
         }
-        phase_timer.record(5, &cu_stream)?;
+        phase_timer.record_after_queued_work(5, &cu_stream)?;
 
         rec_mat.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
@@ -931,7 +956,7 @@ impl CudaKernelProvider {
                 )));
             }
         }
-        phase_timer.record(1, &cu_stream)?;
+        phase_timer.record_after_queued_work(1, &cu_stream)?;
 
         // Device-side exclusive prefix-sum on offsets_buf — u32 plumbing
         // unchanged from the u32 path.
@@ -942,7 +967,7 @@ impl CudaKernelProvider {
             launch_stream,
             runtime,
         )?;
-        phase_timer.record(2, &cu_stream)?;
+        phase_timer.record_after_queued_work(2, &cu_stream)?;
 
         // Reduce two last elements into d_total. Reused unchanged
         // since counters stay u32.
@@ -965,7 +990,7 @@ impl CudaKernelProvider {
                     XlogError::Kernel(format!("wcoj_compute_total launch failed: {}", e))
                 })?;
         }
-        phase_timer.record(3, &cu_stream)?;
+        phase_timer.record_after_queued_work(3, &cu_stream)?;
 
         rec_count.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
@@ -1057,7 +1082,7 @@ impl CudaKernelProvider {
             block_dim: (BLOCK_SIZE, 1, 1),
             shared_mem_bytes: 0,
         };
-        phase_timer.record(4, &cu_stream)?;
+        phase_timer.record_after_queued_work(4, &cu_stream)?;
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 xy_col0.as_kernel_param(),
@@ -1085,7 +1110,7 @@ impl CudaKernelProvider {
                     ))
                 })?;
         }
-        phase_timer.record(5, &cu_stream)?;
+        phase_timer.record_after_queued_work(5, &cu_stream)?;
 
         rec_mat.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
