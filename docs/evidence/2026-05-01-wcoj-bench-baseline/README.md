@@ -159,7 +159,20 @@ The u32 10K Force result is bimodal/contaminated (range 10.6–173.1 ms — like
 
 ### Default-on dispatch readiness
 
-Per the original locked criteria ("uniform-on ≤ 2× uniform-off AND super-hub-on > 1.5× super-hub-off"), `Mode::Adaptive` qualifies for **default-on** dispatch on non-recursive triangle rules with type-eligible inputs. The adaptive flag stays explicit-opt-in for this slice, but the data supports flipping the default in a follow-on slice if no real-workload counterexample emerges.
+Per the original locked criteria ("uniform-on ≤ 2× uniform-off AND super-hub-on > 1.5× super-hub-off"), `Mode::Adaptive` qualifies for **default-on** dispatch on non-recursive triangle rules with type-eligible inputs.
+
+## Default-On Adaptive (post-A2-lite)
+
+After A2-lite landed and the validator confirmed the locked targets, the adaptive classifier was promoted to the default. `RuntimeConfig::default()` (with no overrides) now routes non-recursive triangle rules through the classifier; super-hub-shaped inputs dispatch WCOJ, uniform/empty fall back to binary-join. A hard kill switch (`wcoj_triangle_dispatch_disabled` config field / `XLOG_DISABLE_WCOJ_TRIANGLE=1` env) beats every other flag including force-on.
+
+**Acceptance rerun** at the default-on commit confirms the locked super-hub speedups still pass with material headroom; explicit-mode cells (Off / Force / Adaptive) match the prior baseline within criterion noise. Full default matrix:
+
+* Super-hub adaptive speedups (off/adaptive median): u32 10K **3.64×**, u32 50K **4.73×**, u64 10K **1.62×**, u64 50K **4.49×** — all clear locked minimums {1.44×, 3.85×, 1.42×, 4.38×}.
+* Uniform/empty adaptive ratios (adaptive/off median): all 8 cells ≤ 2.0× under stable conditions. One initial uniform u32 50K reading was high-noise (range 7.81–9.25 ms; focused rerun returned 1.12× steady-state). Acceptance is median-based per the existing methodology note.
+
+**Real-world cert** (`XLOG_USE_DEVICE_RUNTIME=1 cargo test -p xlog-integration --test real_world_tests --release`): **13/13 passed** under default-on. None of the existing real-world tests hit the canonical 3-atom triangle RIR, so default-on is mostly fall-through for that suite — but the smoke confirms the classifier doesn't introduce errors or memory issues in practice.
+
+The kill switch (`XLOG_DISABLE_WCOJ_TRIANGLE=1`) is the production opt-out: ops can pin all WCOJ dispatch off without touching application code or other env vars. Tested via `disable_beats_force_on_superhub` + `disable_beats_default_on_superhub` + `disable_beats_explicit_adaptive_on_superhub` in `crates/xlog-integration/tests/test_wcoj_adaptive_default_on.rs`.
 
 ## Reproducing
 
@@ -176,8 +189,7 @@ The criterion HTML report lands under `target/criterion/`.
 
 ## Out of Scope
 
-- No count/materialize scheduling rewrite — A2-lite adds the skew-classifier histogram kernel and adaptive dispatch, but deliberately leaves the WCOJ count/materialize kernels unchanged.
+- No count/materialize scheduling rewrite — A2-lite adds the skew-classifier histogram kernel and adaptive dispatch, but deliberately leaves the WCOJ count/materialize kernels unchanged. B1 heavy-row offload is the natural next slice.
 - No CI integration.
 - No real-graph imports.
 - Not run with `WCOJ_BENCH_FULL=1` in this baseline pass; left as future work.
-- Default-on dispatch flip deferred to a follow-on slice; this slice keeps adaptive opt-in.

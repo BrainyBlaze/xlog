@@ -84,22 +84,34 @@ pub struct RuntimeConfig {
     /// `None` and configure via the env var.
     pub wcoj_triangle_dispatch: Option<bool>,
     /// Override the env-driven WCOJ adaptive-dispatch gate
-    /// (`XLOG_USE_WCOJ_TRIANGLE_ADAPTIVE`). When the
-    /// force-WCOJ gate above is *not* on, this controls whether
-    /// the runtime runs the GPU skew classifier and dispatches
-    /// only on high-skew triangles. `None` (default) consults
-    /// the env var; `Some(true)` / `Some(false)` force the
-    /// runtime to ignore the env. Test-only knob — production
-    /// callers should leave this `None` and configure via env.
+    /// (`XLOG_USE_WCOJ_TRIANGLE_ADAPTIVE`). Post-default-on:
+    /// `None` (default) means "consult env, fall back to
+    /// adaptive-on if env is unset". `Some(true)` is an
+    /// explicit opt-in (no-op vs default). `Some(false)` is
+    /// an explicit opt-out that disables the default-on for
+    /// this runtime.
     ///
-    /// Decision tree (force beats adaptive beats off):
-    ///   1. If `wcoj_triangle_dispatch` resolves to `true`:
-    ///      force WCOJ; classifier bypassed entirely.
-    ///   2. Else if `wcoj_triangle_dispatch_adaptive` resolves
-    ///      to `true`: run classifier; dispatch WCOJ only when
-    ///      score ≥ 0.10. Otherwise fall back to binary-join.
-    ///   3. Else: no WCOJ dispatch.
+    /// Decision tree (highest → lowest):
+    ///   1. Kill switch (`wcoj_triangle_dispatch_disabled` /
+    ///      `XLOG_DISABLE_WCOJ_TRIANGLE`) → no dispatch.
+    ///   2. Force (`wcoj_triangle_dispatch=Some(true)` /
+    ///      `XLOG_USE_WCOJ_TRIANGLE_U32=1`) → WCOJ pipeline,
+    ///      classifier bypassed.
+    ///   3. Explicit force-off
+    ///      (`wcoj_triangle_dispatch=Some(false)`) → no dispatch.
+    ///   4. Adaptive resolution (config → env → default-on).
+    ///      Adaptive on → classifier runs; score ≥ 0.10 → WCOJ.
+    ///      Else → no dispatch.
     pub wcoj_triangle_dispatch_adaptive: Option<bool>,
+    /// Hard kill switch for ALL WCOJ triangle dispatch.
+    /// `Some(true)` (or env `XLOG_DISABLE_WCOJ_TRIANGLE=1`)
+    /// pins dispatch off — beats force, beats adaptive, beats
+    /// the default-on. Use case: ops emergency to disable
+    /// WCOJ without touching application code or other env
+    /// vars. `None` (default) consults the env. `Some(false)`
+    /// is an explicit "do not engage the kill switch"
+    /// (programmatic override over an env-set kill).
+    pub wcoj_triangle_dispatch_disabled: Option<bool>,
 }
 
 impl Default for RuntimeConfig {
@@ -112,6 +124,7 @@ impl Default for RuntimeConfig {
             strict_deterministic_d2h: false,
             wcoj_triangle_dispatch: None,
             wcoj_triangle_dispatch_adaptive: None,
+            wcoj_triangle_dispatch_disabled: None,
         }
     }
 }
@@ -152,6 +165,17 @@ impl RuntimeConfig {
     /// precedence and bypasses the classifier entirely.
     pub fn with_wcoj_triangle_dispatch_adaptive(mut self, override_value: Option<bool>) -> Self {
         self.wcoj_triangle_dispatch_adaptive = override_value;
+        self
+    }
+
+    /// Engage / disengage the WCOJ triangle dispatch kill
+    /// switch. `Some(true)` pins dispatch off across every
+    /// other flag (force, adaptive, default-on). `Some(false)`
+    /// explicitly does NOT engage the kill switch (useful for
+    /// programmatically overriding `XLOG_DISABLE_WCOJ_TRIANGLE=1`
+    /// in a test). `None` consults the env var.
+    pub fn with_wcoj_triangle_dispatch_disabled(mut self, override_value: Option<bool>) -> Self {
+        self.wcoj_triangle_dispatch_disabled = override_value;
         self
     }
 }

@@ -1,9 +1,27 @@
-//! v0.6.2 env-gated WCOJ triangle dispatch — runtime hook.
+//! v0.6.2 WCOJ triangle dispatch — runtime hook.
 //!
-//! Wires the existing GPU 3-way WCOJ kernel into the executor's
-//! per-rule loop. The hook is opt-in via the env variable
-//! [`ENV_USE_WCOJ_TRIANGLE_U32`] (or via
-//! [`xlog_core::RuntimeConfig::wcoj_triangle_dispatch`] for tests).
+//! Wires the GPU 3-way WCOJ kernel into the executor's per-rule
+//! loop. **Default-on** (post-A2-lite default flip): the
+//! adaptive classifier runs on every matching non-recursive
+//! triangle rule and dispatches WCOJ when the per-key skew
+//! score clears [`WCOJ_ADAPTIVE_SKEW_THRESHOLD`]. Production
+//! callers leave `RuntimeConfig::default()` and accept the
+//! adaptive path.
+//!
+//! Override knobs (config + env, highest precedence first):
+//!
+//!   1. **Hard kill switch** — `wcoj_triangle_dispatch_disabled` /
+//!      [`ENV_DISABLE_WCOJ_TRIANGLE`]. Pins all dispatch off,
+//!      including force. Ops emergency knob.
+//!   2. **Force-WCOJ** — `wcoj_triangle_dispatch=Some(true)` /
+//!      [`ENV_USE_WCOJ_TRIANGLE_U32`]. Bypasses classifier.
+//!   3. **Explicit force-off** —
+//!      `wcoj_triangle_dispatch=Some(false)`. Used by bench
+//!      `Mode::Off` cells and any test that wants binary-join.
+//!   4. **Adaptive opt-out** —
+//!      `wcoj_triangle_dispatch_adaptive=Some(false)`. Disables
+//!      the default-on classifier without a global env var.
+//!   5. **Default**: classifier runs.
 //!
 //! ## Recognized RIR shape
 //!
@@ -59,8 +77,7 @@
 //! * Cost model.
 //! * Mixed-width admission (a triangle with both U32 and U64
 //!   slots stays on the binary-join path).
-//! * Histogram-guided block dispatch.
-//! * Default-on behavior (env var must be explicitly set).
+//! * Histogram-guided block dispatch (B1 heavy-row offload).
 
 use xlog_core::{RelId, Result};
 use xlog_cuda::device_runtime::StreamId;
@@ -87,18 +104,42 @@ pub(super) fn wcoj_gate_enabled(config_override: Option<bool>) -> bool {
 }
 
 /// Env variable controlling the adaptive WCOJ dispatch.
-/// `"1"` / case-insensitive `"true"` → ON. Anything else → OFF.
-/// Force-WCOJ ([`ENV_USE_WCOJ_TRIANGLE_U32`]) takes precedence
-/// over this env: when force is on, the classifier is bypassed.
+/// `"1"` / case-insensitive `"true"` → ON. Anything else
+/// (including unset) is *not* a hard off — the resolver
+/// defaults to ON when this env is unset (post-default-on
+/// flip). To explicitly disable adaptive, use
+/// `RuntimeConfig::wcoj_triangle_dispatch_adaptive = Some(false)`.
 pub const ENV_USE_WCOJ_TRIANGLE_ADAPTIVE: &str = "XLOG_USE_WCOJ_TRIANGLE_ADAPTIVE";
 
-/// Resolve the adaptive dispatch gate. Same precedence shape as
-/// the force gate above (config override > env > false).
+/// Env variable for the hard kill switch. `"1"` / case-
+/// insensitive `"true"` → kill. Beats every other flag.
+pub const ENV_DISABLE_WCOJ_TRIANGLE: &str = "XLOG_DISABLE_WCOJ_TRIANGLE";
+
+/// Resolve the adaptive dispatch gate. Precedence:
+///   * `config_override = Some(b)` → `b` (test-only knob).
+///   * `XLOG_USE_WCOJ_TRIANGLE_ADAPTIVE=1` → `true`.
+///   * `XLOG_USE_WCOJ_TRIANGLE_ADAPTIVE` set to any other
+///     value (`"0"`, `"false"`, …) → `false`.
+///   * Unset → `true` (default-on flip).
 pub(super) fn wcoj_adaptive_enabled(config_override: Option<bool>) -> bool {
     if let Some(v) = config_override {
         return v;
     }
-    std::env::var(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE)
+    match std::env::var(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE) {
+        Ok(v) => v == "1" || v.eq_ignore_ascii_case("true"),
+        // Default-on: when env is unset, adaptive runs.
+        Err(_) => true,
+    }
+}
+
+/// Resolve the kill switch. Same precedence shape as
+/// `wcoj_gate_enabled` (config override > env > false).
+/// Returns `true` when dispatch should be hard-disabled.
+pub(super) fn wcoj_disabled(config_override: Option<bool>) -> bool {
+    if let Some(v) = config_override {
+        return v;
+    }
+    std::env::var(ENV_DISABLE_WCOJ_TRIANGLE)
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
@@ -277,20 +318,24 @@ impl Executor {
         &mut self,
         rule: &CompiledRule,
     ) -> Result<Option<CudaBuffer>> {
-        // 1. Gate resolution. Decision tree:
+        // 1. Gate resolution. Decision tree (highest → lowest):
         //
-        //    a. If `wcoj_triangle_dispatch` resolves to true
+        //    a. Hard kill switch
+        //       (`wcoj_triangle_dispatch_disabled` /
+        //       `XLOG_DISABLE_WCOJ_TRIANGLE=1`) → no dispatch.
+        //       Beats every other flag including force.
+        //    b. If `wcoj_triangle_dispatch` resolves to true
         //       (config Some(true) or env=1) → force WCOJ;
         //       classifier is bypassed entirely (mode = Force).
-        //    b. Else if `wcoj_triangle_dispatch_adaptive`
-        //       resolves to true → run classifier; dispatch only
-        //       when score ≥ threshold (mode = Adaptive).
-        //    c. Else → no dispatch.
-        //
-        // Force takes precedence so test/microbench callers that
-        // already pass `Some(true)` keep their existing
-        // semantics unchanged (and silently sidestep classifier
-        // overhead).
+        //    c. Force = Some(false) → explicit off.
+        //    d. Else if `wcoj_triangle_dispatch_adaptive`
+        //       resolves to true (config / env / default-on) →
+        //       run classifier; dispatch only when score ≥
+        //       threshold (mode = Adaptive).
+        //    e. Else → no dispatch.
+        if wcoj_disabled(self.config.wcoj_triangle_dispatch_disabled) {
+            return Ok(None);
+        }
         let force_override = self.config.wcoj_triangle_dispatch;
         let force_on = wcoj_gate_enabled(force_override);
         let mode = if force_on {

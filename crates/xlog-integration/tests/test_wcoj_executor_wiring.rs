@@ -3,19 +3,30 @@
 //!
 //! Locks the contract for the hook installed in
 //! [`xlog_runtime::Executor::execute_plan`]'s non-recursive
-//! per-rule branch. The hook engages only when:
+//! per-rule branch. The hook engages when ALL of the following
+//! hold:
 //!
-//!   * `RuntimeConfig::wcoj_triangle_dispatch` is `Some(true)`,
-//!     OR `XLOG_USE_WCOJ_TRIANGLE_U32=1` (production callers
-//!     should leave the override `None` and use the env var;
-//!     tests use the explicit override to avoid env races).
+//!   * Dispatch is not hard-disabled
+//!     (`wcoj_triangle_dispatch_disabled` /
+//!     `XLOG_DISABLE_WCOJ_TRIANGLE` not set), AND
+//!   * Either force-on (`wcoj_triangle_dispatch=Some(true)` /
+//!     `XLOG_USE_WCOJ_TRIANGLE_U32=1`) is set, OR the adaptive
+//!     classifier is on (default-on post-A2-lite, opt-out via
+//!     `wcoj_triangle_dispatch_adaptive=Some(false)`).
 //!   * The rule's RIR matches the canonical triangle shape:
 //!     `Project([0, 1, 3]) → Join → Join → Scan, Scan, Scan`
 //!     with the join keys produced by lowering
 //!     `tri(X, Y, Z) :- e1(X, Y), e2(Y, Z), e3(X, Z)`.
-//!   * All three input buffers are 2-column u32.
+//!   * All three input buffers are 2-column u32 / Symbol /
+//!     u64 with widths agreeing across slots.
 //!   * A runtime-backed `GpuMemoryManager` is available (the
 //!     recorded WCOJ primitives require it).
+//!
+//! These wiring tests use explicit `with_wcoj_triangle_dispatch(Some(...))`
+//! rather than relying on the default to avoid coupling to the
+//! adaptive classifier's score on small fixtures. Default-on
+//! adaptive behavior is locked separately in
+//! `test_wcoj_adaptive_default_on.rs`.
 //!
 //! Test surface (all run end-to-end via Compiler + Executor):
 //!   1. gate=Some(false) on the triangle rule produces the

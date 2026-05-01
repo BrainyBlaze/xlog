@@ -51,6 +51,9 @@ cargo bench -- --baseline baseline_name
 | `CUDA_VISIBLE_DEVICES` | GPU device ordinal | `0` |
 | `XLOG_BENCH_MEMORY_MB` | GPU memory budget | `4096` |
 | `WCOJ_BENCH_FULL` | Run the full WCOJ triangle matrix (adds 100K + 250K row sizes) | `0` |
+| `XLOG_USE_WCOJ_TRIANGLE_U32` | Force-on the WCOJ triangle dispatch (bypasses adaptive classifier) | unset |
+| `XLOG_USE_WCOJ_TRIANGLE_ADAPTIVE` | Adaptive (skew-classifier-gated) WCOJ dispatch — set to `0`/`false` to opt out of default-on | unset (default-on) |
+| `XLOG_DISABLE_WCOJ_TRIANGLE` | Hard kill switch — pins all WCOJ triangle dispatch off, beats every other flag | unset |
 
 ---
 
@@ -106,11 +109,11 @@ Tests GROUP BY with COUNT aggregate.
 
 Aggregation throughput is tracked in groups/sec, but the repository does not currently publish a single public pass/fail threshold for this case.
 
-### WCOJ Triangle (env-gated, `xlog-integration`)
+### WCOJ Triangle (default-on adaptive, `xlog-integration`)
 
 **Location:** `crates/xlog-integration/benches/wcoj_triangle_bench.rs`
 
-Compares the GPU 3-way Worst-Case Optimal Join dispatch against the existing binary-join chain on identical fixtures, across `u32`, `u64`, and a Symbol sanity case. The dispatch gate is forced via `RuntimeConfig::with_wcoj_triangle_dispatch(Some(bool))` inside the bench (not the env var, to keep the measured path process-global-free). The env equivalent for production callers is `XLOG_USE_WCOJ_TRIANGLE_U32=1`.
+Compares the GPU 3-way Worst-Case Optimal Join dispatch against the existing binary-join chain on identical fixtures, across `u32`, `u64`, and a Symbol sanity case. Three modes per cell — `Off` (binary), `Force` (WCOJ pipeline always), `Adaptive` (default-on: classifier runs and dispatches WCOJ on high-skew triangles only). The bench overrides each mode explicitly via `RuntimeConfig::with_wcoj_triangle_dispatch[_adaptive]` to keep the measured path process-global-free. Production callers can pin behavior via the env vars in the table at the top of this file.
 
 **Run:**
 ```bash
