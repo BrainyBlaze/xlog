@@ -545,3 +545,144 @@ impl Executor {
         self.wcoj_triangle_stream.get().copied()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Mutex, OnceLock};
+
+    use super::{
+        wcoj_adaptive_enabled, wcoj_disabled, wcoj_gate_enabled, ENV_DISABLE_WCOJ_TRIANGLE,
+        ENV_USE_WCOJ_TRIANGLE_ADAPTIVE, ENV_USE_WCOJ_TRIANGLE_U32,
+    };
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct EnvSnapshot {
+        force: Option<String>,
+        adaptive: Option<String>,
+        disable: Option<String>,
+    }
+
+    impl EnvSnapshot {
+        fn capture_and_clear() -> Self {
+            let snapshot = Self {
+                force: std::env::var(ENV_USE_WCOJ_TRIANGLE_U32).ok(),
+                adaptive: std::env::var(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE).ok(),
+                disable: std::env::var(ENV_DISABLE_WCOJ_TRIANGLE).ok(),
+            };
+
+            // SAFETY: The caller holds `env_lock`, serializing mutation of
+            // these process-global WCOJ env vars.
+            unsafe {
+                std::env::remove_var(ENV_USE_WCOJ_TRIANGLE_U32);
+                std::env::remove_var(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE);
+                std::env::remove_var(ENV_DISABLE_WCOJ_TRIANGLE);
+            }
+
+            snapshot
+        }
+    }
+
+    impl Drop for EnvSnapshot {
+        fn drop(&mut self) {
+            // SAFETY: The snapshot is dropped before `env_lock` is released,
+            // so restoration is serialized even if the test body panics.
+            unsafe {
+                match self.force.take() {
+                    Some(v) => std::env::set_var(ENV_USE_WCOJ_TRIANGLE_U32, v),
+                    None => std::env::remove_var(ENV_USE_WCOJ_TRIANGLE_U32),
+                }
+                match self.adaptive.take() {
+                    Some(v) => std::env::set_var(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE, v),
+                    None => std::env::remove_var(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE),
+                }
+                match self.disable.take() {
+                    Some(v) => std::env::set_var(ENV_DISABLE_WCOJ_TRIANGLE, v),
+                    None => std::env::remove_var(ENV_DISABLE_WCOJ_TRIANGLE),
+                }
+            }
+        }
+    }
+
+    fn with_wcoj_env<R>(f: impl FnOnce() -> R) -> R {
+        let _guard = env_lock().lock().expect("WCOJ env lock poisoned");
+        let _snapshot = EnvSnapshot::capture_and_clear();
+        f()
+    }
+
+    fn set_env(name: &str, value: &str) {
+        // SAFETY: Callers are inside `with_wcoj_env`, which serializes and
+        // restores these process-global WCOJ env vars.
+        unsafe {
+            std::env::set_var(name, value);
+        }
+    }
+
+    #[test]
+    fn adaptive_resolver_defaults_on_when_env_unset() {
+        with_wcoj_env(|| {
+            assert!(wcoj_adaptive_enabled(None));
+            assert!(wcoj_adaptive_enabled(Some(true)));
+            assert!(!wcoj_adaptive_enabled(Some(false)));
+        });
+    }
+
+    #[test]
+    fn adaptive_resolver_env_can_disable_or_enable() {
+        with_wcoj_env(|| {
+            set_env(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE, "0");
+            assert!(!wcoj_adaptive_enabled(None));
+
+            set_env(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE, "false");
+            assert!(!wcoj_adaptive_enabled(None));
+
+            set_env(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE, "true");
+            assert!(wcoj_adaptive_enabled(None));
+
+            set_env(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE, "1");
+            assert!(wcoj_adaptive_enabled(None));
+        });
+    }
+
+    #[test]
+    fn config_overrides_adaptive_env() {
+        with_wcoj_env(|| {
+            set_env(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE, "0");
+            assert!(wcoj_adaptive_enabled(Some(true)));
+
+            set_env(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE, "1");
+            assert!(!wcoj_adaptive_enabled(Some(false)));
+        });
+    }
+
+    #[test]
+    fn kill_switch_resolver_honors_env_and_config_precedence() {
+        with_wcoj_env(|| {
+            assert!(!wcoj_disabled(None));
+
+            set_env(ENV_DISABLE_WCOJ_TRIANGLE, "1");
+            assert!(wcoj_disabled(None));
+            assert!(!wcoj_disabled(Some(false)));
+
+            set_env(ENV_DISABLE_WCOJ_TRIANGLE, "0");
+            assert!(!wcoj_disabled(None));
+            assert!(wcoj_disabled(Some(true)));
+        });
+    }
+
+    #[test]
+    fn force_resolver_config_still_overrides_env() {
+        with_wcoj_env(|| {
+            set_env(ENV_USE_WCOJ_TRIANGLE_U32, "1");
+            assert!(wcoj_gate_enabled(None));
+            assert!(!wcoj_gate_enabled(Some(false)));
+
+            set_env(ENV_USE_WCOJ_TRIANGLE_U32, "0");
+            assert!(!wcoj_gate_enabled(None));
+            assert!(wcoj_gate_enabled(Some(true)));
+        });
+    }
+}
