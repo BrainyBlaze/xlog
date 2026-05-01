@@ -77,6 +77,90 @@ use crate::{AsKernelParam, LaunchAsync, LaunchConfig};
 
 const BLOCK_SIZE: u32 = 256;
 
+// ===============================================================
+// Per-phase CUDA-event timing (feature `wcoj-phase-timing` only).
+//
+// Records 6 events on the launch_stream around the 4 GPU phases
+// of `wcoj_triangle_*_recorded`:
+//
+//   e0 — start of `wcoj_triangle_count` kernel
+//   e1 — end of count + dtod copy (= start of scan)
+//   e2 — end of scan (= start of `wcoj_compute_total` kernel)
+//   e3 — end of `wcoj_compute_total` kernel
+//          [host work: sync, dtoh_scalar, alloc, H2D, recorder]
+//   e4 — start of `wcoj_triangle_materialize` kernel
+//   e5 — end of materialize kernel
+//
+// Phase deltas (`f32` ms via `CudaEvent::elapsed_ms`):
+//   count_ms       = elapsed(e0, e1)
+//   scan_ms        = elapsed(e1, e2)
+//   total_ms       = elapsed(e2, e3)
+//   materialize_ms = elapsed(e4, e5)
+//
+// The host-side work between e3 and e4 is intentionally NOT
+// captured by these events — the caller's residual bucket
+// (wall-clock minus measured GPU phases) accounts for it.
+//
+// Under feature-off, `PhaseTimer` is a unit type with no-op
+// methods that the optimizer eliminates entirely; the
+// `wcoj_triangle_*_recorded` hot path is unchanged.
+
+#[cfg(feature = "wcoj-phase-timing")]
+struct PhaseTimer {
+    events: [cudarc::driver::CudaEvent; 6],
+}
+
+#[cfg(feature = "wcoj-phase-timing")]
+impl PhaseTimer {
+    fn new(stream: &cudarc::driver::CudaStream) -> Result<Self> {
+        use cudarc::driver::sys::CUevent_flags;
+        let ctx = stream.context();
+        let mk = || {
+            ctx.new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))
+                .map_err(|e| XlogError::Kernel(format!("phase event create: {e}")))
+        };
+        Ok(Self {
+            events: [mk()?, mk()?, mk()?, mk()?, mk()?, mk()?],
+        })
+    }
+
+    fn record(&self, idx: usize, stream: &cudarc::driver::CudaStream) -> Result<()> {
+        self.events[idx]
+            .record(stream)
+            .map_err(|e| XlogError::Kernel(format!("phase event record {idx}: {e}")))
+    }
+
+    fn finish(self) -> Result<crate::wcoj_phase_timing::WcojTrianglePhaseTiming> {
+        let elapsed = |a: usize, b: usize| -> Result<f32> {
+            self.events[a]
+                .elapsed_ms(&self.events[b])
+                .map_err(|e| XlogError::Kernel(format!("phase elapsed_ms({a}, {b}): {e}")))
+        };
+        Ok(crate::wcoj_phase_timing::WcojTrianglePhaseTiming {
+            count_ms: elapsed(0, 1)?,
+            scan_ms: elapsed(1, 2)?,
+            total_ms: elapsed(2, 3)?,
+            materialize_ms: elapsed(4, 5)?,
+        })
+    }
+}
+
+/// No-op stub for production builds (feature off).
+#[cfg(not(feature = "wcoj-phase-timing"))]
+struct PhaseTimer;
+
+#[cfg(not(feature = "wcoj-phase-timing"))]
+impl PhaseTimer {
+    #[inline(always)]
+    fn new(_stream: &cudarc::driver::CudaStream) -> Result<Self> {
+        Ok(Self)
+    }
+    #[inline(always)]
+    fn record(&self, _idx: usize, _stream: &cudarc::driver::CudaStream) -> Result<()> {
+        Ok(())
+    }
+}
+
 impl CudaKernelProvider {
     /// Build the sorted+deduped WCOJ physical layout for a 2-column
     /// u32 relation.
@@ -322,6 +406,10 @@ impl CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("wcoj_triangle_count kernel not found".to_string()))?;
         let grid = (n_xy + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
+        // Phase-timing scaffolding (no-op when feature off).
+        let phase_timer = PhaseTimer::new(&cu_stream)?;
+        phase_timer.record(0, &cu_stream)?;
+
         // SAFETY:
         //   wcoj_triangle_count(
         //     const u32* xy_col0, const u32* xy_col1, u32 n_xy,
@@ -380,6 +468,7 @@ impl CudaKernelProvider {
                 )));
             }
         }
+        phase_timer.record(1, &cu_stream)?;
 
         // Device-side exclusive prefix-sum on `offsets_buf` over
         // `[0..n_xy)`. The helper is `pub(crate)` and recorded
@@ -392,6 +481,7 @@ impl CudaKernelProvider {
             launch_stream,
             runtime,
         )?;
+        phase_timer.record(2, &cu_stream)?;
 
         // Reduce the two last elements into `d_total`.
         // SAFETY: 4-arg signature
@@ -416,6 +506,7 @@ impl CudaKernelProvider {
                     XlogError::Kernel(format!("wcoj_compute_total launch failed: {}", e))
                 })?;
         }
+        phase_timer.record(3, &cu_stream)?;
 
         rec_count.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
@@ -525,6 +616,7 @@ impl CudaKernelProvider {
             block_dim: (BLOCK_SIZE, 1, 1),
             shared_mem_bytes: 0,
         };
+        phase_timer.record(4, &cu_stream)?;
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 xy_col0.as_kernel_param(),
@@ -549,6 +641,7 @@ impl CudaKernelProvider {
                     XlogError::Kernel(format!("wcoj_triangle_materialize launch failed: {}", e))
                 })?;
         }
+        phase_timer.record(5, &cu_stream)?;
 
         rec_mat.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
@@ -556,6 +649,25 @@ impl CudaKernelProvider {
                 e
             ))
         })?;
+
+        // Sync once more (the rec_mat commit + recorder events
+        // chain don't guarantee the materialize event has been
+        // observed yet on the host side). Then capture phase
+        // timings into the provider's diagnostic slot — no-op
+        // when feature is off.
+        #[cfg(feature = "wcoj-phase-timing")]
+        {
+            cu_stream.synchronize().map_err(|e| {
+                XlogError::Kernel(format!(
+                    "wcoj_triangle_u32_recorded: stream sync after materialize failed: {}",
+                    e
+                ))
+            })?;
+            let timing = phase_timer.finish()?;
+            self.put_wcoj_triangle_phase_timing(timing);
+        }
+        #[cfg(not(feature = "wcoj-phase-timing"))]
+        let _ = phase_timer; // suppress unused warning when feature off
 
         let columns: Vec<CudaColumn> = vec![out_x.into(), out_y.into(), out_z.into()];
         Ok(CudaBuffer::from_columns_with_host_count(
@@ -769,6 +881,10 @@ impl CudaKernelProvider {
             })?;
         let grid = (n_xy + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
+        // Phase-timing scaffolding (no-op when feature off).
+        let phase_timer = PhaseTimer::new(&cu_stream)?;
+        phase_timer.record(0, &cu_stream)?;
+
         // SAFETY: same 10-arg signature as the u32 count kernel
         // but with u64 join-key buffers; counts stay u32.
         unsafe {
@@ -815,6 +931,7 @@ impl CudaKernelProvider {
                 )));
             }
         }
+        phase_timer.record(1, &cu_stream)?;
 
         // Device-side exclusive prefix-sum on offsets_buf — u32 plumbing
         // unchanged from the u32 path.
@@ -825,6 +942,7 @@ impl CudaKernelProvider {
             launch_stream,
             runtime,
         )?;
+        phase_timer.record(2, &cu_stream)?;
 
         // Reduce two last elements into d_total. Reused unchanged
         // since counters stay u32.
@@ -847,6 +965,7 @@ impl CudaKernelProvider {
                     XlogError::Kernel(format!("wcoj_compute_total launch failed: {}", e))
                 })?;
         }
+        phase_timer.record(3, &cu_stream)?;
 
         rec_count.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
@@ -938,6 +1057,7 @@ impl CudaKernelProvider {
             block_dim: (BLOCK_SIZE, 1, 1),
             shared_mem_bytes: 0,
         };
+        phase_timer.record(4, &cu_stream)?;
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 xy_col0.as_kernel_param(),
@@ -965,6 +1085,7 @@ impl CudaKernelProvider {
                     ))
                 })?;
         }
+        phase_timer.record(5, &cu_stream)?;
 
         rec_mat.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
@@ -972,6 +1093,21 @@ impl CudaKernelProvider {
                 e
             ))
         })?;
+
+        // Sync + capture phase timings (no-op when feature off).
+        #[cfg(feature = "wcoj-phase-timing")]
+        {
+            cu_stream.synchronize().map_err(|e| {
+                XlogError::Kernel(format!(
+                    "wcoj_triangle_u64_recorded: stream sync after materialize failed: {}",
+                    e
+                ))
+            })?;
+            let timing = phase_timer.finish()?;
+            self.put_wcoj_triangle_phase_timing(timing);
+        }
+        #[cfg(not(feature = "wcoj-phase-timing"))]
+        let _ = phase_timer;
 
         let columns: Vec<CudaColumn> = vec![out_x.into(), out_y.into(), out_z.into()];
         Ok(CudaBuffer::from_columns_with_host_count(

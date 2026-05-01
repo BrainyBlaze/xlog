@@ -34,6 +34,22 @@ harness = false
 name = "xlog_run"
 path = "src/bin/xlog_run.rs"
 
+[[bin]]
+name = "wcoj_phase_report"
+path = "src/bin/wcoj_phase_report.rs"
+required-features = ["wcoj-phase-timing"]
+
+[features]
+default = []
+# Diagnostic-only: forwards to xlog-runtime + xlog-cuda's
+# `wcoj-phase-timing` so the report binary can read per-phase
+# CUDA-event timings out of the executor. Off in regular
+# `cargo test --workspace` and bench runs.
+wcoj-phase-timing = [
+    "xlog-runtime/wcoj-phase-timing",
+    "xlog-cuda/wcoj-phase-timing",
+]
+
 [[test]]
 name = "executor_config_tests"
 path = "tests/executor_config_tests.rs"

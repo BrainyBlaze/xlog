@@ -27,6 +27,8 @@ mod node_dispatch;
 mod recursive;
 mod rewrite;
 mod wcoj_dispatch;
+#[cfg(feature = "wcoj-phase-timing")]
+pub mod wcoj_phase_timing;
 use join_cache::JoinIndexCache;
 
 /// Incremental update for a base relation.
@@ -101,6 +103,15 @@ pub struct Executor {
     /// subsequent dispatches through the binary-join fallback,
     /// invalidating the dispatch counter and the gate-on path.
     wcoj_triangle_stream: OnceLock<xlog_cuda::device_runtime::StreamId>,
+    /// Diagnostic-only: per-dispatch WCOJ triangle phase
+    /// timings, populated by `try_dispatch_wcoj_triangle` when
+    /// the `wcoj-phase-timing` Cargo feature is on. Read by the
+    /// `wcoj_phase_report` binary in xlog-integration. Field is
+    /// absent under feature-off so production builds have zero
+    /// overhead.
+    #[cfg(feature = "wcoj-phase-timing")]
+    pub(super) last_wcoj_phase_timing:
+        std::sync::Mutex<Option<wcoj_phase_timing::WcojDispatchPhaseTiming>>,
 }
 
 impl Executor {
@@ -130,7 +141,25 @@ impl Executor {
             ilp_last_result: None,
             wcoj_triangle_dispatch_count: 0,
             wcoj_triangle_stream: OnceLock::new(),
+            #[cfg(feature = "wcoj-phase-timing")]
+            last_wcoj_phase_timing: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Take the most recent WCOJ triangle dispatch's per-phase
+    /// timing breakdown. Reading clears the slot — designed for
+    /// one-shot consumption by the `wcoj_phase_report` binary.
+    /// Returns `None` if no triangle has dispatched since the
+    /// last read (or since construction).
+    ///
+    /// Compiled in only with the `wcoj-phase-timing` Cargo
+    /// feature; production builds have no such method.
+    #[cfg(feature = "wcoj-phase-timing")]
+    pub fn take_wcoj_phase_timing(&self) -> Option<wcoj_phase_timing::WcojDispatchPhaseTiming> {
+        self.last_wcoj_phase_timing
+            .lock()
+            .ok()
+            .and_then(|mut g| g.take())
     }
 
     /// Enable or disable the performance profiler

@@ -12,6 +12,8 @@ pub mod memory;
 pub mod multi_gpu_memory;
 pub mod provider;
 pub mod type_seam;
+#[cfg(feature = "wcoj-phase-timing")]
+pub mod wcoj_phase_timing;
 
 pub(crate) mod embedded_kernel_data {
     include!(concat!(env!("OUT_DIR"), "/embedded_kernel_data.rs"));

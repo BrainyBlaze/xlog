@@ -86,6 +86,9 @@ use xlog_ir::{rir::ProjectExpr, CompiledRule, JoinType, RirNode};
 
 use super::Executor;
 
+#[cfg(feature = "wcoj-phase-timing")]
+use std::time::Instant;
+
 /// Env variable controlling the WCOJ triangle dispatch. Treated
 /// as ON when set to `"1"` or case-insensitive `"true"`; anything
 /// else (unset, `"0"`, `"false"`, empty string, …) means OFF.
@@ -318,6 +321,8 @@ impl Executor {
         &mut self,
         rule: &CompiledRule,
     ) -> Result<Option<CudaBuffer>> {
+        #[cfg(feature = "wcoj-phase-timing")]
+        let wall_start = Instant::now();
         // 1. Gate resolution. Decision tree (highest → lowest):
         //
         //    a. Hard kill switch
@@ -426,7 +431,11 @@ impl Executor {
         // back to binary-join — classifier is optimization, not
         // correctness. A score below
         // `WCOJ_ADAPTIVE_SKEW_THRESHOLD` likewise falls back.
+        #[cfg(feature = "wcoj-phase-timing")]
+        let mut classifier_ms: f32 = 0.0;
         if mode == DispatchMode::Adaptive {
+            #[cfg(feature = "wcoj-phase-timing")]
+            let cls_start = Instant::now();
             let score = match width {
                 WcojKeyWidth::FourByte => self.provider.wcoj_triangle_skew_score_u32(
                     buf_xy,
@@ -441,6 +450,10 @@ impl Executor {
                     launch_stream,
                 ),
             };
+            #[cfg(feature = "wcoj-phase-timing")]
+            {
+                classifier_ms = cls_start.elapsed().as_secs_f64() as f32 * 1000.0;
+            }
             match score {
                 Ok(Some(s)) if s >= WCOJ_ADAPTIVE_SKEW_THRESHOLD => {
                     // Above threshold → fall through to dispatch.
@@ -455,11 +468,39 @@ impl Executor {
         // corrupt store state"). The WCOJ helpers don't write
         // to the store, so an error here only loses the work
         // we just did — the binary-join path picks it up.
-        let dispatch_result =
-            self.run_wcoj_triangle_pipeline(buf_xy, buf_yz, buf_xz, launch_stream, width);
+        #[cfg(feature = "wcoj-phase-timing")]
+        let mut layout_times: [f32; 3] = [0.0; 3];
+        let dispatch_result = self.run_wcoj_triangle_pipeline(
+            buf_xy,
+            buf_yz,
+            buf_xz,
+            launch_stream,
+            width,
+            #[cfg(feature = "wcoj-phase-timing")]
+            &mut layout_times,
+        );
         match dispatch_result {
             Ok(buf) => {
                 self.wcoj_triangle_dispatch_count += 1;
+                #[cfg(feature = "wcoj-phase-timing")]
+                {
+                    let triangle_timing = self
+                        .provider
+                        .take_wcoj_triangle_phase_timing()
+                        .unwrap_or_default();
+                    let wall_ms = wall_start.elapsed().as_secs_f64() as f32 * 1000.0;
+                    let timing = super::wcoj_phase_timing::WcojDispatchPhaseTiming::new(
+                        classifier_ms,
+                        layout_times[0],
+                        layout_times[1],
+                        layout_times[2],
+                        triangle_timing,
+                        wall_ms,
+                    );
+                    if let Ok(mut g) = self.last_wcoj_phase_timing.lock() {
+                        *g = Some(timing);
+                    }
+                }
                 Ok(Some(buf))
             }
             Err(_) => Ok(None),
@@ -470,6 +511,12 @@ impl Executor {
     /// Split out so [`try_dispatch_wcoj_triangle`] can map any
     /// error to `Ok(None)` cleanly. Branches by `width` between
     /// the parallel u32 and u64 provider entries.
+    ///
+    /// Under feature `wcoj-phase-timing`, fills the optional
+    /// `layout_times_ms` slot with `[layout_xy, layout_yz, layout_xz]`
+    /// wall times in milliseconds. The triangle's per-phase GPU
+    /// times are pulled from the provider via
+    /// `take_wcoj_triangle_phase_timing` after this returns.
     fn run_wcoj_triangle_pipeline(
         &self,
         buf_xy: &CudaBuffer,
@@ -477,15 +524,52 @@ impl Executor {
         buf_xz: &CudaBuffer,
         launch_stream: StreamId,
         width: WcojKeyWidth,
+        #[cfg(feature = "wcoj-phase-timing")] layout_times_ms: &mut [f32; 3],
     ) -> Result<CudaBuffer> {
+        #[cfg(feature = "wcoj-phase-timing")]
+        let mut time_layout =
+            |f: &dyn Fn() -> Result<CudaBuffer>, slot: usize| -> Result<CudaBuffer> {
+                let s = Instant::now();
+                let r = f()?;
+                layout_times_ms[slot] = s.elapsed().as_secs_f64() as f32 * 1000.0;
+                Ok(r)
+            };
         match width {
             WcojKeyWidth::FourByte => {
+                #[cfg(feature = "wcoj-phase-timing")]
+                let (layout_xy, layout_yz, layout_xz) = {
+                    let xy = time_layout(
+                        &|| {
+                            self.provider
+                                .wcoj_layout_u32_recorded(buf_xy, launch_stream)
+                        },
+                        0,
+                    )?;
+                    let yz = time_layout(
+                        &|| {
+                            self.provider
+                                .wcoj_layout_u32_recorded(buf_yz, launch_stream)
+                        },
+                        1,
+                    )?;
+                    let xz = time_layout(
+                        &|| {
+                            self.provider
+                                .wcoj_layout_u32_recorded(buf_xz, launch_stream)
+                        },
+                        2,
+                    )?;
+                    (xy, yz, xz)
+                };
+                #[cfg(not(feature = "wcoj-phase-timing"))]
                 let layout_xy = self
                     .provider
                     .wcoj_layout_u32_recorded(buf_xy, launch_stream)?;
+                #[cfg(not(feature = "wcoj-phase-timing"))]
                 let layout_yz = self
                     .provider
                     .wcoj_layout_u32_recorded(buf_yz, launch_stream)?;
+                #[cfg(not(feature = "wcoj-phase-timing"))]
                 let layout_xz = self
                     .provider
                     .wcoj_layout_u32_recorded(buf_xz, launch_stream)?;
@@ -497,12 +581,40 @@ impl Executor {
                 )
             }
             WcojKeyWidth::EightByte => {
+                #[cfg(feature = "wcoj-phase-timing")]
+                let (layout_xy, layout_yz, layout_xz) = {
+                    let xy = time_layout(
+                        &|| {
+                            self.provider
+                                .wcoj_layout_u64_recorded(buf_xy, launch_stream)
+                        },
+                        0,
+                    )?;
+                    let yz = time_layout(
+                        &|| {
+                            self.provider
+                                .wcoj_layout_u64_recorded(buf_yz, launch_stream)
+                        },
+                        1,
+                    )?;
+                    let xz = time_layout(
+                        &|| {
+                            self.provider
+                                .wcoj_layout_u64_recorded(buf_xz, launch_stream)
+                        },
+                        2,
+                    )?;
+                    (xy, yz, xz)
+                };
+                #[cfg(not(feature = "wcoj-phase-timing"))]
                 let layout_xy = self
                     .provider
                     .wcoj_layout_u64_recorded(buf_xy, launch_stream)?;
+                #[cfg(not(feature = "wcoj-phase-timing"))]
                 let layout_yz = self
                     .provider
                     .wcoj_layout_u64_recorded(buf_yz, launch_stream)?;
+                #[cfg(not(feature = "wcoj-phase-timing"))]
                 let layout_xz = self
                     .provider
                     .wcoj_layout_u64_recorded(buf_xz, launch_stream)?;

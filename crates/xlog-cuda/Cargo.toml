@@ -35,3 +35,8 @@ xlog-logic.workspace = true
 [features]
 default = []
 arrow-device-import = []
+# Diagnostic-only: enable per-phase CUDA-event timing inside
+# the WCOJ triangle dispatch. Production builds leave this off
+# to keep the hot path zero-overhead. The phase-report binary
+# in xlog-integration enables it for measurement runs only.
+wcoj-phase-timing = []

@@ -807,6 +807,15 @@ pub struct CudaKernelProvider {
     /// was actually selected for eligible Inner / LeftOuter cases (and
     /// not selected for Semi / Anti or when the env gate is off).
     csm_invocations: AtomicU64,
+    /// Diagnostic-only: last WCOJ triangle dispatch's per-phase
+    /// CUDA-event timings, populated by `wcoj_triangle_*_recorded`
+    /// when the `wcoj-phase-timing` Cargo feature is on. Read by
+    /// the `wcoj_phase_report` binary in xlog-integration. Field
+    /// is absent when the feature is off, so production builds
+    /// have zero overhead.
+    #[cfg(feature = "wcoj-phase-timing")]
+    last_triangle_phase_timing:
+        std::sync::Mutex<Option<crate::wcoj_phase_timing::WcojTrianglePhaseTiming>>,
 }
 
 #[derive(Default)]
@@ -886,6 +895,8 @@ impl CudaKernelProvider {
             deterministic_d2h_violations: AtomicU64::new(0),
             recorded_op_stream: OnceLock::new(),
             csm_invocations: AtomicU64::new(0),
+            #[cfg(feature = "wcoj-phase-timing")]
+            last_triangle_phase_timing: std::sync::Mutex::new(None),
         })
     }
 
@@ -1064,6 +1075,38 @@ impl CudaKernelProvider {
         let stream = runtime.stream_pool().acquire().ok()?;
         let _ = self.recorded_op_stream.set(stream);
         self.recorded_op_stream.get().copied()
+    }
+
+    /// Take the per-phase WCOJ triangle dispatch timings recorded
+    /// by the most recent `wcoj_triangle_*_recorded` call. Reading
+    /// clears the slot — designed for one-shot consumption by the
+    /// `wcoj_phase_report` binary in xlog-integration. Returns
+    /// `None` if no triangle dispatch has fired since the last
+    /// read (or since construction).
+    ///
+    /// Compiled in only with the `wcoj-phase-timing` Cargo
+    /// feature; production builds have no such method.
+    #[cfg(feature = "wcoj-phase-timing")]
+    pub fn take_wcoj_triangle_phase_timing(
+        &self,
+    ) -> Option<crate::wcoj_phase_timing::WcojTrianglePhaseTiming> {
+        self.last_triangle_phase_timing
+            .lock()
+            .ok()
+            .and_then(|mut g| g.take())
+    }
+
+    /// Internal: store the phase timings produced by a triangle
+    /// dispatch. Overwrites any prior unread slot — the report
+    /// binary is expected to read after every `execute_plan`.
+    #[cfg(feature = "wcoj-phase-timing")]
+    pub(crate) fn put_wcoj_triangle_phase_timing(
+        &self,
+        timing: crate::wcoj_phase_timing::WcojTrianglePhaseTiming,
+    ) {
+        if let Ok(mut g) = self.last_triangle_phase_timing.lock() {
+            *g = Some(timing);
+        }
     }
 
     /// Get the CUDA device

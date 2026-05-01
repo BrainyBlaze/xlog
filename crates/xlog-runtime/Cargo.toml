@@ -19,3 +19,11 @@ xlog-stats.workspace = true
 
 [dev-dependencies]
 bytemuck = "1.14"
+
+[features]
+default = []
+# Diagnostic-only: per-phase timing of WCOJ triangle dispatch
+# (classifier + 3 layouts + count/scan/total/materialize).
+# Forwards to xlog-cuda's `wcoj-phase-timing` so the events
+# inside the provider are recorded too. Off in production.
+wcoj-phase-timing = ["xlog-cuda/wcoj-phase-timing"]
