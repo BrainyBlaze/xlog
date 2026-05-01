@@ -116,9 +116,68 @@ WCOJ_BENCH_FULL=1 cargo bench -p xlog-integration --bench wcoj_triangle_bench --
 
 The criterion HTML report lands under `target/criterion/`.
 
+## A2-lite Adaptive Dispatch Acceptance (2026-05-01)
+
+Following the baseline above, the v0.6.2 A2-lite slice landed an adaptive-dispatch path that runs a GPU skew classifier (`wcoj_triangle_skew_score_{u32,u64}`) before the WCOJ pipeline. Score ≥ 0.10 → dispatch WCOJ; else fall back to binary join. The bench harness gained a third mode `Adaptive` per cell; matrix size grew 25 → 37 cells.
+
+**Measured at**: commit `dba0c8db` (commit B) + `70ca8494` (test-comment fix) — the kernel + dispatcher; no source changes between data collection and the merged HEAD.
+
+### Adaptive cells (median wall-clock; speedup vs `Mode::Off` baseline)
+
+| Family | Width | Rows | Off | Adaptive | adaptive/off | Acceptance gate |
+|---|---|---|---|---|---|---|
+| **uniform** | u32 | 10K | 1.77 ms | 2.78 ms | **1.57×** | ≤ 2.0× ✓ |
+| uniform | u32 | 50K | 3.61 ms | 3.82 ms | 1.06× | ≤ 2.0× ✓ |
+| uniform | u64 | 10K | 2.61 ms | 3.04 ms | 1.17× | ≤ 2.0× ✓ |
+| uniform | u64 | 50K | 4.86 ms | 5.21 ms | 1.07× | ≤ 2.0× ✓ |
+| **empty** | u32 | 10K | 1.92 ms | 2.22 ms | 1.16× | ≤ 2.0× ✓ |
+| empty | u32 | 50K | 2.39 ms | 2.71 ms | 1.13× | ≤ 2.0× ✓ |
+| empty | u64 | 10K | 2.11 ms | 2.46 ms | 1.17× | ≤ 2.0× ✓ |
+| empty | u64 | 50K | 2.49 ms | 3.35 ms | 1.35× | ≤ 2.0× ✓ |
+
+| Family | Width | Rows | Off | Adaptive | off/adaptive | Locked min | Acceptance |
+|---|---|---|---|---|---|---|---|
+| **super-hub** | u32 | 10K | 17.39 ms | 10.77 ms | **1.61×** | 1.44× | ✓ (12% headroom) |
+| super-hub | u32 | 50K | 56.54 ms | 11.59 ms | **4.88×** | 3.85× | ✓ (27% headroom) |
+| super-hub | u64 | 10K | 34.84 ms | 21.16 ms | **1.65×** | 1.42× | ✓ (16% headroom) |
+| super-hub | u64 | 50K | 96.02 ms | 19.47 ms | **4.93×** | 4.38× | ✓ (13% headroom) |
+
+**ALL LOCKED TARGETS CLEARED.** Adaptive dispatch:
+- Closes the uniform/empty regressions: `Mode::Adaptive` is ≤ 2× `Mode::Off` for every cell. The classifier overhead (768-byte D2H + one combined kernel launch + host max-bucket reduction) costs ~0.3–1 ms — well under the 8–18 ms WCOJ pipeline overhead it avoids.
+- Preserves the super-hub wins: every cell ≥ baseline minimum, with 12–27% headroom. In some cells (e.g. u64 10K) adaptive is *faster* than `Mode::Force` because the classifier's small overhead is more than offset by avoiding the full WCOJ pipeline launch when classifier-time itself amortizes well.
+
+### Force vs Adaptive for super-hub
+
+| Family | Width | Rows | Force | Adaptive | Adaptive vs Force |
+|---|---|---|---|---|---|
+| super-hub | u32 | 10K | 68.55 ms (high variance: 10.6–173.1) | 10.77 ms | adaptive cleaner — likely no warm-up bimodality |
+| super-hub | u32 | 50K | 11.35 ms | 11.59 ms | adaptive within 2% (classifier overhead) |
+| super-hub | u64 | 10K | 23.23 ms | 21.16 ms | adaptive 1.10× faster |
+| super-hub | u64 | 50K | 19.44 ms | 19.47 ms | within noise |
+
+The u32 10K Force result is bimodal/contaminated (range 10.6–173.1 ms — likely first-iteration JIT or kernel-loading effect not separated from steady state). The Adaptive cell, which exercises the same WCOJ pipeline plus a small classifier prelude, is consistent at 10.77 ms. Worth a separate investigation but does not block A2-lite acceptance (the locked target compares Adaptive vs Off, not Adaptive vs Force).
+
+### Default-on dispatch readiness
+
+Per the original locked criteria ("uniform-on ≤ 2× uniform-off AND super-hub-on > 1.5× super-hub-off"), `Mode::Adaptive` qualifies for **default-on** dispatch on non-recursive triangle rules with type-eligible inputs. The adaptive flag stays explicit-opt-in for this slice, but the data supports flipping the default in a follow-on slice if no real-workload counterexample emerges.
+
+## Reproducing
+
+```bash
+git checkout <commit-with-bench-harness>
+cargo bench -p xlog-integration --bench wcoj_triangle_bench -- --save-baseline wcoj_v062_default
+# Full matrix (slow):
+WCOJ_BENCH_FULL=1 cargo bench -p xlog-integration --bench wcoj_triangle_bench -- --save-baseline wcoj_v062_full
+# A2-lite adaptive baseline:
+cargo bench -p xlog-integration --bench wcoj_triangle_bench -- --save-baseline wcoj_v062_adaptive
+```
+
+The criterion HTML report lands under `target/criterion/`.
+
 ## Out of Scope
 
-- No actual histogram / skew kernel work — this slice's purpose is to identify where it's needed.
+- No actual histogram / skew kernel work — this slice's purpose was to identify where it's needed; A2-lite (skew classifier + adaptive dispatch) closes the locked acceptance gates without touching count/materialize internals.
 - No CI integration.
 - No real-graph imports.
 - Not run with `WCOJ_BENCH_FULL=1` in this baseline pass; left as future work.
+- Default-on dispatch flip deferred to a follow-on slice; this slice keeps adaptive opt-in.

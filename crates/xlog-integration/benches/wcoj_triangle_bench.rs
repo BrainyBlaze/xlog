@@ -7,10 +7,23 @@
 //!
 //! # Default matrix (no env)
 //!
-//! widths × fixtures × sizes × gates =
-//!   {u32, u64} × {uniform, superhub, empty} × {10K, 50K} × {off, on}
-//!   + 1 Symbol uniform 10K gate=on sanity case
-//! = 25 cells.
+//! widths × fixtures × sizes × modes =
+//!   {u32, u64} × {uniform, superhub, empty} × {10K, 50K} ×
+//!   {Off, Force, Adaptive}
+//!   + 1 Symbol uniform 10K Force sanity case
+//! = 37 cells.
+//!
+//! Modes:
+//!   * **Off**:      `wcoj_triangle_dispatch=Some(false)`. Binary-
+//!                   join chain only. Baseline for speedup.
+//!   * **Force**:    `wcoj_triangle_dispatch=Some(true)`. WCOJ
+//!                   pipeline always; classifier bypassed. The
+//!                   pre-A2-lite "gate-on" path.
+//!   * **Adaptive**: `wcoj_triangle_dispatch_adaptive=Some(true)`,
+//!                   force left None. Classifier runs first;
+//!                   dispatches WCOJ only when score ≥ 0.10.
+//!                   uniform/empty → routes to binary; superhub →
+//!                   routes to WCOJ.
 //!
 //! `WCOJ_BENCH_FULL=1` adds {100K, 250K} sizes for the same
 //! width/fixture cross-product. The full matrix is intentionally
@@ -381,16 +394,54 @@ fn make_provider(memory_mb: u64) -> Option<ProviderFixture> {
 // Executor build (timed and untimed paths share this).
 // ---------------------------------------------------------------
 
+/// Three dispatch modes the bench measures per cell. The runtime
+/// supports more shapes (force-off + adaptive-on, etc.); the
+/// bench measures the three production-relevant ones:
+///
+///   * `Off`      — `with_wcoj_triangle_dispatch(Some(false))`.
+///                 Binary-join chain only. Baseline.
+///   * `Force`    — `with_wcoj_triangle_dispatch(Some(true))`.
+///                 WCOJ pipeline always; classifier bypassed.
+///                 The pre-A2-lite "gate-on" semantic.
+///   * `Adaptive` — `with_wcoj_triangle_dispatch_adaptive(Some(true))`,
+///                 force left `None`. Classifier runs and
+///                 dispatches WCOJ only when score ≥ threshold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    Off,
+    Force,
+    Adaptive,
+}
+
+impl Mode {
+    fn label(self) -> &'static str {
+        match self {
+            Mode::Off => "off",
+            Mode::Force => "force",
+            Mode::Adaptive => "adaptive",
+        }
+    }
+
+    fn into_config(self) -> RuntimeConfig {
+        match self {
+            Mode::Off => RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(false)),
+            Mode::Force => RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(true)),
+            Mode::Adaptive => RuntimeConfig::default()
+                .with_wcoj_triangle_dispatch(None)
+                .with_wcoj_triangle_dispatch_adaptive(Some(true)),
+        }
+    }
+}
+
 fn build_executor(
     fix: &ProviderFixture,
     fixture: &Fixture,
     width: Width,
-    gate: bool,
+    mode: Mode,
 ) -> (Executor, ExecutionPlan) {
     let mut compiler = Compiler::new();
     let plan = compiler.compile(TRIANGLE_SOURCE).expect("compile");
-    let config = RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(gate));
-    let mut executor = Executor::new_with_config(Arc::clone(&fix.provider), config);
+    let mut executor = Executor::new_with_config(Arc::clone(&fix.provider), mode.into_config());
     for (name, rel_id) in compiler.rel_ids() {
         executor.register_relation(*rel_id, name);
     }
@@ -462,47 +513,96 @@ fn download_triples_u64(buf: &CudaBuffer) -> BTreeSet<(u64, u64, u64)> {
         .collect()
 }
 
-fn correctness_check(fix: &ProviderFixture, fixture: &Fixture, width: Width, label: &str) {
-    let (mut exec_off, plan_off) = build_executor(fix, fixture, width, false);
-    exec_off.execute_plan(&plan_off).expect("execute gate-off");
+/// One-shot correctness pre-check per `(family, size, width)`
+/// cell: row sets from `Mode::Off` (binary-join) and `Mode::Force`
+/// (WCOJ pipeline) must agree, and the dispatch counter must
+/// reflect mode semantics. `expects_adaptive_dispatch` says
+/// whether the family's input distribution should clear the
+/// classifier threshold; the check uses that to assert
+/// `Mode::Adaptive` routes correctly.
+fn correctness_check(
+    fix: &ProviderFixture,
+    fixture: &Fixture,
+    width: Width,
+    label: &str,
+    expects_adaptive_dispatch: bool,
+) {
+    // Off path: counter==0, row set is the binary-join reference.
+    let (mut exec_off, plan_off) = build_executor(fix, fixture, width, Mode::Off);
+    exec_off.execute_plan(&plan_off).expect("execute Off");
     let off_counter = exec_off.wcoj_triangle_dispatch_count();
     assert_eq!(
         off_counter, 0,
-        "[{label}] gate=false must NOT dispatch; got counter {off_counter}"
+        "[{label}] Mode::Off must NOT dispatch; got counter {off_counter}"
     );
     let rows_off = {
-        let tri_off = exec_off.store().get("tri").expect("tri gate-off");
+        let tri_off = exec_off.store().get("tri").expect("tri Off");
         match width {
             Width::U64 => download_triples_u64(tri_off),
             Width::U32 | Width::Symbol => download_triples_u32(tri_off),
         }
     };
 
-    let (mut exec_on, plan_on) = build_executor(fix, fixture, width, true);
-    exec_on.execute_plan(&plan_on).expect("execute gate-on");
-    let on_counter = exec_on.wcoj_triangle_dispatch_count();
+    // Force path: counter==1, row set must equal Off's.
+    let (mut exec_force, plan_force) = build_executor(fix, fixture, width, Mode::Force);
+    exec_force.execute_plan(&plan_force).expect("execute Force");
+    let force_counter = exec_force.wcoj_triangle_dispatch_count();
     assert_eq!(
-        on_counter, 1,
-        "[{label}] gate=true must dispatch exactly once; got counter {on_counter}"
+        force_counter, 1,
+        "[{label}] Mode::Force must dispatch exactly once; got counter {force_counter}"
     );
-    let rows_on = {
-        let tri_on = exec_on.store().get("tri").expect("tri gate-on");
+    let rows_force = {
+        let tri_force = exec_force.store().get("tri").expect("tri Force");
         match width {
-            Width::U64 => download_triples_u64(tri_on),
-            Width::U32 | Width::Symbol => download_triples_u32(tri_on),
+            Width::U64 => download_triples_u64(tri_force),
+            Width::U32 | Width::Symbol => download_triples_u32(tri_force),
         }
     };
 
     assert_eq!(
         rows_off.len(),
-        rows_on.len(),
+        rows_force.len(),
         "[{label}] row count mismatch — binary {} vs WCOJ {}",
         rows_off.len(),
-        rows_on.len()
+        rows_force.len()
     );
     assert_eq!(
-        rows_off, rows_on,
+        rows_off, rows_force,
         "[{label}] row sets diverge between binary-join and WCOJ paths"
+    );
+
+    // Adaptive path: counter is family-dependent.
+    //   * uniform/empty: classifier rejects → counter==0,
+    //     row set must equal binary-join (Off).
+    //   * superhub: classifier accepts → counter==1, row set
+    //     must equal WCOJ (Force).
+    let (mut exec_adapt, plan_adapt) = build_executor(fix, fixture, width, Mode::Adaptive);
+    exec_adapt
+        .execute_plan(&plan_adapt)
+        .expect("execute Adaptive");
+    let adapt_counter = exec_adapt.wcoj_triangle_dispatch_count();
+    let expected_adapt_counter = if expects_adaptive_dispatch { 1 } else { 0 };
+    assert_eq!(
+        adapt_counter,
+        expected_adapt_counter,
+        "[{label}] Mode::Adaptive expected counter {expected_adapt_counter} (classifier should \
+         {}), got {adapt_counter}",
+        if expects_adaptive_dispatch {
+            "accept"
+        } else {
+            "reject"
+        }
+    );
+    let rows_adapt = {
+        let tri_adapt = exec_adapt.store().get("tri").expect("tri Adaptive");
+        match width {
+            Width::U64 => download_triples_u64(tri_adapt),
+            Width::U32 | Width::Symbol => download_triples_u32(tri_adapt),
+        }
+    };
+    assert_eq!(
+        rows_adapt, rows_off,
+        "[{label}] Mode::Adaptive row set must equal Off (binary-join reference); paths agree"
     );
 }
 
@@ -516,13 +616,14 @@ fn bench_cell(
     fixture: &Fixture,
     width: Width,
     rows: u32,
-    gate: bool,
+    mode: Mode,
+    expects_adaptive_dispatch: bool,
 ) {
     let label = format!(
-        "{}-{}-gate{}",
+        "{}-{}-{}",
         width.label(),
         format_args!("{}K", rows / 1000),
-        if gate { "on" } else { "off" }
+        mode.label()
     );
     group.throughput(Throughput::Elements(fixture.total_rows()));
     group.bench_with_input(BenchmarkId::from_parameter(&label), &(), |b, _| {
@@ -542,19 +643,19 @@ fn bench_cell(
         // iteration so subsequent dispatches don't pay
         // `union_gpu(growing_tri, new_result)` cost — that
         // would bias the timing as iterations accumulate.
-        let (mut executor, plan) = build_executor(fix, fixture, width, gate);
+        let (mut executor, plan) = build_executor(fix, fixture, width, mode);
         b.iter_custom(|iters| {
-            // Counter delta lock: gate=true must dispatch every
-            // iteration (delta == iters); gate=false must never
-            // dispatch (delta == 0). Without this in-loop check,
-            // a future regression that silently fell back to
-            // binary-join (e.g. a stream-pool exhaustion bug
-            // re-emerging in a different shape, or a kernel
-            // error swallowed by the dispatch hook) would
-            // produce valid binary-join *output* with timing
-            // labelled as WCOJ — i.e. silently corrupt the
-            // baseline. The counter is the source of truth
-            // for "WCOJ actually fired"; assert it.
+            // Counter delta lock: per-mode expectations. A
+            // silent fallback anywhere in the hot loop would
+            // produce valid output with timing labelled as the
+            // wrong path, corrupting the baseline; this
+            // assertion is the source of truth.
+            //
+            // Off:        delta == 0 (binary-join only).
+            // Force:      delta == iters (WCOJ every iter).
+            // Adaptive:   delta == iters when classifier
+            //             accepts (super-hub); delta == 0 when
+            //             classifier rejects (uniform / empty).
             let counter_before = executor.wcoj_triangle_dispatch_count();
             let mut total = Duration::ZERO;
             for _ in 0..iters {
@@ -572,15 +673,25 @@ fn bench_cell(
             }
             let counter_after = executor.wcoj_triangle_dispatch_count();
             let delta = counter_after - counter_before;
-            let expected = if gate { iters } else { 0 };
+            let expected = match mode {
+                Mode::Off => 0,
+                Mode::Force => iters,
+                Mode::Adaptive => {
+                    if expects_adaptive_dispatch {
+                        iters
+                    } else {
+                        0
+                    }
+                }
+            };
             assert_eq!(
                 delta,
                 expected,
                 "[bench cell {label_for_assert}] counter delta {delta} != expected {expected} \
-                 across {iters} iterations (gate={gate}). The dispatch path silently fell \
-                 back somewhere in the hot loop; recorded timing for this cell is \
-                 contaminated.",
+                 across {iters} iterations (mode={mode_label}). The dispatch path silently \
+                 fell back somewhere in the hot loop; recorded timing is contaminated.",
                 label_for_assert = label,
+                mode_label = mode.label(),
             );
             total
         });
@@ -606,6 +717,7 @@ fn run_family(
     fix: &ProviderFixture,
     family_label: &str,
     make_fixture: fn(u32) -> Fixture,
+    expects_adaptive_dispatch: bool,
 ) {
     let mut group = c.benchmark_group(format!("wcoj_triangle/{family_label}"));
     group.sample_size(10);
@@ -619,13 +731,22 @@ fn run_family(
         let fixture = make_fixture(rows);
         for width in [Width::U32, Width::U64] {
             // Correctness pre-check (untimed). Runs once per
-            // (family, size, width) combo; panics on any
-            // divergence so the bench can never silently report
-            // numbers from a broken kernel.
+            // (family, size, width) combo across all three
+            // modes; panics on any divergence so the bench can
+            // never silently report numbers from a broken
+            // dispatch path.
             let cell_label = format!("{}-{}-{}K", family_label, width.label(), rows / 1000);
-            correctness_check(fix, &fixture, width, &cell_label);
-            for gate in [false, true] {
-                bench_cell(&mut group, fix, &fixture, width, rows, gate);
+            correctness_check(fix, &fixture, width, &cell_label, expects_adaptive_dispatch);
+            for mode in [Mode::Off, Mode::Force, Mode::Adaptive] {
+                bench_cell(
+                    &mut group,
+                    fix,
+                    &fixture,
+                    width,
+                    rows,
+                    mode,
+                    expects_adaptive_dispatch,
+                );
             }
         }
     }
@@ -638,7 +759,10 @@ fn bench_uniform(c: &mut Criterion) {
         eprintln!("Skipping bench_uniform: No CUDA device");
         return;
     };
-    run_family(c, &fix, "uniform", make_uniform);
+    // Uniform Erdős-Rényi: classifier expected to REJECT
+    // (score ≈ 0.02 < 0.10 threshold). Adaptive cells should
+    // route to binary join.
+    run_family(c, &fix, "uniform", make_uniform, false);
 }
 
 fn bench_superhub(c: &mut Criterion) {
@@ -646,7 +770,9 @@ fn bench_superhub(c: &mut Criterion) {
         eprintln!("Skipping bench_superhub: No CUDA device");
         return;
     };
-    run_family(c, &fix, "superhub", make_superhub);
+    // Super-hub: classifier expected to ACCEPT (score ≈ 0.18 ≥
+    // 0.10 threshold). Adaptive cells should dispatch WCOJ.
+    run_family(c, &fix, "superhub", make_superhub, true);
 }
 
 fn bench_empty(c: &mut Criterion) {
@@ -654,13 +780,17 @@ fn bench_empty(c: &mut Criterion) {
         eprintln!("Skipping bench_empty: No CUDA device");
         return;
     };
-    run_family(c, &fix, "empty", make_empty);
+    // Disjoint key ranges: column distributions are uniform-
+    // shaped, classifier expected to REJECT.
+    run_family(c, &fix, "empty", make_empty, false);
 }
 
 /// One Symbol sanity case at the smallest default size — just
 /// confirms the dispatch path is exercised on a Symbol triangle
 /// and produces correct output. Not a perf datapoint per se;
 /// Symbol shares u32's physical layout so it's expected to track.
+/// Tested under `Mode::Force` only (uniform fixture would route
+/// adaptive to binary; force is the WCOJ-pipeline-fired sanity).
 fn bench_symbol_sanity(c: &mut Criterion) {
     let Some(fix) = make_provider(8 * 1024) else {
         eprintln!("Skipping bench_symbol_sanity: No CUDA device");
@@ -670,8 +800,18 @@ fn bench_symbol_sanity(c: &mut Criterion) {
     group.sample_size(10);
     let rows = 10_000u32;
     let fixture = make_uniform(rows);
-    correctness_check(&fix, &fixture, Width::Symbol, "symbol-uniform-10K");
-    bench_cell(&mut group, &fix, &fixture, Width::Symbol, rows, true);
+    // Uniform-shaped → adaptive would reject. Pass false so the
+    // correctness check asserts adaptive counter == 0.
+    correctness_check(&fix, &fixture, Width::Symbol, "symbol-uniform-10K", false);
+    bench_cell(
+        &mut group,
+        &fix,
+        &fixture,
+        Width::Symbol,
+        rows,
+        Mode::Force,
+        false,
+    );
     group.finish();
 }
 
