@@ -1734,6 +1734,19 @@ impl CudaKernelProvider {
         let col0 = column_u32(input, 0)?;
         let col1 = column_u32(input, 1)?;
 
+        // Resolve the kernel before queueing launch-stream work.
+        // If the module lookup fails, `flag_buf` can drop without
+        // racing any in-flight H2D / kernel work.
+        let device = self.device.inner();
+        let kernel = device
+            .get_func(
+                WCOJ_MODULE,
+                wcoj_kernels::WCOJ_LAYOUT_CHECK_SORTED_UNIQUE_U32,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel("wcoj_layout_check_sorted_unique_u32 kernel not found".into())
+            })?;
+
         let mut rec = LaunchRecorder::new_strict(launch_stream);
         rec.read(input.num_rows_device());
         rec.read_column(input.column(0).expect("col0"));
@@ -1748,52 +1761,56 @@ impl CudaKernelProvider {
         // by stream order). Doing it as part of the recorded
         // window keeps the dealloc-safety chain intact.
         let one: u32 = 1;
-        unsafe {
-            let res = sys::cuMemcpyHtoDAsync_v2(
-                *flag_buf.device_ptr(),
-                &one as *const u32 as *const c_void,
-                std::mem::size_of::<u32>(),
-                cu_stream.cu_stream(),
-            );
-            if res != sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "wcoj_layout fast-path: H2D flag init failed: {res:?}"
-                )));
-            }
-        }
-
-        let device = self.device.inner();
-        let kernel = device
-            .get_func(
-                WCOJ_MODULE,
-                wcoj_kernels::WCOJ_LAYOUT_CHECK_SORTED_UNIQUE_U32,
-            )
-            .ok_or_else(|| {
-                XlogError::Kernel("wcoj_layout_check_sorted_unique_u32 kernel not found".into())
-            })?;
         let grid = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        // SAFETY: 4-arg signature
-        //   wcoj_layout_check_sorted_unique_u32(
-        //     const u32* col0, const u32* col1, u32 n, u32* flag)
-        unsafe {
-            kernel
-                .clone()
-                .launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (grid, 1, 1),
-                        block_dim: (BLOCK_SIZE, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (col0, col1, n, &mut flag_buf),
-                )
-                .map_err(|e| {
-                    XlogError::Kernel(format!("wcoj_layout_check_sorted_unique_u32 launch: {e}"))
-                })?;
+        let queued_result: Result<()> = (|| {
+            unsafe {
+                let res = sys::cuMemcpyHtoDAsync_v2(
+                    *flag_buf.device_ptr(),
+                    &one as *const u32 as *const c_void,
+                    std::mem::size_of::<u32>(),
+                    cu_stream.cu_stream(),
+                );
+                if res != sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "wcoj_layout fast-path: H2D flag init failed: {res:?}"
+                    )));
+                }
+            }
+
+            // SAFETY: 4-arg signature
+            //   wcoj_layout_check_sorted_unique_u32(
+            //     const u32* col0, const u32* col1, u32 n, u32* flag)
+            unsafe {
+                kernel
+                    .clone()
+                    .launch_on_stream(
+                        &cu_stream,
+                        LaunchConfig {
+                            grid_dim: (grid, 1, 1),
+                            block_dim: (BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (col0, col1, n, &mut flag_buf),
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "wcoj_layout_check_sorted_unique_u32 launch: {e}"
+                        ))
+                    })?;
+            }
+            Ok(())
+        })();
+        if let Err(e) = queued_result {
+            let _ = cu_stream.synchronize();
+            return Err(e);
         }
 
-        rec.commit(runtime)
-            .map_err(|e| XlogError::Kernel(format!("wcoj_layout fast-path: commit {e}")))?;
+        if let Err(e) = rec.commit(runtime) {
+            let _ = cu_stream.synchronize();
+            return Err(XlogError::Kernel(format!(
+                "wcoj_layout fast-path: commit {e}"
+            )));
+        }
 
         cu_stream
             .synchronize()
@@ -1848,29 +1865,6 @@ impl CudaKernelProvider {
         let col0 = column_u64(input, 0)?;
         let col1 = column_u64(input, 1)?;
 
-        let mut rec = LaunchRecorder::new_strict(launch_stream);
-        rec.read(input.num_rows_device());
-        rec.read_column(input.column(0).expect("col0"));
-        rec.read_column(input.column(1).expect("col1"));
-        rec.write(&flag_buf);
-        rec.preflight(runtime)
-            .map_err(|e| XlogError::Kernel(format!("wcoj_layout fast-path u64: preflight {e}")))?;
-
-        let one: u32 = 1;
-        unsafe {
-            let res = sys::cuMemcpyHtoDAsync_v2(
-                *flag_buf.device_ptr(),
-                &one as *const u32 as *const c_void,
-                std::mem::size_of::<u32>(),
-                cu_stream.cu_stream(),
-            );
-            if res != sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "wcoj_layout fast-path u64: H2D flag init failed: {res:?}"
-                )));
-            }
-        }
-
         let device = self.device.inner();
         let kernel = device
             .get_func(
@@ -1880,26 +1874,63 @@ impl CudaKernelProvider {
             .ok_or_else(|| {
                 XlogError::Kernel("wcoj_layout_check_sorted_unique_u64 kernel not found".into())
             })?;
+
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read(input.num_rows_device());
+        rec.read_column(input.column(0).expect("col0"));
+        rec.read_column(input.column(1).expect("col1"));
+        rec.write(&flag_buf);
+        rec.preflight(runtime)
+            .map_err(|e| XlogError::Kernel(format!("wcoj_layout fast-path u64: preflight {e}")))?;
+
+        let one: u32 = 1;
         let grid = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        unsafe {
-            kernel
-                .clone()
-                .launch_on_stream(
-                    &cu_stream,
-                    LaunchConfig {
-                        grid_dim: (grid, 1, 1),
-                        block_dim: (BLOCK_SIZE, 1, 1),
-                        shared_mem_bytes: 0,
-                    },
-                    (col0, col1, n, &mut flag_buf),
-                )
-                .map_err(|e| {
-                    XlogError::Kernel(format!("wcoj_layout_check_sorted_unique_u64 launch: {e}"))
-                })?;
+        let queued_result: Result<()> = (|| {
+            unsafe {
+                let res = sys::cuMemcpyHtoDAsync_v2(
+                    *flag_buf.device_ptr(),
+                    &one as *const u32 as *const c_void,
+                    std::mem::size_of::<u32>(),
+                    cu_stream.cu_stream(),
+                );
+                if res != sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "wcoj_layout fast-path u64: H2D flag init failed: {res:?}"
+                    )));
+                }
+            }
+
+            unsafe {
+                kernel
+                    .clone()
+                    .launch_on_stream(
+                        &cu_stream,
+                        LaunchConfig {
+                            grid_dim: (grid, 1, 1),
+                            block_dim: (BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        (col0, col1, n, &mut flag_buf),
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!(
+                            "wcoj_layout_check_sorted_unique_u64 launch: {e}"
+                        ))
+                    })?;
+            }
+            Ok(())
+        })();
+        if let Err(e) = queued_result {
+            let _ = cu_stream.synchronize();
+            return Err(e);
         }
 
-        rec.commit(runtime)
-            .map_err(|e| XlogError::Kernel(format!("wcoj_layout fast-path u64: commit {e}")))?;
+        if let Err(e) = rec.commit(runtime) {
+            let _ = cu_stream.synchronize();
+            return Err(XlogError::Kernel(format!(
+                "wcoj_layout fast-path u64: commit {e}"
+            )));
+        }
 
         cu_stream
             .synchronize()
@@ -1951,44 +1982,55 @@ impl CudaKernelProvider {
         rec.preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("wcoj_layout clone 4B: preflight {e}")))?;
 
-        unsafe {
-            let r0 = sys::cuMemcpyDtoDAsync_v2(
-                *out_col0.device_ptr(),
-                *src_col0.device_ptr(),
-                bpc,
-                cu_stream.cu_stream(),
-            );
-            if r0 != sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "wcoj_layout clone 4B: dtod col0 failed: {r0:?}"
-                )));
+        let queued_result: Result<()> = (|| {
+            unsafe {
+                let r0 = sys::cuMemcpyDtoDAsync_v2(
+                    *out_col0.device_ptr(),
+                    *src_col0.device_ptr(),
+                    bpc,
+                    cu_stream.cu_stream(),
+                );
+                if r0 != sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "wcoj_layout clone 4B: dtod col0 failed: {r0:?}"
+                    )));
+                }
+                let r1 = sys::cuMemcpyDtoDAsync_v2(
+                    *out_col1.device_ptr(),
+                    *src_col1.device_ptr(),
+                    bpc,
+                    cu_stream.cu_stream(),
+                );
+                if r1 != sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "wcoj_layout clone 4B: dtod col1 failed: {r1:?}"
+                    )));
+                }
+                let r2 = sys::cuMemcpyHtoDAsync_v2(
+                    *out_d_num_rows.device_ptr(),
+                    &n as *const u32 as *const c_void,
+                    std::mem::size_of::<u32>(),
+                    cu_stream.cu_stream(),
+                );
+                if r2 != sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "wcoj_layout clone 4B: H2D d_num_rows failed: {r2:?}"
+                    )));
+                }
             }
-            let r1 = sys::cuMemcpyDtoDAsync_v2(
-                *out_col1.device_ptr(),
-                *src_col1.device_ptr(),
-                bpc,
-                cu_stream.cu_stream(),
-            );
-            if r1 != sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "wcoj_layout clone 4B: dtod col1 failed: {r1:?}"
-                )));
-            }
-            let r2 = sys::cuMemcpyHtoDAsync_v2(
-                *out_d_num_rows.device_ptr(),
-                &n as *const u32 as *const c_void,
-                std::mem::size_of::<u32>(),
-                cu_stream.cu_stream(),
-            );
-            if r2 != sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "wcoj_layout clone 4B: H2D d_num_rows failed: {r2:?}"
-                )));
-            }
+            Ok(())
+        })();
+        if let Err(e) = queued_result {
+            let _ = cu_stream.synchronize();
+            return Err(e);
         }
 
-        rec.commit(runtime)
-            .map_err(|e| XlogError::Kernel(format!("wcoj_layout clone 4B: commit {e}")))?;
+        if let Err(e) = rec.commit(runtime) {
+            let _ = cu_stream.synchronize();
+            return Err(XlogError::Kernel(format!(
+                "wcoj_layout clone 4B: commit {e}"
+            )));
+        }
 
         Ok(CudaBuffer::from_columns_with_host_count(
             vec![out_col0.into(), out_col1.into()],
@@ -2026,44 +2068,55 @@ impl CudaKernelProvider {
         rec.preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("wcoj_layout clone 8B: preflight {e}")))?;
 
-        unsafe {
-            let r0 = sys::cuMemcpyDtoDAsync_v2(
-                *out_col0.device_ptr(),
-                *src_col0.device_ptr(),
-                bpc,
-                cu_stream.cu_stream(),
-            );
-            if r0 != sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "wcoj_layout clone 8B: dtod col0 failed: {r0:?}"
-                )));
+        let queued_result: Result<()> = (|| {
+            unsafe {
+                let r0 = sys::cuMemcpyDtoDAsync_v2(
+                    *out_col0.device_ptr(),
+                    *src_col0.device_ptr(),
+                    bpc,
+                    cu_stream.cu_stream(),
+                );
+                if r0 != sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "wcoj_layout clone 8B: dtod col0 failed: {r0:?}"
+                    )));
+                }
+                let r1 = sys::cuMemcpyDtoDAsync_v2(
+                    *out_col1.device_ptr(),
+                    *src_col1.device_ptr(),
+                    bpc,
+                    cu_stream.cu_stream(),
+                );
+                if r1 != sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "wcoj_layout clone 8B: dtod col1 failed: {r1:?}"
+                    )));
+                }
+                let r2 = sys::cuMemcpyHtoDAsync_v2(
+                    *out_d_num_rows.device_ptr(),
+                    &n as *const u32 as *const c_void,
+                    std::mem::size_of::<u32>(),
+                    cu_stream.cu_stream(),
+                );
+                if r2 != sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "wcoj_layout clone 8B: H2D d_num_rows failed: {r2:?}"
+                    )));
+                }
             }
-            let r1 = sys::cuMemcpyDtoDAsync_v2(
-                *out_col1.device_ptr(),
-                *src_col1.device_ptr(),
-                bpc,
-                cu_stream.cu_stream(),
-            );
-            if r1 != sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "wcoj_layout clone 8B: dtod col1 failed: {r1:?}"
-                )));
-            }
-            let r2 = sys::cuMemcpyHtoDAsync_v2(
-                *out_d_num_rows.device_ptr(),
-                &n as *const u32 as *const c_void,
-                std::mem::size_of::<u32>(),
-                cu_stream.cu_stream(),
-            );
-            if r2 != sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "wcoj_layout clone 8B: H2D d_num_rows failed: {r2:?}"
-                )));
-            }
+            Ok(())
+        })();
+        if let Err(e) = queued_result {
+            let _ = cu_stream.synchronize();
+            return Err(e);
         }
 
-        rec.commit(runtime)
-            .map_err(|e| XlogError::Kernel(format!("wcoj_layout clone 8B: commit {e}")))?;
+        if let Err(e) = rec.commit(runtime) {
+            let _ = cu_stream.synchronize();
+            return Err(XlogError::Kernel(format!(
+                "wcoj_layout clone 8B: commit {e}"
+            )));
+        }
 
         Ok(CudaBuffer::from_columns_with_host_count(
             vec![out_col0.into(), out_col1.into()],
