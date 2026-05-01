@@ -14,10 +14,11 @@
 //!      run classifier; dispatch only when score ≥ 0.10.
 //!   4. Else → no dispatch.
 //!
-//! Env precedence (force beats adaptive beats off):
-//!   `XLOG_USE_WCOJ_TRIANGLE_U32=1` > config force=Some(true) >
-//!   `XLOG_USE_WCOJ_TRIANGLE_ADAPTIVE=1` > config adaptive=Some(true) >
-//!   off.
+//! Precedence (config override beats env; force beats adaptive beats off):
+//!   config force=Some(true) > config force=Some(false) >
+//!   `XLOG_USE_WCOJ_TRIANGLE_U32=1` >
+//!   config adaptive=Some(true/false) >
+//!   `XLOG_USE_WCOJ_TRIANGLE_ADAPTIVE=1` > off.
 //!
 //! Hard scope (commit B of 3):
 //!   * RuntimeConfig field + dispatcher branch only.
