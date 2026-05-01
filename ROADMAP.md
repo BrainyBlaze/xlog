@@ -1,17 +1,15 @@
 # XLOG Development Roadmap
 
-Last updated: April 28, 2026
-Current released version: v0.5.2
-Current development target: v0.6.0 stream-safe GPU runtime and execution
-discipline. v0.5.5 deterministic hardening is closed at PRs #49 (strict D2H
-guard), #50 (GPU full-row dedup / set-difference), #52 (binary-join output
-counts as metadata reads), plus crash-window frozen replay evidence; fully
-GPU-resident binary-join materialization (count → prefix → materialize) is
-explicitly deferred. v0.6.1 (Recorded CSM Dispatch and Certification)
-ships the env-gated CSM hash-join dispatch and cert-mode labelling
-on top of the v0.6.0 stream-safe runtime; WCOJ has been re-targeted
-to v0.6.2 — it must not land before recorded launch discipline
-covers the operators it depends on.
+Last updated: May 1, 2026
+Latest tagged release before this prep: v0.6.1
+Current release target: v0.6.2. v0.6.0 shipped the
+stream-safe runtime and recorded launch discipline. v0.6.1 shipped
+recorded CSM hash-join dispatch and explicit CSM cert-mode labeling.
+v0.6.2 ships the first productized WCOJ slice: hypergraph planner /
+oracle foundations plus default-on adaptive GPU triangle WCOJ for
+`U32`, `Symbol`, and `U64` inputs. v0.6.2 deliberately does **not**
+claim general-arity WCOJ, recursive/SCC WCOJ execution, a cost model,
+or a dedicated `MultiWayJoin` / `WcojJoin` RIR node.
 
 This roadmap is version-oriented so planned work is not hidden inside subsystem
 sections. Historical and current-main work uses checked boxes. Future work uses
@@ -1114,62 +1112,135 @@ for legacy callers is unchanged; the new path is opt-in via
 
 ### xlog-ir and Optimizer
 
-- [ ] Add WCOJ eligibility analysis.
-- [ ] Lower eligible plans to `MultiWayJoin` / `WcojJoin` RIR nodes.
-- [ ] Add variable-ordering cost model for WCOJ.
+- [x] Add hypergraph IR and WCOJ eligibility analysis for rule
+      bodies. Shipped in `xlog-logic::hypergraph` with vertices,
+      hyperedges, structural boundaries, typed analysis, transitive
+      SCC type inference, and canonical explain output.
+- [x] Add a mixed plan contract that distinguishes
+      `RulePlan::MultiwayCandidate` from `RulePlan::BinaryFallback`
+      while preserving every fallback boundary for telemetry and
+      future dispatch decisions.
+- [x] Keep binary join backend as fallback for unsupported types,
+      aggregation boundaries, negation boundaries, low-cardinality /
+      non-triangle rules, mixed-width triangles, recursive SCCs, and
+      RIR shapes outside the certified matcher.
+- [ ] Lower eligible plans to a dedicated `MultiWayJoin` /
+      `WcojJoin` RIR node. v0.6.2 executor wiring pattern-matches the
+      current lowered triangle RIR directly; a first-class RIR node is
+      deferred.
+- [ ] Add variable-ordering cost model for WCOJ. v0.6.2 ships only
+      deterministic appearance-order planning plus a trait boundary for
+      future cost models.
 - [ ] Add join reordering based on selectivity estimates.
-- [ ] Keep binary join backend as fallback for unsupported types, aggregation boundaries, negation boundaries, and low-cardinality rules.
 
 ### xlog-runtime
 
-- [ ] Add deterministic WCOJ execution path.
+- [x] Add deterministic default-on adaptive WCOJ execution for the
+      certified non-recursive triangle RIR shape
+      `tri(X,Y,Z) :- e1(X,Y), e2(Y,Z), e3(X,Z)`.
+- [x] Add force / adaptive / hard-disable controls:
+      `RuntimeConfig::wcoj_triangle_dispatch`,
+      `wcoj_triangle_dispatch_adaptive`,
+      `wcoj_triangle_dispatch_disabled`, and env vars
+      `XLOG_USE_WCOJ_TRIANGLE_U32`,
+      `XLOG_USE_WCOJ_TRIANGLE_ADAPTIVE`,
+      `XLOG_DISABLE_WCOJ_TRIANGLE`.
+- [x] Add executor dispatch telemetry via
+      `Executor::wcoj_triangle_dispatch_count()` and feature-gated
+      `Executor::take_wcoj_phase_timing()`.
+- [x] Cache the executor WCOJ launch stream to avoid exhausting the
+      grow-only runtime `StreamPool` on long-lived executors.
 - [ ] Integrate WCOJ into semi-naive recursive evaluation.
-- [ ] Preserve deterministic mixed execution across WCOJ and binary-join rules.
+- [ ] Preserve deterministic mixed execution across WCOJ and
+      binary-join rules inside recursive SCCs. v0.6.2 preserves
+      deterministic fallback for unsupported recursive shapes.
 - [ ] Add statistics integration into recursive SCC evaluation.
 
 ### xlog-cuda
 
-- [ ] Add WCOJ physical relation layout: sorted columnar indexes, trie-level key ranges, and projection metadata.
-- [ ] Add sorted relation accessors for WCOJ.
-- [ ] Add deterministic WCOJ kernels for 3-way conjunctive joins.
+- [x] Add WCOJ physical relation layout construction for 2-column
+      triangle inputs: `wcoj_layout_u32_recorded` for `U32` /
+      `Symbol`, and `wcoj_layout_u64_recorded` for `U64`. Layouts are
+      lex-sorted and full-row deduped.
+- [x] Add layout fast-path for already strictly sorted+unique inputs.
+      The recorded checker proves the property, then a recorded
+      device-side clone skips sort + dedup. Slow path falls back to
+      `dedup_full_row_recorded`.
+- [x] Add deterministic WCOJ kernels for 3-way conjunctive triangle
+      joins (`u32` / `Symbol` physical path and `u64` path). The
+      pipeline is count → device-side prefix scan → materialize with
+      deterministic offsets and no count-vector D2H.
+- [x] Add single-GPU adaptive skew detection for triangle dispatch.
+      The classifier uses 64 hash-mixed buckets over the three
+      join-key columns and dispatches WCOJ when score ≥ 0.10.
+- [x] Add small metadata D2H chokepoint
+      `dtoh_small_metadata_untracked` with a hard 4 KB cap for
+      classifier histograms and similar metadata; strict-D2H tests
+      lock the contract.
+- [x] Add feature-gated WCOJ phase timing for count / scan / total /
+      materialize GPU phases and dispatch-level classifier / layout /
+      residual wall-clock buckets.
+- [ ] Add sorted relation accessors beyond the triangle layout helper.
 - [ ] Add deterministic WCOJ kernels for 4-way conjunctive joins.
 - [ ] Add general-arity WCOJ after 3-way and 4-way certification.
-- [ ] Add single-GPU skew detection and partitioning for WCOJ.
-- [ ] Add kernel fusion where benchmarks show materialization overhead dominates.
+- [ ] Add histogram-guided block scheduling / heavy-row offload.
+      v0.6.2 measured this and deferred it: after the layout
+      fast-path, materialize is a plausible future target but no
+      longer the obvious next slice.
+- [ ] Add kernel fusion where benchmarks show materialization overhead
+      dominates.
 - [ ] Add shared-memory optimization for small relations.
 - [ ] Add warp-level primitives for small-relation optimization.
 
 ### Adaptive Indexing
 
 - [ ] Add nested-loop join for small relations.
-- [ ] Add sort-merge join for pre-sorted data.
+- [x] Add a WCOJ-specific sort-merge-style fast-path for pre-sorted
+      triangle inputs through the layout checker + recorded clone.
+- [ ] Add general sort-merge join for pre-sorted binary relations.
 - [ ] Feed selectivity and heat statistics into WCOJ variable ordering.
 
 ### Tests and Certification
 
-- [ ] Add WCOJ CPU parity tests.
-- [ ] Add WCOJ K-run determinism tests.
-- [ ] Add public WCOJ certification gates for Same Generation, triangle, and skewed multiway workloads.
-- [ ] Add Same Generation, triangle, skewed multi-way, and deep
-      recursive-frontier benchmarks (these depend on the WCOJ
-      execution path landing first; they were previously
-      open in v0.5.5 but had no operator target without WCOJ).
-- [ ] Add skewed multi-way benchmark suite.
-- [ ] Capture binary-join and multi-way stress benchmark
-      baselines for the public release gate (paired with the
-      benchmark suite above).
+- [x] Add WCOJ CPU parity tests through the hypergraph reference
+      evaluator and planner-to-provider certification.
+- [x] Add WCOJ deterministic output tests for triangle provider
+      entries and executor dispatch counters.
+- [x] Add public WCOJ certification workloads for Same Generation,
+      triangle, skewed multiway, deep recursive frontier, and
+      mutually recursive parity SCC in the pure-Rust oracle stack.
+- [x] Add runtime/provider certification for triangle WCOJ, including
+      u32, Symbol, u64, mixed-width fallback, unsupported-type
+      fallback, RIR-shape policy, adaptive/default-on policy, strict
+      deterministic-D2H checks, and layout fast-path checks.
+- [x] Capture binary-join vs WCOJ triangle benchmark baselines and
+      adaptive/default-on acceptance data under
+      `docs/evidence/2026-05-01-wcoj-bench-baseline/`.
+- [x] Add Same Generation, triangle, skewed multi-way, and deep
+      recursive-frontier certification workloads in the oracle stack.
+- [ ] Add GPU Same Generation / skewed multiway / deep-recursive WCOJ
+      execution gates. v0.6.2 certifies these at the oracle layer,
+      not through GPU WCOJ kernels.
+- [ ] Add skewed multi-way GPU benchmark suite beyond triangle.
 - [ ] Preserve deterministic mixed execution across WCOJ,
       binary-join, and recursive rules under a single test
       harness. (The binary-join + recursive determinism part
-      is already in `xlog-runtime`; the WCOJ side lands here.)
+      is already in `xlog-runtime`; v0.6.2 covers non-recursive
+      triangle WCOJ only.)
 - [ ] Add downstream widened-frontier stress replay clean gate.
       (No replay harness is committed today; the harness needs
       to be built alongside the benchmarks above.)
 
 ### Documentation
 
-- [ ] Add WCOJ architecture guide.
-- [ ] Document WCOJ eligibility, fallback, and performance tuning.
+- [x] Document WCOJ benchmark methodology and env/config knobs in
+      `docs/BENCHMARKS.md`.
+- [x] Record WCOJ baseline, adaptive/default-on acceptance,
+      pre-fast-path phase timing, and post-fast-path phase timing in
+      `docs/evidence/2026-05-01-wcoj-bench-baseline/`.
+- [ ] Add dedicated WCOJ architecture guide.
+- [ ] Document WCOJ eligibility, fallback, and performance tuning in a
+      user-facing guide rather than only code docs / benchmark docs.
 
 ## v0.7.0 - Epistemic and Solver Semantics
 

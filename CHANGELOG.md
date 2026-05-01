@@ -277,9 +277,140 @@ for legacy callers is unchanged; the new path is opt-in via
   `XLOG_USE_DEVICE_RUNTIME=1 XLOG_USE_RECORDED_OPS=1`):
   20/20 (recorded across PR #87, #89, #91 prep).
 
-## [Unreleased] — targeting v0.6.2
+## [0.6.2] — 2026-05-01
 
-> Empty: see post-v0.6.1 deferrals listed above.
+Default-On Adaptive WCOJ Triangle Dispatch. Productizes the
+first GPU Worst-Case Optimal Join slice: a certified 3-way
+triangle path for `u32`, `u64`, and `Symbol` keys, wired into
+the runtime behind a default-on adaptive skew classifier and a
+hard kill switch. The release also ships the pure-Rust
+hypergraph planner / oracle stack that future WCOJ kernels are
+certified against. Scope remains deliberately narrow: no
+general-arity WCOJ, no recursive/SCC WCOJ execution, no cost
+model, and no `MultiWayJoin` / `WcojJoin` RIR node yet.
+
+### Added
+
+- **Hypergraph planner and oracle foundation.** Added
+  `xlog-logic::hypergraph` with a hypergraph IR, eligibility
+  analyzer, deterministic variable-order interface, canonical
+  explain output, typed gate, mixed plan contract, single-rule
+  reference evaluator, single-target fixpoint evaluator, SCC
+  fixpoint evaluator, and transitive SCC type inference. The
+  certification workloads cover triangle, Same Generation,
+  skewed multiway, deep recursive frontier, and mutually
+  recursive parity SCC shapes.
+- **GPU WCOJ triangle provider path.** Added recorded
+  `wcoj_triangle_u32_recorded` / `wcoj_triangle_u64_recorded`
+  provider entries plus `wcoj_layout_u32_recorded` /
+  `wcoj_layout_u64_recorded` sorted-layout construction. The
+  triangle pipeline uses count → device-side prefix scan →
+  materialize with a 4-byte metadata D2H total; no count-vector
+  D2H remains. `Symbol` uses the u32 physical path.
+- **Planner-to-provider certification.** Added test-only
+  `xlog-logic` dev dependency in `xlog-cuda` so planner verdicts
+  and GPU provider outputs are certified against the same CPU
+  oracle fixtures before executor wiring.
+- **Runtime WCOJ dispatch.** Added the executor hook for the
+  canonical non-recursive triangle RIR shape
+  `tri(X,Y,Z) :- e1(X,Y), e2(Y,Z), e3(X,Z)`. The hook supports
+  4-byte (`U32` / `Symbol`) and 8-byte (`U64`) uniform-width
+  triangles, silently falls back for unsupported shapes, and
+  exposes `Executor::wcoj_triangle_dispatch_count()` for tests.
+- **Adaptive skew classifier and default-on policy.** Added
+  `wcoj_triangle_skew_score_{u32,u64}` and a 64-bucket
+  hash-mixed L-infinity/L1 classifier. `RuntimeConfig::default()`
+  now runs adaptive WCOJ on matching non-recursive triangle
+  rules: high-skew inputs dispatch WCOJ, uniform / empty inputs
+  fall back to the binary-join chain. Ops can disable the path
+  globally with `XLOG_DISABLE_WCOJ_TRIANGLE=1`.
+- **Diagnostic phase timing.** Added feature-gated
+  `wcoj-phase-timing` support and the `wcoj_phase_report`
+  binary to measure classifier, layout, triangle count / scan /
+  total / materialize, wall, and residual overhead.
+- **WCOJ benchmark baseline.** Added
+  `crates/xlog-integration/benches/wcoj_triangle_bench.rs` and
+  evidence under
+  `docs/evidence/2026-05-01-wcoj-bench-baseline/` for baseline,
+  adaptive acceptance, default-on acceptance, pre-fast-path phase
+  timing, and post-fast-path phase timing.
+
+### Changed
+
+- **WCOJ layout fast-path.** `wcoj_layout_u32_recorded` and
+  `wcoj_layout_u64_recorded` now prove already sorted+unique
+  inputs with a recorded checker kernel and return a recorded
+  device-side clone instead of always running sort + dedup. The
+  slow path is unchanged and remains the correctness fallback.
+- **Recorded sort / dedup U64 support.** `sort_recorded` now
+  supports U64 via the same hi/lo radix strategy as the legacy
+  sort path, and `dedup_full_row_recorded` admits U64 rows.
+- **Executor WCOJ stream reuse.** The executor caches one WCOJ
+  launch stream per instance, preventing long-lived runtimes from
+  exhausting the grow-only `StreamPool` and silently falling back
+  after 16 dispatches.
+- **WCOJ adaptive default.** `RuntimeConfig::wcoj_triangle_dispatch`
+  remains the explicit force/off knob. New
+  `wcoj_triangle_dispatch_adaptive` controls adaptive opt-out /
+  opt-in, and `wcoj_triangle_dispatch_disabled` is the hard kill
+  switch. Precedence is: disable > force > explicit force-off >
+  adaptive.
+
+### Fixed
+
+- **Skew-classifier failure paths.** Failure paths after queued
+  classifier work now drain the launch stream before dropping
+  temporary buffers.
+- **Layout fast-path failure paths.** Failure paths after queued
+  checker / recorded-clone work now drain the launch stream before
+  dropping temporary buffers.
+- **SCC-aware planner precedence.** The hypergraph planner now
+  preserves structural-error precedence when typed gating and SCC
+  inference both apply.
+
+### Bench Evidence
+
+- Initial force-on WCOJ was strong on super-hub fixtures but
+  regressed uniform / empty fixtures. The adaptive classifier
+  cleared the locked median gates: uniform / empty adaptive cells
+  stayed ≤2× binary-join, while super-hub speedups remained above
+  the locked minimums.
+- Phase timing showed layout construction was 91-97% of super-hub
+  WCOJ wall time before the fast-path. The layout fast-path reduced
+  layout time by ~97-98% and wall time by ~90-96% on the measured
+  super-hub cells.
+
+### Deferred to post-v0.6.2
+
+- General `MultiWayJoin` / `WcojJoin` RIR node and optimizer
+  integration.
+- Cost-aware variable ordering and selectivity / heat feedback.
+- Recursive / SCC WCOJ execution and mixed recursive WCOJ +
+  binary-join semantics.
+- 4-way and general-arity WCOJ kernels.
+- Histogram-guided block scheduling / B1 heavy-row offload. Phase
+  timing after the layout fast-path shows materialize is now a
+  plausible future optimization target, but no longer the obvious
+  next slice.
+- Dedicated WCOJ architecture and performance-tuning guide.
+
+### Release Validation Targets
+
+Run before tagging `v0.6.2`:
+
+- `cargo fmt --check`
+- `git diff --check`
+- WCOJ provider / integration test matrix
+- `cargo test -p xlog-logic`
+- `cargo test -p xlog-runtime --lib`
+- `cargo build --workspace --exclude pyxlog`
+- `XLOG_USE_DEVICE_RUNTIME=1 cargo test -p xlog-integration --test real_world_tests --release`
+- Existing certification modes from v0.6.1 remain the recorded-launch
+  baseline for runtime safety.
+
+## [Unreleased] — targeting v0.6.3
+
+> Empty.
 
 ## [0.5.2](https://github.com/BrainyBlaze/xlog/compare/xlog-cli-v0.5.0...xlog-cli-v0.5.2) — 2026-04-20
 

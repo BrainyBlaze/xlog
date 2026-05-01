@@ -197,14 +197,15 @@ impl CudaKernelProvider {
     /// caller chooses which logical relation each input represents
     /// by the slot it passes the layout into.
     ///
-    /// Composes existing recorded primitives end-to-end:
-    /// [`Self::dedup_full_row_recorded`] internally invokes
+    /// Fast-path: if the input is already strictly lex-sorted and
+    /// full-row unique, a recorded checker proves that property and
+    /// the method returns a recorded device-side clone. Otherwise it
+    /// falls back to [`Self::dedup_full_row_recorded`], which invokes
     /// [`Self::sort_recorded`] (typed multi-column radix sort on
     /// `(col0, col1)`) followed by an on-stream
-    /// `mark_unique_full_row_bytewise` mask + counted compaction —
-    /// each primitive carries its own [`crate::launch::LaunchRecorder`]
-    /// commit and the runtime's record-all + wait-all
-    /// `last_use_events` chains the dealloc safety end-to-end.
+    /// `mark_unique_full_row_bytewise` mask + counted compaction.
+    /// Both paths are launch-recorder disciplined and preserve the
+    /// sorted+deduped output contract.
     ///
     /// This entry exists for two reasons:
     ///   1. Narrowing the input contract to 2-column u32 lets the
@@ -766,10 +767,10 @@ impl CudaKernelProvider {
     /// for direct consumption by [`Self::wcoj_triangle_u64_recorded`].
     ///
     /// Composition mirrors [`Self::wcoj_layout_u32_recorded`]:
-    /// delegates to [`Self::dedup_full_row_recorded`], which
-    /// gained U64 admission in commit 1 of this slice (its
-    /// internal `sort_recorded` ports the legacy `sort()`'s hi/lo
-    /// radix-pass strategy into the recorded path).
+    /// already sorted+unique inputs take the recorded fast-path clone;
+    /// other inputs fall back to [`Self::dedup_full_row_recorded`],
+    /// whose U64 `sort_recorded` path ports the legacy `sort()` hi/lo
+    /// radix-pass strategy into recorded launch discipline.
     ///
     /// # Errors
     /// * `XlogError::Kernel` if the manager has no runtime, the
