@@ -86,6 +86,46 @@ pub(super) fn wcoj_gate_enabled(config_override: Option<bool>) -> bool {
         .unwrap_or(false)
 }
 
+/// Env variable controlling the adaptive WCOJ dispatch.
+/// `"1"` / case-insensitive `"true"` → ON. Anything else → OFF.
+/// Force-WCOJ ([`ENV_USE_WCOJ_TRIANGLE_U32`]) takes precedence
+/// over this env: when force is on, the classifier is bypassed.
+pub const ENV_USE_WCOJ_TRIANGLE_ADAPTIVE: &str = "XLOG_USE_WCOJ_TRIANGLE_ADAPTIVE";
+
+/// Resolve the adaptive dispatch gate. Same precedence shape as
+/// the force gate above (config override > env > false).
+pub(super) fn wcoj_adaptive_enabled(config_override: Option<bool>) -> bool {
+    if let Some(v) = config_override {
+        return v;
+    }
+    std::env::var(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Threshold at which a classifier score routes the rule to the
+/// WCOJ pipeline rather than the binary-join fallback. Locked
+/// from the v0.6.2 baseline probe in
+/// `docs/evidence/2026-05-01-wcoj-bench-baseline/`: uniform/empty
+/// fixtures score ≤ 0.04, super-hub fixtures score ≥ 0.18.
+/// Threshold of 0.10 sits in the gap with ≥1.7× headroom on each
+/// side — robust to bench/kernel noise.
+const WCOJ_ADAPTIVE_SKEW_THRESHOLD: f64 = 0.10;
+
+/// Resolved dispatch mode after consulting both gates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DispatchMode {
+    /// Force-WCOJ: classifier is bypassed entirely; dispatch
+    /// fires whenever the RIR + buffers + width all match.
+    /// Set by `wcoj_triangle_dispatch=Some(true)` or env=1.
+    Force,
+    /// Adaptive: run the GPU skew classifier; dispatch only
+    /// when the score clears [`WCOJ_ADAPTIVE_SKEW_THRESHOLD`].
+    /// Set by `wcoj_triangle_dispatch_adaptive=Some(true)` (and
+    /// force is not on).
+    Adaptive,
+}
+
 /// Three rel IDs extracted from a matched triangle RIR. The
 /// names correspond to the WCOJ kernel's slot semantics.
 pub(super) struct TriangleRirMatch {
@@ -237,11 +277,39 @@ impl Executor {
         &mut self,
         rule: &CompiledRule,
     ) -> Result<Option<CudaBuffer>> {
-        // 1. Gate.
-        let override_value = self.config.wcoj_triangle_dispatch;
-        if !wcoj_gate_enabled(override_value) {
-            return Ok(None);
-        }
+        // 1. Gate resolution. Decision tree:
+        //
+        //    a. If `wcoj_triangle_dispatch` resolves to true
+        //       (config Some(true) or env=1) → force WCOJ;
+        //       classifier is bypassed entirely (mode = Force).
+        //    b. Else if `wcoj_triangle_dispatch_adaptive`
+        //       resolves to true → run classifier; dispatch only
+        //       when score ≥ threshold (mode = Adaptive).
+        //    c. Else → no dispatch.
+        //
+        // Force takes precedence so test/microbench callers that
+        // already pass `Some(true)` keep their existing
+        // semantics unchanged (and silently sidestep classifier
+        // overhead).
+        let force_override = self.config.wcoj_triangle_dispatch;
+        let force_on = wcoj_gate_enabled(force_override);
+        let mode = if force_on {
+            DispatchMode::Force
+        } else {
+            // Force-Some(false) is "explicitly off" — adaptive
+            // does NOT resurrect it. Only when force is None or
+            // env-default-off do we consult the adaptive gate.
+            let force_explicit_off = matches!(force_override, Some(false));
+            if force_explicit_off {
+                return Ok(None);
+            }
+            let adaptive_override = self.config.wcoj_triangle_dispatch_adaptive;
+            if wcoj_adaptive_enabled(adaptive_override) {
+                DispatchMode::Adaptive
+            } else {
+                return Ok(None);
+            }
+        };
 
         // 2. Pattern-match the triangle RIR.
         let Some(matched) = match_triangle_rir(&rule.body) else {
@@ -307,7 +375,37 @@ impl Executor {
             None => return Ok(None),
         };
 
-        // 6. Run layout + triangle. Convert any kernel error to
+        // 6. Adaptive mode only: run the classifier on the same
+        // launch_stream as the eventual WCOJ pipeline. Classifier
+        // failures (Ok(None) from the provider) silently fall
+        // back to binary-join — classifier is optimization, not
+        // correctness. A score below
+        // `WCOJ_ADAPTIVE_SKEW_THRESHOLD` likewise falls back.
+        if mode == DispatchMode::Adaptive {
+            let score = match width {
+                WcojKeyWidth::FourByte => self.provider.wcoj_triangle_skew_score_u32(
+                    buf_xy,
+                    buf_yz,
+                    buf_xz,
+                    launch_stream,
+                ),
+                WcojKeyWidth::EightByte => self.provider.wcoj_triangle_skew_score_u64(
+                    buf_xy,
+                    buf_yz,
+                    buf_xz,
+                    launch_stream,
+                ),
+            };
+            match score {
+                Ok(Some(s)) if s >= WCOJ_ADAPTIVE_SKEW_THRESHOLD => {
+                    // Above threshold → fall through to dispatch.
+                }
+                Ok(Some(_)) | Ok(None) => return Ok(None),
+                Err(_) => return Ok(None),
+            }
+        }
+
+        // 7. Run layout + triangle. Convert any kernel error to
         // silent fallback per slice spec ("failure must not
         // corrupt store state"). The WCOJ helpers don't write
         // to the store, so an error here only loses the work

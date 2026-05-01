@@ -83,6 +83,23 @@ pub struct RuntimeConfig {
     /// Test-only knob — production callers should leave this
     /// `None` and configure via the env var.
     pub wcoj_triangle_dispatch: Option<bool>,
+    /// Override the env-driven WCOJ adaptive-dispatch gate
+    /// (`XLOG_USE_WCOJ_TRIANGLE_ADAPTIVE`). When the
+    /// force-WCOJ gate above is *not* on, this controls whether
+    /// the runtime runs the GPU skew classifier and dispatches
+    /// only on high-skew triangles. `None` (default) consults
+    /// the env var; `Some(true)` / `Some(false)` force the
+    /// runtime to ignore the env. Test-only knob — production
+    /// callers should leave this `None` and configure via env.
+    ///
+    /// Decision tree (force beats adaptive beats off):
+    ///   1. If `wcoj_triangle_dispatch` resolves to `true`:
+    ///      force WCOJ; classifier bypassed entirely.
+    ///   2. Else if `wcoj_triangle_dispatch_adaptive` resolves
+    ///      to `true`: run classifier; dispatch WCOJ only when
+    ///      score ≥ 0.10. Otherwise fall back to binary-join.
+    ///   3. Else: no WCOJ dispatch.
+    pub wcoj_triangle_dispatch_adaptive: Option<bool>,
 }
 
 impl Default for RuntimeConfig {
@@ -94,6 +111,7 @@ impl Default for RuntimeConfig {
             max_iterations: 1_000_000,
             strict_deterministic_d2h: false,
             wcoj_triangle_dispatch: None,
+            wcoj_triangle_dispatch_adaptive: None,
         }
     }
 }
@@ -123,6 +141,17 @@ impl RuntimeConfig {
     /// (the production default). Test-only knob.
     pub fn with_wcoj_triangle_dispatch(mut self, override_value: Option<bool>) -> Self {
         self.wcoj_triangle_dispatch = override_value;
+        self
+    }
+
+    /// Override the env-driven WCOJ adaptive-dispatch gate. Pass
+    /// `Some(true)` / `Some(false)` to force the runtime to ignore
+    /// `XLOG_USE_WCOJ_TRIANGLE_ADAPTIVE`; `None` to consult the
+    /// env var (the production default). Force-WCOJ
+    /// (`with_wcoj_triangle_dispatch(Some(true))`) takes
+    /// precedence and bypasses the classifier entirely.
+    pub fn with_wcoj_triangle_dispatch_adaptive(mut self, override_value: Option<bool>) -> Self {
+        self.wcoj_triangle_dispatch_adaptive = override_value;
         self
     }
 }
