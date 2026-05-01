@@ -425,3 +425,153 @@ extern "C" __global__ void wcoj_triangle_materialize_u64(
         xz_col1 + xz_lo, xz_hi - xz_lo,
         base, out_x, out_y, out_z);
 }
+
+// ===============================================================
+// v0.6.2 A2-lite — adaptive-dispatch skew classifier.
+//
+// Combined kernel that histograms the three triangle join-key
+// columns (e1.col1 = Y, e2.col0 = Y, e3.col0 = X) into 3 × 64
+// buckets in a single launch. Caller D2Hs the 768-byte output
+// and computes max(max_bucket / row_count) per column, then
+// thresholds.
+//
+// Bucket function: high 6 bits of a multiplicative-hash mixer
+// over the key. Critical for distinguishing structured-but-
+// uniform inputs (e.g. all keys multiples of 64) from genuinely
+// skewed inputs — raw low-bit bucketing (`key & 63`) collapses
+// such inputs into bucket 0 and false-positives catastrophically.
+// Confirmed by the host probe in
+// `docs/evidence/2026-05-01-wcoj-bench-baseline/`: with the
+// mixer at 64 buckets the super-hub vs uniform/empty margin is
+// ≥ 9× across both 10K and 50K bench fixture sizes.
+//
+// The kernel does NOT zero its output. Caller must zero on the
+// same launch_stream BEFORE invoking the kernel — CUDA does not
+// provide a global barrier inside one regular kernel, so an
+// in-kernel "zero pass + atomic merge" can race. The caller's
+// recorder pattern is:
+//
+//   1. cuMemsetD8Async(histogram_buf, 0, 192*4)
+//   2. wcoj_triangle_skew_histogram_{u32,u64}(...)
+//   3. cu_stream.synchronize()
+//   4. dtoh_small_metadata_untracked(histogram_buf, 192)
+//
+// All four steps run under one LaunchRecorder window in the
+// provider entry.
+
+#define WCOJ_SKEW_NUM_BUCKETS 64
+
+namespace {
+
+__device__ __forceinline__ uint32_t wcoj_skew_bucket_u32(uint32_t key) {
+    // Knuth's golden-ratio constant; high 6 bits have the
+    // strongest avalanche characteristics.
+    return (key * 2654435761u) >> 26;
+}
+
+__device__ __forceinline__ uint32_t wcoj_skew_bucket_u64(uint64_t key) {
+    // SplitMix64 mixer; high 6 bits.
+    uint64_t z = key + 0x9E3779B97F4A7C15ULL;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    z = z ^ (z >> 31);
+    return (uint32_t)(z >> 58);
+}
+
+}  // anonymous namespace
+
+// Combined three-column histogram. Host launches a 1D grid of
+// `3 * blocks_per_col` blocks; the kernel splits by
+// `blockIdx.x / blocks_per_col` so the first third processes
+// `xy_col1`, the second `yz_col0`, the third `xz_col0`.
+// Each block builds a shared-mem 64-bucket histogram and
+// atomically merges into the global `histograms[col_idx*64..]`.
+extern "C" __global__ void wcoj_triangle_skew_histogram_u32(
+    const uint32_t* __restrict__ xy_col1,
+    uint32_t n_xy,
+    const uint32_t* __restrict__ yz_col0,
+    uint32_t n_yz,
+    const uint32_t* __restrict__ xz_col0,
+    uint32_t n_xz,
+    uint32_t blocks_per_col,
+    uint32_t* __restrict__ histograms) {
+    __shared__ uint32_t shared_hist[WCOJ_SKEW_NUM_BUCKETS];
+    if (threadIdx.x < WCOJ_SKEW_NUM_BUCKETS) {
+        shared_hist[threadIdx.x] = 0;
+    }
+    __syncthreads();
+
+    uint32_t col_block = blockIdx.x % blocks_per_col;
+    uint32_t col_idx = blockIdx.x / blocks_per_col;
+    if (col_idx >= 3) {
+        return;
+    }
+    uint32_t i = col_block * blockDim.x + threadIdx.x;
+
+    const uint32_t* col;
+    uint32_t n;
+    if (col_idx == 0) {
+        col = xy_col1; n = n_xy;
+    } else if (col_idx == 1) {
+        col = yz_col0; n = n_yz;
+    } else {
+        col = xz_col0; n = n_xz;
+    }
+    if (i < n) {
+        uint32_t b = wcoj_skew_bucket_u32(col[i]);
+        atomicAdd(&shared_hist[b], 1u);
+    }
+    __syncthreads();
+
+    if (threadIdx.x < WCOJ_SKEW_NUM_BUCKETS) {
+        uint32_t v = shared_hist[threadIdx.x];
+        if (v != 0) {
+            atomicAdd(&histograms[col_idx * WCOJ_SKEW_NUM_BUCKETS + threadIdx.x], v);
+        }
+    }
+}
+
+extern "C" __global__ void wcoj_triangle_skew_histogram_u64(
+    const uint64_t* __restrict__ xy_col1,
+    uint32_t n_xy,
+    const uint64_t* __restrict__ yz_col0,
+    uint32_t n_yz,
+    const uint64_t* __restrict__ xz_col0,
+    uint32_t n_xz,
+    uint32_t blocks_per_col,
+    uint32_t* __restrict__ histograms) {
+    __shared__ uint32_t shared_hist[WCOJ_SKEW_NUM_BUCKETS];
+    if (threadIdx.x < WCOJ_SKEW_NUM_BUCKETS) {
+        shared_hist[threadIdx.x] = 0;
+    }
+    __syncthreads();
+
+    uint32_t col_block = blockIdx.x % blocks_per_col;
+    uint32_t col_idx = blockIdx.x / blocks_per_col;
+    if (col_idx >= 3) {
+        return;
+    }
+    uint32_t i = col_block * blockDim.x + threadIdx.x;
+
+    const uint64_t* col;
+    uint32_t n;
+    if (col_idx == 0) {
+        col = xy_col1; n = n_xy;
+    } else if (col_idx == 1) {
+        col = yz_col0; n = n_yz;
+    } else {
+        col = xz_col0; n = n_xz;
+    }
+    if (i < n) {
+        uint32_t b = wcoj_skew_bucket_u64(col[i]);
+        atomicAdd(&shared_hist[b], 1u);
+    }
+    __syncthreads();
+
+    if (threadIdx.x < WCOJ_SKEW_NUM_BUCKETS) {
+        uint32_t v = shared_hist[threadIdx.x];
+        if (v != 0) {
+            atomicAdd(&histograms[col_idx * WCOJ_SKEW_NUM_BUCKETS + threadIdx.x], v);
+        }
+    }
+}

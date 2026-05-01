@@ -984,6 +984,346 @@ impl CudaKernelProvider {
     }
 }
 
+// ===============================================================
+// v0.6.2 A2-lite — skew classifier provider entries.
+//
+// Single-launch combined histogram across the three triangle
+// join-key columns (e1.col1, e2.col0, e3.col0). Returns
+// `Ok(Some(score))` on success or `Ok(None)` on any classifier-
+// side failure (silent fallback per slice spec — classifier is
+// optimization, not correctness).
+// ===============================================================
+
+const WCOJ_SKEW_NUM_BUCKETS: u32 = 64;
+
+impl CudaKernelProvider {
+    /// Compute the WCOJ adaptive-dispatch skew score for a u32
+    /// (or Symbol) triangle. Returns `Ok(Some(score))` on success
+    /// where `score = max(max_bucket_i / row_count_i)` over the
+    /// three join-key columns. Threshold convention (consumed in
+    /// commit B): `score >= 0.10` → dispatch WCOJ, else fall back.
+    ///
+    /// Returns `Ok(None)` on any failure (no runtime, validation
+    /// failure, kernel error, D2H error, zero rows on any input).
+    /// Caller silently falls back to binary join.
+    pub fn wcoj_triangle_skew_score_u32(
+        &self,
+        e_xy: &CudaBuffer,
+        e_yz: &CudaBuffer,
+        e_xz: &CudaBuffer,
+        launch_stream: StreamId,
+    ) -> Result<Option<f64>> {
+        match self.try_compute_skew_score_u32(e_xy, e_yz, e_xz, launch_stream) {
+            Ok(score) => Ok(Some(score)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Compute the WCOJ adaptive-dispatch skew score for a U64
+    /// triangle. See [`Self::wcoj_triangle_skew_score_u32`].
+    pub fn wcoj_triangle_skew_score_u64(
+        &self,
+        e_xy: &CudaBuffer,
+        e_yz: &CudaBuffer,
+        e_xz: &CudaBuffer,
+        launch_stream: StreamId,
+    ) -> Result<Option<f64>> {
+        match self.try_compute_skew_score_u64(e_xy, e_yz, e_xz, launch_stream) {
+            Ok(score) => Ok(Some(score)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn try_compute_skew_score_u32(
+        &self,
+        e_xy: &CudaBuffer,
+        e_yz: &CudaBuffer,
+        e_xz: &CudaBuffer,
+        launch_stream: StreamId,
+    ) -> Result<f64> {
+        let runtime = self
+            .memory()
+            .runtime()
+            .ok_or_else(|| XlogError::Kernel("skew_score: no runtime".to_string()))?;
+        let cu_stream = runtime
+            .stream_pool()
+            .resolve(launch_stream)
+            .ok_or_else(|| XlogError::Kernel("skew_score: stream resolve failed".to_string()))?;
+
+        // Validate: 2-col with U32 or Symbol on each input.
+        for (label, buf) in [("e_xy", e_xy), ("e_yz", e_yz), ("e_xz", e_xz)] {
+            if buf.arity() != 2 {
+                return Err(XlogError::Kernel(format!(
+                    "skew_score: {label} must be 2-column"
+                )));
+            }
+            for col_idx in 0..2 {
+                let ty = buf
+                    .schema
+                    .column_type(col_idx)
+                    .ok_or_else(|| XlogError::Kernel("skew_score: type missing".to_string()))?;
+                if !matches!(ty, ScalarType::U32 | ScalarType::Symbol) {
+                    return Err(XlogError::Kernel(format!(
+                        "skew_score: {label}.{col_idx} not U32/Symbol"
+                    )));
+                }
+            }
+        }
+
+        let n_xy = self.logical_row_count_u32(e_xy)?;
+        let n_yz = self.logical_row_count_u32(e_yz)?;
+        let n_xz = self.logical_row_count_u32(e_xz)?;
+        if n_xy == 0 || n_yz == 0 || n_xz == 0 {
+            return Err(XlogError::Kernel("skew_score: zero rows".to_string()));
+        }
+
+        // Classifier reads e_xy.col1 (Y), e_yz.col0 (Y), e_xz.col0 (X)
+        // — the three columns the count kernel binary-searches on.
+        let xy_col1 = column_u32(e_xy, 1)?;
+        let yz_col0 = column_u32(e_yz, 0)?;
+        let xz_col0 = column_u32(e_xz, 0)?;
+
+        // Pre-allocate the 3 × 64 histogram buffer BEFORE the
+        // recorder. Total = 768 bytes — under the
+        // `dtoh_small_metadata_untracked` 4 KB cap.
+        let hist_len = (3 * WCOJ_SKEW_NUM_BUCKETS) as usize;
+        let mut hist_buf = self.memory.alloc::<u32>(hist_len)?;
+
+        // Block / grid sizing: one row per thread, 256 threads
+        // per block. Grid is `3 * blocks_per_col` so each third
+        // of the grid handles one column.
+        let max_n = n_xy.max(n_yz).max(n_xz);
+        let blocks_per_col = (max_n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        let total_blocks = blocks_per_col.saturating_mul(3);
+
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read(e_xy.num_rows_device());
+        rec.read(e_yz.num_rows_device());
+        rec.read(e_xz.num_rows_device());
+        rec.read_column(e_xy.column(1).expect("e_xy.col1"));
+        rec.read_column(e_yz.column(0).expect("e_yz.col0"));
+        rec.read_column(e_xz.column(0).expect("e_xz.col0"));
+        rec.write(&hist_buf);
+        rec.preflight(runtime)
+            .map_err(|e| XlogError::Kernel(format!("skew_score: preflight failed: {e}")))?;
+
+        // Step 1: zero the histogram on launch_stream. CUDA does
+        // not provide a global barrier inside one regular kernel,
+        // so an in-kernel "zero pass + atomic merge" can race;
+        // the on-stream memset is the correctness-preserving
+        // sequencing primitive. Bytes = 192 * 4 = 768.
+        let hist_bytes = (hist_len * std::mem::size_of::<u32>()) as usize;
+        unsafe {
+            let res =
+                sys::cuMemsetD8Async(*hist_buf.device_ptr(), 0, hist_bytes, cu_stream.cu_stream());
+            if res != sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "skew_score: cuMemsetD8Async failed: {res:?}"
+                )));
+            }
+        }
+
+        // Step 2: combined histogram kernel.
+        let device = self.device.inner();
+        let kernel = device
+            .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_TRIANGLE_SKEW_HISTOGRAM_U32)
+            .ok_or_else(|| {
+                XlogError::Kernel("skew_score: histogram_u32 kernel not found".to_string())
+            })?;
+        // SAFETY: 8-arg signature
+        //   wcoj_triangle_skew_histogram_u32(
+        //     const u32* xy_col1, u32 n_xy,
+        //     const u32* yz_col0, u32 n_yz,
+        //     const u32* xz_col0, u32 n_xz,
+        //     u32 blocks_per_col,
+        //     u32* histograms)
+        unsafe {
+            kernel
+                .clone()
+                .launch_on_stream(
+                    &cu_stream,
+                    LaunchConfig {
+                        grid_dim: (total_blocks, 1, 1),
+                        block_dim: (BLOCK_SIZE, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        xy_col1,
+                        n_xy,
+                        yz_col0,
+                        n_yz,
+                        xz_col0,
+                        n_xz,
+                        blocks_per_col,
+                        &mut hist_buf,
+                    ),
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!("skew_score: histogram launch failed: {e}"))
+                })?;
+        }
+
+        rec.commit(runtime)
+            .map_err(|e| XlogError::Kernel(format!("skew_score: commit failed: {e}")))?;
+
+        // Step 3: sync before D2H — host must see the histogram
+        // kernel's writes before reading them.
+        cu_stream
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("skew_score: sync failed: {e}")))?;
+
+        // Step 4: D2H the 192-element histogram via the
+        // metadata-only chokepoint.
+        let host_hist = self
+            .dtoh_small_metadata_untracked::<u32>(&hist_buf, hist_len)
+            .map_err(|e| XlogError::Kernel(format!("skew_score: dtoh failed: {e}")))?;
+
+        Ok(score_from_histograms(&host_hist, n_xy, n_yz, n_xz))
+    }
+
+    fn try_compute_skew_score_u64(
+        &self,
+        e_xy: &CudaBuffer,
+        e_yz: &CudaBuffer,
+        e_xz: &CudaBuffer,
+        launch_stream: StreamId,
+    ) -> Result<f64> {
+        let runtime = self
+            .memory()
+            .runtime()
+            .ok_or_else(|| XlogError::Kernel("skew_score: no runtime".to_string()))?;
+        let cu_stream = runtime
+            .stream_pool()
+            .resolve(launch_stream)
+            .ok_or_else(|| XlogError::Kernel("skew_score: stream resolve failed".to_string()))?;
+
+        for (label, buf) in [("e_xy", e_xy), ("e_yz", e_yz), ("e_xz", e_xz)] {
+            if buf.arity() != 2 {
+                return Err(XlogError::Kernel(format!(
+                    "skew_score: {label} must be 2-column"
+                )));
+            }
+            for col_idx in 0..2 {
+                let ty = buf
+                    .schema
+                    .column_type(col_idx)
+                    .ok_or_else(|| XlogError::Kernel("skew_score: type missing".to_string()))?;
+                if !matches!(ty, ScalarType::U64) {
+                    return Err(XlogError::Kernel(format!(
+                        "skew_score: {label}.{col_idx} not U64"
+                    )));
+                }
+            }
+        }
+
+        let n_xy = self.logical_row_count_u32(e_xy)?;
+        let n_yz = self.logical_row_count_u32(e_yz)?;
+        let n_xz = self.logical_row_count_u32(e_xz)?;
+        if n_xy == 0 || n_yz == 0 || n_xz == 0 {
+            return Err(XlogError::Kernel("skew_score: zero rows".to_string()));
+        }
+
+        let xy_col1 = column_u64(e_xy, 1)?;
+        let yz_col0 = column_u64(e_yz, 0)?;
+        let xz_col0 = column_u64(e_xz, 0)?;
+
+        let hist_len = (3 * WCOJ_SKEW_NUM_BUCKETS) as usize;
+        let mut hist_buf = self.memory.alloc::<u32>(hist_len)?;
+
+        let max_n = n_xy.max(n_yz).max(n_xz);
+        let blocks_per_col = (max_n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        let total_blocks = blocks_per_col.saturating_mul(3);
+
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read(e_xy.num_rows_device());
+        rec.read(e_yz.num_rows_device());
+        rec.read(e_xz.num_rows_device());
+        rec.read_column(e_xy.column(1).expect("e_xy.col1"));
+        rec.read_column(e_yz.column(0).expect("e_yz.col0"));
+        rec.read_column(e_xz.column(0).expect("e_xz.col0"));
+        rec.write(&hist_buf);
+        rec.preflight(runtime)
+            .map_err(|e| XlogError::Kernel(format!("skew_score: preflight failed: {e}")))?;
+
+        let hist_bytes = (hist_len * std::mem::size_of::<u32>()) as usize;
+        unsafe {
+            let res =
+                sys::cuMemsetD8Async(*hist_buf.device_ptr(), 0, hist_bytes, cu_stream.cu_stream());
+            if res != sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "skew_score: cuMemsetD8Async failed: {res:?}"
+                )));
+            }
+        }
+
+        let device = self.device.inner();
+        let kernel = device
+            .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_TRIANGLE_SKEW_HISTOGRAM_U64)
+            .ok_or_else(|| {
+                XlogError::Kernel("skew_score: histogram_u64 kernel not found".to_string())
+            })?;
+        unsafe {
+            kernel
+                .clone()
+                .launch_on_stream(
+                    &cu_stream,
+                    LaunchConfig {
+                        grid_dim: (total_blocks, 1, 1),
+                        block_dim: (BLOCK_SIZE, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        xy_col1,
+                        n_xy,
+                        yz_col0,
+                        n_yz,
+                        xz_col0,
+                        n_xz,
+                        blocks_per_col,
+                        &mut hist_buf,
+                    ),
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!("skew_score: histogram launch failed: {e}"))
+                })?;
+        }
+
+        rec.commit(runtime)
+            .map_err(|e| XlogError::Kernel(format!("skew_score: commit failed: {e}")))?;
+
+        cu_stream
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("skew_score: sync failed: {e}")))?;
+
+        let host_hist = self
+            .dtoh_small_metadata_untracked::<u32>(&hist_buf, hist_len)
+            .map_err(|e| XlogError::Kernel(format!("skew_score: dtoh failed: {e}")))?;
+
+        Ok(score_from_histograms(&host_hist, n_xy, n_yz, n_xz))
+    }
+}
+
+/// Reduce the 192-element histogram into a scalar skew score.
+/// Returns `max(max_bucket_i / row_count_i)` over the three
+/// columns. Bucket layout matches the kernel:
+///   `host_hist[col_idx * 64 .. col_idx * 64 + 64]`
+fn score_from_histograms(host_hist: &[u32], n_xy: u32, n_yz: u32, n_xz: u32) -> f64 {
+    let buckets = WCOJ_SKEW_NUM_BUCKETS as usize;
+    let column_score = |col_idx: usize, n: u32| -> f64 {
+        if n == 0 {
+            return 0.0;
+        }
+        let start = col_idx * buckets;
+        let end = start + buckets;
+        let max = host_hist[start..end].iter().copied().max().unwrap_or(0);
+        max as f64 / n as f64
+    };
+    let s0 = column_score(0, n_xy);
+    let s1 = column_score(1, n_yz);
+    let s2 = column_score(2, n_xz);
+    s0.max(s1).max(s2)
+}
+
 /// Borrow a 4-byte-key column out of a 2-column [`CudaBuffer`] as
 /// a typed `TrackedCudaSlice<u32>` reference for kernel binding.
 ///

@@ -265,6 +265,8 @@ pub mod wcoj_kernels {
     pub const WCOJ_TRIANGLE_MATERIALIZE: &str = "wcoj_triangle_materialize";
     pub const WCOJ_TRIANGLE_COUNT_U64: &str = "wcoj_triangle_count_u64";
     pub const WCOJ_TRIANGLE_MATERIALIZE_U64: &str = "wcoj_triangle_materialize_u64";
+    pub const WCOJ_TRIANGLE_SKEW_HISTOGRAM_U32: &str = "wcoj_triangle_skew_histogram_u32";
+    pub const WCOJ_TRIANGLE_SKEW_HISTOGRAM_U64: &str = "wcoj_triangle_skew_histogram_u64";
 }
 
 /// Kernel function names in the Monte Carlo sampling module
@@ -1176,6 +1178,76 @@ impl CudaKernelProvider {
             .inner()
             .dtoh_sync_copy_into(src, dst)
             .map_err(|e| XlogError::Kernel(format!("Failed to copy from device: {}", e)))
+    }
+
+    /// Hard cap (in bytes) for [`Self::dtoh_small_metadata_untracked`].
+    /// Set deliberately small (4 KB) so the helper cannot become a
+    /// general-purpose vector D2H escape hatch — it's strictly for
+    /// classifier histograms and similar small metadata round-trips.
+    pub const DTOH_SMALL_METADATA_MAX_BYTES: usize = 4096;
+
+    /// Read a small metadata vector (≤ [`Self::DTOH_SMALL_METADATA_MAX_BYTES`])
+    /// from device to host WITHOUT updating the D2H transfer tracker.
+    ///
+    /// Sibling of [`Self::dtoh_scalar_untracked`] for callers that need
+    /// a few bucket counts (the WCOJ skew classifier reads a 3 × 64 ×
+    /// `u32` = 768-byte histogram in one go) instead of `count` separate
+    /// scalar reads. Like `dtoh_scalar_untracked`, this method is
+    /// whitelisted by the strict deterministic-D2H gate
+    /// ([`Self::enable_strict_deterministic_d2h`]) — it does NOT trip
+    /// the gate, on purpose, because metadata reads are part of the
+    /// determinism contract (just like a scalar `total` after a scan).
+    ///
+    /// # Hard contract — DO NOT WIDEN THE CAP
+    /// The 4 KB cap is the contract. If a caller wants a larger D2H,
+    /// it's a data-plane transfer and must go through the tracked
+    /// `download_column*` path. Widening this cap turns the helper
+    /// into a backdoor for tracked-bypass column reads, which would
+    /// silently invalidate the strict deterministic-D2H gate.
+    ///
+    /// # Errors
+    ///   * `XlogError::Kernel` if `count * size_of::<T>()` exceeds
+    ///     `DTOH_SMALL_METADATA_MAX_BYTES`.
+    ///   * `XlogError::Kernel` if `count` exceeds the device slice's
+    ///     length, or if the inner sync copy fails.
+    pub fn dtoh_small_metadata_untracked<T: DeviceRepr + Default + Copy>(
+        &self,
+        src: &crate::memory::TrackedCudaSlice<T>,
+        count: usize,
+    ) -> Result<Vec<T>> {
+        let bytes = count.checked_mul(std::mem::size_of::<T>()).ok_or_else(|| {
+            XlogError::Kernel("dtoh_small_metadata_untracked: byte size overflow".to_string())
+        })?;
+        if bytes > Self::DTOH_SMALL_METADATA_MAX_BYTES {
+            return Err(XlogError::Kernel(format!(
+                "dtoh_small_metadata_untracked: requested {} bytes exceeds metadata cap of {} bytes \
+                 (this is metadata-only; use download_column* for data-plane transfers)",
+                bytes,
+                Self::DTOH_SMALL_METADATA_MAX_BYTES
+            )));
+        }
+        if count > src.len() {
+            return Err(XlogError::Kernel(format!(
+                "dtoh_small_metadata_untracked: count={count} > src.len={}",
+                src.len()
+            )));
+        }
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let slice = src.try_slice(0..count).ok_or_else(|| {
+            XlogError::Kernel(format!(
+                "dtoh_small_metadata_untracked: try_slice(0..{count}) failed"
+            ))
+        })?;
+        let mut buf: Vec<T> = vec![T::default(); count];
+        self.device
+            .inner()
+            .dtoh_sync_copy_into(&slice, &mut buf)
+            .map_err(|e| {
+                XlogError::Kernel(format!("dtoh_small_metadata_untracked: copy failed: {}", e))
+            })?;
+        Ok(buf)
     }
 
     /// Read a single scalar from device to host WITHOUT updating the
