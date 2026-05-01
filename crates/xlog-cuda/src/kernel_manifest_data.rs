@@ -452,6 +452,8 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "wcoj_triangle_materialize_u64",
             "wcoj_triangle_skew_histogram_u32",
             "wcoj_triangle_skew_histogram_u64",
+            "wcoj_layout_check_sorted_unique_u32",
+            "wcoj_layout_check_sorted_unique_u64",
         ],
     },
 ];

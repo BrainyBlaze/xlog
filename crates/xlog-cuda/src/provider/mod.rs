@@ -267,6 +267,8 @@ pub mod wcoj_kernels {
     pub const WCOJ_TRIANGLE_MATERIALIZE_U64: &str = "wcoj_triangle_materialize_u64";
     pub const WCOJ_TRIANGLE_SKEW_HISTOGRAM_U32: &str = "wcoj_triangle_skew_histogram_u32";
     pub const WCOJ_TRIANGLE_SKEW_HISTOGRAM_U64: &str = "wcoj_triangle_skew_histogram_u64";
+    pub const WCOJ_LAYOUT_CHECK_SORTED_UNIQUE_U32: &str = "wcoj_layout_check_sorted_unique_u32";
+    pub const WCOJ_LAYOUT_CHECK_SORTED_UNIQUE_U64: &str = "wcoj_layout_check_sorted_unique_u64";
 }
 
 /// Kernel function names in the Monte Carlo sampling module
@@ -807,6 +809,13 @@ pub struct CudaKernelProvider {
     /// was actually selected for eligible Inner / LeftOuter cases (and
     /// not selected for Semi / Anti or when the env gate is off).
     csm_invocations: AtomicU64,
+    /// Per-process counter of WCOJ layout fast-path hits. The
+    /// fast-path skips `dedup_full_row_recorded` when the input
+    /// is already strictly lex-sorted and full-row unique.
+    /// Tests + the phase report binary read this counter to
+    /// confirm the fast-path actually fired vs. silently fell
+    /// through to the existing dedup pipeline.
+    wcoj_layout_fast_path_hit_count: AtomicU64,
     /// Diagnostic-only: last WCOJ triangle dispatch's per-phase
     /// CUDA-event timings, populated by `wcoj_triangle_*_recorded`
     /// when the `wcoj-phase-timing` Cargo feature is on. Read by
@@ -895,6 +904,7 @@ impl CudaKernelProvider {
             deterministic_d2h_violations: AtomicU64::new(0),
             recorded_op_stream: OnceLock::new(),
             csm_invocations: AtomicU64::new(0),
+            wcoj_layout_fast_path_hit_count: AtomicU64::new(0),
             #[cfg(feature = "wcoj-phase-timing")]
             last_triangle_phase_timing: std::sync::Mutex::new(None),
         })
@@ -1107,6 +1117,31 @@ impl CudaKernelProvider {
         if let Ok(mut g) = self.last_triangle_phase_timing.lock() {
             *g = Some(timing);
         }
+    }
+
+    /// Number of times `wcoj_layout_*_recorded` short-circuited
+    /// to the fast-path (recorded clone) instead of running
+    /// `dedup_full_row_recorded`. Increments by 1 per
+    /// fast-path hit (3 hits per dispatch when all inputs are
+    /// already sorted+unique). Used by tests + the phase
+    /// report to confirm the fast-path fired.
+    pub fn wcoj_layout_fast_path_hit_count(&self) -> u64 {
+        self.wcoj_layout_fast_path_hit_count.load(Ordering::Relaxed)
+    }
+
+    /// Reset the fast-path hit counter to 0. Tests use this to
+    /// scope counter assertions to a single dispatch.
+    pub fn reset_wcoj_layout_fast_path_hit_count(&self) {
+        self.wcoj_layout_fast_path_hit_count
+            .store(0, Ordering::Relaxed);
+    }
+
+    /// Internal: increment the fast-path counter. Called by
+    /// `wcoj_layout_*_recorded` after a successful fast-path
+    /// branch. Not part of any public stability guarantee.
+    pub(crate) fn record_wcoj_layout_fast_path_hit(&self) {
+        self.wcoj_layout_fast_path_hit_count
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Get the CUDA device

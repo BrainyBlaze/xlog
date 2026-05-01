@@ -264,6 +264,30 @@ impl CudaKernelProvider {
                 )));
             }
         }
+        // Layout fast-path: if the input is already strictly
+        // lex-sorted AND full-row unique, we can skip the
+        // (expensive) sort + mark-unique + compact pipeline
+        // and emit a recorded device-side clone. The phase
+        // report (docs/evidence/2026-05-01-wcoj-bench-baseline/phase-timing-report.md)
+        // measured layout at 91-97% of WCOJ adaptive dispatch
+        // wall clock; this branch is the targeted overhead
+        // reduction.
+        match self.try_wcoj_layout_fast_path_u32(input, launch_stream) {
+            Ok(Some(out)) => {
+                self.record_wcoj_layout_fast_path_hit();
+                return Ok(out);
+            }
+            Ok(None) => {
+                // Empty input handled by dedup_full_row_recorded
+                // (which has its own n==0 short-circuit returning
+                // create_empty_buffer). Fall through.
+            }
+            Err(_) => {
+                // Checker failed unexpectedly. Fall through to
+                // the safe path; correctness is preserved.
+            }
+        }
+        // Fall through: the input wasn't proven sorted+unique.
         // Delegate to the existing typed sort + full-row dedup.
         // Both primitives are fully recorder-disciplined; the
         // resulting CudaBuffer is sorted lex by (col0, col1) and
@@ -783,6 +807,16 @@ impl CudaKernelProvider {
                     col_idx, ty
                 )));
             }
+        }
+        // Fast-path: see u32 entry for rationale + measurement
+        // basis. Strictly lex-sorted AND full-row unique inputs
+        // skip dedup_full_row_recorded.
+        match self.try_wcoj_layout_fast_path_u64(input, launch_stream) {
+            Ok(Some(out)) => {
+                self.record_wcoj_layout_fast_path_hit();
+                return Ok(out);
+            }
+            Ok(None) | Err(_) => {}
         }
         // dedup_full_row_recorded internally invokes sort_recorded
         // (U64-aware after commit 1) and the bytewise mask kernel
@@ -1617,4 +1651,426 @@ fn column_u64<'a>(buf: &'a CudaBuffer, col_idx: usize) -> Result<&'a TrackedCuda
 /// kernel binding. Mirrors [`reinterpret_u8_as_u32`].
 unsafe fn reinterpret_u8_as_u64(slice: &mut TrackedCudaSlice<u8>) -> &mut TrackedCudaSlice<u64> {
     &mut *(slice as *mut TrackedCudaSlice<u8> as *mut TrackedCudaSlice<u64>)
+}
+
+// ===============================================================
+// v0.6.2 — WCOJ layout fast-path implementation.
+//
+// Goal: when an input is already strictly lex-sorted AND full-row
+// unique, skip `dedup_full_row_recorded` (sort + mark-unique +
+// compact) and emit a recorded device-side clone instead. The
+// existing layout API surface is unchanged; the fast-path is a
+// purely additive optimization with proof-based correctness.
+//
+// Flow:
+//   1. Validate (caller already did this).
+//   2. Resolve LOGICAL row count via `logical_row_count_u32`
+//      (NOT `input.num_rows()` — that returns row_cap on
+//      compacted buffers).
+//   3. n == 0  → return Ok(None); caller falls through to the
+//      existing `dedup_full_row_recorded` n==0 short-circuit
+//      (`create_empty_buffer`). We don't mint an empty clone
+//      here; we preserve existing semantics exactly.
+//   4. n == 1  → recorded clone (trivially sorted+unique).
+//   5. n >= 2  → launch the checker kernel under a fresh
+//      `LaunchRecorder`; sync; D2H the 4-byte flag.
+//   6. Flag == 1 → recorded clone. Flag == 0 → return
+//      Ok(None); caller falls through to the dedup path.
+//
+// Strict-D2H: the 4-byte flag read uses
+// `dtoh_scalar_untracked::<u32>` (whitelisted by the strict
+// gate, same class as `wcoj_compute_total`'s d_total read).
+// ===============================================================
+
+impl CudaKernelProvider {
+    /// Try to short-circuit a u32/Symbol layout call by proving
+    /// the input is already sorted+unique. Returns:
+    ///   * `Ok(Some(out))` — fast-path hit; `out` is the layout.
+    ///   * `Ok(None)`      — fast-path missed (n==0 or proof
+    ///                       failed). Caller falls through to
+    ///                       `dedup_full_row_recorded`.
+    ///   * `Err(e)`        — checker pipeline error. Caller
+    ///                       treats this as "fall through" to
+    ///                       preserve correctness.
+    fn try_wcoj_layout_fast_path_u32(
+        &self,
+        input: &CudaBuffer,
+        launch_stream: StreamId,
+    ) -> Result<Option<CudaBuffer>> {
+        let runtime = self
+            .memory()
+            .runtime()
+            .ok_or_else(|| XlogError::Kernel("wcoj_layout fast-path: no runtime".to_string()))?;
+        let cu_stream = runtime
+            .stream_pool()
+            .resolve(launch_stream)
+            .ok_or_else(|| {
+                XlogError::Kernel("wcoj_layout fast-path: stream resolve".to_string())
+            })?;
+
+        // LOGICAL row count, not row_cap: compacted buffers
+        // (e.g. dedup outputs) have row_cap > logical.
+        let n = self.logical_row_count_u32(input)?;
+        if n == 0 {
+            // Preserve existing semantics: dedup_full_row_recorded's
+            // n==0 path returns create_empty_buffer(schema). Don't
+            // shadow that here.
+            return Ok(None);
+        }
+        if n == 1 {
+            // Trivially sorted+unique; skip the checker entirely.
+            return Ok(Some(self.recorded_clone_2col_4byte(
+                input,
+                n,
+                launch_stream,
+                &cu_stream,
+                runtime,
+            )?));
+        }
+
+        // n >= 2: run the checker. Output flag in u32 (4 bytes).
+        let mut flag_buf = self.memory.alloc::<u32>(1)?;
+
+        let col0 = column_u32(input, 0)?;
+        let col1 = column_u32(input, 1)?;
+
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read(input.num_rows_device());
+        rec.read_column(input.column(0).expect("col0"));
+        rec.read_column(input.column(1).expect("col1"));
+        rec.write(&flag_buf);
+        rec.preflight(runtime)
+            .map_err(|e| XlogError::Kernel(format!("wcoj_layout fast-path: preflight {e}")))?;
+
+        // Initialize flag = 1 on stream via cuMemsetD32Async-
+        // equivalent. The simplest portable path is a 4-byte
+        // host->device async copy (sequenced before the kernel
+        // by stream order). Doing it as part of the recorded
+        // window keeps the dealloc-safety chain intact.
+        let one: u32 = 1;
+        unsafe {
+            let res = sys::cuMemcpyHtoDAsync_v2(
+                *flag_buf.device_ptr(),
+                &one as *const u32 as *const c_void,
+                std::mem::size_of::<u32>(),
+                cu_stream.cu_stream(),
+            );
+            if res != sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "wcoj_layout fast-path: H2D flag init failed: {res:?}"
+                )));
+            }
+        }
+
+        let device = self.device.inner();
+        let kernel = device
+            .get_func(
+                WCOJ_MODULE,
+                wcoj_kernels::WCOJ_LAYOUT_CHECK_SORTED_UNIQUE_U32,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel("wcoj_layout_check_sorted_unique_u32 kernel not found".into())
+            })?;
+        let grid = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        // SAFETY: 4-arg signature
+        //   wcoj_layout_check_sorted_unique_u32(
+        //     const u32* col0, const u32* col1, u32 n, u32* flag)
+        unsafe {
+            kernel
+                .clone()
+                .launch_on_stream(
+                    &cu_stream,
+                    LaunchConfig {
+                        grid_dim: (grid, 1, 1),
+                        block_dim: (BLOCK_SIZE, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (col0, col1, n, &mut flag_buf),
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!("wcoj_layout_check_sorted_unique_u32 launch: {e}"))
+                })?;
+        }
+
+        rec.commit(runtime)
+            .map_err(|e| XlogError::Kernel(format!("wcoj_layout fast-path: commit {e}")))?;
+
+        cu_stream
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("wcoj_layout fast-path: sync {e}")))?;
+
+        let flag_val = self.dtoh_scalar_untracked::<u32>(&flag_buf, 0)?;
+        if flag_val == 1 {
+            Ok(Some(self.recorded_clone_2col_4byte(
+                input,
+                n,
+                launch_stream,
+                &cu_stream,
+                runtime,
+            )?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// U64 variant. Mirrors `try_wcoj_layout_fast_path_u32`.
+    fn try_wcoj_layout_fast_path_u64(
+        &self,
+        input: &CudaBuffer,
+        launch_stream: StreamId,
+    ) -> Result<Option<CudaBuffer>> {
+        let runtime = self
+            .memory()
+            .runtime()
+            .ok_or_else(|| XlogError::Kernel("wcoj_layout fast-path: no runtime".to_string()))?;
+        let cu_stream = runtime
+            .stream_pool()
+            .resolve(launch_stream)
+            .ok_or_else(|| {
+                XlogError::Kernel("wcoj_layout fast-path: stream resolve".to_string())
+            })?;
+
+        let n = self.logical_row_count_u32(input)?;
+        if n == 0 {
+            return Ok(None);
+        }
+        if n == 1 {
+            return Ok(Some(self.recorded_clone_2col_8byte(
+                input,
+                n,
+                launch_stream,
+                &cu_stream,
+                runtime,
+            )?));
+        }
+
+        let mut flag_buf = self.memory.alloc::<u32>(1)?;
+        let col0 = column_u64(input, 0)?;
+        let col1 = column_u64(input, 1)?;
+
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read(input.num_rows_device());
+        rec.read_column(input.column(0).expect("col0"));
+        rec.read_column(input.column(1).expect("col1"));
+        rec.write(&flag_buf);
+        rec.preflight(runtime)
+            .map_err(|e| XlogError::Kernel(format!("wcoj_layout fast-path u64: preflight {e}")))?;
+
+        let one: u32 = 1;
+        unsafe {
+            let res = sys::cuMemcpyHtoDAsync_v2(
+                *flag_buf.device_ptr(),
+                &one as *const u32 as *const c_void,
+                std::mem::size_of::<u32>(),
+                cu_stream.cu_stream(),
+            );
+            if res != sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "wcoj_layout fast-path u64: H2D flag init failed: {res:?}"
+                )));
+            }
+        }
+
+        let device = self.device.inner();
+        let kernel = device
+            .get_func(
+                WCOJ_MODULE,
+                wcoj_kernels::WCOJ_LAYOUT_CHECK_SORTED_UNIQUE_U64,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel("wcoj_layout_check_sorted_unique_u64 kernel not found".into())
+            })?;
+        let grid = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        unsafe {
+            kernel
+                .clone()
+                .launch_on_stream(
+                    &cu_stream,
+                    LaunchConfig {
+                        grid_dim: (grid, 1, 1),
+                        block_dim: (BLOCK_SIZE, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (col0, col1, n, &mut flag_buf),
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!("wcoj_layout_check_sorted_unique_u64 launch: {e}"))
+                })?;
+        }
+
+        rec.commit(runtime)
+            .map_err(|e| XlogError::Kernel(format!("wcoj_layout fast-path u64: commit {e}")))?;
+
+        cu_stream
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("wcoj_layout fast-path u64: sync {e}")))?;
+
+        let flag_val = self.dtoh_scalar_untracked::<u32>(&flag_buf, 0)?;
+        if flag_val == 1 {
+            Ok(Some(self.recorded_clone_2col_8byte(
+                input,
+                n,
+                launch_stream,
+                &cu_stream,
+                runtime,
+            )?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Recorded device-side clone of a 2-column 4-byte-per-key
+    /// buffer, sized to `n` logical rows. Allocates fresh
+    /// columns + d_num_rows on the runtime allocator and copies
+    /// via `cuMemcpyDtoDAsync_v2` on `launch_stream` under a
+    /// `LaunchRecorder` window. NOT a view: the output buffer
+    /// owns its bytes; input lifetime independence is preserved.
+    fn recorded_clone_2col_4byte(
+        &self,
+        input: &CudaBuffer,
+        n: u32,
+        launch_stream: StreamId,
+        cu_stream: &cudarc::driver::CudaStream,
+        runtime: &std::sync::Arc<crate::device_runtime::XlogDeviceRuntime>,
+    ) -> Result<CudaBuffer> {
+        let bpc = (n as usize) * 4;
+        let out_col0 = self.memory.alloc::<u8>(bpc)?;
+        let out_col1 = self.memory.alloc::<u8>(bpc)?;
+        let out_d_num_rows = self.memory.alloc::<u32>(1)?;
+
+        let src_col0 = input.column(0).expect("col0");
+        let src_col1 = input.column(1).expect("col1");
+
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read(input.num_rows_device());
+        rec.read_column(src_col0);
+        rec.read_column(src_col1);
+        rec.write(&out_col0);
+        rec.write(&out_col1);
+        rec.write(&out_d_num_rows);
+        rec.preflight(runtime)
+            .map_err(|e| XlogError::Kernel(format!("wcoj_layout clone 4B: preflight {e}")))?;
+
+        unsafe {
+            let r0 = sys::cuMemcpyDtoDAsync_v2(
+                *out_col0.device_ptr(),
+                *src_col0.device_ptr(),
+                bpc,
+                cu_stream.cu_stream(),
+            );
+            if r0 != sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "wcoj_layout clone 4B: dtod col0 failed: {r0:?}"
+                )));
+            }
+            let r1 = sys::cuMemcpyDtoDAsync_v2(
+                *out_col1.device_ptr(),
+                *src_col1.device_ptr(),
+                bpc,
+                cu_stream.cu_stream(),
+            );
+            if r1 != sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "wcoj_layout clone 4B: dtod col1 failed: {r1:?}"
+                )));
+            }
+            let r2 = sys::cuMemcpyHtoDAsync_v2(
+                *out_d_num_rows.device_ptr(),
+                &n as *const u32 as *const c_void,
+                std::mem::size_of::<u32>(),
+                cu_stream.cu_stream(),
+            );
+            if r2 != sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "wcoj_layout clone 4B: H2D d_num_rows failed: {r2:?}"
+                )));
+            }
+        }
+
+        rec.commit(runtime)
+            .map_err(|e| XlogError::Kernel(format!("wcoj_layout clone 4B: commit {e}")))?;
+
+        Ok(CudaBuffer::from_columns_with_host_count(
+            vec![out_col0.into(), out_col1.into()],
+            n as u64,
+            out_d_num_rows,
+            input.schema().clone(),
+            n,
+        ))
+    }
+
+    /// 8-byte-per-key sibling. Same recorder discipline.
+    fn recorded_clone_2col_8byte(
+        &self,
+        input: &CudaBuffer,
+        n: u32,
+        launch_stream: StreamId,
+        cu_stream: &cudarc::driver::CudaStream,
+        runtime: &std::sync::Arc<crate::device_runtime::XlogDeviceRuntime>,
+    ) -> Result<CudaBuffer> {
+        let bpc = (n as usize) * 8;
+        let out_col0 = self.memory.alloc::<u8>(bpc)?;
+        let out_col1 = self.memory.alloc::<u8>(bpc)?;
+        let out_d_num_rows = self.memory.alloc::<u32>(1)?;
+
+        let src_col0 = input.column(0).expect("col0");
+        let src_col1 = input.column(1).expect("col1");
+
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read(input.num_rows_device());
+        rec.read_column(src_col0);
+        rec.read_column(src_col1);
+        rec.write(&out_col0);
+        rec.write(&out_col1);
+        rec.write(&out_d_num_rows);
+        rec.preflight(runtime)
+            .map_err(|e| XlogError::Kernel(format!("wcoj_layout clone 8B: preflight {e}")))?;
+
+        unsafe {
+            let r0 = sys::cuMemcpyDtoDAsync_v2(
+                *out_col0.device_ptr(),
+                *src_col0.device_ptr(),
+                bpc,
+                cu_stream.cu_stream(),
+            );
+            if r0 != sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "wcoj_layout clone 8B: dtod col0 failed: {r0:?}"
+                )));
+            }
+            let r1 = sys::cuMemcpyDtoDAsync_v2(
+                *out_col1.device_ptr(),
+                *src_col1.device_ptr(),
+                bpc,
+                cu_stream.cu_stream(),
+            );
+            if r1 != sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "wcoj_layout clone 8B: dtod col1 failed: {r1:?}"
+                )));
+            }
+            let r2 = sys::cuMemcpyHtoDAsync_v2(
+                *out_d_num_rows.device_ptr(),
+                &n as *const u32 as *const c_void,
+                std::mem::size_of::<u32>(),
+                cu_stream.cu_stream(),
+            );
+            if r2 != sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "wcoj_layout clone 8B: H2D d_num_rows failed: {r2:?}"
+                )));
+            }
+        }
+
+        rec.commit(runtime)
+            .map_err(|e| XlogError::Kernel(format!("wcoj_layout clone 8B: commit {e}")))?;
+
+        Ok(CudaBuffer::from_columns_with_host_count(
+            vec![out_col0.into(), out_col1.into()],
+            n as u64,
+            out_d_num_rows,
+            input.schema().clone(),
+            n,
+        ))
+    }
 }

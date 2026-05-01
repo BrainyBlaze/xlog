@@ -575,3 +575,61 @@ extern "C" __global__ void wcoj_triangle_skew_histogram_u64(
         }
     }
 }
+
+// ===============================================================
+// v0.6.2 — WCOJ layout fast-path device checker.
+//
+// Returns flag = 1 iff the 2-column input is strictly lex-sorted
+// AND full-row unique. Caller initializes flag to 1; each thread
+// owns one adjacent pair (col0[i-1], col1[i-1]) vs (col0[i], col1[i]).
+// On any non-strict-increase, atomicExch(flag, 0) clears it.
+// `n` is the LOGICAL row count (not row_cap); caller resolves it
+// upstream via `logical_row_count_u32`.
+//
+// Strict-increase is the right check because
+// dedup_full_row_recorded's contract is sorted+unique; we want
+// to bypass it iff we'd produce the same output.
+//
+// Threads with i == 0 or i >= n early-out (the "previous row"
+// is undefined). Empty / single-row inputs are handled by the
+// host (see provider/wcoj.rs).
+// ===============================================================
+
+extern "C" __global__ void wcoj_layout_check_sorted_unique_u32(
+    const uint32_t* __restrict__ col0,
+    const uint32_t* __restrict__ col1,
+    uint32_t n,
+    uint32_t* __restrict__ flag) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i == 0 || i >= n) {
+        return;
+    }
+    uint32_t a0 = col0[i - 1];
+    uint32_t a1 = col1[i - 1];
+    uint32_t b0 = col0[i];
+    uint32_t b1 = col1[i];
+    // Strict lex-increase: (a0, a1) < (b0, b1).
+    bool strictly_less = (a0 < b0) || (a0 == b0 && a1 < b1);
+    if (!strictly_less) {
+        atomicExch(flag, 0u);
+    }
+}
+
+extern "C" __global__ void wcoj_layout_check_sorted_unique_u64(
+    const uint64_t* __restrict__ col0,
+    const uint64_t* __restrict__ col1,
+    uint32_t n,
+    uint32_t* __restrict__ flag) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i == 0 || i >= n) {
+        return;
+    }
+    uint64_t a0 = col0[i - 1];
+    uint64_t a1 = col1[i - 1];
+    uint64_t b0 = col0[i];
+    uint64_t b1 = col1[i];
+    bool strictly_less = (a0 < b0) || (a0 == b0 && a1 < b1);
+    if (!strictly_less) {
+        atomicExch(flag, 0u);
+    }
+}
