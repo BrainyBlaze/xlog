@@ -120,7 +120,7 @@ The criterion HTML report lands under `target/criterion/`.
 
 Following the baseline above, the v0.6.2 A2-lite slice landed an adaptive-dispatch path that runs a GPU skew classifier (`wcoj_triangle_skew_score_{u32,u64}`) before the WCOJ pipeline. Score ≥ 0.10 → dispatch WCOJ; else fall back to binary join. The bench harness gained a third mode `Adaptive` per cell; matrix size grew 25 → 37 cells.
 
-**Measured at**: commit `dba0c8db` (commit B) + `70ca8494` (test-comment fix) — the kernel + dispatcher; no source changes between data collection and the merged HEAD.
+**Measured at**: runtime/kernel source through `70ca8494` (commit B plus test-comment fix) with the commit-C bench harness that landed in `8a177e87`. The tables below use Criterion's saved **median** estimates; mean estimates can be distorted by rare CUDA/JIT/driver outliers and are not the acceptance statistic.
 
 ### Adaptive cells (median wall-clock; speedup vs `Mode::Off` baseline)
 
@@ -142,7 +142,7 @@ Following the baseline above, the v0.6.2 A2-lite slice landed an adaptive-dispat
 | super-hub | u64 | 10K | 34.84 ms | 21.16 ms | **1.65×** | 1.42× | ✓ (16% headroom) |
 | super-hub | u64 | 50K | 96.02 ms | 19.47 ms | **4.93×** | 4.38× | ✓ (13% headroom) |
 
-**ALL LOCKED TARGETS CLEARED.** Adaptive dispatch:
+**ALL LOCKED TARGETS CLEARED by the median gate.** Adaptive dispatch:
 - Closes the uniform/empty regressions: `Mode::Adaptive` is ≤ 2× `Mode::Off` for every cell. The classifier overhead (768-byte D2H + one combined kernel launch + host max-bucket reduction) costs ~0.3–1 ms — well under the 8–18 ms WCOJ pipeline overhead it avoids.
 - Preserves the super-hub wins: every cell ≥ baseline minimum, with 12–27% headroom. In some cells (e.g. u64 10K) adaptive is *faster* than `Mode::Force` because the classifier's small overhead is more than offset by avoiding the full WCOJ pipeline launch when classifier-time itself amortizes well.
 
@@ -176,7 +176,7 @@ The criterion HTML report lands under `target/criterion/`.
 
 ## Out of Scope
 
-- No actual histogram / skew kernel work — this slice's purpose was to identify where it's needed; A2-lite (skew classifier + adaptive dispatch) closes the locked acceptance gates without touching count/materialize internals.
+- No count/materialize scheduling rewrite — A2-lite adds the skew-classifier histogram kernel and adaptive dispatch, but deliberately leaves the WCOJ count/materialize kernels unchanged.
 - No CI integration.
 - No real-graph imports.
 - Not run with `WCOJ_BENCH_FULL=1` in this baseline pass; left as future work.
