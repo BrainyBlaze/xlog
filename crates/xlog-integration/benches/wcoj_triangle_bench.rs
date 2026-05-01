@@ -525,7 +525,7 @@ fn bench_cell(
         if gate { "on" } else { "off" }
     );
     group.throughput(Throughput::Elements(fixture.total_rows()));
-    group.bench_with_input(BenchmarkId::from_parameter(label), &(), |b, _| {
+    group.bench_with_input(BenchmarkId::from_parameter(&label), &(), |b, _| {
         // Long-lived Executor per cell. The executor's cached
         // WCOJ launch stream (`Executor::wcoj_triangle_stream`)
         // is acquired exactly once on first dispatch and reused
@@ -544,6 +544,18 @@ fn bench_cell(
         // would bias the timing as iterations accumulate.
         let (mut executor, plan) = build_executor(fix, fixture, width, gate);
         b.iter_custom(|iters| {
+            // Counter delta lock: gate=true must dispatch every
+            // iteration (delta == iters); gate=false must never
+            // dispatch (delta == 0). Without this in-loop check,
+            // a future regression that silently fell back to
+            // binary-join (e.g. a stream-pool exhaustion bug
+            // re-emerging in a different shape, or a kernel
+            // error swallowed by the dispatch hook) would
+            // produce valid binary-join *output* with timing
+            // labelled as WCOJ — i.e. silently corrupt the
+            // baseline. The counter is the source of truth
+            // for "WCOJ actually fired"; assert it.
+            let counter_before = executor.wcoj_triangle_dispatch_count();
             let mut total = Duration::ZERO;
             for _ in 0..iters {
                 // Setup (untimed): fresh GPU uploads each iter.
@@ -558,6 +570,18 @@ fn bench_cell(
                 // starts from the same store state.
                 let _ = executor.store_mut().remove("tri");
             }
+            let counter_after = executor.wcoj_triangle_dispatch_count();
+            let delta = counter_after - counter_before;
+            let expected = if gate { iters } else { 0 };
+            assert_eq!(
+                delta,
+                expected,
+                "[bench cell {label_for_assert}] counter delta {delta} != expected {expected} \
+                 across {iters} iterations (gate={gate}). The dispatch path silently fell \
+                 back somewhere in the hot loop; recorded timing for this cell is \
+                 contaminated.",
+                label_for_assert = label,
+            );
             total
         });
     });

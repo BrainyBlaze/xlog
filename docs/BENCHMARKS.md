@@ -129,8 +129,9 @@ WCOJ_BENCH_FULL=1 cargo bench -p xlog-integration --bench wcoj_triangle_bench
 | `wcoj_triangle/symbol_sanity` | One uniform 10K case for `Symbol` | Symbol shares u32's physical layout — sanity only |
 
 **Methodology:**
-- Timed region = `Executor::execute_plan` only. Fixture generation, GPU upload, and Compiler+Executor instantiation are in `iter_batched`'s setup closure.
-- Each `(width, fixture, size)` cell pre-runs an untimed correctness check: `gate=Some(false)` (binary-join) and `gate=Some(true)` (WCOJ) must produce identical row sets, and the dispatch counter must be 0 vs 1 respectively. Bench panics on any divergence.
+- Timed region = `Executor::execute_plan` only. Driven via `b.iter_custom(...)` so the per-iteration loop is owned by the harness. Each cell builds ONE long-lived `Executor`; `put_relation` uploads + `store.remove("tri")` cleanup live OUTSIDE the timed region. The long-lived Executor is required so the executor's cached `wcoj_triangle_stream` (`OnceLock<StreamId>`) is acquired exactly once per cell and reused — a fresh Executor per iteration would drain the runtime's `StreamPool` (cap 16, grow-only) past iteration 16.
+- Each `(width, fixture, size)` cell pre-runs an untimed correctness check: `gate=Some(false)` (binary-join) and `gate=Some(true)` (WCOJ) must produce identical row sets (host-side dedup of fixtures aligns the two paths to set semantics). Counter delta is also asserted *inside* `iter_custom`: gate=true must increment by `iters` over the loop, gate=false must increment by 0 — a silent fallback anywhere in the hot loop fails the bench.
+- Bench-only: the `StreamPool` cap is bumped to 1024 in `make_provider` (production default 16). The bench has many short-lived correctness-check executors that each acquire one stream; production runs at 16 because each long-lived process has one provider with one cached stream.
 - Baseline numbers and the defensible target for the future skew/histogram scheduler are recorded in `docs/evidence/2026-05-01-wcoj-bench-baseline/`.
 
 ### Probabilistic Benchmarks (`xlog-prob`)

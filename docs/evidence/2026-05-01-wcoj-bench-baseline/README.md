@@ -1,7 +1,7 @@
 # WCOJ Triangle Benchmark Baseline (v0.6.2)
 
 **Date**: 2026-05-01
-**Commit**: `e609fc52` (head of `feat/v0.6.2-wcoj-u64-keys` post-u64-slice; bench harness lands as a follow-on slice off this commit)
+**Measured at commit**: `127090cc` (`fix(runtime): cache WCOJ launch stream on Executor`) — the runtime fix landed before the bench data was collected; the bench harness + this report committed unchanged afterward as `4576e53f`. Both commits are on `feat/v0.6.2-wcoj-bench-baseline` / local `main`. Re-running the bench at `4576e53f` produces the same numbers (no source changes between the two).
 **GPU**: NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU
 **Driver**: 591.59
 **Compute capability**: 12.0 (SM120)
@@ -16,11 +16,9 @@ Establish baseline performance for the GPU 3-way Worst-Case Optimal Join (WCOJ) 
 
 - Harness: `crates/xlog-integration/benches/wcoj_triangle_bench.rs` (criterion 0.5).
 - Gate forced via `RuntimeConfig::with_wcoj_triangle_dispatch(Some(bool))` — bench never mutates the process-global env.
-- Timed region = `Executor::execute_plan` only. Fixture generation, GPU upload, Compiler+Executor instantiation are in `iter_batched`'s setup closure.
-- Each cell pre-runs an untimed correctness check that asserts:
-  - `gate=Some(false)` produces dispatch counter == 0.
-  - `gate=Some(true)` produces dispatch counter == 1.
-  - Row sets (sorted+deduped) from the two paths are bit-identical.
+- Timed region = `Executor::execute_plan` only. Driven via `b.iter_custom(...)`; the harness owns the per-iteration loop. Each cell builds ONE long-lived `Executor`, and `put_relation` uploads + `store.remove("tri")` cleanup live OUTSIDE the timed region. Building a fresh Executor per iteration would re-acquire one stream from the runtime's grow-only `StreamPool` every iteration and silently saturate it past iteration 16 — instead the long-lived Executor's cached `wcoj_triangle_stream` (`OnceLock<StreamId>`) is acquired once and reused.
+- Counter assertion runs both *before each cell* (correctness pre-check: gate=off counter=0, gate=on counter=1, row sets bit-identical after host-side dedup of fixtures) AND *inside `iter_custom`* (counter delta over `iters` iterations must equal `iters` when gate=true and 0 when gate=false). The in-loop check guards against silent fallback during the timed loop, which would otherwise produce valid binary-join output with timing labelled as WCOJ.
+- Bench-only: `StreamPool` cap bumped to 1024 in `make_provider` (production default 16). The bench has ~25 short-lived correctness-check executors that each acquire one stream; production runs at 16 because each long-lived process has one provider + one cached stream.
 - Sample size: 10 per cell (criterion's GPU-friendly floor).
 
 ## Fixtures
@@ -46,38 +44,42 @@ Full matrix (adds 100K + 250K row sizes) behind `WCOJ_BENCH_FULL=1`; deferred fo
 
 Median wall-clock time of the timed `execute_plan` region per criterion's default estimator. **Speedup = `gate-off median / gate-on median`** — speedup > 1 means WCOJ is *faster* than binary-join.
 
+Row-count columns: **Generated** is what the LCG produces before dedup; **Post-dedup** is what each path actually evaluates (fixtures are deduped host-side so binary-join and WCOJ see the same set-semantic input). Per-relation counts are roughly equal across e1/e2/e3 within a fixture; the table reports the e1 count and totals are 3× that approximately.
+
 ### Uniform Erdős-Rényi (low skew)
 
-| Width  | Rows / rel | Gate off | Gate on | Speedup |
-|--------|------------|----------|---------|---------|
-| u32    | 10K        | 2.16 ms  | 15.06 ms| 0.14×   |
-| u32    | 50K        | 3.84 ms  | 11.52 ms| 0.33×   |
-| u64    | 10K        | 2.54 ms  | 21.34 ms| 0.12×   |
-| u64    | 50K        | 15.81 ms | 19.59 ms| 0.81×   |
+| Width | Generated rows/rel | Post-dedup rows/rel (e1) | Gate off | Gate on | Speedup |
+|---|---|---|---|---|---|
+| u32   | 10K | 9,229  | 2.16 ms  | 15.06 ms | 0.14× |
+| u32   | 50K | 49,246 | 3.84 ms  | 11.52 ms | 0.33× |
+| u64   | 10K | 9,229  | 2.54 ms  | 21.34 ms | 0.12× |
+| u64   | 50K | 49,246 | 15.81 ms | 19.59 ms | 0.81× |
 
-### Super-hub (high skew, ~50% of edges concentrated on one hub key)
+### Super-hub (high skew, ~50% of generated edges concentrated on one hub key)
 
-| Width  | Rows / rel | Gate off | Gate on | Speedup |
-|--------|------------|----------|---------|---------|
-| u32    | 10K        | 16.26 ms | 10.14 ms| **1.60×** |
-| u32    | 50K        | 55.53 ms | 12.98 ms| **4.28×** |
-| u64    | 10K        | 30.35 ms | 19.19 ms| **1.58×** |
-| u64    | 50K        | 94.63 ms | 19.44 ms| **4.87×** |
+The host-side dedup *removes* a substantial fraction of super-hub rows because half the generated rows have a fixed (X, hub_y) or (hub_y, Z) shape with X / Z drawn iid uniform — so duplicates are common. Post-dedup these collapse to roughly `key_range/2 + (rows/2) × P(unique)`. The kernel still sees a set with strong per-Y-key skew because hub_y dominates the e1.col1 / e2.col0 distribution.
+
+| Width | Generated rows/rel | Post-dedup rows/rel (e1) | Gate off | Gate on | Speedup |
+|---|---|---|---|---|---|
+| u32   | 10K | 5,904  | 16.26 ms | 10.14 ms | **1.60×** |
+| u32   | 50K | 29,862 | 55.53 ms | 12.98 ms | **4.28×** |
+| u64   | 10K | 5,904  | 30.35 ms | 19.19 ms | **1.58×** |
+| u64   | 50K | 29,862 | 94.63 ms | 19.44 ms | **4.87×** |
 
 ### Empty result (three relations over disjoint key ranges)
 
-| Width  | Rows / rel | Gate off | Gate on | Speedup |
-|--------|------------|----------|---------|---------|
-| u32    | 10K        | 1.62 ms  | 10.49 ms| 0.15×   |
-| u32    | 50K        | 1.87 ms  | 10.73 ms| 0.17×   |
-| u64    | 10K        | 1.70 ms  | 41.01 ms (high variance: 18.8–80.8 ms) | 0.04× |
-| u64    | 50K        | 2.02 ms  | 18.81 ms| 0.11×   |
+| Width | Generated rows/rel | Post-dedup rows/rel (e1) | Gate off | Gate on | Speedup |
+|---|---|---|---|---|---|
+| u32   | 10K | 9,181  | 1.62 ms | 10.49 ms | 0.15× |
+| u32   | 50K | 49,196 | 1.87 ms | 10.73 ms | 0.17× |
+| u64   | 10K | 9,181  | 1.70 ms | 41.01 ms (high variance: 18.8–80.8 ms) | 0.04× |
+| u64   | 50K | 49,196 | 2.02 ms | 18.81 ms | 0.11× |
 
 ### Symbol sanity
 
-| Width  | Rows / rel | Gate on |
-|--------|------------|---------|
-| Symbol | 10K        | 11.43 ms (≈ u32 10K gateon, as expected; Symbol shares u32 layout) |
+| Width  | Generated rows/rel | Post-dedup rows/rel (e1) | Gate on |
+|---|---|---|---|
+| Symbol | 10K | 9,229 | 11.43 ms (≈ u32 10K gateon, as expected; Symbol shares u32 layout) |
 
 All 25 cells passed the untimed correctness pre-check (`wcoj_triangle_dispatch_count` advanced one-per-cell on gate=on; gate-off counter stayed 0; row sets between paths bit-identical after host-side dedup of fixtures).
 
