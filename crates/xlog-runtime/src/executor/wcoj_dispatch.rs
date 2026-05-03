@@ -207,7 +207,7 @@ pub(super) fn wcoj_4cycle_disabled(config_override: Option<bool>) -> bool {
 /// fixtures score ≤ 0.04, super-hub fixtures score ≥ 0.18.
 /// Threshold of 0.10 sits in the gap with ≥1.7× headroom on each
 /// side — robust to bench/kernel noise.
-const WCOJ_ADAPTIVE_SKEW_THRESHOLD: f64 = 0.10;
+pub(super) const WCOJ_ADAPTIVE_SKEW_THRESHOLD: f64 = 0.10;
 
 /// v0.6.5 slice 2 — threshold for the 4-cycle adaptive
 /// classifier. Reduction across the four join positions is
@@ -218,7 +218,7 @@ const WCOJ_ADAPTIVE_SKEW_THRESHOLD: f64 = 0.10;
 /// (slice 2 step 10) verifies the gap has ≥1.7× headroom on
 /// each side; if the evidence shows a different threshold is
 /// warranted, lock the new value before merging.
-const WCOJ_ADAPTIVE_4CYCLE_SKEW_THRESHOLD: f64 = 0.10;
+pub(super) const WCOJ_ADAPTIVE_4CYCLE_SKEW_THRESHOLD: f64 = 0.10;
 
 /// Resolved dispatch mode after consulting both gates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -432,7 +432,7 @@ fn scan_rel(node: &RirNode) -> Option<RelId> {
 /// the RIR-level dispatch. `FourByte` covers `U32` and `Symbol`
 /// (bit-identical layout); `EightByte` covers `U64`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WcojKeyWidth {
+pub(super) enum WcojKeyWidth {
     FourByte,
     EightByte,
 }

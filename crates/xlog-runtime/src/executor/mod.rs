@@ -26,6 +26,7 @@ mod join_cache;
 mod node_dispatch;
 mod recursive;
 mod rewrite;
+mod wcoj_cost_model;
 mod wcoj_dispatch;
 #[cfg(feature = "wcoj-phase-timing")]
 pub mod wcoj_phase_timing;
