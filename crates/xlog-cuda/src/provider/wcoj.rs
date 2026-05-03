@@ -2376,10 +2376,13 @@ impl CudaKernelProvider {
     /// Compute the WCOJ adaptive-dispatch skew score for a u32 (or
     /// Symbol) 4-cycle. Returns `Ok(Some(score))` on success where
     /// `score = max(max_bucket_i / row_count_i)` over the four
-    /// join-key columns (col1 of each input — the X/Y/Z/W variables
-    /// in their respective second positions). Mirrors the triangle
-    /// classifier; the same threshold convention applies (caller
-    /// uses `score >= 0.10` to dispatch WCOJ, else fall back).
+    /// **lookup-key** columns (col0 of each input — `e1.col0 = W`
+    /// partitions the iteration grid and closes the cycle in e4;
+    /// `e2.col0 = X` / `e3.col0 = Y` / `e4.col0 = Z` are the
+    /// per-axis binary-search keys the count kernel hits). The
+    /// same threshold convention applies as triangle's classifier
+    /// (caller uses `score >= 0.10` to dispatch WCOJ, else falls
+    /// back).
     ///
     /// Returns `Ok(None)` on any failure (no runtime, validation
     /// failure, kernel error, D2H error, zero rows on any input).
