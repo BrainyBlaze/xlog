@@ -23,36 +23,30 @@
 //!      the default-on classifier without a global env var.
 //!   5. **Default**: classifier runs.
 //!
-//! ## Recognized RIR shape
+//! ## Recognized RIR shape (v0.6.5)
 //!
-//! The hook pattern-matches the exact RIR tree that
-//! [`xlog_logic::Lowerer`] produces for a triangle rule of the form
-//! `tri(X, Y, Z) :- e1(X, Y), e2(Y, Z), e3(X, Z)`:
+//! The hook now consumes [`RirNode::MultiWayJoin`], produced by
+//! [`xlog_logic::promote::promote_multiway`] after the optimizer
+//! pass in [`xlog_logic::Compiler::compile_program_with_stats_snapshot`].
+//! The promoter rewrites the canonical lowered+optimized triangle
+//! tree to a `MultiWayJoin` whose structure encodes the same
+//! semantic invariants as the v0.6.2 strict tree-pattern matcher:
 //!
-//! ```text
-//! Project {
-//!     input: Join {
-//!         left: Join {
-//!             left: Scan(e_xy),
-//!             right: Scan(e_yz),
-//!             left_keys: [1],          // e_xy.col1 == Y
-//!             right_keys: [0],         // e_yz.col0 == Y
-//!             join_type: Inner,
-//!         },
-//!         right: Scan(e_xz),
-//!         left_keys: [0, 3],           // X, Z (cols 0 and 3 of inner join's output)
-//!         right_keys: [0, 1],          // e_xz.col0 == X, e_xz.col1 == Z
-//!         join_type: Inner,
-//!     },
-//!     columns: [Column(0), Column(1), Column(3)],  // X, Y, Z
-//! }
-//! ```
+//! * `inputs` is a 3-element vec of `Scan` nodes in WCOJ slot
+//!   order `[xy, yz, xz]`.
+//! * `slot_vars` is exactly `[[Some(0), Some(1)], [Some(1), Some(2)],
+//!   [Some(0), Some(2)]]` — variable-class ids for X, Y, Z.
+//! * `output_columns` is exactly
+//!   `[Column(0), Column(1), Column(3)]` (matching the certified
+//!   GPU kernel's (X, Y, Z) emit order).
+//! * `fallback` is the post-optimizer binary-join tree, executed
+//!   verbatim when this hook declines.
 //!
-//! Anything else (different shape, non-Inner join, recursive SCC,
-//! 2-arity heads, missing input buffers, unsupported scalar types,
-//! mixed-width slots within the same triangle, or no runtime-backed
-//! memory manager) returns `Ok(None)` and the caller takes the
-//! existing binary-join path.
+//! Anything else (rotated/computed projection, non-canonical
+//! slot_vars, non-Scan inputs, recursive SCC, missing input
+//! buffers, unsupported scalar types, mixed-width slots, or no
+//! runtime-backed memory manager) returns `Ok(None)` and the
+//! caller takes the embedded `fallback` path.
 //!
 //! Width branching: 4-byte (U32 / Symbol) inputs go to
 //! `wcoj_layout_u32_recorded` + `wcoj_triangle_u32_recorded`;
@@ -82,7 +76,7 @@
 use xlog_core::{RelId, Result};
 use xlog_cuda::device_runtime::StreamId;
 use xlog_cuda::CudaBuffer;
-use xlog_ir::{rir::ProjectExpr, CompiledRule, JoinType, RirNode};
+use xlog_ir::{rir::ProjectExpr, CompiledRule, RirNode};
 
 use super::Executor;
 
@@ -183,83 +177,91 @@ pub(super) struct TriangleRirMatch {
     pub rel_xz: RelId,
 }
 
-/// Pattern-match the canonical triangle RIR. Returns the three
-/// scan rel IDs in WCOJ slot order on a successful match;
-/// `None` for any deviation.
+/// Pattern-match a `RirNode::MultiWayJoin` whose structure is the
+/// canonical triangle shape. Returns the three scan rel IDs in
+/// WCOJ slot order on a successful match; `None` for any deviation.
 ///
-/// The pattern is intentionally strict: any future RIR shape
-/// change in the lowerer falls back silently rather than running
-/// a kernel against the wrong tree. When the lowerer is
-/// generalized, this matcher gets a corresponding slice.
-pub(super) fn match_triangle_rir(body: &RirNode) -> Option<TriangleRirMatch> {
-    // Outer Project { input: Join, columns: [Column(0), Column(1), Column(3)] }.
-    let RirNode::Project {
-        input: outer_input,
-        columns,
+/// The match is intentionally strict over `inputs`, `slot_vars`,
+/// AND `output_columns`. v0.6.5 slice 1 only certifies the
+/// canonical (X, Y, Z) emit order; rotated head projections,
+/// non-Scan inputs, or non-canonical variable classes decline
+/// dispatch and the caller takes the embedded `fallback` path.
+///
+/// Future slices generalize the matcher in tandem with kernel
+/// generalization (4-way, n-way) — never one without the other.
+pub(super) fn match_multiway_triangle(body: &RirNode) -> Option<TriangleRirMatch> {
+    let RirNode::MultiWayJoin {
+        inputs,
+        slot_vars,
+        output_columns,
+        ..
     } = body
     else {
         return None;
     };
-    if columns.len() != 3 {
+    if inputs.len() != 3 {
         return None;
     }
-    let expected_cols = [0usize, 1, 3];
-    for (i, expr) in columns.iter().enumerate() {
-        match expr {
-            ProjectExpr::Column(idx) if *idx == expected_cols[i] => {}
-            _ => return None,
-        }
-    }
-    // Outer Join — Inner, left_keys [0, 3], right_keys [0, 1].
-    let RirNode::Join {
-        left: l1,
-        right: r1,
-        left_keys: lk1,
-        right_keys: rk1,
-        join_type: jt1,
-    } = outer_input.as_ref()
-    else {
-        return None;
-    };
-    if !matches!(jt1, JoinType::Inner) {
+    if !slot_vars_match_canonical_triangle(slot_vars) {
         return None;
     }
-    if lk1.as_slice() != [0usize, 3] || rk1.as_slice() != [0usize, 1] {
+    if !output_columns_match_canonical_triangle(output_columns) {
         return None;
     }
-    // Right side of outer Join: Scan(e_xz).
-    let RirNode::Scan { rel: rel_xz } = r1.as_ref() else {
-        return None;
-    };
-    // Inner Join — Inner, left_keys [1], right_keys [0].
-    let RirNode::Join {
-        left: l2,
-        right: r2,
-        left_keys: lk2,
-        right_keys: rk2,
-        join_type: jt2,
-    } = l1.as_ref()
-    else {
-        return None;
-    };
-    if !matches!(jt2, JoinType::Inner) {
-        return None;
-    }
-    if lk2.as_slice() != [1usize] || rk2.as_slice() != [0usize] {
-        return None;
-    }
-    // Inner Join's leaves: Scan(e_xy), Scan(e_yz).
-    let RirNode::Scan { rel: rel_xy } = l2.as_ref() else {
-        return None;
-    };
-    let RirNode::Scan { rel: rel_yz } = r2.as_ref() else {
-        return None;
-    };
+    let rel_xy = scan_rel(&inputs[0])?;
+    let rel_yz = scan_rel(&inputs[1])?;
+    let rel_xz = scan_rel(&inputs[2])?;
     Some(TriangleRirMatch {
-        rel_xy: *rel_xy,
-        rel_yz: *rel_yz,
-        rel_xz: *rel_xz,
+        rel_xy,
+        rel_yz,
+        rel_xz,
     })
+}
+
+/// Confirm `slot_vars` is the canonical
+/// `[[A, B], [B, C], [A, C]]` triangle shape with three distinct
+/// variable-class ids. Anything else (rotated, dropped, repeated)
+/// fails the match.
+fn slot_vars_match_canonical_triangle(slot_vars: &[Vec<Option<u32>>]) -> bool {
+    if slot_vars.len() != 3 {
+        return false;
+    }
+    let s0 = &slot_vars[0];
+    let s1 = &slot_vars[1];
+    let s2 = &slot_vars[2];
+    if s0.len() != 2 || s1.len() != 2 || s2.len() != 2 {
+        return false;
+    }
+    let (a, b) = match (s0[0], s0[1]) {
+        (Some(a), Some(b)) if a != b => (a, b),
+        _ => return false,
+    };
+    let c = match (s1[0], s1[1]) {
+        (Some(b1), Some(c)) if b1 == b && c != a && c != b => c,
+        _ => return false,
+    };
+    matches!((s2[0], s2[1]), (Some(a2), Some(c2)) if a2 == a && c2 == c)
+}
+
+/// Confirm `output_columns` is the certified `(X, Y, Z)` emit
+/// order. The GPU kernel writes triples in this order; a rotated
+/// or computed projection would silently produce wrong results.
+fn output_columns_match_canonical_triangle(cols: &[ProjectExpr]) -> bool {
+    cols.len() == 3
+        && matches!(cols[0], ProjectExpr::Column(0))
+        && matches!(cols[1], ProjectExpr::Column(1))
+        && matches!(cols[2], ProjectExpr::Column(3))
+}
+
+/// Extract the `RelId` from a leaf `Scan` node, or `None` for
+/// any non-Scan child. v0.6.5 slice 1 only admits Scan leaves;
+/// future slices may admit `Filter { Scan }` or projected
+/// scans, but always in tandem with kernel support.
+fn scan_rel(node: &RirNode) -> Option<RelId> {
+    match node {
+        RirNode::Scan { rel } => Some(*rel),
+        _ => None,
+    }
 }
 
 /// Physical key width for a WCOJ-eligible binary relation at
@@ -361,8 +363,8 @@ impl Executor {
             }
         };
 
-        // 2. Pattern-match the triangle RIR.
-        let Some(matched) = match_triangle_rir(&rule.body) else {
+        // 2. Pattern-match the canonical-triangle MultiWayJoin.
+        let Some(matched) = match_multiway_triangle(&rule.body) else {
             return Ok(None);
         };
 
@@ -663,9 +665,116 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use super::{
-        wcoj_adaptive_enabled, wcoj_disabled, wcoj_gate_enabled, ENV_DISABLE_WCOJ_TRIANGLE,
-        ENV_USE_WCOJ_TRIANGLE_ADAPTIVE, ENV_USE_WCOJ_TRIANGLE_U32,
+        match_multiway_triangle, wcoj_adaptive_enabled, wcoj_disabled, wcoj_gate_enabled,
+        ENV_DISABLE_WCOJ_TRIANGLE, ENV_USE_WCOJ_TRIANGLE_ADAPTIVE, ENV_USE_WCOJ_TRIANGLE_U32,
     };
+    use xlog_core::RelId;
+    use xlog_ir::rir::ProjectExpr;
+    use xlog_ir::RirNode;
+
+    fn canonical_multiway() -> RirNode {
+        RirNode::MultiWayJoin {
+            inputs: vec![
+                RirNode::Scan { rel: RelId(1) },
+                RirNode::Scan { rel: RelId(2) },
+                RirNode::Scan { rel: RelId(3) },
+            ],
+            slot_vars: vec![
+                vec![Some(0u32), Some(1)],
+                vec![Some(1u32), Some(2)],
+                vec![Some(0u32), Some(2)],
+            ],
+            output_columns: vec![
+                ProjectExpr::Column(0),
+                ProjectExpr::Column(1),
+                ProjectExpr::Column(3),
+            ],
+            fallback: Box::new(RirNode::Unit),
+        }
+    }
+
+    #[test]
+    fn match_canonical_returns_three_rels() {
+        let node = canonical_multiway();
+        let m = match_multiway_triangle(&node).expect("must match canonical triangle");
+        assert_eq!(m.rel_xy, RelId(1));
+        assert_eq!(m.rel_yz, RelId(2));
+        assert_eq!(m.rel_xz, RelId(3));
+    }
+
+    #[test]
+    fn match_rejects_non_multiway_body() {
+        let node = RirNode::Scan { rel: RelId(1) };
+        assert!(match_multiway_triangle(&node).is_none());
+    }
+
+    #[test]
+    fn match_rejects_rotated_output_columns() {
+        let mut node = canonical_multiway();
+        if let RirNode::MultiWayJoin { output_columns, .. } = &mut node {
+            *output_columns = vec![
+                ProjectExpr::Column(1),
+                ProjectExpr::Column(0),
+                ProjectExpr::Column(3),
+            ];
+        }
+        assert!(match_multiway_triangle(&node).is_none());
+    }
+
+    #[test]
+    fn match_rejects_arity_mismatched_output_columns() {
+        let mut node = canonical_multiway();
+        if let RirNode::MultiWayJoin { output_columns, .. } = &mut node {
+            *output_columns = vec![ProjectExpr::Column(0), ProjectExpr::Column(1)];
+        }
+        assert!(match_multiway_triangle(&node).is_none());
+    }
+
+    #[test]
+    fn match_rejects_malformed_slot_vars() {
+        // [[A,B],[B,C],[A,B]] — last slot is wrong (should be [A,C]).
+        let mut node = canonical_multiway();
+        if let RirNode::MultiWayJoin { slot_vars, .. } = &mut node {
+            *slot_vars = vec![
+                vec![Some(0u32), Some(1)],
+                vec![Some(1u32), Some(2)],
+                vec![Some(0u32), Some(1)],
+            ];
+        }
+        assert!(match_multiway_triangle(&node).is_none());
+    }
+
+    #[test]
+    fn match_rejects_repeated_var_in_slot() {
+        let mut node = canonical_multiway();
+        if let RirNode::MultiWayJoin { slot_vars, .. } = &mut node {
+            // [[A, A], …] — repeated var in slot 0.
+            *slot_vars = vec![
+                vec![Some(0u32), Some(0)],
+                vec![Some(1u32), Some(2)],
+                vec![Some(0u32), Some(2)],
+            ];
+        }
+        assert!(match_multiway_triangle(&node).is_none());
+    }
+
+    #[test]
+    fn match_rejects_non_scan_input() {
+        let mut node = canonical_multiway();
+        if let RirNode::MultiWayJoin { inputs, .. } = &mut node {
+            inputs[0] = RirNode::Unit;
+        }
+        assert!(match_multiway_triangle(&node).is_none());
+    }
+
+    #[test]
+    fn match_rejects_input_arity_mismatch() {
+        let mut node = canonical_multiway();
+        if let RirNode::MultiWayJoin { inputs, .. } = &mut node {
+            inputs.pop();
+        }
+        assert!(match_multiway_triangle(&node).is_none());
+    }
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();

@@ -96,7 +96,21 @@ impl Executor {
                             continue;
                         }
 
-                        let result = self.execute_node(&rule.body)?;
+                        // v0.6.5 slice 1: when WCOJ dispatch declines on
+                        // a `MultiWayJoin` body (gate off, kernel error,
+                        // adaptive score below threshold, …), execute
+                        // the embedded `fallback` — the post-optimizer
+                        // binary-join tree the promoter captured. This
+                        // preserves byte-identical behavior with v0.6.2.
+                        // `execute_node`'s `MultiWayJoin` arm is the
+                        // defensive safety net; explicit destructuring
+                        // here keeps the intent visible at the dispatch
+                        // site.
+                        let body_to_execute = match &rule.body {
+                            xlog_ir::RirNode::MultiWayJoin { fallback, .. } => fallback.as_ref(),
+                            other => other,
+                        };
+                        let result = self.execute_node(body_to_execute)?;
 
                         // Union with existing result if predicate already has data
                         if let Some(existing) = self.store.get(&rule.head) {
