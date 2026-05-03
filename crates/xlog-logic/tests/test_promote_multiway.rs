@@ -89,3 +89,62 @@ reach(X, Y) :- edge(X, Y).
         "binary-join rule must not be promoted"
     );
 }
+
+// v0.6.5 slice 2 — 4-cycle Compiler-pipeline coverage.
+
+const FOUR_CYCLE_PROGRAM: &str =
+    "cycle4(W, X, Y, Z) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W).";
+
+#[test]
+fn compile_4cycle_program_produces_multiway_body() {
+    let mut compiler = Compiler::new();
+    let plan = compiler
+        .compile(FOUR_CYCLE_PROGRAM)
+        .expect("compile must succeed");
+
+    let cycle_rule = plan
+        .rules_by_scc
+        .iter()
+        .flatten()
+        .find(|r| r.head == "cycle4")
+        .expect("cycle4 rule must be present");
+
+    match &cycle_rule.body {
+        RirNode::MultiWayJoin {
+            inputs,
+            slot_vars,
+            output_columns,
+            fallback,
+        } => {
+            assert_eq!(inputs.len(), 4);
+            for (slot_idx, scan) in inputs.iter().enumerate() {
+                match scan {
+                    RirNode::Scan { .. } => {}
+                    other => panic!("input slot {} must be a Scan, got {:?}", slot_idx, other),
+                }
+            }
+            assert_eq!(
+                slot_vars,
+                &vec![
+                    vec![Some(0u32), Some(1)],
+                    vec![Some(1u32), Some(2)],
+                    vec![Some(2u32), Some(3)],
+                    vec![Some(3u32), Some(0)],
+                ]
+            );
+            assert_eq!(
+                output_columns,
+                &vec![
+                    ProjectExpr::Column(0),
+                    ProjectExpr::Column(1),
+                    ProjectExpr::Column(3),
+                    ProjectExpr::Column(5),
+                ]
+            );
+            // Fallback is the post-optimizer Project { Join { Join, Join } }
+            // (bushy 4-cycle shape, distinct from triangle's left-deep).
+            assert!(matches!(fallback.as_ref(), RirNode::Project { .. }));
+        }
+        other => panic!("expected MultiWayJoin, got {:?}", other),
+    }
+}
