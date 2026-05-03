@@ -64,14 +64,26 @@
 //! full pipeline succeeds, and the writeback is the caller's
 //! responsibility.
 //!
+//! ## Hook surface
+//!
+//! The dispatcher exposes two entry points per shape (slice 4):
+//!
+//! * `try_dispatch_wcoj_*(rule)` — keyed on `&CompiledRule`,
+//!   used by the non-recursive arm in `execute_stratum_impl`.
+//! * `try_dispatch_wcoj_*_on_body(body)` — keyed on `&RirNode`,
+//!   used by the recursive arm via
+//!   `Executor::execute_wcoj_or_fallback_node` on both seeding
+//!   and per-variant evaluation. The slice 4 promoter gates
+//!   recursive bodies on per-rule recursive-Scan count (≤ 1
+//!   promotes; ≥ 2 stays binary-join — see slice 4.2 deferral).
+//!
 //! ## Out of scope (per slice spec)
 //!
-//! * Recursive / SCC mixed execution — the executor's recursive
-//!   branch is unchanged. We hook only the non-recursive branch.
-//! * Cost model.
+//! * Cost model — slice 5.
 //! * Mixed-width admission (a triangle with both U32 and U64
 //!   slots stays on the binary-join path).
 //! * Histogram-guided block dispatch (B1 heavy-row offload).
+//! * Multi-recursive WCOJ (≥ 2 in-SCC body Scans) — slice 4.2.
 
 use xlog_core::{RelId, Result};
 use xlog_cuda::device_runtime::StreamId;

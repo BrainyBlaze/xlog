@@ -456,6 +456,57 @@ const MULTIREC_TRIANGLE: &str = r#"
     tri(X, Y, Z) :- r1(X, Y), r2(Y, Z), r3(X, Z).
 "#;
 
+// ---------------------------------------------------------------
+// Adaptive parity: classifier makes same decision in recursive arm
+// ---------------------------------------------------------------
+
+/// Hub-heavy fixture: vertex 1 is incident to many edges (skew
+/// well above the 0.10 threshold). The same classifier that
+/// dispatches in the non-recursive arm must dispatch here too.
+fn superhub_inputs() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
+    let mut m: BTreeMap<&'static str, Vec<(u32, u32)>> = BTreeMap::new();
+    let mut edges = Vec::new();
+    for v in 2..=300 {
+        edges.push((1u32, v));
+        edges.push((v, 1));
+    }
+    edges.push((2, 3));
+    edges.push((3, 4));
+    edges.push((4, 2));
+    edges.sort();
+    edges.dedup();
+    m.insert("e1", edges.clone());
+    m.insert("e2", edges.clone());
+    m.insert("e3", edges);
+    m
+}
+
+#[test]
+fn adaptive_dispatches_in_recursive_scc_on_superhub() {
+    // Adaptive default-on (no explicit `with_wcoj_triangle_dispatch`)
+    // → classifier runs on the seeding pass; super-hub fixture
+    // produces score ≥ 0.10 → dispatch fires. Counter == 1
+    // (rule 0 only; the echo + copy rules don't match a triangle
+    // shape).
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let executor = run_program(
+        Arc::clone(&fix.provider),
+        &fix.memory,
+        RuntimeConfig::default(),
+        STABLE_TRIANGLE_RECURSIVE,
+        &superhub_inputs(),
+    );
+    assert!(
+        executor.wcoj_triangle_dispatch_count() >= 1,
+        "adaptive classifier on super-hub fixture must dispatch in \
+         the recursive arm; got counter {}",
+        executor.wcoj_triangle_dispatch_count()
+    );
+}
+
 fn multirec_inputs() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
     let mut m: BTreeMap<&'static str, Vec<(u32, u32)>> = BTreeMap::new();
     m.insert("r1_init", vec![(1, 2), (1, 3), (2, 3)]);

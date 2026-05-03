@@ -105,8 +105,11 @@ impl Executor {
 
                 if is_recursive {
                     // Recursive SCC: use semi-naive fixpoint iteration.
-                    // The WCOJ triangle hook intentionally does NOT
-                    // engage here — recursion is out of v1 scope.
+                    // v0.6.5 slice 4: the recursive engine now invokes
+                    // WCOJ dispatch via `execute_wcoj_or_fallback_node`
+                    // on both the seeding pass and per-variant
+                    // evaluation, gated by the slice 4 promoter
+                    // (recursive-Scan count ≤ 1).
                     self.execute_recursive_scc(rules)?;
                 } else {
                     // Non-recursive SCC: execute rules once, union results for same predicate.
