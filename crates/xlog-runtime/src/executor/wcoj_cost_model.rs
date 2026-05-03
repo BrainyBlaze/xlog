@@ -114,14 +114,20 @@ impl SkewScoreSource for CudaKernelProvider {
 /// `provider` is **not** a field — the classifier score is
 /// fetched via a separate `&dyn SkewScoreSource` parameter so
 /// trait-swap unit tests don't need a real `CudaKernelProvider`.
+///
+/// `stats` and `slot_rels` are populated by every call site but
+/// the slice 3 default impl ignores them. Slice 4/5 cost models
+/// will consult `stats.estimate_join_cardinality(slot_rels[i],
+/// slot_rels[j], …)` and per-column selectivity. Marked
+/// `allow(dead_code)` so the slice-3 default doesn't trigger
+/// unused-field warnings while the future-consumer fields
+/// remain in the public ctx shape.
+#[allow(dead_code)]
 pub(super) struct WcojDispatchCtx<'a> {
     pub stats: &'a StatsManager,
     pub launch_stream: StreamId,
     pub width: WcojKeyWidth,
     pub buffers: &'a [&'a CudaBuffer],
-    /// Pre-resolved relation IDs in WCOJ slot order. Cost models
-    /// that consult `stats` use these to look up cardinality and
-    /// per-column selectivity for the rule's actual inputs.
     pub slot_rels: &'a [RelId],
 }
 
@@ -132,17 +138,10 @@ pub(super) struct WcojDispatchCtx<'a> {
 /// additional impls (e.g. stats-driven cardinality estimates)
 /// without rewriting the dispatch call sites.
 pub(super) trait WcojCostModel: Send + Sync {
-    fn should_dispatch_triangle(
-        &self,
-        ctx: &WcojDispatchCtx,
-        scorer: &dyn SkewScoreSource,
-    ) -> bool;
+    fn should_dispatch_triangle(&self, ctx: &WcojDispatchCtx, scorer: &dyn SkewScoreSource)
+        -> bool;
 
-    fn should_dispatch_4cycle(
-        &self,
-        ctx: &WcojDispatchCtx,
-        scorer: &dyn SkewScoreSource,
-    ) -> bool;
+    fn should_dispatch_4cycle(&self, ctx: &WcojDispatchCtx, scorer: &dyn SkewScoreSource) -> bool;
 }
 
 // -----------------------------------------------------------------
@@ -189,11 +188,7 @@ impl WcojCostModel for SkewClassifierCostModel {
         }
     }
 
-    fn should_dispatch_4cycle(
-        &self,
-        ctx: &WcojDispatchCtx,
-        scorer: &dyn SkewScoreSource,
-    ) -> bool {
+    fn should_dispatch_4cycle(&self, ctx: &WcojDispatchCtx, scorer: &dyn SkewScoreSource) -> bool {
         debug_assert_eq!(
             ctx.buffers.len(),
             4,
@@ -307,8 +302,6 @@ mod tests {
         assert!(collapse(Ok(Some(m.triangle_threshold))));
         assert!(!collapse(Ok(Some(0.05))));
         assert!(!collapse(Ok(None)));
-        assert!(!collapse(Err(xlog_core::XlogError::Kernel(
-            "test".into()
-        ))));
+        assert!(!collapse(Err(xlog_core::XlogError::Kernel("test".into()))));
     }
 }

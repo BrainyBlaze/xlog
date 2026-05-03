@@ -597,35 +597,36 @@ impl Executor {
         // back to binary-join — classifier is optimization, not
         // correctness. A score below
         // `WCOJ_ADAPTIVE_SKEW_THRESHOLD` likewise falls back.
+        // v0.6.5 slice 3: route the adaptive decision through the
+        // WcojCostModel seam. Default impl is SkewClassifierCostModel,
+        // which is a verbatim wrap of the v0.6.5 slice 2 inline
+        // logic — dispatch counts are preserved bit-for-bit.
         #[cfg(feature = "wcoj-phase-timing")]
         let mut classifier_ms: f32 = 0.0;
         if mode == DispatchMode::Adaptive {
             #[cfg(feature = "wcoj-phase-timing")]
             let cls_start = Instant::now();
-            let score = match width {
-                WcojKeyWidth::FourByte => self.provider.wcoj_triangle_skew_score_u32(
-                    buf_xy,
-                    buf_yz,
-                    buf_xz,
-                    launch_stream,
-                ),
-                WcojKeyWidth::EightByte => self.provider.wcoj_triangle_skew_score_u64(
-                    buf_xy,
-                    buf_yz,
-                    buf_xz,
-                    launch_stream,
-                ),
+            let model = super::wcoj_cost_model::SkewClassifierCostModel::default();
+            let buffers: [&CudaBuffer; 3] = [buf_xy, buf_yz, buf_xz];
+            let slot_rels = [matched.rel_xy, matched.rel_yz, matched.rel_xz];
+            let ctx = super::wcoj_cost_model::WcojDispatchCtx {
+                stats: &self.stats,
+                launch_stream,
+                width,
+                buffers: &buffers[..],
+                slot_rels: &slot_rels,
             };
+            let dispatch = <super::wcoj_cost_model::SkewClassifierCostModel as super::wcoj_cost_model::WcojCostModel>::should_dispatch_triangle(
+                &model,
+                &ctx,
+                self.provider.as_ref(),
+            );
             #[cfg(feature = "wcoj-phase-timing")]
             {
                 classifier_ms = cls_start.elapsed().as_secs_f64() as f32 * 1000.0;
             }
-            match score {
-                Ok(Some(s)) if s >= WCOJ_ADAPTIVE_SKEW_THRESHOLD => {
-                    // Above threshold → fall through to dispatch.
-                }
-                Ok(Some(_)) | Ok(None) => return Ok(None),
-                Err(_) => return Ok(None),
+            if !dispatch {
+                return Ok(None);
             }
         }
 
@@ -918,34 +919,33 @@ impl Executor {
             None => return Ok(None),
         };
 
-        // 7. Adaptive mode only: run the skew classifier on the
-        // same launch_stream as the eventual WCOJ pipeline.
-        // Classifier failures (Ok(None)) silently fall back to
-        // binary-join — classifier is optimization, not
-        // correctness. Score below threshold also falls back.
+        // 7. v0.6.5 slice 3: route the adaptive decision through
+        // the WcojCostModel seam. Default impl is
+        // SkewClassifierCostModel — verbatim wrap of the v0.6.5
+        // slice 2 inline logic; dispatch counts preserved.
         if mode == DispatchMode::Adaptive {
-            let score = match width {
-                WcojKeyWidth::FourByte => self.provider.wcoj_4cycle_skew_score_u32(
-                    buf_e1,
-                    buf_e2,
-                    buf_e3,
-                    buf_e4,
-                    launch_stream,
-                ),
-                WcojKeyWidth::EightByte => self.provider.wcoj_4cycle_skew_score_u64(
-                    buf_e1,
-                    buf_e2,
-                    buf_e3,
-                    buf_e4,
-                    launch_stream,
-                ),
+            let model = super::wcoj_cost_model::SkewClassifierCostModel::default();
+            let buffers: [&CudaBuffer; 4] = [buf_e1, buf_e2, buf_e3, buf_e4];
+            let slot_rels = [
+                matched.rel_e1,
+                matched.rel_e2,
+                matched.rel_e3,
+                matched.rel_e4,
+            ];
+            let ctx = super::wcoj_cost_model::WcojDispatchCtx {
+                stats: &self.stats,
+                launch_stream,
+                width,
+                buffers: &buffers[..],
+                slot_rels: &slot_rels,
             };
-            match score {
-                Ok(Some(s)) if s >= WCOJ_ADAPTIVE_4CYCLE_SKEW_THRESHOLD => {
-                    // Above threshold → fall through to dispatch.
-                }
-                Ok(Some(_)) | Ok(None) => return Ok(None),
-                Err(_) => return Ok(None),
+            let dispatch = <super::wcoj_cost_model::SkewClassifierCostModel as super::wcoj_cost_model::WcojCostModel>::should_dispatch_4cycle(
+                &model,
+                &ctx,
+                self.provider.as_ref(),
+            );
+            if !dispatch {
+                return Ok(None);
             }
         }
 
