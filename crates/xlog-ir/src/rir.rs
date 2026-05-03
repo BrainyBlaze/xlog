@@ -214,6 +214,41 @@ pub enum RirNode {
         full_rel: RelId,
     },
 
+    /// A multi-way conjunctive join that the executor MAY dispatch to a
+    /// specialized physical operator (e.g. GPU WCOJ). When the dispatch
+    /// declines, the executor falls through to `fallback`, which is the
+    /// IR-equivalent binary-join plan captured at promotion time.
+    ///
+    /// **Invariant** (upheld by `xlog-logic::promote::promote_multiway`):
+    /// executing `fallback` produces the same row set as a successful
+    /// specialized dispatch.
+    ///
+    /// v0.6.5 slice 1 only emits this for the certified triangle shape;
+    /// 4-way and general-arity admission are deferred to later slices.
+    MultiWayJoin {
+        /// Input scans, in physical-plan slot order. For the v0.6.5
+        /// initial promoter, this is exactly `[Scan(rel_xy), Scan(rel_yz),
+        /// Scan(rel_xz)]` for a recognized triangle. Each input MUST be
+        /// `RirNode::Scan { rel }` in v1.
+        inputs: Vec<RirNode>,
+        /// Per-slot, per-column variable-class id. Same id across slots →
+        /// join on that variable. For the canonical triangle this is
+        /// `[[Some(0), Some(1)], [Some(1), Some(2)], [Some(0), Some(2)]]`.
+        /// `None` is reserved for constant-bound or don't-care columns;
+        /// the v1 promoter never emits `None`.
+        slot_vars: Vec<Vec<Option<u32>>>,
+        /// Output projection in head-tuple order, identical to what the
+        /// equivalent `Project { input: Join { ... } }` carries. For the
+        /// triangle: `[Column(0), Column(1), Column(3)]`. The executor
+        /// re-validates this; a malformed or rotated projection is
+        /// treated as ineligible (no dispatch).
+        output_columns: Vec<ProjectExpr>,
+        /// IR-equivalent binary-join plan. Executed verbatim on dispatch
+        /// decline. Captured from the post-optimizer tree by the
+        /// promoter; never synthesized.
+        fallback: Box<RirNode>,
+    },
+
     /// Tensorized ILP super-graph join. A DLPack mask tensor selects which
     /// (body_i, body_j) → head_k rule combinations are active.
     TensorMaskedJoin {
@@ -288,6 +323,14 @@ impl RirNode {
             RirNode::TensorMaskedJoin { rel_index, .. } => {
                 for (rel_id, _) in rel_index {
                     rels.push(*rel_id);
+                }
+            }
+            RirNode::MultiWayJoin { inputs, .. } => {
+                // Recurse into `inputs` only. The `fallback` references
+                // the same set by promoter invariant; walking both would
+                // double-count.
+                for input in inputs {
+                    input.collect_relations(rels);
                 }
             }
         }
