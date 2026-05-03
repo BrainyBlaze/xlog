@@ -239,6 +239,26 @@ fn run_program(
     (executor, counter)
 }
 
+/// Compute the canonical-correct row set for the triangle program by
+/// running it with the WCOJ gate explicitly OFF — the binary-join
+/// chain. Used as the row-set reference that C1/C2/C5 must match
+/// exactly. Without this, "fallback descent works" tests would pass
+/// even if the walker silently dropped rows (e.g. returned just the
+/// first triangle).
+fn gate_off_reference_rows(
+    provider: Arc<CudaKernelProvider>,
+    memory: &Arc<GpuMemoryManager>,
+    inputs: &BTreeMap<&str, Vec<(u32, u32)>>,
+) -> Vec<(u32, u32, u32)> {
+    let config_off = RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(false));
+    let (exec_off, counter_off) = run_program(provider, memory, config_off, inputs);
+    assert_eq!(
+        counter_off, 0,
+        "gate-off reference must not dispatch; got counter {counter_off}"
+    );
+    download_triples(exec_off.store().get("tri").expect("tri present"))
+}
+
 /// Build a synthesized `MultiWayJoin` body that wraps a real
 /// binary-join `fallback` semantically equivalent to
 /// `tri(X,Y,Z) :- e1(X,Y), e2(Y,Z), e3(X,Z)`. The promoter would
@@ -294,20 +314,33 @@ fn build_canonical_triangle_body(rel_xy: u32, rel_yz: u32, rel_xz: u32) -> RirNo
 // ---------------------------------------------------------------
 
 #[test]
-fn c1_force_on_dispatches_and_produces_row_set() {
+fn c1_force_on_dispatches_and_matches_gate_off_row_set() {
     let Some(fix) = make_runtime_fixture() else {
         eprintln!("Skipping C1: CUDA runtime unavailable");
         return;
     };
     let inputs = triangle_fixture();
+
+    // Reference: gate-off binary-join chain produces the canonical row set.
+    let reference_rows = gate_off_reference_rows(Arc::clone(&fix.provider), &fix.memory, &inputs);
+    assert!(
+        !reference_rows.is_empty(),
+        "binary-join reference must produce at least one triangle on the K_4 fixture"
+    );
+
+    // Under test: force WCOJ. Counter must increment AND the row
+    // set must match the binary-join reference exactly.
     let config = RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(true));
     let (executor, counter) = run_program(Arc::clone(&fix.provider), &fix.memory, config, &inputs);
     assert_eq!(
         counter, 1,
         "force-on triangle must dispatch exactly once; got {counter}"
     );
-    let rows = download_triples(executor.store().get("tri").expect("tri present"));
-    assert!(!rows.is_empty(), "WCOJ dispatch produced empty row set");
+    let dispatch_rows = download_triples(executor.store().get("tri").expect("tri present"));
+    assert_eq!(
+        dispatch_rows, reference_rows,
+        "WCOJ dispatch row set must equal the gate-off binary-join reference"
+    );
 }
 
 // ---------------------------------------------------------------
@@ -320,6 +353,11 @@ fn c2_direct_execute_node_descends_to_fallback() {
         eprintln!("Skipping C2: CUDA runtime unavailable");
         return;
     };
+    let inputs = triangle_fixture();
+
+    // Reference row set comes from the binary-join chain.
+    let reference_rows = gate_off_reference_rows(Arc::clone(&fix.provider), &fix.memory, &inputs);
+
     // Set up an executor with WCOJ kill switch ON so that even if
     // a future refactor adds dispatch logic to execute_node, the
     // fallback path is what we exercise.
@@ -330,7 +368,6 @@ fn c2_direct_execute_node_descends_to_fallback() {
     // to obtain rel_ids and store the inputs in the executor.
     let mut compiler = Compiler::new();
     let _plan = compiler.compile(TRIANGLE_SOURCE).expect("compile");
-    let inputs = triangle_fixture();
     let rel_ids = compiler.rel_ids().clone();
     for (name, rel_id) in &rel_ids {
         executor.register_relation(*rel_id, name);
@@ -351,12 +388,13 @@ fn c2_direct_execute_node_descends_to_fallback() {
     let buf = executor
         .execute_node(&body)
         .expect("execute_node must succeed via fallback descent");
-    let mut rows = download_triples(&buf);
-    rows.sort();
-    rows.dedup();
-    assert!(
-        !rows.is_empty(),
-        "execute_node(MultiWayJoin) must produce a non-empty row set"
+    let rows = download_triples(&buf);
+    assert_eq!(
+        rows, reference_rows,
+        "execute_node(MultiWayJoin) must reproduce the binary-join reference \
+         row-for-row via the safety-net fallback descent. A walker that \
+         silently drops rows (e.g. returns only the first match) would slip \
+         through a non-empty assertion but fail this exact comparison."
     );
     assert_eq!(
         executor.wcoj_triangle_dispatch_count(),
@@ -451,6 +489,11 @@ fn c5_execute_non_recursive_scc_descends_via_safety_net() {
         eprintln!("Skipping C5: CUDA runtime unavailable");
         return;
     };
+    let inputs = triangle_fixture();
+
+    // Reference row set comes from the binary-join chain.
+    let reference_rows = gate_off_reference_rows(Arc::clone(&fix.provider), &fix.memory, &inputs);
+
     // execute_non_recursive_scc bypasses the WCOJ dispatch hook
     // entirely and relies on execute_node's MultiWayJoin safety-net
     // arm. xlog-prob::mc::sampling uses this path; a regression
@@ -462,7 +505,6 @@ fn c5_execute_non_recursive_scc_descends_via_safety_net() {
     // construct rules with synthesized MultiWayJoin bodies.
     let mut compiler = Compiler::new();
     let _plan = compiler.compile(TRIANGLE_SOURCE).expect("compile");
-    let inputs = triangle_fixture();
     let rel_ids = compiler.rel_ids().clone();
     for (name, rel_id) in &rel_ids {
         executor.register_relation(*rel_id, name);
@@ -493,15 +535,21 @@ fn c5_execute_non_recursive_scc_descends_via_safety_net() {
         0,
         "execute_non_recursive_scc must NOT engage WCOJ dispatch"
     );
-    // Result installed under the rule's head.
+    // Result installed under the rule's head, row-set identical to
+    // the binary-join reference. This is the load-bearing assertion:
+    // a walker that silently drops or duplicates rows would slip
+    // through a non-empty check but fail row-for-row equality.
     let buf = executor
         .store()
         .get("tri")
         .expect("execute_non_recursive_scc must install head buffer");
     let rows = download_triples(buf);
-    assert!(
-        !rows.is_empty(),
-        "execute_non_recursive_scc on a MultiWayJoin body must produce rows via fallback"
+    assert_eq!(
+        rows, reference_rows,
+        "execute_non_recursive_scc on a MultiWayJoin body must reproduce the \
+         binary-join reference row-for-row via the safety-net fallback descent. \
+         This is the path xlog-prob::mc::sampling uses for monotone SCCs; \
+         silent row-set divergence here would corrupt MC inference."
     );
 }
 
@@ -522,8 +570,8 @@ fn c6_pyxlog_walk_tmj_has_explicit_multiway_arm() {
     assert!(
         src.contains(needle),
         "pyxlog::ilp::walk_tmj must contain the explicit MultiWayJoin -> walk_tmj(fallback, …) \
-         arm. Source-string contract for slice 1 (xlog-prob::mc) walker hardening; if the arm \
-         is removed or reformatted, walk_tmj will silently miss any TMJ wrapped inside a \
-         promoted MultiWayJoin's fallback."
+         arm. Source-string contract for v0.6.5 slice 2 walker hardening of pyxlog::ilp; \
+         if the arm is removed or reformatted, walk_tmj will silently miss any TMJ wrapped \
+         inside a promoted MultiWayJoin's fallback (the catch-all `_ => None` would swallow it)."
     );
 }
