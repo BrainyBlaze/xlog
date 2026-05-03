@@ -487,6 +487,21 @@ impl Executor {
         &mut self,
         rule: &CompiledRule,
     ) -> Result<Option<CudaBuffer>> {
+        // Slice 4: body-keyed entry. Rule-keyed callers stay
+        // byte-identical via this thin wrapper.
+        self.try_dispatch_wcoj_triangle_on_body(&rule.body)
+    }
+
+    /// Slice 4 entry point — same gate / pattern-match / dispatch
+    /// logic as `try_dispatch_wcoj_triangle`, keyed on `body`
+    /// rather than `&CompiledRule`. The recursive engine calls
+    /// this on the rewritten variant body (one Scan's RelId
+    /// swapped to a delta RelId); the slice 1–3 wrapper above
+    /// preserves the rule-keyed surface for non-recursive callers.
+    pub(super) fn try_dispatch_wcoj_triangle_on_body(
+        &mut self,
+        body: &RirNode,
+    ) -> Result<Option<CudaBuffer>> {
         #[cfg(feature = "wcoj-phase-timing")]
         let wall_start = Instant::now();
         // 1. Gate resolution. Decision tree (highest → lowest):
@@ -528,7 +543,7 @@ impl Executor {
         };
 
         // 2. Pattern-match the canonical-triangle MultiWayJoin.
-        let Some(matched) = match_multiway_triangle(&rule.body) else {
+        let Some(matched) = match_multiway_triangle(body) else {
             return Ok(None);
         };
 
@@ -838,6 +853,19 @@ impl Executor {
         &mut self,
         rule: &CompiledRule,
     ) -> Result<Option<CudaBuffer>> {
+        // Slice 4: body-keyed entry. Rule-keyed callers stay
+        // byte-identical via this thin wrapper.
+        self.try_dispatch_wcoj_4cycle_on_body(&rule.body)
+    }
+
+    /// Slice 4 entry point — same gate / pattern-match / dispatch
+    /// logic as `try_dispatch_wcoj_4cycle`, keyed on `body` rather
+    /// than `&CompiledRule`. See
+    /// `try_dispatch_wcoj_triangle_on_body` for the rationale.
+    pub(super) fn try_dispatch_wcoj_4cycle_on_body(
+        &mut self,
+        body: &RirNode,
+    ) -> Result<Option<CudaBuffer>> {
         // 1. Kill switch.
         if wcoj_4cycle_disabled(self.config.wcoj_4cycle_dispatch_disabled) {
             return Ok(None);
@@ -862,7 +890,7 @@ impl Executor {
         };
 
         // 3. Match the canonical 4-cycle MultiWayJoin.
-        let Some(matched) = match_multiway_4cycle(&rule.body) else {
+        let Some(matched) = match_multiway_4cycle(body) else {
             return Ok(None);
         };
 
