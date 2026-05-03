@@ -1970,6 +1970,13 @@ mod tests {
     /// the node unchanged, `estimate_width` reports the head arity from
     /// `output_columns`, `estimate_cost` is the sum of input costs, and
     /// `find_column_relation` returns `None` (per slice 1 guardrail).
+    ///
+    /// v0.6.5 slice 2 (D5) extends each test below to also exercise a
+    /// synthesized 4-input `MultiWayJoin` via [`build_4input_multiway`].
+    /// This pins shape-agnosticism: the arms must NOT hard-code
+    /// `inputs.len() == 3` or `output_columns.len() == 3`. Slice 2a
+    /// (4-way) will produce real 4-input bodies through the promoter;
+    /// these tests are the load-bearing guard against silent regression.
     fn build_canonical_triangle_multiway() -> RirNode {
         let scan_xy = RirNode::Scan { rel: RelId(1) };
         let scan_yz = RirNode::Scan { rel: RelId(2) };
@@ -2012,62 +2019,139 @@ mod tests {
         }
     }
 
+    /// v0.6.5 slice 2 (D5): synthesized 4-input `MultiWayJoin` for
+    /// shape-agnosticism testing. Slice 1's promoter is triangle-only,
+    /// so this shape never reaches `Optimizer` through the production
+    /// pipeline; the tests below exercise the optimizer arms directly.
+    ///
+    /// Inputs reuse `RelId(1, 2, 3, 1)` — RelId(1) repeats — so the
+    /// stats manager registered in `make_stats_manager` covers all
+    /// four scans. Cost floor is `2*10_000 + 5_000 + 1_000 = 26_000`.
+    fn build_4input_multiway() -> RirNode {
+        let scans = [RelId(1), RelId(2), RelId(3), RelId(1)]
+            .map(|rel| RirNode::Scan { rel })
+            .to_vec();
+        // 4-cycle slot_vars [[A,B],[B,C],[C,D],[A,D]].
+        let slot_vars = vec![
+            vec![Some(0u32), Some(1)],
+            vec![Some(1u32), Some(2)],
+            vec![Some(2u32), Some(3)],
+            vec![Some(0u32), Some(3)],
+        ];
+        // 4-arity head projection (no real semantic meaning — the
+        // synthesized fallback is a stub).
+        let output_columns = vec![
+            ProjectExpr::Column(0),
+            ProjectExpr::Column(1),
+            ProjectExpr::Column(2),
+            ProjectExpr::Column(3),
+        ];
+        // Stub fallback: the optimizer arms do not execute fallback,
+        // so any RirNode is fine. Use Unit to keep the fixture small.
+        let fallback = RirNode::Unit;
+        RirNode::MultiWayJoin {
+            inputs: scans,
+            slot_vars,
+            output_columns,
+            fallback: Box::new(fallback),
+        }
+    }
+
     #[test]
     fn optimize_returns_multiway_unchanged() {
         let optimizer = Optimizer::new(make_stats_manager());
-        let node = build_canonical_triangle_multiway();
-        let optimized = optimizer.optimize(node.clone());
-        match (&node, &optimized) {
-            (
-                RirNode::MultiWayJoin {
-                    inputs: a_in,
-                    output_columns: a_out,
-                    ..
-                },
-                RirNode::MultiWayJoin {
-                    inputs: b_in,
-                    output_columns: b_out,
-                    ..
-                },
-            ) => {
-                assert_eq!(a_in.len(), b_in.len());
-                assert_eq!(a_out.len(), b_out.len());
+        for node in [
+            build_canonical_triangle_multiway(),
+            build_4input_multiway(),
+        ] {
+            let optimized = optimizer.optimize(node.clone());
+            match (&node, &optimized) {
+                (
+                    RirNode::MultiWayJoin {
+                        inputs: a_in,
+                        output_columns: a_out,
+                        ..
+                    },
+                    RirNode::MultiWayJoin {
+                        inputs: b_in,
+                        output_columns: b_out,
+                        ..
+                    },
+                ) => {
+                    assert_eq!(a_in.len(), b_in.len());
+                    assert_eq!(a_out.len(), b_out.len());
+                }
+                _ => panic!("optimize() must return a MultiWayJoin"),
             }
-            _ => panic!("optimize() must return a MultiWayJoin"),
         }
     }
 
     #[test]
     fn estimate_width_uses_output_columns_arity() {
         let optimizer = Optimizer::new(make_stats_manager());
-        let node = build_canonical_triangle_multiway();
-        assert_eq!(optimizer.estimate_width(&node), 3);
+        // Canonical triangle: 3 head columns.
+        assert_eq!(
+            optimizer.estimate_width(&build_canonical_triangle_multiway()),
+            3
+        );
+        // 4-input synthesized: 4 head columns. Locks shape-
+        // agnosticism — the arm must use output_columns.len(),
+        // not a hard-coded 3.
+        assert_eq!(optimizer.estimate_width(&build_4input_multiway()), 4);
     }
 
     #[test]
     fn estimate_cost_sums_input_costs() {
         let optimizer = Optimizer::new(make_stats_manager());
-        let node = build_canonical_triangle_multiway();
-        let cost = optimizer.estimate_cost(&node);
-        // The three inputs are Scan{1,2,3}; their cardinalities are
-        // 10_000 + 5_000 + 1_000 = 16_000. Cost row count must hit at
-        // least that floor (the actual scan-cost computation may add
-        // overhead, so we accept >=).
+
+        // Canonical triangle: rels 1, 2, 3 with cardinalities
+        // 10_000 + 5_000 + 1_000 = 16_000.
+        let cost_tri = optimizer.estimate_cost(&build_canonical_triangle_multiway());
         assert!(
-            cost.rows >= 16_000,
+            cost_tri.rows >= 16_000,
             "expected cost.rows >= 16000, got {}",
-            cost.rows
+            cost_tri.rows
+        );
+
+        // 4-input synthesized: rels 1, 2, 3, 1 → 2*10_000 + 5_000 +
+        // 1_000 = 26_000. The arm sums all four inputs; cost grows.
+        // Locks shape-agnosticism — the arm must walk every entry
+        // in `inputs`, not a hard-coded 3.
+        let cost_4 = optimizer.estimate_cost(&build_4input_multiway());
+        assert!(
+            cost_4.rows >= 26_000,
+            "expected 4-input cost.rows >= 26000, got {}",
+            cost_4.rows
+        );
+        assert!(
+            cost_4.rows > cost_tri.rows,
+            "4-input cost ({}) must exceed triangle cost ({})",
+            cost_4.rows,
+            cost_tri.rows
         );
     }
 
     #[test]
     fn find_column_relation_returns_none_for_multiway() {
         let optimizer = Optimizer::new(make_stats_manager());
-        let node = build_canonical_triangle_multiway();
         // Per slice 1 guardrail: no column-to-input mapping in this
-        // slice. Half-mapped is more dangerous than None.
-        for col in 0..node.referenced_relations().len() {
-            assert!(optimizer.find_column_relation(&node, col).is_none());
+        // slice. Half-mapped is more dangerous than None. The arm
+        // must return None regardless of arity — slice 2 strengthens
+        // this to also check the 4-input synthesized shape so a
+        // future "let's just return inputs[col_idx % len]" patch
+        // gets caught.
+        for node in [
+            build_canonical_triangle_multiway(),
+            build_4input_multiway(),
+        ] {
+            for col in 0..node.referenced_relations().len() {
+                assert!(
+                    optimizer.find_column_relation(&node, col).is_none(),
+                    "find_column_relation must return None for any \
+                     MultiWayJoin column (col={})",
+                    col,
+                );
+            }
         }
     }
 }
