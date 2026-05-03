@@ -1216,6 +1216,108 @@ impl Optimizer {
     }
 }
 
+/// v0.6.5 slice 3 — selectivity-aware optimizer pass.
+///
+/// **No-op by default.** Slice 3 lays the seam; slices 4 / 5 may
+/// add real reordering logic that consults `stats` to pick join
+/// orderings on selectivity.
+///
+/// Walks `plan.rules_by_scc[*].body` and rewrites nodes in place.
+/// The default no-op preserves every existing plan tree
+/// byte-for-byte. Tests assert structural equality (Debug-format
+/// snapshot before/after) for triangle, 4-cycle, and recursive-
+/// SCC plans.
+///
+/// **Compile-pipeline ordering** (locked by slice 3): runs
+/// between `Optimizer::optimize` and `xlog_logic::promote::promote_multiway`.
+/// The slice 1 invariant — promoter sees the post-optimizer tree —
+/// is preserved.
+pub mod selectivity_pass {
+    use xlog_ir::ExecutionPlan;
+    use xlog_stats::StatsManager;
+
+    /// No-op selectivity pass. Real reordering lands in a future
+    /// slice alongside its bench-evidence + cert updates.
+    pub fn run(plan: &mut ExecutionPlan, _stats: &StatsManager) {
+        // No-op: walk nothing, rewrite nothing. The compile-pipeline
+        // call site invokes this between optimizer.optimize and
+        // promote::promote_multiway; locking the no-op contract here
+        // means slice 4/5 can swap in real logic without re-arguing
+        // the call-site ordering.
+        let _ = plan;
+    }
+}
+
+#[cfg(test)]
+mod selectivity_pass_tests {
+    use super::selectivity_pass;
+    use crate::Compiler;
+    use xlog_stats::StatsManager;
+
+    fn body_snapshots(plan: &xlog_ir::ExecutionPlan) -> Vec<String> {
+        plan.rules_by_scc
+            .iter()
+            .flatten()
+            .map(|r| format!("{:?}", r.body))
+            .collect()
+    }
+
+    #[test]
+    fn selectivity_pass_is_noop_for_triangle_plan() {
+        let mut compiler = Compiler::new();
+        let plan = compiler
+            .compile("tri(X, Y, Z) :- e1(X, Y), e2(Y, Z), e3(X, Z).")
+            .expect("compile");
+        let before = body_snapshots(&plan);
+        let stats = StatsManager::new();
+        let mut plan2 = plan.clone();
+        selectivity_pass::run(&mut plan2, &stats);
+        let after = body_snapshots(&plan2);
+        assert_eq!(
+            before, after,
+            "selectivity_pass must preserve every triangle rule body byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn selectivity_pass_is_noop_for_4cycle_plan() {
+        let mut compiler = Compiler::new();
+        let plan = compiler
+            .compile("cycle4(W, X, Y, Z) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W).")
+            .expect("compile");
+        let before = body_snapshots(&plan);
+        let stats = StatsManager::new();
+        let mut plan2 = plan.clone();
+        selectivity_pass::run(&mut plan2, &stats);
+        let after = body_snapshots(&plan2);
+        assert_eq!(
+            before, after,
+            "selectivity_pass must preserve every 4-cycle rule body byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn selectivity_pass_is_noop_for_recursive_scc() {
+        let mut compiler = Compiler::new();
+        let plan = compiler
+            .compile(
+                "edge(1, 2). edge(2, 3). \
+                 reach(X, Y) :- edge(X, Y). \
+                 reach(X, Z) :- reach(X, Y), edge(Y, Z).",
+            )
+            .expect("compile");
+        let before = body_snapshots(&plan);
+        let stats = StatsManager::new();
+        let mut plan2 = plan.clone();
+        selectivity_pass::run(&mut plan2, &stats);
+        let after = body_snapshots(&plan2);
+        assert_eq!(
+            before, after,
+            "selectivity_pass must preserve recursive SCC bodies byte-for-byte"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
