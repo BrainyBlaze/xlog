@@ -1163,8 +1163,7 @@ impl CudaKernelProvider {
         #[cfg(not(feature = "wcoj-phase-timing"))]
         let _ = phase_timer; // suppress unused warning when feature off
 
-        let columns: Vec<CudaColumn> =
-            vec![out_w.into(), out_x.into(), out_y.into(), out_z.into()];
+        let columns: Vec<CudaColumn> = vec![out_w.into(), out_x.into(), out_y.into(), out_z.into()];
         Ok(CudaBuffer::from_columns_with_host_count(
             columns,
             total_rows as u64,
@@ -1963,10 +1962,7 @@ impl CudaKernelProvider {
                 .clone()
                 .launch_on_stream(&cu_stream, mat_config, &mut params)
                 .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "wcoj_4cycle_materialize_u64 launch failed: {}",
-                        e
-                    ))
+                    XlogError::Kernel(format!("wcoj_4cycle_materialize_u64 launch failed: {}", e))
                 })?;
         }
         phase_timer.record_after_queued_work(5, &cu_stream)?;
@@ -1996,8 +1992,7 @@ impl CudaKernelProvider {
         #[cfg(not(feature = "wcoj-phase-timing"))]
         let _ = phase_timer;
 
-        let columns: Vec<CudaColumn> =
-            vec![out_w.into(), out_x.into(), out_y.into(), out_z.into()];
+        let columns: Vec<CudaColumn> = vec![out_w.into(), out_x.into(), out_y.into(), out_z.into()];
         Ok(CudaBuffer::from_columns_with_host_count(
             columns,
             total_rows as u64,
@@ -2464,13 +2459,18 @@ impl CudaKernelProvider {
             return Err(XlogError::Kernel("skew_score: zero rows".to_string()));
         }
 
-        // Classifier reads col1 of each input — the X/Y/Z/W variables
-        // in their respective second positions (one per join axis
-        // J_X / J_Y / J_Z / J_W).
-        let e1_col1 = column_u32(e1, 1)?;
-        let e2_col1 = column_u32(e2, 1)?;
-        let e3_col1 = column_u32(e3, 1)?;
-        let e4_col1 = column_u32(e4, 1)?;
+        // Classifier reads col0 of each input — the lookup-key
+        // sides for the count kernel's binary searches:
+        //   * e1.col0 = W (iteration partition + closing-edge W)
+        //   * e2.col0 = X (e1 → e2 lookup key)
+        //   * e3.col0 = Y (e2 → e3 lookup key)
+        //   * e4.col0 = Z (e3 → e4 lookup key)
+        // Histogramming col1 instead would miss skew that exists
+        // only on the lookup-key side.
+        let e1_col0 = column_u32(e1, 0)?;
+        let e2_col0 = column_u32(e2, 0)?;
+        let e3_col0 = column_u32(e3, 0)?;
+        let e4_col0 = column_u32(e4, 0)?;
 
         // Pre-allocate the 4 × 64 histogram buffer BEFORE the
         // recorder. Total = 1024 bytes — still under the
@@ -2501,10 +2501,10 @@ impl CudaKernelProvider {
         rec.read(e2.num_rows_device());
         rec.read(e3.num_rows_device());
         rec.read(e4.num_rows_device());
-        rec.read_column(e1.column(1).expect("e1.col1"));
-        rec.read_column(e2.column(1).expect("e2.col1"));
-        rec.read_column(e3.column(1).expect("e3.col1"));
-        rec.read_column(e4.column(1).expect("e4.col1"));
+        rec.read_column(e1.column(0).expect("e1.col0"));
+        rec.read_column(e2.column(0).expect("e2.col0"));
+        rec.read_column(e3.column(0).expect("e3.col0"));
+        rec.read_column(e4.column(0).expect("e4.col0"));
         rec.write(&hist_buf);
         rec.preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("skew_score: preflight failed: {e}")))?;
@@ -2539,10 +2539,10 @@ impl CudaKernelProvider {
             // Step 2: combined histogram kernel.
             // SAFETY: 10-arg signature
             //   wcoj_4cycle_skew_histogram_u32(
-            //     const u32* e1_col1, u32 n_e1,
-            //     const u32* e2_col1, u32 n_e2,
-            //     const u32* e3_col1, u32 n_e3,
-            //     const u32* e4_col1, u32 n_e4,
+            //     const u32* e1_col0, u32 n_e1,
+            //     const u32* e2_col0, u32 n_e2,
+            //     const u32* e3_col0, u32 n_e3,
+            //     const u32* e4_col0, u32 n_e4,
             //     u32 blocks_per_col,
             //     u32* histograms)
             unsafe {
@@ -2556,13 +2556,13 @@ impl CudaKernelProvider {
                             shared_mem_bytes: 0,
                         },
                         (
-                            e1_col1,
+                            e1_col0,
                             n_e1,
-                            e2_col1,
+                            e2_col0,
                             n_e2,
-                            e3_col1,
+                            e3_col0,
                             n_e3,
-                            e4_col1,
+                            e4_col0,
                             n_e4,
                             blocks_per_col,
                             &mut hist_buf,
@@ -2653,10 +2653,13 @@ impl CudaKernelProvider {
             return Err(XlogError::Kernel("skew_score: zero rows".to_string()));
         }
 
-        let e1_col1 = column_u64(e1, 1)?;
-        let e2_col1 = column_u64(e2, 1)?;
-        let e3_col1 = column_u64(e3, 1)?;
-        let e4_col1 = column_u64(e4, 1)?;
+        // Classifier reads col0 of each input — the lookup-key
+        // sides for the count kernel's binary searches (mirrors
+        // the u32 path's choice; see comment there for rationale).
+        let e1_col0 = column_u64(e1, 0)?;
+        let e2_col0 = column_u64(e2, 0)?;
+        let e3_col0 = column_u64(e3, 0)?;
+        let e4_col0 = column_u64(e4, 0)?;
 
         let hist_len = (4 * WCOJ_SKEW_NUM_BUCKETS) as usize;
         let mut hist_buf = self.memory.alloc::<u32>(hist_len)?;
@@ -2679,10 +2682,10 @@ impl CudaKernelProvider {
         rec.read(e2.num_rows_device());
         rec.read(e3.num_rows_device());
         rec.read(e4.num_rows_device());
-        rec.read_column(e1.column(1).expect("e1.col1"));
-        rec.read_column(e2.column(1).expect("e2.col1"));
-        rec.read_column(e3.column(1).expect("e3.col1"));
-        rec.read_column(e4.column(1).expect("e4.col1"));
+        rec.read_column(e1.column(0).expect("e1.col0"));
+        rec.read_column(e2.column(0).expect("e2.col0"));
+        rec.read_column(e3.column(0).expect("e3.col0"));
+        rec.read_column(e4.column(0).expect("e4.col0"));
         rec.write(&hist_buf);
         rec.preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("skew_score: preflight failed: {e}")))?;
@@ -2717,13 +2720,13 @@ impl CudaKernelProvider {
                             shared_mem_bytes: 0,
                         },
                         (
-                            e1_col1,
+                            e1_col0,
                             n_e1,
-                            e2_col1,
+                            e2_col0,
                             n_e2,
-                            e3_col1,
+                            e3_col0,
                             n_e3,
-                            e4_col1,
+                            e4_col0,
                             n_e4,
                             blocks_per_col,
                             &mut hist_buf,

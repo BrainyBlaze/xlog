@@ -154,8 +154,7 @@ fn download_quads(buf: &CudaBuffer) -> Vec<(u32, u32, u32, u32)> {
     out
 }
 
-const FOUR_CYCLE_SOURCE: &str =
-    "cycle4(W, X, Y, Z) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W).";
+const FOUR_CYCLE_SOURCE: &str = "cycle4(W, X, Y, Z) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W).";
 
 /// Dedicated 4-cycle fixture — distinct from the triangle K_4
 /// fixture. Vertices {1, 2, 3, 4, 5, 6} with two embedded 4-cycles:
@@ -212,7 +211,10 @@ fn wiring_gate_off_does_not_dispatch_and_produces_row_set() {
     let config = RuntimeConfig::default().with_wcoj_4cycle_dispatch(Some(false));
     let (executor, tri, four) =
         run_program(Arc::clone(&fix.provider), &fix.memory, config, &inputs);
-    assert_eq!(tri, 0, "triangle dispatch must not fire on a 4-cycle program");
+    assert_eq!(
+        tri, 0,
+        "triangle dispatch must not fire on a 4-cycle program"
+    );
     assert_eq!(four, 0, "gate=Some(false) must not dispatch 4-cycle");
     let rows = download_quads(executor.store().get("cycle4").expect("cycle4 present"));
     assert!(
@@ -240,7 +242,10 @@ fn wiring_gate_on_dispatches_and_matches_binary_join_output() {
     let config_on = RuntimeConfig::default().with_wcoj_4cycle_dispatch(Some(true));
     let (exec_on, tri_on, four_on) =
         run_program(Arc::clone(&fix.provider), &fix.memory, config_on, &inputs);
-    assert_eq!(tri_on, 0, "triangle counter must stay 0 on a 4-cycle program");
+    assert_eq!(
+        tri_on, 0,
+        "triangle counter must stay 0 on a 4-cycle program"
+    );
     assert_eq!(
         four_on, 1,
         "gate=Some(true) on the 4-cycle rule must dispatch exactly once; \
@@ -263,8 +268,7 @@ fn wiring_kill_switch_beats_force() {
     let config = RuntimeConfig::default()
         .with_wcoj_4cycle_dispatch(Some(true))
         .with_wcoj_4cycle_dispatch_disabled(Some(true));
-    let (executor, _, four) =
-        run_program(Arc::clone(&fix.provider), &fix.memory, config, &inputs);
+    let (executor, _, four) = run_program(Arc::clone(&fix.provider), &fix.memory, config, &inputs);
     assert_eq!(four, 0, "kill switch must override force-on");
     // Result still computed via binary-join fallback.
     let rows = download_quads(executor.store().get("cycle4").expect("cycle4"));
@@ -283,10 +287,93 @@ fn wiring_adaptive_optin_default_off_does_not_dispatch() {
     };
     let inputs = fourcycle_fixture();
     let config = RuntimeConfig::default(); // no overrides
-    let (_executor, _, four) =
-        run_program(Arc::clone(&fix.provider), &fix.memory, config, &inputs);
+    let (_executor, _, four) = run_program(Arc::clone(&fix.provider), &fix.memory, config, &inputs);
     assert_eq!(
         four, 0,
         "adaptive defaults OFF for 4-cycle (slice 2 contract); no dispatch on default config"
+    );
+}
+
+// -----------------------------------------------------------------
+// Symbol parity — Symbol shares u32's 4-byte physical layout, so
+// the kernel + matcher accept Symbol 4-cycle inputs unchanged.
+// -----------------------------------------------------------------
+
+/// Symbol-typed sibling of `upload_binary_u32`. Same on-device
+/// bytes; only the schema differs.
+fn upload_binary_symbol(memory: &Arc<GpuMemoryManager>, rows: &[(u32, u32)]) -> CudaBuffer {
+    let n = rows.len() as u32;
+    let bytes_per_col = (n as usize) * std::mem::size_of::<u32>();
+    let mut col0 = memory.alloc::<u8>(bytes_per_col).expect("alloc col0");
+    let mut col1 = memory.alloc::<u8>(bytes_per_col).expect("alloc col1");
+    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc d_num_rows");
+    let dev = memory.device().inner();
+    if n > 0 {
+        let c0: Vec<u8> = rows.iter().flat_map(|&(a, _)| a.to_le_bytes()).collect();
+        let c1: Vec<u8> = rows.iter().flat_map(|&(_, b)| b.to_le_bytes()).collect();
+        dev.htod_sync_copy_into(&c0, &mut col0).expect("htod c0");
+        dev.htod_sync_copy_into(&c1, &mut col1).expect("htod c1");
+    }
+    dev.htod_sync_copy_into(&[n], &mut d_num_rows)
+        .expect("htod n");
+    let schema = Schema::new(vec![
+        ("col0".to_string(), ScalarType::Symbol),
+        ("col1".to_string(), ScalarType::Symbol),
+    ]);
+    CudaBuffer::from_columns_with_host_count(
+        vec![col0.into(), col1.into()],
+        n as u64,
+        d_num_rows,
+        schema,
+        n,
+    )
+}
+
+#[test]
+fn wiring_gate_on_symbol_4cycle_dispatches_and_preserves_schema() {
+    // Same 4-cycle topology + bits as the U32 wiring test, but the
+    // input buffers carry Symbol-typed schemas. The classifier and
+    // kernel read the same 4-byte bits unchanged; the output
+    // buffer's schema preserves Symbol per column (no silent
+    // widening to U32).
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let inputs = fourcycle_fixture();
+
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile(FOUR_CYCLE_SOURCE).expect("compile");
+    let config = RuntimeConfig::default().with_wcoj_4cycle_dispatch(Some(true));
+    let mut executor = Executor::new_with_config(Arc::clone(&fix.provider), config);
+    for (name, rel_id) in compiler.rel_ids() {
+        executor.register_relation(*rel_id, name);
+    }
+    for (name, rows) in &inputs {
+        let buf = upload_binary_symbol(&fix.memory, rows);
+        executor.put_relation(name, buf);
+    }
+    executor.execute_plan(&plan).expect("execute_plan");
+    let counter = executor.wcoj_4cycle_dispatch_count();
+    assert_eq!(
+        counter, 1,
+        "gate=Some(true) on Symbol-typed 4-cycle inputs must dispatch exactly once; \
+         got counter {counter}"
+    );
+
+    // Schema preservation: the kernel built its output schema from
+    // the inputs' per-column types, so Symbol-input → Symbol-output.
+    let buf = executor.store().get("cycle4").expect("cycle4 present");
+    assert_eq!(buf.schema.column_type(0), Some(ScalarType::Symbol));
+    assert_eq!(buf.schema.column_type(1), Some(ScalarType::Symbol));
+    assert_eq!(buf.schema.column_type(2), Some(ScalarType::Symbol));
+    assert_eq!(buf.schema.column_type(3), Some(ScalarType::Symbol));
+
+    // Row set: the kernel's bit-equality joins produce the same
+    // quads as the U32 path on the same bit-pattern fixture.
+    let rows = download_quads(buf);
+    assert!(
+        !rows.is_empty(),
+        "Symbol 4-cycle must produce non-empty rows"
     );
 }

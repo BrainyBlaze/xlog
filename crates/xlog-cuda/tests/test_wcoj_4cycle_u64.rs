@@ -154,9 +154,7 @@ fn cpu_4cycle_reference_u64(
                 if y2 != y {
                     continue;
                 }
-                if e4_set.contains(&(z, w))
-                    && e2_set.contains(&(x, y))
-                    && e3_set.contains(&(y, z))
+                if e4_set.contains(&(z, w)) && e2_set.contains(&(x, y)) && e3_set.contains(&(y, z))
                 {
                     out.insert((w, x, y, z));
                 }
@@ -175,7 +173,12 @@ fn wcoj_4cycle_u64_matches_cpu_reference_perfect_square() {
     // Use values larger than u32::MAX to lock that the path is
     // genuinely 64-bit, not u32 with wide schemas.
     let big = (1u64 << 40) - 1; // > u32::MAX
-    let edges: Vec<(u64, u64)> = vec![(big, big + 1), (big + 1, big + 2), (big + 2, big + 3), (big + 3, big)];
+    let edges: Vec<(u64, u64)> = vec![
+        (big, big + 1),
+        (big + 1, big + 2),
+        (big + 2, big + 3),
+        (big + 3, big),
+    ];
     let buf_e1 = upload_binary_u64(&fix.memory, &edges);
     let buf_e2 = upload_binary_u64(&fix.memory, &edges);
     let buf_e3 = upload_binary_u64(&fix.memory, &edges);
@@ -258,7 +261,8 @@ fn wcoj_4cycle_u64_rejects_u32_inputs() {
             dev.htod_sync_copy_into(&c0, &mut col0).expect("htod c0");
             dev.htod_sync_copy_into(&c1, &mut col1).expect("htod c1");
         }
-        dev.htod_sync_copy_into(&[n], &mut d_num_rows).expect("htod n");
+        dev.htod_sync_copy_into(&[n], &mut d_num_rows)
+            .expect("htod n");
         let schema = Schema::new(vec![
             ("col0".to_string(), ScalarType::U32),
             ("col1".to_string(), ScalarType::U32),
@@ -273,9 +277,13 @@ fn wcoj_4cycle_u64_rejects_u32_inputs() {
     };
     let buf_u32 = mk_u32_buf(&[(1, 2)]);
     let launch_stream = fix.pool.acquire().expect("acquire launch_stream");
-    let err = fix
-        .provider
-        .wcoj_4cycle_u64_recorded(&buf_u32, &buf_u32, &buf_u32, &buf_u32, launch_stream);
+    let err = fix.provider.wcoj_4cycle_u64_recorded(
+        &buf_u32,
+        &buf_u32,
+        &buf_u32,
+        &buf_u32,
+        launch_stream,
+    );
     assert!(
         err.is_err(),
         "wcoj_4cycle_u64_recorded must reject U32-schema inputs"

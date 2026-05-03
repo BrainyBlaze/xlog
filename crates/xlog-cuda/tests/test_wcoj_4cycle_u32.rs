@@ -183,9 +183,7 @@ fn cpu_4cycle_reference(
                 if y2 != y {
                     continue;
                 }
-                if e4_set.contains(&(z, w))
-                    && e2_set.contains(&(x, y))
-                    && e3_set.contains(&(y, z))
+                if e4_set.contains(&(z, w)) && e2_set.contains(&(x, y)) && e3_set.contains(&(y, z))
                 {
                     out.insert((w, x, y, z));
                 }

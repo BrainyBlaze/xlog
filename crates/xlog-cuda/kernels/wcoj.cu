@@ -845,12 +845,19 @@ extern "C" __global__ void wcoj_triangle_skew_histogram_u64(
 // ===============================================================
 // v0.6.5 slice 2 — 4-cycle adaptive-dispatch skew classifier.
 //
-// Combined kernel that histograms the four 4-cycle join-key
+// Combined kernel that histograms the four 4-cycle **lookup-key**
 // columns into 4 × 64 buckets in a single launch:
-//   * e1.col1 — X side of J_X (e1 ⋈ e2)
-//   * e2.col1 — Y side of J_Y (e2 ⋈ e3)
-//   * e3.col1 — Z side of J_Z (e3 ⋈ e4)
-//   * e4.col1 — W side of J_W (e4 ⋈ e1, closing the cycle)
+//   * e1.col0 — W (iteration grid partition + W-validation in e4)
+//   * e2.col0 — X (lookup key for the e1 → e2 join)
+//   * e3.col0 — Y (lookup key for the e2 → e3 join)
+//   * e4.col0 — Z (lookup key for the e3 → e4 join)
+//
+// These are the columns the count kernel binary-searches on;
+// concentration on any one of them produces heavy lookup ranges
+// for the threads that hit them. Histogramming col1 instead would
+// miss skew that exists ONLY on the lookup-key side (e.g. all e2
+// rows share the same X but X is uniform across e1 — the kernel
+// would still hammer the same e2 range).
 //
 // Output is a 4 × 64 = 256-bucket histogram (1024 bytes).
 // Caller D2Hs the histogram and reduces to per-position skew
@@ -865,13 +872,13 @@ extern "C" __global__ void wcoj_triangle_skew_histogram_u64(
 // ===============================================================
 
 extern "C" __global__ void wcoj_4cycle_skew_histogram_u32(
-    const uint32_t* __restrict__ e1_col1,
+    const uint32_t* __restrict__ e1_col0,
     uint32_t n_e1,
-    const uint32_t* __restrict__ e2_col1,
+    const uint32_t* __restrict__ e2_col0,
     uint32_t n_e2,
-    const uint32_t* __restrict__ e3_col1,
+    const uint32_t* __restrict__ e3_col0,
     uint32_t n_e3,
-    const uint32_t* __restrict__ e4_col1,
+    const uint32_t* __restrict__ e4_col0,
     uint32_t n_e4,
     uint32_t blocks_per_col,
     uint32_t* __restrict__ histograms) {
@@ -891,13 +898,13 @@ extern "C" __global__ void wcoj_4cycle_skew_histogram_u32(
     const uint32_t* col;
     uint32_t n;
     if (col_idx == 0) {
-        col = e1_col1; n = n_e1;
+        col = e1_col0; n = n_e1;
     } else if (col_idx == 1) {
-        col = e2_col1; n = n_e2;
+        col = e2_col0; n = n_e2;
     } else if (col_idx == 2) {
-        col = e3_col1; n = n_e3;
+        col = e3_col0; n = n_e3;
     } else {
-        col = e4_col1; n = n_e4;
+        col = e4_col0; n = n_e4;
     }
     if (i < n) {
         uint32_t b = wcoj_skew_bucket_u32(col[i]);
@@ -914,13 +921,13 @@ extern "C" __global__ void wcoj_4cycle_skew_histogram_u32(
 }
 
 extern "C" __global__ void wcoj_4cycle_skew_histogram_u64(
-    const uint64_t* __restrict__ e1_col1,
+    const uint64_t* __restrict__ e1_col0,
     uint32_t n_e1,
-    const uint64_t* __restrict__ e2_col1,
+    const uint64_t* __restrict__ e2_col0,
     uint32_t n_e2,
-    const uint64_t* __restrict__ e3_col1,
+    const uint64_t* __restrict__ e3_col0,
     uint32_t n_e3,
-    const uint64_t* __restrict__ e4_col1,
+    const uint64_t* __restrict__ e4_col0,
     uint32_t n_e4,
     uint32_t blocks_per_col,
     uint32_t* __restrict__ histograms) {
@@ -940,13 +947,13 @@ extern "C" __global__ void wcoj_4cycle_skew_histogram_u64(
     const uint64_t* col;
     uint32_t n;
     if (col_idx == 0) {
-        col = e1_col1; n = n_e1;
+        col = e1_col0; n = n_e1;
     } else if (col_idx == 1) {
-        col = e2_col1; n = n_e2;
+        col = e2_col0; n = n_e2;
     } else if (col_idx == 2) {
-        col = e3_col1; n = n_e3;
+        col = e3_col0; n = n_e3;
     } else {
-        col = e4_col1; n = n_e4;
+        col = e4_col0; n = n_e4;
     }
     if (i < n) {
         uint32_t b = wcoj_skew_bucket_u64(col[i]);

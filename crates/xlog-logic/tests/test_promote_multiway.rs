@@ -92,8 +92,7 @@ reach(X, Y) :- edge(X, Y).
 
 // v0.6.5 slice 2 — 4-cycle Compiler-pipeline coverage.
 
-const FOUR_CYCLE_PROGRAM: &str =
-    "cycle4(W, X, Y, Z) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W).";
+const FOUR_CYCLE_PROGRAM: &str = "cycle4(W, X, Y, Z) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W).";
 
 #[test]
 fn compile_4cycle_program_produces_multiway_body() {

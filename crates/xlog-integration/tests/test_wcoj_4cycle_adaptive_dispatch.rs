@@ -10,7 +10,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use cudarc::driver::sys;
 use xlog_core::{MemoryBudget, RuntimeConfig, ScalarType, Schema};
 use xlog_cuda::device_runtime::{
     AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
@@ -100,8 +99,7 @@ fn upload_binary_u32(memory: &Arc<GpuMemoryManager>, rows: &[(u32, u32)]) -> Cud
     )
 }
 
-const FOUR_CYCLE_SOURCE: &str =
-    "cycle4(W, X, Y, Z) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W).";
+const FOUR_CYCLE_SOURCE: &str = "cycle4(W, X, Y, Z) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W).";
 
 /// Super-hub fixture: a single hub vertex (1) dominates the edge
 /// list. Classifier should detect heavy concentration on at least
@@ -252,8 +250,5 @@ fn force_gate_dispatches_regardless_of_adaptive() {
         config,
         &uniform_fixture(),
     );
-    assert_eq!(
-        counter, 1,
-        "force gate must bypass adaptive classifier"
-    );
+    assert_eq!(counter, 1, "force gate must bypass adaptive classifier");
 }

@@ -73,20 +73,36 @@ separate follow-up slice. The cert test
 contract: with `RuntimeConfig::default()` and no env vars set, no
 WCOJ dispatch fires even on super-hub fixtures.
 
-## Full Criterion Bench (Deferred)
+## Criterion Bench (Shipped, Compact Matrix)
 
-A full perf bench mirroring `crates/xlog-integration/benches/wcoj_triangle_bench.rs`
-({u32,u64} × {uniform, superhub, empty} × {sizes} × {Off, Force,
-Adaptive} matrix) is deferred to a follow-up slice. The four
-correctness gates above are the slice acceptance; absolute
-throughput numbers do not affect the dispatch correctness contract.
-A future bench slice will:
+`crates/xlog-integration/benches/wcoj_4cycle_bench.rs` ships with
+slice 2 in a compact form: {u32, u64} × {uniform, superhub} ×
+{2K rows} × {Off, Force, Adaptive} = 12 cells. Each cell pre-runs
+a correctness check outside the timed region (gate-off vs gate-on
+row-set parity, dispatch counter == 0/1).
 
-1. Implement `crates/xlog-integration/benches/wcoj_4cycle_bench.rs`.
-2. Capture {Off, Force, Adaptive} medians + IQR per fixture.
-3. Verify the threshold's ≥1.7× headroom holds quantitatively
-   beyond the cert-test pass/fail boundary.
-4. Inform the eventual default-on follow-up slice's go/no-go.
+Matrix is intentionally smaller than triangle's 37 cells: 4-cycle's
+binary-join fallback is a 4-input cross-product that scales poorly
+with row count. Expanding to triangle's full {10K, 50K, 100K, 250K}
+ladder would require row-count-driven kernel headroom analysis and
+is queued for a follow-up bench slice. The compact bench is
+sufficient to validate the threshold + correctness contract for
+slice 2 acceptance.
+
+Run: `cargo bench -p xlog-integration --bench wcoj_4cycle_bench`.
+
+## Classifier Lookup-Side Coverage Update
+
+After review, the classifier histograms **col0** of each input
+(`e1.col0 = W`, `e2.col0 = X`, `e3.col0 = Y`, `e4.col0 = Z`) rather
+than col1. col0 is the lookup-key side of each binary search the
+count kernel performs (e2.col0 for X-lookup, e3.col0 for Y-lookup,
+e4.col0 for Z-lookup; e1.col0 partitions the iteration grid + closes
+the cycle). Histogramming col1 would miss skew that exists only on
+the lookup-key side — for example, all e2 rows sharing the same X
+while X is uniform across e1. The cert tests
+`crates/xlog-cuda/tests/test_wcoj_4cycle_skew.rs::skew_detected_on_e{1,2,3,4}_col0`
+pin per-axis detection.
 
 ## File Index
 

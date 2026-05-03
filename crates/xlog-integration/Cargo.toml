@@ -30,6 +30,10 @@ criterion = "0.5"
 name = "wcoj_triangle_bench"
 harness = false
 
+[[bench]]
+name = "wcoj_4cycle_bench"
+harness = false
+
 [[bin]]
 name = "xlog_run"
 path = "src/bin/xlog_run.rs"
