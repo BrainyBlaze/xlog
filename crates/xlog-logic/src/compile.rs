@@ -281,6 +281,13 @@ impl Compiler {
             }
         }
 
+        // v0.6.5 slice 1: promote eligible triangle subtrees to
+        // RirNode::MultiWayJoin. Runs *after* the optimizer so the
+        // optimizer never has to learn the new variant. Fallback
+        // identity preserves v0.6.2 binary-join semantics on
+        // dispatch decline.
+        crate::promote::promote_multiway(&mut plan);
+
         Ok(plan)
     }
 
