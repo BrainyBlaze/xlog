@@ -225,6 +225,16 @@ pub enum RirNode {
     ///
     /// v0.6.5 slice 1 only emits this for the certified triangle shape;
     /// 4-way and general-arity admission are deferred to later slices.
+    ///
+    /// # Walker contract
+    ///
+    /// Generic walkers and visitors that handle `MultiWayJoin` MUST be
+    /// shape-agnostic over `inputs`, `slot_vars`, and `output_columns`
+    /// — no walker may assume a fixed arity or a specific
+    /// variable-class layout. Only matchers/promoters whose name
+    /// carries an explicit shape qualifier (e.g.
+    /// `match_multiway_triangle`, `try_promote_triangle`) may lock to
+    /// a specific shape.
     MultiWayJoin {
         /// Input scans, in physical-plan slot order. For the v0.6.5
         /// initial promoter, this is exactly `[Scan(rel_xy), Scan(rel_yz),
