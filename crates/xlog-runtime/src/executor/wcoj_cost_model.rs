@@ -260,6 +260,151 @@ impl WcojCostModel for SkewClassifierCostModel {
 }
 
 // -----------------------------------------------------------------
+// v0.6.5 slice 5 — CardinalityAwareCostModel (opt-in)
+// -----------------------------------------------------------------
+
+/// Pinned thresholds — exposed as `pub(super)` so the slice 5
+/// unit tests can reference them by name. **These are opt-in
+/// experimental constants**, not production-tuned values; the
+/// default cost model is still `SkewClassifierCostModel`. A
+/// future slice (5.2 / v0.6.6) tunes these with workload
+/// evidence and may flip the default.
+///
+/// `MIN_CARDINALITY_BINARY_INTERMEDIATE` — kernel launch
+/// overhead is a fixed cost; below this estimated intermediate,
+/// binary-join is cheaper even when skew is high. The floor is
+/// row-count-based, not byte-based, because per-row width
+/// varies across triangle/4-cycle and u32/u64.
+pub(super) const MIN_CARDINALITY_BINARY_INTERMEDIATE: u64 = 4_096;
+/// `LARGE_CARDINALITY_BINARY_INTERMEDIATE` — clearly past the
+/// AGM-bound crossover for triangle (`O(N^1.5)` vs. `O(N^2)`
+/// for binary). Above this the WCOJ kernel wins regardless of
+/// skew, so the model dispatches even without skew evidence.
+pub(super) const LARGE_CARDINALITY_BINARY_INTERMEDIATE: u64 = 1_000_000;
+/// `MIN_SKEW_FOR_CARDINALITY` — half the slice 2 0.10
+/// threshold. The cardinality clause already requires
+/// non-trivial input sizes; this floor only excludes truly
+/// uniform fixtures where binary-join's branch predictability
+/// dominates.
+pub(super) const MIN_SKEW_FOR_CARDINALITY: f64 = 0.05;
+
+/// Slice 5 opt-in: classifier blended with cardinality
+/// estimates from `xlog_stats::StatsManager`.
+///
+/// Decision rule (locked):
+///   1. **Missing-stats safety floor** — if any slot relation
+///      has `None` from `get_relation_stats` or `cardinality
+///      == 0` (recursive deltas, freshly-uploaded relations,
+///      stats not seeded), delegate to
+///      `SkewClassifierCostModel`. Slice 1–4 behavior preserved
+///      until stats are populated.
+///   2. **Classifier failure is never overridden** — if the
+///      score is `Ok(None)` or `Err(_)`, fall back regardless
+///      of cardinality. Preserves the slice-1 WCOJ safety
+///      invariant.
+///   3. With populated stats AND a real score:
+///      * `binary_est >= LARGE_CARDINALITY_BINARY_INTERMEDIATE`
+///        → dispatch (AGM-bound dominates).
+///      * `binary_est >= MIN_CARDINALITY_BINARY_INTERMEDIATE`
+///        AND `score >= MIN_SKEW_FOR_CARDINALITY` → dispatch.
+///      * Else → fall back.
+pub(super) struct CardinalityAwareCostModel {
+    min_binary_intermediate: u64,
+    large_binary_intermediate: u64,
+    min_skew_for_cardinality: f64,
+    fallback: SkewClassifierCostModel,
+}
+
+impl Default for CardinalityAwareCostModel {
+    fn default() -> Self {
+        Self {
+            min_binary_intermediate: MIN_CARDINALITY_BINARY_INTERMEDIATE,
+            large_binary_intermediate: LARGE_CARDINALITY_BINARY_INTERMEDIATE,
+            min_skew_for_cardinality: MIN_SKEW_FOR_CARDINALITY,
+            fallback: SkewClassifierCostModel::default(),
+        }
+    }
+}
+
+impl CardinalityAwareCostModel {
+    /// Look up populated cardinalities for every slot relation.
+    /// Returns `None` if any slot has missing stats or zero
+    /// cardinality — the caller then delegates to the skew
+    /// fallback.
+    fn populated_cards(&self, ctx: &WcojDispatchCtx) -> Option<Vec<u64>> {
+        ctx.slot_rels
+            .iter()
+            .map(|r| {
+                ctx.stats
+                    .get_relation_stats(*r)
+                    .map(|s| s.cardinality)
+                    .filter(|c| *c > 0)
+            })
+            .collect()
+    }
+
+    /// Apply the binary_est / skew rule on populated stats.
+    /// `inner_left` / `inner_right` are the slot indices that
+    /// the slice 1 / slice 2 promoter joins first (left.col[1]
+    /// = right.col[0] for both triangle and 4-cycle inner
+    /// joins). Returns `false` if the score is `Ok(None)` or
+    /// `Err(_)`.
+    fn decide_from_card_and_skew(&self, binary_est: u64, score: Result<Option<f64>>) -> bool {
+        let s = match score {
+            Ok(Some(s)) => s,
+            Ok(None) | Err(_) => return false,
+        };
+        binary_est >= self.large_binary_intermediate
+            || (binary_est >= self.min_binary_intermediate && s >= self.min_skew_for_cardinality)
+    }
+}
+
+impl WcojCostModel for CardinalityAwareCostModel {
+    fn should_dispatch_triangle(
+        &self,
+        ctx: &WcojDispatchCtx,
+        scorer: &dyn SkewScoreSource,
+    ) -> bool {
+        debug_assert_eq!(
+            ctx.slot_rels.len(),
+            3,
+            "triangle ctx must carry exactly 3 slot relations"
+        );
+        // Step 1: missing-stats safety floor.
+        if self.populated_cards(ctx).is_none() {
+            return self.fallback.should_dispatch_triangle(ctx, scorer);
+        }
+        // Step 2: estimate the inner binary intermediate
+        // (e1 ⋈ e2 on `[1] / [0]` — the canonical slice 1
+        // lowered shape).
+        let binary_est =
+            ctx.stats
+                .estimate_join_cardinality(ctx.slot_rels[0], ctx.slot_rels[1], &[1], &[0]);
+        // Step 3: classifier — failure never overridden.
+        let score = scorer.triangle_skew_score(ctx.launch_stream, ctx.width);
+        self.decide_from_card_and_skew(binary_est, score)
+    }
+
+    fn should_dispatch_4cycle(&self, ctx: &WcojDispatchCtx, scorer: &dyn SkewScoreSource) -> bool {
+        debug_assert_eq!(
+            ctx.slot_rels.len(),
+            4,
+            "4-cycle ctx must carry exactly 4 slot relations"
+        );
+        if self.populated_cards(ctx).is_none() {
+            return self.fallback.should_dispatch_4cycle(ctx, scorer);
+        }
+        // 4-cycle inner join: slot 0 ⋈ slot 1 on `[1] / [0]`
+        // per the slice 2 lowered bushy shape.
+        let binary_est =
+            ctx.stats
+                .estimate_join_cardinality(ctx.slot_rels[0], ctx.slot_rels[1], &[1], &[0]);
+        let score = scorer.cycle4_skew_score(ctx.launch_stream, ctx.width);
+        self.decide_from_card_and_skew(binary_est, score)
+    }
+}
+
+// -----------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------
 
@@ -521,5 +666,168 @@ mod tests {
         // default one.
         assert!(m.should_dispatch_triangle(&triangle_ctx(&stats, &triangle_slots), &scorer));
         assert!(m.should_dispatch_4cycle(&cycle4_ctx(&stats, &cycle4_slots), &scorer));
+    }
+
+    // -------------------------------------------------------------
+    // v0.6.5 slice 5 — CardinalityAwareCostModel
+    // -------------------------------------------------------------
+
+    /// Builds a triangle StatsManager with three populated
+    /// slot relations, each at the supplied cardinality. The
+    /// `estimate_join_cardinality` default-selectivity path
+    /// returns `card * card * 0.1` when no column stats are
+    /// present — sufficient for slice 5's binary_est gating.
+    fn triangle_stats_with_cards(cards: [u64; 3]) -> StatsManager {
+        let mut stats = StatsManager::new();
+        for (i, c) in cards.iter().enumerate() {
+            let rid = RelId(i as u32);
+            stats.register_relation(rid);
+            stats.update_cardinality(rid, *c);
+        }
+        stats
+    }
+
+    fn cycle4_stats_with_cards(cards: [u64; 4]) -> StatsManager {
+        let mut stats = StatsManager::new();
+        for (i, c) in cards.iter().enumerate() {
+            let rid = RelId(i as u32);
+            stats.register_relation(rid);
+            stats.update_cardinality(rid, *c);
+        }
+        stats
+    }
+
+    #[test]
+    fn cardinality_thresholds_pinned_in_default() {
+        // Drift catcher — slice 5.2 / v0.6.6 will tune; that
+        // change should update this test explicitly.
+        let m = CardinalityAwareCostModel::default();
+        assert_eq!(
+            m.min_binary_intermediate,
+            MIN_CARDINALITY_BINARY_INTERMEDIATE
+        );
+        assert_eq!(
+            m.large_binary_intermediate,
+            LARGE_CARDINALITY_BINARY_INTERMEDIATE
+        );
+        assert_eq!(m.min_skew_for_cardinality, MIN_SKEW_FOR_CARDINALITY);
+        assert_eq!(MIN_CARDINALITY_BINARY_INTERMEDIATE, 4_096);
+        assert_eq!(LARGE_CARDINALITY_BINARY_INTERMEDIATE, 1_000_000);
+        assert_eq!(MIN_SKEW_FOR_CARDINALITY, 0.05);
+    }
+
+    #[test]
+    fn cardinality_delegates_when_any_slot_card_missing() {
+        // RelId(2) has no entry → delegate. Configure the
+        // delegate's score to be high; the cardinality model
+        // must reach the skew model's decision.
+        let mut stats = StatsManager::new();
+        stats.register_relation(RelId(0));
+        stats.update_cardinality(RelId(0), 1000);
+        stats.register_relation(RelId(1));
+        stats.update_cardinality(RelId(1), 1000);
+        // RelId(2) intentionally not registered.
+        let slots = [RelId(0), RelId(1), RelId(2)];
+        let ctx = triangle_ctx(&stats, &slots);
+        let scorer = StubScorer::with_triangle(Ok(Some(0.50)));
+        let m = CardinalityAwareCostModel::default();
+        // Delegate: SkewClassifier with score 0.50 → dispatch.
+        assert!(m.should_dispatch_triangle(&ctx, &scorer));
+    }
+
+    #[test]
+    fn cardinality_delegates_when_any_slot_card_zero() {
+        let mut stats = StatsManager::new();
+        for r in &[RelId(0), RelId(1), RelId(2)] {
+            stats.register_relation(*r);
+        }
+        stats.update_cardinality(RelId(0), 1000);
+        stats.update_cardinality(RelId(1), 1000);
+        // RelId(2) cardinality stays 0 — should also delegate.
+        let slots = [RelId(0), RelId(1), RelId(2)];
+        let ctx = triangle_ctx(&stats, &slots);
+        let scorer = StubScorer::with_triangle(Ok(Some(0.50)));
+        let m = CardinalityAwareCostModel::default();
+        assert!(m.should_dispatch_triangle(&ctx, &scorer));
+    }
+
+    #[test]
+    fn cardinality_classifier_err_falls_back_even_on_huge_binary_est() {
+        // 100K × 100K × 0.1 default selectivity ≫ LARGE
+        // threshold — but classifier Err must still fall back.
+        let stats = triangle_stats_with_cards([100_000, 100_000, 100_000]);
+        let slots = [RelId(0), RelId(1), RelId(2)];
+        let ctx = triangle_ctx(&stats, &slots);
+        let scorer = StubScorer::with_triangle(Err(xlog_core::XlogError::Kernel("test".into())));
+        let m = CardinalityAwareCostModel::default();
+        assert!(!m.should_dispatch_triangle(&ctx, &scorer));
+    }
+
+    #[test]
+    fn cardinality_classifier_none_falls_back_even_on_huge_binary_est() {
+        let stats = triangle_stats_with_cards([100_000, 100_000, 100_000]);
+        let slots = [RelId(0), RelId(1), RelId(2)];
+        let ctx = triangle_ctx(&stats, &slots);
+        let scorer = StubScorer::with_triangle(Ok(None));
+        let m = CardinalityAwareCostModel::default();
+        assert!(!m.should_dispatch_triangle(&ctx, &scorer));
+    }
+
+    #[test]
+    fn cardinality_dispatches_when_binary_est_above_large_threshold() {
+        // 100K × 100K × 0.1 = ~1B → ≥ LARGE. Score 0.0 (uniform).
+        // Asymptotic clause fires.
+        let stats = triangle_stats_with_cards([100_000, 100_000, 100_000]);
+        let slots = [RelId(0), RelId(1), RelId(2)];
+        let ctx = triangle_ctx(&stats, &slots);
+        let scorer = StubScorer::with_triangle(Ok(Some(0.0)));
+        let m = CardinalityAwareCostModel::default();
+        assert!(m.should_dispatch_triangle(&ctx, &scorer));
+    }
+
+    #[test]
+    fn cardinality_dispatches_when_skew_and_size_clear_thresholds() {
+        // ~10K binary_est (above MIN, below LARGE), score 0.20
+        // (above skew floor) → dispatch via the skew+size clause.
+        let stats = triangle_stats_with_cards([1_000, 1_000, 1_000]);
+        let slots = [RelId(0), RelId(1), RelId(2)];
+        let ctx = triangle_ctx(&stats, &slots);
+        let scorer = StubScorer::with_triangle(Ok(Some(0.20)));
+        let m = CardinalityAwareCostModel::default();
+        // 1K × 1K × 0.1 = 100K — between MIN(4096) and LARGE(1M),
+        // skew above MIN_SKEW_FOR_CARDINALITY → dispatch.
+        assert!(m.should_dispatch_triangle(&ctx, &scorer));
+    }
+
+    #[test]
+    fn cardinality_falls_back_when_binary_est_below_min_threshold() {
+        // 50 × 50 × 0.1 = 250 < MIN(4096) — kernel overhead
+        // dominates even with high skew.
+        let stats = triangle_stats_with_cards([50, 50, 50]);
+        let slots = [RelId(0), RelId(1), RelId(2)];
+        let ctx = triangle_ctx(&stats, &slots);
+        let scorer = StubScorer::with_triangle(Ok(Some(0.95)));
+        let m = CardinalityAwareCostModel::default();
+        assert!(!m.should_dispatch_triangle(&ctx, &scorer));
+    }
+
+    #[test]
+    fn cardinality_4cycle_dispatches_when_skew_and_size_clear_thresholds() {
+        let stats = cycle4_stats_with_cards([1_000, 1_000, 1_000, 1_000]);
+        let slots = [RelId(0), RelId(1), RelId(2), RelId(3)];
+        let ctx = cycle4_ctx(&stats, &slots);
+        let scorer = StubScorer::with_cycle4(Ok(Some(0.20)));
+        let m = CardinalityAwareCostModel::default();
+        assert!(m.should_dispatch_4cycle(&ctx, &scorer));
+    }
+
+    #[test]
+    fn cardinality_4cycle_falls_back_on_classifier_failure() {
+        let stats = cycle4_stats_with_cards([100_000, 100_000, 100_000, 100_000]);
+        let slots = [RelId(0), RelId(1), RelId(2), RelId(3)];
+        let ctx = cycle4_ctx(&stats, &slots);
+        let scorer = StubScorer::with_cycle4(Err(xlog_core::XlogError::Kernel("test".into())));
+        let m = CardinalityAwareCostModel::default();
+        assert!(!m.should_dispatch_4cycle(&ctx, &scorer));
     }
 }
