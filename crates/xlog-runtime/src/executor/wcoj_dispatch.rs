@@ -504,6 +504,84 @@ impl Executor {
         self.try_dispatch_wcoj_triangle_on_body(&rule.body)
     }
 
+    /// W2.4 — read the WCOJ output buffer's logical row count.
+    /// Returns `None` when the cache isn't populated. **Never
+    /// returns `Some(0)` for an unknown row count** — only for
+    /// an observed-empty output. The distinction matters for
+    /// `record_wcoj_feedback`: an unknown count must skip the
+    /// EMA update, not record selectivity 0.
+    fn wcoj_output_rows(buf: &CudaBuffer) -> Option<u64> {
+        // `CudaBuffer::cached_row_count` returns `Option<u32>`;
+        // widen to `u64` for the `StatsManager` API.
+        buf.cached_row_count().map(u64::from)
+    }
+
+    /// W2.4 — wire successful WCOJ dispatches back into
+    /// `StatsManager` so the cardinality cost model's future
+    /// `binary_est` reads reflect observed selectivity.
+    ///
+    /// Records on the **inner-pair** (`slot_rels[0]`,
+    /// `slot_rels[1]`) with keys `vec![1] / vec![0]` — the
+    /// same pair that
+    /// `CardinalityAwareCostModel::should_dispatch_*` reads
+    /// via `estimate_join_cardinality` for `binary_est`. This
+    /// keeps the writer ↔ reader pair coherent.
+    ///
+    /// Skips the recording when:
+    ///   * `slot_rels.len() < 2` — not enough slots for a
+    ///     binary inner pair (defensive).
+    ///   * `output_rows == None` — unknown logical row count;
+    ///     recording 0 would poison the EMA.
+    ///   * Any of `slot_rels[0..2]` has missing or zero
+    ///     cardinality — `populated_cards` analog from slice 5;
+    ///     unknown inputs would compute a meaningless
+    ///     `input_card_product`.
+    ///
+    /// Recording an observed-empty output (`Some(0)`) IS
+    /// correct — the EMA tightens future estimates toward zero,
+    /// so WCOJ becomes less likely on the same inputs next
+    /// call (the kernel produced nothing useful).
+    ///
+    /// The triangle / 4-cycle output is a strict subset of the
+    /// inner-join intermediate (the third / additional atoms
+    /// further filter it). The recorded selectivity is
+    /// therefore an UPPER BOUND on the true binary
+    /// selectivity, which is the correct conservative direction
+    /// for the cost model: it under-claims the WCOJ kernel's
+    /// win rather than over-claiming.
+    fn record_wcoj_feedback(&mut self, slot_rels: &[RelId], output_rows: Option<u64>) {
+        if slot_rels.len() < 2 {
+            return;
+        }
+        let Some(out_rows) = output_rows else {
+            return;
+        };
+        let card_a = self
+            .stats
+            .get_relation_stats(slot_rels[0])
+            .map(|s| s.cardinality)
+            .filter(|c| *c > 0);
+        let card_b = self
+            .stats
+            .get_relation_stats(slot_rels[1])
+            .map(|s| s.cardinality)
+            .filter(|c| *c > 0);
+        let (Some(a), Some(b)) = (card_a, card_b) else {
+            return;
+        };
+        let input_rows = a.saturating_mul(b);
+        // `record_join_result` takes owned `Vec<usize>` for the
+        // key columns (signature predates this slice).
+        self.stats.record_join_result(
+            slot_rels[0],
+            slot_rels[1],
+            vec![1],
+            vec![0],
+            input_rows,
+            out_rows,
+        );
+    }
+
     /// Slice 4 entry point — same gate / pattern-match / dispatch
     /// logic as `try_dispatch_wcoj_triangle`, keyed on `body`
     /// rather than `&CompiledRule`. The recursive engine calls
@@ -680,6 +758,15 @@ impl Executor {
         );
         match dispatch_result {
             Ok(buf) => {
+                // W2.4 — record observed selectivity into
+                // StatsManager for the cardinality cost model.
+                // Helper handles inner-pair recording and
+                // skip-on-missing-data; called BEFORE the
+                // counter increment so a helper panic doesn't
+                // advance the counter.
+                let output_rows = Self::wcoj_output_rows(&buf);
+                let slot_rels = [matched.rel_xy, matched.rel_yz, matched.rel_xz];
+                self.record_wcoj_feedback(&slot_rels, output_rows);
                 self.wcoj_triangle_dispatch_count += 1;
                 #[cfg(feature = "wcoj-phase-timing")]
                 {
@@ -1002,6 +1089,18 @@ impl Executor {
             self.run_wcoj_4cycle_pipeline(buf_e1, buf_e2, buf_e3, buf_e4, launch_stream, width);
         match dispatch_result {
             Ok(buf) => {
+                // W2.4 — record observed selectivity. Same
+                // helper as the triangle path; inner-pair
+                // recording on (rel_e1, rel_e2) with keys
+                // vec![1] / vec![0].
+                let output_rows = Self::wcoj_output_rows(&buf);
+                let slot_rels = [
+                    matched.rel_e1,
+                    matched.rel_e2,
+                    matched.rel_e3,
+                    matched.rel_e4,
+                ];
+                self.record_wcoj_feedback(&slot_rels, output_rows);
                 self.wcoj_4cycle_dispatch_count += 1;
                 Ok(Some(buf))
             }
