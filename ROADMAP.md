@@ -1209,10 +1209,12 @@ stream-safety contracts.
 
 ### xlog-ir and Optimizer
 
-- [ ] Lower eligible plans to a dedicated `MultiWayJoin` /
+- [x] Lower eligible plans to a dedicated `MultiWayJoin` /
       `WcojJoin` RIR node. v0.6.2 executor wiring pattern-matches the
       current lowered triangle RIR directly; a first-class RIR node is
-      deferred to this release.
+      deferred to this release. **Done v0.6.5 slice 1 — `RirNode::MultiWayJoin`
+      with `inputs`/`slot_vars`/`output_columns`/`fallback`; promoted post-
+      optimizer in `xlog-logic::promote::promote_multiway`.**
 - [ ] Add variable-ordering cost model for WCOJ. v0.6.2 ships only
       deterministic appearance-order planning plus a trait boundary for
       future cost models.
@@ -1220,16 +1222,29 @@ stream-safety contracts.
 
 ### xlog-runtime
 
-- [ ] Integrate WCOJ into semi-naive recursive evaluation.
-- [ ] Preserve deterministic mixed execution across WCOJ and
+- [x] Integrate WCOJ into semi-naive recursive evaluation.
+      **Done v0.6.5 slice 4 — `Executor::execute_wcoj_or_fallback_node`
+      hooks both the seeding pass and per-variant evaluation in
+      `execute_recursive_scc`; promoter gates per-rule on in-SCC
+      Scan count (≤ 1 promotes; ≥ 2 multi-recursive STILL OPEN
+      below).**
+- [x] Preserve deterministic mixed execution across WCOJ and
       binary-join rules inside recursive SCCs. v0.6.2 preserves
       deterministic fallback for unsupported recursive shapes.
+      **Done v0.6.5 slice 4 — `MultiWayJoin.fallback` identity
+      invariant + body-keyed `try_dispatch_wcoj_*_on_body`
+      preserve binary-join behavior bit-identically when the
+      cost model declines or the shape doesn't match.**
 - [ ] Add statistics integration into recursive SCC evaluation.
 
 ### xlog-cuda
 
 - [ ] Add sorted relation accessors beyond the triangle layout helper.
-- [ ] Add deterministic WCOJ kernels for 4-way conjunctive joins.
+- [x] Add deterministic WCOJ kernels for 4-way conjunctive joins.
+      **Done v0.6.5 slice 2 — `wcoj_4cycle_count` / `wcoj_4cycle_materialize`
+      kernels (u32 + u64 + Symbol parity); skew classifier with
+      max-reduction over the four join positions; force gate +
+      adaptive opt-in.**
 - [ ] Add general-arity WCOJ after 3-way and 4-way certification.
 - [ ] Add histogram-guided block scheduling / heavy-row offload.
       v0.6.2 measured this and deferred it: after the layout
@@ -1266,6 +1281,37 @@ stream-safety contracts.
 - [ ] Add dedicated WCOJ architecture guide.
 - [ ] Document WCOJ eligibility, fallback, and performance tuning in a
       user-facing guide rather than only code docs / benchmark docs.
+
+### v0.6.5 Status (as of 2026-05-04)
+
+**4/22 ROADMAP items DONE** (slices 1, 2, 4 above).
+**18/22 ROADMAP items OPEN** — required for v0.6.5 tag.
+**3 internal commitments OPEN** — created during slices 4–5,
+folded into v0.6.5 closure (NOT deferred):
+
+  * `record_join_result` feedback wiring from WCOJ output back
+    into `xlog-stats::StatsManager`.
+  * Default-flip `RuntimeConfig::wcoj_cost_model` from
+    `SkewClassifier` to `Cardinality`.
+  * Multi-recursive WCOJ (≥ 2 in-SCC body Scans).
+
+**Total open for v0.6.5 tag: 21 items** (18 ROADMAP + 3
+internal). v0.6.5 is **NOT releasable** until the closure
+board reaches zero OPEN.
+
+**Closure board:** [`docs/v065-closure-board.md`](docs/v065-closure-board.md)
+— authoritative tracker. Process rules, wave grouping, and
+per-item acceptance gates live there. Any further v0.6.5 work
+references board IDs (W2.x, W3.x, …).
+
+**Slices already shipped against this section** (FF-merged on
+local main, 20 commits ahead of `origin/main`, no push, no tag):
+
+  * Slice 1: `MultiWayJoin` RIR + promoter (item #1).
+  * Slice 2: 4-cycle WCOJ kernels + adaptive opt-in (item #8).
+  * Slice 3: `WcojCostModel` + `SkewScoreSource` seam.
+  * Slice 4: Recursive-arm WCOJ dispatch (items #4, #5).
+  * Slice 5: `CardinalityAwareCostModel` opt-in.
 
 ## v0.7.0 - Epistemic and Solver Semantics
 
