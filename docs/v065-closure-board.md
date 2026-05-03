@@ -48,10 +48,10 @@ any contrary slice-internal decision.
 
 | State | Count |
 |-------|-------|
-| DONE | 0 (none in this closure cycle yet) |
+| DONE | 1 (W2.4) |
 | IN-PROGRESS | 1 (W1.1) |
 | BLOCKED | 2 (W2.5, W2.6) |
-| OPEN | 18 |
+| OPEN | 17 |
 | **Total** | **21** |
 
 The 4 ROADMAP items already DONE from slices 1, 2, 4 are
@@ -74,7 +74,7 @@ prior shipped work.
 | W2.1 | ROADMAP item #2 | OPEN | — | Variable-ordering cost model for WCOJ. Currently dispatch/admission only. Decide which slot becomes the lookup-key vs iteration-key based on stats. | Cert that two semantically-equivalent WCOJ rules with different statistical input shapes pick different slot orderings; row-set agreement preserved. |
 | W2.2 | ROADMAP item #3 | OPEN | — | Populate `xlog-logic::optimizer::selectivity_pass` with real selectivity-driven join reordering. Currently no-op. | Cert: **same rule** compiled twice with **two different stats snapshots** produces **two different chosen join orders** AND identical row sets. (Deterministic canonicalization that ignores stats does NOT pass this gate.) |
 | W2.3 | ROADMAP item #6 | OPEN | — | Statistics integration into recursive SCC evaluation. Per-iteration cardinality update from delta sizes; cost model sees current iteration stats, not seed-only. | Cert: recursive triangle's cost-model decisions evolve across iterations as deltas grow; each iteration's `binary_est` reflects the iteration's actual delta, not the seed. |
-| W2.4 | Internal | OPEN | — | `record_join_result` feedback wired from successful WCOJ dispatch back into `xlog-stats::StatsManager`. Tighten future cardinality estimates with observed selectivity. | Cert: same recursive program run twice (warm StatsManager) makes a different — better — dispatch decision than first run. |
+| W2.4 | Internal | DONE | — | `record_join_result` feedback wired from successful WCOJ dispatch back into `xlog-stats::StatsManager`. Tighten future cardinality estimates with observed selectivity. | DONE — `f586ce34` (impl) + this commit (board update). User-approved corrected gate: pre-dispatch `get_join_selectivity == None` → post-dispatch `Some(_)`; `binary_est` differs between runs read via `executor.stats().estimate_join_cardinality(...)`; row-set parity unchanged. 3/3 certs in `test_wcoj_record_join_result_feedback.rs`. |
 | W2.5 | Internal | BLOCKED | W2.1, W2.2, W2.3, W2.4, W3.2, W4.1, W5.1, W5.2 | Default-flip `RuntimeConfig::wcoj_cost_model` from `SkewClassifier` to `Cardinality`. **Blocked until foundation + kernel + runtime + cert evidence is in hand.** Default cannot flip without proof from W5.1/W5.2 benchmarks that the cardinality model is at least at parity on representative workloads. | New default ships; slice 4 stable-triangle counter still 1 (cardinality + missing-stats safety floor delegates correctly); explicit env opt-out (`XLOG_WCOJ_COST_MODEL=skew`) restores legacy behavior; bench evidence from W5.2 documents the parity / improvement. |
 | W2.6 | ROADMAP item #16 | BLOCKED | W2.1, W2.4 | Selectivity + heat statistics feed into the variable ordering from W2.1. Closes the loop between observed stats and slot ordering. **Scheduled last within Wave 2** — depends on the variable-ordering structure (W2.1) and the feedback wire (W2.4). | Cert: hot relation gets preferred lookup-key slot; cold extensional relation gets iteration-key slot; row-set agreement preserved. |
 
@@ -121,7 +121,9 @@ prior shipped work.
 
 ## Completed
 
-(empty — populated as items move OPEN → DONE per process rule #1)
+| ID | Date | Commits | Notes |
+|----|------|---------|-------|
+| W2.4 | 2026-05-04 | `f586ce34` (impl), board-update commit (this) | `record_join_result` feedback wired into both triangle and 4-cycle success arms via `Executor::record_wcoj_feedback`. Helper skips on unknown output count or missing input cards. User explicitly approved DONE in thread per process rule #1. |
 
 ## Provenance
 
