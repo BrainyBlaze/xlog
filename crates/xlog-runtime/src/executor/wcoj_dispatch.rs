@@ -607,19 +607,23 @@ impl Executor {
             #[cfg(feature = "wcoj-phase-timing")]
             let cls_start = Instant::now();
             let model = super::wcoj_cost_model::SkewClassifierCostModel::default();
-            let buffers: [&CudaBuffer; 3] = [buf_xy, buf_yz, buf_xz];
             let slot_rels = [matched.rel_xy, matched.rel_yz, matched.rel_xz];
             let ctx = super::wcoj_cost_model::WcojDispatchCtx {
                 stats: &self.stats,
                 launch_stream,
                 width,
-                buffers: &buffers[..],
                 slot_rels: &slot_rels,
+            };
+            let scorer = super::wcoj_cost_model::TriangleScorer {
+                provider: self.provider.as_ref(),
+                e_xy: buf_xy,
+                e_yz: buf_yz,
+                e_xz: buf_xz,
             };
             let dispatch = <super::wcoj_cost_model::SkewClassifierCostModel as super::wcoj_cost_model::WcojCostModel>::should_dispatch_triangle(
                 &model,
                 &ctx,
-                self.provider.as_ref(),
+                &scorer,
             );
             #[cfg(feature = "wcoj-phase-timing")]
             {
@@ -925,7 +929,6 @@ impl Executor {
         // slice 2 inline logic; dispatch counts preserved.
         if mode == DispatchMode::Adaptive {
             let model = super::wcoj_cost_model::SkewClassifierCostModel::default();
-            let buffers: [&CudaBuffer; 4] = [buf_e1, buf_e2, buf_e3, buf_e4];
             let slot_rels = [
                 matched.rel_e1,
                 matched.rel_e2,
@@ -936,13 +939,19 @@ impl Executor {
                 stats: &self.stats,
                 launch_stream,
                 width,
-                buffers: &buffers[..],
                 slot_rels: &slot_rels,
+            };
+            let scorer = super::wcoj_cost_model::Cycle4Scorer {
+                provider: self.provider.as_ref(),
+                e1: buf_e1,
+                e2: buf_e2,
+                e3: buf_e3,
+                e4: buf_e4,
             };
             let dispatch = <super::wcoj_cost_model::SkewClassifierCostModel as super::wcoj_cost_model::WcojCostModel>::should_dispatch_4cycle(
                 &model,
                 &ctx,
-                self.provider.as_ref(),
+                &scorer,
             );
             if !dispatch {
                 return Ok(None);
