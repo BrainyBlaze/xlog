@@ -44,9 +44,12 @@
 //! ## Out of scope
 //!
 //! * Cost model, selectivity reordering, variable-ordering choices.
-//! * Recursive SCC bodies. The promoter only walks the top-level
-//!   `rule.body` of each `CompiledRule`; bodies inside recursive
-//!   SCCs are still wrapped with `Fixpoint` and are not eligible.
+//! * Recursive SCC bodies. The promoter walks `rules_by_scc` but
+//!   skips any SCC whose `is_recursive` flag is set; the executor's
+//!   `execute_recursive_scc` semi-naive engine never invokes the
+//!   WCOJ dispatch hook, so promoting a recursive body would only
+//!   add work and force the recursive engine to handle a new IR
+//!   variant. Honor the "no recursive WCOJ" exclusion at the source.
 //! * 4-way / general-arity admission.
 
 use xlog_ir::rir::ProjectExpr;
@@ -58,8 +61,25 @@ use xlog_ir::{ExecutionPlan, JoinType, RirNode};
 /// `CompiledRule.meta` is preserved unchanged — the metadata is
 /// rule-level (head schema, row estimates, layout hints), not
 /// node-level, and the promoter does not alter rule semantics.
+///
+/// **Recursive SCC bodies are skipped.** v0.6.5 slice 1 explicitly
+/// keeps WCOJ dispatch out of `Executor::execute_recursive_scc`'s
+/// semi-naive loop (the executor's WCOJ hook fires only on the
+/// non-recursive branch). Promoting a body inside a recursive SCC
+/// would still be correct via the `MultiWayJoin` fallback descent
+/// arm, but it would be wasted work and would hand a new IR variant
+/// to the recursive engine without the slice's "no recursive WCOJ"
+/// exclusion holding the line. Honor the exclusion at the source.
 pub fn promote_multiway(plan: &mut ExecutionPlan) {
-    for rules in &mut plan.rules_by_scc {
+    for (scc_id, rules) in plan.rules_by_scc.iter_mut().enumerate() {
+        let recursive = plan
+            .sccs
+            .get(scc_id)
+            .map(|s| s.is_recursive)
+            .unwrap_or(false);
+        if recursive {
+            continue;
+        }
         for rule in rules.iter_mut() {
             if let Some(promoted) = try_promote_triangle(&rule.body) {
                 rule.body = promoted;
@@ -400,5 +420,81 @@ mod tests {
             format!("{:?}", &plan.rules_by_scc[0][0].meta),
             format!("{:?}", meta_pre),
         );
+    }
+
+    /// v0.6.5 slice 1 contract: bodies inside a recursive SCC are
+    /// NOT promoted, even when the body is structurally a canonical
+    /// triangle. The executor's recursive engine never invokes
+    /// `try_dispatch_wcoj_triangle`, and pushing a new IR variant
+    /// into `execute_recursive_scc` is out of slice scope.
+    #[test]
+    fn skips_recursive_scc_bodies() {
+        let mut builder = PlanBuilder::new();
+        builder.add_scc(Scc {
+            id: 0,
+            predicates: vec!["tri".to_string()],
+            is_recursive: true,
+        });
+        builder.add_rule(
+            0,
+            CompiledRule {
+                head: "tri".to_string(),
+                body: canonical_triangle_tree(),
+                meta: Default::default(),
+            },
+        );
+        let mut plan = builder.build();
+        promote_multiway(&mut plan);
+        // Body untouched: still the original Project { Join { ... } }.
+        assert!(matches!(
+            &plan.rules_by_scc[0][0].body,
+            RirNode::Project { .. }
+        ));
+    }
+
+    /// Mixed plan: a recursive SCC and a non-recursive SCC, both
+    /// containing the canonical triangle. Only the non-recursive
+    /// body is promoted.
+    #[test]
+    fn promotes_only_non_recursive_sccs_in_mixed_plan() {
+        let mut builder = PlanBuilder::new();
+        builder.add_scc(Scc {
+            id: 0,
+            predicates: vec!["rec".to_string()],
+            is_recursive: true,
+        });
+        builder.add_rule(
+            0,
+            CompiledRule {
+                head: "rec".to_string(),
+                body: canonical_triangle_tree(),
+                meta: Default::default(),
+            },
+        );
+        builder.add_scc(Scc {
+            id: 1,
+            predicates: vec!["nonrec".to_string()],
+            is_recursive: false,
+        });
+        builder.add_rule(
+            1,
+            CompiledRule {
+                head: "nonrec".to_string(),
+                body: canonical_triangle_tree(),
+                meta: Default::default(),
+            },
+        );
+        let mut plan = builder.build();
+        promote_multiway(&mut plan);
+        // Recursive SCC body: untouched.
+        assert!(matches!(
+            &plan.rules_by_scc[0][0].body,
+            RirNode::Project { .. }
+        ));
+        // Non-recursive SCC body: promoted.
+        assert!(matches!(
+            &plan.rules_by_scc[1][0].body,
+            RirNode::MultiWayJoin { .. }
+        ));
     }
 }
