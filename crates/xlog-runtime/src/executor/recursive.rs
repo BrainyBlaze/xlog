@@ -96,6 +96,22 @@ impl Executor {
                             continue;
                         }
 
+                        // v0.6.5 slice 2: WCOJ 4-cycle dispatch.
+                        // Same pattern as triangle. Order is a doc
+                        // anchor — a body cannot match both shapes
+                        // (different atom counts), so triangle's
+                        // earlier attempt always returns None on a
+                        // 4-cycle body and vice versa.
+                        if let Some(wcoj_result) = self.try_dispatch_wcoj_4cycle(rule)? {
+                            if let Some(existing) = self.store.get(&rule.head) {
+                                let merged = self.provider.union_gpu(existing, &wcoj_result)?;
+                                self.store_put(&rule.head, merged);
+                            } else {
+                                self.store_put(&rule.head, wcoj_result);
+                            }
+                            continue;
+                        }
+
                         // v0.6.5 slice 1: when WCOJ dispatch declines on
                         // a `MultiWayJoin` body (gate off, kernel error,
                         // adaptive score below threshold, …), execute
