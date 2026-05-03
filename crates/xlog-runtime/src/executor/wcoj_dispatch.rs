@@ -422,7 +422,7 @@ impl Executor {
         if self.provider.memory().runtime().is_none() {
             return Ok(None);
         }
-        let launch_stream = match self.wcoj_triangle_stream_or_init() {
+        let launch_stream = match self.wcoj_dispatch_stream_or_init() {
             Some(s) => s,
             None => return Ok(None),
         };
@@ -645,18 +645,24 @@ impl Executor {
     /// [`xlog_cuda::CudaKernelProvider::recorded_op_stream`]
     /// (provider/mod.rs).
     ///
+    /// **Shared across WCOJ shapes** (v0.6.5 slice 2): triangle
+    /// and 4-cycle dispatch both go through this resolver and
+    /// reuse the same stream. Renamed from
+    /// `wcoj_triangle_stream_or_init` when 4-cycle dispatch
+    /// landed.
+    ///
     /// Returns `None` only when (a) the manager has no runtime,
     /// or (b) the very first acquisition fails (pool already
     /// at cap from other consumers). After that first success
     /// the cached id keeps resolving for the executor's lifetime.
-    fn wcoj_triangle_stream_or_init(&self) -> Option<StreamId> {
-        if let Some(s) = self.wcoj_triangle_stream.get() {
+    pub(super) fn wcoj_dispatch_stream_or_init(&self) -> Option<StreamId> {
+        if let Some(s) = self.wcoj_dispatch_stream.get() {
             return Some(*s);
         }
         let runtime = self.provider.memory().runtime()?;
         let stream = runtime.stream_pool().acquire().ok()?;
-        let _ = self.wcoj_triangle_stream.set(stream);
-        self.wcoj_triangle_stream.get().copied()
+        let _ = self.wcoj_dispatch_stream.set(stream);
+        self.wcoj_dispatch_stream.get().copied()
     }
 }
 

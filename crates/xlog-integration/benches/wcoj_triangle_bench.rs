@@ -43,12 +43,13 @@
 //!   can keep `put_relation` uploads + `store.remove("tri")`
 //!   cleanup OUT of the measured time. Each cell builds ONE
 //!   long-lived `Executor` so the executor's cached
-//!   `wcoj_triangle_stream` (`OnceLock<StreamId>`) is acquired
-//!   once and reused for every iteration. Building a fresh
-//!   Executor per iteration would acquire a new stream each
-//!   time and drain the runtime's `StreamPool` (cap 16,
-//!   grow-only); past iteration 16 every dispatch would
-//!   silently fall back to binary-join, biasing the timing.
+//!   `wcoj_dispatch_stream` (`OnceLock<StreamId>`, shared across
+//!   triangle and 4-cycle dispatch) is acquired once and reused
+//!   for every iteration. Building a fresh Executor per
+//!   iteration would acquire a new stream each time and drain
+//!   the runtime's `StreamPool` (cap 16, grow-only); past
+//!   iteration 16 every dispatch would silently fall back to
+//!   binary-join, biasing the timing.
 //! * Bench-only: the `StreamPool` cap is bumped to 1024 in
 //!   `make_provider`. Production runs at 16; the bench needs
 //!   headroom across many short-lived correctness-check
@@ -628,8 +629,9 @@ fn bench_cell(
     group.throughput(Throughput::Elements(fixture.total_rows()));
     group.bench_with_input(BenchmarkId::from_parameter(&label), &(), |b, _| {
         // Long-lived Executor per cell. The executor's cached
-        // WCOJ launch stream (`Executor::wcoj_triangle_stream`)
-        // is acquired exactly once on first dispatch and reused
+        // WCOJ launch stream (`Executor::wcoj_dispatch_stream`,
+        // shared across triangle and 4-cycle dispatch) is
+        // acquired exactly once on first dispatch and reused
         // for every iteration of this cell. Building a fresh
         // Executor per iteration would acquire a new stream
         // each time, draining the runtime's grow-only

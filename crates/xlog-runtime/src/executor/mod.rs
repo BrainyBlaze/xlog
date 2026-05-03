@@ -99,10 +99,15 @@ pub struct Executor {
     /// [`xlog_cuda::device_runtime::StreamPool`] is grow-only with a
     /// hard cap (default 16). Acquiring per-invocation would silently
     /// drain the pool on long-lived runtimes (benchmarks, soak tests,
-    /// any program with >16 matching triangle rules) and route
+    /// any program with >16 matching WCOJ-eligible rules) and route
     /// subsequent dispatches through the binary-join fallback,
     /// invalidating the dispatch counter and the gate-on path.
-    wcoj_triangle_stream: OnceLock<xlog_cuda::device_runtime::StreamId>,
+    ///
+    /// **Shared across WCOJ shapes** (v0.6.5 slice 2): triangle and
+    /// 4-cycle dispatch both acquire and reuse this single stream.
+    /// Renamed from `wcoj_triangle_stream` when 4-cycle dispatch
+    /// landed.
+    wcoj_dispatch_stream: OnceLock<xlog_cuda::device_runtime::StreamId>,
     /// Diagnostic-only: per-dispatch WCOJ triangle phase
     /// timings, populated by `try_dispatch_wcoj_triangle` when
     /// the `wcoj-phase-timing` Cargo feature is on. Read by the
@@ -140,7 +145,7 @@ impl Executor {
             ilp_registry: IlpRegistry::new(),
             ilp_last_result: None,
             wcoj_triangle_dispatch_count: 0,
-            wcoj_triangle_stream: OnceLock::new(),
+            wcoj_dispatch_stream: OnceLock::new(),
             #[cfg(feature = "wcoj-phase-timing")]
             last_wcoj_phase_timing: std::sync::Mutex::new(None),
         }
