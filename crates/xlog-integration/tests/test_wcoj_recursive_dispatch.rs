@@ -14,12 +14,13 @@
 //!     NOT promoted and runs the binary-join semi-naive path —
 //!     counter == 0; final row set still matches the binary
 //!     reference.
-//!
-//! Linear-recursive (count == 1) end-to-end behavioral coverage
-//! is structurally guaranteed by the same code path that the
-//! stable case exercises (the helper switches solely on
-//! `RirNode::MultiWayJoin`); compose-time coverage of the
-//! count-1 promoter gate is in `xlog-logic::promote::tests`.
+//!   * A **linear-recursive triangle / 4-cycle** (exactly one
+//!     in-SCC body Scan) IS promoted and dispatches both on the
+//!     seeding pass AND on per-variant evaluation. Counter
+//!     strictly exceeds the seeding-only case (≥ 2 dispatches).
+//!     Final row set matches the binary-join reference, so the
+//!     fixed-point convergence + delta correctness are both
+//!     verified.
 //!
 //! Counter semantics: `wcoj_*_dispatch_count` increments per
 //! successful WCOJ kernel result — once per (seeding pass,
@@ -554,5 +555,187 @@ fn multirec_triangle_skips_wcoj_and_matches_binary_join() {
     assert_eq!(
         attempted_rows, reference_rows,
         "multi-rec WCOJ-skip path must produce the same row set as binary-join"
+    );
+}
+
+// ---------------------------------------------------------------
+// Linear-recursive triangle: WCOJ dispatches on seeding AND per
+// variant, counter strictly > 1, row set matches binary-join.
+// ---------------------------------------------------------------
+
+/// Linear-recursive triangle. Body has exactly ONE in-SCC Scan
+/// (`e1`, fed back from `tri` via the second `e1` rule). The
+/// other two body atoms (`e2`, `e3`) are extensional. Slice 4
+/// promoter gate: count == 1 → promote.
+///
+/// Recursive dynamics:
+///   1. Seeding pass: triangle rule joins `e1_seed` ⋈ e2 ⋈ e3 →
+///      one or more `tri` rows. WCOJ counter increments by 1.
+///   2. Iteration 1: `e1`'s recursive rule projects new `e1`
+///      rows from `tri` (using `tri(X, Z, Y)` so the projection
+///      shifts indices and produces e1 rows that weren't in the
+///      seed). `e1_delta` is non-empty.
+///      Triangle variant: e1's Scan rewritten to `e1_delta`.
+///      Dispatch fires. Counter increments — confirming the
+///      per-variant path actually exercises WCOJ on a body with
+///      one rewritten slot.
+///   3. Iteration 2+: chain may continue or terminate; the
+///      counter is asserted as ≥ 2 (seeding + ≥ 1 variant), not
+///      a tight number, since iteration count depends on
+///      convergence of the chain reaction.
+const LINEAR_REC_TRIANGLE: &str = r#"
+    pred e1_seed(u32, u32).
+    pred e1(u32, u32).
+    pred e2(u32, u32).
+    pred e3(u32, u32).
+    pred tri(u32, u32, u32).
+    e1(X, Y) :- e1_seed(X, Y).
+    e1(X, Y) :- tri(X, Z, Y).
+    tri(X, Y, Z) :- e1(X, Y), e2(Y, Z), e3(X, Z).
+"#;
+
+fn linear_rec_triangle_inputs() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
+    let mut m: BTreeMap<&'static str, Vec<(u32, u32)>> = BTreeMap::new();
+    // Chain: seed (1,2) → tri(1,2,3) (via e2(2,3), e3(1,3)) →
+    //   recursive e1(1,3) → tri(1,3,4) (via e2(3,4), e3(1,4)).
+    m.insert("e1_seed", vec![(1, 2)]);
+    m.insert("e2", vec![(2, 3), (3, 4)]);
+    m.insert("e3", vec![(1, 3), (1, 4)]);
+    m
+}
+
+#[test]
+fn linear_recursive_triangle_dispatches_on_seeding_and_per_variant() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let inputs = linear_rec_triangle_inputs();
+
+    // Reference: gate off. Binary-join semi-naive computes the
+    // fixpoint without any WCOJ dispatch.
+    let reference = run_program(
+        Arc::clone(&fix.provider),
+        &fix.memory,
+        RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(false)),
+        LINEAR_REC_TRIANGLE,
+        &inputs,
+    );
+    assert_eq!(
+        reference.wcoj_triangle_dispatch_count(),
+        0,
+        "gate=off must not dispatch"
+    );
+    let reference_rows = download_triples(reference.store().get("tri").expect("tri"));
+    assert!(
+        reference_rows.len() >= 2,
+        "fixture should produce ≥ 2 tri rows so we know the recursive \
+         chain actually fired (seeding + ≥ 1 iteration); got {} rows",
+        reference_rows.len()
+    );
+
+    // Gate on: slice 4 promotes the linear-recursive triangle.
+    // Seeding fires WCOJ once. Each iteration with a non-empty
+    // `e1_delta` fires WCOJ on the rewritten variant body. The
+    // counter must strictly exceed the seeding-only case.
+    let dispatched = run_program(
+        Arc::clone(&fix.provider),
+        &fix.memory,
+        RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(true)),
+        LINEAR_REC_TRIANGLE,
+        &inputs,
+    );
+    assert!(
+        dispatched.wcoj_triangle_dispatch_count() >= 2,
+        "linear-recursive triangle must dispatch WCOJ on BOTH the \
+         seeding pass AND ≥ 1 variant iteration; got counter {}",
+        dispatched.wcoj_triangle_dispatch_count()
+    );
+    let dispatched_rows = download_triples(dispatched.store().get("tri").expect("tri"));
+    assert_eq!(
+        dispatched_rows, reference_rows,
+        "linear-recursive WCOJ row set must equal the binary-join reference"
+    );
+}
+
+// ---------------------------------------------------------------
+// Linear-recursive 4-cycle: same contract as triangle.
+// ---------------------------------------------------------------
+
+/// Linear-recursive 4-cycle. `e1` is recursive (fed back from
+/// `cyc(Y, W, X, Z)`); `e2/e3/e4` are extensional. Slice 4
+/// promoter sees count == 1 → promote. Same seeding +
+/// per-variant dispatch contract as the triangle case above.
+const LINEAR_REC_4CYCLE: &str = r#"
+    pred e1_seed(u32, u32).
+    pred e1(u32, u32).
+    pred e2(u32, u32).
+    pred e3(u32, u32).
+    pred e4(u32, u32).
+    pred cyc(u32, u32, u32, u32).
+    e1(W, X) :- e1_seed(W, X).
+    e1(W, X) :- cyc(Y, W, X, Z).
+    cyc(W, X, Y, Z) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W).
+"#;
+
+fn linear_rec_cycle4_inputs() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
+    let mut m: BTreeMap<&'static str, Vec<(u32, u32)>> = BTreeMap::new();
+    // Seeding: cyc(1,2,3,4) from e1_seed(1,2) ⋈ e2(2,3) ⋈ e3(3,4) ⋈ e4(4,1).
+    // Iter 1: e1 recursive rule projects cyc(1,2,3,4)'s (col1, col2) =
+    //   (2, 3) into a new e1(2, 3). Triangle variant fires WCOJ on
+    //   e1_delta=(2,3) ⋈ e2(3,4) ⋈ e3(4,5) ⋈ e4(5,2), producing
+    //   cyc(2,3,4,5). Iter 2 may cascade further; counter ≥ 2.
+    m.insert("e1_seed", vec![(1, 2)]);
+    m.insert("e2", vec![(2, 3), (3, 4)]);
+    m.insert("e3", vec![(3, 4), (4, 5)]);
+    m.insert("e4", vec![(4, 1), (5, 2)]);
+    m
+}
+
+#[test]
+fn linear_recursive_4cycle_dispatches_on_seeding_and_per_variant() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let inputs = linear_rec_cycle4_inputs();
+
+    let reference = run_program(
+        Arc::clone(&fix.provider),
+        &fix.memory,
+        RuntimeConfig::default().with_wcoj_4cycle_dispatch(Some(false)),
+        LINEAR_REC_4CYCLE,
+        &inputs,
+    );
+    assert_eq!(
+        reference.wcoj_4cycle_dispatch_count(),
+        0,
+        "gate=off must not dispatch"
+    );
+    let reference_rows = download_quads(reference.store().get("cyc").expect("cyc"));
+    assert!(
+        reference_rows.len() >= 2,
+        "fixture should produce ≥ 2 cyc rows so the recursive chain \
+         demonstrably fires (seeding + ≥ 1 iteration); got {} rows",
+        reference_rows.len()
+    );
+
+    let dispatched = run_program(
+        Arc::clone(&fix.provider),
+        &fix.memory,
+        RuntimeConfig::default().with_wcoj_4cycle_dispatch(Some(true)),
+        LINEAR_REC_4CYCLE,
+        &inputs,
+    );
+    assert!(
+        dispatched.wcoj_4cycle_dispatch_count() >= 2,
+        "linear-recursive 4-cycle must dispatch WCOJ on BOTH the \
+         seeding pass AND ≥ 1 variant iteration; got counter {}",
+        dispatched.wcoj_4cycle_dispatch_count()
+    );
+    let dispatched_rows = download_quads(dispatched.store().get("cyc").expect("cyc"));
+    assert_eq!(
+        dispatched_rows, reference_rows,
+        "linear-recursive 4-cycle WCOJ row set must equal the binary-join reference"
     );
 }

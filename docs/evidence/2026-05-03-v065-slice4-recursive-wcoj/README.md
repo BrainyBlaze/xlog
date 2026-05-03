@@ -28,25 +28,26 @@ All seven gates from the slice 4 plan are met.
 | # | Gate | Status |
 |---|------|--------|
 | 1 | Stable triangle in recursive SCC dispatches WCOJ on seeding (counter == 1) | PASS — `stable_triangle_in_recursive_scc_dispatches_wcoj_on_seeding` |
-| 2 | Linear-recursive triangle dispatches per iteration; row set matches binary-join | PASS (shape coverage via promoter unit tests; same code path as gate 1 — see "Linear-recursive coverage" below) |
+| 2 | Linear-recursive triangle dispatches per iteration; row set matches binary-join | PASS — `linear_recursive_triangle_dispatches_on_seeding_and_per_variant` (counter ≥ 2; row set matches binary-join) |
 | 3 | Multi-recursive triangle skips WCOJ (counter == 0) and matches binary-join | PASS — `multirec_triangle_skips_wcoj_and_matches_binary_join` |
-| 4 | Stable 4-cycle in recursive SCC dispatches WCOJ on seeding (counter == 1) | PASS — `stable_4cycle_in_recursive_scc_dispatches_wcoj_on_seeding` |
+| 4a | Stable 4-cycle in recursive SCC dispatches WCOJ on seeding (counter == 1) | PASS — `stable_4cycle_in_recursive_scc_dispatches_wcoj_on_seeding` |
+| 4b | Linear-recursive 4-cycle dispatches per iteration; row set matches binary-join | PASS — `linear_recursive_4cycle_dispatches_on_seeding_and_per_variant` (counter ≥ 2; row set matches binary-join) |
 | 5 | Adaptive classifier makes same decision in recursive vs non-recursive arm | PASS — `adaptive_dispatches_in_recursive_scc_on_superhub` |
 | 6 | Stale doc claims about "recursive WCOJ excluded" are removed | PASS — `wcoj_dispatch.rs` header + `recursive.rs:106-110` comment + `promote.rs` header all updated |
 | 7 | Workspace + CUDA cert + WCOJ regression no regression | PASS — see "Workspace tally" below |
 
 ## Cert Test Results
 
-Run from `.worktrees/v065-recursive-wcoj` at HEAD `a013ca94`:
-
 ```
 cargo test -p xlog-integration --release --test test_wcoj_recursive_dispatch
-running 4 tests
+running 6 tests
 test adaptive_dispatches_in_recursive_scc_on_superhub ... ok
 test stable_triangle_in_recursive_scc_dispatches_wcoj_on_seeding ... ok
-test multirec_triangle_skips_wcoj_and_matches_binary_join ... ok
+test linear_recursive_triangle_dispatches_on_seeding_and_per_variant ... ok
+test linear_recursive_4cycle_dispatches_on_seeding_and_per_variant ... ok
 test stable_4cycle_in_recursive_scc_dispatches_wcoj_on_seeding ... ok
-test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured
+test multirec_triangle_skips_wcoj_and_matches_binary_join ... ok
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured
 ```
 
 Per-test counter assertions:
@@ -55,21 +56,35 @@ Per-test counter assertions:
 |------|---------|----------------------|
 | `stable_triangle_in_recursive_scc_dispatches_wcoj_on_seeding` | `wcoj_triangle_dispatch_count() == 1` | binary-join row-for-row |
 | `stable_4cycle_in_recursive_scc_dispatches_wcoj_on_seeding`   | `wcoj_4cycle_dispatch_count() == 1`   | binary-join row-for-row |
+| `linear_recursive_triangle_dispatches_on_seeding_and_per_variant` | `wcoj_triangle_dispatch_count() >= 2` (seeding + ≥ 1 variant) | binary-join row-for-row |
+| `linear_recursive_4cycle_dispatches_on_seeding_and_per_variant`   | `wcoj_4cycle_dispatch_count() >= 2`   (seeding + ≥ 1 variant) | binary-join row-for-row |
 | `multirec_triangle_skips_wcoj_and_matches_binary_join`         | `wcoj_triangle_dispatch_count() == 0` | binary-join row-for-row |
 | `adaptive_dispatches_in_recursive_scc_on_superhub`             | `wcoj_triangle_dispatch_count() >= 1` | n/a (counter assertion) |
 
 ## Linear-recursive coverage
 
-End-to-end behavioral coverage of count == 1 in the integration
-crate is **structural via the same code path** that the stable
-case exercises. The recursive engine's seeding pass and
-per-variant evaluation BOTH route through
-`Executor::execute_wcoj_or_fallback_node`, which switches on
-`RirNode::MultiWayJoin`. The slice 4 promoter promotes both
-count-0 and count-1 bodies (the gate is `count <= 1`), and the
-helper handles them identically.
+End-to-end coverage of count == 1 is provided by the two
+linear-recursive cert tests above. Each test:
 
-Promoter-side coverage is in `xlog-logic::promote::tests`:
+1. Builds a fixture with one in-SCC body Scan (`e1` in the
+   triangle case, `e1` in the 4-cycle case) fed back via a
+   dedicated recursive rule (`e1(...) :- tri(...)` / `e1(...)
+   :- cyc(...)`). Other body atoms are extensional.
+2. Designs the EDB so the recursive chain advances at least
+   once: seeding produces an initial result; the recursive
+   `e1` rule projects new `e1` rows from that result; the
+   promoted triangle/4-cycle body is variant-rewritten to use
+   `e1_delta` and dispatches WCOJ; that variant produces NEW
+   result rows; the chain may continue or terminate per data.
+3. Asserts `wcoj_*_dispatch_count() >= 2` — strictly more than
+   the seeding-only case — and asserts the row set matches
+   the binary-join reference.
+
+The fixture chain (triangle): `e1_seed(1,2)` →
+`tri(1,2,3)` (seeding) → recursive `e1(1,3)` → variant fires
+WCOJ on `e1_delta=(1,3)` ⋈ `e2` ⋈ `e3` → `tri(1,3,4)` (new).
+
+Promoter-side coverage in `xlog-logic::promote::tests`:
 
 ```
 test promote::tests::promotes_linear_recursive_triangle ... ok
@@ -80,13 +95,6 @@ test promote::tests::promotes_stable_triangle_in_recursive_scc ... ok
 test promote::tests::promotes_stable_4cycle_in_recursive_scc ... ok
 test promote::tests::promotes_linear_rec_and_non_rec_sccs_in_mixed_plan ... ok
 ```
-
-Constructing a fully end-to-end count-1 fixture that survives
-the lowerer + optimizer + recursive-engine schema friction is
-non-trivial (see "Test-fixture friction" below); the structural
-coverage above plus the dispatcher's RelId-keyed buffer lookup
-(buffer-by-RelId is invariant across delta-vs-full) is the
-acceptance evidence for gate 2.
 
 ## Workspace Tally
 
