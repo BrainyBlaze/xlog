@@ -127,6 +127,30 @@ pub struct RuntimeConfig {
     /// v0.6.5 slice 2 — kill switch for 4-cycle WCOJ. Same shape
     /// as triangle's kill switch: beats force + adaptive.
     pub wcoj_4cycle_dispatch_disabled: Option<bool>,
+
+    /// v0.6.5 slice 5 — selects which `WcojCostModel` impl
+    /// the executor consults when deciding whether to dispatch
+    /// WCOJ in adaptive mode. `None` (default) falls through
+    /// the precedence ladder — see `RuntimeConfig::with_wcoj_cost_model`.
+    pub wcoj_cost_model: Option<CostModelKind>,
+}
+
+/// v0.6.5 slice 5 — cost model selector for WCOJ dispatch.
+///
+/// The legacy `SkewClassifier` model (slice 1–4 default) makes
+/// dispatch decisions on classifier-only signal. The new
+/// `Cardinality` model fuses classifier with cardinality
+/// estimates from `xlog_stats::StatsManager` and gracefully
+/// delegates to `SkewClassifier` when stats are missing.
+///
+/// **Default behavior is unchanged**: this enum is opt-in.
+/// See `with_wcoj_cost_model` for the precedence rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CostModelKind {
+    /// Slice 1–4 default: skew-classifier-only dispatch decision.
+    SkewClassifier,
+    /// Slice 5 opt-in: classifier blended with cardinality estimates.
+    Cardinality,
 }
 
 impl Default for RuntimeConfig {
@@ -143,6 +167,7 @@ impl Default for RuntimeConfig {
             wcoj_4cycle_dispatch: None,
             wcoj_4cycle_dispatch_adaptive: None,
             wcoj_4cycle_dispatch_disabled: None,
+            wcoj_cost_model: None,
         }
     }
 }
@@ -220,6 +245,45 @@ impl RuntimeConfig {
         self.wcoj_4cycle_dispatch_disabled = override_value;
         self
     }
+
+    /// v0.6.5 slice 5 — select which `WcojCostModel` impl the
+    /// executor consults for adaptive dispatch decisions.
+    ///
+    /// **Precedence (pinned)**:
+    ///   1. `Some(CostModelKind)` set here wins.
+    ///   2. Else `XLOG_WCOJ_COST_MODEL` env var:
+    ///      `cardinality` → `Cardinality`; any other value
+    ///      (including `skew`, unset, or unrecognized) →
+    ///      `SkewClassifier`.
+    ///   3. Else default: `SkewClassifier` (slice 1–4 behavior).
+    ///
+    /// Slice 5 ships the cardinality model as **opt-in
+    /// experimental**; the legacy default is unchanged.
+    pub fn with_wcoj_cost_model(mut self, kind: Option<CostModelKind>) -> Self {
+        self.wcoj_cost_model = kind;
+        self
+    }
+
+    /// v0.6.5 slice 5 — resolve the effective cost-model kind
+    /// from the precedence ladder. See `with_wcoj_cost_model`
+    /// for the rules.
+    ///
+    /// Test note: env-var resolution is non-deterministic
+    /// across parallel tests; consumers that need to set
+    /// `XLOG_WCOJ_COST_MODEL` must use the env-lock pattern.
+    pub fn resolved_wcoj_cost_model(&self) -> CostModelKind {
+        if let Some(kind) = self.wcoj_cost_model {
+            return kind;
+        }
+        let raw = std::env::var("XLOG_WCOJ_COST_MODEL").ok();
+        let normalized = raw.as_deref().map(|s| s.trim().to_ascii_lowercase());
+        match normalized.as_deref() {
+            Some("cardinality") => CostModelKind::Cardinality,
+            // Unrecognized / empty / unset all collapse to the
+            // legacy default — no surprise opt-in.
+            _ => CostModelKind::SkewClassifier,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -244,5 +308,129 @@ mod tests {
     fn test_memory_budget_from_device() {
         let budget = MemoryBudget::from_device_memory(10_000_000_000);
         assert_eq!(budget.device_bytes, 8_000_000_000);
+    }
+
+    // -----------------------------------------------------------
+    // v0.6.5 slice 5 — wcoj_cost_model precedence + env resolution
+    // -----------------------------------------------------------
+
+    /// Serialize `XLOG_WCOJ_COST_MODEL` mutation across tests —
+    /// process-global env is shared. Mirrors the pattern in
+    /// `xlog-runtime::executor::wcoj_dispatch::tests`.
+    fn cost_model_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// RAII snapshot of `XLOG_WCOJ_COST_MODEL` — captures the
+    /// pre-test value, clears it, restores on drop. Held while
+    /// `cost_model_env_lock` is locked so concurrent tests don't
+    /// race.
+    struct CostModelEnvSnapshot(Option<String>);
+
+    impl CostModelEnvSnapshot {
+        fn capture_and_clear() -> Self {
+            let prior = std::env::var("XLOG_WCOJ_COST_MODEL").ok();
+            // SAFETY: caller holds `cost_model_env_lock`.
+            unsafe {
+                std::env::remove_var("XLOG_WCOJ_COST_MODEL");
+            }
+            Self(prior)
+        }
+    }
+
+    impl Drop for CostModelEnvSnapshot {
+        fn drop(&mut self) {
+            // SAFETY: snapshot drops before the lock is released.
+            unsafe {
+                match self.0.take() {
+                    Some(v) => std::env::set_var("XLOG_WCOJ_COST_MODEL", v),
+                    None => std::env::remove_var("XLOG_WCOJ_COST_MODEL"),
+                }
+            }
+        }
+    }
+
+    fn with_cost_model_env<R>(f: impl FnOnce() -> R) -> R {
+        let _guard = cost_model_env_lock()
+            .lock()
+            .expect("cost-model env lock poisoned");
+        let _snap = CostModelEnvSnapshot::capture_and_clear();
+        f()
+    }
+
+    #[test]
+    fn cost_model_default_is_skew_classifier_when_unset() {
+        with_cost_model_env(|| {
+            let cfg = RuntimeConfig::default();
+            assert_eq!(
+                cfg.resolved_wcoj_cost_model(),
+                CostModelKind::SkewClassifier
+            );
+        });
+    }
+
+    #[test]
+    fn cost_model_env_var_cardinality_resolves_to_cardinality() {
+        with_cost_model_env(|| {
+            // SAFETY: caller holds env lock.
+            unsafe {
+                std::env::set_var("XLOG_WCOJ_COST_MODEL", "cardinality");
+            }
+            let cfg = RuntimeConfig::default();
+            assert_eq!(cfg.resolved_wcoj_cost_model(), CostModelKind::Cardinality);
+        });
+    }
+
+    #[test]
+    fn cost_model_env_var_garbage_resolves_to_skew_classifier() {
+        with_cost_model_env(|| {
+            unsafe {
+                std::env::set_var("XLOG_WCOJ_COST_MODEL", "not-a-real-model");
+            }
+            let cfg = RuntimeConfig::default();
+            assert_eq!(
+                cfg.resolved_wcoj_cost_model(),
+                CostModelKind::SkewClassifier
+            );
+        });
+    }
+
+    #[test]
+    fn cost_model_env_var_cardinality_with_whitespace_and_case_resolves() {
+        with_cost_model_env(|| {
+            unsafe {
+                std::env::set_var("XLOG_WCOJ_COST_MODEL", "  Cardinality  ");
+            }
+            let cfg = RuntimeConfig::default();
+            assert_eq!(cfg.resolved_wcoj_cost_model(), CostModelKind::Cardinality);
+        });
+    }
+
+    #[test]
+    fn cost_model_config_field_overrides_env_var() {
+        with_cost_model_env(|| {
+            unsafe {
+                std::env::set_var("XLOG_WCOJ_COST_MODEL", "skew");
+            }
+            let cfg =
+                RuntimeConfig::default().with_wcoj_cost_model(Some(CostModelKind::Cardinality));
+            assert_eq!(cfg.resolved_wcoj_cost_model(), CostModelKind::Cardinality);
+        });
+    }
+
+    #[test]
+    fn cost_model_config_field_skew_overrides_env_var_cardinality() {
+        with_cost_model_env(|| {
+            unsafe {
+                std::env::set_var("XLOG_WCOJ_COST_MODEL", "cardinality");
+            }
+            let cfg =
+                RuntimeConfig::default().with_wcoj_cost_model(Some(CostModelKind::SkewClassifier));
+            assert_eq!(
+                cfg.resolved_wcoj_cost_model(),
+                CostModelKind::SkewClassifier
+            );
+        });
     }
 }
