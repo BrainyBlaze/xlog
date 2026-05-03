@@ -3,15 +3,18 @@
 //! WCOJ triangle dispatch.
 //!
 //! Locks the v1 dispatch policy across syntactic variants of a
-//! triangle rule. The executor's matcher in
-//! [`xlog_runtime::executor::wcoj_dispatch::match_triangle_rir`]
-//! is intentionally narrow — it accepts exactly the canonical
-//! RIR shape that the lowerer produces for
-//! `tri(X, Y, Z) :- e1(X, Y), e2(Y, Z), e3(X, Z)`. Equivalent
-//! rules whose RIR shape differs (different join keys, different
-//! Project columns, an injected Filter, fewer head columns) are
-//! intentionally **out of v1 dispatch scope** and silently fall
-//! back to the existing binary-join chain.
+//! triangle rule. As of v0.6.5 slice 1 the executor's matcher
+//! `xlog_runtime::executor::wcoj_dispatch::match_multiway_triangle`
+//! consumes a `RirNode::MultiWayJoin` produced by
+//! `xlog_logic::promote::promote_multiway` after the optimizer
+//! pass. The matcher is intentionally narrow — it admits exactly
+//! the canonical (X, Y, Z) emit order over Scan inputs whose
+//! variable-class layout is `[[A,B],[B,C],[A,C]]`. Equivalent
+//! rules whose post-optimizer RIR shape doesn't promote (different
+//! join keys, different Project columns, an injected Filter, fewer
+//! head columns) are intentionally **out of v1 dispatch scope** and
+//! silently fall back to the embedded binary-join `fallback`
+//! subtree, which produces the same row set.
 //!
 //! Each test below runs the same fixture through Compiler +
 //! Executor twice (gate off vs. gate on) and asserts:

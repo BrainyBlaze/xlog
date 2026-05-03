@@ -42,10 +42,7 @@ fn compile_triangle_program_produces_multiway_body() {
             for (slot_idx, scan) in inputs.iter().enumerate() {
                 match scan {
                     RirNode::Scan { .. } => {}
-                    other => panic!(
-                        "input slot {} must be a Scan, got {:?}",
-                        slot_idx, other
-                    ),
+                    other => panic!("input slot {} must be a Scan, got {:?}", slot_idx, other),
                 }
             }
             assert_eq!(
