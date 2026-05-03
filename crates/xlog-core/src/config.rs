@@ -112,6 +112,21 @@ pub struct RuntimeConfig {
     /// is an explicit "do not engage the kill switch"
     /// (programmatic override over an env-set kill).
     pub wcoj_triangle_dispatch_disabled: Option<bool>,
+
+    /// v0.6.5 slice 2 — force gate for the 4-cycle WCOJ dispatch.
+    /// `Some(true)` / env `XLOG_USE_WCOJ_4CYCLE=1` forces every
+    /// recognized 4-cycle to dispatch the GPU kernel (classifier
+    /// bypassed). `Some(false)` is explicit force-off. `None`
+    /// (default) consults the env.
+    pub wcoj_4cycle_dispatch: Option<bool>,
+    /// v0.6.5 slice 2 — adaptive opt-in for 4-cycle WCOJ. **Unlike
+    /// triangle, 4-cycle adaptive is opt-in by default**, not
+    /// default-on: `None` resolves to `false`. Default-on for
+    /// 4-cycle is a separate follow-up slice gated by bench evidence.
+    pub wcoj_4cycle_dispatch_adaptive: Option<bool>,
+    /// v0.6.5 slice 2 — kill switch for 4-cycle WCOJ. Same shape
+    /// as triangle's kill switch: beats force + adaptive.
+    pub wcoj_4cycle_dispatch_disabled: Option<bool>,
 }
 
 impl Default for RuntimeConfig {
@@ -125,6 +140,9 @@ impl Default for RuntimeConfig {
             wcoj_triangle_dispatch: None,
             wcoj_triangle_dispatch_adaptive: None,
             wcoj_triangle_dispatch_disabled: None,
+            wcoj_4cycle_dispatch: None,
+            wcoj_4cycle_dispatch_adaptive: None,
+            wcoj_4cycle_dispatch_disabled: None,
         }
     }
 }
@@ -176,6 +194,30 @@ impl RuntimeConfig {
     /// in a test). `None` consults the env var.
     pub fn with_wcoj_triangle_dispatch_disabled(mut self, override_value: Option<bool>) -> Self {
         self.wcoj_triangle_dispatch_disabled = override_value;
+        self
+    }
+
+    /// v0.6.5 slice 2 — override the 4-cycle force-gate.
+    /// `Some(true)` forces the GPU kernel; `Some(false)` is
+    /// explicit force-off; `None` consults `XLOG_USE_WCOJ_4CYCLE`.
+    pub fn with_wcoj_4cycle_dispatch(mut self, override_value: Option<bool>) -> Self {
+        self.wcoj_4cycle_dispatch = override_value;
+        self
+    }
+
+    /// v0.6.5 slice 2 — override the 4-cycle adaptive opt-in.
+    /// `Some(true)` engages the classifier; `Some(false)` skips it.
+    /// `None` resolves to `false` (opt-in by default — 4-cycle
+    /// does NOT inherit triangle's default-on behavior).
+    pub fn with_wcoj_4cycle_dispatch_adaptive(mut self, override_value: Option<bool>) -> Self {
+        self.wcoj_4cycle_dispatch_adaptive = override_value;
+        self
+    }
+
+    /// v0.6.5 slice 2 — engage / disengage the 4-cycle kill switch.
+    /// Same shape as the triangle kill switch.
+    pub fn with_wcoj_4cycle_dispatch_disabled(mut self, override_value: Option<bool>) -> Self {
+        self.wcoj_4cycle_dispatch_disabled = override_value;
         self
     }
 }

@@ -92,6 +92,10 @@ pub struct Executor {
     /// counter to assert that the WCOJ path actually fired vs. silently
     /// falling back to the binary-join chain with the same answer.
     wcoj_triangle_dispatch_count: u64,
+    /// v0.6.5 slice 2 — count of times `try_dispatch_wcoj_4cycle`
+    /// produced a result and the executor installed it. Tracks
+    /// 4-cycle dispatches separately from triangle.
+    pub(super) wcoj_4cycle_dispatch_count: u64,
     /// Cached non-default stream for the WCOJ triangle dispatch hook.
     /// Acquired lazily on first dispatch and reused thereafter — mirrors
     /// [`xlog_cuda::CudaKernelProvider::recorded_op_stream`] for the
@@ -145,6 +149,7 @@ impl Executor {
             ilp_registry: IlpRegistry::new(),
             ilp_last_result: None,
             wcoj_triangle_dispatch_count: 0,
+            wcoj_4cycle_dispatch_count: 0,
             wcoj_dispatch_stream: OnceLock::new(),
             #[cfg(feature = "wcoj-phase-timing")]
             last_wcoj_phase_timing: std::sync::Mutex::new(None),

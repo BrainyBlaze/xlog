@@ -141,6 +141,65 @@ pub(super) fn wcoj_disabled(config_override: Option<bool>) -> bool {
         .unwrap_or(false)
 }
 
+// -----------------------------------------------------------------
+// v0.6.5 slice 2 — 4-cycle dispatch gates.
+//
+// Width-neutral env naming: `XLOG_USE_WCOJ_4CYCLE` controls the
+// force gate across u32 / u64 / Symbol. Triangle's `_U32` suffix is
+// historical debt; we do NOT propagate that pattern to 4-cycle.
+//
+// Adaptive resolution differs from triangle: 4-cycle is **opt-in by
+// default**. Unset env + `None` config → `false`. Default-on is
+// gated on bench evidence and lives in a separate follow-up slice.
+// -----------------------------------------------------------------
+
+/// Force-gate env. `"1"` / case-insensitive `"true"` → ON.
+pub const ENV_USE_WCOJ_4CYCLE: &str = "XLOG_USE_WCOJ_4CYCLE";
+
+/// Adaptive opt-in env. Default off (slice 2 ships explicit-only).
+pub const ENV_USE_WCOJ_4CYCLE_ADAPTIVE: &str = "XLOG_USE_WCOJ_4CYCLE_ADAPTIVE";
+
+/// Kill switch env.
+pub const ENV_DISABLE_WCOJ_4CYCLE: &str = "XLOG_DISABLE_WCOJ_4CYCLE";
+
+/// Resolve the 4-cycle force gate (config override > env > false).
+pub(super) fn wcoj_4cycle_gate_enabled(config_override: Option<bool>) -> bool {
+    if let Some(v) = config_override {
+        return v;
+    }
+    std::env::var(ENV_USE_WCOJ_4CYCLE)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Resolve the 4-cycle adaptive opt-in. Precedence:
+///   * `config_override = Some(b)` → `b`.
+///   * `XLOG_USE_WCOJ_4CYCLE_ADAPTIVE=1` → `true`.
+///   * Anything else (including unset) → `false`.
+///
+/// **Differs from triangle**: triangle defaults adaptive to `true`
+/// when env is unset (default-on flip after baseline evidence).
+/// 4-cycle defaults to `false` until its own baseline evidence
+/// supports a default-on flip in a follow-up slice.
+pub(super) fn wcoj_4cycle_adaptive_enabled(config_override: Option<bool>) -> bool {
+    if let Some(v) = config_override {
+        return v;
+    }
+    std::env::var(ENV_USE_WCOJ_4CYCLE_ADAPTIVE)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Resolve the 4-cycle kill switch (config > env > false).
+pub(super) fn wcoj_4cycle_disabled(config_override: Option<bool>) -> bool {
+    if let Some(v) = config_override {
+        return v;
+    }
+    std::env::var(ENV_DISABLE_WCOJ_4CYCLE)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// Threshold at which a classifier score routes the rule to the
 /// WCOJ pipeline rather than the binary-join fallback. Locked
 /// from the v0.6.2 baseline probe in
@@ -251,6 +310,100 @@ fn output_columns_match_canonical_triangle(cols: &[ProjectExpr]) -> bool {
         && matches!(cols[0], ProjectExpr::Column(0))
         && matches!(cols[1], ProjectExpr::Column(1))
         && matches!(cols[2], ProjectExpr::Column(3))
+}
+
+// -----------------------------------------------------------------
+// v0.6.5 slice 2 — 4-cycle matcher.
+//
+// Mirrors the triangle matcher with shape-locked qualifier per the
+// slice 2 walker contract.
+// -----------------------------------------------------------------
+
+/// Four rel IDs extracted from a matched 4-cycle RIR.
+pub(super) struct FourCycleRirMatch {
+    pub rel_e1: RelId,
+    pub rel_e2: RelId,
+    pub rel_e3: RelId,
+    pub rel_e4: RelId,
+}
+
+/// Pattern-match a `RirNode::MultiWayJoin` whose structure is the
+/// canonical 4-cycle shape. Returns the four scan rel IDs in WCOJ
+/// slot order on a successful match; `None` for any deviation.
+///
+/// The match is intentionally strict over `inputs`, `slot_vars`,
+/// AND `output_columns`. v0.6.5 slice 2 only certifies the
+/// canonical (W, X, Y, Z) emit order.
+pub(super) fn match_multiway_4cycle(body: &RirNode) -> Option<FourCycleRirMatch> {
+    let RirNode::MultiWayJoin {
+        inputs,
+        slot_vars,
+        output_columns,
+        ..
+    } = body
+    else {
+        return None;
+    };
+    if inputs.len() != 4 {
+        return None;
+    }
+    if !slot_vars_match_canonical_4cycle(slot_vars) {
+        return None;
+    }
+    if !output_columns_match_canonical_4cycle(output_columns) {
+        return None;
+    }
+    let rel_e1 = scan_rel(&inputs[0])?;
+    let rel_e2 = scan_rel(&inputs[1])?;
+    let rel_e3 = scan_rel(&inputs[2])?;
+    let rel_e4 = scan_rel(&inputs[3])?;
+    Some(FourCycleRirMatch {
+        rel_e1,
+        rel_e2,
+        rel_e3,
+        rel_e4,
+    })
+}
+
+/// Confirm `slot_vars` is the canonical
+/// `[[A, B], [B, C], [C, D], [D, A]]` 4-cycle shape with four
+/// distinct variable-class ids closing the cycle (slot 3's second
+/// var equals slot 0's first var).
+fn slot_vars_match_canonical_4cycle(slot_vars: &[Vec<Option<u32>>]) -> bool {
+    if slot_vars.len() != 4 {
+        return false;
+    }
+    for s in slot_vars {
+        if s.len() != 2 {
+            return false;
+        }
+    }
+    let (a, b) = match (slot_vars[0][0], slot_vars[0][1]) {
+        (Some(a), Some(b)) if a != b => (a, b),
+        _ => return false,
+    };
+    let c = match (slot_vars[1][0], slot_vars[1][1]) {
+        (Some(b1), Some(c)) if b1 == b && c != a && c != b => c,
+        _ => return false,
+    };
+    let d = match (slot_vars[2][0], slot_vars[2][1]) {
+        (Some(c1), Some(d)) if c1 == c && d != a && d != b && d != c => d,
+        _ => return false,
+    };
+    matches!(
+        (slot_vars[3][0], slot_vars[3][1]),
+        (Some(d2), Some(a2)) if d2 == d && a2 == a
+    )
+}
+
+/// Confirm `output_columns` is the certified `(W, X, Y, Z)` emit
+/// order. The GPU kernel writes quads in this order.
+fn output_columns_match_canonical_4cycle(cols: &[ProjectExpr]) -> bool {
+    cols.len() == 4
+        && matches!(cols[0], ProjectExpr::Column(0))
+        && matches!(cols[1], ProjectExpr::Column(1))
+        && matches!(cols[2], ProjectExpr::Column(3))
+        && matches!(cols[3], ProjectExpr::Column(5))
 }
 
 /// Extract the `RelId` from a leaf `Scan` node, or `None` for
@@ -639,6 +792,197 @@ impl Executor {
         self.wcoj_triangle_dispatch_count
     }
 
+    /// v0.6.5 slice 2 — count of times the WCOJ 4-cycle hook
+    /// produced a result and the executor installed it. Tracked
+    /// separately from triangle so tests can pin which shape
+    /// dispatched.
+    pub fn wcoj_4cycle_dispatch_count(&self) -> u64 {
+        self.wcoj_4cycle_dispatch_count
+    }
+
+    /// v0.6.5 slice 2 — try to dispatch a non-recursive rule
+    /// through the GPU 4-cycle WCOJ kernel.
+    ///
+    /// Decision tree (highest → lowest):
+    ///   1. Hard kill switch (`wcoj_4cycle_dispatch_disabled` /
+    ///      `XLOG_DISABLE_WCOJ_4CYCLE=1`) → no dispatch.
+    ///   2. Force gate (`wcoj_4cycle_dispatch=Some(true)` /
+    ///      `XLOG_USE_WCOJ_4CYCLE=1`) → kernel runs.
+    ///   3. Force-Some(false) → no dispatch.
+    ///   4. Adaptive opt-in (config / env, default off) →
+    ///      classifier integration lands in slice 2 step 9;
+    ///      until then, the adaptive branch returns Ok(None)
+    ///      (no dispatch). Per the slice 2 plan, ship force +
+    ///      adaptive together; this step just plumbs the gates.
+    ///
+    /// Returns `Ok(Some(buffer))` on dispatch; `Ok(None)`
+    /// silently otherwise. The caller installs the buffer or
+    /// descends into `MultiWayJoin.fallback`.
+    pub(super) fn try_dispatch_wcoj_4cycle(
+        &mut self,
+        rule: &CompiledRule,
+    ) -> Result<Option<CudaBuffer>> {
+        // 1. Kill switch.
+        if wcoj_4cycle_disabled(self.config.wcoj_4cycle_dispatch_disabled) {
+            return Ok(None);
+        }
+        // 2. Force gate.
+        let force_override = self.config.wcoj_4cycle_dispatch;
+        let force_on = wcoj_4cycle_gate_enabled(force_override);
+        let mode = if force_on {
+            DispatchMode::Force
+        } else {
+            // Force-Some(false) is explicit off — adaptive does
+            // NOT resurrect it.
+            if matches!(force_override, Some(false)) {
+                return Ok(None);
+            }
+            let adaptive_override = self.config.wcoj_4cycle_dispatch_adaptive;
+            if wcoj_4cycle_adaptive_enabled(adaptive_override) {
+                DispatchMode::Adaptive
+            } else {
+                return Ok(None);
+            }
+        };
+
+        // 3. Match the canonical 4-cycle MultiWayJoin.
+        let Some(matched) = match_multiway_4cycle(&rule.body) else {
+            return Ok(None);
+        };
+
+        // 4. Resolve rel IDs to predicate names.
+        let name_e1 = match self.get_rel_name(matched.rel_e1) {
+            Some(s) => s.to_string(),
+            None => return Ok(None),
+        };
+        let name_e2 = match self.get_rel_name(matched.rel_e2) {
+            Some(s) => s.to_string(),
+            None => return Ok(None),
+        };
+        let name_e3 = match self.get_rel_name(matched.rel_e3) {
+            Some(s) => s.to_string(),
+            None => return Ok(None),
+        };
+        let name_e4 = match self.get_rel_name(matched.rel_e4) {
+            Some(s) => s.to_string(),
+            None => return Ok(None),
+        };
+
+        // 5. Look up input buffers + classify their key widths.
+        // All four slots must share the same width.
+        let buf_e1 = match self.store.get(&name_e1) {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        let buf_e2 = match self.store.get(&name_e2) {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        let buf_e3 = match self.store.get(&name_e3) {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        let buf_e4 = match self.store.get(&name_e4) {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+        let width = match (
+            classify_two_col_wcoj_width(buf_e1),
+            classify_two_col_wcoj_width(buf_e2),
+            classify_two_col_wcoj_width(buf_e3),
+            classify_two_col_wcoj_width(buf_e4),
+        ) {
+            (Some(a), Some(b), Some(c), Some(d)) if a == b && b == c && c == d => a,
+            _ => return Ok(None),
+        };
+
+        // 6. Resolve the cached WCOJ launch stream (shared with
+        // triangle dispatch — slice 2's stream rename made this
+        // shape-agnostic).
+        if self.provider.memory().runtime().is_none() {
+            return Ok(None);
+        }
+        let launch_stream = match self.wcoj_dispatch_stream_or_init() {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
+        // 7. Adaptive mode: classifier integration lands in
+        // slice 2 step 9. Until then, requesting adaptive
+        // declines silently (treat as "not yet implemented").
+        if mode == DispatchMode::Adaptive {
+            return Ok(None);
+        }
+
+        // 8. Run layout (4× per slot) + 4-cycle kernel. Failure
+        // → silent fallback per slice contract.
+        let dispatch_result =
+            self.run_wcoj_4cycle_pipeline(buf_e1, buf_e2, buf_e3, buf_e4, launch_stream, width);
+        match dispatch_result {
+            Ok(buf) => {
+                self.wcoj_4cycle_dispatch_count += 1;
+                Ok(Some(buf))
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Inner pipeline for 4-cycle: 4× layout construction + kernel.
+    fn run_wcoj_4cycle_pipeline(
+        &self,
+        buf_e1: &CudaBuffer,
+        buf_e2: &CudaBuffer,
+        buf_e3: &CudaBuffer,
+        buf_e4: &CudaBuffer,
+        launch_stream: StreamId,
+        width: WcojKeyWidth,
+    ) -> Result<CudaBuffer> {
+        match width {
+            WcojKeyWidth::FourByte => {
+                let layout_e1 = self
+                    .provider
+                    .wcoj_layout_u32_recorded(buf_e1, launch_stream)?;
+                let layout_e2 = self
+                    .provider
+                    .wcoj_layout_u32_recorded(buf_e2, launch_stream)?;
+                let layout_e3 = self
+                    .provider
+                    .wcoj_layout_u32_recorded(buf_e3, launch_stream)?;
+                let layout_e4 = self
+                    .provider
+                    .wcoj_layout_u32_recorded(buf_e4, launch_stream)?;
+                self.provider.wcoj_4cycle_u32_recorded(
+                    &layout_e1,
+                    &layout_e2,
+                    &layout_e3,
+                    &layout_e4,
+                    launch_stream,
+                )
+            }
+            WcojKeyWidth::EightByte => {
+                let layout_e1 = self
+                    .provider
+                    .wcoj_layout_u64_recorded(buf_e1, launch_stream)?;
+                let layout_e2 = self
+                    .provider
+                    .wcoj_layout_u64_recorded(buf_e2, launch_stream)?;
+                let layout_e3 = self
+                    .provider
+                    .wcoj_layout_u64_recorded(buf_e3, launch_stream)?;
+                let layout_e4 = self
+                    .provider
+                    .wcoj_layout_u64_recorded(buf_e4, launch_stream)?;
+                self.provider.wcoj_4cycle_u64_recorded(
+                    &layout_e1,
+                    &layout_e2,
+                    &layout_e3,
+                    &layout_e4,
+                    launch_stream,
+                )
+            }
+        }
+    }
+
     /// Resolve the cached WCOJ launch stream, lazily initializing
     /// it on first call by acquiring one stream from the runtime
     /// pool. Subsequent calls reuse the same stream — mirrors
@@ -911,5 +1255,235 @@ mod tests {
             assert!(!wcoj_gate_enabled(None));
             assert!(wcoj_gate_enabled(Some(true)));
         });
+    }
+
+    // -------------------------------------------------------------
+    // v0.6.5 slice 2 — 4-cycle env-resolver + matcher tests.
+    // -------------------------------------------------------------
+
+    use super::{
+        match_multiway_4cycle, wcoj_4cycle_adaptive_enabled, wcoj_4cycle_disabled,
+        wcoj_4cycle_gate_enabled, ENV_DISABLE_WCOJ_4CYCLE, ENV_USE_WCOJ_4CYCLE,
+        ENV_USE_WCOJ_4CYCLE_ADAPTIVE,
+    };
+
+    struct EnvSnapshot4Cycle {
+        force: Option<String>,
+        adaptive: Option<String>,
+        disable: Option<String>,
+    }
+
+    impl EnvSnapshot4Cycle {
+        fn capture_and_clear() -> Self {
+            let snap = Self {
+                force: std::env::var(ENV_USE_WCOJ_4CYCLE).ok(),
+                adaptive: std::env::var(ENV_USE_WCOJ_4CYCLE_ADAPTIVE).ok(),
+                disable: std::env::var(ENV_DISABLE_WCOJ_4CYCLE).ok(),
+            };
+            // SAFETY: caller holds env_lock.
+            unsafe {
+                std::env::remove_var(ENV_USE_WCOJ_4CYCLE);
+                std::env::remove_var(ENV_USE_WCOJ_4CYCLE_ADAPTIVE);
+                std::env::remove_var(ENV_DISABLE_WCOJ_4CYCLE);
+            }
+            snap
+        }
+    }
+
+    impl Drop for EnvSnapshot4Cycle {
+        fn drop(&mut self) {
+            // SAFETY: caller holds env_lock.
+            unsafe {
+                match self.force.take() {
+                    Some(v) => std::env::set_var(ENV_USE_WCOJ_4CYCLE, v),
+                    None => std::env::remove_var(ENV_USE_WCOJ_4CYCLE),
+                }
+                match self.adaptive.take() {
+                    Some(v) => std::env::set_var(ENV_USE_WCOJ_4CYCLE_ADAPTIVE, v),
+                    None => std::env::remove_var(ENV_USE_WCOJ_4CYCLE_ADAPTIVE),
+                }
+                match self.disable.take() {
+                    Some(v) => std::env::set_var(ENV_DISABLE_WCOJ_4CYCLE, v),
+                    None => std::env::remove_var(ENV_DISABLE_WCOJ_4CYCLE),
+                }
+            }
+        }
+    }
+
+    fn with_4cycle_env<R>(f: impl FnOnce() -> R) -> R {
+        let _guard = env_lock().lock().expect("4-cycle env lock poisoned");
+        let _snap = EnvSnapshot4Cycle::capture_and_clear();
+        f()
+    }
+
+    #[test]
+    fn force_4cycle_resolver_defaults_off_when_env_unset() {
+        with_4cycle_env(|| {
+            assert!(!wcoj_4cycle_gate_enabled(None));
+            assert!(wcoj_4cycle_gate_enabled(Some(true)));
+            assert!(!wcoj_4cycle_gate_enabled(Some(false)));
+        });
+    }
+
+    #[test]
+    fn force_4cycle_resolver_env_can_enable() {
+        with_4cycle_env(|| {
+            set_env(ENV_USE_WCOJ_4CYCLE, "1");
+            assert!(wcoj_4cycle_gate_enabled(None));
+            set_env(ENV_USE_WCOJ_4CYCLE, "true");
+            assert!(wcoj_4cycle_gate_enabled(None));
+            set_env(ENV_USE_WCOJ_4CYCLE, "0");
+            assert!(!wcoj_4cycle_gate_enabled(None));
+        });
+    }
+
+    /// **Locks the slice 2 contract**: 4-cycle adaptive opt-in
+    /// defaults OFF, unlike triangle's default-on. If a future
+    /// slice flips this, that change must update this test
+    /// explicitly with bench evidence.
+    #[test]
+    fn adaptive_4cycle_resolver_defaults_off_when_env_unset() {
+        with_4cycle_env(|| {
+            assert!(
+                !wcoj_4cycle_adaptive_enabled(None),
+                "4-cycle adaptive must be OPT-IN by default (unlike triangle's default-on)"
+            );
+            assert!(wcoj_4cycle_adaptive_enabled(Some(true)));
+            assert!(!wcoj_4cycle_adaptive_enabled(Some(false)));
+        });
+    }
+
+    #[test]
+    fn adaptive_4cycle_resolver_env_can_enable() {
+        with_4cycle_env(|| {
+            set_env(ENV_USE_WCOJ_4CYCLE_ADAPTIVE, "1");
+            assert!(wcoj_4cycle_adaptive_enabled(None));
+            set_env(ENV_USE_WCOJ_4CYCLE_ADAPTIVE, "0");
+            assert!(!wcoj_4cycle_adaptive_enabled(None));
+            set_env(ENV_USE_WCOJ_4CYCLE_ADAPTIVE, "true");
+            assert!(wcoj_4cycle_adaptive_enabled(None));
+        });
+    }
+
+    #[test]
+    fn kill_4cycle_resolver_honors_env_and_config() {
+        with_4cycle_env(|| {
+            assert!(!wcoj_4cycle_disabled(None));
+            set_env(ENV_DISABLE_WCOJ_4CYCLE, "1");
+            assert!(wcoj_4cycle_disabled(None));
+            assert!(!wcoj_4cycle_disabled(Some(false)));
+            set_env(ENV_DISABLE_WCOJ_4CYCLE, "0");
+            assert!(wcoj_4cycle_disabled(Some(true)));
+        });
+    }
+
+    fn canonical_4cycle_multiway() -> RirNode {
+        RirNode::MultiWayJoin {
+            inputs: vec![
+                RirNode::Scan { rel: RelId(1) },
+                RirNode::Scan { rel: RelId(2) },
+                RirNode::Scan { rel: RelId(3) },
+                RirNode::Scan { rel: RelId(4) },
+            ],
+            slot_vars: vec![
+                vec![Some(0u32), Some(1)],
+                vec![Some(1u32), Some(2)],
+                vec![Some(2u32), Some(3)],
+                vec![Some(3u32), Some(0)],
+            ],
+            output_columns: vec![
+                ProjectExpr::Column(0),
+                ProjectExpr::Column(1),
+                ProjectExpr::Column(3),
+                ProjectExpr::Column(5),
+            ],
+            fallback: Box::new(RirNode::Unit),
+        }
+    }
+
+    #[test]
+    fn match_4cycle_canonical_returns_four_rels() {
+        let node = canonical_4cycle_multiway();
+        let m = match_multiway_4cycle(&node).expect("must match canonical 4-cycle");
+        assert_eq!(m.rel_e1, RelId(1));
+        assert_eq!(m.rel_e2, RelId(2));
+        assert_eq!(m.rel_e3, RelId(3));
+        assert_eq!(m.rel_e4, RelId(4));
+    }
+
+    #[test]
+    fn match_4cycle_rejects_non_multiway() {
+        assert!(match_multiway_4cycle(&RirNode::Scan { rel: RelId(1) }).is_none());
+    }
+
+    #[test]
+    fn match_4cycle_rejects_triangle_shape() {
+        // Triangle is 3 inputs — 4-cycle matcher must reject.
+        let triangle = RirNode::MultiWayJoin {
+            inputs: vec![
+                RirNode::Scan { rel: RelId(1) },
+                RirNode::Scan { rel: RelId(2) },
+                RirNode::Scan { rel: RelId(3) },
+            ],
+            slot_vars: vec![
+                vec![Some(0u32), Some(1)],
+                vec![Some(1u32), Some(2)],
+                vec![Some(0u32), Some(2)],
+            ],
+            output_columns: vec![
+                ProjectExpr::Column(0),
+                ProjectExpr::Column(1),
+                ProjectExpr::Column(3),
+            ],
+            fallback: Box::new(RirNode::Unit),
+        };
+        assert!(match_multiway_4cycle(&triangle).is_none());
+    }
+
+    #[test]
+    fn match_4cycle_rejects_rotated_output_columns() {
+        let mut node = canonical_4cycle_multiway();
+        if let RirNode::MultiWayJoin { output_columns, .. } = &mut node {
+            output_columns.swap(0, 1);
+        }
+        assert!(match_multiway_4cycle(&node).is_none());
+    }
+
+    #[test]
+    fn match_4cycle_rejects_arity_mismatched_output_columns() {
+        let mut node = canonical_4cycle_multiway();
+        if let RirNode::MultiWayJoin { output_columns, .. } = &mut node {
+            output_columns.pop();
+        }
+        assert!(match_multiway_4cycle(&node).is_none());
+    }
+
+    #[test]
+    fn match_4cycle_rejects_unclosed_cycle() {
+        // Slot 3's second var is supposed to equal slot 0's first
+        // var (closing the cycle). Replace with a fresh id.
+        let mut node = canonical_4cycle_multiway();
+        if let RirNode::MultiWayJoin { slot_vars, .. } = &mut node {
+            slot_vars[3] = vec![Some(3), Some(99)];
+        }
+        assert!(match_multiway_4cycle(&node).is_none());
+    }
+
+    #[test]
+    fn match_4cycle_rejects_non_scan_input() {
+        let mut node = canonical_4cycle_multiway();
+        if let RirNode::MultiWayJoin { inputs, .. } = &mut node {
+            inputs[0] = RirNode::Unit;
+        }
+        assert!(match_multiway_4cycle(&node).is_none());
+    }
+
+    #[test]
+    fn match_4cycle_rejects_input_arity_mismatch() {
+        let mut node = canonical_4cycle_multiway();
+        if let RirNode::MultiWayJoin { inputs, .. } = &mut node {
+            inputs.push(RirNode::Scan { rel: RelId(5) });
+        }
+        assert!(match_multiway_4cycle(&node).is_none());
     }
 }
