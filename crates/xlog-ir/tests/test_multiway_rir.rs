@@ -115,3 +115,51 @@ fn multiway_join_with_empty_inputs_collects_nothing() {
     assert!(node.referenced_relations().is_empty());
     assert!(!node.is_leaf());
 }
+
+/// v0.6.5 slice 2 (D4) — shape-agnosticism guard.
+///
+/// Slice 1 added `MultiWayJoin` with a triangle-only promoter, but
+/// the IR variant itself is shape-agnostic. Slice 2a (4-way) will
+/// add a 4-input promoter; this test pins the contract that
+/// `referenced_relations` on a synthesized 4-input MultiWayJoin
+/// reports four distinct relations from `inputs` alone, regardless
+/// of arity.
+#[test]
+fn referenced_relations_handles_4_inputs() {
+    let scans = [10u32, 20, 30, 40].map(|id| RirNode::Scan { rel: RelId(id) });
+    let node = RirNode::MultiWayJoin {
+        inputs: scans.to_vec(),
+        // Synthetic 4-cycle slot_vars: [[A,B],[B,C],[C,D],[A,D]].
+        slot_vars: vec![
+            vec![Some(0), Some(1)],
+            vec![Some(1), Some(2)],
+            vec![Some(2), Some(3)],
+            vec![Some(0), Some(3)],
+        ],
+        output_columns: vec![
+            ProjectExpr::Column(0),
+            ProjectExpr::Column(1),
+            ProjectExpr::Column(2),
+            ProjectExpr::Column(3),
+        ],
+        // Stub fallback — the test does not execute this; it only
+        // exercises the IR walker.
+        fallback: Box::new(RirNode::Unit),
+    };
+    let rels = node.referenced_relations();
+    assert_eq!(
+        rels.len(),
+        4,
+        "expected 4 entries (one per input slot), got {}: {:?}",
+        rels.len(),
+        rels,
+    );
+    for id in [10, 20, 30, 40] {
+        assert!(
+            rels.contains(&RelId(id)),
+            "RelId({}) missing from {:?}",
+            id,
+            rels,
+        );
+    }
+}

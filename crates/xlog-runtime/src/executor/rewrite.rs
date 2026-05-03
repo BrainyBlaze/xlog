@@ -601,4 +601,118 @@ mod multiway_walker_tests {
             _ => panic!("expected MultiWayJoin after rewrite"),
         }
     }
+
+    /// v0.6.5 slice 2 (D4) — shape-agnosticism guard.
+    ///
+    /// Slice 1's promoter is triangle-only; future slices will add
+    /// 4-input shapes. The walker arms in `collect_scan_rels` and
+    /// `rewrite_scan_nth_impl` must NOT hard-code `inputs.len() ==
+    /// 3`. Synthesize a 4-input `MultiWayJoin` directly and exercise
+    /// the walker. This test does NOT execute the IR through the
+    /// runtime — it only pins the walker's contract.
+    fn fourway_multiway(a: RelId, b: RelId, c: RelId, d: RelId) -> RirNode {
+        // Synthetic 4-cycle slot_vars [[A,B],[B,C],[C,D],[A,D]] with
+        // a stub fallback whose Scan leaves repeat each rel once.
+        let inner1 = RirNode::Join {
+            left: Box::new(RirNode::Scan { rel: a }),
+            right: Box::new(RirNode::Scan { rel: b }),
+            left_keys: vec![1],
+            right_keys: vec![0],
+            join_type: JoinType::Inner,
+        };
+        let inner2 = RirNode::Join {
+            left: Box::new(inner1),
+            right: Box::new(RirNode::Scan { rel: c }),
+            left_keys: vec![3],
+            right_keys: vec![0],
+            join_type: JoinType::Inner,
+        };
+        let outer = RirNode::Join {
+            left: Box::new(inner2),
+            right: Box::new(RirNode::Scan { rel: d }),
+            left_keys: vec![0, 5],
+            right_keys: vec![0, 1],
+            join_type: JoinType::Inner,
+        };
+        let fallback = RirNode::Project {
+            input: Box::new(outer),
+            columns: vec![
+                xlog_ir::rir::ProjectExpr::Column(0),
+                xlog_ir::rir::ProjectExpr::Column(1),
+                xlog_ir::rir::ProjectExpr::Column(3),
+                xlog_ir::rir::ProjectExpr::Column(5),
+            ],
+        };
+        RirNode::MultiWayJoin {
+            inputs: vec![
+                RirNode::Scan { rel: a },
+                RirNode::Scan { rel: b },
+                RirNode::Scan { rel: c },
+                RirNode::Scan { rel: d },
+            ],
+            slot_vars: vec![
+                vec![Some(0), Some(1)],
+                vec![Some(1), Some(2)],
+                vec![Some(2), Some(3)],
+                vec![Some(0), Some(3)],
+            ],
+            output_columns: vec![
+                xlog_ir::rir::ProjectExpr::Column(0),
+                xlog_ir::rir::ProjectExpr::Column(1),
+                xlog_ir::rir::ProjectExpr::Column(2),
+                xlog_ir::rir::ProjectExpr::Column(3),
+            ],
+            fallback: Box::new(fallback),
+        }
+    }
+
+    #[test]
+    fn collect_scan_rels_handles_4_inputs() {
+        let node = fourway_multiway(RelId(10), RelId(20), RelId(30), RelId(40));
+        let mut out = Vec::new();
+        Executor::collect_scan_rels(&node, &mut out);
+        assert_eq!(
+            out.len(),
+            4,
+            "expected 4 scan rels, got {} entries: {:?}",
+            out.len(),
+            out
+        );
+        for id in [10, 20, 30, 40] {
+            assert!(out.contains(&RelId(id)), "RelId({}) missing", id);
+        }
+    }
+
+    #[test]
+    fn rewrite_scan_nth_handles_4_inputs_and_fallback() {
+        let node = fourway_multiway(RelId(10), RelId(20), RelId(30), RelId(40));
+        // RelId(40) appears once in `inputs[3]` and once inside
+        // `fallback` (the outer join's right scan). nth=0 rewrites
+        // the first hit (input[3]); nth=1 rewrites the fallback hit.
+        let rewritten_first = Executor::rewrite_scan_nth(&node, RelId(40), 0, RelId(99))
+            .expect("first rewrite must succeed");
+        let RirNode::MultiWayJoin { inputs, .. } = rewritten_first else {
+            panic!("expected MultiWayJoin");
+        };
+        assert!(matches!(inputs[3], RirNode::Scan { rel: RelId(99) }));
+
+        let rewritten_second = Executor::rewrite_scan_nth(&node, RelId(40), 1, RelId(99))
+            .expect("second rewrite must succeed");
+        let RirNode::MultiWayJoin {
+            inputs, fallback, ..
+        } = rewritten_second
+        else {
+            panic!("expected MultiWayJoin");
+        };
+        assert!(matches!(inputs[3], RirNode::Scan { rel: RelId(40) }));
+        fn find_99(n: &RirNode) -> bool {
+            match n {
+                RirNode::Scan { rel: RelId(99) } => true,
+                RirNode::Project { input, .. } => find_99(input),
+                RirNode::Join { left, right, .. } => find_99(left) || find_99(right),
+                _ => false,
+            }
+        }
+        assert!(find_99(&fallback), "fallback must contain RelId(99)");
+    }
 }
