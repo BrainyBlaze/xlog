@@ -47,21 +47,25 @@ first under the binary-join fallback.
 |---|------|--------|
 | 1 | `CardinalityAwareCostModel` compiles + 8+ stub unit tests pass | PASS — 10 stub tests (delegate-on-missing, classifier-failure-falls-back × 2, large-binary clause, skew+size clause, below-MIN clause, 4-cycle counterparts × 2, threshold pinning) |
 | 2 | Default `RuntimeConfig` selects `SkewClassifier`; slice 4 cert dispatch counts byte-identical | PASS — `cardinality_default_off_keeps_slice4_dispatch_counts` (counter == 1 matches slice 4) |
-| 3 | Opt-in via env var OR config field switches the impl deterministically | PASS — `cardinality_opt_in_via_env_var_matches_config_field` (env-locked) |
-| 4 | Large-binary fixture under cardinality model dispatches; small-binary fixture falls back | PASS — `cardinality_opt_in_with_seeded_large_cards_dispatches_via_adaptive` (counter ≥ 1) and `cardinality_opt_in_with_small_cards_falls_back_to_binary` (counter == 0) |
+| 3a | Missing-stats delegation reaches the executor path | PASS — `cardinality_opt_in_without_seeded_stats_delegates_to_skew_model` runs adaptive-mode twice (default skew vs cardinality with no stats) and asserts counter + row-set parity. Force gate intentionally NOT used here (would bypass the cost model). |
+| 3b | Opt-in via env var OR config field switches the impl deterministically | PASS — `cardinality_opt_in_via_env_var_matches_config_field` (env-locked) |
+| 4a | Triangle: large-binary fixture under cardinality model dispatches; small-binary fixture falls back | PASS — `cardinality_opt_in_with_seeded_large_cards_dispatches_via_adaptive` (counter ≥ 1) and `cardinality_opt_in_with_small_cards_falls_back_to_binary` (counter == 0) |
+| 4b | 4-cycle: same end-to-end coverage with adaptive opt-in | PASS — `cardinality_4cycle_opt_in_with_seeded_large_cards_dispatches` (counter ≥ 1, adaptive opt-in via `with_wcoj_4cycle_dispatch_adaptive(Some(true))`) and `cardinality_4cycle_opt_in_with_small_cards_falls_back_to_binary` (counter == 0; binary-join fallback row set non-empty) |
 | 5 | Workspace + CUDA cert + WCOJ regression no regression | PASS — see workspace tally |
 
 ## Cert Test Results
 
 ```
 cargo test -p xlog-integration --release --test test_wcoj_cardinality_cost_model
-running 5 tests
-test cardinality_opt_in_via_env_var_matches_config_field ... ok
-test cardinality_default_off_keeps_slice4_dispatch_counts ... ok
-test cardinality_opt_in_without_seeded_stats_delegates_to_skew_model ... ok
+running 7 tests
 test cardinality_opt_in_with_seeded_large_cards_dispatches_via_adaptive ... ok
+test cardinality_4cycle_opt_in_with_seeded_large_cards_dispatches ... ok
+test cardinality_default_off_keeps_slice4_dispatch_counts ... ok
+test cardinality_opt_in_via_env_var_matches_config_field ... ok
+test cardinality_opt_in_without_seeded_stats_delegates_to_skew_model ... ok
+test cardinality_4cycle_opt_in_with_small_cards_falls_back_to_binary ... ok
 test cardinality_opt_in_with_small_cards_falls_back_to_binary ... ok
-test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured
 ```
 
 ```

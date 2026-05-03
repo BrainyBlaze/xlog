@@ -33,6 +33,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 
+use cudarc::driver::sys;
 use xlog_core::{CostModelKind, MemoryBudget, RuntimeConfig, ScalarType, Schema};
 use xlog_cuda::device_runtime::{
     AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
@@ -132,6 +133,104 @@ fn upload_binary_u32(memory: &Arc<GpuMemoryManager>, rows: &[(u32, u32)]) -> Cud
     )
 }
 
+fn download_triples(buf: &CudaBuffer) -> Vec<(u32, u32, u32)> {
+    let n = match buf.cached_row_count() {
+        Some(c) => c as usize,
+        None => {
+            let mut count_host = [0u32; 1];
+            unsafe {
+                sys::cuMemcpyDtoH_v2(
+                    count_host.as_mut_ptr() as *mut _,
+                    *buf.num_rows_device().device_ptr(),
+                    std::mem::size_of::<u32>(),
+                );
+            }
+            count_host[0] as usize
+        }
+    };
+    if n == 0 {
+        return Vec::new();
+    }
+    assert_eq!(buf.arity(), 3);
+    let mut col0_bytes = vec![0u8; n * 4];
+    let mut col1_bytes = vec![0u8; n * 4];
+    let mut col2_bytes = vec![0u8; n * 4];
+    unsafe {
+        sys::cuMemcpyDtoH_v2(
+            col0_bytes.as_mut_ptr() as *mut _,
+            *buf.column(0).unwrap().device_ptr(),
+            col0_bytes.len(),
+        );
+        sys::cuMemcpyDtoH_v2(
+            col1_bytes.as_mut_ptr() as *mut _,
+            *buf.column(1).unwrap().device_ptr(),
+            col1_bytes.len(),
+        );
+        sys::cuMemcpyDtoH_v2(
+            col2_bytes.as_mut_ptr() as *mut _,
+            *buf.column(2).unwrap().device_ptr(),
+            col2_bytes.len(),
+        );
+    }
+    let mut out: Vec<(u32, u32, u32)> = (0..n)
+        .map(|i| {
+            (
+                u32::from_le_bytes(col0_bytes[i * 4..i * 4 + 4].try_into().unwrap()),
+                u32::from_le_bytes(col1_bytes[i * 4..i * 4 + 4].try_into().unwrap()),
+                u32::from_le_bytes(col2_bytes[i * 4..i * 4 + 4].try_into().unwrap()),
+            )
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn download_quads(buf: &CudaBuffer) -> Vec<(u32, u32, u32, u32)> {
+    let n = match buf.cached_row_count() {
+        Some(c) => c as usize,
+        None => {
+            let mut count_host = [0u32; 1];
+            unsafe {
+                sys::cuMemcpyDtoH_v2(
+                    count_host.as_mut_ptr() as *mut _,
+                    *buf.num_rows_device().device_ptr(),
+                    std::mem::size_of::<u32>(),
+                );
+            }
+            count_host[0] as usize
+        }
+    };
+    if n == 0 {
+        return Vec::new();
+    }
+    assert_eq!(buf.arity(), 4);
+    let mut cols = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    for c in 0..4 {
+        cols[c] = vec![0u8; n * 4];
+        unsafe {
+            sys::cuMemcpyDtoH_v2(
+                cols[c].as_mut_ptr() as *mut _,
+                *buf.column(c).unwrap().device_ptr(),
+                cols[c].len(),
+            );
+        }
+    }
+    let mut out: Vec<(u32, u32, u32, u32)> = (0..n)
+        .map(|i| {
+            (
+                u32::from_le_bytes(cols[0][i * 4..i * 4 + 4].try_into().unwrap()),
+                u32::from_le_bytes(cols[1][i * 4..i * 4 + 4].try_into().unwrap()),
+                u32::from_le_bytes(cols[2][i * 4..i * 4 + 4].try_into().unwrap()),
+                u32::from_le_bytes(cols[3][i * 4..i * 4 + 4].try_into().unwrap()),
+            )
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Triangle program with `pred` declarations to anchor U32
 /// schemas, identical to slice 4's stable-triangle fixture.
 const STABLE_TRIANGLE_RECURSIVE: &str = r#"
@@ -144,6 +243,31 @@ const STABLE_TRIANGLE_RECURSIVE: &str = r#"
     echo(X, Y, Z) :- tri(X, Y, Z).
     tri(X, Y, Z) :- echo(X, Y, Z).
 "#;
+
+/// 4-cycle program with `pred` declarations, mirrors slice 4's
+/// stable-4-cycle fixture. Adaptive mode for 4-cycle is opt-in
+/// (not default-on like triangle), so the tests below set
+/// `with_wcoj_4cycle_dispatch_adaptive(Some(true))` explicitly.
+const STABLE_4CYCLE_RECURSIVE: &str = r#"
+    pred e1(u32, u32).
+    pred e2(u32, u32).
+    pred e3(u32, u32).
+    pred e4(u32, u32).
+    pred cyc(u32, u32, u32, u32).
+    pred echo(u32, u32, u32, u32).
+    cyc(W, X, Y, Z) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W).
+    echo(W, X, Y, Z) :- cyc(W, X, Y, Z).
+    cyc(W, X, Y, Z) :- echo(W, X, Y, Z).
+"#;
+
+fn cycle4_inputs() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
+    let mut m: BTreeMap<&'static str, Vec<(u32, u32)>> = BTreeMap::new();
+    m.insert("e1", vec![(1, 2), (5, 6)]);
+    m.insert("e2", vec![(2, 3), (6, 7)]);
+    m.insert("e3", vec![(3, 4), (7, 8)]);
+    m.insert("e4", vec![(4, 1), (8, 5)]);
+    m
+}
 
 fn triangle_inputs() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
     let mut m: BTreeMap<&'static str, Vec<(u32, u32)>> = BTreeMap::new();
@@ -343,33 +467,135 @@ fn cardinality_opt_in_with_small_cards_falls_back_to_binary() {
 
 #[test]
 fn cardinality_opt_in_without_seeded_stats_delegates_to_skew_model() {
-    // Opt-in but DON'T seed stats. The missing-stats safety
-    // floor in `CardinalityAwareCostModel` delegates to
-    // `SkewClassifierCostModel`. With force gate on (skipping
-    // adaptive entirely), the dispatch fires on the seeding
-    // pass exactly as in slice 4's stable triangle.
+    // Opt-in cardinality model with NO stats seeded → the
+    // missing-stats safety floor MUST delegate to
+    // SkewClassifierCostModel. We prove that by running two
+    // adaptive-mode executions on the same fixture and
+    // asserting counter + row set parity:
+    //
+    //   1. Default config (SkewClassifier).
+    //   2. Cardinality opt-in (no stats seeded → delegates).
+    //
+    // Force-gate on a triangle would bypass the cost model
+    // entirely, so this test stays in adaptive mode (default-on
+    // for triangle) so the cost model IS consulted. If the
+    // delegation logic broke, the cardinality model would
+    // produce a different decision and the assertion would
+    // catch it.
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
     };
     with_cost_model_env(|| {
+        // Run 1: default cost model (skew classifier), adaptive.
+        let baseline = run_with_optional_stats(
+            Arc::clone(&fix.provider),
+            &fix.memory,
+            RuntimeConfig::default(),
+            STABLE_TRIANGLE_RECURSIVE,
+            &triangle_inputs(),
+            &BTreeMap::new(),
+        );
+        let baseline_counter = baseline.wcoj_triangle_dispatch_count();
+        let baseline_rows = download_triples(baseline.store().get("tri").expect("tri"));
+
+        // Run 2: cardinality model, NO stats seeded → delegate.
+        let delegated = run_with_optional_stats(
+            Arc::clone(&fix.provider),
+            &fix.memory,
+            RuntimeConfig::default().with_wcoj_cost_model(Some(CostModelKind::Cardinality)),
+            STABLE_TRIANGLE_RECURSIVE,
+            &triangle_inputs(),
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(
+            delegated.wcoj_triangle_dispatch_count(),
+            baseline_counter,
+            "cardinality model with missing stats must delegate to \
+             SkewClassifier; counter {} ≠ skew baseline {}",
+            delegated.wcoj_triangle_dispatch_count(),
+            baseline_counter,
+        );
+        let delegated_rows = download_triples(delegated.store().get("tri").expect("tri"));
+        assert_eq!(
+            delegated_rows, baseline_rows,
+            "delegation must produce the same row set as the legacy default"
+        );
+    });
+}
+
+#[test]
+fn cardinality_4cycle_opt_in_with_seeded_large_cards_dispatches() {
+    // 4-cycle counterpart of the large-binary triangle test.
+    // 4-cycle adaptive is opt-in (not default-on), so enable
+    // it explicitly. With cardinality model + seeded large
+    // cards, binary_est >> LARGE threshold → dispatch.
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    with_cost_model_env(|| {
+        let mut seeded = BTreeMap::new();
+        seeded.insert("e1", 100_000u64);
+        seeded.insert("e2", 100_000u64);
+        seeded.insert("e3", 100_000u64);
+        seeded.insert("e4", 100_000u64);
         let executor = run_with_optional_stats(
             Arc::clone(&fix.provider),
             &fix.memory,
             RuntimeConfig::default()
                 .with_wcoj_cost_model(Some(CostModelKind::Cardinality))
-                .with_wcoj_triangle_dispatch(Some(true)),
-            STABLE_TRIANGLE_RECURSIVE,
-            &triangle_inputs(),
-            &BTreeMap::new(),
+                .with_wcoj_4cycle_dispatch_adaptive(Some(true)),
+            STABLE_4CYCLE_RECURSIVE,
+            &cycle4_inputs(),
+            &seeded,
         );
-        // Force gate is on; the cost model isn't consulted at
-        // all in Force mode. Counter should still be 1.
+        assert!(
+            executor.wcoj_4cycle_dispatch_count() >= 1,
+            "cardinality model + huge binary_est must dispatch on 4-cycle; got counter {}",
+            executor.wcoj_4cycle_dispatch_count()
+        );
+    });
+}
+
+#[test]
+fn cardinality_4cycle_opt_in_with_small_cards_falls_back_to_binary() {
+    // 4-cycle counterpart of the small-binary triangle test.
+    // Seeded stats are tiny → binary_est below MIN threshold →
+    // no dispatch (binary-join handles).
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    with_cost_model_env(|| {
+        let mut seeded = BTreeMap::new();
+        seeded.insert("e1", 5u64);
+        seeded.insert("e2", 5u64);
+        seeded.insert("e3", 5u64);
+        seeded.insert("e4", 5u64);
+        let executor = run_with_optional_stats(
+            Arc::clone(&fix.provider),
+            &fix.memory,
+            RuntimeConfig::default()
+                .with_wcoj_cost_model(Some(CostModelKind::Cardinality))
+                .with_wcoj_4cycle_dispatch_adaptive(Some(true)),
+            STABLE_4CYCLE_RECURSIVE,
+            &cycle4_inputs(),
+            &seeded,
+        );
         assert_eq!(
-            executor.wcoj_triangle_dispatch_count(),
-            1,
-            "force gate bypasses the cost model entirely; got counter {}",
-            executor.wcoj_triangle_dispatch_count()
+            executor.wcoj_4cycle_dispatch_count(),
+            0,
+            "cardinality model + small binary_est must fall back on 4-cycle; got counter {}",
+            executor.wcoj_4cycle_dispatch_count()
+        );
+        // Confirm the program still produced the correct row
+        // set via the binary-join path.
+        let rows = download_quads(executor.store().get("cyc").expect("cyc"));
+        assert!(
+            !rows.is_empty(),
+            "binary-join fallback must still produce 4-cycle rows"
         );
     });
 }
