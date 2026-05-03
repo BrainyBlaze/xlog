@@ -348,6 +348,154 @@ extern "C" __global__ void wcoj_triangle_materialize(
 }
 
 // ===============================================================
+// v0.6.5 slice 2 — 4-cycle WCOJ kernels (u32).
+//
+//   cycle4(W, X, Y, Z) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W)
+//
+// Inputs are already-sorted, already-deduped binary u32 relations:
+//   * e1: lex-sorted by (W, X)
+//   * e2: lex-sorted by (X, Y)
+//   * e3: lex-sorted by (Y, Z)
+//   * e4: lex-sorted by (Z, W)
+//
+// Algorithm: dispatch one thread per row of e1. Thread `i` is bound
+// to (W, X) = (e1.col0[i], e1.col1[i]). For each `y` in the X-range
+// of e2, then each `z` in the Y-range of e3, the thread checks
+// whether (z, w) ∈ e4 via a two-level binary search (z on e4.col0,
+// then w on e4.col1 within the Z-equal range). Each closing match
+// emits one (W, X, Y, Z) quad.
+//
+// Two-pass count → materialize, mirrors triangle. Output positions
+// come from a deterministic prefix-sum, no atomics.
+//
+// Heavy-row note: the inner chain is sequential per-thread; the
+// outer parallelism is over slot-0 rows. Histogram-guided
+// scheduling for heavy slot-0 rows is deferred.
+// ===============================================================
+
+namespace {
+
+// Test whether the pair (a, b) is present in a relation sorted lex
+// by (col0, col1). First narrows to the col0 == a range via
+// lower/upper bound, then binary-searches col1 within that range.
+// Returns true iff some row equals (a, b).
+__device__ __forceinline__ bool contains_pair_u32(
+    const uint32_t* __restrict__ col0,
+    const uint32_t* __restrict__ col1,
+    uint32_t n,
+    uint32_t a,
+    uint32_t b) {
+    uint32_t lo = lower_bound_u32(col0, n, a);
+    uint32_t hi = upper_bound_u32(col0, n, a);
+    if (lo == hi) {
+        return false;
+    }
+    uint32_t inner_offset = lower_bound_u32(col1 + lo, hi - lo, b);
+    uint32_t inner_idx = lo + inner_offset;
+    return inner_idx < hi && col1[inner_idx] == b;
+}
+
+}  // anonymous namespace
+
+// Per-thread count kernel: one thread per row of e1.
+//
+// Thread `i` walks the chain e1 → e2 → e3 → e4 and accumulates the
+// number of (W, X, Y, Z) quads it will emit.
+extern "C" __global__ void wcoj_4cycle_count(
+    const uint32_t* __restrict__ e1_col0,
+    const uint32_t* __restrict__ e1_col1,
+    uint32_t n_e1,
+    const uint32_t* __restrict__ e2_col0,
+    const uint32_t* __restrict__ e2_col1,
+    uint32_t n_e2,
+    const uint32_t* __restrict__ e3_col0,
+    const uint32_t* __restrict__ e3_col1,
+    uint32_t n_e3,
+    const uint32_t* __restrict__ e4_col0,
+    const uint32_t* __restrict__ e4_col1,
+    uint32_t n_e4,
+    uint32_t* __restrict__ out_counts) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_e1) {
+        return;
+    }
+    uint32_t w = e1_col0[i];
+    uint32_t x = e1_col1[i];
+
+    uint32_t e2_lo = lower_bound_u32(e2_col0, n_e2, x);
+    uint32_t e2_hi = upper_bound_u32(e2_col0, n_e2, x);
+
+    uint32_t cnt = 0;
+    for (uint32_t j = e2_lo; j < e2_hi; ++j) {
+        uint32_t y = e2_col1[j];
+        uint32_t e3_lo = lower_bound_u32(e3_col0, n_e3, y);
+        uint32_t e3_hi = upper_bound_u32(e3_col0, n_e3, y);
+        for (uint32_t k = e3_lo; k < e3_hi; ++k) {
+            uint32_t z = e3_col1[k];
+            if (contains_pair_u32(e4_col0, e4_col1, n_e4, z, w)) {
+                cnt += 1;
+            }
+        }
+    }
+    out_counts[i] = cnt;
+}
+
+// Per-thread materialize kernel: same chain walk as the count
+// kernel, emits (W, X, Y, Z) into the output columns at
+// out_offsets[i] + j for the j-th match.
+extern "C" __global__ void wcoj_4cycle_materialize(
+    const uint32_t* __restrict__ e1_col0,
+    const uint32_t* __restrict__ e1_col1,
+    uint32_t n_e1,
+    const uint32_t* __restrict__ e2_col0,
+    const uint32_t* __restrict__ e2_col1,
+    uint32_t n_e2,
+    const uint32_t* __restrict__ e3_col0,
+    const uint32_t* __restrict__ e3_col1,
+    uint32_t n_e3,
+    const uint32_t* __restrict__ e4_col0,
+    const uint32_t* __restrict__ e4_col1,
+    uint32_t n_e4,
+    const uint32_t* __restrict__ out_offsets,
+    uint32_t total_rows,
+    uint32_t* __restrict__ out_w,
+    uint32_t* __restrict__ out_x,
+    uint32_t* __restrict__ out_y,
+    uint32_t* __restrict__ out_z) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_e1) {
+        return;
+    }
+    uint32_t w = e1_col0[i];
+    uint32_t x = e1_col1[i];
+    uint32_t base = out_offsets[i];
+    if (base >= total_rows) {
+        return;
+    }
+
+    uint32_t e2_lo = lower_bound_u32(e2_col0, n_e2, x);
+    uint32_t e2_hi = upper_bound_u32(e2_col0, n_e2, x);
+
+    uint32_t emitted = 0;
+    for (uint32_t j = e2_lo; j < e2_hi; ++j) {
+        uint32_t y = e2_col1[j];
+        uint32_t e3_lo = lower_bound_u32(e3_col0, n_e3, y);
+        uint32_t e3_hi = upper_bound_u32(e3_col0, n_e3, y);
+        for (uint32_t k = e3_lo; k < e3_hi; ++k) {
+            uint32_t z = e3_col1[k];
+            if (contains_pair_u32(e4_col0, e4_col1, n_e4, z, w)) {
+                uint32_t pos = base + emitted;
+                out_w[pos] = w;
+                out_x[pos] = x;
+                out_y[pos] = y;
+                out_z[pos] = z;
+                emitted += 1;
+            }
+        }
+    }
+}
+
+// ===============================================================
 // U64 entry kernels — same shape as the u32 pair above, with
 // 64-bit join-key buffers. `wcoj_compute_total` is reused as-is
 // (counters stay u32).

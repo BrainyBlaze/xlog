@@ -454,6 +454,10 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "wcoj_triangle_skew_histogram_u64",
             "wcoj_layout_check_sorted_unique_u32",
             "wcoj_layout_check_sorted_unique_u64",
+            // v0.6.5 slice 2 — 4-cycle WCOJ (u32 first; u64 +
+            // skew histograms land in subsequent slice 2 steps).
+            "wcoj_4cycle_count",
+            "wcoj_4cycle_materialize",
         ],
     },
 ];
