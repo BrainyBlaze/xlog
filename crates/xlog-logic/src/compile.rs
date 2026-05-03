@@ -294,7 +294,11 @@ impl Compiler {
         // optimizer never has to learn the new variant. Fallback
         // identity preserves v0.6.2 binary-join semantics on
         // dispatch decline.
-        crate::promote::promote_multiway(&mut plan);
+        //
+        // v0.6.5 slice 4: pass the lowerer's predicate→RelId map
+        // so the promoter can gate recursive-SCC bodies on the
+        // count of in-SCC Scans (≤ 1 = promote, ≥ 2 = skip).
+        crate::promote::promote_multiway(&mut plan, self.lowerer.rel_ids());
 
         Ok(plan)
     }

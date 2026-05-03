@@ -1,10 +1,11 @@
 //! v0.6.5 slice 1 — `MultiWayJoin` promotion pass.
+//! v0.6.5 slice 4 — recursive-SCC promotion gated on linear recursion.
 //!
 //! Walks an [`ExecutionPlan`] (post-lowering, post-optimizer) and
-//! rewrites recognized triangle subtrees in `rule.body` to
+//! rewrites recognized triangle / 4-cycle subtrees in `rule.body` to
 //! [`RirNode::MultiWayJoin`]. Idempotent.
 //!
-//! ## Eligibility (slice 1)
+//! ## Eligibility
 //!
 //! Exact-match against the canonical lowered-and-optimized triangle
 //! shape — the same tree the v0.6.2 executor's `match_triangle_rir`
@@ -29,10 +30,28 @@
 //! }
 //! ```
 //!
-//! Anything else (different shape, predicate-pushdown-altered Join,
-//! recursive SCC bodies, computed-projection variants) is left
-//! untouched. The promoter does not introduce new eligibility; that
-//! is later-slice work in v0.6.5.
+//! 4-cycle has the analogous canonical lowered shape (slice 2). Any
+//! deviation in shape, predicate-pushdown-altered Join, or
+//! computed-projection variants is left untouched.
+//!
+//! ## Recursive SCC handling (slice 4)
+//!
+//! The promoter no longer blanket-skips recursive SCCs. Instead it
+//! gates per-rule on the number of body Scans whose RelId resolves
+//! to a predicate inside the rule's head SCC:
+//!
+//! | Recursive Scans in body | Slice 4 behavior          |
+//! |-------------------------|---------------------------|
+//! | 0 (stable rule)         | Promote                   |
+//! | 1 (linear recursion)    | Promote                   |
+//! | ≥ 2 (multi-recursion)   | Skip — defer to slice 4.2 |
+//!
+//! The recursive engine (`Executor::execute_recursive_scc`) consumes
+//! the resulting `MultiWayJoin` via
+//! `execute_wcoj_or_fallback_node`, dispatching WCOJ kernels on the
+//! seeding pass and on each variant evaluation. Multi-recursive
+//! bodies stay binary-join because the per-variant union+dedup
+//! interaction with WCOJ is out of slice 4 scope.
 //!
 //! ## Fallback identity invariant
 //!
@@ -44,43 +63,48 @@
 //! ## Out of scope
 //!
 //! * Cost model, selectivity reordering, variable-ordering choices.
-//! * Recursive SCC bodies. The promoter walks `rules_by_scc` but
-//!   skips any SCC whose `is_recursive` flag is set; the executor's
-//!   `execute_recursive_scc` semi-naive engine never invokes the
-//!   WCOJ dispatch hook, so promoting a recursive body would only
-//!   add work and force the recursive engine to handle a new IR
-//!   variant. Honor the "no recursive WCOJ" exclusion at the source.
-//! * 4-way / general-arity admission.
+//! * Multi-recursive (≥ 2) WCOJ — slice 4.2 / v0.6.6.
+//! * 4-way / general-arity admission — slice 5.
 
+use std::collections::{HashMap, HashSet};
+use xlog_core::RelId;
+use xlog_ir::plan::Scc;
 use xlog_ir::rir::ProjectExpr;
 use xlog_ir::{ExecutionPlan, JoinType, RirNode};
 
-/// Walk an `ExecutionPlan` and rewrite eligible triangle subtrees
-/// in each rule body to `RirNode::MultiWayJoin`. Idempotent.
+/// Walk an `ExecutionPlan` and rewrite eligible triangle / 4-cycle
+/// subtrees in each rule body to `RirNode::MultiWayJoin`. Idempotent.
 ///
 /// `CompiledRule.meta` is preserved unchanged — the metadata is
 /// rule-level (head schema, row estimates, layout hints), not
 /// node-level, and the promoter does not alter rule semantics.
 ///
-/// **Recursive SCC bodies are skipped.** v0.6.5 slice 1 explicitly
-/// keeps WCOJ dispatch out of `Executor::execute_recursive_scc`'s
-/// semi-naive loop (the executor's WCOJ hook fires only on the
-/// non-recursive branch). Promoting a body inside a recursive SCC
-/// would still be correct via the `MultiWayJoin` fallback descent
-/// arm, but it would be wasted work and would hand a new IR variant
-/// to the recursive engine without the slice's "no recursive WCOJ"
-/// exclusion holding the line. Honor the exclusion at the source.
-pub fn promote_multiway(plan: &mut ExecutionPlan) {
+/// `rel_ids` is the canonical predicate-name → RelId map used to
+/// resolve body Scans against the head SCC's predicate set. Pass
+/// `Compiler::rel_ids()` (or `Lowerer::rel_ids()`) at the call site.
+///
+/// **Recursive SCC bodies (slice 4).** A rule whose body contains
+/// at most one Scan in its head SCC's predicate set is promoted —
+/// stable rules (count 0) and linear-recursive rules (count 1).
+/// Bodies with ≥ 2 recursive Scans are left as binary-join trees;
+/// see slice 4.2 for multi-recursive WCOJ.
+pub fn promote_multiway(plan: &mut ExecutionPlan, rel_ids: &HashMap<String, RelId>) {
+    // Snapshot SCCs by index so we can pass &Scc into helpers
+    // while holding `&mut plan.rules_by_scc`.
+    let sccs_snapshot: Vec<Scc> = plan.sccs.clone();
     for (scc_id, rules) in plan.rules_by_scc.iter_mut().enumerate() {
-        let recursive = plan
-            .sccs
-            .get(scc_id)
-            .map(|s| s.is_recursive)
-            .unwrap_or(false);
-        if recursive {
-            continue;
-        }
+        let head_scc = match sccs_snapshot.get(scc_id) {
+            Some(scc) => scc,
+            None => continue,
+        };
+        let head_rel_set = build_head_rel_set(head_scc, rel_ids);
         for rule in rules.iter_mut() {
+            // Slice 4 gate: skip multi-recursive bodies. Stable
+            // (count 0) and linear-recursive (count 1) bodies fall
+            // through to the existing shape-match dispatch.
+            if recursive_scan_count(&rule.body, &head_rel_set) > 1 {
+                continue;
+            }
             // Try triangle first, then 4-cycle. A body cannot match
             // both (different atom counts), so order is a doc anchor,
             // not a correctness gate. Future shapes append to this
@@ -93,6 +117,57 @@ pub fn promote_multiway(plan: &mut ExecutionPlan) {
                 rule.body = promoted;
             }
         }
+    }
+}
+
+/// Resolve the head SCC's predicates to the set of RelIds that
+/// would count as "recursive" Scans inside its rule bodies. Returns
+/// an empty set when the SCC's predicates aren't in `rel_ids` (e.g.
+/// in synthetic test plans without a real lowerer); empty set means
+/// every Scan resolves to non-recursive, which is the correct
+/// default for slice 1–3 byte-preservation.
+fn build_head_rel_set(scc: &Scc, rel_ids: &HashMap<String, RelId>) -> HashSet<RelId> {
+    scc.predicates
+        .iter()
+        .filter_map(|p| rel_ids.get(p).copied())
+        .collect()
+}
+
+/// Count Scans in `body` whose RelId is in `head_rel_set`. Walks
+/// every RIR variant including `MultiWayJoin` inputs and fallback;
+/// idempotent on already-promoted bodies.
+fn recursive_scan_count(body: &RirNode, head_rel_set: &HashSet<RelId>) -> usize {
+    match body {
+        RirNode::Unit => 0,
+        RirNode::Scan { rel } => usize::from(head_rel_set.contains(rel)),
+        RirNode::Filter { input, .. }
+        | RirNode::Project { input, .. }
+        | RirNode::GroupBy { input, .. }
+        | RirNode::Distinct { input, .. } => recursive_scan_count(input, head_rel_set),
+        RirNode::Join { left, right, .. } | RirNode::Diff { left, right } => {
+            recursive_scan_count(left, head_rel_set) + recursive_scan_count(right, head_rel_set)
+        }
+        RirNode::Union { inputs } => inputs
+            .iter()
+            .map(|n| recursive_scan_count(n, head_rel_set))
+            .sum(),
+        RirNode::Fixpoint {
+            base, recursive, ..
+        } => {
+            recursive_scan_count(base, head_rel_set) + recursive_scan_count(recursive, head_rel_set)
+        }
+        RirNode::TensorMaskedJoin { rel_index, .. } => rel_index
+            .iter()
+            .filter(|(rid, _)| head_rel_set.contains(rid))
+            .count(),
+        // For an already-promoted body, count from `inputs` —
+        // matches the `collect_scan_rels` invariant. The fallback
+        // subtree references the same RelId set by promoter
+        // construction, so counting both would double-count.
+        RirNode::MultiWayJoin { inputs, .. } => inputs
+            .iter()
+            .map(|n| recursive_scan_count(n, head_rel_set))
+            .sum(),
     }
 }
 
@@ -361,7 +436,7 @@ mod tests {
     #[test]
     fn promotes_canonical_triangle() {
         let mut plan = plan_with_body(canonical_triangle_tree());
-        promote_multiway(&mut plan);
+        promote_multiway(&mut plan, &HashMap::new());
         let body = &plan.rules_by_scc[0][0].body;
         match body {
             RirNode::MultiWayJoin {
@@ -401,7 +476,7 @@ mod tests {
     fn fallback_is_structurally_equal_to_input() {
         let pre = canonical_triangle_tree();
         let mut plan = plan_with_body(pre.clone());
-        promote_multiway(&mut plan);
+        promote_multiway(&mut plan, &HashMap::new());
         let body = &plan.rules_by_scc[0][0].body;
         let RirNode::MultiWayJoin { fallback, .. } = body else {
             panic!("expected MultiWayJoin");
@@ -415,9 +490,9 @@ mod tests {
     #[test]
     fn idempotent_under_repeat_calls() {
         let mut plan = plan_with_body(canonical_triangle_tree());
-        promote_multiway(&mut plan);
+        promote_multiway(&mut plan, &HashMap::new());
         let first = format!("{:?}", &plan.rules_by_scc[0][0].body);
-        promote_multiway(&mut plan);
+        promote_multiway(&mut plan, &HashMap::new());
         let second = format!("{:?}", &plan.rules_by_scc[0][0].body);
         assert_eq!(first, second);
     }
@@ -448,7 +523,7 @@ mod tests {
             ],
         };
         let mut plan = plan_with_body(body);
-        promote_multiway(&mut plan);
+        promote_multiway(&mut plan, &HashMap::new());
         // Body untouched.
         assert!(matches!(
             &plan.rules_by_scc[0][0].body,
@@ -481,7 +556,7 @@ mod tests {
             ],
         };
         let mut plan = plan_with_body(body);
-        promote_multiway(&mut plan);
+        promote_multiway(&mut plan, &HashMap::new());
         assert!(matches!(
             &plan.rules_by_scc[0][0].body,
             RirNode::Project { .. }
@@ -519,7 +594,7 @@ mod tests {
             ],
         };
         let mut plan = plan_with_body(body);
-        promote_multiway(&mut plan);
+        promote_multiway(&mut plan, &HashMap::new());
         assert!(matches!(
             &plan.rules_by_scc[0][0].body,
             RirNode::Project { .. }
@@ -553,20 +628,24 @@ mod tests {
             },
         );
         let mut plan = builder.build();
-        promote_multiway(&mut plan);
+        promote_multiway(&mut plan, &HashMap::new());
         assert_eq!(
             format!("{:?}", &plan.rules_by_scc[0][0].meta),
             format!("{:?}", meta_pre),
         );
     }
 
-    /// v0.6.5 slice 1 contract: bodies inside a recursive SCC are
-    /// NOT promoted, even when the body is structurally a canonical
-    /// triangle. The executor's recursive engine never invokes
-    /// `try_dispatch_wcoj_triangle`, and pushing a new IR variant
-    /// into `execute_recursive_scc` is out of slice scope.
+    // -----------------------------------------------------------
+    // v0.6.5 slice 4 — recursive-SCC promotion gates
+    // -----------------------------------------------------------
+
+    /// Slice 4 contract: a stable triangle (zero recursive Scans) in
+    /// a recursive SCC IS promoted — the recursive engine's seeding
+    /// pass dispatches WCOJ via `execute_wcoj_or_fallback_node`.
+    /// Body Scans are RelId(1)/(2)/(3) and the SCC's predicate "tri"
+    /// is not in `rel_ids`, so the count is 0.
     #[test]
-    fn skips_recursive_scc_bodies() {
+    fn promotes_stable_triangle_in_recursive_scc() {
         let mut builder = PlanBuilder::new();
         builder.add_scc(Scc {
             id: 0,
@@ -582,19 +661,84 @@ mod tests {
             },
         );
         let mut plan = builder.build();
-        promote_multiway(&mut plan);
-        // Body untouched: still the original Project { Join { ... } }.
+        // No "tri" entry in rel_ids → all body Scans are extensional
+        // from this SCC's POV → count == 0 → promote.
+        promote_multiway(&mut plan, &HashMap::new());
+        assert!(matches!(
+            &plan.rules_by_scc[0][0].body,
+            RirNode::MultiWayJoin { .. }
+        ));
+    }
+
+    /// Slice 4 contract: a linear-recursive triangle (exactly one
+    /// in-SCC Scan) IS promoted. Build a triangle whose RelId(2)
+    /// corresponds to the head SCC's predicate "tri" and assert
+    /// promotion despite `is_recursive: true`.
+    #[test]
+    fn promotes_linear_recursive_triangle() {
+        let mut builder = PlanBuilder::new();
+        builder.add_scc(Scc {
+            id: 0,
+            predicates: vec!["tri".to_string()],
+            is_recursive: true,
+        });
+        builder.add_rule(
+            0,
+            CompiledRule {
+                head: "tri".to_string(),
+                body: canonical_triangle_tree(),
+                meta: Default::default(),
+            },
+        );
+        let mut plan = builder.build();
+        let mut rel_ids = HashMap::new();
+        rel_ids.insert("tri".to_string(), RelId(2)); // 1 of 3 Scans
+        promote_multiway(&mut plan, &rel_ids);
+        assert!(matches!(
+            &plan.rules_by_scc[0][0].body,
+            RirNode::MultiWayJoin { .. }
+        ));
+    }
+
+    /// Slice 4 contract: ≥ 2 recursive Scans → NOT promoted. Body
+    /// stays as the original `Project { Join { ... } }` binary-join
+    /// tree. Mark "tri" → RelId(1) and "tri" predicate set covers
+    /// RelId(1)+(2) by aliasing — but easier: add a second SCC
+    /// member predicate that maps to RelId(2) so two of the three
+    /// body Scans count as in-SCC.
+    #[test]
+    fn skips_multirec_triangle_in_recursive_scc() {
+        let mut builder = PlanBuilder::new();
+        builder.add_scc(Scc {
+            id: 0,
+            predicates: vec!["tri_a".to_string(), "tri_b".to_string()],
+            is_recursive: true,
+        });
+        builder.add_rule(
+            0,
+            CompiledRule {
+                head: "tri_a".to_string(),
+                body: canonical_triangle_tree(),
+                meta: Default::default(),
+            },
+        );
+        let mut plan = builder.build();
+        let mut rel_ids = HashMap::new();
+        rel_ids.insert("tri_a".to_string(), RelId(1));
+        rel_ids.insert("tri_b".to_string(), RelId(2));
+        // Count == 2 ≥ 2 → skip.
+        promote_multiway(&mut plan, &rel_ids);
         assert!(matches!(
             &plan.rules_by_scc[0][0].body,
             RirNode::Project { .. }
         ));
     }
 
-    /// Mixed plan: a recursive SCC and a non-recursive SCC, both
-    /// containing the canonical triangle. Only the non-recursive
-    /// body is promoted.
+    /// Mixed plan: a recursive SCC with a linear-recursive triangle
+    /// (count 1) AND a non-recursive SCC with a stable triangle
+    /// (count 0). BOTH get promoted under the slice 4 contract.
     #[test]
-    fn promotes_only_non_recursive_sccs_in_mixed_plan() {
+    fn promotes_linear_rec_and_non_rec_sccs_in_mixed_plan() {
         let mut builder = PlanBuilder::new();
         builder.add_scc(Scc {
             id: 0,
@@ -623,13 +767,15 @@ mod tests {
             },
         );
         let mut plan = builder.build();
-        promote_multiway(&mut plan);
-        // Recursive SCC body: untouched.
+        let mut rel_ids = HashMap::new();
+        rel_ids.insert("rec".to_string(), RelId(1)); // count 1 in SCC 0
+                                                     // SCC 1 has no rec scans (count 0 in SCC 1 because "nonrec"
+                                                     // not in body).
+        promote_multiway(&mut plan, &rel_ids);
         assert!(matches!(
             &plan.rules_by_scc[0][0].body,
-            RirNode::Project { .. }
+            RirNode::MultiWayJoin { .. }
         ));
-        // Non-recursive SCC body: promoted.
         assert!(matches!(
             &plan.rules_by_scc[1][0].body,
             RirNode::MultiWayJoin { .. }
@@ -699,7 +845,7 @@ mod tests {
     #[test]
     fn promotes_canonical_4cycle() {
         let mut plan = plan_with_4cycle_body(canonical_4cycle_tree());
-        promote_multiway(&mut plan);
+        promote_multiway(&mut plan, &HashMap::new());
         let body = &plan.rules_by_scc[0][0].body;
         match body {
             RirNode::MultiWayJoin {
@@ -741,7 +887,7 @@ mod tests {
     fn fallback_4cycle_is_structurally_equal_to_input() {
         let pre = canonical_4cycle_tree();
         let mut plan = plan_with_4cycle_body(pre.clone());
-        promote_multiway(&mut plan);
+        promote_multiway(&mut plan, &HashMap::new());
         let body = &plan.rules_by_scc[0][0].body;
         let RirNode::MultiWayJoin { fallback, .. } = body else {
             panic!("expected MultiWayJoin");
@@ -752,9 +898,9 @@ mod tests {
     #[test]
     fn idempotent_4cycle_under_repeat_calls() {
         let mut plan = plan_with_4cycle_body(canonical_4cycle_tree());
-        promote_multiway(&mut plan);
+        promote_multiway(&mut plan, &HashMap::new());
         let first = format!("{:?}", &plan.rules_by_scc[0][0].body);
-        promote_multiway(&mut plan);
+        promote_multiway(&mut plan, &HashMap::new());
         let second = format!("{:?}", &plan.rules_by_scc[0][0].body);
         assert_eq!(first, second);
     }
@@ -829,8 +975,10 @@ mod tests {
         assert!(try_promote_4cycle(&body).is_none());
     }
 
+    /// Slice 4 contract: stable 4-cycle (zero recursive Scans) IS
+    /// promoted in a recursive SCC.
     #[test]
-    fn skips_recursive_scc_4cycle() {
+    fn promotes_stable_4cycle_in_recursive_scc() {
         let mut builder = PlanBuilder::new();
         builder.add_scc(Scc {
             id: 0,
@@ -846,8 +994,67 @@ mod tests {
             },
         );
         let mut plan = builder.build();
-        promote_multiway(&mut plan);
-        // Recursive SCC body: untouched.
+        // No "rec_cycle" entry in rel_ids → count 0 → promote.
+        promote_multiway(&mut plan, &HashMap::new());
+        assert!(matches!(
+            &plan.rules_by_scc[0][0].body,
+            RirNode::MultiWayJoin { .. }
+        ));
+    }
+
+    /// Slice 4 contract: linear-recursive 4-cycle (count 1) IS
+    /// promoted.
+    #[test]
+    fn promotes_linear_recursive_4cycle() {
+        let mut builder = PlanBuilder::new();
+        builder.add_scc(Scc {
+            id: 0,
+            predicates: vec!["rec_cycle".to_string()],
+            is_recursive: true,
+        });
+        builder.add_rule(
+            0,
+            CompiledRule {
+                head: "rec_cycle".to_string(),
+                body: canonical_4cycle_tree(),
+                meta: Default::default(),
+            },
+        );
+        let mut plan = builder.build();
+        let mut rel_ids = HashMap::new();
+        // canonical_4cycle_tree uses 4 Scans; map exactly one to
+        // rec_cycle (RelId selection from 4cycle_tree below).
+        rel_ids.insert("rec_cycle".to_string(), RelId(2));
+        promote_multiway(&mut plan, &rel_ids);
+        assert!(matches!(
+            &plan.rules_by_scc[0][0].body,
+            RirNode::MultiWayJoin { .. }
+        ));
+    }
+
+    /// Slice 4 contract: ≥ 2 recursive Scans in a 4-cycle body →
+    /// NOT promoted.
+    #[test]
+    fn skips_multirec_4cycle_in_recursive_scc() {
+        let mut builder = PlanBuilder::new();
+        builder.add_scc(Scc {
+            id: 0,
+            predicates: vec!["rc_a".to_string(), "rc_b".to_string()],
+            is_recursive: true,
+        });
+        builder.add_rule(
+            0,
+            CompiledRule {
+                head: "rc_a".to_string(),
+                body: canonical_4cycle_tree(),
+                meta: Default::default(),
+            },
+        );
+        let mut plan = builder.build();
+        let mut rel_ids = HashMap::new();
+        rel_ids.insert("rc_a".to_string(), RelId(1));
+        rel_ids.insert("rc_b".to_string(), RelId(2));
+        promote_multiway(&mut plan, &rel_ids);
         assert!(matches!(
             &plan.rules_by_scc[0][0].body,
             RirNode::Project { .. }
