@@ -13,6 +13,46 @@ impl Executor {
     /// Maximum iterations for fixpoint computation to prevent infinite loops
     const MAX_FIXPOINT_ITERATIONS: usize = 1000;
 
+    /// v0.6.5 slice 4 helper. For a `MultiWayJoin` body (produced
+    /// by the slice 1–2 promoter), try WCOJ dispatch via the
+    /// triangle/4-cycle entry points; on decline, fall back to
+    /// the embedded fallback subtree via `execute_node`. For any
+    /// other RIR variant, defer to `execute_node` directly.
+    ///
+    /// Used at TWO sites in the recursive engine — the seeding
+    /// pass (where stable rules with zero recursive Scans get
+    /// their only chance to dispatch WCOJ) and the per-variant
+    /// loop (where linear-recursive rules see one Scan rewritten
+    /// to its delta RelId on each iteration). Multi-recursive
+    /// bodies never reach a `MultiWayJoin` here because the slice
+    /// 4 promoter gate skips them; the helper falls through to
+    /// `execute_node` and the binary-join tree.
+    ///
+    /// Counter semantics: `wcoj_*_dispatch_count` increments per
+    /// successful WCOJ kernel result — once per (rule, iteration,
+    /// variant). Slice 1–3 non-recursive sites still increment
+    /// once per rule per call.
+    fn execute_wcoj_or_fallback_node(&mut self, node: &RirNode) -> Result<CudaBuffer> {
+        if let RirNode::MultiWayJoin { .. } = node {
+            // Triangle first, then 4-cycle. Slice 1 ordering — a
+            // body cannot match both shapes (different atom
+            // counts). The dispatcher's own gate handles env-var
+            // / config / adaptive decisions; this site is purely
+            // structural. The dispatcher increments
+            // `wcoj_*_dispatch_count` internally on a successful
+            // kernel result, so the helper just returns the
+            // buffer and lets the caller fold it into the rule's
+            // output.
+            if let Some(buf) = self.try_dispatch_wcoj_triangle_on_body(node)? {
+                return Ok(buf);
+            }
+            if let Some(buf) = self.try_dispatch_wcoj_4cycle_on_body(node)? {
+                return Ok(buf);
+            }
+        }
+        self.execute_node(node)
+    }
+
     /// Stub: always returns an error directing callers to use `execute_plan` instead.
     pub fn execute_stratum(&mut self, _stratum: &Stratum) -> Result<()> {
         Err(XlogError::Execution(
@@ -239,9 +279,16 @@ impl Executor {
 
         // Step 1: Execute all rules once against the current store to seed initial results.
         // Accumulate per-head before mutating the store to avoid order dependence.
+        //
+        // v0.6.5 slice 4: route through `execute_wcoj_or_fallback_node`
+        // so MultiWayJoin bodies (slice 4 promoter output for stable
+        // and linear-recursive triangles / 4-cycles) get a chance at
+        // WCOJ dispatch on the seeding pass. Stable rules — bodies
+        // with zero recursive Scans — only run here, so without this
+        // hook they'd never see a kernel.
         let mut derived_initial: HashMap<String, CudaBuffer> = HashMap::new();
         for rule in rules {
-            let result = self.execute_node(&rule.body)?;
+            let result = self.execute_wcoj_or_fallback_node(&rule.body)?;
             if let Some(acc) = derived_initial.get_mut(&rule.head) {
                 let union_input = acc.num_rows() + result.num_rows();
                 let start = self.profiler.start_op();
@@ -387,7 +434,14 @@ impl Executor {
                             },
                         )?;
 
-                    let out = self.execute_node(&variant_node)?;
+                    // v0.6.5 slice 4: try WCOJ on the rewritten variant
+                    // body before falling back to the binary-join walker.
+                    // For a linear-recursive triangle/4-cycle, the
+                    // variant has one Scan's RelId swapped to its
+                    // delta — the kernel reads from the delta store
+                    // entry transparently, no special-case dispatch
+                    // logic needed.
+                    let out = self.execute_wcoj_or_fallback_node(&variant_node)?;
                     rule_delta_raw = Some(if let Some(acc) = rule_delta_raw {
                         let union_input = acc.num_rows() + out.num_rows();
                         let start = self.profiler.start_op();
