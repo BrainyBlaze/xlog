@@ -209,6 +209,17 @@ pub(super) fn wcoj_4cycle_disabled(config_override: Option<bool>) -> bool {
 /// side — robust to bench/kernel noise.
 const WCOJ_ADAPTIVE_SKEW_THRESHOLD: f64 = 0.10;
 
+/// v0.6.5 slice 2 — threshold for the 4-cycle adaptive
+/// classifier. Reduction across the four join positions is
+/// `max(score_per_position)`, which keeps the score in the same
+/// `[0, 1]` range as the triangle classifier — so the same `0.10`
+/// threshold transfers directly. Bench evidence under
+/// `docs/evidence/2026-05-?-wcoj-4cycle-bench-baseline/`
+/// (slice 2 step 10) verifies the gap has ≥1.7× headroom on
+/// each side; if the evidence shows a different threshold is
+/// warranted, lock the new value before merging.
+const WCOJ_ADAPTIVE_4CYCLE_SKEW_THRESHOLD: f64 = 0.10;
+
 /// Resolved dispatch mode after consulting both gates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DispatchMode {
@@ -907,11 +918,35 @@ impl Executor {
             None => return Ok(None),
         };
 
-        // 7. Adaptive mode: classifier integration lands in
-        // slice 2 step 9. Until then, requesting adaptive
-        // declines silently (treat as "not yet implemented").
+        // 7. Adaptive mode only: run the skew classifier on the
+        // same launch_stream as the eventual WCOJ pipeline.
+        // Classifier failures (Ok(None)) silently fall back to
+        // binary-join — classifier is optimization, not
+        // correctness. Score below threshold also falls back.
         if mode == DispatchMode::Adaptive {
-            return Ok(None);
+            let score = match width {
+                WcojKeyWidth::FourByte => self.provider.wcoj_4cycle_skew_score_u32(
+                    buf_e1,
+                    buf_e2,
+                    buf_e3,
+                    buf_e4,
+                    launch_stream,
+                ),
+                WcojKeyWidth::EightByte => self.provider.wcoj_4cycle_skew_score_u64(
+                    buf_e1,
+                    buf_e2,
+                    buf_e3,
+                    buf_e4,
+                    launch_stream,
+                ),
+            };
+            match score {
+                Ok(Some(s)) if s >= WCOJ_ADAPTIVE_4CYCLE_SKEW_THRESHOLD => {
+                    // Above threshold → fall through to dispatch.
+                }
+                Ok(Some(_)) | Ok(None) => return Ok(None),
+                Err(_) => return Ok(None),
+            }
         }
 
         // 8. Run layout (4× per slot) + 4-cycle kernel. Failure

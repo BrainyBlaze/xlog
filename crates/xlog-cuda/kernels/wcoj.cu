@@ -843,6 +843,126 @@ extern "C" __global__ void wcoj_triangle_skew_histogram_u64(
 }
 
 // ===============================================================
+// v0.6.5 slice 2 — 4-cycle adaptive-dispatch skew classifier.
+//
+// Combined kernel that histograms the four 4-cycle join-key
+// columns into 4 × 64 buckets in a single launch:
+//   * e1.col1 — X side of J_X (e1 ⋈ e2)
+//   * e2.col1 — Y side of J_Y (e2 ⋈ e3)
+//   * e3.col1 — Z side of J_Z (e3 ⋈ e4)
+//   * e4.col1 — W side of J_W (e4 ⋈ e1, closing the cycle)
+//
+// Output is a 4 × 64 = 256-bucket histogram (1024 bytes).
+// Caller D2Hs the histogram and reduces to per-position skew
+// scores; the provider takes max(score_per_position) for the
+// dispatch decision (slice 2 plan amendment 7 — keeps score in
+// [0, 1] so triangle's 0.10 threshold transfers directly).
+//
+// Caller zeros the output buffer on the launch_stream before
+// invoking the kernel — the same pattern as the triangle
+// classifier. Bucket function (high 6 bits of the multiplicative
+// hash) is shared with the triangle classifier.
+// ===============================================================
+
+extern "C" __global__ void wcoj_4cycle_skew_histogram_u32(
+    const uint32_t* __restrict__ e1_col1,
+    uint32_t n_e1,
+    const uint32_t* __restrict__ e2_col1,
+    uint32_t n_e2,
+    const uint32_t* __restrict__ e3_col1,
+    uint32_t n_e3,
+    const uint32_t* __restrict__ e4_col1,
+    uint32_t n_e4,
+    uint32_t blocks_per_col,
+    uint32_t* __restrict__ histograms) {
+    __shared__ uint32_t shared_hist[WCOJ_SKEW_NUM_BUCKETS];
+    if (threadIdx.x < WCOJ_SKEW_NUM_BUCKETS) {
+        shared_hist[threadIdx.x] = 0;
+    }
+    __syncthreads();
+
+    uint32_t col_block = blockIdx.x % blocks_per_col;
+    uint32_t col_idx = blockIdx.x / blocks_per_col;
+    if (col_idx >= 4) {
+        return;
+    }
+    uint32_t i = col_block * blockDim.x + threadIdx.x;
+
+    const uint32_t* col;
+    uint32_t n;
+    if (col_idx == 0) {
+        col = e1_col1; n = n_e1;
+    } else if (col_idx == 1) {
+        col = e2_col1; n = n_e2;
+    } else if (col_idx == 2) {
+        col = e3_col1; n = n_e3;
+    } else {
+        col = e4_col1; n = n_e4;
+    }
+    if (i < n) {
+        uint32_t b = wcoj_skew_bucket_u32(col[i]);
+        atomicAdd(&shared_hist[b], 1u);
+    }
+    __syncthreads();
+
+    if (threadIdx.x < WCOJ_SKEW_NUM_BUCKETS) {
+        uint32_t v = shared_hist[threadIdx.x];
+        if (v != 0) {
+            atomicAdd(&histograms[col_idx * WCOJ_SKEW_NUM_BUCKETS + threadIdx.x], v);
+        }
+    }
+}
+
+extern "C" __global__ void wcoj_4cycle_skew_histogram_u64(
+    const uint64_t* __restrict__ e1_col1,
+    uint32_t n_e1,
+    const uint64_t* __restrict__ e2_col1,
+    uint32_t n_e2,
+    const uint64_t* __restrict__ e3_col1,
+    uint32_t n_e3,
+    const uint64_t* __restrict__ e4_col1,
+    uint32_t n_e4,
+    uint32_t blocks_per_col,
+    uint32_t* __restrict__ histograms) {
+    __shared__ uint32_t shared_hist[WCOJ_SKEW_NUM_BUCKETS];
+    if (threadIdx.x < WCOJ_SKEW_NUM_BUCKETS) {
+        shared_hist[threadIdx.x] = 0;
+    }
+    __syncthreads();
+
+    uint32_t col_block = blockIdx.x % blocks_per_col;
+    uint32_t col_idx = blockIdx.x / blocks_per_col;
+    if (col_idx >= 4) {
+        return;
+    }
+    uint32_t i = col_block * blockDim.x + threadIdx.x;
+
+    const uint64_t* col;
+    uint32_t n;
+    if (col_idx == 0) {
+        col = e1_col1; n = n_e1;
+    } else if (col_idx == 1) {
+        col = e2_col1; n = n_e2;
+    } else if (col_idx == 2) {
+        col = e3_col1; n = n_e3;
+    } else {
+        col = e4_col1; n = n_e4;
+    }
+    if (i < n) {
+        uint32_t b = wcoj_skew_bucket_u64(col[i]);
+        atomicAdd(&shared_hist[b], 1u);
+    }
+    __syncthreads();
+
+    if (threadIdx.x < WCOJ_SKEW_NUM_BUCKETS) {
+        uint32_t v = shared_hist[threadIdx.x];
+        if (v != 0) {
+            atomicAdd(&histograms[col_idx * WCOJ_SKEW_NUM_BUCKETS + threadIdx.x], v);
+        }
+    }
+}
+
+// ===============================================================
 // v0.6.2 — WCOJ layout fast-path device checker.
 //
 // Returns flag = 1 iff the 2-column input is strictly lex-sorted
