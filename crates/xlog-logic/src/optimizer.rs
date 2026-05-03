@@ -2060,10 +2060,7 @@ mod tests {
     #[test]
     fn optimize_returns_multiway_unchanged() {
         let optimizer = Optimizer::new(make_stats_manager());
-        for node in [
-            build_canonical_triangle_multiway(),
-            build_4input_multiway(),
-        ] {
+        for node in [build_canonical_triangle_multiway(), build_4input_multiway()] {
             let optimized = optimizer.optimize(node.clone());
             match (&node, &optimized) {
                 (
@@ -2140,10 +2137,7 @@ mod tests {
         // this to also check the 4-input synthesized shape so a
         // future "let's just return inputs[col_idx % len]" patch
         // gets caught.
-        for node in [
-            build_canonical_triangle_multiway(),
-            build_4input_multiway(),
-        ] {
+        for node in [build_canonical_triangle_multiway(), build_4input_multiway()] {
             for col in 0..node.referenced_relations().len() {
                 assert!(
                     optimizer.find_column_relation(&node, col).is_none(),

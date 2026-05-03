@@ -248,15 +248,9 @@ fn run_program(
 /// generalize).
 fn build_canonical_triangle_body(rel_xy: u32, rel_yz: u32, rel_xz: u32) -> RirNode {
     use xlog_core::RelId;
-    let scan_xy = RirNode::Scan {
-        rel: RelId(rel_xy),
-    };
-    let scan_yz = RirNode::Scan {
-        rel: RelId(rel_yz),
-    };
-    let scan_xz = RirNode::Scan {
-        rel: RelId(rel_xz),
-    };
+    let scan_xy = RirNode::Scan { rel: RelId(rel_xy) };
+    let scan_yz = RirNode::Scan { rel: RelId(rel_yz) };
+    let scan_xz = RirNode::Scan { rel: RelId(rel_xz) };
     let inner = RirNode::Join {
         left: Box::new(scan_xy.clone()),
         right: Box::new(scan_yz.clone()),
@@ -428,8 +422,8 @@ fn c4_adaptive_optout_falls_back_with_correct_row_set() {
 
     // Adaptive opt-out: classifier never runs; force is also None
     // (default). No dispatch path engages → fallback to binary.
-    let config_adopt_off = RuntimeConfig::default()
-        .with_wcoj_triangle_dispatch_adaptive(Some(false));
+    let config_adopt_off =
+        RuntimeConfig::default().with_wcoj_triangle_dispatch_adaptive(Some(false));
     let (exec_adopt_off, counter_adopt_off) = run_program(
         Arc::clone(&fix.provider),
         &fix.memory,
