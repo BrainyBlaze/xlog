@@ -37,6 +37,7 @@ pub mod lower;
 pub mod module;
 pub mod optimizer;
 pub mod parser;
+pub mod promote;
 pub mod resolver;
 pub mod stratify;
 #[allow(dead_code)] // reserved API: type inference not yet wired to main pipeline
