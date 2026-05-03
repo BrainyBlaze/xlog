@@ -23,7 +23,7 @@
 //! Visibility: `pub(super)` everywhere. The seam is internal to
 //! the executor; slice 4/5 promote if/when needed.
 
-use xlog_core::{RelId, Result};
+use xlog_core::{CostModelKind, RelId, Result, RuntimeConfig};
 use xlog_cuda::device_runtime::StreamId;
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 use xlog_stats::StatsManager;
@@ -401,6 +401,26 @@ impl WcojCostModel for CardinalityAwareCostModel {
                 .estimate_join_cardinality(ctx.slot_rels[0], ctx.slot_rels[1], &[1], &[0]);
         let score = scorer.cycle4_skew_score(ctx.launch_stream, ctx.width);
         self.decide_from_card_and_skew(binary_est, score)
+    }
+}
+
+// -----------------------------------------------------------------
+// Factory: select cost model from RuntimeConfig precedence
+// -----------------------------------------------------------------
+
+/// Build the active `WcojCostModel` for the current dispatch
+/// based on `RuntimeConfig`'s precedence ladder
+/// (`config_field > env > default skew`). The returned trait
+/// object lets the dispatch site use one calling convention
+/// regardless of which impl wins.
+///
+/// One virtual call per dispatch decision is the only overhead
+/// vs. the previous concrete-type call site; negligible against
+/// a CUDA kernel launch.
+pub(super) fn build_wcoj_cost_model(config: &RuntimeConfig) -> Box<dyn WcojCostModel> {
+    match config.resolved_wcoj_cost_model() {
+        CostModelKind::SkewClassifier => Box::new(SkewClassifierCostModel::default()),
+        CostModelKind::Cardinality => Box::new(CardinalityAwareCostModel::default()),
     }
 }
 
