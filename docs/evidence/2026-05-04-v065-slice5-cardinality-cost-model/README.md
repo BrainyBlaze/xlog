@@ -109,7 +109,7 @@ Slice 1–4 regression bit-identical:
 | `crates/xlog-core/src/lib.rs` | Re-export `CostModelKind` from lib root |
 | `crates/xlog-runtime/src/executor/wcoj_cost_model.rs` | New `CardinalityAwareCostModel` impl with delegate-on-missing-stats safety floor; pinned threshold constants (`MIN_/LARGE_CARDINALITY_BINARY_INTERMEDIATE`, `MIN_SKEW_FOR_CARDINALITY`); `build_wcoj_cost_model` factory; 10 stub unit tests |
 | `crates/xlog-runtime/src/executor/wcoj_dispatch.rs` | Both adaptive dispatch sites use the factory (one virtual call per dispatch decision); UFCS-style call replaced with method call |
-| `crates/xlog-integration/tests/test_wcoj_cardinality_cost_model.rs` | New cert file — 5 tests (default-off, large/small/missing stats, env↔config parity) using runtime-stats seeding pattern |
+| `crates/xlog-integration/tests/test_wcoj_cardinality_cost_model.rs` | New cert file — 7 tests using runtime-stats seeding pattern: default-off keeps slice 4 counts; triangle large/small stats; 4-cycle large/small stats (adaptive opt-in); missing-stats adaptive-mode delegation parity (counter + row-set vs default skew); env↔config parity |
 
 ## Risks / Out-of-Slice
 
