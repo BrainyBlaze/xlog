@@ -1623,6 +1623,389 @@ impl CudaKernelProvider {
             total_rows,
         ))
     }
+
+    /// Evaluate
+    /// `cycle4(W, X, Y, Z) :- e1(W,X), e2(X,Y), e3(Y,Z), e4(Z,W)`
+    /// on already-sorted, already-deduped binary U64 relations.
+    /// Mirrors [`Self::wcoj_4cycle_u32_recorded`]'s contract; the
+    /// only differences are the 8-byte join-key reads/writes and
+    /// the U64-specific count/materialize kernels. Counters and
+    /// the total reducer remain u32 (bounded by the upstream host-
+    /// side row-count guard).
+    ///
+    /// 4-cycle slot order:
+    /// `[e1(W,X), e2(X,Y), e3(Y,Z), e4(Z,W)]`.
+    ///
+    /// # Errors
+    /// * `XlogError::Kernel` if the manager has no runtime, the
+    ///   launch stream does not resolve, an input is not 2-column
+    ///   with U64 columns, or any kernel launch fails.
+    pub fn wcoj_4cycle_u64_recorded(
+        &self,
+        e1: &CudaBuffer,
+        e2: &CudaBuffer,
+        e3: &CudaBuffer,
+        e4: &CudaBuffer,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        let runtime = self.memory().runtime().ok_or_else(|| {
+            XlogError::Kernel(
+                "wcoj_4cycle_u64_recorded requires a runtime-backed \
+                 GpuMemoryManager (constructed via with_runtime)"
+                    .to_string(),
+            )
+        })?;
+        let cu_stream = runtime
+            .stream_pool()
+            .resolve(launch_stream)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "wcoj_4cycle_u64_recorded: launch_stream StreamId({}) does not resolve",
+                    launch_stream.0
+                ))
+            })?;
+
+        // Validate: every relation 2-column U64.
+        for (label, buf) in [("e1", e1), ("e2", e2), ("e3", e3), ("e4", e4)] {
+            if buf.arity() != 2 {
+                return Err(XlogError::Kernel(format!(
+                    "wcoj_4cycle_u64_recorded: {} must be 2-column, got arity {}",
+                    label,
+                    buf.arity()
+                )));
+            }
+            for col_idx in 0..2 {
+                let ty = buf.schema.column_type(col_idx).ok_or_else(|| {
+                    XlogError::Kernel(format!(
+                        "wcoj_4cycle_u64_recorded: {} column {} type missing",
+                        label, col_idx
+                    ))
+                })?;
+                if !matches!(ty, ScalarType::U64) {
+                    return Err(XlogError::Kernel(format!(
+                        "wcoj_4cycle_u64_recorded: {} column {} must be U64, got {:?}",
+                        label, col_idx, ty
+                    )));
+                }
+            }
+        }
+
+        // Output schema preserves per-head-position scalar types
+        // (all U64 by construction at this point).
+        let out_schema = Schema::new(vec![
+            ("col0".to_string(), ScalarType::U64),
+            ("col1".to_string(), ScalarType::U64),
+            ("col2".to_string(), ScalarType::U64),
+            ("col3".to_string(), ScalarType::U64),
+        ]);
+
+        let n_e1 = self.logical_row_count_u32(e1)?;
+        let n_e2 = self.logical_row_count_u32(e2)?;
+        let n_e3 = self.logical_row_count_u32(e3)?;
+        let n_e4 = self.logical_row_count_u32(e4)?;
+
+        if n_e1 == 0 || n_e2 == 0 || n_e3 == 0 || n_e4 == 0 {
+            return self.create_empty_buffer(out_schema);
+        }
+
+        // Phase 1: count + scan + total. Counter buffers stay u32.
+        let mut count_buf = self.memory.alloc::<u32>(n_e1 as usize)?;
+        let mut offsets_buf = self.memory.alloc::<u32>(n_e1 as usize)?;
+        let d_total = self.memory.alloc::<u32>(1)?;
+
+        let e1_col0 = column_u64(e1, 0)?;
+        let e1_col1 = column_u64(e1, 1)?;
+        let e2_col0 = column_u64(e2, 0)?;
+        let e2_col1 = column_u64(e2, 1)?;
+        let e3_col0 = column_u64(e3, 0)?;
+        let e3_col1 = column_u64(e3, 1)?;
+        let e4_col0 = column_u64(e4, 0)?;
+        let e4_col1 = column_u64(e4, 1)?;
+
+        let mut rec_count = LaunchRecorder::new_strict(launch_stream);
+        rec_count.read(e1.num_rows_device());
+        rec_count.read(e2.num_rows_device());
+        rec_count.read(e3.num_rows_device());
+        rec_count.read(e4.num_rows_device());
+        rec_count.read_column(e1.column(0).expect("e1.col0"));
+        rec_count.read_column(e1.column(1).expect("e1.col1"));
+        rec_count.read_column(e2.column(0).expect("e2.col0"));
+        rec_count.read_column(e2.column(1).expect("e2.col1"));
+        rec_count.read_column(e3.column(0).expect("e3.col0"));
+        rec_count.read_column(e3.column(1).expect("e3.col1"));
+        rec_count.read_column(e4.column(0).expect("e4.col0"));
+        rec_count.read_column(e4.column(1).expect("e4.col1"));
+        rec_count.write(&count_buf);
+        rec_count.write(&offsets_buf);
+        rec_count.write(&d_total);
+        rec_count.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "wcoj_4cycle_u64_recorded: count preflight failed: {}",
+                e
+            ))
+        })?;
+
+        let device = self.device.inner();
+        let count_kernel = device
+            .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_4CYCLE_COUNT_U64)
+            .ok_or_else(|| {
+                XlogError::Kernel("wcoj_4cycle_count_u64 kernel not found".to_string())
+            })?;
+        let grid = (n_e1 + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+        // Phase-timing scaffolding (no-op when feature off).
+        let phase_timer = PhaseTimer::new(&cu_stream)?;
+        phase_timer.record(0, &cu_stream)?;
+
+        // SAFETY: 13-arg count_u64 (u64* keys + u32 counters).
+        // Uses the raw param-vec form — exceeds the LaunchAsync
+        // tuple bound (12). Same pattern as the u32 4-cycle entry.
+        let count_config = LaunchConfig {
+            grid_dim: (grid, 1, 1),
+            block_dim: (BLOCK_SIZE, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe {
+            let mut params: Vec<*mut c_void> = vec![
+                e1_col0.as_kernel_param(),
+                e1_col1.as_kernel_param(),
+                n_e1.as_kernel_param(),
+                e2_col0.as_kernel_param(),
+                e2_col1.as_kernel_param(),
+                n_e2.as_kernel_param(),
+                e3_col0.as_kernel_param(),
+                e3_col1.as_kernel_param(),
+                n_e3.as_kernel_param(),
+                e4_col0.as_kernel_param(),
+                e4_col1.as_kernel_param(),
+                n_e4.as_kernel_param(),
+                (&mut count_buf).as_kernel_param(),
+            ];
+            count_kernel
+                .clone()
+                .launch_on_stream(&cu_stream, count_config, &mut params)
+                .map_err(|e| {
+                    XlogError::Kernel(format!("wcoj_4cycle_count_u64 launch failed: {}", e))
+                })?;
+        }
+
+        // dtod-async copy `count_buf → offsets_buf` (u32-sized).
+        let bytes_count = (n_e1 as usize) * std::mem::size_of::<u32>();
+        unsafe {
+            let res = sys::cuMemcpyDtoDAsync_v2(
+                *offsets_buf.device_ptr(),
+                *count_buf.device_ptr(),
+                bytes_count,
+                cu_stream.cu_stream(),
+            );
+            if res != sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "wcoj_4cycle_u64_recorded: dtod count_buf → offsets_buf failed: {:?}",
+                    res
+                )));
+            }
+        }
+        phase_timer.record_after_queued_work(1, &cu_stream)?;
+
+        // Device-side exclusive prefix-sum on offsets_buf — u32 plumbing
+        // unchanged from the u32 path.
+        self.multiblock_scan_u32_inplace_on_stream(
+            &mut offsets_buf,
+            n_e1,
+            &cu_stream,
+            launch_stream,
+            runtime,
+        )?;
+        phase_timer.record_after_queued_work(2, &cu_stream)?;
+
+        // Reduce two last elements into d_total. Reused unchanged
+        // since counters stay u32.
+        let total_kernel = device
+            .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_COMPUTE_TOTAL)
+            .ok_or_else(|| XlogError::Kernel("wcoj_compute_total kernel not found".to_string()))?;
+        unsafe {
+            total_kernel
+                .clone()
+                .launch_on_stream(
+                    &cu_stream,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (&count_buf, &offsets_buf, n_e1, &d_total),
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!("wcoj_compute_total launch failed: {}", e))
+                })?;
+        }
+        phase_timer.record_after_queued_work(3, &cu_stream)?;
+
+        rec_count.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "wcoj_4cycle_u64_recorded: count+scan+total commit failed: {}",
+                e
+            ))
+        })?;
+
+        cu_stream.synchronize().map_err(|e| {
+            XlogError::Kernel(format!(
+                "wcoj_4cycle_u64_recorded: stream sync after total failed: {}",
+                e
+            ))
+        })?;
+        let total_rows = self
+            .dtoh_scalar_untracked::<u32>(&d_total, 0)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "wcoj_4cycle_u64_recorded: read d_total failed: {}",
+                    e
+                ))
+            })?;
+
+        if total_rows == 0 {
+            return self.create_empty_buffer(out_schema);
+        }
+
+        // Phase 2: materialize. Output columns are 8 bytes/row.
+        let bytes_per_col = (total_rows as usize) * std::mem::size_of::<u64>();
+        let mut out_w = self.memory.alloc::<u8>(bytes_per_col)?;
+        let mut out_x = self.memory.alloc::<u8>(bytes_per_col)?;
+        let mut out_y = self.memory.alloc::<u8>(bytes_per_col)?;
+        let mut out_z = self.memory.alloc::<u8>(bytes_per_col)?;
+        let out_d_num_rows = self.memory.alloc::<u32>(1)?;
+
+        let mut rec_mat = LaunchRecorder::new_strict(launch_stream);
+        rec_mat.read(e1.num_rows_device());
+        rec_mat.read(e2.num_rows_device());
+        rec_mat.read(e3.num_rows_device());
+        rec_mat.read(e4.num_rows_device());
+        rec_mat.read_column(e1.column(0).expect("e1.col0"));
+        rec_mat.read_column(e1.column(1).expect("e1.col1"));
+        rec_mat.read_column(e2.column(0).expect("e2.col0"));
+        rec_mat.read_column(e2.column(1).expect("e2.col1"));
+        rec_mat.read_column(e3.column(0).expect("e3.col0"));
+        rec_mat.read_column(e3.column(1).expect("e3.col1"));
+        rec_mat.read_column(e4.column(0).expect("e4.col0"));
+        rec_mat.read_column(e4.column(1).expect("e4.col1"));
+        rec_mat.read(&offsets_buf);
+        rec_mat.write(&out_w);
+        rec_mat.write(&out_x);
+        rec_mat.write(&out_y);
+        rec_mat.write(&out_z);
+        rec_mat.write(&out_d_num_rows);
+        rec_mat.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "wcoj_4cycle_u64_recorded: materialize preflight failed: {}",
+                e
+            ))
+        })?;
+
+        // 4-byte H2D of total_rows into out_d_num_rows. Identical
+        // to u32 path — d_num_rows is u32 regardless of key width.
+        unsafe {
+            let res = sys::cuMemcpyHtoDAsync_v2(
+                *out_d_num_rows.device_ptr(),
+                &total_rows as *const u32 as *const c_void,
+                std::mem::size_of::<u32>(),
+                cu_stream.cu_stream(),
+            );
+            if res != sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "wcoj_4cycle_u64_recorded: H2D out_d_num_rows failed: {:?}",
+                    res
+                )));
+            }
+        }
+
+        let materialize_kernel = device
+            .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_4CYCLE_MATERIALIZE_U64)
+            .ok_or_else(|| {
+                XlogError::Kernel("wcoj_4cycle_materialize_u64 kernel not found".to_string())
+            })?;
+
+        let out_w_u64: &mut TrackedCudaSlice<u64> = unsafe { reinterpret_u8_as_u64(&mut out_w) };
+        let out_x_u64: &mut TrackedCudaSlice<u64> = unsafe { reinterpret_u8_as_u64(&mut out_x) };
+        let out_y_u64: &mut TrackedCudaSlice<u64> = unsafe { reinterpret_u8_as_u64(&mut out_y) };
+        let out_z_u64: &mut TrackedCudaSlice<u64> = unsafe { reinterpret_u8_as_u64(&mut out_z) };
+
+        // SAFETY: 17-arg materialize_u64 (u64* keys + u32 counters
+        // + u64* outputs). Same param-vec form as the u32 path —
+        // exceeds the LaunchAsync tuple bound (13).
+        let mat_config = LaunchConfig {
+            grid_dim: (grid, 1, 1),
+            block_dim: (BLOCK_SIZE, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        phase_timer.record_after_queued_work(4, &cu_stream)?;
+        unsafe {
+            let mut params: Vec<*mut c_void> = vec![
+                e1_col0.as_kernel_param(),
+                e1_col1.as_kernel_param(),
+                n_e1.as_kernel_param(),
+                e2_col0.as_kernel_param(),
+                e2_col1.as_kernel_param(),
+                n_e2.as_kernel_param(),
+                e3_col0.as_kernel_param(),
+                e3_col1.as_kernel_param(),
+                n_e3.as_kernel_param(),
+                e4_col0.as_kernel_param(),
+                e4_col1.as_kernel_param(),
+                n_e4.as_kernel_param(),
+                (&offsets_buf).as_kernel_param(),
+                total_rows.as_kernel_param(),
+                out_w_u64.as_kernel_param(),
+                out_x_u64.as_kernel_param(),
+                out_y_u64.as_kernel_param(),
+                out_z_u64.as_kernel_param(),
+            ];
+            materialize_kernel
+                .clone()
+                .launch_on_stream(&cu_stream, mat_config, &mut params)
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "wcoj_4cycle_materialize_u64 launch failed: {}",
+                        e
+                    ))
+                })?;
+        }
+        phase_timer.record_after_queued_work(5, &cu_stream)?;
+
+        rec_mat.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "wcoj_4cycle_u64_recorded: materialize commit failed: {}",
+                e
+            ))
+        })?;
+
+        // Sync + capture phase timings (no-op when feature off).
+        // The 4-cycle pipeline shape matches triangle's (count,
+        // dtod-copy, scan, compute_total, materialize), so we
+        // reuse the triangle phase-timing slot.
+        #[cfg(feature = "wcoj-phase-timing")]
+        {
+            cu_stream.synchronize().map_err(|e| {
+                XlogError::Kernel(format!(
+                    "wcoj_4cycle_u64_recorded: stream sync after materialize failed: {}",
+                    e
+                ))
+            })?;
+            let timing = phase_timer.finish()?;
+            self.put_wcoj_triangle_phase_timing(timing);
+        }
+        #[cfg(not(feature = "wcoj-phase-timing"))]
+        let _ = phase_timer;
+
+        let columns: Vec<CudaColumn> =
+            vec![out_w.into(), out_x.into(), out_y.into(), out_z.into()];
+        Ok(CudaBuffer::from_columns_with_host_count(
+            columns,
+            total_rows as u64,
+            out_d_num_rows,
+            out_schema,
+            total_rows,
+        ))
+    }
 }
 
 // ===============================================================

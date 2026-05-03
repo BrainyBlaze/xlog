@@ -269,10 +269,12 @@ pub mod wcoj_kernels {
     pub const WCOJ_TRIANGLE_SKEW_HISTOGRAM_U64: &str = "wcoj_triangle_skew_histogram_u64";
     pub const WCOJ_LAYOUT_CHECK_SORTED_UNIQUE_U32: &str = "wcoj_layout_check_sorted_unique_u32";
     pub const WCOJ_LAYOUT_CHECK_SORTED_UNIQUE_U64: &str = "wcoj_layout_check_sorted_unique_u64";
-    // v0.6.5 slice 2 — 4-cycle WCOJ (u32 only this step; u64 +
-    // skew histograms land in subsequent slice 2 steps).
+    // v0.6.5 slice 2 — 4-cycle WCOJ (skew histograms land in a
+    // subsequent slice 2 step).
     pub const WCOJ_4CYCLE_COUNT: &str = "wcoj_4cycle_count";
     pub const WCOJ_4CYCLE_MATERIALIZE: &str = "wcoj_4cycle_materialize";
+    pub const WCOJ_4CYCLE_COUNT_U64: &str = "wcoj_4cycle_count_u64";
+    pub const WCOJ_4CYCLE_MATERIALIZE_U64: &str = "wcoj_4cycle_materialize_u64";
 }
 
 /// Kernel function names in the Monte Carlo sampling module

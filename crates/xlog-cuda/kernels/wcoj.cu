@@ -575,6 +575,124 @@ extern "C" __global__ void wcoj_triangle_materialize_u64(
 }
 
 // ===============================================================
+// v0.6.5 slice 2 — 4-cycle WCOJ kernels (u64).
+// Same shape as the u32 pair, with 64-bit join-key buffers.
+// Counters / counts / offsets / row_count stay u32 (bounded by
+// the host-side row-count guard upstream).
+// ===============================================================
+
+namespace {
+
+__device__ __forceinline__ bool contains_pair_u64(
+    const uint64_t* __restrict__ col0,
+    const uint64_t* __restrict__ col1,
+    uint32_t n,
+    uint64_t a,
+    uint64_t b) {
+    uint32_t lo = lower_bound_u64(col0, n, a);
+    uint32_t hi = upper_bound_u64(col0, n, a);
+    if (lo == hi) {
+        return false;
+    }
+    uint32_t inner_offset = lower_bound_u64(col1 + lo, hi - lo, b);
+    uint32_t inner_idx = lo + inner_offset;
+    return inner_idx < hi && col1[inner_idx] == b;
+}
+
+}  // anonymous namespace
+
+extern "C" __global__ void wcoj_4cycle_count_u64(
+    const uint64_t* __restrict__ e1_col0,
+    const uint64_t* __restrict__ e1_col1,
+    uint32_t n_e1,
+    const uint64_t* __restrict__ e2_col0,
+    const uint64_t* __restrict__ e2_col1,
+    uint32_t n_e2,
+    const uint64_t* __restrict__ e3_col0,
+    const uint64_t* __restrict__ e3_col1,
+    uint32_t n_e3,
+    const uint64_t* __restrict__ e4_col0,
+    const uint64_t* __restrict__ e4_col1,
+    uint32_t n_e4,
+    uint32_t* __restrict__ out_counts) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_e1) {
+        return;
+    }
+    uint64_t w = e1_col0[i];
+    uint64_t x = e1_col1[i];
+
+    uint32_t e2_lo = lower_bound_u64(e2_col0, n_e2, x);
+    uint32_t e2_hi = upper_bound_u64(e2_col0, n_e2, x);
+
+    uint32_t cnt = 0;
+    for (uint32_t j = e2_lo; j < e2_hi; ++j) {
+        uint64_t y = e2_col1[j];
+        uint32_t e3_lo = lower_bound_u64(e3_col0, n_e3, y);
+        uint32_t e3_hi = upper_bound_u64(e3_col0, n_e3, y);
+        for (uint32_t k = e3_lo; k < e3_hi; ++k) {
+            uint64_t z = e3_col1[k];
+            if (contains_pair_u64(e4_col0, e4_col1, n_e4, z, w)) {
+                cnt += 1;
+            }
+        }
+    }
+    out_counts[i] = cnt;
+}
+
+extern "C" __global__ void wcoj_4cycle_materialize_u64(
+    const uint64_t* __restrict__ e1_col0,
+    const uint64_t* __restrict__ e1_col1,
+    uint32_t n_e1,
+    const uint64_t* __restrict__ e2_col0,
+    const uint64_t* __restrict__ e2_col1,
+    uint32_t n_e2,
+    const uint64_t* __restrict__ e3_col0,
+    const uint64_t* __restrict__ e3_col1,
+    uint32_t n_e3,
+    const uint64_t* __restrict__ e4_col0,
+    const uint64_t* __restrict__ e4_col1,
+    uint32_t n_e4,
+    const uint32_t* __restrict__ out_offsets,
+    uint32_t total_rows,
+    uint64_t* __restrict__ out_w,
+    uint64_t* __restrict__ out_x,
+    uint64_t* __restrict__ out_y,
+    uint64_t* __restrict__ out_z) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_e1) {
+        return;
+    }
+    uint64_t w = e1_col0[i];
+    uint64_t x = e1_col1[i];
+    uint32_t base = out_offsets[i];
+    if (base >= total_rows) {
+        return;
+    }
+
+    uint32_t e2_lo = lower_bound_u64(e2_col0, n_e2, x);
+    uint32_t e2_hi = upper_bound_u64(e2_col0, n_e2, x);
+
+    uint32_t emitted = 0;
+    for (uint32_t j = e2_lo; j < e2_hi; ++j) {
+        uint64_t y = e2_col1[j];
+        uint32_t e3_lo = lower_bound_u64(e3_col0, n_e3, y);
+        uint32_t e3_hi = upper_bound_u64(e3_col0, n_e3, y);
+        for (uint32_t k = e3_lo; k < e3_hi; ++k) {
+            uint64_t z = e3_col1[k];
+            if (contains_pair_u64(e4_col0, e4_col1, n_e4, z, w)) {
+                uint32_t pos = base + emitted;
+                out_w[pos] = w;
+                out_x[pos] = x;
+                out_y[pos] = y;
+                out_z[pos] = z;
+                emitted += 1;
+            }
+        }
+    }
+}
+
+// ===============================================================
 // v0.6.2 A2-lite — adaptive-dispatch skew classifier.
 //
 // Combined kernel that histograms the three triangle join-key
