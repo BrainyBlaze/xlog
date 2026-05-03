@@ -700,6 +700,7 @@ fn demo_graph_analytics() {
                     RirNode::Unit => false,
                     RirNode::Scan { .. } => false,
                     RirNode::TensorMaskedJoin { .. } => false,
+                    RirNode::MultiWayJoin { fallback, .. } => contains_fixpoint(fallback),
                 }
             }
 

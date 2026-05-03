@@ -435,6 +435,12 @@ impl Optimizer {
             },
 
             RirNode::TensorMaskedJoin { .. } => node, // Leaf-like: no pushdown
+
+            // v0.6.5: `MultiWayJoin` is produced by `xlog-logic::promote`
+            // *after* the optimizer runs, so this arm is unreachable in
+            // production. Required for compile safety and as a no-op
+            // fallback if the call order ever changes.
+            RirNode::MultiWayJoin { .. } => node,
         }
     }
 
@@ -601,6 +607,9 @@ impl Optimizer {
                 .get(head_rel_id)
                 .map(|s| s.arity())
                 .unwrap_or(2),
+            // v0.6.5: `MultiWayJoin` post-promoter only — width equals
+            // the head projection arity, mirroring the Project arm.
+            RirNode::MultiWayJoin { output_columns, .. } => output_columns.len(),
         }
     }
 
@@ -850,6 +859,21 @@ impl Optimizer {
                 gpu_mem: *max_active_rules as u64 * 1024,
                 transfers: 1,
             },
+            // v0.6.5: `MultiWayJoin` cost is the sum of input scan costs.
+            // Heuristic only — the post-promoter dispatch decides whether
+            // to run the WCOJ kernel or fall back; cost-model integration
+            // for the multiway operator itself is later-slice work.
+            RirNode::MultiWayJoin { inputs, .. } => {
+                let mut total = PlanCost::default();
+                for inp in inputs {
+                    let c = self.estimate_cost(inp);
+                    total.rows = total.rows.saturating_add(c.rows);
+                    total.cpu_cost += c.cpu_cost;
+                    total.gpu_mem = total.gpu_mem.saturating_add(c.gpu_mem);
+                    total.transfers = total.transfers.saturating_add(c.transfers);
+                }
+                total
+            }
         }
     }
 
@@ -1164,6 +1188,12 @@ impl Optimizer {
                     self.find_column_relation(right, col_idx - left_width)
                 }
             }
+            // v0.6.5: per slice 1 guardrail — return None for
+            // `MultiWayJoin`. The promoter runs after the optimizer,
+            // so this arm is unreachable in production. A half-mapped
+            // implementation that walked `inputs` via `slot_vars` would
+            // be more dangerous than `None` for this slice.
+            RirNode::MultiWayJoin { .. } => None,
             _ => None, // Complex cases: give up
         }
     }
@@ -1929,6 +1959,115 @@ mod tests {
             }
         } else {
             panic!("Expected Join node");
+        }
+    }
+
+    /// v0.6.5 slice 1: optimizer arms for `MultiWayJoin`.
+    ///
+    /// The promoter runs after `Optimizer::optimize` in `Compiler`, so
+    /// these arms are unreachable in production. They exist for compile
+    /// safety and to pin the documented semantics: `optimize` returns
+    /// the node unchanged, `estimate_width` reports the head arity from
+    /// `output_columns`, `estimate_cost` is the sum of input costs, and
+    /// `find_column_relation` returns `None` (per slice 1 guardrail).
+    fn build_canonical_triangle_multiway() -> RirNode {
+        let scan_xy = RirNode::Scan { rel: RelId(1) };
+        let scan_yz = RirNode::Scan { rel: RelId(2) };
+        let scan_xz = RirNode::Scan { rel: RelId(3) };
+        let inner_join = RirNode::Join {
+            left: Box::new(scan_xy.clone()),
+            right: Box::new(scan_yz.clone()),
+            left_keys: vec![1],
+            right_keys: vec![0],
+            join_type: JoinType::Inner,
+        };
+        let outer_join = RirNode::Join {
+            left: Box::new(inner_join),
+            right: Box::new(scan_xz.clone()),
+            left_keys: vec![0, 3],
+            right_keys: vec![0, 1],
+            join_type: JoinType::Inner,
+        };
+        let fallback = RirNode::Project {
+            input: Box::new(outer_join),
+            columns: vec![
+                ProjectExpr::Column(0),
+                ProjectExpr::Column(1),
+                ProjectExpr::Column(3),
+            ],
+        };
+        RirNode::MultiWayJoin {
+            inputs: vec![scan_xy, scan_yz, scan_xz],
+            slot_vars: vec![
+                vec![Some(0), Some(1)],
+                vec![Some(1), Some(2)],
+                vec![Some(0), Some(2)],
+            ],
+            output_columns: vec![
+                ProjectExpr::Column(0),
+                ProjectExpr::Column(1),
+                ProjectExpr::Column(3),
+            ],
+            fallback: Box::new(fallback),
+        }
+    }
+
+    #[test]
+    fn optimize_returns_multiway_unchanged() {
+        let optimizer = Optimizer::new(make_stats_manager());
+        let node = build_canonical_triangle_multiway();
+        let optimized = optimizer.optimize(node.clone());
+        match (&node, &optimized) {
+            (
+                RirNode::MultiWayJoin {
+                    inputs: a_in,
+                    output_columns: a_out,
+                    ..
+                },
+                RirNode::MultiWayJoin {
+                    inputs: b_in,
+                    output_columns: b_out,
+                    ..
+                },
+            ) => {
+                assert_eq!(a_in.len(), b_in.len());
+                assert_eq!(a_out.len(), b_out.len());
+            }
+            _ => panic!("optimize() must return a MultiWayJoin"),
+        }
+    }
+
+    #[test]
+    fn estimate_width_uses_output_columns_arity() {
+        let optimizer = Optimizer::new(make_stats_manager());
+        let node = build_canonical_triangle_multiway();
+        assert_eq!(optimizer.estimate_width(&node), 3);
+    }
+
+    #[test]
+    fn estimate_cost_sums_input_costs() {
+        let optimizer = Optimizer::new(make_stats_manager());
+        let node = build_canonical_triangle_multiway();
+        let cost = optimizer.estimate_cost(&node);
+        // The three inputs are Scan{1,2,3}; their cardinalities are
+        // 10_000 + 5_000 + 1_000 = 16_000. Cost row count must hit at
+        // least that floor (the actual scan-cost computation may add
+        // overhead, so we accept >=).
+        assert!(
+            cost.rows >= 16_000,
+            "expected cost.rows >= 16000, got {}",
+            cost.rows
+        );
+    }
+
+    #[test]
+    fn find_column_relation_returns_none_for_multiway() {
+        let optimizer = Optimizer::new(make_stats_manager());
+        let node = build_canonical_triangle_multiway();
+        // Per slice 1 guardrail: no column-to-input mapping in this
+        // slice. Half-mapped is more dangerous than None.
+        for col in 0..node.referenced_relations().len() {
+            assert!(optimizer.find_column_relation(&node, col).is_none());
         }
     }
 }

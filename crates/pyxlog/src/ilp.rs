@@ -476,6 +476,11 @@ fn walk_tmj(node: &RirNode, target_mask: Option<&str>) -> Option<TmjMeta> {
         RirNode::Join { left, right, .. } | RirNode::Diff { left, right } => {
             walk_tmj(left, target_mask).or_else(|| walk_tmj(right, target_mask))
         }
+        // v0.6.5: descend into the fallback so a TMJ wrapped beneath a
+        // promoted MultiWayJoin is still discoverable. The promoter does
+        // not currently wrap TMJ-bearing trees, but the explicit arm
+        // documents the contract instead of relying on the catch-all.
+        RirNode::MultiWayJoin { fallback, .. } => walk_tmj(fallback, target_mask),
         _ => None,
     }
 }

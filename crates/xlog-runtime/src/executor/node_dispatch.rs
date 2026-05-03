@@ -230,6 +230,13 @@ impl Executor {
                 *max_active_rules,
                 head_projection,
             ),
+            // v0.6.5 slice 1: defensive fallback descent for any
+            // `execute_node` caller that bypasses the WCOJ dispatch
+            // hook (probabilistic eval, neural store walks, etc.).
+            // The non-recursive arm in `recursive.rs` short-circuits
+            // dispatch-eligible bodies before reaching here; this
+            // arm is the safety net for everyone else.
+            RirNode::MultiWayJoin { fallback, .. } => self.execute_node(fallback),
         }
     }
 

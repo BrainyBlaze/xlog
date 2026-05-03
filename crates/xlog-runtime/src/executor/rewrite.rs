@@ -133,6 +133,10 @@ impl Executor {
                     base, recursive, ..
                 } => contains_non_monotonic_ops(base) || contains_non_monotonic_ops(recursive),
                 RirNode::TensorMaskedJoin { .. } => false,
+                // v0.6.5: walk the fallback. The promoter only wraps
+                // already-monotonic triangle subtrees in v1, but the
+                // fallback is the load-bearing source of truth.
+                RirNode::MultiWayJoin { fallback, .. } => contains_non_monotonic_ops(fallback),
             }
         }
 
@@ -264,6 +268,13 @@ impl Executor {
             RirNode::TensorMaskedJoin { rel_index, .. } => {
                 for (rel_id, _) in rel_index {
                     out.push(*rel_id);
+                }
+            }
+            // v0.6.5: collect from `inputs` only — the fallback subtree
+            // references the same set by promoter invariant.
+            RirNode::MultiWayJoin { inputs, .. } => {
+                for input in inputs {
+                    Self::collect_scan_rels(input, out);
                 }
             }
         }
@@ -460,6 +471,134 @@ impl Executor {
                 // TensorMaskedJoin is a leaf node — no child scans to rewrite.
                 (node.clone(), false)
             }
+            // v0.6.5: rewrite `inputs` and `fallback` consistently. Both
+            // see the same relation universe; the promoter pairs them
+            // and the executor expects identity.
+            RirNode::MultiWayJoin {
+                inputs,
+                slot_vars,
+                output_columns,
+                fallback,
+            } => {
+                let mut new_inputs = Vec::with_capacity(inputs.len());
+                let mut any_replaced = false;
+                for inp in inputs {
+                    let (new_inp, replaced) =
+                        Self::rewrite_scan_nth_impl(inp, target, remaining, replacement);
+                    any_replaced |= replaced;
+                    new_inputs.push(new_inp);
+                }
+                let (new_fallback, fallback_replaced) =
+                    Self::rewrite_scan_nth_impl(fallback, target, remaining, replacement);
+                (
+                    RirNode::MultiWayJoin {
+                        inputs: new_inputs,
+                        slot_vars: slot_vars.clone(),
+                        output_columns: output_columns.clone(),
+                        fallback: Box::new(new_fallback),
+                    },
+                    any_replaced || fallback_replaced,
+                )
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod multiway_walker_tests {
+    //! v0.6.5 slice 1: walker arm coverage for `MultiWayJoin` in the
+    //! rewrite module. `contains_non_monotonic_ops` is a nested `fn`
+    //! inside an `Executor` method and is not directly callable; its
+    //! arm is exercised through integration tests in step 5. The two
+    //! `pub(crate)` walkers below are testable in isolation.
+
+    use super::*;
+    use xlog_ir::rir::ProjectExpr;
+
+    fn triangle_multiway(a: RelId, b: RelId, c: RelId) -> RirNode {
+        let scan_a = RirNode::Scan { rel: a };
+        let scan_b = RirNode::Scan { rel: b };
+        let scan_c = RirNode::Scan { rel: c };
+        let inner = RirNode::Join {
+            left: Box::new(scan_a.clone()),
+            right: Box::new(scan_b.clone()),
+            left_keys: vec![1],
+            right_keys: vec![0],
+            join_type: JoinType::Inner,
+        };
+        let outer = RirNode::Join {
+            left: Box::new(inner),
+            right: Box::new(scan_c.clone()),
+            left_keys: vec![0, 3],
+            right_keys: vec![0, 1],
+            join_type: JoinType::Inner,
+        };
+        let fallback = RirNode::Project {
+            input: Box::new(outer),
+            columns: vec![
+                ProjectExpr::Column(0),
+                ProjectExpr::Column(1),
+                ProjectExpr::Column(3),
+            ],
+        };
+        RirNode::MultiWayJoin {
+            inputs: vec![scan_a, scan_b, scan_c],
+            slot_vars: vec![
+                vec![Some(0), Some(1)],
+                vec![Some(1), Some(2)],
+                vec![Some(0), Some(2)],
+            ],
+            output_columns: vec![
+                ProjectExpr::Column(0),
+                ProjectExpr::Column(1),
+                ProjectExpr::Column(3),
+            ],
+            fallback: Box::new(fallback),
+        }
+    }
+
+    #[test]
+    fn collect_scan_rels_walks_multiway_inputs_only() {
+        let node = triangle_multiway(RelId(10), RelId(20), RelId(30));
+        let mut out = Vec::new();
+        Executor::collect_scan_rels(&node, &mut out);
+        // One entry per input slot; fallback is NOT walked (would
+        // double-count to 6 entries if it were).
+        assert_eq!(out.len(), 3, "expected 3 scan rels, got: {:?}", out);
+        assert!(out.contains(&RelId(10)));
+        assert!(out.contains(&RelId(20)));
+        assert!(out.contains(&RelId(30)));
+    }
+
+    #[test]
+    fn rewrite_scan_nth_rewrites_inputs_and_fallback() {
+        let node = triangle_multiway(RelId(10), RelId(20), RelId(30));
+        // Replace the second occurrence of RelId(10). Across the
+        // MultiWayJoin, RelId(10) appears once in `inputs[0]` and
+        // once inside `fallback` (the outer join's leftmost leaf).
+        // `rewrite_scan_nth` walks the inputs first (count 1), then
+        // the fallback (count 2). With nth=1 we rewrite the second
+        // hit — i.e., the fallback occurrence.
+        let rewritten = Executor::rewrite_scan_nth(&node, RelId(10), 1, RelId(99))
+            .expect("rewrite must succeed");
+        match rewritten {
+            RirNode::MultiWayJoin {
+                inputs, fallback, ..
+            } => {
+                // Input[0] is unchanged.
+                assert!(matches!(inputs[0], RirNode::Scan { rel: RelId(10) }));
+                // Fallback has the RelId(10) leaf swapped to RelId(99).
+                fn find_99(n: &RirNode) -> bool {
+                    match n {
+                        RirNode::Scan { rel: RelId(99) } => true,
+                        RirNode::Project { input, .. } => find_99(input),
+                        RirNode::Join { left, right, .. } => find_99(left) || find_99(right),
+                        _ => false,
+                    }
+                }
+                assert!(find_99(&fallback), "fallback must contain RelId(99)");
+            }
+            _ => panic!("expected MultiWayJoin after rewrite"),
         }
     }
 }
