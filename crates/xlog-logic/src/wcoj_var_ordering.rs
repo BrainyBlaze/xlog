@@ -41,7 +41,7 @@
 //! | e_zw 3 | e_zw   | e_wx   | e_xy   | e_yz   | (Z, W, X, Y)         |
 
 use xlog_core::RelId;
-use xlog_ir::rir::LookupPerm;
+use xlog_ir::rir::{LookupPerm, ProjectExpr, VariableOrder};
 use xlog_stats::StatsManager;
 
 use crate::compiler_config::{CompilerConfig, WcojVarOrderingKind};
@@ -221,6 +221,84 @@ pub fn triangle_lookup_perms(leader_idx: u8) -> Vec<LookupPerm> {
             },
         ],
         _ => panic!("triangle leader_idx must be in [0, 3): got {leader_idx}"),
+    }
+}
+
+/// Promoter helper: triangle locked head-projection table.
+///
+/// Maps the kernel-direct output (in leader's `(a, b, c)` order)
+/// back to the canonical head order `(X, Y, Z)`.
+///
+/// **Locked semantics** per W2.1 plan §"Permutation Tables":
+/// * 0 (e_xy default) — identity `[Column(0), Column(1), Column(2)]`.
+/// * 1 (e_yz)         — `[Column(2), Column(0), Column(1)]`
+///                      because kernel-direct = `(Y, Z, X)`.
+/// * 2 (e_xz)         — `[Column(0), Column(2), Column(1)]`
+///                      because kernel-direct = `(X, Z, Y)`.
+pub fn triangle_kernel_output_cols(leader_idx: u8) -> Vec<ProjectExpr> {
+    match leader_idx {
+        0 => vec![ProjectExpr::Column(0), ProjectExpr::Column(1), ProjectExpr::Column(2)],
+        1 => vec![ProjectExpr::Column(2), ProjectExpr::Column(0), ProjectExpr::Column(1)],
+        2 => vec![ProjectExpr::Column(0), ProjectExpr::Column(2), ProjectExpr::Column(1)],
+        _ => panic!("triangle leader_idx must be in [0, 3): got {leader_idx}"),
+    }
+}
+
+/// Promoter helper: 4-cycle locked head-projection table.
+///
+/// Maps the kernel-direct output (in leader's rotated cycle order)
+/// back to the canonical head order `(W, X, Y, Z)`. All 4 entries
+/// are pure permutations; no col-swap is involved.
+pub fn cycle4_kernel_output_cols(leader_idx: u8) -> Vec<ProjectExpr> {
+    match leader_idx {
+        0 => vec![
+            ProjectExpr::Column(0),
+            ProjectExpr::Column(1),
+            ProjectExpr::Column(2),
+            ProjectExpr::Column(3),
+        ],
+        1 => vec![
+            // kernel-direct = (X, Y, Z, W) → head (W, X, Y, Z)
+            ProjectExpr::Column(3),
+            ProjectExpr::Column(0),
+            ProjectExpr::Column(1),
+            ProjectExpr::Column(2),
+        ],
+        2 => vec![
+            // kernel-direct = (Y, Z, W, X) → head (W, X, Y, Z)
+            ProjectExpr::Column(2),
+            ProjectExpr::Column(3),
+            ProjectExpr::Column(0),
+            ProjectExpr::Column(1),
+        ],
+        3 => vec![
+            // kernel-direct = (Z, W, X, Y) → head (W, X, Y, Z)
+            ProjectExpr::Column(1),
+            ProjectExpr::Column(2),
+            ProjectExpr::Column(3),
+            ProjectExpr::Column(0),
+        ],
+        _ => panic!("4-cycle leader_idx must be in [0, 4): got {leader_idx}"),
+    }
+}
+
+/// Promoter helper: build a complete `VariableOrder` for a triangle
+/// from the cost model's `leader_idx` decision.
+pub fn build_triangle_var_order(leader_idx: u8) -> VariableOrder {
+    VariableOrder {
+        leader_idx,
+        lookup_perms: triangle_lookup_perms(leader_idx),
+        kernel_output_cols: triangle_kernel_output_cols(leader_idx),
+    }
+}
+
+/// Promoter helper: build a complete `VariableOrder` for a 4-cycle
+/// from the cost model's `leader_idx` decision.
+pub fn build_cycle4_var_order(leader_idx: u8) -> VariableOrder {
+    VariableOrder {
+        leader_idx,
+        lookup_perms: cycle4_lookup_perms(leader_idx),
+        kernel_output_cols: cycle4_kernel_output_cols(leader_idx),
     }
 }
 

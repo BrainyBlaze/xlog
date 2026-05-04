@@ -645,7 +645,17 @@ fn run_synth_post_selectivity(
     // Re-promote with the W2.2 extension. The hand-built
     // body's alt shape goes through the variable-graph
     // promoter and becomes a canonical MultiWayJoin.
-    xlog_logic::promote::promote_multiway(&mut plan, compiler.rel_ids());
+    //
+    // W2.1: signature widened to `(plan, rel_ids, stats, config)`.
+    // Pass empty stats + default config so this W2.2 cert continues
+    // to exercise the legacy slice 1/2/W2.2 dispatch (no W2.1 var
+    // ordering activated; row sets remain bit-identical).
+    xlog_logic::promote::promote_multiway(
+        &mut plan,
+        compiler.rel_ids(),
+        &xlog_stats::StatsManager::new(),
+        &xlog_logic::compiler_config::CompilerConfig::default(),
+    );
     let mut executor = Executor::new_with_config(provider, config);
     for (name, rel_id) in compiler.rel_ids() {
         executor.register_relation(*rel_id, name);

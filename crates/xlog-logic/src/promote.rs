@@ -71,6 +71,10 @@ use xlog_core::RelId;
 use xlog_ir::plan::Scc;
 use xlog_ir::rir::ProjectExpr;
 use xlog_ir::{ExecutionPlan, JoinType, RirNode};
+use xlog_stats::StatsManager;
+
+use crate::compiler_config::CompilerConfig;
+use crate::wcoj_var_ordering::WcojVariableOrderingModel;
 
 /// Walk an `ExecutionPlan` and rewrite eligible triangle / 4-cycle
 /// subtrees in each rule body to `RirNode::MultiWayJoin`. Idempotent.
@@ -88,7 +92,12 @@ use xlog_ir::{ExecutionPlan, JoinType, RirNode};
 /// stable rules (count 0) and linear-recursive rules (count 1).
 /// Bodies with ≥ 2 recursive Scans are left as binary-join trees;
 /// see slice 4.2 for multi-recursive WCOJ.
-pub fn promote_multiway(plan: &mut ExecutionPlan, rel_ids: &HashMap<String, RelId>) {
+pub fn promote_multiway(
+    plan: &mut ExecutionPlan,
+    rel_ids: &HashMap<String, RelId>,
+    stats: &StatsManager,
+    config: &CompilerConfig,
+) {
     // Snapshot SCCs by index so we can pass &Scc into helpers
     // while holding `&mut plan.rules_by_scc`.
     let sccs_snapshot: Vec<Scc> = plan.sccs.clone();
@@ -109,11 +118,11 @@ pub fn promote_multiway(plan: &mut ExecutionPlan, rel_ids: &HashMap<String, RelI
             // both (different atom counts), so order is a doc anchor,
             // not a correctness gate. Future shapes append to this
             // chain in their own slice.
-            if let Some(promoted) = try_promote_triangle(&rule.body) {
+            if let Some(promoted) = try_promote_triangle(&rule.body, stats, config) {
                 rule.body = promoted;
                 continue;
             }
-            if let Some(promoted) = try_promote_4cycle(&rule.body) {
+            if let Some(promoted) = try_promote_4cycle(&rule.body, stats, config) {
                 rule.body = promoted;
             }
         }
@@ -362,7 +371,11 @@ fn infer_triangle_semantics(
 /// `inputs` arranged in canonical semantic order
 /// `[XY, YZ, XZ]` regardless of positional layout. Returns
 /// `None` for shape deviations.
-fn try_promote_triangle(node: &RirNode) -> Option<RirNode> {
+fn try_promote_triangle(
+    node: &RirNode,
+    stats: &StatsManager,
+    config: &CompilerConfig,
+) -> Option<RirNode> {
     let RirNode::Project {
         input: outer_input,
         columns,
@@ -433,12 +446,19 @@ fn try_promote_triangle(node: &RirNode) -> Option<RirNode> {
     ];
     let output_columns = columns.clone();
     let fallback = Box::new(node.clone());
+    // W2.1: ask the cost model whether to set a non-default
+    // leader. With `CompilerConfig::default()` (Disabled), this
+    // always returns None and slice 1/2/4/W2.2 behavior is
+    // bit-identical.
+    let var_order = crate::wcoj_var_ordering::LeaderCardinalityModel
+        .pick_triangle_leader([rel_xy, rel_yz, rel_xz], stats, config)
+        .map(crate::wcoj_var_ordering::build_triangle_var_order);
     Some(RirNode::MultiWayJoin {
         inputs,
         slot_vars,
         output_columns,
         fallback,
-        var_order: None,
+        var_order,
     })
 }
 
@@ -648,7 +668,11 @@ fn infer_4cycle_semantics(
 /// walker contract states only matchers/promoters with explicit
 /// shape qualifiers may shape-lock; this matcher locks 4-cycle
 /// specifically.
-fn try_promote_4cycle(node: &RirNode) -> Option<RirNode> {
+fn try_promote_4cycle(
+    node: &RirNode,
+    stats: &StatsManager,
+    config: &CompilerConfig,
+) -> Option<RirNode> {
     let RirNode::Project {
         input: outer_input,
         columns,
@@ -732,12 +756,18 @@ fn try_promote_4cycle(node: &RirNode) -> Option<RirNode> {
     ];
     let output_columns = columns.clone();
     let fallback = Box::new(node.clone());
+    // W2.1: ask the cost model whether to set a non-default
+    // leader. With `CompilerConfig::default()` (Disabled), this
+    // always returns None.
+    let var_order = crate::wcoj_var_ordering::LeaderCardinalityModel
+        .pick_4cycle_leader([rel_wx, rel_xy, rel_yz, rel_zw], stats, config)
+        .map(crate::wcoj_var_ordering::build_cycle4_var_order);
     Some(RirNode::MultiWayJoin {
         inputs,
         slot_vars,
         output_columns,
         fallback,
-        var_order: None,
+        var_order,
     })
 }
 
@@ -793,7 +823,12 @@ mod tests {
     #[test]
     fn promotes_canonical_triangle() {
         let mut plan = plan_with_body(canonical_triangle_tree());
-        promote_multiway(&mut plan, &HashMap::new());
+        promote_multiway(
+            &mut plan,
+            &HashMap::new(),
+            &StatsManager::new(),
+            &CompilerConfig::default(),
+        );
         let body = &plan.rules_by_scc[0][0].body;
         match body {
             RirNode::MultiWayJoin {
@@ -834,7 +869,12 @@ mod tests {
     fn fallback_is_structurally_equal_to_input() {
         let pre = canonical_triangle_tree();
         let mut plan = plan_with_body(pre.clone());
-        promote_multiway(&mut plan, &HashMap::new());
+        promote_multiway(
+            &mut plan,
+            &HashMap::new(),
+            &StatsManager::new(),
+            &CompilerConfig::default(),
+        );
         let body = &plan.rules_by_scc[0][0].body;
         let RirNode::MultiWayJoin { fallback, .. } = body else {
             panic!("expected MultiWayJoin");
@@ -848,9 +888,19 @@ mod tests {
     #[test]
     fn idempotent_under_repeat_calls() {
         let mut plan = plan_with_body(canonical_triangle_tree());
-        promote_multiway(&mut plan, &HashMap::new());
+        promote_multiway(
+            &mut plan,
+            &HashMap::new(),
+            &StatsManager::new(),
+            &CompilerConfig::default(),
+        );
         let first = format!("{:?}", &plan.rules_by_scc[0][0].body);
-        promote_multiway(&mut plan, &HashMap::new());
+        promote_multiway(
+            &mut plan,
+            &HashMap::new(),
+            &StatsManager::new(),
+            &CompilerConfig::default(),
+        );
         let second = format!("{:?}", &plan.rules_by_scc[0][0].body);
         assert_eq!(first, second);
     }
@@ -885,7 +935,12 @@ mod tests {
             ],
         };
         let mut plan = plan_with_body(body);
-        promote_multiway(&mut plan, &HashMap::new());
+        promote_multiway(
+            &mut plan,
+            &HashMap::new(),
+            &StatsManager::new(),
+            &CompilerConfig::default(),
+        );
         let RirNode::MultiWayJoin {
             inputs, slot_vars, ..
         } = &plan.rules_by_scc[0][0].body
@@ -944,7 +999,12 @@ mod tests {
             ],
         };
         let mut plan = plan_with_body(body);
-        promote_multiway(&mut plan, &HashMap::new());
+        promote_multiway(
+            &mut plan,
+            &HashMap::new(),
+            &StatsManager::new(),
+            &CompilerConfig::default(),
+        );
         let RirNode::MultiWayJoin {
             inputs, slot_vars, ..
         } = &plan.rules_by_scc[0][0].body
@@ -1007,7 +1067,12 @@ mod tests {
             ],
         };
         let mut plan = plan_with_body(body);
-        promote_multiway(&mut plan, &HashMap::new());
+        promote_multiway(
+            &mut plan,
+            &HashMap::new(),
+            &StatsManager::new(),
+            &CompilerConfig::default(),
+        );
         // Body now promoted to MultiWayJoin (W2.2 contract).
         let RirNode::MultiWayJoin {
             slot_vars,
@@ -1062,7 +1127,12 @@ mod tests {
             ],
         };
         let mut plan = plan_with_body(body);
-        promote_multiway(&mut plan, &HashMap::new());
+        promote_multiway(
+            &mut plan,
+            &HashMap::new(),
+            &StatsManager::new(),
+            &CompilerConfig::default(),
+        );
         assert!(matches!(
             &plan.rules_by_scc[0][0].body,
             RirNode::Project { .. }
@@ -1100,7 +1170,12 @@ mod tests {
             ],
         };
         let mut plan = plan_with_body(body);
-        promote_multiway(&mut plan, &HashMap::new());
+        promote_multiway(
+            &mut plan,
+            &HashMap::new(),
+            &StatsManager::new(),
+            &CompilerConfig::default(),
+        );
         assert!(matches!(
             &plan.rules_by_scc[0][0].body,
             RirNode::Project { .. }
@@ -1134,7 +1209,12 @@ mod tests {
             },
         );
         let mut plan = builder.build();
-        promote_multiway(&mut plan, &HashMap::new());
+        promote_multiway(
+            &mut plan,
+            &HashMap::new(),
+            &StatsManager::new(),
+            &CompilerConfig::default(),
+        );
         assert_eq!(
             format!("{:?}", &plan.rules_by_scc[0][0].meta),
             format!("{:?}", meta_pre),
@@ -1169,7 +1249,12 @@ mod tests {
         let mut plan = builder.build();
         // No "tri" entry in rel_ids → all body Scans are extensional
         // from this SCC's POV → count == 0 → promote.
-        promote_multiway(&mut plan, &HashMap::new());
+        promote_multiway(
+            &mut plan,
+            &HashMap::new(),
+            &StatsManager::new(),
+            &CompilerConfig::default(),
+        );
         assert!(matches!(
             &plan.rules_by_scc[0][0].body,
             RirNode::MultiWayJoin { .. }
@@ -1199,7 +1284,12 @@ mod tests {
         let mut plan = builder.build();
         let mut rel_ids = HashMap::new();
         rel_ids.insert("tri".to_string(), RelId(2)); // 1 of 3 Scans
-        promote_multiway(&mut plan, &rel_ids);
+        promote_multiway(
+            &mut plan,
+            &rel_ids,
+            &StatsManager::new(),
+            &CompilerConfig::default(),
+        );
         assert!(matches!(
             &plan.rules_by_scc[0][0].body,
             RirNode::MultiWayJoin { .. }
@@ -1233,7 +1323,12 @@ mod tests {
         rel_ids.insert("tri_a".to_string(), RelId(1));
         rel_ids.insert("tri_b".to_string(), RelId(2));
         // Count == 2 ≥ 2 → skip.
-        promote_multiway(&mut plan, &rel_ids);
+        promote_multiway(
+            &mut plan,
+            &rel_ids,
+            &StatsManager::new(),
+            &CompilerConfig::default(),
+        );
         assert!(matches!(
             &plan.rules_by_scc[0][0].body,
             RirNode::Project { .. }
@@ -1277,7 +1372,12 @@ mod tests {
         rel_ids.insert("rec".to_string(), RelId(1)); // count 1 in SCC 0
                                                      // SCC 1 has no rec scans (count 0 in SCC 1 because "nonrec"
                                                      // not in body).
-        promote_multiway(&mut plan, &rel_ids);
+        promote_multiway(
+            &mut plan,
+            &rel_ids,
+            &StatsManager::new(),
+            &CompilerConfig::default(),
+        );
         assert!(matches!(
             &plan.rules_by_scc[0][0].body,
             RirNode::MultiWayJoin { .. }
@@ -1351,7 +1451,12 @@ mod tests {
     #[test]
     fn promotes_canonical_4cycle() {
         let mut plan = plan_with_4cycle_body(canonical_4cycle_tree());
-        promote_multiway(&mut plan, &HashMap::new());
+        promote_multiway(
+            &mut plan,
+            &HashMap::new(),
+            &StatsManager::new(),
+            &CompilerConfig::default(),
+        );
         let body = &plan.rules_by_scc[0][0].body;
         match body {
             RirNode::MultiWayJoin {
@@ -1394,7 +1499,12 @@ mod tests {
     fn fallback_4cycle_is_structurally_equal_to_input() {
         let pre = canonical_4cycle_tree();
         let mut plan = plan_with_4cycle_body(pre.clone());
-        promote_multiway(&mut plan, &HashMap::new());
+        promote_multiway(
+            &mut plan,
+            &HashMap::new(),
+            &StatsManager::new(),
+            &CompilerConfig::default(),
+        );
         let body = &plan.rules_by_scc[0][0].body;
         let RirNode::MultiWayJoin { fallback, .. } = body else {
             panic!("expected MultiWayJoin");
@@ -1405,9 +1515,19 @@ mod tests {
     #[test]
     fn idempotent_4cycle_under_repeat_calls() {
         let mut plan = plan_with_4cycle_body(canonical_4cycle_tree());
-        promote_multiway(&mut plan, &HashMap::new());
+        promote_multiway(
+            &mut plan,
+            &HashMap::new(),
+            &StatsManager::new(),
+            &CompilerConfig::default(),
+        );
         let first = format!("{:?}", &plan.rules_by_scc[0][0].body);
-        promote_multiway(&mut plan, &HashMap::new());
+        promote_multiway(
+            &mut plan,
+            &HashMap::new(),
+            &StatsManager::new(),
+            &CompilerConfig::default(),
+        );
         let second = format!("{:?}", &plan.rules_by_scc[0][0].body);
         assert_eq!(first, second);
     }
@@ -1447,7 +1567,7 @@ mod tests {
         // its head columns are [0,1,3] — they aren't here (4 cols),
         // so triangle declines. 4-cycle declines because outer-right
         // is a Scan not a Join.
-        assert!(try_promote_4cycle(&body).is_none());
+        assert!(try_promote_4cycle(&body, &StatsManager::new(), &CompilerConfig::default()).is_none());
     }
 
     /// W2.2: 4-cycle with the alternative bushy grouping
@@ -1496,7 +1616,12 @@ mod tests {
             ],
         };
         let mut plan = plan_with_body(body);
-        promote_multiway(&mut plan, &HashMap::new());
+        promote_multiway(
+            &mut plan,
+            &HashMap::new(),
+            &StatsManager::new(),
+            &CompilerConfig::default(),
+        );
         let RirNode::MultiWayJoin {
             inputs, slot_vars, ..
         } = &plan.rules_by_scc[0][0].body
@@ -1536,7 +1661,7 @@ mod tests {
             // Rotate: swap col 0 and col 1.
             columns.swap(0, 1);
         }
-        assert!(try_promote_4cycle(&body).is_none());
+        assert!(try_promote_4cycle(&body, &StatsManager::new(), &CompilerConfig::default()).is_none());
     }
 
     #[test]
@@ -1547,7 +1672,7 @@ mod tests {
                 *join_type = JoinType::LeftOuter;
             }
         }
-        assert!(try_promote_4cycle(&body).is_none());
+        assert!(try_promote_4cycle(&body, &StatsManager::new(), &CompilerConfig::default()).is_none());
     }
 
     #[test]
@@ -1558,7 +1683,7 @@ mod tests {
                 *left_keys = vec![0, 4]; // not [0, 3]
             }
         }
-        assert!(try_promote_4cycle(&body).is_none());
+        assert!(try_promote_4cycle(&body, &StatsManager::new(), &CompilerConfig::default()).is_none());
     }
 
     /// Slice 4 contract: stable 4-cycle (zero recursive Scans) IS
@@ -1581,7 +1706,12 @@ mod tests {
         );
         let mut plan = builder.build();
         // No "rec_cycle" entry in rel_ids → count 0 → promote.
-        promote_multiway(&mut plan, &HashMap::new());
+        promote_multiway(
+            &mut plan,
+            &HashMap::new(),
+            &StatsManager::new(),
+            &CompilerConfig::default(),
+        );
         assert!(matches!(
             &plan.rules_by_scc[0][0].body,
             RirNode::MultiWayJoin { .. }
@@ -1611,7 +1741,12 @@ mod tests {
         // canonical_4cycle_tree uses 4 Scans; map exactly one to
         // rec_cycle (RelId selection from 4cycle_tree below).
         rel_ids.insert("rec_cycle".to_string(), RelId(2));
-        promote_multiway(&mut plan, &rel_ids);
+        promote_multiway(
+            &mut plan,
+            &rel_ids,
+            &StatsManager::new(),
+            &CompilerConfig::default(),
+        );
         assert!(matches!(
             &plan.rules_by_scc[0][0].body,
             RirNode::MultiWayJoin { .. }
@@ -1640,7 +1775,12 @@ mod tests {
         let mut rel_ids = HashMap::new();
         rel_ids.insert("rc_a".to_string(), RelId(1));
         rel_ids.insert("rc_b".to_string(), RelId(2));
-        promote_multiway(&mut plan, &rel_ids);
+        promote_multiway(
+            &mut plan,
+            &rel_ids,
+            &StatsManager::new(),
+            &CompilerConfig::default(),
+        );
         assert!(matches!(
             &plan.rules_by_scc[0][0].body,
             RirNode::Project { .. }
@@ -1653,8 +1793,8 @@ mod tests {
         // try_promote_triangle must NOT also match try_promote_4cycle.
         // Both promoters should be exclusive.
         let triangle = canonical_triangle_tree();
-        assert!(try_promote_4cycle(&triangle).is_none());
+        assert!(try_promote_4cycle(&triangle, &StatsManager::new(), &CompilerConfig::default()).is_none());
         let four_cycle = canonical_4cycle_tree();
-        assert!(try_promote_triangle(&four_cycle).is_none());
+        assert!(try_promote_triangle(&four_cycle, &StatsManager::new(), &CompilerConfig::default()).is_none());
     }
 }

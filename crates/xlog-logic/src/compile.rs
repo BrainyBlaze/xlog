@@ -173,7 +173,7 @@ impl Compiler {
     pub fn compile_program_with_config_and_stats_snapshot(
         &mut self,
         program: &Program,
-        _config: &CompilerConfig,
+        config: &CompilerConfig,
         stats_snapshot: Option<&StatsSnapshot>,
     ) -> Result<ExecutionPlan> {
         let program = desugar_queries_and_constraints(program);
@@ -347,7 +347,12 @@ impl Compiler {
         // v0.6.5 slice 4: pass the lowerer's predicate→RelId map
         // so the promoter can gate recursive-SCC bodies on the
         // count of in-SCC Scans (≤ 1 = promote, ≥ 2 = skip).
-        crate::promote::promote_multiway(&mut plan, self.lowerer.rel_ids());
+        //
+        // W2.1: also pass `&stats_arc` and the caller-provided
+        // `&CompilerConfig`. With `CompilerConfig::default()`
+        // (`Disabled`), the promoter never sets `var_order` and
+        // slice 1/2/4/W2.2 dispatch is bit-identical.
+        crate::promote::promote_multiway(&mut plan, self.lowerer.rel_ids(), &stats_arc, config);
 
         Ok(plan)
     }
