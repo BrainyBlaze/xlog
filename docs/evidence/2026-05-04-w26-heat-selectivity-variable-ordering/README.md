@@ -4,7 +4,7 @@
 **Date:** 2026-05-04
 **Branch:** `feat/w26-heat-selectivity-variable-ordering`
 **Base:** `main` at `cf57f3a1` (W2.3 closure commit).
-**Head:** `7e76b3dd` (3 commits on branch).
+**Head:** `710a0cb1` (7 commits on branch since base).
 **Plan:** `docs/plans/2026-05-04-w26-heat-selectivity-variable-ordering-plan.md`
 (approved iteration 7).
 
@@ -457,17 +457,22 @@ After explicit user "mark W2.6 DONE" approval, a follow-up
 commit applies:
 
 * `docs/v065-closure-board.md` — W2.6 status `OPEN → DONE`,
-  status tally updated (DONE: 8 → 9; OPEN: 9 → 8 — verify
+  status tally updated `DONE: 4 → 5; OPEN: 15 → 14` (verify
   current counts at apply-time).
 * `docs/v065-closure-board.md` "Completed" section gets a W2.6
-  entry referencing commits:
+  entry referencing the 7 branch commits:
   * `d3ef4cda` — plan iteration 7 (approved).
   * `c51e07bb` — HeatAwareLeaderModel + var_order-aware W2.4
     feedback (steps 1-6).
   * `7e76b3dd` — 15 acceptance tests (step 7).
+  * `0c3c8929` — initial evidence README + closure proposal
+    (step 9 first pass).
   * `07eaf5c3` — slice-1 promoter normalizers + Part C.4 cert
     (step 9 follow-up; resolves both plan deviations the user
     flagged).
-  * (this commit, evidence README — step 9).
+  * `0ba1b3cf` — evidence amended after B+D implementation.
+  * `710a0cb1` — patch evidence header / closure proposal
+    tally (DONE 4 → 5; OPEN 15 → 14) / `record_wcoj_feedback`
+    doc-comment after W2.6 reroute. Doc-only.
 * FF-merge `feat/w26-heat-selectivity-variable-ordering` into
   `main`. No tag, no push (per process rule #6).

@@ -694,23 +694,45 @@ impl Executor {
         buf.cached_row_count().map(u64::from)
     }
 
-    /// W2.4 — wire successful WCOJ dispatches back into
+    /// W2.4 + W2.6 — wire successful WCOJ dispatches back into
     /// `StatsManager` so the cardinality cost model's future
     /// `binary_est` reads reflect observed selectivity.
     ///
-    /// Records on the **inner-pair** (`slot_rels[0]`,
-    /// `slot_rels[1]`) with keys `vec![1] / vec![0]` — the
-    /// same pair that
-    /// `CardinalityAwareCostModel::should_dispatch_*` reads
-    /// via `estimate_join_cardinality` for `binary_est`. This
-    /// keeps the writer ↔ reader pair coherent.
+    /// **W2.6 routing**: the `(rel_a, rel_b, left_keys, right_keys)`
+    /// quadruple is derived from the dispatched plan's
+    /// `var_order` via `feedback_pair_from_var_order`, NOT
+    /// hardcoded:
+    ///
+    /// * `var_order = None` (default config): returns the
+    ///   pre-W2.6 W2.4 pair — `(slot_rels[0], slot_rels[1])`
+    ///   with keys `[1] / [0]`. Bit-identical to slice 1-5 +
+    ///   W2.4.
+    /// * `var_order = Some(_)` (W2.1 LeaderCardinality or W2.6
+    ///   HeatAware non-default leader): returns the rotated
+    ///   pair from the locked feedback table — triangle
+    ///   non-default leaders use rotated `(slot_rels[0],
+    ///   slot_rels[1])` with keys `[1] / [1]` (Z-shared edges
+    ///   in canonical layout join on col 1 of both rels);
+    ///   4-cycle is rotation-only with keys `[1] / [0]`.
+    ///
+    /// `CardinalityAwareCostModel::should_dispatch_*` still
+    /// reads via `estimate_join_cardinality` on the canonical
+    /// default-leader pair — but on a non-default-leader run
+    /// the dispatched layout's actual edge is what we observe,
+    /// and that's what gets recorded under the rotated key.
+    /// The W2.1 + W2.6 cost models look up rotated edges
+    /// correspondingly; the writer ↔ reader pair stays
+    /// coherent under each leader topology.
     ///
     /// Skips the recording when:
     ///   * `slot_rels.len() < 2` — not enough slots for a
     ///     binary inner pair (defensive).
     ///   * `output_rows == None` — unknown logical row count;
     ///     recording 0 would poison the EMA.
-    ///   * Any of `slot_rels[0..2]` has missing or zero
+    ///   * `feedback_pair_from_var_order` returns `None` — the
+    ///     leader rotation isn't in the locked feedback table
+    ///     (conservative; never write under uncertainty).
+    ///   * Any of `(rel_a, rel_b)` has missing or zero
     ///     cardinality — `populated_cards` analog from slice 5;
     ///     unknown inputs would compute a meaningless
     ///     `input_card_product`.
