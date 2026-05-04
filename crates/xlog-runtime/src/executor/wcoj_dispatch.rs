@@ -1276,6 +1276,42 @@ mod tests {
         assert!(match_multiway_triangle(&node).is_none());
     }
 
+    /// W2.2: triangle with Z-shared output_columns layout
+    /// `[Column(0), Column(2), Column(3)]` must match. The
+    /// matcher's output-column relaxation in W2.2 accepts both
+    /// `[0, 1, 3]` (Y/X-shared) and `[0, 2, 3]` (Z-shared).
+    #[test]
+    fn match_accepts_w22_z_shared_triangle_output_columns() {
+        let mut node = canonical_multiway();
+        if let RirNode::MultiWayJoin { output_columns, .. } = &mut node {
+            *output_columns = vec![
+                ProjectExpr::Column(0),
+                ProjectExpr::Column(2),
+                ProjectExpr::Column(3),
+            ];
+        }
+        let m = match_multiway_triangle(&node)
+            .expect("W2.2 matcher must accept the Z-shared output-column layout");
+        assert_eq!(m.rel_xy, RelId(1));
+        assert_eq!(m.rel_yz, RelId(2));
+        assert_eq!(m.rel_xz, RelId(3));
+    }
+
+    /// W2.2: triangle output_columns `[Column(0), Column(3), Column(3)]`
+    /// MUST be rejected — second col must be 1 or 2, not 3.
+    #[test]
+    fn match_rejects_invalid_w22_triangle_output_columns() {
+        let mut node = canonical_multiway();
+        if let RirNode::MultiWayJoin { output_columns, .. } = &mut node {
+            *output_columns = vec![
+                ProjectExpr::Column(0),
+                ProjectExpr::Column(3),
+                ProjectExpr::Column(3),
+            ];
+        }
+        assert!(match_multiway_triangle(&node).is_none());
+    }
+
     #[test]
     fn match_rejects_arity_mismatched_output_columns() {
         let mut node = canonical_multiway();
@@ -1650,6 +1686,49 @@ mod tests {
         let mut node = canonical_4cycle_multiway();
         if let RirNode::MultiWayJoin { output_columns, .. } = &mut node {
             output_columns.swap(0, 1);
+        }
+        assert!(match_multiway_4cycle(&node).is_none());
+    }
+
+    /// W2.2: 4-cycle Alt-grouping output_columns
+    /// `[Column(5), Column(0), Column(1), Column(3)]` must
+    /// match. The W2.2 matcher relaxation accepts both
+    /// Default `[0, 1, 3, 5]` and Alt `[5, 0, 1, 3]`.
+    #[test]
+    fn match_4cycle_accepts_w22_alt_grouping_output_columns() {
+        let mut node = canonical_4cycle_multiway();
+        if let RirNode::MultiWayJoin { output_columns, .. } = &mut node {
+            *output_columns = vec![
+                ProjectExpr::Column(5),
+                ProjectExpr::Column(0),
+                ProjectExpr::Column(1),
+                ProjectExpr::Column(3),
+            ];
+        }
+        let m = match_multiway_4cycle(&node)
+            .expect("W2.2 matcher must accept the Alt-grouping output-column layout");
+        // RelIds preserved positionally from the body's
+        // MultiWayJoin.inputs (which are in canonical
+        // semantic order [WX, XY, YZ, ZW] per W2.2 step 2a).
+        assert_eq!(m.rel_e1, RelId(1));
+        assert_eq!(m.rel_e2, RelId(2));
+        assert_eq!(m.rel_e3, RelId(3));
+        assert_eq!(m.rel_e4, RelId(4));
+    }
+
+    /// W2.2: 4-cycle output_columns `[1, 0, 3, 5]` (only swap
+    /// of cols 0 and 1 vs Default) must STILL be rejected —
+    /// it's neither Default nor Alt.
+    #[test]
+    fn match_4cycle_rejects_invalid_w22_output_columns() {
+        let mut node = canonical_4cycle_multiway();
+        if let RirNode::MultiWayJoin { output_columns, .. } = &mut node {
+            *output_columns = vec![
+                ProjectExpr::Column(1),
+                ProjectExpr::Column(0),
+                ProjectExpr::Column(3),
+                ProjectExpr::Column(5),
+            ];
         }
         assert!(match_multiway_4cycle(&node).is_none());
     }

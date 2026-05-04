@@ -137,7 +137,7 @@ Part C canonical-regression).
 | `crates/xlog-logic/src/compile.rs` | Caller passes `self.lowerer.rel_ids()`. |
 | `crates/xlog-logic/src/promote.rs` | `try_promote_triangle` / `try_promote_4cycle` extended via `infer_triangle_semantics` / `infer_4cycle_semantics` — variable-graph deduction recognizes any valid key combination, emits canonical-order `MultiWayJoin.inputs` + shape-fixed `slot_vars`. 3 new tests + 1 reframed test for alternative shapes. |
 | `crates/xlog-integration/Cargo.toml` | Added `xlog-stats` dep for cert. |
-| `crates/xlog-integration/tests/test_selectivity_pass_reordering.rs` | New cert file — 3 integration tests (Part B + Part C ×2). |
+| `crates/xlog-integration/tests/test_selectivity_pass_reordering.rs` | New cert file — 6 integration tests: Part B triangle + 4-cycle (2); Part C synthesized post-selectivity X-shared triangle + Alt-grouping 4-cycle (2); Part C canonical-regression triangle + 4-cycle (2). |
 
 ## Decisions / Limitations
 

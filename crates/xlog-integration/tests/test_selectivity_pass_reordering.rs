@@ -358,35 +358,29 @@ fn selectivity_pass_triangle_two_snapshots_produce_same_row_set() {
 }
 
 // ---------------------------------------------------------------
-// Part C — force-WCOJ dispatch survives W2.2 changes
+// Part C — force-WCOJ dispatch on reordered + canonical bodies
 // ---------------------------------------------------------------
 //
-// **Honest scope note.** Part C as originally framed wanted to
-// drive selectivity_pass to an alt shape end-to-end and then
-// confirm WCOJ dispatch on the alt shape. The compile-time
-// optimizer can emit right-deep `Project { Join { Scan, Join } }`
-// when stats favor it — right-deep is explicitly OUT of W2.2
-// scope (per plan's "Not in Scope"), and the slice 1 / slice 2
-// promoter (even with the W2.2 step 2a extension) does not
-// recognize right-deep.
+// Two pairs of tests, four total:
 //
-// Therefore Part C here uses the **empty stats** path so the
-// optimizer produces canonical left-deep / bushy shapes. This
-// proves W2.2's changes don't break dispatch on the canonical
-// case (regression-style cert). The W2.2 reordering itself is
-// exercised by:
-//   * Step 3 compile-time certs in
-//     `crates/xlog-logic/src/optimizer.rs::selectivity_pass_tests`
-//     — three triangle inner-pair choices verified by direct
-//     plan synthesis.
-//   * Step 2a promoter-extension tests in
-//     `crates/xlog-logic/src/promote.rs::tests` — alt-shape
-//     bodies promote with semantic-order `MultiWayJoin.inputs`
-//     and shape-fixed `slot_vars`.
+//   * **Synthesized post-selectivity** (`*_synthesized_*_dispatches_wcoj`)
+//     — close the approved W2.2 acceptance gate for non-default
+//     reordered bodies. Hand-build the alt-shape lowered RIR
+//     (X-shared triangle / Alt-grouping 4-cycle), feed through
+//     `xlog_logic::promote::promote_multiway` (W2.2 step 2a
+//     extension), execute with force-WCOJ. Counter ≥ 1 AND
+//     row set equals binary-join reference. This is the W2.2
+//     plan's explicit fallback path: "If
+//     compile_with_stats_snapshot currently drives the
+//     optimizer into right-deep output, … build the
+//     integration cert from a synthesized post-selectivity
+//     plan."
 //
-// End-to-end alt-shape integration is gated on right-deep
-// optimizer-output handling, which the W2.2 plan explicitly
-// defers as a separate slice's input.
+//   * **Canonical regression** (`*_do_not_break_canonical_*`)
+//     — empty-stats path so the optimizer produces canonical
+//     left-deep / bushy. Force-WCOJ + counter ≥ 1 + row-set
+//     match. Guards against W2.2 changes regressing the slice
+//     1 / slice 2 dispatch path.
 
 #[test]
 fn selectivity_pass_changes_do_not_break_canonical_triangle_dispatch() {

@@ -852,7 +852,6 @@ mod tests {
         assert_eq!(first, second);
     }
 
-    #[test]
     /// W2.2: triangle with X-shared inner pair — inner keys
     /// `[0]/[0]`, outer keys `[1, 3]/[0, 1]`, project `[0, 1, 3]`.
     /// Body atoms at positions: l2 = e_xy, r2 = e_xz, r1 = e_yz.
