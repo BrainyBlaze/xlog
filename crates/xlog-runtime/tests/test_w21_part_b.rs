@@ -459,12 +459,8 @@ fn assert_cycle4_slot_layout(
     expected_slot_rows: &[&[(u32, u32)]; 4],
 ) {
     let canonical = cycle4_canonical_inputs(&fix.memory);
-    let canonical_refs: [&CudaBuffer; 4] = [
-        &canonical[0],
-        &canonical[1],
-        &canonical[2],
-        &canonical[3],
-    ];
+    let canonical_refs: [&CudaBuffer; 4] =
+        [&canonical[0], &canonical[1], &canonical[2], &canonical[3]];
     let var_order = build_cycle4_var_order(leader_idx);
     assert_eq!(var_order.leader_idx, leader_idx);
     assert_eq!(var_order.kernel_output_cols, expected_kernel_output_cols);

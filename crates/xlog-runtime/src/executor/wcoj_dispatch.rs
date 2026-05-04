@@ -1073,8 +1073,7 @@ impl Executor {
         var_order: &VariableOrder,
     ) -> Result<CudaBuffer> {
         let canonical: [&CudaBuffer; 3] = [buf_xy, buf_yz, buf_xz];
-        let slot_inputs =
-            self.prepare_leader_inputs(&canonical, var_order, launch_stream)?;
+        let slot_inputs = self.prepare_leader_inputs(&canonical, var_order, launch_stream)?;
         if slot_inputs.len() != 3 {
             return Err(xlog_core::XlogError::Kernel(
                 "run_wcoj_triangle_pipeline_w21: prepare_leader_inputs must return 3 slots"
@@ -1476,9 +1475,15 @@ impl Executor {
     /// W2.1 — produce **owned, materialized** kernel slot inputs
     /// from a canonical-order input array and a `VariableOrder`.
     ///
-    /// `pub(crate)` so Part B runtime tests can invoke it directly
-    /// and assert per-slot schema + content. Production callers are
-    /// `run_wcoj_*_pipeline_w21`.
+    /// **Public** runtime helper. Production callers are
+    /// `run_wcoj_*_pipeline_w21` (this module); the W2.1 plan
+    /// §"Part B" runtime tests in
+    /// `crates/xlog-runtime/tests/test_w21_part_b.rs` invoke it
+    /// directly to assert per-slot schema + content against a CPU
+    /// reference. Public visibility is intentional: there is no
+    /// other reasonable seam for tests to inspect rotation +
+    /// col-swap behavior, and the helper has well-defined
+    /// owned-buffer semantics that external callers can rely on.
     ///
     /// Returns a `Vec<CudaBuffer>` of length `canonical.len()` (3
     /// for triangle, 4 for 4-cycle). Slot 0 is the leader; slots
@@ -1487,11 +1492,10 @@ impl Executor {
     /// per the locked permutation table; 4-cycle is rotation-only
     /// and rejects swap requests with a kernel error.
     ///
-    /// Each returned `CudaBuffer` is owned (DtoD-copied via
-    /// `wcoj_project_2col_swap_recorded` on swap; DtoD-copied via
-    /// the same helper with identity-swap-then-swap on no-swap to
-    /// keep ownership uniform — actually we use a no-swap clone
-    /// path: see comment below).
+    /// Each returned `CudaBuffer` is owned: swapped slots are
+    /// DtoD-copied via `wcoj_project_2col_swap_recorded`; non-
+    /// swapped slots use the double-swap clone path below to give
+    /// every slot a uniform owned-buffer return type.
     ///
     /// **Lifetime contract**: returned buffers are independent of
     /// `canonical[*]`. Callers may pass references through to
