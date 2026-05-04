@@ -4,7 +4,10 @@
 **Date:** 2026-05-04
 **Branch:** `feat/w26-heat-selectivity-variable-ordering`
 **Base:** `main` at `cf57f3a1` (W2.3 closure commit).
-**Head:** `a58f6f3b` (7 commits on branch since base).
+**Head:** branch tip — `git log cf57f3a1..HEAD --oneline` lists
+the full commit sequence (8 commits at evidence-finalization
+time; the closure-approval workflow may add one more board-
+update commit before FF-merge).
 **Plan:** `docs/plans/2026-05-04-w26-heat-selectivity-variable-ordering-plan.md`
 (approved iteration 7).
 
@@ -474,5 +477,8 @@ commit applies:
   * `a58f6f3b` — patch evidence header / closure proposal
     tally (DONE 4 → 5; OPEN 15 → 14) / `record_wcoj_feedback`
     doc-comment after W2.6 reroute. Doc-only.
+  * Trailing self-reference fixups (1–2 doc-only commits to
+    de-circularize the README's own commit-hash list — `git log`
+    is the source of truth).
 * FF-merge `feat/w26-heat-selectivity-variable-ordering` into
   `main`. No tag, no push (per process rule #6).
