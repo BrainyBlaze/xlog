@@ -978,12 +978,25 @@ impl Executor {
         );
         match dispatch_result {
             Ok(buf) => {
-                // W2.4 — record observed selectivity into
+                // W2.4 + W2.6 — record observed selectivity into
                 // StatsManager for the cardinality cost model.
-                // Helper handles inner-pair recording and
-                // skip-on-missing-data; called BEFORE the
-                // counter increment so a helper panic doesn't
-                // advance the counter.
+                // The (rel_a, rel_b, left_keys, right_keys) pair
+                // is derived from `var_order_opt` via
+                // `feedback_pair_from_var_order`:
+                //   * `var_order = None` (default config) →
+                //     canonical `(rel_xy, rel_yz)` keys
+                //     `[1]/[0]`. Bit-identical to slice 1-5 +
+                //     W2.4.
+                //   * `var_order = Some(_)` (W2.1 / W2.6
+                //     non-default leader) → rotated pair per
+                //     the locked W2.6 step-5 feedback table.
+                //     Triangle non-default leaders use rotated
+                //     `(slot_rels[0], slot_rels[1])` with keys
+                //     `[1]/[1]` (Z-shared edges in canonical
+                //     layout join on col 1 of both rels).
+                // Helper handles skip-on-missing-data and is
+                // called BEFORE the counter increment so a
+                // helper panic doesn't advance the counter.
                 let output_rows = Self::wcoj_output_rows(&buf);
                 let slot_rels = [matched.rel_xy, matched.rel_yz, matched.rel_xz];
                 self.record_wcoj_feedback(&slot_rels, var_order_opt, output_rows);
@@ -1421,10 +1434,21 @@ impl Executor {
         );
         match dispatch_result {
             Ok(buf) => {
-                // W2.4 — record observed selectivity. Same
-                // helper as the triangle path; inner-pair
-                // recording on (rel_e1, rel_e2) with keys
-                // vec![1] / vec![0].
+                // W2.4 + W2.6 — record observed selectivity.
+                // The (rel_a, rel_b, left_keys, right_keys)
+                // pair is derived from `var_order_opt` via
+                // `feedback_pair_from_var_order`:
+                //   * `var_order = None` (default config) →
+                //     canonical `(rel_e1, rel_e2)` keys
+                //     `[1]/[0]`. Bit-identical to slice 1-5 +
+                //     W2.4.
+                //   * `var_order = Some(_)` (W2.1 / W2.6
+                //     non-default leader) → rotated pair from
+                //     the locked feedback table. 4-cycle is
+                //     rotation-only (every cycle edge is
+                //     `[1]/[0]` in canonical layout), so the
+                //     keys stay `[1]/[0]` while the pair
+                //     itself rotates.
                 let output_rows = Self::wcoj_output_rows(&buf);
                 let slot_rels = [
                     matched.rel_e1,

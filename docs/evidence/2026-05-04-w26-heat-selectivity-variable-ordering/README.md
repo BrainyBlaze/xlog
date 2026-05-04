@@ -4,10 +4,11 @@
 **Date:** 2026-05-04
 **Branch:** `feat/w26-heat-selectivity-variable-ordering`
 **Base:** `main` at `cf57f3a1` (W2.3 closure commit).
-**Head:** branch tip — `git log cf57f3a1..HEAD --oneline` lists
-the full commit sequence (8 commits at evidence-finalization
-time; the closure-approval workflow may add one more board-
-update commit before FF-merge).
+**Head:** branch tip — `git log cf57f3a1..HEAD --oneline` is the
+source of truth for the actual commit sequence (the README does
+not pin the head hash to avoid amend-circularity). The closure-
+approval workflow may add one or more board-update commits
+before FF-merge.
 **Plan:** `docs/plans/2026-05-04-w26-heat-selectivity-variable-ordering-plan.md`
 (approved iteration 7).
 
@@ -463,7 +464,10 @@ commit applies:
   status tally updated `DONE: 4 → 5; OPEN: 15 → 14` (verify
   current counts at apply-time).
 * `docs/v065-closure-board.md` "Completed" section gets a W2.6
-  entry referencing the 7 branch commits:
+  entry referencing the branch commits (full sequence via
+  `git log cf57f3a1..HEAD --oneline`; fixed historical commits
+  enumerated below, plus trailing self-reference fixups for
+  README de-circularization):
   * `d3ef4cda` — plan iteration 7 (approved).
   * `c51e07bb` — HeatAwareLeaderModel + var_order-aware W2.4
     feedback (steps 1-6).
