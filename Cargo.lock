@@ -2427,6 +2427,7 @@ dependencies = [
  "xlog-ir",
  "xlog-logic",
  "xlog-runtime",
+ "xlog-stats",
 ]
 
 [[package]]

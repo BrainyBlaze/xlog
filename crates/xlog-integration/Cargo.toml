@@ -12,6 +12,7 @@ xlog-gpu.workspace = true
 xlog-ir.workspace = true
 xlog-logic.workspace = true
 xlog-runtime.workspace = true
+xlog-stats.workspace = true
 bytemuck = "1.14"
 
 [dev-dependencies]
