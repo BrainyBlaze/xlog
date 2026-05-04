@@ -48,10 +48,10 @@ any contrary slice-internal decision.
 
 | State | Count |
 |-------|-------|
-| DONE | 1 (W2.4) |
+| DONE | 2 (W2.4, W2.2) |
 | IN-PROGRESS | 1 (W1.1) |
 | BLOCKED | 2 (W2.5, W2.6) |
-| OPEN | 17 |
+| OPEN | 16 |
 | **Total** | **21** |
 
 The 4 ROADMAP items already DONE from slices 1, 2, 4 are
@@ -72,7 +72,7 @@ prior shipped work.
 | ID | Source | Status | Blocked by | Required deliverable | Acceptance gate |
 |----|--------|--------|------------|----------------------|-----------------|
 | W2.1 | ROADMAP item #2 | OPEN | — | Variable-ordering cost model for WCOJ. Currently dispatch/admission only. Decide which slot becomes the lookup-key vs iteration-key based on stats. | Cert that two semantically-equivalent WCOJ rules with different statistical input shapes pick different slot orderings; row-set agreement preserved. |
-| W2.2 | ROADMAP item #3 | OPEN | — | Populate `xlog-logic::optimizer::selectivity_pass` with real selectivity-driven join reordering. Currently no-op. | Cert: **same rule** compiled twice with **two different stats snapshots** produces **two different chosen join orders** AND identical row sets. (Deterministic canonicalization that ignores stats does NOT pass this gate.) |
+| W2.2 | ROADMAP item #3 | DONE | — | Populate `xlog-logic::optimizer::selectivity_pass` with real selectivity-driven join reordering. Currently no-op. | DONE — `eea74612` plan + `40da5a71` step 1 + `2e25be37` step 2a + `d51afbd2` step 2/2b + `4af56c0a` step 3 + `0a61f3f0` step 4 + `2783c30b` step 5 + `593b30f8` amendment + `c22585fd` review patches + this commit (board update). Triangle + 4-cycle reordering with variable-graph promoter; Part A 12 compile-time tests + Part A' 26 promoter tests + Part B + C 6 integration tests; runtime matcher widened with 4 unit-tests pinning alt layouts. User-approved DONE in thread. |
 | W2.3 | ROADMAP item #6 | OPEN | — | Statistics integration into recursive SCC evaluation. Per-iteration cardinality update from delta sizes; cost model sees current iteration stats, not seed-only. | Cert: recursive triangle's cost-model decisions evolve across iterations as deltas grow; each iteration's `binary_est` reflects the iteration's actual delta, not the seed. |
 | W2.4 | Internal | DONE | — | `record_join_result` feedback wired from successful WCOJ dispatch back into `xlog-stats::StatsManager`. Tighten future cardinality estimates with observed selectivity. | DONE — `f586ce34` (impl) + this commit (board update). User-approved corrected gate: pre-dispatch `get_join_selectivity == None` → post-dispatch `Some(_)`; `binary_est` differs between runs read via `executor.stats().estimate_join_cardinality(...)`; row-set parity unchanged. 3/3 certs in `test_wcoj_record_join_result_feedback.rs`. |
 | W2.5 | Internal | BLOCKED | W2.1, W2.2, W2.3, W2.4, W3.2, W4.1, W5.1, W5.2 | Default-flip `RuntimeConfig::wcoj_cost_model` from `SkewClassifier` to `Cardinality`. **Blocked until foundation + kernel + runtime + cert evidence is in hand.** Default cannot flip without proof from W5.1/W5.2 benchmarks that the cardinality model is at least at parity on representative workloads. | New default ships; slice 4 stable-triangle counter still 1 (cardinality + missing-stats safety floor delegates correctly); explicit env opt-out (`XLOG_WCOJ_COST_MODEL=skew`) restores legacy behavior; bench evidence from W5.2 documents the parity / improvement. |
@@ -123,7 +123,8 @@ prior shipped work.
 
 | ID | Date | Commits | Notes |
 |----|------|---------|-------|
-| W2.4 | 2026-05-04 | `f586ce34` (impl), board-update commit (this) | `record_join_result` feedback wired into both triangle and 4-cycle success arms via `Executor::record_wcoj_feedback`. Helper skips on unknown output count or missing input cards. User explicitly approved DONE in thread per process rule #1. |
+| W2.4 | 2026-05-04 | `f586ce34` (impl), board-update commit | `record_join_result` feedback wired into both triangle and 4-cycle success arms via `Executor::record_wcoj_feedback`. Helper skips on unknown output count or missing input cards. User explicitly approved DONE in thread per process rule #1. |
+| W2.2 | 2026-05-04 | `eea74612`, `40da5a71`, `2e25be37`, `d51afbd2`, `4af56c0a`, `0a61f3f0`, `2783c30b`, `593b30f8`, `c22585fd`, board-update commit | Real `selectivity_pass` reordering for triangle (3 inner-pair choices) + 4-cycle (2 valid bushy groupings) via variable-graph deduction with pair-derived join keys. Promoter (`try_promote_triangle` / `try_promote_4cycle`) extended with semantic-slot inference; runtime matcher widened to accept alt output_columns layouts. 12 selectivity_pass compile-time tests + 26 promoter tests + 6 Part B/C integration tests + 4 runtime matcher tests. User explicitly approved DONE in thread after two amendment cycles. |
 
 ## Provenance
 
