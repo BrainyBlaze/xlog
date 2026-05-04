@@ -85,10 +85,13 @@
 //! * Histogram-guided block dispatch (B1 heavy-row offload).
 //! * Multi-recursive WCOJ (≥ 2 in-SCC body Scans) — slice 4.2.
 
-use xlog_core::{RelId, Result};
+use xlog_core::{RelId, Result, ScalarType, Schema};
 use xlog_cuda::device_runtime::StreamId;
 use xlog_cuda::CudaBuffer;
-use xlog_ir::{rir::ProjectExpr, CompiledRule, RirNode};
+use xlog_ir::{
+    rir::{ProjectExpr, VariableOrder},
+    CompiledRule, RirNode,
+};
 
 use super::Executor;
 
@@ -508,6 +511,84 @@ fn scalar_wcoj_width(ty: xlog_core::ScalarType) -> Option<WcojKeyWidth> {
     }
 }
 
+/// W2.1: convert `kernel_output_cols` (a `Vec<ProjectExpr>`) into
+/// the `Vec<usize>` permutation that
+/// `wcoj_project_output_columns_recorded` consumes. Triangle and
+/// 4-cycle kernel_output_cols entries are always
+/// `ProjectExpr::Column(_)` per the locked permutation tables in
+/// `xlog_logic::wcoj_var_ordering`; anything else is a planner bug.
+fn perm_indices_from_kernel_output_cols(cols: &[ProjectExpr]) -> Result<Vec<usize>> {
+    let mut out = Vec::with_capacity(cols.len());
+    for c in cols {
+        match c {
+            ProjectExpr::Column(idx) => out.push(*idx),
+            other => {
+                return Err(xlog_core::XlogError::Kernel(format!(
+                    "perm_indices_from_kernel_output_cols: \
+                     W2.1 kernel_output_cols must be ProjectExpr::Column(_), got {:?}",
+                    other
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// W2.1: build the canonical triangle head schema `(X, Y, Z)`
+/// from the canonical promoter inputs. Used as the
+/// `head_schema` argument to
+/// `wcoj_project_output_columns_recorded` on the W2.1 path.
+fn build_triangle_head_schema(buf_xy: &CudaBuffer, buf_yz: &CudaBuffer) -> Result<Schema> {
+    let x_type = buf_xy.schema.column_type(0).ok_or_else(|| {
+        xlog_core::XlogError::Kernel("build_triangle_head_schema: e_xy.col0 type missing".into())
+    })?;
+    let y_type = buf_xy.schema.column_type(1).ok_or_else(|| {
+        xlog_core::XlogError::Kernel("build_triangle_head_schema: e_xy.col1 type missing".into())
+    })?;
+    let z_type = buf_yz.schema.column_type(1).ok_or_else(|| {
+        xlog_core::XlogError::Kernel("build_triangle_head_schema: e_yz.col1 type missing".into())
+    })?;
+    Ok(Schema::new(vec![
+        ("col0".to_string(), x_type),
+        ("col1".to_string(), y_type),
+        ("col2".to_string(), z_type),
+    ]))
+}
+
+/// W2.1: build the canonical 4-cycle head schema
+/// `(W, X, Y, Z)` from the canonical promoter inputs.
+fn build_4cycle_head_schema(
+    buf_e1: &CudaBuffer,
+    buf_e2: &CudaBuffer,
+    buf_e3: &CudaBuffer,
+) -> Result<Schema> {
+    // `[e_wx, e_xy, e_yz, e_zw]` — canonical promoter order.
+    // W = e_wx.col0, X = e_wx.col1 (= e_xy.col0), Y = e_xy.col1
+    // (= e_yz.col0), Z = e_yz.col1 (= e_zw.col0).
+    let w_type = buf_e1.schema.column_type(0).ok_or_else(|| {
+        xlog_core::XlogError::Kernel("build_4cycle_head_schema: e_wx.col0 type missing".into())
+    })?;
+    let x_type = buf_e1.schema.column_type(1).ok_or_else(|| {
+        xlog_core::XlogError::Kernel("build_4cycle_head_schema: e_wx.col1 type missing".into())
+    })?;
+    let y_type = buf_e2.schema.column_type(1).ok_or_else(|| {
+        xlog_core::XlogError::Kernel("build_4cycle_head_schema: e_xy.col1 type missing".into())
+    })?;
+    let z_type = buf_e3.schema.column_type(1).ok_or_else(|| {
+        xlog_core::XlogError::Kernel("build_4cycle_head_schema: e_yz.col1 type missing".into())
+    })?;
+    // Suppress the unused-import warning when ScalarType isn't
+    // referenced in this scope (kept here for explicitness in case
+    // a future change adds a width check).
+    let _: ScalarType = w_type;
+    Ok(Schema::new(vec![
+        ("col0".to_string(), w_type),
+        ("col1".to_string(), x_type),
+        ("col2".to_string(), y_type),
+        ("col3".to_string(), z_type),
+    ]))
+}
+
 impl Executor {
     /// Try to dispatch a single non-recursive rule through the
     /// GPU WCOJ triangle kernel. Returns `Ok(Some(buffer))` if
@@ -764,6 +845,14 @@ impl Executor {
             }
         }
 
+        // W2.1: extract var_order from the matched MultiWayJoin
+        // body. None preserves slice 1/2/W2.2 default-leader
+        // dispatch bit-identically.
+        let var_order_opt: Option<&VariableOrder> = match body {
+            RirNode::MultiWayJoin { var_order, .. } => var_order.as_ref(),
+            _ => None,
+        };
+
         // 7. Run layout + triangle. Convert any kernel error to
         // silent fallback per slice spec ("failure must not
         // corrupt store state"). The WCOJ helpers don't write
@@ -777,6 +866,7 @@ impl Executor {
             buf_xz,
             launch_stream,
             width,
+            var_order_opt,
             #[cfg(feature = "wcoj-phase-timing")]
             &mut layout_times,
         );
@@ -834,8 +924,24 @@ impl Executor {
         buf_xz: &CudaBuffer,
         launch_stream: StreamId,
         width: WcojKeyWidth,
+        var_order: Option<&VariableOrder>,
         #[cfg(feature = "wcoj-phase-timing")] layout_times_ms: &mut [f32; 3],
     ) -> Result<CudaBuffer> {
+        // W2.1: when the cost model selected a non-default leader,
+        // run the rotated/swapped path. Layout helper sees the
+        // (possibly col-swapped) leader-rotated inputs; kernel
+        // emits in (a, b, c) order; final projection helper remaps
+        // to the canonical (X, Y, Z) head order.
+        if let Some(vo) = var_order {
+            return self.run_wcoj_triangle_pipeline_w21(
+                buf_xy,
+                buf_yz,
+                buf_xz,
+                launch_stream,
+                width,
+                vo,
+            );
+        }
         #[cfg(feature = "wcoj-phase-timing")]
         let mut time_layout =
             |f: &dyn Fn() -> Result<CudaBuffer>, slot: usize| -> Result<CudaBuffer> {
@@ -936,6 +1042,121 @@ impl Executor {
                 )
             }
         }
+    }
+
+    /// W2.1 — pipeline for non-default leaders. Uses the locked
+    /// permutation tables on `var_order` to:
+    /// 1. Rotate canonical inputs `[buf_xy, buf_yz, buf_xz]` so the
+    ///    leader sits at slot 0.
+    /// 2. Apply col-swap (via `wcoj_project_2col_swap_recorded`) to
+    ///    any non-leader slot whose `LookupPerm.swap_cols` is true.
+    ///    Triangle e_yz / e_xz leaders need swaps; 4-cycle is
+    ///    rotation-only (no swap entries).
+    /// 3. Run `wcoj_layout_*_recorded` on each slot input.
+    /// 4. Run `wcoj_triangle_*_recorded`. Kernel emits 3 columns
+    ///    in leader's `(a, b, c)` order.
+    /// 5. Apply `wcoj_project_output_columns_recorded` with
+    ///    `var_order.kernel_output_cols` to re-permute the
+    ///    kernel-direct output into the canonical head order
+    ///    `(X, Y, Z)`.
+    ///
+    /// Phase timing is intentionally NOT instrumented on this
+    /// path — perf validation of the W2.1 threshold is W5.2 work
+    /// (per the W2.1 plan §"Risk & Open Questions / Q1").
+    fn run_wcoj_triangle_pipeline_w21(
+        &self,
+        buf_xy: &CudaBuffer,
+        buf_yz: &CudaBuffer,
+        buf_xz: &CudaBuffer,
+        launch_stream: StreamId,
+        width: WcojKeyWidth,
+        var_order: &VariableOrder,
+    ) -> Result<CudaBuffer> {
+        let canonical: [&CudaBuffer; 3] = [buf_xy, buf_yz, buf_xz];
+        // Build slot inputs. The leader sits at slot 0 (no swap
+        // ever; triangle leaders never swap their own atom). Slots
+        // 1 and 2 may need col-swap per the locked permutation
+        // table.
+        let leader_idx = var_order.leader_idx as usize;
+        if leader_idx >= 3 || var_order.lookup_perms.len() != 2 {
+            // Defensive: cost model should never produce out-of-
+            // range leader_idx or wrong lookup_perms length for
+            // a triangle. Treat as no-dispatch.
+            return Err(xlog_core::XlogError::Kernel(
+                "run_wcoj_triangle_pipeline_w21: invalid var_order shape".to_string(),
+            ));
+        }
+        let slot0_input: &CudaBuffer = canonical[leader_idx];
+        // Hold owned swapped views for slots 1 and 2 in locals so
+        // their device buffers stay alive through the kernel call.
+        let owned_slot1: Option<CudaBuffer> = if var_order.lookup_perms[0].swap_cols {
+            Some(self.provider.wcoj_project_2col_swap_recorded(
+                canonical[var_order.lookup_perms[0].input_idx as usize],
+                launch_stream,
+            )?)
+        } else {
+            None
+        };
+        let slot1_input: &CudaBuffer = match &owned_slot1 {
+            Some(b) => b,
+            None => canonical[var_order.lookup_perms[0].input_idx as usize],
+        };
+        let owned_slot2: Option<CudaBuffer> = if var_order.lookup_perms[1].swap_cols {
+            Some(self.provider.wcoj_project_2col_swap_recorded(
+                canonical[var_order.lookup_perms[1].input_idx as usize],
+                launch_stream,
+            )?)
+        } else {
+            None
+        };
+        let slot2_input: &CudaBuffer = match &owned_slot2 {
+            Some(b) => b,
+            None => canonical[var_order.lookup_perms[1].input_idx as usize],
+        };
+
+        // Build the canonical (X, Y, Z) head schema from the
+        // canonical promoter inputs (NOT the rotated kernel
+        // inputs). The kernel will emit in (a, b, c) order under
+        // the rotated leader; the final projection helper maps
+        // back to head order using kernel_output_cols.
+        let head_schema = build_triangle_head_schema(buf_xy, buf_yz)?;
+        let perm = perm_indices_from_kernel_output_cols(&var_order.kernel_output_cols)?;
+
+        let kernel_out: CudaBuffer = match width {
+            WcojKeyWidth::FourByte => {
+                let l0 = self
+                    .provider
+                    .wcoj_layout_u32_recorded(slot0_input, launch_stream)?;
+                let l1 = self
+                    .provider
+                    .wcoj_layout_u32_recorded(slot1_input, launch_stream)?;
+                let l2 = self
+                    .provider
+                    .wcoj_layout_u32_recorded(slot2_input, launch_stream)?;
+                self.provider
+                    .wcoj_triangle_u32_recorded(&l0, &l1, &l2, launch_stream)?
+            }
+            WcojKeyWidth::EightByte => {
+                let l0 = self
+                    .provider
+                    .wcoj_layout_u64_recorded(slot0_input, launch_stream)?;
+                let l1 = self
+                    .provider
+                    .wcoj_layout_u64_recorded(slot1_input, launch_stream)?;
+                let l2 = self
+                    .provider
+                    .wcoj_layout_u64_recorded(slot2_input, launch_stream)?;
+                self.provider
+                    .wcoj_triangle_u64_recorded(&l0, &l1, &l2, launch_stream)?
+            }
+        };
+
+        self.provider.wcoj_project_output_columns_recorded(
+            &kernel_out,
+            &perm,
+            head_schema,
+            launch_stream,
+        )
     }
 
     /// Number of times the WCOJ triangle hook produced a result
@@ -1107,10 +1328,24 @@ impl Executor {
             }
         }
 
+        // W2.1: extract var_order. None preserves slice 2/W2.2
+        // default-leader dispatch bit-identically.
+        let var_order_opt: Option<&VariableOrder> = match body {
+            RirNode::MultiWayJoin { var_order, .. } => var_order.as_ref(),
+            _ => None,
+        };
+
         // 8. Run layout (4× per slot) + 4-cycle kernel. Failure
         // → silent fallback per slice contract.
-        let dispatch_result =
-            self.run_wcoj_4cycle_pipeline(buf_e1, buf_e2, buf_e3, buf_e4, launch_stream, width);
+        let dispatch_result = self.run_wcoj_4cycle_pipeline(
+            buf_e1,
+            buf_e2,
+            buf_e3,
+            buf_e4,
+            launch_stream,
+            width,
+            var_order_opt,
+        );
         match dispatch_result {
             Ok(buf) => {
                 // W2.4 — record observed selectivity. Same
@@ -1141,7 +1376,19 @@ impl Executor {
         buf_e4: &CudaBuffer,
         launch_stream: StreamId,
         width: WcojKeyWidth,
+        var_order: Option<&VariableOrder>,
     ) -> Result<CudaBuffer> {
+        if let Some(vo) = var_order {
+            return self.run_wcoj_4cycle_pipeline_w21(
+                buf_e1,
+                buf_e2,
+                buf_e3,
+                buf_e4,
+                launch_stream,
+                width,
+                vo,
+            );
+        }
         match width {
             WcojKeyWidth::FourByte => {
                 let layout_e1 = self
@@ -1186,6 +1433,89 @@ impl Executor {
                 )
             }
         }
+    }
+
+    /// W2.1 — pipeline for non-default 4-cycle leaders. All
+    /// 4-cycle leaders are rotation-only (no col-swap entries
+    /// in `lookup_perms`); kernel emits in `(a, b, c, d)` order
+    /// per the rotated leader; final projection helper remaps
+    /// to canonical `(W, X, Y, Z)` head order.
+    fn run_wcoj_4cycle_pipeline_w21(
+        &self,
+        buf_e1: &CudaBuffer,
+        buf_e2: &CudaBuffer,
+        buf_e3: &CudaBuffer,
+        buf_e4: &CudaBuffer,
+        launch_stream: StreamId,
+        width: WcojKeyWidth,
+        var_order: &VariableOrder,
+    ) -> Result<CudaBuffer> {
+        let canonical: [&CudaBuffer; 4] = [buf_e1, buf_e2, buf_e3, buf_e4];
+        let leader_idx = var_order.leader_idx as usize;
+        if leader_idx >= 4 || var_order.lookup_perms.len() != 3 {
+            return Err(xlog_core::XlogError::Kernel(
+                "run_wcoj_4cycle_pipeline_w21: invalid var_order shape".to_string(),
+            ));
+        }
+        // Defensive: 4-cycle never needs col-swap. If any
+        // lookup_perm requests one, the cost model produced an
+        // out-of-spec VariableOrder; fail loud.
+        for lp in &var_order.lookup_perms {
+            if lp.swap_cols {
+                return Err(xlog_core::XlogError::Kernel(
+                    "run_wcoj_4cycle_pipeline_w21: 4-cycle does not support col-swaps".to_string(),
+                ));
+            }
+        }
+        let slot0_input: &CudaBuffer = canonical[leader_idx];
+        let slot1_input: &CudaBuffer = canonical[var_order.lookup_perms[0].input_idx as usize];
+        let slot2_input: &CudaBuffer = canonical[var_order.lookup_perms[1].input_idx as usize];
+        let slot3_input: &CudaBuffer = canonical[var_order.lookup_perms[2].input_idx as usize];
+
+        let head_schema = build_4cycle_head_schema(buf_e1, buf_e2, buf_e3)?;
+        let perm = perm_indices_from_kernel_output_cols(&var_order.kernel_output_cols)?;
+
+        let kernel_out: CudaBuffer = match width {
+            WcojKeyWidth::FourByte => {
+                let l0 = self
+                    .provider
+                    .wcoj_layout_u32_recorded(slot0_input, launch_stream)?;
+                let l1 = self
+                    .provider
+                    .wcoj_layout_u32_recorded(slot1_input, launch_stream)?;
+                let l2 = self
+                    .provider
+                    .wcoj_layout_u32_recorded(slot2_input, launch_stream)?;
+                let l3 = self
+                    .provider
+                    .wcoj_layout_u32_recorded(slot3_input, launch_stream)?;
+                self.provider
+                    .wcoj_4cycle_u32_recorded(&l0, &l1, &l2, &l3, launch_stream)?
+            }
+            WcojKeyWidth::EightByte => {
+                let l0 = self
+                    .provider
+                    .wcoj_layout_u64_recorded(slot0_input, launch_stream)?;
+                let l1 = self
+                    .provider
+                    .wcoj_layout_u64_recorded(slot1_input, launch_stream)?;
+                let l2 = self
+                    .provider
+                    .wcoj_layout_u64_recorded(slot2_input, launch_stream)?;
+                let l3 = self
+                    .provider
+                    .wcoj_layout_u64_recorded(slot3_input, launch_stream)?;
+                self.provider
+                    .wcoj_4cycle_u64_recorded(&l0, &l1, &l2, &l3, launch_stream)?
+            }
+        };
+
+        self.provider.wcoj_project_output_columns_recorded(
+            &kernel_out,
+            &perm,
+            head_schema,
+            launch_stream,
+        )
     }
 
     /// Resolve the cached WCOJ launch stream, lazily initializing
