@@ -93,8 +93,12 @@ pub enum ProjectExpr {
 /// 2-col view with cols swapped before calling the layout helper.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LookupPerm {
-    /// Index into the leader-rotated input list (NOT the original
-    /// promoter input list). `0` is the leader slot.
+    /// Index into the **promoter's canonical input order**:
+    /// triangle = `[e_xy, e_yz, e_xz]`, 4-cycle =
+    /// `[e_wx, e_xy, e_yz, e_zw]`. `lookup_perms[i]` describes
+    /// kernel slot `i + 1` (slots 1, 2, 3 — the non-leader slots).
+    /// The leader slot 0 is identified by `VariableOrder::leader_idx`
+    /// and is never repeated here.
     pub input_idx: u8,
     /// Whether to swap col0 ↔ col1 on this input before the layout
     /// helper sees it.

@@ -43,6 +43,7 @@ pub mod resolver;
 pub mod stratify;
 #[allow(dead_code)] // reserved API: type inference not yet wired to main pipeline
 pub mod typeinfer;
+pub mod wcoj_var_ordering;
 
 // Re-export main types
 pub use ast::{
