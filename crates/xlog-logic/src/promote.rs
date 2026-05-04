@@ -781,11 +781,9 @@ fn try_promote_4cycle(
             stats,
             config,
         ),
-        WcojVarOrderingKind::HeatAware => HeatAwareLeaderModel.pick_4cycle_leader(
-            [rel_wx, rel_xy, rel_yz, rel_zw],
-            stats,
-            config,
-        ),
+        WcojVarOrderingKind::HeatAware => {
+            HeatAwareLeaderModel.pick_4cycle_leader([rel_wx, rel_xy, rel_yz, rel_zw], stats, config)
+        }
     };
     let var_order = leader_idx_4.map(build_cycle4_var_order);
     Some(RirNode::MultiWayJoin {

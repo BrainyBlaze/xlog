@@ -238,10 +238,7 @@ impl HeatAwareLeaderModel {
     /// unregistered rels — the formula treats unobserved heat as
     /// cold.
     fn heat_of(stats: &StatsManager, rel: RelId) -> f32 {
-        stats
-            .get_relation_stats(rel)
-            .map(|s| s.heat)
-            .unwrap_or(0.0)
+        stats.get_relation_stats(rel).map(|s| s.heat).unwrap_or(0.0)
     }
 
     /// Look up the observed selectivity for an edge with explicit
@@ -380,28 +377,19 @@ impl WcojVariableOrderingModel for HeatAwareLeaderModel {
                 rel_ids[0],
                 cards[0],
                 stats,
-                &[
-                    (rel_ids[1], &[1], &[0]),
-                    (rel_ids[2], &[0], &[0]),
-                ],
+                &[(rel_ids[1], &[1], &[0]), (rel_ids[2], &[0], &[0])],
             ),
             Self::composite_score(
                 rel_ids[1],
                 cards[1],
                 stats,
-                &[
-                    (rel_ids[0], &[0], &[1]),
-                    (rel_ids[2], &[1], &[1]),
-                ],
+                &[(rel_ids[0], &[0], &[1]), (rel_ids[2], &[1], &[1])],
             ),
             Self::composite_score(
                 rel_ids[2],
                 cards[2],
                 stats,
-                &[
-                    (rel_ids[0], &[0], &[0]),
-                    (rel_ids[1], &[1], &[1]),
-                ],
+                &[(rel_ids[0], &[0], &[0]), (rel_ids[1], &[1], &[1])],
             ),
         ];
         Self::pick_leader_from_scores(rel_ids, scores, config)
@@ -439,28 +427,19 @@ impl WcojVariableOrderingModel for HeatAwareLeaderModel {
                 rel_ids[1],
                 cards[1],
                 stats,
-                &[
-                    (rel_ids[0], &[0], &[1]),
-                    (rel_ids[2], &[1], &[0]),
-                ],
+                &[(rel_ids[0], &[0], &[1]), (rel_ids[2], &[1], &[0])],
             ),
             Self::composite_score(
                 rel_ids[2],
                 cards[2],
                 stats,
-                &[
-                    (rel_ids[1], &[0], &[1]),
-                    (rel_ids[3], &[1], &[0]),
-                ],
+                &[(rel_ids[1], &[0], &[1]), (rel_ids[3], &[1], &[0])],
             ),
             Self::composite_score(
                 rel_ids[3],
                 cards[3],
                 stats,
-                &[
-                    (rel_ids[2], &[0], &[1]),
-                    (rel_ids[0], &[1], &[0]),
-                ],
+                &[(rel_ids[2], &[0], &[1]), (rel_ids[0], &[1], &[0])],
             ),
         ];
         Self::pick_leader_from_scores(rel_ids, scores, config)
@@ -800,5 +779,141 @@ mod tests {
             vec![0, 1, 2]
         );
         assert!(p.iter().all(|lp| !lp.swap_cols));
+    }
+
+    // ===============================================================
+    // W2.6 step 7 Part A — HeatAwareLeaderModel composite-score certs
+    // ===============================================================
+
+    /// Build stats with cards + per-rel heat values (heat injected
+    /// directly via `get_relation_stats_mut`; sidesteps EMA so unit
+    /// tests can pin exact values).
+    fn stats_with_heat(seeded: &[(RelId, u64, f32)]) -> StatsManager {
+        let mut mgr = StatsManager::new();
+        for (rel, card, heat) in seeded {
+            mgr.register_relation(*rel);
+            if *card > 0 {
+                mgr.update_cardinality(*rel, *card);
+            }
+            if let Some(s) = mgr.get_relation_stats_mut(*rel) {
+                s.heat = *heat;
+            }
+        }
+        mgr
+    }
+
+    fn heat_aware_config() -> CompilerConfig {
+        CompilerConfig {
+            wcoj_variable_ordering: WcojVarOrderingKind::HeatAware,
+            ..CompilerConfig::default()
+        }
+    }
+
+    #[test]
+    fn heat_aware_leader_picks_cold_when_hot_relation_at_default_idx() {
+        // Triangle. Cards equal at 100. Hot rel at idx 0 (default
+        // leader): heat = 0.5. Other rels heat = 0.
+        // Expected scores (per locked formula HEAT_WEIGHT = 4):
+        //   idx0: 100 * (1+4*0.5) * 2 = 100 * 3 * 2 = 600
+        //   idx1: 100 * 1 * 2 = 200
+        //   idx2: 100 * 1 * 2 = 200
+        // argmin = idx 1 (first hit). default = 600. ratio
+        // 200/600 = 0.333 ≤ 0.5 → returns Some(1).
+        let stats = stats_with_heat(&[
+            (RelId(1), 100, 0.5),
+            (RelId(2), 100, 0.0),
+            (RelId(3), 100, 0.0),
+        ]);
+        let config = heat_aware_config();
+        let m = HeatAwareLeaderModel;
+        assert_eq!(
+            m.pick_triangle_leader([RelId(1), RelId(2), RelId(3)], &stats, &config),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn heat_aware_leader_demotes_relation_in_tight_edge() {
+        // Triangle. Cards 100 each. Heat 0 each. ONE
+        // JoinSelectivity record on edge (rel(1), rel(2))
+        // (canonical idx 0/1) with selectivity = 0.01.
+        // Expected penalties:
+        //   rel0 ∈ {(0,1) tight, (0,2) default}: 100 + 1 = 101.
+        //   rel1 ∈ {(0,1) tight, (1,2) default}: 101.
+        //   rel2 ∈ {(1,2) default, (0,2) default}: 1 + 1 = 2.
+        // Scores (heat factor 1):
+        //   idx0: 100 * 101 = 10100
+        //   idx1: 10100
+        //   idx2: 100 * 2 = 200
+        // argmin = idx 2. default = 10100. ratio 200/10100
+        // ≈ 0.0198 ≤ 0.5 → returns Some(2).
+        let mut stats = stats_with_heat(&[
+            (RelId(1), 100, 0.0),
+            (RelId(2), 100, 0.0),
+            (RelId(3), 100, 0.0),
+        ]);
+        // Tight edge on (rel0=RelId(1), rel1=RelId(2)) with keys
+        // [1]/[0] (canonical triangle slot_vars[0]=[a,b],
+        // slot_vars[1]=[b,c] → join key b at slot0.col1 / slot1.col0).
+        stats.set_join_selectivity(RelId(1), RelId(2), vec![1], vec![0], 0.01);
+        let config = heat_aware_config();
+        let m = HeatAwareLeaderModel;
+        assert_eq!(
+            m.pick_triangle_leader([RelId(1), RelId(2), RelId(3)], &stats, &config),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn heat_aware_leader_returns_none_when_heat_too_low() {
+        // Cards equal. Heat at idx 0 = 0.1 (one record_access from
+        // cold), others 0. Factor at idx 0 = 1.4, others 1.0.
+        // Score idx0 = 100*1.4*2 = 280. idx1/idx2 = 200.
+        // ratio 200/280 ≈ 0.714 > 0.5 → returns None.
+        let stats = stats_with_heat(&[
+            (RelId(1), 100, 0.1),
+            (RelId(2), 100, 0.0),
+            (RelId(3), 100, 0.0),
+        ]);
+        let config = heat_aware_config();
+        let m = HeatAwareLeaderModel;
+        assert_eq!(
+            m.pick_triangle_leader([RelId(1), RelId(2), RelId(3)], &stats, &config),
+            None
+        );
+    }
+
+    #[test]
+    fn heat_aware_leader_disabled_short_circuit() {
+        // Strong heat differential, but config = Disabled → None.
+        let stats = stats_with_heat(&[
+            (RelId(1), 100, 0.9),
+            (RelId(2), 100, 0.0),
+            (RelId(3), 100, 0.0),
+        ]);
+        let config = CompilerConfig::default(); // Disabled
+        let m = HeatAwareLeaderModel;
+        assert_eq!(
+            m.pick_triangle_leader([RelId(1), RelId(2), RelId(3)], &stats, &config),
+            None
+        );
+    }
+
+    #[test]
+    fn heat_aware_leader_missing_card_safety_floor() {
+        // RelId(2) has no card registered (zero). Cost model
+        // returns None per missing-card safety floor (matches
+        // LeaderCardinalityModel's behavior).
+        let stats = stats_with_heat(&[
+            (RelId(1), 100, 0.5),
+            (RelId(2), 0, 0.0), // missing card
+            (RelId(3), 100, 0.0),
+        ]);
+        let config = heat_aware_config();
+        let m = HeatAwareLeaderModel;
+        assert_eq!(
+            m.pick_triangle_leader([RelId(1), RelId(2), RelId(3)], &stats, &config),
+            None
+        );
     }
 }
