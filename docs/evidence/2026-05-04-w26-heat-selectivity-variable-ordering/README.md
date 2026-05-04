@@ -4,7 +4,7 @@
 **Date:** 2026-05-04
 **Branch:** `feat/w26-heat-selectivity-variable-ordering`
 **Base:** `main` at `cf57f3a1` (W2.3 closure commit).
-**Head:** `710a0cb1` (7 commits on branch since base).
+**Head:** `a58f6f3b` (7 commits on branch since base).
 **Plan:** `docs/plans/2026-05-04-w26-heat-selectivity-variable-ordering-plan.md`
 (approved iteration 7).
 
@@ -471,7 +471,7 @@ commit applies:
     (step 9 follow-up; resolves both plan deviations the user
     flagged).
   * `0ba1b3cf` — evidence amended after B+D implementation.
-  * `710a0cb1` — patch evidence header / closure proposal
+  * `a58f6f3b` — patch evidence header / closure proposal
     tally (DONE 4 → 5; OPEN 15 → 14) / `record_wcoj_feedback`
     doc-comment after W2.6 reroute. Doc-only.
 * FF-merge `feat/w26-heat-selectivity-variable-ordering` into
