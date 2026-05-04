@@ -60,9 +60,19 @@ test cycle4_picks_e_yz_when_e_yz_smallest ... ok
 test triangle_picks_e_xz_when_e_xz_smallest ... ok
 test triangle_picks_e_xy_default_when_e_xy_smallest ... ok
 test triangle_picks_e_yz_when_e_yz_smallest ... ok
-test missing_stats_safety_floor_for_both_shapes ... ok
+test default_leader_already_min_returns_none_for_both_shapes ... ok
 test default_config_leaves_var_order_none_even_with_triggering_stats ... ok
 ```
+
+**Note** on the 9th Part A test: the W2.1 plan §"Part A" framed
+it as "Missing-stats safety floor". At the compile-time /
+promoter level, the actual reachable short-circuit on uniform
+stats is the "default leader is already min" rule (cost model
+returns None when argmin == 0). True missing-stats semantics
+(`card_of` returning None on zero card) is unit-tested at
+`xlog_logic::wcoj_var_ordering::tests::
+missing_stats_returns_none_safety_floor` (step 3, in the unit
+test bucket).
 
 ### Part B (7 tests, all pass)
 
@@ -103,7 +113,8 @@ test part_c_cycle4_default_leader_e_wx ... ok
 
 ```
 cargo test --workspace --release --tests --exclude pyxlog
-PASS=1914 FAIL=0
+  Pre-W2.1 (main @ 0c176e6a): PASS=1859 FAIL=0
+  Post-W2.1 (HEAD):           PASS=1914 FAIL=0
 
 cargo test -p xlog-cuda-tests --release --test certification_suite
 test run_full_certification ... ok
@@ -112,9 +123,24 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured
 
 Slice 1–5 + W2.4 + W2.2 regression preserved bit-identically
 under the `CompilerConfig::default()` (Disabled) path.
-1886 → 1914 = +28 W2.1 acceptance tests on top of the
-already-counted resolver 4, cost-model trait 12, and CUDA helper
-11 unit tests.
+
+**Test delta**: +55 W2.1 tests (1859 → 1914), broken down as:
+
+| Tests | Step | Location |
+|-------|------|----------|
+| 4 | Step 4 | `xlog-logic` resolver unit tests |
+| 12 | Step 3 | `xlog-logic::wcoj_var_ordering::tests` cost-model trait + locked-permutation-table sanity |
+| 11 | Step 2 | `xlog-cuda` helper certs (real CUDA) |
+| 10 | Step 7 | Part A — compile-time leader decision |
+| 7 | Step 7 | Part B — dispatch routing per leader |
+| 7 | Step 7 | Part C — end-to-end row-set parity (real CUDA) |
+| 2 | Step 7 | Part D — stats-driven divergence |
+| 2 | Step 7 | Part E — threshold gate |
+| **55** | | |
+
+The 4 + 12 + 11 = 27 unit tests are **above** the 28 plan-spec
+acceptance gate tests; the plan §"Acceptance Gate" total of 32
+counts the resolver 4 alongside the 28 Part A–E tests.
 
 ## Code-Level Changes
 

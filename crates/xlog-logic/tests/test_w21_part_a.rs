@@ -13,8 +13,11 @@
 //! Coverage:
 //!   * Triangle leader picks (3): e_xy / e_yz / e_xz.
 //!   * 4-cycle leader picks (4): e_wx / e_xy / e_yz / e_zw.
-//!   * Missing-stats safety floor (1): empty snapshot → `None`
-//!     for both shapes.
+//!   * Default-leader-already-min short-circuit (1): uniform
+//!     stats → cost model returns None for both shapes.
+//!     (Missing-stats `card_of` short-circuit is unit-tested at
+//!     `xlog_logic::wcoj_var_ordering::tests::
+//!     missing_stats_returns_none_safety_floor`.)
 //!   * Activation contract (2): same fixture, default config →
 //!     None; LeaderCardinality config → Some(...).
 
@@ -288,23 +291,25 @@ fn cycle4_picks_e_zw_when_e_zw_smallest() {
 }
 
 // ===============================================================
-// Missing-stats safety floor (1 test, single fixture covers both
-// triangle + 4-cycle).
+// Default-leader-already-min short-circuit (1 test, single
+// fixture covers both triangle + 4-cycle).
+//
+// NOTE: the W2.1 plan §"Part A" originally framed this test as
+// "missing-stats safety floor". The actual missing-stats
+// safety-floor semantics (`card_of` returning None on zero card)
+// is exercised at the unit-test level by
+// `wcoj_var_ordering::tests::missing_stats_returns_none_safety_floor`.
+// At the compile-time / promoter level, the more reachable
+// short-circuit is "default leader is already the min" — that's
+// what this test pins.
 // ===============================================================
 
 #[test]
-fn missing_stats_safety_floor_for_both_shapes() {
-    // Missing-stats semantics for the cost model: relations
-    // exist (registered) AND have non-zero card, but no relative
-    // ordering would beat the default leader. The cost model
-    // returns None and `var_order` stays `None` — bit-identical
-    // to slice 1/2/W2.2.
-    //
-    // Concretely: every input has the SAME card. Then argmin is
-    // canonical idx 0 (default leader, ties broken by first
-    // hit), which the cost model already short-circuits to None
-    // since "no reorder is needed". Both triangle + 4-cycle
-    // covered by the same construction.
+fn default_leader_already_min_returns_none_for_both_shapes() {
+    // Every input has the SAME card. Then argmin is canonical
+    // idx 0 (default leader; ties resolve to the first index),
+    // which the cost model short-circuits to None ("no reorder
+    // needed"). Bit-identical to slice 1/2/W2.2.
     let snap = make_snapshot(&[("e1", 100), ("e2", 100), ("e3", 100)]);
     let triangle_plan = compile_w21(
         TRIANGLE_SRC,
