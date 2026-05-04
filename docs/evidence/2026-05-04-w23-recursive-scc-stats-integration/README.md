@@ -64,22 +64,28 @@ on `delta_e1.col1 = X = e2.col0`). The trace populates
 inline; `delta_rel` is unregistered at fixpoint exit, so
 post-`execute_plan` recomputation is impossible).
 
-Each test asserts:
-1. ≥ 2 Phase 2 trace entries with `binary_est_for_variant.is_some()`
-   for `pred == "e1"`. Proves the cost-model lookup `(delta_e1, e2,
-   &[1], &[0])` succeeded with both rels registered + cards
-   populated.
-2. ≥ 2 distinct `delta_rows` values across Phase 2 entries —
-   proves the cost model's INPUT to the formula evolved (W2.3's
-   `update_cardinality(delta_rel, delta_new_rows)` fired with
-   different values per iteration).
+**Closure-board acceptance line: `binary_est_for_variant[N] !=
+binary_est_for_variant[M]` across iterations.** Each test asserts:
 
-The combination of (1) + (2) proves the cost model reads
-iteration-current `delta_rel.cardinality`, not seed-only state.
-Non-constancy of the formula's OUTPUT is **not** asserted: the
-slice-4 fixtures' tiny cardinalities make the formula's
-floor-of-1 dominate; W2.3's responsibility is at the input
-layer (which Part A's `delta_rows`-evolves test already pins).
+1. Every Phase 2 entry for `pred == "e1"` has `binary_est_for_variant.is_some()`
+   — cost-model lookup `(delta_e1, e2, &[1], &[0])` succeeded.
+2. **≥ 2 distinct `binary_est_for_variant` values across
+   iterations.** With slice-4-shape chain producing
+   `delta_e1 ∈ {1, 0}` (pre-convergence + convergence) and
+   inflated `e2.cardinality = 52` (50 filler edges + 2
+   productive), the formula yields:
+   * Phase 2 iteration N (delta_e1=1): `(1*52*0.1).max(1) = 5`.
+   * Phase 2 iteration N+1 (delta_e1=0, converged):
+     `(0*52*0.1).max(1) = 1`.
+   Distinct series `{5, 1}` proves the cost model's output
+   tracks the iteration's actual delta, not the seed.
+
+Fixture inflation rationale: the slice-4 productive chain stays
+unchanged (50 filler edges have X-prefix `10_000+` and are
+unreachable from any iteration's variant body), so Part C's
+counter assertion (`== 4`, slice-4 baseline) holds. The filler
+only inflates `e2.cardinality` past the formula's `min == 1`
+floor.
 
 ### Part C — Row-set + dispatch-counter parity (4 tests)
 
@@ -91,10 +97,17 @@ test recursive_4cycle_dispatch_counter_unchanged_under_default_config ... ok
 ```
 
 W2.3 must not perturb execution semantics. Each test runs the
-slice-4 fixture with force-WCOJ-on + W2.3 wired AND with
-force-WCOJ-off (binary-join reference); asserts the row sets
-match bit-for-bit and the dispatch counter is ≥ 2 (matches
-slice-4's "seed + ≥ 1 variant" assertion).
+slice-4 fixture (with the Part B filler inflation that does NOT
+touch the productive chain) with force-WCOJ-on + W2.3 wired AND
+with force-WCOJ-off (binary-join reference). Asserts:
+
+1. Row sets match bit-for-bit.
+2. **Counter equals exactly 4** — the slice-4 baseline captured
+   from `da644e3d` HEAD via probe (1 seeding-pass dispatch + 3
+   per-variant fixpoint-iteration dispatches). The chain
+   `(1,2) → tri(1,2,3) → e1(1,3) → tri(1,3,4) → e1(1,4)`
+   converges on iteration 3. Same counter for both triangle and
+   4-cycle fixtures (mirrored chain shape).
 
 ### Part D — Multi-recursive bodies untouched (1 test)
 
@@ -167,15 +180,16 @@ added** under default features (production zero overhead).
   (computed inline at Phase 2). Post-`execute_plan`
   recomputation against `delta_rel` is impossible.
 
-* **`binary_est_for_variant` non-constancy is NOT asserted.**
-  The slice-4 fixtures' tiny inputs (`delta_e1.cardinality ≤ 1`,
-  `e2.cardinality == 2`) make `estimate_join_cardinality`'s
-  `min == 1` clamp dominate, producing a constant `1` across
-  iterations. W2.3's responsibility is at the **input** layer
-  (cost model reads W2.3-updated `delta_rel.cardinality`),
-  which Part A's `delta_rows`-evolves test pins. The output
-  layer's behavior on small inputs is a property of the
-  formula, not of W2.3.
+* **`binary_est_for_variant` non-constancy IS asserted** per
+  the closure-board acceptance line. To clear the formula's
+  `min == 1` floor without changing the productive chain (so
+  Part C's counter assertion `== 4` baseline still holds), the
+  triangle + 4-cycle fixtures inflate `e2` with 50 filler
+  edges (X-prefix `10_000+`) that scan-update
+  `e2.cardinality` to 52 but are unreachable from any
+  iteration's variant body. With `e2.cardinality = 52` and
+  `delta_e1 ∈ {1, 0}`, the formula produces
+  `binary_est_for_variant ∈ {5, 1}` across iterations.
 
 * **No new D2H on data plane.** `Executor::buffer_row_count`
   (`mod.rs:855-872`) is the existing primitive that returns
@@ -203,12 +217,19 @@ added** under default features (production zero overhead).
 * **Process rule #2**: every commit references W2.3. Commit
   list (chronological, `git log d10bb72a..HEAD` on the
   `feat/w23-recursive-scc-stats-integration` branch):
-  1. `77f3b843` — W2.3 steps 1-6 (audit + name_to_rel_id +
+  1. `d10bb72a` — W2.3 plan (approved iteration 4).
+  2. `77f3b843` — W2.3 steps 1-6 (audit + name_to_rel_id +
      trace seam + seed pass + Phase 2 + Phase 4 wiring).
-  2. `2b6caff7` — W2.3 step 7+8 (10 acceptance tests +
+  3. `2b6caff7` — W2.3 step 7+8 (10 acceptance tests +
      `recursive-stats-trace` feature + warnings cleanup +
      fmt).
-  3. *(this commit)* — W2.3 step 9 evidence README.
+  4. `b52e9344` — W2.3 step 9 evidence README (initial).
+  5. *(this commit)* — strengthen Part B to assert distinct
+     `binary_est_for_variant` (closure-board acceptance line);
+     pin Part C counter to exact slice-4 baseline (== 4);
+     fix stale test header (`#[cfg(test)]` → feature
+     gate); fixture inflates `e2` with filler to clear formula
+     floor without altering productive chain.
 
 * **Process rule #3**: plan header opens with "Closes W2.3."
 * **Process rule #5**: no `v0.6.6` references.

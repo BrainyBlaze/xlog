@@ -12,10 +12,15 @@
 //!
 //! Total: **10 tests**.
 //!
-//! Lives in xlog-runtime's `tests/` directory so the
-//! `#[cfg(test)]`-gated `Executor::last_recursive_stats_trace()`
-//! accessor is visible (xlog-runtime tests/ directory is
-//! compiled with `cfg(test)` set on the lib for these binaries).
+//! Lives in xlog-runtime's `tests/` directory and declares
+//! `required-features = ["recursive-stats-trace"]` in the
+//! crate's `Cargo.toml` `[[test]]` block. The trace seam
+//! (`Executor::last_recursive_stats_trace()` accessor + the
+//! types it returns) is gated on the `recursive-stats-trace`
+//! Cargo feature; default OFF so production builds carry zero
+//! trace overhead. Run via:
+//!     cargo test --workspace --release --tests --exclude pyxlog \
+//!         --features xlog-runtime/recursive-stats-trace
 //!
 //! Anchors on the slice-4 linear-recursive triangle and 4-cycle
 //! programs (`crates/xlog-integration/tests/test_wcoj_recursive_dispatch.rs`
@@ -240,7 +245,17 @@ const LINEAR_REC_TRIANGLE: &str = r#"
 fn linear_rec_triangle_inputs() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
     let mut m: BTreeMap<&'static str, Vec<(u32, u32)>> = BTreeMap::new();
     m.insert("e1_seed", vec![(1, 2)]);
-    m.insert("e2", vec![(2, 3), (3, 4)]);
+    // Productive chain mirrors slice-4: (2,3) → (3,4). The 50 filler
+    // edges below inflate `e2.cardinality` past the cost-model
+    // formula's `min == 1` floor without touching the productive
+    // chain (filler X-prefix 10_000+ is unreachable from any
+    // recursive iteration). delta_e1 evolves {1, 0}, e2.cardinality
+    // = 52 → binary_est = {5, 1} per iteration → non-constant.
+    let mut e2: Vec<(u32, u32)> = vec![(2, 3), (3, 4)];
+    for i in 0..50 {
+        e2.push((10_000 + i, 20_000 + i));
+    }
+    m.insert("e2", e2);
     m.insert("e3", vec![(1, 3), (1, 4)]);
     m
 }
@@ -261,7 +276,14 @@ const LINEAR_REC_4CYCLE: &str = r#"
 fn linear_rec_cycle4_inputs() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
     let mut m: BTreeMap<&'static str, Vec<(u32, u32)>> = BTreeMap::new();
     m.insert("e1_seed", vec![(1, 2)]);
-    m.insert("e2", vec![(2, 3), (3, 4)]);
+    // Same filler-inflation strategy as triangle: productive chain
+    // mirrors slice-4, 50 unreachable filler edges grow
+    // e2.cardinality past the cost-model floor.
+    let mut e2: Vec<(u32, u32)> = vec![(2, 3), (3, 4)];
+    for i in 0..50 {
+        e2.push((10_000 + i, 20_000 + i));
+    }
+    m.insert("e2", e2);
     m.insert("e3", vec![(3, 4), (4, 5)]);
     m.insert("e4", vec![(4, 1), (5, 2)]);
     m
@@ -465,24 +487,23 @@ fn recursive_4cycle_e1_full_card_grows_across_iterations() {
 // Part B — `binary_est_for_variant` reflects delta_e1 card (2 tests)
 // ===============================================================
 
-/// Helper for Part B: assert that the cost model AT EACH Phase 2
-/// site successfully invoked
-/// `estimate_join_cardinality(delta_e1, e2, &[1], &[0])` (i.e.,
-/// `binary_est_for_variant` is populated). The estimate's
-/// **input** is `delta_rel.cardinality`, which W2.3 has just
-/// written via `update_cardinality` to the iteration's actual
-/// `delta_new_rows`. So a populated `binary_est_for_variant` at
-/// Phase 2 N is, by construction, computed against iteration N's
-/// stat — proving the cost model sees iteration-current state,
-/// not seed-only state.
+/// Helper for Part B: assert the closure-board acceptance line
+/// — `binary_est_for_variant` reflects the iteration's actual
+/// delta. Specifically: across Phase 2 entries for `pred ==
+/// "e1"`, at least two distinct `binary_est_for_variant` values
+/// appear, proving the cost model returns iteration-evolving
+/// estimates (NOT seed-only).
 ///
-/// The non-constancy of the **output** of the formula is NOT
-/// asserted here: with the slice-4 fixtures' tiny inputs, the
-/// formula floors to its `min == 1` value across all iterations.
-/// W2.3's correctness is at the input layer (cost model reads
-/// W2.3-updated stats), and Part A's `delta_rows`-evolves test
-/// already verifies the input evolves across iterations.
-fn assert_phase2_binary_est_populated(
+/// Fixture inflates `e2.cardinality` to 52 (productive chain
+/// unchanged from slice-4; 50 filler edges add to e2's row
+/// count without contributing to the recursive computation).
+/// With `e2.cardinality = 52`:
+/// * `delta_e1 = 0`: estimate = `(0 * 52 * 0.1).max(1) = 1`.
+/// * `delta_e1 = 1`: estimate = `(1 * 52 * 0.1).max(1) = 5`.
+/// The slice-4-shape chain produces `delta_e1 ∈ {1, 0}` across
+/// fixpoint iterations (pre-convergence + convergence), so
+/// `binary_est_for_variant` evolves through `{5, 1}`.
+fn assert_phase2_binary_est_distinct_across_iterations(
     trace: &xlog_runtime::executor::RecursiveStatsTrace,
     pred: &str,
 ) {
@@ -501,40 +522,36 @@ fn assert_phase2_binary_est_populated(
     // Every Phase 2 entry for `pred == "e1"` must have
     // `binary_est_for_variant.is_some()` — proves the cost model
     // lookup `(delta_e1, e2, &[1], &[0])` succeeded with both
-    // rels registered + cards populated.
-    let populated = e1_phase2
+    // rels registered.
+    let populated: Vec<u64> = e1_phase2
         .iter()
-        .filter(|e| e.binary_est_for_variant.is_some())
-        .count();
-    assert!(
-        populated >= 2,
-        "expected ≥ 2 Phase 2 entries with populated \
-         binary_est_for_variant for `{}`; got {} populated of \
-         {} total. This means the cost model lookup `(delta_{0}, \
-         e2, &[1], &[0])` failed — either delta rel was \
-         unregistered or e2 was not registered.",
+        .filter_map(|e| e.binary_est_for_variant)
+        .collect();
+    assert_eq!(
+        populated.len(),
+        e1_phase2.len(),
+        "every Phase 2 entry for `{}` must have populated \
+         binary_est_for_variant; got {} populated of {} total. \
+         If short, cost model lookup `(delta_{0}, e2, &[1], &[0])` \
+         failed — delta rel or e2 unregistered.",
         pred,
-        populated,
+        populated.len(),
         e1_phase2.len()
     );
-    // Cross-check: at every Phase 2 entry where binary_est is
-    // populated, the entry's `delta_rows` field equals what
-    // `update_cardinality` just wrote. This proves the cost model
-    // formula's input (`delta_rel.cardinality`) was the
-    // iteration's `delta_new_rows`, not a stale seed value.
-    // Implicit: at least 2 distinct `delta_rows` values appear
-    // across iterations (Part A's evolves-test). Combined with
-    // populated binary_est, this proves the cost model sees
-    // iteration-evolving stats.
-    let distinct_delta_rows: std::collections::BTreeSet<u64> =
-        e1_phase2.iter().map(|e| e.delta_rows).collect();
+    // **Plan §"Part B" acceptance line: binary_est evolves.**
+    // Assert ≥ 2 distinct values across iterations.
+    let distinct_estimates: std::collections::BTreeSet<u64> = populated.iter().copied().collect();
     assert!(
-        distinct_delta_rows.len() >= 2,
-        "expected ≥ 2 distinct delta_rows across Phase 2 entries \
-         for `{}` (proves cost model input evolved across \
-         iterations); got {:?}",
+        distinct_estimates.len() >= 2,
+        "binary_est_for_variant for `{}` must produce ≥ 2 distinct \
+         values across iterations (W2.3 acceptance: cost model \
+         reads iteration's actual delta, not seed); got series \
+         {:?} (distinct: {:?}). If all values are 1, the formula's \
+         `min == 1` clamp is dominating — increase e2.cardinality \
+         (filler edges) so the formula's product clears the floor.",
         pred,
-        distinct_delta_rows
+        populated,
+        distinct_estimates
     );
 }
 
@@ -546,7 +563,7 @@ fn triangle_binary_est_reflects_delta_e1_card_per_iteration() {
     };
     let inputs = linear_rec_triangle_inputs();
     let exec = run_with_config(&fix, RuntimeConfig::default(), LINEAR_REC_TRIANGLE, &inputs);
-    assert_phase2_binary_est_populated(exec.last_recursive_stats_trace(), "e1");
+    assert_phase2_binary_est_distinct_across_iterations(exec.last_recursive_stats_trace(), "e1");
 }
 
 #[test]
@@ -557,7 +574,7 @@ fn cycle4_binary_est_reflects_delta_e1_card_per_iteration() {
     };
     let inputs = linear_rec_cycle4_inputs();
     let exec = run_with_config(&fix, RuntimeConfig::default(), LINEAR_REC_4CYCLE, &inputs);
-    assert_phase2_binary_est_populated(exec.last_recursive_stats_trace(), "e1");
+    assert_phase2_binary_est_distinct_across_iterations(exec.last_recursive_stats_trace(), "e1");
 }
 
 // ===============================================================
@@ -607,9 +624,21 @@ fn recursive_triangle_dispatch_counter_unchanged_under_default_config() {
     let exec = run_with_config(&fix, force_wcoj_triangle(), LINEAR_REC_TRIANGLE, &inputs);
     // Slice-4 baseline asserts ≥ 2 (seed + ≥ 1 variant). W2.3 must
     // not perturb this counter behavior.
-    assert!(
-        exec.wcoj_triangle_dispatch_count() >= 2,
-        "linear-recursive triangle WCOJ counter must be ≥ 2 (seed + ≥ 1 variant); \
+    // Slice-4 baseline counter (captured from da644e3d HEAD,
+    // preserved bit-identically through W2.3): exactly 4
+    // dispatches for the linear-recursive triangle on this
+    // fixture (1 seed + 3 fixpoint variant iterations, the
+    // chain `(1,2) → tri(1,2,3) → e1(1,3) → tri(1,3,4) → e1(1,4)`
+    // converging on iteration 3). The 50 filler e2 edges
+    // inflate `e2.cardinality` for Part B's binary_est test
+    // but do NOT alter the productive chain — they're
+    // unreachable from any iteration's variant body. Counter
+    // must equal exactly 4 regardless of fixture filler.
+    assert_eq!(
+        exec.wcoj_triangle_dispatch_count(),
+        4,
+        "linear-recursive triangle WCOJ counter must equal slice-4 \
+         baseline of exactly 4 dispatches (1 seed + 3 fixpoint variants); \
          got {}",
         exec.wcoj_triangle_dispatch_count()
     );
@@ -642,10 +671,14 @@ fn recursive_4cycle_dispatch_counter_unchanged_under_default_config() {
     };
     let inputs = linear_rec_cycle4_inputs();
     let exec = run_with_config(&fix, force_wcoj_4cycle(), LINEAR_REC_4CYCLE, &inputs);
-    assert!(
-        exec.wcoj_4cycle_dispatch_count() >= 2,
-        "linear-recursive 4-cycle WCOJ counter must be ≥ 2 (seed + ≥ 1 variant); \
-         got {}",
+    // Slice-4 baseline counter (captured from da644e3d HEAD):
+    // exactly 4 dispatches for the linear-recursive 4-cycle on
+    // this fixture. Same shape rationale as triangle.
+    assert_eq!(
+        exec.wcoj_4cycle_dispatch_count(),
+        4,
+        "linear-recursive 4-cycle WCOJ counter must equal slice-4 \
+         baseline of exactly 4 dispatches; got {}",
         exec.wcoj_4cycle_dispatch_count()
     );
 }
