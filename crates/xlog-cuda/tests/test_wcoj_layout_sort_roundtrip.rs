@@ -19,11 +19,15 @@
 //!   5. Output schema matches input schema bit-for-bit (no
 //!      width-class promotion / Symbol→U32 collapse).
 //!
-//! Symbol fixtures use small contiguous u32 IDs (1..N) — the
-//! existing codebase convention for Symbol columns: the runtime
-//! treats Symbol as 4-byte u32 bits with schema preservation,
-//! and small contiguous IDs match how an interner-allocated
-//! Symbol vocabulary actually looks on the GPU.
+//! Symbol fixtures use **real interner-allocated IDs** via
+//! `xlog_core::symbol::intern("sym_<n>")`. The interner is the
+//! production allocator for `ScalarType::Symbol` values; using
+//! its IDs (rather than raw u32 bit patterns) is the
+//! Symbol-parity contract this cert is meant to lock. The seed
+//! pattern preserves cell-equality structure: every Symbol-typed
+//! cell with seed value `n` is replaced by `intern("sym_n")`,
+//! so two cells share an interned ID iff they share the seed
+//! value, which matches the U32-path equality structure exactly.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -32,7 +36,7 @@ use cudarc::driver::sys;
 use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::device_runtime::{
     AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
-    LoggingSink, SinkError, StreamId, StreamPool, XlogDeviceRuntime,
+    LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
 };
 use xlog_cuda::memory::{CudaBuffer, CudaColumn};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
@@ -118,9 +122,6 @@ impl WidthClass {
             }
         }
     }
-    fn is_u64(self) -> bool {
-        matches!(self, WidthClass::U64)
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,6 +175,34 @@ fn rows_for_shape(arity: usize, shape: Shape) -> Vec<Vec<u32>> {
         Shape::AlreadySorted => locked_sorted_rows(arity),
         Shape::UnsortedDup => locked_unsorted_dup_rows(arity),
     }
+}
+
+/// Map a seed value to a real interner-allocated Symbol ID via
+/// `xlog_core::symbol::intern("sym_<n>")`. The interner is
+/// global+thread-safe and deterministic for a given string, so
+/// repeat calls with the same seed return the same u32 ID — the
+/// row equality / cell-sharing structure of the seed pattern is
+/// preserved 1:1 in the Symbol space.
+fn interned_id(seed: u32) -> u32 {
+    xlog_core::symbol::intern(&format!("sym_{}", seed))
+}
+
+/// Transform a row's per-column values according to the
+/// width-class: cells whose ScalarType is `Symbol` get
+/// `interned_id(seed)`, every other cell keeps the raw seed
+/// value. Used both at buffer-build time AND at expected-set
+/// computation time so input/expected/output stay in lock-step.
+fn transform_row_for_wc(row: &[u32], wc: WidthClass) -> Vec<u32> {
+    row.iter()
+        .enumerate()
+        .map(|(col_idx, &v)| {
+            if matches!(wc.col_type(col_idx), ScalarType::Symbol) {
+                interned_id(v)
+            } else {
+                v
+            }
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------
@@ -362,7 +391,13 @@ fn run_roundtrip_4byte(arity: usize, wc: WidthClass, shape: Shape) {
         );
         return;
     };
-    let input_rows = rows_for_shape(arity, shape);
+    let raw_rows = rows_for_shape(arity, shape);
+    // Transform raw seed rows: Symbol-typed cells go through the
+    // global interner; everything else stays raw u32.
+    let input_rows: Vec<Vec<u32>> = raw_rows
+        .iter()
+        .map(|r| transform_row_for_wc(r, wc))
+        .collect();
     let buf = build_buffer_4byte(&fix.memory, arity, wc, &input_rows);
     let stream = fix.pool.acquire().expect("stream");
     let out = fix

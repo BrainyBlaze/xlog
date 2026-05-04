@@ -145,7 +145,7 @@ matches the locked plan's `+82` acceptance grid (10 validation
 | D1 | New entry points; existing arity-2 helpers stay bit-identical. | Minimal blast radius; production triangle / 4-cycle hot path is untouched. |
 | D2 | Full-row keys (internally `0..arity`). | Matches the existing 2-arity helpers' "every column is a key" semantic; removes `key_cols` parameter from caller's surface. |
 | D3 | Uniform width-class per call (4-byte = U32 + Symbol mixable; 8-byte = U64). Reject mixed 4+8. | Preserves Symbol parity with U32 (existing kernel contract). Mixed-width WCOJ semantics are out of scope for W3.1. |
-| D4 | No fast-path for arity ≥ 3. Out of scope for W3.1 with no closure credit. | Correctness-first; the perf path can be opened on its own merits at a later time, with no W3.1-implied commitment. |
+| D4 | No fast-path for arity ≥ 3. Out of scope for W3.1 with no closure credit. | Correctness-first. Arity ≥ 3 fast-path is not part of W3.1. |
 | D5 | Cert at arities `{2, 3, 4, 5, 6, 7}`. | Arity-7 sentinel proves no silent W3.2-shaped cap. |
 | D6 | Branch from main `475774ef`; plan as branch commit #1. No runtime rerouting. No `.cu` changes. No push, no tag. No self-mark DONE. | Scope discipline; user-gated closure approval. |
 
