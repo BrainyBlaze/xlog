@@ -30,6 +30,7 @@
 
 pub mod ast;
 pub mod compile;
+pub mod compiler_config;
 pub mod expand;
 pub mod function;
 pub mod hypergraph;

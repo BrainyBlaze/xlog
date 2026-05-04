@@ -16,6 +16,7 @@ use xlog_core::Result;
 use xlog_ir::ExecutionPlan;
 use xlog_stats::{StatsManager, StatsSnapshot};
 
+use crate::compiler_config::CompilerConfig;
 use crate::lower::Lowerer;
 use crate::module::ModuleError;
 use crate::optimizer::Optimizer;
@@ -106,14 +107,36 @@ impl Compiler {
 
     /// Compile XLOG source code into an execution plan, optionally seeding the optimizer
     /// with a runtime statistics snapshot.
+    ///
+    /// W2.1: this entry point delegates through the new composable API
+    /// with `CompilerConfig::default()`, which preserves slice
+    /// 1/2/4/W2.2 behavior bit-identically.
     pub fn compile_with_stats_snapshot(
         &mut self,
         source: &str,
         stats_snapshot: Option<&StatsSnapshot>,
     ) -> Result<ExecutionPlan> {
-        // Phase 1: Parse source into AST
+        self.compile_with_config_and_stats_snapshot(
+            source,
+            &CompilerConfig::default(),
+            stats_snapshot,
+        )
+    }
+
+    /// W2.1: composable entry point that accepts a `CompilerConfig`.
+    ///
+    /// Default-config callers should keep using `compile()` /
+    /// `compile_with_stats_snapshot()`. This entry point exists so
+    /// W2.1 can flip the variable-ordering cost model on per-call
+    /// without an env override.
+    pub fn compile_with_config_and_stats_snapshot(
+        &mut self,
+        source: &str,
+        config: &CompilerConfig,
+        stats_snapshot: Option<&StatsSnapshot>,
+    ) -> Result<ExecutionPlan> {
         let program = parse_program(source)?;
-        self.compile_program_with_stats_snapshot(&program, stats_snapshot)
+        self.compile_program_with_config_and_stats_snapshot(&program, config, stats_snapshot)
     }
 
     /// Compile a parsed XLOG program into an execution plan.
@@ -125,9 +148,32 @@ impl Compiler {
     }
 
     /// Compile a parsed XLOG program into an execution plan, optionally seeding the optimizer.
+    ///
+    /// W2.1: delegates to
+    /// [`Self::compile_program_with_config_and_stats_snapshot`] with
+    /// `CompilerConfig::default()`.
     pub fn compile_program_with_stats_snapshot(
         &mut self,
         program: &Program,
+        stats_snapshot: Option<&StatsSnapshot>,
+    ) -> Result<ExecutionPlan> {
+        self.compile_program_with_config_and_stats_snapshot(
+            program,
+            &CompilerConfig::default(),
+            stats_snapshot,
+        )
+    }
+
+    /// W2.1: composable program-level entry point.
+    ///
+    /// `config` is currently consumed only by the promoter
+    /// (W2.1 step 5) when it wires the variable-ordering cost
+    /// model. With `CompilerConfig::default()`, the promoter
+    /// behaves identically to pre-W2.1.
+    pub fn compile_program_with_config_and_stats_snapshot(
+        &mut self,
+        program: &Program,
+        _config: &CompilerConfig,
         stats_snapshot: Option<&StatsSnapshot>,
     ) -> Result<ExecutionPlan> {
         let program = desugar_queries_and_constraints(program);
