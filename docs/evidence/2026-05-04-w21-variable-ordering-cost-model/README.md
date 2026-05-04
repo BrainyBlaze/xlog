@@ -213,11 +213,23 @@ counts the resolver 4 alongside the 28 Part A–E tests.
   End-of-slice commit proposes the OPEN → DONE transition in the
   commit message; user reviews and explicitly approves; a
   separate follow-up commit applies the board update.
-* **Process rule #2**: every commit references W2.1. Commits to
-  date (chronological): plan + 7 implementation steps (1, 4, 3,
-  5, 2, 6, 7) + step 9 evidence + step 9' rename/count
-  amendment + step 9'' fmt + Part B helper extraction = **11
-  commits total**.
+* **Process rule #2**: every commit references W2.1. Full commit
+  list (chronological, `git log 0c176e6a..HEAD`):
+  1. `d1b13951` — plan (approved iteration 8).
+  2. `529b8a54` — step 1 IR change.
+  3. `ad2aea7c` — step 4 CompilerConfig + composable API.
+  4. `547f2ae0` — step 3 cost-model trait + LeaderCardinalityModel.
+  5. `b7bb2a4f` — step 5 promoter wiring (25 caller sites).
+  6. `031d19b4` — step 2 CUDA helpers.
+  7. `e9a89762` — step 6 dispatcher reroute.
+  8. `6341c716` — step 7 acceptance gates.
+  9. `134c803e` — step 9 evidence README.
+  10. `0c826b6d` — Part A rename + count math fix.
+  11. `c94541a7` — fmt + Part B `prepare_leader_inputs`
+      extraction + per-slot schema/content tests.
+  12. `54ef8e9f` — fmt re-pass + helper visibility doc fix.
+
+  **12 commits total.**
 * **Process rule #3**: plan header opens with "Closes W2.1."
 * **Process rule #5**: no `v0.6.6` references introduced in any
   W2.1 file/comment/plan/evidence/commit message.
