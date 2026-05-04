@@ -48,10 +48,10 @@ any contrary slice-internal decision.
 
 | State | Count |
 |-------|-------|
-| DONE | 5 (W2.4, W2.2, W2.1, W2.3, W2.6) |
+| DONE | 6 (W2.4, W2.2, W2.1, W2.3, W2.6, W3.1) |
 | IN-PROGRESS | 1 (W1.1) |
 | BLOCKED | 1 (W2.5) |
-| OPEN | 14 |
+| OPEN | 13 |
 | **Total** | **21** |
 
 The 4 ROADMAP items already DONE from slices 1, 2, 4 are
@@ -82,7 +82,7 @@ prior shipped work.
 
 | ID | Source | Status | Blocked by | Required deliverable | Acceptance gate |
 |----|--------|--------|------------|----------------------|-----------------|
-| W3.1 | ROADMAP item #7 | OPEN | — | Sorted relation accessors beyond the triangle layout helper. Generic `wcoj_layout_sort_*` for any 2+arity slot. | xlog-cuda cert: empty / already-sorted / unsorted+duplicated all round-trip via the new accessors at u32, u64, Symbol widths. |
+| W3.1 | ROADMAP item #7 | DONE | — | Sorted relation accessors beyond the triangle layout helper. Generic `wcoj_layout_sort_*` for any 2+arity slot. | DONE — `65368d3e` plan iteration 6 + `d06a764f` generic `wcoj_layout_sort_u32_recorded` / `_u64_recorded` entry points + `94eeb7b6` 82-test acceptance grid + `7216b3c7` evidence README + `86c113cb` real interner-allocated Symbol IDs + drop test-file warnings + tighten D4 wording + this commit (board update) = **6 commits**. New 4-byte (`U32` / `Symbol` mixable) and 8-byte (`U64`) width-class entries on `CudaKernelProvider`; existing arity-2 `wcoj_layout_u32_recorded` / `_u64_recorded` and their typed fast-path branches are bit-identical pre-W3.1 (triangle + 4-cycle + project-then-layout dispatchers untouched). 82-test acceptance: 5 + 5 width-class validation (arity-class rejection / mixed-width rejection / arity-1 rejection / runtime-backed-required) + 72 round-trip grid (3 shapes × 4 width-class fixtures × 6 arities {2..7}; arity-7 sentinel proves no silent W3.2-shaped cap). Symbol fixtures use real `xlog_core::symbol::intern("sym_<n>")` IDs. Workspace 1875/0/17 → 1957/0/17 (+82 exact). CUDA cert 1/1; W2.1/W2.3/W2.4/W2.6/slice-4 priors all green. No `.cu` source changes; no runtime rerouting; no fast-path for arity ≥ 3 (not part of W3.1). User-approved DONE in thread. |
 | W3.2 | ROADMAP item #9 | OPEN | — | General-arity WCOJ kernel template covering k = 5 AND k = 6 from a single template (3 + 4 are slice 1 / slice 2). | xlog-cuda cert: 5-clique fixture matches CPU oracle AND 6-clique fixture matches CPU oracle; **k=6 cert MUST pass without adding any new `.cu` source for k=6** (template instantiation only). Counter increments on dispatch; binary-join fallback row-set parity at both k. |
 | W3.3 | ROADMAP item #10 | OPEN | — | Histogram-guided block scheduling / heavy-row offload. | Bench: super-hub fixture's heavy-row case shows **≥ 2.0× speedup** vs. uniform block dispatch on the canonical fixture (`tests/...adaptive_dispatch::superhub_fixture`); deterministic output preserved (`download_triples` row-for-row equal to baseline run); no regression on uniform fixture (within ±5%). |
 | W3.4 | ROADMAP item #11 | OPEN | — | Kernel fusion where benchmarks show materialization overhead dominates. Targeted candidates: layout + count, or count + materialize. | Bench: fused kernel shows **≥ 1.3× speedup** vs. 2-kernel sequence on a fixture where materialize is the long pole; deterministic. No regression on a small fixture where fusion penalty exceeds savings (must auto-disable below threshold). |
