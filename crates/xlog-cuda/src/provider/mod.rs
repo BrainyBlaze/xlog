@@ -33,6 +33,7 @@ mod probabilistic;
 mod relational;
 mod transfer;
 mod wcoj;
+mod wcoj_project;
 
 /// Per-module PTX load timing (populated only when XLOG_WARMUP_PROFILE=1).
 #[derive(Debug, Clone, Default)]
