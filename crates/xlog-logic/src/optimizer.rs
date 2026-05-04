@@ -1295,12 +1295,592 @@ pub mod selectivity_pass {
     /// `StatsManager` entries either, the safety floor leaves
     /// every body unchanged (legacy no-op behavior preserved).
     pub fn run(plan: &mut ExecutionPlan, stats: &StatsManager, rel_ids: &HashMap<String, RelId>) {
-        // Step 2 + 2b implement the per-rule reorder logic;
-        // for now, signature change only — body unchanged.
-        // Subsequent commits in this slice fill in the helpers
-        // that walk `rules_by_scc` and rewrite each canonical
-        // body via `match_canonical_*` + `rewrite_*_with_*`.
-        let _ = (plan, stats, rel_ids);
+        // `rel_ids` is reserved for future shape-extension
+        // work; the current rewriters operate on RelIds
+        // directly from the body's Scans, so the map isn't
+        // consulted here. Production callers still pass it
+        // so the API surface is forward-compatible.
+        let _ = rel_ids;
+        for rules in plan.rules_by_scc.iter_mut() {
+            for rule in rules.iter_mut() {
+                if let Some(rewritten) = super::reorder::try_reorder_triangle(&rule.body, stats) {
+                    rule.body = rewritten;
+                    continue;
+                }
+                if let Some(rewritten) = super::reorder::try_reorder_4cycle(&rule.body, stats) {
+                    rule.body = rewritten;
+                }
+            }
+        }
+    }
+}
+
+/// W2.2 — selectivity-driven body rewriters for triangle and
+/// 4-cycle canonical lowered shapes. `pub(super)` so
+/// `selectivity_pass::run` can dispatch into them.
+mod reorder {
+    use std::collections::HashMap;
+    use xlog_core::RelId;
+    use xlog_ir::rir::ProjectExpr;
+    use xlog_ir::{JoinType, RirNode};
+    use xlog_stats::StatsManager;
+
+    fn ac3(atom: u8, col: u8) -> u8 {
+        atom * 2 + col
+    }
+    fn ac4(atom: u8, col: u8) -> u8 {
+        atom * 2 + col
+    }
+    fn uf_find_n<const N: usize>(parent: &mut [u8; N], x: u8) -> u8 {
+        let mut root = x;
+        while parent[root as usize] != root {
+            root = parent[root as usize];
+        }
+        let mut cur = x;
+        while parent[cur as usize] != root {
+            let next = parent[cur as usize];
+            parent[cur as usize] = root;
+            cur = next;
+        }
+        root
+    }
+    fn uf_union_n<const N: usize>(parent: &mut [u8; N], a: u8, b: u8) {
+        let ra = uf_find_n(parent, a);
+        let rb = uf_find_n(parent, b);
+        if ra != rb {
+            parent[rb as usize] = ra;
+        }
+    }
+
+    fn populated_card(stats: &StatsManager, rel: RelId) -> Option<u64> {
+        stats
+            .get_relation_stats(rel)
+            .map(|s| s.cardinality)
+            .filter(|c| *c > 0)
+    }
+
+    // ---------------------------------------------------------
+    // Triangle rewriter
+    // ---------------------------------------------------------
+
+    struct TriangleSemantics {
+        rel_xy: RelId,
+        rel_yz: RelId,
+        rel_xz: RelId,
+    }
+
+    fn match_and_infer_triangle(body: &RirNode) -> Option<TriangleSemantics> {
+        let RirNode::Project {
+            input: outer_input,
+            columns,
+        } = body
+        else {
+            return None;
+        };
+        let RirNode::Join {
+            left: l1,
+            right: r1,
+            left_keys: lk1,
+            right_keys: rk1,
+            join_type: jt1,
+        } = outer_input.as_ref()
+        else {
+            return None;
+        };
+        if !matches!(jt1, JoinType::Inner) {
+            return None;
+        }
+        let RirNode::Scan { rel: rel_third } = r1.as_ref() else {
+            return None;
+        };
+        let RirNode::Join {
+            left: l2,
+            right: r2,
+            left_keys: lk2,
+            right_keys: rk2,
+            join_type: jt2,
+        } = l1.as_ref()
+        else {
+            return None;
+        };
+        if !matches!(jt2, JoinType::Inner) {
+            return None;
+        }
+        let RirNode::Scan { rel: rel_inner_l } = l2.as_ref() else {
+            return None;
+        };
+        let RirNode::Scan { rel: rel_inner_r } = r2.as_ref() else {
+            return None;
+        };
+        if lk2.len() != 1 || rk2.len() != 1 || lk1.len() != 2 || rk1.len() != 2 {
+            return None;
+        }
+        if columns.len() != 3 {
+            return None;
+        }
+        if lk2[0] >= 2 || rk2[0] >= 2 {
+            return None;
+        }
+        if lk1.iter().any(|k| *k >= 4) || rk1.iter().any(|k| *k >= 2) {
+            return None;
+        }
+
+        let mut parent = [0u8, 1, 2, 3, 4, 5];
+        uf_union_n::<6>(&mut parent, ac3(0, lk2[0] as u8), ac3(1, rk2[0] as u8));
+        for i in 0..2 {
+            let inner_ac = match lk1[i] {
+                0 => (0u8, 0u8),
+                1 => (0, 1),
+                2 => (1, 0),
+                3 => (1, 1),
+                _ => return None,
+            };
+            uf_union_n::<6>(
+                &mut parent,
+                ac3(inner_ac.0, inner_ac.1),
+                ac3(2, rk1[i] as u8),
+            );
+        }
+        let roots: [u8; 6] = std::array::from_fn(|i| uf_find_n::<6>(&mut parent, i as u8));
+        let mut counts: HashMap<u8, u8> = HashMap::new();
+        for r in &roots {
+            *counts.entry(*r).or_insert(0) += 1;
+        }
+        if counts.len() != 3 || counts.values().any(|c| *c != 2) {
+            return None;
+        }
+        let mut head_classes: [u8; 3] = [0; 3];
+        for (i, pc) in columns.iter().enumerate() {
+            let ProjectExpr::Column(k) = pc else {
+                return None;
+            };
+            let outer_ac = match *k {
+                0 => (0u8, 0u8),
+                1 => (0, 1),
+                2 => (1, 0),
+                3 => (1, 1),
+                4 => (2, 0),
+                5 => (2, 1),
+                _ => return None,
+            };
+            head_classes[i] = uf_find_n::<6>(&mut parent, ac3(outer_ac.0, outer_ac.1));
+        }
+        if head_classes[0] == head_classes[1]
+            || head_classes[0] == head_classes[2]
+            || head_classes[1] == head_classes[2]
+        {
+            return None;
+        }
+        let x_class = head_classes[0];
+        let y_class = head_classes[1];
+        let z_class = head_classes[2];
+        let atom_classes = |a: u8| (roots[ac3(a, 0) as usize], roots[ac3(a, 1) as usize]);
+        let atom_rels = [*rel_inner_l, *rel_inner_r, *rel_third];
+        let mut rel_xy = None;
+        let mut rel_yz = None;
+        let mut rel_xz = None;
+        for atom_idx in 0..3u8 {
+            let (c0, c1) = atom_classes(atom_idx);
+            let bx = c0 == x_class || c1 == x_class;
+            let by = c0 == y_class || c1 == y_class;
+            let bz = c0 == z_class || c1 == z_class;
+            match (bx, by, bz) {
+                (true, true, false) => rel_xy = Some(atom_rels[atom_idx as usize]),
+                (false, true, true) => rel_yz = Some(atom_rels[atom_idx as usize]),
+                (true, false, true) => rel_xz = Some(atom_rels[atom_idx as usize]),
+                _ => return None,
+            }
+        }
+        Some(TriangleSemantics {
+            rel_xy: rel_xy?,
+            rel_yz: rel_yz?,
+            rel_xz: rel_xz?,
+        })
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum TriangleInnerPair {
+        YShared,
+        XShared,
+        ZShared,
+    }
+
+    fn build_triangle_body(s: &TriangleSemantics, inner_pair: TriangleInnerPair) -> RirNode {
+        let mk_scan = |r: RelId| RirNode::Scan { rel: r };
+        match inner_pair {
+            TriangleInnerPair::YShared => {
+                let inner = RirNode::Join {
+                    left: Box::new(mk_scan(s.rel_xy)),
+                    right: Box::new(mk_scan(s.rel_yz)),
+                    left_keys: vec![1],
+                    right_keys: vec![0],
+                    join_type: JoinType::Inner,
+                };
+                let outer = RirNode::Join {
+                    left: Box::new(inner),
+                    right: Box::new(mk_scan(s.rel_xz)),
+                    left_keys: vec![0, 3],
+                    right_keys: vec![0, 1],
+                    join_type: JoinType::Inner,
+                };
+                RirNode::Project {
+                    input: Box::new(outer),
+                    columns: vec![
+                        ProjectExpr::Column(0),
+                        ProjectExpr::Column(1),
+                        ProjectExpr::Column(3),
+                    ],
+                }
+            }
+            TriangleInnerPair::XShared => {
+                let inner = RirNode::Join {
+                    left: Box::new(mk_scan(s.rel_xy)),
+                    right: Box::new(mk_scan(s.rel_xz)),
+                    left_keys: vec![0],
+                    right_keys: vec![0],
+                    join_type: JoinType::Inner,
+                };
+                let outer = RirNode::Join {
+                    left: Box::new(inner),
+                    right: Box::new(mk_scan(s.rel_yz)),
+                    left_keys: vec![1, 3],
+                    right_keys: vec![0, 1],
+                    join_type: JoinType::Inner,
+                };
+                RirNode::Project {
+                    input: Box::new(outer),
+                    columns: vec![
+                        ProjectExpr::Column(0),
+                        ProjectExpr::Column(1),
+                        ProjectExpr::Column(3),
+                    ],
+                }
+            }
+            TriangleInnerPair::ZShared => {
+                let inner = RirNode::Join {
+                    left: Box::new(mk_scan(s.rel_xz)),
+                    right: Box::new(mk_scan(s.rel_yz)),
+                    left_keys: vec![1],
+                    right_keys: vec![1],
+                    join_type: JoinType::Inner,
+                };
+                let outer = RirNode::Join {
+                    left: Box::new(inner),
+                    right: Box::new(mk_scan(s.rel_xy)),
+                    left_keys: vec![0, 2],
+                    right_keys: vec![0, 1],
+                    join_type: JoinType::Inner,
+                };
+                RirNode::Project {
+                    input: Box::new(outer),
+                    columns: vec![
+                        ProjectExpr::Column(0),
+                        ProjectExpr::Column(2),
+                        ProjectExpr::Column(3),
+                    ],
+                }
+            }
+        }
+    }
+
+    pub fn try_reorder_triangle(body: &RirNode, stats: &StatsManager) -> Option<RirNode> {
+        let s = match_and_infer_triangle(body)?;
+        let _ = (
+            populated_card(stats, s.rel_xy)?,
+            populated_card(stats, s.rel_yz)?,
+            populated_card(stats, s.rel_xz)?,
+        );
+        let est_y = stats.estimate_join_cardinality(s.rel_xy, s.rel_yz, &[1], &[0]);
+        let est_x = stats.estimate_join_cardinality(s.rel_xy, s.rel_xz, &[0], &[0]);
+        let est_z = stats.estimate_join_cardinality(s.rel_yz, s.rel_xz, &[1], &[1]);
+        let mut best = (TriangleInnerPair::YShared, est_y);
+        if est_x < best.1 {
+            best = (TriangleInnerPair::XShared, est_x);
+        }
+        if est_z < best.1 {
+            best = (TriangleInnerPair::ZShared, est_z);
+        }
+        let candidate = build_triangle_body(&s, best.0);
+        // Skip when the candidate is structurally identical to
+        // the input (no-op rewrite). RirNode doesn't impl
+        // PartialEq, so compare via Debug — bodies are small
+        // (≤ 6 Scans + 2 Joins + 1 Project) so the cost is
+        // negligible relative to the optimizer's broader work.
+        if format!("{:?}", candidate) == format!("{:?}", body) {
+            return None;
+        }
+        Some(candidate)
+    }
+
+    // ---------------------------------------------------------
+    // 4-cycle rewriter
+    // ---------------------------------------------------------
+
+    struct Cycle4Semantics {
+        rel_wx: RelId,
+        rel_xy: RelId,
+        rel_yz: RelId,
+        rel_zw: RelId,
+    }
+
+    fn match_and_infer_4cycle(body: &RirNode) -> Option<Cycle4Semantics> {
+        let RirNode::Project {
+            input: outer_input,
+            columns,
+        } = body
+        else {
+            return None;
+        };
+        let RirNode::Join {
+            left: outer_l,
+            right: outer_r,
+            left_keys: olk,
+            right_keys: ork,
+            join_type: ojt,
+        } = outer_input.as_ref()
+        else {
+            return None;
+        };
+        if !matches!(ojt, JoinType::Inner) {
+            return None;
+        }
+        let RirNode::Join {
+            left: ll,
+            right: lr,
+            left_keys: ilk_l,
+            right_keys: irk_l,
+            join_type: ijt_l,
+        } = outer_l.as_ref()
+        else {
+            return None;
+        };
+        if !matches!(ijt_l, JoinType::Inner) {
+            return None;
+        }
+        let RirNode::Scan { rel: rel_ll } = ll.as_ref() else {
+            return None;
+        };
+        let RirNode::Scan { rel: rel_lr } = lr.as_ref() else {
+            return None;
+        };
+        let RirNode::Join {
+            left: rl,
+            right: rr,
+            left_keys: ilk_r,
+            right_keys: irk_r,
+            join_type: ijt_r,
+        } = outer_r.as_ref()
+        else {
+            return None;
+        };
+        if !matches!(ijt_r, JoinType::Inner) {
+            return None;
+        }
+        let RirNode::Scan { rel: rel_rl } = rl.as_ref() else {
+            return None;
+        };
+        let RirNode::Scan { rel: rel_rr } = rr.as_ref() else {
+            return None;
+        };
+        if ilk_l.len() != 1 || irk_l.len() != 1 || ilk_r.len() != 1 || irk_r.len() != 1 {
+            return None;
+        }
+        if olk.len() != 2 || ork.len() != 2 || columns.len() != 4 {
+            return None;
+        }
+        if ilk_l[0] >= 2 || irk_l[0] >= 2 || ilk_r[0] >= 2 || irk_r[0] >= 2 {
+            return None;
+        }
+        if olk.iter().any(|k| *k >= 4) || ork.iter().any(|k| *k >= 4) {
+            return None;
+        }
+
+        let mut parent = [0u8, 1, 2, 3, 4, 5, 6, 7];
+        uf_union_n::<8>(&mut parent, ac4(0, ilk_l[0] as u8), ac4(1, irk_l[0] as u8));
+        uf_union_n::<8>(&mut parent, ac4(2, ilk_r[0] as u8), ac4(3, irk_r[0] as u8));
+        for i in 0..2 {
+            let l_ac = match olk[i] {
+                0 => (0u8, 0u8),
+                1 => (0, 1),
+                2 => (1, 0),
+                3 => (1, 1),
+                _ => return None,
+            };
+            let r_ac = match ork[i] {
+                0 => (2u8, 0u8),
+                1 => (2, 1),
+                2 => (3, 0),
+                3 => (3, 1),
+                _ => return None,
+            };
+            uf_union_n::<8>(&mut parent, ac4(l_ac.0, l_ac.1), ac4(r_ac.0, r_ac.1));
+        }
+        let roots: [u8; 8] = std::array::from_fn(|i| uf_find_n::<8>(&mut parent, i as u8));
+        let mut counts: HashMap<u8, u8> = HashMap::new();
+        for r in &roots {
+            *counts.entry(*r).or_insert(0) += 1;
+        }
+        if counts.len() != 4 || counts.values().any(|c| *c != 2) {
+            return None;
+        }
+
+        let mut head_classes: [u8; 4] = [0; 4];
+        for (i, pc) in columns.iter().enumerate() {
+            let ProjectExpr::Column(k) = pc else {
+                return None;
+            };
+            let ac = match *k {
+                0 => (0u8, 0u8),
+                1 => (0, 1),
+                2 => (1, 0),
+                3 => (1, 1),
+                4 => (2, 0),
+                5 => (2, 1),
+                6 => (3, 0),
+                7 => (3, 1),
+                _ => return None,
+            };
+            head_classes[i] = uf_find_n::<8>(&mut parent, ac4(ac.0, ac.1));
+        }
+        for i in 0..4 {
+            for j in (i + 1)..4 {
+                if head_classes[i] == head_classes[j] {
+                    return None;
+                }
+            }
+        }
+        let w_class = head_classes[0];
+        let x_class = head_classes[1];
+        let y_class = head_classes[2];
+        let z_class = head_classes[3];
+        let atom_classes = |a: u8| (roots[ac4(a, 0) as usize], roots[ac4(a, 1) as usize]);
+        let atom_rels = [*rel_ll, *rel_lr, *rel_rl, *rel_rr];
+        let mut rel_wx = None;
+        let mut rel_xy = None;
+        let mut rel_yz = None;
+        let mut rel_zw = None;
+        for atom_idx in 0..4u8 {
+            let (c0, c1) = atom_classes(atom_idx);
+            let bw = c0 == w_class || c1 == w_class;
+            let bx = c0 == x_class || c1 == x_class;
+            let by = c0 == y_class || c1 == y_class;
+            let bz = c0 == z_class || c1 == z_class;
+            match (bw, bx, by, bz) {
+                (true, true, false, false) => rel_wx = Some(atom_rels[atom_idx as usize]),
+                (false, true, true, false) => rel_xy = Some(atom_rels[atom_idx as usize]),
+                (false, false, true, true) => rel_yz = Some(atom_rels[atom_idx as usize]),
+                (true, false, false, true) => rel_zw = Some(atom_rels[atom_idx as usize]),
+                _ => return None,
+            }
+        }
+        Some(Cycle4Semantics {
+            rel_wx: rel_wx?,
+            rel_xy: rel_xy?,
+            rel_yz: rel_yz?,
+            rel_zw: rel_zw?,
+        })
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Cycle4Grouping {
+        Default,
+        Alt,
+    }
+
+    fn build_4cycle_body(s: &Cycle4Semantics, g: Cycle4Grouping) -> RirNode {
+        let mk_scan = |r: RelId| RirNode::Scan { rel: r };
+        match g {
+            Cycle4Grouping::Default => {
+                let il = RirNode::Join {
+                    left: Box::new(mk_scan(s.rel_wx)),
+                    right: Box::new(mk_scan(s.rel_xy)),
+                    left_keys: vec![1],
+                    right_keys: vec![0],
+                    join_type: JoinType::Inner,
+                };
+                let ir = RirNode::Join {
+                    left: Box::new(mk_scan(s.rel_yz)),
+                    right: Box::new(mk_scan(s.rel_zw)),
+                    left_keys: vec![1],
+                    right_keys: vec![0],
+                    join_type: JoinType::Inner,
+                };
+                let outer = RirNode::Join {
+                    left: Box::new(il),
+                    right: Box::new(ir),
+                    left_keys: vec![0, 3],
+                    right_keys: vec![3, 0],
+                    join_type: JoinType::Inner,
+                };
+                RirNode::Project {
+                    input: Box::new(outer),
+                    columns: vec![
+                        ProjectExpr::Column(0),
+                        ProjectExpr::Column(1),
+                        ProjectExpr::Column(3),
+                        ProjectExpr::Column(5),
+                    ],
+                }
+            }
+            Cycle4Grouping::Alt => {
+                let il = RirNode::Join {
+                    left: Box::new(mk_scan(s.rel_xy)),
+                    right: Box::new(mk_scan(s.rel_yz)),
+                    left_keys: vec![1],
+                    right_keys: vec![0],
+                    join_type: JoinType::Inner,
+                };
+                let ir = RirNode::Join {
+                    left: Box::new(mk_scan(s.rel_zw)),
+                    right: Box::new(mk_scan(s.rel_wx)),
+                    left_keys: vec![1],
+                    right_keys: vec![0],
+                    join_type: JoinType::Inner,
+                };
+                let outer = RirNode::Join {
+                    left: Box::new(il),
+                    right: Box::new(ir),
+                    left_keys: vec![0, 3],
+                    right_keys: vec![3, 0],
+                    join_type: JoinType::Inner,
+                };
+                RirNode::Project {
+                    input: Box::new(outer),
+                    columns: vec![
+                        ProjectExpr::Column(5),
+                        ProjectExpr::Column(0),
+                        ProjectExpr::Column(1),
+                        ProjectExpr::Column(3),
+                    ],
+                }
+            }
+        }
+    }
+
+    pub fn try_reorder_4cycle(body: &RirNode, stats: &StatsManager) -> Option<RirNode> {
+        let s = match_and_infer_4cycle(body)?;
+        let _ = (
+            populated_card(stats, s.rel_wx)?,
+            populated_card(stats, s.rel_xy)?,
+            populated_card(stats, s.rel_yz)?,
+            populated_card(stats, s.rel_zw)?,
+        );
+        let est_default = stats
+            .estimate_join_cardinality(s.rel_wx, s.rel_xy, &[1], &[0])
+            .saturating_add(stats.estimate_join_cardinality(s.rel_yz, s.rel_zw, &[1], &[0]));
+        let est_alt = stats
+            .estimate_join_cardinality(s.rel_xy, s.rel_yz, &[1], &[0])
+            .saturating_add(stats.estimate_join_cardinality(s.rel_zw, s.rel_wx, &[1], &[0]));
+        let chosen = if est_alt < est_default {
+            Cycle4Grouping::Alt
+        } else {
+            Cycle4Grouping::Default
+        };
+        let candidate = build_4cycle_body(&s, chosen);
+        if format!("{:?}", candidate) == format!("{:?}", body) {
+            return None;
+        }
+        Some(candidate)
     }
 }
 
