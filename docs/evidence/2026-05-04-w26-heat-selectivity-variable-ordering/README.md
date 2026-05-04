@@ -21,20 +21,20 @@ edges get demoted from the leader slot, cold relations are
 preferred. The closure-board acceptance line — *"hot relation
 gets preferred lookup-key slot; cold extensional relation gets
 iteration-key slot; row-set agreement preserved"* — is locked
-end-to-end across 15 tests on real-runtime signals.
+end-to-end across 16 tests on real-runtime signals.
 
 `CompilerConfig::default()` continues to select
 `WcojVarOrderingKind::Disabled`, preserving slice 1/2/4 + W2.2
 + W2.1 + W2.3 + W2.4 dispatch and row-set semantics
 **bit-identically**.
 
-## Acceptance Properties (15 tests across Part A / B / C / D / E)
+## Acceptance Properties (16 tests across Part A / B / C / D / E)
 
 | Part | # tests | Location | What it locks |
 |------|---------|----------|---------------|
 | A | 5 | `crates/xlog-logic/src/wcoj_var_ordering.rs::tests` | `HeatAwareLeaderModel` unit-level: locked composite formula, threshold gate, key-validation safety floor, disabled short-circuit. |
 | B | 4 | `crates/xlog-logic/tests/test_w26_part_b.rs` | Compile-time leader divergence via hand-built `StatsSnapshot` (2 shapes × 2 signal types). Sidesteps EMA smoothing — pins exact heat/selectivity values reaching the cost model. |
-| C | 3 | `crates/xlog-integration/tests/test_w26_heat_selectivity.rs` | **Real-runtime** end-to-end certs: warm-up → `executor.stats_snapshot()` → re-compile under HeatAware → leader changes vs LeaderCardinality on the same snapshot AND row-set parity vs binary-join reference. |
+| C | 4 | `crates/xlog-integration/tests/test_w26_heat_selectivity.rs` | **Real-runtime** end-to-end certs: warm-up → `executor.stats_snapshot()` → re-compile under HeatAware → leader changes vs LeaderCardinality on the same snapshot AND row-set parity vs binary-join reference. C.1: triangle selectivity-driven; C.2: triangle heat-driven, zero cold-baseline; C.3: 4-cycle selectivity-driven; C.4: triangle heat-driven, non-zero cold-baseline (≈ 0.1 on cold rels). |
 | D | 2 | same | Default `CompilerConfig::default()` is bit-identical to W2.3 baseline; W2.4 feedback's canonical `(slot_rels[0], slot_rels[1])` pair with `[1]/[0]` keys preserved when `var_order = None`. |
 | E | 1 | same | When HeatAware emits a non-default leader on triangle (idx 2), W2.6's `feedback_pair_from_var_order` reroute records selectivity on the **rotated** pair (canonicalized) with `[1]/[1]` keys. |
 
@@ -57,46 +57,51 @@ end-to-end across 15 tests on real-runtime signals.
 | `cycle4_heat_bias_heat_aware_picks_non_default_leader_card_eq_returns_none` | Same shape on 4-cycle — heat 0.5 on idx 0 → `Some(1)`; cards equal → LeaderCardinality `None`. |
 | `cycle4_selectivity_bias_heat_aware_picks_not_in_tight_edge` | Tight sel(e1,e2)=0.01 → score idx0=idx1=10100, idx2=idx3=200; argmin=idx2 (first hit) → `Some(2)`. LeaderCardinality: `None`. |
 
-### Part C — Real-runtime end-to-end certs (3 tests)
+### Part C — Real-runtime end-to-end certs (4 tests)
 
 #### C.1 `triangle_real_observed_selectivity_drives_heat_aware_leader_to_idx_2`
 
 * **Warm-up phase**: 4 sequential `execute_plan` calls under
   default compiler config + force-WCOJ-on. Each call dispatches
   WCOJ and fires `record_join_result(rel_xy, rel_yz, [1], [0],
-  10000, 1)` — observed_sel = 1/(100*100) = 0.0001.
-* **EMA progression** (cards seeded at 100, EDB has 5 rows; under
+  25, 1)` — input_rows = card_e1 × card_e2 = 5*5 = 25;
+  observed_sel = 1/25 = 0.04.
+* **EMA progression** (cards seeded at 5, EDBs are 5 rows; under
   force-WCOJ-on the WCOJ-success path bypasses
   `node_dispatch::execute_scan`'s auto-update so seeded cards
   persist through all 4 calls):
 
   | Dispatch # | EMA `selectivity` |
   |-----------:|-----------------:|
-  | 1 | 0.700030 |
-  | 2 | 0.490051 |
-  | 3 | 0.343066 |
-  | 4 | **0.240176** |
+  | 1 | 0.712 |
+  | 2 | 0.510 |
+  | 3 | 0.369 |
+  | 4 | **0.270** |
 
 * **Snapshot pre-conditions** (asserted in test):
-  cards remain at the seeded `100` (the EDBs have 5 rows but
-  cards are an independent seed; force-WCOJ-on bypasses
+  cards remain at the seeded `5` (force-WCOJ-on bypasses
   `node_dispatch::execute_scan`'s auto-update for matched WCOJ
   inputs). Exactly one `JoinSelectivity` entry on
   canonical(rel_xy, rel_yz) with
   `(left_keys, right_keys) = ([1], [0])` and
-  `selectivity ∈ [0.20, 0.28]`.
+  `selectivity ∈ [0.25, 0.30]`.
 * **HeatAware re-compile** with this snapshot:
-  * Penalty(rel_xy) = 1/0.240 + 1 ≈ 5.166
-  * Penalty(rel_yz) = 1/0.240 + 1 ≈ 5.166
+  * Penalty(rel_xy) = 1/0.270 + 1 ≈ 4.70
+  * Penalty(rel_yz) = 4.70
   * Penalty(rel_xz) = 1 + 1 = 2.0
   * Heat factor uniform 1.0 (cards seeded; force-WCOJ-on
     bypasses scan-driven `record_access` for matched WCOJ
     inputs).
-  * score(rel_xy) = 100 × 1 × 5.166 ≈ 516.6
-  * score(rel_yz) = 100 × 1 × 5.166 ≈ 516.6
-  * score(rel_xz) = 100 × 1 × 2.0 = 200
-  * argmin = idx 2; default(idx 0) = 516.6; ratio 200/516.6 ≈
-    0.387 ≤ 0.5 → `Some(2)`. ✓ Asserted.
+  * score(rel_xy) = 5 × 1 × 4.70 = 23.50
+  * score(rel_yz) = 5 × 1 × 4.70 = 23.50
+  * score(rel_xz) = 5 × 1 × 2.0 = 10.00
+  * argmin = idx 2; default(idx 0) = 23.50; ratio 10/23.50 ≈
+    0.425 ≤ 0.5 → `Some(2)`. ✓ Asserted.
+* **Promoter shape note**: at card=5, the lowerer's bushy DP
+  emits a right-deep `Project(Join(Scan, Join(Scan, Scan)))`
+  triangle. W2.6's `normalize_triangle_to_left_deep`
+  (`crates/xlog-logic/src/promote.rs`) commutativity-rewrites
+  to canonical left-deep before the matcher runs.
 * **LeaderCardinality** on the same snapshot returns `None`
   (cards equal — W2.1 short-circuits at idx 0). ✓ Asserted.
 * **Row-set parity**: HeatAware-compiled plan + force-WCOJ-on
@@ -104,7 +109,7 @@ end-to-end across 15 tests on real-runtime signals.
   executor with the same EDBs — both yield exactly `{(1,2,3)}`.
   ✓ Asserted.
 
-#### C.2 `triangle_real_observed_heat_drives_heat_aware_leader_to_idx_1`
+#### C.2 `triangle_real_observed_heat_drives_heat_aware_leader_to_idx_1` (zero cold-baseline)
 
 * **Warm-up phase**: heater-only source `dummy_e1(X) :- e1(X, _).`
   × **11 sequential** `execute_plan` calls under triangle WCOJ
@@ -113,15 +118,15 @@ end-to-end across 15 tests on real-runtime signals.
   which advances `e1.heat` by one EMA step
   (`heat = heat * 0.9 + 0.1`). `e2` / `e3` are NEVER scanned in
   this rule, so their heat stays at the initial `0.0`.
-* **Why heater-only and not the planned combined `dummy_e1 + tri`
-  source**: the binary-join path
+* **Why heater-only**: the binary-join path
   (`crates/xlog-runtime/src/executor/node_dispatch.rs:343`) calls
   `record_join_result` after EVERY hash join, which would create
   a `(rel_xy, rel_yz)` selectivity record (`sel ≈ 0.712` after
   one EMA step) — that would perturb the intended heat-only
-  signal in Phase D. Splitting the warm-up into a heater-only
-  rule keeps the snapshot's `join_selectivities` empty (also
-  asserted) and the cert purely heat-driven.
+  signal. Heater-only keeps the snapshot's `join_selectivities`
+  empty (also asserted) and the cert purely heat-driven at the
+  zero-cold-baseline edge case. The non-zero-baseline case the
+  plan iteration 7 originally specified is covered by C.4 below.
 * **Heat math** (asserted):
   * `e1.heat = 1 - 0.9^11 ≈ 0.686` ≥ 0.6 ✓
   * `e2.heat = 0` ≤ 0.05 ✓
@@ -130,10 +135,10 @@ end-to-end across 15 tests on real-runtime signals.
 * **HeatAware re-compile** with this snapshot:
   * Heat factor: e1 = 1+4·0.686 = 3.744; e2/e3 = 1.0.
   * No selectivity records → penalty = 1+1 = 2 per rel.
-  * score(e1) = 100 × 3.744 × 2 = 748.8
-  * score(e2) = score(e3) = 100 × 1.0 × 2 = 200
-  * argmin = idx 1 (e2, first-hit ties); default(idx 0) = 748.8;
-    ratio 200/748.8 ≈ 0.267 ≤ 0.5 → `Some(1)`. ✓ Asserted.
+  * score(e1) = 5 × 3.744 × 2 = 37.44
+  * score(e2) = score(e3) = 5 × 1.0 × 2 = 10
+  * argmin = idx 1 (e2, first-hit ties); default(idx 0) = 37.44;
+    ratio 10/37.44 ≈ 0.267 ≤ 0.5 → `Some(1)`. ✓ Asserted.
 * **LeaderCardinality**: `None` (cards equal). ✓ Asserted.
 * **Row-set parity**: HeatAware + force-WCOJ-on equals
   binary-join reference; both yield `{(1,2,3)}`. ✓ Asserted.
@@ -143,28 +148,67 @@ end-to-end across 15 tests on real-runtime signals.
 Same shape as C.1 on 4-cycle: 4 sequential `execute_plan`
 invocations on `cyc(W, X, Y, Z) :- e1(W, X), e2(X, Y), e3(Y, Z),
 e4(Z, W)` under default config + force-4cycle-on. EMA progression
-identical (5×5 EDBs, seeded cards 100, sel=0.0001 per dispatch
-→ EMA after 4 ≈ 0.240).
+identical to C.1 (5×5 EDBs, seeded cards 5, sel=0.04 per dispatch
+→ EMA after 4 ≈ 0.270).
 
-* Pre-conditions: cards remain 100 each; one
+* Pre-conditions: cards remain 5 each; one
   `JoinSelectivity` entry on canonical(e1, e2) keys [1]/[0],
-  `selectivity ∈ [0.20, 0.28]`.
+  `selectivity ∈ [0.25, 0.30]`.
 * **HeatAware re-compile**:
   * 4-cycle is rotation-only (no slot-swaps); every edge's
     keys are `[1]/[0]` in canonical layout. Edge (e1, e2) with
-    `sel ≈ 0.240` → penalty `1/0.240 ≈ 4.166`. Each rel sits
+    `sel ≈ 0.270` → penalty `1/0.270 ≈ 3.70`. Each rel sits
     in 2 of the 4 cycle edges:
-    * rel_e1 ∈ {(0,1) tight, (3,0) default}: 4.166 + 1 = 5.166.
-    * rel_e2 ∈ {(0,1) tight, (1,2) default}: 5.166.
+    * rel_e1 ∈ {(0,1) tight, (3,0) default}: 3.70 + 1 = 4.70.
+    * rel_e2 ∈ {(0,1) tight, (1,2) default}: 4.70.
     * rel_e3 ∈ {(1,2), (2,3)} both default: 1 + 1 = 2.
     * rel_e4 ∈ {(2,3), (3,0)} both default: 2.
-  * score(e1)=score(e2) = 100 × 1 × 5.166 ≈ 516.6;
-    score(e3)=score(e4) = 100 × 1 × 2 = 200.
-  * argmin = idx 2 (e3, first-hit ties). Ratio 200/516.6 ≈
-    0.387 ≤ 0.5 → `Some(2)`. ✓ Asserted.
+  * score(e1)=score(e2) = 5 × 1 × 4.70 = 23.50;
+    score(e3)=score(e4) = 5 × 1 × 2 = 10.
+  * argmin = idx 2 (e3, first-hit ties). Ratio 10/23.50 ≈
+    0.425 ≤ 0.5 → `Some(2)`. ✓ Asserted.
+* **Promoter shape note**: at card=5, the lowerer's bushy DP
+  emits a fully-right-deep
+  `Project(Join(Scan, Join(Scan, Join(Scan, Scan))))` 4-cycle.
+  W2.6's `normalize_4cycle_to_bushy` (`crates/xlog-logic/src/promote.rs`)
+  detects the rotation-only canonical-cycle pattern and rebuilds
+  the canonical bushy `Project(Join(Join, Join))` form before the
+  matcher runs.
 * **LeaderCardinality**: `None` (cards equal). ✓ Asserted.
 * **Row-set parity**: HeatAware + force-4cycle-on vs.
   binary-join reference; both yield `{(1,2,3,4)}`. ✓ Asserted.
+
+#### C.4 `triangle_real_observed_heat_with_baseline_drives_heat_aware_leader_to_idx_1` (non-zero cold-baseline)
+
+The plan iteration 7 case for "heat differential where cold
+rels have a realistic non-zero baseline (~ 0.1)". Replaces the
+plan's combined `dummy_e1 + tri` source — which would have
+introduced a binary-join `record_join_result` selectivity entry
+(see C.2 rationale above) — with a join-free triple-dummy source
+`dummy_e1 + dummy_e2 + dummy_e3`, three single-Scan rules. Each
+rule scans one EDB, so Phase A gives every rel exactly one
+`record_access` call without any join.
+
+* **Phase A (baseline)**: triple-dummy source × 1 →
+  `e1.heat = e2.heat = e3.heat = 0.1`.
+* **Phase B (heater)**: dummy_e1-only × 11 →
+  `e1.heat = 1 - 0.9^12 ≈ 0.7176`; e2 / e3 unchanged at 0.1.
+* **Asserted heat values** (band-tested for robustness):
+  * `e1.heat ≥ 0.6` ✓
+  * `e2.heat ∈ [0.05, 0.15]` (≈ 0.1) ✓
+  * `e3.heat ∈ [0.05, 0.15]` (≈ 0.1) ✓
+  * `snap.join_selectivities.is_empty()` — triple-dummy + heater
+    introduces zero `record_join_result` calls. ✓ Asserted.
+* **HeatAware re-compile** (cards 5, no selectivity records):
+  * Heat factor: e1 = 1 + 4·0.7176 ≈ 3.870; e2/e3 = 1 + 4·0.1 = 1.4.
+  * Penalty per rel = 1 + 1 = 2.
+  * score(e1) = 5 × 3.870 × 2 ≈ 38.70
+  * score(e2) = score(e3) = 5 × 1.4 × 2 = 14
+  * argmin = idx 1 (e2, first-hit ties). Ratio 14/38.70 ≈ 0.362
+    ≤ 0.5 → `Some(1)`. ✓ Asserted.
+* **LeaderCardinality**: `None` (cards equal). ✓ Asserted.
+* **Row-set parity**: HeatAware + force-WCOJ-on equals binary-join
+  reference; both yield `{(1,2,3)}`. ✓ Asserted.
 
 ### Part D — Default-config bit-identical regression (2 tests)
 
@@ -246,24 +290,24 @@ test cycle4_selectivity_bias_heat_aware_picks_not_in_tight_edge ... ok
 test result: ok. 4 passed; 0 failed; 0 ignored
 
 cargo test -p xlog-integration --release --test test_w26_heat_selectivity
-running 6 tests
+running 7 tests
 test triangle_real_observed_selectivity_drives_heat_aware_leader_to_idx_2 ... ok
 test triangle_real_observed_heat_drives_heat_aware_leader_to_idx_1 ... ok
+test triangle_real_observed_heat_with_baseline_drives_heat_aware_leader_to_idx_1 ... ok
 test cycle4_real_observed_selectivity_drives_heat_aware_leader_to_idx_2 ... ok
 test default_config_bit_identical_to_w23_baseline ... ok
 test record_wcoj_feedback_var_order_none_pair_unchanged ... ok
 test heat_aware_rotated_leader_records_feedback_on_rotated_pair ... ok
-test result: ok. 6 passed; 0 failed; 0 ignored
+test result: ok. 7 passed; 0 failed; 0 ignored
 ```
 
-**W2.6 acceptance total: 5 + 4 + 6 = 15 tests, 15/15 PASS.**
+**W2.6 acceptance total: 5 + 4 + 4 + 2 + 1 = 16 tests, 16/16 PASS.**
 
 ## Workspace Tally
 
 | Suite | PASS | FAIL | IGN |
 |-------|------|------|-----|
-| Workspace tests (default features, lib + integration only) — `cargo test --workspace --release --exclude pyxlog --exclude xlog-cuda-tests` | 1874 | 0 | 17 |
-| Workspace tests with `--all-targets` (default features) — `cargo test --workspace --all-targets --exclude pyxlog --release` | exit 0 (output truncated to 80-line tail of criterion-bench Success messages; per-suite summaries not preserved) | 0 | — |
+| Workspace tests (default features, lib + integration only) — `cargo test --workspace --release --exclude pyxlog --exclude xlog-cuda-tests` | 1875 | 0 | 17 |
 | W2.3 trace gate — `cargo test -p xlog-runtime --release --features recursive-stats-trace --test test_w23_recursive_stats` | 10 | 0 | 0 |
 | W2.4 cert — `cargo test -p xlog-integration --release --test test_wcoj_record_join_result_feedback` | 3 | 0 | 0 |
 | W2.1 cert — `cargo test -p xlog-integration --release --test test_w21_variable_ordering` | 11 | 0 | 0 |
@@ -281,10 +325,10 @@ running each prior slice's cert suite unchanged.
 |------|--------|
 | `crates/xlog-logic/src/compiler_config.rs` | Add `WcojVarOrderingKind::HeatAware` variant. Default remains `Disabled`. |
 | `crates/xlog-logic/src/wcoj_var_ordering.rs` | New `HeatAwareLeaderModel` with locked composite-score formula `card · (1 + 4·heat) · Σ_e 1/max(0.01, sel(e))`. Same threshold gate as W2.1. 5 unit tests for Part A. |
-| `crates/xlog-logic/src/promote.rs` | Promoter dispatches on `config.wcoj_variable_ordering` (Disabled / LeaderCardinality / HeatAware) for both `try_promote_triangle` and `try_promote_4cycle`. |
+| `crates/xlog-logic/src/promote.rs` | Promoter dispatches on `config.wcoj_variable_ordering` (Disabled / LeaderCardinality / HeatAware) for both `try_promote_triangle` and `try_promote_4cycle`. **Plus** two new normalization helpers (W2.6): `normalize_triangle_to_left_deep` and `normalize_4cycle_to_bushy` invoked before each `try_promote_*` to commutativity-rewrite right-deep / fully-right-deep shapes the lowerer's bushy DP can emit at small cardinalities into the canonical forms the matcher accepts. Conservative: any unrecognized shape returns `None` and falls through unpromoted. Idempotent on already-canonical bodies. |
 | `crates/xlog-runtime/src/executor/wcoj_dispatch.rs` | New module-scope helper `feedback_pair_from_var_order(slot_rels, var_order) -> Option<(RelId, RelId, Vec<usize>, Vec<usize>)>`. `record_wcoj_feedback` now takes `var_order: Option<&VariableOrder>` and routes feedback through this helper — `var_order = None` returns the canonical pre-W2.6 W2.4 pair (bit-identical); `Some(_)` returns the rotated pair + correct `[1]/[1]` keys for triangle non-default leaders or `[1]/[0]` for 4-cycle (rotation-only). |
 | `crates/xlog-logic/tests/test_w26_part_b.rs` | NEW. 4 hand-built-snapshot tests (Part B). |
-| `crates/xlog-integration/tests/test_w26_heat_selectivity.rs` | NEW. 6 real-runtime tests (Part C × 3 + D × 2 + E × 1). |
+| `crates/xlog-integration/tests/test_w26_heat_selectivity.rs` | NEW. 7 real-runtime tests (Part C × 4 + D × 2 + E × 1). |
 
 ## Decision Mapping
 
@@ -310,111 +354,98 @@ running each prior slice's cert suite unchanged.
 * Process rule #5: no `v0.6.6` references in this slice.
 * Process rule #6: no push, no tag.
 
-## Plan Deviations from Iteration 7 — Open Questions for User
+## Plan-Iteration-7 Adjustments (Implemented)
 
-The approved plan locked specific numerical and structural
-values for Part C fixtures. Three values shifted during
-execution. **Two of the three deviations expose underlying
-issues that warrant user direction before W2.6 is closed**;
-each is presented below as a binary choice rather than a
-footnote to a closed decision.
+Three plan-locked values shifted during execution. Each is
+documented here with the implemented resolution. None changes
+a contract the plan locked — the leader-pick contract, ratio
+threshold, and row-set parity all hold under the executed
+values.
 
-### Deviation 1 (FLAG): Slice-1 promoter gap exposed by small-card snapshots
+### Adjustment 1 — Slice-1 promoter normalizers (option B from prior iteration)
 
 **Plan iteration 7 specified**: Part C.1 / C.3 / E.1 seed cards
-at 5 (matching 5-row EDBs); EMA selectivity converges to 0.270
-across 4 dispatches; assertion band `[0.25, 0.30]`.
+at 5 (matching 5-row EDBs); EMA selectivity converges to 0.270;
+assertion band `[0.25, 0.30]`.
 
-**Executed**: cards seeded at 100; EMA converges to 0.240;
-band `[0.20, 0.28]`.
+**Issue at execution**: at cards=5/5/5 the lowerer's bushy DP
+planner picks non-canonical lowered shapes that slice-1's
+matchers reject:
+* Triangle: right-deep `Project(Join(Scan, Join(Scan, Scan)))`
+  vs. matcher's left-deep `Project(Join(Join, Scan))`.
+* 4-cycle: fully-right-deep
+  `Project(Join(Scan, Join(Scan, Join(Scan, Scan))))` vs.
+  matcher's bushy `Project(Join(Join, Join))`.
+Without a fix, `HeatAware` silently produces `var_order = None`
+and the closure-board acceptance line would not hold for any
+small-table snapshot recompile flow.
 
-**Why the plan-locked card=5 didn't work**: at card=5/5/5 the
-lowerer's bushy DP planner picks a right-deep
-`Project(Join(Scan, Join(Scan, Scan)))` tree as lowest-cost;
-slice-1's `try_promote_triangle` only matches the canonical
-left-deep `Project(Join(Join(Scan, Scan), Scan))` shape, so
-the body is **not promoted to `MultiWayJoin` at all** — and
-`HeatAware` silently produces `var_order = None`.
+**Implemented fix** (commit `07eaf5c3`):
+`crates/xlog-logic/src/promote.rs` gains two normalization
+helpers invoked before each `try_promote_*`:
 
-**Implication for production**: a user running a non-recursive
-triangle on small tables, capturing `Executor::stats_snapshot()`,
-and recompiling under `WcojVarOrderingKind::HeatAware` will hit
-the same gap — no leader change, no MultiWayJoin promotion. The
-closure-board acceptance line ("hot relation gets preferred
-lookup-key slot…") would not hold. The card=100 fixtures
-sidestep the gap; they do not exercise it.
+* `normalize_triangle_to_left_deep` — detects right-deep and
+  commutativity-rewrites: swap outer Join's left/right + their
+  keys; remap Project columns via `(k + 4) % 6` for the swapped
+  output layout. Inner-Join keys unchanged. Triangle is
+  symmetric under inner-join commutativity, so the rewrite is
+  semantics-preserving.
+* `normalize_4cycle_to_bushy` — detects the rotation-only
+  canonical-cycle fully-right-deep pattern (every inner Join
+  has `[1]/[0]` keys; outer has `[0,1]/[5,0]`) and rebuilds as
+  bushy `Join(Join(R0, R1, [1], [0]), Join(R2, R3, [1], [0]),
+  [3, 0], [0, 3])`. Output column layout is preserved across
+  the rewrite — Project columns pass through unchanged.
 
-**Two ways to close**:
+Both helpers are conservative: any shape they don't recognize
+returns `None` and the body falls through unpromoted (pre-W2.6
+behavior). Already-canonical / bushy bodies bypass the rewrite
+path entirely.
 
-* **(A) Accept the deviation**. W2.6 lands as-is; the slice-1
-  right-deep gap is documented and tracked under a new
-  closure-board item (e.g. *W2.7 promoter shape robustness*).
-  Users who need HeatAware on small tables would need to seed
-  cards manually until W2.7.
-* **(B) Extend `try_promote_triangle` (and `try_promote_4cycle`)
-  to accept right-deep shapes**. Triangle is symmetric under
-  inner-join commutativity, so this is an additive normalization:
-  detect `Project(Join(Scan, Join(Scan, Scan)))` and rewrite to
-  the canonical left-deep form before the existing matcher runs.
-  Estimated 30–50 LOC additive change in
-  `crates/xlog-logic/src/promote.rs`. After this fix, restore
-  the plan-locked card=5 fixture in C.1 / C.3 / E.1.
+**Result**: plan-locked card=5 fixture restored across Part C.
+Math: input_rows = 5×5 = 25, observed_sel = 1/25 = 0.04, EMA
+after 4 dispatches converges to 0.270, band `[0.25, 0.30]`.
+Promoter matches; HeatAware picks `Some(2)`; production small-
+table flow now works.
 
-**Recommendation**: option B is the architecturally correct
-fix and closes a real production gap, but expands W2.6's blast
-radius into slice-1 promoter territory. Option A is the
-minimal-scope path. **The user's call.**
+### Adjustment 2 — New Part C.4 cert (option D from prior iteration)
 
-### Deviation 2 (FLAG): Part C.2 heater-only redesign vs. plan's combined source
+**Plan iteration 7 specified**: Part C.2 with combined
+`dummy_e1 + tri` Phase A → expected `e2.heat ≈ 0.1` baseline.
 
-**Plan iteration 7 specified**: combined `dummy_e1 + tri` Phase
-A (1 execute_plan call under force-WCOJ-OFF) + heater-only
-Phase B (10 calls). Expected post-warm-up state:
-`e1.heat ≈ 0.718`, `e2.heat ≈ 0.1`, `e3.heat ≈ 0.1`. The
-non-zero `e2/e3` baseline was *intentional* — it tests heat
-differential where the cold rels have a realistic
-runtime-observed baseline rather than a pristine zero.
+**Issue at execution**: the binary-join `tri` rule traverses
+`node_dispatch.rs:343` which calls `record_join_result` after
+EVERY hash join. The combined-source Phase A would write a
+`(rel_xy, rel_yz)` selectivity entry (`sel ≈ 0.712` after one
+EMA step) that perturbs the heat-only signal — HeatAware would
+score `argmin = idx 2` rather than the plan's `idx 1` because
+the selectivity penalty on (e1, e2) demotes them more than the
+heat factor demotes e1.
 
-**Executed**: heater-only single source × 11 calls. Result:
-`e1.heat ≈ 0.686`, `e2.heat = 0`, `e3.heat = 0`. The cert
-proves leader change `Some(0) → Some(1)` at heat=zero-baseline
-rather than at the plan's heat=0.1-baseline.
+**Implemented fix** (commit `07eaf5c3`):
+* Existing C.2 (`triangle_real_observed_heat_drives_heat_aware_leader_to_idx_1`)
+  retained as the **zero cold-baseline** cert: heater-only
+  `dummy_e1` source × 11 calls. Empty `join_selectivities`
+  asserted as a pre-condition.
+* **New C.4** (`triangle_real_observed_heat_with_baseline_drives_heat_aware_leader_to_idx_1`)
+  covers the **non-zero cold-baseline** case the plan
+  intended. Uses a join-free triple-dummy source
+  `dummy_e1 + dummy_e2 + dummy_e3` for Phase A so each rel
+  gets a baseline scan giving `e1=e2=e3.heat = 0.1` without
+  any `record_join_result` side effect (no joins → no hash-join
+  path, no auto-recorded selectivity). Phase B heater × 11
+  advances `e1.heat` to ≈ 0.7176. HeatAware picks `Some(1)`
+  with score(e1) ≈ 38.70 vs score(e2)=score(e3) = 14;
+  ratio 14/38.70 ≈ 0.362 ≤ 0.5.
 
-**Why the plan-locked combined source didn't work**: the
-binary-join `tri` rule in Phase A traverses
-`crates/xlog-runtime/src/executor/node_dispatch.rs:343`, which
-calls `stats.record_join_result(...)` after EVERY hash join.
-This creates a `(rel_xy, rel_yz)` selectivity entry
-(`sel ≈ 0.712` after one EMA step from initial 1.0 with
-observed `1/25 = 0.04`). That entry's penalty contribution to
-both `rel_xy` and `rel_yz` swings the HeatAware score so
-`argmin = idx 2` rather than `idx 1` — the cert would assert
-the wrong `leader_idx`.
+The user's direction explicitly required the triple-dummy
+approach (no selectivity mutation, no snapshot subtraction) —
+the implementation matches that direction.
 
-**Two ways to close**:
+**Result**: total Part C tests = 4 (was 3). W2.6 acceptance
+total = 16 (was 15).
 
-* **(C) Accept the deviation**. The cert proves "heat
-  differential drives leader change" at the heat=zero-baseline
-  case; the plan's heat=0.1-baseline case is unproven. The
-  underlying contract ("hot rel demoted from leader") still
-  holds.
-* **(D) Add a fourth Part-C cert for the heat=0.1-baseline
-  case**, by either (i) using the plan's combined source with
-  selectivity records explicitly subtracted from the snapshot
-  before recompile, or (ii) having Phase A use a 3-rule
-  combined source (`dummy_e1 + dummy_e2 + dummy_e3`) where
-  each dummy projects one EDB but no rule ever joins. That
-  gives every rel a baseline scan in Phase A without creating
-  a binary-join selectivity record.
-
-**Recommendation**: the iteration-7 review history shows the
-user iterated 7 times on Part C specifically; the
-heat=zero-baseline case may not be what they're testing.
-**The user's call** — current cert is honest about what it
-locks; preserving the plan's intent requires option D or the
-equivalent.
-
-### Deviation 3 (no flag): Part D.1 counter == 3
+### Adjustment 3 — Part D.1 counter `4 → 3`
 
 | Plan iteration 7 | Executed value | Reason |
 |------------------|----------------|--------|
@@ -422,13 +453,8 @@ equivalent.
 
 ## Closure Board Update Proposal
 
-**Gated on user resolution of Deviations 1 and 2 above.**
-The closure proposal below is contingent on the user's
-direction for each open question. No board update or merge
-will be applied until the user explicitly approves.
-
-After user review + explicit direction on Deviations 1 + 2 +
-explicit "mark W2.6 DONE" approval, a follow-up commit applies:
+After explicit user "mark W2.6 DONE" approval, a follow-up
+commit applies:
 
 * `docs/v065-closure-board.md` — W2.6 status `OPEN → DONE`,
   status tally updated (DONE: 8 → 9; OPEN: 9 → 8 — verify
@@ -439,11 +465,9 @@ explicit "mark W2.6 DONE" approval, a follow-up commit applies:
   * `c51e07bb` — HeatAwareLeaderModel + var_order-aware W2.4
     feedback (steps 1-6).
   * `7e76b3dd` — 15 acceptance tests (step 7).
-  * (this commit, evidence + closure proposal — step 9).
+  * `07eaf5c3` — slice-1 promoter normalizers + Part C.4 cert
+    (step 9 follow-up; resolves both plan deviations the user
+    flagged).
+  * (this commit, evidence README — step 9).
 * FF-merge `feat/w26-heat-selectivity-variable-ordering` into
   `main`. No tag, no push (per process rule #6).
-
-If the user picks options (B) or (D) above, the
-corresponding scope expands first, the README is amended to
-reflect what was done, and the merge follows the same gated
-flow.
