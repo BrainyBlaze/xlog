@@ -1567,7 +1567,9 @@ mod tests {
         // its head columns are [0,1,3] — they aren't here (4 cols),
         // so triangle declines. 4-cycle declines because outer-right
         // is a Scan not a Join.
-        assert!(try_promote_4cycle(&body, &StatsManager::new(), &CompilerConfig::default()).is_none());
+        assert!(
+            try_promote_4cycle(&body, &StatsManager::new(), &CompilerConfig::default()).is_none()
+        );
     }
 
     /// W2.2: 4-cycle with the alternative bushy grouping
@@ -1661,7 +1663,9 @@ mod tests {
             // Rotate: swap col 0 and col 1.
             columns.swap(0, 1);
         }
-        assert!(try_promote_4cycle(&body, &StatsManager::new(), &CompilerConfig::default()).is_none());
+        assert!(
+            try_promote_4cycle(&body, &StatsManager::new(), &CompilerConfig::default()).is_none()
+        );
     }
 
     #[test]
@@ -1672,7 +1676,9 @@ mod tests {
                 *join_type = JoinType::LeftOuter;
             }
         }
-        assert!(try_promote_4cycle(&body, &StatsManager::new(), &CompilerConfig::default()).is_none());
+        assert!(
+            try_promote_4cycle(&body, &StatsManager::new(), &CompilerConfig::default()).is_none()
+        );
     }
 
     #[test]
@@ -1683,7 +1689,9 @@ mod tests {
                 *left_keys = vec![0, 4]; // not [0, 3]
             }
         }
-        assert!(try_promote_4cycle(&body, &StatsManager::new(), &CompilerConfig::default()).is_none());
+        assert!(
+            try_promote_4cycle(&body, &StatsManager::new(), &CompilerConfig::default()).is_none()
+        );
     }
 
     /// Slice 4 contract: stable 4-cycle (zero recursive Scans) IS
@@ -1793,8 +1801,16 @@ mod tests {
         // try_promote_triangle must NOT also match try_promote_4cycle.
         // Both promoters should be exclusive.
         let triangle = canonical_triangle_tree();
-        assert!(try_promote_4cycle(&triangle, &StatsManager::new(), &CompilerConfig::default()).is_none());
+        assert!(
+            try_promote_4cycle(&triangle, &StatsManager::new(), &CompilerConfig::default())
+                .is_none()
+        );
         let four_cycle = canonical_4cycle_tree();
-        assert!(try_promote_triangle(&four_cycle, &StatsManager::new(), &CompilerConfig::default()).is_none());
+        assert!(try_promote_triangle(
+            &four_cycle,
+            &StatsManager::new(),
+            &CompilerConfig::default()
+        )
+        .is_none());
     }
 }

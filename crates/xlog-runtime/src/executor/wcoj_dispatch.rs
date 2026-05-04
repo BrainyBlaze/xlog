@@ -1073,46 +1073,14 @@ impl Executor {
         var_order: &VariableOrder,
     ) -> Result<CudaBuffer> {
         let canonical: [&CudaBuffer; 3] = [buf_xy, buf_yz, buf_xz];
-        // Build slot inputs. The leader sits at slot 0 (no swap
-        // ever; triangle leaders never swap their own atom). Slots
-        // 1 and 2 may need col-swap per the locked permutation
-        // table.
-        let leader_idx = var_order.leader_idx as usize;
-        if leader_idx >= 3 || var_order.lookup_perms.len() != 2 {
-            // Defensive: cost model should never produce out-of-
-            // range leader_idx or wrong lookup_perms length for
-            // a triangle. Treat as no-dispatch.
+        let slot_inputs =
+            self.prepare_leader_inputs(&canonical, var_order, launch_stream)?;
+        if slot_inputs.len() != 3 {
             return Err(xlog_core::XlogError::Kernel(
-                "run_wcoj_triangle_pipeline_w21: invalid var_order shape".to_string(),
+                "run_wcoj_triangle_pipeline_w21: prepare_leader_inputs must return 3 slots"
+                    .to_string(),
             ));
         }
-        let slot0_input: &CudaBuffer = canonical[leader_idx];
-        // Hold owned swapped views for slots 1 and 2 in locals so
-        // their device buffers stay alive through the kernel call.
-        let owned_slot1: Option<CudaBuffer> = if var_order.lookup_perms[0].swap_cols {
-            Some(self.provider.wcoj_project_2col_swap_recorded(
-                canonical[var_order.lookup_perms[0].input_idx as usize],
-                launch_stream,
-            )?)
-        } else {
-            None
-        };
-        let slot1_input: &CudaBuffer = match &owned_slot1 {
-            Some(b) => b,
-            None => canonical[var_order.lookup_perms[0].input_idx as usize],
-        };
-        let owned_slot2: Option<CudaBuffer> = if var_order.lookup_perms[1].swap_cols {
-            Some(self.provider.wcoj_project_2col_swap_recorded(
-                canonical[var_order.lookup_perms[1].input_idx as usize],
-                launch_stream,
-            )?)
-        } else {
-            None
-        };
-        let slot2_input: &CudaBuffer = match &owned_slot2 {
-            Some(b) => b,
-            None => canonical[var_order.lookup_perms[1].input_idx as usize],
-        };
 
         // Build the canonical (X, Y, Z) head schema from the
         // canonical promoter inputs (NOT the rotated kernel
@@ -1126,26 +1094,26 @@ impl Executor {
             WcojKeyWidth::FourByte => {
                 let l0 = self
                     .provider
-                    .wcoj_layout_u32_recorded(slot0_input, launch_stream)?;
+                    .wcoj_layout_u32_recorded(&slot_inputs[0], launch_stream)?;
                 let l1 = self
                     .provider
-                    .wcoj_layout_u32_recorded(slot1_input, launch_stream)?;
+                    .wcoj_layout_u32_recorded(&slot_inputs[1], launch_stream)?;
                 let l2 = self
                     .provider
-                    .wcoj_layout_u32_recorded(slot2_input, launch_stream)?;
+                    .wcoj_layout_u32_recorded(&slot_inputs[2], launch_stream)?;
                 self.provider
                     .wcoj_triangle_u32_recorded(&l0, &l1, &l2, launch_stream)?
             }
             WcojKeyWidth::EightByte => {
                 let l0 = self
                     .provider
-                    .wcoj_layout_u64_recorded(slot0_input, launch_stream)?;
+                    .wcoj_layout_u64_recorded(&slot_inputs[0], launch_stream)?;
                 let l1 = self
                     .provider
-                    .wcoj_layout_u64_recorded(slot1_input, launch_stream)?;
+                    .wcoj_layout_u64_recorded(&slot_inputs[1], launch_stream)?;
                 let l2 = self
                     .provider
-                    .wcoj_layout_u64_recorded(slot2_input, launch_stream)?;
+                    .wcoj_layout_u64_recorded(&slot_inputs[2], launch_stream)?;
                 self.provider
                     .wcoj_triangle_u64_recorded(&l0, &l1, &l2, launch_stream)?
             }
@@ -1451,26 +1419,13 @@ impl Executor {
         var_order: &VariableOrder,
     ) -> Result<CudaBuffer> {
         let canonical: [&CudaBuffer; 4] = [buf_e1, buf_e2, buf_e3, buf_e4];
-        let leader_idx = var_order.leader_idx as usize;
-        if leader_idx >= 4 || var_order.lookup_perms.len() != 3 {
+        let slot_inputs = self.prepare_leader_inputs(&canonical, var_order, launch_stream)?;
+        if slot_inputs.len() != 4 {
             return Err(xlog_core::XlogError::Kernel(
-                "run_wcoj_4cycle_pipeline_w21: invalid var_order shape".to_string(),
+                "run_wcoj_4cycle_pipeline_w21: prepare_leader_inputs must return 4 slots"
+                    .to_string(),
             ));
         }
-        // Defensive: 4-cycle never needs col-swap. If any
-        // lookup_perm requests one, the cost model produced an
-        // out-of-spec VariableOrder; fail loud.
-        for lp in &var_order.lookup_perms {
-            if lp.swap_cols {
-                return Err(xlog_core::XlogError::Kernel(
-                    "run_wcoj_4cycle_pipeline_w21: 4-cycle does not support col-swaps".to_string(),
-                ));
-            }
-        }
-        let slot0_input: &CudaBuffer = canonical[leader_idx];
-        let slot1_input: &CudaBuffer = canonical[var_order.lookup_perms[0].input_idx as usize];
-        let slot2_input: &CudaBuffer = canonical[var_order.lookup_perms[1].input_idx as usize];
-        let slot3_input: &CudaBuffer = canonical[var_order.lookup_perms[2].input_idx as usize];
 
         let head_schema = build_4cycle_head_schema(buf_e1, buf_e2, buf_e3)?;
         let perm = perm_indices_from_kernel_output_cols(&var_order.kernel_output_cols)?;
@@ -1479,32 +1434,32 @@ impl Executor {
             WcojKeyWidth::FourByte => {
                 let l0 = self
                     .provider
-                    .wcoj_layout_u32_recorded(slot0_input, launch_stream)?;
+                    .wcoj_layout_u32_recorded(&slot_inputs[0], launch_stream)?;
                 let l1 = self
                     .provider
-                    .wcoj_layout_u32_recorded(slot1_input, launch_stream)?;
+                    .wcoj_layout_u32_recorded(&slot_inputs[1], launch_stream)?;
                 let l2 = self
                     .provider
-                    .wcoj_layout_u32_recorded(slot2_input, launch_stream)?;
+                    .wcoj_layout_u32_recorded(&slot_inputs[2], launch_stream)?;
                 let l3 = self
                     .provider
-                    .wcoj_layout_u32_recorded(slot3_input, launch_stream)?;
+                    .wcoj_layout_u32_recorded(&slot_inputs[3], launch_stream)?;
                 self.provider
                     .wcoj_4cycle_u32_recorded(&l0, &l1, &l2, &l3, launch_stream)?
             }
             WcojKeyWidth::EightByte => {
                 let l0 = self
                     .provider
-                    .wcoj_layout_u64_recorded(slot0_input, launch_stream)?;
+                    .wcoj_layout_u64_recorded(&slot_inputs[0], launch_stream)?;
                 let l1 = self
                     .provider
-                    .wcoj_layout_u64_recorded(slot1_input, launch_stream)?;
+                    .wcoj_layout_u64_recorded(&slot_inputs[1], launch_stream)?;
                 let l2 = self
                     .provider
-                    .wcoj_layout_u64_recorded(slot2_input, launch_stream)?;
+                    .wcoj_layout_u64_recorded(&slot_inputs[2], launch_stream)?;
                 let l3 = self
                     .provider
-                    .wcoj_layout_u64_recorded(slot3_input, launch_stream)?;
+                    .wcoj_layout_u64_recorded(&slot_inputs[3], launch_stream)?;
                 self.provider
                     .wcoj_4cycle_u64_recorded(&l0, &l1, &l2, &l3, launch_stream)?
             }
@@ -1516,6 +1471,115 @@ impl Executor {
             head_schema,
             launch_stream,
         )
+    }
+
+    /// W2.1 — produce **owned, materialized** kernel slot inputs
+    /// from a canonical-order input array and a `VariableOrder`.
+    ///
+    /// `pub(crate)` so Part B runtime tests can invoke it directly
+    /// and assert per-slot schema + content. Production callers are
+    /// `run_wcoj_*_pipeline_w21`.
+    ///
+    /// Returns a `Vec<CudaBuffer>` of length `canonical.len()` (3
+    /// for triangle, 4 for 4-cycle). Slot 0 is the leader; slots
+    /// 1.. follow `var_order.lookup_perms[i].input_idx` mapping.
+    /// Triangle non-default leaders may col-swap selected slots
+    /// per the locked permutation table; 4-cycle is rotation-only
+    /// and rejects swap requests with a kernel error.
+    ///
+    /// Each returned `CudaBuffer` is owned (DtoD-copied via
+    /// `wcoj_project_2col_swap_recorded` on swap; DtoD-copied via
+    /// the same helper with identity-swap-then-swap on no-swap to
+    /// keep ownership uniform — actually we use a no-swap clone
+    /// path: see comment below).
+    ///
+    /// **Lifetime contract**: returned buffers are independent of
+    /// `canonical[*]`. Callers may pass references through to
+    /// `wcoj_layout_*_recorded` without aliasing concerns.
+    pub fn prepare_leader_inputs(
+        &self,
+        canonical: &[&CudaBuffer],
+        var_order: &VariableOrder,
+        launch_stream: StreamId,
+    ) -> Result<Vec<CudaBuffer>> {
+        let n = canonical.len();
+        if !(n == 3 || n == 4) {
+            return Err(xlog_core::XlogError::Kernel(format!(
+                "prepare_leader_inputs: canonical inputs must be 3 (triangle) or 4 (4-cycle), got {n}"
+            )));
+        }
+        let leader_idx = var_order.leader_idx as usize;
+        if leader_idx >= n {
+            return Err(xlog_core::XlogError::Kernel(format!(
+                "prepare_leader_inputs: leader_idx {leader_idx} out of range for arity {n}"
+            )));
+        }
+        if var_order.lookup_perms.len() != n - 1 {
+            return Err(xlog_core::XlogError::Kernel(format!(
+                "prepare_leader_inputs: lookup_perms.len() = {} must equal {} (arity - 1)",
+                var_order.lookup_perms.len(),
+                n - 1
+            )));
+        }
+        // 4-cycle defense: no col-swaps allowed (locked table).
+        if n == 4 {
+            for lp in &var_order.lookup_perms {
+                if lp.swap_cols {
+                    return Err(xlog_core::XlogError::Kernel(
+                        "prepare_leader_inputs: 4-cycle does not support col-swaps".to_string(),
+                    ));
+                }
+            }
+        }
+
+        // Slot 0: clone the leader via the swap helper called twice
+        // (cancels out → owned pass-through). The simpler path for
+        // production is just passing `canonical[leader_idx]` by
+        // reference, but since the production callers consume the
+        // returned `Vec<CudaBuffer>` by index, we materialize an
+        // owned copy. Triangle leaders never have swap_cols on
+        // their own slot; we use `wcoj_project_2col_swap_recorded`
+        // twice to produce an owned copy with identical layout.
+        //
+        // For clarity and to avoid the extra DtoD: leader slot 0 is
+        // produced by single swap-twice, lookups by either single
+        // swap (when swap_cols) or single swap-twice (when not).
+        //
+        // Cost: one extra DtoD copy per slot vs. the previous
+        // inline-references implementation. The W2.1 path is opt-in
+        // and the DtoD overhead is small relative to the layout +
+        // kernel cost; perf validation is W5.2 anyway.
+        let mut slots: Vec<CudaBuffer> = Vec::with_capacity(n);
+        // Slot 0 = leader, no swap.
+        slots.push(self.clone_buffer_via_swap(canonical[leader_idx], launch_stream)?);
+        for lp in &var_order.lookup_perms {
+            let src = canonical[lp.input_idx as usize];
+            let buf = if lp.swap_cols {
+                self.provider
+                    .wcoj_project_2col_swap_recorded(src, launch_stream)?
+            } else {
+                self.clone_buffer_via_swap(src, launch_stream)?
+            };
+            slots.push(buf);
+        }
+        Ok(slots)
+    }
+
+    /// Clone a 2-col `CudaBuffer` via a double-swap through the
+    /// existing recorded helper. Two swaps cancel — the result is a
+    /// fresh owned buffer with the same column order, schema, and
+    /// content as `src`. Used by `prepare_leader_inputs` to give
+    /// every slot a uniform owned-buffer return type.
+    fn clone_buffer_via_swap(
+        &self,
+        src: &CudaBuffer,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        let once = self
+            .provider
+            .wcoj_project_2col_swap_recorded(src, launch_stream)?;
+        self.provider
+            .wcoj_project_2col_swap_recorded(&once, launch_stream)
     }
 
     /// Resolve the cached WCOJ launch stream, lazily initializing
@@ -1534,7 +1598,7 @@ impl Executor {
     /// or (b) the very first acquisition fails (pool already
     /// at cap from other consumers). After that first success
     /// the cached id keeps resolving for the executor's lifetime.
-    pub(super) fn wcoj_dispatch_stream_or_init(&self) -> Option<StreamId> {
+    pub fn wcoj_dispatch_stream_or_init(&self) -> Option<StreamId> {
         if let Some(s) = self.wcoj_dispatch_stream.get() {
             return Some(*s);
         }

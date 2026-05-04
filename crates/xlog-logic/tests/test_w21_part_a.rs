@@ -61,9 +61,7 @@ fn make_snapshot(seeded: &[(&str, u64)]) -> StatsSnapshot {
 /// `RirNode::MultiWayJoin` (W2.1 fixtures emit exactly one per
 /// rule). Returns the var_order + output_columns directly so each
 /// test can assert on both.
-fn first_multiway(
-    plan: &xlog_ir::ExecutionPlan,
-) -> (Option<VariableOrder>, Vec<ProjectExpr>) {
+fn first_multiway(plan: &xlog_ir::ExecutionPlan) -> (Option<VariableOrder>, Vec<ProjectExpr>) {
     fn find(node: &RirNode) -> Option<(Option<VariableOrder>, Vec<ProjectExpr>)> {
         match node {
             RirNode::MultiWayJoin {
@@ -311,11 +309,7 @@ fn default_leader_already_min_returns_none_for_both_shapes() {
     // which the cost model short-circuits to None ("no reorder
     // needed"). Bit-identical to slice 1/2/W2.2.
     let snap = make_snapshot(&[("e1", 100), ("e2", 100), ("e3", 100)]);
-    let triangle_plan = compile_w21(
-        TRIANGLE_SRC,
-        &snap,
-        WcojVarOrderingKind::LeaderCardinality,
-    );
+    let triangle_plan = compile_w21(TRIANGLE_SRC, &snap, WcojVarOrderingKind::LeaderCardinality);
     let (triangle_vo, _) = first_multiway(&triangle_plan);
     assert!(
         triangle_vo.is_none(),

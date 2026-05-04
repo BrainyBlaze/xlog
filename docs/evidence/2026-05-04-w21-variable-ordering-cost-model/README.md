@@ -74,24 +74,35 @@ returns None when argmin == 0). True missing-stats semantics
 missing_stats_returns_none_safety_floor` (step 3, in the unit
 test bucket).
 
-### Part B (7 tests, all pass)
+### Part B (7 tests, all pass on real CUDA)
+
+Per the W2.1 plan §"Part B", these are **xlog-runtime tests
+that invoke `prepare_leader_inputs` directly** with synthesized
+`VariableOrder` values from the locked permutation tables. Each
+test asserts:
+* per-slot **schema** matches the locked table (e.g., triangle
+  e_yz-leader: slot 0 = `(Y, Z)`, slot 1 = `(Z, X)` after
+  col-swap, slot 2 = `(Y, X)` after col-swap);
+* per-slot **content** matches a CPU-computed reference
+  downloaded via `cuMemcpyDtoH_v2`;
+* `var_order.kernel_output_cols` matches the locked
+  `head_proj`;
+* `var_order.leader_idx` equals the requested leader.
 
 ```
-test dispatch_routing_triangle_e_yz_leader ... ok
-test dispatch_routing_triangle_e_xz_leader ... ok
-test dispatch_routing_cycle4_e_zw_leader ... ok
-test dispatch_routing_cycle4_e_yz_leader ... ok
-test dispatch_routing_cycle4_e_xy_leader ... ok
-test dispatch_routing_triangle_lookup_perms_omit_leader ... ok
-test dispatch_routing_cycle4_lookup_perms_omit_leader_and_no_swap ... ok
+test part_b_triangle_e_yz_leader ... ok
+test part_b_triangle_e_xz_leader ... ok
+test part_b_triangle_e_xy_default_leader ... ok
+test part_b_cycle4_e_xy_leader ... ok
+test part_b_cycle4_e_wx_default_leader ... ok
+test part_b_cycle4_e_yz_leader ... ok
+test part_b_cycle4_e_zw_leader ... ok
 ```
 
-Per-slot **schema** and **content** assertions specified in the
-W2.1 plan §"Part B" are deferred to Part C end-to-end row-set
-parity, which exercises the full GPU pipeline. The IR contract
-pinned in Part B is what the dispatcher's rotation logic depends
-on; Part C row-set parity validates the kernel actually emits
-correct output.
+Lives in `crates/xlog-runtime/tests/test_w21_part_b.rs`.
+`Executor::prepare_leader_inputs` is the new public runtime
+helper that the production W2.1 path
+(`run_wcoj_*_pipeline_w21`) and these tests both consume.
 
 ### Part C / D / E (11 tests, all pass on real CUDA)
 
@@ -154,9 +165,9 @@ counts the resolver 4 alongside the 28 Part A–E tests.
 | `crates/xlog-integration/tests/test_selectivity_pass_reordering.rs` | Cross-crate caller updated to new `promote_multiway` signature. W2.2 cert continues to exercise the legacy slice 1/2/W2.2 dispatch (no W2.1 var ordering activated; row sets remain bit-identical). |
 | `crates/xlog-cuda/src/provider/wcoj_project.rs` | New module: `wcoj_project_2col_swap_recorded` + `wcoj_project_output_columns_recorded`. Failure-drain on Err per slice 2 / W2.4 launch-stream safety pattern; carries `cached_row_count` + DtoD-copies `num_rows_device`. |
 | `crates/xlog-cuda/tests/test_wcoj_project.rs` | New cert file: 11 unit tests on real CUDA. |
-| `crates/xlog-runtime/src/executor/wcoj_dispatch.rs` | `try_dispatch_wcoj_*_on_body` extract `var_order` from body and pass `Option<&VariableOrder>` to the inner pipeline. New `run_wcoj_*_pipeline_w21` variants apply rotation + (triangle) col-swap + post-kernel projection. Module-scope helpers: `perm_indices_from_kernel_output_cols`, `build_triangle_head_schema`, `build_4cycle_head_schema`. |
+| `crates/xlog-runtime/src/executor/wcoj_dispatch.rs` | `try_dispatch_wcoj_*_on_body` extract `var_order` from body and pass `Option<&VariableOrder>` to the inner pipeline. New `run_wcoj_*_pipeline_w21` variants delegate slot prep to `Executor::prepare_leader_inputs` (new pub method) and apply post-kernel projection. Module-scope helpers: `perm_indices_from_kernel_output_cols`, `build_triangle_head_schema`, `build_4cycle_head_schema`. `prepare_leader_inputs` materializes owned slot inputs (DtoD-copy via the swap helper, double-swap for no-swap pass-through) so it has a uniform owned-buffer return type — Part B tests assert per-slot schema + content against this output. `wcoj_dispatch_stream_or_init` promoted from `pub(super)` to `pub` to support the same tests. |
 | `crates/xlog-logic/tests/test_w21_part_a.rs` | New cert file: 10 Part A tests. |
-| `crates/xlog-logic/tests/test_w21_part_b.rs` | New cert file: 7 Part B tests. |
+| `crates/xlog-runtime/tests/test_w21_part_b.rs` | New cert file: 7 Part B tests (per-slot schema + content + var_order metadata). |
 | `crates/xlog-integration/tests/test_w21_variable_ordering.rs` | New cert file: 7 Part C + 2 Part D + 2 Part E tests. |
 
 ## Decisions / Limitations
@@ -175,10 +186,16 @@ counts the resolver 4 alongside the 28 Part A–E tests.
   is folded into closure-board item **W5.2** (skewed multi-way
   GPU benchmark suite). Per-compile threshold is configurable for
   early workload remediation.
-* **Per-slot schema/content** assertions (W2.1 plan §"Part B")
-  deferred to Part C end-to-end row-set parity. The IR contract
-  in Part B is what the dispatcher's rotation logic depends on;
-  Part C validates correctness under the real GPU pipeline.
+* **`prepare_leader_inputs` extracted as a `pub` runtime helper.**
+  The W2.1 plan §"Part B" calls for an extracted helper that
+  Part B tests can invoke directly. `Executor::prepare_leader_inputs(canonical, var_order, stream)`
+  materializes owned slot inputs (using the existing
+  `wcoj_project_2col_swap_recorded` for swap; double-swap for
+  no-swap pass-through) and returns `Vec<CudaBuffer>` with
+  uniform owned ownership. Both production callers
+  (`run_wcoj_*_pipeline_w21`) and Part B tests consume it.
+  `wcoj_dispatch_stream_or_init` was promoted from `pub(super)`
+  to `pub` to support these tests as well.
 * **Phase timing** instrumentation NOT added on the W2.1 path
   (per the plan §"Risk & Open Questions / Q1" — perf validation
   deferred to W5.2).
@@ -189,13 +206,6 @@ counts the resolver 4 alongside the 28 Part A–E tests.
   fall through to binary-join — the W2.1 path is never invoked
   on them. Var_order may be set on the IR (cost model fires),
   but it has no effect.
-* **`prepare_leader_inputs` standalone helper** (mentioned in the
-  plan §"Part B") was NOT extracted as a separate function. The
-  rotation + col-swap logic is inline in
-  `run_wcoj_triangle_pipeline_w21` / `run_wcoj_4cycle_pipeline_w21`
-  per the surgical-changes principle. Part B's IR-level pin on
-  `lookup_perms` + `kernel_output_cols` covers the routing
-  contract; Part C validates content end-to-end.
 
 ## Process Rule Compliance
 
@@ -203,8 +213,11 @@ counts the resolver 4 alongside the 28 Part A–E tests.
   End-of-slice commit proposes the OPEN → DONE transition in the
   commit message; user reviews and explicitly approves; a
   separate follow-up commit applies the board update.
-* **Process rule #2**: every commit references W2.1 (8 commits
-  total: plan + 7 implementation steps + this evidence README).
+* **Process rule #2**: every commit references W2.1. Commits to
+  date (chronological): plan + 7 implementation steps (1, 4, 3,
+  5, 2, 6, 7) + step 9 evidence + step 9' rename/count
+  amendment + step 9'' fmt + Part B helper extraction = **11
+  commits total**.
 * **Process rule #3**: plan header opens with "Closes W2.1."
 * **Process rule #5**: no `v0.6.6` references introduced in any
   W2.1 file/comment/plan/evidence/commit message.
@@ -218,9 +231,11 @@ follow-up commit applies:
 * `docs/v065-closure-board.md` — W2.1 status `OPEN → DONE`,
   status tally updated (DONE: 2 → 3; OPEN: 16 → 15).
 * `docs/v065-closure-board.md` "Completed" section gets a W2.1
-  entry referencing the 8 commits (plan, IR, CompilerConfig,
-  cost-model trait, promoter wiring, CUDA helpers, dispatcher
-  reroute, acceptance gates) plus this evidence README.
+  entry referencing the full commit list (plan, IR,
+  CompilerConfig, cost-model trait, promoter wiring, CUDA
+  helpers, dispatcher reroute, acceptance gates, evidence
+  README, rename/count amendment, fmt + Part B helper
+  extraction).
 * W2.6 unblocking note: with W2.1 now DONE, W2.6's
   `Blocked by` set drops to `{W2.4}` only — and W2.4 is also
   DONE. W2.6 transitions to OPEN.

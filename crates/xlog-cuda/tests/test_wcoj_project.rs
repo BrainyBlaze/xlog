@@ -112,10 +112,7 @@ fn upload_binary_typed(
     )
 }
 
-fn upload_binary_u64_typed(
-    memory: &Arc<GpuMemoryManager>,
-    rows: &[(u64, u64)],
-) -> CudaBuffer {
+fn upload_binary_u64_typed(memory: &Arc<GpuMemoryManager>, rows: &[(u64, u64)]) -> CudaBuffer {
     let n = rows.len() as u32;
     let col0_host: Vec<u64> = rows.iter().map(|(a, _)| *a).collect();
     let col1_host: Vec<u64> = rows.iter().map(|(_, b)| *b).collect();
@@ -223,10 +220,7 @@ fn download_num_rows_device(buf: &CudaBuffer) -> u32 {
     count_host[0]
 }
 
-fn upload_3col_u32(
-    memory: &Arc<GpuMemoryManager>,
-    rows: &[(u32, u32, u32)],
-) -> CudaBuffer {
+fn upload_3col_u32(memory: &Arc<GpuMemoryManager>, rows: &[(u32, u32, u32)]) -> CudaBuffer {
     let n = rows.len() as u32;
     let bytes_per_col = (n as usize) * std::mem::size_of::<u32>();
     let mut c0 = memory.alloc::<u8>(bytes_per_col).expect("alloc c0");
@@ -285,10 +279,7 @@ fn download_triples_u32(buf: &CudaBuffer) -> Vec<(u32, u32, u32)> {
         .collect()
 }
 
-fn upload_4col_u64(
-    memory: &Arc<GpuMemoryManager>,
-    rows: &[(u64, u64, u64, u64)],
-) -> CudaBuffer {
+fn upload_4col_u64(memory: &Arc<GpuMemoryManager>, rows: &[(u64, u64, u64, u64)]) -> CudaBuffer {
     let n = rows.len() as u32;
     let bytes_per_col = (n as usize) * std::mem::size_of::<u64>();
     let mut c0 = memory.alloc::<u8>(bytes_per_col).expect("alloc c0");
@@ -328,7 +319,12 @@ fn download_quads_u64(buf: &CudaBuffer) -> Vec<(u64, u64, u64, u64)> {
     if n == 0 {
         return Vec::new();
     }
-    let mut c = [vec![0u8; n * 8], vec![0u8; n * 8], vec![0u8; n * 8], vec![0u8; n * 8]];
+    let mut c = [
+        vec![0u8; n * 8],
+        vec![0u8; n * 8],
+        vec![0u8; n * 8],
+        vec![0u8; n * 8],
+    ];
     unsafe {
         for idx in 0..4 {
             let res = sys::cuMemcpyDtoH_v2(

@@ -190,7 +190,12 @@ fn download_quads(buf: &CudaBuffer) -> Vec<(u32, u32, u32, u32)> {
         return Vec::new();
     }
     assert_eq!(buf.arity(), 4);
-    let mut cols = [vec![0u8; n * 4], vec![0u8; n * 4], vec![0u8; n * 4], vec![0u8; n * 4]];
+    let mut cols = [
+        vec![0u8; n * 4],
+        vec![0u8; n * 4],
+        vec![0u8; n * 4],
+        vec![0u8; n * 4],
+    ];
     for c in 0..4 {
         unsafe {
             sys::cuMemcpyDtoH_v2(

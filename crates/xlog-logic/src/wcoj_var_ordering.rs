@@ -237,9 +237,21 @@ pub fn triangle_lookup_perms(leader_idx: u8) -> Vec<LookupPerm> {
 ///                      because kernel-direct = `(X, Z, Y)`.
 pub fn triangle_kernel_output_cols(leader_idx: u8) -> Vec<ProjectExpr> {
     match leader_idx {
-        0 => vec![ProjectExpr::Column(0), ProjectExpr::Column(1), ProjectExpr::Column(2)],
-        1 => vec![ProjectExpr::Column(2), ProjectExpr::Column(0), ProjectExpr::Column(1)],
-        2 => vec![ProjectExpr::Column(0), ProjectExpr::Column(2), ProjectExpr::Column(1)],
+        0 => vec![
+            ProjectExpr::Column(0),
+            ProjectExpr::Column(1),
+            ProjectExpr::Column(2),
+        ],
+        1 => vec![
+            ProjectExpr::Column(2),
+            ProjectExpr::Column(0),
+            ProjectExpr::Column(1),
+        ],
+        2 => vec![
+            ProjectExpr::Column(0),
+            ProjectExpr::Column(2),
+            ProjectExpr::Column(1),
+        ],
         _ => panic!("triangle leader_idx must be in [0, 3): got {leader_idx}"),
     }
 }
@@ -430,11 +442,7 @@ mod tests {
         };
         let m = LeaderCardinalityModel;
         assert_eq!(
-            m.pick_4cycle_leader(
-                [RelId(1), RelId(2), RelId(3), RelId(4)],
-                &stats,
-                &config
-            ),
+            m.pick_4cycle_leader([RelId(1), RelId(2), RelId(3), RelId(4)], &stats, &config),
             Some(2)
         );
     }
@@ -473,7 +481,10 @@ mod tests {
     fn cycle4_lookup_perms_default_is_identity_rotation() {
         let p = cycle4_lookup_perms(0);
         // slots 1, 2, 3 = inputs 1, 2, 3
-        assert_eq!(p.iter().map(|lp| lp.input_idx).collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!(
+            p.iter().map(|lp| lp.input_idx).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
         assert!(p.iter().all(|lp| !lp.swap_cols));
     }
 
@@ -481,14 +492,20 @@ mod tests {
     fn cycle4_lookup_perms_leader_xy_rotates_to_yz_zw_wx() {
         let p = cycle4_lookup_perms(1);
         // leader = e_xy. slots 1, 2, 3 = e_yz (2), e_zw (3), e_wx (0).
-        assert_eq!(p.iter().map(|lp| lp.input_idx).collect::<Vec<_>>(), vec![2, 3, 0]);
+        assert_eq!(
+            p.iter().map(|lp| lp.input_idx).collect::<Vec<_>>(),
+            vec![2, 3, 0]
+        );
         assert!(p.iter().all(|lp| !lp.swap_cols));
     }
 
     #[test]
     fn cycle4_lookup_perms_leader_zw_rotates_to_wx_xy_yz() {
         let p = cycle4_lookup_perms(3);
-        assert_eq!(p.iter().map(|lp| lp.input_idx).collect::<Vec<_>>(), vec![0, 1, 2]);
+        assert_eq!(
+            p.iter().map(|lp| lp.input_idx).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
         assert!(p.iter().all(|lp| !lp.swap_cols));
     }
 }
