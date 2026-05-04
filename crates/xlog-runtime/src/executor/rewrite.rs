@@ -479,6 +479,7 @@ impl Executor {
                 slot_vars,
                 output_columns,
                 fallback,
+                var_order,
             } => {
                 let mut new_inputs = Vec::with_capacity(inputs.len());
                 let mut any_replaced = false;
@@ -496,6 +497,7 @@ impl Executor {
                         slot_vars: slot_vars.clone(),
                         output_columns: output_columns.clone(),
                         fallback: Box::new(new_fallback),
+                        var_order: var_order.clone(),
                     },
                     any_replaced || fallback_replaced,
                 )
@@ -554,6 +556,7 @@ mod multiway_walker_tests {
                 ProjectExpr::Column(3),
             ],
             fallback: Box::new(fallback),
+            var_order: None,
         }
     }
 
@@ -663,6 +666,7 @@ mod multiway_walker_tests {
                 xlog_ir::rir::ProjectExpr::Column(3),
             ],
             fallback: Box::new(fallback),
+            var_order: None,
         }
     }
 

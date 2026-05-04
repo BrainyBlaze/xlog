@@ -306,6 +306,7 @@ fn build_canonical_triangle_body(rel_xy: u32, rel_yz: u32, rel_xz: u32) -> RirNo
             ProjectExpr::Column(3),
         ],
         fallback: Box::new(fallback),
+        var_order: None,
     }
 }
 

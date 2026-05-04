@@ -1245,6 +1245,7 @@ mod tests {
                 ProjectExpr::Column(3),
             ],
             fallback: Box::new(RirNode::Unit),
+            var_order: None,
         }
     }
 
@@ -1639,6 +1640,7 @@ mod tests {
                 ProjectExpr::Column(5),
             ],
             fallback: Box::new(RirNode::Unit),
+            var_order: None,
         }
     }
 
@@ -1677,6 +1679,7 @@ mod tests {
                 ProjectExpr::Column(3),
             ],
             fallback: Box::new(RirNode::Unit),
+            var_order: None,
         };
         assert!(match_multiway_4cycle(&triangle).is_none());
     }

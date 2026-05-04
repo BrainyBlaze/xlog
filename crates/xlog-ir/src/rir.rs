@@ -84,6 +84,50 @@ pub enum ProjectExpr {
     Computed(Expr, ScalarType),
 }
 
+/// Per-lookup-input permutation for W2.1 variable-ordering.
+///
+/// When a non-default leader is chosen, the dispatcher rotates kernel
+/// inputs and may swap the two columns of selected lookup atoms (triangle
+/// only — the 4-cycle has rotational symmetry and never needs col-swap).
+/// `swap_cols == true` means the dispatcher must materialize an owned
+/// 2-col view with cols swapped before calling the layout helper.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LookupPerm {
+    /// Index into the leader-rotated input list (NOT the original
+    /// promoter input list). `0` is the leader slot.
+    pub input_idx: u8,
+    /// Whether to swap col0 ↔ col1 on this input before the layout
+    /// helper sees it.
+    pub swap_cols: bool,
+}
+
+/// Variable-ordering decision attached to a `MultiWayJoin`.
+///
+/// `None` on the parent variant preserves slice 1/2/4/W2.2 dispatch
+/// behavior bit-identically (default leader, no col-swap, no kernel
+/// projection — `output_columns` carries the binary-fallback projection
+/// as before).
+///
+/// When `Some`, the dispatcher consumes `leader_idx` to rotate the
+/// kernel `inputs`, applies any `lookup_perms` col-swaps, and
+/// post-projects the kernel-direct output buffer through
+/// `kernel_output_cols`. `MultiWayJoin::output_columns` stays untouched
+/// so binary-fallback consumers continue reading it directly.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VariableOrder {
+    /// Selected leader's index in the canonical promoter input order
+    /// (e.g., for triangle: 0=e_xy, 1=e_yz, 2=e_xz). `0` reproduces
+    /// the default leader.
+    pub leader_idx: u8,
+    /// One entry per non-leader lookup input, in dispatcher slot order.
+    pub lookup_perms: Vec<LookupPerm>,
+    /// Permutation applied to the kernel-direct output buffer to
+    /// produce head-ordered columns. For default leader this would be
+    /// identity but the field is omitted (`var_order = None`) — slice
+    /// 1/2 keeps using `MultiWayJoin::output_columns` directly.
+    pub kernel_output_cols: Vec<ProjectExpr>,
+}
+
 /// Comparison operators
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompareOp {
@@ -257,6 +301,18 @@ pub enum RirNode {
         /// decline. Captured from the post-optimizer tree by the
         /// promoter; never synthesized.
         fallback: Box<RirNode>,
+        /// Optional W2.1 variable-ordering decision.
+        ///
+        /// `None` preserves slice 1/2/4/W2.2 behavior bit-identically:
+        /// dispatcher uses default leader, no col-swap, post-kernel
+        /// projection is the existing `output_columns`.
+        ///
+        /// `Some(VariableOrder)` instructs the dispatcher to rotate
+        /// kernel inputs to put `leader_idx` at slot 0, apply
+        /// `lookup_perms` col-swaps, and post-project via
+        /// `kernel_output_cols`. `output_columns` is NOT consulted on
+        /// the W2.1 path; binary-fallback consumers still read it.
+        var_order: Option<VariableOrder>,
     },
 
     /// Tensorized ILP super-graph join. A DLPack mask tensor selects which

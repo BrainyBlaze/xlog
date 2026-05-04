@@ -438,6 +438,7 @@ fn try_promote_triangle(node: &RirNode) -> Option<RirNode> {
         slot_vars,
         output_columns,
         fallback,
+        var_order: None,
     })
 }
 
@@ -736,6 +737,7 @@ fn try_promote_4cycle(node: &RirNode) -> Option<RirNode> {
         slot_vars,
         output_columns,
         fallback,
+        var_order: None,
     })
 }
 
@@ -799,6 +801,7 @@ mod tests {
                 slot_vars,
                 output_columns,
                 fallback,
+                var_order: _,
             } => {
                 assert_eq!(inputs.len(), 3);
                 assert!(matches!(inputs[0], RirNode::Scan { rel: RelId(1) }));
@@ -1356,6 +1359,7 @@ mod tests {
                 slot_vars,
                 output_columns,
                 fallback,
+                var_order: _,
             } => {
                 assert_eq!(inputs.len(), 4);
                 assert!(matches!(inputs[0], RirNode::Scan { rel: RelId(1) }));
