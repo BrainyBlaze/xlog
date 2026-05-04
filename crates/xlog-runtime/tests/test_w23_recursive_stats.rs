@@ -2,7 +2,7 @@
 //! W2.3 step 7 — recursive-SCC stats integration acceptance gate.
 //!
 //! Part A (3) — iteration-level cardinality evolution via the
-//!   `#[cfg(test)]` recursive-stats trace.
+//!   `recursive-stats-trace` feature-gated trace seam.
 //! Part B (2) — `binary_est_for_variant` reflects the rewritten
 //!   variant's `delta_e1` card.
 //! Part C (4) — row-set + dispatch-counter parity vs. the
