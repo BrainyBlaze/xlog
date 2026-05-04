@@ -517,6 +517,79 @@ fn scalar_wcoj_width(ty: xlog_core::ScalarType) -> Option<WcojKeyWidth> {
 /// 4-cycle kernel_output_cols entries are always
 /// `ProjectExpr::Column(_)` per the locked permutation tables in
 /// `xlog_logic::wcoj_var_ordering`; anything else is a planner bug.
+/// W2.6 step 5 — derive the slot-0 ⋈ slot-1 feedback pair AND
+/// the underlying-relation key columns from `var_order`.
+///
+/// Returns `(rel_a, rel_b, left_keys, right_keys)` where keys
+/// are NATIVE (pre-swap) column indices on the underlying
+/// relations — `record_join_result` stores keys against native
+/// indexing. For triangle non-default leaders, slot 1 is a
+/// 2-col SWAPPED view of the underlying relation; the kernel
+/// invariant `slot0.col1 ≡ slot1.col0` holds for the views
+/// but maps to native key index 1 on BOTH sides.
+///
+/// **Locked rotated-feedback table** (W2.6 plan §"Step 5"):
+///
+/// | Shape    | Leader            | (rel_a, rel_b)      | (left_keys, right_keys) |
+/// |----------|-------------------|---------------------|-------------------------|
+/// | Triangle | 0 (e_xy default)  | (slot[0], slot[1])  | [1] / [0] (no swap) |
+/// | Triangle | 1 (e_yz)          | (slot[1], slot[2])  | **[1] / [1]** (slot 1 = e_xz↔) |
+/// | Triangle | 2 (e_xz)          | (slot[2], slot[1])  | **[1] / [1]** (slot 1 = e_yz↔) |
+/// | 4-cycle  | 0..3 (rotation)   | (slot[i], slot[i+1])| [1] / [0] (no swap) |
+///
+/// Returns `None` only if `slot_rels.len() < 2` (defensive).
+fn feedback_pair_from_var_order(
+    slot_rels: &[RelId],
+    var_order: Option<&VariableOrder>,
+) -> Option<(RelId, RelId, Vec<usize>, Vec<usize>)> {
+    if slot_rels.len() < 2 {
+        return None;
+    }
+    let Some(vo) = var_order else {
+        // Default config / no rotation — bit-identical W2.4
+        // behavior: canonical (slot_rels[0], slot_rels[1]) with
+        // keys [1] / [0].
+        return Some((slot_rels[0], slot_rels[1], vec![1], vec![0]));
+    };
+    let leader_idx = vo.leader_idx as usize;
+    match slot_rels.len() {
+        3 => {
+            // Triangle: locked table per W2.6 plan §"Step 5".
+            match leader_idx {
+                0 => Some((slot_rels[0], slot_rels[1], vec![1], vec![0])),
+                1 => {
+                    // Leader e_yz: slot 0 = rel_yz native, slot 1 =
+                    // rel_xz **swapped** view. Native rel_xz has Z
+                    // at col1, so [1]/[1].
+                    Some((slot_rels[1], slot_rels[2], vec![1], vec![1]))
+                }
+                2 => {
+                    // Leader e_xz: slot 0 = rel_xz native, slot 1 =
+                    // rel_yz **swapped** view. Native rel_yz has Z
+                    // at col1, so [1]/[1].
+                    Some((slot_rels[2], slot_rels[1], vec![1], vec![1]))
+                }
+                _ => None,
+            }
+        }
+        4 => {
+            // 4-cycle: rotation-only, all slots in native layout,
+            // keys [1]/[0] for every leader.
+            if leader_idx >= 4 {
+                return None;
+            }
+            let slot1_input_idx = (leader_idx + 1) % 4;
+            Some((
+                slot_rels[leader_idx],
+                slot_rels[slot1_input_idx],
+                vec![1],
+                vec![0],
+            ))
+        }
+        _ => None,
+    }
+}
+
 fn perm_indices_from_kernel_output_cols(cols: &[ProjectExpr]) -> Result<Vec<usize>> {
     let mut out = Vec::with_capacity(cols.len());
     for c in cols {
@@ -654,21 +727,38 @@ impl Executor {
     /// selectivity, which is the correct conservative direction
     /// for the cost model: it under-claims the WCOJ kernel's
     /// win rather than over-claiming.
-    fn record_wcoj_feedback(&mut self, slot_rels: &[RelId], output_rows: Option<u64>) {
+    fn record_wcoj_feedback(
+        &mut self,
+        slot_rels: &[RelId],
+        var_order: Option<&VariableOrder>,
+        output_rows: Option<u64>,
+    ) {
         if slot_rels.len() < 2 {
             return;
         }
         let Some(out_rows) = output_rows else {
             return;
         };
+        // W2.6: derive the (slot 0, slot 1) feedback pair AND
+        // the underlying-relation key columns from `var_order`.
+        // For `var_order = None` (default config), this returns
+        // the canonical W2.4 pair + keys [1]/[0] — bit-identical
+        // to pre-W2.6 behavior. For Some(_), the pair may be
+        // rotated (triangle non-default leaders use rotated pair
+        // + [1]/[1] keys; 4-cycle is rotation-only [1]/[0]).
+        let Some((rel_a, rel_b, left_keys, right_keys)) =
+            feedback_pair_from_var_order(slot_rels, var_order)
+        else {
+            return;
+        };
         let card_a = self
             .stats
-            .get_relation_stats(slot_rels[0])
+            .get_relation_stats(rel_a)
             .map(|s| s.cardinality)
             .filter(|c| *c > 0);
         let card_b = self
             .stats
-            .get_relation_stats(slot_rels[1])
+            .get_relation_stats(rel_b)
             .map(|s| s.cardinality)
             .filter(|c| *c > 0);
         let (Some(a), Some(b)) = (card_a, card_b) else {
@@ -677,14 +767,8 @@ impl Executor {
         let input_rows = a.saturating_mul(b);
         // `record_join_result` takes owned `Vec<usize>` for the
         // key columns (signature predates this slice).
-        self.stats.record_join_result(
-            slot_rels[0],
-            slot_rels[1],
-            vec![1],
-            vec![0],
-            input_rows,
-            out_rows,
-        );
+        self.stats
+            .record_join_result(rel_a, rel_b, left_keys, right_keys, input_rows, out_rows);
     }
 
     /// Slice 4 entry point — same gate / pattern-match / dispatch
@@ -880,7 +964,7 @@ impl Executor {
                 // advance the counter.
                 let output_rows = Self::wcoj_output_rows(&buf);
                 let slot_rels = [matched.rel_xy, matched.rel_yz, matched.rel_xz];
-                self.record_wcoj_feedback(&slot_rels, output_rows);
+                self.record_wcoj_feedback(&slot_rels, var_order_opt, output_rows);
                 self.wcoj_triangle_dispatch_count += 1;
                 #[cfg(feature = "wcoj-phase-timing")]
                 {
@@ -1326,7 +1410,7 @@ impl Executor {
                     matched.rel_e3,
                     matched.rel_e4,
                 ];
-                self.record_wcoj_feedback(&slot_rels, output_rows);
+                self.record_wcoj_feedback(&slot_rels, var_order_opt, output_rows);
                 self.wcoj_4cycle_dispatch_count += 1;
                 Ok(Some(buf))
             }

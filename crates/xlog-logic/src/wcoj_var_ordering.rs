@@ -174,6 +174,299 @@ impl WcojVariableOrderingModel for LeaderCardinalityModel {
     }
 }
 
+// ---------------------------------------------------------------
+// W2.6 — HeatAwareLeaderModel
+// ---------------------------------------------------------------
+
+/// W2.6 cost model: combines cardinality, access heat, and observed
+/// join selectivity into a composite score per the locked plan
+/// formula. Higher score = more expensive to iterate over → demote
+/// from the leader (slot 0). The model picks `argmin(score)` as
+/// leader, gated by the same `effective_wcoj_var_ordering_threshold`
+/// as W2.1.
+///
+/// **Locked formula** (W2.6 plan §"Composite score"):
+/// ```text
+/// score(rel) = cardinality(rel)
+///            * (1.0 + 4.0 * heat(rel))
+///            * Σ_{e ∈ edges(rel)} 1.0 / max(0.01, observed_sel_or_one(e))
+/// ```
+///
+/// * `cardinality` from `StatsManager::get_relation_stats(rel).cardinality`.
+/// * `heat` from `RelationStats.heat: f32` (EMA written by
+///   `record_access` at `node_dispatch.rs:26`).
+/// * `observed_sel_or_one(e)` from
+///   `StatsManager::get_join_selectivity(rel_a, rel_b)` (W2.4
+///   output via `record_join_result`, EMA-smoothed).
+///   **Key-validation**: only consume a cached `JoinSelectivity`
+///   when its `(left_keys, right_keys)` match the candidate edge
+///   keys after `StatsManager::canonical_join_key` swap. On
+///   mismatch, default to `1.0` (no observed filter assumption).
+///
+/// **Heat weight 4.0** locked: with W2.1 default threshold 0.5,
+/// gate fires when `min/default ≤ 0.5`. With cards equal +
+/// `heat = h` on the hot rel, ratio = `1 / (1 + 4h)`. For
+/// `1 + 4h ≥ 2.0` → `h ≥ 0.25` (~3 `record_access` calls).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HeatAwareLeaderModel;
+
+impl HeatAwareLeaderModel {
+    /// Locked heat weight (W2.6 plan §"Composite score").
+    pub const HEAT_WEIGHT: f32 = 4.0;
+
+    /// Default selectivity for an edge with no observed
+    /// `JoinSelectivity` record (or with mismatched keys).
+    pub const NO_OBSERVED_SEL: f64 = 1.0;
+
+    /// Floor used in `1/max(0.01, sel)` to avoid divide-by-zero
+    /// on tightly observed edges.
+    pub const SEL_FLOOR: f64 = 0.01;
+
+    /// Same `card_of` semantics as `LeaderCardinalityModel`:
+    /// returns None for unregistered or zero-card rels (safety
+    /// floor).
+    fn card_of(stats: &StatsManager, rel: RelId) -> Option<u64> {
+        let s = stats.get_relation_stats(rel)?;
+        if s.cardinality == 0 {
+            None
+        } else {
+            Some(s.cardinality)
+        }
+    }
+
+    /// Read heat from the cached `RelationStats`. Returns 0.0 for
+    /// unregistered rels — the formula treats unobserved heat as
+    /// cold.
+    fn heat_of(stats: &StatsManager, rel: RelId) -> f32 {
+        stats
+            .get_relation_stats(rel)
+            .map(|s| s.heat)
+            .unwrap_or(0.0)
+    }
+
+    /// Look up the observed selectivity for an edge with explicit
+    /// key validation. The candidate keys describe how slot
+    /// `pair.0` joins with slot `pair.1` in the canonical kernel
+    /// topology; the cache key is canonicalized via
+    /// `StatsManager::canonical_join_key` (which may swap the rel
+    /// order). On a hit, the stored `left_keys` / `right_keys`
+    /// MUST match the candidate keys after the same swap;
+    /// otherwise return `NO_OBSERVED_SEL` (the model treats the
+    /// edge as having no useful filter info).
+    fn observed_sel_or_one(
+        stats: &StatsManager,
+        rel_a: RelId,
+        rel_b: RelId,
+        candidate_left_keys: &[usize],
+        candidate_right_keys: &[usize],
+    ) -> f64 {
+        let Some(js) = stats.get_join_selectivity(rel_a, rel_b) else {
+            return Self::NO_OBSERVED_SEL;
+        };
+        // `get_join_selectivity` canonicalizes internally so
+        // `js.left_rel <= js.right_rel`. The candidate keys must
+        // be swapped correspondingly when the stored canonical
+        // order differs from the candidate's `(rel_a, rel_b)`
+        // order.
+        let (expected_left_keys, expected_right_keys) = if js.left_rel == rel_a {
+            (candidate_left_keys, candidate_right_keys)
+        } else {
+            // Stored entry has rels swapped vs candidate; swap
+            // expected keys correspondingly.
+            (candidate_right_keys, candidate_left_keys)
+        };
+        if js.left_keys.as_slice() == expected_left_keys
+            && js.right_keys.as_slice() == expected_right_keys
+        {
+            js.selectivity
+        } else {
+            Self::NO_OBSERVED_SEL
+        }
+    }
+
+    /// Compute the locked composite score for a single rel.
+    ///
+    /// `incident_edges` is a slice of `(other_rel,
+    /// candidate_left_keys, candidate_right_keys)` for each edge
+    /// containing `rel`. The model derives this from the canonical
+    /// kernel topology (triangle: 3 edges, 4-cycle: 4 edges); the
+    /// key columns come from the locked permutation tables.
+    fn composite_score(
+        rel: RelId,
+        card: u64,
+        stats: &StatsManager,
+        incident_edges: &[(RelId, &[usize], &[usize])],
+    ) -> f64 {
+        let heat = Self::heat_of(stats, rel);
+        let heat_factor = 1.0 + Self::HEAT_WEIGHT as f64 * heat as f64;
+        let sel_penalty: f64 = incident_edges
+            .iter()
+            .map(|(other, lk, rk)| {
+                let sel = Self::observed_sel_or_one(stats, rel, *other, lk, rk);
+                1.0 / sel.max(Self::SEL_FLOOR)
+            })
+            .sum();
+        card as f64 * heat_factor * sel_penalty
+    }
+
+    /// Generic argmin over composite scores with the same
+    /// short-circuits as `LeaderCardinalityModel::pick_leader`:
+    /// `Disabled` config → None; argmin == 0 (default leader
+    /// already optimal) → None; threshold-gate via
+    /// `min_score / default_score ≤ effective_threshold` else
+    /// None.
+    fn pick_leader_from_scores<const N: usize>(
+        rel_ids: [RelId; N],
+        scores: [f64; N],
+        config: &CompilerConfig,
+    ) -> Option<u8> {
+        if config.wcoj_variable_ordering == WcojVarOrderingKind::Disabled {
+            return None;
+        }
+        // Defensive: if any score is non-finite or zero, treat as
+        // missing data → safety floor returns None.
+        if scores.iter().any(|s| !s.is_finite() || *s <= 0.0) {
+            return None;
+        }
+        let _ = rel_ids; // future-proof param; unused today.
+        let (min_idx, &min_score) = scores
+            .iter()
+            .enumerate()
+            .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))?;
+        if min_idx == 0 {
+            return None;
+        }
+        let default_score = scores[0];
+        let ratio = min_score / default_score;
+        let threshold = config.effective_wcoj_var_ordering_threshold();
+        if ratio <= threshold {
+            Some(min_idx as u8)
+        } else {
+            None
+        }
+    }
+}
+
+impl WcojVariableOrderingModel for HeatAwareLeaderModel {
+    fn pick_triangle_leader(
+        &self,
+        rel_ids: [RelId; 3],
+        stats: &StatsManager,
+        config: &CompilerConfig,
+    ) -> Option<u8> {
+        // Triangle canonical edges: {(0,1), (1,2), (0,2)} —
+        // each rel ∈ 2 edges. Edge keys per W2.1 locked
+        // permutation tables: every triangle edge joins on
+        // [1]/[0] in the **canonical** layout (no swaps in the
+        // canonical default-leader topology). The HeatAware
+        // model's selectivity lookup uses these canonical-layout
+        // keys; non-default-leader rotated keys (W2.6 step 5
+        // table) are only relevant on the FEEDBACK side.
+        let cards: [u64; 3] = match (
+            Self::card_of(stats, rel_ids[0]),
+            Self::card_of(stats, rel_ids[1]),
+            Self::card_of(stats, rel_ids[2]),
+        ) {
+            (Some(a), Some(b), Some(c)) => [a, b, c],
+            _ => return None, // safety floor on missing card
+        };
+        // Edges: indexed by (slot_a, slot_b) per canonical topology.
+        // edge01 = rel_ids[0] ⋈ rel_ids[1] on rel_ids[0].col1 ↔ rel_ids[1].col0
+        // edge12 = rel_ids[1] ⋈ rel_ids[2] on rel_ids[1].col1 ↔ rel_ids[2].col0
+        // edge02 = rel_ids[0] ⋈ rel_ids[2] on rel_ids[0].col0 ↔ rel_ids[2].col0
+        //   (canonical triangle slot_vars[2] = [a, c] — keys [0]/[0]).
+        let scores: [f64; 3] = [
+            Self::composite_score(
+                rel_ids[0],
+                cards[0],
+                stats,
+                &[
+                    (rel_ids[1], &[1], &[0]),
+                    (rel_ids[2], &[0], &[0]),
+                ],
+            ),
+            Self::composite_score(
+                rel_ids[1],
+                cards[1],
+                stats,
+                &[
+                    (rel_ids[0], &[0], &[1]),
+                    (rel_ids[2], &[1], &[1]),
+                ],
+            ),
+            Self::composite_score(
+                rel_ids[2],
+                cards[2],
+                stats,
+                &[
+                    (rel_ids[0], &[0], &[0]),
+                    (rel_ids[1], &[1], &[1]),
+                ],
+            ),
+        ];
+        Self::pick_leader_from_scores(rel_ids, scores, config)
+    }
+
+    fn pick_4cycle_leader(
+        &self,
+        rel_ids: [RelId; 4],
+        stats: &StatsManager,
+        config: &CompilerConfig,
+    ) -> Option<u8> {
+        // 4-cycle canonical edges: {(0,1), (1,2), (2,3), (3,0)} —
+        // each rel ∈ 2 edges. Rotation-only (no swaps); every
+        // edge joins on [1]/[0] in canonical layout.
+        let cards: [u64; 4] = match (
+            Self::card_of(stats, rel_ids[0]),
+            Self::card_of(stats, rel_ids[1]),
+            Self::card_of(stats, rel_ids[2]),
+            Self::card_of(stats, rel_ids[3]),
+        ) {
+            (Some(a), Some(b), Some(c), Some(d)) => [a, b, c, d],
+            _ => return None,
+        };
+        let scores: [f64; 4] = [
+            Self::composite_score(
+                rel_ids[0],
+                cards[0],
+                stats,
+                &[
+                    (rel_ids[1], &[1], &[0]), // edge (0,1)
+                    (rel_ids[3], &[0], &[1]), // edge (3,0) — reversed: rel0.col0 ↔ rel3.col1
+                ],
+            ),
+            Self::composite_score(
+                rel_ids[1],
+                cards[1],
+                stats,
+                &[
+                    (rel_ids[0], &[0], &[1]),
+                    (rel_ids[2], &[1], &[0]),
+                ],
+            ),
+            Self::composite_score(
+                rel_ids[2],
+                cards[2],
+                stats,
+                &[
+                    (rel_ids[1], &[0], &[1]),
+                    (rel_ids[3], &[1], &[0]),
+                ],
+            ),
+            Self::composite_score(
+                rel_ids[3],
+                cards[3],
+                stats,
+                &[
+                    (rel_ids[2], &[0], &[1]),
+                    (rel_ids[0], &[1], &[0]),
+                ],
+            ),
+        ];
+        Self::pick_leader_from_scores(rel_ids, scores, config)
+    }
+}
+
 /// Promoter helper: triangle locked permutation table.
 ///
 /// Returns `lookup_perms` (the 2 non-leader slot entries) for the

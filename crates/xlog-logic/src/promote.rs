@@ -446,13 +446,24 @@ fn try_promote_triangle(
     ];
     let output_columns = columns.clone();
     let fallback = Box::new(node.clone());
-    // W2.1: ask the cost model whether to set a non-default
-    // leader. With `CompilerConfig::default()` (Disabled), this
-    // always returns None and slice 1/2/4/W2.2 behavior is
-    // bit-identical.
-    let var_order = crate::wcoj_var_ordering::LeaderCardinalityModel
-        .pick_triangle_leader([rel_xy, rel_yz, rel_xz], stats, config)
-        .map(crate::wcoj_var_ordering::build_triangle_var_order);
+    // W2.1 + W2.6: dispatch to the cost model selected by
+    // `config.wcoj_variable_ordering`. With
+    // `CompilerConfig::default()` (Disabled), no cost model
+    // runs and slice 1/2/4/W2.2 behavior is bit-identical.
+    use crate::compiler_config::WcojVarOrderingKind;
+    use crate::wcoj_var_ordering::{
+        build_triangle_var_order, HeatAwareLeaderModel, LeaderCardinalityModel,
+    };
+    let leader_idx = match config.wcoj_variable_ordering {
+        WcojVarOrderingKind::Disabled => None,
+        WcojVarOrderingKind::LeaderCardinality => {
+            LeaderCardinalityModel.pick_triangle_leader([rel_xy, rel_yz, rel_xz], stats, config)
+        }
+        WcojVarOrderingKind::HeatAware => {
+            HeatAwareLeaderModel.pick_triangle_leader([rel_xy, rel_yz, rel_xz], stats, config)
+        }
+    };
+    let var_order = leader_idx.map(build_triangle_var_order);
     Some(RirNode::MultiWayJoin {
         inputs,
         slot_vars,
@@ -759,9 +770,24 @@ fn try_promote_4cycle(
     // W2.1: ask the cost model whether to set a non-default
     // leader. With `CompilerConfig::default()` (Disabled), this
     // always returns None.
-    let var_order = crate::wcoj_var_ordering::LeaderCardinalityModel
-        .pick_4cycle_leader([rel_wx, rel_xy, rel_yz, rel_zw], stats, config)
-        .map(crate::wcoj_var_ordering::build_cycle4_var_order);
+    use crate::compiler_config::WcojVarOrderingKind;
+    use crate::wcoj_var_ordering::{
+        build_cycle4_var_order, HeatAwareLeaderModel, LeaderCardinalityModel,
+    };
+    let leader_idx_4 = match config.wcoj_variable_ordering {
+        WcojVarOrderingKind::Disabled => None,
+        WcojVarOrderingKind::LeaderCardinality => LeaderCardinalityModel.pick_4cycle_leader(
+            [rel_wx, rel_xy, rel_yz, rel_zw],
+            stats,
+            config,
+        ),
+        WcojVarOrderingKind::HeatAware => HeatAwareLeaderModel.pick_4cycle_leader(
+            [rel_wx, rel_xy, rel_yz, rel_zw],
+            stats,
+            config,
+        ),
+    };
+    let var_order = leader_idx_4.map(build_cycle4_var_order);
     Some(RirNode::MultiWayJoin {
         inputs,
         slot_vars,

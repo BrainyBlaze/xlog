@@ -34,6 +34,14 @@ pub enum WcojVarOrderingKind {
     /// Use the default `LeaderCardinalityModel` to pick a
     /// stats-driven leader for triangle / 4-cycle WCOJ inputs.
     LeaderCardinality,
+    /// W2.6: use `HeatAwareLeaderModel` — combines cardinality,
+    /// access heat, and observed join selectivity into a
+    /// composite score. Hot relations and rels in tight (low
+    /// selectivity) edges get demoted from the leader slot;
+    /// cold extensional rels are preferred as leader. Same
+    /// threshold gate as `LeaderCardinality` via
+    /// `effective_wcoj_var_ordering_threshold()`.
+    HeatAware,
 }
 
 /// Compile-time configuration for the W2.1 variable-ordering cost
