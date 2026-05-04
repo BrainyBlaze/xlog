@@ -283,11 +283,14 @@ impl Compiler {
         }
 
         // v0.6.5 slice 3: selectivity-aware reordering pass. Runs
-        // BETWEEN the optimizer loop and promote_multiway. No-op
-        // by default; slice 4/5 populate with real reordering.
+        // BETWEEN the optimizer loop and promote_multiway.
         // Locked compile-pipeline ordering:
         //   lower → optimizer → selectivity_pass → promote_multiway
-        crate::optimizer::selectivity_pass::run(&mut plan, &stats_arc);
+        //
+        // v0.6.5 W2.2: takes `rel_ids` so per-body Scans can be
+        // resolved against `StatsManager`. Behavior on empty
+        // stats / unseeded relations is no-op (safety floor).
+        crate::optimizer::selectivity_pass::run(&mut plan, &stats_arc, self.lowerer.rel_ids());
 
         // v0.6.5 slice 1: promote eligible triangle subtrees to
         // RirNode::MultiWayJoin. Runs *after* the optimizer so the

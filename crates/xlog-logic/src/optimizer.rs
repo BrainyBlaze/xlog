@@ -1233,18 +1233,74 @@ impl Optimizer {
 /// The slice 1 invariant — promoter sees the post-optimizer tree —
 /// is preserved.
 pub mod selectivity_pass {
+    //! v0.6.5 W2.2 — selectivity-driven join reordering for
+    //! canonical lowered triangle and 4-cycle bodies.
+    //!
+    //! ## Behavior
+    //!
+    //! For each rule body that matches the canonical lowered
+    //! triangle or 4-cycle shape, the pass enumerates the valid
+    //! candidate inner pairings (3 for triangle, 2 for 4-cycle),
+    //! computes each candidate's
+    //! `StatsManager::estimate_join_cardinality` with
+    //! **pair-derived join keys from the shared-variable
+    //! mapping**, and rewrites the body so the smallest-cost
+    //! choice is materialized first. Tie → keep the optimizer's
+    //! existing order (deterministic no-op).
+    //!
+    //! ## Safety floor
+    //!
+    //! If any input atom for a recognized body has no
+    //! `StatsManager` entry OR `cardinality == 0`, the body is
+    //! left unchanged. Recursive deltas / freshly-uploaded
+    //! relations / unseeded predicates therefore stay on the
+    //! optimizer's default order until stats are populated.
+    //!
+    //! ## Default-fallback edge case
+    //!
+    //! `StatsManager::estimate_join_cardinality` returns `u64`
+    //! with no provenance — the caller cannot tell whether the
+    //! estimate came from the cached `JoinSelectivity` table,
+    //! the column-distinct heuristic, or the 10% default
+    //! fallback. When all input atoms have populated
+    //! cardinalities but no column statistics, the per-pair
+    //! estimates may all collapse to the same fallback ratio,
+    //! making the chosen pairing uninformative. **This is an
+    //! accepted trade-off**: row-set parity holds regardless of
+    //! selectivity quality (the rewrite preserves semantics);
+    //! the integration certs gate on row-set + WCOJ-dispatch
+    //! correctness, not on optimal pair choice.
+    //!
+    //! ## Promoter coordination
+    //!
+    //! The slice 1 / slice 2 promoters were extended in W2.2
+    //! step 2a to accept the canonical *semantic* shape with
+    //! any valid key combination — they emit
+    //! `MultiWayJoin.inputs` and `slot_vars` in canonical
+    //! semantic order regardless of the body's positional
+    //! layout. Reordered bodies therefore still promote and
+    //! still dispatch the WCOJ kernel correctly.
+    use std::collections::HashMap;
+    use xlog_core::RelId;
     use xlog_ir::ExecutionPlan;
     use xlog_stats::StatsManager;
 
-    /// No-op selectivity pass. Real reordering lands in a future
-    /// slice alongside its bench-evidence + cert updates.
-    pub fn run(plan: &mut ExecutionPlan, _stats: &StatsManager) {
-        // No-op: walk nothing, rewrite nothing. The compile-pipeline
-        // call site invokes this between optimizer.optimize and
-        // promote::promote_multiway; locking the no-op contract here
-        // means slice 4/5 can swap in real logic without re-arguing
-        // the call-site ordering.
-        let _ = plan;
+    /// W2.2: selectivity-driven join reordering for canonical
+    /// triangle + 4-cycle bodies. See module-level doc.
+    ///
+    /// `rel_ids` is the predicate-name → RelId map used to
+    /// resolve body Scans against `StatsManager` lookups.
+    /// Production callers pass `Compiler::lowerer().rel_ids()`.
+    /// Test callers can pass an empty map; with no
+    /// `StatsManager` entries either, the safety floor leaves
+    /// every body unchanged (legacy no-op behavior preserved).
+    pub fn run(plan: &mut ExecutionPlan, stats: &StatsManager, rel_ids: &HashMap<String, RelId>) {
+        // Step 2 + 2b implement the per-rule reorder logic;
+        // for now, signature change only — body unchanged.
+        // Subsequent commits in this slice fill in the helpers
+        // that walk `rules_by_scc` and rewrite each canonical
+        // body via `match_canonical_*` + `rewrite_*_with_*`.
+        let _ = (plan, stats, rel_ids);
     }
 }
 
@@ -1271,7 +1327,7 @@ mod selectivity_pass_tests {
         let before = body_snapshots(&plan);
         let stats = StatsManager::new();
         let mut plan2 = plan.clone();
-        selectivity_pass::run(&mut plan2, &stats);
+        selectivity_pass::run(&mut plan2, &stats, &std::collections::HashMap::new());
         let after = body_snapshots(&plan2);
         assert_eq!(
             before, after,
@@ -1288,7 +1344,7 @@ mod selectivity_pass_tests {
         let before = body_snapshots(&plan);
         let stats = StatsManager::new();
         let mut plan2 = plan.clone();
-        selectivity_pass::run(&mut plan2, &stats);
+        selectivity_pass::run(&mut plan2, &stats, &std::collections::HashMap::new());
         let after = body_snapshots(&plan2);
         assert_eq!(
             before, after,
@@ -1309,7 +1365,7 @@ mod selectivity_pass_tests {
         let before = body_snapshots(&plan);
         let stats = StatsManager::new();
         let mut plan2 = plan.clone();
-        selectivity_pass::run(&mut plan2, &stats);
+        selectivity_pass::run(&mut plan2, &stats, &std::collections::HashMap::new());
         let after = body_snapshots(&plan2);
         assert_eq!(
             before, after,
