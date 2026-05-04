@@ -46,7 +46,7 @@ manager.
   WILL evolve across iterations — this is the **intended W2.3
   semantic**, not a regression).
 
-## Out of Scope (deferred / owned elsewhere)
+## Out of Scope (owned elsewhere)
 
 * **W2.5** default flip of `RuntimeConfig::wcoj_cost_model` —
   out of scope. W2.5's blocker set narrows to `{W3.2, W4.1, W5.1, W5.2}`
@@ -293,23 +293,32 @@ W2.3 introduces on `Executor`. No external callers; W2.3 steps
 Mid-iteration observability is **not possible** from outside
 `execute_recursive_scc` today — it runs to fixpoint and then
 unregisters delta relations + their stats at
-`recursive.rs:592-597`. W2.3 adds a `#[cfg(test)]`-gated
-recursive-stats trace recorder so Part A + Part B can snapshot
-per-iteration state without changing production behavior.
+`recursive.rs:592-597`. W2.3 adds a recursive-stats trace
+recorder gated on the `recursive-stats-trace` Cargo feature
+(default OFF — production builds carry zero overhead) so
+Part A + Part B can snapshot per-iteration state without
+changing production behavior. The Cargo feature replaces the
+`#[cfg(test)]` gating originally drafted because integration
+tests in `tests/` cannot reference lib `cfg(test)` items
+across crates; the feature plus a `[[test]]`
+`required-features` declaration achieves the same
+production-zero-overhead contract while making the seam
+visible to the W2.3 acceptance gate.
 
 All trace types, the `Executor` field that holds them, and the
-accessor are gated **`#[cfg(test)]`-only**. Production builds
-do not see these symbols; the recording calls in
-`execute_recursive_scc` are also `#[cfg(test)]`-gated. Production
-builds carry zero trace overhead — no struct field, no
-populating call site, no compile-time cost.
+accessor are gated on the **`recursive-stats-trace` Cargo
+feature** (default OFF). Production builds do not see these
+symbols; the recording calls in `execute_recursive_scc` are
+also feature-gated. Production builds carry zero trace
+overhead — no struct field, no populating call site, no
+compile-time cost.
 
 ```rust
-#[cfg(test)]
+#[cfg(feature = "recursive-stats-trace")]
 pub struct RecursiveStatsTrace {
     pub entries: Vec<RecursiveStatsTraceEntry>,
 }
-#[cfg(test)]
+#[cfg(feature = "recursive-stats-trace")]
 pub struct RecursiveStatsTraceEntry {
     pub iteration: usize,             // 0 = seed pass, 1+ = fixpoint iter.
     pub pred: String,
@@ -320,7 +329,7 @@ pub struct RecursiveStatsTraceEntry {
     pub binary_est_for_variant: Option<u64>,
 }
 
-#[cfg(test)]
+#[cfg(feature = "recursive-stats-trace")]
 impl Executor {
     pub fn last_recursive_stats_trace(&self) -> &RecursiveStatsTrace {
         &self.last_recursive_stats_trace
@@ -328,14 +337,24 @@ impl Executor {
 }
 
 // Inside `pub struct Executor { ... }`:
-#[cfg(test)]
+#[cfg(feature = "recursive-stats-trace")]
 last_recursive_stats_trace: RecursiveStatsTrace,
 ```
 
-`execute_recursive_scc` populates this trace **only under
-`#[cfg(test)]`**, inline after each Phase 2 (delta record) and
-Phase 4 (full record) update site (and after the seed pass).
-`binary_est_for_variant` is populated by re-running
+The W2.3 test target in `crates/xlog-runtime/Cargo.toml`
+declares `required-features = ["recursive-stats-trace"]`, so
+the test only compiles when the feature is enabled. The
+workspace gate command is:
+
+```
+cargo test --workspace --release --tests --exclude pyxlog \
+  --features xlog-runtime/recursive-stats-trace
+```
+
+`execute_recursive_scc` populates this trace **only when the
+feature is enabled**, inline after each Phase 2 (delta record)
+and Phase 4 (full record) update site (and after the seed
+pass). `binary_est_for_variant` is populated by re-running
 `stats.estimate_join_cardinality(...)` with the iteration's
 delta_rel as the rewritten Scan target — pinning the
 closure-board acceptance line ("`binary_est` reflects the
@@ -542,11 +561,11 @@ On the same fixtures as Parts A + B, run two compiles:
    `Executor::name_to_rel_id(name: &str) -> Option<RelId>`
    method (1-line body wrapping `self.name_to_rel.get`). No
    other helper introduced.
-3. **Trace seam** (`#[cfg(test)]`-gated): add
+3. **Trace seam** (`recursive-stats-trace` feature-gated): add
    `RecursiveStatsTrace` + `RecursiveStatsTraceEntry` types in
    `xlog-runtime` and a `last_recursive_stats_trace()` accessor
-   on `Executor`. `execute_recursive_scc` populates it under
-   `#[cfg(test)]` only.
+   on `Executor`. `execute_recursive_scc` populates it only
+   when the feature is enabled.
 4. **Wire seed pass**: insert `update_cardinality(delta_rel,
    buffer_row_count(delta_initial))` and `update_cardinality(full_rel,
    full_new_rows)` per predicate after `recursive.rs:375`'s
