@@ -1,36 +1,24 @@
 // crates/xlog-integration/tests/test_selectivity_pass_reordering.rs
 //! v0.6.5 W2.2 integration cert — selectivity-driven join
 //! reordering preserves both (Part B) row-set semantics and
-//! (Part C) WCOJ dispatch correctness across reordered bodies.
-//!
-//! ## Scope
-//!
-//! These certs use a minimal end-to-end fixture (the slice 4
-//! stable triangle / 4-cycle) and exercise the full pipeline:
-//! compile (with an optional stats snapshot) → optimizer →
-//! selectivity_pass → promoter → executor → WCOJ dispatch.
-//!
-//! W2.2's selectivity_pass operates only on canonical
-//! left-deep triangle (and bushy 4-cycle) bodies; right-deep
-//! optimizer output is explicitly out of W2.2 scope. The
-//! fixtures here use `pred` declarations without inline facts,
-//! which empirically produce left-deep canonical output for
-//! triangle and bushy canonical for 4-cycle (verified by
-//! slice 5's cardinality cost-model certs).
+//! (Part C) WCOJ dispatch correctness on **non-default
+//! reordered** bodies (triangle + 4-cycle).
 //!
 //! ## Coverage
 //!
-//!   * Part B (`selectivity_pass_triangle_two_snapshots_produce_same_row_set`)
-//!     — same source compiled twice with two distinct stats
-//!     snapshots. Row sets after execution must be IDENTICAL
-//!     because reordering preserves rule semantics.
-//!   * Part C (`selectivity_pass_reordered_triangle_still_dispatches_wcoj`)
-//!     — force-WCOJ on the triangle path; W2.2 promoter
-//!     extension must accept any body shape selectivity_pass
-//!     produced. Counter ≥ 1 AND row set equals gate-off
-//!     binary-join reference.
-//!   * Part C 4-cycle counterpart
-//!     (`selectivity_pass_reordered_4cycle_still_dispatches_wcoj`).
+//!   * Part B triangle — `compile_with_stats_snapshot` with
+//!     two distinct snapshots → IDENTICAL row sets.
+//!   * Part B 4-cycle counterpart.
+//!   * Part C triangle — synthesized post-selectivity X-shared
+//!     body fed through `promote_multiway` + executor under
+//!     force-WCOJ. Counter ≥ 1 AND row set equals binary
+//!     reference. Uses synthesized plan per W2.2 plan's
+//!     fallback ("If compile_with_stats_snapshot currently
+//!     drives the optimizer into right-deep output, … build
+//!     the integration cert from a synthesized post-selectivity
+//!     plan").
+//!   * Part C 4-cycle counterpart on the alt grouping
+//!     `(e_xy⋈e_yz on Y) + (e_zw⋈e_wx on W)`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -43,6 +31,8 @@ use xlog_cuda::device_runtime::{
 };
 use xlog_cuda::memory::CudaBuffer;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_ir::rir::ProjectExpr;
+use xlog_ir::{JoinType, RirNode};
 use xlog_logic::Compiler;
 use xlog_runtime::Executor;
 use xlog_stats::{RelationStats, StatsSnapshot};
@@ -486,5 +476,303 @@ fn selectivity_pass_changes_do_not_break_canonical_4cycle_dispatch() {
     assert_eq!(
         dispatched_rows, reference_rows,
         "4-cycle WCOJ output must equal the binary-join reference after W2.2 changes"
+    );
+}
+
+// ---------------------------------------------------------------
+// Part B 4-cycle — row-set parity across two stats snapshots
+// ---------------------------------------------------------------
+
+#[test]
+fn selectivity_pass_4cycle_two_snapshots_produce_same_row_set() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let inputs = cycle4_inputs();
+
+    // Snapshot A: cards favor Default grouping
+    // (e1, e2 small + e3, e4 small).
+    let snap_a = make_snapshot(&[("e1", 10), ("e2", 10_000), ("e3", 10_000), ("e4", 10)]);
+    let exec_a = run_program(
+        Arc::clone(&fix.provider),
+        &fix.memory,
+        RuntimeConfig::default(),
+        STABLE_4CYCLE,
+        &inputs,
+        Some(&snap_a),
+    );
+    let rows_a = download_quads(exec_a.store().get("cyc").expect("cyc"));
+
+    // Snapshot B: cards favor Alt grouping
+    // (e1, e2 large + e3, e4 small).
+    let snap_b = make_snapshot(&[("e1", 10_000), ("e2", 10_000), ("e3", 10), ("e4", 10)]);
+    let exec_b = run_program(
+        Arc::clone(&fix.provider),
+        &fix.memory,
+        RuntimeConfig::default(),
+        STABLE_4CYCLE,
+        &inputs,
+        Some(&snap_b),
+    );
+    let rows_b = download_quads(exec_b.store().get("cyc").expect("cyc"));
+
+    assert!(
+        !rows_a.is_empty(),
+        "fixture should produce ≥ 1 cyc row to make the cert non-degenerate"
+    );
+    assert_eq!(
+        rows_a, rows_b,
+        "different stats snapshots must produce IDENTICAL 4-cycle row sets — \
+         reordering preserves rule semantics"
+    );
+}
+
+// ---------------------------------------------------------------
+// Part C — force-WCOJ on synthesized post-selectivity bodies
+// ---------------------------------------------------------------
+//
+// The integration tests below build a SYNTHESIZED
+// post-selectivity_pass body (X-shared inner triangle / Alt
+// grouping 4-cycle) by:
+//   1. Compiling the source normally to obtain RelIds + schema
+//      registrations.
+//   2. Replacing the rule body with a hand-crafted alt-shape
+//      lowered RIR using the same RelIds.
+//   3. Re-running `xlog_logic::promote::promote_multiway` with
+//      the W2.2 step 2a extension — alt-shape body promotes
+//      to MultiWayJoin with semantic-order inputs.
+//   4. Running the executor with force-WCOJ.
+//   5. Asserting counter ≥ 1 + row set equals binary-join
+//      reference (gate-off canonical compile).
+//
+// This is the "synthesized post-selectivity plan" path
+// permitted by the W2.2 plan when the optimizer's right-deep
+// output blocks pure compile-then-execute.
+
+/// Build an X-shared lowered triangle body.
+/// inner = (e1 ⋈ e3) on X with keys [0]/[0]
+/// outer = (inner ⋈ e2) on (Y, Z) with keys [1, 3]/[0, 1]
+/// project [0, 1, 3] → (X, Y, Z).
+fn synth_x_shared_triangle_body(rel_e1: RelId, rel_e2: RelId, rel_e3: RelId) -> RirNode {
+    let inner = RirNode::Join {
+        left: Box::new(RirNode::Scan { rel: rel_e1 }),
+        right: Box::new(RirNode::Scan { rel: rel_e3 }),
+        left_keys: vec![0],
+        right_keys: vec![0],
+        join_type: JoinType::Inner,
+    };
+    let outer = RirNode::Join {
+        left: Box::new(inner),
+        right: Box::new(RirNode::Scan { rel: rel_e2 }),
+        left_keys: vec![1, 3],
+        right_keys: vec![0, 1],
+        join_type: JoinType::Inner,
+    };
+    RirNode::Project {
+        input: Box::new(outer),
+        columns: vec![
+            ProjectExpr::Column(0),
+            ProjectExpr::Column(1),
+            ProjectExpr::Column(3),
+        ],
+    }
+}
+
+/// Build an Alt-grouping lowered 4-cycle body.
+/// left_inner = (e_xy ⋈ e_yz) on Y with keys [1]/[0]
+/// right_inner = (e_zw ⋈ e_wx) on W with keys [1]/[0]
+/// outer keys [0, 3]/[3, 0]
+/// project [5, 0, 1, 3] → (W, X, Y, Z).
+fn synth_alt_grouping_4cycle_body(
+    rel_e1: RelId,
+    rel_e2: RelId,
+    rel_e3: RelId,
+    rel_e4: RelId,
+) -> RirNode {
+    let inner_left = RirNode::Join {
+        left: Box::new(RirNode::Scan { rel: rel_e2 }),
+        right: Box::new(RirNode::Scan { rel: rel_e3 }),
+        left_keys: vec![1],
+        right_keys: vec![0],
+        join_type: JoinType::Inner,
+    };
+    let inner_right = RirNode::Join {
+        left: Box::new(RirNode::Scan { rel: rel_e4 }),
+        right: Box::new(RirNode::Scan { rel: rel_e1 }),
+        left_keys: vec![1],
+        right_keys: vec![0],
+        join_type: JoinType::Inner,
+    };
+    let outer = RirNode::Join {
+        left: Box::new(inner_left),
+        right: Box::new(inner_right),
+        left_keys: vec![0, 3],
+        right_keys: vec![3, 0],
+        join_type: JoinType::Inner,
+    };
+    RirNode::Project {
+        input: Box::new(outer),
+        columns: vec![
+            ProjectExpr::Column(5),
+            ProjectExpr::Column(0),
+            ProjectExpr::Column(1),
+            ProjectExpr::Column(3),
+        ],
+    }
+}
+
+/// Run a hand-built post-selectivity plan through executor.
+/// Compiles the source for setup (RelIds, schemas), then
+/// replaces the matching rule's body with `synth_body`,
+/// re-runs `promote_multiway`, and executes.
+fn run_synth_post_selectivity(
+    provider: Arc<CudaKernelProvider>,
+    memory: &Arc<GpuMemoryManager>,
+    config: RuntimeConfig,
+    source: &str,
+    inputs: &BTreeMap<&str, Vec<(u32, u32)>>,
+    head_pred: &str,
+    synth_body: RirNode,
+) -> Executor {
+    let mut compiler = Compiler::new();
+    let mut plan = compiler.compile(source).expect("compile");
+    // Replace the rule body for the matching head predicate.
+    let mut replaced = false;
+    for rules in plan.rules_by_scc.iter_mut() {
+        for rule in rules.iter_mut() {
+            if rule.head == head_pred {
+                rule.body = synth_body.clone();
+                replaced = true;
+            }
+        }
+    }
+    assert!(replaced, "no rule with head {head_pred} found");
+    // Re-promote with the W2.2 extension. The hand-built
+    // body's alt shape goes through the variable-graph
+    // promoter and becomes a canonical MultiWayJoin.
+    xlog_logic::promote::promote_multiway(&mut plan, compiler.rel_ids());
+    let mut executor = Executor::new_with_config(provider, config);
+    for (name, rel_id) in compiler.rel_ids() {
+        executor.register_relation(*rel_id, name);
+    }
+    for (name, rows) in inputs {
+        let buf = upload_binary_u32(memory, rows);
+        executor.put_relation(name, buf);
+    }
+    let _ = executor.execute_plan(&plan).expect("execute_plan");
+    executor
+}
+
+#[test]
+fn selectivity_pass_synthesized_x_shared_triangle_dispatches_wcoj() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let inputs = triangle_inputs();
+
+    // Reference: canonical body, gate off → binary-join answer.
+    let exec_off = run_program(
+        Arc::clone(&fix.provider),
+        &fix.memory,
+        RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(false)),
+        STABLE_TRIANGLE,
+        &inputs,
+        None,
+    );
+    let reference_rows = download_triples(exec_off.store().get("tri").expect("tri"));
+    assert!(
+        !reference_rows.is_empty(),
+        "binary-join reference should produce ≥ 1 tri row"
+    );
+
+    // Resolve RelIds via a throwaway compile so we can build
+    // the alt-shape body using the actual RelIds the executor
+    // will see.
+    let rel_ids = {
+        let mut c = Compiler::new();
+        c.compile(STABLE_TRIANGLE).expect("compile");
+        c.rel_ids().clone()
+    };
+    let e1 = rel_ids.get("e1").copied().expect("e1");
+    let e2 = rel_ids.get("e2").copied().expect("e2");
+    let e3 = rel_ids.get("e3").copied().expect("e3");
+
+    let synth_body = synth_x_shared_triangle_body(e1, e2, e3);
+    let exec_on = run_synth_post_selectivity(
+        Arc::clone(&fix.provider),
+        &fix.memory,
+        RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(true)),
+        STABLE_TRIANGLE,
+        &inputs,
+        "tri",
+        synth_body,
+    );
+    assert!(
+        exec_on.wcoj_triangle_dispatch_count() >= 1,
+        "force-WCOJ on synthesized X-shared triangle body must dispatch; \
+         got counter {}",
+        exec_on.wcoj_triangle_dispatch_count()
+    );
+    let dispatched_rows = download_triples(exec_on.store().get("tri").expect("tri"));
+    assert_eq!(
+        dispatched_rows, reference_rows,
+        "WCOJ output on X-shared (non-default) triangle must equal binary-join reference"
+    );
+}
+
+#[test]
+fn selectivity_pass_synthesized_alt_grouping_4cycle_dispatches_wcoj() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let inputs = cycle4_inputs();
+
+    let exec_off = run_program(
+        Arc::clone(&fix.provider),
+        &fix.memory,
+        RuntimeConfig::default().with_wcoj_4cycle_dispatch(Some(false)),
+        STABLE_4CYCLE,
+        &inputs,
+        None,
+    );
+    let reference_rows = download_quads(exec_off.store().get("cyc").expect("cyc"));
+    assert!(
+        !reference_rows.is_empty(),
+        "binary-join reference should produce ≥ 1 cyc row"
+    );
+
+    let rel_ids = {
+        let mut c = Compiler::new();
+        c.compile(STABLE_4CYCLE).expect("compile");
+        c.rel_ids().clone()
+    };
+    let e1 = rel_ids.get("e1").copied().expect("e1");
+    let e2 = rel_ids.get("e2").copied().expect("e2");
+    let e3 = rel_ids.get("e3").copied().expect("e3");
+    let e4 = rel_ids.get("e4").copied().expect("e4");
+
+    let synth_body = synth_alt_grouping_4cycle_body(e1, e2, e3, e4);
+    let exec_on = run_synth_post_selectivity(
+        Arc::clone(&fix.provider),
+        &fix.memory,
+        RuntimeConfig::default().with_wcoj_4cycle_dispatch(Some(true)),
+        STABLE_4CYCLE,
+        &inputs,
+        "cyc",
+        synth_body,
+    );
+    assert!(
+        exec_on.wcoj_4cycle_dispatch_count() >= 1,
+        "force-WCOJ on synthesized Alt-grouping 4-cycle body must dispatch; \
+         got counter {}",
+        exec_on.wcoj_4cycle_dispatch_count()
+    );
+    let dispatched_rows = download_quads(exec_on.store().get("cyc").expect("cyc"));
+    assert_eq!(
+        dispatched_rows, reference_rows,
+        "WCOJ output on Alt-grouping (non-default) 4-cycle must equal binary-join reference"
     );
 }

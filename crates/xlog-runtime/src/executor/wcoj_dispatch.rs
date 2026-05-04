@@ -325,14 +325,27 @@ fn slot_vars_match_canonical_triangle(slot_vars: &[Vec<Option<u32>>]) -> bool {
     matches!((s2[0], s2[1]), (Some(a2), Some(c2)) if a2 == a && c2 == c)
 }
 
-/// Confirm `output_columns` is the certified `(X, Y, Z)` emit
-/// order. The GPU kernel writes triples in this order; a rotated
-/// or computed projection would silently produce wrong results.
+/// Confirm `output_columns` is one of the valid head-extraction
+/// layouts. The GPU kernel writes triples in canonical
+/// `(X, Y, Z)` order; the project columns describe the
+/// binary-join-intermediate layout the head extracts from.
+///
+/// W2.2 — accepted layouts:
+///   * `[Column(0), Column(1), Column(3)]` — Y-shared /
+///     X-shared inner pair (binary intermediate cols
+///     [X, Y, Y, Z, X, Z] / [X, Y, X, Z, Y, Z]).
+///   * `[Column(0), Column(2), Column(3)]` — Z-shared inner
+///     pair (binary intermediate cols [X, Z, Y, Z, X, Y]).
 fn output_columns_match_canonical_triangle(cols: &[ProjectExpr]) -> bool {
-    cols.len() == 3
-        && matches!(cols[0], ProjectExpr::Column(0))
-        && matches!(cols[1], ProjectExpr::Column(1))
-        && matches!(cols[2], ProjectExpr::Column(3))
+    if cols.len() != 3 {
+        return false;
+    }
+    let cols_pattern = (
+        matches!(cols[0], ProjectExpr::Column(0)),
+        matches!(cols[1], ProjectExpr::Column(1)) || matches!(cols[1], ProjectExpr::Column(2)),
+        matches!(cols[2], ProjectExpr::Column(3)),
+    );
+    cols_pattern == (true, true, true)
 }
 
 // -----------------------------------------------------------------
@@ -421,12 +434,23 @@ fn slot_vars_match_canonical_4cycle(slot_vars: &[Vec<Option<u32>>]) -> bool {
 
 /// Confirm `output_columns` is the certified `(W, X, Y, Z)` emit
 /// order. The GPU kernel writes quads in this order.
+/// W2.2 — 4-cycle accepted output_column layouts:
+///   * `[Column(0), Column(1), Column(3), Column(5)]` —
+///     Default grouping `(WX⋈XY) + (YZ⋈ZW)`.
+///   * `[Column(5), Column(0), Column(1), Column(3)]` — Alt
+///     grouping `(XY⋈YZ) + (ZW⋈WX)` (binary intermediate
+///     col 5 = W from inner-right; (W, X, Y, Z) extracts
+///     from cols [5, 0, 1, 3]).
 fn output_columns_match_canonical_4cycle(cols: &[ProjectExpr]) -> bool {
-    cols.len() == 4
-        && matches!(cols[0], ProjectExpr::Column(0))
-        && matches!(cols[1], ProjectExpr::Column(1))
-        && matches!(cols[2], ProjectExpr::Column(3))
-        && matches!(cols[3], ProjectExpr::Column(5))
+    if cols.len() != 4 {
+        return false;
+    }
+    let exact = |idx: usize, want: usize| matches!(cols[idx], ProjectExpr::Column(c) if c == want);
+    // Default layout.
+    let default_layout = exact(0, 0) && exact(1, 1) && exact(2, 3) && exact(3, 5);
+    // Alt layout.
+    let alt_layout = exact(0, 5) && exact(1, 0) && exact(2, 1) && exact(3, 3);
+    default_layout || alt_layout
 }
 
 /// Extract the `RelId` from a leaf `Scan` node, or `None` for

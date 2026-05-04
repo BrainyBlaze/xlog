@@ -2166,6 +2166,230 @@ mod selectivity_pass_tests {
         // the three) or the body stays unchanged. Both are OK.
         let _ = inspect_triangle_inner_pair(&plan);
     }
+
+    // ---------------------------------------------------------
+    // W2.2 — 4-cycle compile-time reordering tests
+    // ---------------------------------------------------------
+
+    /// Build a hand-crafted canonical lowered 4-cycle plan
+    /// with four Scans at RelId(1), RelId(2), RelId(3), RelId(4)
+    /// for (e_wx, e_xy, e_yz, e_zw). Bypasses the optimizer.
+    /// Default canonical bushy shape: inner-left
+    /// `(e_wx ⋈ e_xy)` on X, inner-right `(e_yz ⋈ e_zw)` on Z,
+    /// outer keys `[0, 3] / [3, 0]`, project `[0, 1, 3, 5]`.
+    fn synth_4cycle_plan() -> ExecutionPlan {
+        let inner_left = RirNode::Join {
+            left: Box::new(RirNode::Scan { rel: RelId(1) }),
+            right: Box::new(RirNode::Scan { rel: RelId(2) }),
+            left_keys: vec![1],
+            right_keys: vec![0],
+            join_type: JoinType::Inner,
+        };
+        let inner_right = RirNode::Join {
+            left: Box::new(RirNode::Scan { rel: RelId(3) }),
+            right: Box::new(RirNode::Scan { rel: RelId(4) }),
+            left_keys: vec![1],
+            right_keys: vec![0],
+            join_type: JoinType::Inner,
+        };
+        let outer = RirNode::Join {
+            left: Box::new(inner_left),
+            right: Box::new(inner_right),
+            left_keys: vec![0, 3],
+            right_keys: vec![3, 0],
+            join_type: JoinType::Inner,
+        };
+        let body = RirNode::Project {
+            input: Box::new(outer),
+            columns: vec![
+                ProjectExpr::Column(0),
+                ProjectExpr::Column(1),
+                ProjectExpr::Column(3),
+                ProjectExpr::Column(5),
+            ],
+        };
+        let mut builder = PlanBuilder::new();
+        builder.add_scc(Scc {
+            id: 0,
+            predicates: vec!["cyc".to_string()],
+            is_recursive: false,
+        });
+        builder.add_rule(
+            0,
+            CompiledRule {
+                head: "cyc".to_string(),
+                body,
+                meta: Default::default(),
+            },
+        );
+        builder.build()
+    }
+
+    fn seed_4cycle_stats(c1: u64, c2: u64, c3: u64, c4: u64) -> StatsManager {
+        let mut stats = StatsManager::new();
+        for (rid, card) in [
+            (RelId(1), c1),
+            (RelId(2), c2),
+            (RelId(3), c3),
+            (RelId(4), c4),
+        ] {
+            stats.register_relation(rid);
+            stats.update_cardinality(rid, card);
+        }
+        stats
+    }
+
+    /// Recover the 4-cycle inner-grouping signature: `(left_left,
+    /// left_right, right_left, right_right)` Scan RelIds. Used
+    /// to identify which grouping the rewriter chose.
+    fn inspect_4cycle_grouping(
+        plan: &xlog_ir::ExecutionPlan,
+    ) -> Option<(RelId, RelId, RelId, RelId)> {
+        let body = &plan.rules_by_scc.iter().flatten().next()?.body;
+        let body = match body {
+            xlog_ir::RirNode::MultiWayJoin { fallback, .. } => fallback.as_ref(),
+            other => other,
+        };
+        let xlog_ir::RirNode::Project { input, .. } = body else {
+            return None;
+        };
+        let xlog_ir::RirNode::Join { left, right, .. } = input.as_ref() else {
+            return None;
+        };
+        let xlog_ir::RirNode::Join {
+            left: ll,
+            right: lr,
+            ..
+        } = left.as_ref()
+        else {
+            return None;
+        };
+        let xlog_ir::RirNode::Join {
+            left: rl,
+            right: rr,
+            ..
+        } = right.as_ref()
+        else {
+            return None;
+        };
+        let xlog_ir::RirNode::Scan { rel: r_ll } = ll.as_ref() else {
+            return None;
+        };
+        let xlog_ir::RirNode::Scan { rel: r_lr } = lr.as_ref() else {
+            return None;
+        };
+        let xlog_ir::RirNode::Scan { rel: r_rl } = rl.as_ref() else {
+            return None;
+        };
+        let xlog_ir::RirNode::Scan { rel: r_rr } = rr.as_ref() else {
+            return None;
+        };
+        Some((*r_ll, *r_lr, *r_rl, *r_rr))
+    }
+
+    /// W2.2 — 4-cycle: cards favor Default grouping
+    /// `(e_wx⋈e_xy on X) + (e_yz⋈e_zw on Z)`. Default cost is
+    /// `est(WX⋈XY)+est(YZ⋈ZW) = 0.1*c1*c2 + 0.1*c3*c4`.
+    /// Alt cost is `0.1*c2*c3 + 0.1*c4*c1`. Default smaller
+    /// when `c1*c2 + c3*c4 < c2*c3 + c4*c1`. With
+    /// (c1=10, c2=10, c3=100_000, c4=100_000):
+    ///   default = 100 + 10^10 ≈ 10^10.
+    ///   alt = 10^6 + 10^6 ≈ 2*10^6.
+    /// → alt is smaller, so this fixture actually favors Alt.
+    /// Use (c1=10, c2=10, c3=10, c4=10_000_000) instead:
+    ///   default = 100 + 10^8 = 10^8.
+    ///   alt = 100 + 10^8 = 10^8 (same).
+    /// Need uneven c4 vs others: (c1=10, c2=10, c3=10_000_000, c4=10):
+    ///   default = 100 + 10^8 = 10^8.
+    ///   alt = 10^8 + 100 = 10^8 (same).
+    /// Default favored when c1*c2 << c2*c3 AND c3*c4 << c4*c1.
+    /// I.e., c1 small and c4 small relative to c2 and c3.
+    /// (c1=10, c2=10_000, c3=10_000, c4=10):
+    ///   default = 0.1*100_000 + 0.1*100_000 = 20_000.
+    ///   alt = 0.1*100_000_000 + 0.1*100 = 10_000_010.
+    /// → Default smaller. ✓
+    #[test]
+    fn selectivity_pass_4cycle_picks_default_grouping_when_corners_smallest() {
+        let mut plan = synth_4cycle_plan();
+        let stats = seed_4cycle_stats(10, 10_000, 10_000, 10);
+        selectivity_pass::run(&mut plan, &stats, &std::collections::HashMap::new());
+        let (ll, lr, rl, rr) = inspect_4cycle_grouping(&plan).expect("grouping");
+        // Default: (e_wx, e_xy, e_yz, e_zw) = (RelId(1..4)).
+        assert_eq!(
+            (ll, lr, rl, rr),
+            (RelId(1), RelId(2), RelId(3), RelId(4)),
+            "expected Default grouping"
+        );
+    }
+
+    /// W2.2 — 4-cycle: cards favor Alt grouping
+    /// `(e_xy⋈e_yz on Y) + (e_zw⋈e_wx on W)`. Alt smaller when
+    /// `c2*c3 + c4*c1 < c1*c2 + c3*c4`. Use
+    /// (c1=10_000, c2=10, c3=10, c4=10_000):
+    ///   default = 0.1*100_000 + 0.1*100_000 = 20_000.
+    ///   alt = 0.1*100 + 0.1*10^8 = 10_000_010.
+    /// → Default still wins. Need c1*c2 LARGE and c3*c4 LARGE
+    /// while c2*c3 SMALL and c4*c1 SMALL. Try
+    /// (c1=10_000, c2=10_000, c3=10, c4=10):
+    ///   default = 0.1*10^8 + 0.1*100 = 10_000_010.
+    ///   alt = 0.1*100_000 + 0.1*100_000 = 20_000.
+    /// → Alt smaller. ✓
+    #[test]
+    fn selectivity_pass_4cycle_picks_alt_grouping_when_diagonals_smallest() {
+        let mut plan = synth_4cycle_plan();
+        let stats = seed_4cycle_stats(10_000, 10_000, 10, 10);
+        selectivity_pass::run(&mut plan, &stats, &std::collections::HashMap::new());
+        let (ll, lr, rl, rr) = inspect_4cycle_grouping(&plan).expect("grouping");
+        // Alt: (e_xy, e_yz, e_zw, e_wx) = (RelId(2), RelId(3), RelId(4), RelId(1)).
+        assert_eq!(
+            (ll, lr, rl, rr),
+            (RelId(2), RelId(3), RelId(4), RelId(1)),
+            "expected Alt grouping"
+        );
+    }
+
+    /// W2.2 — same plan, two stats snapshots → two different
+    /// 4-cycle groupings. Pins "stats drive the choice" for
+    /// 4-cycle.
+    #[test]
+    fn selectivity_pass_4cycle_two_snapshots_produce_different_groupings() {
+        let mut plan_a = synth_4cycle_plan();
+        let stats_a = seed_4cycle_stats(10, 10_000, 10_000, 10); // Default.
+        selectivity_pass::run(&mut plan_a, &stats_a, &std::collections::HashMap::new());
+        let g_a = inspect_4cycle_grouping(&plan_a).expect("grouping a");
+
+        let mut plan_b = synth_4cycle_plan();
+        let stats_b = seed_4cycle_stats(10_000, 10_000, 10, 10); // Alt.
+        selectivity_pass::run(&mut plan_b, &stats_b, &std::collections::HashMap::new());
+        let g_b = inspect_4cycle_grouping(&plan_b).expect("grouping b");
+
+        assert_ne!(
+            g_a, g_b,
+            "two different stats snapshots must produce different 4-cycle groupings; \
+             got A = {:?}, B = {:?}",
+            g_a, g_b
+        );
+    }
+
+    /// W2.2 — 4-cycle missing-stats safety floor: any unseeded
+    /// relation → body unchanged.
+    #[test]
+    fn selectivity_pass_4cycle_skips_when_card_missing() {
+        let mut plan = synth_4cycle_plan();
+        // Only seed 3 of 4.
+        let mut stats = StatsManager::new();
+        for rid in [RelId(1), RelId(2), RelId(3)] {
+            stats.register_relation(rid);
+            stats.update_cardinality(rid, 100);
+        }
+        let before = format!("{:?}", plan.rules_by_scc[0][0].body);
+        selectivity_pass::run(&mut plan, &stats, &std::collections::HashMap::new());
+        let after = format!("{:?}", plan.rules_by_scc[0][0].body);
+        assert_eq!(
+            before, after,
+            "missing-stats safety floor must leave body unchanged"
+        );
+    }
 }
 
 #[cfg(test)]
