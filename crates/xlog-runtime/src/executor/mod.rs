@@ -124,10 +124,15 @@ pub struct Executor {
         std::sync::Mutex<Option<wcoj_phase_timing::WcojDispatchPhaseTiming>>,
     /// W2.3: per-iteration recursive-SCC stats trace, populated
     /// by `execute_recursive_scc` after each Phase 2 (delta) and
-    /// Phase 4 (full) cardinality update site. Test-only; field
-    /// + populating call sites are `#[cfg(test)]`-gated, so
-    /// production builds carry zero overhead.
-    #[cfg(test)]
+    /// Phase 4 (full) cardinality update site. Field + types +
+    /// accessor + populating call sites are gated on the
+    /// `recursive-stats-trace` Cargo feature (default OFF) so
+    /// production builds carry zero trace overhead — no field,
+    /// no populating call site, no symbol. The W2.3 acceptance
+    /// test target declares this feature in its
+    /// `required-features`, so it is only built when the
+    /// feature is enabled.
+    #[cfg(feature = "recursive-stats-trace")]
     pub(super) last_recursive_stats_trace: RecursiveStatsTrace,
 }
 
@@ -139,8 +144,9 @@ pub struct Executor {
 /// Used by Part A + Part B tests to assert per-iteration
 /// cardinality evolution + binary-join estimate evolution
 /// without intrusive instrumentation.
-#[cfg(test)]
+#[cfg(feature = "recursive-stats-trace")]
 #[derive(Debug, Default, Clone)]
+#[allow(missing_docs)]
 pub struct RecursiveStatsTrace {
     pub entries: Vec<RecursiveStatsTraceEntry>,
 }
@@ -153,8 +159,9 @@ pub struct RecursiveStatsTrace {
 /// A's strict `>` assertions on `full_rows` only see Phase 4
 /// snapshots (full_rel actually advanced) and Part A's
 /// delta-evolves assertions only see Phase 2 snapshots.
-#[cfg(test)]
+#[cfg(feature = "recursive-stats-trace")]
 #[derive(Debug, Clone)]
+#[allow(missing_docs)]
 pub struct RecursiveStatsTraceEntry {
     pub iteration: usize,
     pub pred: String,
@@ -171,8 +178,9 @@ pub struct RecursiveStatsTraceEntry {
     pub binary_est_for_variant: Option<u64>,
 }
 
-#[cfg(test)]
+#[cfg(feature = "recursive-stats-trace")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(missing_docs)]
 pub enum RecursiveStatsPhase {
     /// Seed pass — full_rel + delta_rel both updated; trace
     /// entry contains both row counts. iteration == 0.
@@ -217,15 +225,16 @@ impl Executor {
             wcoj_dispatch_stream: OnceLock::new(),
             #[cfg(feature = "wcoj-phase-timing")]
             last_wcoj_phase_timing: std::sync::Mutex::new(None),
-            #[cfg(test)]
+            #[cfg(feature = "recursive-stats-trace")]
             last_recursive_stats_trace: RecursiveStatsTrace::default(),
         }
     }
 
     /// W2.3 Part A + Part B test seam — return the most recent
     /// recursive-SCC stats trace populated by
-    /// `execute_recursive_scc`. Test-only.
-    #[cfg(test)]
+    /// `execute_recursive_scc`. Gated on the
+    /// `recursive-stats-trace` Cargo feature; default OFF.
+    #[cfg(feature = "recursive-stats-trace")]
     pub fn last_recursive_stats_trace(&self) -> &RecursiveStatsTrace {
         &self.last_recursive_stats_trace
     }

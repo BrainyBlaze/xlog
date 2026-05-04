@@ -19,6 +19,11 @@ xlog-stats.workspace = true
 
 [dev-dependencies]
 bytemuck = "1.14"
+# W2.3 acceptance tests in `tests/test_w23_*` need the
+# `Compiler` entry point. xlog-logic does NOT depend on
+# xlog-runtime (verified via grep), so this dev-dep
+# introduces no cycle.
+xlog-logic.workspace = true
 
 [features]
 default = []
@@ -27,3 +32,22 @@ default = []
 # Forwards to xlog-cuda's `wcoj-phase-timing` so the events
 # inside the provider are recorded too. Off in production.
 wcoj-phase-timing = ["xlog-cuda/wcoj-phase-timing"]
+# W2.3: per-iteration recursive-SCC stats trace seam. Gates
+# the trace types, the Executor field, the populating call
+# sites in `execute_recursive_scc`, and the accessor. Default
+# OFF — production builds carry zero trace overhead (no
+# field, no work, no symbol). The W2.3 acceptance test
+# `tests/test_w23_recursive_stats.rs` declares this feature
+# in its `required-features`, so it is only compiled when
+# the feature is enabled (e.g., `cargo test --features
+# xlog-runtime/recursive-stats-trace` or `--all-features`).
+recursive-stats-trace = []
+
+# W2.3 acceptance gate test target — only compiled when the
+# `recursive-stats-trace` feature is enabled. Workspace
+# command to run W2.3 tests:
+#   cargo test --workspace --features xlog-runtime/recursive-stats-trace
+[[test]]
+name = "test_w23_recursive_stats"
+path = "tests/test_w23_recursive_stats.rs"
+required-features = ["recursive-stats-trace"]

@@ -228,8 +228,9 @@ impl Executor {
     /// 4. Repeat until no changes (fixpoint reached)
     pub fn execute_recursive_scc(&mut self, rules: &[xlog_ir::CompiledRule]) -> Result<()> {
         // W2.3: reset the per-iteration stats trace at SCC entry so
-        // tests see a fresh trace per invocation. Test-only.
-        #[cfg(test)]
+        // tests see a fresh trace per invocation. Gated on the
+        // `recursive-stats-trace` feature; default OFF.
+        #[cfg(feature = "recursive-stats-trace")]
         {
             self.last_recursive_stats_trace.entries.clear();
         }
@@ -400,10 +401,11 @@ impl Executor {
             }
             self.stats.update_cardinality(delta_rel, delta_initial_rows);
 
-            // W2.3 trace seam — test-only.
-            #[cfg(test)]
-            self.last_recursive_stats_trace.entries.push(
-                super::RecursiveStatsTraceEntry {
+            // W2.3 trace seam — gated on `recursive-stats-trace`.
+            #[cfg(feature = "recursive-stats-trace")]
+            self.last_recursive_stats_trace
+                .entries
+                .push(super::RecursiveStatsTraceEntry {
                     iteration: 0,
                     pred: pred.clone(),
                     full_rel: full_rel_opt.unwrap_or(RelId(u32::MAX)),
@@ -412,8 +414,7 @@ impl Executor {
                     delta_rows: delta_initial_rows,
                     phase: super::RecursiveStatsPhase::Seed,
                     binary_est_for_variant: None,
-                },
-            );
+                });
         }
 
         // Step 2: Iterate until no new tuples are produced.
@@ -540,8 +541,9 @@ impl Executor {
                     .ok_or_else(|| XlogError::Execution(format!("Missing relation: {}", pred)))?;
                 // W2.3 step 5: capture the pre-Phase-4 full row count
                 // for the trace's full_rows field at this Phase 2 site.
-                // This is the cost model's currently-visible full card
-                // (Phase 4's merge hasn't run yet this iteration).
+                // Gated on `recursive-stats-trace` so production builds
+                // don't compute it.
+                #[cfg(feature = "recursive-stats-trace")]
                 let pre_phase4_full_rows = self.buffer_row_count(full)? as u64;
 
                 let delta_raw = delta_new_raw_by_head.remove(pred);
@@ -575,7 +577,10 @@ impl Executor {
                     delta_tracker.mark_changed();
                 }
                 // Pre-resolve rel_id lookups before the &mut self
-                // store_put + stats update below.
+                // store_put + stats update below. `full_rel_opt` is
+                // only used by the trace under the
+                // `recursive-stats-trace` feature.
+                #[cfg(feature = "recursive-stats-trace")]
                 let full_rel_opt = self.name_to_rel_id(pred);
                 let delta_rel = delta_tracker.delta_rel_id(pred)?;
                 self.store_put(&delta_name, delta_new);
@@ -585,15 +590,15 @@ impl Executor {
                 // changed yet this iteration; Phase 4 owns that).
                 self.stats.update_cardinality(delta_rel, delta_new_rows);
 
-                // W2.3 trace seam — test-only. binary_est_for_variant
-                // captures the cost model's first-binary-hop estimate
-                // for the slice-4 linear-recursive fixtures
-                // (`pred == "e1"` rewrites Scan(e1) → Scan(delta_e1);
-                // first hop is `delta_e1.col1 ⋈ e2.col0`). Populated
-                // inline because delta_rel is unregistered at fixpoint
-                // exit (recursive.rs cleanup), so the test cannot
-                // recompute this value after `execute_plan` returns.
-                #[cfg(test)]
+                // W2.3 trace seam — gated on `recursive-stats-trace`.
+                // binary_est_for_variant captures the cost model's
+                // first-binary-hop estimate for the slice-4
+                // linear-recursive fixtures (`pred == "e1"` rewrites
+                // Scan(e1) → Scan(delta_e1); first hop is
+                // `delta_e1.col1 ⋈ e2.col0`). Populated inline because
+                // delta_rel is unregistered at fixpoint exit, so the
+                // test cannot recompute after `execute_plan` returns.
+                #[cfg(feature = "recursive-stats-trace")]
                 let binary_est_for_variant: Option<u64> = if pred == "e1" {
                     self.name_to_rel_id("e2").map(|e2_rel| {
                         self.stats
@@ -602,9 +607,10 @@ impl Executor {
                 } else {
                     None
                 };
-                #[cfg(test)]
-                self.last_recursive_stats_trace.entries.push(
-                    super::RecursiveStatsTraceEntry {
+                #[cfg(feature = "recursive-stats-trace")]
+                self.last_recursive_stats_trace
+                    .entries
+                    .push(super::RecursiveStatsTraceEntry {
                         iteration: iteration_count,
                         pred: pred.clone(),
                         full_rel: full_rel_opt.unwrap_or(RelId(u32::MAX)),
@@ -613,8 +619,7 @@ impl Executor {
                         delta_rows: delta_new_rows,
                         phase: super::RecursiveStatsPhase::Phase2Delta,
                         binary_est_for_variant,
-                    },
-                );
+                    });
             }
 
             // Fixpoint reached if no deltas produced.
@@ -677,11 +682,15 @@ impl Executor {
                     deduped
                 };
                 // W2.3 step 6 — Phase 4: capture full_new's row count
-                // BEFORE the store_put move; pre-resolve rel_id
-                // lookups before the &mut self stats borrow.
+                // BEFORE the store_put move; pre-resolve full_rel_opt
+                // before the &mut self stats borrow. delta_rows_phase4
+                // and delta_rel are only used by the trace under the
+                // `recursive-stats-trace` feature.
                 let full_new_rows_phase4 = self.buffer_row_count(&full_new)? as u64;
+                #[cfg(feature = "recursive-stats-trace")]
                 let delta_rows_phase4 = self.buffer_row_count(&delta)? as u64;
                 let full_rel_opt = self.name_to_rel_id(pred);
+                #[cfg(feature = "recursive-stats-trace")]
                 let delta_rel = delta_tracker.delta_rel_id(pred)?;
                 self.store_put(pred, full_new);
                 self.store_put(&dn, delta);
@@ -693,10 +702,11 @@ impl Executor {
                         .update_cardinality(full_rel, full_new_rows_phase4);
                 }
 
-                // W2.3 trace seam — test-only.
-                #[cfg(test)]
-                self.last_recursive_stats_trace.entries.push(
-                    super::RecursiveStatsTraceEntry {
+                // W2.3 trace seam — gated on `recursive-stats-trace`.
+                #[cfg(feature = "recursive-stats-trace")]
+                self.last_recursive_stats_trace
+                    .entries
+                    .push(super::RecursiveStatsTraceEntry {
                         iteration: iteration_count,
                         pred: pred.clone(),
                         full_rel: full_rel_opt.unwrap_or(RelId(u32::MAX)),
@@ -705,8 +715,7 @@ impl Executor {
                         delta_rows: delta_rows_phase4,
                         phase: super::RecursiveStatsPhase::Phase4Full,
                         binary_est_for_variant: None,
-                    },
-                );
+                    });
             }
         }
 
