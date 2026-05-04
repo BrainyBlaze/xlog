@@ -122,6 +122,69 @@ pub struct Executor {
     #[cfg(feature = "wcoj-phase-timing")]
     pub(super) last_wcoj_phase_timing:
         std::sync::Mutex<Option<wcoj_phase_timing::WcojDispatchPhaseTiming>>,
+    /// W2.3: per-iteration recursive-SCC stats trace, populated
+    /// by `execute_recursive_scc` after each Phase 2 (delta) and
+    /// Phase 4 (full) cardinality update site. Test-only; field
+    /// + populating call sites are `#[cfg(test)]`-gated, so
+    /// production builds carry zero overhead.
+    #[cfg(test)]
+    pub(super) last_recursive_stats_trace: RecursiveStatsTrace,
+}
+
+/// W2.3 step 7 acceptance gate — recursive-SCC stats trace.
+///
+/// Captures one entry per `(iteration, predicate)` boundary
+/// at which `execute_recursive_scc` updates `StatsManager` for
+/// a recursive predicate's `(full_rel, delta_rel)` RelIds.
+/// Used by Part A + Part B tests to assert per-iteration
+/// cardinality evolution + binary-join estimate evolution
+/// without intrusive instrumentation.
+#[cfg(test)]
+#[derive(Debug, Default, Clone)]
+pub struct RecursiveStatsTrace {
+    pub entries: Vec<RecursiveStatsTraceEntry>,
+}
+
+/// One entry per `(iteration, pred)` boundary.
+///
+/// `iteration == 0` is the seed pass; `iteration >= 1` is the
+/// fixpoint loop. `phase` distinguishes the Phase 2 delta-
+/// recording site from the Phase 4 full-recording site so Part
+/// A's strict `>` assertions on `full_rows` only see Phase 4
+/// snapshots (full_rel actually advanced) and Part A's
+/// delta-evolves assertions only see Phase 2 snapshots.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub struct RecursiveStatsTraceEntry {
+    pub iteration: usize,
+    pub pred: String,
+    pub full_rel: RelId,
+    pub delta_rel: RelId,
+    pub full_rows: u64,
+    pub delta_rows: u64,
+    pub phase: RecursiveStatsPhase,
+    /// Optional binary-join estimate the cost model would use
+    /// for the variant body's first binary hop. Triangle:
+    /// `(delta_e1_rel, e2_rel, &[1], &[0])`. 4-cycle: same
+    /// `(delta_e1_rel, e2_rel, &[1], &[0])` (slot 0 → slot 1
+    /// adjacency on the X variable).
+    pub binary_est_for_variant: Option<u64>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecursiveStatsPhase {
+    /// Seed pass — full_rel + delta_rel both updated; trace
+    /// entry contains both row counts. iteration == 0.
+    Seed,
+    /// Fixpoint loop Phase 2 — delta_rel updated; full_rel
+    /// holds the previous iteration's value. Trace entry
+    /// reports `full_rows` as the previous-iter card it sees.
+    Phase2Delta,
+    /// Fixpoint loop Phase 4 — full_rel updated post-merge.
+    /// Trace entry reports the new full row count + the
+    /// delta_rel value Phase 2 just recorded.
+    Phase4Full,
 }
 
 impl Executor {
@@ -154,7 +217,17 @@ impl Executor {
             wcoj_dispatch_stream: OnceLock::new(),
             #[cfg(feature = "wcoj-phase-timing")]
             last_wcoj_phase_timing: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            last_recursive_stats_trace: RecursiveStatsTrace::default(),
         }
+    }
+
+    /// W2.3 Part A + Part B test seam — return the most recent
+    /// recursive-SCC stats trace populated by
+    /// `execute_recursive_scc`. Test-only.
+    #[cfg(test)]
+    pub fn last_recursive_stats_trace(&self) -> &RecursiveStatsTrace {
+        &self.last_recursive_stats_trace
     }
 
     /// Take the most recent WCOJ triangle dispatch's per-phase
@@ -333,6 +406,17 @@ impl Executor {
         self.rel_names.insert(rel_id, name.to_string());
         self.name_to_rel.insert(name.to_string(), rel_id);
         self.stats.register_relation(rel_id);
+    }
+
+    /// W2.3: reverse-lookup a RelId by predicate name. Used by
+    /// `execute_recursive_scc` to resolve a recursive predicate's
+    /// full-rel RelId for `StatsManager::update_cardinality`
+    /// calls at iteration boundaries. Returns `None` for
+    /// unregistered names (defensive — production callers
+    /// register IDB heads before `execute_plan`; tests that
+    /// omit registration get a no-op stats update).
+    fn name_to_rel_id(&self, name: &str) -> Option<RelId> {
+        self.name_to_rel.get(name).copied()
     }
 
     /// Get the relation name for a RelId
