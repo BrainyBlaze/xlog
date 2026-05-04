@@ -296,6 +296,84 @@ impl CudaKernelProvider {
         self.dedup_full_row_recorded(input, launch_stream)
     }
 
+    /// W3.1 — generic full-row sort+dedup for relations of any
+    /// arity ≥ 2 in the 4-byte width-class (`U32`, `Symbol`,
+    /// mixable within the class).
+    ///
+    /// **Design (per W3.1 plan iteration 6, D1)**: this is a NEW
+    /// entry point. The existing arity-2
+    /// [`Self::wcoj_layout_u32_recorded`] is **unchanged** for
+    /// the triangle / 4-cycle / project-then-layout callers — it
+    /// retains its arity-2-specific fast-path branch. W3.1's
+    /// generic surface delegates straight to
+    /// [`Self::dedup_full_row_recorded`] for any arity ≥ 2.
+    ///
+    /// **Validation order** (`runtime → arity ≥ 2 → per-column
+    /// width-class → delegate`):
+    ///   1. Manager runtime-backed.
+    ///   2. `input.arity() >= 2`.
+    ///   3. Every column type ∈ `{U32, Symbol}` (4-byte
+    ///      width-class). Mixed `U32` + `Symbol` within one
+    ///      relation is permitted; `U64` is rejected — use
+    ///      [`Self::wcoj_layout_sort_u64_recorded`] instead.
+    ///   4. Delegate to `dedup_full_row_recorded(input, launch_stream)`.
+    ///
+    /// Stream resolution is owned by `dedup_full_row_recorded`
+    /// and is NOT in this entry point's validation list. The
+    /// `n == 0` short-circuit (returns
+    /// `create_empty_buffer(input.schema().clone())`) is also
+    /// owned downstream — single source of truth, no duplicated
+    /// empty-buffer semantics.
+    ///
+    /// **Composition**: `dedup_full_row_recorded` only — there
+    /// is no fast-path branch for arity ≥ 3 in W3.1 (the
+    /// existing arity-2 fast-path stays untouched and reachable
+    /// only via `wcoj_layout_u32_recorded`).
+    ///
+    /// # Errors
+    /// * `XlogError::Kernel` if the manager has no runtime
+    ///   (`with_runtime` is required).
+    /// * `XlogError::Kernel` if `input.arity() < 2`.
+    /// * `XlogError::Kernel` if any column is not `U32` /
+    ///   `Symbol`.
+    /// * Whatever `dedup_full_row_recorded` returns for
+    ///   stream-resolution / kernel-launch failures.
+    pub fn wcoj_layout_sort_u32_recorded(
+        &self,
+        input: &CudaBuffer,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        if self.memory().runtime().is_none() {
+            return Err(XlogError::Kernel(
+                "wcoj_layout_sort_u32_recorded requires a runtime-backed \
+                 GpuMemoryManager (constructed via with_runtime)"
+                    .to_string(),
+            ));
+        }
+        if input.arity() < 2 {
+            return Err(XlogError::Kernel(format!(
+                "wcoj_layout_sort_u32_recorded: input must have arity >= 2, got {}",
+                input.arity()
+            )));
+        }
+        for col_idx in 0..input.arity() {
+            let ty = input.schema.column_type(col_idx).ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "wcoj_layout_sort_u32_recorded: column {} type missing",
+                    col_idx
+                ))
+            })?;
+            if !matches!(ty, ScalarType::U32 | ScalarType::Symbol) {
+                return Err(XlogError::Kernel(format!(
+                    "wcoj_layout_sort_u32_recorded: column {} must be U32 or Symbol \
+                     (4-byte width-class), got {:?}",
+                    col_idx, ty
+                )));
+            }
+        }
+        self.dedup_full_row_recorded(input, launch_stream)
+    }
+
     /// Evaluate `tri(X, Y, Z) :- e_xy(X,Y), e_yz(Y,Z), e_xz(X,Z)`
     /// on already-sorted, already-deduped binary 4-byte-key
     /// relations. See module-level docs for the full contract.
@@ -1266,6 +1344,74 @@ impl CudaKernelProvider {
         // dedup_full_row_recorded internally invokes sort_recorded
         // (U64-aware after commit 1) and the bytewise mask kernel
         // (already width-generic via col_sizes upload).
+        self.dedup_full_row_recorded(input, launch_stream)
+    }
+
+    /// W3.1 — generic full-row sort+dedup for relations of any
+    /// arity ≥ 2 in the 8-byte width-class (`U64` only).
+    ///
+    /// **Design (per W3.1 plan iteration 6, D1)**: NEW entry
+    /// point. The existing arity-2
+    /// [`Self::wcoj_layout_u64_recorded`] is **unchanged** for
+    /// the existing 2-column callers — it retains its
+    /// arity-2-specific fast-path branch. W3.1's generic surface
+    /// delegates straight to [`Self::dedup_full_row_recorded`]
+    /// for any arity ≥ 2.
+    ///
+    /// Mirrors [`Self::wcoj_layout_sort_u32_recorded`]'s contract
+    /// at the 8-byte width-class — see that entry's doc for the
+    /// validation order, stream-resolution ownership, n==0
+    /// semantics, and "no fast-path for arity ≥ 3" lock.
+    ///
+    /// **Validation order** (`runtime → arity ≥ 2 → per-column
+    /// width-class → delegate`):
+    ///   1. Manager runtime-backed.
+    ///   2. `input.arity() >= 2`.
+    ///   3. Every column type = `U64`. `U32` / `Symbol` are
+    ///      rejected — use [`Self::wcoj_layout_sort_u32_recorded`]
+    ///      instead.
+    ///   4. Delegate to `dedup_full_row_recorded(input, launch_stream)`.
+    ///
+    /// # Errors
+    /// * `XlogError::Kernel` if the manager has no runtime
+    ///   (`with_runtime` is required).
+    /// * `XlogError::Kernel` if `input.arity() < 2`.
+    /// * `XlogError::Kernel` if any column is not `U64`.
+    /// * Whatever `dedup_full_row_recorded` returns for
+    ///   stream-resolution / kernel-launch failures.
+    pub fn wcoj_layout_sort_u64_recorded(
+        &self,
+        input: &CudaBuffer,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        if self.memory().runtime().is_none() {
+            return Err(XlogError::Kernel(
+                "wcoj_layout_sort_u64_recorded requires a runtime-backed \
+                 GpuMemoryManager (constructed via with_runtime)"
+                    .to_string(),
+            ));
+        }
+        if input.arity() < 2 {
+            return Err(XlogError::Kernel(format!(
+                "wcoj_layout_sort_u64_recorded: input must have arity >= 2, got {}",
+                input.arity()
+            )));
+        }
+        for col_idx in 0..input.arity() {
+            let ty = input.schema.column_type(col_idx).ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "wcoj_layout_sort_u64_recorded: column {} type missing",
+                    col_idx
+                ))
+            })?;
+            if !matches!(ty, ScalarType::U64) {
+                return Err(XlogError::Kernel(format!(
+                    "wcoj_layout_sort_u64_recorded: column {} must be U64 \
+                     (8-byte width-class), got {:?}",
+                    col_idx, ty
+                )));
+            }
+        }
         self.dedup_full_row_recorded(input, launch_stream)
     }
 
