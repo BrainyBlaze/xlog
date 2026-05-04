@@ -114,15 +114,24 @@ pub fn promote_multiway(
             if recursive_scan_count(&rule.body, &head_rel_set) > 1 {
                 continue;
             }
-            // Try triangle first, then 4-cycle. A body cannot match
-            // both (different atom counts), so order is a doc anchor,
-            // not a correctness gate. Future shapes append to this
-            // chain in their own slice.
-            if let Some(promoted) = try_promote_triangle(&rule.body, stats, config) {
+            // W2.6 robustness: the lowerer's bushy DP planner may
+            // emit a right-deep `Project(Join(Scan, Join(Scan,
+            // Scan)))` triangle for small-card inputs (snapshot-driven
+            // recompile flow) — semantically a triangle, but slice-1's
+            // canonical-shape matcher rejects it. `normalize_*_to_left_deep`
+            // detects those alternative-but-equivalent shapes and
+            // commutativity-rewrites them to the canonical left-deep
+            // form before matching. Idempotent on already-canonical
+            // bodies — left-deep input passes through unchanged.
+            let normalized_tri = normalize_triangle_to_left_deep(&rule.body);
+            let body_for_tri = normalized_tri.as_ref().unwrap_or(&rule.body);
+            if let Some(promoted) = try_promote_triangle(body_for_tri, stats, config) {
                 rule.body = promoted;
                 continue;
             }
-            if let Some(promoted) = try_promote_4cycle(&rule.body, stats, config) {
+            let normalized_4c = normalize_4cycle_to_bushy(&rule.body);
+            let body_for_4c = normalized_4c.as_ref().unwrap_or(&rule.body);
+            if let Some(promoted) = try_promote_4cycle(body_for_4c, stats, config) {
                 rule.body = promoted;
             }
         }
@@ -363,6 +372,214 @@ fn infer_triangle_semantics(
     }
 
     Some((rel_xy?, rel_yz?, rel_xz?))
+}
+
+/// W2.6: detect a right-deep triangle body
+/// `Project(Join(Scan(third), Join(Scan(inner_l), Scan(inner_r))))`
+/// and commutativity-rewrite it to the canonical left-deep
+/// form `Project(Join(Join(Scan(inner_l), Scan(inner_r)),
+/// Scan(third)))`. Returns `None` for any non-matching shape
+/// (left-deep / fully unknown / nested deeper) — caller falls
+/// back to the original body.
+///
+/// The rewrite preserves semantics under inner-join
+/// commutativity. Project columns must be remapped because
+/// the output column layout swaps:
+///   * Right-deep: `[third.0, third.1, inner_l.0, inner_l.1,
+///     inner_r.0, inner_r.1]`
+///   * Left-deep:  `[inner_l.0, inner_l.1, inner_r.0, inner_r.1,
+///     third.0, third.1]`
+///   * Remap formula: `new_k = (old_k + 4) % 6`.
+/// The outer Join's `(left_keys, right_keys)` swap correspondingly
+/// (the side they reference switches). Inner Join's keys are
+/// unchanged.
+fn normalize_triangle_to_left_deep(node: &RirNode) -> Option<RirNode> {
+    let RirNode::Project {
+        input: outer_input,
+        columns,
+    } = node
+    else {
+        return None;
+    };
+    let RirNode::Join {
+        left: outer_l,
+        right: outer_r,
+        left_keys: outer_lk,
+        right_keys: outer_rk,
+        join_type: outer_jt,
+    } = outer_input.as_ref()
+    else {
+        return None;
+    };
+    if !matches!(outer_jt, JoinType::Inner) {
+        return None;
+    }
+    // Right-deep triangle requires outer.left = Scan, outer.right = Join.
+    let RirNode::Scan { rel: _ } = outer_l.as_ref() else {
+        return None;
+    };
+    let RirNode::Join { .. } = outer_r.as_ref() else {
+        return None;
+    };
+    // Verify outer.right's structure (inner Join of two Scans) so
+    // we don't mistakenly rewrite non-triangle right-deep trees.
+    let RirNode::Join {
+        left: inner_l,
+        right: inner_r,
+        ..
+    } = outer_r.as_ref()
+    else {
+        return None;
+    };
+    if !matches!(inner_l.as_ref(), RirNode::Scan { .. })
+        || !matches!(inner_r.as_ref(), RirNode::Scan { .. })
+    {
+        return None;
+    }
+    // Swap: new outer.left = old outer.right (inner Join);
+    //       new outer.right = old outer.left (third Scan);
+    //       new outer.left_keys = old outer.right_keys;
+    //       new outer.right_keys = old outer.left_keys.
+    let new_outer = RirNode::Join {
+        left: outer_r.clone(),
+        right: outer_l.clone(),
+        left_keys: outer_rk.clone(),
+        right_keys: outer_lk.clone(),
+        join_type: JoinType::Inner,
+    };
+    // Remap project columns: (k + 4) % 6.
+    let new_columns: Vec<ProjectExpr> = columns
+        .iter()
+        .map(|expr| match expr {
+            ProjectExpr::Column(k) => ProjectExpr::Column((*k + 4) % 6),
+            other => other.clone(),
+        })
+        .collect();
+    Some(RirNode::Project {
+        input: Box::new(new_outer),
+        columns: new_columns,
+    })
+}
+
+/// W2.6: detect a fully right-deep 4-cycle body
+/// `Project(Join(Scan(R0), Join(Scan(R1), Join(Scan(R2), Scan(R3)))))`
+/// (the lowerer's bushy DP can pick this shape at small
+/// cardinalities) and rewrite to the canonical bushy form
+/// `Project(Join(Join(Scan(R0), Scan(R1)), Join(Scan(R2), Scan(R3))))`
+/// that the slice-2 4-cycle promoter matches.
+///
+/// The output column layout is preserved (both forms produce
+/// `[R0.0, R0.1, R1.0, R1.1, R2.0, R2.1, R3.0, R3.1]`), so
+/// project columns pass through unchanged.
+///
+/// Validation: only rewrites when the right-deep keys exactly
+/// match the canonical 4-cycle topology
+/// (rotation-only `[1]/[0]` on each inner Join + outer keys
+/// `[0,1]/[5,0]`). Other shapes return `None` — caller falls
+/// back to the original body (and pre-W2.6 behavior).
+fn normalize_4cycle_to_bushy(node: &RirNode) -> Option<RirNode> {
+    let RirNode::Project {
+        input: outer_input,
+        columns,
+    } = node
+    else {
+        return None;
+    };
+    let RirNode::Join {
+        left: outer_l,
+        right: outer_r,
+        left_keys: outer_lk,
+        right_keys: outer_rk,
+        join_type: outer_jt,
+    } = outer_input.as_ref()
+    else {
+        return None;
+    };
+    if !matches!(outer_jt, JoinType::Inner) {
+        return None;
+    }
+    // Right-deep canonical-cycle pattern: outer.left = Scan(R0);
+    // outer.right = Join(Scan(R1), Join(Scan(R2), Scan(R3))).
+    let RirNode::Scan { rel: r0 } = outer_l.as_ref() else {
+        return None;
+    };
+    let RirNode::Join {
+        left: middle_l,
+        right: middle_r,
+        left_keys: middle_lk,
+        right_keys: middle_rk,
+        join_type: middle_jt,
+    } = outer_r.as_ref()
+    else {
+        return None;
+    };
+    if !matches!(middle_jt, JoinType::Inner) {
+        return None;
+    }
+    let RirNode::Scan { rel: r1 } = middle_l.as_ref() else {
+        return None;
+    };
+    let RirNode::Join {
+        left: deep_l,
+        right: deep_r,
+        left_keys: deep_lk,
+        right_keys: deep_rk,
+        join_type: deep_jt,
+    } = middle_r.as_ref()
+    else {
+        return None;
+    };
+    if !matches!(deep_jt, JoinType::Inner) {
+        return None;
+    }
+    let RirNode::Scan { rel: r2 } = deep_l.as_ref() else {
+        return None;
+    };
+    let RirNode::Scan { rel: r3 } = deep_r.as_ref() else {
+        return None;
+    };
+    // Validate canonical-cycle keys.
+    if outer_lk.as_slice() != [0, 1] || outer_rk.as_slice() != [5, 0] {
+        return None;
+    }
+    if middle_lk.as_slice() != [1] || middle_rk.as_slice() != [0] {
+        return None;
+    }
+    if deep_lk.as_slice() != [1] || deep_rk.as_slice() != [0] {
+        return None;
+    }
+    // Reconstruct bushy form. Inner pairs use the canonical
+    // (e1,e2) and (e3,e4) edge keys [1]/[0]. Outer connects the
+    // two subtrees on (e2,e3) [Y] and (e4,e1) [W] cycle edges:
+    //   left_subtree output: [R0.0, R0.1, R1.0, R1.1]
+    //   right_subtree output: [R2.0, R2.1, R3.0, R3.1]
+    //   left_keys [3, 0]: R1.1 (Y), R0.0 (W)
+    //   right_keys [0, 3]: R2.0 (Y), R3.1 (W)
+    let inner_left = RirNode::Join {
+        left: Box::new(RirNode::Scan { rel: *r0 }),
+        right: Box::new(RirNode::Scan { rel: *r1 }),
+        left_keys: vec![1],
+        right_keys: vec![0],
+        join_type: JoinType::Inner,
+    };
+    let inner_right = RirNode::Join {
+        left: Box::new(RirNode::Scan { rel: *r2 }),
+        right: Box::new(RirNode::Scan { rel: *r3 }),
+        left_keys: vec![1],
+        right_keys: vec![0],
+        join_type: JoinType::Inner,
+    };
+    let new_outer = RirNode::Join {
+        left: Box::new(inner_left),
+        right: Box::new(inner_right),
+        left_keys: vec![3, 0],
+        right_keys: vec![0, 3],
+        join_type: JoinType::Inner,
+    };
+    Some(RirNode::Project {
+        input: Box::new(new_outer),
+        columns: columns.clone(),
+    })
 }
 
 /// W2.2: recognize the canonical triangle in any valid

@@ -376,13 +376,14 @@ fn triangle_real_observed_selectivity_drives_heat_aware_leader_to_idx_2() {
         .expect("compile default");
 
     let inputs = tri_nonrec_inputs();
-    // Seed card=100 (matches W2.4 cert pattern — independent of
-    // EDB size; lowerer's bushy DP picks left-deep tree at this
-    // scale, allowing slice-1's promoter to match).
+    // Seed card=5 to match plan iteration 7 — actual EDB size.
+    // Slice-1 promoter's right-deep normalizer (W2.6) handles
+    // the lowerer's bushy DP choice of right-deep trees at this
+    // small scale.
     let mut seeded = BTreeMap::new();
-    seeded.insert("e1", 100u64);
-    seeded.insert("e2", 100u64);
-    seeded.insert("e3", 100u64);
+    seeded.insert("e1", 5u64);
+    seeded.insert("e2", 5u64);
+    seeded.insert("e3", 5u64);
     let mut executor = build_executor(
         Arc::clone(&fix.provider),
         &fix.memory,
@@ -401,10 +402,10 @@ fn triangle_real_observed_selectivity_drives_heat_aware_leader_to_idx_2() {
     );
 
     // Phase 2: snapshot pins equal-card invariant + EMA selectivity
-    // converged to ~0.240 on the canonical (rel_xy, rel_yz) pair.
-    // Math: input_rows = 100*100 = 10_000; output_rows = 1;
-    // observed_sel = 1e-4. EMA(0.7-old, 0.3-new) for 4 steps:
-    //   0.7^4*1.0 + 0.3*1e-4*(1+0.7+0.49+0.343) ≈ 0.2402.
+    // converged to ~0.270 on the canonical (rel_xy, rel_yz) pair.
+    // Math: input_rows = 5*5 = 25; output_rows = 1;
+    // observed_sel = 0.04. EMA(0.7-old, 0.3-new) for 4 steps
+    // converges to ~0.270.
     let snap = executor.stats_snapshot();
     let rel_xy = *compiler.rel_ids().get("e1").expect("e1 rel_id");
     let rel_yz = *compiler.rel_ids().get("e2").expect("e2 rel_id");
@@ -417,8 +418,8 @@ fn triangle_real_observed_selectivity_drives_heat_aware_leader_to_idx_2() {
             .map(|r| r.cardinality)
             .unwrap_or(0);
         assert_eq!(
-            card, 100,
-            "{} card must remain at seeded 100 (force-WCOJ-on bypasses execute_scan auto-update); got {}",
+            card, 5,
+            "{} card must remain at seeded 5 (force-WCOJ-on bypasses execute_scan auto-update); got {}",
             label, card
         );
     }
@@ -435,8 +436,8 @@ fn triangle_real_observed_selectivity_drives_heat_aware_leader_to_idx_2() {
     );
     let sel_xy_yz = entries[0].selectivity;
     assert!(
-        (0.20..=0.28).contains(&sel_xy_yz),
-        "EMA selectivity after 4 dispatches at card=100 must be in [0.20, 0.28]; got {}",
+        (0.25..=0.30).contains(&sel_xy_yz),
+        "EMA selectivity after 4 dispatches at card=5 must be in [0.25, 0.30]; got {}",
         sel_xy_yz
     );
 
@@ -556,9 +557,9 @@ fn triangle_real_observed_heat_drives_heat_aware_leader_to_idx_1() {
         .expect("compile heater");
     let inputs = tri_nonrec_inputs();
     let mut seeded = BTreeMap::new();
-    seeded.insert("e1", 100u64);
-    seeded.insert("e2", 100u64);
-    seeded.insert("e3", 100u64);
+    seeded.insert("e1", 5u64);
+    seeded.insert("e2", 5u64);
+    seeded.insert("e3", 5u64);
     let mut executor = build_executor(
         Arc::clone(&fix.provider),
         &fix.memory,
@@ -575,11 +576,10 @@ fn triangle_real_observed_heat_drives_heat_aware_leader_to_idx_1() {
     let rel_e2 = *compiler.rel_ids().get("e2").expect("e2 rel_id");
     let rel_e3 = *compiler.rel_ids().get("e3").expect("e3 rel_id");
 
-    // Refresh cards to 100 so the snapshot the recompile sees has
-    // card=100 for e1 (execute_scan auto-updates to actual buffer
-    // rows = 5). e2/e3 keep their seeded value since they're never
-    // scanned.
-    executor.stats_mut().update_cardinality(rel_e1, 100);
+    // Refresh e1's card back to 5 — execute_scan auto-updates to
+    // actual buffer rows (5) which already matches our seed; e2/e3
+    // keep their seeded value since they're never scanned.
+    executor.stats_mut().update_cardinality(rel_e1, 5);
 
     // Phase C: pin heat differential — e1 heated by 11 EMA steps
     // (1 - 0.9^11 ≈ 0.686), e2/e3 untouched at 0.
@@ -626,10 +626,10 @@ fn triangle_real_observed_heat_drives_heat_aware_leader_to_idx_1() {
     // Phase D: re-compile triangle-only under HeatAware + snapshot.
     // No selectivity records (heater-only warm-up). Penalty per
     // rel = 1 + 1 = 2. Heat factors: e1 = 1+4*0.686 = 3.744;
-    // e2/e3 = 1.0. Cards uniform 100.
-    //   score(e1) = 100 * 3.744 * 2 = 748.8
-    //   score(e2) = score(e3) = 100 * 1.0 * 2 = 200
-    // argmin = idx 1 (e2, first-hit ties). Ratio 200/748.8 ≈ 0.267
+    // e2/e3 = 1.0. Cards uniform 5.
+    //   score(e1) = 5 * 3.744 * 2 = 37.44
+    //   score(e2) = score(e3) = 5 * 1.0 * 2 = 10
+    // argmin = idx 1 (e2, first-hit ties). Ratio 10/37.44 ≈ 0.267
     // ≤ 0.5 → Some(1).
     let mut compiler_heat = Compiler::new();
     let cfg_heat = CompilerConfig {
@@ -697,6 +697,201 @@ fn triangle_real_observed_heat_drives_heat_aware_leader_to_idx_1() {
 }
 
 // ===============================================================
+// Part C.4 — Real heat drives leader; non-zero cold-baseline
+// ===============================================================
+//
+// Plan iteration 7 originally specified Phase A with combined
+// `dummy_e1 + tri` source so each rel got a baseline scan giving
+// `e2/e3.heat ≈ 0.1`. Implementing that would create a
+// `record_join_result` selectivity entry from the binary-join
+// `tri` rule (`node_dispatch.rs:343` calls record_join_result
+// after every hash join), perturbing the heat-only signal.
+//
+// The triple-dummy source `dummy_e1 + dummy_e2 + dummy_e3` (no
+// joins, three single-Scan rules) achieves the plan's intent —
+// non-zero baseline heat for every rel — without any
+// `record_join_result` side effect.
+
+const TRI_HEAT_TRIPLE_DUMMY_SRC: &str = r#"
+    pred e1(u32, u32). pred e2(u32, u32). pred e3(u32, u32).
+    pred dummy_e1(u32). pred dummy_e2(u32). pred dummy_e3(u32).
+    dummy_e1(X) :- e1(X, _).
+    dummy_e2(X) :- e2(X, _).
+    dummy_e3(X) :- e3(X, _).
+"#;
+
+#[test]
+fn triangle_real_observed_heat_with_baseline_drives_heat_aware_leader_to_idx_1() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    // Same Compiler instance across all phases preserves rel_id
+    // assignments for shared predicates.
+    let mut compiler = Compiler::new();
+    let cfg_default = CompilerConfig::default();
+
+    // Phase A (baseline): triple-dummy source, 1 execute_plan
+    // call → each rel scanned exactly once (one record_access
+    // per scan). e1.heat = e2.heat = e3.heat = 0.1.
+    let plan_baseline = compiler
+        .compile_with_config_and_stats_snapshot(TRI_HEAT_TRIPLE_DUMMY_SRC, &cfg_default, None)
+        .expect("compile baseline");
+    let inputs = tri_nonrec_inputs();
+    let mut seeded = BTreeMap::new();
+    seeded.insert("e1", 5u64);
+    seeded.insert("e2", 5u64);
+    seeded.insert("e3", 5u64);
+    let mut executor = build_executor(
+        Arc::clone(&fix.provider),
+        &fix.memory,
+        RuntimeConfig::default().with_wcoj_triangle_dispatch_disabled(Some(true)),
+        &compiler,
+        &inputs,
+        &seeded,
+    );
+    let _ = executor
+        .execute_plan(&plan_baseline)
+        .expect("execute baseline");
+
+    let rel_e1 = *compiler.rel_ids().get("e1").expect("e1 rel_id");
+    let rel_e2 = *compiler.rel_ids().get("e2").expect("e2 rel_id");
+    let rel_e3 = *compiler.rel_ids().get("e3").expect("e3 rel_id");
+
+    // Phase B (heater): dummy_e1 only, 11 calls. e1 heat
+    // advances from 0.1 to 1 - 0.9^12 ≈ 0.7176; e2 / e3 stay
+    // at 0.1.
+    let plan_heater = compiler
+        .compile_with_config_and_stats_snapshot(TRI_HEAT_HEATER_SRC, &cfg_default, None)
+        .expect("compile heater");
+    for _ in 0..11 {
+        let _ = executor.execute_plan(&plan_heater).expect("execute heater");
+    }
+
+    // execute_scan auto-updates cards to actual buffer rows (5)
+    // each call — already matches our card=5 seed for e1; e2 / e3
+    // were updated in Phase A and stay at 5.
+
+    // Phase C: pin heat differential — non-zero baseline.
+    let snap = executor.stats_snapshot();
+    let heat_e1 = snap
+        .relations
+        .iter()
+        .find(|r| r.rel_id == rel_e1)
+        .map(|r| r.heat)
+        .unwrap_or(0.0);
+    let heat_e2 = snap
+        .relations
+        .iter()
+        .find(|r| r.rel_id == rel_e2)
+        .map(|r| r.heat)
+        .unwrap_or(0.0);
+    let heat_e3 = snap
+        .relations
+        .iter()
+        .find(|r| r.rel_id == rel_e3)
+        .map(|r| r.heat)
+        .unwrap_or(0.0);
+    assert!(
+        heat_e1 >= 0.6,
+        "Phase A+B must drive e1 heat ≥ 0.6; got {}",
+        heat_e1
+    );
+    // e2/e3 picked up exactly one scan in Phase A → heat = 0.1.
+    // Band [0.05, 0.15] keeps the cert robust to ± single
+    // additional scan in case of optimizer quirks.
+    assert!(
+        (0.05..=0.15).contains(&heat_e2),
+        "e2 heat must reflect Phase-A baseline scan (≈ 0.1, band [0.05, 0.15]); got {}",
+        heat_e2
+    );
+    assert!(
+        (0.05..=0.15).contains(&heat_e3),
+        "e3 heat must reflect Phase-A baseline scan (≈ 0.1, band [0.05, 0.15]); got {}",
+        heat_e3
+    );
+    assert!(
+        snap.join_selectivities.is_empty(),
+        "triple-dummy + heater warm-up must not write any join_selectivities; got {:?}",
+        snap.join_selectivities
+    );
+
+    // Phase D: re-compile triangle-only under HeatAware + snapshot.
+    // Score (card=5):
+    //   factor(e1) = 1 + 4*0.7176 ≈ 3.870
+    //   factor(e2) = factor(e3) = 1 + 4*0.1 = 1.4
+    //   penalty per rel = 2 (no selectivity records)
+    //   score(e1) = 5 * 3.870 * 2 ≈ 38.70
+    //   score(e2) = score(e3) = 5 * 1.4 * 2 = 14
+    // argmin = idx 1 (e2, first-hit ties). Ratio 14/38.70 ≈ 0.362
+    // ≤ 0.5 → Some(1). The non-zero-baseline case the plan
+    // intended.
+    let mut compiler_heat = Compiler::new();
+    let cfg_heat = CompilerConfig {
+        wcoj_variable_ordering: WcojVarOrderingKind::HeatAware,
+        ..CompilerConfig::default()
+    };
+    let plan_heat = compiler_heat
+        .compile_with_config_and_stats_snapshot(TRI_NONREC_SRC, &cfg_heat, Some(&snap))
+        .expect("compile HeatAware");
+    let vo_heat = first_var_order(&plan_heat).expect("HeatAware must set var_order");
+    assert_eq!(
+        vo_heat.leader_idx, 1,
+        "HeatAware on heat-biased snapshot (non-zero cold baseline) must pick leader_idx = 1"
+    );
+
+    let mut compiler_card = Compiler::new();
+    let cfg_card = CompilerConfig {
+        wcoj_variable_ordering: WcojVarOrderingKind::LeaderCardinality,
+        ..CompilerConfig::default()
+    };
+    let plan_card = compiler_card
+        .compile_with_config_and_stats_snapshot(TRI_NONREC_SRC, &cfg_card, Some(&snap))
+        .expect("compile LeaderCardinality");
+    assert!(
+        first_var_order(&plan_card).is_none(),
+        "LeaderCardinality on equal-card snapshot must return None"
+    );
+
+    // Phase E: row-set parity vs binary-join reference.
+    let mut compiler_ref = Compiler::new();
+    let plan_ref = compiler_ref
+        .compile_with_config_and_stats_snapshot(TRI_NONREC_SRC, &cfg_default, None)
+        .expect("compile reference");
+    let mut executor_ref = build_executor(
+        Arc::clone(&fix.provider),
+        &fix.memory,
+        RuntimeConfig::default().with_wcoj_triangle_dispatch_disabled(Some(true)),
+        &compiler_ref,
+        &inputs,
+        &seeded,
+    );
+    let _ = executor_ref
+        .execute_plan(&plan_ref)
+        .expect("execute reference");
+    let rows_ref = download_triples(executor_ref.store().get("tri").expect("tri ref"));
+
+    let mut executor_heat = build_executor(
+        Arc::clone(&fix.provider),
+        &fix.memory,
+        RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(true)),
+        &compiler_heat,
+        &inputs,
+        &seeded,
+    );
+    let _ = executor_heat
+        .execute_plan(&plan_heat)
+        .expect("execute HeatAware");
+    let rows_heat = download_triples(executor_heat.store().get("tri").expect("tri heat"));
+    assert_eq!(
+        rows_ref, rows_heat,
+        "non-zero-baseline HeatAware leader_idx=1 must produce same row set as binary-join reference"
+    );
+    assert_eq!(rows_heat, vec![(1, 2, 3)], "expected exactly {{(1,2,3)}}");
+}
+
+// ===============================================================
 // Part C.3 — Real selectivity drives leader for 4-cycle
 // ===============================================================
 
@@ -714,14 +909,12 @@ fn cycle4_real_observed_selectivity_drives_heat_aware_leader_to_idx_2() {
         .compile_with_config_and_stats_snapshot(CYC4_NONREC_SRC, &cfg_default, None)
         .expect("compile default");
     let inputs = cyc4_nonrec_inputs();
-    // Seed card=100 (matches W2.4 cert pattern; lowerer's bushy
-    // DP picks left-deep at this scale, allowing slice-1's
-    // promoter to match).
+    // Seed card=5 (plan iteration 7 — actual EDB size).
     let mut seeded = BTreeMap::new();
-    seeded.insert("e1", 100u64);
-    seeded.insert("e2", 100u64);
-    seeded.insert("e3", 100u64);
-    seeded.insert("e4", 100u64);
+    seeded.insert("e1", 5u64);
+    seeded.insert("e2", 5u64);
+    seeded.insert("e3", 5u64);
+    seeded.insert("e4", 5u64);
     let mut executor = build_executor(
         Arc::clone(&fix.provider),
         &fix.memory,
@@ -757,8 +950,8 @@ fn cycle4_real_observed_selectivity_drives_heat_aware_leader_to_idx_2() {
             .map(|r| r.cardinality)
             .unwrap_or(0);
         assert_eq!(
-            card, 100,
-            "{} card must remain at seeded 100; got {}",
+            card, 5,
+            "{} card must remain at seeded 5; got {}",
             label, card
         );
     }
@@ -775,8 +968,8 @@ fn cycle4_real_observed_selectivity_drives_heat_aware_leader_to_idx_2() {
     );
     let sel_e1_e2 = entries[0].selectivity;
     assert!(
-        (0.20..=0.28).contains(&sel_e1_e2),
-        "4-cycle EMA selectivity after 4 dispatches at card=100 must be in [0.20, 0.28]; got {}",
+        (0.25..=0.30).contains(&sel_e1_e2),
+        "4-cycle EMA selectivity after 4 dispatches at card=5 must be in [0.25, 0.30]; got {}",
         sel_e1_e2
     );
 
