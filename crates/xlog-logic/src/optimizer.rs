@@ -1952,6 +1952,220 @@ mod selectivity_pass_tests {
             "selectivity_pass must preserve recursive SCC bodies byte-for-byte"
         );
     }
+
+    // ---------------------------------------------------------
+    // W2.2 — selectivity-driven reordering tests
+    // ---------------------------------------------------------
+
+    use xlog_core::RelId;
+    use xlog_ir::plan::{CompiledRule, PlanBuilder, Scc};
+    use xlog_ir::rir::ProjectExpr;
+    use xlog_ir::{ExecutionPlan, JoinType, RirNode};
+
+    /// Build a hand-crafted canonical lowered triangle plan
+    /// with three Scans at RelId(1), RelId(2), RelId(3) for
+    /// (e_xy, e_yz, e_xz). Bypasses the optimizer entirely so
+    /// the W2.2 cert is a clean stats-→-pair-choice
+    /// observation, not a confounded test of optimizer + W2.2.
+    ///
+    /// Default canonical shape (Y-shared inner): inner keys
+    /// `[1]/[0]`, outer keys `[0,3]/[0,1]`, project `[0,1,3]`.
+    fn synth_triangle_plan() -> ExecutionPlan {
+        let inner = RirNode::Join {
+            left: Box::new(RirNode::Scan { rel: RelId(1) }),
+            right: Box::new(RirNode::Scan { rel: RelId(2) }),
+            left_keys: vec![1],
+            right_keys: vec![0],
+            join_type: JoinType::Inner,
+        };
+        let outer = RirNode::Join {
+            left: Box::new(inner),
+            right: Box::new(RirNode::Scan { rel: RelId(3) }),
+            left_keys: vec![0, 3],
+            right_keys: vec![0, 1],
+            join_type: JoinType::Inner,
+        };
+        let body = RirNode::Project {
+            input: Box::new(outer),
+            columns: vec![
+                ProjectExpr::Column(0),
+                ProjectExpr::Column(1),
+                ProjectExpr::Column(3),
+            ],
+        };
+        let mut builder = PlanBuilder::new();
+        builder.add_scc(Scc {
+            id: 0,
+            predicates: vec!["tri".to_string()],
+            is_recursive: false,
+        });
+        builder.add_rule(
+            0,
+            CompiledRule {
+                head: "tri".to_string(),
+                body,
+                meta: Default::default(),
+            },
+        );
+        builder.build()
+    }
+
+    /// Seed a `StatsManager` with three triangle-edge
+    /// cardinalities at the conventional RelIds (1, 2, 3) used
+    /// by `synth_triangle_plan`.
+    fn seed_triangle_stats(c1: u64, c2: u64, c3: u64) -> StatsManager {
+        let mut stats = StatsManager::new();
+        for (rid, card) in [(RelId(1), c1), (RelId(2), c2), (RelId(3), c3)] {
+            stats.register_relation(rid);
+            stats.update_cardinality(rid, card);
+        }
+        stats
+    }
+
+    /// Inspect the (left RelId, right RelId) of the inner Join
+    /// in a canonical lowered triangle body. Used by W2.2
+    /// reordering certs.
+    ///
+    /// After `compile()` the body is a `MultiWayJoin` whose
+    /// `fallback` field holds the post-selectivity-pass
+    /// pre-promotion shape — that's where the inner-pair
+    /// signature lives. The helper unwraps `MultiWayJoin →
+    /// fallback` if needed before drilling into the binary
+    /// Join structure.
+    fn inspect_triangle_inner_pair(plan: &xlog_ir::ExecutionPlan) -> Option<(RelId, RelId)> {
+        let body = &plan.rules_by_scc.iter().flatten().next()?.body;
+        let body = match body {
+            xlog_ir::RirNode::MultiWayJoin { fallback, .. } => fallback.as_ref(),
+            other => other,
+        };
+        let xlog_ir::RirNode::Project { input, .. } = body else {
+            return None;
+        };
+        let xlog_ir::RirNode::Join { left, .. } = input.as_ref() else {
+            return None;
+        };
+        let xlog_ir::RirNode::Join {
+            left: l2,
+            right: r2,
+            ..
+        } = left.as_ref()
+        else {
+            return None;
+        };
+        let xlog_ir::RirNode::Scan { rel: rel_l } = l2.as_ref() else {
+            return None;
+        };
+        let xlog_ir::RirNode::Scan { rel: rel_r } = r2.as_ref() else {
+            return None;
+        };
+        Some((*rel_l, *rel_r))
+    }
+
+    /// W2.2 — snapshot 1: cards favor `(e1, e2)` Y-shared inner.
+    /// Triangle rule: `tri(X, Y, Z) :- e1(X, Y), e2(Y, Z), e3(X, Z)`.
+    /// To make Y-shared smallest, give e1 + e2 small cards and
+    /// e3 a large card so all pair products are dominated by
+    /// pairs containing e3 — except the pair (e1, e2) which
+    /// is the smallest product.
+    #[test]
+    fn selectivity_pass_picks_y_shared_inner_when_e1_e2_smallest() {
+        let mut plan = synth_triangle_plan();
+        // e1=10, e2=10, e3=100_000 → Y-shared (e1⋈e2) smallest.
+        let stats = seed_triangle_stats(10, 10, 100_000);
+        selectivity_pass::run(&mut plan, &stats, &std::collections::HashMap::new());
+        let pair = inspect_triangle_inner_pair(&plan).expect("inner pair");
+        // Y-shared inner = (e_xy, e_yz) = (RelId(1), RelId(2)).
+        assert!(
+            pair == (RelId(1), RelId(2)) || pair == (RelId(2), RelId(1)),
+            "expected (RelId(1), RelId(2)) for Y-shared; got {:?}",
+            pair
+        );
+    }
+
+    /// W2.2 — snapshot 2: cards favor `(e1, e3)` X-shared inner.
+    /// e1 + e3 small, e2 large.
+    #[test]
+    fn selectivity_pass_picks_x_shared_inner_when_e1_e3_smallest() {
+        let mut plan = synth_triangle_plan();
+        // e1=10, e2=100_000, e3=10 → X-shared (e1⋈e3) smallest.
+        let stats = seed_triangle_stats(10, 100_000, 10);
+        selectivity_pass::run(&mut plan, &stats, &std::collections::HashMap::new());
+        let pair = inspect_triangle_inner_pair(&plan).expect("inner pair");
+        // X-shared inner = (e_xy, e_xz) = (RelId(1), RelId(3)).
+        assert!(
+            pair == (RelId(1), RelId(3)) || pair == (RelId(3), RelId(1)),
+            "expected (RelId(1), RelId(3)) for X-shared; got {:?}",
+            pair
+        );
+    }
+
+    /// W2.2 — snapshot 3: cards favor `(e2, e3)` Z-shared inner.
+    /// e2 + e3 small, e1 large.
+    #[test]
+    fn selectivity_pass_picks_z_shared_inner_when_e2_e3_smallest() {
+        let mut plan = synth_triangle_plan();
+        // e1=100_000, e2=10, e3=10 → Z-shared (e2⋈e3) smallest.
+        let stats = seed_triangle_stats(100_000, 10, 10);
+        selectivity_pass::run(&mut plan, &stats, &std::collections::HashMap::new());
+        let pair = inspect_triangle_inner_pair(&plan).expect("inner pair");
+        // Z-shared inner = (e_yz, e_xz) = (RelId(2), RelId(3)).
+        assert!(
+            pair == (RelId(2), RelId(3)) || pair == (RelId(3), RelId(2)),
+            "expected (RelId(2), RelId(3)) for Z-shared; got {:?}",
+            pair
+        );
+    }
+
+    /// W2.2 — two snapshots produce different inner pairs. Pins
+    /// "stats drive the order, not deterministic
+    /// canonicalization." Deterministic canonicalization that
+    /// ignores stats CANNOT pass this gate.
+    #[test]
+    fn selectivity_pass_two_snapshots_produce_different_inner_pairs() {
+        let mut plan_a = synth_triangle_plan();
+        let stats_a = seed_triangle_stats(10, 10, 100_000); // Y-shared
+        selectivity_pass::run(&mut plan_a, &stats_a, &std::collections::HashMap::new());
+        let pair_a = inspect_triangle_inner_pair(&plan_a).expect("snapshot A pair");
+
+        let mut plan_b = synth_triangle_plan();
+        let stats_b = seed_triangle_stats(100_000, 10, 10); // Z-shared
+        selectivity_pass::run(&mut plan_b, &stats_b, &std::collections::HashMap::new());
+        let pair_b = inspect_triangle_inner_pair(&plan_b).expect("snapshot B pair");
+
+        let normalize = |(a, b): (RelId, RelId)| -> (RelId, RelId) {
+            if a.0 <= b.0 {
+                (a, b)
+            } else {
+                (b, a)
+            }
+        };
+        assert_ne!(
+            normalize(pair_a),
+            normalize(pair_b),
+            "two different stats snapshots must produce different inner pairs; \
+             got A = {:?}, B = {:?}",
+            pair_a,
+            pair_b
+        );
+    }
+
+    /// W2.2 — fallback edge case: relation cards present but no
+    /// column statistics. The 10% default fallback inside
+    /// `estimate_join_cardinality` means all three pair
+    /// estimates collapse to roughly the same ratio. The pass
+    /// either picks SOME pair or leaves the body unchanged;
+    /// the test is tolerant by design and documents the
+    /// uninformative-fallback case explicitly.
+    #[test]
+    fn selectivity_pass_with_only_relation_cards_may_pick_arbitrary_pair() {
+        let mut plan = synth_triangle_plan();
+        // All three cards equal — no column stats to break ties.
+        let stats = seed_triangle_stats(100, 100, 100);
+        selectivity_pass::run(&mut plan, &stats, &std::collections::HashMap::new());
+        // Either a triangle inner pair is identifiable (any of
+        // the three) or the body stays unchanged. Both are OK.
+        let _ = inspect_triangle_inner_pair(&plan);
+    }
 }
 
 #[cfg(test)]
