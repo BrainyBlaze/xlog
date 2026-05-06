@@ -37,6 +37,7 @@ use xlog_cuda::device_runtime::{
 };
 use xlog_cuda::memory::CudaBuffer;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_ir::{ExecutionPlan, RirNode};
 use xlog_logic::Compiler;
 use xlog_runtime::Executor;
 
@@ -165,6 +166,58 @@ fn k_clique_inputs(k: usize) -> BTreeMap<String, Vec<(u32, u32)>> {
     m
 }
 
+/// Test-only RIR rewrite helper: walk the plan tree, detect
+/// `RirNode::MultiWayJoin` nodes, and substitute each with its
+/// `fallback` field. Used to build the binary-join reference
+/// row set without introducing new force/kill/adaptive knobs
+/// (per W3.2 D8 lock).
+fn replace_multiway_with_fallback(mut plan: ExecutionPlan) -> ExecutionPlan {
+    fn rewrite(node: &RirNode) -> RirNode {
+        match node {
+            RirNode::MultiWayJoin { fallback, .. } => rewrite(fallback),
+            RirNode::Project { input, columns } => RirNode::Project {
+                input: Box::new(rewrite(input)),
+                columns: columns.clone(),
+            },
+            RirNode::Filter { input, predicate } => RirNode::Filter {
+                input: Box::new(rewrite(input)),
+                predicate: predicate.clone(),
+            },
+            RirNode::Join {
+                left,
+                right,
+                left_keys,
+                right_keys,
+                join_type,
+            } => RirNode::Join {
+                left: Box::new(rewrite(left)),
+                right: Box::new(rewrite(right)),
+                left_keys: left_keys.clone(),
+                right_keys: right_keys.clone(),
+                join_type: *join_type,
+            },
+            RirNode::Union { inputs } => RirNode::Union {
+                inputs: inputs.iter().map(rewrite).collect(),
+            },
+            RirNode::Diff { left, right } => RirNode::Diff {
+                left: Box::new(rewrite(left)),
+                right: Box::new(rewrite(right)),
+            },
+            RirNode::Distinct { input, key_cols } => RirNode::Distinct {
+                input: Box::new(rewrite(input)),
+                key_cols: key_cols.clone(),
+            },
+            other => other.clone(),
+        }
+    }
+    for rules in plan.rules_by_scc.iter_mut() {
+        for rule in rules.iter_mut() {
+            rule.body = rewrite(&rule.body);
+        }
+    }
+    plan
+}
+
 fn download_k_row_set(buf: &CudaBuffer, k: usize) -> std::collections::BTreeSet<Vec<u32>> {
     let n = match buf.cached_row_count() {
         Some(c) => c as usize,
@@ -210,50 +263,77 @@ fn download_k_row_set(buf: &CudaBuffer, k: usize) -> std::collections::BTreeSet<
         .collect()
 }
 
-#[test]
-fn clique5_dispatch_counter_advances_and_row_set_matches_fallback_body() {
-    let Some(fix) = make_runtime_backed_fixture() else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    let inputs = k_clique_inputs(5);
+/// Run a clique-K test: compile, build two executors (dispatch
+/// path + fallback-only path), assert counter ≥ 1 on dispatch
+/// AND row-set equality between dispatch output and
+/// `replace_multiway_with_fallback` reference.
+fn run_counter_advance_test(
+    fix: &RuntimeBackedFixture,
+    src: &str,
+    head_name: &str,
+    k: usize,
+    check_counter: fn(&Executor) -> u64,
+) {
+    let inputs = k_clique_inputs(k);
 
-    // Run with default dispatch (clique5 path).
+    // 1. Dispatch path: compile + run under default dispatch.
     let mut compiler = Compiler::new();
-    let plan = compiler.compile(CLIQUE5_SRC).expect("compile k=5");
+    let plan = compiler.compile(src).expect("compile");
     let mut executor =
         Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
     for (name, rid) in compiler.rel_ids().clone() {
         executor.register_relation(rid, &name);
     }
     for (name, rows) in &inputs {
-        let buf = upload_binary_u32(&fix.memory, rows);
-        executor.put_relation(name, buf);
+        executor.put_relation(name, upload_binary_u32(&fix.memory, rows));
     }
-    let _ = executor.execute_plan(&plan).expect("execute clique5");
-
-    let dispatch_rows =
-        download_k_row_set(executor.store().get("clique5").expect("clique5 head"), 5);
+    let _ = executor.execute_plan(&plan).expect("execute dispatch");
+    let dispatch_rows = download_k_row_set(executor.store().get(head_name).expect("head"), k);
     assert!(
-        executor.wcoj_clique5_dispatch_count() >= 1,
-        "expected ≥ 1 clique5 dispatch; got {}",
-        executor.wcoj_clique5_dispatch_count()
+        check_counter(&executor) >= 1,
+        "expected ≥ 1 clique dispatch; got {}",
+        check_counter(&executor)
     );
 
-    // Reference: build via binary-join only by NOT registering a
-    // single edge — promoter still promotes, but dispatcher /
-    // executor falls through to `MultiWayJoin.fallback`. To
-    // get a CLEAN binary-join reference instead, recompile with
-    // a fresh executor and force the dispatcher to decline by
-    // running with K=5 fixture pre-laid-out and re-executing.
-    //
-    // Simpler reference: 1 clique row expected = (1, 2, 3, 4, 5).
-    let expected: std::collections::BTreeSet<Vec<u32>> =
-        [vec![1u32, 2, 3, 4, 5]].iter().cloned().collect();
+    // 2. Fallback reference: rewrite the plan to replace
+    //    MultiWayJoin nodes with their fallback bodies, then
+    //    run on a fresh executor with the same inputs. This
+    //    exercises the binary-join path without any new
+    //    force/kill/adaptive knobs (per W3.2 D8 lock).
+    let mut compiler_ref = Compiler::new();
+    let plan_ref = compiler_ref.compile(src).expect("compile ref");
+    let fallback_plan = replace_multiway_with_fallback(plan_ref);
+    let mut executor_ref =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rid) in compiler_ref.rel_ids().clone() {
+        executor_ref.register_relation(rid, &name);
+    }
+    for (name, rows) in &inputs {
+        executor_ref.put_relation(name, upload_binary_u32(&fix.memory, rows));
+    }
+    let _ = executor_ref
+        .execute_plan(&fallback_plan)
+        .expect("execute fallback");
+    let fallback_rows =
+        download_k_row_set(executor_ref.store().get(head_name).expect("head ref"), k);
+
+    // 3. Row-set parity: dispatch output == fallback output.
     assert_eq!(
-        dispatch_rows, expected,
-        "K=5 clique dispatch row set must equal expected single clique"
+        dispatch_rows, fallback_rows,
+        "K={} dispatch row set must equal MultiWayJoin.fallback reference",
+        k
     );
+}
+
+#[test]
+fn clique5_dispatch_counter_advances_and_row_set_matches_fallback_body() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    run_counter_advance_test(&fix, CLIQUE5_SRC, "clique5", 5, |e| {
+        e.wcoj_clique5_dispatch_count()
+    });
 }
 
 #[test]
@@ -262,33 +342,98 @@ fn clique6_dispatch_counter_advances_and_row_set_matches_fallback_body() {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
     };
-    let inputs = k_clique_inputs(6);
+    run_counter_advance_test(&fix, CLIQUE6_SRC, "clique6", 6, |e| {
+        e.wcoj_clique6_dispatch_count()
+    });
+}
 
+/// Run a clique-K dispatcher-decline test: one edge is NOT put
+/// into the executor's store so the dispatcher's
+/// `self.rel_names.get(rid)` → `store.get(name)` returns None →
+/// dispatcher returns Ok(None) → counter stays at 0 → executor
+/// falls through to `MultiWayJoin.fallback`. The fallback body
+/// (the original binary-join tree) ALSO cannot find the missing
+/// edge's buffer and executes with an empty Scan for that rel →
+/// produces an empty result (no cliques when an edge is missing).
+///
+/// Reference: `replace_multiway_with_fallback` on the SAME
+/// missing-input fixture produces the same empty result, proving
+/// row-set parity between the decline path and the fallback
+/// reference under identical input conditions.
+///
+/// Asserts: (a) counter == 0, (b) row set from decline path ==
+/// row set from fallback-only plan on the same missing-input
+/// fixture.
+fn run_dispatcher_decline_test(
+    fix: &RuntimeBackedFixture,
+    src: &str,
+    head_name: &str,
+    k: usize,
+    missing_edge_name: &str,
+    check_counter: fn(&Executor) -> u64,
+) {
+    let inputs = k_clique_inputs(k);
+
+    // 1. Decline executor: all edges except one are present.
     let mut compiler = Compiler::new();
-    let plan = compiler.compile(CLIQUE6_SRC).expect("compile k=6");
+    let plan = compiler.compile(src).expect("compile");
     let mut executor =
         Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
     for (name, rid) in compiler.rel_ids().clone() {
         executor.register_relation(rid, &name);
     }
     for (name, rows) in &inputs {
-        let buf = upload_binary_u32(&fix.memory, rows);
-        executor.put_relation(name, buf);
+        if name == missing_edge_name {
+            continue;
+        }
+        executor.put_relation(name, upload_binary_u32(&fix.memory, rows));
     }
-    let _ = executor.execute_plan(&plan).expect("execute clique6");
-
-    let dispatch_rows =
-        download_k_row_set(executor.store().get("clique6").expect("clique6 head"), 6);
-    assert!(
-        executor.wcoj_clique6_dispatch_count() >= 1,
-        "expected ≥ 1 clique6 dispatch; got {}",
-        executor.wcoj_clique6_dispatch_count()
-    );
-    let expected: std::collections::BTreeSet<Vec<u32>> =
-        [vec![1u32, 2, 3, 4, 5, 6]].iter().cloned().collect();
+    let _ = executor.execute_plan(&plan);
     assert_eq!(
-        dispatch_rows, expected,
-        "K=6 clique dispatch row set must equal expected single clique"
+        check_counter(&executor),
+        0,
+        "dispatcher decline must NOT advance the K={} counter; got {}",
+        k,
+        check_counter(&executor)
+    );
+
+    // 2. Fallback reference: same missing-input fixture, plan
+    //    rewritten to bypass MultiWayJoin → pure binary-join.
+    let mut compiler_ref = Compiler::new();
+    let plan_ref = compiler_ref.compile(src).expect("compile ref");
+    let fallback_plan = replace_multiway_with_fallback(plan_ref);
+    let mut executor_ref =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rid) in compiler_ref.rel_ids().clone() {
+        executor_ref.register_relation(rid, &name);
+    }
+    for (name, rows) in &inputs {
+        if name == missing_edge_name {
+            continue;
+        }
+        executor_ref.put_relation(name, upload_binary_u32(&fix.memory, rows));
+    }
+    let _ = executor_ref.execute_plan(&fallback_plan);
+
+    // 3. Row-set parity: both paths see the same missing input
+    //    and produce the same (empty) result. This proves the
+    //    decline path's fallback behavior matches the binary-join
+    //    reference under identical conditions.
+    let decline_rows = executor
+        .store()
+        .get(head_name)
+        .map(|b| download_k_row_set(b, k))
+        .unwrap_or_default();
+    let fallback_rows = executor_ref
+        .store()
+        .get(head_name)
+        .map(|b| download_k_row_set(b, k))
+        .unwrap_or_default();
+    assert_eq!(
+        decline_rows, fallback_rows,
+        "K={} dispatcher-decline row set must equal fallback reference \
+         (both should be empty since edge {} is missing)",
+        k, missing_edge_name
     );
 }
 
@@ -298,42 +443,9 @@ fn clique5_dispatcher_decline_does_not_advance_counter_and_row_set_matches_fallb
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
     };
-    let inputs = k_clique_inputs(5);
-
-    let mut compiler = Compiler::new();
-    let plan = compiler.compile(CLIQUE5_SRC).expect("compile k=5");
-    let mut executor =
-        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
-    // Register all rel_ids EXCEPT the clique-head (so all input
-    // edges are findable by name → store.get(name) returns
-    // Some). But to engineer a dispatcher decline AFTER
-    // MultiWayJoin promotion, we DON'T `put_relation` for one
-    // edge: e34. The promoter still emits MultiWayJoin (it
-    // operates on RIR, not on store contents); the dispatcher's
-    // store.get("e34") returns None → returns Ok(None); the
-    // executor falls through to `MultiWayJoin.fallback`, which
-    // ALSO can't find e34 — but the executor's relational
-    // path returns an empty buffer rather than crashing.
-    for (name, rid) in compiler.rel_ids().clone() {
-        executor.register_relation(rid, &name);
-    }
-    for (name, rows) in &inputs {
-        if name == "e34" {
-            continue; // engineer the dispatcher decline
-        }
-        let buf = upload_binary_u32(&fix.memory, rows);
-        executor.put_relation(name, buf);
-    }
-    // execute_plan may error or may produce empty; we don't care
-    // about the row set on this cell — only the counter
-    // observability contract.
-    let _ = executor.execute_plan(&plan);
-    assert_eq!(
-        executor.wcoj_clique5_dispatch_count(),
-        0,
-        "dispatcher decline must NOT advance the counter; got {}",
-        executor.wcoj_clique5_dispatch_count()
-    );
+    run_dispatcher_decline_test(&fix, CLIQUE5_SRC, "clique5", 5, "e34", |e| {
+        e.wcoj_clique5_dispatch_count()
+    });
 }
 
 #[test]
@@ -342,27 +454,7 @@ fn clique6_dispatcher_decline_does_not_advance_counter_and_row_set_matches_fallb
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
     };
-    let inputs = k_clique_inputs(6);
-
-    let mut compiler = Compiler::new();
-    let plan = compiler.compile(CLIQUE6_SRC).expect("compile k=6");
-    let mut executor =
-        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
-    for (name, rid) in compiler.rel_ids().clone() {
-        executor.register_relation(rid, &name);
-    }
-    for (name, rows) in &inputs {
-        if name == "e45" {
-            continue;
-        }
-        let buf = upload_binary_u32(&fix.memory, rows);
-        executor.put_relation(name, buf);
-    }
-    let _ = executor.execute_plan(&plan);
-    assert_eq!(
-        executor.wcoj_clique6_dispatch_count(),
-        0,
-        "dispatcher decline must NOT advance the counter; got {}",
-        executor.wcoj_clique6_dispatch_count()
-    );
+    run_dispatcher_decline_test(&fix, CLIQUE6_SRC, "clique6", 6, "e45", |e| {
+        e.wcoj_clique6_dispatch_count()
+    });
 }
