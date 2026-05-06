@@ -1026,3 +1026,284 @@ extern "C" __global__ void wcoj_layout_check_sorted_unique_u64(
         atomicExch(flag, 0u);
     }
 }
+
+// ===============================================================
+// W3.2 — General-arity WCOJ clique kernel (K = 5, 6).
+// Single C++ template instantiated at K=5 and K=6 from the same
+// source. The 8 ABI wrappers (k=5/k=6 × count/materialize ×
+// u32/u64) are all template-call-only; no hand-written K-specific
+// algorithm body. Tier-2 source-audit (test_w32_kernel_source_audit)
+// enforces this contract.
+//
+// Algorithm: each thread fixes one leader-edge row (canonical edge
+// 0 = edge between head vertices 0 and 1). v_0, v_1 bound from the
+// leader row. Recursively bind v_2 .. v_{K-1} via level-keyed
+// template recursion. At each level L, the candidate set for v_L
+// is the L-way intersection of {col1 of edge(j, L) where col0 ==
+// v_j} for j ∈ 0..L. Implementation: pick j=0 as iteration set;
+// for each candidate, binary-search membership in all other
+// ranges. Inputs are sorted+deduped per W3.1 layout-sort; the
+// dispatcher routes every edge through wcoj_layout_sort_*_recorded
+// before invoking these kernels.
+// ===============================================================
+
+// Canonical edge index for (i, j) with 0 <= i < j < K_VAL.
+// Lex order: (0,1)=0, (0,2)=1, ..., (0,K-1)=K-2, (1,2)=K-1, ...
+// Formula: i * (K - 1) - i * (i - 1) / 2 + (j - i - 1).
+template <int K_VAL>
+__device__ __forceinline__ int clique_edge_idx_t(int i, int j) {
+    return i * (K_VAL - 1) - i * (i - 1) / 2 + (j - i - 1);
+}
+
+// Binary-search membership: does sorted [arr+lo, arr+hi) contain target?
+template <typename T>
+__device__ __forceinline__ bool contains_in_range_t(
+    const T* arr, uint32_t lo, uint32_t hi, T target) {
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        T v = arr[mid];
+        if (v == target) return true;
+        if (v < target) lo = mid + 1;
+        else hi = mid;
+    }
+    return false;
+}
+
+// Lower/upper bound generic over T (delegates to existing typed
+// helpers). Compile-time selection via T width.
+template <typename T>
+__device__ __forceinline__ uint32_t lower_bound_t(const T* arr, uint32_t n, T target);
+
+template <>
+__device__ __forceinline__ uint32_t lower_bound_t<uint32_t>(
+    const uint32_t* arr, uint32_t n, uint32_t target) {
+    return lower_bound_u32(arr, n, target);
+}
+
+template <>
+__device__ __forceinline__ uint32_t lower_bound_t<uint64_t>(
+    const uint64_t* arr, uint32_t n, uint64_t target) {
+    return lower_bound_u64(arr, n, target);
+}
+
+template <typename T>
+__device__ __forceinline__ uint32_t upper_bound_t(const T* arr, uint32_t n, T target);
+
+template <>
+__device__ __forceinline__ uint32_t upper_bound_t<uint32_t>(
+    const uint32_t* arr, uint32_t n, uint32_t target) {
+    return upper_bound_u32(arr, n, target);
+}
+
+template <>
+__device__ __forceinline__ uint32_t upper_bound_t<uint64_t>(
+    const uint64_t* arr, uint32_t n, uint64_t target) {
+    return upper_bound_u64(arr, n, target);
+}
+
+// Level-keyed template recursion. Bind vertex `Level` via L-way
+// intersection of L back-edges from already-bound v_0..v_{Level-1}.
+// Terminates when Level == K_VAL (count++ or materialize).
+//
+// `Out` is a callable that consumes the fully-bound binding[].
+// For count: incrementing a counter. For materialize: writing to
+// output columns.
+template <int K_VAL, int Level, typename T, typename Out>
+__device__ __forceinline__ void clique_recurse_t(
+    const T* const* edge_col0,
+    const T* const* edge_col1,
+    const uint32_t* edge_n,
+    T* binding,
+    Out& out) {
+    if constexpr (Level >= K_VAL) {
+        out(binding);
+        return;
+    } else {
+        // Iteration set: edge (0, Level). For each candidate v_L
+        // there, check it's in edge (j, Level)'s col0==v_j range
+        // for all j in 1..Level.
+        int e0L = clique_edge_idx_t<K_VAL>(0, Level);
+        T v0 = binding[0];
+        uint32_t lo0 = lower_bound_t<T>(edge_col0[e0L], edge_n[e0L], v0);
+        uint32_t hi0 = upper_bound_t<T>(edge_col0[e0L], edge_n[e0L], v0);
+        for (uint32_t k = lo0; k < hi0; ++k) {
+            T candidate = edge_col1[e0L][k];
+            bool all_match = true;
+            for (int j = 1; j < Level; ++j) {
+                int eJL = clique_edge_idx_t<K_VAL>(j, Level);
+                T vj = binding[j];
+                uint32_t loJ = lower_bound_t<T>(edge_col0[eJL], edge_n[eJL], vj);
+                uint32_t hiJ = upper_bound_t<T>(edge_col0[eJL], edge_n[eJL], vj);
+                if (!contains_in_range_t<T>(edge_col1[eJL], loJ, hiJ, candidate)) {
+                    all_match = false;
+                    break;
+                }
+            }
+            if (all_match) {
+                binding[Level] = candidate;
+                clique_recurse_t<K_VAL, Level + 1, T, Out>(
+                    edge_col0, edge_col1, edge_n, binding, out);
+            }
+        }
+    }
+}
+
+// Per-thread count: returns the number of K_VAL-cliques extending
+// the leader row.
+template <int K_VAL, typename T>
+__device__ __forceinline__ uint32_t wcoj_clique_template_count_t(
+    const T* const* edge_col0,
+    const T* const* edge_col1,
+    const uint32_t* edge_n,
+    uint32_t leader_idx) {
+    T binding[K_VAL];
+    binding[0] = edge_col0[0][leader_idx];
+    binding[1] = edge_col1[0][leader_idx];
+    uint32_t count = 0;
+    auto counter = [&count](T*) { count++; };
+    clique_recurse_t<K_VAL, 2, T, decltype(counter)>(
+        edge_col0, edge_col1, edge_n, binding, counter);
+    return count;
+}
+
+// Per-thread emit: writes one row per K_VAL-clique extension into
+// the output column array starting at `base`. Returns total
+// emitted (caller is responsible for budget).
+template <int K_VAL, typename T>
+__device__ __forceinline__ uint32_t wcoj_clique_template_emit_t(
+    const T* const* edge_col0,
+    const T* const* edge_col1,
+    const uint32_t* edge_n,
+    uint32_t leader_idx,
+    T* const* out_cols,
+    uint32_t base) {
+    T binding[K_VAL];
+    binding[0] = edge_col0[0][leader_idx];
+    binding[1] = edge_col1[0][leader_idx];
+    uint32_t emitted = 0;
+    auto emitter = [&](T* b) {
+        uint32_t pos = base + emitted;
+        for (int c = 0; c < K_VAL; ++c) {
+            out_cols[c][pos] = b[c];
+        }
+        emitted++;
+    };
+    clique_recurse_t<K_VAL, 2, T, decltype(emitter)>(
+        edge_col0, edge_col1, edge_n, binding, emitter);
+    return emitted;
+}
+
+// ---------------------------------------------------------------
+// ABI wrappers — TEMPLATE CALL ONLY. NO hand-written algorithm.
+// Tier-1 source-audit (test_w32_kernel_source_audit): each body
+// is exactly one statement that calls the template; no loops,
+// no conditionals.
+// Tier-2 source-audit: NO `template <>` specialization for K=6,
+// NO `if constexpr (K == 6)` branch, NO `clique6` helper body
+// outside these wrappers, NO hardcoded `5` / `6` literal in the
+// shared template body (K=5 / K=6 come from instantiation only).
+// ---------------------------------------------------------------
+
+extern "C" __global__ void wcoj_clique5_count_u32(
+    const uint32_t* const* edge_col0,
+    const uint32_t* const* edge_col1,
+    const uint32_t* edge_n,
+    uint32_t* out_counts) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= edge_n[0]) return;
+    out_counts[i] = wcoj_clique_template_count_t<5, uint32_t>(
+        edge_col0, edge_col1, edge_n, i);
+}
+
+extern "C" __global__ void wcoj_clique5_materialize_u32(
+    const uint32_t* const* edge_col0,
+    const uint32_t* const* edge_col1,
+    const uint32_t* edge_n,
+    const uint32_t* __restrict__ out_offsets,
+    uint32_t total_rows,
+    uint32_t* const* out_cols) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= edge_n[0]) return;
+    uint32_t base = out_offsets[i];
+    if (base >= total_rows) return;
+    wcoj_clique_template_emit_t<5, uint32_t>(
+        edge_col0, edge_col1, edge_n, i, out_cols, base);
+}
+
+extern "C" __global__ void wcoj_clique5_count_u64(
+    const uint64_t* const* edge_col0,
+    const uint64_t* const* edge_col1,
+    const uint32_t* edge_n,
+    uint32_t* out_counts) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= edge_n[0]) return;
+    out_counts[i] = wcoj_clique_template_count_t<5, uint64_t>(
+        edge_col0, edge_col1, edge_n, i);
+}
+
+extern "C" __global__ void wcoj_clique5_materialize_u64(
+    const uint64_t* const* edge_col0,
+    const uint64_t* const* edge_col1,
+    const uint32_t* edge_n,
+    const uint32_t* __restrict__ out_offsets,
+    uint32_t total_rows,
+    uint64_t* const* out_cols) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= edge_n[0]) return;
+    uint32_t base = out_offsets[i];
+    if (base >= total_rows) return;
+    wcoj_clique_template_emit_t<5, uint64_t>(
+        edge_col0, edge_col1, edge_n, i, out_cols, base);
+}
+
+extern "C" __global__ void wcoj_clique6_count_u32(
+    const uint32_t* const* edge_col0,
+    const uint32_t* const* edge_col1,
+    const uint32_t* edge_n,
+    uint32_t* out_counts) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= edge_n[0]) return;
+    out_counts[i] = wcoj_clique_template_count_t<6, uint32_t>(
+        edge_col0, edge_col1, edge_n, i);
+}
+
+extern "C" __global__ void wcoj_clique6_materialize_u32(
+    const uint32_t* const* edge_col0,
+    const uint32_t* const* edge_col1,
+    const uint32_t* edge_n,
+    const uint32_t* __restrict__ out_offsets,
+    uint32_t total_rows,
+    uint32_t* const* out_cols) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= edge_n[0]) return;
+    uint32_t base = out_offsets[i];
+    if (base >= total_rows) return;
+    wcoj_clique_template_emit_t<6, uint32_t>(
+        edge_col0, edge_col1, edge_n, i, out_cols, base);
+}
+
+extern "C" __global__ void wcoj_clique6_count_u64(
+    const uint64_t* const* edge_col0,
+    const uint64_t* const* edge_col1,
+    const uint32_t* edge_n,
+    uint32_t* out_counts) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= edge_n[0]) return;
+    out_counts[i] = wcoj_clique_template_count_t<6, uint64_t>(
+        edge_col0, edge_col1, edge_n, i);
+}
+
+extern "C" __global__ void wcoj_clique6_materialize_u64(
+    const uint64_t* const* edge_col0,
+    const uint64_t* const* edge_col1,
+    const uint32_t* edge_n,
+    const uint32_t* __restrict__ out_offsets,
+    uint32_t total_rows,
+    uint64_t* const* out_cols) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= edge_n[0]) return;
+    uint32_t base = out_offsets[i];
+    if (base >= total_rows) return;
+    wcoj_clique_template_emit_t<6, uint64_t>(
+        edge_col0, edge_col1, edge_n, i, out_cols, base);
+}
