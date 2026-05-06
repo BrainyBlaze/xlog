@@ -18,9 +18,9 @@ use cudarc::driver::sys;
 use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::device_runtime::{
     AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
-    LoggingSink, SinkError, StreamId, StreamPool, XlogDeviceRuntime,
+    LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
 };
-use xlog_cuda::memory::{CudaBuffer, CudaColumn};
+use xlog_cuda::memory::CudaBuffer;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
 struct DiscardSink;
@@ -106,7 +106,6 @@ where
     }
     let vertex_vec: Vec<T> = vertices.into_iter().collect();
     // Generate all K-tuples (v_0, ..., v_{K-1}) of distinct vertices.
-    let n = vertex_vec.len();
     let mut results: Vec<[T; K]> = Vec::new();
     let mut binding: [Option<T>; K] = [None; K];
     fn recurse<T: Copy + Ord, const K: usize>(

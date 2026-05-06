@@ -41,13 +41,12 @@ fn build_left_deep_clique(k: usize, rel_ids: &[RelId]) -> RirNode {
     // column space. For each variable v_x, store the FIRST
     // position where it appeared.
     let mut var_pos: HashMap<usize, usize> = HashMap::new();
-    let mut acc_width: usize = 0;
-    // Seed with atom 0 = edge (0, 1).
+    // Seed with atom 0 = edge (0, 1) — occupies cols 0 and 1.
     let (i0, j0) = edge_for_idx(0);
     var_pos.insert(i0, 0);
     var_pos.insert(j0, 1);
     let mut acc: RirNode = RirNode::Scan { rel: rel_ids[0] };
-    acc_width = 2;
+    let mut acc_width: usize = 2;
     for a in 1..rel_ids.len() {
         let (vi, vj) = edge_for_idx(a);
         let new_atom = RirNode::Scan { rel: rel_ids[a] };
@@ -447,7 +446,6 @@ fn clique5_with_reversed_atom_rejected() {
     // Then continue building the rest of the clique on this broken
     // base. The mismatch propagates.
     let mut acc = bad;
-    let mut acc_w = 4;
     for i in 2..rels.len() {
         acc = RirNode::Join {
             left: Box::new(acc),
@@ -456,7 +454,6 @@ fn clique5_with_reversed_atom_rejected() {
             right_keys: vec![0],
             join_type: JoinType::Inner,
         };
-        acc_w += 2;
     }
     let body = RirNode::Project {
         input: Box::new(acc),

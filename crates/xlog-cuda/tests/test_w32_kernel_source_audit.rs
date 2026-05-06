@@ -113,27 +113,6 @@ fn extract_extern_c_global_body(src: &str, name: &str) -> Option<String> {
     Some(src[s..e].to_string())
 }
 
-/// Count semicolon-terminated statements in `body`. Naive but
-/// sufficient: strips comments + counts `;` tokens.
-fn count_statements(body: &str) -> usize {
-    let stripped = strip_comments(body);
-    stripped.matches(';').count()
-}
-
-fn body_contains_loop_or_conditional(body: &str) -> bool {
-    let s = strip_comments(body);
-    let tokens = [
-        "for", "while", "do ", "do{", "do (", "if ", "if(", "switch", "?:",
-    ];
-    tokens.iter().any(|t| s.contains(t))
-}
-
-fn body_contains_template_call(body: &str, template_name: &str, k_val: usize) -> bool {
-    let s = strip_comments(body);
-    let needle = format!("{}<{}", template_name, k_val);
-    s.contains(&needle)
-}
-
 // ===============================================================
 // Tier 1 — wrapper bodies are template-call-only (4 cells)
 //
