@@ -49,18 +49,13 @@ impl Executor {
             if let Some(buf) = self.try_dispatch_wcoj_4cycle_on_body(node)? {
                 return Ok(buf);
             }
-            // W3.2 — k=5 / k=6 clique dispatch on MultiWayJoin
-            // bodies. Recursive callers reject recursive clique
-            // bodies upstream (try_promote_clique_k declines on
-            // recursive_scan_count >= 1); the on_body entries
-            // here are reachable from non-recursive promotion
-            // paths and the recursive seed pass.
-            if let Some(buf) = self.try_dispatch_wcoj_clique5_on_body(node)? {
-                return Ok(buf);
-            }
-            if let Some(buf) = self.try_dispatch_wcoj_clique6_on_body(node)? {
-                return Ok(buf);
-            }
+            // W3.2 plan §177: the recursive WCOJ helper is NOT
+            // extended for clique-keyed dispatch. Recursive
+            // clique bodies are rejected at the promoter level
+            // (`promote_multiway` gates clique promotion on
+            // `recursive_scan_count == 0`), so they fall through
+            // to the binary-join path here. No `try_dispatch_wcoj_clique*`
+            // call site in this helper.
         }
         self.execute_node(node)
     }

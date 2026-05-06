@@ -1194,10 +1194,48 @@ __device__ __forceinline__ uint32_t wcoj_clique_template_emit_t(
 }
 
 // ---------------------------------------------------------------
-// ABI wrappers — TEMPLATE CALL ONLY. NO hand-written algorithm.
-// Tier-1 source-audit (test_w32_kernel_source_audit): each body
-// is exactly one statement that calls the template; no loops,
-// no conditionals.
+// Grid-level templates — absorb thread-idx + bound checks so the
+// `extern "C"` ABI wrappers below are single-statement
+// template-calls, satisfying the locked Tier-1 source-audit
+// contract (W3.2 plan §345: "exactly one template-call statement
+// with no conditionals").
+// ---------------------------------------------------------------
+
+template <int K_VAL, typename T>
+__device__ __forceinline__ void wcoj_clique_template_count_grid_t(
+    const T* const* edge_col0,
+    const T* const* edge_col1,
+    const uint32_t* edge_n,
+    uint32_t* out_counts) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= edge_n[0]) return;
+    out_counts[i] = wcoj_clique_template_count_t<K_VAL, T>(
+        edge_col0, edge_col1, edge_n, i);
+}
+
+template <int K_VAL, typename T>
+__device__ __forceinline__ void wcoj_clique_template_materialize_grid_t(
+    const T* const* edge_col0,
+    const T* const* edge_col1,
+    const uint32_t* edge_n,
+    const uint32_t* __restrict__ out_offsets,
+    uint32_t total_rows,
+    T* const* out_cols) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= edge_n[0]) return;
+    uint32_t base = out_offsets[i];
+    if (base >= total_rows) return;
+    wcoj_clique_template_emit_t<K_VAL, T>(
+        edge_col0, edge_col1, edge_n, i, out_cols, base);
+}
+
+// ---------------------------------------------------------------
+// ABI wrappers — TEMPLATE CALL ONLY. Each body is exactly ONE
+// statement that calls the grid-level template — no thread-idx
+// computation, no conditionals, no loops in the wrapper itself.
+// Tier-1 source-audit (test_w32_kernel_source_audit) enforces
+// the 1-statement contract literally.
+//
 // Tier-2 source-audit: NO `template <>` specialization for K=6,
 // NO `if constexpr (K == 6)` branch, NO `clique6` helper body
 // outside these wrappers, NO hardcoded `5` / `6` literal in the
@@ -1209,10 +1247,7 @@ extern "C" __global__ void wcoj_clique5_count_u32(
     const uint32_t* const* edge_col1,
     const uint32_t* edge_n,
     uint32_t* out_counts) {
-    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= edge_n[0]) return;
-    out_counts[i] = wcoj_clique_template_count_t<5, uint32_t>(
-        edge_col0, edge_col1, edge_n, i);
+    wcoj_clique_template_count_grid_t<5, uint32_t>(edge_col0, edge_col1, edge_n, out_counts);
 }
 
 extern "C" __global__ void wcoj_clique5_materialize_u32(
@@ -1222,12 +1257,7 @@ extern "C" __global__ void wcoj_clique5_materialize_u32(
     const uint32_t* __restrict__ out_offsets,
     uint32_t total_rows,
     uint32_t* const* out_cols) {
-    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= edge_n[0]) return;
-    uint32_t base = out_offsets[i];
-    if (base >= total_rows) return;
-    wcoj_clique_template_emit_t<5, uint32_t>(
-        edge_col0, edge_col1, edge_n, i, out_cols, base);
+    wcoj_clique_template_materialize_grid_t<5, uint32_t>(edge_col0, edge_col1, edge_n, out_offsets, total_rows, out_cols);
 }
 
 extern "C" __global__ void wcoj_clique5_count_u64(
@@ -1235,10 +1265,7 @@ extern "C" __global__ void wcoj_clique5_count_u64(
     const uint64_t* const* edge_col1,
     const uint32_t* edge_n,
     uint32_t* out_counts) {
-    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= edge_n[0]) return;
-    out_counts[i] = wcoj_clique_template_count_t<5, uint64_t>(
-        edge_col0, edge_col1, edge_n, i);
+    wcoj_clique_template_count_grid_t<5, uint64_t>(edge_col0, edge_col1, edge_n, out_counts);
 }
 
 extern "C" __global__ void wcoj_clique5_materialize_u64(
@@ -1248,12 +1275,7 @@ extern "C" __global__ void wcoj_clique5_materialize_u64(
     const uint32_t* __restrict__ out_offsets,
     uint32_t total_rows,
     uint64_t* const* out_cols) {
-    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= edge_n[0]) return;
-    uint32_t base = out_offsets[i];
-    if (base >= total_rows) return;
-    wcoj_clique_template_emit_t<5, uint64_t>(
-        edge_col0, edge_col1, edge_n, i, out_cols, base);
+    wcoj_clique_template_materialize_grid_t<5, uint64_t>(edge_col0, edge_col1, edge_n, out_offsets, total_rows, out_cols);
 }
 
 extern "C" __global__ void wcoj_clique6_count_u32(
@@ -1261,10 +1283,7 @@ extern "C" __global__ void wcoj_clique6_count_u32(
     const uint32_t* const* edge_col1,
     const uint32_t* edge_n,
     uint32_t* out_counts) {
-    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= edge_n[0]) return;
-    out_counts[i] = wcoj_clique_template_count_t<6, uint32_t>(
-        edge_col0, edge_col1, edge_n, i);
+    wcoj_clique_template_count_grid_t<6, uint32_t>(edge_col0, edge_col1, edge_n, out_counts);
 }
 
 extern "C" __global__ void wcoj_clique6_materialize_u32(
@@ -1274,12 +1293,7 @@ extern "C" __global__ void wcoj_clique6_materialize_u32(
     const uint32_t* __restrict__ out_offsets,
     uint32_t total_rows,
     uint32_t* const* out_cols) {
-    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= edge_n[0]) return;
-    uint32_t base = out_offsets[i];
-    if (base >= total_rows) return;
-    wcoj_clique_template_emit_t<6, uint32_t>(
-        edge_col0, edge_col1, edge_n, i, out_cols, base);
+    wcoj_clique_template_materialize_grid_t<6, uint32_t>(edge_col0, edge_col1, edge_n, out_offsets, total_rows, out_cols);
 }
 
 extern "C" __global__ void wcoj_clique6_count_u64(
@@ -1287,10 +1301,7 @@ extern "C" __global__ void wcoj_clique6_count_u64(
     const uint64_t* const* edge_col1,
     const uint32_t* edge_n,
     uint32_t* out_counts) {
-    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= edge_n[0]) return;
-    out_counts[i] = wcoj_clique_template_count_t<6, uint64_t>(
-        edge_col0, edge_col1, edge_n, i);
+    wcoj_clique_template_count_grid_t<6, uint64_t>(edge_col0, edge_col1, edge_n, out_counts);
 }
 
 extern "C" __global__ void wcoj_clique6_materialize_u64(
@@ -1300,10 +1311,5 @@ extern "C" __global__ void wcoj_clique6_materialize_u64(
     const uint32_t* __restrict__ out_offsets,
     uint32_t total_rows,
     uint64_t* const* out_cols) {
-    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= edge_n[0]) return;
-    uint32_t base = out_offsets[i];
-    if (base >= total_rows) return;
-    wcoj_clique_template_emit_t<6, uint64_t>(
-        edge_col0, edge_col1, edge_n, i, out_cols, base);
+    wcoj_clique_template_materialize_grid_t<6, uint64_t>(edge_col0, edge_col1, edge_n, out_offsets, total_rows, out_cols);
 }

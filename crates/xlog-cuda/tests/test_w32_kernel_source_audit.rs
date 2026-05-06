@@ -136,35 +136,56 @@ fn body_contains_template_call(body: &str, template_name: &str, k_val: usize) ->
 
 // ===============================================================
 // Tier 1 — wrapper bodies are template-call-only (4 cells)
+//
+// Per W3.2 plan §345: each k=6 wrapper body must contain
+// **exactly one statement** that calls the shared grid-level
+// template, with NO conditionals (no `if`, no `switch`, no
+// ternary), NO loops (no `for`, `while`, `do`). The grid-level
+// template absorbs thread-idx + bounds checks so the wrapper
+// itself is purely a template invocation.
 // ===============================================================
 
-#[test]
-fn k6_count_u32_wrapper_is_template_call_only() {
-    let src = wcoj_cu_source();
-    let body = extract_extern_c_global_body(&src, "wcoj_clique6_count_u32")
-        .expect("wcoj_clique6_count_u32 must exist in wcoj.cu");
-    let stmts = count_statements(&body);
+fn assert_wrapper_is_single_template_call(
+    src: &str,
+    wrapper_name: &str,
+    expected_grid_template: &str,
+    k_val: usize,
+) {
+    let body = extract_extern_c_global_body(src, wrapper_name)
+        .unwrap_or_else(|| panic!("{} must exist in wcoj.cu", wrapper_name));
+    let stripped = strip_comments(&body);
+    let stmts = stripped.matches(';').count();
     assert_eq!(
-        stmts, 3,
-        "wcoj_clique6_count_u32 body must contain exactly 3 statements \
-         (thread idx + bound check + template call); got {} in body:\n{}",
-        stmts, body
+        stmts, 1,
+        "{} body must contain exactly 1 statement (single template call \
+         per W3.2 plan §345); got {} in body:\n{}",
+        wrapper_name, stmts, body
     );
+    let needle = format!("{}<{}", expected_grid_template, k_val);
     assert!(
-        body_contains_template_call(&body, "wcoj_clique_template_count_t", 6),
-        "wcoj_clique6_count_u32 must call wcoj_clique_template_count_t<6, ...>; got body:\n{}",
+        stripped.contains(&needle),
+        "{} must call {}<{}, ...>; got body:\n{}",
+        wrapper_name,
+        expected_grid_template,
+        k_val,
         body
     );
-    // `for`/`while`/`do`/`switch` are forbidden — they would
-    // indicate a hand-written algorithm body. The single `if`
-    // for the thread-bounds check is allowed; the statement
-    // count assertion above (== 3) bounds total complexity.
-    let stripped = strip_comments(&body);
-    for forbidden in &["for ", "for(", "while ", "while(", "do ", "do{", "switch"] {
+    // No conditionals: `if`, `switch`, ternary `?`.
+    for forbidden in &["if ", "if(", "switch ", "switch(", "?"] {
         assert!(
             !stripped.contains(forbidden),
-            "wcoj_clique6_count_u32 body contains forbidden token `{}`: hand-written \
-             algorithm body detected. Body:\n{}",
+            "{} body contains forbidden conditional token `{}`. Body:\n{}",
+            wrapper_name,
+            forbidden,
+            body
+        );
+    }
+    // No loops.
+    for forbidden in &["for ", "for(", "while ", "while(", "do ", "do{"] {
+        assert!(
+            !stripped.contains(forbidden),
+            "{} body contains forbidden loop token `{}`. Body:\n{}",
+            wrapper_name,
             forbidden,
             body
         );
@@ -172,51 +193,46 @@ fn k6_count_u32_wrapper_is_template_call_only() {
 }
 
 #[test]
+fn k6_count_u32_wrapper_is_template_call_only() {
+    let src = wcoj_cu_source();
+    assert_wrapper_is_single_template_call(
+        &src,
+        "wcoj_clique6_count_u32",
+        "wcoj_clique_template_count_grid_t",
+        6,
+    );
+}
+
+#[test]
 fn k6_count_u64_wrapper_is_template_call_only() {
     let src = wcoj_cu_source();
-    let body = extract_extern_c_global_body(&src, "wcoj_clique6_count_u64")
-        .expect("wcoj_clique6_count_u64 must exist");
-    let stmts = count_statements(&body);
-    assert_eq!(stmts, 3, "wcoj_clique6_count_u64 stmts: got {}", stmts);
-    assert!(
-        body_contains_template_call(&body, "wcoj_clique_template_count_t", 6),
-        "wcoj_clique6_count_u64 must call wcoj_clique_template_count_t<6, ...>"
+    assert_wrapper_is_single_template_call(
+        &src,
+        "wcoj_clique6_count_u64",
+        "wcoj_clique_template_count_grid_t",
+        6,
     );
 }
 
 #[test]
 fn k6_materialize_u32_wrapper_is_template_call_only() {
     let src = wcoj_cu_source();
-    let body = extract_extern_c_global_body(&src, "wcoj_clique6_materialize_u32")
-        .expect("wcoj_clique6_materialize_u32 must exist");
-    let stmts = count_statements(&body);
-    // materialize wrapper: thread idx + bound check + base lookup
-    // + base-vs-total check + emit call = 5 statements.
-    assert_eq!(
-        stmts, 5,
-        "wcoj_clique6_materialize_u32 stmts: got {}",
-        stmts
-    );
-    assert!(
-        body_contains_template_call(&body, "wcoj_clique_template_emit_t", 6),
-        "wcoj_clique6_materialize_u32 must call wcoj_clique_template_emit_t<6, ...>"
+    assert_wrapper_is_single_template_call(
+        &src,
+        "wcoj_clique6_materialize_u32",
+        "wcoj_clique_template_materialize_grid_t",
+        6,
     );
 }
 
 #[test]
 fn k6_materialize_u64_wrapper_is_template_call_only() {
     let src = wcoj_cu_source();
-    let body = extract_extern_c_global_body(&src, "wcoj_clique6_materialize_u64")
-        .expect("wcoj_clique6_materialize_u64 must exist");
-    let stmts = count_statements(&body);
-    assert_eq!(
-        stmts, 5,
-        "wcoj_clique6_materialize_u64 stmts: got {}",
-        stmts
-    );
-    assert!(
-        body_contains_template_call(&body, "wcoj_clique_template_emit_t", 6),
-        "wcoj_clique6_materialize_u64 must call wcoj_clique_template_emit_t<6, ...>"
+    assert_wrapper_is_single_template_call(
+        &src,
+        "wcoj_clique6_materialize_u64",
+        "wcoj_clique_template_materialize_grid_t",
+        6,
     );
 }
 
@@ -370,6 +386,8 @@ fn no_six_literal_in_template_body() {
     let template_names = [
         "wcoj_clique_template_count_t",
         "wcoj_clique_template_emit_t",
+        "wcoj_clique_template_count_grid_t",
+        "wcoj_clique_template_materialize_grid_t",
         "clique_recurse_t",
     ];
     for name in &template_names {
