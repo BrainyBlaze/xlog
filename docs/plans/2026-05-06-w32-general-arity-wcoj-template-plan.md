@@ -4,9 +4,9 @@
 No new env knobs. No `force` / `kill` / `adaptive` toggles. No
 W3.3–W3.6 work. No CUDA `.cu` changes for triangle (k=3) or
 4-cycle (k=4) — those are slice-1 / slice-2 territory and stay
-bit-identical. No `v0.6.6` references; no punt-to-later wording
-— out-of-scope concerns are owned by W3.3+ board items, named
-at the point of reference. No push, no tag. Plan-first; no
+bit-identical. No release-train references; no scope-punting
+wording — out-of-scope concerns are owned by W3.3+ board items,
+named at the point of reference. No push, no tag. Plan-first; no
 implementation until iteration is approved by the user.
 
 **Plan iteration:** 4 (strengthen Step 11 source-audit per user iteration-3 review).
@@ -501,7 +501,7 @@ following the W2.6 / W3.1 README structure:
 * Process rule #1: this slice does **not** self-mark W3.2 DONE.
 * Process rule #2: every commit references W3.2.
 * Process rule #3: this plan opens with "Closes W3.2 only."
-* Process rule #5: no `v0.6.6` references; no punt-to-later wording — out-of-scope items are owned by W3.3+ board items, named at the point of reference, not pre-named here as W3.2's responsibility.
+* Process rule #5: no release-train references; no scope-punting wording — out-of-scope items are owned by W3.3+ board items, named at the point of reference, not pre-named here as W3.2's responsibility.
 * Process rule #6: no push, no tag.
 
 ## Iteration 3 → 4 Patch Log
@@ -554,7 +554,7 @@ One blocking item from iteration-3 review:
 Five blocking items + three required clarifications the user
 flagged in iteration-2 review:
 
-**Blocking #1 — punt-to-later wording removed from live body.**
+**Blocking #1 — scope-punting wording removed from live body.**
 Two paragraphs in iteration 2 (Step 6 filter-wrapper rejection
 rationale and Step 6 recursive-clique rejection rationale)
 named hypothetical follow-up work as W3.2-implied. Both
@@ -638,7 +638,7 @@ review, all incorporated:
    pins `cargo build -p xlog-cuda --release` and the k=6
    provider cert as the hard-stop on the template strategy.
 2. **No clique-off knob in runtime cert.** Step 9 replaces
-   "force-clique-OFF run on same fixture" with a test-only RIR
+   "force/kill OFF run on same fixture" with a test-only RIR
    rewrite helper that substitutes `MultiWayJoin` nodes with
    their `fallback` field. No new `RuntimeConfig` field, no env
    var, no force/kill/adaptive knob.
@@ -689,7 +689,7 @@ review, all incorporated:
 
 Iteration 4 closes the iteration-3 blocker (Step 11 source-audit
 strengthened to two-tier with file-wide forbidden-pattern
-checks). All prior locks (live punt-to-later wording removed,
+checks). All prior locks (live scope-punting wording removed,
 fallback-counter cert engineers a dispatcher decline,
 `cpu_clique_reference` signature stable-Rust implementable,
 step-13 arithmetic corrected, step-8 layout-sort pre-condition

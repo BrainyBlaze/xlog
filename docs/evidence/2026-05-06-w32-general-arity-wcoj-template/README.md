@@ -205,7 +205,7 @@ modification — locked.
 * Process rule #1: this slice does **not** self-mark W3.2 DONE.
 * Process rule #2: every commit references W3.2.
 * Process rule #3: plan opens with "Closes W3.2 only."
-* Process rule #5: no `v0.6.6` references; no punt-to-later
+* Process rule #5: no release-train references; no scope-punting
   wording — out-of-scope items (k=7 support, recursive clique
   helper, skew classifier for cliques) are rejected in W3.2 with
   no closure credit.
