@@ -1866,9 +1866,11 @@ impl Executor {
         let mut laid_out: Vec<CudaBuffer> = Vec::with_capacity(expected_edges);
         for buf in &raw_bufs {
             let res = if is_u64 {
-                self.provider.wcoj_layout_sort_u64_recorded(buf, launch_stream)
+                self.provider
+                    .wcoj_layout_sort_u64_recorded(buf, launch_stream)
             } else {
-                self.provider.wcoj_layout_sort_u32_recorded(buf, launch_stream)
+                self.provider
+                    .wcoj_layout_sort_u32_recorded(buf, launch_stream)
             };
             match res {
                 Ok(b) => laid_out.push(b),

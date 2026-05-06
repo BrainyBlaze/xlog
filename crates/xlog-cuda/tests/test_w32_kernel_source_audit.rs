@@ -28,8 +28,7 @@ fn wcoj_cu_source() -> String {
     // human-readable source the developer ships.
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.push("kernels/wcoj.cu");
-    fs::read_to_string(&p)
-        .unwrap_or_else(|e| panic!("failed to read {}: {}", p.display(), e))
+    fs::read_to_string(&p).unwrap_or_else(|e| panic!("failed to read {}: {}", p.display(), e))
 }
 
 /// Strip C/C++ line comments (`// ...`) and block comments
@@ -123,7 +122,9 @@ fn count_statements(body: &str) -> usize {
 
 fn body_contains_loop_or_conditional(body: &str) -> bool {
     let s = strip_comments(body);
-    let tokens = ["for", "while", "do ", "do{", "do (", "if ", "if(", "switch", "?:"];
+    let tokens = [
+        "for", "while", "do ", "do{", "do (", "if ", "if(", "switch", "?:",
+    ];
     tokens.iter().any(|t| s.contains(t))
 }
 
@@ -191,7 +192,11 @@ fn k6_materialize_u32_wrapper_is_template_call_only() {
     let stmts = count_statements(&body);
     // materialize wrapper: thread idx + bound check + base lookup
     // + base-vs-total check + emit call = 5 statements.
-    assert_eq!(stmts, 5, "wcoj_clique6_materialize_u32 stmts: got {}", stmts);
+    assert_eq!(
+        stmts, 5,
+        "wcoj_clique6_materialize_u32 stmts: got {}",
+        stmts
+    );
     assert!(
         body_contains_template_call(&body, "wcoj_clique_template_emit_t", 6),
         "wcoj_clique6_materialize_u32 must call wcoj_clique_template_emit_t<6, ...>"
@@ -204,7 +209,11 @@ fn k6_materialize_u64_wrapper_is_template_call_only() {
     let body = extract_extern_c_global_body(&src, "wcoj_clique6_materialize_u64")
         .expect("wcoj_clique6_materialize_u64 must exist");
     let stmts = count_statements(&body);
-    assert_eq!(stmts, 5, "wcoj_clique6_materialize_u64 stmts: got {}", stmts);
+    assert_eq!(
+        stmts, 5,
+        "wcoj_clique6_materialize_u64 stmts: got {}",
+        stmts
+    );
     assert!(
         body_contains_template_call(&body, "wcoj_clique_template_emit_t", 6),
         "wcoj_clique6_materialize_u64 must call wcoj_clique_template_emit_t<6, ...>"
@@ -333,8 +342,8 @@ fn no_clique6_helper_function_body() {
             // forward for `{`. If both, forbidden.
             let look_back_start = id_start.saturating_sub(80);
             let preceding = &src[look_back_start..id_start];
-            let has_device_qual = preceding.contains("__device__")
-                || preceding.contains("__global__");
+            let has_device_qual =
+                preceding.contains("__device__") || preceding.contains("__global__");
             // Look forward for `(` then `{` (function definition).
             let look_forward_end = (id_end + 200).min(src.len());
             let following = &src[id_end..look_forward_end];

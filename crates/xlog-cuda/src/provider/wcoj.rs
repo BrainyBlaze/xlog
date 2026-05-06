@@ -3537,7 +3537,7 @@ impl CudaKernelProvider {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CliqueWidthClass {
-    FourByte, // U32 / Symbol
+    FourByte,  // U32 / Symbol
     EightByte, // U64
 }
 
@@ -3721,12 +3721,18 @@ impl CudaKernelProvider {
         device
             .htod_sync_copy_into(&edge_col0_ptrs, &mut d_edge_col0)
             .map_err(|e| {
-                XlogError::Kernel(format!("{}: htod edge_col0_ptrs failed: {}", entry_label, e))
+                XlogError::Kernel(format!(
+                    "{}: htod edge_col0_ptrs failed: {}",
+                    entry_label, e
+                ))
             })?;
         device
             .htod_sync_copy_into(&edge_col1_ptrs, &mut d_edge_col1)
             .map_err(|e| {
-                XlogError::Kernel(format!("{}: htod edge_col1_ptrs failed: {}", entry_label, e))
+                XlogError::Kernel(format!(
+                    "{}: htod edge_col1_ptrs failed: {}",
+                    entry_label, e
+                ))
             })?;
         device
             .htod_sync_copy_into(&edge_n_host, &mut d_edge_n)
@@ -3824,9 +3830,7 @@ impl CudaKernelProvider {
         // Compute total = counts[n-1] + offsets[n-1].
         let total_kernel = device
             .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_COMPUTE_TOTAL)
-            .ok_or_else(|| {
-                XlogError::Kernel("wcoj_compute_total kernel not found".to_string())
-            })?;
+            .ok_or_else(|| XlogError::Kernel("wcoj_compute_total kernel not found".to_string()))?;
         unsafe {
             total_kernel
                 .clone()
@@ -3852,7 +3856,10 @@ impl CudaKernelProvider {
         })?;
 
         cu_stream.synchronize().map_err(|e| {
-            XlogError::Kernel(format!("{}: stream sync after total failed: {}", entry_label, e))
+            XlogError::Kernel(format!(
+                "{}: stream sync after total failed: {}",
+                entry_label, e
+            ))
         })?;
         let total_rows = self
             .dtoh_scalar_untracked::<u32>(&d_total, 0)
@@ -3960,22 +3967,15 @@ impl CudaKernelProvider {
                     ),
                 )
                 .map_err(|e| {
-                    XlogError::Kernel(format!(
-                        "{}: materialize launch failed: {}",
-                        entry_label, e
-                    ))
+                    XlogError::Kernel(format!("{}: materialize launch failed: {}", entry_label, e))
                 })?;
         }
 
         rec_mat.commit(runtime).map_err(|e| {
-            XlogError::Kernel(format!(
-                "{}: materialize commit failed: {}",
-                entry_label, e
-            ))
+            XlogError::Kernel(format!("{}: materialize commit failed: {}", entry_label, e))
         })?;
 
-        let columns: Vec<CudaColumn> =
-            out_col_bufs.into_iter().map(|b| b.into()).collect();
+        let columns: Vec<CudaColumn> = out_col_bufs.into_iter().map(|b| b.into()).collect();
         Ok(CudaBuffer::from_columns_with_host_count(
             columns,
             total_rows as u64,

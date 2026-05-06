@@ -309,11 +309,21 @@ fn cycle_5_does_not_promote() {
     let pentagon_rels: Vec<RelId> = (1..=5u32).map(RelId).collect();
     // Build atoms binding (0,1), (1,2), (2,3), (3,4), (4,0) —
     // hand-crafted left-deep.
-    let s0 = RirNode::Scan { rel: pentagon_rels[0] }; // (0,1)
-    let s1 = RirNode::Scan { rel: pentagon_rels[1] }; // (1,2)
-    let s2 = RirNode::Scan { rel: pentagon_rels[2] }; // (2,3)
-    let s3 = RirNode::Scan { rel: pentagon_rels[3] }; // (3,4)
-    let s4 = RirNode::Scan { rel: pentagon_rels[4] }; // (4,0)
+    let s0 = RirNode::Scan {
+        rel: pentagon_rels[0],
+    }; // (0,1)
+    let s1 = RirNode::Scan {
+        rel: pentagon_rels[1],
+    }; // (1,2)
+    let s2 = RirNode::Scan {
+        rel: pentagon_rels[2],
+    }; // (2,3)
+    let s3 = RirNode::Scan {
+        rel: pentagon_rels[3],
+    }; // (3,4)
+    let s4 = RirNode::Scan {
+        rel: pentagon_rels[4],
+    }; // (4,0)
     let j01 = RirNode::Join {
         left: Box::new(s0),
         right: Box::new(s1),
@@ -379,7 +389,7 @@ fn disconnected_subcomponents_do_not_promote() {
         acc = RirNode::Join {
             left: Box::new(acc),
             right: Box::new(RirNode::Scan { rel: *r }),
-            left_keys: vec![],  // cross product, no shared vars
+            left_keys: vec![], // cross product, no shared vars
             right_keys: vec![],
             join_type: JoinType::Inner,
         };
@@ -431,7 +441,7 @@ fn clique5_with_reversed_atom_rejected() {
         left: Box::new(s0),
         right: Box::new(s1),
         left_keys: vec![0],
-        right_keys: vec![1],  // wrong: should be [0]
+        right_keys: vec![1], // wrong: should be [0]
         join_type: JoinType::Inner,
     };
     // Then continue building the rest of the clique on this broken

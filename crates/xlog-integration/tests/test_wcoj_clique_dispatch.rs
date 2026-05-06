@@ -232,10 +232,8 @@ fn clique5_dispatch_counter_advances_and_row_set_matches_fallback_body() {
     }
     let _ = executor.execute_plan(&plan).expect("execute clique5");
 
-    let dispatch_rows = download_k_row_set(
-        executor.store().get("clique5").expect("clique5 head"),
-        5,
-    );
+    let dispatch_rows =
+        download_k_row_set(executor.store().get("clique5").expect("clique5 head"), 5);
     assert!(
         executor.wcoj_clique5_dispatch_count() >= 1,
         "expected ≥ 1 clique5 dispatch; got {}",
@@ -250,10 +248,8 @@ fn clique5_dispatch_counter_advances_and_row_set_matches_fallback_body() {
     // running with K=5 fixture pre-laid-out and re-executing.
     //
     // Simpler reference: 1 clique row expected = (1, 2, 3, 4, 5).
-    let expected: std::collections::BTreeSet<Vec<u32>> = [vec![1u32, 2, 3, 4, 5]]
-        .iter()
-        .cloned()
-        .collect();
+    let expected: std::collections::BTreeSet<Vec<u32>> =
+        [vec![1u32, 2, 3, 4, 5]].iter().cloned().collect();
     assert_eq!(
         dispatch_rows, expected,
         "K=5 clique dispatch row set must equal expected single clique"
@@ -281,19 +277,15 @@ fn clique6_dispatch_counter_advances_and_row_set_matches_fallback_body() {
     }
     let _ = executor.execute_plan(&plan).expect("execute clique6");
 
-    let dispatch_rows = download_k_row_set(
-        executor.store().get("clique6").expect("clique6 head"),
-        6,
-    );
+    let dispatch_rows =
+        download_k_row_set(executor.store().get("clique6").expect("clique6 head"), 6);
     assert!(
         executor.wcoj_clique6_dispatch_count() >= 1,
         "expected ≥ 1 clique6 dispatch; got {}",
         executor.wcoj_clique6_dispatch_count()
     );
-    let expected: std::collections::BTreeSet<Vec<u32>> = [vec![1u32, 2, 3, 4, 5, 6]]
-        .iter()
-        .cloned()
-        .collect();
+    let expected: std::collections::BTreeSet<Vec<u32>> =
+        [vec![1u32, 2, 3, 4, 5, 6]].iter().cloned().collect();
     assert_eq!(
         dispatch_rows, expected,
         "K=6 clique dispatch row set must equal expected single clique"

@@ -350,8 +350,9 @@ fn run_k6_test_u32_or_symbol(col_type: ScalarType) {
         .wcoj_clique6_u32_recorded(arr, stream)
         .expect("clique6 u32");
     let actual: BTreeSet<[u32; 6]> = download_k6_u32(&out).into_iter().collect();
-    let expected: BTreeSet<[u32; 6]> =
-        cpu_clique_reference::<u32, 6>(&host_edges).into_iter().collect();
+    let expected: BTreeSet<[u32; 6]> = cpu_clique_reference::<u32, 6>(&host_edges)
+        .into_iter()
+        .collect();
     assert_eq!(
         actual, expected,
         "K=6 ({:?}) row set must match CPU oracle",
@@ -406,8 +407,9 @@ fn clique6_u64_round_trips_against_cpu_oracle() {
         .wcoj_clique6_u64_recorded(arr, stream)
         .expect("clique6 u64");
     let actual: BTreeSet<[u64; 6]> = download_k6_u64(&out).into_iter().collect();
-    let expected: BTreeSet<[u64; 6]> =
-        cpu_clique_reference::<u64, 6>(&host_edges).into_iter().collect();
+    let expected: BTreeSet<[u64; 6]> = cpu_clique_reference::<u64, 6>(&host_edges)
+        .into_iter()
+        .collect();
     assert_eq!(actual, expected, "K=6 (U64) row set must match CPU oracle");
     for col_idx in 0..6 {
         assert_eq!(

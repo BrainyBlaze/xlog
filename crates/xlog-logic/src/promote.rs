@@ -1085,9 +1085,7 @@ fn uf_union_clique(parent: &mut [usize], a: usize, b: usize) {
 ///
 /// `project_columns` is the outermost Project's column list,
 /// each entry's index translated to a global slot position.
-fn flatten_clique_body(
-    body: &RirNode,
-) -> Option<(Vec<RelId>, Vec<(usize, usize)>, Vec<usize>)> {
+fn flatten_clique_body(body: &RirNode) -> Option<(Vec<RelId>, Vec<(usize, usize)>, Vec<usize>)> {
     let RirNode::Project { input, columns } = body else {
         return None;
     };
