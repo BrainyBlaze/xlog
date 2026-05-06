@@ -133,6 +133,19 @@ pub fn promote_multiway(
             let body_for_4c = normalized_4c.as_ref().unwrap_or(&rule.body);
             if let Some(promoted) = try_promote_4cycle(body_for_4c, stats, config) {
                 rule.body = promoted;
+                continue;
+            }
+            // W3.2 — k=5 / k=6 clique promotion. Tree-flatten +
+            // complete-K_k validation. Robust to left-deep /
+            // right-deep / bushy. Order is doc anchor only;
+            // a body matching k=5 cannot also match k=6
+            // (different scan count).
+            if let Some(promoted) = try_promote_clique_k(&rule.body, 5) {
+                rule.body = promoted;
+                continue;
+            }
+            if let Some(promoted) = try_promote_clique_k(&rule.body, 6) {
+                rule.body = promoted;
             }
         }
     }
@@ -1009,6 +1022,291 @@ fn try_promote_4cycle(
         output_columns,
         fallback,
         var_order,
+    })
+}
+
+// ===============================================================
+// W3.2 — K-clique promoter (k = 5, k = 6).
+//
+// Tree-flatten + complete-K_k validation. Robust to left-deep /
+// right-deep / bushy lowered trees. Rejects:
+//   * Filter / comparison wrappers (semantic preservation gate).
+//   * Non-canonical nodes (anything other than Project/Join/Scan).
+//   * Self-edge atoms (e(X, X) — same var in both columns).
+//   * Reversed atoms (e(v_j, v_i) for canonical (v_i, v_j) with
+//     i < j) — W3.2 does not implement column-swap layout for
+//     clique edges.
+//   * Constants in atom positions.
+//   * Recursive scan bodies (recursive_scan_count >= 1).
+//   * Atom multisets that don't form the complete K_k edge set.
+// ===============================================================
+
+/// Canonical edge index for (i, j) with 0 <= i < j < k.
+fn clique_edge_idx(i: usize, j: usize, k: usize) -> usize {
+    debug_assert!(i < j && j < k);
+    i * (k - 1) - i * (i - 1) / 2 + (j - i - 1)
+}
+
+/// Tiny union-find on atom-column slots (position space).
+fn uf_find_clique(parent: &mut [usize], mut x: usize) -> usize {
+    while parent[x] != x {
+        parent[x] = parent[parent[x]];
+        x = parent[x];
+    }
+    x
+}
+
+fn uf_union_clique(parent: &mut [usize], a: usize, b: usize) {
+    let ra = uf_find_clique(parent, a);
+    let rb = uf_find_clique(parent, b);
+    if ra != rb {
+        parent[rb] = ra;
+    }
+}
+
+/// Flatten the join tree. Walks Project/Join/Scan only;
+/// rejects on Filter or any other RIR variant. Returns
+/// `(scans, key_equiv_pairs, project_columns)` on success.
+///
+/// `scans[i]` = RelId of the i-th leaf Scan in left-to-right
+/// traversal order. The "global slot space" assigns slot indices
+/// `2*i` and `2*i + 1` to atom i's col0 and col1 respectively.
+///
+/// `key_equiv_pairs` is a list of `(global_slot_a, global_slot_b)`
+/// pairs derived from each Join's `(left_keys, right_keys)` —
+/// every Join key references LOCAL join output positions, which
+/// the flatten translates to global slot positions.
+///
+/// `project_columns` is the outermost Project's column list,
+/// each entry's index translated to a global slot position.
+fn flatten_clique_body(
+    body: &RirNode,
+) -> Option<(Vec<RelId>, Vec<(usize, usize)>, Vec<usize>)> {
+    let RirNode::Project { input, columns } = body else {
+        return None;
+    };
+    let mut scans: Vec<RelId> = Vec::new();
+    let mut key_pairs: Vec<(usize, usize)> = Vec::new();
+    let _width = walk_clique_node(input, &mut scans, &mut key_pairs)?;
+    let mut project_globals: Vec<usize> = Vec::with_capacity(columns.len());
+    for c in columns {
+        let xlog_ir::rir::ProjectExpr::Column(k) = c else {
+            return None;
+        };
+        project_globals.push(*k);
+    }
+    Some((scans, key_pairs, project_globals))
+}
+
+/// Recursive walker. Returns the width (in global slots) of the
+/// subtree, after accumulating its scans + key-equiv pairs.
+fn walk_clique_node(
+    node: &RirNode,
+    scans: &mut Vec<RelId>,
+    key_pairs: &mut Vec<(usize, usize)>,
+) -> Option<usize> {
+    match node {
+        RirNode::Scan { rel } => {
+            scans.push(*rel);
+            Some(2)
+        }
+        RirNode::Join {
+            left,
+            right,
+            left_keys,
+            right_keys,
+            join_type,
+        } => {
+            if !matches!(join_type, JoinType::Inner) {
+                return None;
+            }
+            let left_offset = scans.len() * 2;
+            let left_width = walk_clique_node(left, scans, key_pairs)?;
+            let right_offset = left_offset + left_width;
+            let right_width = walk_clique_node(right, scans, key_pairs)?;
+            if left_keys.len() != right_keys.len() {
+                return None;
+            }
+            for (lk, rk) in left_keys.iter().zip(right_keys.iter()) {
+                if *lk >= left_width || *rk >= right_width {
+                    return None;
+                }
+                key_pairs.push((left_offset + *lk, right_offset + *rk));
+            }
+            Some(left_width + right_width)
+        }
+        // Reject Project (only outermost is allowed; we already
+        // peeled it off in flatten_clique_body), Filter, and
+        // any other RIR variant.
+        _ => None,
+    }
+}
+
+/// W3.2 K-clique promoter for k ∈ {5, 6}.
+///
+/// Per the W3.2 plan iteration 4 lock: tree-flatten + complete-
+/// K_k validation. Robust to left-deep / right-deep / bushy.
+/// Rejects filter wrappers, reversed atoms, self-edges,
+/// constants, recursive bodies, and any non-canonical shape.
+fn try_promote_clique_k(body: &RirNode, k: usize) -> Option<RirNode> {
+    if !(k == 5 || k == 6) {
+        return None;
+    }
+    let expected_edges = k * (k - 1) / 2;
+
+    // 1. Flatten body. Rejects Filter, non-canonical nodes.
+    let (scans, key_pairs, project_globals) = flatten_clique_body(body)?;
+
+    // 2. Scan count must equal C(k, 2).
+    if scans.len() != expected_edges {
+        return None;
+    }
+
+    // 3. Head must have exactly k variables.
+    if project_globals.len() != k {
+        return None;
+    }
+
+    // 4. Union-find on global slot space (size 2 * expected_edges)
+    // to derive variable equivalence classes.
+    let n_slots = 2 * expected_edges;
+    let mut parent: Vec<usize> = (0..n_slots).collect();
+    for (a, b) in &key_pairs {
+        if *a >= n_slots || *b >= n_slots {
+            return None;
+        }
+        uf_union_clique(&mut parent, *a, *b);
+    }
+
+    // 5. Find unique class representative per Project column.
+    // Each Project column references a global slot; resolve to
+    // its class root.
+    let mut head_class: Vec<usize> = Vec::with_capacity(k);
+    for col in &project_globals {
+        if *col >= n_slots {
+            return None;
+        }
+        head_class.push(uf_find_clique(&mut parent, *col));
+    }
+    // 6. The k head classes must be distinct.
+    let mut sorted_head_classes = head_class.clone();
+    sorted_head_classes.sort();
+    sorted_head_classes.dedup();
+    if sorted_head_classes.len() != k {
+        return None;
+    }
+
+    // 7. Total distinct classes across all slots must equal k.
+    // (No "extra" non-head variables in atom slots — every slot's
+    // class must be one of the k head classes.)
+    let mut all_class_count: HashMap<usize, usize> = HashMap::new();
+    for slot in 0..n_slots {
+        let root = uf_find_clique(&mut parent, slot);
+        *all_class_count.entry(root).or_insert(0) += 1;
+    }
+    if all_class_count.len() != k {
+        return None;
+    }
+    // 8. Every class must have exactly k-1 slots (each variable
+    // appears in exactly k-1 atoms = clique edges incident to it).
+    for &count in all_class_count.values() {
+        if count != k - 1 {
+            return None;
+        }
+    }
+
+    // 9. Map class → head-var index. The Project column ordering
+    // defines the head-var indices (Project col i = head var i).
+    let mut class_to_head_idx: HashMap<usize, usize> = HashMap::new();
+    for (head_idx, cls) in head_class.iter().enumerate() {
+        class_to_head_idx.insert(*cls, head_idx);
+    }
+
+    // 10. For each scan, derive its (var_a, var_b) pair from the
+    // class memberships of its two slots. Reject self-edges
+    // (both slots in same class) and atoms touching a non-head
+    // class (already filtered above by class-count check, but
+    // defensive).
+    let mut atom_pairs: Vec<(usize, usize)> = Vec::with_capacity(expected_edges);
+    let mut canonical_to_scan_idx: HashMap<(usize, usize), usize> = HashMap::new();
+    for (atom_i, _rel) in scans.iter().enumerate() {
+        let slot_a = 2 * atom_i;
+        let slot_b = 2 * atom_i + 1;
+        let cls_a = uf_find_clique(&mut parent, slot_a);
+        let cls_b = uf_find_clique(&mut parent, slot_b);
+        if cls_a == cls_b {
+            // Self-edge e(X, X) — reject.
+            return None;
+        }
+        let head_a = class_to_head_idx.get(&cls_a)?;
+        let head_b = class_to_head_idx.get(&cls_b)?;
+        // 11. Reversed-atom rejection: canonical form requires
+        // col0 maps to lower head idx, col1 to higher. If col0
+        // is at higher idx, the atom is reversed (W3.2 does not
+        // implement column-swap layout for clique edges).
+        if *head_a > *head_b {
+            return None;
+        }
+        let (lo, hi) = (*head_a, *head_b);
+        atom_pairs.push((lo, hi));
+        // 12. Reject duplicate edges (same (i, j) appearing twice).
+        if canonical_to_scan_idx.insert((lo, hi), atom_i).is_some() {
+            return None;
+        }
+    }
+
+    // 13. Verify the atom_pairs set equals the complete K_k edge
+    // set {(i, j) | 0 <= i < j < k}.
+    if canonical_to_scan_idx.len() != expected_edges {
+        return None;
+    }
+    for i in 0..k {
+        for j in (i + 1)..k {
+            if !canonical_to_scan_idx.contains_key(&(i, j)) {
+                return None;
+            }
+        }
+    }
+
+    // 14. Reorder scans into canonical lex (i, j) order.
+    let mut reordered_scans: Vec<RelId> = Vec::with_capacity(expected_edges);
+    for i in 0..k {
+        for j in (i + 1)..k {
+            let scan_idx = canonical_to_scan_idx[&(i, j)];
+            reordered_scans.push(scans[scan_idx]);
+        }
+    }
+
+    // 15. Build canonical MultiWayJoin.inputs (one Scan per
+    // canonical edge in lex order) + slot_vars (each atom's
+    // (col0, col1) bind (head_i, head_j) for canonical edge
+    // (i, j)).
+    let inputs: Vec<RirNode> = reordered_scans
+        .iter()
+        .map(|rel| RirNode::Scan { rel: *rel })
+        .collect();
+    let mut slot_vars: Vec<Vec<Option<u32>>> = Vec::with_capacity(expected_edges);
+    for i in 0..k {
+        for j in (i + 1)..k {
+            let _ = clique_edge_idx(i, j, k); // sanity; locked invariant
+            slot_vars.push(vec![Some(i as u32), Some(j as u32)]);
+        }
+    }
+    // Project's existing column list defines the head-output
+    // mapping; we preserve it on the MultiWayJoin's
+    // output_columns.
+    let RirNode::Project { columns, .. } = body else {
+        return None;
+    };
+    let output_columns = columns.clone();
+    let fallback = Box::new(body.clone());
+
+    Some(RirNode::MultiWayJoin {
+        inputs,
+        slot_vars,
+        output_columns,
+        fallback,
+        var_order: None,
     })
 }
 
