@@ -139,13 +139,19 @@ pub fn promote_multiway(
             // complete-K_k validation. Robust to left-deep /
             // right-deep / bushy. Order is doc anchor only;
             // a body matching k=5 cannot also match k=6
-            // (different scan count).
-            if let Some(promoted) = try_promote_clique_k(&rule.body, 5) {
-                rule.body = promoted;
-                continue;
-            }
-            if let Some(promoted) = try_promote_clique_k(&rule.body, 6) {
-                rule.body = promoted;
+            // (different scan count). Recursive clique bodies
+            // (any scan in the head SCC) are rejected — W3.2
+            // does not extend the recursive WCOJ helper for
+            // clique-keyed dispatch. Rejected in W3.2 — no
+            // closure credit.
+            if recursive_scan_count(&rule.body, &head_rel_set) == 0 {
+                if let Some(promoted) = try_promote_clique_k(&rule.body, 5) {
+                    rule.body = promoted;
+                    continue;
+                }
+                if let Some(promoted) = try_promote_clique_k(&rule.body, 6) {
+                    rule.body = promoted;
+                }
             }
         }
     }
