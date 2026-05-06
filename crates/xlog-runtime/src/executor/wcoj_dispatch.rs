@@ -1743,6 +1743,189 @@ impl Executor {
     }
 }
 
+// ===============================================================
+// W3.2 — K-clique dispatch (k = 5, k = 6).
+//
+// Default-dispatch on shape match. No force / kill / adaptive
+// knobs (those are out of scope for W3.2 per the locked plan).
+// Silent fallback to MultiWayJoin.fallback on dispatcher decline
+// or kernel error.
+//
+// Counter accessors are public (per fix #6) so xlog-integration
+// certs can assert across the crate boundary.
+// ===============================================================
+
+impl Executor {
+    /// W3.2 — Number of times the WCOJ k=5-clique hook produced a
+    /// result and the executor installed it. Counter does NOT
+    /// advance on dispatcher decline / kernel-launch failure
+    /// (silent fallback to `MultiWayJoin.fallback`).
+    pub fn wcoj_clique5_dispatch_count(&self) -> u64 {
+        self.wcoj_clique5_dispatch_count
+    }
+
+    /// W3.2 — Number of times the WCOJ k=6-clique hook produced
+    /// a result. Same observability contract as
+    /// `wcoj_clique5_dispatch_count`.
+    pub fn wcoj_clique6_dispatch_count(&self) -> u64 {
+        self.wcoj_clique6_dispatch_count
+    }
+
+    /// W3.2 — Try k=5-clique dispatch. Wrapper for rule-keyed
+    /// callers (recursive engine + non-recursive scc).
+    pub(super) fn try_dispatch_wcoj_clique5(
+        &mut self,
+        rule: &CompiledRule,
+    ) -> Result<Option<CudaBuffer>> {
+        self.try_dispatch_wcoj_clique5_on_body(&rule.body)
+    }
+
+    /// W3.2 — Try k=6-clique dispatch.
+    pub(super) fn try_dispatch_wcoj_clique6(
+        &mut self,
+        rule: &CompiledRule,
+    ) -> Result<Option<CudaBuffer>> {
+        self.try_dispatch_wcoj_clique6_on_body(&rule.body)
+    }
+
+    /// W3.2 — Body-keyed k=5-clique dispatch.
+    pub(super) fn try_dispatch_wcoj_clique5_on_body(
+        &mut self,
+        body: &RirNode,
+    ) -> Result<Option<CudaBuffer>> {
+        self.try_dispatch_wcoj_clique_k_on_body(body, 5)
+    }
+
+    /// W3.2 — Body-keyed k=6-clique dispatch.
+    pub(super) fn try_dispatch_wcoj_clique6_on_body(
+        &mut self,
+        body: &RirNode,
+    ) -> Result<Option<CudaBuffer>> {
+        self.try_dispatch_wcoj_clique_k_on_body(body, 6)
+    }
+
+    /// W3.2 — Generic K-clique dispatch shared by k=5 and k=6
+    /// entries. Returns `Ok(Some(buffer))` on dispatch;
+    /// `Ok(None)` on decline / fallback.
+    fn try_dispatch_wcoj_clique_k_on_body(
+        &mut self,
+        body: &RirNode,
+        k: usize,
+    ) -> Result<Option<CudaBuffer>> {
+        let expected_edges = k * (k - 1) / 2;
+        // 1. Shape match: MultiWayJoin with inputs.len() == C(k, 2).
+        let RirNode::MultiWayJoin { inputs, .. } = body else {
+            return Ok(None);
+        };
+        if inputs.len() != expected_edges {
+            return Ok(None);
+        }
+        // 2. Extract RelIds from each input (must all be Scans).
+        let mut rel_ids: Vec<RelId> = Vec::with_capacity(expected_edges);
+        for input in inputs {
+            let RirNode::Scan { rel } = input else {
+                return Ok(None);
+            };
+            rel_ids.push(*rel);
+        }
+        // 3. Resolve each rel to a buffer in the relation store.
+        let mut raw_bufs: Vec<&CudaBuffer> = Vec::with_capacity(expected_edges);
+        for rid in &rel_ids {
+            let name = match self.rel_names.get(rid) {
+                Some(n) => n.clone(),
+                None => return Ok(None),
+            };
+            match self.store.get(&name) {
+                Some(b) => raw_bufs.push(b),
+                None => return Ok(None),
+            }
+        }
+        // 4. Acquire dispatch stream.
+        let launch_stream = match self.wcoj_dispatch_stream_or_init() {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        // 5. Determine width-class from the first edge's column 0.
+        // All edges must share the width-class; provider entries
+        // re-validate.
+        let first_ty = match raw_bufs[0].schema.column_type(0) {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+        let is_u64 = matches!(first_ty, xlog_core::ScalarType::U64);
+        let is_4byte = matches!(
+            first_ty,
+            xlog_core::ScalarType::U32 | xlog_core::ScalarType::Symbol
+        );
+        if !is_u64 && !is_4byte {
+            return Ok(None);
+        }
+        // 6. Layout-sort + dedup each edge unconditionally
+        // through W3.1. Per fix #7 — no provider-side sortedness
+        // checker; dispatcher always layouts.
+        let mut laid_out: Vec<CudaBuffer> = Vec::with_capacity(expected_edges);
+        for buf in &raw_bufs {
+            let res = if is_u64 {
+                self.provider.wcoj_layout_sort_u64_recorded(buf, launch_stream)
+            } else {
+                self.provider.wcoj_layout_sort_u32_recorded(buf, launch_stream)
+            };
+            match res {
+                Ok(b) => laid_out.push(b),
+                Err(_) => return Ok(None),
+            }
+        }
+        // 7. Build the slice of buffer references the provider
+        // expects.
+        let edge_refs: Vec<&CudaBuffer> = laid_out.iter().collect();
+        // 8. Dispatch the appropriate provider entry.
+        let result = match (k, is_u64) {
+            (5, false) => {
+                let arr: &[&CudaBuffer; 10] = match edge_refs.as_slice().try_into() {
+                    Ok(a) => a,
+                    Err(_) => return Ok(None),
+                };
+                self.provider.wcoj_clique5_u32_recorded(arr, launch_stream)
+            }
+            (5, true) => {
+                let arr: &[&CudaBuffer; 10] = match edge_refs.as_slice().try_into() {
+                    Ok(a) => a,
+                    Err(_) => return Ok(None),
+                };
+                self.provider.wcoj_clique5_u64_recorded(arr, launch_stream)
+            }
+            (6, false) => {
+                let arr: &[&CudaBuffer; 15] = match edge_refs.as_slice().try_into() {
+                    Ok(a) => a,
+                    Err(_) => return Ok(None),
+                };
+                self.provider.wcoj_clique6_u32_recorded(arr, launch_stream)
+            }
+            (6, true) => {
+                let arr: &[&CudaBuffer; 15] = match edge_refs.as_slice().try_into() {
+                    Ok(a) => a,
+                    Err(_) => return Ok(None),
+                };
+                self.provider.wcoj_clique6_u64_recorded(arr, launch_stream)
+            }
+            _ => return Ok(None),
+        };
+        // 9. On success: counter++, return Some. On error:
+        // silent fallback (no counter advance).
+        match result {
+            Ok(buf) => {
+                if k == 5 {
+                    self.wcoj_clique5_dispatch_count += 1;
+                } else {
+                    self.wcoj_clique6_dispatch_count += 1;
+                }
+                Ok(Some(buf))
+            }
+            Err(_) => Ok(None),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Mutex, OnceLock};

@@ -97,6 +97,13 @@ pub struct Executor {
     /// produced a result and the executor installed it. Tracks
     /// 4-cycle dispatches separately from triangle.
     pub(super) wcoj_4cycle_dispatch_count: u64,
+    /// W3.2 — count of times `try_dispatch_wcoj_clique5` produced
+    /// a result and the executor installed it. Public accessor:
+    /// `Executor::wcoj_clique5_dispatch_count(&self) -> u64`.
+    pub(super) wcoj_clique5_dispatch_count: u64,
+    /// W3.2 — count of times `try_dispatch_wcoj_clique6` produced
+    /// a result and the executor installed it.
+    pub(super) wcoj_clique6_dispatch_count: u64,
     /// Cached non-default stream for the WCOJ triangle dispatch hook.
     /// Acquired lazily on first dispatch and reused thereafter — mirrors
     /// [`xlog_cuda::CudaKernelProvider::recorded_op_stream`] for the
@@ -222,6 +229,8 @@ impl Executor {
             ilp_last_result: None,
             wcoj_triangle_dispatch_count: 0,
             wcoj_4cycle_dispatch_count: 0,
+            wcoj_clique5_dispatch_count: 0,
+            wcoj_clique6_dispatch_count: 0,
             wcoj_dispatch_stream: OnceLock::new(),
             #[cfg(feature = "wcoj-phase-timing")]
             last_wcoj_phase_timing: std::sync::Mutex::new(None),

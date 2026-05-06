@@ -49,6 +49,18 @@ impl Executor {
             if let Some(buf) = self.try_dispatch_wcoj_4cycle_on_body(node)? {
                 return Ok(buf);
             }
+            // W3.2 — k=5 / k=6 clique dispatch on MultiWayJoin
+            // bodies. Recursive callers reject recursive clique
+            // bodies upstream (try_promote_clique_k declines on
+            // recursive_scan_count >= 1); the on_body entries
+            // here are reachable from non-recursive promotion
+            // paths and the recursive seed pass.
+            if let Some(buf) = self.try_dispatch_wcoj_clique5_on_body(node)? {
+                return Ok(buf);
+            }
+            if let Some(buf) = self.try_dispatch_wcoj_clique6_on_body(node)? {
+                return Ok(buf);
+            }
         }
         self.execute_node(node)
     }
@@ -146,6 +158,30 @@ impl Executor {
                         // earlier attempt always returns None on a
                         // 4-cycle body and vice versa.
                         if let Some(wcoj_result) = self.try_dispatch_wcoj_4cycle(rule)? {
+                            if let Some(existing) = self.store.get(&rule.head) {
+                                let merged = self.provider.union_gpu(existing, &wcoj_result)?;
+                                self.store_put(&rule.head, merged);
+                            } else {
+                                self.store_put(&rule.head, wcoj_result);
+                            }
+                            continue;
+                        }
+
+                        // W3.2 — k=5 / k=6 clique dispatch.
+                        // Same shape-gated default-dispatch
+                        // pattern as triangle / 4-cycle; silent
+                        // fallback to MultiWayJoin.fallback on
+                        // dispatcher decline or kernel error.
+                        if let Some(wcoj_result) = self.try_dispatch_wcoj_clique5(rule)? {
+                            if let Some(existing) = self.store.get(&rule.head) {
+                                let merged = self.provider.union_gpu(existing, &wcoj_result)?;
+                                self.store_put(&rule.head, merged);
+                            } else {
+                                self.store_put(&rule.head, wcoj_result);
+                            }
+                            continue;
+                        }
+                        if let Some(wcoj_result) = self.try_dispatch_wcoj_clique6(rule)? {
                             if let Some(existing) = self.store.get(&rule.head) {
                                 let merged = self.provider.union_gpu(existing, &wcoj_result)?;
                                 self.store_put(&rule.head, merged);
