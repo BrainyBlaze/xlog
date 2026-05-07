@@ -20,7 +20,7 @@ OPEN).
 Case Optimal Datalog to GPUs"
 ([arXiv:2604.20073](https://arxiv.org/abs/2604.20073)) — claims
 P1 (semi-naïve occurrence semantics) and P4 (delta-outermost) are
-load-bearing for iteration-4 D1 / D6 / Step 11. See audit at
+load-bearing for iteration-4 D1 / D6 / Step 13. See audit at
 `docs/evidence/2026-05-07-w3-paper-alignment-audit/README.md`
 on `feat/w3-paper-alignment-audit` HEAD `3470288f`.
 
@@ -31,15 +31,24 @@ on `feat/w3-paper-alignment-audit` HEAD `3470288f`.
 > binary-join reference. Promoter gate `count <= 1` is removed;
 > replaced with `count <= rule.recursive_arity` or equivalent.
 
-W4.1 is a **promoter gate widening** + a **test surface
-addition**. The runtime engine is already multi-recursive-ready
-(verified by recon — see "Read-Only Surface" below). The work
-is therefore narrowly scoped: one promoter gate change, one
-existing test flipped/renamed, one new test added.
+W4.1 is a **paper-grounded** (arXiv:2604.20073) promoter gate
+removal + `rewrite_scan_nth` occurrence-identity fix + a test
+surface delta covering distinct-recursive AND same-predicate
+self-recursive bodies (per paper P1). Per the iteration-4
+canonical D-table + 16-step plan below, the work surface is:
+(1) promoter gate removal at `promote.rs:114`; (2) two-spot
+`rewrite_scan_nth_impl` fix at `rewrite.rs:303-311 + :477-504`;
+(3) two existing `rewrite.rs` test rewrites at `:577 + :691`
+for the new symmetric semantic; (4) one flipped multirec triangle
+test, one new multirec 4-cycle positive cert, one new self-
+recursive triangle positive cert, one new rewrite-fix regression
+test, and one flipped W2.3 Part D cert; (5) doc-scrub at 4
+locations; (6) Step 13 delta-outermost (paper P4) verification —
+documentation-only.
 
 ## Process Rule Compliance
 
-* Process rule #1: no DONE marking under any iteration-1 outcome.
+* Process rule #1: no DONE marking under any iteration-4 outcome.
 * Process rule #2: every W4.1 commit references W4.1.
 * Process rule #5: no release-train references; out-of-scope
   concerns are owned by W4.2 / W5.x board items, named at the
@@ -64,7 +73,7 @@ iterations.
 | **D5** | **Correctness verification.** | Row-set parity vs binary-join reference (gate-off run) for each W4.1 cert. The rewrite-fix regression test verifies occurrence-identity preservation directly at the helper level (no GPU, no executor). |
 | **D6** | **Counter semantics (corrected per F-W41-11).** | The seeding pass at `recursive.rs:331-347` evaluates each rule **once** on its **original** body (no variant rewrites); WCOJ counter increments by 1 per rule per seeding. Variants are constructed and dispatched in the **iteration loop** at `recursive.rs:455-540` (line 455 = `for _iteration in 0..max_iterations`; line 520 = the per-variant `execute_wcoj_or_fallback_node` call site). The first iteration with non-empty initial deltas is what produces multiple per-variant dispatches. Thus `>= 2` is satisfiable iff the fixture's initial deltas (after seeding) are non-empty AND iterating at least once. **All three W4.1 dispatch certs use fixtures whose initial deltas are guaranteed non-empty** (multirec_triangle's `r1_init` + `r2_init`, multirec_4cycle's analogous initial relations, selfrec_triangle's `p_init`); each produces seeding=1 dispatch + iter1 ≥ 1 variant dispatch = `>= 2` total per rule. Reference rows asserted non-empty so an empty-output run cannot trivially satisfy parity. |
 | **D7** | **Acceptance gates (locked).** | (1) flipped multirec triangle PASS (counter `>= 2`); (2) new multirec 4-cycle PASS; (3) **new selfrec triangle PASS** (positive cert per P1; concrete fixture per F-W41-13); (4) flipped W2.3 Part D PASS under `--features recursive-stats-trace`; (5) rewrite-fix regression test PASS in `rewrite.rs` `#[cfg(test)] mod`; (6) **rewritten `rewrite_scan_nth_rewrites_inputs_and_fallback` and `rewrite_scan_nth_handles_4_inputs_and_fallback` PASS** with the new symmetric semantics; (7) all other slice-1/2/4 tests PASS; (8) zero workspace warnings on touched files; (9) `cargo fmt --check --all` clean; (10) `cargo test --workspace --release --exclude pyxlog --exclude xlog-cuda-tests` exit 0 with workspace pass-count delta of **+3** (new multirec 4-cycle + new selfrec triangle + new rewrite-fix regression cell; the two flipped recursive-dispatch tests + the two rewritten `rewrite.rs` tests are renames-or-rewrites keeping cell count constant; the W2.3 Part D flip is also a rename keeping cell count constant); (11) `cargo test -p xlog-runtime --release --features recursive-stats-trace --test test_w23_recursive_stats` exit 0; (12) `cargo test -p xlog-cuda-tests --test certification_suite --release` 1/1. |
-| **D8** | **Process locks.** | No W2.5 default flip. No W3.3 resurrection. **W3.4 / W3.5 / W3.6 stay not-started until paper-aligned W3.3 is drafted + approved (per audit recommendation).** No performance work — D7 has no ratio gate; iteration 4's Step 11 (delta-outermost / paper P4) is documentation-only, citing actual files per F-W41-12. No push, no tag, no board edit, no DONE marking. No env-knob additions. No `RuntimeConfig` field additions. |
+| **D8** | **Process locks.** | No W2.5 default flip. No W3.3 resurrection. **W3.4 / W3.5 / W3.6 stay not-started until paper-aligned W3.3 is drafted + approved (per audit recommendation).** No performance work — D7 has no ratio gate; iteration 4's Step 13 (delta-outermost / paper P4) is documentation-only, citing actual files per F-W41-12. No push, no tag, no board edit, no DONE marking. No env-knob additions. No `RuntimeConfig` field additions. |
 
 ## Read-Only Surface (recon results, no edits in this plan)
 
@@ -91,7 +100,7 @@ iterations.
 * Line 696: `linear_recursive_4cycle_dispatches_on_seeding_and_per_variant` — single-rec 4-cycle, count == 1, **unaffected by W4.1**.
 * **No multi-recursive 4-cycle test exists today** — W4.1 adds one.
 
-## Step-by-Step Execution Plan (12 steps, iteration-4 canonical)
+## Step-by-Step Execution Plan (16 steps, iteration-4 canonical)
 
 Iteration-1 / 2 / 3 step structures are preserved at the foot of
 this file in the corresponding amendment-log sections. The 12-step
@@ -301,8 +310,9 @@ chooses min-cardinality at compile time and does not re-pick the
 leader after rewrite. **Document this divergence** in the audit
 follow-up section of the W4.1 plan: correctness (row-set parity)
 is preserved; perf alignment with P4 is partial; W4.1 does NOT
-add delta-outermost re-selection (out of scope for v0.6.5
-closure window).
+add delta-outermost re-selection — out of scope for W4.1, named
+at point of reference for any subsequent perf-focused W3.x or
+W4.x work.
 
 Commit subject: `docs(w41): document delta-outermost divergence vs paper P4`.
 
@@ -407,7 +417,7 @@ gate clean. CUDA cert suite green.
 | Variant-loop performance regresses on multi-recursive bodies. | For triangle / 4-cycle / k-clique, N variants ≤ shape-arity ≤ 4. No perf gate in W4.1; D7 has no ratio criterion. |
 | Recursive iteration termination differs between WCOJ + binary-join paths. | Row-set-parity assertion catches divergence on the final fixed point. Counter assertion is a lower bound (`>= 2`), iteration-count flexible. |
 | Self-recursive cert fixture (Step 10) doesn't exercise both occurrence variants. | Concrete tuples pinned in F-W41-13: `p_init = {(1,2),(2,3)}`, `q = {(1,3)}` with shape `tri(X,Y,Z) :- p(X,Y), p(Y,Z), q(X,Z)`. Initial delta_p (after seeding) = `{(1,2),(2,3)}` non-empty; iteration 1 fires both occ=0 and occ=1 of `p`. Reference `tri = {(1,2,3)}` non-empty. |
-| Step 13's delta-outermost (paper P4) verification finds a divergence that warrants implementation. | W4.1 documents the divergence; does NOT implement re-pick of leader after rewrite. Out-of-scope for v0.6.5; named at point of reference; correctness preserved (parity vs binary-join). |
+| Step 13's delta-outermost (paper P4) verification finds a divergence that warrants implementation. | W4.1 documents the divergence; does NOT implement re-pick of leader after rewrite. Out of scope for W4.1; named at point of reference for any subsequent perf-focused W3.x or W4.x work; correctness preserved (parity vs binary-join). |
 | Test rename breaks workspace test filters or other tests. | Grep across the workspace for the old test names before each rename. The old names are presumed test-file-local; verify in Step 8 / 11. |
 
 ## Plan-Approval Gate (iteration-4 canonical)
