@@ -433,13 +433,13 @@ iteration 6 (via "Iteration 6 is approved" or equivalent).
 
 If the user requests revisions, this plan is amended in place
 (additional F-W41-N entries appended below) and re-submitted.
-Iteration 4 does not advance until the plan itself is locked.
+Iteration 6 does not advance until the plan itself is locked.
 
 The acceptance criteria for advancing past this gate:
-* User explicit approval of iteration 4.
+* User explicit approval of iteration 6.
 * No unresolved blocking findings.
-* Worktree clean at base `610406ae` + iteration 1 / 2 / 3 / 4
-  plan commits.
+* Worktree clean at base `610406ae` + iteration 1 / 2 / 3 / 4 /
+  5 / 6 plan commits.
 
 ## Iteration-2 Amendment Log
 
