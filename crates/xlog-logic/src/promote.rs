@@ -34,24 +34,30 @@
 //! deviation in shape, predicate-pushdown-altered Join, or
 //! computed-projection variants is left untouched.
 //!
-//! ## Recursive SCC handling (slice 4)
+//! ## Recursive SCC handling (slice 4 + W4.1)
 //!
-//! The promoter no longer blanket-skips recursive SCCs. Instead it
-//! gates per-rule on the number of body Scans whose RelId resolves
-//! to a predicate inside the rule's head SCC:
+//! The promoter does not blanket-skip recursive SCCs. It gates
+//! per-rule on the number of body Scans whose RelId resolves to a
+//! predicate inside the rule's head SCC:
 //!
-//! | Recursive Scans in body | Slice 4 behavior          |
-//! |-------------------------|---------------------------|
-//! | 0 (stable rule)         | Promote                   |
-//! | 1 (linear recursion)    | Promote                   |
-//! | ≥ 2 (multi-recursion)   | Skip — defer to slice 4.2 |
+//! | Recursive Scans in body | Behavior                                 |
+//! |-------------------------|------------------------------------------|
+//! | 0 (stable rule)         | Promote                                  |
+//! | 1 (linear recursion)    | Promote                                  |
+//! | ≥ 2 (multi-recursion)   | Promote (W4.1 — paper P1 admits this)    |
 //!
-//! The recursive engine (`Executor::execute_recursive_scc`) consumes
-//! the resulting `MultiWayJoin` via
-//! `execute_wcoj_or_fallback_node`, dispatching WCOJ kernels on the
-//! seeding pass and on each variant evaluation. Multi-recursive
-//! bodies stay binary-join because the per-variant union+dedup
-//! interaction with WCOJ is out of slice 4 scope.
+//! Per paper P1 (arXiv:2604.20073), semi-naïve evaluation reasons
+//! over body-clause OCCURRENCES, not predicate names. Multi-
+//! recursive bodies including same-predicate self-recursive
+//! occurrences (e.g. `tri(X,Y,Z) :- p(X,Y), p(Y,Z), q(X,Z)` with
+//! `p` recursive) are admitted. The recursive engine
+//! (`Executor::execute_recursive_scc`) consumes the resulting
+//! `MultiWayJoin` via `execute_wcoj_or_fallback_node`, dispatching
+//! WCOJ kernels on the seeding pass and on each iteration's variant.
+//! The W4.1 `rewrite_scan_nth` occurrence-identity fix at
+//! `crates/xlog-runtime/src/executor/rewrite.rs:303-311 + :477-504`
+//! ensures per-variant rewrites preserve the N-th occurrence
+//! independently in `MultiWayJoin.inputs` and `MultiWayJoin.fallback`.
 //!
 //! ## Fallback identity invariant
 //!
@@ -63,8 +69,10 @@
 //! ## Out of scope
 //!
 //! * Cost model, selectivity reordering, variable-ordering choices.
-//! * Multi-recursive (≥ 2) WCOJ — slice 4.2 / v0.6.6.
-//! * 4-way / general-arity admission — slice 5.
+//! * Recursive-clique promotion — W3.2 excluded recursive cliques;
+//!   the clique gate at `recursive_scan_count == 0` is unchanged.
+//! * 4-way / general-arity admission beyond triangle / 4-cycle —
+//!   slice 5.
 
 use std::collections::{HashMap, HashSet};
 use xlog_core::RelId;
@@ -1852,12 +1860,13 @@ mod tests {
 
     /// Slice 4 contract: ≥ 2 recursive Scans → NOT promoted. Body
     /// stays as the original `Project { Join { ... } }` binary-join
-    /// tree. Mark "tri" → RelId(1) and "tri" predicate set covers
-    /// RelId(1)+(2) by aliasing — but easier: add a second SCC
-    /// member predicate that maps to RelId(2) so two of the three
-    /// body Scans count as in-SCC.
+    /// W4.1 contract (paper P1): a recursive SCC body with ≥ 2
+    /// recursive Scans (here: 2 distinct in-SCC predicates) IS
+    /// promoted to `MultiWayJoin`. Mark "tri_a" → RelId(1) and
+    /// "tri_b" → RelId(2) so two of the three body Scans count as
+    /// in-SCC.
     #[test]
-    fn skips_multirec_triangle_in_recursive_scc() {
+    fn promotes_multirec_triangle_in_recursive_scc() {
         let mut builder = PlanBuilder::new();
         builder.add_scc(Scc {
             id: 0,
@@ -1876,7 +1885,7 @@ mod tests {
         let mut rel_ids = HashMap::new();
         rel_ids.insert("tri_a".to_string(), RelId(1));
         rel_ids.insert("tri_b".to_string(), RelId(2));
-        // Count == 2 ≥ 2 → skip.
+        // Count == 2 ≥ 2 → W4.1 admits (paper P1).
         promote_multiway(
             &mut plan,
             &rel_ids,
@@ -1885,7 +1894,7 @@ mod tests {
         );
         assert!(matches!(
             &plan.rules_by_scc[0][0].body,
-            RirNode::Project { .. }
+            RirNode::MultiWayJoin { .. }
         ));
     }
 
@@ -2315,10 +2324,10 @@ mod tests {
         ));
     }
 
-    /// Slice 4 contract: ≥ 2 recursive Scans in a 4-cycle body →
-    /// NOT promoted.
+    /// W4.1 contract (paper P1): ≥ 2 recursive Scans in a 4-cycle
+    /// body IS promoted to `MultiWayJoin`.
     #[test]
-    fn skips_multirec_4cycle_in_recursive_scc() {
+    fn promotes_multirec_4cycle_in_recursive_scc() {
         let mut builder = PlanBuilder::new();
         builder.add_scc(Scc {
             id: 0,
@@ -2345,7 +2354,7 @@ mod tests {
         );
         assert!(matches!(
             &plan.rules_by_scc[0][0].body,
-            RirNode::Project { .. }
+            RirNode::MultiWayJoin { .. }
         ));
     }
 
