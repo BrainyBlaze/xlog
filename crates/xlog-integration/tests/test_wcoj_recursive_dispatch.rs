@@ -767,3 +767,117 @@ fn linear_recursive_4cycle_dispatches_on_seeding_and_per_variant() {
         "linear-recursive 4-cycle WCOJ row set must equal the binary-join reference"
     );
 }
+
+// ---------------------------------------------------------------
+// Multi-recursive 4-cycle: WCOJ dispatched (seeding + variants),
+// binary-join parity (W4.1 paper P1).
+// ---------------------------------------------------------------
+
+/// W4.1 multi-recursive 4-cycle. Two of the four body Scans
+/// (`r1`, `r2`) are recursive — they receive feedback from `cyc`
+/// via SHIFTED projections so iter 1 produces non-empty deltas
+/// for BOTH:
+///   * `r1(W, X) :- cyc(Y, W, X, Z)` — extracts cyc cols 1,2.
+///   * `r2(A, B) :- cyc(W, X, A, B)` — extracts cyc cols 2,3.
+/// The other two atoms (`r3`, `r4`) are extensional. Per paper
+/// P1 (semi-naive occurrence semantics), the W4.1 promoter
+/// admits this body because the recursive Scans target DISTINCT
+/// predicates — the variant-construction loop in
+/// `recursive.rs:455-540` builds one variant per recursive
+/// occurrence with a non-empty delta and dispatches WCOJ on each.
+///
+/// Counter dynamics:
+///   * Seeding pass (`recursive.rs:331-347`): cyc rule fires
+///     once on its full body — counter += 1.
+///   * Iteration 1 (`recursive.rs:455-540`): both `r1_init` and
+///     `r2_init` are non-empty AND the shifted projections of
+///     the seeded `cyc` rows lie outside the initial r1/r2, so
+///     two variants fire — counter += 2.
+///
+/// Total: counter `>= 2` (in fact `== 3` for this fixture).
+const MULTIREC_4CYCLE: &str = r#"
+    pred r1_init(u32, u32).
+    pred r2_init(u32, u32).
+    pred r3(u32, u32).
+    pred r4(u32, u32).
+    pred r1(u32, u32).
+    pred r2(u32, u32).
+    pred cyc(u32, u32, u32, u32).
+    r1(W, X) :- r1_init(W, X).
+    r1(W, X) :- cyc(Y, W, X, Z).
+    r2(X, Y) :- r2_init(X, Y).
+    r2(A, B) :- cyc(W, X, A, B).
+    cyc(W, X, Y, Z) :- r1(W, X), r2(X, Y), r3(Y, Z), r4(Z, W).
+"#;
+
+fn multirec_4cycle_inputs() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
+    let mut m: BTreeMap<&'static str, Vec<(u32, u32)>> = BTreeMap::new();
+    // Seeding produces two disjoint 4-cycles:
+    //   * r1_init(1,2) ⋈ r2_init(2,3) ⋈ r3(3,4) ⋈ r4(4,1) → cyc(1,2,3,4)
+    //   * r1_init(5,6) ⋈ r2_init(6,7) ⋈ r3(7,8) ⋈ r4(8,5) → cyc(5,6,7,8)
+    // Iter 1 produces non-empty deltas for BOTH recursive
+    // predicates via the shifted projections (see MULTIREC_4CYCLE
+    // doc), so two variants fire — counter >= 2.
+    m.insert("r1_init", vec![(1, 2), (5, 6)]);
+    m.insert("r2_init", vec![(2, 3), (6, 7)]);
+    m.insert("r3", vec![(3, 4), (7, 8)]);
+    m.insert("r4", vec![(4, 1), (8, 5)]);
+    m
+}
+
+#[test]
+fn multirec_4cycle_dispatches_wcoj_and_matches_binary_join() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let inputs = multirec_4cycle_inputs();
+
+    // Reference: gate off → binary-join answer.
+    let reference = run_program(
+        Arc::clone(&fix.provider),
+        &fix.memory,
+        RuntimeConfig::default().with_wcoj_4cycle_dispatch(Some(false)),
+        MULTIREC_4CYCLE,
+        &inputs,
+    );
+    assert_eq!(
+        reference.wcoj_4cycle_dispatch_count(),
+        0,
+        "gate=off must not dispatch"
+    );
+    let reference_rows = download_quads(reference.store().get("cyc").expect("cyc"));
+    assert!(
+        !reference_rows.is_empty(),
+        "fixture must produce at least one cyc row so row-set parity \
+         is not trivially satisfied by an empty-output bug; got {} rows",
+        reference_rows.len()
+    );
+
+    // Gate on: W4.1 promoter admits the multi-recursive 4-cycle.
+    // Seeding fires WCOJ once on the full body. Iter 1 fires one
+    // variant per recursive predicate with a non-empty delta —
+    // for this fixture, both r1's and r2's shifted projections
+    // produce non-empty deltas, so two variants fire. Total
+    // counter >= 2. Final row set must equal the binary-join
+    // reference.
+    let dispatched = run_program(
+        Arc::clone(&fix.provider),
+        &fix.memory,
+        RuntimeConfig::default().with_wcoj_4cycle_dispatch(Some(true)),
+        MULTIREC_4CYCLE,
+        &inputs,
+    );
+    assert!(
+        dispatched.wcoj_4cycle_dispatch_count() >= 2,
+        "multi-recursive 4-cycle (distinct recursive predicates \
+         r1, r2) must dispatch WCOJ on the seeding pass AND ≥ 1 \
+         variant in the iteration loop; got counter {}",
+        dispatched.wcoj_4cycle_dispatch_count()
+    );
+    let dispatched_rows = download_quads(dispatched.store().get("cyc").expect("cyc"));
+    assert_eq!(
+        dispatched_rows, reference_rows,
+        "multi-recursive 4-cycle WCOJ row set must equal the binary-join reference"
+    );
+}
