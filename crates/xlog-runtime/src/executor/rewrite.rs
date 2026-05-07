@@ -789,23 +789,18 @@ mod w41_rewrite_scan_nth_occurrence_identity_tests {
     /// This is the structural shape of a self-recursive triangle body
     /// like `tri(X,Y,Z) :- p(X,Y), p(Y,Z), p(X,Z)` after promotion: 3
     /// inputs slots all targeting `p`, fallback containing 3 `p` Scans
-    /// in the binary-join expansion.
-    fn three_same_predicate_multiway(target_rel: RelId, sentinel_other: RelId) -> RirNode {
-        // Inputs: 3 Scans of `target_rel`, then 1 of `sentinel_other`
-        // wouldn't make a valid 4-cycle but for this test we only care
-        // about how many copies of `target_rel` exist in `inputs`. We
-        // keep the structure minimal: inputs = [target, target, target].
-        // For shape validity (a real promoter would never emit this
-        // shape), we still need a `MultiWayJoin` that compiles; the
-        // walker doesn't validate shape.
+    /// in the binary-join expansion. The fallback's left-deep Join
+    /// produces canonical depth-first walk order
+    /// `[innermost-left, inner-right, outer-right]` — matching the
+    /// inputs' left-to-right order, so the k-th input occurrence and
+    /// the k-th fallback occurrence correspond to the same logical
+    /// body slot.
+    fn three_same_predicate_multiway(target_rel: RelId) -> RirNode {
         let inputs = vec![
             RirNode::Scan { rel: target_rel },
             RirNode::Scan { rel: target_rel },
             RirNode::Scan { rel: target_rel },
         ];
-        // Fallback: 3 same-predicate Scans inside a left-deep Join
-        // chain, mirroring the inputs. This is what the promoter would
-        // construct as the binary-join expansion.
         let inner = RirNode::Join {
             left: Box::new(RirNode::Scan { rel: target_rel }),
             right: Box::new(RirNode::Scan { rel: target_rel }),
@@ -828,7 +823,6 @@ mod w41_rewrite_scan_nth_occurrence_identity_tests {
                 ProjectExpr::Column(3),
             ],
         };
-        let _ = sentinel_other;
         RirNode::MultiWayJoin {
             inputs,
             slot_vars: vec![
@@ -846,76 +840,102 @@ mod w41_rewrite_scan_nth_occurrence_identity_tests {
         }
     }
 
-    /// Helper: count `Scan { rel: needle }` occurrences in any RirNode.
-    fn count_scans_of(node: &RirNode, needle: RelId) -> usize {
+    /// Walk a body depth-first / left-first and collect every Scan
+    /// RelId in encounter order. For a `MultiWayJoin`, walks `inputs`
+    /// in order then `fallback`. Used by the regression tests to
+    /// assert EXACT post-rewrite positional identity.
+    fn collect_scans_in_order(node: &RirNode, out: &mut Vec<RelId>) {
         match node {
-            RirNode::Unit => 0,
-            RirNode::Scan { rel } => {
-                if *rel == needle {
-                    1
-                } else {
-                    0
-                }
-            }
+            RirNode::Unit => {}
+            RirNode::Scan { rel } => out.push(*rel),
             RirNode::Filter { input, .. }
             | RirNode::Project { input, .. }
             | RirNode::GroupBy { input, .. }
-            | RirNode::Distinct { input, .. } => count_scans_of(input, needle),
+            | RirNode::Distinct { input, .. } => collect_scans_in_order(input, out),
             RirNode::Join { left, right, .. } | RirNode::Diff { left, right } => {
-                count_scans_of(left, needle) + count_scans_of(right, needle)
+                collect_scans_in_order(left, out);
+                collect_scans_in_order(right, out);
             }
-            RirNode::Union { inputs } => inputs.iter().map(|n| count_scans_of(n, needle)).sum(),
+            RirNode::Union { inputs } => {
+                for n in inputs {
+                    collect_scans_in_order(n, out);
+                }
+            }
             RirNode::Fixpoint {
                 base, recursive, ..
-            } => count_scans_of(base, needle) + count_scans_of(recursive, needle),
-            RirNode::TensorMaskedJoin { rel_index, .. } => rel_index
-                .iter()
-                .filter(|(rid, _)| *rid == needle)
-                .count(),
+            } => {
+                collect_scans_in_order(base, out);
+                collect_scans_in_order(recursive, out);
+            }
+            RirNode::TensorMaskedJoin { rel_index, .. } => {
+                for (rid, _) in rel_index {
+                    out.push(*rid);
+                }
+            }
             RirNode::MultiWayJoin {
                 inputs, fallback, ..
             } => {
-                inputs.iter().map(|n| count_scans_of(n, needle)).sum::<usize>()
-                    + count_scans_of(fallback, needle)
+                for inp in inputs {
+                    collect_scans_in_order(inp, out);
+                }
+                collect_scans_in_order(fallback, out);
             }
         }
     }
 
-    /// Pre-W4.1 bug pin: with 3 occurrences of `target` in `inputs` and
-    /// the sentinel/separate-counter fix BOTH applied, occ=0, occ=1,
-    /// occ=2 each substitute exactly ONE of the three input occurrences
-    /// (and exactly one of the three fallback occurrences) — never
-    /// multiple in either view, never zero.
+    /// Pre-W4.1 bug pin: with 3 occurrences of `target` in `inputs`
+    /// and 3 in `fallback`, the sentinel/separate-counter fix BOTH
+    /// applied makes occ=k substitute the k-th occurrence in
+    /// **inputs walk order** AND the k-th occurrence in **fallback
+    /// walk order** — and ONLY those two positions; all other
+    /// occurrences remain unchanged.
+    ///
+    /// This test asserts EXACT positional identity (not just total
+    /// replacement count). A broken implementation that always
+    /// rewrites occurrence 0 for every occ would pass a count-only
+    /// check but fails this positional assertion.
     #[test]
-    fn rewrite_scan_nth_replaces_exactly_one_input_occurrence() {
+    fn rewrite_scan_nth_replaces_exact_kth_occurrence_in_inputs_and_fallback() {
         let target = RelId(7);
-        let replacement = RelId(99);
-        let other = RelId(8); // unused stub
-        let body = three_same_predicate_multiway(target, other);
+        let body = three_same_predicate_multiway(target);
 
-        // Pre-rewrite: target appears 3× in inputs + 3× in fallback = 6
-        // total Scans of target.
-        assert_eq!(count_scans_of(&body, target), 6);
+        // Pre-rewrite: 6 Scans of target in canonical walk order.
+        // [input[0], input[1], input[2], fallback's innermost-left,
+        //  fallback's inner-right, fallback's outer-right].
+        let mut pre = Vec::new();
+        collect_scans_in_order(&body, &mut pre);
+        assert_eq!(
+            pre,
+            vec![target, target, target, target, target, target],
+            "pre-rewrite: 6 target Scans in canonical walk order"
+        );
 
+        // For each occ in {0, 1, 2}, the k-th occurrence in the
+        // INPUTS walk AND the k-th occurrence in the FALLBACK walk
+        // are replaced — and nothing else.
         for occ in 0..3 {
+            // Use a distinct RelId per occ so a buggy implementation
+            // that always rewrites occurrence 0 for every occ would
+            // produce a different post-rewrite Scan order than
+            // expected.
+            let replacement = RelId(100 + occ as u32);
             let rewritten = Executor::rewrite_scan_nth(&body, target, occ, replacement)
                 .unwrap_or_else(|| panic!("occ={} must succeed", occ));
-            // Post-rewrite: 6 - 2 = 4 target Scans (one substituted in
-            // inputs, one substituted in fallback). Replacement RelId(99)
-            // appears 2× (one input slot, one fallback leaf).
+
+            let mut post = Vec::new();
+            collect_scans_in_order(&rewritten, &mut post);
+
+            // Build expected sequence: positions 0..3 = inputs walk,
+            // positions 3..6 = fallback walk. Position `occ` in each
+            // half becomes `replacement`; all others remain `target`.
+            let mut expected = vec![target; 6];
+            expected[occ] = replacement; // k-th input occurrence
+            expected[3 + occ] = replacement; // k-th fallback occurrence
+
             assert_eq!(
-                count_scans_of(&rewritten, target),
-                4,
-                "occ={}: target Scan count must be 4 (was 6); got {}",
-                occ,
-                count_scans_of(&rewritten, target)
-            );
-            assert_eq!(
-                count_scans_of(&rewritten, replacement),
-                2,
-                "occ={}: replacement Scan count must be 2 (1 in inputs, 1 in fallback); got {}",
-                occ,
-                count_scans_of(&rewritten, replacement)
+                post, expected,
+                "occ={}: post-rewrite Scan order must replace EXACTLY the k-th occurrence in inputs AND fallback; got {:?}, expected {:?}",
+                occ, post, expected
             );
         }
     }
@@ -924,12 +944,19 @@ mod w41_rewrite_scan_nth_occurrence_identity_tests {
     /// in fallback's leftmost leaf substitutes BOTH copies (input/
     /// fallback symmetry). Locks paper-P1's "logical body shared
     /// between inputs and fallback" semantic.
+    ///
+    /// This test asserts the EXACT post-rewrite shape (input[0]
+    /// becomes replacement; the rest of the inputs+fallback structure
+    /// is identical to pre-rewrite except fallback's leftmost-Scan
+    /// becomes replacement). Complementary to
+    /// `rewrite_scan_nth_replaces_exact_kth_occurrence_in_inputs_and_fallback`
+    /// above which exercises occ ∈ {0, 1, 2}; this test is the
+    /// focused occ=0 cert.
     #[test]
     fn rewrite_scan_nth_input_fallback_symmetry_at_occ_0() {
         let target = RelId(7);
         let replacement = RelId(99);
-        let other = RelId(8);
-        let body = three_same_predicate_multiway(target, other);
+        let body = three_same_predicate_multiway(target);
 
         let rewritten = Executor::rewrite_scan_nth(&body, target, 0, replacement)
             .expect("occ=0 must succeed");
@@ -948,18 +975,15 @@ mod w41_rewrite_scan_nth_occurrence_identity_tests {
                 // input[1] and input[2] must remain the original target.
                 assert!(matches!(inputs[1], RirNode::Scan { rel } if rel == target));
                 assert!(matches!(inputs[2], RirNode::Scan { rel } if rel == target));
-                // Fallback must contain exactly one replacement Scan
-                // (the leftmost leaf — the 0th occurrence in fallback's
-                // walk order).
+                // Fallback walk order: [innermost-left, inner-right,
+                // outer-right]. occ=0 must replace the innermost-left
+                // (position 0 in fallback walk) ONLY.
+                let mut fallback_scans = Vec::new();
+                collect_scans_in_order(&fallback, &mut fallback_scans);
                 assert_eq!(
-                    count_scans_of(&fallback, replacement),
-                    1,
-                    "fallback must contain exactly one replacement Scan (the 0th occurrence)"
-                );
-                assert_eq!(
-                    count_scans_of(&fallback, target),
-                    2,
-                    "fallback must contain 2 unchanged target Scans (occurrences 1 and 2)"
+                    fallback_scans,
+                    vec![replacement, target, target],
+                    "fallback walk order: occ=0 must replace position 0 only"
                 );
             }
             _ => panic!("expected MultiWayJoin after rewrite"),
