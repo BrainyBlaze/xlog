@@ -3,17 +3,17 @@
 **Closes W4.1 only.** No W2.5 default flip. No W3.3 resurrection.
 No performance work. No new env knobs. No push, no tag, no
 board update, no DONE marking without explicit user approval.
-Plan-first; no implementation until iteration 6 is approved by
+Plan-first; no implementation until iteration 7 is approved by
 the user.
 
-**Plan iteration:** 6 — wording-only cleanups over iterations 4
-and 5; **canonical D-table, Step-by-Step Execution Plan, and
-Acceptance Grid content remains iteration 4** (no design changes
-since iteration 4). The canonical sections below reflect iteration
-4's locked content; iteration-1 / 2 / 3 / 4 / 5 amendment logs at
-the foot of this file are **historical / superseded** and
-preserved only for traceability of how the wording / direction
-evolved.
+**Plan iteration:** 7 — wording-only cleanup over iterations 4–6;
+**canonical D-table, Step-by-Step Execution Plan, and Acceptance
+Grid content remains iteration 4** (no design changes since
+iteration 4). The canonical sections below reflect iteration 4's
+locked content; iteration-1 / 2 / 3 / 4 / 5 / 6 amendment logs
+and historical gates at the foot of this file are **historical /
+superseded** and preserved only for traceability of how the
+wording / direction evolved.
 **Base:** `main` at `610406ae` (post-W3.2 closure commit).
 **Worktree:** `.worktrees/w41-multi-recursive-wcoj`.
 **Branch:** `feat/w41-multi-recursive-wcoj`.
@@ -425,21 +425,21 @@ gate clean. CUDA cert suite green.
 
 ## Plan-Approval Gate (current iteration)
 
-This plan is **iteration 6 draft** (wording-only cleanup over
-iteration 5; canonical D-table + Step plan + Acceptance Grid
+This plan is **iteration 7 draft** (wording-only cleanup over
+iterations 4–6; canonical D-table + Step plan + Acceptance Grid
 content remains iteration 4). The agent does NOT advance to
 Step 5 (promoter gate removal) until the user explicitly approves
-iteration 6 (via "Iteration 6 is approved" or equivalent).
+iteration 7 (via "Iteration 7 is approved" or equivalent).
 
 If the user requests revisions, this plan is amended in place
 (additional F-W41-N entries appended below) and re-submitted.
-Iteration 6 does not advance until the plan itself is locked.
+Iteration 7 does not advance until the plan itself is locked.
 
 The acceptance criteria for advancing past this gate:
-* User explicit approval of iteration 6.
+* User explicit approval of iteration 7.
 * No unresolved blocking findings.
 * Worktree clean at base `610406ae` + iteration 1 / 2 / 3 / 4 /
-  5 / 6 plan commits.
+  5 / 6 / 7 plan commits.
 
 ## Iteration-2 Amendment Log
 
@@ -608,6 +608,6 @@ This iteration-4 plan-approval gate is **historical**. At the
 time iteration 4 was committed (commit `7859de3f`), this gate
 read "iteration 4 is draft; agent does NOT advance to Step 5
 until the user explicitly approves iteration 4." User feedback
-on iteration 4 produced 5 wording findings (Iteration-5 / 6
-cleanup commits) but did not change canonical content. The live
-plan-approval gate above (iteration 6) is the current gate.
+on iteration 4 produced wording findings across iteration-5 / 6
+/ 7 cleanup commits but did not change canonical content. The
+live plan-approval gate above (iteration 7) is the current gate.
