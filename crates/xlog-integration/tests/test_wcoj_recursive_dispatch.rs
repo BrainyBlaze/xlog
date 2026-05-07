@@ -435,7 +435,8 @@ fn stable_4cycle_in_recursive_scc_dispatches_wcoj_on_seeding() {
 }
 
 // ---------------------------------------------------------------
-// Multi-recursive triangle: WCOJ skipped, binary-join answer
+// Multi-recursive triangle: WCOJ dispatched (seeding + variants),
+// binary-join parity (W4.1 paper P1).
 // ---------------------------------------------------------------
 
 /// W4.1 multi-recursive triangle. Two of the three body Scans
