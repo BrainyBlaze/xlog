@@ -548,3 +548,65 @@ extern "C" __global__ void init_hash_table(
         hash_table[gid] = 0xFFFFFFFF;
     }
 }
+
+// ===============================================================
+// W4.2 — Nested-loop inner join (emit-pairs design).
+// Multi-col-compatible via columnar `CudaBuffer`: kernel reads
+// ONLY the key columns (one `*const uint32_t` pointer per side)
+// and emits matched (left_idx, right_idx) pairs as two parallel
+// `uint32_t` arrays. Payload columns are materialized AFTER the
+// kernel via `gather_buffer_by_indices` in the provider fn —
+// outside this kernel's scope.
+//
+// Spike-vs-production note: the bench-spike branch
+// `bench-spike/w42-nested-loop` carries a 1-col emit-keys spike
+// kernel (`nested_loop_join_inner_u32_1key_1col`) used for
+// crossover measurement; that kernel does NOT graduate to
+// production. This kernel is the production-shape design.
+//
+// Restrictions (per W4.2 plan iteration-4 canonical, D1+D2):
+//   * Inner join only (Semi/Anti/LeftOuter not supported).
+//   * U32 / Symbol keys (Symbol IS u32 at the byte level).
+//   * Single key column (multi-key not supported).
+//
+// Memory contract:
+//   * `left_keys`, `right_keys`: pointers to the single key
+//     column from each side. Caller (provider fn) validates
+//     `num_bytes() == num_rows * 4` BEFORE launching this
+//     kernel (per plan F-W42-14 byte-length validation).
+//   * `output_left_idx`, `output_right_idx`: pre-allocated to
+//     `output_capacity = num_left * num_right` rows. Caller
+//     (provider fn) enforces `num_left * num_right <=
+//     NESTED_LOOP_TOTAL_THRESHOLD = 4_000_000` via `checked_mul`
+//     before allocation (per plan F-W42-15).
+//   * `output_count`: pre-zeroed `uint32_t[1]`.
+//
+// Defense-in-depth: the kernel guards `out_idx <
+// output_capacity` even though, by the provider's contract,
+// the guard is unreachable on a well-formed call. The branch
+// is well-predicted (all threads in a warp evaluate together)
+// and protects against future callers violating the contract.
+// ===============================================================
+extern "C" __global__ void nested_loop_join_inner_u32_1key_pairs(
+    const uint32_t* __restrict__ left_keys,
+    const uint32_t* __restrict__ right_keys,
+    uint32_t num_left,
+    uint32_t num_right,
+    uint32_t* __restrict__ output_left_idx,
+    uint32_t* __restrict__ output_right_idx,
+    uint32_t* __restrict__ output_count,
+    uint32_t output_capacity
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_left) return;
+    uint32_t lk = left_keys[tid];
+    for (uint32_t r = 0; r < num_right; r++) {
+        if (right_keys[r] == lk) {
+            uint32_t out_idx = atomicAdd(output_count, 1);
+            if (out_idx < output_capacity) {
+                output_left_idx[out_idx] = tid;
+                output_right_idx[out_idx] = r;
+            }
+        }
+    }
+}

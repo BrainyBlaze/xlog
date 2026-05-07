@@ -62,6 +62,8 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "hash_join_semi",
             "hash_join_anti",
             "init_hash_table",
+            // W4.2 nested-loop inner join (emit-pairs design).
+            "nested_loop_join_inner_u32_1key_pairs",
         ],
     },
     KernelModuleSpec {

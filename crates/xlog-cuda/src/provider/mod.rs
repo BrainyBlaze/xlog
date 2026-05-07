@@ -480,6 +480,13 @@ pub mod join_kernels {
     pub const HASH_JOIN_SEMI: &str = "hash_join_semi";
     pub const HASH_JOIN_ANTI: &str = "hash_join_anti";
     pub const INIT_HASH_TABLE: &str = "init_hash_table";
+    /// W4.2 nested-loop inner join (emit-pairs design). Reads
+    /// the single key column from each side; emits matched
+    /// `(left_idx, right_idx)` pairs as two parallel u32 arrays.
+    /// Payload columns are materialized after the kernel via
+    /// `gather_buffer_by_indices` in the provider fn.
+    pub const NESTED_LOOP_JOIN_INNER_U32_1KEY_PAIRS: &str =
+        "nested_loop_join_inner_u32_1key_pairs";
 }
 
 /// Kernel function names in the dedup module
