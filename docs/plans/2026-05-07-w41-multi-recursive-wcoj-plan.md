@@ -423,6 +423,104 @@ gate clean. CUDA cert suite green.
 | Step 13's delta-outermost (paper P4) verification finds a divergence that warrants implementation. | W4.1 documents the divergence; does NOT implement re-pick of leader after rewrite. Out of scope for W4.1; named at point of reference for any subsequent perf-focused W3.x or W4.x work; correctness preserved (parity vs binary-join). |
 | Test rename breaks workspace test filters or other tests. | Grep across the workspace for the old test names before each rename. The old names are presumed test-file-local; verify in Step 8 / 11. |
 
+## Audit Follow-up — Paper P4 (Delta-Outermost) Divergence (Step 13)
+
+**Documentation-only verification per F-W41-12.** The xlog WCOJ
+implementation diverges from paper claim P4 ("delta strictly
+outermost"). Correctness (row-set parity vs binary-join) is
+preserved; performance alignment with P4 is **partial**; W4.1
+does NOT add delta-outermost re-selection — named here as out of
+scope for W4.1 and at point of reference for any subsequent
+perf-focused W3.x or W4.x work.
+
+### Where the leader is chosen
+
+The W2.1 leader cost model lives at
+`crates/xlog-logic/src/wcoj_var_ordering.rs:1`
+(`WcojVariableOrderingModel` trait, `LeaderCardinalityModel`
+impl). The promoter calls `pick_triangle_leader` /
+`pick_4cycle_leader` at COMPILE time over the **original body's**
+relation cardinalities — see `crates/xlog-logic/src/promote.rs:712-721`
+(triangle) and `:1032-1043` (4-cycle). The selected leader index
+is baked into `MultiWayJoin.var_order` once and never updated.
+
+### Where variant rewrite happens
+
+The recursive engine's per-iteration variant loop at
+`crates/xlog-runtime/src/executor/recursive.rs:507-518` calls
+`Executor::rewrite_scan_nth(&rule.body, rel_id, occ, delta_rel_id)`
+to substitute one Scan's RelId for its delta. The MultiWayJoin
+arm of `rewrite_scan_nth_impl` at
+`crates/xlog-runtime/src/executor/rewrite.rs:525-531` constructs
+the rewritten body with `var_order: var_order.clone()` —
+**propagated unchanged from the compile-time choice**, not
+recomputed against the variant's delta-cardinality input.
+
+### What this means for paper P4
+
+Paper P4 requires the delta-substituted relation to occupy slot 0
+(the outermost iteration) on every iteration, because delta is
+typically much smaller than the full relation and a smaller
+outer-loop minimizes inner work. xlog satisfies P4 only on the
+*subset* of variant-rewrite combinations where the compile-time
+leader happens to coincide with the recursive predicate being
+delta-substituted in this variant. Concretely:
+
+* **Linear-recursive triangle** (e.g.
+  `tri(X,Y,Z) :- e1(X,Y), e2(Y,Z), e3(X,Z)` with `e1` recursive
+  and `e1` in canonical slot 0): every iter ≥ 1 dispatch puts
+  delta at slot 0 → **P4-aligned by canonical-order coincidence**.
+* **Multi-recursive triangle** (e.g. Step 8's MULTIREC_TRIANGLE
+  with `r1`, `r2` both recursive): the iter-1 variant for `r1`
+  substitutes delta_r1 into slot 0 → P4-aligned. The iter-1
+  variant for `r2` substitutes delta_r2 into slot 1 while the
+  compile-time leader (chosen over full-`r1` cardinality) stays
+  at slot 0 → **P4-divergent**.
+* **Same-predicate self-recursive triangle** (Step 10's
+  SELFREC_TRIANGLE with two `p` Scans): occ=0 substitutes delta_p
+  into slot 0 → P4-aligned. occ=1 substitutes delta_p into slot 1
+  while the compile-time leader stays at slot 0 → **P4-divergent**.
+
+### Correctness vs performance
+
+The WCOJ kernel produces the same row set regardless of which
+slot leads — it's worst-case-optimal in any leader choice; only
+the outer-loop iteration count changes. Row-set-parity assertions
+across all W4.1 dispatch certs (Steps 8 / 9 / 10) directly verify
+this. **No correctness gap.**
+
+The performance gap is variant-dependent: the smaller the delta
+relative to the full relation, the larger the perf delta between
+the divergent and aligned cases. For early iterations on
+small-cardinality recursive predicates, the gap is negligible;
+for late iterations on hub-heavy recursive predicates, the gap
+can be measurable.
+
+### W4.1 scope decision
+
+W4.1 does NOT add post-rewrite leader re-selection. Reasons:
+
+1. The selfrec / multirec POSITIVE certs (Steps 8 / 9 / 10) all
+   pass with the current compile-time leader, demonstrating
+   correctness preservation under the divergence.
+2. The fix is a non-trivial change to the variant-rewrite path
+   (it would need to re-run the cost model with the
+   delta-substituted body's cardinality and rebuild
+   `VariableOrder` per variant per iteration — touching
+   `wcoj_var_ordering.rs`, `promote.rs`'s
+   `build_triangle_var_order` / `build_cycle4_var_order` helpers,
+   and `rewrite.rs`'s `MultiWayJoin` arm).
+3. W4.1's acceptance grid has no perf gate (D7 / D8 explicitly
+   exclude perf criteria); a perf-targeting change belongs to a
+   subsequent perf-focused W3.x or W4.x.
+
+**Future-work pointer:** any subsequent perf-focused work on the
+recursive WCOJ path should consult this section and the cited
+files when designing P4-aligned leader re-selection. The
+correctness-preserving witness is already in place via the W4.1
+positive certs — perf-focused work can add a benchmark gate on
+top without re-proving correctness.
+
 ## Plan-Approval Gate (current iteration)
 
 This plan is **iteration 7 draft** (wording-only cleanup over
