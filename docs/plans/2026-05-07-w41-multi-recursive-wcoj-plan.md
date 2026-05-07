@@ -438,11 +438,30 @@ perf-focused W3.x or W4.x work.
 The W2.1 leader cost model lives at
 `crates/xlog-logic/src/wcoj_var_ordering.rs:1`
 (`WcojVariableOrderingModel` trait, `LeaderCardinalityModel`
-impl). The promoter calls `pick_triangle_leader` /
-`pick_4cycle_leader` at COMPILE time over the **original body's**
-relation cardinalities — see `crates/xlog-logic/src/promote.rs:712-721`
-(triangle) and `:1032-1043` (4-cycle). The selected leader index
-is baked into `MultiWayJoin.var_order` once and never updated.
+impl). The promoter dispatches on `config.wcoj_variable_ordering`
+at `crates/xlog-logic/src/promote.rs:712-721` (triangle) and
+`:1032-1043` (4-cycle). Two regimes:
+
+* **Default (`WcojVarOrderingKind::Disabled`** — the default in
+  `CompilerConfig::default()` at
+  `crates/xlog-logic/src/compiler_config.rs:67`; the regime
+  exercised by **all W4.1 dispatch certs** in Steps 8 / 9 / 10,
+  which use `RuntimeConfig::default()`). The cost model is
+  skipped, `pick_*_leader` returns `None`, and
+  `MultiWayJoin.var_order = None`. The kernel falls back to
+  **canonical slot order** — slot 0 = the first promoter-canonical
+  input (e.g., `e_xy` for triangle, `e_wx` for 4-cycle).
+* **Enabled (`LeaderCardinality` / `HeatAware`)**. The cost model
+  picks a leader at COMPILE time over the **original body's**
+  relation cardinalities; the selected leader index is baked into
+  `MultiWayJoin.var_order` once.
+
+In **both** regimes, the leader (whether canonical-default or
+cost-model-selected) is **fixed at compile time and is never
+updated after variant rewrite** — that is the structural source
+of the P4 divergence. The two regimes differ only in *how* the
+compile-time leader is chosen, not in *whether* it adapts to
+delta cardinalities at runtime (it never does).
 
 ### Where variant rewrite happens
 
@@ -464,22 +483,49 @@ typically much smaller than the full relation and a smaller
 outer-loop minimizes inner work. xlog satisfies P4 only on the
 *subset* of variant-rewrite combinations where the compile-time
 leader happens to coincide with the recursive predicate being
-delta-substituted in this variant. Concretely:
+delta-substituted in this variant.
+
+The variant-by-variant verdicts below are stated for the
+**default `Disabled` regime** that the W4.1 certs actually
+exercise — i.e., `var_order = None`, kernel uses canonical slot
+order, slot 0 = first promoter-canonical input. (Under the
+enabled `LeaderCardinality` / `HeatAware` regime, the divergence
+pattern is the same but the leader's slot index can shift to a
+non-canonical position based on the cost model's compile-time
+choice; the structural fact "leader fixed at compile time, not
+updated after rewrite" is unchanged.)
+
+Concretely:
 
 * **Linear-recursive triangle** (e.g.
   `tri(X,Y,Z) :- e1(X,Y), e2(Y,Z), e3(X,Z)` with `e1` recursive
-  and `e1` in canonical slot 0): every iter ≥ 1 dispatch puts
-  delta at slot 0 → **P4-aligned by canonical-order coincidence**.
-* **Multi-recursive triangle** (e.g. Step 8's MULTIREC_TRIANGLE
-  with `r1`, `r2` both recursive): the iter-1 variant for `r1`
-  substitutes delta_r1 into slot 0 → P4-aligned. The iter-1
-  variant for `r2` substitutes delta_r2 into slot 1 while the
-  compile-time leader (chosen over full-`r1` cardinality) stays
-  at slot 0 → **P4-divergent**.
+  and `e1` in canonical slot 0): default `var_order = None`
+  leaves canonical slot 0 = `e1`. Every iter ≥ 1 dispatch puts
+  delta_e1 at slot 0 → **P4-aligned by canonical-order
+  coincidence** (the cert author placed the recursive predicate
+  first in the body, which is also slot 0 in the promoter's
+  canonical input order).
+* **Multi-recursive triangle** (Step 8's MULTIREC_TRIANGLE with
+  `r1`, `r2` both recursive): default `var_order = None` leaves
+  canonical slot 0 = `r1` (the first body atom). The iter-1
+  variant for `r1` substitutes delta_r1 into slot 0 →
+  **P4-aligned**. The iter-1 variant for `r2` substitutes
+  delta_r2 into slot 1 while canonical slot 0 remains `r1`
+  (full) → **P4-divergent**. If variable ordering is enabled,
+  any leader slot is chosen at compile time over original-body
+  cardinalities and then propagated unchanged through the
+  rewrite — the alignment vs divergence pattern still depends
+  on whether the chosen leader's slot coincides with the
+  variant's delta substitution.
 * **Same-predicate self-recursive triangle** (Step 10's
-  SELFREC_TRIANGLE with two `p` Scans): occ=0 substitutes delta_p
-  into slot 0 → P4-aligned. occ=1 substitutes delta_p into slot 1
-  while the compile-time leader stays at slot 0 → **P4-divergent**.
+  SELFREC_TRIANGLE with two `p` Scans): default `var_order = None`
+  leaves canonical slot 0 = `p` (the first occurrence). occ=0
+  substitutes delta_p into slot 0 → **P4-aligned**. occ=1
+  substitutes delta_p into slot 1 while canonical slot 0 remains
+  the full-`p` leaf → **P4-divergent**. Under enabled variable
+  ordering the same observation holds: only the variant whose
+  occurrence coincides with the (cost-model-selected) leader
+  slot is P4-aligned.
 
 ### Correctness vs performance
 
