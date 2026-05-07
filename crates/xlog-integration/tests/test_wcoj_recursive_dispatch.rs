@@ -881,3 +881,120 @@ fn multirec_4cycle_dispatches_wcoj_and_matches_binary_join() {
         "multi-recursive 4-cycle WCOJ row set must equal the binary-join reference"
     );
 }
+
+// ---------------------------------------------------------------
+// Self-recursive triangle (same-predicate, paper P1 lock):
+// WCOJ dispatched (seeding + variants), binary-join parity.
+// ---------------------------------------------------------------
+
+/// W4.1 self-recursive triangle. Rule 3's body has TWO `p` Scans
+/// (same predicate, two distinct occurrences). Per paper P1
+/// (semi-naïve evaluation reasons over body-clause OCCURRENCES,
+/// not predicate names), this body must be admitted by the
+/// promoter — every occurrence is a valid Δ-binding site, and
+/// each occurrence yields its own per-iteration variant.
+///
+/// This is the strict test of Step 6's `rewrite_scan_nth` fix:
+/// with two same-predicate occurrences, the rewrite walker must
+/// stop after replacing the k-th occurrence (not continue and
+/// replace the (k+1)-th too) and the inputs/fallback views must
+/// be walked symmetrically. Distinct-predicate certs (multirec
+/// triangle / 4-cycle) cannot detect a pre-Step-6 walker
+/// regression because the second predicate has a different RelId
+/// and does not match.
+///
+/// Counter dynamics:
+///   * Seeding pass: rule 3's body is promoted to a MultiWayJoin
+///     and `execute_wcoj_or_fallback_node` dispatches WCOJ once.
+///     Store-`p` is empty at seeding entry (rule 1 has not yet
+///     applied to the store), so the kernel launches with 0
+///     rows but counter still increments — counter += 1.
+///   * Iteration 1: delta_p (after seeding) = `{(1,2),(2,3)}`,
+///     non-empty. Rule 3 has 2 recursive `p` occurrences, so the
+///     variant-construction loop builds 2 variants and dispatches
+///     WCOJ on each — counter += 2.
+///
+/// Total: counter `>= 2` (in fact `>= 3` for this fixture).
+const SELFREC_TRIANGLE: &str = r#"
+    pred p_init(u32, u32).
+    pred q(u32, u32).
+    pred p(u32, u32).
+    pred tri(u32, u32, u32).
+    p(X, Y) :- p_init(X, Y).
+    p(X, Z) :- tri(X, Y, Z).
+    tri(X, Y, Z) :- p(X, Y), p(Y, Z), q(X, Z).
+"#;
+
+fn selfrec_triangle_inputs() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
+    // F-W41-13 pinned fixture:
+    //   p_init = {(1,2),(2,3)} → seeding rule 1 populates p.
+    //   q      = {(1,3)}.
+    //   Reference tri = {(1,2,3)} non-empty. Iteration 1's two
+    //   variants of `p` (occ=0 and occ=1) both produce tri(1,2,3)
+    //   (already present); iteration 2 may grow `p` via rule 2
+    //   (p(1,3) from tri's projection) but no further tri rows.
+    let mut m: BTreeMap<&'static str, Vec<(u32, u32)>> = BTreeMap::new();
+    m.insert("p_init", vec![(1, 2), (2, 3)]);
+    m.insert("q", vec![(1, 3)]);
+    m
+}
+
+#[test]
+fn selfrec_triangle_dispatches_wcoj_and_matches_binary_join() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let inputs = selfrec_triangle_inputs();
+
+    // Reference: gate off → binary-join answer. Body is still
+    // promoted to MultiWayJoin (compile-time) but execution uses
+    // the fallback path; rewrite_scan_nth still operates on the
+    // MultiWayJoin to build per-occurrence variants, so the same
+    // Step-6 occurrence-identity contract applies under gate=off.
+    let reference = run_program(
+        Arc::clone(&fix.provider),
+        &fix.memory,
+        RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(false)),
+        SELFREC_TRIANGLE,
+        &inputs,
+    );
+    assert_eq!(
+        reference.wcoj_triangle_dispatch_count(),
+        0,
+        "gate=off must not dispatch"
+    );
+    let reference_rows = download_triples(reference.store().get("tri").expect("tri"));
+    assert_eq!(
+        reference_rows,
+        vec![(1, 2, 3)],
+        "F-W41-13 pinned reference: tri must equal {{(1,2,3)}}; got {:?}",
+        reference_rows
+    );
+
+    // Gate on: W4.1 promoter admits the same-predicate
+    // self-recursive triangle (paper P1). Step 6's
+    // `rewrite_scan_nth` fix preserves occurrence identity for
+    // both `p` Scans across the inputs and fallback views, so
+    // each variant rewrites exactly one `p` occurrence to
+    // `delta_p` and dispatches WCOJ. Total counter `>= 2`.
+    let dispatched = run_program(
+        Arc::clone(&fix.provider),
+        &fix.memory,
+        RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(true)),
+        SELFREC_TRIANGLE,
+        &inputs,
+    );
+    assert!(
+        dispatched.wcoj_triangle_dispatch_count() >= 2,
+        "self-recursive triangle (same-predicate `p` appearing twice) \
+         must dispatch WCOJ on the seeding pass AND ≥ 1 variant in \
+         the iteration loop; got counter {}",
+        dispatched.wcoj_triangle_dispatch_count()
+    );
+    let dispatched_rows = download_triples(dispatched.store().get("tri").expect("tri"));
+    assert_eq!(
+        dispatched_rows, reference_rows,
+        "self-recursive WCOJ row set must equal the binary-join reference"
+    );
+}
