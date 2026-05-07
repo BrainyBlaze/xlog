@@ -13,20 +13,27 @@ impl Executor {
     /// Maximum iterations for fixpoint computation to prevent infinite loops
     const MAX_FIXPOINT_ITERATIONS: usize = 1000;
 
-    /// v0.6.5 slice 4 helper. For a `MultiWayJoin` body (produced
-    /// by the slice 1–2 promoter), try WCOJ dispatch via the
-    /// triangle/4-cycle entry points; on decline, fall back to
-    /// the embedded fallback subtree via `execute_node`. For any
-    /// other RIR variant, defer to `execute_node` directly.
+    /// v0.6.5 slice 4 / W4.1 helper. For a `MultiWayJoin` body
+    /// (produced by the slice 1–2 promoter), try WCOJ dispatch
+    /// via the triangle/4-cycle entry points; on decline, fall
+    /// back to the embedded fallback subtree via `execute_node`.
+    /// For any other RIR variant, defer to `execute_node`
+    /// directly.
     ///
     /// Used at TWO sites in the recursive engine — the seeding
-    /// pass (where stable rules with zero recursive Scans get
-    /// their only chance to dispatch WCOJ) and the per-variant
-    /// loop (where linear-recursive rules see one Scan rewritten
-    /// to its delta RelId on each iteration). Multi-recursive
-    /// bodies never reach a `MultiWayJoin` here because the slice
-    /// 4 promoter gate skips them; the helper falls through to
-    /// `execute_node` and the binary-join tree.
+    /// pass (where stable rules with zero recursive Scans AND
+    /// linear/multi-recursive rules with non-zero in-SCC Scans
+    /// get their initial dispatch on the full body) and the
+    /// per-variant loop (where each recursive Scan with a
+    /// non-empty delta is rewritten to its delta RelId for one
+    /// dispatch). Multi-recursive bodies — both distinct-
+    /// recursive-predicate and same-predicate self-recursive
+    /// (paper P1, arXiv:2604.20073) — DO reach a `MultiWayJoin`
+    /// here after W4.1 removed the `recursive_scan_count > 1`
+    /// promoter cutoff at `crates/xlog-logic/src/promote.rs:114`;
+    /// the per-variant rewrite loop builds N variants (one per
+    /// recursive occurrence with a non-empty delta) and
+    /// dispatches each via this helper.
     ///
     /// Counter semantics: `wcoj_*_dispatch_count` increments per
     /// successful WCOJ kernel result — once per (rule, iteration,

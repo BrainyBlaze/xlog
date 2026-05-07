@@ -1,19 +1,15 @@
 // crates/xlog-integration/tests/test_wcoj_recursive_dispatch.rs
-//! v0.6.5 slice 4 — recursive-SCC WCOJ dispatch certification.
+//! v0.6.5 slice 4 + W4.1 — recursive-SCC WCOJ dispatch certification.
 //!
 //! Locks the contract for `Executor::execute_wcoj_or_fallback_node`
 //! at both the seeding pass and the per-variant evaluation in
-//! `execute_recursive_scc`. After slice 4:
+//! `execute_recursive_scc`. After slice 4 + W4.1:
 //!
 //!   * A **stable triangle** (zero recursive Scans in body) inside
 //!     a recursive SCC is promoted by the slice 4 promoter and
 //!     dispatched on the seeding pass — counter == 1.
 //!   * A **stable 4-cycle** in a recursive SCC behaves the same
 //!     for the 4-cycle counter.
-//!   * A **multi-recursive** triangle (≥ 2 in-SCC body Scans) is
-//!     NOT promoted and runs the binary-join semi-naive path —
-//!     counter == 0; final row set still matches the binary
-//!     reference.
 //!   * A **linear-recursive triangle / 4-cycle** (exactly one
 //!     in-SCC body Scan) IS promoted and dispatches both on the
 //!     seeding pass AND on per-variant evaluation. Counter
@@ -21,6 +17,18 @@
 //!     Final row set matches the binary-join reference, so the
 //!     fixed-point convergence + delta correctness are both
 //!     verified.
+//!   * A **multi-recursive triangle / 4-cycle** (≥ 2 in-SCC body
+//!     Scans, distinct recursive predicates) IS promoted by W4.1
+//!     (paper P1, arXiv:2604.20073 — semi-naïve evaluation
+//!     reasons over body-clause occurrences). Seeding dispatches
+//!     once; iter 1 dispatches one variant per recursive
+//!     occurrence with a non-empty delta. Counter `>= 2`. Final
+//!     row set matches the binary-join reference.
+//!   * A **same-predicate self-recursive triangle** (paper P1
+//!     positive cert) — body `tri(X,Y,Z) :- p(X,Y), p(Y,Z), q(X,Z)`
+//!     with `p` appearing twice — dispatches via the W4.1
+//!     `rewrite_scan_nth` occurrence-identity fix. Counter `>= 2`.
+//!     Row-set parity vs binary-join reference.
 //!
 //! Counter semantics: `wcoj_*_dispatch_count` increments per
 //! successful WCOJ kernel result — once per (seeding pass,
