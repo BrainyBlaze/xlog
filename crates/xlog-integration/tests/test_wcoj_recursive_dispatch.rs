@@ -438,11 +438,24 @@ fn stable_4cycle_in_recursive_scc_dispatches_wcoj_on_seeding() {
 // Multi-recursive triangle: WCOJ skipped, binary-join answer
 // ---------------------------------------------------------------
 
-/// Two of the three body Scans (`r1`, `r2`) are recursive — they
-/// receive feedback from `tri`. The third (`r3`) is extensional.
-/// Slice 4 promoter sees count == 2 and refuses to promote the
-/// triangle body, so the recursive engine runs the binary-join
-/// semi-naive variants. WCOJ counter must stay at 0.
+/// W4.1 multi-recursive triangle. Two of the three body Scans
+/// (`r1`, `r2`) are recursive — they receive feedback from `tri`.
+/// The third (`r3`) is extensional. Per paper P1 (semi-naive
+/// occurrence semantics), the W4.1 promoter admits this body
+/// because the recursive Scans target DISTINCT predicates — the
+/// variant-construction loop in `recursive.rs:455-540` builds one
+/// variant per recursive occurrence with a non-empty delta and
+/// dispatches WCOJ on each.
+///
+/// Counter dynamics:
+///   * Seeding pass (`recursive.rs:331-347`): triangle rule fires
+///     once on its full body — counter += 1.
+///   * Iteration 1 (`recursive.rs:455-540`): both `r1_init` and
+///     `r2_init` are non-empty, so two variants fire (one with
+///     `r1`'s scan rewritten to `r1_delta`, one with `r2`'s scan
+///     rewritten to `r2_delta`) — counter += 2.
+///
+/// Total: counter `>= 2` (in fact `== 3` for this fixture).
 const MULTIREC_TRIANGLE: &str = r#"
     pred r1_init(u32, u32).
     pred r2_init(u32, u32).
@@ -517,7 +530,7 @@ fn multirec_inputs() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
 }
 
 #[test]
-fn multirec_triangle_skips_wcoj_and_matches_binary_join() {
+fn multirec_triangle_dispatches_wcoj_and_matches_binary_join() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
@@ -532,29 +545,43 @@ fn multirec_triangle_skips_wcoj_and_matches_binary_join() {
         MULTIREC_TRIANGLE,
         &inputs,
     );
-    assert_eq!(reference.wcoj_triangle_dispatch_count(), 0);
+    assert_eq!(
+        reference.wcoj_triangle_dispatch_count(),
+        0,
+        "gate=off must not dispatch"
+    );
     let reference_rows = download_triples(reference.store().get("tri").expect("tri"));
+    assert!(
+        !reference_rows.is_empty(),
+        "fixture must produce at least one tri row so row-set parity is \
+         not trivially satisfied by an empty-output bug; got {} rows",
+        reference_rows.len()
+    );
 
-    // Gate on: slice 4 promoter refuses (multi-rec). The body
-    // stays binary-join; counter == 0 across all iterations and
-    // the final row set still matches.
-    let attempted = run_program(
+    // Gate on: W4.1 promoter admits the multi-recursive triangle.
+    // Seeding fires WCOJ once on the full body. Iter 1 fires one
+    // variant per recursive predicate with a non-empty delta — for
+    // this fixture, both `r1_init` and `r2_init` are non-empty, so
+    // two variants fire. Total counter `>= 2`. Final row set must
+    // equal the binary-join reference.
+    let dispatched = run_program(
         Arc::clone(&fix.provider),
         &fix.memory,
         RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(true)),
         MULTIREC_TRIANGLE,
         &inputs,
     );
-    assert_eq!(
-        attempted.wcoj_triangle_dispatch_count(),
-        0,
-        "multi-recursive triangle (≥ 2 in-SCC Scans) must NOT dispatch WCOJ; got counter {}",
-        attempted.wcoj_triangle_dispatch_count()
+    assert!(
+        dispatched.wcoj_triangle_dispatch_count() >= 2,
+        "multi-recursive triangle (distinct recursive predicates \
+         r1, r2) must dispatch WCOJ on the seeding pass AND ≥ 1 \
+         variant in the iteration loop; got counter {}",
+        dispatched.wcoj_triangle_dispatch_count()
     );
-    let attempted_rows = download_triples(attempted.store().get("tri").expect("tri"));
+    let dispatched_rows = download_triples(dispatched.store().get("tri").expect("tri"));
     assert_eq!(
-        attempted_rows, reference_rows,
-        "multi-rec WCOJ-skip path must produce the same row set as binary-join"
+        dispatched_rows, reference_rows,
+        "multi-recursive WCOJ row set must equal the binary-join reference"
     );
 }
 
