@@ -48,10 +48,10 @@ any contrary slice-internal decision.
 
 | State | Count |
 |-------|-------|
-| DONE | 7 (W2.4, W2.2, W2.1, W2.3, W2.6, W3.1, W3.2) |
+| DONE | 8 (W2.4, W2.2, W2.1, W2.3, W2.6, W3.1, W3.2, W4.1) |
 | IN-PROGRESS | 1 (W1.1) |
 | BLOCKED | 1 (W2.5) |
-| OPEN | 12 |
+| OPEN | 11 |
 | **Total** | **21** |
 
 The 4 ROADMAP items already DONE from slices 1, 2, 4 are
@@ -93,7 +93,7 @@ prior shipped work.
 
 | ID | Source | Status | Blocked by | Required deliverable | Acceptance gate |
 |----|--------|--------|------------|----------------------|-----------------|
-| W4.1 | Internal + ROADMAP item #4 finishing | OPEN | — | Multi-recursive WCOJ (≥ 2 in-SCC body Scans). Slice 4 gated this out; close it with per-rule variant union + dedup safe under WCOJ output. | Cert: multi-recursive triangle + multi-recursive 4-cycle dispatch on each iteration's variant; row-set parity vs. binary-join reference. Promoter gate `count <= 1` is removed; replaced with `count <= rule.recursive_arity` or equivalent. |
+| W4.1 | Internal + ROADMAP item #4 finishing | DONE | — | Multi-recursive WCOJ (≥ 2 in-SCC body Scans), grounded in arXiv:2604.20073 paper claim P1 (semi-naïve evaluation reasons over body-clause OCCURRENCES, not predicate names). | DONE — 8 plan-iteration commits (`07ea1df0`..`4e435f87`) + 15 implementation/verification commits (Steps 5–14: `e5c2731c` promoter gate removal + `bc671c1b`/`f2d99e68` `rewrite_scan_nth` occurrence-identity fix + `33544900` rewritten slice-1 tests for input/fallback symmetry + `82030f5b`/`345e917a` flipped multirec triangle cert + `c310891a` new multirec 4-cycle cert + `fa1b7ff2` new selfrec triangle cert (paper P1 positive cert with F-W41-13 pinned fixture) + `4364b715` flipped W2.3 Part D cert + `b3411620` 4-location stale-contract doc-scrub + `fc2200ff`/`7fad3c85` paper P4 (delta-outermost) divergence documentation + `cf6dcf52` workspace gate green) + this commit (board update) = **24 commits**. Promoter gate `recursive_scan_count > 1` at `promote.rs:114` removed outright (no replacement guard; triangle/4-cycle shape gates implicitly bound atom count at 3/4); `rewrite_scan_nth` (`rewrite.rs:303-321 + :488-526`) preserves occurrence identity via sentinel post-replacement + separate inputs/fallback counter copies. Three W4.1 dispatch certs (`multirec_triangle_dispatches_wcoj_and_matches_binary_join`, `multirec_4cycle_dispatches_wcoj_and_matches_binary_join`, `selfrec_triangle_dispatches_wcoj_and_matches_binary_join`) all PASS with counter `>= 2` (empirical 3) + non-empty reference rows + row-set parity vs binary-join. Same-predicate self-recursion admitted per paper P1 (selfrec triangle is the strict test of the rewrite-fix; distinct-predicate certs cannot detect a regression of the walker's stop semantic). Workspace pass-count delta +3 cells (multirec_4cycle + selfrec_triangle + rewrite-fix regression mod). All gates green: `cargo fmt --check --all` exit 0; `cargo test --workspace --release --exclude pyxlog --exclude xlog-cuda-tests` 1994/0/17; `cargo test -p xlog-runtime --release --features recursive-stats-trace --test test_w23_recursive_stats` 10/0; `cargo test -p xlog-cuda-tests --test certification_suite --release` 1/1 (206 internal scenarios); zero warnings on touched files. Paper P4 (delta-outermost) divergence documented in plan's audit-followup section: leader fixed at compile time and not updated after variant rewrite (default `WcojVarOrderingKind::Disabled` → canonical slot order; enabled regimes → cost-model leader; both fixed pre-rewrite). Correctness preserved via row-set-parity certs; perf alignment partial; out of scope for W4.1 per D8 process locks; named at point of reference for any subsequent perf-focused W3.x or W4.x work. User-approved DONE in thread. |
 | W4.2 | ROADMAP item #14 | OPEN | — | Nested-loop join operator for small relations. Adaptive selection: when both sides are below a threshold, nested-loop is cheaper than hash. | Cert: small × small fixture picks nested-loop; large × small picks hash; row-set agreement. |
 | W4.3 | ROADMAP item #15 | OPEN | — | General sort-merge join operator for pre-sorted binary relations. Triangle-layout helper is a special case; this is the generic path. | Cert: pre-sorted binary join skips the sort step, matches reference output. |
 
