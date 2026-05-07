@@ -87,11 +87,15 @@ use crate::wcoj_var_ordering::WcojVariableOrderingModel;
 /// resolve body Scans against the head SCC's predicate set. Pass
 /// `Compiler::rel_ids()` (or `Lowerer::rel_ids()`) at the call site.
 ///
-/// **Recursive SCC bodies (slice 4).** A rule whose body contains
-/// at most one Scan in its head SCC's predicate set is promoted —
-/// stable rules (count 0) and linear-recursive rules (count 1).
-/// Bodies with ≥ 2 recursive Scans are left as binary-join trees;
-/// see slice 4.2 for multi-recursive WCOJ.
+/// **Recursive SCC bodies (slice 4 + W4.1).** Multi-recursive
+/// bodies are admitted, including same-predicate self-recursive
+/// occurrences (per paper P1 from arXiv:2604.20073 — semi-naïve
+/// evaluation reasons over body-clause OCCURRENCES, not predicate
+/// names). The triangle / 4-cycle shape gates already cap atom
+/// count at 3 / 4, so the recursive-Scan count is implicitly
+/// bounded; the runtime's per-variant rewrite + dispatch loop in
+/// `execute_recursive_scc` handles N variants correctly with the
+/// W4.1 `rewrite_scan_nth` occurrence-identity fix.
 pub fn promote_multiway(
     plan: &mut ExecutionPlan,
     rel_ids: &HashMap<String, RelId>,
@@ -108,12 +112,19 @@ pub fn promote_multiway(
         };
         let head_rel_set = build_head_rel_set(head_scc, rel_ids);
         for rule in rules.iter_mut() {
-            // Slice 4 gate: skip multi-recursive bodies. Stable
-            // (count 0) and linear-recursive (count 1) bodies fall
-            // through to the existing shape-match dispatch.
-            if recursive_scan_count(&rule.body, &head_rel_set) > 1 {
-                continue;
-            }
+            // W4.1 gate: the slice-4 `recursive_scan_count > 1`
+            // cutoff is removed (paper P1 — admit occurrence-level
+            // multi-recursion). The triangle / 4-cycle shape gates
+            // (try_promote_*) cap atom count at 3 / 4, implicitly
+            // bounding the recursive-Scan count at the rule's atom
+            // count. Multi-recursive bodies (count >= 2), including
+            // same-predicate self-recursive (e.g.
+            // `tri(X,Y,Z) :- p(X,Y), p(Y,Z), q(X,Z)`), are admitted;
+            // the runtime's per-variant rewrite + dispatch loop in
+            // `execute_recursive_scc` handles N variants correctly
+            // after the W4.1 `rewrite_scan_nth` fix at
+            // `crates/xlog-runtime/src/executor/rewrite.rs:303-311 +
+            // :477-504`.
             // W2.6 robustness: the lowerer's bushy DP planner may
             // emit a right-deep `Project(Join(Scan, Join(Scan,
             // Scan)))` triangle for small-card inputs (snapshot-driven
