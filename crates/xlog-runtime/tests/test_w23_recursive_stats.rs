@@ -7,8 +7,8 @@
 //!   variant's `delta_e1` card.
 //! Part C (4) — row-set + dispatch-counter parity vs. the
 //!   pre-W2.3 baseline.
-//! Part D (1) — multi-recursive bodies still skip the WCOJ
-//!   promoter gate (W4.1 owns the gate).
+//! Part D (1) — W4.1 multi-recursive bodies dispatch WCOJ
+//!   (paper P1); W2.3 trace records remain predicate-level.
 //!
 //! Total: **10 tests**.
 //!
@@ -289,9 +289,12 @@ fn linear_rec_cycle4_inputs() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
     m
 }
 
-/// Multi-recursive triangle — slice-4 anchor pattern. Two
-/// recursive IDBs (`r1`, `r2`) feed the head rule with
-/// `recursive_scan_count == 2`; W4.1's gate refuses promotion.
+/// W4.1 multi-recursive triangle — paper P1 anchor pattern.
+/// Two distinct recursive IDBs (`r1`, `r2`) feed the head rule
+/// with `recursive_scan_count == 2`. Per paper P1 (semi-naïve
+/// occurrence semantics), W4.1's promoter admits this body and
+/// the variant-construction loop dispatches WCOJ once per
+/// recursive occurrence with a non-empty delta.
 const MULTIREC_TRIANGLE: &str = r#"
     pred r1_init(u32, u32).
     pred r2_init(u32, u32).
@@ -684,31 +687,36 @@ fn recursive_4cycle_dispatch_counter_unchanged_under_default_config() {
 }
 
 // ===============================================================
-// Part D — Multi-recursive bodies untouched (1 test)
+// Part D — Multi-recursive bodies (W4.1 paper P1) (1 test)
 // ===============================================================
 
 #[test]
-fn multi_recursive_triangle_per_iteration_update_does_not_promote() {
+fn multi_recursive_triangle_per_iteration_update_dispatches_wcoj() {
     let Some(fix) = make_runtime_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
     };
     let inputs = multirec_inputs();
     let exec = run_with_config(&fix, force_wcoj_triangle(), MULTIREC_TRIANGLE, &inputs);
-    // Slice-4 anchor: `tri(X, Y, Z) :- r1(X, Y), r2(Y, Z), r3(X, Z).`
+    // W4.1 paper-P1 anchor: `tri(X, Y, Z) :- r1(X, Y), r2(Y, Z), r3(X, Z).`
     // has recursive_scan_count == 2 (r1 + r2 are both recursive
-    // IDBs in the SCC); W4.1's gate refuses promotion. Counter
-    // must stay 0 across all iterations.
-    assert_eq!(
-        exec.wcoj_triangle_dispatch_count(),
-        0,
-        "multi-recursive tri (recursive_scan_count > 1) must NOT promote; \
-         got dispatch counter {}",
+    // IDBs in the SCC). The W4.1 promoter admits this body; the
+    // seeding pass dispatches WCOJ once on the full body, and
+    // iter 1 with non-empty `r1_init`/`r2_init` deltas dispatches
+    // one variant per recursive occurrence — total counter `>= 2`
+    // (in fact `== 3` for this fixture).
+    assert!(
+        exec.wcoj_triangle_dispatch_count() >= 2,
+        "multi-recursive tri (distinct recursive predicates r1, r2) \
+         must dispatch WCOJ on the seeding pass AND ≥ 1 variant in \
+         the iteration loop; got dispatch counter {}",
         exec.wcoj_triangle_dispatch_count()
     );
     // Per-iteration trace fires for the recursive predicates
-    // (r1, r2) even when the head rule is gated out — W2.3
-    // updates are predicate-level, not promoter-level.
+    // (r1, r2) — W2.3 updates are predicate-level, independent
+    // of whether the promoter dispatches WCOJ on the head rule's
+    // body. The check below preserves the W2.3 invariant verbatim
+    // (recursive_pred_records >= 1) across the W4.1 contract flip.
     let trace = exec.last_recursive_stats_trace();
     let recursive_pred_records = trace
         .entries
@@ -717,8 +725,9 @@ fn multi_recursive_triangle_per_iteration_update_does_not_promote() {
         .count();
     assert!(
         recursive_pred_records >= 1,
-        "W2.3 trace must contain at least one r1/r2 record even \
-         when WCOJ promotion is gated out by W4.1; got {} records: {:?}",
+        "W2.3 trace must contain at least one r1/r2 record — \
+         predicate-level updates fire regardless of promoter \
+         outcome; got {} records: {:?}",
         recursive_pred_records,
         trace.entries
     );
