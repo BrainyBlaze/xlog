@@ -303,9 +303,20 @@ impl Executor {
             RirNode::Scan { rel } => {
                 if *rel == target {
                     if *remaining == 0 {
+                        // W4.1 (paper P1): replace exactly one occurrence
+                        // per `rewrite_scan_nth` call, then mark this walk
+                        // "done" via the `usize::MAX` sentinel so subsequent
+                        // matches in the same walk do NOT replace again.
+                        // Without this, a body with 2+ same-predicate
+                        // recursive Scans would have ALL occurrences after
+                        // `nth` overwritten when the caller intended only
+                        // the `nth`-th to be substituted.
+                        *remaining = usize::MAX;
                         return (RirNode::Scan { rel: replacement }, true);
                     }
-                    *remaining -= 1;
+                    if *remaining != usize::MAX {
+                        *remaining -= 1;
+                    }
                 }
                 (node.clone(), false)
             }
@@ -471,9 +482,16 @@ impl Executor {
                 // TensorMaskedJoin is a leaf node — no child scans to rewrite.
                 (node.clone(), false)
             }
-            // v0.6.5: rewrite `inputs` and `fallback` consistently. Both
-            // see the same relation universe; the promoter pairs them
-            // and the executor expects identity.
+            // W4.1 (paper P1): rewrite `inputs` and `fallback` with
+            // SEPARATE `remaining` counter copies — both views are the
+            // same logical body, so each must independently target the
+            // N-th occurrence. Sharing one counter across the two walks
+            // contaminated the fallback's count by the inputs' consumed
+            // matches, which produced wrong-occurrence substitutions on
+            // self-recursive bodies. The outer caller's `remaining` is
+            // updated to whatever the inputs walk consumed, so siblings
+            // of this MultiWayJoin (rare; typically wrapped in Project)
+            // see consistent counting.
             RirNode::MultiWayJoin {
                 inputs,
                 slot_vars,
@@ -481,16 +499,28 @@ impl Executor {
                 fallback,
                 var_order,
             } => {
+                let starting_remaining = *remaining;
+                let mut inputs_remaining = starting_remaining;
                 let mut new_inputs = Vec::with_capacity(inputs.len());
                 let mut any_replaced = false;
                 for inp in inputs {
-                    let (new_inp, replaced) =
-                        Self::rewrite_scan_nth_impl(inp, target, remaining, replacement);
+                    let (new_inp, replaced) = Self::rewrite_scan_nth_impl(
+                        inp,
+                        target,
+                        &mut inputs_remaining,
+                        replacement,
+                    );
                     any_replaced |= replaced;
                     new_inputs.push(new_inp);
                 }
-                let (new_fallback, fallback_replaced) =
-                    Self::rewrite_scan_nth_impl(fallback, target, remaining, replacement);
+                let mut fallback_remaining = starting_remaining;
+                let (new_fallback, fallback_replaced) = Self::rewrite_scan_nth_impl(
+                    fallback,
+                    target,
+                    &mut fallback_remaining,
+                    replacement,
+                );
+                *remaining = inputs_remaining;
                 (
                     RirNode::MultiWayJoin {
                         inputs: new_inputs,
@@ -718,5 +748,221 @@ mod multiway_walker_tests {
             }
         }
         assert!(find_99(&fallback), "fallback must contain RelId(99)");
+    }
+}
+
+#[cfg(test)]
+mod w41_rewrite_scan_nth_occurrence_identity_tests {
+    //! W4.1 (paper P1) — `rewrite_scan_nth` occurrence-identity
+    //! preservation. The Step-6 fix at `rewrite.rs:Scan case` (sentinel
+    //! post-replacement) and `:MultiWayJoin arm` (separate `remaining`
+    //! counters for inputs vs fallback) ensures:
+    //!
+    //! 1. For a body with N same-predicate occurrences, calling
+    //!    `rewrite_scan_nth(body, target, occ=k, replacement)` substitutes
+    //!    EXACTLY ONE occurrence (the k-th) — not 0, not >1.
+    //!
+    //! 2. For a `MultiWayJoin` whose `inputs` and `fallback` both contain
+    //!    the target, occ=k substitutes the k-th occurrence INDEPENDENTLY
+    //!    in inputs AND in fallback (both views share the same logical
+    //!    body; both must reflect the same logical rewrite).
+    //!
+    //! Pre-W4.1 behavior bugs (now fixed):
+    //! - Scan case early-returned on match without decrementing
+    //!   `remaining`, so subsequent matches in the same walk would also
+    //!   replace at remaining==0.
+    //! - MultiWayJoin arm shared `&mut remaining` across the inputs walk
+    //!   and the subsequent fallback walk; the fallback walk's counter
+    //!   was contaminated by inputs' consumption.
+    //!
+    //! Both bugs latent on distinct-recursive-predicate fixtures (slice 4
+    //! single-rec, MULTIREC_TRIANGLE with r1+r2 distinct); manifest on
+    //! same-predicate self-recursive bodies admitted by W4.1 Step 5.
+
+    use super::*;
+    use xlog_ir::rir::ProjectExpr;
+    use xlog_ir::JoinType;
+
+    /// Build a synthetic `MultiWayJoin` whose `inputs` are 3 same-
+    /// predicate Scans (`Scan { rel: target_rel }` × 3) plus a fallback
+    /// that mirrors the same 3 Scans inside a left-deep Join chain.
+    /// This is the structural shape of a self-recursive triangle body
+    /// like `tri(X,Y,Z) :- p(X,Y), p(Y,Z), p(X,Z)` after promotion: 3
+    /// inputs slots all targeting `p`, fallback containing 3 `p` Scans
+    /// in the binary-join expansion.
+    fn three_same_predicate_multiway(target_rel: RelId, sentinel_other: RelId) -> RirNode {
+        // Inputs: 3 Scans of `target_rel`, then 1 of `sentinel_other`
+        // wouldn't make a valid 4-cycle but for this test we only care
+        // about how many copies of `target_rel` exist in `inputs`. We
+        // keep the structure minimal: inputs = [target, target, target].
+        // For shape validity (a real promoter would never emit this
+        // shape), we still need a `MultiWayJoin` that compiles; the
+        // walker doesn't validate shape.
+        let inputs = vec![
+            RirNode::Scan { rel: target_rel },
+            RirNode::Scan { rel: target_rel },
+            RirNode::Scan { rel: target_rel },
+        ];
+        // Fallback: 3 same-predicate Scans inside a left-deep Join
+        // chain, mirroring the inputs. This is what the promoter would
+        // construct as the binary-join expansion.
+        let inner = RirNode::Join {
+            left: Box::new(RirNode::Scan { rel: target_rel }),
+            right: Box::new(RirNode::Scan { rel: target_rel }),
+            left_keys: vec![1],
+            right_keys: vec![0],
+            join_type: JoinType::Inner,
+        };
+        let outer = RirNode::Join {
+            left: Box::new(inner),
+            right: Box::new(RirNode::Scan { rel: target_rel }),
+            left_keys: vec![0, 3],
+            right_keys: vec![0, 1],
+            join_type: JoinType::Inner,
+        };
+        let fallback = RirNode::Project {
+            input: Box::new(outer),
+            columns: vec![
+                ProjectExpr::Column(0),
+                ProjectExpr::Column(1),
+                ProjectExpr::Column(3),
+            ],
+        };
+        let _ = sentinel_other;
+        RirNode::MultiWayJoin {
+            inputs,
+            slot_vars: vec![
+                vec![Some(0), Some(1)],
+                vec![Some(1), Some(2)],
+                vec![Some(0), Some(2)],
+            ],
+            output_columns: vec![
+                ProjectExpr::Column(0),
+                ProjectExpr::Column(1),
+                ProjectExpr::Column(2),
+            ],
+            fallback: Box::new(fallback),
+            var_order: None,
+        }
+    }
+
+    /// Helper: count `Scan { rel: needle }` occurrences in any RirNode.
+    fn count_scans_of(node: &RirNode, needle: RelId) -> usize {
+        match node {
+            RirNode::Unit => 0,
+            RirNode::Scan { rel } => {
+                if *rel == needle {
+                    1
+                } else {
+                    0
+                }
+            }
+            RirNode::Filter { input, .. }
+            | RirNode::Project { input, .. }
+            | RirNode::GroupBy { input, .. }
+            | RirNode::Distinct { input, .. } => count_scans_of(input, needle),
+            RirNode::Join { left, right, .. } | RirNode::Diff { left, right } => {
+                count_scans_of(left, needle) + count_scans_of(right, needle)
+            }
+            RirNode::Union { inputs } => inputs.iter().map(|n| count_scans_of(n, needle)).sum(),
+            RirNode::Fixpoint {
+                base, recursive, ..
+            } => count_scans_of(base, needle) + count_scans_of(recursive, needle),
+            RirNode::TensorMaskedJoin { rel_index, .. } => rel_index
+                .iter()
+                .filter(|(rid, _)| *rid == needle)
+                .count(),
+            RirNode::MultiWayJoin {
+                inputs, fallback, ..
+            } => {
+                inputs.iter().map(|n| count_scans_of(n, needle)).sum::<usize>()
+                    + count_scans_of(fallback, needle)
+            }
+        }
+    }
+
+    /// Pre-W4.1 bug pin: with 3 occurrences of `target` in `inputs` and
+    /// the sentinel/separate-counter fix BOTH applied, occ=0, occ=1,
+    /// occ=2 each substitute exactly ONE of the three input occurrences
+    /// (and exactly one of the three fallback occurrences) — never
+    /// multiple in either view, never zero.
+    #[test]
+    fn rewrite_scan_nth_replaces_exactly_one_input_occurrence() {
+        let target = RelId(7);
+        let replacement = RelId(99);
+        let other = RelId(8); // unused stub
+        let body = three_same_predicate_multiway(target, other);
+
+        // Pre-rewrite: target appears 3× in inputs + 3× in fallback = 6
+        // total Scans of target.
+        assert_eq!(count_scans_of(&body, target), 6);
+
+        for occ in 0..3 {
+            let rewritten = Executor::rewrite_scan_nth(&body, target, occ, replacement)
+                .unwrap_or_else(|| panic!("occ={} must succeed", occ));
+            // Post-rewrite: 6 - 2 = 4 target Scans (one substituted in
+            // inputs, one substituted in fallback). Replacement RelId(99)
+            // appears 2× (one input slot, one fallback leaf).
+            assert_eq!(
+                count_scans_of(&rewritten, target),
+                4,
+                "occ={}: target Scan count must be 4 (was 6); got {}",
+                occ,
+                count_scans_of(&rewritten, target)
+            );
+            assert_eq!(
+                count_scans_of(&rewritten, replacement),
+                2,
+                "occ={}: replacement Scan count must be 2 (1 in inputs, 1 in fallback); got {}",
+                occ,
+                count_scans_of(&rewritten, replacement)
+            );
+        }
+    }
+
+    /// Pre-W4.1 bug pin: occ=0 of a target appearing in input[0] AND
+    /// in fallback's leftmost leaf substitutes BOTH copies (input/
+    /// fallback symmetry). Locks paper-P1's "logical body shared
+    /// between inputs and fallback" semantic.
+    #[test]
+    fn rewrite_scan_nth_input_fallback_symmetry_at_occ_0() {
+        let target = RelId(7);
+        let replacement = RelId(99);
+        let other = RelId(8);
+        let body = three_same_predicate_multiway(target, other);
+
+        let rewritten = Executor::rewrite_scan_nth(&body, target, 0, replacement)
+            .expect("occ=0 must succeed");
+
+        match rewritten {
+            RirNode::MultiWayJoin {
+                inputs, fallback, ..
+            } => {
+                // input[0] must be the replacement (the 0th occurrence
+                // in inputs).
+                assert!(
+                    matches!(inputs[0], RirNode::Scan { rel } if rel == replacement),
+                    "input[0] must be replacement; got {:?}",
+                    inputs[0]
+                );
+                // input[1] and input[2] must remain the original target.
+                assert!(matches!(inputs[1], RirNode::Scan { rel } if rel == target));
+                assert!(matches!(inputs[2], RirNode::Scan { rel } if rel == target));
+                // Fallback must contain exactly one replacement Scan
+                // (the leftmost leaf — the 0th occurrence in fallback's
+                // walk order).
+                assert_eq!(
+                    count_scans_of(&fallback, replacement),
+                    1,
+                    "fallback must contain exactly one replacement Scan (the 0th occurrence)"
+                );
+                assert_eq!(
+                    count_scans_of(&fallback, target),
+                    2,
+                    "fallback must contain 2 unchanged target Scans (occurrences 1 and 2)"
+                );
+            }
+            _ => panic!("expected MultiWayJoin after rewrite"),
+        }
     }
 }
