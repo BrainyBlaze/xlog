@@ -617,8 +617,8 @@ mod multiway_walker_tests {
         let node = triangle_multiway(RelId(10), RelId(20), RelId(30));
 
         // occ=0 substitutes input[0] AND fallback's leftmost leaf.
-        let rewritten = Executor::rewrite_scan_nth(&node, RelId(10), 0, RelId(99))
-            .expect("occ=0 must succeed");
+        let rewritten =
+            Executor::rewrite_scan_nth(&node, RelId(10), 0, RelId(99)).expect("occ=0 must succeed");
         match rewritten {
             RirNode::MultiWayJoin {
                 inputs, fallback, ..
@@ -755,8 +755,8 @@ mod multiway_walker_tests {
         let node = fourway_multiway(RelId(10), RelId(20), RelId(30), RelId(40));
 
         // occ=0 substitutes input[3] AND fallback's RelId(40) leaf.
-        let rewritten = Executor::rewrite_scan_nth(&node, RelId(40), 0, RelId(99))
-            .expect("occ=0 must succeed");
+        let rewritten =
+            Executor::rewrite_scan_nth(&node, RelId(40), 0, RelId(99)).expect("occ=0 must succeed");
         let RirNode::MultiWayJoin {
             inputs, fallback, ..
         } = rewritten
@@ -1004,8 +1004,8 @@ mod w41_rewrite_scan_nth_occurrence_identity_tests {
         let replacement = RelId(99);
         let body = three_same_predicate_multiway(target);
 
-        let rewritten = Executor::rewrite_scan_nth(&body, target, 0, replacement)
-            .expect("occ=0 must succeed");
+        let rewritten =
+            Executor::rewrite_scan_nth(&body, target, 0, replacement).expect("occ=0 must succeed");
 
         match rewritten {
             RirNode::MultiWayJoin {

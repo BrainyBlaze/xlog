@@ -442,7 +442,7 @@ impl). The promoter dispatches on `config.wcoj_variable_ordering`
 at `crates/xlog-logic/src/promote.rs:712-721` (triangle) and
 `:1032-1043` (4-cycle). Two regimes:
 
-* **Default (`WcojVarOrderingKind::Disabled`** — the default in
+* **Default (`WcojVarOrderingKind::Disabled`)** — the default in
   `CompilerConfig::default()` at
   `crates/xlog-logic/src/compiler_config.rs:67`; the regime
   exercised by **all W4.1 dispatch certs** in Steps 8 / 9 / 10,
