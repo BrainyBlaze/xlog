@@ -3,14 +3,17 @@
 **Closes W4.1 only.** No W2.5 default flip. No W3.3 resurrection.
 No performance work. No new env knobs. No push, no tag, no
 board update, no DONE marking without explicit user approval.
-Plan-first; no implementation until iteration 4 is approved by
+Plan-first; no implementation until iteration 6 is approved by
 the user.
 
-**Plan iteration:** 4 (paper-grounded, post-audit). The canonical
-D-table, Step-by-Step Execution Plan, and Acceptance Grid below
-reflect iteration 4's locked content; iteration-1 / 2 / 3 amendment
-logs at the foot of this file are **historical / superseded** and
-preserved only for traceability of how the design evolved.
+**Plan iteration:** 6 — wording-only cleanups over iterations 4
+and 5; **canonical D-table, Step-by-Step Execution Plan, and
+Acceptance Grid content remains iteration 4** (no design changes
+since iteration 4). The canonical sections below reflect iteration
+4's locked content; iteration-1 / 2 / 3 / 4 / 5 amendment logs at
+the foot of this file are **historical / superseded** and
+preserved only for traceability of how the wording / direction
+evolved.
 **Base:** `main` at `610406ae` (post-W3.2 closure commit).
 **Worktree:** `.worktrees/w41-multi-recursive-wcoj`.
 **Branch:** `feat/w41-multi-recursive-wcoj`.
@@ -48,7 +51,7 @@ documentation-only.
 
 ## Process Rule Compliance
 
-* Process rule #1: no DONE marking under any iteration-4 outcome.
+* Process rule #1: no DONE marking under any plan iteration's outcome.
 * Process rule #2: every W4.1 commit references W4.1.
 * Process rule #5: no release-train references; out-of-scope
   concerns are owned by W4.2 / W5.x board items, named at the
@@ -103,7 +106,7 @@ iterations.
 ## Step-by-Step Execution Plan (16 steps, iteration-4 canonical)
 
 Iteration-1 / 2 / 3 step structures are preserved at the foot of
-this file in the corresponding amendment-log sections. The 12-step
+this file in the corresponding amendment-log sections. The 16-step
 sequence below is the **only canonical step plan**.
 
 ### Step 1–3 — Plan iteration commits (DONE)
@@ -420,11 +423,13 @@ gate clean. CUDA cert suite green.
 | Step 13's delta-outermost (paper P4) verification finds a divergence that warrants implementation. | W4.1 documents the divergence; does NOT implement re-pick of leader after rewrite. Out of scope for W4.1; named at point of reference for any subsequent perf-focused W3.x or W4.x work; correctness preserved (parity vs binary-join). |
 | Test rename breaks workspace test filters or other tests. | Grep across the workspace for the old test names before each rename. The old names are presumed test-file-local; verify in Step 8 / 11. |
 
-## Plan-Approval Gate (iteration-4 canonical)
+## Plan-Approval Gate (current iteration)
 
-This plan is **iteration 4 draft**. The agent does NOT advance to
+This plan is **iteration 6 draft** (wording-only cleanup over
+iteration 5; canonical D-table + Step plan + Acceptance Grid
+content remains iteration 4). The agent does NOT advance to
 Step 5 (promoter gate removal) until the user explicitly approves
-iteration 4 (via "Iteration 4 is approved" or equivalent).
+iteration 6 (via "Iteration 6 is approved" or equivalent).
 
 If the user requests revisions, this plan is amended in place
 (additional F-W41-N entries appended below) and re-submitted.
@@ -597,11 +602,12 @@ iteration-3 amendment log preserved as historical record.
 * **Plan-Approval Gate**: iteration tag 1 → 4.
 * **Banned-token compliance**: avoids release-train references and closure-avoidance wording per the project process rules.
 
-### Plan-Approval Gate (Iteration 4)
+### Plan-Approval Gate (Iteration 4 — historical, superseded)
 
-This iteration-4 amendment is **draft**. The agent does NOT
-advance to Step 5 (promoter gate removal at `promote.rs:114`)
-until the user explicitly approves iteration 4 (via "Iteration 4
-is approved" or equivalent). If the user requests revisions, this
-amendment is amended in place (additional F-W41-N entries
-appended) and re-submitted.
+This iteration-4 plan-approval gate is **historical**. At the
+time iteration 4 was committed (commit `7859de3f`), this gate
+read "iteration 4 is draft; agent does NOT advance to Step 5
+until the user explicitly approves iteration 4." User feedback
+on iteration 4 produced 5 wording findings (Iteration-5 / 6
+cleanup commits) but did not change canonical content. The live
+plan-approval gate above (iteration 6) is the current gate.
