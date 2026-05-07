@@ -1858,8 +1858,6 @@ mod tests {
         ));
     }
 
-    /// Slice 4 contract: ≥ 2 recursive Scans → NOT promoted. Body
-    /// stays as the original `Project { Join { ... } }` binary-join
     /// W4.1 contract (paper P1): a recursive SCC body with ≥ 2
     /// recursive Scans (here: 2 distinct in-SCC predicates) IS
     /// promoted to `MultiWayJoin`. Mark "tri_a" → RelId(1) and
