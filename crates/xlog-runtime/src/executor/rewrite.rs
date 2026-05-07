@@ -603,36 +603,60 @@ mod multiway_walker_tests {
         assert!(out.contains(&RelId(30)));
     }
 
+    /// W4.1 (paper P1) input/fallback symmetric semantic: `RelId(10)`
+    /// appears once in `inputs[0]` AND once inside `fallback` (the
+    /// outer join's leftmost leaf). Both copies are the 0-th
+    /// occurrence in their respective walks. Per the paper-P1
+    /// contract that inputs and fallback are two views of the same
+    /// logical body, `occ=0` substitutes BOTH copies.
+    ///
+    /// `occ=1` returns `None` because `RelId(10)` has only ONE
+    /// occurrence per view; there is no 2nd occurrence to substitute.
     #[test]
     fn rewrite_scan_nth_rewrites_inputs_and_fallback() {
         let node = triangle_multiway(RelId(10), RelId(20), RelId(30));
-        // Replace the second occurrence of RelId(10). Across the
-        // MultiWayJoin, RelId(10) appears once in `inputs[0]` and
-        // once inside `fallback` (the outer join's leftmost leaf).
-        // `rewrite_scan_nth` walks the inputs first (count 1), then
-        // the fallback (count 2). With nth=1 we rewrite the second
-        // hit — i.e., the fallback occurrence.
-        let rewritten = Executor::rewrite_scan_nth(&node, RelId(10), 1, RelId(99))
-            .expect("rewrite must succeed");
+
+        // occ=0 substitutes input[0] AND fallback's leftmost leaf.
+        let rewritten = Executor::rewrite_scan_nth(&node, RelId(10), 0, RelId(99))
+            .expect("occ=0 must succeed");
         match rewritten {
             RirNode::MultiWayJoin {
                 inputs, fallback, ..
             } => {
-                // Input[0] is unchanged.
-                assert!(matches!(inputs[0], RirNode::Scan { rel: RelId(10) }));
-                // Fallback has the RelId(10) leaf swapped to RelId(99).
-                fn find_99(n: &RirNode) -> bool {
+                // Input[0] is the replacement.
+                assert!(matches!(inputs[0], RirNode::Scan { rel: RelId(99) }));
+                // Inputs[1] and [2] are unchanged.
+                assert!(matches!(inputs[1], RirNode::Scan { rel: RelId(20) }));
+                assert!(matches!(inputs[2], RirNode::Scan { rel: RelId(30) }));
+                // Fallback's RelId(10) leaf is now RelId(99); no
+                // RelId(10) remains in the fallback.
+                fn find_rel(n: &RirNode, target: RelId) -> bool {
                     match n {
-                        RirNode::Scan { rel: RelId(99) } => true,
-                        RirNode::Project { input, .. } => find_99(input),
-                        RirNode::Join { left, right, .. } => find_99(left) || find_99(right),
+                        RirNode::Scan { rel } => *rel == target,
+                        RirNode::Project { input, .. } => find_rel(input, target),
+                        RirNode::Join { left, right, .. } => {
+                            find_rel(left, target) || find_rel(right, target)
+                        }
                         _ => false,
                     }
                 }
-                assert!(find_99(&fallback), "fallback must contain RelId(99)");
+                assert!(
+                    find_rel(&fallback, RelId(99)),
+                    "fallback must contain RelId(99) at the 0-th occurrence position"
+                );
+                assert!(
+                    !find_rel(&fallback, RelId(10)),
+                    "fallback must NOT contain RelId(10) — the only occurrence was substituted"
+                );
             }
             _ => panic!("expected MultiWayJoin after rewrite"),
         }
+
+        // occ=1 returns None: RelId(10) appears only once per view.
+        assert!(
+            Executor::rewrite_scan_nth(&node, RelId(10), 1, RelId(99)).is_none(),
+            "occ=1 must return None — RelId(10) has only 1 occurrence per view"
+        );
     }
 
     /// v0.6.5 slice 2 (D4) — shape-agnosticism guard.
@@ -717,37 +741,59 @@ mod multiway_walker_tests {
         }
     }
 
+    /// W4.1 (paper P1) input/fallback symmetric semantic for the
+    /// 4-input shape: `RelId(40)` appears once in `inputs[3]` AND
+    /// once inside `fallback` (the outer join's right scan). Both
+    /// copies are the 0-th occurrence in their respective walks; per
+    /// the paper-P1 input/fallback symmetric contract, `occ=0`
+    /// substitutes BOTH copies.
+    ///
+    /// `occ=1` returns `None` because `RelId(40)` has only ONE
+    /// occurrence per view.
     #[test]
     fn rewrite_scan_nth_handles_4_inputs_and_fallback() {
         let node = fourway_multiway(RelId(10), RelId(20), RelId(30), RelId(40));
-        // RelId(40) appears once in `inputs[3]` and once inside
-        // `fallback` (the outer join's right scan). nth=0 rewrites
-        // the first hit (input[3]); nth=1 rewrites the fallback hit.
-        let rewritten_first = Executor::rewrite_scan_nth(&node, RelId(40), 0, RelId(99))
-            .expect("first rewrite must succeed");
-        let RirNode::MultiWayJoin { inputs, .. } = rewritten_first else {
-            panic!("expected MultiWayJoin");
-        };
-        assert!(matches!(inputs[3], RirNode::Scan { rel: RelId(99) }));
 
-        let rewritten_second = Executor::rewrite_scan_nth(&node, RelId(40), 1, RelId(99))
-            .expect("second rewrite must succeed");
+        // occ=0 substitutes input[3] AND fallback's RelId(40) leaf.
+        let rewritten = Executor::rewrite_scan_nth(&node, RelId(40), 0, RelId(99))
+            .expect("occ=0 must succeed");
         let RirNode::MultiWayJoin {
             inputs, fallback, ..
-        } = rewritten_second
+        } = rewritten
         else {
             panic!("expected MultiWayJoin");
         };
-        assert!(matches!(inputs[3], RirNode::Scan { rel: RelId(40) }));
-        fn find_99(n: &RirNode) -> bool {
+        // Input[3] is the replacement; inputs [0..2] unchanged.
+        assert!(matches!(inputs[0], RirNode::Scan { rel: RelId(10) }));
+        assert!(matches!(inputs[1], RirNode::Scan { rel: RelId(20) }));
+        assert!(matches!(inputs[2], RirNode::Scan { rel: RelId(30) }));
+        assert!(matches!(inputs[3], RirNode::Scan { rel: RelId(99) }));
+        // Fallback's RelId(40) leaf is now RelId(99); no RelId(40)
+        // remains in the fallback.
+        fn find_rel(n: &RirNode, target: RelId) -> bool {
             match n {
-                RirNode::Scan { rel: RelId(99) } => true,
-                RirNode::Project { input, .. } => find_99(input),
-                RirNode::Join { left, right, .. } => find_99(left) || find_99(right),
+                RirNode::Scan { rel } => *rel == target,
+                RirNode::Project { input, .. } => find_rel(input, target),
+                RirNode::Join { left, right, .. } => {
+                    find_rel(left, target) || find_rel(right, target)
+                }
                 _ => false,
             }
         }
-        assert!(find_99(&fallback), "fallback must contain RelId(99)");
+        assert!(
+            find_rel(&fallback, RelId(99)),
+            "fallback must contain RelId(99) at the 0-th occurrence position"
+        );
+        assert!(
+            !find_rel(&fallback, RelId(40)),
+            "fallback must NOT contain RelId(40) — the only occurrence was substituted"
+        );
+
+        // occ=1 returns None: RelId(40) appears only once per view.
+        assert!(
+            Executor::rewrite_scan_nth(&node, RelId(40), 1, RelId(99)).is_none(),
+            "occ=1 must return None — RelId(40) has only 1 occurrence per view"
+        );
     }
 }
 
