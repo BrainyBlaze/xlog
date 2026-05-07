@@ -1,6 +1,6 @@
-# W4.2 Nested-Loop Join Operator — Iteration-1 Plan
+# W4.2 Nested-Loop Join Operator — Plan (iteration 2 canonical)
 
-**Plan iteration:** 1 (first draft).
+**Plan iteration:** 2 (amendment after iteration-1 review surfaced F-W42-1..6 — 3 blocking + 2 major + 1 minor).
 **Worktree:** `.worktrees/w42-nested-loop-join` on branch `feat/w42-nested-loop-join` (off local `main` `20dd96a5`).
 **Spike evidence:** `bench-spike/w42-nested-loop` HEAD `9c0cefc6` (unmerged); evidence at `docs/evidence/2026-05-07-w42-bench-spike/README.md`.
 **Date:** 2026-05-07.
@@ -31,10 +31,10 @@ W4.2 has **no direct paper claim** in arXiv:2604.20073 (the SRDatalog paper is a
 | ID | Topic | Direction |
 |----|-------|-----------|
 | **D1** | **Eligibility predicate (production-narrow).** | A join is eligible for nested-loop dispatch iff ALL hold: (a) `JoinType::Inner` (only Inner; Semi/Anti/LeftOuter fall back to hash); (b) exactly **1 key column** on each side (`left_keys.len() == 1 && right_keys.len() == 1`); (c) the key column is `ScalarType::U32` OR `ScalarType::Symbol` (both 4-byte unsigned with identical kernel-level treatment); (d) size threshold (D4) is met. ANY other shape (multi-key, non-U32/Symbol key, non-Inner) MUST fall back to hash. The eligibility check lives at the dispatch site and is bit-cheap (no buffer reads, no kernel launches). |
-| **D2** | **Production kernel scope.** | Hardened nested-loop kernel `nested_loop_join_inner_u32_1key`. Inputs: multi-col `CudaBuffer` allowed (production has payload columns), single key column at caller-specified index. Output schema: `[left_cols, right_cols_minus_key]` matching `hash_join_v2 Inner`. Symbol keys reuse the U32 kernel byte-identically (Symbol IS u32 in xlog's `ScalarType` representation). The spike's 1-col kernel (`nested_loop_join_inner_u32_1key_1col` on the spike branch) does NOT graduate to production — it is a spike-shape kernel that proved the concept; production gets its own multi-col-aware kernel. |
-| **D3** | **Provider API surface.** | Add `pub fn nested_loop_join_v2_inner_u32_1key(left, right, left_key, right_key) -> Result<CudaBuffer>` on `CudaKernelProvider`. Mirrors `hash_join_v2`'s ownership/error/D2H profile (single u32 D2H for output count via `dtoh_scalar_untracked`; no other host reads). NO API entry for fall-back to hash inside the provider — fallback decisions are made by the executor's dispatch site, not by the provider. |
-| **D4** | **Threshold (Cartesian product, conservative from spike).** | Dispatch nested-loop iff `left_rows * right_rows < NESTED_LOOP_TOTAL_THRESHOLD` where `NESTED_LOOP_TOTAL_THRESHOLD = 4_000_000` (4M Cartesian rows). **Rationale from spike (`docs/evidence/2026-05-07-w42-bench-spike/README.md`):** the largest symmetric tested cell `L=R=2000` → 4M total, NL win 5.41×; the next tested cell `L=R=5000` → 25M total, still NL win 4.28×; the algorithmic crossover is extrapolated to ~10000×10000 = 100M; 4M is well below the untested zone with 6× margin to absorb the F3 caveat (production multi-col kernel may have higher per-row cost than the spike's 1-col kernel). The Cartesian-product semantic (`left * right`) replaces the existing dead `right_rows < 1000` semantic (`crates/xlog-runtime/src/statistics.rs:22`) — the spike showed `right_rows`-only is insufficient because L=5000×R=50 wins the same as L=50×R=5000. **The existing `JoinStrategy::NESTED_LOOP_THRESHOLD = 1000` is NOT shipped unchanged**: W4.2 introduces a NEW constant `NESTED_LOOP_TOTAL_THRESHOLD = 4_000_000` and leaves the existing dead-code enum untouched (its cleanup is out of W4.2 scope). |
-| **D5** | **Test surface (correctness certs).** | Four certs in `crates/xlog-integration/tests/test_w42_nested_loop_dispatch.rs` (new file): **(A)** small×small dispatch — eligible inputs at `L=100, R=100` (10K total, well below threshold); assert `nested_loop_dispatch_count >= 1`, `wcoj_*_dispatch_count == 0`, row-set parity vs gate-off (hash) reference. **(B)** large×small fallback — `L=10000, R=10000` (100M total, above threshold); assert `nested_loop_dispatch_count == 0`, output via hash matches reference. **(C)** unsupported-shape fallback — multi-col key (`left_keys.len() == 2`); assert `nested_loop_dispatch_count == 0` despite small sizes. Plus a non-Inner subcase (`JoinType::Semi`) on the same fixture. **(D)** row-set parity — bit-identical `BTreeSet<row>` comparison vs hash on every cert above (built into A/B/C as tail assertions). Plus a fifth eligibility-edge cert: **(E)** Symbol-typed key dispatch — a Symbol-keyed inner join with row counts in the eligible range; assert nested-loop dispatched and row-set parity vs hash. |
+| **D2** | **Production kernel scope (per F-W42-1, F-W42-2).** | Hardened nested-loop kernel `nested_loop_join_inner_u32_1key_pairs`. Kernel emits **matched (left_idx, right_idx) index pairs** as two parallel `u32` arrays — it does NOT materialize output rows. Output materialization happens AFTER the kernel via `Self::gather_buffer_by_indices` (the same gather pattern `hash_join_v2` uses at `crates/xlog-cuda/src/provider/relational.rs:3344-3354`). Output schema: **full concatenation** `[left_cols, right_cols]` via `combine_schemas(left, right)` — drop-in compatible with `hash_join_v2`'s actual output (verified: hash gathers BOTH sides' full column lists; there is no key-column dropping). Symbol keys reuse the U32 kernel byte-identically (Symbol is `u32` at the `ScalarType` byte level). The kernel reads ONLY the key columns from each side as `*const uint32_t` pointers (one per side); payload columns are NOT touched by the kernel — they reach the output through `gather_buffer_by_indices`. Per F-W42-2: this is consistent with `CudaBuffer`'s columnar layout (`crates/xlog-cuda/src/memory.rs:1041-1055`) — `CudaBuffer.columns` is a `Vec<CudaColumn>`, each column its own `CudaSlice<u8>`; the kernel takes per-column pointers, not row-major raw bytes. The spike's 1-col kernel does NOT graduate to production. |
+| **D3** | **Provider API surface (per F-W42-2, F-W42-5).** | Add `pub fn nested_loop_join_v2_inner_u32_1key(left, right, left_key, right_key) -> Result<CudaBuffer>` on `CudaKernelProvider`. Body sequence: (1) validate eligibility (1 key col, U32 OR Symbol type, key cols within arity); (2) read row counts (`device_row_count`); (3) compute upper-bound output rows = `num_left * num_right` (in `u64` to avoid overflow at the validation step); (4) allocate the two index arrays as `TrackedCudaSlice<u32>` of length `upper_bound`; allocate counter; (5) launch kernel with key-column pointers; (6) `device.synchronize()`; (7) D2H counter via `dtoh_scalar_untracked` (single u32 — same metadata-only D2H profile as `hash_join_v2`); (8) call `gather_buffer_by_indices(left, &output_left_idx, output_rows)` and same for right (the existing GPU-side gather machinery); (9) construct result `CudaBuffer` via `buffer_from_columns` with `combine_schemas(left, right)`. **No silent capacity clamp**: per F-W42-5, the eligibility predicate (D1+D4) caps `num_left * num_right <= 4_000_000`, so the index-array allocation upper bound is bounded at 32 MB total (4M × 4 bytes × 2 arrays). The provider validates `num_left * num_right <= NESTED_LOOP_TOTAL_THRESHOLD` defensively and returns `Err(XlogError::Kernel)` if the caller violates the contract — fail-closed, never truncate. NO API entry for fall-back to hash inside the provider — fallback decisions are made by the executor's dispatch site, not by the provider. |
+| **D4** | **Threshold (Cartesian product, conservative from spike, per F-W42-4).** | Dispatch nested-loop iff `left_rows * right_rows <= NESTED_LOOP_TOTAL_THRESHOLD` (note: **`<=`**, inclusive — per F-W42-4 boundary fix; `2000 * 2000 = 4_000_000` is admitted, matching the spike's largest verified-winning symmetric cell) where `NESTED_LOOP_TOTAL_THRESHOLD = 4_000_000` (4M Cartesian rows). **Rationale from spike (`docs/evidence/2026-05-07-w42-bench-spike/README.md`):** the largest symmetric tested cell `L=R=2000` → 4M total, NL win 5.41×; the next tested cell `L=R=5000` → 25M total, still NL win 4.28×; the algorithmic crossover is extrapolated to ~10000×10000 = 100M; 4M is well below the untested zone with 6× margin to absorb the F3 caveat (production multi-col kernel may have higher per-row cost than the spike's 1-col kernel). The Cartesian-product semantic (`left * right`) replaces the existing dead `right_rows < 1000` semantic (`crates/xlog-runtime/src/statistics.rs:22`) — the spike showed `right_rows`-only is insufficient because L=5000×R=50 wins the same as L=50×R=5000. **The existing `JoinStrategy::NESTED_LOOP_THRESHOLD = 1000` is NOT shipped unchanged**: W4.2 introduces a NEW constant `NESTED_LOOP_TOTAL_THRESHOLD = 4_000_000` and leaves the existing dead-code enum untouched (its cleanup is out of W4.2 scope). The threshold also serves as the **memory-safety cap** (per F-W42-5 + D3): within eligibility, the index-array allocation is bounded at 32 MB total. |
+| **D5** | **Test surface (correctness certs, per F-W42-3, F-W42-6).** | Five certs in `crates/xlog-integration/tests/test_w42_nested_loop_dispatch.rs` (new file): **(A)** small×small dispatch — eligible inputs at `L=100, R=100` (10K total, well below threshold); assert `nested_loop_dispatch_count >= 1` AND row-set parity vs a reference computed by **direct provider call to `provider.hash_join_v2`** on the same uploaded `CudaBuffer` inputs (per F-W42-6: do NOT use `wcoj_*` counters as hash evidence — wcoj is unrelated; the parity assertion is the correctness witness). **(B)** **large × small fallback (board acceptance line)** — asymmetric above-threshold fixture **`L=50_000, R=100`** (5M total, above 4M threshold) with bounded matches (e.g., right keys ⊆ left keys with controlled cardinality so the join output stays small enough for parity comparison); assert `nested_loop_dispatch_count == 0` AND row-set parity vs `provider.hash_join_v2` reference. (Per F-W42-3: the iteration-1 `L=R=10000` was symmetric, not "large × small" as the board acceptance line requires.) **(C)** multi-col key fallback — `L=100, R=100`, `left_keys = [0, 1]`, `right_keys = [0, 1]` (2-col composite key, eligibility predicate disqualifies); assert `nested_loop_dispatch_count == 0` AND row-set parity. **(C')** non-Inner fallback — `L=100, R=100`, `JoinType::Semi`; assert `nested_loop_dispatch_count == 0` AND semi-join row set correct. **(E)** Symbol-typed key dispatch — Symbol-keyed inner join with row counts in eligible range; assert `nested_loop_dispatch_count >= 1` AND row-set parity. **(D)** row-set parity is folded as tail `BTreeSet<row>` comparison into A/B/C/C'/E. |
 | **D6** | **Dispatch counter.** | Add `nested_loop_dispatch_count: AtomicU64` to `Executor` (mirrors the existing `wcoj_triangle_dispatch_count` / `wcoj_4cycle_dispatch_count` pattern at `crates/xlog-runtime/src/executor/mod.rs`). Increments on every successful nested-loop launch from `execute_join`. Accessor `pub fn nested_loop_dispatch_count(&self) -> u64`. NO `RuntimeConfig` field, NO env knob (per D8 process locks). The counter is observability for tests; runtime always dispatches via the eligibility predicate. |
 | **D7** | **Acceptance gates (locked).** | (1) Cert A PASS (small×small dispatch + parity); (2) Cert B PASS (large×small hash fallback + parity); (3) Cert C PASS (unsupported-shape fallback for multi-col key + non-Inner); (4) Cert D PASS (row-set parity built into A/B/C); (5) Cert E PASS (Symbol-typed dispatch); (6) Post-implementation bench (Step 12) shows nested-loop wins by **≥ 2×** vs hash on the eligible-envelope fixture (multi-col, single-key, U32/Symbol, ≤ 4M total); (7) all other slice-1/2/4 + W4.1 tests PASS (no regressions); (8) zero workspace warnings on touched files; (9) `cargo fmt --check --all` clean; (10) `cargo test --workspace --release --exclude pyxlog --exclude xlog-cuda-tests` exit 0; (11) `cargo test -p xlog-cuda-tests --test certification_suite --release` 1/1; (12) post-impl bench evidence committed to `docs/evidence/2026-05-07-w42-production-bench/README.md`. |
 | **D8** | **Process locks.** | No board edit. No DONE marking. No FF-merge. No `v0.6.6` references. No env-knob additions (`XLOG_NESTED_LOOP_*` etc. forbidden). No `RuntimeConfig` field additions. The threshold `NESTED_LOOP_TOTAL_THRESHOLD` is a `const` in code, not config-tunable in v0.6.5. The existing dead `JoinStrategy` enum at `crates/xlog-runtime/src/statistics.rs:7-44` is NOT touched (its cleanup is out of W4.2 scope; W4.2 introduces a parallel constant + eligibility predicate). The bench spike branch (`bench-spike/w42-nested-loop`) stays unmerged — W4.2 does not graduate spike code to production. |
@@ -62,33 +62,55 @@ This iteration-1 plan, on `feat/w42-nested-loop-join`. No code yet. The agent do
 
 Commit subject: `docs(plan): W4.2 iteration 1 — nested-loop join (recon + spike-grounded direction)`.
 
-### Step 2 — Production kernel
+### Step 2 — Production kernel (emit-pairs design)
 
 File: `crates/xlog-cuda/kernels/join.cu` (append).
 
-Add `extern "C" __global__ void nested_loop_join_inner_u32_1key(...)` that:
-* Reads `left_data` (row-major bytes), `right_data` (row-major bytes), with separate `left_arity`, `right_arity`, `left_key_col`, `right_key_col` parameters.
-* Each thread takes one left-row; iterates over all right-rows; on `left_data[tid * left_arity + left_key_col] == right_data[r * right_arity + right_key_col]`, atomicAdd to output counter and write the concatenated `[left_cols, right_cols_minus_key]` row to the output buffer.
-* Spike kernel (1-col) is NOT graduated — production gets a fresh multi-col-aware impl.
+Add `extern "C" __global__ void nested_loop_join_inner_u32_1key_pairs(...)` that emits matched **(left_idx, right_idx) index pairs** (NOT row-major bytes). Per F-W42-2 this matches `CudaBuffer`'s columnar layout (`crates/xlog-cuda/src/memory.rs:1041-1055`).
 
-Register kernel name in `crates/xlog-cuda/src/kernel_manifest_data.rs` and add a constant in `crates/xlog-cuda/src/provider/mod.rs::join_kernels` (mirror Step 5's W4.1 pattern).
+Signature:
 
-Commit subject: `feat(w42): add multi-col nested-loop inner join kernel`.
+```cuda
+extern "C" __global__ void nested_loop_join_inner_u32_1key_pairs(
+    const uint32_t* __restrict__ left_keys,    // pointer to left's key column data
+    const uint32_t* __restrict__ right_keys,   // pointer to right's key column data
+    uint32_t num_left,
+    uint32_t num_right,
+    uint32_t* __restrict__ output_left_idx,    // pre-allocated, capacity = num_left * num_right
+    uint32_t* __restrict__ output_right_idx,
+    uint32_t* __restrict__ output_count,
+    uint32_t output_capacity                   // = num_left * num_right (no clamp; eligibility caps this at 4M)
+);
+```
 
-### Step 3 — Provider API
+Each thread takes one left-row; iterates over all right-rows; on `right_keys[r] == left_keys[tid]`, `atomicAdd` to `output_count` and write `(tid, r)` to the index arrays. Per F-W42-5: there is no silent clamp — the eligibility predicate (D1+D4) caps `num_left * num_right <= 4_000_000`, so allocation is bounded and `out_idx < output_capacity` is by-construction. The kernel WILL still guard with `if (out_idx < output_capacity)` defensively (cheap branch); on contract violation the provider returns `Err` BEFORE the launch.
+
+Symbol-typed keys reuse this kernel byte-identically (Symbol IS u32). Register kernel name in `crates/xlog-cuda/src/kernel_manifest_data.rs::"join"` module and add a constant in `crates/xlog-cuda/src/provider/mod.rs::join_kernels`.
+
+Commit subject: `feat(w42): add nested-loop emit-pairs kernel (multi-col-compatible)`.
+
+### Step 3 — Provider API (emit-pairs + columnar gather)
 
 File: `crates/xlog-cuda/src/provider/nested_loop.rs` (new file).
 
-`pub fn nested_loop_join_v2_inner_u32_1key(left, right, left_key, right_key)`:
-* Validate: 1 key column, U32 OR Symbol type, both sides arity ≥ 1, key cols within arity bounds.
-* Allocate output buffer at `(num_left * num_right) * (left_arity + right_arity - 1) * 4` bytes; capacity-clamp same as spike (256M entries).
-* Allocate u32 counter; zero it.
-* Launch kernel; synchronize; D2H counter via `dtoh_scalar_untracked`.
-* Construct result `CudaBuffer` with `[left_cols, right_cols_minus_key]` schema and host-known row count.
+`pub fn nested_loop_join_v2_inner_u32_1key(left: &CudaBuffer, right: &CudaBuffer, left_key: usize, right_key: usize) -> Result<CudaBuffer>`:
+
+1. Validate eligibility:
+   - `left.arity() > left_key` and `right.arity() > right_key` (key indices within arity bounds).
+   - `left.schema().column_type(left_key)` and right's match `ScalarType::U32` OR `ScalarType::Symbol`.
+   - `num_left * num_right <= NESTED_LOOP_TOTAL_THRESHOLD`. If exceeded, return `Err(XlogError::Kernel("nested_loop: caller violated eligibility threshold"))` — fail-closed per F-W42-5.
+2. Compute `upper_bound = (num_left as u64) * (num_right as u64)`. Cast to `u32` after the threshold check (4M fits in u32).
+3. Allocate `d_output_left_idx: TrackedCudaSlice<u32>` of length `upper_bound`. Same for `d_output_right_idx`. Allocate `d_output_count: TrackedCudaSlice<u32>` of length 1; zero it via `memset_zeros`.
+4. Read key-column pointers from `left.column(left_key)` and `right.column(right_key)`. (Both are `CudaColumn::Owned(TrackedCudaSlice<u8>)` for U32/Symbol — pass directly to the kernel as the `*const uint32_t` parameter.)
+5. Launch the kernel with grid `(num_left + 255) / 256`, block `256`.
+6. `device.synchronize()`.
+7. D2H the counter via `self.dtoh_scalar_untracked(&d_output_count, 0)?` (single u32 — same metadata-only D2H pattern as `hash_join_v2`).
+8. Materialize the output via the existing GPU-side gather machinery: call `self.gather_buffer_by_indices(left, &d_output_left_idx, output_rows)?` to get `gathered_left`, same for `gathered_right`. (This is the same pattern `hash_join_inner_v2` uses at `relational.rs:3344-3354`.)
+9. Combine via `let combined_schema = self.combine_schemas(left.schema(), right.schema());` then `self.buffer_from_columns(result_columns, output_rows as usize, combined_schema)`. Per F-W42-1 + D2: output schema is the FULL `[left_cols, right_cols]` concatenation, drop-in compatible with `hash_join_v2`.
 
 Register in `provider/mod.rs::mod nested_loop;`. Add kernel-name constant. Build verifies clean compile.
 
-Commit subject: `feat(w42): add nested_loop_join_v2_inner_u32_1key provider fn`.
+Commit subject: `feat(w42): add nested_loop_join_v2_inner_u32_1key provider fn (gather-based)`.
 
 ### Step 4 — Eligibility predicate
 
@@ -108,24 +130,30 @@ Constant: `const NESTED_LOOP_TOTAL_THRESHOLD: u64 = 4_000_000;` colocated with t
 
 Commit subject: `feat(w42): wire nested-loop dispatch + counter at execute_join`.
 
-### Step 6 — Cert A: small×small dispatch
+### Step 6 — Cert A: small×small dispatch (per F-W42-6)
 
 File: `crates/xlog-integration/tests/test_w42_nested_loop_dispatch.rs` (new).
 
 Test `small_small_dispatches_nested_loop_and_matches_hash`:
-* Fixture: `L=100, R=100`, single-col U32 keys (or arity-2 with payload, single-key), unique-keyed.
-* Reference run: gate-off (hash via env-equivalent: temporarily force hash). Capture row set.
-* Dispatched run: default config. Assert `nested_loop_dispatch_count >= 1`, `hash` was NOT used (we'll need a hash counter — alternatively assert nested-loop counter > 0 alone since hash is otherwise the default), row-set parity.
+* Fixture: `L=100, R=100`, multi-col (e.g., arity 2 with key at col 0, payload at col 1), single-key U32, unique-keyed.
+* **Reference row set:** computed by direct provider call `provider.hash_join_v2(left, right, &[0], &[0], JoinType::Inner)` on the same uploaded `CudaBuffer` inputs — bypasses the executor's dispatch path. Convert to `BTreeSet<Row>`.
+* **Dispatched row set:** computed via `Executor::execute_plan` with default config (which routes through the new dispatch wiring). Assert:
+  - `executor.nested_loop_dispatch_count() >= 1` — confirms the new path fired.
+  - `BTreeSet<Row>` equals the reference set — correctness witness.
+* **No `wcoj_*` counter assertions** — per F-W42-6, WCOJ counters are unrelated to hash/nested-loop dispatch and are not evidence here. The pair `(nested_loop_dispatch_count >= 1, row-set parity)` is sufficient evidence: the dispatch path fired AND produced the right answer.
 
 Commit subject: `test(w42): cert A — small×small dispatches nested-loop with hash parity`.
 
-### Step 7 — Cert B: large×small hash fallback
+### Step 7 — Cert B: large × small hash fallback (per F-W42-3, board acceptance line)
 
-Test `large_large_falls_back_to_hash_above_threshold`:
-* Fixture: `L=10000, R=10000` (100M total, well above 4M threshold).
-* Single run, default config. Assert `nested_loop_dispatch_count == 0`. Row-set must match a known reference (small-fixture-extended computation). Parity is the correctness witness even though no nested-loop dispatched here.
+Test `large_times_small_falls_back_to_hash_above_threshold`:
+* Fixture: **asymmetric large×small** `L=50_000, R=100`. Cartesian product = 5_000_000 > `NESTED_LOOP_TOTAL_THRESHOLD = 4_000_000` → ineligible. Per F-W42-3, this matches the board's "large × small picks hash" acceptance line; iteration-1's symmetric `L=R=10000` was the wrong shape.
+* Bounded matches: right keys ⊆ `[0..100)`, left keys = sequential repeats so each left row matches at most one right key. Output ≈ 100 rows total — small enough for `BTreeSet<Row>` parity comparison.
+* Single run via `Executor::execute_plan`, default config. Assert:
+  - `executor.nested_loop_dispatch_count() == 0` — confirms the eligibility predicate refused the dispatch.
+  - `BTreeSet<Row>` equals the reference computed by direct `provider.hash_join_v2(left, right, &[0], &[0], JoinType::Inner)`.
 
-Commit subject: `test(w42): cert B — large×large falls back to hash above threshold`.
+Commit subject: `test(w42): cert B — large × small falls back to hash above threshold`.
 
 ### Step 8 — Cert C: unsupported-shape fallback
 
@@ -189,7 +217,7 @@ Commit subject (text-only): N/A (no commit).
 | Cell | Count | Test file | Acceptance criterion |
 |------|-------|-----------|----------------------|
 | **Cert A — small×small dispatch + parity** | 1 | `test_w42_nested_loop_dispatch.rs` (new) | `nested_loop_dispatch_count >= 1`; `BTreeSet<Row>` parity vs hash reference |
-| **Cert B — large×large hash fallback + parity** | 1 | `test_w42_nested_loop_dispatch.rs` | `nested_loop_dispatch_count == 0`; row-set parity vs known reference |
+| **Cert B — large × small hash fallback + parity** | 1 | `test_w42_nested_loop_dispatch.rs` | Asymmetric `L=50_000 R=100` (5M total > 4M threshold); `nested_loop_dispatch_count == 0`; row-set parity vs `provider.hash_join_v2` reference |
 | **Cert C — multi-col key fallback** | 1 | `test_w42_nested_loop_dispatch.rs` | `nested_loop_dispatch_count == 0`; row-set parity |
 | **Cert C' — non-Inner (Semi) fallback** | 1 | `test_w42_nested_loop_dispatch.rs` | `nested_loop_dispatch_count == 0`; semi-join row set correct |
 | **Cert E — Symbol-typed dispatch** | 1 | `test_w42_nested_loop_dispatch.rs` | `nested_loop_dispatch_count >= 1`; row-set parity |
@@ -210,18 +238,18 @@ Commit subject (text-only): N/A (no commit).
 
 | Risk | Mitigation |
 |------|------------|
-| Production multi-col kernel has higher per-row cost than spike's 1-col kernel (F3 caveat) → 4M Cartesian threshold may overshoot | Step 12 post-impl bench validates the threshold against production-shape fixtures. If post-bench shows < 2× win at 4M, Step 12 amends the threshold downward via plan iteration 2. |
+| Production multi-col kernel has higher per-row cost than spike's 1-col kernel (F3 caveat) → 4M Cartesian threshold may overshoot | Step 12 post-impl bench validates the threshold against production-shape fixtures. If post-bench shows < 2× win at 4M, a subsequent plan iteration amends the threshold downward. The emit-pairs design (D2 per F-W42-2) keeps the kernel's per-row cost low: only key columns are touched in the inner loop; payload arrives via columnar gather AFTER the kernel, so per-row kernel work is independent of arity. |
 | `hash_join_v2`'s ~2.7 ms launch-overhead floor (F2 caveat) means measured wins partly attributable to overhead, not algorithm | Out of scope for W4.2 per user direction "Hash launch-overhead reduction is separate work". Recorded in Risk Register; W4.2 does NOT optimize hash. |
 | Eligibility predicate misses an edge case (e.g., empty inputs, key column index out-of-bounds) → silent dispatch error | Step 4's predicate is fail-closed: any unrecognized type / out-of-bounds / arity mismatch returns `false` → falls back to hash. Cert C (multi-col + non-Inner) verifies the negative direction. |
 | Symbol-typed inputs handled differently than U32 in the kernel | Symbol IS u32 at the byte level in xlog's `ScalarType` representation. Cert E directly verifies. If Symbol byte representation diverges in any subtle way, the cert fails before merge. |
 | Threshold `4_000_000` is a magic number; future maintainers won't know why | Constant has a doc-comment citing the spike evidence path + iteration-1 plan ref. Bench evidence (Step 12 + spike) is the empirical basis. |
 | Existing `JoinStrategy` dead code adds confusion | NOT touched by W4.2 (per D8). A separate cleanup task can delete it later. W4.2's parallel constant + dispatch live in the executor + provider, NOT in the dead `statistics.rs` enum. |
 | Cert A's "nested-loop dispatched" assertion needs a way to force hash for the reference run | Two options: (a) add a `RuntimeConfig::with_nested_loop_dispatch(Some(false))` knob (REJECTED per D8 — no `RuntimeConfig` field additions); (b) capture hash row set via direct provider call in the test, bypass the executor for the reference. Use (b). Cert A's reference run calls `provider.hash_join_v2` directly on the same uploaded buffers; dispatched run uses `Executor::execute_plan`. |
-| Cert B at `L=R=10000` may take long to upload + run; bench-time budget concern | 10K×10K = 100M-row Cartesian product is the *upper bound*; actual hash-join cost on 10K×10K with controlled match rate is ~10K output rows = bounded. Test budget should be < 10s on CUDA. If it's slower, drop to (5000, 5000) which is still > 4M threshold. |
+| Cert B fixture upload time concerns (per F-W42-3 amendment to asymmetric large×small) | `L=50_000 R=100` is 5M Cartesian rows but only 50K + 100 = ~50K input rows uploaded — a fraction of the iteration-1 `L=R=10000` (100K input rows). Hash-join wall time on this fixture is dominated by the ~2.7 ms launch-overhead floor (per spike F2), not by the input size. Test budget < 5s on CUDA. |
 
-## Plan-Approval Gate (iteration 1)
+## Plan-Approval Gate (iteration 2)
 
-This plan is **iteration 1 draft**. The agent does NOT advance to Step 2 until the user explicitly states "Iteration 1 is approved" (or equivalent). Subsequent iterations may add F-W42-N findings; the live D-table + Step plan + Acceptance Grid above are the canonical source of truth.
+This plan is **iteration 2 draft** (iteration 1 had F-W42-1..6 surfaced; live D-table + Step plan + Acceptance Grid + Risk Register rewritten in place). The agent does NOT advance to Step 2 until the user explicitly states "Iteration 2 is approved" (or equivalent). Subsequent iterations may add further F-W42-N findings; the live D-table + Step plan + Acceptance Grid above are the canonical source of truth.
 
 Before iteration approval, the user may:
 * Push back on threshold value (e.g., reduce 4M to 2M or 1M for more conservatism).
@@ -235,8 +263,25 @@ Before iteration approval, the user may:
 
 The agent does NOT modify the live D-table / Step plan / Acceptance Grid based on chat alone — every amendment lands as a new iteration commit (`docs(plan): W4.2 iteration 2 amendment — F-W42-N findings`).
 
-## Iteration 1 Notes
+## Iteration 1 Notes (historical / superseded)
 
 * Plan length: ~370 lines (intentionally tighter than W4.1's 757-line iteration-7 final). Subsequent iterations may expand if F-W42-N findings warrant.
 * No paper-claim (P1-P5) alignment is required for W4.2 — the SRDatalog paper does not cover binary-join operator selection. W4.2 is internal-optimization closure work.
 * Spike evidence is treated as **load-bearing input**: the threshold value (4M) and the post-impl bench acceptance (≥ 2×) are both derived from spike measurements. If subsequent W4.2 iterations contradict the spike, the spike evidence README is the canonical reference.
+
+## Iteration-2 Amendment Log
+
+User review of iteration 1 surfaced 3 blocking + 2 major + 1 minor findings. The live D-table, Step plan, Acceptance Grid, and Risk Register above are rewritten in place to be **iteration-2 canonical**. Each finding's before/after state is recorded here for traceability.
+
+| ID | Severity | Finding | Iteration-1 (wrong) | Iteration-2 (corrected) |
+|----|----------|---------|---------------------|--------------------------|
+| **F-W42-1** | Blocking | Output schema is `[left_cols, right_cols]` not `[left_cols, right_cols_minus_key]` | D2 said `[left_cols, right_cols_minus_key]` | D2 + D3 + Step 3 say full concatenation `[left_cols, right_cols]` via `combine_schemas`; matches `hash_join_v2` (verified at `crates/xlog-cuda/src/provider/mod.rs:2151` `combine_schemas` extends both sides; `crates/xlog-cuda/src/provider/relational.rs:3344-3354` gathers full left + full right). Drop-in compatible. |
+| **F-W42-2** | Blocking | Step 2's row-major kernel shape contradicts `CudaBuffer`'s columnar layout | Step 2 said `left_data[tid * left_arity + left_key_col]` (row-major bytes) | Step 2 + D2 + D3 redesigned to **emit (left_idx, right_idx) index pairs** + reuse `gather_buffer_by_indices` for columnar materialization. Kernel takes per-column pointers (`*const uint32_t left_keys`, `*const uint32_t right_keys`); payload columns are NOT touched by the kernel. Matches `CudaBuffer` columnar layout at `crates/xlog-cuda/src/memory.rs:1041-1055`. |
+| **F-W42-3** | Blocking | Cert B fixture didn't match board's "large × small picks hash" | Cert B was `L=R=10000` (symmetric) | Cert B is now `L=50_000, R=100` (asymmetric large × small, 5M total > 4M threshold). Bounded matches via right keys ⊆ left keys. |
+| **F-W42-4** | Major | Threshold boundary inconsistent: `<` vs `<=` for `2000 * 2000 = 4_000_000` | D4 said `< 4_000_000`; Step 12 listed `(2000,2000)` as eligible | D4 corrected to **`<= 4_000_000`** (inclusive). `2000 * 2000 = 4_000_000` is admitted, matching the spike's largest verified-winning symmetric cell. |
+| **F-W42-5** | Major | "Capacity-clamp same as spike" is unsafe in production (silent truncation violates row-set parity) | D3 said "capacity-clamp same as spike (256M entries)" | D3 + Step 3 + Step 2 redesigned: provider validates `num_left * num_right <= NESTED_LOOP_TOTAL_THRESHOLD` and returns `Err(XlogError::Kernel)` on contract violation BEFORE any allocation (fail-closed). Within eligibility, allocation is exact (`upper_bound = num_left * num_right`); kernel cannot overflow because output_capacity equals the upper bound. The 4M threshold IS the safety cap; index-array allocation is bounded at 32 MB total. |
+| **F-W42-6** | Minor | Cert A's "hash was NOT used" wording mentioned wcoj_* counters, which are unrelated | Step 6 cert A said "assert wcoj_*_dispatch_count == 0" as hash-evidence | Step 6 + D5 corrected: Cert A relies on `nested_loop_dispatch_count >= 1` (positive evidence the new path fired) AND row-set parity vs a reference computed by direct `provider.hash_join_v2` call (correctness witness). No `wcoj_*` assertions; no hash counter introduced. |
+
+**Net effect:** D2, D3, D4, D5 rewritten in place. Step 2 and Step 3 redesigned. Step 6 (Cert A), Step 7 (Cert B) updated. Risk Register row about Cert B fixture updated. Acceptance Grid row about Cert B updated. Header iteration tag bumped from 1 to 2.
+
+**Process note:** Per the W4.1 plan-iteration discipline (which W4.2 inherits), all amendments are surfaced as F-W42-N findings with explicit before/after states. The agent does NOT modify the live D-table / Step plan based on chat alone — every amendment lands as a new iteration commit. This iteration-2 commit (`docs(plan): W4.2 iteration 2 amendment — F-W42-1..6 (3 blocking, 2 major, 1 minor)`) is the corresponding artifact.
