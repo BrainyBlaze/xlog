@@ -731,3 +731,155 @@ fn semi_join_falls_back_to_hash() {
          (left rows whose keys appear in right)"
     );
 }
+
+// ---------------------------------------------------------------
+// Cert E — Symbol-typed key dispatches nested-loop.
+//
+// Per W4.2 plan iter-4 D1 + D5: the eligibility predicate's
+// admitted-set check is `matches!(lt, Some(U32) | Some(Symbol))`.
+// Cert A exercised the U32 branch; Cert E covers the Symbol
+// branch. Symbol is byte-identical to U32 at the kernel level
+// (both are 4-byte unsigned), so the same kernel applies — only
+// the schema-level type declaration differs.
+//
+// The cert proves:
+//   1. Symbol-typed key columns route through nested-loop
+//      (`nested_loop_dispatch_count() >= 1`). The predicate's
+//      `matches!(...) | Some(Symbol)` arm is exercised.
+//   2. Row-set parity vs `provider.hash_join_v2 Inner` on the
+//      same Symbol-typed buffers — drop-in compatibility holds
+//      across the type label, not just U32.
+// ---------------------------------------------------------------
+
+/// Upload a 2-col buffer where col 0 is declared as
+/// `ScalarType::Symbol` (the key column under test) and col 1 is
+/// `ScalarType::U32` (payload). The byte layout is identical to
+/// `upload_binary_u32`'s output — Symbol is u32 at the byte level.
+/// Only the schema's column-type label differs, which is exactly
+/// what the eligibility predicate inspects.
+fn upload_symbol_keyed(memory: &Arc<GpuMemoryManager>, rows: &[(u32, u32)]) -> CudaBuffer {
+    let n = rows.len() as u32;
+    let bytes_per_col = (n as usize) * std::mem::size_of::<u32>();
+    let mut col0 = memory.alloc::<u8>(bytes_per_col).expect("alloc col0");
+    let mut col1 = memory.alloc::<u8>(bytes_per_col).expect("alloc col1");
+    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc d_num_rows");
+    let device = memory.device().inner();
+    if n > 0 {
+        let col0_bytes: Vec<u8> = rows.iter().flat_map(|(a, _)| a.to_le_bytes()).collect();
+        let col1_bytes: Vec<u8> = rows.iter().flat_map(|(_, b)| b.to_le_bytes()).collect();
+        device
+            .htod_sync_copy_into(&col0_bytes, &mut col0)
+            .expect("htod col0");
+        device
+            .htod_sync_copy_into(&col1_bytes, &mut col1)
+            .expect("htod col1");
+    }
+    device
+        .htod_sync_copy_into(&[n], &mut d_num_rows)
+        .expect("htod d_num_rows");
+    let schema = Schema::new(vec![
+        ("sym".to_string(), ScalarType::Symbol),
+        ("p".to_string(), ScalarType::U32),
+    ]);
+    CudaBuffer::from_columns_with_host_count(
+        vec![col0.into(), col1.into()],
+        n as u64,
+        d_num_rows,
+        schema,
+        n,
+    )
+}
+
+#[test]
+fn symbol_typed_key_dispatches_nested_loop() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    // Fixture: 100 rows each side, arity 2 (Symbol key + U32
+    // payload). All 100 keys match. 100 × 100 = 10_000 ≪
+    // 4_000_000 threshold → eligible. Inner + 1-key + matching
+    // Symbol type → eligibility predicate accepts.
+    let left_rows: Vec<(u32, u32)> = (0..100u32).map(|i| (i, 1000 + i)).collect();
+    let right_rows: Vec<(u32, u32)> = (0..100u32).map(|i| (i, 2000 + i)).collect();
+
+    // Reference: direct provider.hash_join_v2 on Symbol-typed
+    // buffers. hash_join_v2 admits Symbol because its own
+    // type-equality check (relational.rs:3567-3576) compares
+    // ScalarType values for left/right key columns and accepts
+    // any matching pair. Output schema is 4-col
+    // [left_sym, left_p, right_sym, right_p].
+    let left_buf_ref = upload_symbol_keyed(&fix.memory, &left_rows);
+    let right_buf_ref = upload_symbol_keyed(&fix.memory, &right_rows);
+    let hash_buf = fix
+        .provider
+        .hash_join_v2(&left_buf_ref, &right_buf_ref, &[0], &[0], JoinType::Inner)
+        .expect("hash_join_v2 reference (Symbol-keyed)");
+    let reference_set: BTreeSet<(u32, u32, u32, u32)> =
+        download_quads(&hash_buf).into_iter().collect();
+    assert_eq!(
+        reference_set.len(),
+        100,
+        "Symbol-keyed reference should produce exactly 100 matched rows"
+    );
+
+    // Dispatched: build executor with separate Symbol-typed
+    // buffers (the reference and dispatched runs cannot share a
+    // single CudaBuffer because put_relation takes ownership).
+    // Manual RirNode::Join + execute_node — bypasses Datalog so
+    // the test focuses on the eligibility-predicate's Symbol
+    // branch.
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    let lhs = RelId(2000);
+    let rhs = RelId(2001);
+    executor.register_relation(lhs, "lhs_sym");
+    executor.register_relation(rhs, "rhs_sym");
+    executor.put_relation("lhs_sym", upload_symbol_keyed(&fix.memory, &left_rows));
+    executor.put_relation("rhs_sym", upload_symbol_keyed(&fix.memory, &right_rows));
+
+    let join = RirNode::Join {
+        left: Box::new(RirNode::Scan { rel: lhs }),
+        right: Box::new(RirNode::Scan { rel: rhs }),
+        left_keys: vec![0],
+        right_keys: vec![0],
+        join_type: IrJoinType::Inner,
+    };
+
+    assert_eq!(
+        executor.nested_loop_dispatch_count(),
+        0,
+        "dispatch counter must be zero before execute_node"
+    );
+
+    let result = executor.execute_node(&join).expect("execute_node");
+
+    // -----------------------------------------------------------
+    // Assertions:
+    //   1. Symbol-typed key admitted by the predicate's
+    //      `Some(Symbol)` arm → counter >= 1.
+    //   2. Row-set parity vs hash reference (proves drop-in
+    //      compatibility holds across the type label).
+    // -----------------------------------------------------------
+    assert!(
+        executor.nested_loop_dispatch_count() >= 1,
+        "Symbol-typed key inner join MUST dispatch nested-loop \
+         (eligibility predicate's `Some(Symbol)` admitted-set arm); \
+         got dispatch counter {}",
+        executor.nested_loop_dispatch_count()
+    );
+
+    let dispatched_set: BTreeSet<(u32, u32, u32, u32)> =
+        download_quads(&result).into_iter().collect();
+    assert_eq!(
+        dispatched_set.len(),
+        100,
+        "Symbol-keyed dispatch should produce exactly 100 matched rows; got {}",
+        dispatched_set.len()
+    );
+    assert_eq!(
+        dispatched_set, reference_set,
+        "Symbol-typed nested-loop row set must equal the hash_join_v2 reference"
+    );
+}
