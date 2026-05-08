@@ -2651,25 +2651,43 @@ impl super::CudaKernelProvider {
         let right_col = right.column(right_key).ok_or_else(|| {
             XlogError::Kernel(format!("nested_loop: right.column({})", right_key))
         })?;
-        let expected_left_bytes = num_left
+        // Byte-length lower-bound check (per F-W42-14, corrected
+        // to ≥-semantic). The codebase convention is that
+        // `CudaColumn::num_bytes()` reports the ALLOCATION size,
+        // which can exceed `num_rows * sizeof(T)` when the buffer
+        // has spare capacity (row_cap > num_rows). The check
+        // must therefore be a lower-bound (column has AT LEAST
+        // enough bytes for the kernel's `num_rows` reads), NOT
+        // strict equality. Mirrors the `ilp.rs:18` idiom in this
+        // codebase (`col.num_bytes() < required_bytes` for the
+        // failure case). Strict equality would falsely reject
+        // any normal buffer with spare allocation — surfaced as
+        // a regression in `test_simple_join` and
+        // `test_transitive_closure` after the Step-5 dispatch
+        // wiring routed those joins through this path.
+        let required_left_bytes = num_left
             .checked_mul(4)
             .ok_or_else(|| XlogError::Kernel("nested_loop: left byte-count overflow".into()))?;
-        let expected_right_bytes = num_right
+        let required_right_bytes = num_right
             .checked_mul(4)
             .ok_or_else(|| XlogError::Kernel("nested_loop: right byte-count overflow".into()))?;
-        if left_col.num_bytes() != expected_left_bytes {
+        if left_col.num_bytes() < required_left_bytes {
             return Err(XlogError::Kernel(format!(
-                "nested_loop: left key column has {} bytes; expected {} ({} rows × 4)",
+                "nested_loop: left key column has {} bytes; \
+                 require at least {} ({} rows × 4) — buffer allocation \
+                 is smaller than logical row count",
                 left_col.num_bytes(),
-                expected_left_bytes,
+                required_left_bytes,
                 num_left
             )));
         }
-        if right_col.num_bytes() != expected_right_bytes {
+        if right_col.num_bytes() < required_right_bytes {
             return Err(XlogError::Kernel(format!(
-                "nested_loop: right key column has {} bytes; expected {} ({} rows × 4)",
+                "nested_loop: right key column has {} bytes; \
+                 require at least {} ({} rows × 4) — buffer allocation \
+                 is smaller than logical row count",
                 right_col.num_bytes(),
-                expected_right_bytes,
+                required_right_bytes,
                 num_right
             )));
         }

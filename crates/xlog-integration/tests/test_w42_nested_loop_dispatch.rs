@@ -653,8 +653,8 @@ fn multi_col_key_falls_back_to_hash() {
 //
 // Per W4.2 plan iter-4 D1 + D5: the eligibility predicate's
 // `join_type == JoinType::Inner` check rejects Semi/Anti/LeftOuter
-// regardless of size + key shape. Fixture is small (100 × 100 =
-// 10K, well below threshold) and uses 1-key U32 — only the
+// regardless of size + key shape. Fixture is small (100 × 50 =
+// 5K, well below threshold) and uses 1-key U32 — only the
 // non-Inner join type disqualifies.
 //
 // Semi-join semantics: output = subset of left rows whose key
