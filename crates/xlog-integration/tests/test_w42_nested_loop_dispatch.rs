@@ -362,3 +362,132 @@ fn small_small_dispatches_nested_loop_and_matches_hash() {
         "W4.2 nested-loop row set must equal the hash_join_v2 reference"
     );
 }
+
+// ---------------------------------------------------------------
+// Cert B — large × small Cartesian product falls back to hash.
+//
+// Per W4.2 plan iter-4 F-W42-3: matches the board's "large × small
+// picks hash" acceptance line. Asymmetric `L=50_000, R=100` →
+// Cartesian = 5_000_000 > NESTED_LOOP_TOTAL_THRESHOLD = 4_000_000
+// → ineligible. The eligibility predicate's individual checks
+// (Inner, 1-key, U32, type equality) ALL pass; only the
+// Cartesian-product threshold rejects this join. Confirms the
+// `left * right` semantic of the threshold (a naive `right_rows
+// < 1000` semantic would admit this since R=100 < 1000).
+// ---------------------------------------------------------------
+
+#[test]
+fn large_times_small_falls_back_to_hash_above_threshold() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    // Fixture: L=50_000 unique keys [0..50_000); R=100 unique
+    // keys [0..100). Cartesian = 5_000_000 > 4_000_000 threshold.
+    //
+    // Bounded matches: right keys ⊆ left keys; each right key
+    // matches exactly one left row. Output = 100 rows — small
+    // enough for `BTreeSet<Row>` parity comparison.
+    let left_rows: Vec<(u32, u32)> = (0..50_000u32).map(|i| (i, 1000 + i)).collect();
+    let right_rows: Vec<(u32, u32)> = (0..100u32).map(|i| (i, 2_000_000 + i)).collect();
+
+    // Reference row set: direct provider.hash_join_v2 on the
+    // same uploaded buffers. Output schema is 4-col
+    // [left_k, left_p, right_k, right_p]; project to 3-col
+    // (K, A, B) via dropping the duplicate K from the right.
+    let left_buf = upload_binary_u32(&fix.memory, &left_rows);
+    let right_buf = upload_binary_u32(&fix.memory, &right_rows);
+    let hash_quads_buf = fix
+        .provider
+        .hash_join_v2(&left_buf, &right_buf, &[0], &[0], JoinType::Inner)
+        .expect("hash_join_v2 reference");
+    let reference_set: BTreeSet<(u32, u32, u32)> = download_quads(&hash_quads_buf)
+        .into_iter()
+        .map(|(lk, lp, _rk, rp)| (lk, lp, rp))
+        .collect();
+    assert_eq!(
+        reference_set.len(),
+        100,
+        "hash reference should produce exactly 100 matched rows"
+    );
+
+    // Dispatched run: Executor::execute_plan must route through
+    // hash because the threshold predicate refuses the W4.2
+    // dispatch.
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile(SMALL_INNER_JOIN_PROGRAM).expect("compile");
+    let rel_ids = compiler.rel_ids().clone();
+    let left_rel = *rel_ids.get("left_rel").expect("left_rel rel_id");
+    let right_rel = *rel_ids.get("right_rel").expect("right_rel rel_id");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &rel_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    let mut inputs: BTreeMap<&str, Vec<(u32, u32)>> = BTreeMap::new();
+    inputs.insert("left_rel", left_rows.clone());
+    inputs.insert("right_rel", right_rows.clone());
+    for (name, rows) in &inputs {
+        let buf = upload_binary_u32(&fix.memory, rows);
+        executor.put_relation(name, buf);
+    }
+
+    assert_eq!(
+        executor.nested_loop_dispatch_count(),
+        0,
+        "dispatch counter must be zero before execute_plan"
+    );
+
+    executor.execute_plan(&plan).expect("execute_plan");
+
+    // -----------------------------------------------------------
+    // Assertions:
+    //   1. **Load-bearing**: `nested_loop_dispatch_count() == 0`
+    //      — the eligibility predicate refused to dispatch
+    //      W4.2 because the Cartesian product (5M) exceeds the
+    //      threshold (4M). Strict equality, NOT `<= some bound`.
+    //   2. Row-set parity vs hash reference (correctness witness
+    //      for the hash fallback path).
+    //   3. `record_join_result` feedback wired even on the hash
+    //      fallback path (drop-in contract: the existing W2.4
+    //      contract holds regardless of which dispatch path
+    //      execute_join chose).
+    // -----------------------------------------------------------
+    assert_eq!(
+        executor.nested_loop_dispatch_count(),
+        0,
+        "above-threshold join MUST NOT dispatch nested-loop; \
+         got dispatch counter {}",
+        executor.nested_loop_dispatch_count()
+    );
+
+    let result_buf = executor
+        .store()
+        .get("result")
+        .expect("result relation must exist post-execute");
+    let dispatched_set: BTreeSet<(u32, u32, u32)> =
+        download_triples(result_buf).into_iter().collect();
+    assert_eq!(
+        dispatched_set.len(),
+        100,
+        "above-threshold result should produce exactly 100 matched rows; got {}",
+        dispatched_set.len()
+    );
+    assert_eq!(
+        dispatched_set, reference_set,
+        "hash-fallback row set must equal the direct provider.hash_join_v2 reference"
+    );
+
+    assert!(
+        executor
+            .stats()
+            .get_join_selectivity(left_rel, right_rel)
+            .is_some(),
+        "record_join_result must fire on the hash fallback path too \
+         (the W4.2 Step-5 patch routed all three dispatch paths through \
+          the shared feedback block); pre-execute None → post-execute \
+          Some(_) is the W2.4 contract that W4.2 must preserve"
+    );
+}
