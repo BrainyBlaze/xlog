@@ -10,7 +10,8 @@ use super::{
     dedup_kernels, filter_kernels, ilp_kernels, join_kernels, pack_kernels, scan_kernels,
     set_ops_kernels, sort_kernels, HashTableU64, JoinHashTableV2, JoinIndexV2, JoinType,
     PackedKeyData, RadixSortScratch, DEDUP_MODULE, DEFAULT_JOIN_MAX_OUTPUT, FILTER_MODULE,
-    ILP_MODULE, JOIN_MODULE, PACK_MODULE, SCAN_MODULE, SET_OPS_MODULE, SORT_MODULE,
+    ILP_MODULE, JOIN_MODULE, NESTED_LOOP_TOTAL_THRESHOLD, PACK_MODULE, SCAN_MODULE,
+    SET_OPS_MODULE, SORT_MODULE,
 };
 use crate::device_runtime::{Access, BlockId, StreamId};
 use crate::launch::LaunchRecorder;
@@ -2561,6 +2562,228 @@ impl super::CudaKernelProvider {
                 self.hash_join_left_outer_impl(left, right, left_keys, right_keys, max_output)
             }
         }
+    }
+
+    /// W4.2 nested-loop inner join (emit-pairs design).
+    ///
+    /// Drop-in compatible with `hash_join_v2(_, _, &[left_key],
+    /// &[right_key], JoinType::Inner)`: same input types, same
+    /// output schema (`combine_schemas(left, right)`), same row
+    /// set. Caller (the executor's dispatch site, Step 5) is
+    /// responsible for choosing between `hash_join_v2` and this
+    /// fn based on the eligibility predicate + threshold check;
+    /// this fn validates the same contract fail-closed and
+    /// returns `Err` if a caller violates it.
+    ///
+    /// # Eligibility (validated inside; `Err` on violation)
+    ///
+    /// * `left.arity() > left_key && right.arity() > right_key`.
+    /// * Left and right key columns share the same `ScalarType`,
+    ///   and that shared type is `U32` or `Symbol` (Symbol is
+    ///   `u32` at the byte level — same kernel applies).
+    /// * Each key column's byte length matches `num_rows * 4`
+    ///   (preflight validation, mirrors `compare_const_mask` at
+    ///   `crates/xlog-cuda/src/provider/filter.rs:545-556`).
+    /// * `num_left * num_right <= NESTED_LOOP_TOTAL_THRESHOLD`
+    ///   (computed via `checked_mul`; release-mode wrapping
+    ///   multiply is forbidden).
+    ///
+    /// # Implementation outline
+    ///
+    /// 1. Read logical row counts via `device_row_count` (NOT
+    ///    `row_cap`).
+    /// 2. Empty-input fast path: if either side is empty, return
+    ///    `create_empty_buffer(combine_schemas(...))` — mirrors
+    ///    `hash_join_inner_v2`'s pattern at
+    ///    `crates/xlog-cuda/src/provider/relational.rs:3165-3170`.
+    /// 3. Validate eligibility (above).
+    /// 4. Allocate two `u32` index arrays of length
+    ///    `num_left * num_right` (bounded at 32 MB total under
+    ///    the threshold).
+    /// 5. Launch `nested_loop_join_inner_u32_1key_pairs` with
+    ///    `&CudaColumn` key pointers (variant-agnostic).
+    /// 6. D2H the output count.
+    /// 7. Materialize via `gather_buffer_by_indices` for both
+    ///    sides + concatenate columns.
+    pub fn nested_loop_join_v2_inner_u32_1key(
+        &self,
+        left: &CudaBuffer,
+        right: &CudaBuffer,
+        left_key: usize,
+        right_key: usize,
+    ) -> Result<CudaBuffer> {
+        // ----- 1. Logical row counts (NOT row_cap) -----
+        let num_left = self.device_row_count(left)?;
+        let num_right = self.device_row_count(right)?;
+
+        // ----- 2. Empty-input fast path (inner-join schema) -----
+        if num_left == 0 || num_right == 0 {
+            let combined_schema = self.combine_schemas(left.schema(), right.schema());
+            return self.create_empty_buffer(combined_schema);
+        }
+
+        // ----- 3. Eligibility validation -----
+        if left.arity() <= left_key {
+            return Err(XlogError::Kernel(format!(
+                "nested_loop: left_key={} out of bounds (arity={})",
+                left_key,
+                left.arity()
+            )));
+        }
+        if right.arity() <= right_key {
+            return Err(XlogError::Kernel(format!(
+                "nested_loop: right_key={} out of bounds (arity={})",
+                right_key,
+                right.arity()
+            )));
+        }
+        let lt = left.schema().column_type(left_key);
+        let rt = right.schema().column_type(right_key);
+        if lt != rt
+            || !matches!(
+                lt,
+                Some(ScalarType::U32) | Some(ScalarType::Symbol)
+            )
+        {
+            return Err(XlogError::Kernel(format!(
+                "nested_loop: key types must be equal U32/Symbol; got left={:?} right={:?}",
+                lt, rt
+            )));
+        }
+        let left_col = left
+            .column(left_key)
+            .ok_or_else(|| XlogError::Kernel(format!("nested_loop: left.column({})", left_key)))?;
+        let right_col = right
+            .column(right_key)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!("nested_loop: right.column({})", right_key))
+            })?;
+        let expected_left_bytes = num_left
+            .checked_mul(4)
+            .ok_or_else(|| XlogError::Kernel("nested_loop: left byte-count overflow".into()))?;
+        let expected_right_bytes = num_right
+            .checked_mul(4)
+            .ok_or_else(|| XlogError::Kernel("nested_loop: right byte-count overflow".into()))?;
+        if left_col.num_bytes() != expected_left_bytes {
+            return Err(XlogError::Kernel(format!(
+                "nested_loop: left key column has {} bytes; expected {} ({} rows × 4)",
+                left_col.num_bytes(),
+                expected_left_bytes,
+                num_left
+            )));
+        }
+        if right_col.num_bytes() != expected_right_bytes {
+            return Err(XlogError::Kernel(format!(
+                "nested_loop: right key column has {} bytes; expected {} ({} rows × 4)",
+                right_col.num_bytes(),
+                expected_right_bytes,
+                num_right
+            )));
+        }
+
+        // ----- 4. Fail-closed threshold check via checked_mul -----
+        let upper_bound: u64 = (num_left as u64)
+            .checked_mul(num_right as u64)
+            .ok_or_else(|| {
+                XlogError::Kernel("nested_loop: row-count product overflow".into())
+            })?;
+        if upper_bound > NESTED_LOOP_TOTAL_THRESHOLD {
+            return Err(XlogError::Kernel(format!(
+                "nested_loop: caller violated eligibility threshold: \
+                 num_left * num_right = {} > {} (NESTED_LOOP_TOTAL_THRESHOLD)",
+                upper_bound, NESTED_LOOP_TOTAL_THRESHOLD
+            )));
+        }
+
+        // ----- 5. Allocate index arrays + counter -----
+        let upper_bound_usize = upper_bound as usize;
+        let mut d_output_left_idx = self.memory.alloc::<u32>(upper_bound_usize)?;
+        let mut d_output_right_idx = self.memory.alloc::<u32>(upper_bound_usize)?;
+        let mut d_output_count = self.memory.alloc::<u32>(1)?;
+        self.device
+            .inner()
+            .memset_zeros(&mut d_output_count)
+            .map_err(|e| {
+                XlogError::Kernel(format!("nested_loop: counter zero failed: {}", e))
+            })?;
+
+        // ----- 6. Launch kernel (variant-agnostic column refs) -----
+        let func = self
+            .device
+            .inner()
+            .get_func(JOIN_MODULE, join_kernels::NESTED_LOOP_JOIN_INNER_U32_1KEY_PAIRS)
+            .ok_or_else(|| {
+                XlogError::Kernel(
+                    "nested_loop_join_inner_u32_1key_pairs kernel not found".into(),
+                )
+            })?;
+
+        let num_left_u32 = num_left as u32;
+        let num_right_u32 = num_right as u32;
+        let upper_bound_u32 = upper_bound as u32;
+        let block_size = 256u32;
+        let grid_size = num_left_u32.div_ceil(block_size);
+        let config = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        // SAFETY: kernel signature matches PTX:
+        //   nested_loop_join_inner_u32_1key_pairs(
+        //     const uint32_t* left_keys, const uint32_t* right_keys,
+        //     uint32_t num_left, uint32_t num_right,
+        //     uint32_t* output_left_idx, uint32_t* output_right_idx,
+        //     uint32_t* output_count, uint32_t output_capacity)
+        // Byte lengths validated above; counts fit in u32 by the
+        // threshold; allocations sized to upper_bound; counter
+        // pre-zeroed.
+        unsafe {
+            func.clone()
+                .launch(
+                    config,
+                    (
+                        left_col,
+                        right_col,
+                        num_left_u32,
+                        num_right_u32,
+                        &mut d_output_left_idx,
+                        &mut d_output_right_idx,
+                        &mut d_output_count,
+                        upper_bound_u32,
+                    ),
+                )
+                .map_err(|e| XlogError::Kernel(format!("nested_loop launch failed: {}", e)))?;
+        }
+
+        self.device.synchronize()?;
+
+        // ----- 7. D2H the output count (single u32) -----
+        let output_rows = self.dtoh_scalar_untracked(&d_output_count, 0)?;
+        // Defense-in-depth: kernel guarantees output_rows ≤
+        // upper_bound by the in-kernel atomic-cap branch, but
+        // double-check to surface contract violations early.
+        if (output_rows as u64) > upper_bound {
+            return Err(XlogError::Kernel(format!(
+                "nested_loop: kernel reported {} output rows > upper_bound {}",
+                output_rows, upper_bound
+            )));
+        }
+
+        // ----- 8. Gather both sides via existing GPU machinery -----
+        let gathered_left =
+            self.gather_buffer_by_indices(left, &d_output_left_idx, output_rows)?;
+        let gathered_right =
+            self.gather_buffer_by_indices(right, &d_output_right_idx, output_rows)?;
+
+        // ----- 9. Combine columns + return drop-in result -----
+        let combined_schema = self.combine_schemas(left.schema(), right.schema());
+        let mut result_columns = Vec::with_capacity(combined_schema.arity());
+        result_columns.extend(gathered_left.columns.into_iter());
+        result_columns.extend(gathered_right.columns.into_iter());
+        // `buffer_from_columns` takes `row_cap: u64` — see
+        // `crates/xlog-cuda/src/provider/mod.rs:2133-2138`.
+        self.buffer_from_columns(result_columns, output_rows as u64, combined_schema)
     }
 
     /// Build a cached join index for the right/build side of v2 hash join.

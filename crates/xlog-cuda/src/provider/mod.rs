@@ -688,6 +688,28 @@ pub mod sat_kernels {
 /// This prevents memory overflow when joining large tables with high cardinality matches.
 pub const DEFAULT_JOIN_MAX_OUTPUT: usize = 1_000_000;
 
+/// W4.2 nested-loop join eligibility threshold (Cartesian product
+/// upper bound). The dispatcher routes to nested-loop iff
+/// `num_left * num_right <= NESTED_LOOP_TOTAL_THRESHOLD`; the
+/// provider validates the same invariant fail-closed before any
+/// allocation.
+///
+/// This is the **single source of truth** for the threshold.
+/// `xlog-runtime`'s dispatch site imports this constant; do NOT
+/// redeclare in xlog-runtime (would create either drift risk or
+/// a reverse `xlog-cuda → xlog-runtime` dep cycle).
+///
+/// Value (`4_000_000`) is grounded in the bench-spike at
+/// `bench-spike/w42-nested-loop` HEAD `9c0cefc6` (see
+/// `docs/evidence/2026-05-07-w42-bench-spike/README.md`):
+/// largest symmetric tested cell `L=R=2000` → 4M total wins by
+/// 5.41× over hash; the algorithmic crossover is extrapolated to
+/// ~10000×10000 = 100M; 4M leaves 6× margin to absorb
+/// production-kernel cost asymmetry. The threshold also caps the
+/// index-array allocation at 32 MB total (4M × 4 bytes × 2
+/// arrays).
+pub const NESTED_LOOP_TOTAL_THRESHOLD: u64 = 4_000_000;
+
 /// Comparison operators for filtering
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
