@@ -2581,9 +2581,15 @@ impl super::CudaKernelProvider {
     /// * Left and right key columns share the same `ScalarType`,
     ///   and that shared type is `U32` or `Symbol` (Symbol is
     ///   `u32` at the byte level — same kernel applies).
-    /// * Each key column's byte length matches `num_rows * 4`
-    ///   (preflight validation, mirrors `compare_const_mask` at
-    ///   `crates/xlog-cuda/src/provider/filter.rs:545-556`).
+    /// * Each key column's allocation is at least `num_rows * 4`
+    ///   bytes (preflight lower-bound validation; mirrors the
+    ///   `crates/xlog-cuda/src/provider/ilp.rs:18` codebase idiom
+    ///   `col.num_bytes() < required_bytes`). `CudaColumn::num_bytes()`
+    ///   reports the allocation size, which can exceed
+    ///   `num_rows * 4` when the buffer has spare capacity
+    ///   (`row_cap > num_rows`); strict-equality validation would
+    ///   false-positive-reject normal over-allocated buffers
+    ///   reaching this path through `Executor::execute_node`.
     /// * `num_left * num_right <= NESTED_LOOP_TOTAL_THRESHOLD`
     ///   (computed via `checked_mul`; release-mode wrapping
     ///   multiply is forbidden).
