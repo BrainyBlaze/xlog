@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use xlog_core::{AggOp, RelId, Result, Schema, XlogError};
+use xlog_core::{AggOp, RelId, Result, ScalarType, Schema, XlogError};
 use xlog_cuda::{CudaBuffer, JoinType as CudaJoinType};
 use xlog_ir::{JoinType, ProjectExpr, RirNode};
 
@@ -10,6 +10,54 @@ use crate::ilp_registry::{read_device_row_count, IlpMask, IlpTagEntry, IlpTagged
 
 use super::join_cache::{estimate_join_index_bytes, JoinIndexKey};
 use super::Executor;
+
+/// W4.2 eligibility predicate for nested-loop join dispatch.
+///
+/// Returns `true` iff the join shape is admissible for the
+/// `nested_loop_join_v2_inner_u32_1key` provider entry point.
+/// The predicate is intentionally narrow per the W4.2
+/// iteration-4 plan D1:
+///   * `JoinType::Inner` only (Semi / Anti / LeftOuter fall back
+///     to hash).
+///   * Exactly one key column on each side.
+///   * Both key columns share the same `ScalarType` AND that
+///     shared type is `U32` or `Symbol` (Symbol is `u32` at the
+///     byte level — same kernel applies). U32-on-Symbol or
+///     other type mismatches return `false`, mirroring
+///     `hash_join_v2`'s own type-mismatch rejection at
+///     `crates/xlog-cuda/src/provider/relational.rs:3567-3576`.
+///
+/// Out-of-bounds key indices yield `Schema::column_type(_) = None`,
+/// which fails the `matches!(...)` guard — falling back to hash
+/// without a separate bounds check.
+///
+/// Cheap O(1) — no kernel launches, no row-count reads, no D2H.
+/// The threshold check (`num_left * num_right <=
+/// NESTED_LOOP_TOTAL_THRESHOLD`) is performed at the dispatch
+/// site (W4.2 Step 5), not in this predicate.
+//
+// W4.2 plan iteration-4 Step 4: predicate is added in this
+// commit; the call site that wires it into `execute_join` lives
+// in Step 5 (along with the dispatch counter on `Executor`).
+// Until Step 5 lands the predicate is intentionally unused.
+#[allow(dead_code)]
+fn eligible_for_nested_loop(
+    left: &CudaBuffer,
+    right: &CudaBuffer,
+    left_keys: &[usize],
+    right_keys: &[usize],
+    join_type: JoinType,
+) -> bool {
+    if join_type != JoinType::Inner {
+        return false;
+    }
+    if left_keys.len() != 1 || right_keys.len() != 1 {
+        return false;
+    }
+    let lt = left.schema().column_type(left_keys[0]);
+    let rt = right.schema().column_type(right_keys[0]);
+    lt == rt && matches!(lt, Some(ScalarType::U32) | Some(ScalarType::Symbol))
+}
 
 impl Executor {
     /// Execute a Scan node — looks up the relation by RelId and returns a clone.
