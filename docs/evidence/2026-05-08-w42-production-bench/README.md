@@ -90,7 +90,12 @@ Hash medians range from 726 µs (10K Cartesian) to 980 µs (25M Cartesian) — o
 
 ### F4. Production crossover is OUTSIDE the eligible range, as expected.
 
-At the threshold ceiling (L=R=2000 = 4M Cartesian), nested-loop is 2.10×. Extrapolating from the slope (NL ~= 215 µs + 0.05 µs × Cartesian-millions; Hash ~= 700-1000 µs constant), the algorithmic crossover lands somewhere around L=R=4000-5000 (16M-25M Cartesian), well above the threshold. Hash's hash-only data at L=R=5000 (972 µs) suggests nested-loop at the same size would take ~1.4 ms — about 1.4× slower than hash. So the 4M threshold sits comfortably below the actual crossover.
+At the threshold ceiling (L=R=2000 = 4M Cartesian), nested-loop is 2.10×. Extrapolating from the eligible-cell measurements:
+* L=100×R=100 (10K = 0.01M Cartesian) → 262.34 µs NL.
+* L=2000×R=2000 (4M Cartesian) → 428.18 µs NL.
+* Empirical slope ≈ (428.18 − 262.34) / (4 − 0.01) ≈ **42 µs per Cartesian-million** (intercept ≈ 262 µs).
+
+Projecting to L=R=5000 (25M Cartesian): NL ≈ 262 µs + 42 × 25 ≈ **1310 µs**. Hash's measured hash-only data at the same size is 972 µs, so projected NL would be ~1.35× slower than hash there. The algorithmic crossover lands somewhere between L=R=2000 (NL wins 2.10×) and L=R=5000 (NL projected to lose by ~1.35×) — i.e., between 4M and 25M Cartesian. The 4M threshold sits at the low end of that uncertainty band, comfortably inside the NL-wins region.
 
 ### F5. Schema concatenation works correctly across both paths.
 

@@ -177,7 +177,9 @@ const ABOVE_THRESHOLD_MATRIX: &[(u32, u32)] = &[
 /// `[num_left/2..num_left/2 + num_right)` so output has
 /// `min(num_left/2 + num_right, num_left) - num_left/2`
 /// matched rows. For symmetric `(N, N)` cells this gives
-/// `N/2 + 1` matches (50% match rate).
+/// `N/2` matches (50% match rate). E.g., L=R=100 → 50 matches;
+/// L=R=2000 → 1000 matches; matches the parity-check counts in
+/// the bench output (50 / 250 / 500 / 1000).
 fn fixture_3col(num_left: u32, num_right: u32) -> (Vec<(u32, u32, u32)>, Vec<(u32, u32, u32)>) {
     let left: Vec<(u32, u32, u32)> = (0..num_left)
         .map(|i| (i, 1_000_000 + i, 2_000_000 + i))
