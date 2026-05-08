@@ -297,12 +297,28 @@ impl Executor {
         left_rel: Option<RelId>,
         right_rel: Option<RelId>,
     ) -> Result<CudaBuffer> {
-        // W4.2 nested-loop dispatch (must precede the IR→CUDA
-        // join-type conversion since `eligible_for_nested_loop`
-        // takes `JoinType` not `CudaJoinType`). On predicate +
-        // threshold pass, route to `nested_loop_join_v2_inner_u32_1key`,
-        // bump the dispatch counter, and return. Otherwise fall
-        // through to the existing hash path unchanged.
+        // Convert IR JoinType to CUDA JoinType (used by adaptive
+        // indexing and the hash fallback below).
+        let cuda_join_type = match join_type {
+            JoinType::Inner => CudaJoinType::Inner,
+            JoinType::Semi => CudaJoinType::Semi,
+            JoinType::Anti => CudaJoinType::Anti,
+            JoinType::LeftOuter => CudaJoinType::LeftOuter,
+        };
+
+        // Output buffer — set by W4.2 nested-loop dispatch,
+        // adaptive indexing, or the hash fallback. All three
+        // paths flow through the shared `record_join_result`
+        // feedback block at the end of this fn.
+        let mut out: Option<CudaBuffer> = None;
+
+        // W4.2 nested-loop dispatch (precedes adaptive indexing
+        // and hash fallback). On predicate + threshold pass,
+        // route to `nested_loop_join_v2_inner_u32_1key` and bump
+        // the dispatch counter; do NOT early-return — leave the
+        // result in `out` so the shared feedback block at fn-end
+        // observes it. Otherwise leave `out = None` and fall
+        // through.
         //
         // Threshold check uses logical row counts via
         // `provider.device_row_count(...)` (NOT `row_cap`), with
@@ -316,93 +332,87 @@ impl Executor {
                 .map(|p| p <= NESTED_LOOP_TOTAL_THRESHOLD)
                 .unwrap_or(false);
             if in_threshold {
-                let out = self.provider.nested_loop_join_v2_inner_u32_1key(
+                out = Some(self.provider.nested_loop_join_v2_inner_u32_1key(
                     left,
                     right,
                     left_keys[0],
                     right_keys[0],
-                )?;
+                )?);
                 self.nested_loop_dispatch_count += 1;
-                return Ok(out);
             }
         }
 
-        // Convert IR JoinType to CUDA JoinType
-        let cuda_join_type = match join_type {
-            JoinType::Inner => CudaJoinType::Inner,
-            JoinType::Semi => CudaJoinType::Semi,
-            JoinType::Anti => CudaJoinType::Anti,
-            JoinType::LeftOuter => CudaJoinType::LeftOuter,
-        };
+        // Adaptive indexing: opportunistically reuse cached
+        // build-side hash tables when the right side is a base
+        // relation scan and has become "hot" in runtime
+        // statistics. Only runs if W4.2 didn't dispatch.
+        if out.is_none() {
+            if let Some(build_rel) = right_rel {
+                let build_heat = self
+                    .stats
+                    .get_relation_stats(build_rel)
+                    .map(|s| s.heat)
+                    .unwrap_or(0.0);
+                let est_index_bytes = estimate_join_index_bytes(right, right_keys);
+                let budget_bytes = self.provider.memory().budget().device_bytes;
+                let remaining_bytes = self.provider.memory().remaining_bytes();
 
-        // Adaptive indexing: opportunistically reuse cached build-side hash tables when the right side
-        // is a base relation scan and has become "hot" in runtime statistics.
-        let mut out: Option<CudaBuffer> = None;
-        if let Some(build_rel) = right_rel {
-            let build_heat = self
-                .stats
-                .get_relation_stats(build_rel)
-                .map(|s| s.heat)
-                .unwrap_or(0.0);
-            let est_index_bytes = estimate_join_index_bytes(right, right_keys);
-            let budget_bytes = self.provider.memory().budget().device_bytes;
-            let remaining_bytes = self.provider.memory().remaining_bytes();
+                let should_index = self.join_index_cache.should_build(
+                    est_index_bytes,
+                    build_heat,
+                    remaining_bytes,
+                    budget_bytes,
+                );
 
-            let should_index = self.join_index_cache.should_build(
-                est_index_bytes,
-                build_heat,
-                remaining_bytes,
-                budget_bytes,
-            );
+                if let Some(build_name) = self.get_rel_name(build_rel).map(|s| s.to_string()) {
+                    if let Some(version) = self.store.version(&build_name) {
+                        let key = JoinIndexKey {
+                            rel: build_rel,
+                            version,
+                            key_cols: right_keys.to_vec(),
+                        };
 
-            if let Some(build_name) = self.get_rel_name(build_rel).map(|s| s.to_string()) {
-                if let Some(version) = self.store.version(&build_name) {
-                    let key = JoinIndexKey {
-                        rel: build_rel,
-                        version,
-                        key_cols: right_keys.to_vec(),
-                    };
-
-                    if let Some(index) = self.join_index_cache.get(&key) {
-                        out = Some(self.provider.hash_join_v2_with_index(
-                            left,
-                            right,
-                            left_keys,
-                            right_keys,
-                            cuda_join_type,
-                            index,
-                            None,
-                        )?);
-                    } else if should_index {
-                        if let Some(build_buf) = self.store.get(&build_name) {
-                            match self.provider.build_join_index_v2(build_buf, right_keys) {
-                                Ok(index) => {
-                                    let joined = self.provider.hash_join_v2_with_index(
-                                        left,
-                                        right,
-                                        left_keys,
-                                        right_keys,
-                                        cuda_join_type,
-                                        &index,
-                                        None,
-                                    )?;
-                                    self.join_index_cache.insert(key, index);
-                                    if let Some(stats) =
-                                        self.stats.get_relation_stats_mut(build_rel)
-                                    {
-                                        stats.has_index = true;
+                        if let Some(index) = self.join_index_cache.get(&key) {
+                            out = Some(self.provider.hash_join_v2_with_index(
+                                left,
+                                right,
+                                left_keys,
+                                right_keys,
+                                cuda_join_type,
+                                index,
+                                None,
+                            )?);
+                        } else if should_index {
+                            if let Some(build_buf) = self.store.get(&build_name) {
+                                match self.provider.build_join_index_v2(build_buf, right_keys) {
+                                    Ok(index) => {
+                                        let joined = self.provider.hash_join_v2_with_index(
+                                            left,
+                                            right,
+                                            left_keys,
+                                            right_keys,
+                                            cuda_join_type,
+                                            &index,
+                                            None,
+                                        )?;
+                                        self.join_index_cache.insert(key, index);
+                                        if let Some(stats) =
+                                            self.stats.get_relation_stats_mut(build_rel)
+                                        {
+                                            stats.has_index = true;
+                                        }
+                                        out = Some(joined);
                                     }
-                                    out = Some(joined);
-                                }
-                                Err(_) => {
-                                    // If indexing fails (e.g., memory pressure), fall back to normal join.
+                                    Err(_) => {
+                                        // If indexing fails (e.g., memory pressure), fall back to normal join.
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
-        }
+        } // end `if out.is_none()` (adaptive-indexing gate added by W4.2 Step 5 patch)
 
         let out = match out {
             Some(buf) => buf,

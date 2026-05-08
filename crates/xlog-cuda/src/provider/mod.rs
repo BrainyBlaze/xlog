@@ -485,8 +485,7 @@ pub mod join_kernels {
     /// `(left_idx, right_idx)` pairs as two parallel u32 arrays.
     /// Payload columns are materialized after the kernel via
     /// `gather_buffer_by_indices` in the provider fn.
-    pub const NESTED_LOOP_JOIN_INNER_U32_1KEY_PAIRS: &str =
-        "nested_loop_join_inner_u32_1key_pairs";
+    pub const NESTED_LOOP_JOIN_INNER_U32_1KEY_PAIRS: &str = "nested_loop_join_inner_u32_1key_pairs";
 }
 
 /// Kernel function names in the dedup module

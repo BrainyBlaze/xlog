@@ -10,8 +10,8 @@ use super::{
     dedup_kernels, filter_kernels, ilp_kernels, join_kernels, pack_kernels, scan_kernels,
     set_ops_kernels, sort_kernels, HashTableU64, JoinHashTableV2, JoinIndexV2, JoinType,
     PackedKeyData, RadixSortScratch, DEDUP_MODULE, DEFAULT_JOIN_MAX_OUTPUT, FILTER_MODULE,
-    ILP_MODULE, JOIN_MODULE, NESTED_LOOP_TOTAL_THRESHOLD, PACK_MODULE, SCAN_MODULE,
-    SET_OPS_MODULE, SORT_MODULE,
+    ILP_MODULE, JOIN_MODULE, NESTED_LOOP_TOTAL_THRESHOLD, PACK_MODULE, SCAN_MODULE, SET_OPS_MODULE,
+    SORT_MODULE,
 };
 use crate::device_runtime::{Access, BlockId, StreamId};
 use crate::launch::LaunchRecorder;
@@ -2639,12 +2639,7 @@ impl super::CudaKernelProvider {
         }
         let lt = left.schema().column_type(left_key);
         let rt = right.schema().column_type(right_key);
-        if lt != rt
-            || !matches!(
-                lt,
-                Some(ScalarType::U32) | Some(ScalarType::Symbol)
-            )
-        {
+        if lt != rt || !matches!(lt, Some(ScalarType::U32) | Some(ScalarType::Symbol)) {
             return Err(XlogError::Kernel(format!(
                 "nested_loop: key types must be equal U32/Symbol; got left={:?} right={:?}",
                 lt, rt
@@ -2653,11 +2648,9 @@ impl super::CudaKernelProvider {
         let left_col = left
             .column(left_key)
             .ok_or_else(|| XlogError::Kernel(format!("nested_loop: left.column({})", left_key)))?;
-        let right_col = right
-            .column(right_key)
-            .ok_or_else(|| {
-                XlogError::Kernel(format!("nested_loop: right.column({})", right_key))
-            })?;
+        let right_col = right.column(right_key).ok_or_else(|| {
+            XlogError::Kernel(format!("nested_loop: right.column({})", right_key))
+        })?;
         let expected_left_bytes = num_left
             .checked_mul(4)
             .ok_or_else(|| XlogError::Kernel("nested_loop: left byte-count overflow".into()))?;
@@ -2684,9 +2677,7 @@ impl super::CudaKernelProvider {
         // ----- 4. Fail-closed threshold check via checked_mul -----
         let upper_bound: u64 = (num_left as u64)
             .checked_mul(num_right as u64)
-            .ok_or_else(|| {
-                XlogError::Kernel("nested_loop: row-count product overflow".into())
-            })?;
+            .ok_or_else(|| XlogError::Kernel("nested_loop: row-count product overflow".into()))?;
         if upper_bound > NESTED_LOOP_TOTAL_THRESHOLD {
             return Err(XlogError::Kernel(format!(
                 "nested_loop: caller violated eligibility threshold: \
@@ -2703,19 +2694,18 @@ impl super::CudaKernelProvider {
         self.device
             .inner()
             .memset_zeros(&mut d_output_count)
-            .map_err(|e| {
-                XlogError::Kernel(format!("nested_loop: counter zero failed: {}", e))
-            })?;
+            .map_err(|e| XlogError::Kernel(format!("nested_loop: counter zero failed: {}", e)))?;
 
         // ----- 6. Launch kernel (variant-agnostic column refs) -----
         let func = self
             .device
             .inner()
-            .get_func(JOIN_MODULE, join_kernels::NESTED_LOOP_JOIN_INNER_U32_1KEY_PAIRS)
+            .get_func(
+                JOIN_MODULE,
+                join_kernels::NESTED_LOOP_JOIN_INNER_U32_1KEY_PAIRS,
+            )
             .ok_or_else(|| {
-                XlogError::Kernel(
-                    "nested_loop_join_inner_u32_1key_pairs kernel not found".into(),
-                )
+                XlogError::Kernel("nested_loop_join_inner_u32_1key_pairs kernel not found".into())
             })?;
 
         let num_left_u32 = num_left as u32;
@@ -2771,8 +2761,7 @@ impl super::CudaKernelProvider {
         }
 
         // ----- 8. Gather both sides via existing GPU machinery -----
-        let gathered_left =
-            self.gather_buffer_by_indices(left, &d_output_left_idx, output_rows)?;
+        let gathered_left = self.gather_buffer_by_indices(left, &d_output_left_idx, output_rows)?;
         let gathered_right =
             self.gather_buffer_by_indices(right, &d_output_right_idx, output_rows)?;
 
