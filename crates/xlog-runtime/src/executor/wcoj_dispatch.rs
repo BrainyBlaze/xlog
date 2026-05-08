@@ -1262,6 +1262,16 @@ impl Executor {
         self.wcoj_4cycle_dispatch_count
     }
 
+    /// W4.2 — count of times `execute_join` routed an inner-join
+    /// to the nested-loop provider entry point because the
+    /// eligibility predicate + Cartesian-product threshold both
+    /// held. Tests use this counter to assert that the W4.2 path
+    /// actually fired vs. silently falling back to hash with the
+    /// same answer.
+    pub fn nested_loop_dispatch_count(&self) -> u64 {
+        self.nested_loop_dispatch_count
+    }
+
     /// v0.6.5 slice 2 — try to dispatch a non-recursive rule
     /// through the GPU 4-cycle WCOJ kernel.
     ///

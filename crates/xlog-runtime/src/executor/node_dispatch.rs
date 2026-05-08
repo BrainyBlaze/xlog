@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use xlog_core::{AggOp, RelId, Result, ScalarType, Schema, XlogError};
+use xlog_cuda::provider::NESTED_LOOP_TOTAL_THRESHOLD;
 use xlog_cuda::{CudaBuffer, JoinType as CudaJoinType};
 use xlog_ir::{JoinType, ProjectExpr, RirNode};
 
@@ -36,11 +37,6 @@ use super::Executor;
 /// NESTED_LOOP_TOTAL_THRESHOLD`) is performed at the dispatch
 /// site (W4.2 Step 5), not in this predicate.
 //
-// W4.2 plan iteration-4 Step 4: predicate is added in this
-// commit; the call site that wires it into `execute_join` lives
-// in Step 5 (along with the dispatch counter on `Executor`).
-// Until Step 5 lands the predicate is intentionally unused.
-#[allow(dead_code)]
 fn eligible_for_nested_loop(
     left: &CudaBuffer,
     right: &CudaBuffer,
@@ -301,6 +297,36 @@ impl Executor {
         left_rel: Option<RelId>,
         right_rel: Option<RelId>,
     ) -> Result<CudaBuffer> {
+        // W4.2 nested-loop dispatch (must precede the IR→CUDA
+        // join-type conversion since `eligible_for_nested_loop`
+        // takes `JoinType` not `CudaJoinType`). On predicate +
+        // threshold pass, route to `nested_loop_join_v2_inner_u32_1key`,
+        // bump the dispatch counter, and return. Otherwise fall
+        // through to the existing hash path unchanged.
+        //
+        // Threshold check uses logical row counts via
+        // `provider.device_row_count(...)` (NOT `row_cap`), with
+        // `checked_mul` fail-closed on overflow per W4.2
+        // iteration-4 F-W42-15.
+        if eligible_for_nested_loop(left, right, left_keys, right_keys, join_type) {
+            let num_left = self.provider.device_row_count(left)? as u64;
+            let num_right = self.provider.device_row_count(right)? as u64;
+            let in_threshold = num_left
+                .checked_mul(num_right)
+                .map(|p| p <= NESTED_LOOP_TOTAL_THRESHOLD)
+                .unwrap_or(false);
+            if in_threshold {
+                let out = self.provider.nested_loop_join_v2_inner_u32_1key(
+                    left,
+                    right,
+                    left_keys[0],
+                    right_keys[0],
+                )?;
+                self.nested_loop_dispatch_count += 1;
+                return Ok(out);
+            }
+        }
+
         // Convert IR JoinType to CUDA JoinType
         let cuda_join_type = match join_type {
             JoinType::Inner => CudaJoinType::Inner,
