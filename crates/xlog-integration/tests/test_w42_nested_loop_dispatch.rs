@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use cudarc::driver::sys;
+use xlog_core::RelId;
 use xlog_core::{MemoryBudget, RuntimeConfig, ScalarType, Schema};
 use xlog_cuda::device_runtime::{
     AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
@@ -22,6 +23,7 @@ use xlog_cuda::device_runtime::{
 };
 use xlog_cuda::memory::CudaBuffer;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager, JoinType};
+use xlog_ir::{JoinType as IrJoinType, RirNode};
 use xlog_logic::Compiler;
 use xlog_runtime::Executor;
 
@@ -489,5 +491,243 @@ fn large_times_small_falls_back_to_hash_above_threshold() {
          (the W4.2 Step-5 patch routed all three dispatch paths through \
           the shared feedback block); pre-execute None → post-execute \
           Some(_) is the W2.4 contract that W4.2 must preserve"
+    );
+}
+
+// ---------------------------------------------------------------
+// Helpers for Certs C and C' (manual RirNode construction).
+// ---------------------------------------------------------------
+
+/// Download a 2-col U32 buffer (used for Semi-join output, which
+/// preserves the left schema of an arity-2 left input).
+fn download_pairs(buf: &CudaBuffer) -> Vec<(u32, u32)> {
+    let n = match buf.cached_row_count() {
+        Some(c) => c as usize,
+        None => {
+            let mut count_host = [0u32; 1];
+            unsafe {
+                sys::cuMemcpyDtoH_v2(
+                    count_host.as_mut_ptr() as *mut _,
+                    *buf.num_rows_device().device_ptr(),
+                    std::mem::size_of::<u32>(),
+                );
+            }
+            count_host[0] as usize
+        }
+    };
+    if n == 0 {
+        return Vec::new();
+    }
+    assert_eq!(buf.arity(), 2, "download_pairs expects arity 2");
+    let mut col0_bytes = vec![0u8; n * 4];
+    let mut col1_bytes = vec![0u8; n * 4];
+    unsafe {
+        sys::cuMemcpyDtoH_v2(
+            col0_bytes.as_mut_ptr() as *mut _,
+            *buf.column(0).unwrap().device_ptr(),
+            col0_bytes.len(),
+        );
+        sys::cuMemcpyDtoH_v2(
+            col1_bytes.as_mut_ptr() as *mut _,
+            *buf.column(1).unwrap().device_ptr(),
+            col1_bytes.len(),
+        );
+    }
+    (0..n)
+        .map(|i| {
+            let off = i * 4;
+            (
+                u32::from_le_bytes(col0_bytes[off..off + 4].try_into().unwrap()),
+                u32::from_le_bytes(col1_bytes[off..off + 4].try_into().unwrap()),
+            )
+        })
+        .collect()
+}
+
+/// Build an executor + register two relations under manual
+/// RelIds + upload buffers. Returns the executor and the
+/// RelIds (`lhs`, `rhs`) so the test can construct an
+/// `RirNode::Join` referencing them.
+fn build_executor_with_two_relations(
+    fix: &RuntimeBackedFixture,
+    left_rows: &[(u32, u32)],
+    right_rows: &[(u32, u32)],
+) -> (Executor, RelId, RelId) {
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    let lhs = RelId(1000);
+    let rhs = RelId(1001);
+    executor.register_relation(lhs, "lhs");
+    executor.register_relation(rhs, "rhs");
+    executor.put_relation("lhs", upload_binary_u32(&fix.memory, left_rows));
+    executor.put_relation("rhs", upload_binary_u32(&fix.memory, right_rows));
+    (executor, lhs, rhs)
+}
+
+// ---------------------------------------------------------------
+// Cert C — multi-col composite key inner join falls back to hash.
+//
+// Per W4.2 plan iter-4 D1 + D5: the eligibility predicate's
+// `left_keys.len() != 1 || right_keys.len() != 1` check rejects
+// composite-key joins regardless of size. Fixture is small
+// (100 × 100 = 10K, well below the 4M threshold) so SIZE is
+// NOT the disqualifying property — only the key arity is. This
+// isolates the multi-key rejection.
+// ---------------------------------------------------------------
+
+#[test]
+fn multi_col_key_falls_back_to_hash() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    // Fixture: 2-col arity each side (both columns are keys; no
+    // payload). 100 rows each side; key tuples (i, i+1000). All
+    // 100 tuples match exactly. Cartesian = 10_000 ≪ 4_000_000.
+    // Size is admissible; only the multi-key shape disqualifies.
+    let left_rows: Vec<(u32, u32)> = (0..100u32).map(|i| (i, i + 1000)).collect();
+    let right_rows: Vec<(u32, u32)> = (0..100u32).map(|i| (i, i + 1000)).collect();
+
+    // Reference: provider.hash_join_v2 with composite key cols
+    // [0, 1] on each side. Output schema is 4-col
+    // [left_k1, left_k2, right_k1, right_k2] (combine_schemas).
+    let left_buf = upload_binary_u32(&fix.memory, &left_rows);
+    let right_buf = upload_binary_u32(&fix.memory, &right_rows);
+    let hash_buf = fix
+        .provider
+        .hash_join_v2(&left_buf, &right_buf, &[0, 1], &[0, 1], JoinType::Inner)
+        .expect("hash_join_v2 reference (multi-key)");
+    let reference_set: BTreeSet<(u32, u32, u32, u32)> =
+        download_quads(&hash_buf).into_iter().collect();
+    assert_eq!(
+        reference_set.len(),
+        100,
+        "multi-key reference should produce exactly 100 matched rows"
+    );
+
+    // Dispatched: Executor::execute_node on a manually-built
+    // RirNode::Join { left_keys: [0, 1], right_keys: [0, 1],
+    // join_type: Inner }. The compiler+lowerer would produce
+    // this same shape from a Datalog rule with a 2-col
+    // composite key, but we construct it directly to keep the
+    // test focused on the dispatch decision.
+    let (mut executor, lhs, rhs) = build_executor_with_two_relations(&fix, &left_rows, &right_rows);
+    let join = RirNode::Join {
+        left: Box::new(RirNode::Scan { rel: lhs }),
+        right: Box::new(RirNode::Scan { rel: rhs }),
+        left_keys: vec![0, 1],
+        right_keys: vec![0, 1],
+        join_type: IrJoinType::Inner,
+    };
+    let result = executor.execute_node(&join).expect("execute_node");
+
+    // -----------------------------------------------------------
+    // Load-bearing: dispatch counter MUST be exactly zero.
+    // The eligibility predicate's
+    //   `left_keys.len() == 1 && right_keys.len() == 1`
+    // check rejected this join despite small size + Inner +
+    // matching U32 types.
+    // -----------------------------------------------------------
+    assert_eq!(
+        executor.nested_loop_dispatch_count(),
+        0,
+        "multi-key inner join MUST NOT dispatch nested-loop \
+         (eligibility predicate's 1-key gate); got dispatch counter {}",
+        executor.nested_loop_dispatch_count()
+    );
+
+    // Row-set parity vs hash reference (correctness witness for
+    // the hash fallback path on multi-key inputs).
+    let dispatched_set: BTreeSet<(u32, u32, u32, u32)> =
+        download_quads(&result).into_iter().collect();
+    assert_eq!(
+        dispatched_set, reference_set,
+        "multi-key hash-fallback row set must equal the direct provider.hash_join_v2 reference"
+    );
+}
+
+// ---------------------------------------------------------------
+// Cert C' — Semi-join falls back to hash, semi-join row-set
+// semantics preserved.
+//
+// Per W4.2 plan iter-4 D1 + D5: the eligibility predicate's
+// `join_type == JoinType::Inner` check rejects Semi/Anti/LeftOuter
+// regardless of size + key shape. Fixture is small (100 × 100 =
+// 10K, well below threshold) and uses 1-key U32 — only the
+// non-Inner join type disqualifies.
+//
+// Semi-join semantics: output = subset of left rows whose key
+// matches at least one right key. Output schema = left schema.
+// For the reference computation we filter host-side and compare
+// to the executor's output as `BTreeSet<(left_col0, left_col1)>`.
+// ---------------------------------------------------------------
+
+#[test]
+fn semi_join_falls_back_to_hash() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    // Fixture: 2-col arity each side. left has 100 rows with
+    // keys [0..100); right has 50 rows with keys [25..75) (a
+    // proper subset of left's keys). Semi-join should produce
+    // exactly the 50 left rows whose keys are in [25..75).
+    let left_rows: Vec<(u32, u32)> = (0..100u32).map(|i| (i, 1000 + i)).collect();
+    let right_rows: Vec<(u32, u32)> = (25..75u32).map(|i| (i, 9999)).collect();
+
+    // Host-computed semi-join reference: left rows whose key is
+    // in right's key set.
+    let right_keys: BTreeSet<u32> = right_rows.iter().map(|(k, _)| *k).collect();
+    let reference_set: BTreeSet<(u32, u32)> = left_rows
+        .iter()
+        .filter(|(k, _)| right_keys.contains(k))
+        .copied()
+        .collect();
+    assert_eq!(
+        reference_set.len(),
+        50,
+        "semi-join reference should produce exactly 50 left rows with matching keys"
+    );
+
+    // Dispatched: Executor::execute_node on a manually-built
+    // RirNode::Join { join_type: Semi, ... }.
+    let (mut executor, lhs, rhs) = build_executor_with_two_relations(&fix, &left_rows, &right_rows);
+    let join = RirNode::Join {
+        left: Box::new(RirNode::Scan { rel: lhs }),
+        right: Box::new(RirNode::Scan { rel: rhs }),
+        left_keys: vec![0],
+        right_keys: vec![0],
+        join_type: IrJoinType::Semi,
+    };
+    let result = executor.execute_node(&join).expect("execute_node");
+
+    // -----------------------------------------------------------
+    // Load-bearing: dispatch counter MUST be exactly zero. The
+    // eligibility predicate's `join_type == JoinType::Inner`
+    // check rejected this join despite small size + 1-key + U32.
+    // -----------------------------------------------------------
+    assert_eq!(
+        executor.nested_loop_dispatch_count(),
+        0,
+        "Semi join MUST NOT dispatch nested-loop \
+         (eligibility predicate's Inner-only gate); got dispatch counter {}",
+        executor.nested_loop_dispatch_count()
+    );
+
+    // Semi-join row-set semantics: output schema = left schema
+    // (arity 2). Each output row is a left row whose key has at
+    // least one match in right.
+    assert_eq!(
+        result.arity(),
+        2,
+        "Semi-join output schema must equal left's schema (arity 2)"
+    );
+    let dispatched_set: BTreeSet<(u32, u32)> = download_pairs(&result).into_iter().collect();
+    assert_eq!(
+        dispatched_set, reference_set,
+        "Semi-join row set must match the host-computed semi reference \
+         (left rows whose keys appear in right)"
     );
 }
