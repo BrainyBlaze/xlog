@@ -35,6 +35,10 @@ harness = false
 name = "wcoj_4cycle_bench"
 harness = false
 
+[[bench]]
+name = "w42_production_nested_loop_bench"
+harness = false
+
 [[bin]]
 name = "xlog_run"
 path = "src/bin/xlog_run.rs"
