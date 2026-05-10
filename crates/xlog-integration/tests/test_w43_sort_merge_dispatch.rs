@@ -1263,6 +1263,33 @@ fn empty_input_dispatches_no_crash_with_parity() {
             .execute_node(&join)
             .expect("G1: execute_node must not crash on empty-L input");
 
+        // -----------------------------------------------------------
+        // D7 route assertion (per F-W43-4 contract): with empty L
+        // and sorted R, `is_sorted_ascending_u32` short-circuits
+        // both sides to `Ok(true)` (n == 0 < 2 trivially sorted on
+        // L; sorted ascending on R), Cartesian = 0 ≤ threshold,
+        // and the eligibility predicate admits → W4.3 sort-merge
+        // dispatch fires exactly once. Pins which short-circuit
+        // path the runtime took on n == 0 — without this, a
+        // future regression that silently re-routed empty-input
+        // joins through hash would slip through the parity check.
+        // -----------------------------------------------------------
+        assert_eq!(
+            executor.sort_merge_dispatch_count(),
+            1,
+            "G1: empty-L + sorted-R must dispatch sort-merge exactly once \
+             (sortedness probe short-circuits n < 2 to Ok(true)); \
+             got dispatch counter {}",
+            executor.sort_merge_dispatch_count()
+        );
+        assert_eq!(
+            executor.nested_loop_dispatch_count(),
+            0,
+            "G1: nested-loop must NOT have fired (D2 precedence held); \
+             got dispatch counter {}",
+            executor.nested_loop_dispatch_count()
+        );
+
         let dispatched_set: BTreeSet<(u32, u32, u32, u32)> =
             download_quads(&result).into_iter().collect();
         assert!(
@@ -1307,6 +1334,28 @@ fn empty_input_dispatches_no_crash_with_parity() {
         let result = executor
             .execute_node(&join)
             .expect("G2: execute_node must not crash on empty-R input");
+
+        // D7 route assertion (per F-W43-4 contract): mirror of G1
+        // with empty side flipped. Sorted L + empty R → both
+        // `is_sorted_ascending_u32` calls return `Ok(true)`
+        // (sorted ascending on L; n == 0 < 2 trivially sorted on
+        // R), Cartesian = 0, eligibility admits → sort-merge
+        // dispatches exactly once.
+        assert_eq!(
+            executor.sort_merge_dispatch_count(),
+            1,
+            "G2: sorted-L + empty-R must dispatch sort-merge exactly once \
+             (sortedness probe short-circuits n < 2 to Ok(true)); \
+             got dispatch counter {}",
+            executor.sort_merge_dispatch_count()
+        );
+        assert_eq!(
+            executor.nested_loop_dispatch_count(),
+            0,
+            "G2: nested-loop must NOT have fired (D2 precedence held); \
+             got dispatch counter {}",
+            executor.nested_loop_dispatch_count()
+        );
 
         let dispatched_set: BTreeSet<(u32, u32, u32, u32)> =
             download_quads(&result).into_iter().collect();
