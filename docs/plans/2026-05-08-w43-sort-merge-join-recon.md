@@ -17,7 +17,7 @@ The acceptance gate is functional, not perf-locked: the cert proves "skips sort 
 ### 1. Kernel surface
 
 * `crates/xlog-cuda/kernels/sort.cu` — full radix-sort family (histogram → digit-prefix-sums → ranks → scatter, plus permutation appliers + key-gather kernels). NO sort-merge join kernel.
-* `crates/xlog-cuda/kernels/wcoj.cu` carries `wcoj_layout_check_sorted_unique_u32/u64` (W3.2's runtime-detection kernels) — useful precedent for a "scan and decide" sortedness check.
+* `crates/xlog-cuda/kernels/wcoj.cu` carries `wcoj_layout_check_sorted_unique_u32/u64` — runtime-detection kernels used by the WCOJ layout fast-path. Provider entry points at `crates/xlog-cuda/src/provider/wcoj.rs:3137` (u32) and `:3265` (u64). Useful precedent for a "scan and decide" sortedness check, regardless of the originating closure-board attribution.
 * W4.3 needs a NEW kernel: a sort-merge join kernel that takes two pre-sorted single-key buffers and emits matched `(left_idx, right_idx)` pairs (similar emit-pairs design to W4.2's nested-loop kernel).
 
 ### 2. Provider surface
@@ -29,7 +29,7 @@ The acceptance gate is functional, not perf-locked: the cert proves "skips sort 
 
 ### 3. Dispatch surface (the key design question)
 
-How does production runtime know inputs are pre-sorted? Three tractable options:
+How does production runtime know inputs are pre-sorted? Four tractable options:
 
 | Option | Description | Cost | Safety | Where it fits |
 |--------|-------------|------|--------|---------------|
@@ -65,10 +65,10 @@ Mirroring the W4.2 spike-first discipline:
 | # | Lock | Proposed value |
 |---|------|----------------|
 | 1 | Worktree + branch (unmerged regardless of outcome) | `.worktrees/w43-bench-spike-sort-merge` on `bench-spike/w43-sort-merge` (NOT `feat/w43-sort-merge-join`) |
-| 2 | Kernel scope (minimum viable) | Inner join only, U32 only, 1-key, 1-col arity. Caller asserts pre-sorted. Same minimum-viable shape that W4.2's spike used. |
-| 3 | Bench envelope parity | Provider-direct `provider.sort_merge_join_v2_inner_u32_1key_1col_spike(...)` vs `provider.hash_join_v2(...)` on the same uploaded `CudaBuffer` inputs. |
-| 4 | Row-set parity check | `BTreeSet<u32>` equality on every measured fixture (sorted-unique inputs make matched-key sets unambiguous). |
-| 5 | Falsification matrix | Symmetric `(N, N)` and asymmetric `(N, M)` cells across 50–10000 row-counts. Match the W4.2 spike's matrix for cross-comparison. |
+| 2 | Kernel scope (minimum viable) | Inner join only, U32 keys only, 1-key (single key column). Two arity regimes: (a) **sorted-unique 1-col** for set-intersection-style measurement; (b) **2-col `(key, payload)` with duplicate keys** for run-length-aware pair-emission measurement. Caller asserts inputs are pre-sorted by the key column. Both regimes use the same kernel; the test fixtures select between them. |
+| 3 | Bench envelope parity | Provider-direct `provider.sort_merge_join_v2_inner_u32_1key_spike(...)` vs `provider.hash_join_v2(...)` on the same uploaded `CudaBuffer` inputs. |
+| 4 | Row-set parity check | For sorted-unique cells: `BTreeSet<u32>` equality on matched-key set. For duplicate-key cells: `BTreeSet<(u32, u32, u32)>` equality on `(key, left_payload, right_payload)` triples — exercises pair-emission semantics, where each matched-key run produces `dup_left × dup_right` rows. Both paths' outputs go through the same parity assertion. |
+| 5 | Falsification matrix | Two regimes:<br>**(a) Sorted-unique 1-col cells** — symmetric `(N, N)` and asymmetric `(N, M)` across 50–5000 row-counts (matches W4.2 spike's matrix for cross-comparison; measures upper-bound speedup at the simplest input shape).<br>**(b) Duplicate-key 2-col cells** — at least one symmetric duplicate-rate cell (e.g., `L=R=1000` with each key duplicated 4× → 4× join expansion → 4000 output rows per side, 16000 total Cartesian-per-key matches; total = 1000 × 4 × 4 = 16000 output rows). Confirms the operator handles run-length matching correctly AND measures whether the speedup holds when output rows ≫ input rows. |
 | 6 | Decision gate after spike | If sort-merge wins by ≥ 2× in any useful region → iteration-1 plan locks the dispatch threshold from spike data + runtime-detection mechanism choice. If hash always wins or speedup < 2× → spike preserved as evidence; W4.3 re-scoped (operator-only without dispatch wiring, OR closed as "not worth it"). |
 
 ## Open questions for iteration-1 plan (out of spike scope)
