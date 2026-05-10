@@ -1,4 +1,4 @@
-# W4.3 Sort-Merge Join Operator — Plan (iteration 4 canonical)
+# W4.3 Sort-Merge Join Operator — Plan (iteration 5 canonical)
 
 **Plan iteration:** 4 (amendment after iteration-3 review surfaced F-W43-9..10 — 1 major + 1 minor; live section-heading and approval-gate label drift left over from iterations 1–2).
 **Worktree:** `.worktrees/w43-sort-merge-join` on branch `feat/w43-sort-merge-join` (off local `main` `19f7bc5d`).
@@ -22,7 +22,7 @@ W4.3 has **no direct paper claim** in arXiv:2604.20073 — the SRDatalog paper c
 * Spike decision-gate ≥ 2× win on tested matrix: ✅ met (range 2.52×–3.25×).
 * Five mandatory iteration-1 locks per user direction: encoded in D1–D5 below.
 
-## Direction (locked, iteration 4 canonical)
+## Direction (locked, iteration 5 canonical)
 
 | ID | Lock | Direction |
 |----|------|-----------|
@@ -53,7 +53,7 @@ W4.3 has **no direct paper claim** in arXiv:2604.20073 — the SRDatalog paper c
 
 ### Step 1 — Plan iteration commit (this commit)
 
-The current plan-iteration commit (iter 1, then amendments per F-W43-N), on `feat/w43-sort-merge-join`. No code yet. The agent does NOT advance to Step 2 until the user explicitly approves the live iteration (currently iteration 4).
+The current plan-iteration commit (iter 1, then amendments per F-W43-N), on `feat/w43-sort-merge-join`. No code yet at iteration approval; iteration 5 captures findings surfaced during execution. The agent does NOT advance to Step 2 until the user explicitly approves the live iteration (currently iteration 5).
 
 Commit subject: `docs(plan): W4.3 iteration 1 — sort-merge join (post-spike, 5 mandatory locks)`.
 
@@ -188,6 +188,16 @@ Commit subject: `test(w43): cert E + F + G — Symbol-typed + duplicate-key + em
 
 Mirrors W4.2 Step 11. fmt + warnings + workspace tests + CUDA cert suite. Pass-count delta = **+8** per the Acceptance Grid (Certs A, B, C, D, D', E, F, G — Cert G added per F-W43-4). The Acceptance Grid is canonical for the count.
 
+**Workspace-test gate exception (per F-W43-12)**: `cargo test -p xlog-cuda --release --test test_wcoj_layout_fast_path` is a **pre-existing flake** unrelated to W4.3 — failures reproduce on the merge-base 19f7bc5d (W4.2 closure HEAD) when run alongside other CUDA tests; data-corruption signature is consistent with missing stream-synchronize between kernel launch and D2H download in the v0.6.2 WCOJ layout fast-path code (out-of-W4.3-scope to fix). Step 11's workspace-test gate is satisfied iff:
+* `cargo fmt --check --all` exits 0,
+* `RUSTFLAGS="-D warnings" cargo build --release --workspace --exclude pyxlog` exits 0,
+* `cargo test -p xlog-cuda-tests --test certification_suite --release` is green (the **authoritative gate** per MEMORY.md),
+* `cargo test -p xlog-runtime --release` is green,
+* `cargo test -p xlog-integration --release --tests` is green (all integration test binaries pass, including W4.3 dispatch certs 8/8 and W4.2 dispatch certs 5/5),
+* AND every test outside `test_wcoj_layout_fast_path` in the canonical workspace command exits 0.
+
+The flake is documented in this plan and deferred to follow-up work on the v0.6.2 WCOJ fast-path code.
+
 Commit subject (if any cleanup): `chore(w43): workspace gate green pre-bench`.
 
 ### Step 12 — Post-implementation bench (per F-W43-3 timed-region clarification + F-W43-2 overlap cells)
@@ -208,7 +218,7 @@ Commit subject: `feat(w43): add production sort-merge bench + evidence (executor
 
 Plan-iteration commit + Steps 2–12 commits on `feat/w43-sort-merge-join`. No board edit. No FF-merge. No advance until separate user approval.
 
-## Acceptance Grid (iteration-4 canonical)
+## Acceptance Grid (iteration-5 canonical)
 
 | Cell | Count | Test file | Acceptance criterion |
 |------|-------|-----------|----------------------|
@@ -224,7 +234,7 @@ Plan-iteration commit + Steps 2–12 commits on `feat/w43-sort-merge-join`. No b
 | **Post-impl bench Part B (per F-W43-2)** | 1 | same file | Side-by-side overlap cells confirm D2 precedence (sort-merge > nested-loop) OR surface a counter-finding |
 | **Workspace pass-count delta** | **+8** | — | 8 new test cells (A, B, C, D, D', E, F, G — Cert G added per F-W43-4). D folded as parity tail. |
 
-## Source-of-Truth References (iteration-4 canonical)
+## Source-of-Truth References (iteration-5 canonical)
 
 * Spike evidence: `docs/evidence/2026-05-10-w43-bench-spike/README.md` (on `bench-spike/w43-sort-merge`); `fadc2700` HEAD.
 * Recon: `docs/plans/2026-05-08-w43-sort-merge-join-recon.md`.
@@ -233,7 +243,7 @@ Plan-iteration commit + Steps 2–12 commits on `feat/w43-sort-merge-join`. No b
 * Sortedness-check kernel precedent: `crates/xlog-cuda/kernels/wcoj.cu::wcoj_layout_check_sorted_unique_u32` + `provider/wcoj.rs:3137`.
 * Existing `JoinStrategy::SortMerge` dead-code: `crates/xlog-runtime/src/statistics.rs:15` (untouched).
 
-## Risk Register (informational, iteration-4 canonical)
+## Risk Register (informational, iteration-5 canonical)
 
 | Risk | Mitigation |
 |------|------------|
@@ -244,9 +254,9 @@ Plan-iteration commit + Steps 2–12 commits on `feat/w43-sort-merge-join`. No b
 | Detection kernel reports "unsorted" on edge cases (single-row inputs, empty inputs) | Per F-W43-4: empty AND single-row inputs (`n < 2`) are short-circuited by `is_sorted_ascending_u32`'s **own internal fast path** (return `Ok(true)` BEFORE allocation/launch) — they enter detection AFTER the threshold check admits the join (`0 * 0 = 0 ≤ 4M = true`). The detection kernel never launches with grid_dim 0. Once detection returns `Ok(true)` for an empty side, `sort_merge_join_v2_inner_u32_1key`'s own empty fast path returns the empty `combine_schemas` buffer (mirrors `hash_join_inner_v2`'s empty handling at `relational.rs:3165-3170`). Cert G covers both empty-left and empty-right fixtures. |
 | `JoinStrategy::SortMerge` dead-enum confusion | NOT touched per D8. Future cleanup commit (out of W4.3) can delete the enum entirely. |
 
-## Plan-Approval Gate (iteration 4)
+## Plan-Approval Gate (iteration 5)
 
-This plan is **iteration 4 draft** (iteration 3 surfaced F-W43-9..10: 1 major + 1 minor — live section-heading + approval-gate label drift left over from iterations 1–2; targeted 5-site label sweep). The agent does NOT advance to Step 2 until the user explicitly states "Iteration 4 is approved" (or equivalent). Subsequent iterations may add further F-W43-N findings; the live D-table + Step plan + Acceptance Grid above are the canonical source of truth.
+This plan is **iteration 5** (iteration 4 was approved and Steps 2-11 executed; iteration 5 retroactively captures two execution-discovered findings — F-W43-11 from Step 5 review and F-W43-12 from Step 11 verification — to keep the plan record aligned with executed work). Iterations 1-4 follow the standard pre-execution review pattern; iteration 5 is the post-execution amendment pattern documented in the Iteration-5 Amendment Log. The live D-table + Step plan + Acceptance Grid above remain the canonical source of truth.
 
 Common amendment vectors per the W4.2 / W4.1 plan-iteration discipline:
 * Threshold sharing decision (D3) — could push back to introduce a separate constant, or argue for a different value.
@@ -306,3 +316,14 @@ User review of iteration 3 surfaced 1 major + 1 minor finding — live section-h
 **Net effect**: 5 surgical label-bump edits (header + Direction + Step 1 gate text + Acceptance Grid + Source-of-Truth + Risk Register + Plan-Approval Gate). No D-table, Step plan, or Acceptance Grid content changes. All iter-3 design decisions preserved unchanged.
 
 **Iteration-4 process observation (extends iter-3's)**: F-W43-9/10 are the same class of residual drift as F-W43-7/8 — *content-matching* iter-3's amendment scope but missed because the labels are in different sections than the rewritten content. Future plan-discipline improvement compounding iter-3's: when bumping the iteration tag, grep for `iteration \d` and `iteration-\d` (both spellings) across the entire file and either bump or explicitly justify each occurrence. Cumulative lesson: iteration-bumping is a *file-wide concern*, not a section-local one.
+
+## Iteration-5 Amendment Log
+
+Iteration 5 captures two findings surfaced during execution rather than during plan review: F-W43-11 (retroactively logged from Step 5) and F-W43-12 (workspace-test gate exception surfaced during Step 11 verification). Both findings landed operationally before this amendment commit; iteration 5 brings the plan record into alignment with the executed work. Header iteration tag bumped 4 → 5.
+
+| ID | Severity | Finding | Pre-iter-5 (wrong / silent) | Iter-5 (corrected) |
+|----|----------|---------|-----------------------------|--------------------|
+| **F-W43-11** | Major | D2 precedence (sort-merge > nested-loop) silently broke W4.2 Cert A and Cert E: their fixtures used trivial `(0..N).map(|i| (i, ...))` sorted-ascending keys, so after Step 5's W4.3 dispatch landed the sort-merge path took precedence and `nested_loop_dispatch_count == 1` failed. The W4.2 certs were no longer regression-detecting for the nested-loop path. | Step 5 wiring did not document a fixture-de-overlap requirement; W4.2 cert files used sorted ascending keys; no explicit guard in the plan. | Step 5 + W4.2 fixture de-overlap bundled into one commit (4ef14855). Cert A and Cert E now use rotate-halves `(N/2..N).chain(0..N/2)` — minimum-violation unsorted shape, deterministic, same key set / same row-set / same match counts as before. Bundled commit message documents both halves. Future plan-discipline improvement: dispatch-precedence changes that admit a new strategy MUST audit existing-strategy positive certs for shape collision before commit. |
+| **F-W43-12** | Major | Step 11's workspace-test gate (`cargo test --workspace --release --exclude pyxlog`) does not exit 0 because `crates/xlog-cuda/tests/test_wcoj_layout_fast_path.rs` fails non-deterministically — even under `--test-threads=1`. Confirmed pre-existing: the same flake reproduces on merge-base 19f7bc5d (W4.2 closure HEAD) when running the test file alongside the rest of the workspace. Failure signature (last-row-only data corruption + u64 high-bits leaking into u32 reads) is consistent with missing stream-synchronize between kernel launch and D2H download in the v0.6.2 WCOJ layout fast-path code. | Step 11 implied the canonical workspace command must exit 0; the flake was documented in the Step 11 commit message but the gate criterion was not relaxed. | Step 11 amended in this iteration to record an explicit gate exception: every workspace-test path EXCEPT `test_wcoj_layout_fast_path` exits 0, and the cert suite (the authoritative gate per MEMORY.md) passes. Fixing the flake is **out-of-W4.3-scope** because (a) the failures are in v0.6.2 WCOJ code unrelated to W4.3, and (b) the merge-base reproduces the flake. Deferred to follow-up work on the v0.6.2 fast-path code. The Step 11 commit message references this F-W43-12 gate exception. |
+
+**Iteration-5 process observation**: F-W43-11 and F-W43-12 are a different class from F-W43-7/8/9/10 — they are *execution-discovered* findings that could not have been surfaced by plan review alone (F-W43-11 required the W4.3 dispatch wiring to actually exist in source; F-W43-12 required running the workspace gate against the live CUDA environment). The pattern teaches: post-execution amendment commits are part of the plan-iteration discipline, not a violation of it; the discipline says "every amendment lands as a new iteration commit," and that includes amendments motivated by reality after the fact. The retroactive F-W43-11 entry is an explicit record of that pattern.
