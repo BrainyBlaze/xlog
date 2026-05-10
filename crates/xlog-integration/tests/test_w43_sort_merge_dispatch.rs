@@ -908,3 +908,415 @@ fn semi_join_falls_back_to_hash() {
          (left rows whose keys appear in right)"
     );
 }
+
+// ---------------------------------------------------------------
+// Helpers for Certs E (Symbol) and F (duplicate-key).
+// ---------------------------------------------------------------
+
+/// Upload a 2-col buffer where col 0 is declared as
+/// `ScalarType::Symbol` (the key column under test) and col 1 is
+/// `ScalarType::U32` (payload). The byte layout is identical to
+/// `upload_binary_u32`'s output — Symbol is u32 at the byte level.
+/// Only the schema's column-type label differs, which is exactly
+/// what the eligibility predicate inspects.
+fn upload_symbol_keyed(memory: &Arc<GpuMemoryManager>, rows: &[(u32, u32)]) -> CudaBuffer {
+    let n = rows.len() as u32;
+    let bytes_per_col = (n as usize) * std::mem::size_of::<u32>();
+    let mut col0 = memory.alloc::<u8>(bytes_per_col).expect("alloc col0");
+    let mut col1 = memory.alloc::<u8>(bytes_per_col).expect("alloc col1");
+    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc d_num_rows");
+    let device = memory.device().inner();
+    if n > 0 {
+        let col0_bytes: Vec<u8> = rows.iter().flat_map(|(a, _)| a.to_le_bytes()).collect();
+        let col1_bytes: Vec<u8> = rows.iter().flat_map(|(_, b)| b.to_le_bytes()).collect();
+        device
+            .htod_sync_copy_into(&col0_bytes, &mut col0)
+            .expect("htod col0");
+        device
+            .htod_sync_copy_into(&col1_bytes, &mut col1)
+            .expect("htod col1");
+    }
+    device
+        .htod_sync_copy_into(&[n], &mut d_num_rows)
+        .expect("htod d_num_rows");
+    let schema = Schema::new(vec![
+        ("sym".to_string(), ScalarType::Symbol),
+        ("p".to_string(), ScalarType::U32),
+    ]);
+    CudaBuffer::from_columns_with_host_count(
+        vec![col0.into(), col1.into()],
+        n as u64,
+        d_num_rows,
+        schema,
+        n,
+    )
+}
+
+// ---------------------------------------------------------------
+// Cert E — Symbol-typed sorted key dispatches sort-merge.
+//
+// The W4.3 eligibility predicate's admitted-set check is
+// `matches!(lt, Some(U32) | Some(Symbol))` (same admitted set as
+// W4.2's predicate). Cert A exercised the U32 branch; Cert E
+// covers the Symbol branch on a SORTED fixture (vs W4.2's Cert E
+// which deliberately uses an UNSORTED rotate-halves fixture so
+// W4.3 declines and W4.2 fires). The two Symbol certs together
+// prove the `Some(Symbol)` admitted-set arm works whether or not
+// sortedness admits the W4.3 path.
+// ---------------------------------------------------------------
+
+#[test]
+fn symbol_typed_sorted_key_dispatches_sort_merge() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    // Fixture: 100 rows each side, arity 2 (Symbol key + U32
+    // payload). Keys sorted ascending [0..100). Cartesian =
+    // 10_000 ≪ 4_000_000. Inner + 1-key + Symbol + sorted →
+    // every W4.3 eligibility check passes → sort-merge
+    // dispatches. 100 unique keys → 100 join output rows.
+    let left_rows: Vec<(u32, u32)> = (0..100u32).map(|i| (i, 1000 + i)).collect();
+    let right_rows: Vec<(u32, u32)> = (0..100u32).map(|i| (i, 2000 + i)).collect();
+
+    // Reference: direct provider.hash_join_v2 on Symbol-typed
+    // buffers. Output schema = 4-col [left_sym, left_p,
+    // right_sym, right_p].
+    let left_buf_ref = upload_symbol_keyed(&fix.memory, &left_rows);
+    let right_buf_ref = upload_symbol_keyed(&fix.memory, &right_rows);
+    let hash_buf = fix
+        .provider
+        .hash_join_v2(&left_buf_ref, &right_buf_ref, &[0], &[0], JoinType::Inner)
+        .expect("hash_join_v2 reference (Symbol-keyed)");
+    let reference_set: BTreeSet<(u32, u32, u32, u32)> =
+        download_quads(&hash_buf).into_iter().collect();
+    assert_eq!(
+        reference_set.len(),
+        100,
+        "Symbol-keyed reference should produce exactly 100 matched rows"
+    );
+
+    // Dispatched: build executor + manual RirNode::Join +
+    // execute_node, parallel to W4.2 Cert E's structure.
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    let lhs = RelId(2000);
+    let rhs = RelId(2001);
+    executor.register_relation(lhs, "lhs_sym");
+    executor.register_relation(rhs, "rhs_sym");
+    executor.put_relation("lhs_sym", upload_symbol_keyed(&fix.memory, &left_rows));
+    executor.put_relation("rhs_sym", upload_symbol_keyed(&fix.memory, &right_rows));
+
+    let join = RirNode::Join {
+        left: Box::new(RirNode::Scan { rel: lhs }),
+        right: Box::new(RirNode::Scan { rel: rhs }),
+        left_keys: vec![0],
+        right_keys: vec![0],
+        join_type: IrJoinType::Inner,
+    };
+
+    assert_eq!(
+        executor.sort_merge_dispatch_count(),
+        0,
+        "sort-merge counter must be zero before execute_node"
+    );
+    assert_eq!(
+        executor.nested_loop_dispatch_count(),
+        0,
+        "nested-loop counter must be zero before execute_node"
+    );
+
+    let result = executor.execute_node(&join).expect("execute_node");
+
+    // -----------------------------------------------------------
+    // Assertions:
+    //   1. W4.3 sort-merge counter == 1 (Symbol admitted by the
+    //      predicate's `Some(Symbol)` arm; sorted keys → W4.3
+    //      took the join).
+    //   2. W4.2 nested-loop counter == 0 (D2 precedence held on
+    //      the Symbol path too, not just the U32 path).
+    //   3. Row-set parity vs hash reference (drop-in compat
+    //      across the type label).
+    // -----------------------------------------------------------
+    assert_eq!(
+        executor.sort_merge_dispatch_count(),
+        1,
+        "Symbol-typed sorted-key inner join must dispatch sort-merge \
+         exactly once (predicate's `Some(Symbol)` arm × sorted-eligible); \
+         got dispatch counter {}",
+        executor.sort_merge_dispatch_count()
+    );
+    assert_eq!(
+        executor.nested_loop_dispatch_count(),
+        0,
+        "W4.2 nested-loop must NOT have fired on the Symbol-sorted path \
+         (D2 precedence holds on Symbol); got dispatch counter {}",
+        executor.nested_loop_dispatch_count()
+    );
+
+    let dispatched_set: BTreeSet<(u32, u32, u32, u32)> =
+        download_quads(&result).into_iter().collect();
+    assert_eq!(
+        dispatched_set.len(),
+        100,
+        "W4.3-dispatched Symbol-keyed result should produce exactly 100 \
+         matched rows; got {}",
+        dispatched_set.len()
+    );
+    assert_eq!(
+        dispatched_set, reference_set,
+        "W4.3 sort-merge row set must equal hash_join_v2 reference \
+         on Symbol-typed buffers"
+    );
+}
+
+// ---------------------------------------------------------------
+// Cert F — duplicate-key 2-col sorted fixture dispatches
+// sort-merge with 4000 output rows. Mirrors the spike's
+// regime (b) at `docs/evidence/2026-05-10-w43-bench-spike/`:
+// 250 unique keys × 4 dups per key on each side → 1000 rows
+// each side → output = 250 keys × (4 × 4) per-key matches
+// = 4000 rows. The kernel's per-thread `lower_bound` +
+// `upper_bound` pair in `sort_merge_join_inner_u32_1key_pairs`
+// yields a per-row run-length match count, so this cert
+// exercises the duplicate-key path that the unique-key Cert A
+// did not.
+// ---------------------------------------------------------------
+
+#[test]
+fn duplicate_key_2col_sorted_dispatches_sort_merge_with_4000_output() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    // Fixture: 250 unique keys × 4 dups each → 1000 rows each
+    // side, sorted ascending on the key. Payload = running
+    // counter so each duplicated row is distinct in (k, p) tuple
+    // space (avoids hash de-dup masking row-count asymmetries
+    // in the parity check).
+    //
+    //   left  rows = [(0, 1000), (0, 1001), (0, 1002), (0, 1003),
+    //                 (1, 1004), (1, 1005), ...]
+    //   right rows = [(0, 2000), (0, 2001), (0, 2002), (0, 2003),
+    //                 (1, 2004), (1, 2005), ...]
+    //
+    // Cartesian = 1000 × 1000 = 1_000_000 ≤ 4_000_000 threshold.
+    // Each key contributes 4 × 4 = 16 output rows; 250 keys total
+    // → 4000 output rows.
+    let left_rows: Vec<(u32, u32)> = (0..1000u32).map(|i| (i / 4, 1000 + i)).collect();
+    let right_rows: Vec<(u32, u32)> = (0..1000u32).map(|i| (i / 4, 2000 + i)).collect();
+
+    // Reference: direct provider.hash_join_v2.
+    let left_buf = upload_binary_u32(&fix.memory, &left_rows);
+    let right_buf = upload_binary_u32(&fix.memory, &right_rows);
+    let hash_buf = fix
+        .provider
+        .hash_join_v2(&left_buf, &right_buf, &[0], &[0], JoinType::Inner)
+        .expect("hash_join_v2 reference (duplicate-key)");
+    let reference_set: BTreeSet<(u32, u32, u32)> = download_quads(&hash_buf)
+        .into_iter()
+        .map(|(lk, lp, _rk, rp)| (lk, lp, rp))
+        .collect();
+    assert_eq!(
+        reference_set.len(),
+        4000,
+        "duplicate-key reference should produce exactly 4000 matched rows \
+         (250 keys × 4×4 per-key matches)"
+    );
+
+    // Dispatched run via Datalog program.
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile(SMALL_INNER_JOIN_PROGRAM).expect("compile");
+    let rel_ids = compiler.rel_ids().clone();
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &rel_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    let mut inputs: BTreeMap<&str, Vec<(u32, u32)>> = BTreeMap::new();
+    inputs.insert("left_rel", left_rows.clone());
+    inputs.insert("right_rel", right_rows.clone());
+    for (name, rows) in &inputs {
+        let buf = upload_binary_u32(&fix.memory, rows);
+        executor.put_relation(name, buf);
+    }
+
+    executor.execute_plan(&plan).expect("execute_plan");
+
+    // -----------------------------------------------------------
+    // Assertions:
+    //   1. W4.3 sort-merge dispatched exactly once on the
+    //      sorted-eligible duplicate-key fixture.
+    //   2. W4.2 nested-loop counter unchanged (D2 precedence).
+    //   3. Output row count == 4000 (proves the run-length
+    //      kernel produces the right multiplicity, not just
+    //      the right unique row set).
+    //   4. Row-set parity vs hash reference.
+    // -----------------------------------------------------------
+    assert_eq!(
+        executor.sort_merge_dispatch_count(),
+        1,
+        "duplicate-key sorted inner join must dispatch sort-merge exactly once; \
+         got dispatch counter {}",
+        executor.sort_merge_dispatch_count()
+    );
+    assert_eq!(
+        executor.nested_loop_dispatch_count(),
+        0,
+        "W4.2 nested-loop must NOT have fired on duplicate-key sorted fixture \
+         (D2 precedence); got dispatch counter {}",
+        executor.nested_loop_dispatch_count()
+    );
+
+    let result_buf = executor
+        .store()
+        .get("result")
+        .expect("result relation must exist post-execute");
+    let dispatched_triples = download_triples(result_buf);
+    assert_eq!(
+        dispatched_triples.len(),
+        4000,
+        "duplicate-key dispatched output must contain exactly 4000 rows \
+         (proves the run-length kernel emits the right multiplicity); got {}",
+        dispatched_triples.len()
+    );
+    let dispatched_set: BTreeSet<(u32, u32, u32)> = dispatched_triples.into_iter().collect();
+    assert_eq!(
+        dispatched_set.len(),
+        4000,
+        "all 4000 (k, lp, rp) tuples must be distinct (running-counter payload \
+         design); got {} distinct tuples",
+        dispatched_set.len()
+    );
+    assert_eq!(
+        dispatched_set, reference_set,
+        "duplicate-key sort-merge row set must equal hash_join_v2 reference"
+    );
+}
+
+// ---------------------------------------------------------------
+// Cert G — empty-input dispatch (per F-W43-4).
+//
+// Two subcases in one test (counts as one Acceptance Grid cell):
+//   G1. num_left == 0, right populated + sorted.
+//   G2. num_right == 0, left populated + sorted.
+//
+// F-W43-4 contract: `is_sorted_ascending_u32` short-circuits
+// `n < 2 → Ok(true)` BEFORE any allocation or kernel launch.
+// With both sides admitted by the sortedness probe AND
+// Cartesian = 0 ≤ threshold, the W4.3 dispatch fires; the
+// `sort_merge_join_v2_inner_u32_1key` kernel's own empty-input
+// fast path emits an empty combined-schema buffer.
+//
+// Asserts: no kernel-launch crash + empty output + parity vs
+// hash reference (which has its own empty fast path at
+// `relational.rs:3165-3170` and produces an empty output too).
+// Three independent short-circuit layers (sortedness probe →
+// dispatch predicate → kernel) all bottom out cleanly on n == 0.
+// ---------------------------------------------------------------
+
+#[test]
+fn empty_input_dispatches_no_crash_with_parity() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    // ===========================================================
+    // Subcase G1: empty L, populated sorted R.
+    // ===========================================================
+    {
+        let left_rows: Vec<(u32, u32)> = Vec::new();
+        let right_rows: Vec<(u32, u32)> = (0..50u32).map(|i| (i, 2000 + i)).collect();
+
+        // Reference: provider.hash_join_v2 on these buffers
+        // takes the hash empty-input fast path. Output is
+        // an arity-4 buffer with zero rows.
+        let left_buf = upload_binary_u32(&fix.memory, &left_rows);
+        let right_buf = upload_binary_u32(&fix.memory, &right_rows);
+        let hash_buf = fix
+            .provider
+            .hash_join_v2(&left_buf, &right_buf, &[0], &[0], JoinType::Inner)
+            .expect("hash_join_v2 reference (empty L)");
+        let reference_set: BTreeSet<(u32, u32, u32, u32)> =
+            download_quads(&hash_buf).into_iter().collect();
+        assert!(
+            reference_set.is_empty(),
+            "G1 hash reference must produce zero rows on empty-L input"
+        );
+
+        // Dispatched: execute_node — proves the W4.3 dispatch
+        // probe + kernel survive n == 0 without a launch crash.
+        let (mut executor, lhs, rhs) =
+            build_executor_with_two_relations(&fix, &left_rows, &right_rows);
+        let join = RirNode::Join {
+            left: Box::new(RirNode::Scan { rel: lhs }),
+            right: Box::new(RirNode::Scan { rel: rhs }),
+            left_keys: vec![0],
+            right_keys: vec![0],
+            join_type: IrJoinType::Inner,
+        };
+        let result = executor
+            .execute_node(&join)
+            .expect("G1: execute_node must not crash on empty-L input");
+
+        let dispatched_set: BTreeSet<(u32, u32, u32, u32)> =
+            download_quads(&result).into_iter().collect();
+        assert!(
+            dispatched_set.is_empty(),
+            "G1 dispatched output must be empty (left input has zero rows)"
+        );
+        assert_eq!(
+            dispatched_set, reference_set,
+            "G1 dispatched row set must equal hash reference (both empty)"
+        );
+    }
+
+    // ===========================================================
+    // Subcase G2: populated sorted L, empty R.
+    // ===========================================================
+    {
+        let left_rows: Vec<(u32, u32)> = (0..50u32).map(|i| (i, 1000 + i)).collect();
+        let right_rows: Vec<(u32, u32)> = Vec::new();
+
+        let left_buf = upload_binary_u32(&fix.memory, &left_rows);
+        let right_buf = upload_binary_u32(&fix.memory, &right_rows);
+        let hash_buf = fix
+            .provider
+            .hash_join_v2(&left_buf, &right_buf, &[0], &[0], JoinType::Inner)
+            .expect("hash_join_v2 reference (empty R)");
+        let reference_set: BTreeSet<(u32, u32, u32, u32)> =
+            download_quads(&hash_buf).into_iter().collect();
+        assert!(
+            reference_set.is_empty(),
+            "G2 hash reference must produce zero rows on empty-R input"
+        );
+
+        let (mut executor, lhs, rhs) =
+            build_executor_with_two_relations(&fix, &left_rows, &right_rows);
+        let join = RirNode::Join {
+            left: Box::new(RirNode::Scan { rel: lhs }),
+            right: Box::new(RirNode::Scan { rel: rhs }),
+            left_keys: vec![0],
+            right_keys: vec![0],
+            join_type: IrJoinType::Inner,
+        };
+        let result = executor
+            .execute_node(&join)
+            .expect("G2: execute_node must not crash on empty-R input");
+
+        let dispatched_set: BTreeSet<(u32, u32, u32, u32)> =
+            download_quads(&result).into_iter().collect();
+        assert!(
+            dispatched_set.is_empty(),
+            "G2 dispatched output must be empty (right input has zero rows)"
+        );
+        assert_eq!(
+            dispatched_set, reference_set,
+            "G2 dispatched row set must equal hash reference (both empty)"
+        );
+    }
+}
