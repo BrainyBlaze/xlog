@@ -334,8 +334,11 @@ fn pre_sorted_small_cartesian_dispatches_sort_merge_and_matches_hash() {
 
     // -----------------------------------------------------------
     // Post-execute assertions:
-    //   1. W4.3 sort-merge dispatch counter incremented (proves
-    //      the W4.3 path fired).
+    //   1. W4.3 sort-merge dispatch counter == 1 (proves the W4.3
+    //      path fired exactly once — exact equality, not `>= 1`,
+    //      so the cert catches double-dispatch / re-execution
+    //      regressions instead of silently masking them on a
+    //      single-join fixture).
     //   2. W4.2 nested-loop counter unchanged (proves D2 precedence
     //      — sort-merge took priority over nested-loop on this
     //      sorted-eligible fixture).
@@ -345,9 +348,11 @@ fn pre_sorted_small_cartesian_dispatches_sort_merge_and_matches_hash() {
     //      bottom of execute_join).
     //   4. Row-set parity vs hash reference (proves correctness).
     // -----------------------------------------------------------
-    assert!(
-        executor.sort_merge_dispatch_count() >= 1,
-        "W4.3 sort-merge dispatch must have fired at least once; got counter {}",
+    assert_eq!(
+        executor.sort_merge_dispatch_count(),
+        1,
+        "W4.3 sort-merge dispatch must have fired exactly once for this \
+         single-join program; got counter {}",
         executor.sort_merge_dispatch_count()
     );
     assert_eq!(
