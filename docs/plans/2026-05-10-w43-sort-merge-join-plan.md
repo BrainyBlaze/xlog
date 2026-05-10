@@ -1,6 +1,6 @@
-# W4.3 Sort-Merge Join Operator — Plan (iteration 2 canonical)
+# W4.3 Sort-Merge Join Operator — Plan (iteration 3 canonical)
 
-**Plan iteration:** 2 (amendment after iteration-1 review surfaced F-W43-1..6 — 1 blocking + 3 major + 2 minor).
+**Plan iteration:** 3 (amendment after iteration-2 review surfaced F-W43-7..8 — 1 major + 1 minor; both are stale-text drift left over from iteration-1).
 **Worktree:** `.worktrees/w43-sort-merge-join` on branch `feat/w43-sort-merge-join` (off local `main` `19f7bc5d`).
 **Spike evidence:** `bench-spike/w43-sort-merge` HEAD `fadc2700` (unmerged); evidence at `docs/evidence/2026-05-10-w43-bench-spike/README.md`.
 **Recon predecessor:** `docs/plans/2026-05-08-w43-sort-merge-join-recon.md`.
@@ -186,7 +186,7 @@ Commit subject: `test(w43): cert E + F + G — Symbol-typed + duplicate-key + em
 
 ### Step 11 — Workspace gate
 
-Mirrors W4.2 Step 11. fmt + warnings + workspace tests + CUDA cert suite. Pass-count delta = +6 (6 new W4.3 cert fns: A, B, C, D, D', E, F — actually 7; placeholder count, will be exact after implementation).
+Mirrors W4.2 Step 11. fmt + warnings + workspace tests + CUDA cert suite. Pass-count delta = **+8** per the Acceptance Grid (Certs A, B, C, D, D', E, F, G — Cert G added per F-W43-4). The Acceptance Grid is canonical for the count.
 
 Commit subject (if any cleanup): `chore(w43): workspace gate green pre-bench`.
 
@@ -241,12 +241,12 @@ Plan-iteration commit + Steps 2–12 commits on `feat/w43-sort-merge-join`. No b
 | Sort-merge wins in spike but loses in production due to multi-col gather overhead | Spike's 2-col duplicate-key cell already exercises gather (2.56× win). Step 12 bench at production arity validates. |
 | Threshold mismatch between W4.2 and W4.3 | D3 explicitly shares the constant. Iteration-1 lock prevents drift. |
 | Sort-merge dispatch overrides nested-loop in cases where nested-loop is faster | Spike doesn't cross-compare sort-merge vs nested-loop directly. Step 12 bench could include a side-by-side comparison cell at small sorted Cartesian inputs to confirm sort-merge precedence is empirically right. |
-| Detection kernel reports "unsorted" on edge cases (single-row inputs, empty inputs) | Empty-input handled by D3's fast path before detection. Single-row inputs are trivially sorted (1-element scan returns 1). Test fixture coverage ensures both. |
+| Detection kernel reports "unsorted" on edge cases (single-row inputs, empty inputs) | Per F-W43-4: empty AND single-row inputs (`n < 2`) are short-circuited by `is_sorted_ascending_u32`'s **own internal fast path** (return `Ok(true)` BEFORE allocation/launch) — they enter detection AFTER the threshold check admits the join (`0 * 0 = 0 ≤ 4M = true`). The detection kernel never launches with grid_dim 0. Once detection returns `Ok(true)` for an empty side, `sort_merge_join_v2_inner_u32_1key`'s own empty fast path returns the empty `combine_schemas` buffer (mirrors `hash_join_inner_v2`'s empty handling at `relational.rs:3165-3170`). Cert G covers both empty-left and empty-right fixtures. |
 | `JoinStrategy::SortMerge` dead-enum confusion | NOT touched per D8. Future cleanup commit (out of W4.3) can delete the enum entirely. |
 
-## Plan-Approval Gate (iteration 2)
+## Plan-Approval Gate (iteration 3)
 
-This plan is **iteration 2 draft** (iteration 1 surfaced F-W43-1..6: 1 blocking + 3 major + 2 minor; live D-table + Step plan + Acceptance Grid rewritten in place; iteration-1 history preserved in the amendment log below). The agent does NOT advance to Step 2 until the user explicitly states "Iteration 2 is approved" (or equivalent). Subsequent iterations may add further F-W43-N findings; the live D-table + Step plan + Acceptance Grid above are the canonical source of truth.
+This plan is **iteration 3 draft** (iteration 2 surfaced F-W43-7..8: 1 major + 1 minor — both stale-text drift left over from iteration 1; targeted Step 11 placeholder + Risk Register row patches). The agent does NOT advance to Step 2 until the user explicitly states "Iteration 3 is approved" (or equivalent). Subsequent iterations may add further F-W43-N findings; the live D-table + Step plan + Acceptance Grid above are the canonical source of truth.
 
 Common amendment vectors per the W4.2 / W4.1 plan-iteration discipline:
 * Threshold sharing decision (D3) — could push back to introduce a separate constant, or argue for a different value.
@@ -280,3 +280,16 @@ User review of iteration 1 surfaced 1 blocking + 3 major + 2 minor findings. Liv
 **Net effect:** D1 (empty fast path), D2 (provisional precedence), D5 (fail-closed `match`-not-`?`), D7 (executor-dispatch-path timing + Cert G + +8 delta), Step 3 (file path), Step 5 (`matches!` pseudocode + empty doc-comment), Step 10 (Cert G added), Step 12 (two-part bench design). Acceptance Grid expanded from 7 certs + 1 bench to 8 certs + 2 bench parts. Header iteration tag bumped 1 → 2.
 
 **Process note**: per the W4.2 plan-iteration discipline, all amendments are surfaced as F-W43-N findings with explicit before/after states. The agent does NOT modify the live D-table / Step plan based on chat alone — every amendment lands as a new iteration commit.
+
+## Iteration-3 Amendment Log
+
+User review of iteration 2 surfaced 1 major + 1 minor finding. Both are residual stale-text drift left over from iteration 1 — content that wasn't rewritten when iteration 2 fixed the surrounding sections. Patches are surgical (no structural change to D-table, Step plan, or Acceptance Grid). Header iteration tag bumped 2 → 3.
+
+| ID | Severity | Finding | Iteration-2 (wrong) | Iteration-3 (corrected) |
+|----|----------|---------|---------------------|--------------------------|
+| **F-W43-7** | Major | Step 11 still contained the iter-1 placeholder "Pass-count delta = +6 (... actually 7; placeholder count, will be exact after implementation)" — directly contradicting iter-2's Acceptance Grid which is "+8 (Cert G added)" | Step 11: "Pass-count delta = +6 ... actually 7; placeholder count" | Step 11 says "Pass-count delta = **+8** per the Acceptance Grid (Certs A, B, C, D, D', E, F, G — Cert G added per F-W43-4). The Acceptance Grid is canonical for the count." — single source of truth (the Grid) referenced explicitly. |
+| **F-W43-8** | Minor | Risk Register row about edge-case detection said "Empty-input handled by D3's fast path **before** detection" — but the iter-2 design handles empties INSIDE `is_sorted_ascending_u32` AFTER the threshold check admits the join (`0 ≤ 4M = true`), then the join provider's own empty fast path returns the empty `combine_schemas` buffer | Row text: "by D3's fast path before detection" | Row rewritten to match the actual iter-2 design: empties enter detection AFTER threshold admits the join, then `is_sorted_ascending_u32`'s INTERNAL `n < 2 → Ok(true)` fast path short-circuits BEFORE allocation/launch, then `sort_merge_join_v2_inner_u32_1key`'s own empty fast path returns the empty buffer. Cites Cert G as coverage. |
+
+**Net effect**: 2 surgical text patches (Step 11 placeholder; Risk Register row). No D-table changes, no Step plan structural changes, no Acceptance Grid changes. All iter-2 design decisions preserved unchanged.
+
+**Iteration-3 process observation**: F-W43-7 and F-W43-8 are residual drift — text that should have been rewritten in iteration 2 alongside the related D-table/Grid edits but wasn't. Iteration 2's amendment scope was D1/D2/D5/D7 + Steps 3/5/10/12 + Grid; the iter-1 lines at Step 11 and Risk Register weren't included even though they referenced the same content. A future plan-discipline improvement: when amending a count or design fact, grep the entire plan file for related text before declaring the iteration complete. Otherwise residual-drift findings continue to cost iterations.
