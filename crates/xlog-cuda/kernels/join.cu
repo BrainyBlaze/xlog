@@ -616,10 +616,14 @@ extern "C" __global__ void nested_loop_join_inner_u32_1key_pairs(
 // multi-col-compatible via columnar `CudaBuffer`).
 //
 // Caller asserts both inputs are pre-sorted ascending by the
-// single key column (validated at the dispatch site via the
-// runtime detection kernel `check_ascending_sorted_u32` BEFORE
-// invoking this kernel; on caller-contract violation the
-// row-set output is undefined). Each thread takes one LEFT-row
+// single key column. Callers may pre-check via the runtime
+// detection kernel `check_ascending_sorted_u32` (provider fn
+// `is_sorted_ascending_u32`); on caller-contract violation the
+// row-set output is undefined. Per W4.3 plan iter-6 F-W43-14
+// (operator-only scope after Step 12 bench rejected D2
+// precedence), there is no executor dispatch-site pre-check
+// — sortedness is purely a caller-supplied invariant. Each
+// thread takes one LEFT-row
 // and uses binary search on the RIGHT side to find the matched-
 // key run (`lower_bound` + `upper_bound`), then emits
 // `(left_idx, right_idx)` pairs for each `right_idx` in

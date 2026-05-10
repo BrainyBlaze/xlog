@@ -2810,7 +2810,7 @@ impl super::CudaKernelProvider {
     /// or kernel launch. The detection kernel's grid `(n + 255)
     /// / 256` is undefined for `n == 0`; single-row sequences
     /// are trivially sorted. This is the load-bearing
-    /// invariant the dispatch site relies on at `execute_join`.
+    /// invariant Cert G's empty-input subcases verify.
     ///
     /// Validation:
     ///   * Key column index within arity bounds.
@@ -2819,19 +2819,20 @@ impl super::CudaKernelProvider {
     ///   * Key column allocation `>= num_rows * 4` bytes
     ///     (mirrors W4.2 F-W42-14 byte-length lower-bound idiom).
     ///
-    /// **Fail-closed contract** (per W4.3 plan iter-4 D5 +
-    /// F-W43-1): this fn returns the honest `Result<bool>` —
-    /// the kernel can fail (allocation, launch, D2H), and the
+    /// **Caller surface (per W4.3 plan iter-6 F-W43-14)**: this
+    /// fn has NO executor-dispatch caller after iteration-6
+    /// unwiring — its only callers are operator-level certs
+    /// (Cert G's empty-input subcases) and the Step 12
+    /// production bench (sort-merge-with-detection Path 1
+    /// timing). The provider returns the honest `Result<bool>`
+    /// — the kernel can fail (allocation, launch, D2H), and
     /// `Err(_)` is preserved so callers can log or surface it
-    /// at their abstraction level. The dispatch site MUST
-    /// handle the returned `Result<bool>` such that BOTH
-    /// `Ok(false)` AND `Err(_)` fall through to nested-loop
-    /// or hash via the pattern
-    /// `matches!(self.provider.is_sorted_ascending_u32(...), Ok(true))`.
-    /// The dispatch site (Step 5) is responsible for
-    /// suppressing the `Err` side; this provider fn does NOT
-    /// auto-suppress because that would lose the failure
-    /// information the caller might want to log.
+    /// at their abstraction level. There is no fail-closed
+    /// dispatch contract anymore (the iteration-1–5 fail-closed
+    /// `matches!(_, Ok(true))` pattern was removed by Step 4'
+    /// when the dispatch site was unwired). Future v0.6.6+
+    /// callers — if any — must decide their own Err-handling
+    /// policy.
     pub fn is_sorted_ascending_u32(&self, buf: &CudaBuffer, key_col: usize) -> Result<bool> {
         // Empty / single-row fast path (per F-W43-4).
         let n = self.device_row_count(buf)?;
@@ -2924,19 +2925,31 @@ impl super::CudaKernelProvider {
     /// inputs). Drop-in compatible with `hash_join_v2(_, _,
     /// &[left_key], &[right_key], JoinType::Inner)`: same
     /// input types, same output schema
-    /// (`combine_schemas(left, right)`), same row set. Caller
-    /// (the executor's dispatch site, Step 5) is responsible
-    /// for choosing between hash, nested-loop, and this fn
-    /// based on the eligibility predicate + threshold check
-    /// + sortedness detection; this fn validates the same
-    /// contract fail-closed and returns `Err` if a caller
-    /// violates it.
+    /// (`combine_schemas(left, right)`), same row set.
+    ///
+    /// **Caller surface (per W4.3 plan iter-6 F-W43-14)**: this
+    /// fn has NO executor-dispatch caller after iteration-6
+    /// unwiring (the iteration-1–5 dispatch site at
+    /// `execute_join` was removed when the Step 12 production
+    /// bench rejected D2 precedence and D7 #8). The fn is
+    /// preserved as graduated implementation work for any
+    /// future v0.6.6+ caller (e.g., a hypothetical sort-merge
+    /// dispatch path with kernel-perf improvements that recover
+    /// the spike's 1-col 2.5×–3.3× advantage on multi-col arity).
+    /// Current callers: operator-level certs in
+    /// `crates/xlog-integration/tests/test_w43_sort_merge_dispatch.rs`
+    /// (Cert A/E/F/G provider parity tests) and the Step 12
+    /// production bench at
+    /// `crates/xlog-integration/benches/w43_production_sort_merge_bench.rs`
+    /// (sort-merge-with-detection Path 1 timing).
     ///
     /// **Caller contract**: both inputs are pre-sorted ascending
     /// by their respective key column. The kernel does NOT
-    /// detect or enforce sortedness — that responsibility
-    /// lives at the dispatch site via `is_sorted_ascending_u32`.
-    /// On unsorted inputs the row-set output is undefined.
+    /// detect or enforce sortedness; callers may pre-check via
+    /// `is_sorted_ascending_u32`. On unsorted inputs the row-set
+    /// output is undefined (operator-level UB per iter-6 D4 —
+    /// the iteration-1–5 dispatch-site fall-back path no longer
+    /// exists).
     ///
     /// # Eligibility (validated inside; `Err` on violation)
     ///
@@ -3098,10 +3111,11 @@ impl super::CudaKernelProvider {
         //     uint32_t num_left, uint32_t num_right,
         //     uint32_t* output_left_idx, uint32_t* output_right_idx,
         //     uint32_t* output_count, uint32_t output_capacity)
-        // Byte length validated above; sortedness validated by
-        // dispatch site before invoking; counts fit in u32 by
-        // threshold; allocations sized to upper_bound; counter
-        // pre-zeroed.
+        // Byte length validated above; sortedness is a caller-
+        // supplied invariant (per iter-6 D4 — no dispatch-site
+        // pre-check exists after F-W43-14 unwiring); counts fit
+        // in u32 by caller-supplied input-size bound; allocations
+        // sized to upper_bound; counter pre-zeroed.
         unsafe {
             func.clone()
                 .launch(
