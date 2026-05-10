@@ -55,6 +55,64 @@ fn eligible_for_nested_loop(
     lt == rt && matches!(lt, Some(ScalarType::U32) | Some(ScalarType::Symbol))
 }
 
+/// W4.3 eligibility predicate for sort-merge join dispatch.
+///
+/// Returns `true` iff the join shape is admissible for the
+/// `sort_merge_join_v2_inner_u32_1key` provider entry point.
+/// The predicate is intentionally narrow per the W4.3
+/// iteration-4 plan D4 — same envelope as
+/// `eligible_for_nested_loop` so the dispatch decision tree
+/// (D2: sort-merge > nested-loop > hash) can route between
+/// operators with symmetric eligibility checks:
+///   * `JoinType::Inner` only (Semi / Anti / LeftOuter fall back
+///     to nested-loop or hash).
+///   * Exactly one key column on each side.
+///   * Both key columns share the same `ScalarType` AND that
+///     shared type is `U32` or `Symbol` (Symbol is `u32` at the
+///     byte level — same kernel applies).
+///
+/// **Sortedness detection is NOT in this predicate** (per W4.3
+/// D1 + Step 4 lock): runtime sortedness detection requires a
+/// kernel launch + D2H, which is a runtime cost not appropriate
+/// for a static eligibility predicate. The dispatch site (Step
+/// 5) calls `provider.is_sorted_ascending_u32` AFTER this
+/// predicate accepts AND the threshold check passes, so
+/// detection cost is paid only on candidates.
+///
+/// **Threshold check is NOT in this predicate** either — it
+/// requires `device_row_count` (an O(1) read but cheap-relative-
+/// to-kernel and conventionally placed at the dispatch site
+/// per W4.2's pattern).
+///
+/// Out-of-bounds key indices yield `Schema::column_type(_) = None`,
+/// which fails the `matches!(...)` guard — falling back to
+/// hash without a separate bounds check.
+///
+/// Cheap O(1) — no kernel launches, no row-count reads, no D2H.
+//
+// W4.3 plan iter-4 Step 4: predicate is added in this commit;
+// the call site that wires it into `execute_join` (BEFORE the
+// W4.2 nested-loop branch per D2 precedence) lives in Step 5.
+// Until Step 5 lands the predicate is intentionally unused.
+#[allow(dead_code)]
+fn eligible_for_sort_merge(
+    left: &CudaBuffer,
+    right: &CudaBuffer,
+    left_keys: &[usize],
+    right_keys: &[usize],
+    join_type: JoinType,
+) -> bool {
+    if join_type != JoinType::Inner {
+        return false;
+    }
+    if left_keys.len() != 1 || right_keys.len() != 1 {
+        return false;
+    }
+    let lt = left.schema().column_type(left_keys[0]);
+    let rt = right.schema().column_type(right_keys[0]);
+    lt == rt && matches!(lt, Some(ScalarType::U32) | Some(ScalarType::Symbol))
+}
+
 impl Executor {
     /// Execute a Scan node — looks up the relation by RelId and returns a clone.
     pub(super) fn execute_scan(&mut self, rel: RelId) -> Result<CudaBuffer> {
