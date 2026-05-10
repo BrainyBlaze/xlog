@@ -1272,6 +1272,17 @@ impl Executor {
         self.nested_loop_dispatch_count
     }
 
+    /// W4.3 — count of times `execute_join` routed an inner-join
+    /// to the sort-merge provider entry point because the
+    /// eligibility predicate + Cartesian-product threshold +
+    /// sortedness detection (both sides Ok(true)) all held.
+    /// Tests use this counter to assert that the W4.3 path
+    /// actually fired vs. falling through to nested-loop or
+    /// hash per D2 precedence.
+    pub fn sort_merge_dispatch_count(&self) -> u64 {
+        self.sort_merge_dispatch_count
+    }
+
     /// v0.6.5 slice 2 — try to dispatch a non-recursive rule
     /// through the GPU 4-cycle WCOJ kernel.
     ///

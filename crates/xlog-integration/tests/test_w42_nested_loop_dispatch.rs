@@ -246,11 +246,23 @@ fn small_small_dispatches_nested_loop_and_matches_hash() {
         return;
     };
 
-    // Fixture: 100 unique-keyed rows on each side. All 100 keys
-    // match → 100 join output rows. 100×100 = 10_000 Cartesian
-    // ≤ 4_000_000 threshold → eligible for W4.2 dispatch.
-    let left_rows: Vec<(u32, u32)> = (0..100u32).map(|i| (i, 1000 + i)).collect();
-    let right_rows: Vec<(u32, u32)> = (0..100u32).map(|i| (i, 2000 + i)).collect();
+    // Fixture: 100 unique-keyed rows on each side. Keys are
+    // **deterministically unsorted** via rotate-halves
+    // (`[50..100, 0..50)`) so W4.3's sort-merge dispatch
+    // detection returns `Ok(false)` and falls through, leaving
+    // W4.2 nested-loop directly certified by this test. All 100
+    // keys still match (key-set on each side is `[0..100)`,
+    // identical to a sorted fixture); 100 join output rows;
+    // 100×100 = 10_000 Cartesian ≤ 4_000_000 threshold →
+    // eligible for W4.2 dispatch.
+    //
+    // The single descending step at index 49→50 (`99 > 0`) is
+    // sufficient to fail `check_ascending_sorted_u32`'s
+    // adjacent-pair check — minimum-violation unsorted shape.
+    let left_keys: Vec<u32> = (50..100u32).chain(0..50u32).collect();
+    let right_keys: Vec<u32> = (50..100u32).chain(0..50u32).collect();
+    let left_rows: Vec<(u32, u32)> = left_keys.iter().map(|&k| (k, 1000 + k)).collect();
+    let right_rows: Vec<(u32, u32)> = right_keys.iter().map(|&k| (k, 2000 + k)).collect();
 
     // -----------------------------------------------------------
     // Reference row set: direct provider call to hash_join_v2 on
@@ -798,11 +810,23 @@ fn symbol_typed_key_dispatches_nested_loop() {
     };
 
     // Fixture: 100 rows each side, arity 2 (Symbol key + U32
-    // payload). All 100 keys match. 100 × 100 = 10_000 ≪
-    // 4_000_000 threshold → eligible. Inner + 1-key + matching
-    // Symbol type → eligibility predicate accepts.
-    let left_rows: Vec<(u32, u32)> = (0..100u32).map(|i| (i, 1000 + i)).collect();
-    let right_rows: Vec<(u32, u32)> = (0..100u32).map(|i| (i, 2000 + i)).collect();
+    // payload). Keys are **deterministically unsorted** via
+    // rotate-halves (`[50..100, 0..50)`) so W4.3's sort-merge
+    // dispatch detection returns `Ok(false)` and falls through,
+    // leaving W4.2 nested-loop directly certified by this test
+    // even after W4.3 introduces the precedence change.
+    // All 100 keys still match (key-set on each side is
+    // `[0..100)`, identical to a sorted fixture); 100 × 100 =
+    // 10_000 ≪ 4_000_000 threshold → eligible. Inner + 1-key +
+    // matching Symbol type → eligibility predicate accepts.
+    //
+    // Same rotate-halves pattern as Cert A's U32 fixture — the
+    // unsorted-key invariant is uniform across W4.2 positive
+    // dispatch certs.
+    let left_keys: Vec<u32> = (50..100u32).chain(0..50u32).collect();
+    let right_keys: Vec<u32> = (50..100u32).chain(0..50u32).collect();
+    let left_rows: Vec<(u32, u32)> = left_keys.iter().map(|&k| (k, 1000 + k)).collect();
+    let right_rows: Vec<(u32, u32)> = right_keys.iter().map(|&k| (k, 2000 + k)).collect();
 
     // Reference: direct provider.hash_join_v2 on Symbol-typed
     // buffers. hash_join_v2 admits Symbol because its own

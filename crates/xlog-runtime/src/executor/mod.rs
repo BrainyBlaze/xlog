@@ -113,6 +113,16 @@ pub struct Executor {
     /// hash. Public accessor:
     /// `Executor::nested_loop_dispatch_count(&self) -> u64`.
     pub(super) nested_loop_dispatch_count: u64,
+    /// W4.3 — count of times `execute_join` routed an inner-join
+    /// to the sort-merge provider entry point
+    /// (`CudaKernelProvider::sort_merge_join_v2_inner_u32_1key`)
+    /// because the eligibility predicate + Cartesian-product
+    /// threshold + sortedness detection (both sides) all held.
+    /// Tests use this counter to assert that the W4.3 path
+    /// actually fired vs. falling through to W4.2 nested-loop
+    /// or hash per D2 precedence. Public accessor:
+    /// `Executor::sort_merge_dispatch_count(&self) -> u64`.
+    pub(super) sort_merge_dispatch_count: u64,
     /// Cached non-default stream for the WCOJ triangle dispatch hook.
     /// Acquired lazily on first dispatch and reused thereafter — mirrors
     /// [`xlog_cuda::CudaKernelProvider::recorded_op_stream`] for the
@@ -241,6 +251,7 @@ impl Executor {
             wcoj_clique5_dispatch_count: 0,
             wcoj_clique6_dispatch_count: 0,
             nested_loop_dispatch_count: 0,
+            sort_merge_dispatch_count: 0,
             wcoj_dispatch_stream: OnceLock::new(),
             #[cfg(feature = "wcoj-phase-timing")]
             last_wcoj_phase_timing: std::sync::Mutex::new(None),
