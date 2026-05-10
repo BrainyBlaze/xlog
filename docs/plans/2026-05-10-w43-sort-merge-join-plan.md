@@ -1,6 +1,6 @@
-# W4.3 Sort-Merge Join Operator — Plan (iteration 3 canonical)
+# W4.3 Sort-Merge Join Operator — Plan (iteration 4 canonical)
 
-**Plan iteration:** 3 (amendment after iteration-2 review surfaced F-W43-7..8 — 1 major + 1 minor; both are stale-text drift left over from iteration-1).
+**Plan iteration:** 4 (amendment after iteration-3 review surfaced F-W43-9..10 — 1 major + 1 minor; live section-heading and approval-gate label drift left over from iterations 1–2).
 **Worktree:** `.worktrees/w43-sort-merge-join` on branch `feat/w43-sort-merge-join` (off local `main` `19f7bc5d`).
 **Spike evidence:** `bench-spike/w43-sort-merge` HEAD `fadc2700` (unmerged); evidence at `docs/evidence/2026-05-10-w43-bench-spike/README.md`.
 **Recon predecessor:** `docs/plans/2026-05-08-w43-sort-merge-join-recon.md`.
@@ -22,7 +22,7 @@ W4.3 has **no direct paper claim** in arXiv:2604.20073 — the SRDatalog paper c
 * Spike decision-gate ≥ 2× win on tested matrix: ✅ met (range 2.52×–3.25×).
 * Five mandatory iteration-1 locks per user direction: encoded in D1–D5 below.
 
-## Direction (locked, iteration 1)
+## Direction (locked, iteration 4 canonical)
 
 | ID | Lock | Direction |
 |----|------|-----------|
@@ -53,7 +53,7 @@ W4.3 has **no direct paper claim** in arXiv:2604.20073 — the SRDatalog paper c
 
 ### Step 1 — Plan iteration commit (this commit)
 
-Iteration-1 plan, on `feat/w43-sort-merge-join`. No code yet. The agent does NOT advance to Step 2 until the user explicitly approves iteration 1.
+The current plan-iteration commit (iter 1, then amendments per F-W43-N), on `feat/w43-sort-merge-join`. No code yet. The agent does NOT advance to Step 2 until the user explicitly approves the live iteration (currently iteration 4).
 
 Commit subject: `docs(plan): W4.3 iteration 1 — sort-merge join (post-spike, 5 mandatory locks)`.
 
@@ -208,7 +208,7 @@ Commit subject: `feat(w43): add production sort-merge bench + evidence (executor
 
 Plan-iteration commit + Steps 2–12 commits on `feat/w43-sort-merge-join`. No board edit. No FF-merge. No advance until separate user approval.
 
-## Acceptance Grid (iteration-2 canonical)
+## Acceptance Grid (iteration-4 canonical)
 
 | Cell | Count | Test file | Acceptance criterion |
 |------|-------|-----------|----------------------|
@@ -224,7 +224,7 @@ Plan-iteration commit + Steps 2–12 commits on `feat/w43-sort-merge-join`. No b
 | **Post-impl bench Part B (per F-W43-2)** | 1 | same file | Side-by-side overlap cells confirm D2 precedence (sort-merge > nested-loop) OR surface a counter-finding |
 | **Workspace pass-count delta** | **+8** | — | 8 new test cells (A, B, C, D, D', E, F, G — Cert G added per F-W43-4). D folded as parity tail. |
 
-## Source-of-Truth References (iteration-1 canonical)
+## Source-of-Truth References (iteration-4 canonical)
 
 * Spike evidence: `docs/evidence/2026-05-10-w43-bench-spike/README.md` (on `bench-spike/w43-sort-merge`); `fadc2700` HEAD.
 * Recon: `docs/plans/2026-05-08-w43-sort-merge-join-recon.md`.
@@ -233,7 +233,7 @@ Plan-iteration commit + Steps 2–12 commits on `feat/w43-sort-merge-join`. No b
 * Sortedness-check kernel precedent: `crates/xlog-cuda/kernels/wcoj.cu::wcoj_layout_check_sorted_unique_u32` + `provider/wcoj.rs:3137`.
 * Existing `JoinStrategy::SortMerge` dead-code: `crates/xlog-runtime/src/statistics.rs:15` (untouched).
 
-## Risk Register (informational, iteration 1)
+## Risk Register (informational, iteration-4 canonical)
 
 | Risk | Mitigation |
 |------|------------|
@@ -244,9 +244,9 @@ Plan-iteration commit + Steps 2–12 commits on `feat/w43-sort-merge-join`. No b
 | Detection kernel reports "unsorted" on edge cases (single-row inputs, empty inputs) | Per F-W43-4: empty AND single-row inputs (`n < 2`) are short-circuited by `is_sorted_ascending_u32`'s **own internal fast path** (return `Ok(true)` BEFORE allocation/launch) — they enter detection AFTER the threshold check admits the join (`0 * 0 = 0 ≤ 4M = true`). The detection kernel never launches with grid_dim 0. Once detection returns `Ok(true)` for an empty side, `sort_merge_join_v2_inner_u32_1key`'s own empty fast path returns the empty `combine_schemas` buffer (mirrors `hash_join_inner_v2`'s empty handling at `relational.rs:3165-3170`). Cert G covers both empty-left and empty-right fixtures. |
 | `JoinStrategy::SortMerge` dead-enum confusion | NOT touched per D8. Future cleanup commit (out of W4.3) can delete the enum entirely. |
 
-## Plan-Approval Gate (iteration 3)
+## Plan-Approval Gate (iteration 4)
 
-This plan is **iteration 3 draft** (iteration 2 surfaced F-W43-7..8: 1 major + 1 minor — both stale-text drift left over from iteration 1; targeted Step 11 placeholder + Risk Register row patches). The agent does NOT advance to Step 2 until the user explicitly states "Iteration 3 is approved" (or equivalent). Subsequent iterations may add further F-W43-N findings; the live D-table + Step plan + Acceptance Grid above are the canonical source of truth.
+This plan is **iteration 4 draft** (iteration 3 surfaced F-W43-9..10: 1 major + 1 minor — live section-heading + approval-gate label drift left over from iterations 1–2; targeted 5-site label sweep). The agent does NOT advance to Step 2 until the user explicitly states "Iteration 4 is approved" (or equivalent). Subsequent iterations may add further F-W43-N findings; the live D-table + Step plan + Acceptance Grid above are the canonical source of truth.
 
 Common amendment vectors per the W4.2 / W4.1 plan-iteration discipline:
 * Threshold sharing decision (D3) — could push back to introduce a separate constant, or argue for a different value.
@@ -293,3 +293,16 @@ User review of iteration 2 surfaced 1 major + 1 minor finding. Both are residual
 **Net effect**: 2 surgical text patches (Step 11 placeholder; Risk Register row). No D-table changes, no Step plan structural changes, no Acceptance Grid changes. All iter-2 design decisions preserved unchanged.
 
 **Iteration-3 process observation**: F-W43-7 and F-W43-8 are residual drift — text that should have been rewritten in iteration 2 alongside the related D-table/Grid edits but wasn't. Iteration 2's amendment scope was D1/D2/D5/D7 + Steps 3/5/10/12 + Grid; the iter-1 lines at Step 11 and Risk Register weren't included even though they referenced the same content. A future plan-discipline improvement: when amending a count or design fact, grep the entire plan file for related text before declaring the iteration complete. Otherwise residual-drift findings continue to cost iterations.
+
+## Iteration-4 Amendment Log
+
+User review of iteration 3 surfaced 1 major + 1 minor finding — live section-heading and approval-gate label drift left over from iterations 1–2. Iteration-3 patched Step 11 + Risk Register but left section headings and Step 1 approval-gate text at older iteration labels. Iteration 4 sweeps the remaining 5 label sites in a single surgical pass. No design changes; D-table, Step plan, and Acceptance Grid content unchanged. Header iteration tag bumped 3 → 4.
+
+| ID | Severity | Finding | Iteration-3 (wrong) | Iteration-4 (corrected) |
+|----|----------|---------|---------------------|--------------------------|
+| **F-W43-9** | Major | Step 1 (line 56) said "agent does NOT advance to Step 2 until the user explicitly approves iteration 1" — wrong gate-target after multiple iterations | "approves iteration 1" | "approves the live iteration (currently iteration 4)" + first-line generalized to "the current plan-iteration commit (iter 1, then amendments per F-W43-N)" |
+| **F-W43-10** | Minor | Four section-heading labels at older iterations:<br>• Direction (line 25): "iteration 1"<br>• Acceptance Grid (line 211): "iteration-2 canonical"<br>• Source-of-Truth (line 227): "iteration-1 canonical"<br>• Risk Register (line 236): "iteration 1" | mixed labels (1/2 with iter-3 content) | All four bumped to "iteration 4 canonical" / "iteration-4 canonical". Headers now uniformly reflect the current canonical iteration. |
+
+**Net effect**: 5 surgical label-bump edits (header + Direction + Step 1 gate text + Acceptance Grid + Source-of-Truth + Risk Register + Plan-Approval Gate). No D-table, Step plan, or Acceptance Grid content changes. All iter-3 design decisions preserved unchanged.
+
+**Iteration-4 process observation (extends iter-3's)**: F-W43-9/10 are the same class of residual drift as F-W43-7/8 — *content-matching* iter-3's amendment scope but missed because the labels are in different sections than the rewritten content. Future plan-discipline improvement compounding iter-3's: when bumping the iteration tag, grep for `iteration \d` and `iteration-\d` (both spellings) across the entire file and either bump or explicitly justify each occurrence. Cumulative lesson: iteration-bumping is a *file-wide concern*, not a section-local one.
