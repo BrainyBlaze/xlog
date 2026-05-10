@@ -442,3 +442,39 @@ extern "C" __global__ void gather_keys_f64_hi_u32(
     uint64_t ord = xlog_f64_to_ordered_u64(f64_bits[permutation[gid]]);
     out_keys[gid] = (uint32_t)(ord >> 32);
 }
+
+// ===============================================================
+// W4.3 — Detect ascending-sorted U32 key column.
+//
+// Each thread checks one adjacent pair `(keys[tid], keys[tid+1])`.
+// On `keys[tid] > keys[tid+1]` (a violation), atomically writes
+// 0 to the single-element `result` flag. Caller initializes
+// `result[0] = 1` before launch; reads the result post-launch.
+//
+// Properties:
+//   * Write-rare on sorted inputs (no atomic contention).
+//   * Idempotent on violations (multiple threads writing 0 to
+//     the same flag don't conflict semantically).
+//   * Returns "sorted ascending" semantics: keys[i] <= keys[i+1]
+//     for all i in [0, num_rows-1). Duplicates are admitted —
+//     sort-merge handles run-length matching downstream.
+//   * Caller MUST short-circuit `num_rows < 2` BEFORE launch
+//     (per W4.3 plan iter-4 D1 + F-W43-4): the kernel grid
+//     `(num_rows + 255) / 256` is undefined for num_rows == 0,
+//     and a single-row sequence is trivially sorted (no
+//     adjacent pair to check). The provider fn
+//     `is_sorted_ascending_u32` enforces this fast path.
+// ===============================================================
+extern "C" __global__ void check_ascending_sorted_u32(
+    const uint32_t* __restrict__ keys,
+    uint32_t num_rows,
+    uint32_t* __restrict__ result
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    // Each thread checks the pair (tid, tid+1). The last
+    // thread (tid == num_rows - 1) has no successor, so skip.
+    if (tid + 1 >= num_rows) return;
+    if (keys[tid] > keys[tid + 1]) {
+        atomicExch(result, 0u);
+    }
+}

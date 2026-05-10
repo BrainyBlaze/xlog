@@ -486,6 +486,14 @@ pub mod join_kernels {
     /// Payload columns are materialized after the kernel via
     /// `gather_buffer_by_indices` in the provider fn.
     pub const NESTED_LOOP_JOIN_INNER_U32_1KEY_PAIRS: &str = "nested_loop_join_inner_u32_1key_pairs";
+    /// W4.3 sort-merge inner join (emit-pairs design,
+    /// caller-asserted pre-sorted inputs). Reads the single
+    /// key column from each side, performs per-thread binary
+    /// search on the right side to find matched-key runs,
+    /// emits `(left_idx, right_idx)` pairs as two parallel
+    /// u32 arrays. Payload columns materialize after the
+    /// kernel via `gather_buffer_by_indices`.
+    pub const SORT_MERGE_JOIN_INNER_U32_1KEY_PAIRS: &str = "sort_merge_join_inner_u32_1key_pairs";
 }
 
 /// Kernel function names in the dedup module
@@ -551,6 +559,14 @@ pub mod sort_kernels {
 
     pub const GATHER_KEYS_F64_LO_U32: &str = "gather_keys_f64_lo_u32";
     pub const GATHER_KEYS_F64_HI_U32: &str = "gather_keys_f64_hi_u32";
+    /// W4.3 sortedness-detection kernel — single-pass adjacent-
+    /// pair check; atomically writes 0 to a u32 flag on
+    /// `keys[i] > keys[i+1]`. Caller initializes flag to 1
+    /// before launch, reads result post-launch. Used by the
+    /// dispatch-site eligibility check at `execute_join` to
+    /// validate caller-asserted sortedness before invoking
+    /// `sort_merge_join_v2_inner_u32_1key`.
+    pub const CHECK_ASCENDING_SORTED_U32: &str = "check_ascending_sorted_u32";
 }
 
 /// Kernel function names in the filter module

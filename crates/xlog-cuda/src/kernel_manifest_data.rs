@@ -64,6 +64,9 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "init_hash_table",
             // W4.2 nested-loop inner join (emit-pairs design).
             "nested_loop_join_inner_u32_1key_pairs",
+            // W4.3 sort-merge inner join (emit-pairs design,
+            // caller-asserted pre-sorted inputs).
+            "sort_merge_join_inner_u32_1key_pairs",
         ],
     },
     KernelModuleSpec {
@@ -132,6 +135,10 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "gather_keys_i64_hi_u32",
             "gather_keys_f64_lo_u32",
             "gather_keys_f64_hi_u32",
+            // W4.3 sortedness-detection kernel (used by the
+            // dispatch-site eligibility check before invoking
+            // the sort-merge join).
+            "check_ascending_sorted_u32",
         ],
     },
     KernelModuleSpec {

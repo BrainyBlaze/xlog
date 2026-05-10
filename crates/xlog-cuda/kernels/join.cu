@@ -610,3 +610,97 @@ extern "C" __global__ void nested_loop_join_inner_u32_1key_pairs(
         }
     }
 }
+
+// ===============================================================
+// W4.3 — Sort-merge inner join (emit-pairs design,
+// multi-col-compatible via columnar `CudaBuffer`).
+//
+// Caller asserts both inputs are pre-sorted ascending by the
+// single key column (validated at the dispatch site via the
+// runtime detection kernel `check_ascending_sorted_u32` BEFORE
+// invoking this kernel; on caller-contract violation the
+// row-set output is undefined). Each thread takes one LEFT-row
+// and uses binary search on the RIGHT side to find the matched-
+// key run (`lower_bound` + `upper_bound`), then emits
+// `(left_idx, right_idx)` pairs for each `right_idx` in
+// `[lb, ub)`. Total work O(L · log R) — between hash's
+// O(L+R) and nested-loop's O(L·R). Binary search exploits
+// sortedness; pair emission handles run-length matching for
+// duplicate-key inputs.
+//
+// Spike-vs-production note: the bench-spike branch
+// `bench-spike/w43-sort-merge` carries
+// `sort_merge_join_inner_u32_1key_pairs_spike` used for the
+// crossover measurement; that kernel does NOT graduate to
+// production. This kernel is the production-shape design,
+// written fresh per W4.3 plan iter-4 D8.
+//
+// Restrictions (per W4.3 plan iter-4 D4):
+//   * Inner join only.
+//   * U32 / Symbol keys (Symbol IS u32 at the byte level).
+//   * Single key column.
+//
+// Memory contract:
+//   * `left_keys` / `right_keys`: pointers to the single key
+//     column from each side, sorted ascending. Caller
+//     (provider fn) validates `num_bytes() >= num_rows * 4`
+//     BEFORE launching (W4.2 F-W42-14 idiom).
+//   * Index arrays: pre-allocated to
+//     `output_capacity = num_left * num_right`. Caller
+//     enforces `num_left * num_right <= 4_000_000` via
+//     `checked_mul` (shared `NESTED_LOOP_TOTAL_THRESHOLD`
+//     per W4.3 D3).
+//   * `output_count`: pre-zeroed.
+//
+// Defense-in-depth: kernel guards `out_idx < output_capacity`
+// even though, by the provider's contract, the guard is
+// unreachable on a well-formed call.
+// ===============================================================
+extern "C" __global__ void sort_merge_join_inner_u32_1key_pairs(
+    const uint32_t* __restrict__ left_keys,    // sorted ascending
+    const uint32_t* __restrict__ right_keys,   // sorted ascending
+    uint32_t num_left,
+    uint32_t num_right,
+    uint32_t* __restrict__ output_left_idx,
+    uint32_t* __restrict__ output_right_idx,
+    uint32_t* __restrict__ output_count,
+    uint32_t output_capacity
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_left) return;
+    uint32_t key = left_keys[tid];
+
+    // lower_bound: first index in right where right_keys[idx] >= key
+    uint32_t lo = 0, hi = num_right;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        if (right_keys[mid] < key) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    uint32_t lb = lo;
+
+    // upper_bound: first index in right where right_keys[idx] > key
+    lo = lb;
+    hi = num_right;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        if (right_keys[mid] <= key) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    uint32_t ub = lo;
+
+    // Emit (tid, r) pairs for each r in [lb, ub).
+    for (uint32_t r = lb; r < ub; r++) {
+        uint32_t out_idx = atomicAdd(output_count, 1);
+        if (out_idx < output_capacity) {
+            output_left_idx[out_idx] = tid;
+            output_right_idx[out_idx] = r;
+        }
+    }
+}
