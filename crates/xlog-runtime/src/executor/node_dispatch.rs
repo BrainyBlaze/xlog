@@ -55,59 +55,6 @@ fn eligible_for_nested_loop(
     lt == rt && matches!(lt, Some(ScalarType::U32) | Some(ScalarType::Symbol))
 }
 
-/// W4.3 eligibility predicate for sort-merge join dispatch.
-///
-/// Returns `true` iff the join shape is admissible for the
-/// `sort_merge_join_v2_inner_u32_1key` provider entry point.
-/// The predicate is intentionally narrow per the W4.3
-/// iteration-4 plan D4 — same envelope as
-/// `eligible_for_nested_loop` so the dispatch decision tree
-/// (D2: sort-merge > nested-loop > hash) can route between
-/// operators with symmetric eligibility checks:
-///   * `JoinType::Inner` only (Semi / Anti / LeftOuter fall back
-///     to nested-loop or hash).
-///   * Exactly one key column on each side.
-///   * Both key columns share the same `ScalarType` AND that
-///     shared type is `U32` or `Symbol` (Symbol is `u32` at the
-///     byte level — same kernel applies).
-///
-/// **Sortedness detection is NOT in this predicate** (per W4.3
-/// D1 + Step 4 lock): runtime sortedness detection requires a
-/// kernel launch + D2H, which is a runtime cost not appropriate
-/// for a static eligibility predicate. The dispatch site (Step
-/// 5) calls `provider.is_sorted_ascending_u32` AFTER this
-/// predicate accepts AND the threshold check passes, so
-/// detection cost is paid only on candidates.
-///
-/// **Threshold check is NOT in this predicate** either — it
-/// requires `device_row_count` (an O(1) read but cheap-relative-
-/// to-kernel and conventionally placed at the dispatch site
-/// per W4.2's pattern).
-///
-/// Out-of-bounds key indices yield `Schema::column_type(_) = None`,
-/// which fails the `matches!(...)` guard — falling back to
-/// hash without a separate bounds check.
-///
-/// Cheap O(1) — no kernel launches, no row-count reads, no D2H.
-//
-fn eligible_for_sort_merge(
-    left: &CudaBuffer,
-    right: &CudaBuffer,
-    left_keys: &[usize],
-    right_keys: &[usize],
-    join_type: JoinType,
-) -> bool {
-    if join_type != JoinType::Inner {
-        return false;
-    }
-    if left_keys.len() != 1 || right_keys.len() != 1 {
-        return false;
-    }
-    let lt = left.schema().column_type(left_keys[0]);
-    let rt = right.schema().column_type(right_keys[0]);
-    lt == rt && matches!(lt, Some(ScalarType::U32) | Some(ScalarType::Symbol))
-}
-
 impl Executor {
     /// Execute a Scan node — looks up the relation by RelId and returns a clone.
     pub(super) fn execute_scan(&mut self, rel: RelId) -> Result<CudaBuffer> {
@@ -359,82 +306,24 @@ impl Executor {
             JoinType::LeftOuter => CudaJoinType::LeftOuter,
         };
 
-        // Output buffer — set by W4.3 sort-merge dispatch, W4.2
-        // nested-loop dispatch, adaptive indexing, or the hash
-        // fallback. All four paths flow through the shared
-        // `record_join_result` feedback block at the end of
-        // this fn.
+        // Output buffer — set by W4.2 nested-loop dispatch,
+        // adaptive indexing, or the hash fallback. All three
+        // paths flow through the shared `record_join_result`
+        // feedback block at the end of this fn.
         let mut out: Option<CudaBuffer> = None;
 
-        // W4.3 sort-merge dispatch (precedes W4.2 nested-loop
-        // per iteration-4 D2 precedence: sort-merge > nested-loop
-        // > hash). On predicate + threshold + sortedness-on-both-
-        // sides pass, route to `sort_merge_join_v2_inner_u32_1key`
-        // and bump the dispatch counter; do NOT early-return —
-        // leave the result in `out` so the shared feedback block
-        // observes it.
-        //
-        // Fail-closed contract per F-W43-1: detection-side
-        // calls use `matches!(_, Ok(true))` to swallow BOTH
-        // `Ok(false)` AND `Err(_)`. The W4.3 dispatch never
-        // propagates a detection-kernel error to the caller's
-        // `?` chain — Err falls through to W4.2 nested-loop or
-        // hash. The plan's iter-4 D5 lock makes this explicit.
-        //
-        // Empty inputs per F-W43-4: pass the threshold check
-        // `0 * 0 = 0 <= 4M`, then `is_sorted_ascending_u32`'s
-        // own internal `n < 2 → Ok(true)` short-circuit handles
-        // the kernel-launch grid-zero hazard;
-        // `sort_merge_join_v2_inner_u32_1key` then returns the
-        // empty `combine_schemas` buffer via its own empty fast
-        // path.
-        if eligible_for_sort_merge(left, right, left_keys, right_keys, join_type) {
-            let num_left = self.provider.device_row_count(left)? as u64;
-            let num_right = self.provider.device_row_count(right)? as u64;
-            let in_threshold = num_left
-                .checked_mul(num_right)
-                .map(|p| p <= NESTED_LOOP_TOTAL_THRESHOLD)
-                .unwrap_or(false);
-            if in_threshold {
-                let lk = left_keys[0];
-                let rk = right_keys[0];
-                let left_sorted =
-                    matches!(self.provider.is_sorted_ascending_u32(left, lk), Ok(true));
-                let right_sorted =
-                    matches!(self.provider.is_sorted_ascending_u32(right, rk), Ok(true));
-                if left_sorted && right_sorted {
-                    out = Some(
-                        self.provider
-                            .sort_merge_join_v2_inner_u32_1key(left, right, lk, rk)?,
-                    );
-                    self.sort_merge_dispatch_count += 1;
-                }
-                // Else (Ok(false) on either side, Err on either
-                // side): fall through to W4.2 nested-loop branch
-                // via `out.is_none()` below. Detection errors
-                // are NEVER propagated to the caller per D5.
-            }
-        }
-
         // W4.2 nested-loop dispatch (precedes adaptive indexing
-        // and hash fallback; falls through to it if W4.3
-        // sort-merge already dispatched per D2 precedence). On
-        // predicate + threshold pass, route to
-        // `nested_loop_join_v2_inner_u32_1key` and bump the
-        // dispatch counter; do NOT early-return — leave the
-        // result in `out` so the shared feedback block observes
-        // it. Otherwise leave `out` unchanged.
+        // and hash fallback). On predicate + threshold pass,
+        // route to `nested_loop_join_v2_inner_u32_1key` and
+        // bump the dispatch counter; do NOT early-return —
+        // leave the result in `out` so the shared feedback
+        // block observes it. Otherwise leave `out` unchanged.
         //
         // Threshold check uses logical row counts via
         // `provider.device_row_count(...)` (NOT `row_cap`), with
         // `checked_mul` fail-closed on overflow per W4.2
         // iteration-4 F-W42-15.
-        //
-        // Wrapped in `if out.is_none()` per W4.3 D2 precedence:
-        // if W4.3 sort-merge already set `out`, this branch is
-        // skipped to avoid overwriting the sort-merge result.
-        if out.is_none() && eligible_for_nested_loop(left, right, left_keys, right_keys, join_type)
-        {
+        if eligible_for_nested_loop(left, right, left_keys, right_keys, join_type) {
             let num_left = self.provider.device_row_count(left)? as u64;
             let num_right = self.provider.device_row_count(right)? as u64;
             let in_threshold = num_left
@@ -455,8 +344,8 @@ impl Executor {
         // Adaptive indexing: opportunistically reuse cached
         // build-side hash tables when the right side is a base
         // relation scan and has become "hot" in runtime
-        // statistics. Only runs if neither W4.3 sort-merge nor
-        // W4.2 nested-loop dispatched.
+        // statistics. Only runs if W4.2 nested-loop didn't
+        // dispatch.
         if out.is_none() {
             if let Some(build_rel) = right_rel {
                 let build_heat = self
