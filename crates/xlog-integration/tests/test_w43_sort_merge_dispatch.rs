@@ -391,3 +391,151 @@ fn pre_sorted_small_cartesian_dispatches_sort_merge_and_matches_hash() {
         "W4.3 sort-merge row set must equal the hash_join_v2 reference"
     );
 }
+
+// ---------------------------------------------------------------
+// Cert B — unsorted-but-otherwise-eligible falls back to W4.2
+// nested-loop. Mirror of Cert A: same row counts, same key set,
+// same eligibility envelope (Inner + 1-key + U32 + small
+// Cartesian) — only sortedness flips. Pins D2 precedence from
+// the W4.3 side: when `is_sorted_ascending_u32` returns
+// `Ok(false)` for either input, sort-merge declines (counter ==
+// 0) and the dispatcher falls through to W4.2 (counter == 1).
+// ---------------------------------------------------------------
+
+#[test]
+fn unsorted_eligible_falls_back_to_nested_loop() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    // Fixture: 100 unique-keyed rows on each side, **deterministically
+    // unsorted** via rotate-halves (`[50..100, 0..50)`). Same key
+    // set as Cert A → same 100-row reference output → same join
+    // output count. The single descending step at index 49→50
+    // (`99 > 0`) is sufficient to fail
+    // `check_ascending_sorted_u32`'s adjacent-pair check —
+    // minimum-violation unsorted shape. This is the same pattern
+    // used by the W4.2 Cert A fixture (kept consistent so the
+    // W4.2 ↔ W4.3 mirror reads cleanly).
+    //
+    // Eligibility checks otherwise pass: Inner + 1-key + U32 +
+    // 100×100 = 10_000 ≤ 4_000_000 threshold. The ONLY reason
+    // W4.3 declines is the sortedness probe.
+    let left_keys: Vec<u32> = (50..100u32).chain(0..50u32).collect();
+    let right_keys: Vec<u32> = (50..100u32).chain(0..50u32).collect();
+    let left_rows: Vec<(u32, u32)> = left_keys.iter().map(|&k| (k, 1000 + k)).collect();
+    let right_rows: Vec<(u32, u32)> = right_keys.iter().map(|&k| (k, 2000 + k)).collect();
+
+    // Reference row set: direct provider.hash_join_v2 — same
+    // pattern as Cert A.
+    let left_buf = upload_binary_u32(&fix.memory, &left_rows);
+    let right_buf = upload_binary_u32(&fix.memory, &right_rows);
+    let hash_quads_buf = fix
+        .provider
+        .hash_join_v2(&left_buf, &right_buf, &[0], &[0], JoinType::Inner)
+        .expect("hash_join_v2 reference");
+    let reference_set: BTreeSet<(u32, u32, u32)> = download_quads(&hash_quads_buf)
+        .into_iter()
+        .map(|(lk, lp, _rk, rp)| (lk, lp, rp))
+        .collect();
+    assert_eq!(
+        reference_set.len(),
+        100,
+        "hash reference should produce exactly 100 matched rows"
+    );
+
+    // Dispatched run.
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile(SMALL_INNER_JOIN_PROGRAM).expect("compile");
+    let rel_ids = compiler.rel_ids().clone();
+    let left_rel = *rel_ids.get("left_rel").expect("left_rel rel_id");
+    let right_rel = *rel_ids.get("right_rel").expect("right_rel rel_id");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &rel_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    let mut inputs: BTreeMap<&str, Vec<(u32, u32)>> = BTreeMap::new();
+    inputs.insert("left_rel", left_rows.clone());
+    inputs.insert("right_rel", right_rows.clone());
+    for (name, rows) in &inputs {
+        let buf = upload_binary_u32(&fix.memory, rows);
+        executor.put_relation(name, buf);
+    }
+
+    // Pre-execute invariants.
+    assert_eq!(
+        executor.sort_merge_dispatch_count(),
+        0,
+        "sort-merge dispatch counter must be zero before execute_plan"
+    );
+    assert_eq!(
+        executor.nested_loop_dispatch_count(),
+        0,
+        "nested-loop dispatch counter must be zero before execute_plan"
+    );
+
+    executor.execute_plan(&plan).expect("execute_plan");
+
+    // -----------------------------------------------------------
+    // Post-execute assertions (mirror of Cert A, with the
+    // dispatch-counter expectations swapped):
+    //   1. W4.3 sort-merge counter == 0 (proves the sortedness
+    //      probe declined despite all other eligibility checks
+    //      passing).
+    //   2. W4.2 nested-loop counter == 1 (proves the dispatcher
+    //      fell through to the next priority per D2). Exact
+    //      equality, not `>= 1`, per the F-W42-2 hardening
+    //      pattern locked in by the Step 6 patch — catches
+    //      double-dispatch/re-execution regressions.
+    //   3. record_join_result feedback wired into stats (D6
+    //      invariant — proves the W4.2 branch inside the
+    //      `if out.is_none()` wrap still reaches the shared
+    //      record_join_result block at the bottom of execute_join).
+    //   4. Row-set parity vs hash reference.
+    // -----------------------------------------------------------
+    assert_eq!(
+        executor.sort_merge_dispatch_count(),
+        0,
+        "W4.3 sort-merge dispatch must NOT have fired on unsorted inputs \
+         (sortedness probe should return Ok(false)); got counter {}",
+        executor.sort_merge_dispatch_count()
+    );
+    assert_eq!(
+        executor.nested_loop_dispatch_count(),
+        1,
+        "W4.2 nested-loop fallback must have fired exactly once after W4.3 \
+         declined; got counter {}",
+        executor.nested_loop_dispatch_count()
+    );
+
+    assert!(
+        executor
+            .stats()
+            .get_join_selectivity(left_rel, right_rel)
+            .is_some(),
+        "record_join_result must have been called for the W4.2-fallback join \
+         (left_rel={:?}, right_rel={:?}); selectivity should transition None → Some",
+        left_rel,
+        right_rel
+    );
+
+    let result_buf = executor
+        .store()
+        .get("result")
+        .expect("result relation must exist post-execute");
+    let dispatched_set: BTreeSet<(u32, u32, u32)> =
+        download_triples(result_buf).into_iter().collect();
+    assert_eq!(
+        dispatched_set.len(),
+        100,
+        "W4.2-fallback result should produce exactly 100 matched rows; got {}",
+        dispatched_set.len()
+    );
+    assert_eq!(
+        dispatched_set, reference_set,
+        "W4.2 fallback row set must equal the hash_join_v2 reference"
+    );
+}
