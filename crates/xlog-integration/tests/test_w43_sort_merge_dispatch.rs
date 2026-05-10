@@ -539,3 +539,121 @@ fn unsorted_eligible_falls_back_to_nested_loop() {
         "W4.2 fallback row set must equal the hash_join_v2 reference"
     );
 }
+
+// ---------------------------------------------------------------
+// Cert C — above-threshold sorted Cartesian falls back to hash.
+// Both W4.3 sort-merge and W4.2 nested-loop are gated by the
+// shared `NESTED_LOOP_TOTAL_THRESHOLD = 4_000_000` Cartesian
+// product test. This cert pins that the threshold rejects BOTH
+// dispatch paths at once even when sortedness alone would
+// otherwise admit W4.3.
+//
+// Together with Certs A + B this completes three of the four
+// envelope quadrants:
+//   Cert A: (sorted,   in-threshold)    → (SM=1, NL=0)
+//   Cert B: (unsorted, in-threshold)    → (SM=0, NL=1)
+//   Cert C: (sorted,   above-threshold) → (SM=0, NL=0)
+// ---------------------------------------------------------------
+
+#[test]
+fn above_threshold_sorted_falls_back_to_hash() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    // Fixture: L = 50_000 unique keys [0..50_000), sorted
+    // ascending; R = 100 unique keys [0..100), sorted ascending.
+    // Cartesian = 50_000 × 100 = 5_000_000 > 4_000_000 threshold
+    // → both W4.3 and W4.2 dispatch are refused by the shared
+    // Cartesian-product test.
+    //
+    // Bounded matches: right keys ⊆ left keys; each right key
+    // matches exactly one left row → output = 100 rows. Small
+    // enough for BTreeSet parity even though the inputs are 50K.
+    let left_rows: Vec<(u32, u32)> = (0..50_000u32).map(|i| (i, 1000 + i)).collect();
+    let right_rows: Vec<(u32, u32)> = (0..100u32).map(|i| (i, 2_000_000 + i)).collect();
+
+    // Reference row set: direct provider.hash_join_v2.
+    let left_buf = upload_binary_u32(&fix.memory, &left_rows);
+    let right_buf = upload_binary_u32(&fix.memory, &right_rows);
+    let hash_quads_buf = fix
+        .provider
+        .hash_join_v2(&left_buf, &right_buf, &[0], &[0], JoinType::Inner)
+        .expect("hash_join_v2 reference");
+    let reference_set: BTreeSet<(u32, u32, u32)> = download_quads(&hash_quads_buf)
+        .into_iter()
+        .map(|(lk, lp, _rk, rp)| (lk, lp, rp))
+        .collect();
+    assert_eq!(
+        reference_set.len(),
+        100,
+        "hash reference should produce exactly 100 matched rows"
+    );
+
+    // Dispatched run.
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile(SMALL_INNER_JOIN_PROGRAM).expect("compile");
+    let rel_ids = compiler.rel_ids().clone();
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &rel_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    let mut inputs: BTreeMap<&str, Vec<(u32, u32)>> = BTreeMap::new();
+    inputs.insert("left_rel", left_rows.clone());
+    inputs.insert("right_rel", right_rows.clone());
+    for (name, rows) in &inputs {
+        let buf = upload_binary_u32(&fix.memory, rows);
+        executor.put_relation(name, buf);
+    }
+
+    executor.execute_plan(&plan).expect("execute_plan");
+
+    // -----------------------------------------------------------
+    // Post-execute assertions:
+    //   1. W4.3 sort-merge counter == 0 (proves the threshold
+    //      gate refused W4.3 even though sortedness would
+    //      otherwise admit it — isolates the threshold as the
+    //      sole reason for refusal on this sorted fixture).
+    //   2. W4.2 nested-loop counter == 0 (same threshold also
+    //      refuses W4.2; hash takes the join).
+    //   3. Row-set parity vs hash reference (since the executor
+    //      ALSO routed through hash, this also pins that the
+    //      executor's hash dispatch matches the direct-provider
+    //      hash reference — a sanity check on the fall-through
+    //      tail).
+    // -----------------------------------------------------------
+    assert_eq!(
+        executor.sort_merge_dispatch_count(),
+        0,
+        "W4.3 sort-merge dispatch must NOT have fired above threshold \
+         (Cartesian = 5_000_000 > 4_000_000); got counter {}",
+        executor.sort_merge_dispatch_count()
+    );
+    assert_eq!(
+        executor.nested_loop_dispatch_count(),
+        0,
+        "W4.2 nested-loop dispatch must NOT have fired above threshold \
+         (Cartesian = 5_000_000 > 4_000_000); got counter {}",
+        executor.nested_loop_dispatch_count()
+    );
+
+    let result_buf = executor
+        .store()
+        .get("result")
+        .expect("result relation must exist post-execute");
+    let dispatched_set: BTreeSet<(u32, u32, u32)> =
+        download_triples(result_buf).into_iter().collect();
+    assert_eq!(
+        dispatched_set.len(),
+        100,
+        "hash-fallback result should produce exactly 100 matched rows; got {}",
+        dispatched_set.len()
+    );
+    assert_eq!(
+        dispatched_set, reference_set,
+        "hash-fallback row set must equal the direct-provider hash_join_v2 reference"
+    );
+}
