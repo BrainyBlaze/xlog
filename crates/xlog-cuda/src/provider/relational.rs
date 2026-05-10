@@ -2820,13 +2820,18 @@ impl super::CudaKernelProvider {
     ///     (mirrors W4.2 F-W42-14 byte-length lower-bound idiom).
     ///
     /// **Fail-closed contract** (per W4.3 plan iter-4 D5 +
-    /// F-W43-1): the dispatch site MUST handle the returned
-    /// `Result<bool>` such that BOTH `Ok(false)` AND `Err(_)`
-    /// fall through to nested-loop or hash. The pattern is
+    /// F-W43-1): this fn returns the honest `Result<bool>` —
+    /// the kernel can fail (allocation, launch, D2H), and the
+    /// `Err(_)` is preserved so callers can log or surface it
+    /// at their abstraction level. The dispatch site MUST
+    /// handle the returned `Result<bool>` such that BOTH
+    /// `Ok(false)` AND `Err(_)` fall through to nested-loop
+    /// or hash via the pattern
     /// `matches!(self.provider.is_sorted_ascending_u32(...), Ok(true))`.
-    /// This fn does NOT propagate detection errors to the
-    /// dispatch caller's `?` chain — by design, callers MUST
-    /// suppress the Err side.
+    /// The dispatch site (Step 5) is responsible for
+    /// suppressing the `Err` side; this provider fn does NOT
+    /// auto-suppress because that would lose the failure
+    /// information the caller might want to log.
     pub fn is_sorted_ascending_u32(&self, buf: &CudaBuffer, key_col: usize) -> Result<bool> {
         // Empty / single-row fast path (per F-W43-4).
         let n = self.device_row_count(buf)?;
@@ -2850,7 +2855,10 @@ impl super::CudaKernelProvider {
             )));
         }
         let key_column = buf.column(key_col).ok_or_else(|| {
-            XlogError::Kernel(format!("is_sorted_ascending_u32: column({}) missing", key_col))
+            XlogError::Kernel(format!(
+                "is_sorted_ascending_u32: column({}) missing",
+                key_col
+            ))
         })?;
         let required_bytes = n
             .checked_mul(4)
@@ -2942,9 +2950,13 @@ impl super::CudaKernelProvider {
     ///   `checked_mul`; release-mode wrapping multiply is
     ///   forbidden).
     ///
-    /// # Implementation outline (mirrors
-    /// # `nested_loop_join_v2_inner_u32_1key` literal idioms
-    /// # per W4.2 F-W42-13/14/15/16/17)
+    /// # Implementation outline
+    ///
+    /// Mirrors `nested_loop_join_v2_inner_u32_1key` literal
+    /// idioms verbatim per W4.2 F-W42-13/14/15/16/17 (empty
+    /// fast path with no `?`, byte-length lower-bound `<`
+    /// check, `checked_mul` for threshold, `as u64` for
+    /// `row_cap`, variant-agnostic `&CudaColumn` launch).
     ///
     /// 1. Read logical row counts via `device_row_count` (NOT
     ///    `row_cap`).
@@ -3060,7 +3072,10 @@ impl super::CudaKernelProvider {
         let func = self
             .device
             .inner()
-            .get_func(JOIN_MODULE, join_kernels::SORT_MERGE_JOIN_INNER_U32_1KEY_PAIRS)
+            .get_func(
+                JOIN_MODULE,
+                join_kernels::SORT_MERGE_JOIN_INNER_U32_1KEY_PAIRS,
+            )
             .ok_or_else(|| {
                 XlogError::Kernel("sort_merge_join_inner_u32_1key_pairs kernel not found".into())
             })?;
@@ -3119,8 +3134,7 @@ impl super::CudaKernelProvider {
         }
 
         // ----- 8. Gather both sides via existing GPU machinery -----
-        let gathered_left =
-            self.gather_buffer_by_indices(left, &d_output_left_idx, output_rows)?;
+        let gathered_left = self.gather_buffer_by_indices(left, &d_output_left_idx, output_rows)?;
         let gathered_right =
             self.gather_buffer_by_indices(right, &d_output_right_idx, output_rows)?;
 
