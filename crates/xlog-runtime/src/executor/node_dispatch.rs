@@ -455,7 +455,8 @@ impl Executor {
         // Adaptive indexing: opportunistically reuse cached
         // build-side hash tables when the right side is a base
         // relation scan and has become "hot" in runtime
-        // statistics. Only runs if W4.2 didn't dispatch.
+        // statistics. Only runs if neither W4.3 sort-merge nor
+        // W4.2 nested-loop dispatched.
         if out.is_none() {
             if let Some(build_rel) = right_rel {
                 let build_heat = self
