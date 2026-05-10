@@ -1,6 +1,6 @@
-# W4.3 Sort-Merge Join Operator — Plan (iteration 5 canonical)
+# W4.3 Sort-Merge Join Operator — Plan (iteration 6 canonical)
 
-**Plan iteration:** 5 (post-execution amendment capturing three execution-discovered findings: F-W43-11 retroactive D2-precedence fixture-de-overlap from Step 5, F-W43-12 workspace-test gate exception for the pre-existing `test_wcoj_layout_fast_path` flake from Step 11 verification, and F-W43-13 cert-contract drift — D7 + Acceptance Grid sync to the executed exact-equality counter discipline that landed via Step 6 + Step 10 patches. All three are post-execution findings, distinct from the pre-execution review pattern of iterations 1–4).
+**Plan iteration:** 6 (post-execution amendment capturing F-W43-14: the Step 12 production bench surfaced the counter-finding F-W43-2 was designed to anticipate — D2 precedence + D7 #8 BOTH FAIL on every cell of the 50×50–2000×2000 sorted-eligible matrix. Per user direction, W4.3 closure scope changes from "production dispatch closure" to "operator implemented, production dispatch rejected by evidence": executor wiring removed, dispatch counter + accessor + eligibility predicate removed, dispatch-only certs (B/C/D/D') retired as superseded, operator-meaningful certs (A/E/F/G) rewritten as provider/operator parity certs, provider/kernel/manifest surface preserved, bench evidence preserved as the rejection record. Iterations 1–4 were pre-execution review; iteration 5 was post-execution alignment of plan-record with executed work (F-W43-11/12/13); iteration 6 is the post-bench scope-redirect amendment.).
 **Worktree:** `.worktrees/w43-sort-merge-join` on branch `feat/w43-sort-merge-join` (off local `main` `19f7bc5d`).
 **Spike evidence:** `bench-spike/w43-sort-merge` HEAD `fadc2700` (unmerged); evidence at `docs/evidence/2026-05-10-w43-bench-spike/README.md`.
 **Recon predecessor:** `docs/plans/2026-05-08-w43-sort-merge-join-recon.md`.
@@ -22,17 +22,17 @@ W4.3 has **no direct paper claim** in arXiv:2604.20073 — the SRDatalog paper c
 * Spike decision-gate ≥ 2× win on tested matrix: ✅ met (range 2.52×–3.25×).
 * Five mandatory iteration-1 locks per user direction: encoded in D1–D5 below.
 
-## Direction (locked, iteration 5 canonical)
+## Direction (locked, iteration 6 canonical)
 
 | ID | Lock | Direction |
 |----|------|-----------|
 | **D1** | **Sortedness detection mechanism (per F-W43-4 empty-input handling)**. | **Option B (runtime detection kernel)** per recon. New kernel `check_ascending_sorted_u32` in `crates/xlog-cuda/kernels/sort.cu` — single-pass scan, returns `1` if `keys[i] <= keys[i+1]` for all `i`, else `0`. Provider fn `provider.is_sorted_ascending_u32(buf, key) -> Result<bool>` wraps the kernel. **Empty / single-row fast path (per F-W43-4)**: provider fn checks `device_row_count(buf)? < 2` BEFORE any allocation or kernel launch and returns `Ok(true)` (a 0- or 1-row sequence is trivially sorted). Empty inputs reach the dispatch site through threshold check `0 * 0 = 0 <= 4M = true`, so detection MUST short-circuit empties without launching the kernel — otherwise the kernel grid `(0 + 255) / 256 = 0` is undefined. Same fast-path semantic as `hash_join_inner_v2`'s empty handling at `relational.rs:3165-3170`. For `n >= 2` rows the kernel runs, reads the u32 result via `dtoh_scalar_untracked` (single-u32 D2H, same metadata-only profile as `hash_join_v2`'s row-count reads). The dispatch site at `execute_join` calls this fn ONLY when the join is otherwise eligible for sort-merge (Inner + 1-key + matching U32/Symbol + size-eligible per D3); detection cost is paid only on candidates, NOT on every join. Mirrors the established WCOJ layout fast-path pattern at `crates/xlog-cuda/src/provider/wcoj.rs:3137-3187` (u32) and `:3265-3307` (u64), but checks "sorted ascending" only — duplicates allowed (sort-merge handles run-length). The kernel does NOT check uniqueness. **Out of scope for W4.3**: producer-side metadata tracking (option C) and IR-level annotation (option D); both are larger structural changes that can be considered in v0.6.6+ if benchmark data justifies eliminating the per-dispatch detection cost. |
-| **D2** | **Dispatch precedence vs W4.2 nested-loop (PROVISIONAL per F-W43-2)**. | **Sort-merge takes precedence when sorted**, nested-loop when not sorted (and size-eligible), hash otherwise. Decision tree at `execute_join`:<br>1. Eligible for sort-merge envelope (Inner + 1-key + matching U32/Symbol)?<br>&nbsp;&nbsp;a. Yes AND size-eligible (D3)?<br>&nbsp;&nbsp;&nbsp;&nbsp;i. Both inputs detected sorted via D1 kernel (Ok(true))? → **sort-merge**.<br>&nbsp;&nbsp;&nbsp;&nbsp;ii. Either Ok(false), Err(_), or precondition failure? → fall through (fail-closed per D5).<br>&nbsp;&nbsp;b. Not size-eligible? → fall through.<br>2. Eligible for nested-loop envelope (W4.2 D1 + size-eligible)? → **nested-loop**.<br>3. Else → **hash**.<br><br>**Precedence is PROVISIONAL** (per F-W43-2): the spike measured sort-merge-vs-hash and W4.2 measured nested-loop-vs-hash, but no benchmark has DIRECTLY compared sort-merge vs nested-loop on overlapping eligibility (sorted + size-eligible inputs) WITH detection cost included. The Step-12 production bench MUST include side-by-side overlap cells where both operators are eligible, so the precedence decision can be empirically validated. If the bench shows nested-loop wins on the overlap (e.g., because detection-kernel cost erodes sort-merge's advantage on tiny cells), iteration-2+ amends D2 to nested-loop-first. Until Step 12 evidence lands, the precedence is the working hypothesis based on indirect spike data only. |
+| **D2** | **Dispatch precedence vs W4.2 nested-loop (REJECTED per F-W43-14, was PROVISIONAL per F-W43-2)**. | **W4.3 has NO production dispatch.** The iteration-1 working hypothesis (sort-merge > nested-loop > hash) was empirically rejected by the Step 12 bench: nested-loop wins 1.25×–2.46× on every cell of the 50×50–2000×2000 sorted-eligible matrix, and sort-merge fails to reach the D7 #8 ≥ 2× threshold vs hash on any cell either. The iteration-6 production decision tree at `execute_join` reverts to:<br>1. Eligible for nested-loop envelope (Inner + 1-key + matching U32/Symbol + ≤ 4M Cartesian)? → **nested-loop** (W4.2's existing path, unchanged).<br>2. Else → **hash** (existing fallback, unchanged).<br><br>The W4.3 sort-merge operator is implemented + benched + provider-cert-tested but is **not wired into the executor's dispatch decision tree**. Iteration-6 unwiring removes: (a) `eligible_for_sort_merge` predicate, (b) the `if eligible_for_sort_merge { ... }` branch in `execute_join`, (c) the `if out.is_none()` guard wrapping the W4.2 branch (no longer needed since W4.3 cannot consume the slot). The W4.2 branch returns to its pre-Step-5 unwrapped form. Per F-W43-2's anticipated outcome: *"If the bench shows nested-loop wins on the overlap, iteration-N+ amends D2."* Iteration 6 IS that amendment. |
 | **D3** | **Memory-safe output sizing**. | **Cartesian-style threshold matching W4.2's** `NESTED_LOOP_TOTAL_THRESHOLD = 4_000_000`. Sort-merge dispatches iff `(L as u64).checked_mul(R as u64).map(\|p\| p <= NESTED_LOOP_TOTAL_THRESHOLD).unwrap_or(false)`. Output worst-case is `L * R` (when all keys identical → full Cartesian explosion); the threshold caps allocation at 4M output rows × 4 bytes × 2 index arrays = 32 MB total intermediate, plus the gather pass output. **Constant-sharing decision**: both W4.2 (nested-loop) and W4.3 (sort-merge) use the SAME constant. No new constant introduced. **Rationale**: spike data shows sort-merge wins through L=R=5000 (25M Cartesian) — bigger than the 4M threshold — but the worst-case OUTPUT for arbitrary key distributions can be `L * R`, not just `min(L, R) * dup_rate`. The 4M cap is conservative-but-bench-grounded for both operators; consistency between them simplifies the dispatch + makes the memory budget at the dispatch site predictable. **Future iteration**: a higher sort-merge-specific threshold could be introduced in v0.6.6+ if production traffic shows expected-output is much smaller than worst-case (e.g., empirical-distribution-based dynamic threshold). Not in W4.3 scope. |
 | **D4** | **Schema/key-type admissibility (production-narrow)**. | A join is eligible for sort-merge dispatch iff ALL hold: (a) `JoinType::Inner` (Semi/Anti/LeftOuter fall back); (b) exactly **1 key column** on each side (`left_keys.len() == 1 && right_keys.len() == 1`); (c) **left and right key column types are EQUAL** AND that shared type is `ScalarType::U32` OR `ScalarType::Symbol`; (d) size threshold (D3) met; (e) sortedness detected on BOTH sides via D1 kernel. Mirrors W4.2's narrow envelope so the operator-precedence decision tree (D2) is symmetric across sort-merge and nested-loop's eligibility checks. Multi-key, non-Inner, non-U32/Symbol, mismatched types, above-threshold, OR unsorted → fall back to nested-loop or hash per D2. |
 | **D5** | **Hash-fallback policy on detection failure (per F-W43-1 fail-closed lock)**. | **Fall through to W4.2 nested-loop OR hash** per D2's decision tree. Sort-then-merge (sort the inputs first, then merge) is NOT in W4.3 scope. Rationale: the sort kernel itself has multi-launch overhead (~7-step radix-sort family at `crates/xlog-cuda/kernels/sort.cu`); paying that upfront would erode the sort-merge speedup such that the operator may net-lose vs hash. Spike does not measure sort-then-merge; without empirical data, sort-then-merge is speculative and out of scope. The dispatch is **FAIL-CLOSED** on detection: the dispatch site MUST handle `is_sorted_ascending_u32`'s return as `Result<bool>` and fall through on **both** `Ok(false)` AND `Err(_)`. Specifically, the dispatch site MUST NOT use the `?` operator on the detection call — propagating the Err to the caller would violate the fail-closed contract by erroring out a join that COULD have succeeded via nested-loop or hash. The pseudocode in Step 5 reflects this: `match is_sorted_ascending_u32(...) { Ok(true) => proceed, _ => fall through }`. Detection NEVER causes an error to propagate to the caller. |
-| **D6** | **Dispatch counter**. | Add `pub(super) sort_merge_dispatch_count: u64` to `Executor` (mirrors W4.2 `nested_loop_dispatch_count` plain-`u64` convention; methods take `&mut self` so atomic synchronization is unnecessary). Increments on every successful sort-merge launch from `execute_join` via `self.sort_merge_dispatch_count += 1`. Public accessor `pub fn sort_merge_dispatch_count(&self) -> u64`. NO `RuntimeConfig` field, NO env knob (per process locks). The counter is observability for tests; runtime always dispatches via the eligibility predicate + detection kernel. |
-| **D7** | **Acceptance gates (locked, per F-W43-3 timed-region clarification + F-W43-4 empty-input cert + F-W43-12 workspace-test gate exception + F-W43-13 exact-equality counter discipline).** | (1) Cert A PASS — pre-sorted small-Cartesian dispatch + parity vs hash + `sort_merge_dispatch_count == 1` + `nested_loop_dispatch_count == 0` + selectivity feedback wired (mirrors W4.2 Cert A); (2) Cert B PASS — UNSORTED-but-otherwise-eligible inputs fall back to nested-loop (`sort_merge_dispatch_count == 0`, `nested_loop_dispatch_count == 1`, row-set parity); (3) Cert C PASS — above-threshold sorted inputs fall back to hash (`sort_merge_dispatch_count == 0`, `nested_loop_dispatch_count == 0`, parity); (4) Cert D PASS — multi-col composite key fallback (`sort_merge_dispatch_count == 0`); (5) Cert D' PASS — non-Inner (Semi) fallback (`sort_merge_dispatch_count == 0` AND `nested_loop_dispatch_count == 0`); (6) Cert E PASS — Symbol-typed sorted-key dispatch (`sort_merge_dispatch_count == 1`, `nested_loop_dispatch_count == 0`, parity); (7) Cert F PASS — duplicate-key run-length matching dispatches sort-merge (`sort_merge_dispatch_count == 1`, `nested_loop_dispatch_count == 0`, output row count == 4000, parity, all 4000 (k,lp,rp) tuples distinct — the spike-validated regime); (7') **Cert G PASS (per F-W43-4 + F-W43-13 D7 route assertion) — empty-input dispatch**: at least one cell with `num_left == 0` and one cell with `num_right == 0`; on each subcase a fresh executor must show `sort_merge_dispatch_count == 1` AND `nested_loop_dispatch_count == 0` post-`execute_node` (proves the chosen short-circuit: detection's n<2→Ok(true) + sortedness probe on the populated side + dispatch admits + kernel empty fast path); row-set parity vs hash (both produce empty); no kernel-launch crash; (8) **Post-implementation bench (per F-W43-3 + F-W43-2)** shows the EXECUTOR DISPATCH PATH including BOTH detection kernel calls AND the chosen-operator launch wins by **≥ 2×** vs hash on the eligible envelope. Timed region MUST be `Executor::execute_plan` or equivalent end-to-end dispatch path (NOT `provider.sort_merge_join_v2_inner_u32_1key` direct call) so the detection cost is included in the reported numbers. The bench MUST also include side-by-side overlap cells where the same fixture is run twice — once routed through sort-merge dispatch and once forced through nested-loop — to empirically validate the D2 precedence decision; if the comparison shows nested-loop wins on the overlap, iteration-N+ amends D2; (9) all other slice-1/2/4 + W4.1 + W4.2 tests PASS (no regressions); (10) zero workspace warnings on touched files; (11) `cargo fmt --check --all` clean; (12) **(per F-W43-12 gate exception)** `cargo test --workspace --release --exclude pyxlog --exclude xlog-cuda-tests` exits 0 for every test path EXCEPT `crates/xlog-cuda/tests/test_wcoj_layout_fast_path.rs`, which is a pre-existing flake reproducible on merge-base 19f7bc5d (W4.2 closure HEAD) and out-of-W4.3-scope to fix (data-corruption signature consistent with missing stream-synchronize between kernel launch and D2H download in the v0.6.2 WCOJ layout fast-path code); the exception is narrow — every OTHER workspace-test path must still exit 0; (13) `cargo test -p xlog-cuda-tests --test certification_suite --release` 1/1 (the **authoritative gate** per MEMORY.md, which compensates for the (12) exception); (14) post-impl bench evidence committed to `docs/evidence/<YYYY-MM-DD>-w43-production-bench/README.md`. |
+| **D6** | **Dispatch counter (REMOVED per F-W43-14)**. | Iteration 1–5 added `sort_merge_dispatch_count: u64` to `Executor` + accessor for cert observability. Iteration 6 removes both: with no production dispatch (D2 amended), the counter has nothing to increment and would be permanently stuck at 0 in any production session. The W4.2 `nested_loop_dispatch_count` field/accessor remains (W4.2 still dispatches). Operator-level certs (Step 6/9/10 rewrites) verify the W4.3 provider/kernel surface directly via `provider.sort_merge_join_v2_inner_u32_1key` — no executor-side observability needed. |
+| **D7** | **Acceptance gates (locked, per F-W43-3 timed-region clarification + F-W43-4 empty-input cert + F-W43-12 workspace-test gate exception + F-W43-14 operator-only scope redirect).** | **Operator-level acceptance gates (post-F-W43-14):** (1) **Cert A — sorted-key operator parity**: `provider.sort_merge_join_v2_inner_u32_1key` on a sorted-ascending 100-row 1-key U32 fixture produces `BTreeSet<[u32; 4]>` row-set parity vs `provider.hash_join_v2 Inner` reference. (2) **Cert E — Symbol-typed operator parity**: same shape on Symbol-typed buffers; the operator handles Symbol (byte-identical to U32 at the kernel level). (3) **Cert F — duplicate-key operator parity**: 250 keys × 4 dups → 1000 rows each side → `provider.sort_merge_join_v2_inner_u32_1key` produces 4000 output rows, all (k, lp, rp) tuples distinct, row-set parity vs hash. Exercises the kernel's `lower_bound`/`upper_bound` run-length emit path. (4) **Cert G — empty-input operator (per F-W43-4 layered-short-circuit contract)**: two subcases (`num_left == 0`, `num_right == 0`); each routes through `provider.is_sorted_ascending_u32`'s `n < 2 → Ok(true)` short-circuit followed by `provider.sort_merge_join_v2_inner_u32_1key`'s empty-input fast path; asserts no kernel-launch crash + empty output + row-set parity vs hash empty fast path at `relational.rs:3165-3170`. (5) **W4.2 nested-loop dispatch certs (5 tests in `test_w42_nested_loop_dispatch.rs`) PASS unchanged** — production-routing guard for the post-unwiring executor (W4.2 dispatch is the only join-operator dispatch in the executor after F-W43-14). (6) **Retired dispatch-only certs (B, C, D, D')**: superseded by F-W43-14. With no executor sort-merge dispatch path, asserting `sort_merge_dispatch_count == 0` on fall-through fixtures or `dispatch_count == 1` on positive fixtures becomes meaningless. The retirement is recorded explicitly in the cert file's deletion commit + this row; W4.2 dispatch fall-through behavior on those fixture shapes (multi-col key, Semi, above-threshold) is already covered by the W4.2 cert suite. (7) **Step 12 bench evidence is the rejection record, not an acceptance gate**. The iteration-1 D7 #8 (≥ 2× vs hash) is **REJECTED**: bench data shows sort-merge wins 1.10×–1.80× vs hash, never reaching 2×. The iteration-1 D2 precedence (sort-merge > nested-loop) is **REJECTED**: bench data shows nested-loop wins 1.25×–2.46× on every overlap cell. Both rejections are documented in `docs/evidence/2026-05-10-w43-production-bench/README.md` per F-W43-2's anticipated amendment path. (8) Workspace gates unchanged: `cargo fmt --check --all` clean; zero workspace warnings on touched files; cert suite 1/1 (authoritative per MEMORY.md); `cargo test --workspace --release --exclude pyxlog --exclude xlog-cuda-tests` exits 0 for every path EXCEPT `test_wcoj_layout_fast_path` (per F-W43-12 pre-existing flake exception). |
 | **D8** | **Process locks**. | No board edit. No DONE marking. No FF-merge until separately authorized. No env-knob additions (`XLOG_SORT_MERGE_*` etc. forbidden). No `RuntimeConfig` field additions. The threshold is the existing `NESTED_LOOP_TOTAL_THRESHOLD` (shared constant, not config-tunable in v0.6.5). The existing dead `JoinStrategy::SortMerge` enum at `crates/xlog-runtime/src/statistics.rs:15` is NOT touched (mirrors W4.2's leave-the-dead-enum-alone discipline). The bench-spike branch (`bench-spike/w43-sort-merge`) stays unmerged — W4.3 does NOT graduate spike code (the production kernel + provider are written fresh with the empty-input fast path, byte-length validation, etc., that the spike skipped). |
 
 ## Read-Only Surface (recon results, augmented post-spike)
@@ -40,7 +40,7 @@ W4.3 has **no direct paper claim** in arXiv:2604.20073 — the SRDatalog paper c
 * **Existing dead-code design layer** (W4.3 leaves untouched per D8):
   * `crates/xlog-runtime/src/statistics.rs:15` — `JoinStrategy::SortMerge` enum variant. Zero production consumers.
 * **Production hash-join dispatch site** (W4.3 wires after W4.2's branch):
-  * `crates/xlog-runtime/src/executor/node_dispatch.rs::execute_join` — currently has W4.2's nested-loop branch + adaptive indexing + hash fallback. W4.3 inserts a sort-merge branch BEFORE the nested-loop branch (per D2 precedence).
+  * `crates/xlog-runtime/src/executor/node_dispatch.rs::execute_join` — has W4.2's nested-loop branch + adaptive indexing + hash fallback. **Iteration-6 outcome (per F-W43-14 D2 amendment): NO W4.3 dispatch branch is added; the sort-merge operator is implemented at the provider layer but is not invoked from the executor's dispatch decision tree.**
 * **GPU kernel infrastructure**:
   * `crates/xlog-cuda/kernels/sort.cu` — radix-sort family. W4.3 appends `check_ascending_sorted_u32` (D1 detection kernel).
   * `crates/xlog-cuda/kernels/join.cu` — hash-join + nested-loop kernel families. W4.3 appends `sort_merge_join_inner_u32_1key_pairs` (production kernel; the spike kernel `sort_merge_join_inner_u32_1key_pairs_spike` does NOT graduate).
@@ -53,7 +53,7 @@ W4.3 has **no direct paper claim** in arXiv:2604.20073 — the SRDatalog paper c
 
 ### Step 1 — Plan iteration commit (this commit)
 
-The current plan-iteration commit (iter 1, then amendments per F-W43-N), on `feat/w43-sort-merge-join`. No code yet at iteration approval; iteration 5 captures findings surfaced during execution. The agent does NOT advance to Step 2 until the user explicitly approves the live iteration (currently iteration 5).
+The current plan-iteration commit (iter 1, then amendments per F-W43-N), on `feat/w43-sort-merge-join`. Iteration 5 captured execution-discovered drift; iteration 6 captures the post-bench scope-redirect (F-W43-14). The agent does NOT advance to iteration-6 unwiring + cert rewrite (Steps 4'/5'/6'/7'/8') until the user explicitly approves the live iteration (currently iteration 6).
 
 Commit subject: `docs(plan): W4.3 iteration 1 — sort-merge join (post-spike, 5 mandatory locks)`.
 
@@ -77,15 +77,15 @@ File: `crates/xlog-cuda/src/provider/relational.rs` (edit). Per F-W43-5, sort pr
 
 Commit subject: `feat(w43): add sort_merge_join_v2_inner_u32_1key + is_sorted_ascending_u32 provider fns`.
 
-### Step 4 — Eligibility predicate
+### Step 4 — Eligibility predicate (SUPERSEDED by F-W43-14)
 
-File: `crates/xlog-runtime/src/executor/node_dispatch.rs` (edit).
+**Iteration 1–5 historical**: File: `crates/xlog-runtime/src/executor/node_dispatch.rs` (edit). Added a private free fn `eligible_for_sort_merge(...)` mirroring `eligible_for_nested_loop`'s shape. Operationally landed at commit `b1a5ff76`.
 
-Add a private free fn `eligible_for_sort_merge(left, right, left_keys, right_keys, join_type) -> bool` mirroring `eligible_for_nested_loop`'s shape. Same checks (Inner + 1-key + matching U32/Symbol). NO sortedness check or threshold check inside the predicate — those happen at the dispatch site (Step 5) since they require runtime data (kernel launch + row counts).
+**Iteration 6 (per F-W43-14)**: with no production dispatch, the predicate has no caller. Iteration-6 unwiring removes `eligible_for_sort_merge` from `node_dispatch.rs`. Step 4 is replaced by **Step 4'** (F-W43-14 unwiring step) — see "Iteration-6 Replacement Steps" below.
 
-Commit subject: `feat(w43): add eligible_for_sort_merge predicate`.
+Commit subject (historical): `feat(w43): add eligible_for_sort_merge predicate`.
 
-### Step 5 — Dispatch counter + dispatch wiring
+### Step 5 — Dispatch counter + dispatch wiring (SUPERSEDED by F-W43-14)
 
 Files: `crates/xlog-runtime/src/executor/mod.rs` (counter field) + `crates/xlog-runtime/src/executor/node_dispatch.rs` (wiring) + `crates/xlog-runtime/src/executor/wcoj_dispatch.rs` (accessor, alongside W4.2's accessor).
 
@@ -136,51 +136,46 @@ The two `matches!(...)` calls swallow `Err(_)` deliberately: detection failures 
 
 The W4.2 nested-loop branch is wrapped in `if out.is_none()` already (per Step-5 patch `82d19fd1`). W4.3's branch sets `out = Some(...)` on hit; nested-loop sees `out.is_some()` and skips. All paths converge at the shared `record_join_result` block.
 
-Commit subject: `feat(w43): wire sort-merge dispatch + counter at execute_join (precedes nested-loop)`.
+**Iteration 6 (per F-W43-14)**: the entire dispatch wiring shown above is removed. The `if out.is_none()` wrap on the W4.2 branch is also removed (no longer needed since W4.3 cannot consume the slot). The `sort_merge_dispatch_count` field on `Executor` and its accessor in `wcoj_dispatch.rs` are removed. The kernel-name constants `SORT_MERGE_JOIN_INNER_U32_1KEY_PAIRS` and `CHECK_ASCENDING_SORTED_U32` in `provider/mod.rs` are KEPT (provider fns still use them). Operationally landed at commit `4ef14855` originally; iteration-6 reverts that commit's executor wiring while preserving its other changes (W4.2 fixture de-overlap landed in the same commit; iteration-6 keeps the de-overlap as a no-op-but-harmless change OR optionally reverts to sorted-ascending fixtures since W4.3 dispatch precedence no longer exists — decision recorded in iteration-6 unwiring commit).
 
-### Step 6 — Cert A: pre-sorted small-Cartesian dispatch + parity + selectivity feedback
+Commit subject (historical): `feat(w43): wire sort-merge dispatch + counter at execute_join (precedes nested-loop)`.
 
-File: `crates/xlog-integration/tests/test_w43_sort_merge_dispatch.rs` (new).
+### Step 6 — Cert A: pre-sorted small-Cartesian dispatch + parity + selectivity feedback (REWRITTEN by F-W43-14)
 
-Test `pre_sorted_small_cartesian_dispatches_sort_merge_and_matches_hash`. Same shape as W4.2 Cert A but with sorted-ascending fixtures. Asserts:
-* `sort_merge_dispatch_count == 1` (per F-W43-13 exact-equality discipline — single-join fixture must dispatch sort-merge exactly once).
-* `nested_loop_dispatch_count == 0` (sort-merge took precedence).
-* `BTreeSet<[u32; 4]>` row-set parity vs `provider.hash_join_v2 Inner`.
-* `executor.stats().get_join_selectivity(left_rel, right_rel).is_some()` post-execute (D6 invariant carried forward from W4.2 / W2.4).
+**Iteration 1–5 historical**: File `crates/xlog-integration/tests/test_w43_sort_merge_dispatch.rs` test `pre_sorted_small_cartesian_dispatches_sort_merge_and_matches_hash` asserted `sort_merge_dispatch_count == 1` + `nested_loop_dispatch_count == 0` + parity + selectivity feedback. Operationally landed at commits `e917976e` + Step 6 patch `c665bd0e`.
 
-Commit subject: `test(w43): cert A — pre-sorted small dispatches sort-merge + parity + selectivity`.
+**Iteration 6 (per F-W43-14)**: rewritten as **Cert A (operator-level)**: `provider.sort_merge_join_v2_inner_u32_1key` on a sorted-ascending 100-row 1-key U32 fixture produces row-set parity vs `provider.hash_join_v2 Inner`. No `sort_merge_dispatch_count` assertion (field/accessor removed per F-W43-14 D6). No `nested_loop_dispatch_count == 0` assertion (no dispatch path exists). No selectivity-feedback assertion (no executor wiring). Pure operator parity at the provider layer.
 
-### Step 7 — Cert B: unsorted-but-otherwise-eligible falls back to nested-loop
+Commit subject: `test(w43): rewrite cert A as operator-level provider parity (per F-W43-14)`.
 
-File: same as Cert A.
+### Step 7 — Cert B: unsorted-but-otherwise-eligible falls back to nested-loop (RETIRED by F-W43-14)
 
-Test `unsorted_eligible_falls_back_to_nested_loop`. Inputs are NOT sorted (e.g., shuffled 1-key U32 inputs at L=R=100); same eligibility envelope (Inner + 1-key + U32 + small Cartesian). Asserts:
-* `sort_merge_dispatch_count == 0` (D1 detection refused).
-* `nested_loop_dispatch_count == 1` (per F-W43-13 — W4.2 fallback fired exactly once per D2 precedence).
-* Row-set parity vs hash reference.
+**Iteration 1–5 historical**: Asserted `sort_merge_dispatch_count == 0` AND `nested_loop_dispatch_count == 1` to prove D2 precedence on unsorted fixtures. Operationally landed at commit `c1eff9eb`.
 
-Commit subject: `test(w43): cert B — unsorted eligible falls back to nested-loop`.
+**Iteration 6 (per F-W43-14)**: **RETIRED**. With no executor sort-merge dispatch path, asserting `sort_merge_dispatch_count == 0` is vacuously true and not regression-detecting. The W4.2 cert suite already verifies nested-loop dispatch on its native fixtures. Iteration-6 cert-rewrite commit deletes this test from `test_w43_sort_merge_dispatch.rs`.
 
-### Step 8 — Cert C: above-threshold sorted falls back to hash
+### Step 8 — Cert C: above-threshold sorted falls back to hash (RETIRED by F-W43-14)
 
-Test `above_threshold_sorted_falls_back_to_hash`. Asymmetric sorted fixture (e.g., L=50_000 R=100, sorted), 5M Cartesian above 4M threshold. Asserts:
-* `sort_merge_dispatch_count == 0` (D3 threshold refused).
-* `nested_loop_dispatch_count == 0` (also above threshold).
-* Row-set parity vs hash reference (hash fallback).
+**Iteration 1–5 historical**: Asserted `sort_merge_dispatch_count == 0 AND nested_loop_dispatch_count == 0` on above-4M-Cartesian fixtures. Operationally landed at commit `c0eb3d1a`.
 
-Commit subject: `test(w43): cert C — above-threshold sorted falls back to hash`.
+**Iteration 6 (per F-W43-14)**: **RETIRED**. Same reason as Cert B — vacuous in the absence of dispatch. The W4.2 cert suite already covers above-threshold hash fallback on the same fixture shape (W4.2 Cert B `large_times_small_falls_back_to_hash_above_threshold`).
 
-### Step 9 — Cert D + D': multi-col key + Semi fallback
+### Step 9 — Cert D + D': multi-col key + Semi fallback (RETIRED by F-W43-14)
 
-Mirrors W4.2 Certs C/C'. Multi-col key fallback `sort_merge_dispatch_count == 0` (D4 disqualified). Semi join fallback `sort_merge_dispatch_count == 0` AND `nested_loop_dispatch_count == 0` (both Inner-only).
+**Iteration 1–5 historical**: Cert D asserted `sort_merge_dispatch_count == 0` on multi-col composite-key fixtures. Cert D' asserted `sort_merge_dispatch_count == 0 AND nested_loop_dispatch_count == 0` on Semi-join fixtures. Operationally landed at commit `e66daf9a`.
 
-Commit subject: `test(w43): cert D + D' — multi-col key + Semi fall back to hash`.
+**Iteration 6 (per F-W43-14)**: **RETIRED**. Same reason. The W4.2 cert suite already covers multi-col key + Semi fallback (W4.2 Cert C `multi_col_key_falls_back_to_hash` + Cert C' `semi_join_falls_back_to_hash`).
 
-### Step 10 — Cert E + Cert F + Cert G: Symbol-typed + duplicate-key + empty (per F-W43-4)
+### Step 10 — Cert E + Cert F + Cert G: Symbol-typed + duplicate-key + empty (REWRITTEN by F-W43-14)
 
-Cert E: Symbol-keyed sorted small inner join → sort-merge dispatched (`sort_merge_dispatch_count == 1`, `nested_loop_dispatch_count == 0` per F-W43-13) + parity vs hash on Symbol-typed buffers (mirrors W4.2 Cert E in shape, inverts sortedness so W4.3 fires).
-Cert F: duplicate-key sorted 2-col fixture (e.g., 250 keys × 4× dup → 1000 rows each side, 4000 output rows; mirrors the spike's regime (b)) → sort-merge dispatched (`sort_merge_dispatch_count == 1`, `nested_loop_dispatch_count == 0` per F-W43-13) + parity vs hash + asserts output row count == 4000 + all 4000 (k, lp, rp) tuples distinct (the running-counter payload design proves the run-length kernel emits the right multiplicity, not just the right unique row set).
-**Cert G (per F-W43-4 + F-W43-13 D7 route assertion)**: empty-input fixtures — at least one subcase with `num_left == 0` (right populated + sorted) and one subcase with `num_right == 0` (left populated + sorted), each on a fresh executor. Asserts on each subcase: `sort_merge_dispatch_count == 1` AND `nested_loop_dispatch_count == 0` (proves the F-W43-4 contract end-to-end — `is_sorted_ascending_u32` short-circuits `n < 2` to `Ok(true)` BEFORE allocation/launch, dispatch admits, then `sort_merge_join_v2_inner_u32_1key`'s empty fast path returns the empty `combine_schemas` buffer); empty output; row-set parity vs hash (which has its own empty fast path at `relational.rs:3165-3170`); no kernel-launch crash. Closes the parity-only loophole — without the counter pin, a future regression silently re-routing empty-input joins through hash would slip past the parity check.
+**Iteration 1–5 historical**: Cert E asserted Symbol-typed dispatch + counter `== 1`. Cert F asserted duplicate-key dispatch + 4000 output count + counter `== 1`. Cert G asserted empty-input dispatch via `is_sorted_ascending_u32`'s `n < 2 → Ok(true)` short-circuit + counter `== 1` per fresh-executor subcase. Operationally landed at commits `0c01f6a9` + Step 10 patch `6f25377d`.
+
+**Iteration 6 (per F-W43-14)**: rewritten as operator-level provider parity certs.
+* **Cert E (operator)**: `provider.sort_merge_join_v2_inner_u32_1key` on Symbol-typed buffers (sorted-ascending 100-row 1-key) produces row-set parity vs `provider.hash_join_v2 Inner`. Proves Symbol-typed kernel surface (byte-identical to U32 at the kernel level).
+* **Cert F (operator)**: `provider.sort_merge_join_v2_inner_u32_1key` on duplicate-key sorted 2-col fixture (250 keys × 4 dups → 1000 rows each side) produces 4000 output rows, all (k, lp, rp) tuples distinct, row-set parity vs hash. Exercises the kernel's `lower_bound`/`upper_bound` run-length emit path. The 4000-row + distinctness assertions remain — they are operator correctness, not dispatch shape.
+* **Cert G (operator, per F-W43-4 layered-short-circuit contract)**: two subcases — `is_sorted_ascending_u32` on `n == 0` returns `Ok(true)` via the `n < 2` short-circuit; `provider.sort_merge_join_v2_inner_u32_1key` on each empty-input combination produces an empty combined-schema buffer with no kernel-launch crash; row-set parity vs hash empty fast path at `relational.rs:3165-3170`. The contract that motivated F-W43-4 (three layered short-circuits all bottom out cleanly) remains testable at the provider layer; only the dispatch-counter assertion drops.
+
+Commit subject: `test(w43): rewrite certs E + F + G as operator-level provider parity (per F-W43-14)`.
 
 Commit subject: `test(w43): cert E + F + G — Symbol-typed + duplicate-key + empty-input dispatch`.
 
@@ -206,35 +201,46 @@ File: `crates/xlog-integration/benches/w43_production_sort_merge_bench.rs` (new)
 
 **Two-part bench design:**
 
-* **Part A — Executor-dispatch-path timing**: timed region is `Executor::execute_plan` (or equivalent end-to-end dispatch path), NOT a direct `provider.sort_merge_join_v2_inner_u32_1key` call. The detection kernel cost (`is_sorted_ascending_u32` × 2 sides) and the eligibility predicate are INSIDE the timed region. Compares end-to-end sort-merge dispatch vs end-to-end hash dispatch on multi-col fixtures matching production eligibility. **D7 acceptance #8 is satisfied iff this path wins ≥ 2× vs hash on eligible cells.** Per F-W43-3, this resolves the iteration-1 timed-region ambiguity: the bench measures what production traffic actually pays, including detection.
+* **Part A — sort-merge-with-detection vs hash**: timed region is `provider.is_sorted_ascending_u32(left, 0)` + `provider.is_sorted_ascending_u32(right, 0)` + `provider.sort_merge_join_v2_inner_u32_1key`. Hash baseline: direct `provider.hash_join_v2`. The initial-iteration interpretation of F-W43-3 used `executor.execute_node` as the timed region but the `execute_scan`-clone overhead is identical for sort-merge AND hash dispatch in production and therefore did not differentiate the two paths; provider-direct + explicit detection on the sort-merge side preserves F-W43-3's intent (detection cost included) while keeping the comparison apples-to-apples on kernel-level work. See bench file header for the design rationale.
 
-* **Part B — D2 precedence overlap validation (per F-W43-2)**: at least 3 cells where the same fixture is run twice — once with `RuntimeConfig::default()` (sort-merge dispatched per D2) and once with sort-merge dispatch disabled (forces nested-loop fallback under the same eligibility envelope). Compares end-to-end timings. If the comparison shows nested-loop wins on the overlap, iteration-N+ amends D2 to nested-loop-first. The disable mechanism is a test-only construct (e.g., temporary direct-hash + direct-nested-loop provider calls bypassing the eligibility predicate); does NOT add a `RuntimeConfig` field per D8.
+* **Part B — D2 precedence overlap validation (per F-W43-2)**: same cell matrix as Part A. Path 1 = sort-merge-with-detection (provider-direct + explicit detection on the sort-merge side). Path 2 = direct `provider.nested_loop_join_v2_inner_u32_1key`. Side-by-side timing per cell. Per F-W43-2's anticipated outcome: if nested-loop wins on overlap, iteration-N+ amends D2.
 
-Output: `docs/evidence/<YYYY-MM-DD>-w43-production-bench/README.md` with median timings + speedup table for Part A + Part B's overlap-comparison data + decision-validation conclusion (D2 precedence held vs needs amendment).
+Output: `docs/evidence/2026-05-10-w43-production-bench/README.md` with median timings + speedup table for Part A + Part B + decision-validation conclusion.
 
-Commit subject: `feat(w43): add production sort-merge bench + evidence (executor-dispatch-path + D2-overlap validation)`.
+**Iteration-6 outcome (per F-W43-14 — counter-finding rather than acceptance success)**: Step 12 bench surfaced the counter-finding F-W43-2 was designed to catch:
+* **Part A — D7 #8 (≥ 2× vs hash) FAILED on every cell**: speedups range 1.10×–1.80×, never reaching 2× across the 50×50–2000×2000 sorted-eligible matrix.
+* **Part B — D2 precedence (sort-merge > nested-loop) FAILED on every cell**: nested-loop wins 1.25×–2.46× on every overlap cell.
 
-### Step 13 — Closure proposal (text-only)
+Both rejections are documented in `docs/evidence/2026-05-10-w43-production-bench/README.md`. Step 12 in iteration 6 is the **bench evidence + rejection record**, not an acceptance success. Per F-W43-2's locked amendment path, iteration-6 (this iteration) executes the W4.3 unwiring + cert rewrite that the counter-finding mandates.
 
-Plan-iteration commit + Steps 2–12 commits on `feat/w43-sort-merge-join`. No board edit. No FF-merge. No advance until separate user approval.
+Commit subjects: `feat(w43): add production sort-merge bench + evidence (counter-finding: D2 precedence + D7 #8 both fail)` (operationally landed at `ab7021d4`).
 
-## Acceptance Grid (iteration-5 canonical)
+### Step 13 — Closure proposal (text-only, scope amended per F-W43-14)
+
+**Iteration 1–5 historical**: Plan-iteration commit + Steps 2–12 commits on `feat/w43-sort-merge-join`. Acceptance was full production sort-merge dispatch closure.
+
+**Iteration 6 (per F-W43-14)**: closure proposal scope changes to **operator-only**:
+* Plan-iteration commit + Steps 2–3 commits (operator + provider implementation) + iteration-6 unwiring commit + iteration-6 cert-rewrite commit + Step 12 bench/evidence commit + iteration-6 closure-proposal commit (this final commit) on `feat/w43-sort-merge-join`.
+* The W4.3 sort-merge operator is **implemented**, **bench-validated** (vs hash 1.10×–1.80× win), **operator-cert-tested** (4 provider-level certs: A/E/F/G after F-W43-14 rewrite), but **not wired into production dispatch** (D2 amended; bench rejected).
+* No board edit. No FF-merge. No DONE marking until the user explicitly approves operator-only scope as a valid closure for the W4.3 board item.
+* The closure proposal explicitly raises the scope question: "W4.3 operator implemented but production dispatch rejected by evidence — does the closure board accept this as DONE, or does it require a different completion criterion (e.g., operator removed entirely; or dispatch-perf investigation deferred to v0.6.6+)?"
+
+## Acceptance Grid (iteration-6 canonical)
 
 | Cell | Count | Test file | Acceptance criterion |
 |------|-------|-----------|----------------------|
-| **Cert A — pre-sorted small dispatch** | 1 | `test_w43_sort_merge_dispatch.rs` (new) | sort_merge_dispatch_count == 1 + nested_loop == 0 + parity + selectivity feedback |
-| **Cert B — unsorted falls back to nested-loop** | 1 | same | sort_merge == 0 + nested_loop == 1 + parity |
-| **Cert C — above-threshold falls back to hash** | 1 | same | sort_merge == 0 + nested_loop == 0 + parity |
-| **Cert D — multi-col key fallback** | 1 | same | sort_merge == 0 + parity |
-| **Cert D' — Semi join fallback** | 1 | same | sort_merge == 0 + nested_loop == 0 + Semi parity |
-| **Cert E — Symbol-typed dispatch** | 1 | same | sort_merge == 1 + nested_loop == 0 + parity |
-| **Cert F — duplicate-key run-length dispatch** | 1 | same | sort_merge == 1 + nested_loop == 0 + output count == 4000 + all 4000 tuples distinct + parity |
-| **Cert G — empty-input dispatch (per F-W43-4 + F-W43-13)** | 1 | same | both subcases (empty L + empty R) per fresh executor: sort_merge == 1 + nested_loop == 0 + empty output + parity vs hash + no kernel-launch crash |
-| **Post-impl bench Part A** | 1 | `w43_production_sort_merge_bench.rs` (new) | Executor-dispatch-path including detection wins ≥ 2× vs hash on eligible cells |
-| **Post-impl bench Part B (per F-W43-2)** | 1 | same file | Side-by-side overlap cells confirm D2 precedence (sort-merge > nested-loop) OR surface a counter-finding |
-| **Workspace pass-count delta** | **+8** | — | 8 new test cells (A, B, C, D, D', E, F, G — Cert G added per F-W43-4). D folded as parity tail. |
+| **Cert A (operator) — sorted-key parity** | 1 | `test_w43_sort_merge_dispatch.rs` | `provider.sort_merge_join_v2_inner_u32_1key` row-set parity vs hash on sorted 100-row 1-key U32 fixture |
+| **Cert E (operator) — Symbol-typed parity** | 1 | same | `provider.sort_merge_join_v2_inner_u32_1key` row-set parity vs hash on Symbol-typed buffers |
+| **Cert F (operator) — duplicate-key parity** | 1 | same | `provider.sort_merge_join_v2_inner_u32_1key` on 250 keys × 4 dups → 4000 output rows, all (k, lp, rp) tuples distinct, parity vs hash |
+| **Cert G (operator) — empty-input parity (per F-W43-4)** | 1 | same | two subcases: `is_sorted_ascending_u32` returns Ok(true) on `n == 0` (n<2 short-circuit); `provider.sort_merge_join_v2_inner_u32_1key` produces empty buffer with no crash; row-set parity vs hash empty fast path |
+| **Step 12 bench — counter-finding evidence** | 1 | `w43_production_sort_merge_bench.rs` + `docs/evidence/2026-05-10-w43-production-bench/README.md` | Bench runs to completion; documents D7 #8 + D2 rejection per F-W43-14. NOT a ≥2×-win acceptance criterion. |
+| **W4.2 dispatch certs (production-routing guard)** | 5 (already-existing) | `test_w42_nested_loop_dispatch.rs` | All 5 W4.2 certs PASS unchanged (Inner + Symbol + multi-col + Semi + above-threshold) — the production-routing guard for the post-unwiring executor |
+| **Workspace pass-count delta (iteration-6)** | **+4 W4.3 operator certs (A, E, F, G after rewrite)**, **0 W4.2 cert delta** (existing W4.2 suite unchanged), **−4 dispatch-only certs retired (B, C, D, D')** | — | Iteration 1–5 originally targeted +8 dispatch certs; iteration 6 retires B/C/D/D' as superseded and rewrites A/E/F/G as operator certs. Net W4.3 pass-count delta: +4. |
+| **Iteration-1 Cert B/C/D/D' (RETIRED per F-W43-14)** | 0 | — | Removed in iteration-6 cert-rewrite commit. Replaced by W4.2 suite which already covers fall-through fixture shapes. |
+| **Iteration-1 Bench Part A "≥ 2× vs hash" (REJECTED per F-W43-14)** | 0 | — | The ≥2× threshold was the iteration-1 working hypothesis. Bench measured 1.10×–1.80×; D7 #8 fails. The bench evidence is preserved as the rejection record. |
+| **Iteration-1 Bench Part B "D2 precedence holds" (REJECTED per F-W43-14)** | 0 | — | Bench measured nested-loop wins 1.25×–2.46× on every overlap cell; D2 amended to "no W4.3 production dispatch". |
 
-## Source-of-Truth References (iteration-5 canonical)
+## Source-of-Truth References (iteration-6 canonical)
 
 * Spike evidence: `docs/evidence/2026-05-10-w43-bench-spike/README.md` (on `bench-spike/w43-sort-merge`); `fadc2700` HEAD.
 * Recon: `docs/plans/2026-05-08-w43-sort-merge-join-recon.md`.
@@ -243,20 +249,20 @@ Plan-iteration commit + Steps 2–12 commits on `feat/w43-sort-merge-join`. No b
 * Sortedness-check kernel precedent: `crates/xlog-cuda/kernels/wcoj.cu::wcoj_layout_check_sorted_unique_u32` + `provider/wcoj.rs:3137`.
 * Existing `JoinStrategy::SortMerge` dead-code: `crates/xlog-runtime/src/statistics.rs:15` (untouched).
 
-## Risk Register (informational, iteration-5 canonical)
+## Risk Register (informational, iteration-6 canonical)
 
 | Risk | Mitigation |
 |------|------------|
 | Detection kernel cost erodes the speedup | D1 detection is a single-pass `O(L+R)` scan + 1 D2H scalar — bounded at ~5-50 µs vs sort-merge's ~300 µs win over hash. Step 12 post-impl bench validates net speedup ≥ 2× INCLUDING detection cost. |
 | Sort-merge wins in spike but loses in production due to multi-col gather overhead | Spike's 2-col duplicate-key cell already exercises gather (2.56× win). Step 12 bench at production arity validates. |
 | Threshold mismatch between W4.2 and W4.3 | D3 explicitly shares the constant. Iteration-1 lock prevents drift. |
-| Sort-merge dispatch overrides nested-loop in cases where nested-loop is faster | Spike doesn't cross-compare sort-merge vs nested-loop directly. Step 12 bench could include a side-by-side comparison cell at small sorted Cartesian inputs to confirm sort-merge precedence is empirically right. |
+| Sort-merge dispatch overrides nested-loop in cases where nested-loop is faster | **REALIZED per F-W43-14**: Step 12 bench surfaced the counter-finding (nested-loop wins 1.25×–2.46× on every overlap cell). Iteration-6 unwiring removes W4.3 from production dispatch entirely; nested-loop remains the production path for the shared eligibility envelope. |
 | Detection kernel reports "unsorted" on edge cases (single-row inputs, empty inputs) | Per F-W43-4: empty AND single-row inputs (`n < 2`) are short-circuited by `is_sorted_ascending_u32`'s **own internal fast path** (return `Ok(true)` BEFORE allocation/launch) — they enter detection AFTER the threshold check admits the join (`0 * 0 = 0 ≤ 4M = true`). The detection kernel never launches with grid_dim 0. Once detection returns `Ok(true)` for an empty side, `sort_merge_join_v2_inner_u32_1key`'s own empty fast path returns the empty `combine_schemas` buffer (mirrors `hash_join_inner_v2`'s empty handling at `relational.rs:3165-3170`). Cert G covers both empty-left and empty-right fixtures. |
 | `JoinStrategy::SortMerge` dead-enum confusion | NOT touched per D8. Future cleanup commit (out of W4.3) can delete the enum entirely. |
 
-## Plan-Approval Gate (iteration 5)
+## Plan-Approval Gate (iteration 6)
 
-This plan is **iteration 5** (iteration 4 was approved and Steps 2-11 executed; iteration 5 retroactively captures three execution-discovered findings — F-W43-11 from Step 5 review, F-W43-12 from Step 11 verification, and F-W43-13 cert-contract drift surfaced during the iteration-5 plan review itself — to keep the plan record aligned with executed work). Iterations 1-4 follow the standard pre-execution review pattern; iteration 5 is the post-execution amendment pattern documented in the Iteration-5 Amendment Log. The live D-table + Step plan + Acceptance Grid above remain the canonical source of truth.
+This plan is **iteration 6** (iteration 5 was approved through Step 11; iteration 5's Step 12 bench surfaced the F-W43-2 anticipated counter-finding; iteration 6 amends the W4.3 closure scope to "operator implemented, production dispatch rejected by evidence" per user direction in response to the bench rejection). Iterations 1-4 follow the pre-execution review pattern; iteration 5 captured execution-discovered drift (F-W43-11/12/13); iteration 6 is the post-bench scope-redirect amendment (F-W43-14). The live D-table + Step plan + Acceptance Grid above remain the canonical source of truth.
 
 Common amendment vectors per the W4.2 / W4.1 plan-iteration discipline:
 * Threshold sharing decision (D3) — could push back to introduce a separate constant, or argue for a different value.
@@ -328,3 +334,94 @@ Iteration 5 captures three findings surfaced during execution rather than during
 | **F-W43-13** | Major | Cert-contract drift between the executed certs and the plan's canonical D7 + Acceptance Grid. Step 6 patch (commit c665bd0e) tightened Cert A's `sort_merge_dispatch_count >= 1` to `== 1` and that exact-equality discipline was extended to Certs B/E/F as the certs landed; Step 10 patch (commit 6f25377d) tightened Cert G to assert `sort_merge_dispatch_count == 1` AND `nested_loop_dispatch_count == 0` per fresh-executor subcase (closing the parity-only loophole). The plan still carried the soft `>= 1` criteria in D7 #1, #2, #6, #7 and the Acceptance Grid Certs A/B/E/F, plus the "either path" / "no kernel-launch crash; empty output via either path" loophole text in D7 #7' and Cert G. Certs are correct; canonical contract was stale. | D7 #1: `sort_merge_dispatch_count >= 1`; D7 #2: `nested_loop_dispatch_count >= 1 or hash`; D7 #7' Cert G: "assert `sort_merge_dispatch_count` reflects the chosen short-circuit (either dispatched OR not-dispatched)"; Acceptance Grid Certs A/B/E/F: `>= 1` + grid Cert G: "no kernel-launch crash; empty output via either path; row-set parity". | D7 #1: `sort_merge_dispatch_count == 1` + `nested_loop == 0`. D7 #2: `sort_merge == 0`, `nested_loop == 1`. D7 #5 + #6 (D' + E): both add explicit `nested_loop == 0`. D7 #7 (F): `sort_merge == 1`, `nested_loop == 0`, output count == 4000, all 4000 tuples distinct. D7 #7' (G): on each fresh-executor subcase `sort_merge == 1` AND `nested_loop == 0` (proves the F-W43-4 contract end-to-end: detection short-circuits n<2→Ok(true) + sortedness probe on populated side + dispatch admits + kernel empty fast path). Acceptance Grid synced to match. Same lesson as F-W43-7/8/9/10: contract changes are file-wide concerns; future plan-discipline improvement compounding the iteration-bumping lesson — when *any* contract change lands operationally, grep the canonical D-table grid AND the Acceptance Grid AND any prose Step section before declaring the patch complete. |
 
 **Iteration-5 process observation**: F-W43-11, F-W43-12, and F-W43-13 are all *execution-discovered* findings that could not have been surfaced by plan review alone — F-W43-11 required the W4.3 dispatch wiring to exist in source; F-W43-12 required running the workspace gate against the live CUDA environment; F-W43-13 required the cert review tightenings (Step 6 patch + Step 10 patch) to land before the drift between executed certs and canonical plan became visible. The pattern teaches: post-execution amendment commits are part of the plan-iteration discipline, not a violation of it; the discipline says "every amendment lands as a new iteration commit," and that includes amendments motivated by reality after the fact. F-W43-13 specifically extends the F-W43-7/8/9/10 file-wide-concern lesson: when a contract is tightened (not just labeled), the same grep-everywhere discipline applies — D7 grid + Acceptance Grid + prose Steps must all be inspected before the iteration is declared closed.
+
+## Iteration-6 Amendment Log
+
+Iteration 6 captures one execution-discovered finding (F-W43-14) that materially changes the W4.3 closure scope from "production dispatch closure" to "operator implemented, production dispatch rejected by evidence." This amendment was anticipated by F-W43-2's iteration-1 instruction: *"If the bench shows nested-loop wins on the overlap, iteration-N+ amends D2."* Iteration 6 IS that amendment.
+
+| ID | Severity | Finding | Pre-iter-6 (working hypothesis, now rejected) | Iter-6 (amended) |
+|----|----------|---------|------------------------------------------------|-------------------|
+| **F-W43-14** | Major | Step 12 production bench (commit `ab7021d4`) surfaced two simultaneous failures of iteration-1 design hypotheses. **Part A**: D7 #8 "≥ 2× vs hash" REJECTED — measured speedups 1.10×–1.80× on every cell of the 50×50–2000×2000 sorted-eligible matrix. **Part B**: D2 precedence "sort-merge > nested-loop" REJECTED — nested-loop wins 1.25×–2.46× on every overlap cell. F-W43-2 anticipated this exact outcome and locked in the amendment path. Per user direction: keep operator + provider + kernels + manifest + bench evidence; remove executor dispatch wiring + counter + accessor + eligibility predicate; rewrite operator-meaningful certs (A/E/F/G) at the provider layer; retire dispatch-only certs (B/C/D/D') as superseded; W4.2 cert suite remains the production-routing guard for the post-unwiring executor; closure scope changes to operator-only. | D2: sort-merge > nested-loop > hash precedence in `execute_join`. D6: `sort_merge_dispatch_count` field + accessor on `Executor`. D7 #1–#7' + Acceptance Grid: 8 dispatch certs at executor level, all asserting counter values. D7 #8: ≥ 2× vs hash bench acceptance. Step 4 added `eligible_for_sort_merge` predicate. Step 5 wired W4.3 branch in `execute_join` ahead of W4.2. Steps 6–10 cert file with 8 dispatch certs. Step 13 closure proposal: full production sort-merge dispatch closure. | D2 amended: NO production dispatch; W4.3 sort-merge implemented at provider layer only. D6: counter field/accessor REMOVED. D7 amended: 4 operator-level provider parity certs (A/E/F/G after rewrite); W4.2 cert suite kept as production-routing guard; bench evidence is the rejection record (NOT a ≥2× acceptance). Step 4 + Step 5 + (parts of) Step 9–10: superseded; iteration-6 unwiring step replaces them. Steps 6–10 cert file: A/E/F/G rewritten as provider parity certs; B/C/D/D' retired (superseded by W4.2 suite which already covers fall-through fixture shapes). Step 13 closure proposal: operator-only scope, raises closure-board scope question. The W4.3 sort-merge operator + provider + kernels + bench evidence remain as graduated implementation work. |
+
+**Iteration-6 process observation**: F-W43-14 is unique among the iteration-5/6 findings in that it materially shrinks the closure scope rather than tightening or relaxing existing criteria. The iteration-1 plan correctly anticipated this possibility (D2 marked PROVISIONAL, F-W43-2 locked the amendment path); the iteration-1 review explicitly built in the path that iteration 6 is now executing. The discipline lesson: when a design lock is marked PROVISIONAL with an explicit "if X, then amend" instruction, the iteration-N+ amendment commit IS the closure of that conditional, not a deviation from the original plan. This is also a productive use of bench-spike-first discipline (`feedback_perf_bench_spike_first.md`) compounded with provisional-precedence: the spike validated the operator works; the production bench validated the precedence is wrong. Both kinds of evidence are load-bearing.
+
+## Iteration-6 Replacement Steps (per F-W43-14)
+
+These steps replace the superseded portions of Steps 4–10. They are executed in order on top of the iteration-5 commit history (no rebase, no force-push — additive commits only).
+
+### Step 4' — Executor unwiring (per F-W43-14 D2 + D6 amendment)
+
+File: `crates/xlog-runtime/src/executor/node_dispatch.rs` (edit) + `crates/xlog-runtime/src/executor/mod.rs` (edit) + `crates/xlog-runtime/src/executor/wcoj_dispatch.rs` (edit).
+
+Removals:
+* `eligible_for_sort_merge` private free fn at `node_dispatch.rs`.
+* The `if eligible_for_sort_merge { ... checked_mul ... is_sorted_ascending_u32 × 2 ... sort_merge_join_v2_inner_u32_1key ... }` block in `execute_join`.
+* The `if out.is_none()` wrap on the W4.2 nested-loop branch (no longer needed; W4.3 cannot consume the slot).
+* `sort_merge_dispatch_count: u64` field on `Executor` at `executor/mod.rs`.
+* The constructor's `sort_merge_dispatch_count: 0` initializer.
+* The `sort_merge_dispatch_count(&self) -> u64` accessor at `wcoj_dispatch.rs` (or wherever it lives).
+
+Preserves:
+* `crates/xlog-cuda/src/provider/relational.rs::is_sorted_ascending_u32`.
+* `crates/xlog-cuda/src/provider/relational.rs::sort_merge_join_v2_inner_u32_1key`.
+* `crates/xlog-cuda/kernels/sort.cu::check_ascending_sorted_u32`.
+* `crates/xlog-cuda/kernels/join.cu::sort_merge_join_inner_u32_1key_pairs`.
+* `crates/xlog-cuda/src/kernel_manifest_data.rs` entries for both kernels.
+* `crates/xlog-cuda/src/provider/mod.rs` kernel-name constants `SORT_MERGE_JOIN_INNER_U32_1KEY_PAIRS` + `CHECK_ASCENDING_SORTED_U32`.
+* `node_dispatch.rs:458` adaptive-indexing comment update from Step 11 patch (now states "Only runs if W4.2 nested-loop didn't dispatch" — drop the W4.3 reference).
+
+Commit subject: `refactor(w43): remove executor sort-merge dispatch + counter + predicate (per F-W43-14)`.
+
+### Step 5' — Cert rewrite (per F-W43-14 D7 amendment)
+
+File: `crates/xlog-integration/tests/test_w43_sort_merge_dispatch.rs` (rewrite).
+
+Retire (delete from file): Cert B (`unsorted_eligible_falls_back_to_nested_loop`), Cert C (`above_threshold_sorted_falls_back_to_hash`), Cert D (`multi_col_key_falls_back_to_hash`), Cert D' (`semi_join_falls_back_to_hash`). The W4.2 cert suite already covers these fall-through fixture shapes for the production-routing guard.
+
+Rewrite at the operator/provider layer:
+* **Cert A (operator)**: `provider.sort_merge_join_v2_inner_u32_1key` on sorted 100-row 1-key U32 fixture; `BTreeSet<[u32; 4]>` parity vs `provider.hash_join_v2 Inner`. No executor, no dispatch counter, no selectivity feedback. Pure operator parity.
+* **Cert E (operator)**: same shape on Symbol-typed buffers (uses `upload_symbol_keyed`); parity vs hash.
+* **Cert F (operator)**: 250 keys × 4 dups → `provider.sort_merge_join_v2_inner_u32_1key` produces 4000 output rows, all (k, lp, rp) tuples distinct, parity vs hash.
+* **Cert G (operator, per F-W43-4 layered short-circuit)**: two subcases (`num_left == 0`, `num_right == 0`). Each asserts `provider.is_sorted_ascending_u32` returns `Ok(true)` on the `n < 2` short-circuit; `provider.sort_merge_join_v2_inner_u32_1key` produces empty buffer; row-set parity vs hash empty fast path.
+
+Helpers (`make_runtime_backed_fixture`, `upload_binary_u32`, `upload_symbol_keyed`, `download_quads`) remain. `RuntimeBackedFixture` retains `provider` + `memory` only — the executor-related fields can stay or be trimmed (decision: keep, harmless). `download_pairs` + `download_triples` + `build_executor_with_two_relations` can be deleted if unused after rewrite.
+
+The Executor + RuntimeConfig + Compiler imports can be removed if no remaining test uses them.
+
+Commit subject: `test(w43): rewrite W4.3 certs as operator-level provider parity (per F-W43-14); retire dispatch-only certs B/C/D/D'`.
+
+### Step 6' — Optional W4.2 fixture revert (per F-W43-14)
+
+File: `crates/xlog-integration/tests/test_w42_nested_loop_dispatch.rs` (edit, OPTIONAL).
+
+Iteration-5 / Step-5 commit `4ef14855` introduced rotate-halves fixtures (`(50..100u32).chain(0..50u32)`) on W4.2 Cert A and Cert E to keep them regression-detecting under W4.3 dispatch precedence (F-W43-11). With W4.3 dispatch removed in iteration 6, the rotate-halves is no longer required — the fixtures could revert to `(0..100u32)` sorted ascending.
+
+**Decision**: keep the rotate-halves intact. Reverting introduces churn for no behavioral gain (the certs still pass with rotate-halves and the original sorted-ascending shape; rotate-halves doesn't break anything). The F-W43-11 amendment record stays accurate as a historical justification. If a future reader is confused about why W4.2 fixtures use rotate-halves, the inline comment + F-W43-11 amendment log entry explain the original motivation; the iteration-6 amendment log records why the motivation no longer applies. This is the lower-risk choice.
+
+This step is **optional** and may be skipped if the iteration-6 unwiring + cert rewrite verification gates pass without it. Iteration-6 proceeds without the revert by default.
+
+### Step 7' — Final verification gate (per F-W43-12 exception)
+
+After Steps 4' + 5' (+ optional 6'):
+* `cargo fmt --check --all` exits 0.
+* `RUSTFLAGS="-D warnings" cargo build --release --workspace --exclude pyxlog` exits 0.
+* `cargo test -p xlog-cuda-tests --test certification_suite --release` 1/1 (authoritative gate per MEMORY.md).
+* `cargo test --workspace --release --exclude pyxlog --exclude xlog-cuda-tests` exits 0 for every test path EXCEPT `test_wcoj_layout_fast_path` (per F-W43-12 exception).
+* `cargo test -p xlog-integration --release --test test_w43_sort_merge_dispatch` → 4 tests pass (A, E, F, G after rewrite; B, C, D, D' retired).
+* `cargo test -p xlog-integration --release --test test_w42_nested_loop_dispatch` → 5 tests pass (W4.2 suite unchanged).
+* `cargo bench -p xlog-integration --bench w43_production_sort_merge_bench --no-run` → 0 errors (bench remains valid even though its result is now a rejection record).
+
+### Step 8' — Iteration-6 closure proposal (per F-W43-14 D7 closure-scope amendment)
+
+Closure proposal commit (text-only commit message + this plan iteration commit; no board edit, no DONE marking, no FF-merge). Explicitly raises the scope question to the user / closure board:
+
+> W4.3 sort-merge join operator: implemented, bench-validated (vs hash 1.10×–1.80× win), provider-cert-tested (4 operator-level parity certs). Production dispatch rejected by Step 12 bench evidence (D2 precedence + D7 #8 both fail). Per F-W43-2's anticipated amendment path, iteration-6 removes the dispatch wiring + counter + predicate while preserving the operator surface as graduated implementation work.
+>
+> **Closure-board question**: does the v0.6.5 closure board accept "operator implemented, production dispatch rejected by evidence" as a valid completion of the W4.3 board item, or does the board require a different completion criterion?
+>
+> Possible board responses:
+> 1. **Accept as DONE**: W4.3 closure board mark switches OPEN → DONE; tally DONE 9→10, OPEN 10→9. Close W4.3.
+> 2. **Reject; require operator removal entirely**: revert the operator + provider + kernel work; mark W4.3 ABANDONED.
+> 3. **Defer**: keep W4.3 OPEN; reopen in v0.6.6 with kernel-perf investigation as the new scope.
+
+Commit subject: `docs(w43): iteration-6 closure proposal — operator-only scope (production dispatch rejected per F-W43-14)`.
