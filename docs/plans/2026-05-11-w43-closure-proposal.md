@@ -9,12 +9,12 @@
 
 ## Status
 
-W4.3 has 29 commits on `feat/w43-sort-merge-join`. The sort-merge join operator is **implemented at the provider layer**, **bench-validated** (vs hash 1.10×–1.80× win on the 50×50–2000×2000 matrix), and **operator-cert-tested** (4 provider-level parity certs PASS). The executor dispatch wiring was **removed in iteration 6** per F-W43-14, because the Step 12 production bench empirically rejected the iteration-1 design hypotheses that motivated the dispatch path:
+W4.3 has 30 commits on `feat/w43-sort-merge-join` (verified via `git rev-list --count 19f7bc5d..HEAD`). The sort-merge join operator is **implemented at the provider layer**, **bench-validated** (vs hash 1.10×–1.80× win on the 50×50–2000×2000 matrix), and **operator-cert-tested** (4 provider-level parity certs PASS). The executor dispatch wiring was **removed in iteration 6** per F-W43-14, because the Step 12 production bench empirically rejected the iteration-1 design hypotheses that motivated the dispatch path:
 
 * **D7 #8 (≥ 2× vs hash) — REJECTED**: measured speedups 1.10×–1.80× on every cell. Sort-merge wins vs hash, but by a sub-2× margin that did not meet the gate.
 * **D2 precedence (sort-merge > nested-loop) — REJECTED**: nested-loop wins 1.25×–2.46× on every overlap cell. The iteration-1 working hypothesis (sort-merge takes precedence on sorted inputs) was empirically wrong; nested-loop dominates the entire shared eligibility envelope.
 
-The iteration-1 plan correctly anticipated this possibility (D2 marked **PROVISIONAL** per F-W43-2): *"If the bench shows nested-loop wins on the overlap, iteration-N+ amends D2 to nested-loop-first."* Iteration 6 IS that amendment. The Step 12 bench is the documented rejection record, not an acceptance success.
+The iteration-1 plan correctly anticipated this possibility (D2 marked **PROVISIONAL** per F-W43-2): *"If the bench shows nested-loop wins on the overlap, iteration-N+ amends D2."* Iteration 6 IS that amendment. The actual iteration-6 D2 is **"W4.3 has NO production dispatch"** — the executor's join decision tree reverts to W4.2 nested-loop (when eligible) then hash (otherwise); the W4.3 sort-merge operator is implemented at the provider layer but is not wired into the dispatch decision tree. The Step 12 bench is the documented rejection record, not an acceptance success.
 
 ---
 
@@ -103,11 +103,11 @@ None of those follow-up actions are executed by this commit — Step 8' is text-
 
 ---
 
-## Commit history (29 commits on `feat/w43-sort-merge-join`)
+## Commit history (30 commits on `feat/w43-sort-merge-join`)
 
 Pre-execution iterations (1–4): 5 plan-iteration commits.
 Iteration-5 execution + amendments: 14 commits (Steps 2–11 + iteration-5 amendments F-W43-11/12/13).
 Iteration-6 execution + amendments: 10 commits (Step 12 bench + F-W43-14 amendment + Step 4'+5' unwiring + cert rewrite + doc patches + F-W43-15 amendment).
-Step 8' (this commit): closure proposal.
+Step 8' (this commit): closure proposal. **Total: 5 + 14 + 10 + 1 = 30 commits.**
 
 Spike: `bench-spike/w43-sort-merge` HEAD `fadc2700` preserved unmerged per `feedback_perf_bench_spike_first.md`.
