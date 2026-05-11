@@ -51,8 +51,8 @@ any contrary slice-internal decision.
 | DONE | 10 (W2.4, W2.2, W2.1, W2.3, W2.6, W3.1, W3.2, W4.1, W4.2, W4.3) |
 | IN-PROGRESS | 1 (W1.1) |
 | BLOCKED | 1 (W2.5) |
-| OPEN | 9 |
-| **Total** | **21** |
+| OPEN | 11 (W3.3, W3.4, W3.5, W3.6, W5.1, W5.2, W5.3, W5.4, W6.1, W6.2, W7.1) |
+| **Total** | **23** |
 
 The 4 ROADMAP items already DONE from slices 1, 2, 4 are
 recorded in ROADMAP.md and the slice evidence READMEs; they're
