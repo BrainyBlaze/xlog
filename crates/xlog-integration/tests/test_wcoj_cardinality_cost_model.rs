@@ -3,18 +3,18 @@
 //!
 //! Locks the contract for the slice 5 opt-in cost model:
 //!
-//!   * **Default config** (no env, no field) keeps slice 4
-//!     dispatch counts bit-identical — the factory falls
-//!     through to `SkewClassifierCostModel`.
+//!   * **Default config** (no env, no field) selects
+//!     `CardinalityAwareCostModel`; missing-stats runs preserve
+//!     legacy skew behavior through the safety-floor delegate.
 //!   * **Opt-in via config field** with populated runtime
 //!     stats: large `binary_est` triggers the asymptotic
 //!     clause and dispatches.
 //!   * **Opt-in via config field** with small populated
 //!     stats: `binary_est` below `MIN_CARDINALITY_BINARY_INTERMEDIATE`
 //!     keeps the binary-join path (counter == 0).
-//!   * **Opt-in WITHOUT seeded stats**: cardinality model
+//!   * **Bare default WITHOUT seeded stats**: cardinality model
 //!     delegates to `SkewClassifierCostModel`, so the dispatch
-//!     decision matches the legacy default.
+//!     decision matches an explicit skew baseline.
 //!   * **Env var ↔ config field parity**: `XLOG_WCOJ_COST_MODEL=cardinality`
 //!     produces the same selection as the config builder.
 //!
@@ -466,15 +466,15 @@ fn cardinality_opt_in_with_small_cards_falls_back_to_binary() {
 }
 
 #[test]
-fn cardinality_opt_in_without_seeded_stats_delegates_to_skew_model() {
-    // Opt-in cardinality model with NO stats seeded → the
-    // missing-stats safety floor MUST delegate to
+fn bare_default_without_seeded_stats_delegates_to_skew_model() {
+    // Bare default now selects CardinalityAwareCostModel. With NO
+    // stats seeded, the missing-stats safety floor MUST delegate to
     // SkewClassifierCostModel. We prove that by running two
-    // adaptive-mode executions on the same fixture and
-    // asserting counter + row set parity:
+    // adaptive-mode executions on the same fixture and asserting
+    // counter + row set parity:
     //
-    //   1. Default config (SkewClassifier).
-    //   2. Cardinality opt-in (no stats seeded → delegates).
+    //   1. Explicit SkewClassifier baseline.
+    //   2. Bare default (cardinality, no stats seeded → delegates).
     //
     // Force-gate on a triangle would bypass the cost model
     // entirely, so this test stays in adaptive mode (default-on
@@ -487,23 +487,27 @@ fn cardinality_opt_in_without_seeded_stats_delegates_to_skew_model() {
         return;
     };
     with_cost_model_env(|| {
-        // Run 1: default cost model (skew classifier), adaptive.
+        // Run 1: explicit skew-classifier baseline, adaptive.
         let baseline = run_with_optional_stats(
             Arc::clone(&fix.provider),
             &fix.memory,
-            RuntimeConfig::default(),
+            RuntimeConfig::default().with_wcoj_cost_model(Some(CostModelKind::SkewClassifier)),
             STABLE_TRIANGLE_RECURSIVE,
             &triangle_inputs(),
             &BTreeMap::new(),
         );
         let baseline_counter = baseline.wcoj_triangle_dispatch_count();
+        assert!(
+            baseline_counter > 0,
+            "explicit SkewClassifier baseline must dispatch on the stable triangle"
+        );
         let baseline_rows = download_triples(baseline.store().get("tri").expect("tri"));
 
-        // Run 2: cardinality model, NO stats seeded → delegate.
+        // Run 2: bare default, NO stats seeded → delegate.
         let delegated = run_with_optional_stats(
             Arc::clone(&fix.provider),
             &fix.memory,
-            RuntimeConfig::default().with_wcoj_cost_model(Some(CostModelKind::Cardinality)),
+            RuntimeConfig::default(),
             STABLE_TRIANGLE_RECURSIVE,
             &triangle_inputs(),
             &BTreeMap::new(),
@@ -520,7 +524,7 @@ fn cardinality_opt_in_without_seeded_stats_delegates_to_skew_model() {
         let delegated_rows = download_triples(delegated.store().get("tri").expect("tri"));
         assert_eq!(
             delegated_rows, baseline_rows,
-            "delegation must produce the same row set as the legacy default"
+            "bare-default delegation must produce the same row set as explicit skew"
         );
     });
 }
