@@ -137,14 +137,14 @@ pub struct RuntimeConfig {
 
 /// v0.6.5 slice 5 — cost model selector for WCOJ dispatch.
 ///
-/// The legacy `SkewClassifier` model (slice 1–4 default) makes
-/// dispatch decisions on classifier-only signal. The new
+/// The legacy `SkewClassifier` model makes dispatch decisions on
+/// classifier-only signal. The default
 /// `Cardinality` model fuses classifier with cardinality
 /// estimates from `xlog_stats::StatsManager` and gracefully
 /// delegates to `SkewClassifier` when stats are missing.
 ///
-/// **Default behavior is unchanged**: this enum is opt-in.
-/// See `with_wcoj_cost_model` for the precedence rules.
+/// See `with_wcoj_cost_model` for the precedence rules and the
+/// explicit `skew` opt-out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CostModelKind {
     /// Slice 1–4 default: skew-classifier-only dispatch decision.
@@ -252,13 +252,13 @@ impl RuntimeConfig {
     /// **Precedence (pinned)**:
     ///   1. `Some(CostModelKind)` set here wins.
     ///   2. Else `XLOG_WCOJ_COST_MODEL` env var:
-    ///      `cardinality` → `Cardinality`; any other value
-    ///      (including `skew`, unset, or unrecognized) →
-    ///      `SkewClassifier`.
-    ///   3. Else default: `SkewClassifier` (slice 1–4 behavior).
+    ///      `cardinality` → `Cardinality`; `skew` /
+    ///      `skewclassifier` / unrecognized → `SkewClassifier`.
+    ///   3. Else default: `Cardinality`.
     ///
-    /// Slice 5 ships the cardinality model as **opt-in
-    /// experimental**; the legacy default is unchanged.
+    /// W2.5 ships the cardinality model as the production default;
+    /// the legacy skew classifier remains available as an explicit
+    /// conservative opt-out.
     pub fn with_wcoj_cost_model(mut self, kind: Option<CostModelKind>) -> Self {
         self.wcoj_cost_model = kind;
         self
@@ -279,9 +279,8 @@ impl RuntimeConfig {
         let normalized = raw.as_deref().map(|s| s.trim().to_ascii_lowercase());
         match normalized.as_deref() {
             Some("cardinality") => CostModelKind::Cardinality,
-            // Unrecognized / empty / unset all collapse to the
-            // legacy default — no surprise opt-in.
-            _ => CostModelKind::SkewClassifier,
+            Some("skew") | Some("skewclassifier") | Some(_) => CostModelKind::SkewClassifier,
+            None => CostModelKind::Cardinality,
         }
     }
 }
@@ -360,13 +359,10 @@ mod tests {
     }
 
     #[test]
-    fn cost_model_default_is_skew_classifier_when_unset() {
+    fn wcoj_cost_model_default_is_cardinality_when_unset() {
         with_cost_model_env(|| {
             let cfg = RuntimeConfig::default();
-            assert_eq!(
-                cfg.resolved_wcoj_cost_model(),
-                CostModelKind::SkewClassifier
-            );
+            assert_eq!(cfg.resolved_wcoj_cost_model(), CostModelKind::Cardinality);
         });
     }
 
@@ -379,6 +375,20 @@ mod tests {
             }
             let cfg = RuntimeConfig::default();
             assert_eq!(cfg.resolved_wcoj_cost_model(), CostModelKind::Cardinality);
+        });
+    }
+
+    #[test]
+    fn wcoj_cost_model_env_var_skew_resolves_to_skew_classifier() {
+        with_cost_model_env(|| {
+            unsafe {
+                std::env::set_var("XLOG_WCOJ_COST_MODEL", "skew");
+            }
+            let cfg = RuntimeConfig::default();
+            assert_eq!(
+                cfg.resolved_wcoj_cost_model(),
+                CostModelKind::SkewClassifier
+            );
         });
     }
 
