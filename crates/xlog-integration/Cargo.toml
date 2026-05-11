@@ -43,6 +43,10 @@ harness = false
 name = "w43_production_sort_merge_bench"
 harness = false
 
+[[bench]]
+name = "w52_skewed_multiway_bench"
+harness = false
+
 [[bin]]
 name = "xlog_run"
 path = "src/bin/xlog_run.rs"
