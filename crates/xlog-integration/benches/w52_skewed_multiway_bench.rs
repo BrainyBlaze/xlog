@@ -23,6 +23,7 @@ const BENCH_GROUP: &str = "w52_skewed_multiway";
 const DEVICE_BUDGET_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const FOUR_CYCLE_CELLS: &[u32] = &[50, 250, 1000, 2000];
 const CLIQUE5_CELLS: &[u32] = &[10, 25, 50, 100];
+const PIVOT5_CELLS: &[u32] = &[10, 20, 30, 40];
 const CLIQUE5_EDGE_NAMES: [(&str, &str); 10] = [
     ("v0", "v1"),
     ("v0", "v2"),
@@ -34,6 +35,18 @@ const CLIQUE5_EDGE_NAMES: [(&str, &str); 10] = [
     ("v2", "v3"),
     ("v2", "v4"),
     ("v3", "v4"),
+];
+const PIVOT5_EDGE_NAMES: [(&str, &str); 10] = [
+    ("p", "a"),
+    ("p", "b"),
+    ("p", "c"),
+    ("p", "d"),
+    ("a", "b"),
+    ("a", "c"),
+    ("a", "d"),
+    ("b", "c"),
+    ("b", "d"),
+    ("c", "d"),
 ];
 
 struct DiscardSink;
@@ -265,6 +278,37 @@ fn expected_diagonal_k5_rows(n: u32) -> BTreeSet<Vec<u32>> {
     (1..=n).map(|i| vec![i, i, i, i, i]).collect()
 }
 
+fn expected_pivot5_rows(n: u32) -> BTreeSet<Vec<u32>> {
+    (1..=n).map(|i| vec![0, i, i, i, i]).collect()
+}
+
+fn pivot_heavy_k5_fixture(n: u32) -> [Vec<(u32, u32)>; 10] {
+    std::array::from_fn(|idx| {
+        if idx < 4 {
+            (1..=n).map(|i| (0, i)).collect()
+        } else {
+            (1..=n).map(|i| (i, i)).collect()
+        }
+    })
+}
+
+fn upload_pivot5_fixture(prov: &Provider, rows: &[Vec<(u32, u32)>; 10]) -> [CudaBuffer; 10] {
+    std::array::from_fn(|idx| {
+        let (left, right) = PIVOT5_EDGE_NAMES[idx];
+        upload_2col_u32(&prov.memory, left, right, &rows[idx])
+    })
+}
+
+fn head_schema_pivot5() -> Schema {
+    Schema::new(vec![
+        ("p".to_string(), ScalarType::U32),
+        ("a".to_string(), ScalarType::U32),
+        ("b".to_string(), ScalarType::U32),
+        ("c".to_string(), ScalarType::U32),
+        ("d".to_string(), ScalarType::U32),
+    ])
+}
+
 fn gpu_wcoj_clique5_path(prov: &Provider, inputs: &[CudaBuffer; 10]) -> CudaBuffer {
     let laid_out: Vec<CudaBuffer> = inputs
         .iter()
@@ -345,6 +389,56 @@ fn hash_clique5_chain_path(prov: &Provider, inputs: &[CudaBuffer; 10]) -> CudaBu
     out
 }
 
+fn hash_pivot5_chain_path(prov: &Provider, inputs: &[CudaBuffer; 10]) -> CudaBuffer {
+    let pa_pb = prov
+        .provider
+        .hash_join_v2(&inputs[0], &inputs[1], &[0], &[0], JoinType::Inner)
+        .expect("hash pa_pb");
+    let pa_pb_pc = prov
+        .provider
+        .hash_join_v2(&pa_pb, &inputs[2], &[0], &[0], JoinType::Inner)
+        .expect("hash pa_pb_pc");
+    let pa_pb_pc_pd = prov
+        .provider
+        .hash_join_v2(&pa_pb_pc, &inputs[3], &[0], &[0], JoinType::Inner)
+        .expect("hash pa_pb_pc_pd");
+    let with_ab = prov
+        .provider
+        .hash_join_v2(&pa_pb_pc_pd, &inputs[4], &[1, 3], &[0, 1], JoinType::Inner)
+        .expect("hash ab");
+    let with_ac = prov
+        .provider
+        .hash_join_v2(&with_ab, &inputs[5], &[1, 5], &[0, 1], JoinType::Inner)
+        .expect("hash ac");
+    let with_ad = prov
+        .provider
+        .hash_join_v2(&with_ac, &inputs[6], &[1, 7], &[0, 1], JoinType::Inner)
+        .expect("hash ad");
+    let with_bc = prov
+        .provider
+        .hash_join_v2(&with_ad, &inputs[7], &[3, 5], &[0, 1], JoinType::Inner)
+        .expect("hash bc");
+    let with_bd = prov
+        .provider
+        .hash_join_v2(&with_bc, &inputs[8], &[3, 7], &[0, 1], JoinType::Inner)
+        .expect("hash bd");
+    let with_cd = prov
+        .provider
+        .hash_join_v2(&with_bd, &inputs[9], &[5, 7], &[0, 1], JoinType::Inner)
+        .expect("hash cd");
+    let out = prov
+        .provider
+        .wcoj_project_output_columns_recorded(
+            &with_cd,
+            &[0, 1, 3, 5, 7],
+            head_schema_pivot5(),
+            prov.launch_stream,
+        )
+        .expect("project pivot hash output to PABCD");
+    sync_launch_stream(prov);
+    out
+}
+
 fn assert_clique5_parity(prov: &Provider, inputs: &[CudaBuffer; 10], n: u32) {
     let wcoj = gpu_wcoj_clique5_path(prov, inputs);
     let hash = hash_clique5_chain_path(prov, inputs);
@@ -357,6 +451,29 @@ fn assert_clique5_parity(prov: &Provider, inputs: &[CudaBuffer; 10], n: u32) {
     eprintln!(
         "  [parity] workload=5clique N={n:>4} final_rows={:>4} edge_rows_per_relation={n}",
         wcoj_rows.len()
+    );
+}
+
+fn assert_pivot5_parity(prov: &Provider, inputs: &[CudaBuffer; 10], n: u32) {
+    let wcoj = gpu_wcoj_clique5_path(prov, inputs);
+    let hash = hash_pivot5_chain_path(prov, inputs);
+    let wcoj_rows = download_u32_rows(&wcoj, &prov.provider, 5);
+    let hash_rows = download_u32_rows(&hash, &prov.provider, 5);
+    let expected = expected_pivot5_rows(n);
+    assert_eq!(
+        wcoj_rows, hash_rows,
+        "pivot-heavy K5 WCOJ/hash parity at N={n}"
+    );
+    assert_eq!(wcoj_rows, expected, "pivot-heavy K5 exact rows");
+    assert_eq!(
+        wcoj_rows.len(),
+        n as usize,
+        "pivot-heavy K5 final row count"
+    );
+    eprintln!(
+        "  [parity] workload=pivot5 N={n:>4} final_rows={:>4} pivot_intermediate={}",
+        wcoj_rows.len(),
+        (n as u64).pow(4)
     );
 }
 
@@ -428,6 +545,35 @@ fn bench_w52_skewed_multiway(c: &mut Criterion) {
                 let start = Instant::now();
                 for _ in 0..iters {
                     let out = hash_clique5_chain_path(&prov, &inputs);
+                    black_box(out.cached_row_count());
+                }
+                start.elapsed()
+            })
+        });
+    }
+
+    for &n in PIVOT5_CELLS {
+        let rows = pivot_heavy_k5_fixture(n);
+        let inputs = upload_pivot5_fixture(&prov, &rows);
+        assert_pivot5_parity(&prov, &inputs, n);
+        let cell = format!("pivot5_N{n}");
+
+        group.bench_with_input(BenchmarkId::new("gpu_wcoj", &cell), &n, |b, _| {
+            b.iter_custom(|iters| {
+                let start = Instant::now();
+                for _ in 0..iters {
+                    let out = gpu_wcoj_clique5_path(&prov, &inputs);
+                    black_box(out.cached_row_count());
+                }
+                start.elapsed()
+            })
+        });
+
+        group.bench_with_input(BenchmarkId::new("hash_chain", &cell), &n, |b, _| {
+            b.iter_custom(|iters| {
+                let start = Instant::now();
+                for _ in 0..iters {
+                    let out = hash_pivot5_chain_path(&prov, &inputs);
                     black_box(out.cached_row_count());
                 }
                 start.elapsed()
