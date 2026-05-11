@@ -335,3 +335,28 @@ All three bench invocations exited 0.
 Direction flips: none. The pivot-heavy K5 fixture remains hash-favored in all
 tested cells, though `N=40` approaches parity in two of three runs. No GPU-win
 crossover appears within the tested pivot-heavy range.
+
+## Cross-Workload Summary
+
+The W5.2 corpus contains 36 cell-run measurements:
+3 workloads x 4 cells x 3 independent Criterion invocations. Each invocation
+was snapshotted immediately after completion into `/tmp/w52_*` TSV files before
+the next invocation started.
+
+| Workload | Cells | Ratio Min | Ratio Median | Ratio Max | Direction Stability | Crossover Finding | Observed Regime |
+| --- | --- | ---: | ---: | ---: | --- | --- | --- |
+| 4-cycle hub-filtered | `N={50,250,1000,2000}` | 2.1156x | 3.8628x | 7.0174x | GPU 12/12 | Stable GPU win throughout tested range | GPU advantage is largest at small `N` and compresses as `N` grows. |
+| 5-clique diagonal | `N={10,25,50,100}` | 0.4945x | 0.5446x | 0.5945x | HASH 12/12 | Stable hash win throughout tested range | Clique5 WCOJ overhead dominates this diagonal fixture. |
+| Pivot-heavy K5 | `N={10,20,30,40}` | 0.5365x | 0.6294x | 0.9098x | HASH 12/12 | Stable hash win throughout tested range | The hash path trends toward parity at larger pivot fanout but does not cross. |
+
+Acceptance-grid status:
+
+| Workload | Provider-direct parity | Exact/non-empty output | LP-MULTI-RUN evidence | Closure-grade result |
+| --- | --- | --- | --- | --- |
+| 4-cycle | GPU WCOJ rows equal binary hash rows before timing. | Non-empty final row count equals `N`. | 4 cells x 3 runs; all direction-stable. | Stable GPU-win threshold is at or below `N=50` for the tested shape. |
+| 5-clique | GPU WCOJ rows equal binary hash rows before timing. | Exact diagonal row set `{(i,i,i,i,i)}` for `i in 1..=N`. | 4 cells x 3 runs; all direction-stable. | Stable no-GPU-crossover finding in the tested range. |
+| Pivot-heavy K5 | GPU WCOJ rows equal pivot-incident-first binary hash rows before timing. | Exact pivot row set `{(0,i,i,i,i)}` for `i in 1..=N`. | 4 cells x 3 runs; all direction-stable. | Stable no-GPU-crossover finding in the tested range. |
+
+Paper-alignment scope remains P2/P5 only. W5.2 does not claim P1, P3, or P4;
+the pivot-heavy fixture is evidence about skew sensitivity, not a claim of
+histogram-guided launch balancing.
