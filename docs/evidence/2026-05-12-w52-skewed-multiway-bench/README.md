@@ -182,3 +182,80 @@ All three bench invocations exited 0.
 Direction flips: none. The 1.0x and 2.0x thresholds are at or below the
 smallest tested cell (`N=50`) for this fixture; no binary-win crossover appears
 within the tested 4-cycle range.
+
+## Step 4 - 5-Clique Workload
+
+Fixture: diagonal K5 in canonical lexicographic edge order:
+`(0,1), (0,2), (0,3), (0,4), (1,2), (1,3), (1,4), (2,3), (2,4), (3,4)`.
+Each edge relation contains `(i, i)` for `i in 1..=N`; expected output is
+`N` rows `(i, i, i, i, i)`.
+
+Cells: `N in {10, 25, 50, 100}`.
+
+GPU WCOJ path:
+
+```text
+wcoj_layout_sort_u32_recorded(E01)
+wcoj_layout_sort_u32_recorded(E02)
+wcoj_layout_sort_u32_recorded(E03)
+wcoj_layout_sort_u32_recorded(E04)
+wcoj_layout_sort_u32_recorded(E12)
+wcoj_layout_sort_u32_recorded(E13)
+wcoj_layout_sort_u32_recorded(E14)
+wcoj_layout_sort_u32_recorded(E23)
+wcoj_layout_sort_u32_recorded(E24)
+wcoj_layout_sort_u32_recorded(E34)
+wcoj_clique5_u32_recorded(E01, E02, E03, E04, E12, E13, E14, E23, E24, E34)
+```
+
+Binary hash path:
+
+```text
+E01 join E02 on V0
+then join E03 on V0
+then join E04 on V0
+then join E12 on V1,V2
+then join E13 on V1,V3
+then join E14 on V1,V4
+then join E23 on V2,V3
+then join E24 on V2,V4
+then join E34 on V3,V4
+then project V0..V4
+```
+
+Parity and exact expected rows are asserted before timing for every cell. Raw
+extraction files for this step are
+`/tmp/w52_skewed_multiway_step4_run{1,2,3}.tsv`.
+
+Measured run pattern:
+
+```text
+cargo bench -p xlog-integration --bench w52_skewed_multiway_bench
+extract 5-clique medians immediately to /tmp/w52_skewed_multiway_step4_run1.tsv
+sleep 20
+cargo bench -p xlog-integration --bench w52_skewed_multiway_bench
+extract 5-clique medians immediately to /tmp/w52_skewed_multiway_step4_run2.tsv
+sleep 20
+cargo bench -p xlog-integration --bench w52_skewed_multiway_bench
+extract 5-clique medians immediately to /tmp/w52_skewed_multiway_step4_run3.tsv
+```
+
+All three bench invocations exited 0.
+
+| Cell | Run 1 GPU ms | Run 1 Hash ms | Run 1 Ratio | Run 2 GPU ms | Run 2 Hash ms | Run 2 Ratio | Run 3 GPU ms | Run 3 Hash ms | Run 3 Ratio |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 5clique_N10 | 40.3576 | 23.5284 | 0.5830x | 43.5682 | 23.7401 | 0.5449x | 41.9650 | 22.3792 | 0.5333x |
+| 5clique_N25 | 43.1361 | 23.8343 | 0.5525x | 45.5823 | 24.0796 | 0.5283x | 42.7401 | 23.5001 | 0.5498x |
+| 5clique_N50 | 44.0312 | 23.9602 | 0.5442x | 42.3305 | 24.2765 | 0.5735x | 43.6296 | 23.3934 | 0.5362x |
+| 5clique_N100 | 45.3401 | 23.5539 | 0.5195x | 38.5873 | 22.9401 | 0.5945x | 48.9590 | 24.2123 | 0.4945x |
+
+| Cell | Min Ratio | Median Ratio | Max Ratio | Direction Stability |
+| --- | ---: | ---: | ---: | --- |
+| 5clique_N10 | 0.5333x | 0.5449x | 0.5830x | HASH 3/3 |
+| 5clique_N25 | 0.5283x | 0.5498x | 0.5525x | HASH 3/3 |
+| 5clique_N50 | 0.5362x | 0.5442x | 0.5735x | HASH 3/3 |
+| 5clique_N100 | 0.4945x | 0.5195x | 0.5945x | HASH 3/3 |
+
+Direction flips: none. Unlike the 4-cycle fixture, the 5-clique diagonal
+fixture is hash-favored across all tested cells; no GPU-win crossover appears
+within the tested 5-clique range.

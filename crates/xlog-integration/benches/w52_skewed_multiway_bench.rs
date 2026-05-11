@@ -1,8 +1,7 @@
-//! W5.2 skewed multiway benchmark skeleton.
+//! W5.2 skewed multiway benchmark harness.
 //!
-//! Step 2 establishes the shared provider-direct harness and the
-//! Criterion group name. Workload-specific 4-cycle, 5-clique, and
-//! pivot-heavy K5 benchmark groups are added in later commits.
+//! Provider-direct Criterion groups compare WCOJ paths against binary
+//! hash-chain baselines for the W5.2 closure evidence.
 
 #![allow(dead_code)]
 
@@ -23,6 +22,19 @@ use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager, JoinType};
 const BENCH_GROUP: &str = "w52_skewed_multiway";
 const DEVICE_BUDGET_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const FOUR_CYCLE_CELLS: &[u32] = &[50, 250, 1000, 2000];
+const CLIQUE5_CELLS: &[u32] = &[10, 25, 50, 100];
+const CLIQUE5_EDGE_NAMES: [(&str, &str); 10] = [
+    ("v0", "v1"),
+    ("v0", "v2"),
+    ("v0", "v3"),
+    ("v0", "v4"),
+    ("v1", "v2"),
+    ("v1", "v3"),
+    ("v1", "v4"),
+    ("v2", "v3"),
+    ("v2", "v4"),
+    ("v3", "v4"),
+];
 
 struct DiscardSink;
 impl LoggingSink for DiscardSink {
@@ -228,6 +240,126 @@ fn assert_4cycle_parity(prov: &Provider, inputs: &[CudaBuffer; 4], n: u32) {
     );
 }
 
+fn head_schema_clique5() -> Schema {
+    Schema::new(vec![
+        ("v0".to_string(), ScalarType::U32),
+        ("v1".to_string(), ScalarType::U32),
+        ("v2".to_string(), ScalarType::U32),
+        ("v3".to_string(), ScalarType::U32),
+        ("v4".to_string(), ScalarType::U32),
+    ])
+}
+
+fn diagonal_k5_fixture(n: u32) -> [Vec<(u32, u32)>; 10] {
+    std::array::from_fn(|_| (1..=n).map(|i| (i, i)).collect())
+}
+
+fn upload_clique5_fixture(prov: &Provider, rows: &[Vec<(u32, u32)>; 10]) -> [CudaBuffer; 10] {
+    std::array::from_fn(|idx| {
+        let (left, right) = CLIQUE5_EDGE_NAMES[idx];
+        upload_2col_u32(&prov.memory, left, right, &rows[idx])
+    })
+}
+
+fn expected_diagonal_k5_rows(n: u32) -> BTreeSet<Vec<u32>> {
+    (1..=n).map(|i| vec![i, i, i, i, i]).collect()
+}
+
+fn gpu_wcoj_clique5_path(prov: &Provider, inputs: &[CudaBuffer; 10]) -> CudaBuffer {
+    let laid_out: Vec<CudaBuffer> = inputs
+        .iter()
+        .enumerate()
+        .map(|(idx, input)| {
+            prov.provider
+                .wcoj_layout_sort_u32_recorded(input, prov.launch_stream)
+                .unwrap_or_else(|e| panic!("layout-sort clique5 edge {idx}: {e}"))
+        })
+        .collect();
+    let edge_refs: [&CudaBuffer; 10] = [
+        &laid_out[0],
+        &laid_out[1],
+        &laid_out[2],
+        &laid_out[3],
+        &laid_out[4],
+        &laid_out[5],
+        &laid_out[6],
+        &laid_out[7],
+        &laid_out[8],
+        &laid_out[9],
+    ];
+    let out = prov
+        .provider
+        .wcoj_clique5_u32_recorded(&edge_refs, prov.launch_stream)
+        .expect("wcoj clique5");
+    sync_launch_stream(prov);
+    out
+}
+
+fn hash_clique5_chain_path(prov: &Provider, inputs: &[CudaBuffer; 10]) -> CudaBuffer {
+    let j02 = prov
+        .provider
+        .hash_join_v2(&inputs[0], &inputs[1], &[0], &[0], JoinType::Inner)
+        .expect("hash e01_e02");
+    let j03 = prov
+        .provider
+        .hash_join_v2(&j02, &inputs[2], &[0], &[0], JoinType::Inner)
+        .expect("hash e01_e02_e03");
+    let j04 = prov
+        .provider
+        .hash_join_v2(&j03, &inputs[3], &[0], &[0], JoinType::Inner)
+        .expect("hash e01_e02_e03_e04");
+    let j12 = prov
+        .provider
+        .hash_join_v2(&j04, &inputs[4], &[1, 3], &[0, 1], JoinType::Inner)
+        .expect("hash e12");
+    let j13 = prov
+        .provider
+        .hash_join_v2(&j12, &inputs[5], &[1, 5], &[0, 1], JoinType::Inner)
+        .expect("hash e13");
+    let j14 = prov
+        .provider
+        .hash_join_v2(&j13, &inputs[6], &[1, 7], &[0, 1], JoinType::Inner)
+        .expect("hash e14");
+    let j23 = prov
+        .provider
+        .hash_join_v2(&j14, &inputs[7], &[3, 5], &[0, 1], JoinType::Inner)
+        .expect("hash e23");
+    let j24 = prov
+        .provider
+        .hash_join_v2(&j23, &inputs[8], &[3, 7], &[0, 1], JoinType::Inner)
+        .expect("hash e24");
+    let j34 = prov
+        .provider
+        .hash_join_v2(&j24, &inputs[9], &[5, 7], &[0, 1], JoinType::Inner)
+        .expect("hash e34");
+    let out = prov
+        .provider
+        .wcoj_project_output_columns_recorded(
+            &j34,
+            &[0, 1, 3, 5, 7],
+            head_schema_clique5(),
+            prov.launch_stream,
+        )
+        .expect("project hash output to V0..V4");
+    sync_launch_stream(prov);
+    out
+}
+
+fn assert_clique5_parity(prov: &Provider, inputs: &[CudaBuffer; 10], n: u32) {
+    let wcoj = gpu_wcoj_clique5_path(prov, inputs);
+    let hash = hash_clique5_chain_path(prov, inputs);
+    let wcoj_rows = download_u32_rows(&wcoj, &prov.provider, 5);
+    let hash_rows = download_u32_rows(&hash, &prov.provider, 5);
+    let expected = expected_diagonal_k5_rows(n);
+    assert_eq!(wcoj_rows, hash_rows, "5-clique WCOJ/hash parity at N={n}");
+    assert_eq!(wcoj_rows, expected, "5-clique exact diagonal rows");
+    assert_eq!(wcoj_rows.len(), n as usize, "5-clique final row count");
+    eprintln!(
+        "  [parity] workload=5clique N={n:>4} final_rows={:>4} edge_rows_per_relation={n}",
+        wcoj_rows.len()
+    );
+}
+
 fn bench_w52_skewed_multiway(c: &mut Criterion) {
     let Some(prov) = make_provider() else {
         eprintln!("Skipping W5.2 skewed multiway bench: CUDA runtime unavailable");
@@ -267,6 +399,35 @@ fn bench_w52_skewed_multiway(c: &mut Criterion) {
                 let start = Instant::now();
                 for _ in 0..iters {
                     let out = hash_4cycle_chain_path(&prov, &inputs);
+                    black_box(out.cached_row_count());
+                }
+                start.elapsed()
+            })
+        });
+    }
+
+    for &n in CLIQUE5_CELLS {
+        let rows = diagonal_k5_fixture(n);
+        let inputs = upload_clique5_fixture(&prov, &rows);
+        assert_clique5_parity(&prov, &inputs, n);
+        let cell = format!("5clique_N{n}");
+
+        group.bench_with_input(BenchmarkId::new("gpu_wcoj", &cell), &n, |b, _| {
+            b.iter_custom(|iters| {
+                let start = Instant::now();
+                for _ in 0..iters {
+                    let out = gpu_wcoj_clique5_path(&prov, &inputs);
+                    black_box(out.cached_row_count());
+                }
+                start.elapsed()
+            })
+        });
+
+        group.bench_with_input(BenchmarkId::new("hash_chain", &cell), &n, |b, _| {
+            b.iter_custom(|iters| {
+                let start = Instant::now();
+                for _ in 0..iters {
+                    let out = hash_clique5_chain_path(&prov, &inputs);
                     black_box(out.cached_row_count());
                 }
                 start.elapsed()
