@@ -346,6 +346,29 @@ fn stable_triangle_in_recursive_scc_dispatches_wcoj_on_seeding() {
         "binary-join reference produced empty triangle — fixture is degenerate"
     );
 
+    // Bare default: W2.5 makes CardinalityAwareCostModel the default. With
+    // missing stats, the safety floor delegates to the skew classifier and
+    // preserves the slice-4 seeding-pass dispatch count.
+    let default_exec = run_program(
+        Arc::clone(&fix.provider),
+        &fix.memory,
+        RuntimeConfig::default(),
+        STABLE_TRIANGLE_RECURSIVE,
+        &inputs,
+    );
+    assert_eq!(
+        default_exec.wcoj_triangle_dispatch_count(),
+        1,
+        "bare default stable triangle must dispatch WCOJ exactly once \
+         on the seeding pass; got counter {}",
+        default_exec.wcoj_triangle_dispatch_count()
+    );
+    let default_rows = download_triples(default_exec.store().get("tri").expect("tri"));
+    assert_eq!(
+        default_rows, reference_rows,
+        "bare-default WCOJ dispatch in recursive arm must produce the same row set as binary-join"
+    );
+
     // Gate on: slice 4 promotes the stable rule → dispatch on
     // seeding pass. Counter == 1 (rule 1 only; the echo + copy
     // rules don't match a WCOJ shape).
