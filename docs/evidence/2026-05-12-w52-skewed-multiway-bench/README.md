@@ -12,8 +12,7 @@ Bench target: `crates/xlog-integration/benches/w52_skewed_multiway_bench.rs`
 
 Step 2 adds the bench target registration, shared provider-direct CUDA setup,
 2-column U32 upload helper, row-set download helper, Criterion configuration,
-and this extraction runbook. Workload-specific 4-cycle, 5-clique, and
-pivot-heavy K5 measurement tables are added in later commits.
+and this extraction runbook.
 
 Compile gate:
 
@@ -119,3 +118,67 @@ END {
 
 W5.2 evidence may claim P2 and P5 only. P1, P3, and P4 are not claimed here;
 P3 histogram-guided launch balancing remains W3.3-owned.
+
+## Step 3 - 4-Cycle Workload
+
+Fixture: `hub_filtered`, matching the G3 spike shape. For each cell,
+`E1(W,X)` and `E2(X,Y)` share one hub `X=0`, so the first binary join forms
+`N*N` rows. `E3(Y,Z)` and `E4(Z,W)` filter the final answer back to `N`
+cycles.
+
+Cells: `N in {50, 250, 1000, 2000}`.
+
+GPU WCOJ path:
+
+```text
+wcoj_layout_u32_recorded(E1)
+wcoj_layout_u32_recorded(E2)
+wcoj_layout_u32_recorded(E3)
+wcoj_layout_u32_recorded(E4)
+wcoj_4cycle_u32_recorded(E1, E2, E3, E4)
+```
+
+Binary hash path:
+
+```text
+E1(W,X) join E2(X,Y) on X
+then join E3(Y,Z) on Y
+then join E4(Z,W) on Z,W
+then project WXYZ
+```
+
+Parity is asserted before timing for every cell. Raw extraction files for this
+step are `/tmp/w52_skewed_multiway_step3_run{1,2,3}.tsv`.
+
+Measured run pattern:
+
+```text
+cargo bench -p xlog-integration --bench w52_skewed_multiway_bench
+extract medians immediately to /tmp/w52_skewed_multiway_step3_run1.tsv
+sleep 20
+cargo bench -p xlog-integration --bench w52_skewed_multiway_bench
+extract medians immediately to /tmp/w52_skewed_multiway_step3_run2.tsv
+sleep 20
+cargo bench -p xlog-integration --bench w52_skewed_multiway_bench
+extract medians immediately to /tmp/w52_skewed_multiway_step3_run3.tsv
+```
+
+All three bench invocations exited 0.
+
+| Cell | Run 1 GPU ms | Run 1 Hash ms | Run 1 Ratio | Run 2 GPU ms | Run 2 Hash ms | Run 2 Ratio | Run 3 GPU ms | Run 3 Hash ms | Run 3 Ratio |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4cycle_N50 | 1.5954 | 10.9897 | 6.8884x | 1.5512 | 10.8857 | 7.0174x | 1.6090 | 11.2404 | 6.9861x |
+| 4cycle_N250 | 2.2198 | 10.9828 | 4.9477x | 2.1166 | 11.1045 | 5.2464x | 2.1256 | 11.4953 | 5.4079x |
+| 4cycle_N1000 | 5.0714 | 13.7850 | 2.7182x | 4.9477 | 13.7447 | 2.7780x | 4.9208 | 13.5968 | 2.7631x |
+| 4cycle_N2000 | 9.2398 | 21.5434 | 2.3316x | 9.5465 | 20.1968 | 2.1156x | 9.3820 | 21.1509 | 2.2544x |
+
+| Cell | Min Ratio | Median Ratio | Max Ratio | Direction Stability |
+| --- | ---: | ---: | ---: | --- |
+| 4cycle_N50 | 6.8884x | 6.9861x | 7.0174x | GPU 3/3 |
+| 4cycle_N250 | 4.9477x | 5.2464x | 5.4079x | GPU 3/3 |
+| 4cycle_N1000 | 2.7182x | 2.7631x | 2.7780x | GPU 3/3 |
+| 4cycle_N2000 | 2.1156x | 2.2544x | 2.3316x | GPU 3/3 |
+
+Direction flips: none. The 1.0x and 2.0x thresholds are at or below the
+smallest tested cell (`N=50`) for this fixture; no binary-win crossover appears
+within the tested 4-cycle range.

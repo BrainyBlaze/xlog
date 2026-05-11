@@ -8,9 +8,9 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 
 use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::device_runtime::{
@@ -18,10 +18,11 @@ use xlog_cuda::device_runtime::{
     LoggingSink, SinkError, StreamId, StreamPool, XlogDeviceRuntime,
 };
 use xlog_cuda::memory::CudaBuffer;
-use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager, JoinType};
 
 const BENCH_GROUP: &str = "w52_skewed_multiway";
 const DEVICE_BUDGET_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const FOUR_CYCLE_CELLS: &[u32] = &[50, 250, 1000, 2000];
 
 struct DiscardSink;
 impl LoggingSink for DiscardSink {
@@ -136,6 +137,97 @@ fn download_u32_rows(
         .collect()
 }
 
+fn head_schema_4cycle() -> Schema {
+    Schema::new(vec![
+        ("w".to_string(), ScalarType::U32),
+        ("x".to_string(), ScalarType::U32),
+        ("y".to_string(), ScalarType::U32),
+        ("z".to_string(), ScalarType::U32),
+    ])
+}
+
+fn hub_filtered_4cycle(n: u32) -> [Vec<(u32, u32)>; 4] {
+    let e1: Vec<(u32, u32)> = (0..n).map(|i| (i, 0)).collect();
+    let e2: Vec<(u32, u32)> = (0..n).map(|i| (0, i)).collect();
+    let e3: Vec<(u32, u32)> = (0..n).map(|i| (i, i)).collect();
+    let e4: Vec<(u32, u32)> = (0..n).map(|i| (i, i)).collect();
+    [e1, e2, e3, e4]
+}
+
+fn upload_4cycle_fixture(prov: &Provider, rows: &[Vec<(u32, u32)>; 4]) -> [CudaBuffer; 4] {
+    [
+        upload_2col_u32(&prov.memory, "w", "x", &rows[0]),
+        upload_2col_u32(&prov.memory, "x", "y", &rows[1]),
+        upload_2col_u32(&prov.memory, "y", "z", &rows[2]),
+        upload_2col_u32(&prov.memory, "z", "w", &rows[3]),
+    ]
+}
+
+fn gpu_wcoj_4cycle_path(prov: &Provider, inputs: &[CudaBuffer; 4]) -> CudaBuffer {
+    let e1 = prov
+        .provider
+        .wcoj_layout_u32_recorded(&inputs[0], prov.launch_stream)
+        .expect("layout e1");
+    let e2 = prov
+        .provider
+        .wcoj_layout_u32_recorded(&inputs[1], prov.launch_stream)
+        .expect("layout e2");
+    let e3 = prov
+        .provider
+        .wcoj_layout_u32_recorded(&inputs[2], prov.launch_stream)
+        .expect("layout e3");
+    let e4 = prov
+        .provider
+        .wcoj_layout_u32_recorded(&inputs[3], prov.launch_stream)
+        .expect("layout e4");
+    let out = prov
+        .provider
+        .wcoj_4cycle_u32_recorded(&e1, &e2, &e3, &e4, prov.launch_stream)
+        .expect("wcoj 4cycle");
+    sync_launch_stream(prov);
+    out
+}
+
+fn hash_4cycle_chain_path(prov: &Provider, inputs: &[CudaBuffer; 4]) -> CudaBuffer {
+    let j12 = prov
+        .provider
+        .hash_join_v2(&inputs[0], &inputs[1], &[1], &[0], JoinType::Inner)
+        .expect("hash e1_e2");
+    let j123 = prov
+        .provider
+        .hash_join_v2(&j12, &inputs[2], &[3], &[0], JoinType::Inner)
+        .expect("hash e1_e2_e3");
+    let j1234 = prov
+        .provider
+        .hash_join_v2(&j123, &inputs[3], &[5, 0], &[0, 1], JoinType::Inner)
+        .expect("hash e1_e2_e3_e4");
+    let out = prov
+        .provider
+        .wcoj_project_output_columns_recorded(
+            &j1234,
+            &[0, 1, 3, 5],
+            head_schema_4cycle(),
+            prov.launch_stream,
+        )
+        .expect("project hash output to WXYZ");
+    sync_launch_stream(prov);
+    out
+}
+
+fn assert_4cycle_parity(prov: &Provider, inputs: &[CudaBuffer; 4], n: u32) {
+    let wcoj = gpu_wcoj_4cycle_path(prov, inputs);
+    let hash = hash_4cycle_chain_path(prov, inputs);
+    let wcoj_rows = download_u32_rows(&wcoj, &prov.provider, 4);
+    let hash_rows = download_u32_rows(&hash, &prov.provider, 4);
+    assert_eq!(wcoj_rows, hash_rows, "4-cycle WCOJ/hash parity at N={n}");
+    assert_eq!(wcoj_rows.len(), n as usize, "4-cycle final row count");
+    eprintln!(
+        "  [parity] workload=4cycle N={n:>4} final_rows={:>4} binary_intermediate={}",
+        wcoj_rows.len(),
+        (n as u64) * (n as u64)
+    );
+}
+
 fn bench_w52_skewed_multiway(c: &mut Criterion) {
     let Some(prov) = make_provider() else {
         eprintln!("Skipping W5.2 skewed multiway bench: CUDA runtime unavailable");
@@ -152,6 +244,36 @@ fn bench_w52_skewed_multiway(c: &mut Criterion) {
     group.bench_function("skeleton/provider_ready", |b| {
         b.iter(|| black_box(uploaded.cached_row_count()))
     });
+
+    for &n in FOUR_CYCLE_CELLS {
+        let rows = hub_filtered_4cycle(n);
+        let inputs = upload_4cycle_fixture(&prov, &rows);
+        assert_4cycle_parity(&prov, &inputs, n);
+        let cell = format!("4cycle_N{n}");
+
+        group.bench_with_input(BenchmarkId::new("gpu_wcoj", &cell), &n, |b, _| {
+            b.iter_custom(|iters| {
+                let start = Instant::now();
+                for _ in 0..iters {
+                    let out = gpu_wcoj_4cycle_path(&prov, &inputs);
+                    black_box(out.cached_row_count());
+                }
+                start.elapsed()
+            })
+        });
+
+        group.bench_with_input(BenchmarkId::new("hash_chain", &cell), &n, |b, _| {
+            b.iter_custom(|iters| {
+                let start = Instant::now();
+                for _ in 0..iters {
+                    let out = hash_4cycle_chain_path(&prov, &inputs);
+                    black_box(out.cached_row_count());
+                }
+                start.elapsed()
+            })
+        });
+    }
+
     group.finish();
 }
 
