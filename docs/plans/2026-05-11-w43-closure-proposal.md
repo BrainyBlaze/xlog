@@ -9,7 +9,7 @@
 
 ## Status
 
-W4.3 has 30 commits on `feat/w43-sort-merge-join` (verified via `git rev-list --count 19f7bc5d..HEAD`). The sort-merge join operator is **implemented at the provider layer**, **bench-validated** (vs hash 1.10×–1.80× win on the 50×50–2000×2000 matrix), and **operator-cert-tested** (4 provider-level parity certs PASS). The executor dispatch wiring was **removed in iteration 6** per F-W43-14, because the Step 12 production bench empirically rejected the iteration-1 design hypotheses that motivated the dispatch path:
+W4.3 has 30 commits on `feat/w43-sort-merge-join` measured at the closure-proposal commit (`git rev-list --count 19f7bc5d..0d94ec75 = 30`). Subsequent self-amendment commits to this proposal document increase the live HEAD count but not the underlying delivered work; anchoring the count to commit `0d94ec75` keeps the headline stable. The sort-merge join operator is **implemented at the provider layer**, **bench-validated** (vs hash 1.10×–1.80× win on the 50×50–2000×2000 matrix), and **operator-cert-tested** (4 provider-level parity certs PASS). The executor dispatch wiring was **removed in iteration 6** per F-W43-14, because the Step 12 production bench empirically rejected the iteration-1 design hypotheses that motivated the dispatch path:
 
 * **D7 #8 (≥ 2× vs hash) — REJECTED**: measured speedups 1.10×–1.80× on every cell. Sort-merge wins vs hash, but by a sub-2× margin that did not meet the gate.
 * **D2 precedence (sort-merge > nested-loop) — REJECTED**: nested-loop wins 1.25×–2.46× on every overlap cell. The iteration-1 working hypothesis (sort-merge takes precedence on sorted inputs) was empirically wrong; nested-loop dominates the entire shared eligibility envelope.
@@ -103,11 +103,13 @@ None of those follow-up actions are executed by this commit — Step 8' is text-
 
 ---
 
-## Commit history (30 commits on `feat/w43-sort-merge-join`)
+## Commit history (30 commits on `feat/w43-sort-merge-join` measured at Step 8' commit `0d94ec75`)
 
 Pre-execution iterations (1–4): 5 plan-iteration commits.
 Iteration-5 execution + amendments: 14 commits (Steps 2–11 + iteration-5 amendments F-W43-11/12/13).
 Iteration-6 execution + amendments: 10 commits (Step 12 bench + F-W43-14 amendment + Step 4'+5' unwiring + cert rewrite + doc patches + F-W43-15 amendment).
-Step 8' (this commit): closure proposal. **Total: 5 + 14 + 10 + 1 = 30 commits.**
+Step 8' closure proposal (commit `0d94ec75`): this document. **Subtotal at `0d94ec75`: 5 + 14 + 10 + 1 = 30 commits.**
+
+Post-`0d94ec75` self-amendment commits (`bea79129` and later) patch this proposal document in response to closure-board review findings (F-W43-16/17/18 …). Those commits raise the live `git rev-list --count 19f7bc5d..HEAD` figure but do not change the delivered W4.3 work surface; the 30-commit subtotal anchored at `0d94ec75` is the load-bearing count for the closure board.
 
 Spike: `bench-spike/w43-sort-merge` HEAD `fadc2700` preserved unmerged per `feedback_perf_bench_spike_first.md`.
