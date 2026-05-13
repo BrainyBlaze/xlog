@@ -1247,8 +1247,15 @@ impl Executor {
                 let l2 = self
                     .provider
                     .wcoj_layout_u32_recorded(&slot_inputs[2], launch_stream)?;
-                self.provider
-                    .wcoj_triangle_u32_recorded(&l0, &l1, &l2, launch_stream)?
+                let out = self.provider.wcoj_triangle_hg_u32_recorded(
+                    &l0,
+                    &l1,
+                    &l2,
+                    wcoj_block_work_unit(),
+                    launch_stream,
+                )?;
+                self.provider.record_wcoj_triangle_hg_dispatch();
+                out
             }
             WcojKeyWidth::EightByte => {
                 let l0 = self
