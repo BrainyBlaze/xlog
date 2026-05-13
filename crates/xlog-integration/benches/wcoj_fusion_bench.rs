@@ -221,8 +221,31 @@ fn run_thresholded(fix: &ProviderFixture, input: &UploadedFixture) -> CudaBuffer
     }
 }
 
+fn sync_launch_stream(fix: &ProviderFixture) {
+    let runtime = fix.provider.memory().runtime().expect("runtime");
+    let stream = runtime
+        .stream_pool()
+        .resolve(fix.launch_stream)
+        .expect("launch stream");
+    stream.synchronize().expect("launch stream sync");
+}
+
 fn download_triples_u32(buf: &CudaBuffer) -> BTreeSet<(u64, u64, u64)> {
-    let n = buf.num_rows() as usize;
+    let n = match buf.cached_row_count() {
+        Some(rows) => rows,
+        None => {
+            let mut rows = [0u32];
+            unsafe {
+                let res = sys::cuMemcpyDtoH_v2(
+                    rows.as_mut_ptr() as *mut _,
+                    *buf.num_rows_device().device_ptr(),
+                    std::mem::size_of::<u32>(),
+                );
+                assert_eq!(res, sys::cudaError_enum::CUDA_SUCCESS);
+            }
+            rows[0]
+        }
+    } as usize;
     if n == 0 {
         return BTreeSet::new();
     }
@@ -270,8 +293,10 @@ fn measure_unfused_with_pairing(
     for _ in 0..iters {
         let start = Instant::now();
         let _ = run_unfused(fix, input);
+        sync_launch_stream(fix);
         measured += start.elapsed();
         let _ = run_thresholded(fix, input);
+        sync_launch_stream(fix);
     }
     measured
 }
@@ -284,8 +309,10 @@ fn measure_thresholded_with_pairing(
     let mut measured = Duration::ZERO;
     for _ in 0..iters {
         let _ = run_unfused(fix, input);
+        sync_launch_stream(fix);
         let start = Instant::now();
         let _ = run_thresholded(fix, input);
+        sync_launch_stream(fix);
         measured += start.elapsed();
     }
     measured

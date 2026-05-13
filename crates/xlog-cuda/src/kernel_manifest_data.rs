@@ -465,8 +465,6 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "wcoj_triangle_materialize_hg_cached_u32",
             "wcoj_scan_hg_block_counts_u32",
             "wcoj_triangle_count",
-            // W3.4 bench-spike-only layout+count fusion candidate.
-            "wcoj_triangle_fused_lc_count",
             "wcoj_compute_total",
             "wcoj_triangle_materialize",
             "wcoj_triangle_count_u64",

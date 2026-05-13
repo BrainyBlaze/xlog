@@ -2,6 +2,8 @@ use cudarc::driver::DeviceRepr;
 
 use crate::memory::TrackedCudaSlice;
 
+pub const WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT: u32 = 1024;
+
 pub struct WcojRelationMetadata<K: DeviceRepr> {
     pub unique_keys: TrackedCudaSlice<K>,
     pub fan_out: TrackedCudaSlice<u32>,
