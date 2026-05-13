@@ -483,14 +483,14 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             // W3.2 — General-arity clique kernel (k=5, k=6 from
             // single C++ template; ABI wrappers below are
             // template-call-only per Tier-1 source-audit).
-            "wcoj_clique5_count_u32",
-            "wcoj_clique5_materialize_u32",
-            "wcoj_clique5_count_u64",
-            "wcoj_clique5_materialize_u64",
-            "wcoj_clique6_count_u32",
-            "wcoj_clique6_materialize_u32",
-            "wcoj_clique6_count_u64",
-            "wcoj_clique6_materialize_u64",
+            "wcoj_clique5_count_hg_u32",
+            "wcoj_clique5_materialize_hg_u32",
+            "wcoj_clique5_count_hg_u64",
+            "wcoj_clique5_materialize_hg_u64",
+            "wcoj_clique6_count_hg_u32",
+            "wcoj_clique6_materialize_hg_u32",
+            "wcoj_clique6_count_hg_u64",
+            "wcoj_clique6_materialize_hg_u64",
         ],
     },
 ];

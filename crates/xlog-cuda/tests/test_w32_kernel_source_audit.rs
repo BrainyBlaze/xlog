@@ -176,8 +176,8 @@ fn k6_count_u32_wrapper_is_template_call_only() {
     let src = wcoj_cu_source();
     assert_wrapper_is_single_template_call(
         &src,
-        "wcoj_clique6_count_u32",
-        "wcoj_clique_template_count_grid_t",
+        "wcoj_clique6_count_hg_u32",
+        "wcoj_clique_template_count_hg_grid_t",
         6,
     );
 }
@@ -187,8 +187,8 @@ fn k6_count_u64_wrapper_is_template_call_only() {
     let src = wcoj_cu_source();
     assert_wrapper_is_single_template_call(
         &src,
-        "wcoj_clique6_count_u64",
-        "wcoj_clique_template_count_grid_t",
+        "wcoj_clique6_count_hg_u64",
+        "wcoj_clique_template_count_hg_grid_t",
         6,
     );
 }
@@ -198,8 +198,8 @@ fn k6_materialize_u32_wrapper_is_template_call_only() {
     let src = wcoj_cu_source();
     assert_wrapper_is_single_template_call(
         &src,
-        "wcoj_clique6_materialize_u32",
-        "wcoj_clique_template_materialize_grid_t",
+        "wcoj_clique6_materialize_hg_u32",
+        "wcoj_clique_template_materialize_hg_grid_t",
         6,
     );
 }
@@ -209,8 +209,8 @@ fn k6_materialize_u64_wrapper_is_template_call_only() {
     let src = wcoj_cu_source();
     assert_wrapper_is_single_template_call(
         &src,
-        "wcoj_clique6_materialize_u64",
-        "wcoj_clique_template_materialize_grid_t",
+        "wcoj_clique6_materialize_hg_u64",
+        "wcoj_clique_template_materialize_hg_grid_t",
         6,
     );
 }
@@ -293,10 +293,10 @@ fn no_clique6_helper_function_body() {
     // identifier with a `__device__` or `__global__` qualifier
     // followed by a non-empty body would be forbidden.
     let allowed_names = [
-        "wcoj_clique6_count_u32",
-        "wcoj_clique6_count_u64",
-        "wcoj_clique6_materialize_u32",
-        "wcoj_clique6_materialize_u64",
+        "wcoj_clique6_count_hg_u32",
+        "wcoj_clique6_count_hg_u64",
+        "wcoj_clique6_materialize_hg_u32",
+        "wcoj_clique6_materialize_hg_u64",
     ];
     // Find every `clique6` substring; for each, check the
     // surrounding context against the allowed-name whitelist.

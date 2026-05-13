@@ -1937,14 +1937,14 @@ impl CliqueWidthClass {
 /// Resolve the kernel name for a given `(K, count_or_materialize, width_class)`.
 fn clique_kernel_name(k: usize, materialize: bool, w: CliqueWidthClass) -> &'static str {
     match (k, materialize, w) {
-        (5, false, CliqueWidthClass::FourByte) => wcoj_kernels::WCOJ_CLIQUE5_COUNT_U32,
-        (5, true, CliqueWidthClass::FourByte) => wcoj_kernels::WCOJ_CLIQUE5_MATERIALIZE_U32,
-        (5, false, CliqueWidthClass::EightByte) => wcoj_kernels::WCOJ_CLIQUE5_COUNT_U64,
-        (5, true, CliqueWidthClass::EightByte) => wcoj_kernels::WCOJ_CLIQUE5_MATERIALIZE_U64,
-        (6, false, CliqueWidthClass::FourByte) => wcoj_kernels::WCOJ_CLIQUE6_COUNT_U32,
-        (6, true, CliqueWidthClass::FourByte) => wcoj_kernels::WCOJ_CLIQUE6_MATERIALIZE_U32,
-        (6, false, CliqueWidthClass::EightByte) => wcoj_kernels::WCOJ_CLIQUE6_COUNT_U64,
-        (6, true, CliqueWidthClass::EightByte) => wcoj_kernels::WCOJ_CLIQUE6_MATERIALIZE_U64,
+        (5, false, CliqueWidthClass::FourByte) => wcoj_kernels::WCOJ_CLIQUE5_COUNT_HG_U32,
+        (5, true, CliqueWidthClass::FourByte) => wcoj_kernels::WCOJ_CLIQUE5_MATERIALIZE_HG_U32,
+        (5, false, CliqueWidthClass::EightByte) => wcoj_kernels::WCOJ_CLIQUE5_COUNT_HG_U64,
+        (5, true, CliqueWidthClass::EightByte) => wcoj_kernels::WCOJ_CLIQUE5_MATERIALIZE_HG_U64,
+        (6, false, CliqueWidthClass::FourByte) => wcoj_kernels::WCOJ_CLIQUE6_COUNT_HG_U32,
+        (6, true, CliqueWidthClass::FourByte) => wcoj_kernels::WCOJ_CLIQUE6_MATERIALIZE_HG_U32,
+        (6, false, CliqueWidthClass::EightByte) => wcoj_kernels::WCOJ_CLIQUE6_COUNT_HG_U64,
+        (6, true, CliqueWidthClass::EightByte) => wcoj_kernels::WCOJ_CLIQUE6_MATERIALIZE_HG_U64,
         _ => panic!("clique_kernel_name: K must be 5 or 6, got {}", k),
     }
 }
@@ -2112,9 +2112,11 @@ impl CudaKernelProvider {
                 XlogError::Kernel(format!("{}: htod edge_n failed: {}", entry_label, e))
             })?;
 
-        // Phase 1: count + scan + total.
-        let mut count_buf = self.memory.alloc::<u32>(n_leader as usize)?;
-        let mut offsets_buf = self.memory.alloc::<u32>(n_leader as usize)?;
+        // Phase 1: HG block counts + scan + total.
+        let block_work_unit = crate::wcoj_metadata::WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT;
+        let grid = n_leader.div_ceil(block_work_unit);
+        let mut count_buf = self.memory.alloc::<u32>(grid as usize)?;
+        let mut offsets_buf = self.memory.alloc::<u32>(grid as usize)?;
         let d_total = self.memory.alloc::<u32>(1)?;
 
         let mut rec_count = LaunchRecorder::new_strict(launch_stream);
@@ -2142,7 +2144,6 @@ impl CudaKernelProvider {
                     clique_kernel_name(k, false, width_class)
                 ))
             })?;
-        let grid = (n_leader + BLOCK_SIZE - 1) / BLOCK_SIZE;
         let count_config = LaunchConfig {
             grid_dim: (grid, 1, 1),
             block_dim: (BLOCK_SIZE, 1, 1),
@@ -2154,7 +2155,9 @@ impl CudaKernelProvider {
         //     const T* const* edge_col0,
         //     const T* const* edge_col1,
         //     const u32* edge_n,
-        //     u32* out_counts)
+        //     u32 leader_count,
+        //     u32 block_work_unit,
+        //     u32* out_block_counts)
         // Pointers all device-resident; preflight verified
         // cross-stream tracking.
         unsafe {
@@ -2163,7 +2166,14 @@ impl CudaKernelProvider {
                 .launch_on_stream(
                     &cu_stream,
                     count_config,
-                    (&d_edge_col0, &d_edge_col1, &d_edge_n, &mut count_buf),
+                    (
+                        &d_edge_col0,
+                        &d_edge_col1,
+                        &d_edge_n,
+                        n_leader,
+                        block_work_unit,
+                        &mut count_buf,
+                    ),
                 )
                 .map_err(|e| {
                     XlogError::Kernel(format!(
@@ -2174,7 +2184,7 @@ impl CudaKernelProvider {
         }
 
         // dtod count → offsets (scan modifies offsets in place).
-        let bytes_count = (n_leader as usize) * std::mem::size_of::<u32>();
+        let bytes_count = (grid as usize) * std::mem::size_of::<u32>();
         unsafe {
             let res = sys::cuMemcpyDtoDAsync_v2(
                 *offsets_buf.device_ptr(),
@@ -2193,7 +2203,7 @@ impl CudaKernelProvider {
         // Device-side exclusive prefix-sum on offsets.
         self.multiblock_scan_u32_inplace_on_stream(
             &mut offsets_buf,
-            n_leader,
+            grid,
             &cu_stream,
             launch_stream,
             runtime,
@@ -2213,7 +2223,7 @@ impl CudaKernelProvider {
                         block_dim: (1, 1, 1),
                         shared_mem_bytes: 0,
                     },
-                    (&count_buf, &offsets_buf, n_leader, &d_total),
+                    (&count_buf, &offsets_buf, grid, &d_total),
                 )
                 .map_err(|e| {
                     XlogError::Kernel(format!("wcoj_compute_total launch failed: {}", e))
@@ -2314,10 +2324,12 @@ impl CudaKernelProvider {
         //     const T* const* edge_col0,
         //     const T* const* edge_col1,
         //     const u32* edge_n,
-        //     const u32* out_offsets,
+        //     u32 leader_count,
+        //     u32 block_work_unit,
+        //     const u32* block_offsets,
         //     u32 total_rows,
         //     T* const* out_cols)
-        // 6 args, fits the LaunchAsync tuple-launch.
+        // 8 args, fits the LaunchAsync tuple-launch.
         let mat_config = LaunchConfig {
             grid_dim: (grid, 1, 1),
             block_dim: (BLOCK_SIZE, 1, 1),
@@ -2333,6 +2345,8 @@ impl CudaKernelProvider {
                         &d_edge_col0,
                         &d_edge_col1,
                         &d_edge_n,
+                        n_leader,
+                        block_work_unit,
                         &offsets_buf,
                         total_rows,
                         &d_out_cols,

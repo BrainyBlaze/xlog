@@ -12,6 +12,15 @@ fn wcoj_cu_source() -> String {
 
 fn extract_extern_c_global_body(src: &str, name: &str) -> Option<String> {
     let needle = format!("__global__ void {}", name);
+    extract_body_after(src, &needle)
+}
+
+fn extract_device_function_body(src: &str, name: &str) -> Option<String> {
+    let needle = format!("void {}", name);
+    extract_body_after(src, &needle)
+}
+
+fn extract_body_after(src: &str, needle: &str) -> Option<String> {
     let start = src.find(&needle)?;
     let after_name = start + needle.len();
     let mut depth_paren = 0i32;
@@ -163,4 +172,78 @@ fn four_cycle_u64_count_and_materialize_are_hg_block_slice() {
             "{name} must recover the root row from the prefix-summed work plan"
         );
     }
+}
+
+#[test]
+fn clique_count_and_materialize_are_hg_block_slice() {
+    let src = wcoj_cu_source();
+    for (old_count, old_materialize) in [
+        (
+            "__global__ void wcoj_clique5_count_u32(",
+            "__global__ void wcoj_clique5_materialize_u32(",
+        ),
+        (
+            "__global__ void wcoj_clique5_count_u64(",
+            "__global__ void wcoj_clique5_materialize_u64(",
+        ),
+        (
+            "__global__ void wcoj_clique6_count_u32(",
+            "__global__ void wcoj_clique6_materialize_u32(",
+        ),
+        (
+            "__global__ void wcoj_clique6_count_u64(",
+            "__global__ void wcoj_clique6_materialize_u64(",
+        ),
+    ] {
+        assert!(
+            !src.contains(old_count),
+            "clique count must use a W3.3 HG block-slice symbol"
+        );
+        assert!(
+            !src.contains(old_materialize),
+            "clique materialize must use a W3.3 HG block-slice symbol"
+        );
+    }
+
+    for (count_name, materialize_name) in [
+        (
+            "wcoj_clique5_count_hg_u32",
+            "wcoj_clique5_materialize_hg_u32",
+        ),
+        (
+            "wcoj_clique5_count_hg_u64",
+            "wcoj_clique5_materialize_hg_u64",
+        ),
+        (
+            "wcoj_clique6_count_hg_u32",
+            "wcoj_clique6_materialize_hg_u32",
+        ),
+        (
+            "wcoj_clique6_count_hg_u64",
+            "wcoj_clique6_materialize_hg_u64",
+        ),
+    ] {
+        extract_extern_c_global_body(&src, count_name)
+            .unwrap_or_else(|| panic!("{count_name} must exist"));
+        extract_extern_c_global_body(&src, materialize_name)
+            .unwrap_or_else(|| panic!("{materialize_name} must exist"));
+    }
+
+    let count_template = extract_device_function_body(&src, "wcoj_clique_template_count_hg_grid_t")
+        .expect("wcoj_clique_template_count_hg_grid_t must exist");
+    let materialize_template =
+        extract_device_function_body(&src, "wcoj_clique_template_materialize_hg_grid_t")
+            .expect("wcoj_clique_template_materialize_hg_grid_t must exist");
+    assert!(
+        count_template.contains("blockIdx.x * block_work_unit"),
+        "clique count template must derive its block slice from block_work_unit"
+    );
+    assert!(
+        materialize_template.contains("blockIdx.x * block_work_unit"),
+        "clique materialize template must derive its block slice from block_work_unit"
+    );
+    assert!(
+        materialize_template.contains("block_offsets[blockIdx.x]"),
+        "clique materialize template must emit from the scanned HG block offset"
+    );
 }
