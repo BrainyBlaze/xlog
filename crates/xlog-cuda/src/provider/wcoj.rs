@@ -72,7 +72,7 @@ const BLOCK_SIZE: u32 = 256;
 //   e2 — end of scan (= start of `wcoj_compute_total` kernel)
 //   e3 — end of `wcoj_compute_total` kernel
 //          [host work: sync, dtoh_scalar, alloc, H2D, recorder]
-//   e4 — start of `wcoj_triangle_materialize` kernel
+//   e4 — start of materialize kernel
 //   e5 — end of materialize kernel
 //
 // Phase deltas (`f32` ms via `CudaEvent::elapsed_ms`):

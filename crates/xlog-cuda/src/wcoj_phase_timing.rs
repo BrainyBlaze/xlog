@@ -4,13 +4,13 @@
 //! enabled. Production builds omit this module entirely so the
 //! hot path has zero overhead.
 //!
-//! Records four GPU-stream-time phases inside the non-HG
-//! count+scan+materialize entries via CUDA events:
+//! Records four GPU-stream-time phases inside count+scan+materialize
+//! entries via CUDA events:
 //!   * `count_ms`       — count kernel + the
 //!                        `count_buf → offsets_buf` dtod copy.
 //!   * `scan_ms`        — `multiblock_scan_u32_inplace_on_stream`.
 //!   * `total_ms`       — `wcoj_compute_total` kernel.
-//!   * `materialize_ms` — `wcoj_triangle_materialize` kernel.
+//!   * `materialize_ms` — materialize kernel.
 //!
 //! Each value is the stream-time elapsed between two
 //! `cudarc::driver::CudaEvent` records, returned as `f32`

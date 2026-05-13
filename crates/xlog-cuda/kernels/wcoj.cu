@@ -755,84 +755,10 @@ extern "C" __global__ void wcoj_compute_total(
     *total = counts[n - 1] + offsets[n - 1];
 }
 
-// Per-thread materialize kernel: same lookups + intersection as
-// the count kernel, but emits (X, Y, Z) into the output columns
-// at positions derived from the device-side prefix-sum of the
-// count array (no host scan).
-//
-// Caller passes:
-//   * `out_offsets[i]` — exclusive-scan of the per-row counts,
-//     so thread `i` writes its `j`-th triangle at
-//     `out_offsets[i] + j`.
-//   * `total_rows`     — sum of all counts; the output column
-//     allocations must be at least this many u32s. Threads with
-//     `out_offsets[i] == total_rows` (i.e., no work to emit)
-//     simply return.
-extern "C" __global__ void wcoj_triangle_materialize(
-    const uint32_t* __restrict__ xy_col0,
-    const uint32_t* __restrict__ xy_col1,
-    uint32_t n_xy,
-    const uint32_t* __restrict__ yz_col0,
-    const uint32_t* __restrict__ yz_col1,
-    uint32_t n_yz,
-    const uint32_t* __restrict__ xz_col0,
-    const uint32_t* __restrict__ xz_col1,
-    uint32_t n_xz,
-    const uint32_t* __restrict__ out_offsets,
-    uint32_t total_rows,
-    uint32_t* __restrict__ out_x,
-    uint32_t* __restrict__ out_y,
-    uint32_t* __restrict__ out_z) {
-    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n_xy) {
-        return;
-    }
-    uint32_t x = xy_col0[i];
-    uint32_t y = xy_col1[i];
-    uint32_t base = out_offsets[i];
-    if (base >= total_rows) {
-        return;
-    }
-
-    uint32_t yz_lo = lower_bound_u32(yz_col0, n_yz, y);
-    uint32_t yz_hi = upper_bound_u32(yz_col0, n_yz, y);
-    uint32_t xz_lo = lower_bound_u32(xz_col0, n_xz, x);
-    uint32_t xz_hi = upper_bound_u32(xz_col0, n_xz, x);
-
-    if (yz_hi <= yz_lo || xz_hi <= xz_lo) {
-        return;
-    }
-    intersect_emit_xyz(
-        x, y,
-        yz_col1 + yz_lo, yz_hi - yz_lo,
-        xz_col1 + xz_lo, xz_hi - xz_lo,
-        base, out_x, out_y, out_z);
-}
-
 // ===============================================================
-// v0.6.5 slice 2 — 4-cycle WCOJ kernels (u32).
+// 4-cycle HG WCOJ kernels (u32).
 //
 //   cycle4(W, X, Y, Z) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W)
-//
-// Inputs are already-sorted, already-deduped binary u32 relations:
-//   * e1: lex-sorted by (W, X)
-//   * e2: lex-sorted by (X, Y)
-//   * e3: lex-sorted by (Y, Z)
-//   * e4: lex-sorted by (Z, W)
-//
-// Algorithm: dispatch one thread per row of e1. Thread `i` is bound
-// to (W, X) = (e1.col0[i], e1.col1[i]). For each `y` in the X-range
-// of e2, then each `z` in the Y-range of e3, the thread checks
-// whether (z, w) ∈ e4 via a two-level binary search (z on e4.col0,
-// then w on e4.col1 within the Z-equal range). Each closing match
-// emits one (W, X, Y, Z) quad.
-//
-// Two-pass count → materialize, mirrors triangle. Output positions
-// come from a deterministic prefix-sum, no atomics.
-//
-// Heavy-row note: the inner chain is sequential per-thread; the
-// outer parallelism is over slot-0 rows until the HG block-slice
-// replacement lands for this arity.
 // ===============================================================
 
 namespace {

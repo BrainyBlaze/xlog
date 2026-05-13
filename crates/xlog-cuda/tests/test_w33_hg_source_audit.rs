@@ -53,6 +53,23 @@ fn extract_extern_c_global_body(src: &str, name: &str) -> Option<String> {
 }
 
 #[test]
+fn triangle_u32_materialize_uses_hg_block_slice_surface() {
+    let src = wcoj_cu_source();
+    assert!(
+        !src.contains("__global__ void wcoj_triangle_materialize("),
+        "u32 triangle materialize must use the W3.3 HG block-slice symbol"
+    );
+
+    let materialize = extract_extern_c_global_body(&src, "wcoj_triangle_materialize_hg_cached_u32")
+        .expect("wcoj_triangle_materialize_hg_cached_u32 must exist");
+
+    assert!(
+        materialize.contains("blockIdx.x * block_work_unit"),
+        "u32 triangle materialize must derive its block slice from block_work_unit"
+    );
+}
+
+#[test]
 fn four_cycle_u32_count_and_materialize_are_hg_block_slice() {
     let src = wcoj_cu_source();
     assert!(

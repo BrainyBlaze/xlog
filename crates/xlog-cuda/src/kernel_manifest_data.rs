@@ -465,7 +465,6 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "wcoj_triangle_materialize_hg_cached_u32",
             "wcoj_scan_hg_block_counts_u32",
             "wcoj_compute_total",
-            "wcoj_triangle_materialize",
             "wcoj_triangle_count_u64",
             "wcoj_triangle_materialize_u64",
             "wcoj_triangle_skew_histogram_u32",
