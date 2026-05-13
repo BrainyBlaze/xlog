@@ -62,8 +62,3 @@ harness = true
 name = "ilp_reduce_sum"
 path = "tests/ilp_reduce_sum.rs"
 harness = true
-
-[[test]]
-name = "test_wcoj_w34_fusion"
-path = "tests/test_wcoj_w34_fusion.rs"
-harness = true

@@ -1,8 +1,8 @@
 //! W3.3 HG block-slice production benchmark.
 //!
-//! Measures the paper-aligned HG triangle path against the prior
-//! uniform driver-row triangle provider entry on identical laid-out
-//! u32 fixtures. Row equality is asserted before any timing sample is
+//! Measures the paper-aligned HG triangle path with a precomputed
+//! work plan against the public provider route on identical u32
+//! fixtures. Row equality is asserted before any timing sample is
 //! accepted.
 
 use std::collections::BTreeSet;
@@ -236,22 +236,22 @@ fn layout_fixture(fix: &ProviderFixture, input: &UploadedFixture) -> LayoutFixtu
     }
 }
 
-fn run_current_main(fix: &ProviderFixture, input: &UploadedFixture) -> CudaBuffer {
+fn run_public_provider_route(fix: &ProviderFixture, input: &UploadedFixture) -> CudaBuffer {
     let xy = fix
         .provider
         .wcoj_layout_u32_recorded(&input.e1, fix.launch_stream)
-        .expect("current-main layout xy");
+        .expect("public provider layout xy");
     let yz = fix
         .provider
         .wcoj_layout_u32_recorded(&input.e2, fix.launch_stream)
-        .expect("current-main layout yz");
+        .expect("public provider layout yz");
     let xz = fix
         .provider
         .wcoj_layout_u32_recorded(&input.e3, fix.launch_stream)
-        .expect("current-main layout xz");
+        .expect("public provider layout xz");
     fix.provider
         .wcoj_triangle_u32_recorded(&xy, &yz, &xz, fix.launch_stream)
-        .expect("current-main triangle")
+        .expect("public provider triangle")
 }
 
 fn run_hg(fix: &ProviderFixture, input: &LayoutFixture) -> CudaBuffer {
@@ -322,13 +322,13 @@ fn assert_row_equality(
     layout: &LayoutFixture,
     label: &str,
 ) -> usize {
-    let baseline = run_current_main(fix, uploaded);
+    let baseline = run_public_provider_route(fix, uploaded);
     let hg = run_hg(fix, layout);
     let baseline_rows = download_triples(&baseline);
     let hg_rows = download_triples(&hg);
     assert_eq!(
         baseline_rows, hg_rows,
-        "[{label}] HG output diverged from uniform driver output"
+        "[{label}] HG output diverged from public provider output"
     );
     eprintln!("W33_ROW_EQUALITY {label} PASS rows={}", baseline_rows.len());
     baseline_rows.len()
@@ -343,7 +343,7 @@ fn measure_baseline_with_pairing(
     let mut measured = Duration::ZERO;
     for _ in 0..iters {
         let start = Instant::now();
-        let result = run_current_main(fix, uploaded);
+        let result = run_public_provider_route(fix, uploaded);
         sync_launch_stream(fix);
         measured += start.elapsed();
         drop(result);
@@ -361,7 +361,7 @@ fn measure_hg_with_pairing(
 ) -> Duration {
     let mut measured = Duration::ZERO;
     for _ in 0..iters {
-        let _ = run_current_main(fix, uploaded);
+        let _ = run_public_provider_route(fix, uploaded);
         sync_launch_stream(fix);
         let start = Instant::now();
         let result = run_hg(fix, layout);
@@ -392,7 +392,7 @@ fn bench_fixture(
     group.throughput(Throughput::Elements(layout.total_rows));
 
     group.bench_with_input(
-        BenchmarkId::new("current_main_baseline", label),
+        BenchmarkId::new("public_provider_route", label),
         &(),
         |b, _| b.iter_custom(|iters| measure_baseline_with_pairing(fix, &uploaded, &layout, iters)),
     );

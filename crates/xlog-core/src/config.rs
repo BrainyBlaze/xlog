@@ -1,21 +1,5 @@
 //! Configuration types for XLOG runtime
 
-/// Default total-input-row threshold for W3.4 triangle layout+count
-/// fusion.
-///
-/// The metric is the sum of the three canonical triangle slot row
-/// counts before the WCOJ provider call. The value is grounded by
-/// `docs/evidence/2026-05-13-w34-kernel-fusion-impl/README.md`:
-/// `superhub-50K` stays above the W3.4 perf gate, while
-/// `superhub-1K` remains below threshold and therefore auto-disables
-/// fusion to preserve the no-small-fixture-regression gate.
-pub const W34_FUSION_THRESHOLD: u32 = 4_096;
-
-/// Env override for [`W34_FUSION_THRESHOLD`].
-///
-/// Parsed as a `u32`; invalid values fall back to the const.
-pub const ENV_WCOJ_W34_THRESHOLD: &str = "XLOG_WCOJ_W34_THRESHOLD";
-
 /// GPU memory budget configuration.
 ///
 /// Use [`MemoryBudget::default()`] or the builder methods ([`MemoryBudget::from_device_memory`],

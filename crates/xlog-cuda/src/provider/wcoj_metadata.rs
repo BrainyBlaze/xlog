@@ -427,14 +427,6 @@ impl CudaKernelProvider {
                 .as_ref()
                 .expect("local HG counts allocated when grid exceeds single-block scan")
         };
-        let output_capacity = plan.total_work;
-        let bytes_per_col = (output_capacity as usize)
-            .checked_mul(std::mem::size_of::<u32>())
-            .ok_or_else(|| XlogError::Kernel(format!("{ctx}: output byte size overflow")))?;
-        let mut out_x = self.memory().alloc::<u8>(bytes_per_col)?;
-        let mut out_y = self.memory().alloc::<u8>(bytes_per_col)?;
-        let mut out_z = self.memory().alloc::<u8>(bytes_per_col)?;
-
         let mut rec_hg = LaunchRecorder::new_strict(launch_stream);
         rec_hg.read(e_xy.num_rows_device());
         rec_hg.read(e_yz.num_rows_device());
@@ -462,9 +454,6 @@ impl CudaKernelProvider {
         rec_hg.read_write(&plan.scratch_x);
         rec_hg.read_write(&plan.scratch_y);
         rec_hg.read_write(&plan.scratch_z);
-        rec_hg.write(&out_x);
-        rec_hg.write(&out_y);
-        rec_hg.write(&out_z);
         rec_hg
             .preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: HG preflight failed: {e}")))?;
@@ -599,15 +588,45 @@ impl CudaKernelProvider {
                     })?;
             }
         }
+        rec_hg
+            .commit(runtime)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: HG count commit failed: {e}")))?;
+        cu_stream
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: count stream sync failed: {e}")))?;
+        let total_rows = self
+            .dtoh_scalar_untracked::<u32>(&total_rows_device, 0)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: read total rows failed: {e}")))?;
+        if total_rows == 0 {
+            return self.create_empty_buffer(out_schema);
+        }
 
+        let bytes_per_col = (total_rows as usize)
+            .checked_mul(std::mem::size_of::<u32>())
+            .ok_or_else(|| XlogError::Kernel(format!("{ctx}: output byte size overflow")))?;
+        let mut out_x = self.memory().alloc::<u8>(bytes_per_col)?;
+        let mut out_y = self.memory().alloc::<u8>(bytes_per_col)?;
+        let mut out_z = self.memory().alloc::<u8>(bytes_per_col)?;
+        let materialize_offsets = if grid <= 1024 {
+            &plan.block_offsets
+        } else {
+            local_offsets
+                .as_ref()
+                .expect("local HG offsets allocated when grid exceeds single-block scan")
+        };
+        let mut rec_mat = LaunchRecorder::new_strict(launch_stream);
+        rec_mat.read(count_u32);
+        rec_mat.read(materialize_offsets);
+        rec_mat.read(&plan.scratch_x);
+        rec_mat.read(&plan.scratch_y);
+        rec_mat.read(&plan.scratch_z);
+        rec_mat.write(&out_x);
+        rec_mat.write(&out_y);
+        rec_mat.write(&out_z);
+        rec_mat
+            .preflight(runtime)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: materialize preflight failed: {e}")))?;
         {
-            let materialize_offsets = if grid <= 1024 {
-                &plan.block_offsets
-            } else {
-                local_offsets
-                    .as_ref()
-                    .expect("local HG offsets allocated when grid exceeds single-block scan")
-            };
             let kernel = self
                 .device()
                 .inner()
@@ -627,7 +646,7 @@ impl CudaKernelProvider {
                 count_u32.as_kernel_param(),
                 materialize_offsets.as_kernel_param(),
                 plan.block_work_unit.as_kernel_param(),
-                output_capacity.as_kernel_param(),
+                total_rows.as_kernel_param(),
                 (&plan.scratch_x).as_kernel_param(),
                 (&plan.scratch_y).as_kernel_param(),
                 (&plan.scratch_z).as_kernel_param(),
@@ -652,18 +671,19 @@ impl CudaKernelProvider {
                     })?;
             }
         }
-        rec_hg
+        rec_mat
             .commit(runtime)
-            .map_err(|e| XlogError::Kernel(format!("{ctx}: HG commit failed: {e}")))?;
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: materialize commit failed: {e}")))?;
         cu_stream.synchronize().map_err(|e| {
             XlogError::Kernel(format!("{ctx}: materialize stream sync failed: {e}"))
         })?;
 
-        Ok(CudaBuffer::from_columns(
+        Ok(CudaBuffer::from_columns_with_host_count(
             vec![out_x.into(), out_y.into(), out_z.into()],
-            output_capacity as u64,
+            total_rows as u64,
             total_rows_device,
             out_schema,
+            total_rows,
         ))
     }
 

@@ -48,10 +48,6 @@ name = "w52_skewed_multiway_bench"
 harness = false
 
 [[bench]]
-name = "wcoj_fusion_bench"
-harness = false
-
-[[bench]]
 name = "wcoj_w33_superhub"
 harness = false
 

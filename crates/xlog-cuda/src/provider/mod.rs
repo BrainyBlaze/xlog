@@ -275,7 +275,6 @@ pub mod wcoj_kernels {
     pub const WCOJ_TRIANGLE_MATERIALIZE_HG_CACHED_U32: &str =
         "wcoj_triangle_materialize_hg_cached_u32";
     pub const WCOJ_SCAN_HG_BLOCK_COUNTS_U32: &str = "wcoj_scan_hg_block_counts_u32";
-    pub const WCOJ_TRIANGLE_COUNT: &str = "wcoj_triangle_count";
     pub const WCOJ_COMPUTE_TOTAL: &str = "wcoj_compute_total";
     pub const WCOJ_TRIANGLE_MATERIALIZE: &str = "wcoj_triangle_materialize";
     pub const WCOJ_TRIANGLE_COUNT_U64: &str = "wcoj_triangle_count_u64";

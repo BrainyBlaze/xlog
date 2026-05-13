@@ -12,21 +12,25 @@
 //   * e_yz: lex-sorted by (Y, Z)
 //   * e_xz: lex-sorted by (X, Z)
 //
-// Algorithm shape (mirrors SRDatalog Algorithm 2 for the triangle
-// WCOJ relation family):
+// Algorithm shape:
 //
-//   * Dispatch one thread per row of e_xy. Thread `i` is bound
-//     to (X, Y) = (e_xy.col0[i], e_xy.col1[i]) and emits every
-//     (X, Y, Z) such that (Y, Z) ∈ e_yz and (X, Z) ∈ e_xz.
+//   * The u32 / Symbol entry uses the histogram-guided block-slice
+//     kernels below. A block owns a contiguous slice of the
+//     prefix-summed root-key work space from SRDatalog Algorithm 2.
+//   * The u64 entry uses row-wise count and materialize kernels:
+//     thread `i` is bound to (X, Y) = (e_xy.col0[i], e_xy.col1[i])
+//     and emits every (X, Y, Z) such that (Y, Z) ∈ e_yz and
+//     (X, Z) ∈ e_xz.
 //   * Z is found by a sorted-merge intersection of
 //     e_yz.col1 over the Y range and e_xz.col1 over the X range,
 //     each range located by a per-thread binary search on the
 //     respective col0.
 //   * Two-pass count → materialize: pass 1 fills `out_counts[i]`
-//     with the number of triangles thread `i` will emit. The host
-//     prefix-sums `out_counts` to get write offsets and the total
-//     row count; pass 2 re-runs the intersection, writing each
-//     emitted (X, Y, Z) at `offsets[i] + j` for the j-th match.
+//     with the number of triangles thread `i` will emit. The
+//     recorded scan helper prefix-sums `out_counts` to get write
+//     offsets and the total row count; pass 2 re-runs the
+//     intersection, writing each emitted (X, Y, Z) at
+//     `offsets[i] + j` for the j-th match.
 //   * Output is naturally lex-sorted by (X, Y, Z): e_xy is
 //     (X, Y)-sorted, sorted-merge enumerates Z in ascending
 //     order, so the per-thread emission stride is monotone.
@@ -726,50 +730,6 @@ extern "C" __global__ void wcoj_scan_hg_block_counts_u32(
     if (tid == 0) {
         *total_rows = (n == 0) ? 0u : scan[n - 1];
     }
-}
-
-// Per-thread count kernel: one thread per row of e_xy.
-//
-// For thread `i` with row (X, Y) = (xy_col0[i], xy_col1[i]):
-//   * Locate the Y range in e_yz via [lower_bound, upper_bound)
-//     on yz_col0 → range of Z values e_yz contributes.
-//   * Locate the X range in e_xz via [lower_bound, upper_bound)
-//     on xz_col0 → range of Z values e_xz contributes.
-//   * Count intersection size → out_counts[i].
-//
-// Threads with `i >= n_xy` do nothing. The kernel writes
-// out_counts[i] = 0 in that case if its slot is in range; the
-// host pre-zeroes the buffer so no write is needed for OOB.
-extern "C" __global__ void wcoj_triangle_count(
-    const uint32_t* __restrict__ xy_col0,
-    const uint32_t* __restrict__ xy_col1,
-    uint32_t n_xy,
-    const uint32_t* __restrict__ yz_col0,
-    const uint32_t* __restrict__ yz_col1,
-    uint32_t n_yz,
-    const uint32_t* __restrict__ xz_col0,
-    const uint32_t* __restrict__ xz_col1,
-    uint32_t n_xz,
-    uint32_t* __restrict__ out_counts) {
-    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n_xy) {
-        return;
-    }
-    uint32_t x = xy_col0[i];
-    uint32_t y = xy_col1[i];
-
-    uint32_t yz_lo = lower_bound_u32(yz_col0, n_yz, y);
-    uint32_t yz_hi = upper_bound_u32(yz_col0, n_yz, y);
-    uint32_t xz_lo = lower_bound_u32(xz_col0, n_xz, x);
-    uint32_t xz_hi = upper_bound_u32(xz_col0, n_xz, x);
-
-    uint32_t cnt = 0;
-    if (yz_hi > yz_lo && xz_hi > xz_lo) {
-        cnt = intersect_count(
-            yz_col1 + yz_lo, yz_hi - yz_lo,
-            xz_col1 + xz_lo, xz_hi - xz_lo);
-    }
-    out_counts[i] = cnt;
 }
 
 // Single-thread reducer: total = counts[n-1] + offsets[n-1].

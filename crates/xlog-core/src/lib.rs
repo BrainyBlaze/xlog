@@ -7,9 +7,7 @@ pub mod symbol;
 pub mod traits;
 pub mod types;
 
-pub use config::{
-    CostModelKind, MemoryBudget, RuntimeConfig, ENV_WCOJ_W34_THRESHOLD, W34_FUSION_THRESHOLD,
-};
+pub use config::{CostModelKind, MemoryBudget, RuntimeConfig};
 pub use error::{Result, XlogError};
 pub use traits::{GpuBuffer, KernelProvider, RelationStore};
 pub use types::{AggOp, RelId, ScalarType, Schema};
