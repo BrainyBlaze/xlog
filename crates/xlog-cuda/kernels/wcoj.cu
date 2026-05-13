@@ -594,6 +594,9 @@ extern "C" __global__ void wcoj_triangle_count_hg_cached_u32(
     }
 
     uint32_t local_count = 0;
+    uint32_t local_x[8];
+    uint32_t local_y[8];
+    uint32_t local_z[8];
     for (uint32_t work_idx = block_start + threadIdx.x;
          work_idx < block_end;
          work_idx += blockDim.x) {
@@ -624,6 +627,11 @@ extern "C" __global__ void wcoj_triangle_count_hg_cached_u32(
             uint32_t z = yz_col1[yz_lo + probe_offset];
             uint32_t found = lower_bound_u32(xz_col1 + xz_lo, xz_len, z);
             matched = (found < xz_len && xz_col1[xz_lo + found] == z) ? 1u : 0u;
+            if (matched != 0u && local_count < 8u) {
+                local_x[local_count] = xy_col0[xy_idx];
+                local_y[local_count] = xy_col1[xy_idx];
+                local_z[local_count] = z;
+            }
         } else {
             if (probe_offset >= xz_len) {
                 continue;
@@ -631,11 +639,18 @@ extern "C" __global__ void wcoj_triangle_count_hg_cached_u32(
             uint32_t z = xz_col1[xz_lo + probe_offset];
             uint32_t found = lower_bound_u32(yz_col1 + yz_lo, yz_len, z);
             matched = (found < yz_len && yz_col1[yz_lo + found] == z) ? 1u : 0u;
+            if (matched != 0u && local_count < 8u) {
+                local_x[local_count] = xy_col0[xy_idx];
+                local_y[local_count] = xy_col1[xy_idx];
+                local_z[local_count] = z;
+            }
         }
-        local_count += matched;
+        if (matched != 0u) {
+            local_count += 1;
+        }
     }
 
-    __shared__ uint32_t thread_prefix[256];
+    __shared__ uint32_t thread_prefix[1024];
     thread_prefix[threadIdx.x] = local_count;
     __syncthreads();
     for (uint32_t stride = 1; stride < blockDim.x; stride <<= 1) {
@@ -652,54 +667,12 @@ extern "C" __global__ void wcoj_triangle_count_hg_cached_u32(
         out_block_counts[blockIdx.x] = thread_prefix[threadIdx.x];
     }
 
-    uint32_t local_emit = 0;
     uint32_t scratch_base = blockIdx.x * block_work_unit + thread_base;
-    for (uint32_t work_idx = block_start + threadIdx.x;
-         work_idx < block_end;
-         work_idx += blockDim.x) {
-        uint32_t root_pos = upper_bound_u32(xy_work_prefix, n_xy + 1, work_idx);
-        if (root_pos == 0) {
-            continue;
-        }
-        uint32_t xy_idx = root_pos - 1;
-        if (xy_idx >= n_xy) {
-            continue;
-        }
-        uint32_t row_start = xy_work_prefix[xy_idx];
-        uint32_t yz_lo = xy_yz_start[xy_idx];
-        uint32_t yz_hi = xy_yz_end[xy_idx];
-        uint32_t xz_lo = xy_xz_start[xy_idx];
-        uint32_t xz_hi = xy_xz_end[xy_idx];
-        if (yz_hi > n_yz || xz_hi > n_xz || yz_lo >= yz_hi || xz_lo >= xz_hi) {
-            continue;
-        }
-        uint32_t yz_len = yz_hi - yz_lo;
-        uint32_t xz_len = xz_hi - xz_lo;
-        uint32_t probe_offset = work_idx - row_start;
-        uint32_t matched = 0;
-        uint32_t z = 0;
-        if (yz_len <= xz_len) {
-            if (probe_offset >= yz_len) {
-                continue;
-            }
-            z = yz_col1[yz_lo + probe_offset];
-            uint32_t found = lower_bound_u32(xz_col1 + xz_lo, xz_len, z);
-            matched = (found < xz_len && xz_col1[xz_lo + found] == z) ? 1u : 0u;
-        } else {
-            if (probe_offset >= xz_len) {
-                continue;
-            }
-            z = xz_col1[xz_lo + probe_offset];
-            uint32_t found = lower_bound_u32(yz_col1 + yz_lo, yz_len, z);
-            matched = (found < yz_len && yz_col1[yz_lo + found] == z) ? 1u : 0u;
-        }
-        if (matched != 0u) {
-            uint32_t out = scratch_base + local_emit;
-            scratch_x[out] = xy_col0[xy_idx];
-            scratch_y[out] = xy_col1[xy_idx];
-            scratch_z[out] = z;
-            local_emit += 1;
-        }
+    for (uint32_t i = 0; i < local_count && i < 8u; ++i) {
+        uint32_t out = scratch_base + i;
+        scratch_x[out] = local_x[i];
+        scratch_y[out] = local_y[i];
+        scratch_z[out] = local_z[i];
     }
 }
 

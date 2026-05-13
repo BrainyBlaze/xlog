@@ -11,6 +11,7 @@ use crate::wcoj_metadata::{WcojRelationMetadata, WcojTriangleHgWorkPlanU32};
 use crate::{AsKernelParam, CudaBuffer, LaunchAsync, LaunchConfig};
 
 const BLOCK_SIZE: u32 = 256;
+const HG_COUNT_BLOCK_SIZE: u32 = 1024;
 
 impl CudaKernelProvider {
     pub fn wcoj_build_metadata_u32_recorded(
@@ -461,7 +462,7 @@ impl CudaKernelProvider {
                         &cu_stream,
                         LaunchConfig {
                             grid_dim: (grid, 1, 1),
-                            block_dim: (BLOCK_SIZE, 1, 1),
+                            block_dim: (HG_COUNT_BLOCK_SIZE, 1, 1),
                             shared_mem_bytes: 0,
                         },
                         &mut params,
