@@ -897,6 +897,10 @@ pub struct CudaKernelProvider {
     /// dispatches that used the existing unfused WCOJ pipeline
     /// after the W3.4 threshold branch selected or fell back to it.
     wcoj_triangle_unfused_dispatch_count: AtomicU64,
+    /// W3.3 routing counter: successful triangle dispatches
+    /// accepted through the histogram-guided block-slice provider
+    /// entry.
+    wcoj_triangle_hg_dispatch_count: AtomicU64,
     /// Diagnostic-only: last WCOJ triangle dispatch's per-phase
     /// CUDA-event timings, populated by `wcoj_triangle_*_recorded`
     /// when the `wcoj-phase-timing` Cargo feature is on. Read by
@@ -988,6 +992,7 @@ impl CudaKernelProvider {
             wcoj_layout_fast_path_hit_count: AtomicU64::new(0),
             wcoj_triangle_fused_dispatch_count: AtomicU64::new(0),
             wcoj_triangle_unfused_dispatch_count: AtomicU64::new(0),
+            wcoj_triangle_hg_dispatch_count: AtomicU64::new(0),
             #[cfg(feature = "wcoj-phase-timing")]
             last_triangle_phase_timing: std::sync::Mutex::new(None),
         })
@@ -1226,6 +1231,13 @@ impl CudaKernelProvider {
             .load(Ordering::Relaxed)
     }
 
+    /// W3.3 test/diagnostic counter: successful triangle WCOJ
+    /// dispatches that routed through the HG block-slice provider
+    /// entry.
+    pub fn wcoj_triangle_hg_dispatch_count(&self) -> u64 {
+        self.wcoj_triangle_hg_dispatch_count.load(Ordering::Relaxed)
+    }
+
     /// Reset the fast-path hit counter to 0. Tests use this to
     /// scope counter assertions to a single dispatch.
     pub fn reset_wcoj_layout_fast_path_hit_count(&self) {
@@ -1257,6 +1269,14 @@ impl CudaKernelProvider {
     #[doc(hidden)]
     pub fn record_wcoj_triangle_unfused_dispatch(&self) {
         self.wcoj_triangle_unfused_dispatch_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// W3.3 runtime hook: record a successful HG block-slice
+    /// triangle dispatch.
+    #[doc(hidden)]
+    pub fn record_wcoj_triangle_hg_dispatch(&self) {
+        self.wcoj_triangle_hg_dispatch_count
             .fetch_add(1, Ordering::Relaxed);
     }
 

@@ -49,10 +49,9 @@
 //! caller takes the embedded `fallback` path.
 //!
 //! Width branching: 4-byte (U32 / Symbol) inputs go to
-//! `wcoj_layout_u32_recorded` + `wcoj_triangle_u32_recorded`;
+//! `wcoj_layout_u32_recorded` + `wcoj_triangle_hg_u32_recorded`;
 //! 8-byte (U64) inputs go to the `_u64_recorded` siblings. All
-//! three slots must share a width — mixed-width triangles fall
-//! back to the binary-join path.
+//! three slots must share a width.
 //!
 //! ## Failure handling
 //!
@@ -82,10 +81,9 @@
 //! * Cost model — slice 5.
 //! * Mixed-width admission (a triangle with both U32 and U64
 //!   slots stays on the binary-join path).
-//! * Histogram-guided block dispatch (B1 heavy-row offload).
 //! * Multi-recursive WCOJ (≥ 2 in-SCC body Scans) — slice 4.2.
 
-use xlog_core::{RelId, Result, ScalarType, Schema, ENV_WCOJ_W34_THRESHOLD, W34_FUSION_THRESHOLD};
+use xlog_core::{RelId, Result, ScalarType, Schema};
 use xlog_cuda::device_runtime::StreamId;
 use xlog_cuda::CudaBuffer;
 use xlog_ir::{
@@ -127,6 +125,33 @@ pub const ENV_USE_WCOJ_TRIANGLE_ADAPTIVE: &str = "XLOG_USE_WCOJ_TRIANGLE_ADAPTIV
 /// insensitive `"true"` → kill. Beats every other flag.
 pub const ENV_DISABLE_WCOJ_TRIANGLE: &str = "XLOG_DISABLE_WCOJ_TRIANGLE";
 
+pub const ENV_WCOJ_BLOCK_WORK_UNIT: &str = "XLOG_WCOJ_BLOCK_WORK_UNIT";
+pub(super) const WCOJ_BLOCK_WORK_UNIT_DEFAULT: u32 = 1024;
+pub(super) const WCOJ_BLOCK_WORK_UNIT_MAX: u32 = 8192;
+
+pub(super) fn wcoj_block_work_unit() -> u32 {
+    match std::env::var(ENV_WCOJ_BLOCK_WORK_UNIT) {
+        Ok(raw) => match raw.trim().parse::<u32>() {
+            Ok(v @ 1..=WCOJ_BLOCK_WORK_UNIT_MAX) => v,
+            Ok(v) => {
+                eprintln!(
+                    "warning: {ENV_WCOJ_BLOCK_WORK_UNIT}={v} is outside 1..={WCOJ_BLOCK_WORK_UNIT_MAX}; \
+                     using {WCOJ_BLOCK_WORK_UNIT_DEFAULT}"
+                );
+                WCOJ_BLOCK_WORK_UNIT_DEFAULT
+            }
+            Err(_) => {
+                eprintln!(
+                    "warning: {ENV_WCOJ_BLOCK_WORK_UNIT}={raw:?} is not a u32; \
+                     using {WCOJ_BLOCK_WORK_UNIT_DEFAULT}"
+                );
+                WCOJ_BLOCK_WORK_UNIT_DEFAULT
+            }
+        },
+        Err(_) => WCOJ_BLOCK_WORK_UNIT_DEFAULT,
+    }
+}
+
 /// Resolve the adaptive dispatch gate. Precedence:
 ///   * `config_override = Some(b)` → `b` (test-only knob).
 ///   * `XLOG_USE_WCOJ_TRIANGLE_ADAPTIVE=1` → `true`.
@@ -154,28 +179,6 @@ pub(super) fn wcoj_disabled(config_override: Option<bool>) -> bool {
     std::env::var(ENV_DISABLE_WCOJ_TRIANGLE)
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
-}
-
-/// Resolve the W3.4 layout+count fusion threshold.
-///
-/// The threshold metric is total logical input rows across the
-/// canonical triangle slots. `XLOG_WCOJ_W34_THRESHOLD` may override
-/// the const for bench/cert calibration; invalid values fall back to
-/// [`W34_FUSION_THRESHOLD`].
-pub(super) fn w34_fusion_threshold() -> u64 {
-    match std::env::var(ENV_WCOJ_W34_THRESHOLD) {
-        Ok(raw) => match raw.trim().parse::<u32>() {
-            Ok(v) => u64::from(v),
-            Err(_) => {
-                eprintln!(
-                    "warning: {ENV_WCOJ_W34_THRESHOLD}={raw:?} is not a u32; \
-                     falling back to W34_FUSION_THRESHOLD={W34_FUSION_THRESHOLD}"
-                );
-                u64::from(W34_FUSION_THRESHOLD)
-            }
-        },
-        Err(_) => u64::from(W34_FUSION_THRESHOLD),
-    }
 }
 
 // -----------------------------------------------------------------
@@ -269,18 +272,6 @@ enum DispatchMode {
     /// Set by `wcoj_triangle_dispatch_adaptive=Some(true)` (and
     /// force is not on).
     Adaptive,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum W34FusionRoute {
-    Fused,
-    Unfused,
-}
-
-fn logical_rows_for_threshold(buf: &CudaBuffer) -> u64 {
-    buf.cached_row_count()
-        .map(u64::from)
-        .unwrap_or_else(|| buf.num_rows())
 }
 
 /// Three rel IDs extracted from a matched triangle RIR. The
@@ -1095,29 +1086,6 @@ impl Executor {
                 vo,
             );
         }
-        let w34_route = if matches!(width, WcojKeyWidth::FourByte) {
-            let total_input_rows = logical_rows_for_threshold(buf_xy)
-                .saturating_add(logical_rows_for_threshold(buf_yz))
-                .saturating_add(logical_rows_for_threshold(buf_xz));
-            if total_input_rows >= w34_fusion_threshold() {
-                W34FusionRoute::Fused
-            } else {
-                W34FusionRoute::Unfused
-            }
-        } else {
-            W34FusionRoute::Unfused
-        };
-        if w34_route == W34FusionRoute::Fused {
-            if let Ok(buf) = self.provider.wcoj_triangle_fused_lc_u32_recorded(
-                buf_xy,
-                buf_yz,
-                buf_xz,
-                launch_stream,
-            ) {
-                self.provider.record_wcoj_triangle_fused_dispatch();
-                return Ok(buf);
-            }
-        }
         #[cfg(feature = "wcoj-phase-timing")]
         let mut time_layout =
             |f: &dyn Fn() -> Result<CudaBuffer>, slot: usize| -> Result<CudaBuffer> {
@@ -1165,13 +1133,14 @@ impl Executor {
                 let layout_xz = self
                     .provider
                     .wcoj_layout_u32_recorded(buf_xz, launch_stream)?;
-                let out = self.provider.wcoj_triangle_u32_recorded(
+                let out = self.provider.wcoj_triangle_hg_u32_recorded(
                     &layout_xy,
                     &layout_yz,
                     &layout_xz,
+                    wcoj_block_work_unit(),
                     launch_stream,
                 )?;
-                self.provider.record_wcoj_triangle_unfused_dispatch();
+                self.provider.record_wcoj_triangle_hg_dispatch();
                 Ok(out)
             }
             WcojKeyWidth::EightByte => {

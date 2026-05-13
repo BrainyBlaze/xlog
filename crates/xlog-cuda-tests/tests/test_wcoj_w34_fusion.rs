@@ -216,6 +216,7 @@ struct RunResult {
     rows: Vec<(u32, u32, u32)>,
     fused_count: u64,
     unfused_count: u64,
+    hg_count: u64,
     triangle_count: u64,
     total_input_rows: u64,
 }
@@ -240,6 +241,7 @@ fn run_program(
         rows: download_triples(tri),
         fused_count: fix.provider.wcoj_triangle_fused_dispatch_count(),
         unfused_count: fix.provider.wcoj_triangle_unfused_dispatch_count(),
+        hg_count: fix.provider.wcoj_triangle_hg_dispatch_count(),
         triangle_count: executor.wcoj_triangle_dispatch_count(),
         total_input_rows: total_input_rows(inputs),
     })
@@ -282,12 +284,12 @@ fn with_w34_threshold<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
 }
 
 #[test]
-fn above_threshold_routes_to_fused_and_matches_reference() {
+fn above_threshold_routes_to_hg_and_matches_reference() {
     let inputs = superhub_fixture(6_000);
-    let Some(reference) = with_w34_threshold(Some(&u32::MAX.to_string()), || {
+    let Some(reference) = with_w34_threshold(None, || {
         run_program(
             &inputs,
-            RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(true)),
+            RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(false)),
         )
     }) else {
         eprintln!("Skipping: CUDA runtime unavailable");
@@ -308,12 +310,13 @@ fn above_threshold_routes_to_fused_and_matches_reference() {
     );
     assert_eq!(tested.rows, reference.rows);
     assert_eq!(tested.triangle_count, 1);
-    assert_eq!(tested.fused_count, 1);
+    assert_eq!(tested.hg_count, 1);
+    assert_eq!(tested.fused_count, 0);
     assert_eq!(tested.unfused_count, 0);
 }
 
 #[test]
-fn below_threshold_routes_to_unfused_and_matches_reference() {
+fn below_threshold_routes_to_hg_and_matches_reference() {
     let inputs = superhub_fixture(1_024);
     let Some(reference) = with_w34_threshold(None, || {
         run_program(
@@ -339,12 +342,13 @@ fn below_threshold_routes_to_unfused_and_matches_reference() {
     );
     assert_eq!(tested.rows, reference.rows);
     assert_eq!(tested.triangle_count, 1);
+    assert_eq!(tested.hg_count, 1);
     assert_eq!(tested.fused_count, 0);
-    assert_eq!(tested.unfused_count, 1);
+    assert_eq!(tested.unfused_count, 0);
 }
 
 #[test]
-fn env_override_can_force_unfused_on_large_fixture() {
+fn threshold_env_does_not_restore_unfused_route_on_large_fixture() {
     let inputs = superhub_fixture(6_000);
     let Some(tested) = with_w34_threshold(Some(&u32::MAX.to_string()), || {
         run_program(
@@ -356,12 +360,13 @@ fn env_override_can_force_unfused_on_large_fixture() {
         return;
     };
     assert_eq!(tested.triangle_count, 1);
+    assert_eq!(tested.hg_count, 1);
     assert_eq!(tested.fused_count, 0);
-    assert_eq!(tested.unfused_count, 1);
+    assert_eq!(tested.unfused_count, 0);
 }
 
 #[test]
-fn env_override_can_force_fused_on_small_fixture() {
+fn threshold_env_does_not_restore_fused_route_on_small_fixture() {
     let inputs = superhub_fixture(1_024);
     let Some(reference) = with_w34_threshold(None, || {
         run_program(
@@ -381,7 +386,8 @@ fn env_override_can_force_fused_on_small_fixture() {
     });
     assert_eq!(tested.rows, reference.rows);
     assert_eq!(tested.triangle_count, 1);
-    assert_eq!(tested.fused_count, 1);
+    assert_eq!(tested.hg_count, 1);
+    assert_eq!(tested.fused_count, 0);
     assert_eq!(tested.unfused_count, 0);
 }
 
