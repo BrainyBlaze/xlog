@@ -1,17 +1,9 @@
 // crates/xlog-cuda/tests/test_wcoj_triangle_u64.rs
-//! Tests for the v0.6.2 GPU 3-way WCOJ triangle kernel — u64 variant.
+//! Tests for the GPU 3-way WCOJ triangle kernel — u64 variant.
 //!
 //! Locks the provider entry
 //! `CudaKernelProvider::wcoj_triangle_u64_recorded(e_xy, e_yz, e_xz, launch_stream)`
-//! against the same SRDatalog two-phase contract as the u32 path,
-//! widened to 64-bit keys via parallel kernels (`wcoj_triangle_count_u64`,
-//! `wcoj_triangle_materialize_u64`) and the shared `wcoj_compute_total`
-//! reducer (counters stay u32 since they're bounded by `u32::MAX`).
-//!
-//! Hard scope (commit 2 of 3):
-//!   * Tests provider entry only — no AST/RIR dispatch (commit 3).
-//!   * Caller-supplied sorted+deduped inputs (layout tests cover that).
-//!   * No mixed-width admission — all three relations must be U64.
+//! against the same SRDatalog HG block-slice contract as the u32 path.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;

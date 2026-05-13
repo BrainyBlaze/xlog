@@ -176,57 +176,6 @@ __device__ __forceinline__ uint32_t upper_bound_u64(
     return lo;
 }
 
-__device__ __forceinline__ uint32_t intersect_count_u64(
-    const uint64_t* __restrict__ a, uint32_t na,
-    const uint64_t* __restrict__ b, uint32_t nb) {
-    uint32_t ia = 0, ib = 0;
-    uint32_t cnt = 0;
-    while (ia < na && ib < nb) {
-        uint64_t va = a[ia];
-        uint64_t vb = b[ib];
-        if (va == vb) {
-            cnt += 1;
-            ia += 1;
-            ib += 1;
-        } else if (va < vb) {
-            ia += 1;
-        } else {
-            ib += 1;
-        }
-    }
-    return cnt;
-}
-
-__device__ __forceinline__ uint32_t intersect_emit_xyz_u64(
-    uint64_t x, uint64_t y,
-    const uint64_t* __restrict__ a, uint32_t na,
-    const uint64_t* __restrict__ b, uint32_t nb,
-    uint32_t out_base,
-    uint64_t* __restrict__ out_x,
-    uint64_t* __restrict__ out_y,
-    uint64_t* __restrict__ out_z) {
-    uint32_t ia = 0, ib = 0;
-    uint32_t emitted = 0;
-    while (ia < na && ib < nb) {
-        uint64_t va = a[ia];
-        uint64_t vb = b[ib];
-        if (va == vb) {
-            uint32_t pos = out_base + emitted;
-            out_x[pos] = x;
-            out_y[pos] = y;
-            out_z[pos] = va;
-            emitted += 1;
-            ia += 1;
-            ib += 1;
-        } else if (va < vb) {
-            ia += 1;
-        } else {
-            ib += 1;
-        }
-    }
-    return emitted;
-}
-
 }  // anonymous namespace
 
 extern "C" __global__ void wcoj_build_metadata_mark_boundaries_u32(
@@ -552,6 +501,267 @@ extern "C" __global__ void wcoj_triangle_materialize_hg_u32(
             }
             z = xz_col1[xz_lo + probe_offset];
             uint32_t found = lower_bound_u32(yz_col1 + yz_lo, yz_len, z);
+            matched = (found < yz_len && yz_col1[yz_lo + found] == z) ? 1u : 0u;
+        }
+        if (matched != 0u) {
+            uint32_t out = thread_base + local_emit;
+            if (out < total_rows) {
+                out_x[out] = xy_col0[xy_idx];
+                out_y[out] = xy_col1[xy_idx];
+                out_z[out] = z;
+            }
+            local_emit += 1;
+        }
+    }
+}
+
+extern "C" __global__ void wcoj_triangle_build_hg_work_plan_u64(
+    const uint64_t* __restrict__ xy_col0,
+    const uint64_t* __restrict__ xy_col1,
+    uint32_t n_xy,
+    const uint64_t* __restrict__ yz_col0,
+    uint32_t n_yz,
+    const uint64_t* __restrict__ xz_col0,
+    uint32_t n_xz,
+    uint32_t* __restrict__ xy_work_prefix,
+    uint32_t* __restrict__ xy_yz_start,
+    uint32_t* __restrict__ xy_yz_end,
+    uint32_t* __restrict__ xy_xz_start,
+    uint32_t* __restrict__ xy_xz_end) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i == 0) {
+        xy_work_prefix[n_xy] = 0;
+    }
+    if (i >= n_xy) {
+        return;
+    }
+    uint64_t x = xy_col0[i];
+    uint64_t y = xy_col1[i];
+    uint32_t yz_lo = lower_bound_u64(yz_col0, n_yz, y);
+    uint32_t yz_hi = upper_bound_u64(yz_col0, n_yz, y);
+    uint32_t xz_lo = lower_bound_u64(xz_col0, n_xz, x);
+    uint32_t xz_hi = upper_bound_u64(xz_col0, n_xz, x);
+    uint32_t yz_len = yz_hi - yz_lo;
+    uint32_t xz_len = xz_hi - xz_lo;
+    xy_work_prefix[i] = (yz_len < xz_len) ? yz_len : xz_len;
+    xy_yz_start[i] = yz_lo;
+    xy_yz_end[i] = yz_hi;
+    xy_xz_start[i] = xz_lo;
+    xy_xz_end[i] = xz_hi;
+}
+
+extern "C" __global__ void wcoj_triangle_count_hg_u64(
+    const uint64_t* __restrict__ yz_col1,
+    uint32_t n_yz,
+    const uint64_t* __restrict__ xz_col1,
+    uint32_t n_xz,
+    const uint32_t* __restrict__ xy_work_prefix,
+    const uint32_t* __restrict__ xy_yz_start,
+    const uint32_t* __restrict__ xy_yz_end,
+    const uint32_t* __restrict__ xy_xz_start,
+    const uint32_t* __restrict__ xy_xz_end,
+    uint32_t n_xy,
+    uint32_t total_work,
+    uint32_t block_work_unit,
+    uint32_t* __restrict__ out_block_counts) {
+    uint32_t block_start = blockIdx.x * block_work_unit;
+    if (block_start >= total_work) {
+        if (threadIdx.x == 0) {
+            out_block_counts[blockIdx.x] = 0;
+        }
+        return;
+    }
+    uint32_t block_end = block_start + block_work_unit;
+    if (block_end < block_start || block_end > total_work) {
+        block_end = total_work;
+    }
+
+    uint32_t local_count = 0;
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t root_pos = upper_bound_u32(xy_work_prefix, n_xy + 1, work_idx);
+        if (root_pos == 0) {
+            continue;
+        }
+        uint32_t xy_idx = root_pos - 1;
+        if (xy_idx >= n_xy) {
+            continue;
+        }
+        uint32_t row_start = xy_work_prefix[xy_idx];
+        uint32_t yz_lo = xy_yz_start[xy_idx];
+        uint32_t yz_hi = xy_yz_end[xy_idx];
+        uint32_t xz_lo = xy_xz_start[xy_idx];
+        uint32_t xz_hi = xy_xz_end[xy_idx];
+        if (yz_hi > n_yz || xz_hi > n_xz || yz_lo >= yz_hi || xz_lo >= xz_hi) {
+            continue;
+        }
+        uint32_t yz_len = yz_hi - yz_lo;
+        uint32_t xz_len = xz_hi - xz_lo;
+        uint32_t probe_offset = work_idx - row_start;
+        if (yz_len <= xz_len) {
+            if (probe_offset >= yz_len) {
+                continue;
+            }
+            uint64_t z = yz_col1[yz_lo + probe_offset];
+            uint32_t found = lower_bound_u64(xz_col1 + xz_lo, xz_len, z);
+            if (found < xz_len && xz_col1[xz_lo + found] == z) {
+                local_count += 1;
+            }
+        } else {
+            if (probe_offset >= xz_len) {
+                continue;
+            }
+            uint64_t z = xz_col1[xz_lo + probe_offset];
+            uint32_t found = lower_bound_u64(yz_col1 + yz_lo, yz_len, z);
+            if (found < yz_len && yz_col1[yz_lo + found] == z) {
+                local_count += 1;
+            }
+        }
+    }
+
+    __shared__ uint32_t partial[256];
+    partial[threadIdx.x] = local_count;
+    __syncthreads();
+    for (uint32_t stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            partial[threadIdx.x] += partial[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        out_block_counts[blockIdx.x] = partial[0];
+    }
+}
+
+extern "C" __global__ void wcoj_triangle_materialize_hg_u64(
+    const uint64_t* __restrict__ xy_col0,
+    const uint64_t* __restrict__ xy_col1,
+    const uint64_t* __restrict__ yz_col1,
+    uint32_t n_yz,
+    const uint64_t* __restrict__ xz_col1,
+    uint32_t n_xz,
+    const uint32_t* __restrict__ xy_work_prefix,
+    const uint32_t* __restrict__ xy_yz_start,
+    const uint32_t* __restrict__ xy_yz_end,
+    const uint32_t* __restrict__ xy_xz_start,
+    const uint32_t* __restrict__ xy_xz_end,
+    uint32_t n_xy,
+    uint32_t total_work,
+    uint32_t block_work_unit,
+    const uint32_t* __restrict__ block_offsets,
+    uint32_t total_rows,
+    uint64_t* __restrict__ out_x,
+    uint64_t* __restrict__ out_y,
+    uint64_t* __restrict__ out_z) {
+    uint32_t block_start = blockIdx.x * block_work_unit;
+    if (block_start >= total_work) {
+        return;
+    }
+    uint32_t block_end = block_start + block_work_unit;
+    if (block_end < block_start || block_end > total_work) {
+        block_end = total_work;
+    }
+
+    uint32_t local_count = 0;
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t root_pos = upper_bound_u32(xy_work_prefix, n_xy + 1, work_idx);
+        if (root_pos == 0) {
+            continue;
+        }
+        uint32_t xy_idx = root_pos - 1;
+        if (xy_idx >= n_xy) {
+            continue;
+        }
+        uint32_t row_start = xy_work_prefix[xy_idx];
+        uint32_t yz_lo = xy_yz_start[xy_idx];
+        uint32_t yz_hi = xy_yz_end[xy_idx];
+        uint32_t xz_lo = xy_xz_start[xy_idx];
+        uint32_t xz_hi = xy_xz_end[xy_idx];
+        if (yz_hi > n_yz || xz_hi > n_xz || yz_lo >= yz_hi || xz_lo >= xz_hi) {
+            continue;
+        }
+        uint32_t yz_len = yz_hi - yz_lo;
+        uint32_t xz_len = xz_hi - xz_lo;
+        uint32_t probe_offset = work_idx - row_start;
+        if (yz_len <= xz_len) {
+            if (probe_offset >= yz_len) {
+                continue;
+            }
+            uint64_t z = yz_col1[yz_lo + probe_offset];
+            uint32_t found = lower_bound_u64(xz_col1 + xz_lo, xz_len, z);
+            if (found < xz_len && xz_col1[xz_lo + found] == z) {
+                local_count += 1;
+            }
+        } else {
+            if (probe_offset >= xz_len) {
+                continue;
+            }
+            uint64_t z = xz_col1[xz_lo + probe_offset];
+            uint32_t found = lower_bound_u64(yz_col1 + yz_lo, yz_len, z);
+            if (found < yz_len && yz_col1[yz_lo + found] == z) {
+                local_count += 1;
+            }
+        }
+    }
+
+    __shared__ uint32_t thread_prefix[256];
+    thread_prefix[threadIdx.x] = local_count;
+    __syncthreads();
+    for (uint32_t stride = 1; stride < blockDim.x; stride <<= 1) {
+        uint32_t add = 0;
+        if (threadIdx.x >= stride) {
+            add = thread_prefix[threadIdx.x - stride];
+        }
+        __syncthreads();
+        thread_prefix[threadIdx.x] += add;
+        __syncthreads();
+    }
+    uint32_t thread_base = block_offsets[blockIdx.x];
+    if (threadIdx.x > 0) {
+        thread_base += thread_prefix[threadIdx.x - 1];
+    }
+
+    uint32_t local_emit = 0;
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t root_pos = upper_bound_u32(xy_work_prefix, n_xy + 1, work_idx);
+        if (root_pos == 0) {
+            continue;
+        }
+        uint32_t xy_idx = root_pos - 1;
+        if (xy_idx >= n_xy) {
+            continue;
+        }
+        uint32_t row_start = xy_work_prefix[xy_idx];
+        uint32_t yz_lo = xy_yz_start[xy_idx];
+        uint32_t yz_hi = xy_yz_end[xy_idx];
+        uint32_t xz_lo = xy_xz_start[xy_idx];
+        uint32_t xz_hi = xy_xz_end[xy_idx];
+        if (yz_hi > n_yz || xz_hi > n_xz || yz_lo >= yz_hi || xz_lo >= xz_hi) {
+            continue;
+        }
+        uint32_t yz_len = yz_hi - yz_lo;
+        uint32_t xz_len = xz_hi - xz_lo;
+        uint32_t probe_offset = work_idx - row_start;
+        uint32_t matched = 0;
+        uint64_t z = 0;
+        if (yz_len <= xz_len) {
+            if (probe_offset >= yz_len) {
+                continue;
+            }
+            z = yz_col1[yz_lo + probe_offset];
+            uint32_t found = lower_bound_u64(xz_col1 + xz_lo, xz_len, z);
+            matched = (found < xz_len && xz_col1[xz_lo + found] == z) ? 1u : 0u;
+        } else {
+            if (probe_offset >= xz_len) {
+                continue;
+            }
+            z = xz_col1[xz_lo + probe_offset];
+            uint32_t found = lower_bound_u64(yz_col1 + yz_lo, yz_len, z);
             matched = (found < yz_len && yz_col1[yz_lo + found] == z) ? 1u : 0u;
         }
         if (matched != 0u) {
@@ -1015,85 +1225,6 @@ extern "C" __global__ void wcoj_4cycle_materialize_hg_u32(
             break;
         }
     }
-}
-
-// ===============================================================
-// U64 entry kernels — same shape as the u32 pair above, with
-// 64-bit join-key buffers. `wcoj_compute_total` is reused as-is
-// (counters stay u32).
-// ===============================================================
-
-extern "C" __global__ void wcoj_triangle_count_u64(
-    const uint64_t* __restrict__ xy_col0,
-    const uint64_t* __restrict__ xy_col1,
-    uint32_t n_xy,
-    const uint64_t* __restrict__ yz_col0,
-    const uint64_t* __restrict__ yz_col1,
-    uint32_t n_yz,
-    const uint64_t* __restrict__ xz_col0,
-    const uint64_t* __restrict__ xz_col1,
-    uint32_t n_xz,
-    uint32_t* __restrict__ out_counts) {
-    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n_xy) {
-        return;
-    }
-    uint64_t x = xy_col0[i];
-    uint64_t y = xy_col1[i];
-
-    uint32_t yz_lo = lower_bound_u64(yz_col0, n_yz, y);
-    uint32_t yz_hi = upper_bound_u64(yz_col0, n_yz, y);
-    uint32_t xz_lo = lower_bound_u64(xz_col0, n_xz, x);
-    uint32_t xz_hi = upper_bound_u64(xz_col0, n_xz, x);
-
-    uint32_t cnt = 0;
-    if (yz_hi > yz_lo && xz_hi > xz_lo) {
-        cnt = intersect_count_u64(
-            yz_col1 + yz_lo, yz_hi - yz_lo,
-            xz_col1 + xz_lo, xz_hi - xz_lo);
-    }
-    out_counts[i] = cnt;
-}
-
-extern "C" __global__ void wcoj_triangle_materialize_u64(
-    const uint64_t* __restrict__ xy_col0,
-    const uint64_t* __restrict__ xy_col1,
-    uint32_t n_xy,
-    const uint64_t* __restrict__ yz_col0,
-    const uint64_t* __restrict__ yz_col1,
-    uint32_t n_yz,
-    const uint64_t* __restrict__ xz_col0,
-    const uint64_t* __restrict__ xz_col1,
-    uint32_t n_xz,
-    const uint32_t* __restrict__ out_offsets,
-    uint32_t total_rows,
-    uint64_t* __restrict__ out_x,
-    uint64_t* __restrict__ out_y,
-    uint64_t* __restrict__ out_z) {
-    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n_xy) {
-        return;
-    }
-    uint64_t x = xy_col0[i];
-    uint64_t y = xy_col1[i];
-    uint32_t base = out_offsets[i];
-    if (base >= total_rows) {
-        return;
-    }
-
-    uint32_t yz_lo = lower_bound_u64(yz_col0, n_yz, y);
-    uint32_t yz_hi = upper_bound_u64(yz_col0, n_yz, y);
-    uint32_t xz_lo = lower_bound_u64(xz_col0, n_xz, x);
-    uint32_t xz_hi = upper_bound_u64(xz_col0, n_xz, x);
-
-    if (yz_hi <= yz_lo || xz_hi <= xz_lo) {
-        return;
-    }
-    intersect_emit_xyz_u64(
-        x, y,
-        yz_col1 + yz_lo, yz_hi - yz_lo,
-        xz_col1 + xz_lo, xz_hi - xz_lo,
-        base, out_x, out_y, out_z);
 }
 
 // ===============================================================

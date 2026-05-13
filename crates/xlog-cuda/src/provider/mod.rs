@@ -271,13 +271,14 @@ pub mod wcoj_kernels {
     pub const WCOJ_TRIANGLE_BUILD_HG_WORK_PLAN_U32: &str = "wcoj_triangle_build_hg_work_plan_u32";
     pub const WCOJ_TRIANGLE_COUNT_HG_U32: &str = "wcoj_triangle_count_hg_u32";
     pub const WCOJ_TRIANGLE_MATERIALIZE_HG_U32: &str = "wcoj_triangle_materialize_hg_u32";
+    pub const WCOJ_TRIANGLE_BUILD_HG_WORK_PLAN_U64: &str = "wcoj_triangle_build_hg_work_plan_u64";
+    pub const WCOJ_TRIANGLE_COUNT_HG_U64: &str = "wcoj_triangle_count_hg_u64";
+    pub const WCOJ_TRIANGLE_MATERIALIZE_HG_U64: &str = "wcoj_triangle_materialize_hg_u64";
     pub const WCOJ_TRIANGLE_COUNT_HG_CACHED_U32: &str = "wcoj_triangle_count_hg_cached_u32";
     pub const WCOJ_TRIANGLE_MATERIALIZE_HG_CACHED_U32: &str =
         "wcoj_triangle_materialize_hg_cached_u32";
     pub const WCOJ_SCAN_HG_BLOCK_COUNTS_U32: &str = "wcoj_scan_hg_block_counts_u32";
     pub const WCOJ_COMPUTE_TOTAL: &str = "wcoj_compute_total";
-    pub const WCOJ_TRIANGLE_COUNT_U64: &str = "wcoj_triangle_count_u64";
-    pub const WCOJ_TRIANGLE_MATERIALIZE_U64: &str = "wcoj_triangle_materialize_u64";
     pub const WCOJ_TRIANGLE_SKEW_HISTOGRAM_U32: &str = "wcoj_triangle_skew_histogram_u32";
     pub const WCOJ_TRIANGLE_SKEW_HISTOGRAM_U64: &str = "wcoj_triangle_skew_histogram_u64";
     pub const WCOJ_LAYOUT_CHECK_SORTED_UNIQUE_U32: &str = "wcoj_layout_check_sorted_unique_u32";
