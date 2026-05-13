@@ -11,7 +11,7 @@ use crate::wcoj_metadata::{WcojRelationMetadata, WcojTriangleHgWorkPlanU32};
 use crate::{AsKernelParam, CudaBuffer, LaunchAsync, LaunchConfig};
 
 const BLOCK_SIZE: u32 = 256;
-const HG_COUNT_BLOCK_SIZE: u32 = 1024;
+const HG_COUNT_BLOCK_SIZE: u32 = 512;
 
 impl CudaKernelProvider {
     pub fn wcoj_build_metadata_u32_recorded(
@@ -67,6 +67,8 @@ impl CudaKernelProvider {
         let mut xy_xz_end = self.memory().alloc::<u32>(n_xy as usize)?;
 
         if n_xy == 0 {
+            let block_counts = self.memory().alloc::<u32>(1)?;
+            let block_offsets = self.memory().alloc::<u32>(1)?;
             let scratch_x = self.memory().alloc::<u32>(1)?;
             let scratch_y = self.memory().alloc::<u32>(1)?;
             let scratch_z = self.memory().alloc::<u32>(1)?;
@@ -76,6 +78,8 @@ impl CudaKernelProvider {
                 xy_yz_end,
                 xy_xz_start,
                 xy_xz_end,
+                block_counts,
+                block_offsets,
                 scratch_x,
                 scratch_y,
                 scratch_z,
@@ -187,6 +191,13 @@ impl CudaKernelProvider {
         let scratch_x = self.memory().alloc::<u32>(scratch_slots)?;
         let scratch_y = self.memory().alloc::<u32>(scratch_slots)?;
         let scratch_z = self.memory().alloc::<u32>(scratch_slots)?;
+        let grid = if total_work == 0 {
+            1
+        } else {
+            total_work.div_ceil(block_work_unit)
+        };
+        let block_counts = self.memory().alloc::<u32>(grid as usize)?;
+        let block_offsets = self.memory().alloc::<u32>(grid as usize)?;
 
         Ok(WcojTriangleHgWorkPlanU32 {
             xy_work_prefix,
@@ -194,6 +205,8 @@ impl CudaKernelProvider {
             xy_yz_end,
             xy_xz_start,
             xy_xz_end,
+            block_counts,
+            block_offsets,
             scratch_x,
             scratch_y,
             scratch_z,
@@ -379,8 +392,12 @@ impl CudaKernelProvider {
         let bytes_count = (grid as usize)
             .checked_mul(std::mem::size_of::<u32>())
             .ok_or_else(|| XlogError::Kernel(format!("{ctx}: count byte size overflow")))?;
-        let mut count_bytes = self.memory().alloc::<u8>(bytes_count)?;
-        let mut offsets = self.memory().alloc::<u32>(grid as usize)?;
+        let mut local_counts = None;
+        let mut local_offsets = None;
+        if grid > 1024 {
+            local_counts = Some(self.memory().alloc::<u32>(grid as usize)?);
+            local_offsets = Some(self.memory().alloc::<u32>(grid as usize)?);
+        }
         let total_rows_device = self.memory().alloc::<u32>(1)?;
 
         let runtime = self.memory().runtime().ok_or_else(|| {
@@ -403,28 +420,54 @@ impl CudaKernelProvider {
         let n_yz = self.metadata_logical_rows(e_yz)?;
         let n_xz = self.metadata_logical_rows(e_xz)?;
 
-        let count_u32 = unsafe { reinterpret_u8_as_u32(&mut count_bytes) };
+        let count_u32 = if grid <= 1024 {
+            &plan.block_counts
+        } else {
+            local_counts
+                .as_ref()
+                .expect("local HG counts allocated when grid exceeds single-block scan")
+        };
+        let output_capacity = plan.total_work;
+        let bytes_per_col = (output_capacity as usize)
+            .checked_mul(std::mem::size_of::<u32>())
+            .ok_or_else(|| XlogError::Kernel(format!("{ctx}: output byte size overflow")))?;
+        let mut out_x = self.memory().alloc::<u8>(bytes_per_col)?;
+        let mut out_y = self.memory().alloc::<u8>(bytes_per_col)?;
+        let mut out_z = self.memory().alloc::<u8>(bytes_per_col)?;
 
-        let mut rec_count = LaunchRecorder::new_strict(launch_stream);
-        rec_count.read(e_xy.num_rows_device());
-        rec_count.read(e_yz.num_rows_device());
-        rec_count.read(e_xz.num_rows_device());
-        rec_count.read_column(e_xy.column(0).expect("xy.col0"));
-        rec_count.read_column(e_xy.column(1).expect("xy.col1"));
-        rec_count.read_column(e_yz.column(1).expect("yz.col1"));
-        rec_count.read_column(e_xz.column(1).expect("xz.col1"));
-        rec_count.read(&plan.xy_work_prefix);
-        rec_count.read(&plan.xy_yz_start);
-        rec_count.read(&plan.xy_yz_end);
-        rec_count.read(&plan.xy_xz_start);
-        rec_count.read(&plan.xy_xz_end);
-        rec_count.write(count_u32);
-        rec_count.write(&plan.scratch_x);
-        rec_count.write(&plan.scratch_y);
-        rec_count.write(&plan.scratch_z);
-        rec_count
+        let mut rec_hg = LaunchRecorder::new_strict(launch_stream);
+        rec_hg.read(e_xy.num_rows_device());
+        rec_hg.read(e_yz.num_rows_device());
+        rec_hg.read(e_xz.num_rows_device());
+        rec_hg.read_column(e_xy.column(0).expect("xy.col0"));
+        rec_hg.read_column(e_xy.column(1).expect("xy.col1"));
+        rec_hg.read_column(e_yz.column(1).expect("yz.col1"));
+        rec_hg.read_column(e_xz.column(1).expect("xz.col1"));
+        rec_hg.read(&plan.xy_work_prefix);
+        rec_hg.read(&plan.xy_yz_start);
+        rec_hg.read(&plan.xy_yz_end);
+        rec_hg.read(&plan.xy_xz_start);
+        rec_hg.read(&plan.xy_xz_end);
+        rec_hg.read_write(count_u32);
+        if grid <= 1024 {
+            rec_hg.read_write(&plan.block_offsets);
+        } else {
+            rec_hg.read_write(
+                local_offsets
+                    .as_ref()
+                    .expect("local HG offsets allocated when grid exceeds single-block scan"),
+            );
+        }
+        rec_hg.write(&total_rows_device);
+        rec_hg.read_write(&plan.scratch_x);
+        rec_hg.read_write(&plan.scratch_y);
+        rec_hg.read_write(&plan.scratch_z);
+        rec_hg.write(&out_x);
+        rec_hg.write(&out_y);
+        rec_hg.write(&out_z);
+        rec_hg
             .preflight(runtime)
-            .map_err(|e| XlogError::Kernel(format!("{ctx}: cached count preflight failed: {e}")))?;
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: HG preflight failed: {e}")))?;
         {
             let kernel = self
                 .device()
@@ -472,18 +515,7 @@ impl CudaKernelProvider {
                     })?;
             }
         }
-        rec_count
-            .commit(runtime)
-            .map_err(|e| XlogError::Kernel(format!("{ctx}: cached count commit failed: {e}")))?;
-
-        let mut rec_scan = LaunchRecorder::new_strict(launch_stream);
-        rec_scan.read(count_u32);
-        rec_scan.write(&offsets);
-        rec_scan.write(&total_rows_device);
-        rec_scan
-            .preflight(runtime)
-            .map_err(|e| XlogError::Kernel(format!("{ctx}: scan preflight failed: {e}")))?;
-        let total_rows = if grid <= 1024 {
+        if grid <= 1024 {
             let kernel = self
                 .device()
                 .inner()
@@ -494,7 +526,7 @@ impl CudaKernelProvider {
             let mut params: Vec<*mut c_void> = vec![
                 count_u32.as_kernel_param(),
                 grid.as_kernel_param(),
-                (&offsets).as_kernel_param(),
+                (&plan.block_offsets).as_kernel_param(),
                 (&total_rows_device).as_kernel_param(),
             ];
             unsafe {
@@ -513,17 +545,13 @@ impl CudaKernelProvider {
                         XlogError::Kernel(format!("{ctx}: HG block-count scan failed: {e}"))
                     })?;
             }
-            rec_scan
-                .commit(runtime)
-                .map_err(|e| XlogError::Kernel(format!("{ctx}: scan commit failed: {e}")))?;
-            cu_stream
-                .synchronize()
-                .map_err(|e| XlogError::Kernel(format!("{ctx}: scan stream sync failed: {e}")))?;
-            u64::from(self.dtoh_scalar_untracked::<u32>(&total_rows_device, 0)?)
         } else {
+            let offsets_mut = local_offsets
+                .as_mut()
+                .expect("local HG offsets allocated when grid exceeds single-block scan");
             unsafe {
                 let res = sys::cuMemcpyDtoDAsync_v2(
-                    *offsets.device_ptr(),
+                    *offsets_mut.device_ptr(),
                     *count_u32.device_ptr(),
                     bytes_count,
                     cu_stream.cu_stream(),
@@ -535,64 +563,51 @@ impl CudaKernelProvider {
                 }
             }
             self.multiblock_scan_u32_inplace_on_stream(
-                &mut offsets,
+                offsets_mut,
                 grid,
                 &cu_stream,
                 launch_stream,
                 runtime,
             )?;
-            rec_scan
-                .commit(runtime)
-                .map_err(|e| XlogError::Kernel(format!("{ctx}: scan commit failed: {e}")))?;
-            cu_stream
-                .synchronize()
-                .map_err(|e| XlogError::Kernel(format!("{ctx}: scan stream sync failed: {e}")))?;
-            let last = grid - 1;
-            u64::from(self.dtoh_scalar_untracked::<u32>(&offsets, last as usize)?)
-                + u64::from(self.dtoh_scalar_untracked::<u32>(count_u32, last as usize)?)
-        };
-        if total_rows == 0 {
-            return self.create_empty_buffer(out_schema);
-        }
-        let total_rows_u32 = u32::try_from(total_rows).map_err(|_| {
-            XlogError::Kernel(format!("{ctx}: total rows {total_rows} exceed u32::MAX"))
-        })?;
-
-        let bytes_per_col = (total_rows_u32 as usize)
-            .checked_mul(std::mem::size_of::<u32>())
-            .ok_or_else(|| XlogError::Kernel(format!("{ctx}: output byte size overflow")))?;
-        let mut out_x = self.memory().alloc::<u8>(bytes_per_col)?;
-        let mut out_y = self.memory().alloc::<u8>(bytes_per_col)?;
-        let mut out_z = self.memory().alloc::<u8>(bytes_per_col)?;
-        let out_d_num_rows = self.memory().alloc::<u32>(1)?;
-
-        let mut rec_mat = LaunchRecorder::new_strict(launch_stream);
-        rec_mat.read(count_u32);
-        rec_mat.read(&offsets);
-        rec_mat.read(&plan.scratch_x);
-        rec_mat.read(&plan.scratch_y);
-        rec_mat.read(&plan.scratch_z);
-        rec_mat.write(&out_x);
-        rec_mat.write(&out_y);
-        rec_mat.write(&out_z);
-        rec_mat.write(&out_d_num_rows);
-        rec_mat
-            .preflight(runtime)
-            .map_err(|e| XlogError::Kernel(format!("{ctx}: materialize preflight failed: {e}")))?;
-        unsafe {
-            let res = sys::cuMemcpyHtoDAsync_v2(
-                *out_d_num_rows.device_ptr(),
-                &total_rows_u32 as *const u32 as *const c_void,
-                std::mem::size_of::<u32>(),
-                cu_stream.cu_stream(),
-            );
-            if res != sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "{ctx}: H2D output row count failed: {res:?}"
-                )));
+            let total_kernel = self
+                .device()
+                .inner()
+                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_COMPUTE_TOTAL)
+                .ok_or_else(|| {
+                    XlogError::Kernel("wcoj_compute_total kernel not found".to_string())
+                })?;
+            let mut params: Vec<*mut c_void> = vec![
+                count_u32.as_kernel_param(),
+                (&*offsets_mut).as_kernel_param(),
+                grid.as_kernel_param(),
+                (&total_rows_device).as_kernel_param(),
+            ];
+            unsafe {
+                total_kernel
+                    .clone()
+                    .launch_on_stream(
+                        &cu_stream,
+                        LaunchConfig {
+                            grid_dim: (1, 1, 1),
+                            block_dim: (1, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        &mut params,
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!("{ctx}: HG total reducer failed: {e}"))
+                    })?;
             }
         }
+
         {
+            let materialize_offsets = if grid <= 1024 {
+                &plan.block_offsets
+            } else {
+                local_offsets
+                    .as_ref()
+                    .expect("local HG offsets allocated when grid exceeds single-block scan")
+            };
             let kernel = self
                 .device()
                 .inner()
@@ -610,9 +625,9 @@ impl CudaKernelProvider {
             let out_z_u32 = unsafe { reinterpret_u8_as_u32(&mut out_z) };
             let mut params: Vec<*mut c_void> = vec![
                 count_u32.as_kernel_param(),
-                (&offsets).as_kernel_param(),
+                materialize_offsets.as_kernel_param(),
                 plan.block_work_unit.as_kernel_param(),
-                total_rows_u32.as_kernel_param(),
+                output_capacity.as_kernel_param(),
                 (&plan.scratch_x).as_kernel_param(),
                 (&plan.scratch_y).as_kernel_param(),
                 (&plan.scratch_z).as_kernel_param(),
@@ -637,19 +652,18 @@ impl CudaKernelProvider {
                     })?;
             }
         }
-        rec_mat
+        rec_hg
             .commit(runtime)
-            .map_err(|e| XlogError::Kernel(format!("{ctx}: materialize commit failed: {e}")))?;
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: HG commit failed: {e}")))?;
         cu_stream.synchronize().map_err(|e| {
             XlogError::Kernel(format!("{ctx}: materialize stream sync failed: {e}"))
         })?;
 
-        Ok(CudaBuffer::from_columns_with_host_count(
+        Ok(CudaBuffer::from_columns(
             vec![out_x.into(), out_y.into(), out_z.into()],
-            total_rows_u32 as u64,
-            out_d_num_rows,
+            output_capacity as u64,
+            total_rows_device,
             out_schema,
-            total_rows_u32,
         ))
     }
 

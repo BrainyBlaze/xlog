@@ -594,9 +594,9 @@ extern "C" __global__ void wcoj_triangle_count_hg_cached_u32(
     }
 
     uint32_t local_count = 0;
-    uint32_t local_x[8];
-    uint32_t local_y[8];
-    uint32_t local_z[8];
+    uint32_t local_x[16];
+    uint32_t local_y[16];
+    uint32_t local_z[16];
     for (uint32_t work_idx = block_start + threadIdx.x;
          work_idx < block_end;
          work_idx += blockDim.x) {
@@ -627,7 +627,7 @@ extern "C" __global__ void wcoj_triangle_count_hg_cached_u32(
             uint32_t z = yz_col1[yz_lo + probe_offset];
             uint32_t found = lower_bound_u32(xz_col1 + xz_lo, xz_len, z);
             matched = (found < xz_len && xz_col1[xz_lo + found] == z) ? 1u : 0u;
-            if (matched != 0u && local_count < 8u) {
+            if (matched != 0u && local_count < 16u) {
                 local_x[local_count] = xy_col0[xy_idx];
                 local_y[local_count] = xy_col1[xy_idx];
                 local_z[local_count] = z;
@@ -639,7 +639,7 @@ extern "C" __global__ void wcoj_triangle_count_hg_cached_u32(
             uint32_t z = xz_col1[xz_lo + probe_offset];
             uint32_t found = lower_bound_u32(yz_col1 + yz_lo, yz_len, z);
             matched = (found < yz_len && yz_col1[yz_lo + found] == z) ? 1u : 0u;
-            if (matched != 0u && local_count < 8u) {
+            if (matched != 0u && local_count < 16u) {
                 local_x[local_count] = xy_col0[xy_idx];
                 local_y[local_count] = xy_col1[xy_idx];
                 local_z[local_count] = z;
@@ -668,7 +668,7 @@ extern "C" __global__ void wcoj_triangle_count_hg_cached_u32(
     }
 
     uint32_t scratch_base = blockIdx.x * block_work_unit + thread_base;
-    for (uint32_t i = 0; i < local_count && i < 8u; ++i) {
+    for (uint32_t i = 0; i < local_count && i < 16u; ++i) {
         uint32_t out = scratch_base + i;
         scratch_x[out] = local_x[i];
         scratch_y[out] = local_y[i];

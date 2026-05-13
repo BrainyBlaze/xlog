@@ -17,6 +17,8 @@ pub struct WcojTriangleHgWorkPlanU32 {
     pub xy_yz_end: TrackedCudaSlice<u32>,
     pub xy_xz_start: TrackedCudaSlice<u32>,
     pub xy_xz_end: TrackedCudaSlice<u32>,
+    pub block_counts: TrackedCudaSlice<u32>,
+    pub block_offsets: TrackedCudaSlice<u32>,
     pub scratch_x: TrackedCudaSlice<u32>,
     pub scratch_y: TrackedCudaSlice<u32>,
     pub scratch_z: TrackedCudaSlice<u32>,

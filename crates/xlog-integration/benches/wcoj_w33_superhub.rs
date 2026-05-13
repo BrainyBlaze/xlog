@@ -267,7 +267,21 @@ fn run_hg(fix: &ProviderFixture, input: &LayoutFixture) -> CudaBuffer {
 }
 
 fn download_triples(buf: &CudaBuffer) -> BTreeSet<(u32, u32, u32)> {
-    let n = buf.cached_row_count().unwrap_or(buf.num_rows() as u32) as usize;
+    let n = match buf.cached_row_count() {
+        Some(rows) => rows,
+        None => {
+            let mut rows = [0u32];
+            unsafe {
+                let res = sys::cuMemcpyDtoH_v2(
+                    rows.as_mut_ptr() as *mut _,
+                    *buf.num_rows_device().device_ptr(),
+                    std::mem::size_of::<u32>(),
+                );
+                assert_eq!(res, sys::cudaError_enum::CUDA_SUCCESS);
+            }
+            rows[0]
+        }
+    } as usize;
     if n == 0 {
         return BTreeSet::new();
     }
@@ -320,8 +334,9 @@ fn measure_baseline_with_pairing(
     let mut measured = Duration::ZERO;
     for _ in 0..iters {
         let start = Instant::now();
-        let _ = run_current_main(fix, uploaded);
+        let result = run_current_main(fix, uploaded);
         measured += start.elapsed();
+        drop(result);
         let _ = run_hg(fix, layout);
     }
     measured
@@ -337,8 +352,9 @@ fn measure_hg_with_pairing(
     for _ in 0..iters {
         let _ = run_current_main(fix, uploaded);
         let start = Instant::now();
-        let _ = run_hg(fix, layout);
+        let result = run_hg(fix, layout);
         measured += start.elapsed();
+        drop(result);
     }
     measured
 }
