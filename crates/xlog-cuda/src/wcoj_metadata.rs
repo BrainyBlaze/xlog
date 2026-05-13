@@ -11,6 +11,17 @@ pub struct WcojRelationMetadata<K: DeviceRepr> {
     pub row_count: u32,
 }
 
+pub struct WcojTriangleHgWorkPlanU32 {
+    pub xy_work_prefix: TrackedCudaSlice<u32>,
+    pub xy_yz_start: TrackedCudaSlice<u32>,
+    pub xy_yz_end: TrackedCudaSlice<u32>,
+    pub xy_xz_start: TrackedCudaSlice<u32>,
+    pub xy_xz_end: TrackedCudaSlice<u32>,
+    pub total_work: u32,
+    pub block_work_unit: u32,
+    pub row_count: u32,
+}
+
 impl<K: DeviceRepr> WcojRelationMetadata<K> {
     pub fn metadata_bytes(&self) -> u64 {
         let key_bytes = self.unique_keys.len() as u64 * std::mem::size_of::<K>() as u64;

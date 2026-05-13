@@ -5,7 +5,7 @@ use xlog_cuda::device_runtime::{
     AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
     LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
 };
-use xlog_cuda::memory::CudaBuffer;
+use xlog_cuda::memory::{CudaBuffer, CudaColumn};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
 struct DiscardSink;
@@ -84,6 +84,57 @@ fn upload_u64_keys(memory: &Arc<GpuMemoryManager>, keys: &[u64]) -> CudaBuffer {
     CudaBuffer::from_columns_with_host_count(vec![col0.into()], n as u64, d_num_rows, schema, n)
 }
 
+fn upload_binary_u32(memory: &Arc<GpuMemoryManager>, rows: &[(u32, u32)]) -> CudaBuffer {
+    let n = rows.len() as u32;
+    let mut col0 = memory
+        .alloc::<u8>(rows.len() * std::mem::size_of::<u32>())
+        .expect("alloc col0");
+    let mut col1 = memory
+        .alloc::<u8>(rows.len() * std::mem::size_of::<u32>())
+        .expect("alloc col1");
+    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc d_num_rows");
+    let col0_bytes: Vec<u8> = rows.iter().flat_map(|(a, _)| a.to_le_bytes()).collect();
+    let col1_bytes: Vec<u8> = rows.iter().flat_map(|(_, b)| b.to_le_bytes()).collect();
+    let device = memory.device().inner();
+    device
+        .htod_sync_copy_into(&col0_bytes, &mut col0)
+        .expect("htod col0");
+    device
+        .htod_sync_copy_into(&col1_bytes, &mut col1)
+        .expect("htod col1");
+    device
+        .htod_sync_copy_into(&[n], &mut d_num_rows)
+        .expect("htod d_num_rows");
+    let schema = Schema::new(vec![
+        ("col0".to_string(), ScalarType::U32),
+        ("col1".to_string(), ScalarType::U32),
+    ]);
+    CudaBuffer::from_columns_with_host_count(
+        vec![col0.into(), col1.into()],
+        n as u64,
+        d_num_rows,
+        schema,
+        n,
+    )
+}
+
+fn download_count_column(memory: &Arc<GpuMemoryManager>, buffer: &CudaBuffer) -> Vec<u32> {
+    let n = buffer.cached_row_count().expect("cached count") as usize;
+    let mut bytes = vec![0u8; n * std::mem::size_of::<u32>()];
+    let CudaColumn::Owned(col) = buffer.column(0).expect("count column") else {
+        panic!("count column must be owned");
+    };
+    memory
+        .device()
+        .inner()
+        .dtoh_sync_copy_into(col, &mut bytes)
+        .expect("dtoh count column");
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("u32 bytes")))
+        .collect()
+}
+
 #[test]
 fn wcoj_metadata_u32_builds_unique_fanout_prefix() {
     let Some(fix) = make_fixture() else {
@@ -152,4 +203,40 @@ fn wcoj_metadata_u64_builds_unique_fanout_prefix() {
     assert_eq!(keys, vec![10, 11, 13]);
     assert_eq!(fan_out, vec![2, 1, 3]);
     assert_eq!(prefix, vec![0, 2, 3]);
+}
+
+#[test]
+fn wcoj_triangle_hg_count_matches_cpu_total() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("skipping WCOJ HG count test: no CUDA device");
+        return;
+    };
+    let e_xy = upload_binary_u32(&fix.memory, &[(1, 2), (1, 3), (2, 2), (3, 4)]);
+    let e_yz = upload_binary_u32(&fix.memory, &[(2, 5), (2, 6), (3, 6), (4, 9)]);
+    let e_xz = upload_binary_u32(&fix.memory, &[(1, 5), (1, 6), (2, 5), (3, 9)]);
+
+    let plan = fix
+        .provider
+        .wcoj_triangle_hg_work_plan_u32_recorded(
+            &e_xy,
+            &e_yz,
+            &e_xz,
+            2,
+            xlog_cuda::device_runtime::StreamId::DEFAULT,
+        )
+        .expect("work plan");
+    assert_eq!(plan.total_work, 5);
+    assert_eq!(plan.row_count, 4);
+
+    let counts = fix
+        .provider
+        .wcoj_triangle_count_hg_u32_recorded(
+            &e_yz,
+            &e_xz,
+            &plan,
+            xlog_cuda::device_runtime::StreamId::DEFAULT,
+        )
+        .expect("hg count");
+    let block_counts = download_count_column(&fix.memory, &counts);
+    assert_eq!(block_counts.iter().sum::<u32>(), 5);
 }

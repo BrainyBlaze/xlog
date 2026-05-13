@@ -295,6 +295,131 @@ extern "C" __global__ void wcoj_build_metadata_scatter_u64(
     prefix_sum[out] = degree;
 }
 
+extern "C" __global__ void wcoj_triangle_build_hg_work_plan_u32(
+    const uint32_t* __restrict__ xy_col0,
+    const uint32_t* __restrict__ xy_col1,
+    uint32_t n_xy,
+    const uint32_t* __restrict__ yz_col0,
+    uint32_t n_yz,
+    const uint32_t* __restrict__ xz_col0,
+    uint32_t n_xz,
+    uint32_t* __restrict__ xy_work_prefix,
+    uint32_t* __restrict__ xy_yz_start,
+    uint32_t* __restrict__ xy_yz_end,
+    uint32_t* __restrict__ xy_xz_start,
+    uint32_t* __restrict__ xy_xz_end) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i == 0) {
+        xy_work_prefix[n_xy] = 0;
+    }
+    if (i >= n_xy) {
+        return;
+    }
+    uint32_t x = xy_col0[i];
+    uint32_t y = xy_col1[i];
+    uint32_t yz_lo = lower_bound_u32(yz_col0, n_yz, y);
+    uint32_t yz_hi = upper_bound_u32(yz_col0, n_yz, y);
+    uint32_t xz_lo = lower_bound_u32(xz_col0, n_xz, x);
+    uint32_t xz_hi = upper_bound_u32(xz_col0, n_xz, x);
+    uint32_t yz_len = yz_hi - yz_lo;
+    uint32_t xz_len = xz_hi - xz_lo;
+    xy_work_prefix[i] = (yz_len < xz_len) ? yz_len : xz_len;
+    xy_yz_start[i] = yz_lo;
+    xy_yz_end[i] = yz_hi;
+    xy_xz_start[i] = xz_lo;
+    xy_xz_end[i] = xz_hi;
+}
+
+extern "C" __global__ void wcoj_triangle_count_hg_u32(
+    const uint32_t* __restrict__ yz_col1,
+    uint32_t n_yz,
+    const uint32_t* __restrict__ xz_col1,
+    uint32_t n_xz,
+    const uint32_t* __restrict__ xy_work_prefix,
+    const uint32_t* __restrict__ xy_yz_start,
+    const uint32_t* __restrict__ xy_yz_end,
+    const uint32_t* __restrict__ xy_xz_start,
+    const uint32_t* __restrict__ xy_xz_end,
+    uint32_t n_xy,
+    uint32_t total_work,
+    uint32_t block_work_unit,
+    uint32_t* __restrict__ out_block_counts) {
+    // T4 Alg.2 line 3: block b owns a slice [bs, be) of the flattened work space.
+    uint32_t block_start = blockIdx.x * block_work_unit;
+    if (block_start >= total_work) {
+        if (threadIdx.x == 0) {
+            out_block_counts[blockIdx.x] = 0;
+        }
+        return;
+    }
+    uint32_t block_end = block_start + block_work_unit;
+    if (block_end < block_start || block_end > total_work) {
+        block_end = total_work;
+    }
+
+    uint32_t local_count = 0;
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        // T4 Alg.2 line 4: binary-search C to recover the root row κ.
+        uint32_t root_pos = upper_bound_u32(xy_work_prefix, n_xy + 1, work_idx);
+        if (root_pos == 0) {
+            continue;
+        }
+        uint32_t xy_idx = root_pos - 1;
+        if (xy_idx >= n_xy) {
+            continue;
+        }
+        uint32_t row_start = xy_work_prefix[xy_idx];
+        uint32_t yz_lo = xy_yz_start[xy_idx];
+        uint32_t yz_hi = xy_yz_end[xy_idx];
+        uint32_t xz_lo = xy_xz_start[xy_idx];
+        uint32_t xz_hi = xy_xz_end[xy_idx];
+        if (yz_hi > n_yz || xz_hi > n_xz || yz_lo >= yz_hi || xz_lo >= xz_hi) {
+            continue;
+        }
+        uint32_t yz_len = yz_hi - yz_lo;
+        uint32_t xz_len = xz_hi - xz_lo;
+        uint32_t probe_offset = work_idx - row_start;
+        // T4 Alg.2 line 6: narrow the first handle to this lane's share.
+        if (yz_len <= xz_len) {
+            if (probe_offset >= yz_len) {
+                continue;
+            }
+            uint32_t z = yz_col1[yz_lo + probe_offset];
+            // T4 Alg.2 line 10: leaf intersection.
+            uint32_t found = lower_bound_u32(xz_col1 + xz_lo, xz_len, z);
+            if (found < xz_len && xz_col1[xz_lo + found] == z) {
+                local_count += 1;
+            }
+        } else {
+            if (probe_offset >= xz_len) {
+                continue;
+            }
+            uint32_t z = xz_col1[xz_lo + probe_offset];
+            // T4 Alg.2 line 10: leaf intersection.
+            uint32_t found = lower_bound_u32(yz_col1 + yz_lo, yz_len, z);
+            if (found < yz_len && yz_col1[yz_lo + found] == z) {
+                local_count += 1;
+            }
+        }
+    }
+
+    __shared__ uint32_t partial[256];
+    partial[threadIdx.x] = local_count;
+    __syncthreads();
+    for (uint32_t stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            partial[threadIdx.x] += partial[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        // T3 Alg.1 line 9: per-block output counts feed the deterministic scan.
+        out_block_counts[blockIdx.x] = partial[0];
+    }
+}
+
 // Per-thread count kernel: one thread per row of e_xy.
 //
 // For thread `i` with row (X, Y) = (xy_col0[i], xy_col1[i]):
