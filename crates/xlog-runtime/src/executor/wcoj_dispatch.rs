@@ -85,7 +85,7 @@
 //! * Histogram-guided block dispatch (B1 heavy-row offload).
 //! * Multi-recursive WCOJ (≥ 2 in-SCC body Scans) — slice 4.2.
 
-use xlog_core::{RelId, Result, ScalarType, Schema};
+use xlog_core::{RelId, Result, ScalarType, Schema, ENV_WCOJ_W34_THRESHOLD, W34_FUSION_THRESHOLD};
 use xlog_cuda::device_runtime::StreamId;
 use xlog_cuda::CudaBuffer;
 use xlog_ir::{
@@ -154,6 +154,28 @@ pub(super) fn wcoj_disabled(config_override: Option<bool>) -> bool {
     std::env::var(ENV_DISABLE_WCOJ_TRIANGLE)
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+/// Resolve the W3.4 layout+count fusion threshold.
+///
+/// The threshold metric is total logical input rows across the
+/// canonical triangle slots. `XLOG_WCOJ_W34_THRESHOLD` may override
+/// the const for bench/cert calibration; invalid values fall back to
+/// [`W34_FUSION_THRESHOLD`].
+pub(super) fn w34_fusion_threshold() -> u64 {
+    match std::env::var(ENV_WCOJ_W34_THRESHOLD) {
+        Ok(raw) => match raw.trim().parse::<u32>() {
+            Ok(v) => u64::from(v),
+            Err(_) => {
+                eprintln!(
+                    "warning: {ENV_WCOJ_W34_THRESHOLD}={raw:?} is not a u32; \
+                     falling back to W34_FUSION_THRESHOLD={W34_FUSION_THRESHOLD}"
+                );
+                u64::from(W34_FUSION_THRESHOLD)
+            }
+        },
+        Err(_) => u64::from(W34_FUSION_THRESHOLD),
+    }
 }
 
 // -----------------------------------------------------------------
@@ -247,6 +269,18 @@ enum DispatchMode {
     /// Set by `wcoj_triangle_dispatch_adaptive=Some(true)` (and
     /// force is not on).
     Adaptive,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum W34FusionRoute {
+    Fused,
+    Unfused,
+}
+
+fn logical_rows_for_threshold(buf: &CudaBuffer) -> u64 {
+    buf.cached_row_count()
+        .map(u64::from)
+        .unwrap_or_else(|| buf.num_rows())
 }
 
 /// Three rel IDs extracted from a matched triangle RIR. The
@@ -1061,6 +1095,29 @@ impl Executor {
                 vo,
             );
         }
+        let w34_route = if matches!(width, WcojKeyWidth::FourByte) {
+            let total_input_rows = logical_rows_for_threshold(buf_xy)
+                .saturating_add(logical_rows_for_threshold(buf_yz))
+                .saturating_add(logical_rows_for_threshold(buf_xz));
+            if total_input_rows >= w34_fusion_threshold() {
+                W34FusionRoute::Fused
+            } else {
+                W34FusionRoute::Unfused
+            }
+        } else {
+            W34FusionRoute::Unfused
+        };
+        if w34_route == W34FusionRoute::Fused {
+            if let Ok(buf) = self.provider.wcoj_triangle_fused_lc_u32_recorded(
+                buf_xy,
+                buf_yz,
+                buf_xz,
+                launch_stream,
+            ) {
+                self.provider.record_wcoj_triangle_fused_dispatch();
+                return Ok(buf);
+            }
+        }
         #[cfg(feature = "wcoj-phase-timing")]
         let mut time_layout =
             |f: &dyn Fn() -> Result<CudaBuffer>, slot: usize| -> Result<CudaBuffer> {
@@ -1108,12 +1165,14 @@ impl Executor {
                 let layout_xz = self
                     .provider
                     .wcoj_layout_u32_recorded(buf_xz, launch_stream)?;
-                self.provider.wcoj_triangle_u32_recorded(
+                let out = self.provider.wcoj_triangle_u32_recorded(
                     &layout_xy,
                     &layout_yz,
                     &layout_xz,
                     launch_stream,
-                )
+                )?;
+                self.provider.record_wcoj_triangle_unfused_dispatch();
+                Ok(out)
             }
             WcojKeyWidth::EightByte => {
                 #[cfg(feature = "wcoj-phase-timing")]

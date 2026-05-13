@@ -455,6 +455,8 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
         module_name: "xlog_wcoj",
         kernels: &[
             "wcoj_triangle_count",
+            // W3.4 bench-spike-only layout+count fusion candidate.
+            "wcoj_triangle_fused_lc_count",
             "wcoj_compute_total",
             "wcoj_triangle_materialize",
             "wcoj_triangle_count_u64",

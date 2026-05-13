@@ -11,6 +11,8 @@ publish = false
 [dependencies]
 xlog-cuda.workspace = true
 xlog-core.workspace = true
+xlog-logic.workspace = true
+xlog-runtime.workspace = true
 xlog-solve.workspace = true
 cudarc = { workspace = true }
 rand = "0.8"
@@ -59,4 +61,9 @@ harness = true
 [[test]]
 name = "ilp_reduce_sum"
 path = "tests/ilp_reduce_sum.rs"
+harness = true
+
+[[test]]
+name = "test_wcoj_w34_fusion"
+path = "tests/test_wcoj_w34_fusion.rs"
 harness = true

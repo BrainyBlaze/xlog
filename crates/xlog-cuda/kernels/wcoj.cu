@@ -269,6 +269,44 @@ extern "C" __global__ void wcoj_triangle_count(
     out_counts[i] = cnt;
 }
 
+// W3.4 production layout+count fusion kernel.
+//
+// This kernel intentionally mirrors wcoj_triangle_count. The provider
+// entry calls it directly on already sorted+deduped WCOJ layout inputs,
+// bypassing the three layout calls after the runtime threshold fork has
+// selected the fused path.
+extern "C" __global__ void wcoj_triangle_fused_lc_count(
+    const uint32_t* __restrict__ xy_col0,
+    const uint32_t* __restrict__ xy_col1,
+    uint32_t n_xy,
+    const uint32_t* __restrict__ yz_col0,
+    const uint32_t* __restrict__ yz_col1,
+    uint32_t n_yz,
+    const uint32_t* __restrict__ xz_col0,
+    const uint32_t* __restrict__ xz_col1,
+    uint32_t n_xz,
+    uint32_t* __restrict__ out_counts) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_xy) {
+        return;
+    }
+    uint32_t x = xy_col0[i];
+    uint32_t y = xy_col1[i];
+
+    uint32_t yz_lo = lower_bound_u32(yz_col0, n_yz, y);
+    uint32_t yz_hi = upper_bound_u32(yz_col0, n_yz, y);
+    uint32_t xz_lo = lower_bound_u32(xz_col0, n_xz, x);
+    uint32_t xz_hi = upper_bound_u32(xz_col0, n_xz, x);
+
+    uint32_t cnt = 0;
+    if (yz_hi > yz_lo && xz_hi > xz_lo) {
+        cnt = intersect_count(
+            yz_col1 + yz_lo, yz_hi - yz_lo,
+            xz_col1 + xz_lo, xz_hi - xz_lo);
+    }
+    out_counts[i] = cnt;
+}
+
 // Single-thread reducer: total = counts[n-1] + offsets[n-1].
 //
 // `offsets` is produced by an in-place exclusive prefix-sum over

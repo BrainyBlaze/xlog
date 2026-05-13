@@ -1,0 +1,70 @@
+   Compiling xlog-cuda v0.6.2 (/home/dev/projects/xlog/.worktrees/w34-fusion-impl/crates/xlog-cuda)
+   Compiling xlog-runtime v0.6.2 (/home/dev/projects/xlog/.worktrees/w34-fusion-impl/crates/xlog-runtime)
+   Compiling xlog-gpu v0.6.2 (/home/dev/projects/xlog/.worktrees/w34-fusion-impl/crates/xlog-gpu)
+   Compiling xlog-integration v0.1.0 (/home/dev/projects/xlog/.worktrees/w34-fusion-impl/crates/xlog-integration)
+    Finished `bench` profile [optimized] target(s) in 9.16s
+     Running benches/wcoj_fusion_bench.rs (target/release/deps/wcoj_fusion_bench-c9cb7fb590efe33d)
+Gnuplot not found, using plotters backend
+W34_ROW_EQUALITY superhub-1K PASS rows=82
+W34_INPUT_ROWS superhub-1K total_input_rows=2730 threshold=4096
+Benchmarking w34_kernel_fusion/wcoj_unfused_baseline/superhub-1K
+Benchmarking w34_kernel_fusion/wcoj_unfused_baseline/superhub-1K: Warming up for 3.0000 s
+Benchmarking w34_kernel_fusion/wcoj_unfused_baseline/superhub-1K: Collecting 200 samples in estimated 5.1553 s (2600 iterations)
+Benchmarking w34_kernel_fusion/wcoj_unfused_baseline/superhub-1K: Analyzing
+w34_kernel_fusion/wcoj_unfused_baseline/superhub-1K
+                        time:   [1.2671 ms 1.3112 ms 1.3568 ms]
+                        thrpt:  [2.0121 Melem/s 2.0821 Melem/s 2.1545 Melem/s]
+                 change:
+                        time:   [-14.254% -10.497% -6.4310%] (p = 0.00 < 0.05)
+                        thrpt:  [+6.8729% +11.728% +16.624%]
+                        Performance has improved.
+Found 2 outliers among 200 measurements (1.00%)
+  2 (1.00%) high mild
+Benchmarking w34_kernel_fusion/wcoj_threshold_route/superhub-1K
+Benchmarking w34_kernel_fusion/wcoj_threshold_route/superhub-1K: Warming up for 3.0000 s
+Benchmarking w34_kernel_fusion/wcoj_threshold_route/superhub-1K: Collecting 200 samples in estimated 5.1392 s (2800 iterations)
+Benchmarking w34_kernel_fusion/wcoj_threshold_route/superhub-1K: Analyzing
+w34_kernel_fusion/wcoj_threshold_route/superhub-1K
+                        time:   [875.41 µs 883.14 µs 891.63 µs]
+                        thrpt:  [3.0618 Melem/s 3.0912 Melem/s 3.1185 Melem/s]
+                 change:
+                        time:   [-4.2423% -3.1286% -1.9800%] (p = 0.00 < 0.05)
+                        thrpt:  [+2.0200% +3.2296% +4.4302%]
+                        Performance has improved.
+Found 20 outliers among 200 measurements (10.00%)
+  2 (1.00%) low mild
+  7 (3.50%) high mild
+  11 (5.50%) high severe
+
+W34_MEASURED_CELL superhub-1K rows=82
+W34_ROW_EQUALITY superhub-50K PASS rows=29539
+W34_INPUT_ROWS superhub-50K total_input_rows=89609 threshold=4096
+Benchmarking w34_kernel_fusion/wcoj_unfused_baseline/superhub-50K
+Benchmarking w34_kernel_fusion/wcoj_unfused_baseline/superhub-50K: Warming up for 3.0000 s
+Benchmarking w34_kernel_fusion/wcoj_unfused_baseline/superhub-50K: Collecting 200 samples in estimated 5.3183 s (1800 iterations)
+Benchmarking w34_kernel_fusion/wcoj_unfused_baseline/superhub-50K: Analyzing
+w34_kernel_fusion/wcoj_unfused_baseline/superhub-50K
+                        time:   [1.8131 ms 1.8212 ms 1.8295 ms]
+                        thrpt:  [48.980 Melem/s 49.204 Melem/s 49.423 Melem/s]
+                 change:
+                        time:   [+0.5260% +1.1335% +1.7596%] (p = 0.00 < 0.05)
+                        thrpt:  [-1.7292% -1.1208% -0.5233%]
+                        Change within noise threshold.
+Found 7 outliers among 200 measurements (3.50%)
+  7 (3.50%) high mild
+Benchmarking w34_kernel_fusion/wcoj_threshold_route/superhub-50K
+Benchmarking w34_kernel_fusion/wcoj_threshold_route/superhub-50K: Warming up for 3.0000 s
+Benchmarking w34_kernel_fusion/wcoj_threshold_route/superhub-50K: Collecting 200 samples in estimated 5.3171 s (1800 iterations)
+Benchmarking w34_kernel_fusion/wcoj_threshold_route/superhub-50K: Analyzing
+w34_kernel_fusion/wcoj_threshold_route/superhub-50K
+                        time:   [1.1350 ms 1.1386 ms 1.1423 ms]
+                        thrpt:  [78.446 Melem/s 78.704 Melem/s 78.953 Melem/s]
+                 change:
+                        time:   [+0.6460% +1.0553% +1.5184%] (p = 0.00 < 0.05)
+                        thrpt:  [-1.4957% -1.0443% -0.6419%]
+                        Change within noise threshold.
+Found 5 outliers among 200 measurements (2.50%)
+  4 (2.00%) high mild
+  1 (0.50%) high severe
+
+W34_MEASURED_CELL superhub-50K rows=29539
