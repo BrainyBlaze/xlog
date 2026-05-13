@@ -283,9 +283,9 @@ pub mod wcoj_kernels {
     pub const WCOJ_TRIANGLE_SKEW_HISTOGRAM_U64: &str = "wcoj_triangle_skew_histogram_u64";
     pub const WCOJ_LAYOUT_CHECK_SORTED_UNIQUE_U32: &str = "wcoj_layout_check_sorted_unique_u32";
     pub const WCOJ_LAYOUT_CHECK_SORTED_UNIQUE_U64: &str = "wcoj_layout_check_sorted_unique_u64";
-    // v0.6.5 slice 2 — 4-cycle WCOJ.
-    pub const WCOJ_4CYCLE_COUNT: &str = "wcoj_4cycle_count";
-    pub const WCOJ_4CYCLE_MATERIALIZE: &str = "wcoj_4cycle_materialize";
+    pub const WCOJ_4CYCLE_BUILD_HG_WORK_PLAN_U32: &str = "wcoj_4cycle_build_hg_work_plan_u32";
+    pub const WCOJ_4CYCLE_COUNT_HG_U32: &str = "wcoj_4cycle_count_hg_u32";
+    pub const WCOJ_4CYCLE_MATERIALIZE_HG_U32: &str = "wcoj_4cycle_materialize_hg_u32";
     pub const WCOJ_4CYCLE_COUNT_U64: &str = "wcoj_4cycle_count_u64";
     pub const WCOJ_4CYCLE_MATERIALIZE_U64: &str = "wcoj_4cycle_materialize_u64";
     pub const WCOJ_4CYCLE_SKEW_HISTOGRAM_U32: &str = "wcoj_4cycle_skew_histogram_u32";

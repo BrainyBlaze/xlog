@@ -859,100 +859,234 @@ __device__ __forceinline__ bool contains_pair_u32(
 
 }  // anonymous namespace
 
-// Per-thread count kernel: one thread per row of e1.
-//
-// Thread `i` walks the chain e1 → e2 → e3 → e4 and accumulates the
-// number of (W, X, Y, Z) quads it will emit.
-extern "C" __global__ void wcoj_4cycle_count(
-    const uint32_t* __restrict__ e1_col0,
+extern "C" __global__ void wcoj_4cycle_build_hg_work_plan_u32(
     const uint32_t* __restrict__ e1_col1,
     uint32_t n_e1,
     const uint32_t* __restrict__ e2_col0,
     const uint32_t* __restrict__ e2_col1,
     uint32_t n_e2,
     const uint32_t* __restrict__ e3_col0,
-    const uint32_t* __restrict__ e3_col1,
     uint32_t n_e3,
-    const uint32_t* __restrict__ e4_col0,
-    const uint32_t* __restrict__ e4_col1,
-    uint32_t n_e4,
-    uint32_t* __restrict__ out_counts) {
+    uint32_t* __restrict__ e1_work_prefix,
+    uint32_t* __restrict__ e1_e2_start,
+    uint32_t* __restrict__ e1_e2_end) {
     uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i == 0) {
+        e1_work_prefix[n_e1] = 0;
+    }
     if (i >= n_e1) {
         return;
     }
-    uint32_t w = e1_col0[i];
     uint32_t x = e1_col1[i];
-
     uint32_t e2_lo = lower_bound_u32(e2_col0, n_e2, x);
     uint32_t e2_hi = upper_bound_u32(e2_col0, n_e2, x);
-
-    uint32_t cnt = 0;
+    uint32_t work = 0;
     for (uint32_t j = e2_lo; j < e2_hi; ++j) {
         uint32_t y = e2_col1[j];
         uint32_t e3_lo = lower_bound_u32(e3_col0, n_e3, y);
         uint32_t e3_hi = upper_bound_u32(e3_col0, n_e3, y);
-        for (uint32_t k = e3_lo; k < e3_hi; ++k) {
-            uint32_t z = e3_col1[k];
-            if (contains_pair_u32(e4_col0, e4_col1, n_e4, z, w)) {
-                cnt += 1;
-            }
-        }
+        work += e3_hi - e3_lo;
     }
-    out_counts[i] = cnt;
+    e1_work_prefix[i] = work;
+    e1_e2_start[i] = e2_lo;
+    e1_e2_end[i] = e2_hi;
 }
 
-// Per-thread materialize kernel: same chain walk as the count
-// kernel, emits (W, X, Y, Z) into the output columns at
-// out_offsets[i] + j for the j-th match.
-extern "C" __global__ void wcoj_4cycle_materialize(
+extern "C" __global__ void wcoj_4cycle_count_hg_u32(
     const uint32_t* __restrict__ e1_col0,
     const uint32_t* __restrict__ e1_col1,
     uint32_t n_e1,
-    const uint32_t* __restrict__ e2_col0,
     const uint32_t* __restrict__ e2_col1,
-    uint32_t n_e2,
     const uint32_t* __restrict__ e3_col0,
     const uint32_t* __restrict__ e3_col1,
     uint32_t n_e3,
     const uint32_t* __restrict__ e4_col0,
     const uint32_t* __restrict__ e4_col1,
     uint32_t n_e4,
-    const uint32_t* __restrict__ out_offsets,
+    const uint32_t* __restrict__ e1_work_prefix,
+    const uint32_t* __restrict__ e1_e2_start,
+    const uint32_t* __restrict__ e1_e2_end,
+    uint32_t total_work,
+    uint32_t block_work_unit,
+    uint32_t* __restrict__ out_block_counts) {
+    uint32_t block_start = blockIdx.x * block_work_unit;
+    if (block_start >= total_work) {
+        if (threadIdx.x == 0) {
+            out_block_counts[blockIdx.x] = 0;
+        }
+        return;
+    }
+    uint32_t block_end = block_start + block_work_unit;
+    if (block_end < block_start || block_end > total_work) {
+        block_end = total_work;
+    }
+
+    uint32_t local_count = 0;
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t root_pos = upper_bound_u32(e1_work_prefix, n_e1 + 1, work_idx);
+        if (root_pos == 0) {
+            continue;
+        }
+        uint32_t e1_idx = root_pos - 1;
+        if (e1_idx >= n_e1) {
+            continue;
+        }
+        uint32_t local = work_idx - e1_work_prefix[e1_idx];
+        uint32_t w = e1_col0[e1_idx];
+        uint32_t e2_lo = e1_e2_start[e1_idx];
+        uint32_t e2_hi = e1_e2_end[e1_idx];
+        for (uint32_t j = e2_lo; j < e2_hi; ++j) {
+            uint32_t y = e2_col1[j];
+            uint32_t e3_lo = lower_bound_u32(e3_col0, n_e3, y);
+            uint32_t e3_hi = upper_bound_u32(e3_col0, n_e3, y);
+            uint32_t e3_len = e3_hi - e3_lo;
+            if (local >= e3_len) {
+                local -= e3_len;
+                continue;
+            }
+            uint32_t z = e3_col1[e3_lo + local];
+            if (contains_pair_u32(e4_col0, e4_col1, n_e4, z, w)) {
+                local_count += 1;
+            }
+            break;
+        }
+    }
+
+    __shared__ uint32_t partial[256];
+    partial[threadIdx.x] = local_count;
+    __syncthreads();
+    for (uint32_t stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            partial[threadIdx.x] += partial[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        out_block_counts[blockIdx.x] = partial[0];
+    }
+}
+
+extern "C" __global__ void wcoj_4cycle_materialize_hg_u32(
+    const uint32_t* __restrict__ e1_col0,
+    const uint32_t* __restrict__ e1_col1,
+    uint32_t n_e1,
+    const uint32_t* __restrict__ e2_col1,
+    const uint32_t* __restrict__ e3_col0,
+    const uint32_t* __restrict__ e3_col1,
+    uint32_t n_e3,
+    const uint32_t* __restrict__ e4_col0,
+    const uint32_t* __restrict__ e4_col1,
+    uint32_t n_e4,
+    const uint32_t* __restrict__ e1_work_prefix,
+    const uint32_t* __restrict__ e1_e2_start,
+    const uint32_t* __restrict__ e1_e2_end,
+    uint32_t total_work,
+    uint32_t block_work_unit,
+    const uint32_t* __restrict__ block_offsets,
     uint32_t total_rows,
     uint32_t* __restrict__ out_w,
     uint32_t* __restrict__ out_x,
     uint32_t* __restrict__ out_y,
     uint32_t* __restrict__ out_z) {
-    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n_e1) {
+    uint32_t block_start = blockIdx.x * block_work_unit;
+    if (block_start >= total_work) {
         return;
     }
-    uint32_t w = e1_col0[i];
-    uint32_t x = e1_col1[i];
-    uint32_t base = out_offsets[i];
-    if (base >= total_rows) {
-        return;
+    uint32_t block_end = block_start + block_work_unit;
+    if (block_end < block_start || block_end > total_work) {
+        block_end = total_work;
     }
 
-    uint32_t e2_lo = lower_bound_u32(e2_col0, n_e2, x);
-    uint32_t e2_hi = upper_bound_u32(e2_col0, n_e2, x);
-
-    uint32_t emitted = 0;
-    for (uint32_t j = e2_lo; j < e2_hi; ++j) {
-        uint32_t y = e2_col1[j];
-        uint32_t e3_lo = lower_bound_u32(e3_col0, n_e3, y);
-        uint32_t e3_hi = upper_bound_u32(e3_col0, n_e3, y);
-        for (uint32_t k = e3_lo; k < e3_hi; ++k) {
-            uint32_t z = e3_col1[k];
-            if (contains_pair_u32(e4_col0, e4_col1, n_e4, z, w)) {
-                uint32_t pos = base + emitted;
-                out_w[pos] = w;
-                out_x[pos] = x;
-                out_y[pos] = y;
-                out_z[pos] = z;
-                emitted += 1;
+    uint32_t local_count = 0;
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t root_pos = upper_bound_u32(e1_work_prefix, n_e1 + 1, work_idx);
+        if (root_pos == 0) {
+            continue;
+        }
+        uint32_t e1_idx = root_pos - 1;
+        if (e1_idx >= n_e1) {
+            continue;
+        }
+        uint32_t local = work_idx - e1_work_prefix[e1_idx];
+        uint32_t w = e1_col0[e1_idx];
+        uint32_t e2_lo = e1_e2_start[e1_idx];
+        uint32_t e2_hi = e1_e2_end[e1_idx];
+        for (uint32_t j = e2_lo; j < e2_hi; ++j) {
+            uint32_t y = e2_col1[j];
+            uint32_t e3_lo = lower_bound_u32(e3_col0, n_e3, y);
+            uint32_t e3_hi = upper_bound_u32(e3_col0, n_e3, y);
+            uint32_t e3_len = e3_hi - e3_lo;
+            if (local >= e3_len) {
+                local -= e3_len;
+                continue;
             }
+            uint32_t z = e3_col1[e3_lo + local];
+            if (contains_pair_u32(e4_col0, e4_col1, n_e4, z, w)) {
+                local_count += 1;
+            }
+            break;
+        }
+    }
+
+    __shared__ uint32_t thread_prefix[256];
+    thread_prefix[threadIdx.x] = local_count;
+    __syncthreads();
+    for (uint32_t stride = 1; stride < blockDim.x; stride <<= 1) {
+        uint32_t add = 0;
+        if (threadIdx.x >= stride) {
+            add = thread_prefix[threadIdx.x - stride];
+        }
+        __syncthreads();
+        thread_prefix[threadIdx.x] += add;
+        __syncthreads();
+    }
+    uint32_t thread_base = block_offsets[blockIdx.x];
+    if (threadIdx.x > 0) {
+        thread_base += thread_prefix[threadIdx.x - 1];
+    }
+
+    uint32_t local_emit = 0;
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t root_pos = upper_bound_u32(e1_work_prefix, n_e1 + 1, work_idx);
+        if (root_pos == 0) {
+            continue;
+        }
+        uint32_t e1_idx = root_pos - 1;
+        if (e1_idx >= n_e1) {
+            continue;
+        }
+        uint32_t local = work_idx - e1_work_prefix[e1_idx];
+        uint32_t w = e1_col0[e1_idx];
+        uint32_t x = e1_col1[e1_idx];
+        uint32_t e2_lo = e1_e2_start[e1_idx];
+        uint32_t e2_hi = e1_e2_end[e1_idx];
+        for (uint32_t j = e2_lo; j < e2_hi; ++j) {
+            uint32_t y = e2_col1[j];
+            uint32_t e3_lo = lower_bound_u32(e3_col0, n_e3, y);
+            uint32_t e3_hi = upper_bound_u32(e3_col0, n_e3, y);
+            uint32_t e3_len = e3_hi - e3_lo;
+            if (local >= e3_len) {
+                local -= e3_len;
+                continue;
+            }
+            uint32_t z = e3_col1[e3_lo + local];
+            if (contains_pair_u32(e4_col0, e4_col1, n_e4, z, w)) {
+                uint32_t out = thread_base + local_emit;
+                if (out < total_rows) {
+                    out_w[out] = w;
+                    out_x[out] = x;
+                    out_y[out] = y;
+                    out_z[out] = z;
+                }
+                local_emit += 1;
+            }
+            break;
         }
     }
 }

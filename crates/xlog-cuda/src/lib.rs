@@ -38,4 +38,4 @@ pub use provider::{
     GROUPBY_MODULE, ILP_MODULE, JOIN_MODULE, PACK_MODULE, PIR_MODULE, SCAN_MODULE, SET_OPS_MODULE,
     SORT_MODULE,
 };
-pub use wcoj_metadata::{WcojRelationMetadata, WcojTriangleHgWorkPlanU32};
+pub use wcoj_metadata::{WcojCycle4HgWorkPlanU32, WcojRelationMetadata, WcojTriangleHgWorkPlanU32};
