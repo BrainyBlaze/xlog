@@ -205,7 +205,12 @@ fn build_superhub_inputs(memory: &Arc<GpuMemoryManager>) -> [CudaBuffer; 3] {
     ]
 }
 
-fn run_with_config(fix: &Fix, config: RuntimeConfig, inputs: [CudaBuffer; 3]) -> Executor {
+fn run_with_config_and_cards(
+    fix: &Fix,
+    config: RuntimeConfig,
+    inputs: [CudaBuffer; 3],
+    seeded_cards: Option<[u64; 3]>,
+) -> Executor {
     let mut compiler = Compiler::new();
     let plan = compiler.compile(SOURCE).expect("compile");
     let mut executor = Executor::new_with_config(Arc::clone(&fix.provider), config);
@@ -216,8 +221,20 @@ fn run_with_config(fix: &Fix, config: RuntimeConfig, inputs: [CudaBuffer; 3]) ->
     executor.put_relation("e1", b1);
     executor.put_relation("e2", b2);
     executor.put_relation("e3", b3);
+    if let Some(cards) = seeded_cards {
+        for (idx, name) in ["e1", "e2", "e3"].iter().enumerate() {
+            if let Some(rel_id) = compiler.rel_ids().get(*name) {
+                executor.stats_mut().register_relation(*rel_id);
+                executor.stats_mut().update_cardinality(*rel_id, cards[idx]);
+            }
+        }
+    }
     let _ = executor.execute_plan(&plan).expect("execute_plan");
     executor
+}
+
+fn run_with_config(fix: &Fix, config: RuntimeConfig, inputs: [CudaBuffer; 3]) -> Executor {
+    run_with_config_and_cards(fix, config, inputs, None)
 }
 
 // =================================================================
@@ -293,11 +310,16 @@ fn adaptive_superhub_dispatches() {
     let config = RuntimeConfig::default()
         .with_wcoj_triangle_dispatch(None)
         .with_wcoj_triangle_dispatch_adaptive(Some(true));
-    let exec = run_with_config(&fix, config, build_superhub_inputs(&fix.memory));
+    let exec = run_with_config_and_cards(
+        &fix,
+        config,
+        build_superhub_inputs(&fix.memory),
+        Some([100_000; 3]),
+    );
     assert_eq!(
         exec.wcoj_triangle_dispatch_count(),
         1,
-        "adaptive on super-hub MUST dispatch (classifier accepts); got counter {}",
+        "stats gate on super-hub must dispatch with seeded cards; got counter {}",
         exec.wcoj_triangle_dispatch_count()
     );
 }
@@ -400,13 +422,18 @@ fn adaptive_dispatch_no_d2h_violations_under_strict_gate() {
         let config = RuntimeConfig::default()
             .with_wcoj_triangle_dispatch(None)
             .with_wcoj_triangle_dispatch_adaptive(Some(true));
-        let exec = run_with_config(&fix, config, build_superhub_inputs(&fix.memory));
+        let exec = run_with_config_and_cards(
+            &fix,
+            config,
+            build_superhub_inputs(&fix.memory),
+            Some([100_000; 3]),
+        );
         let v = fix.provider.deterministic_d2h_violation_count();
         fix.provider.disable_strict_deterministic_d2h();
         assert_eq!(
             exec.wcoj_triangle_dispatch_count(),
             1,
-            "super-hub classifier must accept"
+            "super-hub stats gate must accept"
         );
         // The full WCOJ pipeline (classifier + layout + triangle)
         // should produce 0 strict-D2H violations: the existing
@@ -446,6 +473,12 @@ fn adaptive_counter_increments_once_per_dispatch() {
     executor.put_relation("e1", b1);
     executor.put_relation("e2", b2);
     executor.put_relation("e3", b3);
+    for name in ["e1", "e2", "e3"] {
+        if let Some(rel_id) = compiler.rel_ids().get(name) {
+            executor.stats_mut().register_relation(*rel_id);
+            executor.stats_mut().update_cardinality(*rel_id, 100_000);
+        }
+    }
 
     // Run 3 times; counter must reach 3 (one per dispatch),
     // not e.g. 6 (counting classifier as a separate dispatch).

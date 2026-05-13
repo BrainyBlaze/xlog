@@ -256,6 +256,18 @@ fn run_program(
     source: &str,
     inputs: &BTreeMap<&str, Vec<(u32, u32)>>,
 ) -> Executor {
+    let seeded_cards: BTreeMap<&str, u64> = BTreeMap::new();
+    run_program_with_cards(provider, memory, config, source, inputs, &seeded_cards)
+}
+
+fn run_program_with_cards(
+    provider: Arc<CudaKernelProvider>,
+    memory: &Arc<GpuMemoryManager>,
+    config: RuntimeConfig,
+    source: &str,
+    inputs: &BTreeMap<&str, Vec<(u32, u32)>>,
+    seeded_cards: &BTreeMap<&str, u64>,
+) -> Executor {
     let mut compiler = Compiler::new();
     let plan = compiler.compile(source).expect("compile");
     let mut executor = Executor::new_with_config(provider, config);
@@ -265,6 +277,12 @@ fn run_program(
     for (name, rows) in inputs {
         let buf = upload_binary_u32(memory, rows);
         executor.put_relation(name, buf);
+    }
+    for (name, card) in seeded_cards {
+        if let Some(rel_id) = compiler.rel_ids().get(*name) {
+            executor.stats_mut().register_relation(*rel_id);
+            executor.stats_mut().update_cardinality(*rel_id, *card);
+        }
     }
     let _ = executor.execute_plan(&plan).expect("execute_plan");
     executor
@@ -346,15 +364,16 @@ fn stable_triangle_in_recursive_scc_dispatches_wcoj_on_seeding() {
         "binary-join reference produced empty triangle — fixture is degenerate"
     );
 
-    // Bare default: W2.5 makes CardinalityAwareCostModel the default. With
-    // missing stats, the safety floor delegates to the skew classifier and
-    // preserves the slice-4 seeding-pass dispatch count.
-    let default_exec = run_program(
+    // Bare default now uses CardinalityAwareCostModel only. Seed runtime
+    // cards to preserve the slice-4 seeding-pass dispatch count.
+    let seeded_cards = BTreeMap::from([("e1", 100_000), ("e2", 100_000), ("e3", 100_000)]);
+    let default_exec = run_program_with_cards(
         Arc::clone(&fix.provider),
         &fix.memory,
         RuntimeConfig::default(),
         STABLE_TRIANGLE_RECURSIVE,
         &inputs,
+        &seeded_cards,
     );
     assert_eq!(
         default_exec.wcoj_triangle_dispatch_count(),
@@ -538,16 +557,18 @@ fn adaptive_dispatches_in_recursive_scc_on_superhub() {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
     };
-    let executor = run_program(
+    let seeded_cards = BTreeMap::from([("e1", 100_000), ("e2", 100_000), ("e3", 100_000)]);
+    let executor = run_program_with_cards(
         Arc::clone(&fix.provider),
         &fix.memory,
         RuntimeConfig::default(),
         STABLE_TRIANGLE_RECURSIVE,
         &superhub_inputs(),
+        &seeded_cards,
     );
     assert!(
         executor.wcoj_triangle_dispatch_count() >= 1,
-        "adaptive classifier on super-hub fixture must dispatch in \
+        "cardinality model on super-hub fixture must dispatch in \
          the recursive arm; got counter {}",
         executor.wcoj_triangle_dispatch_count()
     );

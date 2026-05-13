@@ -206,7 +206,12 @@ fn build_superhub_inputs(memory: &Arc<GpuMemoryManager>) -> [CudaBuffer; 3] {
     ]
 }
 
-fn run_with_config(fix: &Fix, config: RuntimeConfig, inputs: [CudaBuffer; 3]) -> Executor {
+fn run_with_config_and_cards(
+    fix: &Fix,
+    config: RuntimeConfig,
+    inputs: [CudaBuffer; 3],
+    seeded_cards: Option<[u64; 3]>,
+) -> Executor {
     let mut compiler = Compiler::new();
     let plan = compiler.compile(SOURCE).expect("compile");
     let mut executor = Executor::new_with_config(Arc::clone(&fix.provider), config);
@@ -217,8 +222,20 @@ fn run_with_config(fix: &Fix, config: RuntimeConfig, inputs: [CudaBuffer; 3]) ->
     executor.put_relation("e1", b1);
     executor.put_relation("e2", b2);
     executor.put_relation("e3", b3);
+    if let Some(cards) = seeded_cards {
+        for (idx, name) in ["e1", "e2", "e3"].iter().enumerate() {
+            if let Some(rel_id) = compiler.rel_ids().get(*name) {
+                executor.stats_mut().register_relation(*rel_id);
+                executor.stats_mut().update_cardinality(*rel_id, cards[idx]);
+            }
+        }
+    }
     let _ = executor.execute_plan(&plan).expect("execute_plan");
     executor
+}
+
+fn run_with_config(fix: &Fix, config: RuntimeConfig, inputs: [CudaBuffer; 3]) -> Executor {
+    run_with_config_and_cards(fix, config, inputs, None)
 }
 
 // =================================================================
@@ -235,10 +252,11 @@ fn default_runtime_dispatches_superhub() {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
     };
-    let exec = run_with_config(
+    let exec = run_with_config_and_cards(
         &fix,
         RuntimeConfig::default(),
         build_superhub_inputs(&fix.memory),
+        Some([100_000; 3]),
     );
     assert_eq!(
         exec.wcoj_triangle_dispatch_count(),
@@ -283,7 +301,12 @@ fn explicit_off_beats_default_on_superhub() {
         return;
     };
     let config = RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(false));
-    let exec = run_with_config(&fix, config, build_superhub_inputs(&fix.memory));
+    let exec = run_with_config_and_cards(
+        &fix,
+        config,
+        build_superhub_inputs(&fix.memory),
+        Some([100_000; 3]),
+    );
     assert_eq!(
         exec.wcoj_triangle_dispatch_count(),
         0,
@@ -385,7 +408,12 @@ fn disable_some_false_does_not_disable() {
         return;
     };
     let config = RuntimeConfig::default().with_wcoj_triangle_dispatch_disabled(Some(false));
-    let exec = run_with_config(&fix, config, build_superhub_inputs(&fix.memory));
+    let exec = run_with_config_and_cards(
+        &fix,
+        config,
+        build_superhub_inputs(&fix.memory),
+        Some([100_000; 3]),
+    );
     assert_eq!(
         exec.wcoj_triangle_dispatch_count(),
         1,
