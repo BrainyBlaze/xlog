@@ -51,6 +51,10 @@ harness = false
 name = "wcoj_w33_superhub"
 harness = false
 
+[[bench]]
+name = "wcoj_w37_helper_split"
+harness = false
+
 [[bin]]
 name = "xlog_run"
 path = "src/bin/xlog_run.rs"
