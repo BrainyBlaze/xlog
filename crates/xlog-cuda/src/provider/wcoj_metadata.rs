@@ -302,6 +302,230 @@ impl CudaKernelProvider {
         ))
     }
 
+    pub fn wcoj_triangle_hg_u32_recorded(
+        &self,
+        e_xy: &CudaBuffer,
+        e_yz: &CudaBuffer,
+        e_xz: &CudaBuffer,
+        block_work_unit: u32,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        let ctx = "wcoj_triangle_hg_u32_recorded";
+        validate_binary_u32(ctx, "e_xy", e_xy)?;
+        validate_binary_u32(ctx, "e_yz", e_yz)?;
+        validate_binary_u32(ctx, "e_xz", e_xz)?;
+        let out_schema = Schema::new(vec![
+            (
+                "x".to_string(),
+                e_xy.schema().column_type(0).expect("xy.col0 type").clone(),
+            ),
+            (
+                "y".to_string(),
+                e_xy.schema().column_type(1).expect("xy.col1 type").clone(),
+            ),
+            (
+                "z".to_string(),
+                e_yz.schema().column_type(1).expect("yz.col1 type").clone(),
+            ),
+        ]);
+        let plan = self.wcoj_triangle_hg_work_plan_u32_recorded(
+            e_xy,
+            e_yz,
+            e_xz,
+            block_work_unit,
+            launch_stream,
+        )?;
+        if plan.total_work == 0 {
+            return self.create_empty_buffer(out_schema);
+        }
+
+        let count_buffer =
+            self.wcoj_triangle_count_hg_u32_recorded(e_yz, e_xz, &plan, launch_stream)?;
+        let grid = count_buffer.cached_row_count().ok_or_else(|| {
+            XlogError::Kernel(format!("{ctx}: count buffer missing cached row count"))
+        })?;
+        let count_u32 = count_column_u32(&count_buffer)?;
+        let mut offsets = self.memory().alloc::<u32>(grid as usize)?;
+
+        let runtime = self.memory().runtime().ok_or_else(|| {
+            XlogError::Kernel(format!("{ctx} requires a runtime-backed GpuMemoryManager"))
+        })?;
+        let cu_stream = runtime
+            .stream_pool()
+            .resolve(launch_stream)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "{ctx}: launch_stream StreamId({}) does not resolve",
+                    launch_stream.0
+                ))
+            })?;
+
+        let mut rec_scan = LaunchRecorder::new_strict(launch_stream);
+        rec_scan.read(count_u32);
+        rec_scan.write(&offsets);
+        rec_scan
+            .preflight(runtime)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: scan preflight failed: {e}")))?;
+        let bytes_count = (grid as usize)
+            .checked_mul(std::mem::size_of::<u32>())
+            .ok_or_else(|| XlogError::Kernel(format!("{ctx}: count byte size overflow")))?;
+        unsafe {
+            let res = sys::cuMemcpyDtoDAsync_v2(
+                *offsets.device_ptr(),
+                *count_u32.device_ptr(),
+                bytes_count,
+                cu_stream.cu_stream(),
+            );
+            if res != sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "{ctx}: DtoD count to offsets failed: {res:?}"
+                )));
+            }
+        }
+        self.multiblock_scan_u32_inplace_on_stream(
+            &mut offsets,
+            grid,
+            &cu_stream,
+            launch_stream,
+            runtime,
+        )?;
+        rec_scan
+            .commit(runtime)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: scan commit failed: {e}")))?;
+        cu_stream
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: scan stream sync failed: {e}")))?;
+        let last = grid - 1;
+        let total_rows = u64::from(self.dtoh_scalar_untracked::<u32>(&offsets, last as usize)?)
+            + u64::from(self.dtoh_scalar_untracked::<u32>(count_u32, last as usize)?);
+        if total_rows == 0 {
+            return self.create_empty_buffer(out_schema);
+        }
+        let total_rows_u32 = u32::try_from(total_rows).map_err(|_| {
+            XlogError::Kernel(format!("{ctx}: total rows {total_rows} exceed u32::MAX"))
+        })?;
+
+        let bytes_per_col = (total_rows_u32 as usize)
+            .checked_mul(std::mem::size_of::<u32>())
+            .ok_or_else(|| XlogError::Kernel(format!("{ctx}: output byte size overflow")))?;
+        let mut out_x = self.memory().alloc::<u8>(bytes_per_col)?;
+        let mut out_y = self.memory().alloc::<u8>(bytes_per_col)?;
+        let mut out_z = self.memory().alloc::<u8>(bytes_per_col)?;
+        let out_d_num_rows = self.memory().alloc::<u32>(1)?;
+
+        let xy_col0 = metadata_column_u32(e_xy, 0)?;
+        let xy_col1 = metadata_column_u32(e_xy, 1)?;
+        let yz_col1 = metadata_column_u32(e_yz, 1)?;
+        let xz_col1 = metadata_column_u32(e_xz, 1)?;
+        let n_yz = self.metadata_logical_rows(e_yz)?;
+        let n_xz = self.metadata_logical_rows(e_xz)?;
+
+        let mut rec_mat = LaunchRecorder::new_strict(launch_stream);
+        rec_mat.read(e_xy.num_rows_device());
+        rec_mat.read(e_yz.num_rows_device());
+        rec_mat.read(e_xz.num_rows_device());
+        rec_mat.read_column(e_xy.column(0).expect("xy.col0"));
+        rec_mat.read_column(e_xy.column(1).expect("xy.col1"));
+        rec_mat.read_column(e_yz.column(1).expect("yz.col1"));
+        rec_mat.read_column(e_xz.column(1).expect("xz.col1"));
+        rec_mat.read(&plan.xy_work_prefix);
+        rec_mat.read(&plan.xy_yz_start);
+        rec_mat.read(&plan.xy_yz_end);
+        rec_mat.read(&plan.xy_xz_start);
+        rec_mat.read(&plan.xy_xz_end);
+        rec_mat.read(&offsets);
+        rec_mat.write(&out_x);
+        rec_mat.write(&out_y);
+        rec_mat.write(&out_z);
+        rec_mat.write(&out_d_num_rows);
+        rec_mat
+            .preflight(runtime)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: materialize preflight failed: {e}")))?;
+        unsafe {
+            let res = sys::cuMemcpyHtoDAsync_v2(
+                *out_d_num_rows.device_ptr(),
+                &total_rows_u32 as *const u32 as *const c_void,
+                std::mem::size_of::<u32>(),
+                cu_stream.cu_stream(),
+            );
+            if res != sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "{ctx}: H2D output row count failed: {res:?}"
+                )));
+            }
+        }
+        {
+            let kernel = self
+                .device()
+                .inner()
+                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_TRIANGLE_MATERIALIZE_HG_U32)
+                .ok_or_else(|| {
+                    XlogError::Kernel(
+                        "wcoj_triangle_materialize_hg_u32 kernel not found".to_string(),
+                    )
+                })?;
+            let out_x_u32 = unsafe { reinterpret_u8_as_u32(&mut out_x) };
+            let out_y_u32 = unsafe { reinterpret_u8_as_u32(&mut out_y) };
+            let out_z_u32 = unsafe { reinterpret_u8_as_u32(&mut out_z) };
+            let mut params: Vec<*mut c_void> = vec![
+                xy_col0.as_kernel_param(),
+                xy_col1.as_kernel_param(),
+                yz_col1.as_kernel_param(),
+                n_yz.as_kernel_param(),
+                xz_col1.as_kernel_param(),
+                n_xz.as_kernel_param(),
+                (&plan.xy_work_prefix).as_kernel_param(),
+                (&plan.xy_yz_start).as_kernel_param(),
+                (&plan.xy_yz_end).as_kernel_param(),
+                (&plan.xy_xz_start).as_kernel_param(),
+                (&plan.xy_xz_end).as_kernel_param(),
+                plan.row_count.as_kernel_param(),
+                plan.total_work.as_kernel_param(),
+                plan.block_work_unit.as_kernel_param(),
+                (&offsets).as_kernel_param(),
+                total_rows_u32.as_kernel_param(),
+                out_x_u32.as_kernel_param(),
+                out_y_u32.as_kernel_param(),
+                out_z_u32.as_kernel_param(),
+            ];
+            let grid_dim = if plan.total_work == 0 {
+                1
+            } else {
+                plan.total_work.div_ceil(plan.block_work_unit)
+            };
+            unsafe {
+                kernel
+                    .clone()
+                    .launch_on_stream(
+                        &cu_stream,
+                        LaunchConfig {
+                            grid_dim: (grid_dim, 1, 1),
+                            block_dim: (BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        &mut params,
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!("{ctx}: materialize launch failed: {e}"))
+                    })?;
+            }
+        }
+        rec_mat
+            .commit(runtime)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: materialize commit failed: {e}")))?;
+        cu_stream.synchronize().map_err(|e| {
+            XlogError::Kernel(format!("{ctx}: materialize stream sync failed: {e}"))
+        })?;
+
+        Ok(CudaBuffer::from_columns_with_host_count(
+            vec![out_x.into(), out_y.into(), out_z.into()],
+            total_rows_u32 as u64,
+            out_d_num_rows,
+            out_schema,
+            total_rows_u32,
+        ))
+    }
+
     fn validate_metadata_column(
         &self,
         input: &CudaBuffer,
@@ -896,6 +1120,20 @@ fn metadata_column_u64<'a>(
         },
         _ => Err(XlogError::Kernel(
             "wcoj_build_metadata_u64_recorded: key column must be an owned CudaColumn".to_string(),
+        )),
+    }
+}
+
+fn count_column_u32(buffer: &CudaBuffer) -> Result<&TrackedCudaSlice<u32>> {
+    let col = buffer.column(0).ok_or_else(|| {
+        XlogError::Kernel("wcoj_triangle_hg_u32_recorded: count column missing".to_string())
+    })?;
+    match col {
+        CudaColumn::Owned(slice) => unsafe {
+            Ok(&*(slice as *const TrackedCudaSlice<u8> as *const TrackedCudaSlice<u32>))
+        },
+        _ => Err(XlogError::Kernel(
+            "wcoj_triangle_hg_u32_recorded: count column must be owned".to_string(),
         )),
     }
 }

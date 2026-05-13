@@ -460,6 +460,7 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "wcoj_build_metadata_scatter_u64",
             "wcoj_triangle_build_hg_work_plan_u32",
             "wcoj_triangle_count_hg_u32",
+            "wcoj_triangle_materialize_hg_u32",
             "wcoj_triangle_count",
             // W3.4 bench-spike-only layout+count fusion candidate.
             "wcoj_triangle_fused_lc_count",

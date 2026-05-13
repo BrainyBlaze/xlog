@@ -135,6 +135,31 @@ fn download_count_column(memory: &Arc<GpuMemoryManager>, buffer: &CudaBuffer) ->
         .collect()
 }
 
+fn download_triples(memory: &Arc<GpuMemoryManager>, buffer: &CudaBuffer) -> Vec<(u32, u32, u32)> {
+    let n = buffer.cached_row_count().expect("cached count") as usize;
+    let mut cols = [Vec::new(), Vec::new(), Vec::new()];
+    for (idx, out) in cols.iter_mut().enumerate() {
+        out.resize(n * std::mem::size_of::<u32>(), 0);
+        let CudaColumn::Owned(col) = buffer.column(idx).expect("output column") else {
+            panic!("output column must be owned");
+        };
+        memory
+            .device()
+            .inner()
+            .dtoh_sync_copy_into(col, out)
+            .expect("dtoh output column");
+    }
+    (0..n)
+        .map(|i| {
+            let read = |bytes: &[u8]| {
+                let start = i * 4;
+                u32::from_le_bytes(bytes[start..start + 4].try_into().expect("u32 bytes"))
+            };
+            (read(&cols[0]), read(&cols[1]), read(&cols[2]))
+        })
+        .collect()
+}
+
 #[test]
 fn wcoj_metadata_u32_builds_unique_fanout_prefix() {
     let Some(fix) = make_fixture() else {
@@ -239,4 +264,32 @@ fn wcoj_triangle_hg_count_matches_cpu_total() {
         .expect("hg count");
     let block_counts = download_count_column(&fix.memory, &counts);
     assert_eq!(block_counts.iter().sum::<u32>(), 5);
+}
+
+#[test]
+fn wcoj_triangle_hg_materializes_expected_rows() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("skipping WCOJ HG materialize test: no CUDA device");
+        return;
+    };
+    let e_xy = upload_binary_u32(&fix.memory, &[(1, 2), (1, 3), (2, 2), (3, 4)]);
+    let e_yz = upload_binary_u32(&fix.memory, &[(2, 5), (2, 6), (3, 6), (4, 9)]);
+    let e_xz = upload_binary_u32(&fix.memory, &[(1, 5), (1, 6), (2, 5), (3, 9)]);
+
+    let output = fix
+        .provider
+        .wcoj_triangle_hg_u32_recorded(
+            &e_xy,
+            &e_yz,
+            &e_xz,
+            2,
+            xlog_cuda::device_runtime::StreamId::DEFAULT,
+        )
+        .expect("hg triangle");
+    let mut rows = download_triples(&fix.memory, &output);
+    rows.sort();
+    assert_eq!(
+        rows,
+        vec![(1, 2, 5), (1, 2, 6), (1, 3, 6), (2, 2, 5), (3, 4, 9)]
+    );
 }
