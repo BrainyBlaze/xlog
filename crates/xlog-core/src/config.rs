@@ -83,40 +83,20 @@ pub struct RuntimeConfig {
     /// Test-only knob — production callers should leave this
     /// `None` and configure via the env var.
     pub wcoj_triangle_dispatch: Option<bool>,
-    /// Override the env-driven WCOJ adaptive-dispatch gate
-    /// (`XLOG_USE_WCOJ_TRIANGLE_ADAPTIVE`). Post-default-on:
-    /// `None` (default) means "consult env, fall back to
-    /// adaptive-on if env is unset". `Some(true)` is an
-    /// explicit opt-in (no-op vs default). `Some(false)` is
-    /// an explicit opt-out that disables the default-on for
-    /// this runtime.
-    ///
-    /// Decision tree (highest → lowest):
-    ///   1. Kill switch (`wcoj_triangle_dispatch_disabled` /
-    ///      `XLOG_DISABLE_WCOJ_TRIANGLE`) → no dispatch.
-    ///   2. Force (`wcoj_triangle_dispatch=Some(true)` /
-    ///      `XLOG_USE_WCOJ_TRIANGLE_U32=1`) → WCOJ pipeline,
-    ///      classifier bypassed.
-    ///   3. Explicit force-off
-    ///      (`wcoj_triangle_dispatch=Some(false)`) → no dispatch.
-    ///   4. Adaptive resolution (config → env → default-on).
-    ///      Adaptive on → classifier runs; score ≥ 0.10 → WCOJ.
-    ///      Else → no dispatch.
+    /// Override the stats-backed WCOJ triangle dispatch gate.
+    /// `None` uses the production default. `Some(true)` enables
+    /// the cardinality model; `Some(false)` disables this runtime's
+    /// default stats-backed decision.
     pub wcoj_triangle_dispatch_adaptive: Option<bool>,
-    /// Hard kill switch for ALL WCOJ triangle dispatch.
-    /// `Some(true)` (or env `XLOG_DISABLE_WCOJ_TRIANGLE=1`)
-    /// pins dispatch off — beats force, beats adaptive, beats
-    /// the default-on. Use case: ops emergency to disable
-    /// WCOJ without touching application code or other env
-    /// vars. `None` (default) consults the env. `Some(false)`
-    /// is an explicit "do not engage the kill switch"
-    /// (programmatic override over an env-set kill).
+    /// Runtime-local hard stop for WCOJ triangle dispatch.
+    /// `Some(true)` pins dispatch off across force and stats mode.
+    /// `Some(false)` leaves dispatch available for this runtime.
+    /// `None` uses the production default.
     pub wcoj_triangle_dispatch_disabled: Option<bool>,
 
     /// v0.6.5 slice 2 — force gate for the 4-cycle WCOJ dispatch.
     /// `Some(true)` / env `XLOG_USE_WCOJ_4CYCLE=1` forces every
-    /// recognized 4-cycle to dispatch the GPU kernel (classifier
-    /// bypassed). `Some(false)` is explicit force-off. `None`
+    /// recognized 4-cycle to dispatch the GPU kernel. `Some(false)` is explicit force-off. `None`
     /// (default) consults the env.
     pub wcoj_4cycle_dispatch: Option<bool>,
     /// v0.6.5 slice 2 — adaptive opt-in for 4-cycle WCOJ. **Unlike
@@ -127,30 +107,6 @@ pub struct RuntimeConfig {
     /// v0.6.5 slice 2 — kill switch for 4-cycle WCOJ. Same shape
     /// as triangle's kill switch: beats force + adaptive.
     pub wcoj_4cycle_dispatch_disabled: Option<bool>,
-
-    /// v0.6.5 slice 5 — selects which `WcojCostModel` impl
-    /// the executor consults when deciding whether to dispatch
-    /// WCOJ in adaptive mode. `None` (default) falls through
-    /// the precedence ladder — see `RuntimeConfig::with_wcoj_cost_model`.
-    pub wcoj_cost_model: Option<CostModelKind>,
-}
-
-/// v0.6.5 slice 5 — cost model selector for WCOJ dispatch.
-///
-/// The legacy `SkewClassifier` model makes dispatch decisions on
-/// classifier-only signal. The default
-/// `Cardinality` model fuses classifier with cardinality
-/// estimates from `xlog_stats::StatsManager` and gracefully
-/// delegates to `SkewClassifier` when stats are missing.
-///
-/// See `with_wcoj_cost_model` for the precedence rules and the
-/// explicit `skew` opt-out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CostModelKind {
-    /// Slice 1–4 default: skew-classifier-only dispatch decision.
-    SkewClassifier,
-    /// Slice 5 opt-in: classifier blended with cardinality estimates.
-    Cardinality,
 }
 
 impl Default for RuntimeConfig {
@@ -167,7 +123,6 @@ impl Default for RuntimeConfig {
             wcoj_4cycle_dispatch: None,
             wcoj_4cycle_dispatch_adaptive: None,
             wcoj_4cycle_dispatch_disabled: None,
-            wcoj_cost_model: None,
         }
     }
 }
@@ -200,23 +155,16 @@ impl RuntimeConfig {
         self
     }
 
-    /// Override the env-driven WCOJ adaptive-dispatch gate. Pass
-    /// `Some(true)` / `Some(false)` to force the runtime to ignore
-    /// `XLOG_USE_WCOJ_TRIANGLE_ADAPTIVE`; `None` to consult the
-    /// env var (the production default). Force-WCOJ
-    /// (`with_wcoj_triangle_dispatch(Some(true))`) takes
-    /// precedence and bypasses the classifier entirely.
+    /// Override the stats-backed WCOJ triangle dispatch gate.
+    /// Force-WCOJ (`with_wcoj_triangle_dispatch(Some(true))`)
+    /// takes precedence.
     pub fn with_wcoj_triangle_dispatch_adaptive(mut self, override_value: Option<bool>) -> Self {
         self.wcoj_triangle_dispatch_adaptive = override_value;
         self
     }
 
-    /// Engage / disengage the WCOJ triangle dispatch kill
-    /// switch. `Some(true)` pins dispatch off across every
-    /// other flag (force, adaptive, default-on). `Some(false)`
-    /// explicitly does NOT engage the kill switch (useful for
-    /// programmatically overriding `XLOG_DISABLE_WCOJ_TRIANGLE=1`
-    /// in a test). `None` consults the env var.
+    /// Engage / disengage the runtime-local WCOJ triangle
+    /// dispatch hard stop.
     pub fn with_wcoj_triangle_dispatch_disabled(mut self, override_value: Option<bool>) -> Self {
         self.wcoj_triangle_dispatch_disabled = override_value;
         self
@@ -230,8 +178,8 @@ impl RuntimeConfig {
         self
     }
 
-    /// v0.6.5 slice 2 — override the 4-cycle adaptive opt-in.
-    /// `Some(true)` engages the classifier; `Some(false)` skips it.
+    /// v0.6.5 slice 2 — override the 4-cycle stats opt-in.
+    /// `Some(true)` engages the cardinality model; `Some(false)` skips it.
     /// `None` resolves to `false` (opt-in by default — 4-cycle
     /// does NOT inherit triangle's default-on behavior).
     pub fn with_wcoj_4cycle_dispatch_adaptive(mut self, override_value: Option<bool>) -> Self {
@@ -244,44 +192,6 @@ impl RuntimeConfig {
     pub fn with_wcoj_4cycle_dispatch_disabled(mut self, override_value: Option<bool>) -> Self {
         self.wcoj_4cycle_dispatch_disabled = override_value;
         self
-    }
-
-    /// v0.6.5 slice 5 — select which `WcojCostModel` impl the
-    /// executor consults for adaptive dispatch decisions.
-    ///
-    /// **Precedence (pinned)**:
-    ///   1. `Some(CostModelKind)` set here wins.
-    ///   2. Else `XLOG_WCOJ_COST_MODEL` env var:
-    ///      `cardinality` → `Cardinality`; `skew` /
-    ///      `skewclassifier` / unrecognized → `SkewClassifier`.
-    ///   3. Else default: `Cardinality`.
-    ///
-    /// W2.5 ships the cardinality model as the production default;
-    /// the legacy skew classifier remains available as an explicit
-    /// conservative opt-out.
-    pub fn with_wcoj_cost_model(mut self, kind: Option<CostModelKind>) -> Self {
-        self.wcoj_cost_model = kind;
-        self
-    }
-
-    /// v0.6.5 slice 5 — resolve the effective cost-model kind
-    /// from the precedence ladder. See `with_wcoj_cost_model`
-    /// for the rules.
-    ///
-    /// Test note: env-var resolution is non-deterministic
-    /// across parallel tests; consumers that need to set
-    /// `XLOG_WCOJ_COST_MODEL` must use the env-lock pattern.
-    pub fn resolved_wcoj_cost_model(&self) -> CostModelKind {
-        if let Some(kind) = self.wcoj_cost_model {
-            return kind;
-        }
-        let raw = std::env::var("XLOG_WCOJ_COST_MODEL").ok();
-        let normalized = raw.as_deref().map(|s| s.trim().to_ascii_lowercase());
-        match normalized.as_deref() {
-            Some("cardinality") => CostModelKind::Cardinality,
-            Some("skew") | Some("skewclassifier") | Some(_) => CostModelKind::SkewClassifier,
-            None => CostModelKind::Cardinality,
-        }
     }
 }
 
@@ -307,140 +217,5 @@ mod tests {
     fn test_memory_budget_from_device() {
         let budget = MemoryBudget::from_device_memory(10_000_000_000);
         assert_eq!(budget.device_bytes, 8_000_000_000);
-    }
-
-    // -----------------------------------------------------------
-    // v0.6.5 slice 5 — wcoj_cost_model precedence + env resolution
-    // -----------------------------------------------------------
-
-    /// Serialize `XLOG_WCOJ_COST_MODEL` mutation across tests —
-    /// process-global env is shared. Mirrors the pattern in
-    /// `xlog-runtime::executor::wcoj_dispatch::tests`.
-    fn cost_model_env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
-
-    /// RAII snapshot of `XLOG_WCOJ_COST_MODEL` — captures the
-    /// pre-test value, clears it, restores on drop. Held while
-    /// `cost_model_env_lock` is locked so concurrent tests don't
-    /// race.
-    struct CostModelEnvSnapshot(Option<String>);
-
-    impl CostModelEnvSnapshot {
-        fn capture_and_clear() -> Self {
-            let prior = std::env::var("XLOG_WCOJ_COST_MODEL").ok();
-            // SAFETY: caller holds `cost_model_env_lock`.
-            unsafe {
-                std::env::remove_var("XLOG_WCOJ_COST_MODEL");
-            }
-            Self(prior)
-        }
-    }
-
-    impl Drop for CostModelEnvSnapshot {
-        fn drop(&mut self) {
-            // SAFETY: snapshot drops before the lock is released.
-            unsafe {
-                match self.0.take() {
-                    Some(v) => std::env::set_var("XLOG_WCOJ_COST_MODEL", v),
-                    None => std::env::remove_var("XLOG_WCOJ_COST_MODEL"),
-                }
-            }
-        }
-    }
-
-    fn with_cost_model_env<R>(f: impl FnOnce() -> R) -> R {
-        let _guard = cost_model_env_lock()
-            .lock()
-            .expect("cost-model env lock poisoned");
-        let _snap = CostModelEnvSnapshot::capture_and_clear();
-        f()
-    }
-
-    #[test]
-    fn wcoj_cost_model_default_is_cardinality_when_unset() {
-        with_cost_model_env(|| {
-            let cfg = RuntimeConfig::default();
-            assert_eq!(cfg.resolved_wcoj_cost_model(), CostModelKind::Cardinality);
-        });
-    }
-
-    #[test]
-    fn cost_model_env_var_cardinality_resolves_to_cardinality() {
-        with_cost_model_env(|| {
-            // SAFETY: caller holds env lock.
-            unsafe {
-                std::env::set_var("XLOG_WCOJ_COST_MODEL", "cardinality");
-            }
-            let cfg = RuntimeConfig::default();
-            assert_eq!(cfg.resolved_wcoj_cost_model(), CostModelKind::Cardinality);
-        });
-    }
-
-    #[test]
-    fn wcoj_cost_model_env_var_skew_resolves_to_skew_classifier() {
-        with_cost_model_env(|| {
-            unsafe {
-                std::env::set_var("XLOG_WCOJ_COST_MODEL", "skew");
-            }
-            let cfg = RuntimeConfig::default();
-            assert_eq!(
-                cfg.resolved_wcoj_cost_model(),
-                CostModelKind::SkewClassifier
-            );
-        });
-    }
-
-    #[test]
-    fn cost_model_env_var_garbage_resolves_to_skew_classifier() {
-        with_cost_model_env(|| {
-            unsafe {
-                std::env::set_var("XLOG_WCOJ_COST_MODEL", "not-a-real-model");
-            }
-            let cfg = RuntimeConfig::default();
-            assert_eq!(
-                cfg.resolved_wcoj_cost_model(),
-                CostModelKind::SkewClassifier
-            );
-        });
-    }
-
-    #[test]
-    fn cost_model_env_var_cardinality_with_whitespace_and_case_resolves() {
-        with_cost_model_env(|| {
-            unsafe {
-                std::env::set_var("XLOG_WCOJ_COST_MODEL", "  Cardinality  ");
-            }
-            let cfg = RuntimeConfig::default();
-            assert_eq!(cfg.resolved_wcoj_cost_model(), CostModelKind::Cardinality);
-        });
-    }
-
-    #[test]
-    fn cost_model_config_field_overrides_env_var() {
-        with_cost_model_env(|| {
-            unsafe {
-                std::env::set_var("XLOG_WCOJ_COST_MODEL", "skew");
-            }
-            let cfg =
-                RuntimeConfig::default().with_wcoj_cost_model(Some(CostModelKind::Cardinality));
-            assert_eq!(cfg.resolved_wcoj_cost_model(), CostModelKind::Cardinality);
-        });
-    }
-
-    #[test]
-    fn cost_model_config_field_skew_overrides_env_var_cardinality() {
-        with_cost_model_env(|| {
-            unsafe {
-                std::env::set_var("XLOG_WCOJ_COST_MODEL", "cardinality");
-            }
-            let cfg =
-                RuntimeConfig::default().with_wcoj_cost_model(Some(CostModelKind::SkewClassifier));
-            assert_eq!(
-                cfg.resolved_wcoj_cost_model(),
-                CostModelKind::SkewClassifier
-            );
-        });
     }
 }

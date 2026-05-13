@@ -468,8 +468,6 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "wcoj_triangle_materialize_hg_cached_u32",
             "wcoj_scan_hg_block_counts_u32",
             "wcoj_compute_total",
-            "wcoj_triangle_skew_histogram_u32",
-            "wcoj_triangle_skew_histogram_u64",
             "wcoj_layout_check_sorted_unique_u32",
             "wcoj_layout_check_sorted_unique_u64",
             "wcoj_4cycle_build_hg_work_plan_u32",
@@ -478,8 +476,6 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "wcoj_4cycle_build_hg_work_plan_u64",
             "wcoj_4cycle_count_hg_u64",
             "wcoj_4cycle_materialize_hg_u64",
-            "wcoj_4cycle_skew_histogram_u32",
-            "wcoj_4cycle_skew_histogram_u64",
             // W3.2 — General-arity clique kernel (k=5, k=6 from
             // single C++ template; ABI wrappers below are
             // template-call-only per Tier-1 source-audit).

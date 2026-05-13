@@ -279,8 +279,6 @@ pub mod wcoj_kernels {
         "wcoj_triangle_materialize_hg_cached_u32";
     pub const WCOJ_SCAN_HG_BLOCK_COUNTS_U32: &str = "wcoj_scan_hg_block_counts_u32";
     pub const WCOJ_COMPUTE_TOTAL: &str = "wcoj_compute_total";
-    pub const WCOJ_TRIANGLE_SKEW_HISTOGRAM_U32: &str = "wcoj_triangle_skew_histogram_u32";
-    pub const WCOJ_TRIANGLE_SKEW_HISTOGRAM_U64: &str = "wcoj_triangle_skew_histogram_u64";
     pub const WCOJ_LAYOUT_CHECK_SORTED_UNIQUE_U32: &str = "wcoj_layout_check_sorted_unique_u32";
     pub const WCOJ_LAYOUT_CHECK_SORTED_UNIQUE_U64: &str = "wcoj_layout_check_sorted_unique_u64";
     pub const WCOJ_4CYCLE_BUILD_HG_WORK_PLAN_U32: &str = "wcoj_4cycle_build_hg_work_plan_u32";
@@ -289,8 +287,6 @@ pub mod wcoj_kernels {
     pub const WCOJ_4CYCLE_BUILD_HG_WORK_PLAN_U64: &str = "wcoj_4cycle_build_hg_work_plan_u64";
     pub const WCOJ_4CYCLE_COUNT_HG_U64: &str = "wcoj_4cycle_count_hg_u64";
     pub const WCOJ_4CYCLE_MATERIALIZE_HG_U64: &str = "wcoj_4cycle_materialize_hg_u64";
-    pub const WCOJ_4CYCLE_SKEW_HISTOGRAM_U32: &str = "wcoj_4cycle_skew_histogram_u32";
-    pub const WCOJ_4CYCLE_SKEW_HISTOGRAM_U64: &str = "wcoj_4cycle_skew_histogram_u64";
     // W3.2 — General-arity clique kernels (k=5, k=6 from single template).
     pub const WCOJ_CLIQUE5_COUNT_HG_U32: &str = "wcoj_clique5_count_hg_u32";
     pub const WCOJ_CLIQUE5_MATERIALIZE_HG_U32: &str = "wcoj_clique5_materialize_hg_u32";

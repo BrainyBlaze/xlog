@@ -1,27 +1,17 @@
 //! v0.6.2 WCOJ triangle dispatch — runtime hook.
 //!
-//! Wires the GPU 3-way WCOJ kernel into the executor's per-rule
-//! loop. **Default-on** (post-A2-lite default flip): the
-//! adaptive classifier runs on every matching non-recursive
-//! triangle rule and dispatches WCOJ when the per-key skew
-//! score clears [`WCOJ_ADAPTIVE_SKEW_THRESHOLD`]. Production
-//! callers leave `RuntimeConfig::default()` and accept the
-//! adaptive path.
+//! Wires the GPU WCOJ kernels into the executor's per-rule loop.
+//! Production callers leave `RuntimeConfig::default()` and use
+//! the stats-backed dispatch model.
 //!
 //! Override knobs (config + env, highest precedence first):
 //!
-//!   1. **Hard kill switch** — `wcoj_triangle_dispatch_disabled` /
-//!      [`ENV_DISABLE_WCOJ_TRIANGLE`]. Pins all dispatch off,
-//!      including force. Ops emergency knob.
-//!   2. **Force-WCOJ** — `wcoj_triangle_dispatch=Some(true)` /
-//!      [`ENV_USE_WCOJ_TRIANGLE_U32`]. Bypasses classifier.
-//!   3. **Explicit force-off** —
+//!   1. **Force-WCOJ** — `wcoj_triangle_dispatch=Some(true)` /
+//!      [`ENV_USE_WCOJ_TRIANGLE_U32`]. Bypasses stats decision.
+//!   2. **Explicit force-off** —
 //!      `wcoj_triangle_dispatch=Some(false)`. Used by bench
 //!      `Mode::Off` cells and any test that wants binary-join.
-//!   4. **Adaptive opt-out** —
-//!      `wcoj_triangle_dispatch_adaptive=Some(false)`. Disables
-//!      the default-on classifier without a global env var.
-//!   5. **Default**: classifier runs.
+//!   3. **Default**: stats-backed dispatch model.
 //!
 //! ## Recognized RIR shape (v0.6.5)
 //!
@@ -113,18 +103,6 @@ pub(super) fn wcoj_gate_enabled(config_override: Option<bool>) -> bool {
         .unwrap_or(false)
 }
 
-/// Env variable controlling the adaptive WCOJ dispatch.
-/// `"1"` / case-insensitive `"true"` → ON. Anything else
-/// (including unset) is *not* a hard off — the resolver
-/// defaults to ON when this env is unset (post-default-on
-/// flip). To explicitly disable adaptive, use
-/// `RuntimeConfig::wcoj_triangle_dispatch_adaptive = Some(false)`.
-pub const ENV_USE_WCOJ_TRIANGLE_ADAPTIVE: &str = "XLOG_USE_WCOJ_TRIANGLE_ADAPTIVE";
-
-/// Env variable for the hard kill switch. `"1"` / case-
-/// insensitive `"true"` → kill. Beats every other flag.
-pub const ENV_DISABLE_WCOJ_TRIANGLE: &str = "XLOG_DISABLE_WCOJ_TRIANGLE";
-
 pub const ENV_WCOJ_BLOCK_WORK_UNIT: &str = "XLOG_WCOJ_BLOCK_WORK_UNIT";
 pub(super) const WCOJ_BLOCK_WORK_UNIT_DEFAULT: u32 = 1024;
 pub(super) const WCOJ_BLOCK_WORK_UNIT_MAX: u32 = 8192;
@@ -152,33 +130,8 @@ pub(super) fn wcoj_block_work_unit() -> u32 {
     }
 }
 
-/// Resolve the adaptive dispatch gate. Precedence:
-///   * `config_override = Some(b)` → `b` (test-only knob).
-///   * `XLOG_USE_WCOJ_TRIANGLE_ADAPTIVE=1` → `true`.
-///   * `XLOG_USE_WCOJ_TRIANGLE_ADAPTIVE` set to any other
-///     value (`"0"`, `"false"`, …) → `false`.
-///   * Unset → `true` (default-on flip).
 pub(super) fn wcoj_adaptive_enabled(config_override: Option<bool>) -> bool {
-    if let Some(v) = config_override {
-        return v;
-    }
-    match std::env::var(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE) {
-        Ok(v) => v == "1" || v.eq_ignore_ascii_case("true"),
-        // Default-on: when env is unset, adaptive runs.
-        Err(_) => true,
-    }
-}
-
-/// Resolve the kill switch. Same precedence shape as
-/// `wcoj_gate_enabled` (config override > env > false).
-/// Returns `true` when dispatch should be hard-disabled.
-pub(super) fn wcoj_disabled(config_override: Option<bool>) -> bool {
-    if let Some(v) = config_override {
-        return v;
-    }
-    std::env::var(ENV_DISABLE_WCOJ_TRIANGLE)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    config_override.unwrap_or(true)
 }
 
 // -----------------------------------------------------------------
@@ -240,38 +193,11 @@ pub(super) fn wcoj_4cycle_disabled(config_override: Option<bool>) -> bool {
         .unwrap_or(false)
 }
 
-/// Threshold at which a classifier score routes the rule to the
-/// WCOJ pipeline rather than the binary-join fallback. Locked
-/// from the v0.6.2 baseline probe in
-/// `docs/evidence/2026-05-01-wcoj-bench-baseline/`: uniform/empty
-/// fixtures score ≤ 0.04, super-hub fixtures score ≥ 0.18.
-/// Threshold of 0.10 sits in the gap with ≥1.7× headroom on each
-/// side — robust to bench/kernel noise.
-pub(super) const WCOJ_ADAPTIVE_SKEW_THRESHOLD: f64 = 0.10;
-
-/// v0.6.5 slice 2 — threshold for the 4-cycle adaptive
-/// classifier. Reduction across the four join positions is
-/// `max(score_per_position)`, which keeps the score in the same
-/// `[0, 1]` range as the triangle classifier — so the same `0.10`
-/// threshold transfers directly. Bench evidence under
-/// `docs/evidence/2026-05-?-wcoj-4cycle-bench-baseline/`
-/// (slice 2 step 10) verifies the gap has ≥1.7× headroom on
-/// each side; if the evidence shows a different threshold is
-/// warranted, lock the new value before merging.
-pub(super) const WCOJ_ADAPTIVE_4CYCLE_SKEW_THRESHOLD: f64 = 0.10;
-
 /// Resolved dispatch mode after consulting both gates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DispatchMode {
-    /// Force-WCOJ: classifier is bypassed entirely; dispatch
-    /// fires whenever the RIR + buffers + width all match.
-    /// Set by `wcoj_triangle_dispatch=Some(true)` or env=1.
     Force,
-    /// Adaptive: run the GPU skew classifier; dispatch only
-    /// when the score clears [`WCOJ_ADAPTIVE_SKEW_THRESHOLD`].
-    /// Set by `wcoj_triangle_dispatch_adaptive=Some(true)` (and
-    /// force is not on).
-    Adaptive,
+    CostModel,
 }
 
 /// Three rel IDs extracted from a matched triangle RIR. The
@@ -832,20 +758,14 @@ impl Executor {
         let wall_start = Instant::now();
         // 1. Gate resolution. Decision tree (highest → lowest):
         //
-        //    a. Hard kill switch
-        //       (`wcoj_triangle_dispatch_disabled` /
-        //       `XLOG_DISABLE_WCOJ_TRIANGLE=1`) → no dispatch.
-        //       Beats every other flag including force.
+        //    a. Runtime disable flag → no dispatch.
         //    b. If `wcoj_triangle_dispatch` resolves to true
-        //       (config Some(true) or env=1) → force WCOJ;
-        //       classifier is bypassed entirely (mode = Force).
+        //       (config Some(true) or env=1) → force WCOJ.
         //    c. Force = Some(false) → explicit off.
-        //    d. Else if `wcoj_triangle_dispatch_adaptive`
-        //       resolves to true (config / env / default-on) →
-        //       run classifier; dispatch only when score ≥
-        //       threshold (mode = Adaptive).
+        //    d. Else if stats mode resolves to true, consult
+        //       the cardinality model.
         //    e. Else → no dispatch.
-        if wcoj_disabled(self.config.wcoj_triangle_dispatch_disabled) {
+        if self.config.wcoj_triangle_dispatch_disabled.unwrap_or(false) {
             return Ok(None);
         }
         let force_override = self.config.wcoj_triangle_dispatch;
@@ -853,16 +773,16 @@ impl Executor {
         let mode = if force_on {
             DispatchMode::Force
         } else {
-            // Force-Some(false) is "explicitly off" — adaptive
-            // does NOT resurrect it. Only when force is None or
-            // env-default-off do we consult the adaptive gate.
+            // Force-Some(false) is "explicitly off". Only when
+            // force is None or env-default-off do we consult the
+            // stats gate.
             let force_explicit_off = matches!(force_override, Some(false));
             if force_explicit_off {
                 return Ok(None);
             }
             let adaptive_override = self.config.wcoj_triangle_dispatch_adaptive;
             if wcoj_adaptive_enabled(adaptive_override) {
-                DispatchMode::Adaptive
+                DispatchMode::CostModel
             } else {
                 return Ok(None);
             }
@@ -932,26 +852,13 @@ impl Executor {
             None => return Ok(None),
         };
 
-        // 6. Adaptive mode only: run the classifier on the same
-        // launch_stream as the eventual WCOJ pipeline. Classifier
-        // failures (Ok(None) from the provider) silently fall
-        // back to binary-join — classifier is optimization, not
-        // correctness. A score below
-        // `WCOJ_ADAPTIVE_SKEW_THRESHOLD` likewise falls back.
-        // v0.6.5 slice 3: route the adaptive decision through the
-        // WcojCostModel seam. Default impl is SkewClassifierCostModel,
-        // which is a verbatim wrap of the v0.6.5 slice 2 inline
-        // logic — dispatch counts are preserved bit-for-bit.
+        // 6. Stats-backed mode only: resolve the WCOJ cost model
+        // on the same launch stream as the eventual GPU pipeline.
         #[cfg(feature = "wcoj-phase-timing")]
         let mut classifier_ms: f32 = 0.0;
-        if mode == DispatchMode::Adaptive {
+        if mode == DispatchMode::CostModel {
             #[cfg(feature = "wcoj-phase-timing")]
             let cls_start = Instant::now();
-            // Slice 5: factory selects per RuntimeConfig precedence.
-            // Default (slice 1–4 behavior) is `SkewClassifierCostModel`;
-            // opt-in via `XLOG_WCOJ_COST_MODEL=cardinality` or
-            // `RuntimeConfig::with_wcoj_cost_model(...)` selects
-            // `CardinalityAwareCostModel`.
             let model = super::wcoj_cost_model::build_wcoj_cost_model(&self.config);
             let slot_rels = [matched.rel_xy, matched.rel_yz, matched.rel_xz];
             let ctx = super::wcoj_cost_model::WcojDispatchCtx {
@@ -960,13 +867,7 @@ impl Executor {
                 width,
                 slot_rels: &slot_rels,
             };
-            let scorer = super::wcoj_cost_model::TriangleScorer {
-                provider: self.provider.as_ref(),
-                e_xy: buf_xy,
-                e_yz: buf_yz,
-                e_xz: buf_xz,
-            };
-            let dispatch = model.should_dispatch_triangle(&ctx, &scorer);
+            let dispatch = model.should_dispatch_triangle(&ctx);
             #[cfg(feature = "wcoj-phase-timing")]
             {
                 classifier_ms = cls_start.elapsed().as_secs_f64() as f32 * 1000.0;
@@ -1316,11 +1217,8 @@ impl Executor {
     ///   2. Force gate (`wcoj_4cycle_dispatch=Some(true)` /
     ///      `XLOG_USE_WCOJ_4CYCLE=1`) → kernel runs.
     ///   3. Force-Some(false) → no dispatch.
-    ///   4. Adaptive opt-in (config / env, default off) →
-    ///      classifier integration lands in slice 2 step 9;
-    ///      until then, the adaptive branch returns Ok(None)
-    ///      (no dispatch). Per the slice 2 plan, ship force +
-    ///      adaptive together; this step just plumbs the gates.
+    ///   4. Stats opt-in (config / env, default off) →
+    ///      cardinality model decides whether the kernel runs.
     ///
     /// Returns `Ok(Some(buffer))` on dispatch; `Ok(None)`
     /// silently otherwise. The caller installs the buffer or
@@ -1359,7 +1257,7 @@ impl Executor {
             }
             let adaptive_override = self.config.wcoj_4cycle_dispatch_adaptive;
             if wcoj_4cycle_adaptive_enabled(adaptive_override) {
-                DispatchMode::Adaptive
+                DispatchMode::CostModel
             } else {
                 return Ok(None);
             }
@@ -1427,11 +1325,9 @@ impl Executor {
             None => return Ok(None),
         };
 
-        // 7. v0.6.5 slice 3: route the adaptive decision through
-        // the WcojCostModel seam. Default impl is
-        // SkewClassifierCostModel — verbatim wrap of the v0.6.5
-        // slice 2 inline logic; dispatch counts preserved.
-        if mode == DispatchMode::Adaptive {
+        // 7. Stats-backed mode: route the decision through
+        // the cardinality WCOJ cost model.
+        if mode == DispatchMode::CostModel {
             // Slice 5: factory selects per RuntimeConfig precedence.
             let model = super::wcoj_cost_model::build_wcoj_cost_model(&self.config);
             let slot_rels = [
@@ -1446,14 +1342,7 @@ impl Executor {
                 width,
                 slot_rels: &slot_rels,
             };
-            let scorer = super::wcoj_cost_model::Cycle4Scorer {
-                provider: self.provider.as_ref(),
-                e1: buf_e1,
-                e2: buf_e2,
-                e3: buf_e3,
-                e4: buf_e4,
-            };
-            let dispatch = model.should_dispatch_4cycle(&ctx, &scorer);
+            let dispatch = model.should_dispatch_4cycle(&ctx);
             if !dispatch {
                 return Ok(None);
             }
@@ -1978,8 +1867,8 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use super::{
-        match_multiway_triangle, wcoj_adaptive_enabled, wcoj_disabled, wcoj_gate_enabled,
-        ENV_DISABLE_WCOJ_TRIANGLE, ENV_USE_WCOJ_TRIANGLE_ADAPTIVE, ENV_USE_WCOJ_TRIANGLE_U32,
+        match_multiway_triangle, wcoj_adaptive_enabled, wcoj_gate_enabled,
+        ENV_USE_WCOJ_TRIANGLE_U32,
     };
     use xlog_core::RelId;
     use xlog_ir::rir::ProjectExpr;
@@ -2133,24 +2022,18 @@ mod tests {
 
     struct EnvSnapshot {
         force: Option<String>,
-        adaptive: Option<String>,
-        disable: Option<String>,
     }
 
     impl EnvSnapshot {
         fn capture_and_clear() -> Self {
             let snapshot = Self {
                 force: std::env::var(ENV_USE_WCOJ_TRIANGLE_U32).ok(),
-                adaptive: std::env::var(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE).ok(),
-                disable: std::env::var(ENV_DISABLE_WCOJ_TRIANGLE).ok(),
             };
 
             // SAFETY: The caller holds `env_lock`, serializing mutation of
-            // these process-global WCOJ env vars.
+            // this process-global WCOJ env var.
             unsafe {
                 std::env::remove_var(ENV_USE_WCOJ_TRIANGLE_U32);
-                std::env::remove_var(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE);
-                std::env::remove_var(ENV_DISABLE_WCOJ_TRIANGLE);
             }
 
             snapshot
@@ -2165,14 +2048,6 @@ mod tests {
                 match self.force.take() {
                     Some(v) => std::env::set_var(ENV_USE_WCOJ_TRIANGLE_U32, v),
                     None => std::env::remove_var(ENV_USE_WCOJ_TRIANGLE_U32),
-                }
-                match self.adaptive.take() {
-                    Some(v) => std::env::set_var(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE, v),
-                    None => std::env::remove_var(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE),
-                }
-                match self.disable.take() {
-                    Some(v) => std::env::set_var(ENV_DISABLE_WCOJ_TRIANGLE, v),
-                    None => std::env::remove_var(ENV_DISABLE_WCOJ_TRIANGLE),
                 }
             }
         }
@@ -2193,7 +2068,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_resolver_defaults_on_when_env_unset() {
+    fn stats_gate_defaults_on_when_env_unset() {
         with_wcoj_env(|| {
             assert!(wcoj_adaptive_enabled(None));
             assert!(wcoj_adaptive_enabled(Some(true)));
@@ -2202,45 +2077,10 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_resolver_env_can_disable_or_enable() {
+    fn config_controls_stats_gate() {
         with_wcoj_env(|| {
-            set_env(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE, "0");
-            assert!(!wcoj_adaptive_enabled(None));
-
-            set_env(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE, "false");
-            assert!(!wcoj_adaptive_enabled(None));
-
-            set_env(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE, "true");
-            assert!(wcoj_adaptive_enabled(None));
-
-            set_env(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE, "1");
-            assert!(wcoj_adaptive_enabled(None));
-        });
-    }
-
-    #[test]
-    fn config_overrides_adaptive_env() {
-        with_wcoj_env(|| {
-            set_env(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE, "0");
             assert!(wcoj_adaptive_enabled(Some(true)));
-
-            set_env(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE, "1");
             assert!(!wcoj_adaptive_enabled(Some(false)));
-        });
-    }
-
-    #[test]
-    fn kill_switch_resolver_honors_env_and_config_precedence() {
-        with_wcoj_env(|| {
-            assert!(!wcoj_disabled(None));
-
-            set_env(ENV_DISABLE_WCOJ_TRIANGLE, "1");
-            assert!(wcoj_disabled(None));
-            assert!(!wcoj_disabled(Some(false)));
-
-            set_env(ENV_DISABLE_WCOJ_TRIANGLE, "0");
-            assert!(!wcoj_disabled(None));
-            assert!(wcoj_disabled(Some(true)));
         });
     }
 

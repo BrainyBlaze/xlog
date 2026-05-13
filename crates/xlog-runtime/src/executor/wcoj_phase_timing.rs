@@ -9,14 +9,14 @@
 use xlog_cuda::wcoj_phase_timing::WcojTrianglePhaseTiming;
 
 /// Per-dispatch breakdown of WCOJ triangle dispatch wall-clock
-/// time into 11 buckets (4 GPU + 4 layout/classifier/wall +
+/// time into 11 buckets (4 GPU + 4 layout/decision/wall +
 /// 1 derived total + 1 derived residual).
 ///
 /// All times are in milliseconds (`f32`).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct WcojDispatchPhaseTiming {
-    /// Time spent in the GPU skew classifier
-    /// (`wcoj_triangle_skew_score_*`). 0.0 in `Mode::Force`.
+    /// Time spent in the stats-backed dispatch decision.
+    /// 0.0 in `Mode::Force`.
     pub classifier_ms: f32,
     /// Time spent in `wcoj_layout_*_recorded` for e_xy / e_yz /
     /// e_xz independently.
@@ -45,10 +45,10 @@ pub struct WcojDispatchPhaseTiming {
     /// from `try_dispatch_wcoj_triangle` entry to dispatch
     /// success.
     pub execute_plan_wall_ms: f32,
-    /// `wall - classifier - layout_total - triangle_gpu_total`.
+    /// `wall - dispatch-decision - layout_total - triangle_gpu_total`.
     /// Captures: validation, memory allocation, recorder
     /// preflight/commit, host syncs, `dtoh_scalar_untracked`,
-    /// the metadata D2H of the classifier histogram, output
+    /// output
     /// buffer alloc, H2D of `out_d_num_rows`, etc.
     pub residual_overhead_ms: f32,
 }

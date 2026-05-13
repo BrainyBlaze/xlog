@@ -1,22 +1,14 @@
 // crates/xlog-integration/tests/test_wcoj_cardinality_cost_model.rs
 //! v0.6.5 slice 5 — `CardinalityAwareCostModel` cert.
 //!
-//! Locks the contract for the slice 5 opt-in cost model:
+//! Locks the contract for the cardinality WCOJ cost model:
 //!
-//!   * **Default config** (no env, no field) selects
-//!     `CardinalityAwareCostModel`; missing-stats runs preserve
-//!     legacy skew behavior through the safety-floor delegate.
-//!   * **Opt-in via config field** with populated runtime
-//!     stats: large `binary_est` triggers the asymptotic
-//!     clause and dispatches.
-//!   * **Opt-in via config field** with small populated
-//!     stats: `binary_est` below `MIN_CARDINALITY_BINARY_INTERMEDIATE`
-//!     keeps the binary-join path (counter == 0).
-//!   * **Bare default WITHOUT seeded stats**: cardinality model
-//!     delegates to `SkewClassifierCostModel`, so the dispatch
-//!     decision matches an explicit skew baseline.
-//!   * **Env var ↔ config field parity**: `XLOG_WCOJ_COST_MODEL=cardinality`
-//!     produces the same selection as the config builder.
+//!   * Populated runtime stats with large `binary_est` trigger
+//!     dispatch.
+//!   * Populated runtime stats with small `binary_est` keep the
+//!     binary-join path (counter == 0).
+//!   * Missing runtime stats keep the binary-join path while
+//!     preserving row-set parity against an explicit off run.
 //!
 //! ## Runtime-stats seeding
 //!
@@ -31,10 +23,9 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::{Mutex, OnceLock};
 
 use cudarc::driver::sys;
-use xlog_core::{CostModelKind, MemoryBudget, RuntimeConfig, ScalarType, Schema};
+use xlog_core::{MemoryBudget, RuntimeConfig, ScalarType, Schema};
 use xlog_cuda::device_runtime::{
     AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
     LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
@@ -293,8 +284,7 @@ fn triangle_inputs() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
 /// Compile + execute. Optionally seed runtime stats with the
 /// supplied (relation-name, cardinality) pairs after relations
 /// are registered + populated. Empty `seeded_cards` means
-/// "stats not seeded" — the cardinality model's missing-stats
-/// safety floor delegates to the skew model.
+/// "stats not seeded".
 fn run_with_optional_stats(
     provider: Arc<CudaKernelProvider>,
     memory: &Arc<GpuMemoryManager>,
@@ -314,10 +304,8 @@ fn run_with_optional_stats(
         let buf = upload_binary_u32(memory, rows);
         executor.put_relation(name, buf);
     }
-    // v0.6.5 slice 5 — seed runtime stats AFTER register +
-    // upload. The cost model reads `Executor::stats` at
-    // dispatch time; without explicit seeding the cardinality
-    // model delegates to the skew classifier (safety floor).
+    // Seed runtime stats AFTER register + upload. The cost model
+    // reads `Executor::stats` at dispatch time.
     for (name, card) in seeded_cards {
         if let Some(rid) = rel_ids.get(*name) {
             executor.stats_mut().register_relation(*rid);
@@ -329,204 +317,123 @@ fn run_with_optional_stats(
 }
 
 // ---------------------------------------------------------------
-// Env-lock for XLOG_WCOJ_COST_MODEL
-// ---------------------------------------------------------------
-
-fn cost_model_env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-struct CostModelEnvSnapshot(Option<String>);
-
-impl CostModelEnvSnapshot {
-    fn capture_and_clear() -> Self {
-        let prior = std::env::var("XLOG_WCOJ_COST_MODEL").ok();
-        // SAFETY: caller holds `cost_model_env_lock`.
-        unsafe {
-            std::env::remove_var("XLOG_WCOJ_COST_MODEL");
-        }
-        Self(prior)
-    }
-}
-
-impl Drop for CostModelEnvSnapshot {
-    fn drop(&mut self) {
-        unsafe {
-            match self.0.take() {
-                Some(v) => std::env::set_var("XLOG_WCOJ_COST_MODEL", v),
-                None => std::env::remove_var("XLOG_WCOJ_COST_MODEL"),
-            }
-        }
-    }
-}
-
-fn with_cost_model_env<R>(f: impl FnOnce() -> R) -> R {
-    let _guard = cost_model_env_lock()
-        .lock()
-        .expect("cost-model env lock poisoned");
-    let _snap = CostModelEnvSnapshot::capture_and_clear();
-    f()
-}
-
-// ---------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------
 
 #[test]
 fn cardinality_default_off_keeps_slice4_dispatch_counts() {
-    // No env, no config field → factory selects
-    // SkewClassifierCostModel. Slice 4's stable-triangle test
-    // baseline (counter == 1 with force gate on) must hold
-    // bit-identical.
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
     };
-    with_cost_model_env(|| {
-        let executor = run_with_optional_stats(
-            Arc::clone(&fix.provider),
-            &fix.memory,
-            RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(true)),
-            STABLE_TRIANGLE_RECURSIVE,
-            &triangle_inputs(),
-            &BTreeMap::new(),
-        );
-        assert_eq!(
-            executor.wcoj_triangle_dispatch_count(),
-            1,
-            "default cost model must preserve slice 4 stable-triangle counter"
-        );
-    });
+    let executor = run_with_optional_stats(
+        Arc::clone(&fix.provider),
+        &fix.memory,
+        RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(true)),
+        STABLE_TRIANGLE_RECURSIVE,
+        &triangle_inputs(),
+        &BTreeMap::new(),
+    );
+    assert_eq!(
+        executor.wcoj_triangle_dispatch_count(),
+        1,
+        "force gate must preserve slice 4 stable-triangle counter"
+    );
 }
 
 #[test]
-fn cardinality_opt_in_with_seeded_large_cards_dispatches_via_adaptive() {
-    // Opt-in cardinality model. Seed runtime stats large enough
-    // that binary_est >= LARGE_CARDINALITY_BINARY_INTERMEDIATE
-    // (1M). 100K * 100K * 0.1 default selectivity ≈ 1B → above
-    // threshold. Use adaptive mode (default-on for triangle)
-    // so the cost model is consulted, not bypassed.
+fn cardinality_with_seeded_large_cards_dispatches_via_stats_gate() {
+    // Seed runtime stats large enough that binary_est >=
+    // LARGE_CARDINALITY_BINARY_INTERMEDIATE (1M). 100K * 100K
+    // * 0.1 default selectivity is above threshold. Use stats
+    // mode so the cost model is consulted, not bypassed.
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
     };
-    with_cost_model_env(|| {
-        let mut seeded = BTreeMap::new();
-        seeded.insert("e1", 100_000u64);
-        seeded.insert("e2", 100_000u64);
-        seeded.insert("e3", 100_000u64);
-        let executor = run_with_optional_stats(
-            Arc::clone(&fix.provider),
-            &fix.memory,
-            RuntimeConfig::default().with_wcoj_cost_model(Some(CostModelKind::Cardinality)),
-            STABLE_TRIANGLE_RECURSIVE,
-            &triangle_inputs(),
-            &seeded,
-        );
-        assert!(
-            executor.wcoj_triangle_dispatch_count() >= 1,
-            "cardinality model + huge binary_est must dispatch even on uniform inputs; got counter {}",
-            executor.wcoj_triangle_dispatch_count()
-        );
-    });
+    let mut seeded = BTreeMap::new();
+    seeded.insert("e1", 100_000u64);
+    seeded.insert("e2", 100_000u64);
+    seeded.insert("e3", 100_000u64);
+    let executor = run_with_optional_stats(
+        Arc::clone(&fix.provider),
+        &fix.memory,
+        RuntimeConfig::default(),
+        STABLE_TRIANGLE_RECURSIVE,
+        &triangle_inputs(),
+        &seeded,
+    );
+    assert!(
+        executor.wcoj_triangle_dispatch_count() >= 1,
+        "cardinality model + huge binary_est must dispatch even on uniform inputs; got counter {}",
+        executor.wcoj_triangle_dispatch_count()
+    );
 }
 
 #[test]
-fn cardinality_opt_in_with_small_cards_falls_back_to_binary() {
-    // Opt-in cardinality model, but seeded stats are tiny:
-    // 5 * 5 * 0.1 = 2.5 → binary_est = 1 (clamped to >= 1) <
-    // MIN_CARDINALITY_BINARY_INTERMEDIATE (4096). Even with
-    // adaptive mode and a high score, the cardinality model
-    // says "kernel not worth the launch" → no dispatch.
+fn cardinality_with_small_cards_keeps_binary_path() {
+    // Seeded stats are tiny: 5 * 5 * 0.1 = 2.5, so binary_est
+    // is below MIN_CARDINALITY_BINARY_INTERMEDIATE (4096).
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
     };
-    with_cost_model_env(|| {
-        let mut seeded = BTreeMap::new();
-        seeded.insert("e1", 5u64);
-        seeded.insert("e2", 5u64);
-        seeded.insert("e3", 5u64);
-        let executor = run_with_optional_stats(
-            Arc::clone(&fix.provider),
-            &fix.memory,
-            RuntimeConfig::default().with_wcoj_cost_model(Some(CostModelKind::Cardinality)),
-            STABLE_TRIANGLE_RECURSIVE,
-            &triangle_inputs(),
-            &seeded,
-        );
-        assert_eq!(
-            executor.wcoj_triangle_dispatch_count(),
-            0,
-            "cardinality model + small binary_est must fall back; got counter {}",
-            executor.wcoj_triangle_dispatch_count()
-        );
-    });
+    let mut seeded = BTreeMap::new();
+    seeded.insert("e1", 5u64);
+    seeded.insert("e2", 5u64);
+    seeded.insert("e3", 5u64);
+    let executor = run_with_optional_stats(
+        Arc::clone(&fix.provider),
+        &fix.memory,
+        RuntimeConfig::default(),
+        STABLE_TRIANGLE_RECURSIVE,
+        &triangle_inputs(),
+        &seeded,
+    );
+    assert_eq!(
+        executor.wcoj_triangle_dispatch_count(),
+        0,
+        "cardinality model + small binary_est must keep binary path; got counter {}",
+        executor.wcoj_triangle_dispatch_count()
+    );
 }
 
 #[test]
-fn bare_default_without_seeded_stats_delegates_to_skew_model() {
-    // Bare default now selects CardinalityAwareCostModel. With NO
-    // stats seeded, the missing-stats safety floor MUST delegate to
-    // SkewClassifierCostModel. We prove that by running two
-    // adaptive-mode executions on the same fixture and asserting
-    // counter + row set parity:
-    //
-    //   1. Explicit SkewClassifier baseline.
-    //   2. Bare default (cardinality, no stats seeded → delegates).
-    //
-    // Force-gate on a triangle would bypass the cost model
-    // entirely, so this test stays in adaptive mode (default-on
-    // for triangle) so the cost model IS consulted. If the
-    // delegation logic broke, the cardinality model would
-    // produce a different decision and the assertion would
-    // catch it.
+fn bare_default_without_seeded_stats_keeps_binary_path() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
     };
-    with_cost_model_env(|| {
-        // Run 1: explicit skew-classifier baseline, adaptive.
-        let baseline = run_with_optional_stats(
-            Arc::clone(&fix.provider),
-            &fix.memory,
-            RuntimeConfig::default().with_wcoj_cost_model(Some(CostModelKind::SkewClassifier)),
-            STABLE_TRIANGLE_RECURSIVE,
-            &triangle_inputs(),
-            &BTreeMap::new(),
-        );
-        let baseline_counter = baseline.wcoj_triangle_dispatch_count();
-        assert!(
-            baseline_counter > 0,
-            "explicit SkewClassifier baseline must dispatch on the stable triangle"
-        );
-        let baseline_rows = download_triples(baseline.store().get("tri").expect("tri"));
+    let reference = run_with_optional_stats(
+        Arc::clone(&fix.provider),
+        &fix.memory,
+        RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(false)),
+        STABLE_TRIANGLE_RECURSIVE,
+        &triangle_inputs(),
+        &BTreeMap::new(),
+    );
+    let reference_rows = download_triples(reference.store().get("tri").expect("tri"));
 
-        // Run 2: bare default, NO stats seeded → delegate.
-        let delegated = run_with_optional_stats(
-            Arc::clone(&fix.provider),
-            &fix.memory,
-            RuntimeConfig::default(),
-            STABLE_TRIANGLE_RECURSIVE,
-            &triangle_inputs(),
-            &BTreeMap::new(),
-        );
+    let default_run = run_with_optional_stats(
+        Arc::clone(&fix.provider),
+        &fix.memory,
+        RuntimeConfig::default(),
+        STABLE_TRIANGLE_RECURSIVE,
+        &triangle_inputs(),
+        &BTreeMap::new(),
+    );
 
-        assert_eq!(
-            delegated.wcoj_triangle_dispatch_count(),
-            baseline_counter,
-            "cardinality model with missing stats must delegate to \
-             SkewClassifier; counter {} ≠ skew baseline {}",
-            delegated.wcoj_triangle_dispatch_count(),
-            baseline_counter,
-        );
-        let delegated_rows = download_triples(delegated.store().get("tri").expect("tri"));
-        assert_eq!(
-            delegated_rows, baseline_rows,
-            "bare-default delegation must produce the same row set as explicit skew"
-        );
-    });
+    assert_eq!(
+        default_run.wcoj_triangle_dispatch_count(),
+        0,
+        "cardinality model with missing stats must keep binary path; got counter {}",
+        default_run.wcoj_triangle_dispatch_count(),
+    );
+    let default_rows = download_triples(default_run.store().get("tri").expect("tri"));
+    assert_eq!(
+        default_rows, reference_rows,
+        "bare default without seeded stats must preserve row set"
+    );
 }
 
 #[test]
@@ -539,32 +446,28 @@ fn cardinality_4cycle_opt_in_with_seeded_large_cards_dispatches() {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
     };
-    with_cost_model_env(|| {
-        let mut seeded = BTreeMap::new();
-        seeded.insert("e1", 100_000u64);
-        seeded.insert("e2", 100_000u64);
-        seeded.insert("e3", 100_000u64);
-        seeded.insert("e4", 100_000u64);
-        let executor = run_with_optional_stats(
-            Arc::clone(&fix.provider),
-            &fix.memory,
-            RuntimeConfig::default()
-                .with_wcoj_cost_model(Some(CostModelKind::Cardinality))
-                .with_wcoj_4cycle_dispatch_adaptive(Some(true)),
-            STABLE_4CYCLE_RECURSIVE,
-            &cycle4_inputs(),
-            &seeded,
-        );
-        assert!(
-            executor.wcoj_4cycle_dispatch_count() >= 1,
-            "cardinality model + huge binary_est must dispatch on 4-cycle; got counter {}",
-            executor.wcoj_4cycle_dispatch_count()
-        );
-    });
+    let mut seeded = BTreeMap::new();
+    seeded.insert("e1", 100_000u64);
+    seeded.insert("e2", 100_000u64);
+    seeded.insert("e3", 100_000u64);
+    seeded.insert("e4", 100_000u64);
+    let executor = run_with_optional_stats(
+        Arc::clone(&fix.provider),
+        &fix.memory,
+        RuntimeConfig::default().with_wcoj_4cycle_dispatch_adaptive(Some(true)),
+        STABLE_4CYCLE_RECURSIVE,
+        &cycle4_inputs(),
+        &seeded,
+    );
+    assert!(
+        executor.wcoj_4cycle_dispatch_count() >= 1,
+        "cardinality model + huge binary_est must dispatch on 4-cycle; got counter {}",
+        executor.wcoj_4cycle_dispatch_count()
+    );
 }
 
 #[test]
-fn cardinality_4cycle_opt_in_with_small_cards_falls_back_to_binary() {
+fn cardinality_4cycle_opt_in_with_small_cards_keeps_binary_path() {
     // 4-cycle counterpart of the small-binary triangle test.
     // Seeded stats are tiny → binary_est below MIN threshold →
     // no dispatch (binary-join handles).
@@ -572,68 +475,25 @@ fn cardinality_4cycle_opt_in_with_small_cards_falls_back_to_binary() {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
     };
-    with_cost_model_env(|| {
-        let mut seeded = BTreeMap::new();
-        seeded.insert("e1", 5u64);
-        seeded.insert("e2", 5u64);
-        seeded.insert("e3", 5u64);
-        seeded.insert("e4", 5u64);
-        let executor = run_with_optional_stats(
-            Arc::clone(&fix.provider),
-            &fix.memory,
-            RuntimeConfig::default()
-                .with_wcoj_cost_model(Some(CostModelKind::Cardinality))
-                .with_wcoj_4cycle_dispatch_adaptive(Some(true)),
-            STABLE_4CYCLE_RECURSIVE,
-            &cycle4_inputs(),
-            &seeded,
-        );
-        assert_eq!(
-            executor.wcoj_4cycle_dispatch_count(),
-            0,
-            "cardinality model + small binary_est must fall back on 4-cycle; got counter {}",
-            executor.wcoj_4cycle_dispatch_count()
-        );
-        // Confirm the program still produced the correct row
-        // set via the binary-join path.
-        let rows = download_quads(executor.store().get("cyc").expect("cyc"));
-        assert!(
-            !rows.is_empty(),
-            "binary-join fallback must still produce 4-cycle rows"
-        );
-    });
-}
-
-#[test]
-fn cardinality_opt_in_via_env_var_matches_config_field() {
-    // Set env var to `cardinality`, no config-field override —
-    // expect identical behavior to the config-field-set test
-    // above.
-    let Some(fix) = make_runtime_backed_fixture() else {
-        eprintln!("Skipping: CUDA runtime unavailable");
-        return;
-    };
-    with_cost_model_env(|| {
-        // SAFETY: caller holds `cost_model_env_lock`.
-        unsafe {
-            std::env::set_var("XLOG_WCOJ_COST_MODEL", "cardinality");
-        }
-        let mut seeded = BTreeMap::new();
-        seeded.insert("e1", 100_000u64);
-        seeded.insert("e2", 100_000u64);
-        seeded.insert("e3", 100_000u64);
-        let executor = run_with_optional_stats(
-            Arc::clone(&fix.provider),
-            &fix.memory,
-            RuntimeConfig::default(), // no config-field override
-            STABLE_TRIANGLE_RECURSIVE,
-            &triangle_inputs(),
-            &seeded,
-        );
-        assert!(
-            executor.wcoj_triangle_dispatch_count() >= 1,
-            "env-var opt-in with seeded large cards must dispatch; got counter {}",
-            executor.wcoj_triangle_dispatch_count()
-        );
-    });
+    let mut seeded = BTreeMap::new();
+    seeded.insert("e1", 5u64);
+    seeded.insert("e2", 5u64);
+    seeded.insert("e3", 5u64);
+    seeded.insert("e4", 5u64);
+    let executor = run_with_optional_stats(
+        Arc::clone(&fix.provider),
+        &fix.memory,
+        RuntimeConfig::default().with_wcoj_4cycle_dispatch_adaptive(Some(true)),
+        STABLE_4CYCLE_RECURSIVE,
+        &cycle4_inputs(),
+        &seeded,
+    );
+    assert_eq!(
+        executor.wcoj_4cycle_dispatch_count(),
+        0,
+        "cardinality model + small binary_est must keep binary path on 4-cycle; got counter {}",
+        executor.wcoj_4cycle_dispatch_count()
+    );
+    let rows = download_quads(executor.store().get("cyc").expect("cyc"));
+    assert!(!rows.is_empty(), "binary-join path must produce rows");
 }

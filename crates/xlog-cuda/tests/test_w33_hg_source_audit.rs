@@ -10,6 +10,16 @@ fn wcoj_cu_source() -> String {
     fs::read_to_string(&p).unwrap_or_else(|e| panic!("failed to read {}: {}", p.display(), e))
 }
 
+fn workspace_source(path: &str) -> String {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("crate lives under workspace/crates");
+    let full = root.join(path);
+    fs::read_to_string(&full).unwrap_or_else(|e| panic!("failed to read {}: {}", full.display(), e))
+}
+
 fn extract_extern_c_global_body(src: &str, name: &str) -> Option<String> {
     let needle = format!("__global__ void {}", name);
     extract_body_after(src, &needle)
@@ -246,4 +256,41 @@ fn clique_count_and_materialize_are_hg_block_slice() {
         materialize_template.contains("block_offsets[blockIdx.x]"),
         "clique materialize template must emit from the scanned HG block offset"
     );
+}
+
+#[test]
+fn adaptive_skew_classifier_surface_is_removed() {
+    let combined = [
+        wcoj_cu_source(),
+        workspace_source("crates/xlog-cuda/src/provider/wcoj.rs"),
+        workspace_source("crates/xlog-cuda/src/provider/mod.rs"),
+        workspace_source("crates/xlog-cuda/src/kernel_manifest_data.rs"),
+        workspace_source("crates/xlog-runtime/src/executor/wcoj_dispatch.rs"),
+        workspace_source("crates/xlog-runtime/src/executor/wcoj_cost_model.rs"),
+    ]
+    .join("\n");
+
+    for symbol in [
+        "WCOJ_ADAPTIVE_SKEW_THRESHOLD",
+        "wcoj_triangle_skew_histogram_u32",
+        "wcoj_triangle_skew_histogram_u64",
+        "wcoj_triangle_skew_score_u32",
+        "wcoj_triangle_skew_score_u64",
+        "wcoj_4cycle_skew_histogram_u32",
+        "wcoj_4cycle_skew_histogram_u64",
+        "wcoj_4cycle_skew_score_u32",
+        "wcoj_4cycle_skew_score_u64",
+        "wcoj_skew_bucket_u32",
+        "wcoj_skew_bucket_u64",
+        "SkewScoreSource",
+        "TriangleScorer",
+        "Cycle4Scorer",
+        "ENV_USE_WCOJ_TRIANGLE_ADAPTIVE",
+        "ENV_DISABLE_WCOJ_TRIANGLE",
+    ] {
+        assert!(
+            !combined.contains(symbol),
+            "S1.7 classifier surface must remove {symbol}"
+        );
+    }
 }
