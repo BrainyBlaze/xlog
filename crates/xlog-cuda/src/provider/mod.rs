@@ -891,15 +891,6 @@ pub struct CudaKernelProvider {
     /// confirm the fast-path actually fired vs. silently fell
     /// through to the existing dedup pipeline.
     wcoj_layout_fast_path_hit_count: AtomicU64,
-    /// W3.4 routing counter: number of successful triangle
-    /// dispatches that used the layout+count fused provider entry.
-    /// Incremented by xlog-runtime after the dispatch result is
-    /// accepted, not by the provider method itself.
-    wcoj_triangle_fused_dispatch_count: AtomicU64,
-    /// W3.4 routing counter: number of successful triangle
-    /// dispatches that used the existing unfused WCOJ pipeline
-    /// after the W3.4 threshold branch selected or fell back to it.
-    wcoj_triangle_unfused_dispatch_count: AtomicU64,
     /// W3.3 routing counter: successful triangle dispatches
     /// accepted through the histogram-guided block-slice provider
     /// entry.
@@ -993,8 +984,6 @@ impl CudaKernelProvider {
             recorded_op_stream: OnceLock::new(),
             csm_invocations: AtomicU64::new(0),
             wcoj_layout_fast_path_hit_count: AtomicU64::new(0),
-            wcoj_triangle_fused_dispatch_count: AtomicU64::new(0),
-            wcoj_triangle_unfused_dispatch_count: AtomicU64::new(0),
             wcoj_triangle_hg_dispatch_count: AtomicU64::new(0),
             #[cfg(feature = "wcoj-phase-timing")]
             last_triangle_phase_timing: std::sync::Mutex::new(None),
@@ -1220,20 +1209,6 @@ impl CudaKernelProvider {
         self.wcoj_layout_fast_path_hit_count.load(Ordering::Relaxed)
     }
 
-    /// W3.4 test/diagnostic counter: successful triangle WCOJ
-    /// dispatches that routed through `wcoj_triangle_fused_lc_*`.
-    pub fn wcoj_triangle_fused_dispatch_count(&self) -> u64 {
-        self.wcoj_triangle_fused_dispatch_count
-            .load(Ordering::Relaxed)
-    }
-
-    /// W3.4 test/diagnostic counter: successful triangle WCOJ
-    /// dispatches that routed through the existing unfused pipeline.
-    pub fn wcoj_triangle_unfused_dispatch_count(&self) -> u64 {
-        self.wcoj_triangle_unfused_dispatch_count
-            .load(Ordering::Relaxed)
-    }
-
     /// W3.3 test/diagnostic counter: successful triangle WCOJ
     /// dispatches that routed through the HG block-slice provider
     /// entry.
@@ -1253,25 +1228,6 @@ impl CudaKernelProvider {
     /// branch. Not part of any public stability guarantee.
     pub(crate) fn record_wcoj_layout_fast_path_hit(&self) {
         self.wcoj_layout_fast_path_hit_count
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// W3.4 runtime hook: record a successful fused triangle
-    /// dispatch. Public because `xlog-runtime` owns the dispatch
-    /// decision; not a stable application API.
-    #[doc(hidden)]
-    pub fn record_wcoj_triangle_fused_dispatch(&self) {
-        self.wcoj_triangle_fused_dispatch_count
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// W3.4 runtime hook: record a successful unfused triangle
-    /// dispatch selected by the W3.4 threshold branch. Public
-    /// because `xlog-runtime` owns the dispatch decision; not a
-    /// stable application API.
-    #[doc(hidden)]
-    pub fn record_wcoj_triangle_unfused_dispatch(&self) {
-        self.wcoj_triangle_unfused_dispatch_count
             .fetch_add(1, Ordering::Relaxed);
     }
 
