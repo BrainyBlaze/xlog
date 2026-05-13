@@ -271,6 +271,10 @@ pub mod wcoj_kernels {
     pub const WCOJ_TRIANGLE_BUILD_HG_WORK_PLAN_U32: &str = "wcoj_triangle_build_hg_work_plan_u32";
     pub const WCOJ_TRIANGLE_COUNT_HG_U32: &str = "wcoj_triangle_count_hg_u32";
     pub const WCOJ_TRIANGLE_MATERIALIZE_HG_U32: &str = "wcoj_triangle_materialize_hg_u32";
+    pub const WCOJ_TRIANGLE_COUNT_HG_CACHED_U32: &str = "wcoj_triangle_count_hg_cached_u32";
+    pub const WCOJ_TRIANGLE_MATERIALIZE_HG_CACHED_U32: &str =
+        "wcoj_triangle_materialize_hg_cached_u32";
+    pub const WCOJ_SCAN_HG_BLOCK_COUNTS_U32: &str = "wcoj_scan_hg_block_counts_u32";
     pub const WCOJ_TRIANGLE_COUNT: &str = "wcoj_triangle_count";
     pub const WCOJ_TRIANGLE_FUSED_LC_COUNT: &str = "wcoj_triangle_fused_lc_count";
     pub const WCOJ_COMPUTE_TOTAL: &str = "wcoj_compute_total";

@@ -562,6 +562,199 @@ extern "C" __global__ void wcoj_triangle_materialize_hg_u32(
     }
 }
 
+extern "C" __global__ void wcoj_triangle_count_hg_cached_u32(
+    const uint32_t* __restrict__ xy_col0,
+    const uint32_t* __restrict__ xy_col1,
+    const uint32_t* __restrict__ yz_col1,
+    uint32_t n_yz,
+    const uint32_t* __restrict__ xz_col1,
+    uint32_t n_xz,
+    const uint32_t* __restrict__ xy_work_prefix,
+    const uint32_t* __restrict__ xy_yz_start,
+    const uint32_t* __restrict__ xy_yz_end,
+    const uint32_t* __restrict__ xy_xz_start,
+    const uint32_t* __restrict__ xy_xz_end,
+    uint32_t n_xy,
+    uint32_t total_work,
+    uint32_t block_work_unit,
+    uint32_t* __restrict__ out_block_counts,
+    uint32_t* __restrict__ scratch_x,
+    uint32_t* __restrict__ scratch_y,
+    uint32_t* __restrict__ scratch_z) {
+    uint32_t block_start = blockIdx.x * block_work_unit;
+    if (block_start >= total_work) {
+        if (threadIdx.x == 0) {
+            out_block_counts[blockIdx.x] = 0;
+        }
+        return;
+    }
+    uint32_t block_end = block_start + block_work_unit;
+    if (block_end < block_start || block_end > total_work) {
+        block_end = total_work;
+    }
+
+    uint32_t local_count = 0;
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t root_pos = upper_bound_u32(xy_work_prefix, n_xy + 1, work_idx);
+        if (root_pos == 0) {
+            continue;
+        }
+        uint32_t xy_idx = root_pos - 1;
+        if (xy_idx >= n_xy) {
+            continue;
+        }
+        uint32_t row_start = xy_work_prefix[xy_idx];
+        uint32_t yz_lo = xy_yz_start[xy_idx];
+        uint32_t yz_hi = xy_yz_end[xy_idx];
+        uint32_t xz_lo = xy_xz_start[xy_idx];
+        uint32_t xz_hi = xy_xz_end[xy_idx];
+        if (yz_hi > n_yz || xz_hi > n_xz || yz_lo >= yz_hi || xz_lo >= xz_hi) {
+            continue;
+        }
+        uint32_t yz_len = yz_hi - yz_lo;
+        uint32_t xz_len = xz_hi - xz_lo;
+        uint32_t probe_offset = work_idx - row_start;
+        uint32_t matched = 0;
+        if (yz_len <= xz_len) {
+            if (probe_offset >= yz_len) {
+                continue;
+            }
+            uint32_t z = yz_col1[yz_lo + probe_offset];
+            uint32_t found = lower_bound_u32(xz_col1 + xz_lo, xz_len, z);
+            matched = (found < xz_len && xz_col1[xz_lo + found] == z) ? 1u : 0u;
+        } else {
+            if (probe_offset >= xz_len) {
+                continue;
+            }
+            uint32_t z = xz_col1[xz_lo + probe_offset];
+            uint32_t found = lower_bound_u32(yz_col1 + yz_lo, yz_len, z);
+            matched = (found < yz_len && yz_col1[yz_lo + found] == z) ? 1u : 0u;
+        }
+        local_count += matched;
+    }
+
+    __shared__ uint32_t thread_prefix[256];
+    thread_prefix[threadIdx.x] = local_count;
+    __syncthreads();
+    for (uint32_t stride = 1; stride < blockDim.x; stride <<= 1) {
+        uint32_t add = 0;
+        if (threadIdx.x >= stride) {
+            add = thread_prefix[threadIdx.x - stride];
+        }
+        __syncthreads();
+        thread_prefix[threadIdx.x] += add;
+        __syncthreads();
+    }
+    uint32_t thread_base = threadIdx.x == 0 ? 0 : thread_prefix[threadIdx.x - 1];
+    if (threadIdx.x == blockDim.x - 1) {
+        out_block_counts[blockIdx.x] = thread_prefix[threadIdx.x];
+    }
+
+    uint32_t local_emit = 0;
+    uint32_t scratch_base = blockIdx.x * block_work_unit + thread_base;
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t root_pos = upper_bound_u32(xy_work_prefix, n_xy + 1, work_idx);
+        if (root_pos == 0) {
+            continue;
+        }
+        uint32_t xy_idx = root_pos - 1;
+        if (xy_idx >= n_xy) {
+            continue;
+        }
+        uint32_t row_start = xy_work_prefix[xy_idx];
+        uint32_t yz_lo = xy_yz_start[xy_idx];
+        uint32_t yz_hi = xy_yz_end[xy_idx];
+        uint32_t xz_lo = xy_xz_start[xy_idx];
+        uint32_t xz_hi = xy_xz_end[xy_idx];
+        if (yz_hi > n_yz || xz_hi > n_xz || yz_lo >= yz_hi || xz_lo >= xz_hi) {
+            continue;
+        }
+        uint32_t yz_len = yz_hi - yz_lo;
+        uint32_t xz_len = xz_hi - xz_lo;
+        uint32_t probe_offset = work_idx - row_start;
+        uint32_t matched = 0;
+        uint32_t z = 0;
+        if (yz_len <= xz_len) {
+            if (probe_offset >= yz_len) {
+                continue;
+            }
+            z = yz_col1[yz_lo + probe_offset];
+            uint32_t found = lower_bound_u32(xz_col1 + xz_lo, xz_len, z);
+            matched = (found < xz_len && xz_col1[xz_lo + found] == z) ? 1u : 0u;
+        } else {
+            if (probe_offset >= xz_len) {
+                continue;
+            }
+            z = xz_col1[xz_lo + probe_offset];
+            uint32_t found = lower_bound_u32(yz_col1 + yz_lo, yz_len, z);
+            matched = (found < yz_len && yz_col1[yz_lo + found] == z) ? 1u : 0u;
+        }
+        if (matched != 0u) {
+            uint32_t out = scratch_base + local_emit;
+            scratch_x[out] = xy_col0[xy_idx];
+            scratch_y[out] = xy_col1[xy_idx];
+            scratch_z[out] = z;
+            local_emit += 1;
+        }
+    }
+}
+
+extern "C" __global__ void wcoj_triangle_materialize_hg_cached_u32(
+    const uint32_t* __restrict__ block_counts,
+    const uint32_t* __restrict__ block_offsets,
+    uint32_t block_work_unit,
+    uint32_t total_rows,
+    const uint32_t* __restrict__ scratch_x,
+    const uint32_t* __restrict__ scratch_y,
+    const uint32_t* __restrict__ scratch_z,
+    uint32_t* __restrict__ out_x,
+    uint32_t* __restrict__ out_y,
+    uint32_t* __restrict__ out_z) {
+    uint32_t count = block_counts[blockIdx.x];
+    uint32_t out_base = block_offsets[blockIdx.x];
+    uint32_t scratch_base = blockIdx.x * block_work_unit;
+    for (uint32_t i = threadIdx.x; i < count; i += blockDim.x) {
+        uint32_t out = out_base + i;
+        if (out < total_rows) {
+            uint32_t scratch = scratch_base + i;
+            out_x[out] = scratch_x[scratch];
+            out_y[out] = scratch_y[scratch];
+            out_z[out] = scratch_z[scratch];
+        }
+    }
+}
+
+extern "C" __global__ void wcoj_scan_hg_block_counts_u32(
+    const uint32_t* __restrict__ counts,
+    uint32_t n,
+    uint32_t* __restrict__ offsets,
+    uint32_t* __restrict__ total_rows) {
+    __shared__ uint32_t scan[1024];
+    uint32_t tid = threadIdx.x;
+    uint32_t value = (tid < n) ? counts[tid] : 0u;
+    scan[tid] = value;
+    __syncthreads();
+    for (uint32_t stride = 1; stride < blockDim.x; stride <<= 1) {
+        uint32_t add = 0;
+        if (tid >= stride) {
+            add = scan[tid - stride];
+        }
+        __syncthreads();
+        scan[tid] += add;
+        __syncthreads();
+    }
+    if (tid < n) {
+        offsets[tid] = scan[tid] - value;
+    }
+    if (tid == 0) {
+        *total_rows = (n == 0) ? 0u : scan[n - 1];
+    }
+}
+
 // Per-thread count kernel: one thread per row of e_xy.
 //
 // For thread `i` with row (X, Y) = (xy_col0[i], xy_col1[i]):
