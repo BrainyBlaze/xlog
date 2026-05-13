@@ -8,8 +8,8 @@ use crate::device_runtime::StreamId;
 use crate::launch::LaunchRecorder;
 use crate::memory::{CudaColumn, TrackedCudaSlice};
 use crate::wcoj_metadata::{
-    WcojCycle4HgWorkPlanU32, WcojRelationMetadata, WcojTriangleHgWorkPlanU32,
-    WcojTriangleHgWorkPlanU64,
+    WcojCycle4HgWorkPlanU32, WcojCycle4HgWorkPlanU64, WcojRelationMetadata,
+    WcojTriangleHgWorkPlanU32, WcojTriangleHgWorkPlanU64,
 };
 use crate::{AsKernelParam, CudaBuffer, LaunchAsync, LaunchConfig};
 
@@ -1647,6 +1647,498 @@ impl CudaKernelProvider {
                 out_x_u32.as_kernel_param(),
                 out_y_u32.as_kernel_param(),
                 out_z_u32.as_kernel_param(),
+            ];
+            unsafe {
+                kernel
+                    .clone()
+                    .launch_on_stream(
+                        &cu_stream,
+                        LaunchConfig {
+                            grid_dim: (grid, 1, 1),
+                            block_dim: (BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        &mut params,
+                    )
+                    .map_err(|e| {
+                        XlogError::Kernel(format!("{ctx}: materialize launch failed: {e}"))
+                    })?;
+            }
+        }
+        rec_mat
+            .commit(runtime)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: materialize commit failed: {e}")))?;
+        cu_stream.synchronize().map_err(|e| {
+            XlogError::Kernel(format!("{ctx}: materialize stream sync failed: {e}"))
+        })?;
+
+        Ok(CudaBuffer::from_columns_with_host_count(
+            vec![out_w.into(), out_x.into(), out_y.into(), out_z.into()],
+            total_rows as u64,
+            total_rows_device,
+            out_schema,
+            total_rows,
+        ))
+    }
+
+    pub fn wcoj_4cycle_hg_work_plan_u64_recorded(
+        &self,
+        e1: &CudaBuffer,
+        e2: &CudaBuffer,
+        e3: &CudaBuffer,
+        e4: &CudaBuffer,
+        block_work_unit: u32,
+        launch_stream: StreamId,
+    ) -> Result<WcojCycle4HgWorkPlanU64> {
+        let ctx = "wcoj_4cycle_hg_work_plan_u64_recorded";
+        if block_work_unit == 0 {
+            return Err(XlogError::Kernel(format!(
+                "{ctx}: block_work_unit must be nonzero"
+            )));
+        }
+        validate_binary_u64(ctx, "e1", e1)?;
+        validate_binary_u64(ctx, "e2", e2)?;
+        validate_binary_u64(ctx, "e3", e3)?;
+        validate_binary_u64(ctx, "e4", e4)?;
+
+        let n_e1 = self.metadata_logical_rows(e1)?;
+        let n_e2 = self.metadata_logical_rows(e2)?;
+        let n_e3 = self.metadata_logical_rows(e3)?;
+        let prefix_len = n_e1
+            .checked_add(1)
+            .ok_or_else(|| XlogError::Kernel(format!("{ctx}: prefix length overflow")))?;
+        let mut e1_work_prefix = self.memory().alloc::<u32>(prefix_len as usize)?;
+        let mut e1_e2_start = self.memory().alloc::<u32>(n_e1 as usize)?;
+        let mut e1_e2_end = self.memory().alloc::<u32>(n_e1 as usize)?;
+
+        if n_e1 == 0 || n_e2 == 0 || n_e3 == 0 || self.metadata_logical_rows(e4)? == 0 {
+            let block_counts = self.memory().alloc::<u32>(1)?;
+            let block_offsets = self.memory().alloc::<u32>(1)?;
+            return Ok(WcojCycle4HgWorkPlanU64 {
+                e1_work_prefix,
+                e1_e2_start,
+                e1_e2_end,
+                block_counts,
+                block_offsets,
+                total_work: 0,
+                block_work_unit,
+                row_count: n_e1,
+            });
+        }
+
+        let runtime = self.memory().runtime().ok_or_else(|| {
+            XlogError::Kernel(format!("{ctx} requires a runtime-backed GpuMemoryManager"))
+        })?;
+        let cu_stream = runtime
+            .stream_pool()
+            .resolve(launch_stream)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "{ctx}: launch_stream StreamId({}) does not resolve",
+                    launch_stream.0
+                ))
+            })?;
+
+        let e1_col1 = metadata_column_u64(e1, 1)?;
+        let e2_col0 = metadata_column_u64(e2, 0)?;
+        let e2_col1 = metadata_column_u64(e2, 1)?;
+        let e3_col0 = metadata_column_u64(e3, 0)?;
+
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read(e1.num_rows_device());
+        rec.read(e2.num_rows_device());
+        rec.read(e3.num_rows_device());
+        rec.read_column(e1.column(1).expect("e1.col1"));
+        rec.read_column(e2.column(0).expect("e2.col0"));
+        rec.read_column(e2.column(1).expect("e2.col1"));
+        rec.read_column(e3.column(0).expect("e3.col0"));
+        rec.write(&e1_work_prefix);
+        rec.write(&e1_e2_start);
+        rec.write(&e1_e2_end);
+        rec.preflight(runtime)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: preflight failed: {e}")))?;
+
+        let kernel = self
+            .device()
+            .inner()
+            .get_func(
+                WCOJ_MODULE,
+                wcoj_kernels::WCOJ_4CYCLE_BUILD_HG_WORK_PLAN_U64,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel("wcoj_4cycle_build_hg_work_plan_u64 kernel not found".to_string())
+            })?;
+        let grid = n_e1.div_ceil(BLOCK_SIZE);
+        unsafe {
+            kernel
+                .clone()
+                .launch_on_stream(
+                    &cu_stream,
+                    LaunchConfig {
+                        grid_dim: (grid, 1, 1),
+                        block_dim: (BLOCK_SIZE, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        e1_col1,
+                        n_e1,
+                        e2_col0,
+                        e2_col1,
+                        n_e2,
+                        e3_col0,
+                        n_e3,
+                        &mut e1_work_prefix,
+                        &mut e1_e2_start,
+                        &mut e1_e2_end,
+                    ),
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "wcoj_4cycle_build_hg_work_plan_u64 launch failed: {e}"
+                    ))
+                })?;
+        }
+        self.multiblock_scan_u32_inplace_on_stream(
+            &mut e1_work_prefix,
+            prefix_len,
+            &cu_stream,
+            launch_stream,
+            runtime,
+        )?;
+        rec.commit(runtime)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: commit failed: {e}")))?;
+        cu_stream
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: stream sync failed: {e}")))?;
+        let total_work = self.dtoh_scalar_untracked::<u32>(&e1_work_prefix, n_e1 as usize)?;
+        let grid = if total_work == 0 {
+            1
+        } else {
+            total_work.div_ceil(block_work_unit)
+        };
+        let block_counts = self.memory().alloc::<u32>(grid as usize)?;
+        let block_offsets = self.memory().alloc::<u32>(grid as usize)?;
+
+        Ok(WcojCycle4HgWorkPlanU64 {
+            e1_work_prefix,
+            e1_e2_start,
+            e1_e2_end,
+            block_counts,
+            block_offsets,
+            total_work,
+            block_work_unit,
+            row_count: n_e1,
+        })
+    }
+
+    pub fn wcoj_4cycle_hg_u64_recorded(
+        &self,
+        e1: &CudaBuffer,
+        e2: &CudaBuffer,
+        e3: &CudaBuffer,
+        e4: &CudaBuffer,
+        block_work_unit: u32,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        let ctx = "wcoj_4cycle_hg_u64_recorded";
+        validate_binary_u64(ctx, "e1", e1)?;
+        validate_binary_u64(ctx, "e2", e2)?;
+        validate_binary_u64(ctx, "e3", e3)?;
+        validate_binary_u64(ctx, "e4", e4)?;
+        let plan = self.wcoj_4cycle_hg_work_plan_u64_recorded(
+            e1,
+            e2,
+            e3,
+            e4,
+            block_work_unit,
+            launch_stream,
+        )?;
+        let out_schema = Schema::new(vec![
+            ("col0".to_string(), ScalarType::U64),
+            ("col1".to_string(), ScalarType::U64),
+            ("col2".to_string(), ScalarType::U64),
+            ("col3".to_string(), ScalarType::U64),
+        ]);
+        if plan.total_work == 0 {
+            return self.create_empty_buffer(out_schema);
+        }
+
+        let grid = plan.total_work.div_ceil(plan.block_work_unit);
+        let bytes_count = (grid as usize)
+            .checked_mul(std::mem::size_of::<u32>())
+            .ok_or_else(|| XlogError::Kernel(format!("{ctx}: count byte size overflow")))?;
+        let mut local_counts = None;
+        let mut local_offsets = None;
+        if grid > 1024 {
+            local_counts = Some(self.memory().alloc::<u32>(grid as usize)?);
+            local_offsets = Some(self.memory().alloc::<u32>(grid as usize)?);
+        }
+        let total_rows_device = self.memory().alloc::<u32>(1)?;
+
+        let runtime = self.memory().runtime().ok_or_else(|| {
+            XlogError::Kernel(format!("{ctx} requires a runtime-backed GpuMemoryManager"))
+        })?;
+        let cu_stream = runtime
+            .stream_pool()
+            .resolve(launch_stream)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "{ctx}: launch_stream StreamId({}) does not resolve",
+                    launch_stream.0
+                ))
+            })?;
+
+        let e1_col0 = metadata_column_u64(e1, 0)?;
+        let e1_col1 = metadata_column_u64(e1, 1)?;
+        let e2_col1 = metadata_column_u64(e2, 1)?;
+        let e3_col0 = metadata_column_u64(e3, 0)?;
+        let e3_col1 = metadata_column_u64(e3, 1)?;
+        let e4_col0 = metadata_column_u64(e4, 0)?;
+        let e4_col1 = metadata_column_u64(e4, 1)?;
+        let n_e3 = self.metadata_logical_rows(e3)?;
+        let n_e4 = self.metadata_logical_rows(e4)?;
+
+        let count_u32 = if grid <= 1024 {
+            &plan.block_counts
+        } else {
+            local_counts
+                .as_ref()
+                .expect("local HG counts allocated when grid exceeds single-block scan")
+        };
+        let mut rec_hg = LaunchRecorder::new_strict(launch_stream);
+        rec_hg.read(e1.num_rows_device());
+        rec_hg.read(e2.num_rows_device());
+        rec_hg.read(e3.num_rows_device());
+        rec_hg.read(e4.num_rows_device());
+        rec_hg.read_column(e1.column(0).expect("e1.col0"));
+        rec_hg.read_column(e1.column(1).expect("e1.col1"));
+        rec_hg.read_column(e2.column(1).expect("e2.col1"));
+        rec_hg.read_column(e3.column(0).expect("e3.col0"));
+        rec_hg.read_column(e3.column(1).expect("e3.col1"));
+        rec_hg.read_column(e4.column(0).expect("e4.col0"));
+        rec_hg.read_column(e4.column(1).expect("e4.col1"));
+        rec_hg.read(&plan.e1_work_prefix);
+        rec_hg.read(&plan.e1_e2_start);
+        rec_hg.read(&plan.e1_e2_end);
+        rec_hg.read_write(count_u32);
+        if grid <= 1024 {
+            rec_hg.read_write(&plan.block_offsets);
+        } else {
+            rec_hg.read_write(
+                local_offsets
+                    .as_ref()
+                    .expect("local HG offsets allocated when grid exceeds single-block scan"),
+            );
+        }
+        rec_hg.write(&total_rows_device);
+        rec_hg
+            .preflight(runtime)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: HG preflight failed: {e}")))?;
+        {
+            let kernel = self
+                .device()
+                .inner()
+                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_4CYCLE_COUNT_HG_U64)
+                .ok_or_else(|| {
+                    XlogError::Kernel("wcoj_4cycle_count_hg_u64 kernel not found".to_string())
+                })?;
+            let mut params: Vec<*mut c_void> = vec![
+                e1_col0.as_kernel_param(),
+                e1_col1.as_kernel_param(),
+                plan.row_count.as_kernel_param(),
+                e2_col1.as_kernel_param(),
+                e3_col0.as_kernel_param(),
+                e3_col1.as_kernel_param(),
+                n_e3.as_kernel_param(),
+                e4_col0.as_kernel_param(),
+                e4_col1.as_kernel_param(),
+                n_e4.as_kernel_param(),
+                (&plan.e1_work_prefix).as_kernel_param(),
+                (&plan.e1_e2_start).as_kernel_param(),
+                (&plan.e1_e2_end).as_kernel_param(),
+                plan.total_work.as_kernel_param(),
+                plan.block_work_unit.as_kernel_param(),
+                count_u32.as_kernel_param(),
+            ];
+            unsafe {
+                kernel
+                    .clone()
+                    .launch_on_stream(
+                        &cu_stream,
+                        LaunchConfig {
+                            grid_dim: (grid, 1, 1),
+                            block_dim: (BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        &mut params,
+                    )
+                    .map_err(|e| XlogError::Kernel(format!("{ctx}: count launch failed: {e}")))?;
+            }
+        }
+        if grid <= 1024 {
+            let kernel = self
+                .device()
+                .inner()
+                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_SCAN_HG_BLOCK_COUNTS_U32)
+                .ok_or_else(|| {
+                    XlogError::Kernel("wcoj_scan_hg_block_counts_u32 kernel not found".to_string())
+                })?;
+            let mut params: Vec<*mut c_void> = vec![
+                count_u32.as_kernel_param(),
+                grid.as_kernel_param(),
+                (&plan.block_offsets).as_kernel_param(),
+                (&total_rows_device).as_kernel_param(),
+            ];
+            unsafe {
+                kernel
+                    .clone()
+                    .launch_on_stream(
+                        &cu_stream,
+                        LaunchConfig {
+                            grid_dim: (1, 1, 1),
+                            block_dim: (1024, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        &mut params,
+                    )
+                    .map_err(|e| XlogError::Kernel(format!("{ctx}: scan failed: {e}")))?;
+            }
+        } else {
+            let offsets_mut = local_offsets
+                .as_mut()
+                .expect("local HG offsets allocated when grid exceeds single-block scan");
+            unsafe {
+                let res = sys::cuMemcpyDtoDAsync_v2(
+                    *offsets_mut.device_ptr(),
+                    *count_u32.device_ptr(),
+                    bytes_count,
+                    cu_stream.cu_stream(),
+                );
+                if res != sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "{ctx}: DtoD count to offsets failed: {res:?}"
+                    )));
+                }
+            }
+            self.multiblock_scan_u32_inplace_on_stream(
+                offsets_mut,
+                grid,
+                &cu_stream,
+                launch_stream,
+                runtime,
+            )?;
+            let total_kernel = self
+                .device()
+                .inner()
+                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_COMPUTE_TOTAL)
+                .ok_or_else(|| {
+                    XlogError::Kernel("wcoj_compute_total kernel not found".to_string())
+                })?;
+            let mut params: Vec<*mut c_void> = vec![
+                count_u32.as_kernel_param(),
+                (&*offsets_mut).as_kernel_param(),
+                grid.as_kernel_param(),
+                (&total_rows_device).as_kernel_param(),
+            ];
+            unsafe {
+                total_kernel
+                    .clone()
+                    .launch_on_stream(
+                        &cu_stream,
+                        LaunchConfig {
+                            grid_dim: (1, 1, 1),
+                            block_dim: (1, 1, 1),
+                            shared_mem_bytes: 0,
+                        },
+                        &mut params,
+                    )
+                    .map_err(|e| XlogError::Kernel(format!("{ctx}: total failed: {e}")))?;
+            }
+        }
+        rec_hg
+            .commit(runtime)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: count commit failed: {e}")))?;
+        cu_stream
+            .synchronize()
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: count stream sync failed: {e}")))?;
+        let total_rows = self
+            .dtoh_scalar_untracked::<u32>(&total_rows_device, 0)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: read total rows failed: {e}")))?;
+        if total_rows == 0 {
+            return self.create_empty_buffer(out_schema);
+        }
+
+        let bytes_per_col = (total_rows as usize)
+            .checked_mul(std::mem::size_of::<u64>())
+            .ok_or_else(|| XlogError::Kernel(format!("{ctx}: output byte size overflow")))?;
+        let mut out_w = self.memory().alloc::<u8>(bytes_per_col)?;
+        let mut out_x = self.memory().alloc::<u8>(bytes_per_col)?;
+        let mut out_y = self.memory().alloc::<u8>(bytes_per_col)?;
+        let mut out_z = self.memory().alloc::<u8>(bytes_per_col)?;
+        let materialize_offsets = if grid <= 1024 {
+            &plan.block_offsets
+        } else {
+            local_offsets
+                .as_ref()
+                .expect("local HG offsets allocated when grid exceeds single-block scan")
+        };
+        let mut rec_mat = LaunchRecorder::new_strict(launch_stream);
+        rec_mat.read(materialize_offsets);
+        rec_mat.read(e1.num_rows_device());
+        rec_mat.read(e2.num_rows_device());
+        rec_mat.read(e3.num_rows_device());
+        rec_mat.read(e4.num_rows_device());
+        rec_mat.read_column(e1.column(0).expect("e1.col0"));
+        rec_mat.read_column(e1.column(1).expect("e1.col1"));
+        rec_mat.read_column(e2.column(1).expect("e2.col1"));
+        rec_mat.read_column(e3.column(0).expect("e3.col0"));
+        rec_mat.read_column(e3.column(1).expect("e3.col1"));
+        rec_mat.read_column(e4.column(0).expect("e4.col0"));
+        rec_mat.read_column(e4.column(1).expect("e4.col1"));
+        rec_mat.read(&plan.e1_work_prefix);
+        rec_mat.read(&plan.e1_e2_start);
+        rec_mat.read(&plan.e1_e2_end);
+        rec_mat.write(&out_w);
+        rec_mat.write(&out_x);
+        rec_mat.write(&out_y);
+        rec_mat.write(&out_z);
+        rec_mat
+            .preflight(runtime)
+            .map_err(|e| XlogError::Kernel(format!("{ctx}: materialize preflight failed: {e}")))?;
+        {
+            let kernel = self
+                .device()
+                .inner()
+                .get_func(WCOJ_MODULE, wcoj_kernels::WCOJ_4CYCLE_MATERIALIZE_HG_U64)
+                .ok_or_else(|| {
+                    XlogError::Kernel("wcoj_4cycle_materialize_hg_u64 kernel not found".to_string())
+                })?;
+            let out_w_u64 = unsafe { reinterpret_u8_as_u64(&mut out_w) };
+            let out_x_u64 = unsafe { reinterpret_u8_as_u64(&mut out_x) };
+            let out_y_u64 = unsafe { reinterpret_u8_as_u64(&mut out_y) };
+            let out_z_u64 = unsafe { reinterpret_u8_as_u64(&mut out_z) };
+            let mut params: Vec<*mut c_void> = vec![
+                e1_col0.as_kernel_param(),
+                e1_col1.as_kernel_param(),
+                plan.row_count.as_kernel_param(),
+                e2_col1.as_kernel_param(),
+                e3_col0.as_kernel_param(),
+                e3_col1.as_kernel_param(),
+                n_e3.as_kernel_param(),
+                e4_col0.as_kernel_param(),
+                e4_col1.as_kernel_param(),
+                n_e4.as_kernel_param(),
+                (&plan.e1_work_prefix).as_kernel_param(),
+                (&plan.e1_e2_start).as_kernel_param(),
+                (&plan.e1_e2_end).as_kernel_param(),
+                plan.total_work.as_kernel_param(),
+                plan.block_work_unit.as_kernel_param(),
+                materialize_offsets.as_kernel_param(),
+                total_rows.as_kernel_param(),
+                out_w_u64.as_kernel_param(),
+                out_x_u64.as_kernel_param(),
+                out_y_u64.as_kernel_param(),
+                out_z_u64.as_kernel_param(),
             ];
             unsafe {
                 kernel

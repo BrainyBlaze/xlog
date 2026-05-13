@@ -132,3 +132,35 @@ fn four_cycle_u32_count_and_materialize_are_hg_block_slice() {
         );
     }
 }
+
+#[test]
+fn four_cycle_u64_count_and_materialize_are_hg_block_slice() {
+    let src = wcoj_cu_source();
+    assert!(
+        !src.contains("__global__ void wcoj_4cycle_count_u64("),
+        "u64 4-cycle count must use the W3.3 HG block-slice symbol"
+    );
+    assert!(
+        !src.contains("__global__ void wcoj_4cycle_materialize_u64("),
+        "u64 4-cycle materialize must use the W3.3 HG block-slice symbol"
+    );
+
+    let count = extract_extern_c_global_body(&src, "wcoj_4cycle_count_hg_u64")
+        .expect("wcoj_4cycle_count_hg_u64 must exist");
+    let materialize = extract_extern_c_global_body(&src, "wcoj_4cycle_materialize_hg_u64")
+        .expect("wcoj_4cycle_materialize_hg_u64 must exist");
+
+    for (name, body) in [
+        ("wcoj_4cycle_count_hg_u64", count),
+        ("wcoj_4cycle_materialize_hg_u64", materialize),
+    ] {
+        assert!(
+            body.contains("blockIdx.x * block_work_unit"),
+            "{name} must derive its block slice from block_work_unit"
+        );
+        assert!(
+            body.contains("upper_bound_u32(e1_work_prefix"),
+            "{name} must recover the root row from the prefix-summed work plan"
+        );
+    }
+}

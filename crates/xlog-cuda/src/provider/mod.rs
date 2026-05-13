@@ -286,8 +286,9 @@ pub mod wcoj_kernels {
     pub const WCOJ_4CYCLE_BUILD_HG_WORK_PLAN_U32: &str = "wcoj_4cycle_build_hg_work_plan_u32";
     pub const WCOJ_4CYCLE_COUNT_HG_U32: &str = "wcoj_4cycle_count_hg_u32";
     pub const WCOJ_4CYCLE_MATERIALIZE_HG_U32: &str = "wcoj_4cycle_materialize_hg_u32";
-    pub const WCOJ_4CYCLE_COUNT_U64: &str = "wcoj_4cycle_count_u64";
-    pub const WCOJ_4CYCLE_MATERIALIZE_U64: &str = "wcoj_4cycle_materialize_u64";
+    pub const WCOJ_4CYCLE_BUILD_HG_WORK_PLAN_U64: &str = "wcoj_4cycle_build_hg_work_plan_u64";
+    pub const WCOJ_4CYCLE_COUNT_HG_U64: &str = "wcoj_4cycle_count_hg_u64";
+    pub const WCOJ_4CYCLE_MATERIALIZE_HG_U64: &str = "wcoj_4cycle_materialize_hg_u64";
     pub const WCOJ_4CYCLE_SKEW_HISTOGRAM_U32: &str = "wcoj_4cycle_skew_histogram_u32";
     pub const WCOJ_4CYCLE_SKEW_HISTOGRAM_U64: &str = "wcoj_4cycle_skew_histogram_u64";
     // W3.2 — General-arity clique kernels (k=5, k=6 from single template).
@@ -1189,6 +1190,7 @@ impl CudaKernelProvider {
     /// dispatch. Overwrites any prior unread slot — the report
     /// binary is expected to read after every `execute_plan`.
     #[cfg(feature = "wcoj-phase-timing")]
+    #[allow(dead_code)]
     pub(crate) fn put_wcoj_triangle_phase_timing(
         &self,
         timing: crate::wcoj_phase_timing::WcojTrianglePhaseTiming,

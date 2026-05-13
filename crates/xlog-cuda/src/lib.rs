@@ -39,6 +39,6 @@ pub use provider::{
     SORT_MODULE,
 };
 pub use wcoj_metadata::{
-    WcojCycle4HgWorkPlanU32, WcojRelationMetadata, WcojTriangleHgWorkPlanU32,
-    WcojTriangleHgWorkPlanU64,
+    WcojCycle4HgWorkPlanU32, WcojCycle4HgWorkPlanU64, WcojRelationMetadata,
+    WcojTriangleHgWorkPlanU32, WcojTriangleHgWorkPlanU64,
 };
