@@ -33,6 +33,7 @@ mod probabilistic;
 mod relational;
 mod transfer;
 mod wcoj;
+mod wcoj_metadata;
 mod wcoj_project;
 
 /// Per-module PTX load timing (populated only when XLOG_WARMUP_PROFILE=1).
@@ -261,6 +262,12 @@ const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 23);
 
 /// Kernel function names in the GPU WCOJ module.
 pub mod wcoj_kernels {
+    pub const WCOJ_BUILD_METADATA_MARK_BOUNDARIES_U32: &str =
+        "wcoj_build_metadata_mark_boundaries_u32";
+    pub const WCOJ_BUILD_METADATA_MARK_BOUNDARIES_U64: &str =
+        "wcoj_build_metadata_mark_boundaries_u64";
+    pub const WCOJ_BUILD_METADATA_SCATTER_U32: &str = "wcoj_build_metadata_scatter_u32";
+    pub const WCOJ_BUILD_METADATA_SCATTER_U64: &str = "wcoj_build_metadata_scatter_u64";
     pub const WCOJ_TRIANGLE_COUNT: &str = "wcoj_triangle_count";
     pub const WCOJ_TRIANGLE_FUSED_LC_COUNT: &str = "wcoj_triangle_fused_lc_count";
     pub const WCOJ_COMPUTE_TOTAL: &str = "wcoj_compute_total";

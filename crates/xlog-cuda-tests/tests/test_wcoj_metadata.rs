@@ -1,0 +1,155 @@
+use std::sync::Arc;
+
+use xlog_core::{MemoryBudget, ScalarType, Schema};
+use xlog_cuda::device_runtime::{
+    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
+    LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
+};
+use xlog_cuda::memory::CudaBuffer;
+use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+
+struct DiscardSink;
+impl LoggingSink for DiscardSink {
+    fn emit(&self, _record: LogRecord) -> Result<(), SinkError> {
+        Ok(())
+    }
+}
+
+struct Fixture {
+    memory: Arc<GpuMemoryManager>,
+    provider: Arc<CudaKernelProvider>,
+}
+
+fn make_fixture() -> Option<Fixture> {
+    let device = Arc::new(CudaDevice::new(0).ok()?);
+    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
+        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    );
+    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
+        async_resource,
+        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
+    ));
+    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
+        Box::new(GlobalDeviceBudget::new(logging, 256 * 1024 * 1024));
+    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
+        Arc::clone(&device),
+        0,
+        Arc::clone(&pool),
+        budget,
+    ));
+    let memory = Arc::new(GpuMemoryManager::with_runtime(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(256 * 1024 * 1024),
+        runtime,
+    ));
+    let provider =
+        Arc::new(CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).ok()?);
+    Some(Fixture { memory, provider })
+}
+
+fn upload_u32_keys(memory: &Arc<GpuMemoryManager>, keys: &[u32]) -> CudaBuffer {
+    let n = keys.len() as u32;
+    let mut col0 = memory
+        .alloc::<u8>(keys.len() * std::mem::size_of::<u32>())
+        .expect("alloc col0");
+    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc d_num_rows");
+    let bytes: Vec<u8> = keys.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let device = memory.device().inner();
+    device
+        .htod_sync_copy_into(&bytes, &mut col0)
+        .expect("htod col0");
+    device
+        .htod_sync_copy_into(&[n], &mut d_num_rows)
+        .expect("htod d_num_rows");
+    let schema = Schema::new(vec![("key".to_string(), ScalarType::U32)]);
+    CudaBuffer::from_columns_with_host_count(vec![col0.into()], n as u64, d_num_rows, schema, n)
+}
+
+fn upload_u64_keys(memory: &Arc<GpuMemoryManager>, keys: &[u64]) -> CudaBuffer {
+    let n = keys.len() as u32;
+    let mut col0 = memory
+        .alloc::<u8>(keys.len() * std::mem::size_of::<u64>())
+        .expect("alloc col0");
+    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc d_num_rows");
+    let bytes: Vec<u8> = keys.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let device = memory.device().inner();
+    device
+        .htod_sync_copy_into(&bytes, &mut col0)
+        .expect("htod col0");
+    device
+        .htod_sync_copy_into(&[n], &mut d_num_rows)
+        .expect("htod d_num_rows");
+    let schema = Schema::new(vec![("key".to_string(), ScalarType::U64)]);
+    CudaBuffer::from_columns_with_host_count(vec![col0.into()], n as u64, d_num_rows, schema, n)
+}
+
+#[test]
+fn wcoj_metadata_u32_builds_unique_fanout_prefix() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("skipping WCOJ metadata u32 test: no CUDA device");
+        return;
+    };
+    let input = upload_u32_keys(&fix.memory, &[1, 1, 1, 2, 4, 4, 9]);
+    let metadata = fix
+        .provider
+        .wcoj_build_metadata_u32_recorded(&input, 0, xlog_cuda::device_runtime::StreamId::DEFAULT)
+        .expect("metadata");
+
+    assert_eq!(metadata.key_count, 4);
+    assert_eq!(metadata.row_count, 7);
+    assert_eq!(metadata.total, 7);
+
+    let mut keys = vec![0u32; metadata.key_count as usize];
+    let mut fan_out = vec![0u32; metadata.key_count as usize];
+    let mut prefix = vec![0u32; metadata.key_count as usize];
+    let device = fix.memory.device().inner();
+    device
+        .dtoh_sync_copy_into(&metadata.unique_keys, &mut keys)
+        .expect("dtoh unique");
+    device
+        .dtoh_sync_copy_into(&metadata.fan_out, &mut fan_out)
+        .expect("dtoh fan_out");
+    device
+        .dtoh_sync_copy_into(&metadata.prefix_sum, &mut prefix)
+        .expect("dtoh prefix");
+
+    assert_eq!(keys, vec![1, 2, 4, 9]);
+    assert_eq!(fan_out, vec![3, 1, 2, 1]);
+    assert_eq!(prefix, vec![0, 3, 4, 6]);
+}
+
+#[test]
+fn wcoj_metadata_u64_builds_unique_fanout_prefix() {
+    let Some(fix) = make_fixture() else {
+        eprintln!("skipping WCOJ metadata u64 test: no CUDA device");
+        return;
+    };
+    let input = upload_u64_keys(&fix.memory, &[10, 10, 11, 13, 13, 13]);
+    let metadata = fix
+        .provider
+        .wcoj_build_metadata_u64_recorded(&input, 0, xlog_cuda::device_runtime::StreamId::DEFAULT)
+        .expect("metadata");
+
+    assert_eq!(metadata.key_count, 3);
+    assert_eq!(metadata.row_count, 6);
+    assert_eq!(metadata.total, 6);
+
+    let mut keys = vec![0u64; metadata.key_count as usize];
+    let mut fan_out = vec![0u32; metadata.key_count as usize];
+    let mut prefix = vec![0u32; metadata.key_count as usize];
+    let device = fix.memory.device().inner();
+    device
+        .dtoh_sync_copy_into(&metadata.unique_keys, &mut keys)
+        .expect("dtoh unique");
+    device
+        .dtoh_sync_copy_into(&metadata.fan_out, &mut fan_out)
+        .expect("dtoh fan_out");
+    device
+        .dtoh_sync_copy_into(&metadata.prefix_sum, &mut prefix)
+        .expect("dtoh prefix");
+
+    assert_eq!(keys, vec![10, 11, 13]);
+    assert_eq!(fan_out, vec![2, 1, 3]);
+    assert_eq!(prefix, vec![0, 2, 3]);
+}

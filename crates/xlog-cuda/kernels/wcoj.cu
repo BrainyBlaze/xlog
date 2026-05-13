@@ -12,8 +12,8 @@
 //   * e_yz: lex-sorted by (Y, Z)
 //   * e_xz: lex-sorted by (X, Z)
 //
-// Algorithm shape (mirrors SRDatalog Algorithm 2 specialised to a
-// triangle, with simplifications for v1):
+// Algorithm shape (mirrors SRDatalog Algorithm 2 for the triangle
+// WCOJ relation family):
 //
 //   * Dispatch one thread per row of e_xy. Thread `i` is bound
 //     to (X, Y) = (e_xy.col0[i], e_xy.col1[i]) and emits every
@@ -225,6 +225,76 @@ __device__ __forceinline__ uint32_t intersect_emit_xyz_u64(
 
 }  // anonymous namespace
 
+extern "C" __global__ void wcoj_build_metadata_mark_boundaries_u32(
+    const uint32_t* __restrict__ keys,
+    uint32_t n,
+    uint32_t* __restrict__ boundary_mask,
+    uint32_t* __restrict__ boundary_prefix) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) {
+        return;
+    }
+    uint32_t is_boundary = (i == 0 || keys[i] != keys[i - 1]) ? 1u : 0u;
+    boundary_mask[i] = is_boundary;
+    boundary_prefix[i] = is_boundary;
+}
+
+extern "C" __global__ void wcoj_build_metadata_mark_boundaries_u64(
+    const uint64_t* __restrict__ keys,
+    uint32_t n,
+    uint32_t* __restrict__ boundary_mask,
+    uint32_t* __restrict__ boundary_prefix) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) {
+        return;
+    }
+    uint32_t is_boundary = (i == 0 || keys[i] != keys[i - 1]) ? 1u : 0u;
+    boundary_mask[i] = is_boundary;
+    boundary_prefix[i] = is_boundary;
+}
+
+extern "C" __global__ void wcoj_build_metadata_scatter_u32(
+    const uint32_t* __restrict__ keys,
+    uint32_t n,
+    const uint32_t* __restrict__ boundary_mask,
+    const uint32_t* __restrict__ boundary_prefix,
+    uint32_t* __restrict__ unique_keys,
+    uint32_t* __restrict__ fan_out,
+    uint32_t* __restrict__ prefix_sum) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n || boundary_mask[i] == 0u) {
+        return;
+    }
+    uint32_t out = boundary_prefix[i];
+    uint32_t key = keys[i];
+    uint32_t end = upper_bound_u32(keys, n, key);
+    uint32_t degree = end - i;
+    unique_keys[out] = key;
+    fan_out[out] = degree;
+    prefix_sum[out] = degree;
+}
+
+extern "C" __global__ void wcoj_build_metadata_scatter_u64(
+    const uint64_t* __restrict__ keys,
+    uint32_t n,
+    const uint32_t* __restrict__ boundary_mask,
+    const uint32_t* __restrict__ boundary_prefix,
+    uint64_t* __restrict__ unique_keys,
+    uint32_t* __restrict__ fan_out,
+    uint32_t* __restrict__ prefix_sum) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n || boundary_mask[i] == 0u) {
+        return;
+    }
+    uint32_t out = boundary_prefix[i];
+    uint64_t key = keys[i];
+    uint32_t end = upper_bound_u64(keys, n, key);
+    uint32_t degree = end - i;
+    unique_keys[out] = key;
+    fan_out[out] = degree;
+    prefix_sum[out] = degree;
+}
+
 // Per-thread count kernel: one thread per row of e_xy.
 //
 // For thread `i` with row (X, Y) = (xy_col0[i], xy_col1[i]):
@@ -314,8 +384,7 @@ extern "C" __global__ void wcoj_triangle_fused_lc_count(
 // total — i.e. the number of triangles to materialize — is
 // `offsets[n-1] + counts[n-1]`. Writing the scalar to device
 // memory means the host can use the sanctioned
-// `dtoh_scalar_untracked` chokepoint to read just the total,
-// avoiding the v1 count-vector D2H.
+// `dtoh_scalar_untracked` chokepoint to read just the total.
 extern "C" __global__ void wcoj_compute_total(
     const uint32_t* __restrict__ counts,
     const uint32_t* __restrict__ offsets,
@@ -407,8 +476,8 @@ extern "C" __global__ void wcoj_triangle_materialize(
 // come from a deterministic prefix-sum, no atomics.
 //
 // Heavy-row note: the inner chain is sequential per-thread; the
-// outer parallelism is over slot-0 rows. Histogram-guided
-// scheduling for heavy slot-0 rows is deferred.
+// outer parallelism is over slot-0 rows until the HG block-slice
+// replacement lands for this arity.
 // ===============================================================
 
 namespace {

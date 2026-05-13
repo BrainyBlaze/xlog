@@ -12,6 +12,7 @@ pub mod memory;
 pub mod multi_gpu_memory;
 pub mod provider;
 pub mod type_seam;
+pub mod wcoj_metadata;
 #[cfg(feature = "wcoj-phase-timing")]
 pub mod wcoj_phase_timing;
 
@@ -37,3 +38,4 @@ pub use provider::{
     GROUPBY_MODULE, ILP_MODULE, JOIN_MODULE, PACK_MODULE, PIR_MODULE, SCAN_MODULE, SET_OPS_MODULE,
     SORT_MODULE,
 };
+pub use wcoj_metadata::WcojRelationMetadata;
