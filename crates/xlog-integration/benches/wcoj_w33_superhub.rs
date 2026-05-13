@@ -266,6 +266,15 @@ fn run_hg(fix: &ProviderFixture, input: &LayoutFixture) -> CudaBuffer {
         .expect("HG triangle")
 }
 
+fn sync_launch_stream(fix: &ProviderFixture) {
+    let runtime = fix.provider.memory().runtime().expect("runtime");
+    let stream = runtime
+        .stream_pool()
+        .resolve(fix.launch_stream)
+        .expect("launch stream");
+    stream.synchronize().expect("launch stream sync");
+}
+
 fn download_triples(buf: &CudaBuffer) -> BTreeSet<(u32, u32, u32)> {
     let n = match buf.cached_row_count() {
         Some(rows) => rows,
@@ -335,9 +344,11 @@ fn measure_baseline_with_pairing(
     for _ in 0..iters {
         let start = Instant::now();
         let result = run_current_main(fix, uploaded);
+        sync_launch_stream(fix);
         measured += start.elapsed();
         drop(result);
         let _ = run_hg(fix, layout);
+        sync_launch_stream(fix);
     }
     measured
 }
@@ -351,8 +362,10 @@ fn measure_hg_with_pairing(
     let mut measured = Duration::ZERO;
     for _ in 0..iters {
         let _ = run_current_main(fix, uploaded);
+        sync_launch_stream(fix);
         let start = Instant::now();
         let result = run_hg(fix, layout);
+        sync_launch_stream(fix);
         measured += start.elapsed();
         drop(result);
     }
