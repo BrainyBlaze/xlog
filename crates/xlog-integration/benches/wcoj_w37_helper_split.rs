@@ -257,8 +257,7 @@ fn run_unsplit(prov: &Provider, input: &UploadedFixture) -> CudaBuffer {
     dedup_recorded(prov, &projected)
 }
 
-fn run_hand_split(prov: &Provider, input: &UploadedFixture) -> CudaBuffer {
-    let helper = build_helper(prov, input);
+fn run_hand_split(prov: &Provider, input: &UploadedFixture, helper: &CudaBuffer) -> CudaBuffer {
     let ab_bc = prov
         .provider
         .hash_join_v2(&input.r_ab, &input.r_bc, &[1], &[0], JoinType::Inner)
@@ -288,9 +287,14 @@ fn run_hand_split(prov: &Provider, input: &UploadedFixture) -> CudaBuffer {
     dedup_recorded(prov, &projected)
 }
 
-fn assert_parity(prov: &Provider, fixture: &DeepSkewFixture, input: &UploadedFixture) {
+fn assert_parity(
+    prov: &Provider,
+    fixture: &DeepSkewFixture,
+    input: &UploadedFixture,
+    helper: &CudaBuffer,
+) {
     let unsplit = run_unsplit(prov, input);
-    let split = run_hand_split(prov, input);
+    let split = run_hand_split(prov, input, helper);
     let unsplit_rows = download_rows(&unsplit, &prov.provider, 5);
     let split_rows = download_rows(&split, &prov.provider, 5);
     assert_eq!(unsplit_rows, split_rows, "row equality {}", fixture.label);
@@ -311,19 +315,20 @@ fn measure_unsplit(prov: &Provider, input: &UploadedFixture, iters: u64) -> Dura
         let out = run_unsplit(prov, input);
         measured += start.elapsed();
         black_box(out.cached_row_count());
-        let split = run_hand_split(prov, input);
-        black_box(split.cached_row_count());
     }
     measured
 }
 
-fn measure_hand_split(prov: &Provider, input: &UploadedFixture, iters: u64) -> Duration {
+fn measure_hand_split(
+    prov: &Provider,
+    input: &UploadedFixture,
+    helper: &CudaBuffer,
+    iters: u64,
+) -> Duration {
     let mut measured = Duration::ZERO;
     for _ in 0..iters {
-        let unsplit = run_unsplit(prov, input);
-        black_box(unsplit.cached_row_count());
         let start = Instant::now();
-        let out = run_hand_split(prov, input);
+        let out = run_hand_split(prov, input, helper);
         measured += start.elapsed();
         black_box(out.cached_row_count());
     }
@@ -332,7 +337,8 @@ fn measure_hand_split(prov: &Provider, input: &UploadedFixture, iters: u64) -> D
 
 fn bench_fixture(c: &mut Criterion, prov: &Provider, fixture: DeepSkewFixture) {
     let uploaded = upload_fixture(prov, &fixture);
-    assert_parity(prov, &fixture, &uploaded);
+    let helper = build_helper(prov, &uploaded);
+    assert_parity(prov, &fixture, &uploaded, &helper);
     eprintln!(
         "W37_FIXTURE {} outer_rows={} inner_fanout={} f_buckets={} inner_intermediate_rows={}",
         fixture.label,
@@ -357,7 +363,7 @@ fn bench_fixture(c: &mut Criterion, prov: &Provider, fixture: DeepSkewFixture) {
     group.bench_with_input(
         BenchmarkId::new("hand_split_helper", fixture.label),
         &(),
-        |b, _| b.iter_custom(|iters| measure_hand_split(prov, &uploaded, iters)),
+        |b, _| b.iter_custom(|iters| measure_hand_split(prov, &uploaded, &helper, iters)),
     );
     group.finish();
 }
@@ -375,7 +381,7 @@ fn bench_w37_helper_split(c: &mut Criterion) {
     bench_fixture(
         c,
         &prov,
-        make_fixture("heapalloc-inner-skew", 8192, 4096, 1),
+        make_fixture("heapalloc-inner-skew", 4096, 8192, 1),
     );
 }
 

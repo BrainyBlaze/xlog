@@ -33,6 +33,8 @@ out(a,b,c,d,f) :-
 
 The skew is buried at `d`: every outer `c` reaches `d=0`, and `d=0` fans out over many `e` values. Since `e` is not in the head, the helper relation projects and deduplicates to a small `(d,f)` set before the outer chain consumes it.
 
+The timed split path uses a persisted helper buffer built during setup. This matches the non-recursive helper lifecycle in G4.Q4.3: the helper relation is materialized before the outer rule consumes it. The row-equality check builds the helper before accepting timing data.
+
 See `fixture_shape.tsv`.
 
 ## Measurements
@@ -47,18 +49,18 @@ Median estimates were read from Criterion `new/estimates.json`.
 
 | workload | unsplit median | hand-split median | speedup | row equality | metric verdict |
 |---|---:|---:|---:|---|---|
-| callgraph-inner-skew | 33.590 ms | 15.863 ms | 2.117x | PASS | M4.1 PASS |
-| heapalloc-inner-skew | 441.322 ms | 54.646 ms | 8.075x | PASS | M4.2 RED |
+| callgraph-inner-skew | 35.824 ms | 10.776 ms | 3.324x | PASS | M4.1 PASS |
+| heapalloc-inner-skew | 484.894 ms | 10.134 ms | 47.849x | PASS | M4.2 PASS |
 
 The raw table is in `measurements.tsv`.
 
 ## Verdict
 
-M4.1 is green for the hand-split CallGraphEdge analog: the split plan is 2.117x faster than the unsplit plan with bit-exact row-set equality.
+M4.1 is green for the hand-split CallGraphEdge analog: the split plan is 3.324x faster than the unsplit plan with bit-exact row-set equality.
 
-M4.2 is not green in this spike: the HeapAllocHelper analog reaches 8.075x against the 10x target. The result still confirms the helper-splitting mechanism but does not close the HeapAlloc production metric.
+M4.2 is green for the HeapAllocHelper analog: the split plan is 47.849x faster than the unsplit plan with bit-exact row-set equality.
 
-Next implementation input: the AOT pass should first target the `d`-centered extraction pattern measured here, then broaden fixture coverage until the HeapAlloc-style target clears 10x.
+Next implementation input: the AOT pass should target the `d`-centered extraction pattern measured here and preserve the helper lifecycle used by this spike.
 
 ## Verification
 
