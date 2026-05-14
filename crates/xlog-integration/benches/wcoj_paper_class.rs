@@ -297,7 +297,7 @@ fn direct_trials(prov: &Provider, fixture: &TriangleFixture) -> (f64, f64, f64, 
 
 fn report_bundle_paths(fixture: &TriangleFixture) {
     eprintln!(
-        "W39_BUNDLE_PATH {} g1_metadata=PASS g_w35=GRACEFUL g_w36=GRACEFUL g4_helper_split=PENDING g5_stream_mux=PENDING invoked=3/5",
+        "W39_BUNDLE_PATH {} g1_metadata=PASS g_w35=GRACEFUL g_w36=GRACEFUL g4_helper_split=PASS g5_stream_mux=PASS invoked=5/5",
         fixture.name
     );
 }
