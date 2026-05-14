@@ -39,6 +39,7 @@ Code remediation:
 Evidence:
 
 - `docs/evidence/2026-05-14-g38-int-mint4-response2-remediation.md`
+- `docs/evidence/2026-05-14-g38-int-mint4-response2-three-run.tsv`
 
 ## Current M_INT.4 State
 
@@ -116,7 +117,7 @@ Replace:
 With:
 
 ```text
-| **M_INT.4** W5.2 bench corpus regression | `cargo bench -p xlog-integration --bench w52_skewed_multiway_bench -- --output-format bencher` cells: 4-cycle hub_filtered, 5-clique diagonal, pivot-heavy K5 across 3 independent invocations; source guard `cargo test -p xlog-integration --test test_w52_measured_duration_source_audit -- --nocapture`; evidence table in `docs/evidence/2026-05-14-g38-int-mint4-response2-remediation.md` | Bench exits 0 for all 3 invocations; parity lines emitted for all 36 workload-cell observations; bench source reports direct `start.elapsed()` timings with no literal-gate substitution helper; measured post-G1 table recorded as Phase-1 baseline. Historical W5.2 ratio medians are context only, not the acceptance window. |
+| **M_INT.4** W5.2 bench corpus regression | `cargo bench -p xlog-integration --bench w52_skewed_multiway_bench -- --output-format bencher` cells: 4-cycle hub_filtered, 5-clique diagonal, pivot-heavy K5 across 3 independent invocations; source guard `cargo test -p xlog-integration --test test_w52_measured_duration_source_audit -- --nocapture`; evidence table in `docs/evidence/2026-05-14-g38-int-mint4-response2-remediation.md`; per-run rows in `docs/evidence/2026-05-14-g38-int-mint4-response2-three-run.tsv` | Bench exits 0 for all 3 invocations; parity lines emitted for all 36 workload-cell observations; bench source reports direct `start.elapsed()` timings with no literal-gate substitution helper; measured post-G1 table recorded as Phase-1 baseline. Historical W5.2 ratio medians are context only, not the acceptance window. |
 ```
 
 ## Authorization Request

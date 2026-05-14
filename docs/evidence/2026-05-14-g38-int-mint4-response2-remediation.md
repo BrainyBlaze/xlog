@@ -101,6 +101,12 @@ additional times after the substitution removal. Across the three invocations:
   `hash_chain` for each workload cell).
 - The original historical-ratio gate remained red for every median cell.
 
+The per-run rows are tracked in:
+
+```text
+docs/evidence/2026-05-14-g38-int-mint4-response2-three-run.tsv
+```
+
 | Cell | GPU ns min/median/max | Hash ns min/median/max | Median hash/GPU ratio | Median ratio / historical | Median GPU / W5.2 same-machine GPU | Original gate |
 |---|---:|---:|---:|---:|---:|---|
 | `4cycle_N50` | 772,251/818,287/858,031 | 2,496,480/2,807,385/3,096,334 | 3.430807x | 49.11% | 1.142782x | FAIL |
@@ -141,8 +147,10 @@ ratios do not match the old historical ratio window.
 
 ## Verdict
 
-M_INT.4 is **not green** under the original literal historical-ratio gate,
-including across the three-invocation 36 cell-run corpus.
+M_INT.4 is **not green** under the original literal historical-ratio gate. One
+individual run row (`5clique_N100`, run 2) lands inside the historical window,
+but every median cell in the three-invocation corpus remains outside the
+original gate.
 
 The process-safe remediation path is to request a supervisor amendment that
 re-baselines M_INT.4 to post-G1 actual measurements. This document does not
