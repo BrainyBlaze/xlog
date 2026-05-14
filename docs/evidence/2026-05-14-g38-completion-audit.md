@@ -95,6 +95,9 @@ comparison and root-cause assessment.
 See `docs/evidence/2026-05-14-g38-int-mint4-e2-prefix-attempt.md` for the
 HG-preserving u32 4-cycle mitigation and the post-fix M_INT.4 rerun.
 
+See `docs/plans/2026-05-14-g38-mint4-response-proposal.md` for the proposed
+supervisor response to the remaining literal ratio-window mismatch.
+
 ## Other Worktree Findings
 
 The old W3.4 implementation work is present in sibling worktrees such as:
@@ -200,6 +203,7 @@ acceptance cell.
 1. Amend M_INT.4 if the supervisor accepts a changed W5.2 regression criterion;
    the amendment should separate same-machine baseline drift from successor-HG
    behavior. The G38-only 4-cycle slowdown now has a production mitigation.
+   Proposal: `docs/plans/2026-05-14-g38-mint4-response-proposal.md`.
 2. Continue W5.2 corpus work on `5clique`/`pivot5` and any remaining ratio-window
    mismatch without violating W3.3 HG source-audit locks.
 3. Treat G38 as STUCK at M_INT.4 under the current goal-038 contract.
