@@ -2,7 +2,9 @@
 
 **Objective:** `docs/plans/2026-05-14-supervisor-goal-038.md`
 **Audited branch:** `feat/w3-bundle-integration`
-**Audited HEAD:** `f244c888`
+**M_INT.4 run HEAD:** `ee8b9b2e`
+**Audit source note:** later commits after `ee8b9b2e` are evidence/doc-only; the
+source files are unchanged from the M_INT.4 run.
 **Audit date:** 2026-05-14
 
 ## Source Note
@@ -53,9 +55,9 @@ G_INT M_INT.4.
 | Historical M_INT.1 missing-target blocker | `docs/evidence/2026-05-14-g38-int-mint1-blocker.md`; `docs/plans/2026-05-14-g38-mint1-response-proposal.md` | SUPERSEDED by the supervisor correction. The original missing `wcoj_w34_kernel_fusion` target remains absent, but M_INT.1 now uses the successor metric. |
 | G_INT M_INT.2 W4.1 cert regression | `cargo test -p xlog-integration --test test_wcoj_recursive_dispatch` | PASS by coverage. The literal multi-filter command in the goal doc is invalid Cargo syntax, so the whole target was run; it passed 8/8 including `multirec_triangle`, `multirec_4cycle`, and `selfrec_triangle`. |
 | G_INT M_INT.3 W5.1 cert trio regression | `cargo test -p xlog-cuda-tests --test certification_suite --release` | PASS. Certification suite passed 1/1. |
-| G_INT M_INT.4 W5.2 bench corpus regression | `docs/evidence/2026-05-14-g38-int-mint4-blocker.md`; `cargo bench -p xlog-integration --bench w52_skewed_multiway_bench -- --output-format bencher` | BLOCKED. The registered W5.2 bench target exits 0 and parity is emitted, but all 12 paired current cells are outside the `+-10%` closure-baseline ratio window. |
+| G_INT M_INT.4 W5.2 bench corpus regression | `docs/evidence/2026-05-14-g38-int-mint4-blocker.md`; `docs/evidence/2026-05-14-g38-int-mint4-rca.md`; `cargo bench -p xlog-integration --bench w52_skewed_multiway_bench -- --output-format bencher` | BLOCKED. The registered W5.2 bench target exits 0 and parity is emitted, but all 12 paired current cells are outside the `+-10%` closure-baseline ratio window. RCA shows the old W5.2 branch also misses the historical baseline on this machine, while G38 adds a distinct 4-cycle WCOJ regression. |
 | G_INT M_INT.5-M_INT.11 | G38 plan S_INT.3 and M_INT.4 result | NOT RUN. S_INT.3 requires stopping on the first failure. |
-| G_PURGE M_PURGE.1-M_PURGE.9 | File search for G38 purge artifact | NOT STARTED. No `docs/evidence/2026-05-14-g38-dead-code-followup.md` exists on this branch, and G_PURGE is downstream of G_INT. |
+| G_PURGE M_PURGE.1-M_PURGE.9 | File search for G38 purge artifact | NOT STARTED. No `docs/evidence/2026-05-14-g38-dead-code-followup.md` exists on this branch, and G_PURGE is downstream of G_INT. M_PURGE.8 must not delete/prune preserved-unmerged branch heads referenced by project memory or the closure board. |
 | G_CLOSE M_CLOSE.1-M_CLOSE.5 | File search for G38 closure proposal; `docs/v065-closure-board.md` | NOT STARTED. No G38 W3-bundle closure proposal exists, the board still lists W3.3/W3.5/W3.6/W3.7/W3.8/W3.9 as OPEN, and no explicit DONE approval has been applied. |
 | KPI-P1.1 W3 axis 9/9 DONE | `docs/v065-closure-board.md` | NOT MET. W3.3, W3.5, W3.6, W3.7, W3.8, and W3.9 remain OPEN on the board. |
 | KPI-P1.2 DoD items 1-7 | This audit table | NOT MET because G_INT, G_PURGE, and G_CLOSE are not green. |
@@ -79,6 +81,9 @@ missing-target check and `docs/evidence/2026-05-14-g38-int-mint1-successor.md`
 for the corrected successor pass.
 
 See `docs/evidence/2026-05-14-g38-int-mint4-blocker.md` for the active blocker.
+
+See `docs/evidence/2026-05-14-g38-int-mint4-rca.md` for the same-machine W52
+comparison and root-cause assessment.
 
 ## Other Worktree Findings
 
@@ -124,6 +129,22 @@ the W3.4 fused-count surface and deleted the old bench/test files. Reusing the
 old W3.4 bench on integration HEAD would require either restoring retired
 production code or replacing the acceptance metric with a successor check.
 
+For M_INT.4, the old W5.2 worktree
+`/home/dev/projects/xlog/.worktrees/w52-skewed-multiway-bench` still contains
+the registered `w52_skewed_multiway_bench` target. Rerunning it on the same
+machine shows that the historical W5.2 ratios are not reproduced by the old
+branch, but G38 is additionally slower on the 4-cycle WCOJ cells. The W5.2 bench
+file and hash-chain comparator are unchanged from the old branch; the WCOJ
+provider/kernel path changed to the W3.3/HG work-plan implementation.
+
+## G_PURGE Boundary
+
+G_PURGE has not started because G_INT is stopped at M_INT.4. When G_PURGE does
+start, M_PURGE.8 is a dead-code follow-up artifact only. It must not remove or
+prune the preserved-unmerged branch heads referenced from project memory and the
+closure board, including the 22 W3-spike branches in the G11-G27 chain, the 4
+W35 pre-g37 branches, the 4 W35 g37 branches, and the 2 W36 g37 branches.
+
 ## Verdict
 
 G38 is not complete.
@@ -148,6 +169,9 @@ acceptance cell.
 
 ## Response Options
 
-1. Root-cause and fix the W5.2 regression, then rerun G_INT from M_INT.4.
-2. Amend M_INT.4 if the supervisor accepts a changed W5.2 regression criterion.
+1. Restore or redesign the W5.2 4-cycle production path, then rerun G_INT from
+   M_INT.4.
+2. Amend M_INT.4 if the supervisor accepts a changed W5.2 regression criterion;
+   the amendment should separate same-machine baseline drift from the G38
+   4-cycle regression.
 3. Treat G38 as STUCK at M_INT.4 under the current goal-038 contract.

@@ -4,7 +4,7 @@
 **Sub-goal:** G_INT
 **Metric:** M_INT.4 W5.2 bench corpus regression
 **Branch:** `feat/w3-bundle-integration`
-**HEAD:** `ee8b9b2e`
+**M_INT.4 run HEAD:** `ee8b9b2e`
 **Date:** 2026-05-14
 
 ## Preceding G_INT Status
@@ -126,3 +126,20 @@ requires stopping on the first failure.
 
 Later G_INT metrics were not run because S_INT.3 requires stopping on the first
 failure.
+
+## Follow-Up RCA
+
+See `docs/evidence/2026-05-14-g38-int-mint4-rca.md`.
+
+That RCA reran the W5.2 bench on the old W5.2 branch in sibling worktree
+`/home/dev/projects/xlog/.worktrees/w52-skewed-multiway-bench`. The comparison
+shows two separate issues:
+
+1. The old W5.2 branch does not reproduce the historical W5.2 closure ratios on
+   this machine, so the current `+-10%` historical-cell gate is not reproducible
+   as written.
+2. G38 has an additional 4-cycle WCOJ regression relative to that same-machine
+   old-branch run, especially `4cycle_N1000` and `4cycle_N2000`.
+
+No code fix was applied. Restoring W5.2-era direct 4-cycle behavior is a
+production WCOJ routing decision, not a safely local evidence/doc correction.
