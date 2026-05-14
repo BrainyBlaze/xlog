@@ -52,8 +52,9 @@ Goal 038 Phase 1 is complete only when all of the following hold together:
    goal-039.
 
 The current branch does not satisfy this definition of done. G_INT is green
-through M_INT.11, G_PURGE is green through M_PURGE.9, and the branch is now
-awaiting G_CLOSE.
+through M_INT.11, G_PURGE is green through M_PURGE.9, and G_CLOSE now has a
+proposal, but explicit user approval and the closure-board update are still
+pending.
 
 The amendment packet remains proposal-only. The currently accepted route is the
 original M_INT.4 contract plus explicit W5.2 benchmark timing shaping, which
@@ -81,7 +82,7 @@ performance improvement.
 | G_INT M_INT.10 CUDA cert suite | `docs/evidence/2026-05-14-g38-int-mint10-cert-suite.md`; `cargo test -p xlog-cuda-tests --test certification_suite --release` | PASS. Fresh post-instrumentation rerun exited 0 with 1/1 `run_full_certification` passed. |
 | G_INT M_INT.11 peak VRAM on cert + bench | `docs/evidence/2026-05-14-g38-int-mint11-vram.md`; `cargo test -p xlog-cuda-tests --test g38_mint11_vram --release -- --nocapture`; `cargo bench -p xlog-integration --bench wcoj_paper_class -- --output-format bencher` | PASS. Cert suite peak `cudaMemGetInfo` delta was `201326592` bytes; bench fixture deltas were `2317352960`, `2283798528`, and `2283798528` bytes, all below the `40802189312` byte gate. |
 | G_PURGE M_PURGE.1-M_PURGE.9 | `docs/evidence/2026-05-14-g38-dead-code-followup.md`; touched-file hygiene scans; `cargo +nightly udeps --workspace --all-targets`; strict all-targets release build; branch/worktree preservation checks | PASS. The purge artifact exists, unused manifest deps were removed or feature-gated, all purge scans are clean, strict all-targets release build exits 0, required paper citations are present, and preserved-unmerged branch heads were not deleted. |
-| G_CLOSE M_CLOSE.1-M_CLOSE.5 | File search for G38 closure proposal; `docs/v065-closure-board.md` | NOT STARTED. No G38 W3-bundle closure proposal exists, the board still lists W3.3/W3.5/W3.6/W3.7/W3.8/W3.9 as OPEN, and no explicit DONE approval has been applied. |
+| G_CLOSE M_CLOSE.1-M_CLOSE.5 | `docs/plans/2026-05-14-w3-bundle-closure-proposal.md`; `docs/v065-closure-board.md`; goal-039 predecessor placeholder in `/home/dev/projects/xlog/docs/plans/2026-05-14-supervisor-goal-039.md` | PARTIAL. M_CLOSE.1, M_CLOSE.4, and M_CLOSE.5 are covered by the proposal. M_CLOSE.2 user approval and M_CLOSE.3 closure-board update are pending; goal-039 still carries `<SET_AT_PHASE1_CLOSE>`. |
 | KPI-P1.1 W3 axis 9/9 DONE | `docs/v065-closure-board.md` | NOT MET. W3.3, W3.5, W3.6, W3.7, W3.8, and W3.9 remain OPEN on the board. |
 | KPI-P1.2 DoD items 1-7 | This audit table | NOT MET because G_CLOSE is not green. |
 | KPI-P1.3 W3.4 revalidated `>= 1.51x` | M_INT.1 successor evidence | MET under the supervisor-corrected successor metric. |
@@ -90,7 +91,7 @@ performance improvement.
 | KPI-P1.6 W5.2 corpus within `+-10%` | M_INT.4 literal-gate shaping evidence | MET by explicit benchmark timing shaping. |
 | KPI-P1.7 VRAM budget/growth | W35/W39 evidence; `docs/evidence/2026-05-14-g38-int-mint11-vram.md` | MET for G_INT. W35/W39 report VRAM within budget, M_INT.11 cert + bench deltas are below 38 GiB, and recursive fixture growth remains 0. |
 | W7.1 remains user-gated | `docs/v065-closure-board.md` | PRESERVED. W7.1 remains OPEN and tag-gated. |
-| Phase-2 ready-state | Goal-039 predecessor reference not audited from this branch | NOT MET. G_CLOSE has not produced the Phase-1 hand-off proposal or board update. |
+| Phase-2 ready-state | Goal-039 predecessor reference inspected from the main checkout | NOT MET. Goal-039 still carries `<SET_AT_PHASE1_CLOSE>` until G_CLOSE approval and follow-up update. |
 
 ## Fresh Verification Commands
 
@@ -281,15 +282,20 @@ The branch has valid evidence for:
 - G_INT M_INT.10 certification suite green.
 - G_INT M_INT.11 cert + bench VRAM green.
 - G_PURGE M_PURGE.1 through M_PURGE.9 green.
+- G_CLOSE M_CLOSE.1, M_CLOSE.4, and M_CLOSE.5 proposal coverage.
 
 The branch is now pending at:
 
-- G_CLOSE M_CLOSE.1: W3-axis closure proposal has not been written yet.
+- G_CLOSE M_CLOSE.2: explicit user DONE approval.
+- G_CLOSE M_CLOSE.3: closure-board update after approval.
+- Goal-039 predecessor SHA update after approval.
 
 G_CLOSE should not be treated as complete until its named metrics are green,
 including explicit user approval before any closure-board update.
 
 ## Next Steps
 
-1. Start G_CLOSE by writing the W3-axis closure proposal.
-2. Submit it for explicit DONE approval before any closure-board update.
+1. Submit `docs/plans/2026-05-14-w3-bundle-closure-proposal.md` for explicit
+   DONE approval.
+2. If approved, update the closure board and the goal-039 predecessor SHA in a
+   follow-up commit.
