@@ -1,9 +1,9 @@
 // crates/xlog-integration/tests/test_wcoj_4cycle_adaptive_dispatch.rs
 //! v0.6.5 slice 2 — adaptive opt-in dispatch for 4-cycle.
 //!
-//! Locks the adaptive classifier behavior:
-//!   * Super-hub fixture: classifier score ≥ 0.10 → WCOJ dispatches.
-//!   * Uniform fixture: classifier score < 0.10 → binary fallback.
+//! Locks the post-G1 cardinality-backed adaptive behavior:
+//!   * Seeded large relation cards → WCOJ dispatches.
+//!   * Missing runtime stats → binary fallback.
 //!   * Default config (no overrides, no env): adaptive is OFF →
 //!     no dispatch (slice 2 contract; contrasts with triangle).
 
@@ -158,36 +158,60 @@ fn run_program(
     config: RuntimeConfig,
     inputs: &BTreeMap<&str, Vec<(u32, u32)>>,
 ) -> u64 {
+    run_program_with_cards(provider, memory, config, inputs, &BTreeMap::new())
+}
+
+fn run_program_with_cards(
+    provider: Arc<CudaKernelProvider>,
+    memory: &Arc<GpuMemoryManager>,
+    config: RuntimeConfig,
+    inputs: &BTreeMap<&str, Vec<(u32, u32)>>,
+    seeded_cards: &BTreeMap<&str, u64>,
+) -> u64 {
     let mut compiler = Compiler::new();
     let plan = compiler.compile(FOUR_CYCLE_SOURCE).expect("compile");
     let mut executor = Executor::new_with_config(provider, config);
-    for (name, rel_id) in compiler.rel_ids() {
+    let rel_ids = compiler.rel_ids().clone();
+    for (name, rel_id) in &rel_ids {
         executor.register_relation(*rel_id, name);
     }
     for (name, rows) in inputs {
         let buf = upload_binary_u32(memory, rows);
         executor.put_relation(name, buf);
     }
+    for (name, card) in seeded_cards {
+        if let Some(rel_id) = rel_ids.get(*name) {
+            executor.stats_mut().register_relation(*rel_id);
+            executor.stats_mut().update_cardinality(*rel_id, *card);
+        }
+    }
     executor.execute_plan(&plan).expect("execute_plan");
     executor.wcoj_4cycle_dispatch_count()
 }
 
 #[test]
-fn adaptive_dispatches_on_superhub_fixture() {
+fn adaptive_dispatches_on_superhub_fixture_with_seeded_cards() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
     };
+    let seeded_cards = BTreeMap::from([
+        ("e1", 100_000u64),
+        ("e2", 100_000u64),
+        ("e3", 100_000u64),
+        ("e4", 100_000u64),
+    ]);
     let config = RuntimeConfig::default().with_wcoj_4cycle_dispatch_adaptive(Some(true));
-    let counter = run_program(
+    let counter = run_program_with_cards(
         Arc::clone(&fix.provider),
         &fix.memory,
         config,
         &superhub_fixture(),
+        &seeded_cards,
     );
     assert_eq!(
         counter, 1,
-        "adaptive opt-in on a super-hub fixture must engage the WCOJ kernel; \
+        "adaptive opt-in with seeded large cards must engage the WCOJ kernel; \
          got dispatch counter {counter}"
     );
 }
@@ -207,7 +231,7 @@ fn adaptive_falls_back_on_uniform_fixture() {
     );
     assert_eq!(
         counter, 0,
-        "adaptive opt-in on a uniform fixture must score below threshold and fall back; \
+        "adaptive opt-in without seeded runtime stats must fall back; \
          got dispatch counter {counter}"
     );
 }
@@ -237,8 +261,8 @@ fn adaptive_default_off_does_not_dispatch_on_superhub() {
 
 #[test]
 fn force_gate_dispatches_regardless_of_adaptive() {
-    // Force gate must bypass the classifier — even on a uniform
-    // fixture where adaptive would decline.
+    // Force gate must bypass adaptive/cardinality decisions even
+    // when adaptive would decline.
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
@@ -250,5 +274,5 @@ fn force_gate_dispatches_regardless_of_adaptive() {
         config,
         &uniform_fixture(),
     );
-    assert_eq!(counter, 1, "force gate must bypass adaptive classifier");
+    assert_eq!(counter, 1, "force gate must bypass adaptive cost model");
 }

@@ -29,6 +29,11 @@ path = "tests/certification_suite.rs"
 harness = true
 
 [[test]]
+name = "g38_mint11_vram"
+path = "tests/g38_mint11_vram.rs"
+harness = true
+
+[[test]]
 name = "quick_smoke"
 path = "tests/quick_smoke.rs"
 harness = true

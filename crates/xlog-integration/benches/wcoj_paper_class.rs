@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use cudarc::driver::result::mem_get_info;
 
 use fixtures::paper_class::{paper_class_fixtures, TriangleFixture};
 use xlog_core::{MemoryBudget, ScalarType, Schema};
@@ -82,6 +83,53 @@ struct Provider {
     pool: Arc<StreamPool>,
     launch_stream: StreamId,
     peak: Arc<PeakSink>,
+    mem_info: Arc<CudaMemInfoTracker>,
+}
+
+struct CudaMemInfoTracker {
+    baseline_free: u64,
+    total: u64,
+    min_free: AtomicU64,
+}
+
+impl CudaMemInfoTracker {
+    fn new() -> Self {
+        let (free, total) = mem_get_info().expect("cudaMemGetInfo before W39 fixture");
+        Self {
+            baseline_free: free as u64,
+            total: total as u64,
+            min_free: AtomicU64::new(free as u64),
+        }
+    }
+
+    fn sample(&self) {
+        let Ok((free, total)) = mem_get_info() else {
+            return;
+        };
+        let free = free as u64;
+        let total = total as u64;
+        debug_assert_eq!(
+            self.total, total,
+            "CUDA total memory changed during fixture"
+        );
+        let mut observed = self.min_free.load(Ordering::Relaxed);
+        while free < observed {
+            match self.min_free.compare_exchange_weak(
+                observed,
+                free,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(next) => observed = next,
+            }
+        }
+    }
+
+    fn peak_delta_bytes(&self) -> u64 {
+        self.baseline_free
+            .saturating_sub(self.min_free.load(Ordering::Relaxed))
+    }
 }
 
 fn make_provider() -> Option<Provider> {
@@ -89,6 +137,7 @@ fn make_provider() -> Option<Provider> {
     let pool = Arc::new(StreamPool::new(Arc::clone(&device), 1024));
     let launch_stream = pool.acquire().ok()?;
     let peak = Arc::new(PeakSink::default());
+    let mem_info = Arc::new(CudaMemInfoTracker::new());
     let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
         AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
     );
@@ -120,6 +169,7 @@ fn make_provider() -> Option<Provider> {
         pool,
         launch_stream,
         peak,
+        mem_info,
     })
 }
 
@@ -171,11 +221,13 @@ struct UploadedFixture {
 }
 
 fn upload_fixture(prov: &Provider, fixture: &TriangleFixture) -> UploadedFixture {
-    UploadedFixture {
+    let uploaded = UploadedFixture {
         xy: upload_2col_u32(&prov.memory, &fixture.e_xy),
         yz: upload_2col_u32(&prov.memory, &fixture.e_yz),
         xz: upload_2col_u32(&prov.memory, &fixture.e_xz),
-    }
+    };
+    prov.mem_info.sample();
+    uploaded
 }
 
 fn download_triples(
@@ -204,9 +256,12 @@ fn run_hash_triangle(prov: &Provider, input: &UploadedFixture) -> CudaBuffer {
         .provider
         .hash_join_v2(&input.xy, &input.yz, &[1], &[0], JoinType::Inner)
         .expect("hash xy-yz");
-    prov.provider
+    let out = prov
+        .provider
         .hash_join_v2(&xy_yz, &input.xz, &[0, 3], &[0, 1], JoinType::Inner)
-        .expect("hash triangle")
+        .expect("hash triangle");
+    prov.mem_info.sample();
+    out
 }
 
 fn run_wcoj_triangle(prov: &Provider, input: &UploadedFixture) -> CudaBuffer {
@@ -227,6 +282,7 @@ fn run_wcoj_triangle(prov: &Provider, input: &UploadedFixture) -> CudaBuffer {
         .wcoj_triangle_u32_recorded(&xy, &yz, &xz, prov.launch_stream)
         .expect("wcoj triangle");
     sync_launch_stream(prov);
+    prov.mem_info.sample();
     out
 }
 
@@ -362,6 +418,13 @@ fn bench_fixture(
         "W39_PEAK_VRAM {} bytes={} gate_bytes={VRAM_GATE_BYTES}",
         fixture.name,
         prov.peak.peak_bytes()
+    );
+    eprintln!(
+        "W39_CUDA_MEM_GET_INFO {} peak_delta_bytes={} gate_bytes={} total_bytes={}",
+        fixture.name,
+        prov.mem_info.peak_delta_bytes(),
+        VRAM_GATE_BYTES,
+        prov.mem_info.total
     );
     if fixture.recursive {
         eprintln!(
