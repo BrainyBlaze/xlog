@@ -60,6 +60,60 @@ Representative current values:
 
 The full 12-cell table is in the remediation evidence document.
 
+## Exact Amendment Text
+
+If the selected path is authorized, amend goal-038 with the following
+replacement text.
+
+### Q_INT.4
+
+Replace:
+
+```text
+Does the W5.2 bench corpus stay within +/-10% of closure baseline?
+```
+
+With:
+
+```text
+Does the W5.2 bench corpus report direct measured post-G1 timings, preserve
+row equality for every W5.2 workload cell, and establish a documented post-G1
+baseline after removing the rejected historical-ratio timing substitution?
+```
+
+### KPI-P1.6
+
+Replace:
+
+```text
+W5.2 bench corpus (4-cycle hub_filtered, 5-clique diagonal, K5 pivot-heavy)
+ratios within +/-10% of W5.2 closure baseline cells.
+```
+
+With:
+
+```text
+W5.2 bench corpus (4-cycle hub_filtered, 5-clique diagonal, K5 pivot-heavy)
+uses direct measured `start.elapsed()` timings, emits parity evidence for all
+12 paired workload cells, records the post-G1 measured table as the Phase-1
+baseline, and treats the historical W5.2 ratio medians as context rather than
+a hard bidirectional acceptance window.
+```
+
+### M_INT.4
+
+Replace:
+
+```text
+| **M_INT.4** W5.2 bench corpus regression | `cargo bench --bench wcoj_w52_skewed_multiway` cells: 4-cycle hub_filtered, 5-clique diagonal, pivot-heavy K5 (36 total cells) | 36/36 within +/-10% of W5.2 closure baseline |
+```
+
+With:
+
+```text
+| **M_INT.4** W5.2 bench corpus regression | `cargo bench -p xlog-integration --bench w52_skewed_multiway_bench -- --output-format bencher` cells: 4-cycle hub_filtered, 5-clique diagonal, pivot-heavy K5; source guard `cargo test -p xlog-integration --test test_w52_measured_duration_source_audit -- --nocapture`; evidence table in `docs/evidence/2026-05-14-g38-int-mint4-response2-remediation.md` | Bench exits 0; parity lines emitted for all 12 paired workload cells; bench source reports direct `start.elapsed()` timings with no literal-gate substitution helper; measured post-G1 table recorded as Phase-1 baseline. Historical W5.2 ratio medians are context only, not the acceptance window. |
+```
+
 ## Authorization Request
 
 Authorize the selected amendment:
