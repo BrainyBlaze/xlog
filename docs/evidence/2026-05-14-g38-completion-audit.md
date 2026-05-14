@@ -2,12 +2,13 @@
 
 **Objective:** `docs/plans/2026-05-14-supervisor-goal-038.md`
 **Audited branch:** `feat/w3-bundle-integration`
-**Audited code/evidence base:** Response 2 three-run corpus checkpoint
-`cb725279` (`docs(g38): record three-run M_INT.4 rebaseline corpus`), before
-any later audit-anchor doc-only update. This supersedes the pre-rejection
-G_PURGE checkpoint `35b5a4f5`, G_INT checkpoint `d339b7c2`, and initial
-Response 2 remediation checkpoint `ae95ce13` for closure status; the earlier
-evidence remains valid only where explicitly noted below.
+**Audited code/evidence base:** Response 2 TSV-backed corpus checkpoint
+`651219c0` (`docs(g38): add M_INT.4 three-run TSV evidence`), before any later
+audit-anchor doc-only update. This supersedes the pre-rejection G_PURGE
+checkpoint `35b5a4f5`, G_INT checkpoint `d339b7c2`, initial Response 2
+remediation checkpoint `ae95ce13`, and prose-table three-run checkpoint
+`cb725279` for closure status; the earlier evidence remains valid only where
+explicitly noted below.
 **M_INT.4 follow-up series:** starts at `78cb41c8` and contains RCA,
 same-machine comparison TSV, amendment-packet, audit-metadata docs, E2-prefix
 mitigation, rejected W5.2 literal-gate timing shaping, and Response 2
@@ -18,6 +19,7 @@ remediation/resubmission evidence.
 **Response 2 resubmission commit:** `da57fa83`
 **Response 2 tally-correction commit:** `ae95ce13`
 **Response 2 three-run corpus commit:** `cb725279`
+**Response 2 three-run TSV evidence commit:** `651219c0`
 **Audit date:** 2026-05-14
 
 ## Source Note

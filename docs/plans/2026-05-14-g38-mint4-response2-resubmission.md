@@ -5,6 +5,7 @@
 **Governing plan:** `/home/dev/projects/xlog/docs/plans/2026-05-14-supervisor-goal-038.md`
 **Response 2 remediation checkpoint:** `ae95ce13`
 **Response 2 three-run corpus checkpoint:** `cb725279`
+**Response 2 three-run TSV checkpoint:** `651219c0`
 **Code remediation commit:** `7376ce52`
 **Evidence/resubmission commit:** `da57fa83`
 **Closure status:** W3 axis remains `OPEN`.

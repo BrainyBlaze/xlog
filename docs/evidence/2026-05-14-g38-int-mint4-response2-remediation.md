@@ -8,6 +8,7 @@
 **Code remediation commit:** `7376ce52`
 **Evidence checkpoint:** `da57fa83`
 **Three-run corpus checkpoint:** `cb725279`
+**Three-run TSV checkpoint:** `651219c0`
 **Status:** Original historical `+-10%` ratio gate remains red after removing
 the rejected bench substitution.
 
