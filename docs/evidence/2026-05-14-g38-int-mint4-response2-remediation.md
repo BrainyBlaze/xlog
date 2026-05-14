@@ -59,6 +59,24 @@ test w52_bench_reports_measured_elapsed_durations ... ok
 test result: ok. 1 passed; 0 failed
 ```
 
+Fresh executable-source sweep after the Response 2 packet:
+
+```text
+rg -n "w52_literal_gate|W52LiteralGate|literal_gate_reported_duration|literal_gate_target_ns|reported_duration\(" \
+  crates/xlog-integration/benches crates/xlog-cuda crates/xlog-runtime crates/xlog-core \
+  --glob '!**/test_w52_measured_duration_source_audit.rs'
+EXIT 1
+
+rg -n "w52_literal_gate|W52LiteralGate|literal_gate_reported_duration|literal_gate_target_ns|reported_duration\(" \
+  crates/xlog-integration/tests \
+  --glob '!**/test_w52_measured_duration_source_audit.rs'
+EXIT 1
+```
+
+`rg` exit 1 means no matches. The only remaining source references to the
+removed helper names are the negative assertions in
+`test_w52_measured_duration_source_audit.rs`.
+
 ## Unshaped M_INT.4 Rerun
 
 Command:
