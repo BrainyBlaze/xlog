@@ -29,6 +29,11 @@ pub struct WcojTriangleHgWorkPlanU32 {
     pub row_count: u32,
 }
 
+pub struct WcojTriangleHgCountPhaseU32 {
+    pub total_rows_device: TrackedCudaSlice<u32>,
+    pub total_rows: u32,
+}
+
 pub struct WcojTriangleHgWorkPlanU64 {
     pub xy_work_prefix: TrackedCudaSlice<u32>,
     pub xy_yz_start: TrackedCudaSlice<u32>,
