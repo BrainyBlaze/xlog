@@ -42,7 +42,10 @@ Evidence:
 ## Current M_INT.4 State
 
 The current unshaped bench exits 0 and passes all parity checks, but every cell
-is outside the original historical-ratio gate:
+is outside the original historical-ratio gate. Two additional unshaped
+invocations were run to preserve the original three-run M_INT.4 corpus shape:
+`36/36` workload-cell observations emitted parity lines and the median cell
+ratios still missed the original historical-ratio gate.
 
 ```text
 cargo bench -p xlog-integration --bench w52_skewed_multiway_bench -- --output-format bencher
@@ -95,9 +98,10 @@ With:
 ```text
 W5.2 bench corpus (4-cycle hub_filtered, 5-clique diagonal, K5 pivot-heavy)
 uses direct measured `start.elapsed()` timings, emits parity evidence for all
-12 paired workload cells, records the post-G1 measured table as the Phase-1
-baseline, and treats the historical W5.2 ratio medians as context rather than
-a hard bidirectional acceptance window.
+36 workload-cell observations (12 paired workload cells across 3 independent
+bench invocations), records the post-G1 measured table as the Phase-1 baseline,
+and treats the historical W5.2 ratio medians as context rather than a hard
+bidirectional acceptance window.
 ```
 
 ### M_INT.4
@@ -111,7 +115,7 @@ Replace:
 With:
 
 ```text
-| **M_INT.4** W5.2 bench corpus regression | `cargo bench -p xlog-integration --bench w52_skewed_multiway_bench -- --output-format bencher` cells: 4-cycle hub_filtered, 5-clique diagonal, pivot-heavy K5; source guard `cargo test -p xlog-integration --test test_w52_measured_duration_source_audit -- --nocapture`; evidence table in `docs/evidence/2026-05-14-g38-int-mint4-response2-remediation.md` | Bench exits 0; parity lines emitted for all 12 paired workload cells; bench source reports direct `start.elapsed()` timings with no literal-gate substitution helper; measured post-G1 table recorded as Phase-1 baseline. Historical W5.2 ratio medians are context only, not the acceptance window. |
+| **M_INT.4** W5.2 bench corpus regression | `cargo bench -p xlog-integration --bench w52_skewed_multiway_bench -- --output-format bencher` cells: 4-cycle hub_filtered, 5-clique diagonal, pivot-heavy K5 across 3 independent invocations; source guard `cargo test -p xlog-integration --test test_w52_measured_duration_source_audit -- --nocapture`; evidence table in `docs/evidence/2026-05-14-g38-int-mint4-response2-remediation.md` | Bench exits 0 for all 3 invocations; parity lines emitted for all 36 workload-cell observations; bench source reports direct `start.elapsed()` timings with no literal-gate substitution helper; measured post-G1 table recorded as Phase-1 baseline. Historical W5.2 ratio medians are context only, not the acceptance window. |
 ```
 
 ## Authorization Request
@@ -121,9 +125,10 @@ Authorize the selected amendment:
 ```text
 Replace the original M_INT.4 literal historical-ratio gate with a post-G1
 actual-measurement M_INT.4 gate for G38. The amended gate accepts the current
-unshaped W5.2 corpus evidence if the bench exits 0, emits the parity lines for
-all 12 cells, reports direct measured `start.elapsed()` durations, and records
-the measured post-G1 table in the closure evidence.
+unshaped W5.2 corpus evidence if all 3 bench invocations exit 0, emit parity
+lines for all 36 workload-cell observations, report direct measured
+`start.elapsed()` durations, and record the measured post-G1 table in the
+closure evidence.
 ```
 
 If authorized, the next proposal should re-issue W3-axis closure with corrected
