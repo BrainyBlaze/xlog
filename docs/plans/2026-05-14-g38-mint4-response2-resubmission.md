@@ -6,6 +6,7 @@
 **Response 2 remediation checkpoint:** `ae95ce13`
 **Response 2 three-run corpus checkpoint:** `cb725279`
 **Response 2 three-run TSV checkpoint:** `651219c0`
+**Response 2 completion-audit checkpoint:** `4c0307a3`
 **Code remediation commit:** `7376ce52`
 **Evidence/resubmission commit:** `da57fa83`
 **Closure status:** W3 axis remains `OPEN`.
@@ -41,6 +42,7 @@ Evidence:
 
 - `docs/evidence/2026-05-14-g38-int-mint4-response2-remediation.md`
 - `docs/evidence/2026-05-14-g38-int-mint4-response2-three-run.tsv`
+- `docs/evidence/2026-05-14-g38-completion-audit.md`
 
 ## Current M_INT.4 State
 
