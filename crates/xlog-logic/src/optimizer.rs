@@ -1845,6 +1845,9 @@ pub mod helper_split_pass {
     }
 }
 
+#[path = "optimizer/stream_schedule_pass.rs"]
+pub mod stream_schedule_pass;
+
 #[cfg(test)]
 mod helper_split_pass_tests {
     use std::collections::HashMap;
