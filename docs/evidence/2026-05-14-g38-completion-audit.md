@@ -2,7 +2,9 @@
 
 **Objective:** `docs/plans/2026-05-14-supervisor-goal-038.md`
 **Audited branch:** `feat/w3-bundle-integration`
-**Audited HEAD:** `4fc0bc92`
+**Audited code/evidence base HEAD:** `4fc0bc92`
+**Proposal-only series after base:** starts at `78cb41c8` and contains M_INT.4
+RCA / amendment-packet / audit-metadata docs only
 **Initial M_INT.4 blocker run HEAD:** `ee8b9b2e`
 **Post-mitigation M_INT.4 rerun:** after `71f726fc`
 **Audit date:** 2026-05-14
@@ -49,6 +51,10 @@ Goal 038 Phase 1 is complete only when all of the following hold together:
 
 The current branch does not satisfy this definition of done. It is stopped at
 G_INT M_INT.4.
+
+The commits after `4fc0bc92` are proposal/evidence-only M_INT.4 follow-ups.
+They do not change the production code or turn M_INT.4 green under the current
+goal-038 contract.
 
 ## Prompt-To-Artifact Checklist
 
