@@ -1315,6 +1315,712 @@ pub mod selectivity_pass {
     }
 }
 
+/// W3.7 AOT helper-relation splitting for deep joins with buried skew.
+pub mod helper_split_pass {
+    use std::collections::{HashMap, HashSet};
+
+    use xlog_core::{RelId, ScalarType, Schema};
+    use xlog_ir::{CompiledRule, ExecutionPlan, JoinType, ProjectExpr, RirMeta, RirNode, Scc};
+    use xlog_stats::StatsManager;
+
+    const HEAVY_SKEW_RATIO: f64 = 10.0;
+
+    /// Description of a helper relation introduced by the pass.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct HelperRelationSpec {
+        /// Predicate name allocated for the helper relation.
+        pub name: String,
+        /// Relation identifier allocated for the helper relation.
+        pub rel_id: RelId,
+        /// Output schema of the helper relation.
+        pub schema: Schema,
+        /// Pair of source relations extracted into the helper body.
+        pub source_rels: [RelId; 2],
+    }
+
+    struct JoinStep {
+        left_keys: Vec<usize>,
+        right_keys: Vec<usize>,
+    }
+
+    struct LinearBody {
+        leaves: Vec<RelId>,
+        leaf_classes: Vec<Vec<u32>>,
+        joins: Vec<JoinStep>,
+        project: Vec<ProjectExpr>,
+        final_classes: Vec<u32>,
+    }
+
+    struct FlatJoin {
+        leaves: Vec<RelId>,
+        output_cols: Vec<usize>,
+        equalities: Vec<(usize, usize)>,
+    }
+
+    struct Candidate {
+        pair_start: usize,
+        helper_schema: Schema,
+        helper_project: Vec<ProjectExpr>,
+        helper_join_left_keys: Vec<usize>,
+        helper_join_right_keys: Vec<usize>,
+        exposed_classes: Vec<u32>,
+    }
+
+    struct Rewrite {
+        helper_body: RirNode,
+        outer_body: RirNode,
+        spec: HelperRelationSpec,
+    }
+
+    /// Rewrite eligible rules in-place and return the helper relations introduced.
+    pub fn run<F>(
+        plan: &mut ExecutionPlan,
+        schemas: &HashMap<RelId, Schema>,
+        stats: &StatsManager,
+        mut allocate: F,
+    ) -> Vec<HelperRelationSpec>
+    where
+        F: FnMut(Schema) -> (String, RelId),
+    {
+        let mut specs = Vec::new();
+        for scc_idx in 0..plan.rules_by_scc.len() {
+            let mut rule_idx = 0;
+            while rule_idx < plan.rules_by_scc[scc_idx].len() {
+                let rewrite = {
+                    let rule = &plan.rules_by_scc[scc_idx][rule_idx];
+                    try_rewrite_rule(rule, schemas, stats, &mut allocate)
+                };
+                if let Some(rewrite) = rewrite {
+                    let helper_rule = CompiledRule {
+                        head: rewrite.spec.name.clone(),
+                        body: rewrite.helper_body,
+                        meta: RirMeta::with_schema(rewrite.spec.schema.clone()),
+                    };
+                    plan.rules_by_scc[scc_idx].insert(rule_idx, helper_rule);
+                    rule_idx += 1;
+                    plan.rules_by_scc[scc_idx][rule_idx].body = rewrite.outer_body;
+                    add_helper_to_scc(&mut plan.sccs, scc_idx, &rewrite.spec.name);
+                    specs.push(rewrite.spec);
+                }
+                rule_idx += 1;
+            }
+        }
+        specs
+    }
+
+    fn add_helper_to_scc(sccs: &mut [Scc], scc_idx: usize, helper: &str) {
+        if let Some(scc) = sccs.get_mut(scc_idx) {
+            if !scc.predicates.iter().any(|p| p == helper) {
+                scc.predicates.push(helper.to_string());
+            }
+        }
+    }
+
+    fn try_rewrite_rule<F>(
+        rule: &CompiledRule,
+        schemas: &HashMap<RelId, Schema>,
+        stats: &StatsManager,
+        allocate: &mut F,
+    ) -> Option<Rewrite>
+    where
+        F: FnMut(Schema) -> (String, RelId),
+    {
+        let linear = linearize_project_body(&rule.body, schemas)?;
+        let candidate = choose_candidate(&linear, schemas, stats)?;
+        let (helper_name, helper_rel) = allocate(candidate.helper_schema.clone());
+        let helper_body = build_helper_body(&linear, &candidate);
+        let outer_body = build_outer_body(&linear, &candidate, helper_rel)?;
+        Some(Rewrite {
+            helper_body,
+            outer_body,
+            spec: HelperRelationSpec {
+                name: helper_name,
+                rel_id: helper_rel,
+                schema: candidate.helper_schema,
+                source_rels: [
+                    linear.leaves[candidate.pair_start],
+                    linear.leaves[candidate.pair_start + 1],
+                ],
+            },
+        })
+    }
+
+    fn linearize_project_body(
+        body: &RirNode,
+        schemas: &HashMap<RelId, Schema>,
+    ) -> Option<LinearBody> {
+        let RirNode::Project { input, columns } = body else {
+            return None;
+        };
+        let flat = collect_join_graph(input, schemas)?;
+        if flat.leaves.len() < 6 {
+            return None;
+        }
+        let mut offsets = Vec::with_capacity(flat.leaves.len());
+        let mut total_cols = 0usize;
+        for rel in &flat.leaves {
+            offsets.push(total_cols);
+            total_cols += schemas.get(rel)?.arity();
+        }
+        let mut uf = UnionFind::new(total_cols);
+        for (left, right) in flat.equalities {
+            if left >= total_cols || right >= total_cols {
+                return None;
+            }
+            uf.union(left, right);
+        }
+        let mut leaf_classes: Vec<Vec<u32>> = Vec::with_capacity(flat.leaves.len());
+        for (leaf_idx, rel) in flat.leaves.iter().enumerate() {
+            let arity = schemas.get(rel)?.arity();
+            let offset = offsets[leaf_idx];
+            leaf_classes.push((0..arity).map(|col| uf.find(offset + col) as u32).collect());
+        }
+        let final_classes = flat
+            .output_cols
+            .iter()
+            .map(|col| uf.find(*col) as u32)
+            .collect();
+        let joins = derive_left_deep_steps(&leaf_classes)?;
+        Some(LinearBody {
+            leaves: flat.leaves,
+            leaf_classes,
+            joins,
+            project: columns.clone(),
+            final_classes,
+        })
+    }
+
+    fn collect_join_graph(node: &RirNode, schemas: &HashMap<RelId, Schema>) -> Option<FlatJoin> {
+        match node {
+            RirNode::Scan { rel } => Some(FlatJoin {
+                leaves: vec![*rel],
+                output_cols: (0..schemas.get(rel)?.arity()).collect(),
+                equalities: Vec::new(),
+            }),
+            RirNode::Join {
+                left,
+                right,
+                left_keys,
+                right_keys,
+                join_type,
+            } if *join_type == JoinType::Inner => {
+                let left_flat = collect_join_graph(left, schemas)?;
+                let right_flat = collect_join_graph(right, schemas)?;
+                if left_keys.len() != right_keys.len() {
+                    return None;
+                }
+                let right_shift = total_width(&left_flat.leaves, schemas)?;
+                let mut leaves = left_flat.leaves;
+                leaves.extend(right_flat.leaves);
+                let right_output_cols: Vec<usize> = right_flat
+                    .output_cols
+                    .iter()
+                    .map(|col| col + right_shift)
+                    .collect();
+                let mut equalities = left_flat.equalities;
+                equalities.extend(
+                    right_flat
+                        .equalities
+                        .iter()
+                        .map(|(left, right)| (left + right_shift, right + right_shift)),
+                );
+                for (&left_key, &right_key) in left_keys.iter().zip(right_keys.iter()) {
+                    equalities.push((
+                        *left_flat.output_cols.get(left_key)?,
+                        *right_output_cols.get(right_key)?,
+                    ));
+                }
+                let mut output_cols = left_flat.output_cols;
+                output_cols.extend(right_output_cols);
+                Some(FlatJoin {
+                    leaves,
+                    output_cols,
+                    equalities,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn total_width(leaves: &[RelId], schemas: &HashMap<RelId, Schema>) -> Option<usize> {
+        leaves
+            .iter()
+            .map(|rel| schemas.get(rel).map(Schema::arity))
+            .try_fold(0usize, |acc, width| width.map(|width| acc + width))
+    }
+
+    fn derive_left_deep_steps(leaf_classes: &[Vec<u32>]) -> Option<Vec<JoinStep>> {
+        let mut joins = Vec::with_capacity(leaf_classes.len().saturating_sub(1));
+        let mut current = leaf_classes.first()?.clone();
+        for classes in leaf_classes.iter().skip(1) {
+            let mut left_keys = Vec::new();
+            let mut right_keys = Vec::new();
+            for (right_col, class) in classes.iter().enumerate() {
+                if let Some(left_col) = current
+                    .iter()
+                    .position(|current_class| current_class == class)
+                {
+                    left_keys.push(left_col);
+                    right_keys.push(right_col);
+                }
+            }
+            if left_keys.is_empty() {
+                return None;
+            }
+            joins.push(JoinStep {
+                left_keys,
+                right_keys,
+            });
+            current.extend(classes.iter().copied());
+        }
+        Some(joins)
+    }
+
+    fn choose_candidate(
+        linear: &LinearBody,
+        schemas: &HashMap<RelId, Schema>,
+        stats: &StatsManager,
+    ) -> Option<Candidate> {
+        for pair_start in 3..linear.leaves.len().saturating_sub(1) {
+            let candidate = build_candidate(linear, schemas, pair_start)?;
+            if skew_ratio_for_candidate(linear, stats, &candidate) >= HEAVY_SKEW_RATIO {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    fn build_candidate(
+        linear: &LinearBody,
+        schemas: &HashMap<RelId, Schema>,
+        pair_start: usize,
+    ) -> Option<Candidate> {
+        let left_rel = linear.leaves[pair_start];
+        let right_rel = linear.leaves[pair_start + 1];
+        let left_schema = schemas.get(&left_rel)?;
+        let right_schema = schemas.get(&right_rel)?;
+        let internal_step = linear.joins.get(pair_start)?;
+        let mut helper_left_keys = Vec::new();
+        let mut helper_right_keys = Vec::new();
+        for (&left_key, &right_key) in internal_step
+            .left_keys
+            .iter()
+            .zip(internal_step.right_keys.iter())
+        {
+            let class = class_at_state(linear, pair_start + 1, left_key)?;
+            let left_col = linear.leaf_classes[pair_start]
+                .iter()
+                .position(|c| *c == class)?;
+            helper_left_keys.push(left_col);
+            helper_right_keys.push(right_key);
+        }
+        let internal: HashSet<u32> = helper_left_keys
+            .iter()
+            .map(|col| linear.leaf_classes[pair_start][*col])
+            .collect();
+        let outside = outside_classes(linear, pair_start);
+        let output = projected_classes(linear)?;
+        let mut exposed_classes = Vec::new();
+        let mut helper_project = Vec::new();
+        let mut helper_columns = Vec::new();
+        for (col, class) in linear.leaf_classes[pair_start].iter().copied().enumerate() {
+            if !internal.contains(&class)
+                && (outside.contains(&class) || output.contains(&class))
+                && !exposed_classes.contains(&class)
+            {
+                exposed_classes.push(class);
+                helper_project.push(ProjectExpr::Column(col));
+                let ty = left_schema.column_type(col).unwrap_or(ScalarType::U32);
+                helper_columns.push((format!("c{}", helper_columns.len()), ty));
+            }
+        }
+        let right_offset = left_schema.arity();
+        for (col, class) in linear.leaf_classes[pair_start + 1]
+            .iter()
+            .copied()
+            .enumerate()
+        {
+            if !internal.contains(&class)
+                && (outside.contains(&class) || output.contains(&class))
+                && !exposed_classes.contains(&class)
+            {
+                exposed_classes.push(class);
+                helper_project.push(ProjectExpr::Column(right_offset + col));
+                let ty = right_schema.column_type(col).unwrap_or(ScalarType::U32);
+                helper_columns.push((format!("c{}", helper_columns.len()), ty));
+            }
+        }
+        if exposed_classes.len() != 2 {
+            return None;
+        }
+        Some(Candidate {
+            pair_start,
+            helper_schema: Schema::new(helper_columns),
+            helper_project,
+            helper_join_left_keys: helper_left_keys,
+            helper_join_right_keys: helper_right_keys,
+            exposed_classes,
+        })
+    }
+
+    fn class_at_state(linear: &LinearBody, leaf_count: usize, col: usize) -> Option<u32> {
+        let mut idx = col;
+        for leaf_idx in 0..leaf_count {
+            let classes = &linear.leaf_classes[leaf_idx];
+            if idx < classes.len() {
+                return Some(classes[idx]);
+            }
+            idx -= classes.len();
+        }
+        None
+    }
+
+    fn outside_classes(linear: &LinearBody, pair_start: usize) -> HashSet<u32> {
+        linear
+            .leaf_classes
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| *idx != pair_start && *idx != pair_start + 1)
+            .flat_map(|(_, classes)| classes.iter().copied())
+            .collect()
+    }
+
+    fn projected_classes(linear: &LinearBody) -> Option<HashSet<u32>> {
+        let mut out = HashSet::new();
+        for expr in &linear.project {
+            let ProjectExpr::Column(col) = expr else {
+                return None;
+            };
+            out.insert(*linear.final_classes.get(*col)?);
+        }
+        Some(out)
+    }
+
+    fn skew_ratio_for_candidate(
+        linear: &LinearBody,
+        stats: &StatsManager,
+        candidate: &Candidate,
+    ) -> f64 {
+        let rel = linear.leaves[candidate.pair_start];
+        let Some(rel_stats) = stats.get_relation_stats(rel) else {
+            return 0.0;
+        };
+        let mut ratio: f64 = 0.0;
+        for (col, class) in linear.leaf_classes[candidate.pair_start]
+            .iter()
+            .copied()
+            .enumerate()
+        {
+            if !candidate.exposed_classes.contains(&class) {
+                continue;
+            }
+            let Some(col_stats) = rel_stats.get_column(col) else {
+                continue;
+            };
+            if col_stats.distinct_estimate == 0 {
+                continue;
+            }
+            ratio = ratio.max(rel_stats.cardinality as f64 / col_stats.distinct_estimate as f64);
+        }
+        ratio
+    }
+
+    fn build_helper_body(linear: &LinearBody, candidate: &Candidate) -> RirNode {
+        let left = RirNode::Scan {
+            rel: linear.leaves[candidate.pair_start],
+        };
+        let right = RirNode::Scan {
+            rel: linear.leaves[candidate.pair_start + 1],
+        };
+        RirNode::Project {
+            input: Box::new(RirNode::Join {
+                left: Box::new(left),
+                right: Box::new(right),
+                left_keys: candidate.helper_join_left_keys.clone(),
+                right_keys: candidate.helper_join_right_keys.clone(),
+                join_type: JoinType::Inner,
+            }),
+            columns: candidate.helper_project.clone(),
+        }
+    }
+
+    fn build_outer_body(
+        linear: &LinearBody,
+        candidate: &Candidate,
+        helper_rel: RelId,
+    ) -> Option<RirNode> {
+        let mut node = RirNode::Scan {
+            rel: linear.leaves[0],
+        };
+        let mut classes = linear.leaf_classes[0].clone();
+        for leaf_idx in 1..candidate.pair_start {
+            let step = &linear.joins[leaf_idx - 1];
+            node = RirNode::Join {
+                left: Box::new(node),
+                right: Box::new(RirNode::Scan {
+                    rel: linear.leaves[leaf_idx],
+                }),
+                left_keys: step.left_keys.clone(),
+                right_keys: step.right_keys.clone(),
+                join_type: JoinType::Inner,
+            };
+            classes.extend(linear.leaf_classes[leaf_idx].iter().copied());
+        }
+        let prefix_step = &linear.joins[candidate.pair_start - 1];
+        let mut helper_right_keys = Vec::new();
+        for &rk in &prefix_step.right_keys {
+            let class = linear.leaf_classes[candidate.pair_start][rk];
+            helper_right_keys.push(candidate.exposed_classes.iter().position(|c| *c == class)?);
+        }
+        node = RirNode::Join {
+            left: Box::new(node),
+            right: Box::new(RirNode::Scan { rel: helper_rel }),
+            left_keys: prefix_step.left_keys.clone(),
+            right_keys: helper_right_keys,
+            join_type: JoinType::Inner,
+        };
+        classes.extend(candidate.exposed_classes.iter().copied());
+        for leaf_idx in candidate.pair_start + 2..linear.leaves.len() {
+            let step = &linear.joins[leaf_idx - 1];
+            let mut left_keys = Vec::new();
+            for &lk in &step.left_keys {
+                let class = class_at_state(linear, leaf_idx, lk)?;
+                left_keys.push(classes.iter().position(|c| *c == class)?);
+            }
+            node = RirNode::Join {
+                left: Box::new(node),
+                right: Box::new(RirNode::Scan {
+                    rel: linear.leaves[leaf_idx],
+                }),
+                left_keys,
+                right_keys: step.right_keys.clone(),
+                join_type: JoinType::Inner,
+            };
+            classes.extend(linear.leaf_classes[leaf_idx].iter().copied());
+        }
+        let mut project = Vec::with_capacity(linear.project.len());
+        for expr in &linear.project {
+            let ProjectExpr::Column(col) = expr else {
+                return None;
+            };
+            let class = *linear.final_classes.get(*col)?;
+            let mapped = classes.iter().position(|c| *c == class)?;
+            project.push(ProjectExpr::Column(mapped));
+        }
+        Some(RirNode::Project {
+            input: Box::new(node),
+            columns: project,
+        })
+    }
+
+    struct UnionFind {
+        parent: Vec<usize>,
+    }
+
+    impl UnionFind {
+        fn new(len: usize) -> Self {
+            Self {
+                parent: (0..len).collect(),
+            }
+        }
+
+        fn find(&mut self, x: usize) -> usize {
+            let p = self.parent[x];
+            if p == x {
+                x
+            } else {
+                let root = self.find(p);
+                self.parent[x] = root;
+                root
+            }
+        }
+
+        fn union(&mut self, a: usize, b: usize) {
+            let ra = self.find(a);
+            let rb = self.find(b);
+            if ra != rb {
+                self.parent[rb] = ra;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod helper_split_pass_tests {
+    use std::collections::HashMap;
+
+    use super::helper_split_pass;
+    use xlog_core::{RelId, ScalarType, Schema};
+    use xlog_ir::{CompiledRule, ExecutionPlan, JoinType, ProjectExpr, RirMeta, RirNode, Scc};
+    use xlog_stats::{ColumnStats, StatsManager};
+
+    fn edge_schema() -> Schema {
+        Schema::new(vec![
+            ("c0".to_string(), ScalarType::U32),
+            ("c1".to_string(), ScalarType::U32),
+        ])
+    }
+
+    fn helper_schema() -> Schema {
+        Schema::new(vec![
+            ("c0".to_string(), ScalarType::U32),
+            ("c1".to_string(), ScalarType::U32),
+        ])
+    }
+
+    fn schemas() -> HashMap<RelId, Schema> {
+        (0..6)
+            .map(|idx| (RelId(idx), edge_schema()))
+            .collect::<HashMap<_, _>>()
+    }
+
+    fn left_deep_fixture_body() -> RirNode {
+        let ab_bc = RirNode::Join {
+            left: Box::new(RirNode::Scan { rel: RelId(0) }),
+            right: Box::new(RirNode::Scan { rel: RelId(1) }),
+            left_keys: vec![1],
+            right_keys: vec![0],
+            join_type: JoinType::Inner,
+        };
+        let with_cd = RirNode::Join {
+            left: Box::new(ab_bc),
+            right: Box::new(RirNode::Scan { rel: RelId(2) }),
+            left_keys: vec![3],
+            right_keys: vec![0],
+            join_type: JoinType::Inner,
+        };
+        let with_de = RirNode::Join {
+            left: Box::new(with_cd),
+            right: Box::new(RirNode::Scan { rel: RelId(3) }),
+            left_keys: vec![5],
+            right_keys: vec![0],
+            join_type: JoinType::Inner,
+        };
+        let with_ef = RirNode::Join {
+            left: Box::new(with_de),
+            right: Box::new(RirNode::Scan { rel: RelId(4) }),
+            left_keys: vec![7],
+            right_keys: vec![0],
+            join_type: JoinType::Inner,
+        };
+        let with_af = RirNode::Join {
+            left: Box::new(with_ef),
+            right: Box::new(RirNode::Scan { rel: RelId(5) }),
+            left_keys: vec![0, 9],
+            right_keys: vec![0, 1],
+            join_type: JoinType::Inner,
+        };
+        RirNode::Project {
+            input: Box::new(with_af),
+            columns: vec![
+                ProjectExpr::Column(0),
+                ProjectExpr::Column(1),
+                ProjectExpr::Column(3),
+                ProjectExpr::Column(5),
+                ProjectExpr::Column(9),
+            ],
+        }
+    }
+
+    fn plan() -> ExecutionPlan {
+        ExecutionPlan {
+            sccs: vec![Scc {
+                id: 0,
+                predicates: vec!["out".to_string()],
+                is_recursive: false,
+            }],
+            strata: vec![],
+            rules_by_scc: vec![vec![CompiledRule {
+                head: "out".to_string(),
+                body: left_deep_fixture_body(),
+                meta: RirMeta::with_schema(Schema::new(vec![
+                    ("a".to_string(), ScalarType::U32),
+                    ("b".to_string(), ScalarType::U32),
+                    ("c".to_string(), ScalarType::U32),
+                    ("d".to_string(), ScalarType::U32),
+                    ("f".to_string(), ScalarType::U32),
+                ])),
+            }]],
+            est_memory_peak: 0,
+        }
+    }
+
+    fn stats_for_de(distinct_d: u64) -> StatsManager {
+        let mut stats = StatsManager::new();
+        for idx in 0..6 {
+            stats.register_relation(RelId(idx));
+            stats.update_cardinality(RelId(idx), 8192);
+        }
+        let mut d_col = ColumnStats::new(0, ScalarType::U32);
+        d_col.update_distinct(distinct_d);
+        stats.add_column_stats(RelId(3), d_col);
+        stats
+    }
+
+    fn contains_scan(node: &RirNode, rel: RelId) -> bool {
+        match node {
+            RirNode::Scan { rel: scan_rel } => *scan_rel == rel,
+            RirNode::Join { left, right, .. } => {
+                contains_scan(left, rel) || contains_scan(right, rel)
+            }
+            RirNode::Project { input, .. }
+            | RirNode::Filter { input, .. }
+            | RirNode::Distinct { input, .. }
+            | RirNode::GroupBy { input, .. } => contains_scan(input, rel),
+            RirNode::Union { inputs } => inputs.iter().any(|input| contains_scan(input, rel)),
+            RirNode::Diff { left, right } => contains_scan(left, rel) || contains_scan(right, rel),
+            RirNode::Fixpoint {
+                base, recursive, ..
+            } => contains_scan(base, rel) || contains_scan(recursive, rel),
+            RirNode::MultiWayJoin { inputs, .. } => {
+                inputs.iter().any(|input| contains_scan(input, rel))
+            }
+            RirNode::TensorMaskedJoin { rel_index, .. } => {
+                rel_index.iter().any(|(input_rel, _)| *input_rel == rel)
+            }
+            RirNode::Unit => false,
+        }
+    }
+
+    #[test]
+    fn helper_split_extracts_buried_pair() {
+        let mut plan = plan();
+        let schemas = schemas();
+        let stats = stats_for_de(1);
+        let specs = helper_split_pass::run(&mut plan, &schemas, &stats, |_| {
+            ("__w37_helper_6".to_string(), RelId(6))
+        });
+
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].name, "__w37_helper_6");
+        assert_eq!(specs[0].rel_id, RelId(6));
+        assert_eq!(specs[0].schema, helper_schema());
+        assert_eq!(specs[0].source_rels, [RelId(3), RelId(4)]);
+        assert_eq!(plan.rules_by_scc[0].len(), 2);
+        assert_eq!(plan.rules_by_scc[0][0].head, "__w37_helper_6");
+        assert_eq!(plan.rules_by_scc[0][1].head, "out");
+        assert!(contains_scan(&plan.rules_by_scc[0][1].body, RelId(6)));
+        assert!(plan.sccs[0]
+            .predicates
+            .iter()
+            .any(|predicate| predicate == "__w37_helper_6"));
+    }
+
+    #[test]
+    fn helper_split_ignores_flat_distribution() {
+        let mut plan = plan();
+        let schemas = schemas();
+        let stats = stats_for_de(8192);
+        let specs = helper_split_pass::run(&mut plan, &schemas, &stats, |_| {
+            ("__w37_helper_6".to_string(), RelId(6))
+        });
+
+        assert!(specs.is_empty());
+        assert_eq!(plan.rules_by_scc[0].len(), 1);
+        assert!(!contains_scan(&plan.rules_by_scc[0][0].body, RelId(6)));
+    }
+}
+
 /// W2.2 — selectivity-driven body rewriters for triangle and
 /// 4-cycle canonical lowered shapes. `pub(super)` so
 /// `selectivity_pass::run` can dispatch into them.
