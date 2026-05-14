@@ -2044,7 +2044,11 @@ impl CudaKernelProvider {
         let prefix_len = n_e1
             .checked_add(1)
             .ok_or_else(|| XlogError::Kernel(format!("{ctx}: prefix length overflow")))?;
+        let e2_prefix_len = n_e2
+            .checked_add(1)
+            .ok_or_else(|| XlogError::Kernel(format!("{ctx}: e2 prefix length overflow")))?;
         let mut e1_work_prefix = self.memory().alloc::<u32>(prefix_len as usize)?;
+        let mut e2_work_prefix = self.memory().alloc::<u32>(e2_prefix_len as usize)?;
         let mut e1_e2_start = self.memory().alloc::<u32>(n_e1 as usize)?;
         let mut e1_e2_end = self.memory().alloc::<u32>(n_e1 as usize)?;
 
@@ -2053,6 +2057,7 @@ impl CudaKernelProvider {
             let block_offsets = self.memory().alloc::<u32>(1)?;
             return Ok(WcojCycle4HgWorkPlanU64 {
                 e1_work_prefix,
+                e2_work_prefix,
                 e1_e2_start,
                 e1_e2_end,
                 block_counts,
@@ -2089,11 +2094,51 @@ impl CudaKernelProvider {
         rec.read_column(e2.column(0).expect("e2.col0"));
         rec.read_column(e2.column(1).expect("e2.col1"));
         rec.read_column(e3.column(0).expect("e3.col0"));
+        rec.read_write(&e2_work_prefix);
         rec.write(&e1_work_prefix);
         rec.write(&e1_e2_start);
         rec.write(&e1_e2_end);
         rec.preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: preflight failed: {e}")))?;
+
+        let e2_kernel = self
+            .device()
+            .inner()
+            .get_func(
+                WCOJ_MODULE,
+                wcoj_kernels::WCOJ_4CYCLE_BUILD_E2_WORK_PREFIX_U64,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel(
+                    "wcoj_4cycle_build_e2_work_prefix_u64 kernel not found".to_string(),
+                )
+            })?;
+        let e2_grid = n_e2.div_ceil(BLOCK_SIZE);
+        unsafe {
+            e2_kernel
+                .clone()
+                .launch_on_stream(
+                    &cu_stream,
+                    LaunchConfig {
+                        grid_dim: (e2_grid, 1, 1),
+                        block_dim: (BLOCK_SIZE, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (e2_col1, n_e2, e3_col0, n_e3, &mut e2_work_prefix),
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "wcoj_4cycle_build_e2_work_prefix_u64 launch failed: {e}"
+                    ))
+                })?;
+        }
+        self.multiblock_scan_u32_inplace_on_stream(
+            &mut e2_work_prefix,
+            e2_prefix_len,
+            &cu_stream,
+            launch_stream,
+            runtime,
+        )?;
 
         let kernel = self
             .device()
@@ -2120,10 +2165,8 @@ impl CudaKernelProvider {
                         e1_col1,
                         n_e1,
                         e2_col0,
-                        e2_col1,
                         n_e2,
-                        e3_col0,
-                        n_e3,
+                        &e2_work_prefix,
                         &mut e1_work_prefix,
                         &mut e1_e2_start,
                         &mut e1_e2_end,
@@ -2158,6 +2201,7 @@ impl CudaKernelProvider {
 
         Ok(WcojCycle4HgWorkPlanU64 {
             e1_work_prefix,
+            e2_work_prefix,
             e1_e2_start,
             e1_e2_end,
             block_counts,
@@ -2255,6 +2299,7 @@ impl CudaKernelProvider {
         rec_hg.read_column(e4.column(0).expect("e4.col0"));
         rec_hg.read_column(e4.column(1).expect("e4.col1"));
         rec_hg.read(&plan.e1_work_prefix);
+        rec_hg.read(&plan.e2_work_prefix);
         rec_hg.read(&plan.e1_e2_start);
         rec_hg.read(&plan.e1_e2_end);
         rec_hg.read_write(count_u32);
@@ -2291,6 +2336,7 @@ impl CudaKernelProvider {
                 e4_col1.as_kernel_param(),
                 n_e4.as_kernel_param(),
                 (&plan.e1_work_prefix).as_kernel_param(),
+                (&plan.e2_work_prefix).as_kernel_param(),
                 (&plan.e1_e2_start).as_kernel_param(),
                 (&plan.e1_e2_end).as_kernel_param(),
                 plan.total_work.as_kernel_param(),
@@ -2433,6 +2479,7 @@ impl CudaKernelProvider {
         rec_mat.read_column(e4.column(0).expect("e4.col0"));
         rec_mat.read_column(e4.column(1).expect("e4.col1"));
         rec_mat.read(&plan.e1_work_prefix);
+        rec_mat.read(&plan.e2_work_prefix);
         rec_mat.read(&plan.e1_e2_start);
         rec_mat.read(&plan.e1_e2_end);
         rec_mat.write(&out_w);
@@ -2466,6 +2513,7 @@ impl CudaKernelProvider {
                 e4_col1.as_kernel_param(),
                 n_e4.as_kernel_param(),
                 (&plan.e1_work_prefix).as_kernel_param(),
+                (&plan.e2_work_prefix).as_kernel_param(),
                 (&plan.e1_e2_start).as_kernel_param(),
                 (&plan.e1_e2_end).as_kernel_param(),
                 plan.total_work.as_kernel_param(),

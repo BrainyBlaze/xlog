@@ -474,6 +474,7 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "wcoj_4cycle_build_hg_work_plan_u32",
             "wcoj_4cycle_count_hg_u32",
             "wcoj_4cycle_materialize_hg_u32",
+            "wcoj_4cycle_build_e2_work_prefix_u64",
             "wcoj_4cycle_build_hg_work_plan_u64",
             "wcoj_4cycle_count_hg_u64",
             "wcoj_4cycle_materialize_hg_u64",

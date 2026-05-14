@@ -208,6 +208,38 @@ fn four_cycle_u64_count_and_materialize_are_hg_block_slice() {
 }
 
 #[test]
+fn four_cycle_u64_hg_work_items_do_not_scan_e2_linearly() {
+    let src = wcoj_cu_source();
+    let count = extract_extern_c_global_body(&src, "wcoj_4cycle_count_hg_u64")
+        .expect("wcoj_4cycle_count_hg_u64 must exist");
+    let materialize = extract_extern_c_global_body(&src, "wcoj_4cycle_materialize_hg_u64")
+        .expect("wcoj_4cycle_materialize_hg_u64 must exist");
+
+    assert!(
+        src.contains("wcoj_4cycle_build_e2_work_prefix_u64"),
+        "u64 4-cycle HG must precompute the E2/E3 work prefix"
+    );
+    assert!(
+        src.contains("resolve_4cycle_e2_work_u64"),
+        "u64 4-cycle HG must resolve work items through the E2/E3 prefix plan"
+    );
+
+    for (name, body) in [
+        ("wcoj_4cycle_count_hg_u64", count),
+        ("wcoj_4cycle_materialize_hg_u64", materialize),
+    ] {
+        assert!(
+            body.contains("e2_work_prefix"),
+            "{name} must map HG work items through the E2/E3 prefix plan"
+        );
+        assert!(
+            !body.contains("for (uint32_t j = e2_lo; j < e2_hi; ++j)"),
+            "{name} must not linearly rescan the E2 range per HG work item"
+        );
+    }
+}
+
+#[test]
 fn clique_count_and_materialize_are_hg_block_slice() {
     let src = wcoj_cu_source();
     for (old_count, old_materialize) in [
