@@ -134,5 +134,17 @@ lines for all 36 workload-cell observations, report direct measured
 closure evidence.
 ```
 
-If authorized, the next proposal should re-issue W3-axis closure with corrected
-M_INT.4 evidence and without the rejected timing-shaping contract.
+This packet does not authorize closure-board edits, goal-039 predecessor edits,
+merge, push, tag, or W3 DONE marking.
+
+## Response Options
+
+| Response | Option | Outcome |
+|---|---|---|
+| 1 | Authorize re-baseline (Recommended) | Amend M_INT.4/Q_INT.4/KPI-P1.6 with the exact text above, classify the three-run direct-measured corpus as the post-G1 Phase-1 baseline, and allow a corrected W3-axis closure proposal to be re-issued. |
+| 2 | Reject re-baseline | Keep M_INT.4 red under the original historical-ratio gate and require a new algorithm-level or benchmark-contract remediation path before any closure proposal. |
+| 3 | Mark STUCK | Keep W3 axis OPEN and escalate M_INT.4 as blocked after Response 2 remediation. |
+
+If Response 1 is authorized, the next proposal should re-issue W3-axis closure
+with corrected M_INT.4 evidence and without the rejected timing-shaping
+contract.
