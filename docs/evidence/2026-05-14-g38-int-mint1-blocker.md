@@ -4,7 +4,13 @@
 **Sub-goal:** G_INT
 **Metric:** M_INT.1 W3.4 re-validation
 **Branch:** `feat/w3-bundle-integration`
-**HEAD:** `caf54929`
+**First observed code HEAD:** `caf54929`
+**Blocker still active after:** `cc305412`
+
+Related follow-up artifacts:
+
+- `docs/evidence/2026-05-14-g38-completion-audit.md`
+- `docs/plans/2026-05-14-g38-mint1-response-proposal.md`
 
 ## Required gate
 
@@ -26,6 +32,9 @@ EXIT 101
 
 error: no bench target named `wcoj_w34_kernel_fusion` in `xlog-integration` package
 ```
+
+The same command was rerun after adding the completion audit and response
+proposal commits; it still exits 101 with the same missing-target error.
 
 The older W3.4 implementation commit is an ancestor of integration HEAD:
 
@@ -61,7 +70,8 @@ EXIT 1
 G_INT stops at M_INT.1.
 
 This is not a performance regression measurement yet; it is a missing
-re-validation artifact. The supervisor must choose one of:
+re-validation artifact. The response proposal expands the choices as an
+explicit decision artifact; in short, the supervisor must choose one of:
 
 1. Restore or replace the W3.4 re-validation bench and rerun M_INT.1.
 2. Amend M_INT.1 to a successor metric that validates the post-W33 replacement
