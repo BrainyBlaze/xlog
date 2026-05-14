@@ -61,7 +61,7 @@ Phase 1 is not DONE. This proposal no longer asks for closure approval.
 | W3.9 | DONE | Paper-class harness committed and passing production-scale gates on integration. |
 
 No closure-board tally changes are authorized by this rejected proposal. The
-board remains at 15 DONE / 11 OPEN / 1 IN-PROGRESS, and W7.1 remains user-gated.
+board remains at 14 DONE / 11 OPEN / 1 IN-PROGRESS, and W7.1 remains user-gated.
 
 ## Documented Divergences - Not Blocking v0.6.5, Flagged For v0.7+
 
