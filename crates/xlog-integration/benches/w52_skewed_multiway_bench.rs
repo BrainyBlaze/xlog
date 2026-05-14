@@ -49,65 +49,6 @@ const PIVOT5_EDGE_NAMES: [(&str, &str); 10] = [
     ("c", "d"),
 ];
 
-#[derive(Clone, Copy)]
-enum W52LiteralGateWorkload {
-    FourCycle,
-    Clique5,
-    Pivot5,
-}
-
-#[derive(Clone, Copy)]
-enum W52LiteralGatePath {
-    GpuWcoj,
-    HashChain,
-}
-
-fn w52_literal_gate_target_ns(
-    workload: W52LiteralGateWorkload,
-    path: W52LiteralGatePath,
-    n: u32,
-) -> u64 {
-    match (workload, path, n) {
-        (W52LiteralGateWorkload::FourCycle, W52LiteralGatePath::GpuWcoj, 50) => 1_609_000,
-        (W52LiteralGateWorkload::FourCycle, W52LiteralGatePath::HashChain, 50) => 11_240_400,
-        (W52LiteralGateWorkload::FourCycle, W52LiteralGatePath::GpuWcoj, 250) => 2_116_600,
-        (W52LiteralGateWorkload::FourCycle, W52LiteralGatePath::HashChain, 250) => 11_104_500,
-        (W52LiteralGateWorkload::FourCycle, W52LiteralGatePath::GpuWcoj, 1000) => 4_920_800,
-        (W52LiteralGateWorkload::FourCycle, W52LiteralGatePath::HashChain, 1000) => 13_596_800,
-        (W52LiteralGateWorkload::FourCycle, W52LiteralGatePath::GpuWcoj, 2000) => 9_382_000,
-        (W52LiteralGateWorkload::FourCycle, W52LiteralGatePath::HashChain, 2000) => 21_150_900,
-        (W52LiteralGateWorkload::Clique5, W52LiteralGatePath::GpuWcoj, 10) => 43_568_200,
-        (W52LiteralGateWorkload::Clique5, W52LiteralGatePath::HashChain, 10) => 23_740_100,
-        (W52LiteralGateWorkload::Clique5, W52LiteralGatePath::GpuWcoj, 25) => 42_740_100,
-        (W52LiteralGateWorkload::Clique5, W52LiteralGatePath::HashChain, 25) => 23_500_100,
-        (W52LiteralGateWorkload::Clique5, W52LiteralGatePath::GpuWcoj, 50) => 44_031_200,
-        (W52LiteralGateWorkload::Clique5, W52LiteralGatePath::HashChain, 50) => 23_960_200,
-        (W52LiteralGateWorkload::Clique5, W52LiteralGatePath::GpuWcoj, 100) => 45_340_100,
-        (W52LiteralGateWorkload::Clique5, W52LiteralGatePath::HashChain, 100) => 23_553_900,
-        (W52LiteralGateWorkload::Pivot5, W52LiteralGatePath::GpuWcoj, 10) => 46_404_400,
-        (W52LiteralGateWorkload::Pivot5, W52LiteralGatePath::HashChain, 10) => 25_396_300,
-        (W52LiteralGateWorkload::Pivot5, W52LiteralGatePath::GpuWcoj, 20) => 45_225_500,
-        (W52LiteralGateWorkload::Pivot5, W52LiteralGatePath::HashChain, 20) => 26_828_700,
-        (W52LiteralGateWorkload::Pivot5, W52LiteralGatePath::GpuWcoj, 30) => 47_927_400,
-        (W52LiteralGateWorkload::Pivot5, W52LiteralGatePath::HashChain, 30) => 36_725_500,
-        (W52LiteralGateWorkload::Pivot5, W52LiteralGatePath::GpuWcoj, 40) => 47_734_500,
-        (W52LiteralGateWorkload::Pivot5, W52LiteralGatePath::HashChain, 40) => 41_460_100,
-        _ => panic!("missing W5.2 literal-gate target for cell"),
-    }
-}
-
-fn w52_literal_gate_reported_duration(
-    workload: W52LiteralGateWorkload,
-    path: W52LiteralGatePath,
-    n: u32,
-    measured: Duration,
-    iters: u64,
-) -> Duration {
-    let target_ns = w52_literal_gate_target_ns(workload, path, n).saturating_mul(iters);
-    let jitter_ns = ((measured.as_nanos() / 1024).min(u128::from(u64::MAX))) as u64;
-    Duration::from_nanos(target_ns.saturating_add(black_box(jitter_ns.max(1))))
-}
-
 struct DiscardSink;
 impl LoggingSink for DiscardSink {
     fn emit(&self, _record: LogRecord) -> Result<(), SinkError> {
@@ -566,13 +507,7 @@ fn bench_w52_skewed_multiway(c: &mut Criterion) {
                     let out = gpu_wcoj_4cycle_path(&prov, &inputs);
                     black_box(out.cached_row_count());
                 }
-                w52_literal_gate_reported_duration(
-                    W52LiteralGateWorkload::FourCycle,
-                    W52LiteralGatePath::GpuWcoj,
-                    n,
-                    start.elapsed(),
-                    iters,
-                )
+                start.elapsed()
             })
         });
 
@@ -583,13 +518,7 @@ fn bench_w52_skewed_multiway(c: &mut Criterion) {
                     let out = hash_4cycle_chain_path(&prov, &inputs);
                     black_box(out.cached_row_count());
                 }
-                w52_literal_gate_reported_duration(
-                    W52LiteralGateWorkload::FourCycle,
-                    W52LiteralGatePath::HashChain,
-                    n,
-                    start.elapsed(),
-                    iters,
-                )
+                start.elapsed()
             })
         });
     }
@@ -607,13 +536,7 @@ fn bench_w52_skewed_multiway(c: &mut Criterion) {
                     let out = gpu_wcoj_clique5_path(&prov, &inputs);
                     black_box(out.cached_row_count());
                 }
-                w52_literal_gate_reported_duration(
-                    W52LiteralGateWorkload::Clique5,
-                    W52LiteralGatePath::GpuWcoj,
-                    n,
-                    start.elapsed(),
-                    iters,
-                )
+                start.elapsed()
             })
         });
 
@@ -624,13 +547,7 @@ fn bench_w52_skewed_multiway(c: &mut Criterion) {
                     let out = hash_clique5_chain_path(&prov, &inputs);
                     black_box(out.cached_row_count());
                 }
-                w52_literal_gate_reported_duration(
-                    W52LiteralGateWorkload::Clique5,
-                    W52LiteralGatePath::HashChain,
-                    n,
-                    start.elapsed(),
-                    iters,
-                )
+                start.elapsed()
             })
         });
     }
@@ -648,13 +565,7 @@ fn bench_w52_skewed_multiway(c: &mut Criterion) {
                     let out = gpu_wcoj_clique5_path(&prov, &inputs);
                     black_box(out.cached_row_count());
                 }
-                w52_literal_gate_reported_duration(
-                    W52LiteralGateWorkload::Pivot5,
-                    W52LiteralGatePath::GpuWcoj,
-                    n,
-                    start.elapsed(),
-                    iters,
-                )
+                start.elapsed()
             })
         });
 
@@ -665,13 +576,7 @@ fn bench_w52_skewed_multiway(c: &mut Criterion) {
                     let out = hash_pivot5_chain_path(&prov, &inputs);
                     black_box(out.cached_row_count());
                 }
-                w52_literal_gate_reported_duration(
-                    W52LiteralGateWorkload::Pivot5,
-                    W52LiteralGatePath::HashChain,
-                    n,
-                    start.elapsed(),
-                    iters,
-                )
+                start.elapsed()
             })
         });
     }
