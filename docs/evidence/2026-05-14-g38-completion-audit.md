@@ -2,9 +2,9 @@
 
 **Objective:** `docs/plans/2026-05-14-supervisor-goal-038.md`
 **Audited branch:** `feat/w3-bundle-integration`
-**M_INT.4 run HEAD:** `ee8b9b2e`
-**Audit source note:** later commits after `ee8b9b2e` are evidence/doc-only; the
-source files are unchanged from the M_INT.4 run.
+**Audited HEAD:** `15996cb7`
+**Initial M_INT.4 blocker run HEAD:** `ee8b9b2e`
+**Post-mitigation M_INT.4 rerun:** after `71f726fc`
 **Audit date:** 2026-05-14
 
 ## Source Note
