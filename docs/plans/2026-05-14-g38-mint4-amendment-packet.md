@@ -2,7 +2,8 @@
 
 **Goal document:** `docs/plans/2026-05-14-supervisor-goal-038.md`
 **Branch:** `feat/w3-bundle-integration`
-**Prepared from evidence through:** `11ffad31`
+**Prepared from evidence through:** same-machine comparison TSV commit
+`95dac0c2`
 **Status:** proposal only; requires explicit supervisor acceptance before use.
 
 ## Purpose

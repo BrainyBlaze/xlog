@@ -4,7 +4,7 @@
 **Audited branch:** `feat/w3-bundle-integration`
 **Audited code/evidence base HEAD:** `4fc0bc92`
 **Proposal-only series after base:** starts at `78cb41c8` and contains M_INT.4
-RCA / amendment-packet / audit-metadata docs only
+RCA / same-machine comparison TSV / amendment-packet / audit-metadata docs only
 **Initial M_INT.4 blocker run HEAD:** `ee8b9b2e`
 **Post-mitigation M_INT.4 rerun:** after `71f726fc`
 **Audit date:** 2026-05-14
