@@ -137,6 +137,19 @@ Phase 2 must preserve these Phase-1 invariants:
 | VRAM | Keep peak VRAM below 38 GB on the Phase-1 cert and paper-class bench surfaces. |
 | M18 / M37-A surface | Preserve the neural-symbolic training surface; static dead-code cleanup must not remove it. |
 
+## Post-Approval Follow-Up
+
+If Response 1 is approved, the follow-up commit must:
+
+1. Update `docs/v065-closure-board.md` for W3.3, W3.5, W3.6, W3.7, W3.8, and
+   W3.9 from `OPEN` to `DONE`.
+2. Fill the goal-039 predecessor placeholder currently present in
+   `/home/dev/projects/xlog/docs/plans/2026-05-14-supervisor-goal-039.md`.
+3. Apply S_CLOSE.2 by importing or updating
+   `docs/evidence/2026-05-07-w3-paper-alignment-audit/README.md` from the
+   preserved `feat/w3-paper-alignment-audit @ 3470288f` artifact and adding the
+   approved Phase-1 closure marker.
+
 ## Response Options
 
 | Response | Option | Outcome |

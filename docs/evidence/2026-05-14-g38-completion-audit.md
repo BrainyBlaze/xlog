@@ -83,6 +83,7 @@ performance improvement.
 | G_INT M_INT.11 peak VRAM on cert + bench | `docs/evidence/2026-05-14-g38-int-mint11-vram.md`; `cargo test -p xlog-cuda-tests --test g38_mint11_vram --release -- --nocapture`; `cargo bench -p xlog-integration --bench wcoj_paper_class -- --output-format bencher` | PASS. Cert suite peak `cudaMemGetInfo` delta was `201326592` bytes; bench fixture deltas were `2317352960`, `2283798528`, and `2283798528` bytes, all below the `40802189312` byte gate. |
 | G_PURGE M_PURGE.1-M_PURGE.9 | `docs/evidence/2026-05-14-g38-dead-code-followup.md`; touched-file hygiene scans; `cargo +nightly udeps --workspace --all-targets`; strict all-targets release build; branch/worktree preservation checks | PASS. The purge artifact exists, unused manifest deps were removed or feature-gated, all purge scans are clean, strict all-targets release build exits 0, required paper citations are present, and preserved-unmerged branch heads were not deleted. |
 | G_CLOSE M_CLOSE.1-M_CLOSE.5 | `docs/plans/2026-05-14-w3-bundle-closure-proposal.md`; `docs/v065-closure-board.md`; goal-039 predecessor placeholder in `/home/dev/projects/xlog/docs/plans/2026-05-14-supervisor-goal-039.md` | PARTIAL. M_CLOSE.1, M_CLOSE.4, and M_CLOSE.5 are covered by the proposal. M_CLOSE.2 user approval and M_CLOSE.3 closure-board update are pending; goal-039 still carries `<SET_AT_PHASE1_CLOSE>`. |
+| G_CLOSE S_CLOSE.2 W3 paper-alignment audit note | Source artifact inspected at `/home/dev/projects/xlog/.worktrees/w3-paper-alignment-audit/docs/evidence/2026-05-07-w3-paper-alignment-audit/README.md`; source branch `feat/w3-paper-alignment-audit @ 3470288f` | PENDING. The file is not present on the integration branch or main checkout. The required `BUNDLE CLOSED (PHASE 1)` note must wait for explicit approval, then be imported or updated in the follow-up closure-board commit. |
 | KPI-P1.1 W3 axis 9/9 DONE | `docs/v065-closure-board.md` | NOT MET. W3.3, W3.5, W3.6, W3.7, W3.8, and W3.9 remain OPEN on the board. |
 | KPI-P1.2 DoD items 1-7 | This audit table | NOT MET because G_CLOSE is not green. |
 | KPI-P1.3 W3.4 revalidated `>= 1.51x` | M_INT.1 successor evidence | MET under the supervisor-corrected successor metric. |
@@ -288,6 +289,7 @@ The branch is now pending at:
 
 - G_CLOSE M_CLOSE.2: explicit user DONE approval.
 - G_CLOSE M_CLOSE.3: closure-board update after approval.
+- G_CLOSE S_CLOSE.2: W3 paper-alignment audit closure note after approval.
 - Goal-039 predecessor SHA update after approval.
 
 G_CLOSE should not be treated as complete until its named metrics are green,
@@ -299,3 +301,5 @@ including explicit user approval before any closure-board update.
    DONE approval.
 2. If approved, update the closure board and the goal-039 predecessor SHA in a
    follow-up commit.
+3. In that same approved follow-up, import or update the W3 paper-alignment
+   audit note with the Phase-1 closure marker.
