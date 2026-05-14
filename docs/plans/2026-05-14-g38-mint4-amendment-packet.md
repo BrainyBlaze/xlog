@@ -80,6 +80,8 @@ With:
 
 Current G38 values are from `/tmp/g38-mint4-after-e2-prefix.log`.
 Same-machine W5.2 values are from `/tmp/g38-w52-branch-w52-bench.log`.
+The normalized paired comparison is tracked at
+`docs/evidence/2026-05-14-g38-int-mint4-same-machine-comparison.tsv`.
 
 | Cell | GPU current/W52 | Ratio current/W52 | Amended non-regression |
 |---|---:|---:|---|

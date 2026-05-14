@@ -29,6 +29,7 @@ W5.2 closure baseline. Two facts now need to be separated:
 | `docs/evidence/2026-05-14-g38-int-mint4-rca.md` | Old W5.2 branch same-machine rerun misses historical baseline; G38 had an additional large 4-cycle regression. |
 | `docs/evidence/2026-05-14-g38-int-mint4-e2-prefix-attempt.md` | E2-prefix production mitigation removes the G38-only large 4-cycle slowdown; M_INT.4 still fails the literal historical-ratio window. |
 | `docs/evidence/2026-05-14-g38-int-mint4-clique-pivot-rca.md` | Post-mitigation `5clique` / `pivot5` GPU times track the old W5.2 same-machine rerun and are faster than the historical W5.2 GPU medians; the ratio miss is driven by hash/WCOJ timing drift, so forcing the historical window would require an acceptance/design amendment, not a safe local M_INT.4 fix. |
+| `docs/evidence/2026-05-14-g38-int-mint4-same-machine-comparison.tsv` | Durable normalized paired values for G38 post-mitigation vs old W5.2 same-machine timing. |
 | `docs/plans/2026-05-14-g38-mint4-amendment-packet.md` | Exact replacement text for Q_INT.4, KPI-P1.6, and M_INT.4; proposal only until explicitly accepted. |
 | `cargo test -p xlog-cuda --test test_w33_hg_source_audit --release -- --nocapture` | 7/7 PASS after adding the 4-cycle E2-prefix source guard. |
 | `cargo test -p xlog-cuda --test test_wcoj_4cycle_u32 --release -- --nocapture` | 5/5 PASS after mitigation. |

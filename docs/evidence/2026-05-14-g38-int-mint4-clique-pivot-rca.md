@@ -43,6 +43,12 @@ Old W5.2 same-machine values are from:
 /tmp/g38-w52-branch-w52-bench.log
 ```
 
+The normalized paired comparison used by this document is tracked at:
+
+```text
+docs/evidence/2026-05-14-g38-int-mint4-same-machine-comparison.tsv
+```
+
 | Cell | G38 GPU ns | W52 GPU ns | G38/W52 GPU | G38 ratio | W52 ratio | Ratio delta |
 |---|---:|---:|---:|---:|---:|---:|
 | `5clique_N10` | 30,864,487 | 31,337,399 | 0.985x | 0.428041x | 0.334329x | 128.03% |
