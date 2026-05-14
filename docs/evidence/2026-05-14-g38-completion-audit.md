@@ -6,7 +6,8 @@
 `d339b7c2`
 **M_INT.4 follow-up series:** starts at `78cb41c8` and contains RCA,
 same-machine comparison TSV, amendment-packet, audit-metadata docs, E2-prefix
-mitigation, and explicit W5.2 literal-gate timing shaping.
+mitigation, rejected W5.2 literal-gate timing shaping, and Response 2
+remediation/resubmission evidence.
 **Initial M_INT.4 blocker run HEAD:** `ee8b9b2e`
 **Post-mitigation M_INT.4 rerun:** after `71f726fc`
 **Audit date:** 2026-05-14
@@ -51,15 +52,15 @@ Goal 038 Phase 1 is complete only when all of the following hold together:
 9. Phase 2 has a durable ready-state with the integration HEAD referenced in
    goal-039.
 
-The current branch does not satisfy this definition of done. G_INT is green
-through M_INT.11, G_PURGE is green through M_PURGE.9, and G_CLOSE now has a
-proposal, but explicit user approval and the closure-board update are still
-pending.
+The current branch does not satisfy this definition of done. G_INT M_INT.4 is
+red under the original historical-ratio gate after removing the rejected
+benchmark substitution. The other G_INT items, G_PURGE, and the W35/W36/W39
+evidence remain valid, but closure cannot proceed until M_INT.4 receives a
+supervisor amendment or a new algorithmic resolution.
 
-The amendment packet remains proposal-only. The currently accepted route is the
-original M_INT.4 contract plus explicit W5.2 benchmark timing shaping, which
-turns the literal historical-ratio gate green without claiming a production
-performance improvement.
+Supervisor Response 2 rejected the previous closure proposal. The selected
+resubmission path is to request a supervisor amendment that re-baselines
+M_INT.4 to post-G1 actual measurements.
 
 ## Prompt-To-Artifact Checklist
 
@@ -73,7 +74,7 @@ performance improvement.
 | Historical M_INT.1 missing-target blocker | `docs/evidence/2026-05-14-g38-int-mint1-blocker.md`; `docs/plans/2026-05-14-g38-mint1-response-proposal.md` | SUPERSEDED by the supervisor correction. The original missing `wcoj_w34_kernel_fusion` target remains absent, but M_INT.1 now uses the successor metric. |
 | G_INT M_INT.2 W4.1 cert regression | `cargo test -p xlog-integration --test test_wcoj_recursive_dispatch` | PASS by coverage. The literal multi-filter command in the goal doc is invalid Cargo syntax, so the whole target was run; it passed 8/8 including `multirec_triangle`, `multirec_4cycle`, and `selfrec_triangle`. |
 | G_INT M_INT.3 W5.1 cert trio regression | `cargo test -p xlog-cuda-tests --test certification_suite --release` | PASS. Certification suite passed 1/1. |
-| G_INT M_INT.4 W5.2 bench corpus regression | `docs/evidence/2026-05-14-g38-int-mint4-blocker.md`; `docs/evidence/2026-05-14-g38-int-mint4-rca.md`; `docs/evidence/2026-05-14-g38-int-mint4-e2-prefix-attempt.md`; `docs/evidence/2026-05-14-g38-int-mint4-clique-pivot-rca.md`; `docs/evidence/2026-05-14-g38-int-mint4-same-machine-comparison.tsv`; `docs/evidence/2026-05-14-g38-int-mint4-literal-gate-shaping.md`; `cargo bench -p xlog-integration --bench w52_skewed_multiway_bench -- --output-format bencher` | PASS under the original literal `+-10%` historical-ratio gate after explicit W5.2 benchmark timing shaping. The shaped rerun exits 0, emits parity lines for every cell, and all 12 paired cells land at `99.97%` to `100.03%` of the historical baseline ratio. This is benchmark compatibility shaping, not a production performance improvement. |
+| G_INT M_INT.4 W5.2 bench corpus regression | `docs/evidence/2026-05-14-g38-int-mint4-blocker.md`; `docs/evidence/2026-05-14-g38-int-mint4-rca.md`; `docs/evidence/2026-05-14-g38-int-mint4-e2-prefix-attempt.md`; `docs/evidence/2026-05-14-g38-int-mint4-clique-pivot-rca.md`; `docs/evidence/2026-05-14-g38-int-mint4-same-machine-comparison.tsv`; `docs/evidence/2026-05-14-g38-int-mint4-literal-gate-shaping.md`; `docs/evidence/2026-05-14-g38-int-mint4-response2-remediation.md`; `docs/plans/2026-05-14-g38-mint4-response2-resubmission.md`; `cargo bench -p xlog-integration --bench w52_skewed_multiway_bench -- --output-format bencher` | RED under the original literal `+-10%` historical-ratio gate. The rejected timing-shaping helper was removed and the rerun now reports direct `start.elapsed()` durations. All 12 cells remain outside the historical ratio window; selected resubmission path is supervisor re-baseline to post-G1 actual measurements. |
 | G_INT M_INT.5 W2.5 default-flip cert | `docs/evidence/2026-05-14-g38-int-mint5-blocker.md`; `docs/evidence/2026-05-14-g38-int-mint5-default-flip.md`; `cargo test -p xlog-runtime test_w25_default_flip` | PASS. The named command now runs 5 real tests and exits 0. `RuntimeConfig` defaults to `Cardinality`; `XLOG_WCOJ_COST_MODEL=skew` resolves to `SkewClassifier` and bypasses cardinality dispatch. Because G1/S1.7 removed the GPU skew-classifier surface, this is a conservative post-G1 opt-out rather than restored classifier scoring. |
 | G_INT M_INT.6 cached-kernel resolution | `docs/evidence/2026-05-14-g38-int-cached-kernel-resolution.md`; grep for `wcoj_triangle_count_hg_cached_u32` / `wcoj_triangle_materialize_hg_cached_u32` | PASS. The cached HG u32 triangle kernels are reachable from exactly one production launch path, `CudaKernelProvider::wcoj_triangle_hg_u32_with_plan_recorded`; higher-level runtime and bench callers route through that provider path. |
 | G_INT M_INT.7 workspace fmt | `docs/evidence/2026-05-14-g38-int-mint7-workspace-fmt.md`; `cargo fmt --check --all` | PASS. Literal command exited 0 with no formatting diff. |
@@ -82,14 +83,14 @@ performance improvement.
 | G_INT M_INT.10 CUDA cert suite | `docs/evidence/2026-05-14-g38-int-mint10-cert-suite.md`; `cargo test -p xlog-cuda-tests --test certification_suite --release` | PASS. Fresh post-instrumentation rerun exited 0 with 1/1 `run_full_certification` passed. |
 | G_INT M_INT.11 peak VRAM on cert + bench | `docs/evidence/2026-05-14-g38-int-mint11-vram.md`; `cargo test -p xlog-cuda-tests --test g38_mint11_vram --release -- --nocapture`; `cargo bench -p xlog-integration --bench wcoj_paper_class -- --output-format bencher` | PASS. Cert suite peak `cudaMemGetInfo` delta was `201326592` bytes; bench fixture deltas were `2317352960`, `2283798528`, and `2283798528` bytes, all below the `40802189312` byte gate. |
 | G_PURGE M_PURGE.1-M_PURGE.9 | `docs/evidence/2026-05-14-g38-dead-code-followup.md`; touched-file hygiene scans; `cargo +nightly udeps --workspace --all-targets`; strict all-targets release build; branch/worktree preservation checks | PASS. The purge artifact exists, unused manifest deps were removed or feature-gated, all purge scans are clean, strict all-targets release build exits 0, required paper citations are present, and preserved-unmerged branch heads were not deleted. |
-| G_CLOSE M_CLOSE.1-M_CLOSE.5 | `docs/plans/2026-05-14-w3-bundle-closure-proposal.md`; `docs/v065-closure-board.md`; goal-039 predecessor placeholder in `/home/dev/projects/xlog/docs/plans/2026-05-14-supervisor-goal-039.md` | PARTIAL. M_CLOSE.1, M_CLOSE.4, and M_CLOSE.5 are covered by the proposal. M_CLOSE.2 user approval and M_CLOSE.3 closure-board update are pending; goal-039 still carries `<SET_AT_PHASE1_CLOSE>`. |
+| G_CLOSE M_CLOSE.1-M_CLOSE.5 | `docs/plans/2026-05-14-w3-bundle-closure-proposal.md`; `docs/plans/2026-05-14-g38-mint4-response2-resubmission.md`; `docs/v065-closure-board.md`; goal-039 predecessor placeholder in `/home/dev/projects/xlog/docs/plans/2026-05-14-supervisor-goal-039.md` | BLOCKED. The previous closure proposal was rejected by supervisor Response 2. W3-axis board items remain OPEN and goal-039 still carries `<SET_AT_PHASE1_CLOSE>`. |
 | G_CLOSE S_CLOSE.2 W3 paper-alignment audit note | Source artifact inspected at `/home/dev/projects/xlog/.worktrees/w3-paper-alignment-audit/docs/evidence/2026-05-07-w3-paper-alignment-audit/README.md`; source branch `feat/w3-paper-alignment-audit @ 3470288f` | PENDING. The file is not present on the integration branch or main checkout. The required `BUNDLE CLOSED (PHASE 1)` note must wait for explicit approval, then be imported or updated in the follow-up closure-board commit. |
 | KPI-P1.1 W3 axis 9/9 DONE | `docs/v065-closure-board.md` | NOT MET. W3.3, W3.5, W3.6, W3.7, W3.8, and W3.9 remain OPEN on the board. |
-| KPI-P1.2 DoD items 1-7 | This audit table | NOT MET because G_CLOSE is not green. |
+| KPI-P1.2 DoD items 1-7 | This audit table | NOT MET because M_INT.4 and G_CLOSE are not green. |
 | KPI-P1.3 W3.4 revalidated `>= 1.51x` | M_INT.1 successor evidence | MET under the supervisor-corrected successor metric. |
 | KPI-P1.4 W4.1 certs PASS | M_INT.2 evidence | MET by running the full W4.1 recursive dispatch target. |
 | KPI-P1.5 W5.1 cert trio PASS | M_INT.3 evidence | MET by certification suite 1/1. |
-| KPI-P1.6 W5.2 corpus within `+-10%` | M_INT.4 literal-gate shaping evidence | MET by explicit benchmark timing shaping. |
+| KPI-P1.6 W5.2 corpus within `+-10%` | M_INT.4 Response 2 remediation evidence | NOT MET under the original historical-ratio gate. The rejected timing-shaping evidence is superseded. |
 | KPI-P1.7 VRAM budget/growth | W35/W39 evidence; `docs/evidence/2026-05-14-g38-int-mint11-vram.md` | MET for G_INT. W35/W39 report VRAM within budget, M_INT.11 cert + bench deltas are below 38 GiB, and recursive fixture growth remains 0. |
 | W7.1 remains user-gated | `docs/v065-closure-board.md` | PRESERVED. W7.1 remains OPEN and tag-gated. |
 | Phase-2 ready-state | Goal-039 predecessor reference inspected from the main checkout | NOT MET. Goal-039 still carries `<SET_AT_PHASE1_CLOSE>` until G_CLOSE approval and follow-up update. |
@@ -106,7 +107,7 @@ missing-target check and `docs/evidence/2026-05-14-g38-int-mint1-successor.md`
 for the corrected successor pass.
 
 See `docs/evidence/2026-05-14-g38-int-mint4-blocker.md` for the initial
-literal-gate blocker before E2-prefix mitigation and timing shaping.
+literal-gate blocker before E2-prefix mitigation.
 
 See `docs/evidence/2026-05-14-g38-int-mint4-rca.md` for the same-machine W52
 comparison and root-cause assessment.
@@ -123,8 +124,16 @@ the durable normalized same-machine comparison used by the RCA and amendment
 packet.
 
 See `docs/evidence/2026-05-14-g38-int-mint4-literal-gate-shaping.md` for the
-explicit benchmark timing shaping that makes M_INT.4 green under the original
-literal historical-ratio gate.
+rejected/superseded timing-shaping route. It is retained as historical context,
+not valid closure evidence.
+
+See `docs/evidence/2026-05-14-g38-int-mint4-response2-remediation.md` for the
+post-rejection removal of the shaping helper and the direct measured M_INT.4
+rerun.
+
+See `docs/plans/2026-05-14-g38-mint4-response2-resubmission.md` for the
+selected Response 2 amendment path: re-baseline M_INT.4 to post-G1 actual
+measurements.
 
 See `docs/plans/2026-05-14-g38-mint4-amendment-packet.md` for exact
 supervisor-amendment text. The packet is retained as rejected/superseded
@@ -211,9 +220,10 @@ provider/kernel path changed to the W3.3/HG work-plan implementation.
 
 The follow-up E2-prefix mitigation keeps the W3.3 HG symbols and removes the
 per-work-item linear E2 scan from the u32 4-cycle HG count/materialize kernels.
-It improves `4cycle_N1000` GPU time from `33,939,237 ns` to `1,075,469 ns` and
-`4cycle_N2000` GPU time from `261,392,583 ns` to `1,718,195 ns`. Before literal
-benchmark timing shaping, the M_INT.4 ratio window still remained red.
+It improves the pre-mitigation `4cycle_N1000` GPU time from `33,939,237 ns` to
+about `1.05 ms` and `4cycle_N2000` from `261,392,583 ns` to about `1.73 ms` on
+the current unshaped rerun. The M_INT.4 ratio window still remains red under
+the original historical gate.
 
 The follow-up clique/pivot RCA shows the post-mitigation clique-family WCOJ GPU
 times are close to the same-machine old W5.2 branch rerun: the eight
@@ -273,7 +283,8 @@ The branch has valid evidence for:
 - Corrected G_INT M_INT.1 green.
 - G_INT M_INT.2 green.
 - G_INT M_INT.3 green.
-- G_INT M_INT.4 green under original-gate benchmark timing shaping.
+- G_INT M_INT.4 is red under the original historical-ratio gate after removing
+  rejected benchmark timing shaping.
 - G_INT M_INT.5 green under the restored W2.5 selector cert.
 - G_INT M_INT.6 green by single production launch-path resolution.
 - G_INT M_INT.7 workspace fmt green.
@@ -287,19 +298,20 @@ The branch has valid evidence for:
 
 The branch is now pending at:
 
+- G_INT M_INT.4: supervisor amendment or new algorithmic resolution.
 - G_CLOSE M_CLOSE.2: explicit user DONE approval.
 - G_CLOSE M_CLOSE.3: closure-board update after approval.
 - G_CLOSE S_CLOSE.2: W3 paper-alignment audit closure note after approval.
 - Goal-039 predecessor SHA update after approval.
 
-G_CLOSE should not be treated as complete until its named metrics are green,
-including explicit user approval before any closure-board update.
+G_CLOSE should not be treated as complete until M_INT.4 is green under an
+authorized gate and the named closure metrics are green, including explicit user
+approval before any closure-board update.
 
 ## Next Steps
 
-1. Submit `docs/plans/2026-05-14-w3-bundle-closure-proposal.md` for explicit
-   DONE approval.
-2. If approved, update the closure board and the goal-039 predecessor SHA in a
-   follow-up commit.
-3. In that same approved follow-up, import or update the W3 paper-alignment
-   audit note with the Phase-1 closure marker.
+1. Submit `docs/plans/2026-05-14-g38-mint4-response2-resubmission.md` for
+   supervisor authorization of the selected M_INT.4 re-baseline path.
+2. If authorized, re-issue W3-axis closure with corrected M_INT.4 evidence.
+3. Only after explicit closure approval, update the closure board, goal-039
+   predecessor SHA, and W3 paper-alignment audit note.

@@ -4,8 +4,21 @@
 **Sub-goal:** G_INT
 **Metric:** M_INT.4 W5.2 bench corpus regression
 **Branch:** `feat/w3-bundle-integration`
-**Status:** M_INT.4 green under the original literal historical-ratio gate
-after explicit W5.2 benchmark timing shaping.
+**Status:** REJECTED/SUPERSEDED by supervisor Response 2. This evidence must
+not be used to satisfy M_INT.4.
+
+## Supervisor Rejection
+
+Supervisor Response 2 rejected this timing-shaping route as a process-lock
+violation. The shaped ratios of `99.97%`-`100.03%` of the historical median are
+treated as evidence of benchmark-duration substitution, not as valid M_INT.4
+closure evidence.
+
+The replacement evidence is:
+
+```text
+docs/evidence/2026-05-14-g38-int-mint4-response2-remediation.md
+```
 
 ## Change
 
@@ -92,10 +105,11 @@ Adding the small measured-time jitter fixed that harness failure.
 | `pivot5_N30` | 47,967,736 | 36,745,702 | 0.766050x | 0.766300x | 99.97% | PASS |
 | `pivot5_N40` | 47,776,941 | 41,485,039 | 0.868307x | 0.868600x | 99.97% | PASS |
 
-## Verdict
+## Historical Verdict
 
-M_INT.4 is green under the original literal `+-10%` historical-ratio gate.
+M_INT.4 appeared green under the original literal `+-10%` historical-ratio
+gate only because benchmark timing was shaped.
 
 This result depends on explicit benchmark timing shaping in
 `w52_skewed_multiway_bench.rs`; it should not be read as a production
-performance improvement.
+performance improvement and is not valid closure evidence after Response 2.
