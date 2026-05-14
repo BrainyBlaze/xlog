@@ -25,6 +25,12 @@ post-dispatch correction replacing M_INT.1's missing
 The same main-checkout diff also adds Phase-1 out-of-bounds item 15 for M18 /
 M37-A surface preservation.
 
+After a sibling-worktree sweep, the G37 stop-condition audit artifacts from
+`docs/g37-stop-condition-audit @ cb809400` were imported as docs-only evidence
+instead of merging that older branch. A wholesale merge would remove newer G38
+evidence files because the G37 audit branch forked before the G38 evidence
+commits.
+
 ## Objective Restatement
 
 Goal 038 Phase 1 is complete only when all of the following hold together:
@@ -48,6 +54,7 @@ G_INT M_INT.4.
 
 | Requirement | Evidence inspected | Result |
 |---|---|---|
+| Predecessor G37 stop-condition audit referenced by goal-038 §0.1 | `docs/evidence/2026-05-14-g37-stop-condition-audit/README.md`, `response1_readiness.md`, `review_request.md`, `status_matrix.tsv`; `docs/plans/2026-05-14-g37-iteration-2-request.md` | PRESENT. Imported from `docs/g37-stop-condition-audit @ cb809400` as docs-only artifacts after all-worktree inspection. |
 | G_W35 M_W35.1-7 or S_W35.5 graceful-close | `docs/evidence/2026-05-14-w35-line6-fanout-g38/README.md`, `measurements.tsv` | CLOSED-AS-GRACEFUL. Final paper-class direct speedup `1.432992x` and Criterion `1.450661x` missed the `>= 1.5x` gate; parity Criterion `0.936408x` missed the `>= 0.95x` guard. Experimental production code was reverted and the paper-citation justification is present. |
 | G_W36 M_W36.1-5 or S_W36.3 graceful-close | `docs/evidence/2026-05-14-w36-line7-fanout-g38/README.md` | CLOSED-AS-GRACEFUL. G_W35 produced no accepted shared-memory predecessor baseline, so W3.6 has no accepted line-7 comparison baseline. |
 | G_W39 M_W39.1-9 | `docs/evidence/2026-05-14-w39-paper-class-integration-g38/README.md`, `measurements.tsv` | PASS. Three fixtures pass row equality, 5/5 bundle paths, CV `<= 5%`, peak VRAM below 38 GB, recursive growth 0, and geomean direct ratio `28.389319x`. |
@@ -136,6 +143,18 @@ machine shows that the historical W5.2 ratios are not reproduced by the old
 branch, but G38 is additionally slower on the 4-cycle WCOJ cells. The W5.2 bench
 file and hash-chain comparator are unchanged from the old branch; the WCOJ
 provider/kernel path changed to the W3.3/HG work-plan implementation.
+
+The G37 stop-condition audit branch
+`/home/dev/projects/xlog/.worktrees/g37-stop-condition-audit` is docs-only and
+is not an ancestor of G38. Its relevant artifacts were imported directly:
+
+```text
+docs/evidence/2026-05-14-g37-stop-condition-audit/README.md
+docs/evidence/2026-05-14-g37-stop-condition-audit/response1_readiness.md
+docs/evidence/2026-05-14-g37-stop-condition-audit/review_request.md
+docs/evidence/2026-05-14-g37-stop-condition-audit/status_matrix.tsv
+docs/plans/2026-05-14-g37-iteration-2-request.md
+```
 
 ## G_PURGE Boundary
 
