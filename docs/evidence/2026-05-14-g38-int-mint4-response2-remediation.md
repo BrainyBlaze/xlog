@@ -5,6 +5,8 @@
 **Metric:** M_INT.4 W5.2 bench corpus regression
 **Branch:** `feat/w3-bundle-integration`
 **Date:** 2026-05-14
+**Code remediation commit:** `7376ce52`
+**Evidence checkpoint:** `da57fa83`
 **Status:** Original historical `+-10%` ratio gate remains red after removing
 the rejected bench substitution.
 
