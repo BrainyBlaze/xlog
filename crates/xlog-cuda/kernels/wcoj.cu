@@ -17,6 +17,7 @@
 //   * The u32 / Symbol entry uses the histogram-guided block-slice
 //     kernels below. A block owns a contiguous slice of the
 //     prefix-summed root-key work space from SRDatalog Algorithm 2.
+//   * Paper §5 Algorithm 2 lines 1,3,4,5,7,9,10,12 preserved; lines 6 + per-warp narrowing dropped per Phase-1 §2.2 A5 hardware constraint.
 //   * The u64 entry uses row-wise count and materialize kernels:
 //     thread `i` is bound to (X, Y) = (e_xy.col0[i], e_xy.col1[i])
 //     and emits every (X, Y, Z) such that (Y, Z) ∈ e_yz and
