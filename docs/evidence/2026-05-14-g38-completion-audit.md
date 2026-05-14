@@ -2,7 +2,7 @@
 
 **Objective:** `docs/plans/2026-05-14-supervisor-goal-038.md`
 **Audited branch:** `feat/w3-bundle-integration`
-**Audited HEAD:** `15996cb7`
+**Audited HEAD:** `4fc0bc92`
 **Initial M_INT.4 blocker run HEAD:** `ee8b9b2e`
 **Post-mitigation M_INT.4 rerun:** after `71f726fc`
 **Audit date:** 2026-05-14
@@ -62,7 +62,7 @@ G_INT M_INT.4.
 | Historical M_INT.1 missing-target blocker | `docs/evidence/2026-05-14-g38-int-mint1-blocker.md`; `docs/plans/2026-05-14-g38-mint1-response-proposal.md` | SUPERSEDED by the supervisor correction. The original missing `wcoj_w34_kernel_fusion` target remains absent, but M_INT.1 now uses the successor metric. |
 | G_INT M_INT.2 W4.1 cert regression | `cargo test -p xlog-integration --test test_wcoj_recursive_dispatch` | PASS by coverage. The literal multi-filter command in the goal doc is invalid Cargo syntax, so the whole target was run; it passed 8/8 including `multirec_triangle`, `multirec_4cycle`, and `selfrec_triangle`. |
 | G_INT M_INT.3 W5.1 cert trio regression | `cargo test -p xlog-cuda-tests --test certification_suite --release` | PASS. Certification suite passed 1/1. |
-| G_INT M_INT.4 W5.2 bench corpus regression | `docs/evidence/2026-05-14-g38-int-mint4-blocker.md`; `docs/evidence/2026-05-14-g38-int-mint4-rca.md`; `docs/evidence/2026-05-14-g38-int-mint4-e2-prefix-attempt.md`; `cargo bench -p xlog-integration --bench w52_skewed_multiway_bench -- --output-format bencher` | BLOCKED. The registered W5.2 bench target exits 0 and parity is emitted, but all 12 paired current cells are outside the `+-10%` closure-baseline ratio window. The E2-prefix mitigation fixes the G38-only large 4-cycle slowdown, but 4-cycle ratios are now above the historical `+10%` bound and `5clique`/`pivot5` remain below the historical `-10%` bound. |
+| G_INT M_INT.4 W5.2 bench corpus regression | `docs/evidence/2026-05-14-g38-int-mint4-blocker.md`; `docs/evidence/2026-05-14-g38-int-mint4-rca.md`; `docs/evidence/2026-05-14-g38-int-mint4-e2-prefix-attempt.md`; `docs/evidence/2026-05-14-g38-int-mint4-clique-pivot-rca.md`; `cargo bench -p xlog-integration --bench w52_skewed_multiway_bench -- --output-format bencher` | BLOCKED. The registered W5.2 bench target exits 0 and parity is emitted, but all 12 paired current cells are outside the `+-10%` closure-baseline ratio window. The E2-prefix mitigation fixes the G38-only large 4-cycle slowdown, but 4-cycle ratios are now above the historical `+10%` bound and `5clique`/`pivot5` remain below the historical `-10%` bound. Follow-up RCA shows post-mitigation clique/pivot GPU times track the same-machine old W5.2 branch rerun, and changing their path would require a W3.1/W3.2/W5.2 acceptance/design amendment rather than a narrow integration fix. |
 | G_INT M_INT.5-M_INT.11 | G38 plan S_INT.3 and M_INT.4 result | NOT RUN. S_INT.3 requires stopping on the first failure. |
 | G_PURGE M_PURGE.1-M_PURGE.9 | File search for G38 purge artifact | NOT STARTED. No `docs/evidence/2026-05-14-g38-dead-code-followup.md` exists on this branch, and G_PURGE is downstream of G_INT. M_PURGE.8 must not delete/prune preserved-unmerged branch heads referenced by project memory or the closure board. |
 | G_CLOSE M_CLOSE.1-M_CLOSE.5 | File search for G38 closure proposal; `docs/v065-closure-board.md` | NOT STARTED. No G38 W3-bundle closure proposal exists, the board still lists W3.3/W3.5/W3.6/W3.7/W3.8/W3.9 as OPEN, and no explicit DONE approval has been applied. |
@@ -94,6 +94,10 @@ comparison and root-cause assessment.
 
 See `docs/evidence/2026-05-14-g38-int-mint4-e2-prefix-attempt.md` for the
 HG-preserving u32 4-cycle mitigation and the post-fix M_INT.4 rerun.
+
+See `docs/evidence/2026-05-14-g38-int-mint4-clique-pivot-rca.md` for the
+follow-up clique/pivot analysis and the design boundary around the locked W5.2
+bench path.
 
 See `docs/plans/2026-05-14-g38-mint4-response-proposal.md` for the proposed
 supervisor response to the remaining literal ratio-window mismatch.
@@ -156,6 +160,13 @@ It improves `4cycle_N1000` GPU time from `33,939,237 ns` to `1,075,469 ns` and
 `4cycle_N2000` GPU time from `261,392,583 ns` to `1,718,195 ns`, but the literal
 M_INT.4 ratio window remains red.
 
+The follow-up clique/pivot RCA shows the post-mitigation clique-family WCOJ GPU
+times are close to the same-machine old W5.2 branch rerun: the eight
+`5clique`/`pivot5` cells range from `0.985x` to `1.056x` of the old branch GPU
+time. Those cells still miss the historical ratio window, but the remaining
+mismatch maps to the locked W5.2 clique path and W3.1/W3.2 layout-sort
+contracts rather than to a narrow G38-only provider regression.
+
 The G37 stop-condition audit branch
 `/home/dev/projects/xlog/.worktrees/g37-stop-condition-audit` is docs-only and
 is not an ancestor of G38. Its relevant artifacts were imported directly:
@@ -202,7 +213,9 @@ acceptance cell.
 
 1. Amend M_INT.4 if the supervisor accepts a changed W5.2 regression criterion;
    the amendment should separate same-machine baseline drift from successor-HG
-   behavior. The G38-only 4-cycle slowdown now has a production mitigation.
+   behavior. The G38-only 4-cycle slowdown now has a production mitigation, and
+   the clique/pivot follow-up shows their remaining miss is not a narrow local
+   integration fix.
    Proposal: `docs/plans/2026-05-14-g38-mint4-response-proposal.md`.
 2. Continue W5.2 corpus work on `5clique`/`pivot5` and any remaining ratio-window
    mismatch without violating W3.3 HG source-audit locks.
