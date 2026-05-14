@@ -59,6 +59,35 @@ of the same-machine W52 rerun. That is materially different from the original
 G38-only 4-cycle issue, where `4cycle_N1000` and `4cycle_N2000` were `4.164x`
 and `32.022x` slower before the E2-prefix mitigation.
 
+## Historical Baseline Decomposition
+
+The literal M_INT.4 gate compares ratios, not WCOJ GPU times alone. For the
+`5clique` and `pivot5` cells, the post-mitigation integration WCOJ GPU time is
+already faster than the historical W5.2 median-run GPU time. The ratio is lower
+because the hash-chain comparator is faster by an even larger factor on the
+current machine.
+
+Historical median-run timings are from
+`docs/evidence/2026-05-12-w52-skewed-multiway-bench/README.md`. Current timings
+are from `/tmp/g38-mint4-after-e2-prefix.log`.
+
+| Cell | Current GPU ms | Historical GPU ms | GPU current/hist | Current hash ms | Historical hash ms | Hash current/hist |
+|---|---:|---:|---:|---:|---:|---:|
+| `5clique_N10` | 30.8645 | 43.5682 | 0.708x | 13.2113 | 23.7401 | 0.556x |
+| `5clique_N25` | 33.6849 | 42.7401 | 0.788x | 13.2167 | 23.5001 | 0.562x |
+| `5clique_N50` | 34.4152 | 44.0312 | 0.782x | 14.3219 | 23.9602 | 0.598x |
+| `5clique_N100` | 35.0423 | 45.3401 | 0.773x | 12.3314 | 23.5539 | 0.524x |
+| `pivot5_N10` | 35.9830 | 46.4044 | 0.775x | 13.7181 | 25.3963 | 0.540x |
+| `pivot5_N20` | 38.5352 | 45.2255 | 0.852x | 15.8142 | 26.8287 | 0.589x |
+| `pivot5_N30` | 39.2716 | 47.9274 | 0.819x | 15.9224 | 36.7255 | 0.434x |
+| `pivot5_N40` | 41.4319 | 47.7345 | 0.868x | 18.5422 | 41.4601 | 0.447x |
+
+This decomposition rules out a simple "current clique/pivot WCOJ is slower than
+W5.2 closure" explanation. Passing the unchanged ratio gate would require
+making WCOJ faster still relative to a comparator that also moved, or
+artificially degrading the hash-chain comparator. Neither is a narrow
+regression fix for the integrated W3 bundle.
+
 ## Locked Path Evidence
 
 The W5.2 closure proposal defines the clique-family GPU path as:
@@ -107,10 +136,10 @@ The corresponding plan locks are:
 
 The `5clique` and `pivot5` failures are not analogous to the pre-mitigation
 large 4-cycle slowdown. The post-mitigation clique-family WCOJ GPU times mostly
-track the old W5.2 branch rerun on the same machine. The remaining ratio-window
-miss comes from the literal historical baseline comparison and hash/WCOJ timing
-drift, not from an isolated G38 clique-family provider regression with a narrow
-code fix.
+track the old W5.2 branch rerun on the same machine, and they are faster than
+the historical W5.2 median-run GPU times. The remaining ratio-window miss comes
+from the literal historical baseline comparison and hash/WCOJ timing drift, not
+from an isolated G38 clique-family provider regression with a narrow code fix.
 
 Under the current contract, M_INT.4 remains red. Under a same-machine
 predecessor/no-regression amendment, the clique-family cells would be evaluated

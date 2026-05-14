@@ -26,7 +26,7 @@ W5.2 closure baseline. Two facts now need to be separated:
 |---|---|
 | `docs/evidence/2026-05-14-g38-int-mint4-rca.md` | Old W5.2 branch same-machine rerun misses historical baseline; G38 had an additional large 4-cycle regression. |
 | `docs/evidence/2026-05-14-g38-int-mint4-e2-prefix-attempt.md` | E2-prefix production mitigation removes the G38-only large 4-cycle slowdown; M_INT.4 still fails the literal historical-ratio window. |
-| `docs/evidence/2026-05-14-g38-int-mint4-clique-pivot-rca.md` | Post-mitigation `5clique` / `pivot5` GPU times track the old W5.2 same-machine rerun; forcing the historical window would require an acceptance/design amendment, not a safe local M_INT.4 fix. |
+| `docs/evidence/2026-05-14-g38-int-mint4-clique-pivot-rca.md` | Post-mitigation `5clique` / `pivot5` GPU times track the old W5.2 same-machine rerun and are faster than the historical W5.2 GPU medians; the ratio miss is driven by hash/WCOJ timing drift, so forcing the historical window would require an acceptance/design amendment, not a safe local M_INT.4 fix. |
 | `cargo test -p xlog-cuda --test test_w33_hg_source_audit --release -- --nocapture` | 7/7 PASS after adding the 4-cycle E2-prefix source guard. |
 | `cargo test -p xlog-cuda --test test_wcoj_4cycle_u32 --release -- --nocapture` | 5/5 PASS after mitigation. |
 | `cargo bench -p xlog-integration --bench w52_skewed_multiway_bench -- --output-format bencher` | EXIT 0 with parity lines; 12/12 cells outside the historical `+-10%` ratio window. |
@@ -51,8 +51,8 @@ Replace the literal historical ratio-window cell with:
 Under this amendment, the post-mitigation 4-cycle cells have strong evidence of
 successor improvement. `5clique` / `pivot5` should be judged against the
 same-machine predecessor because their post-mitigation GPU times track the old
-branch rerun and the literal historical baseline is not reproduced by that old
-branch on this machine.
+branch rerun, are faster than the historical W5.2 GPU medians, and the literal
+historical ratio baseline is not reproduced by that old branch on this machine.
 
 ## Alternatives
 
