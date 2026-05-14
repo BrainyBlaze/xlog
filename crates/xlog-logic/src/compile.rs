@@ -840,10 +840,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_compile_with_named_stats_snapshot_creates_helper_relation() {
-        let mut compiler = Compiler::new();
-        let source = r#"
+    fn helper_split_source() -> &'static str {
+        r#"
             ab(0, 0). bc(0, 0). cd(0, 0). de(0, 0). ef(0, 0). af(0, 0).
             out(A, B, C, D, F) :-
                 ab(A, B),
@@ -852,20 +850,22 @@ mod tests {
                 de(D, E),
                 ef(E, F),
                 af(A, F).
-        "#;
+        "#
+    }
 
+    fn helper_split_snapshot(distinct_d: u64) -> StatsSnapshot {
         let mut snapshot_relations = Vec::new();
         for (idx, name) in ["ab", "bc", "cd", "de", "ef", "af"].iter().enumerate() {
             let mut rel_stats = RelationStats::new(RelId(idx as u32));
             rel_stats.update_cardinality(8192);
             if *name == "de" {
                 let mut d_col = ColumnStats::new(0, ScalarType::U32);
-                d_col.update_distinct(1);
+                d_col.update_distinct(distinct_d);
                 rel_stats.add_column(d_col);
             }
             snapshot_relations.push(rel_stats);
         }
-        let snapshot = StatsSnapshot {
+        StatsSnapshot {
             relations: snapshot_relations,
             join_selectivities: Vec::new(),
             rel_names: ["ab", "bc", "cd", "de", "ef", "af"]
@@ -873,10 +873,15 @@ mod tests {
                 .enumerate()
                 .map(|(idx, name)| (RelId(idx as u32), (*name).to_string()))
                 .collect(),
-        };
+        }
+    }
 
+    #[test]
+    fn test_compile_with_named_stats_snapshot_creates_helper_relation() {
+        let mut compiler = Compiler::new();
+        let snapshot = helper_split_snapshot(1);
         let plan = compiler
-            .compile_with_stats_snapshot(source, Some(&snapshot))
+            .compile_with_stats_snapshot(helper_split_source(), Some(&snapshot))
             .expect("compile with helper stats");
         let helper = compiler
             .rel_ids()
@@ -902,6 +907,27 @@ mod tests {
             .find(|rule| rule.head == "out")
             .expect("out rule");
         assert!(contains_scan(&out_rule.body, helper.1));
+    }
+
+    #[test]
+    fn test_compile_with_flat_named_stats_keeps_original_rule() {
+        let mut compiler = Compiler::new();
+        let snapshot = helper_split_snapshot(8192);
+        let plan = compiler
+            .compile_with_stats_snapshot(helper_split_source(), Some(&snapshot))
+            .expect("compile with flat stats");
+
+        assert!(!compiler
+            .rel_ids()
+            .keys()
+            .any(|name| name.starts_with("__w37_helper_")));
+        let out_rules = plan
+            .rules_by_scc
+            .iter()
+            .flatten()
+            .filter(|rule| rule.head == "out")
+            .count();
+        assert_eq!(out_rules, 1);
     }
 
     fn contains_scan(node: &RirNode, rel: RelId) -> bool {

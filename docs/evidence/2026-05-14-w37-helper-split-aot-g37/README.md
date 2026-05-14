@@ -19,7 +19,7 @@
 | M4.1 callgraph analog speedup | `3.324x` from preserved spike `7203a7e6` | PASS |
 | M4.2 heapalloc analog speedup | `47.849x` from preserved spike `7203a7e6` | PASS |
 | M4.3 row equality | PASS on both spike fixtures; helper rewrite structural cert PASS | PASS |
-| M4.4 no buried-skew rewrite | `helper_split_ignores_flat_distribution` PASS; no helper scan inserted | PASS |
+| M4.4 no buried-skew rewrite | optimizer and compiler flat-stats certs PASS; no helper scan inserted | PASS |
 | M4.5 W4.1 recursive composition | 3 targeted recursive dispatch certs PASS | PASS |
 
 ## Verification
@@ -27,7 +27,8 @@
 | Command | Result |
 |---|---:|
 | `cargo test -p xlog-logic --lib helper -- --nocapture` | 3/0 PASS |
-| `cargo test -p xlog-logic --lib` | 230/0 PASS |
+| `cargo test -p xlog-logic --lib test_compile_with_flat_named_stats_keeps_original_rule -- --nocapture` | 1/0 PASS |
+| `cargo test -p xlog-logic --lib` | 231/0 PASS |
 | `RUSTFLAGS="-D warnings" cargo build -p xlog-logic --release` | EXIT 0 |
 | `cargo bench -p xlog-integration --bench wcoj_w37_helper_split --no-run` | EXIT 0 |
 | `cargo test -p xlog-integration --test test_wcoj_recursive_dispatch multirec_triangle_dispatches_wcoj_and_matches_binary_join -- --nocapture` | 1/0 PASS |
@@ -41,6 +42,7 @@
 ## Production Cert Coverage
 
 - `compile::tests::test_compile_with_named_stats_snapshot_creates_helper_relation` proves the compiler hook allocates and scans a helper relation from named stats.
+- `compile::tests::test_compile_with_flat_named_stats_keeps_original_rule` proves the compiler hook leaves flat-stats rules without a helper relation.
 - `optimizer::helper_split_pass_tests::helper_split_extracts_buried_pair` proves the pass extracts the `(de, ef)` inner pair and inserts the helper rule before the outer rule.
 - `optimizer::helper_split_pass_tests::helper_split_ignores_flat_distribution` proves a flat distribution remains on the original rule shape, which is the M4.4 no-regression guard for rules with no buried skew.
 
