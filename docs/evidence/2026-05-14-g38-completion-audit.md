@@ -99,6 +99,10 @@ See `docs/evidence/2026-05-14-g38-int-mint4-clique-pivot-rca.md` for the
 follow-up clique/pivot analysis and the design boundary around the locked W5.2
 bench path.
 
+See `docs/plans/2026-05-14-g38-mint4-amendment-packet.md` for exact
+supervisor-amendment text. The packet is proposal-only and does not mark
+M_INT.4 green unless accepted.
+
 See `docs/plans/2026-05-14-g38-mint4-response-proposal.md` for the proposed
 supervisor response to the remaining literal ratio-window mismatch.
 
@@ -219,7 +223,8 @@ acceptance cell.
    behavior. The G38-only 4-cycle slowdown now has a production mitigation, and
    the clique/pivot follow-up shows their remaining miss is not a narrow local
    integration fix.
-   Proposal: `docs/plans/2026-05-14-g38-mint4-response-proposal.md`.
+   Proposal: `docs/plans/2026-05-14-g38-mint4-response-proposal.md`; exact
+   replacement text: `docs/plans/2026-05-14-g38-mint4-amendment-packet.md`.
 2. Continue W5.2 corpus work on `5clique`/`pivot5` and any remaining ratio-window
    mismatch without violating W3.3 HG source-audit locks.
 3. Treat G38 as STUCK at M_INT.4 under the current goal-038 contract.
