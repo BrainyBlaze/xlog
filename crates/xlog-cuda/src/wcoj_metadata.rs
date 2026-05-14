@@ -49,6 +49,7 @@ pub struct WcojTriangleHgWorkPlanU64 {
 
 pub struct WcojCycle4HgWorkPlanU32 {
     pub e1_work_prefix: TrackedCudaSlice<u32>,
+    pub e2_work_prefix: TrackedCudaSlice<u32>,
     pub e1_e2_start: TrackedCudaSlice<u32>,
     pub e1_e2_end: TrackedCudaSlice<u32>,
     pub block_counts: TrackedCudaSlice<u32>,

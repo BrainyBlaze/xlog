@@ -994,16 +994,69 @@ __device__ __forceinline__ bool contains_pair_u32(
     return inner_idx < hi && col1[inner_idx] == b;
 }
 
+__device__ __forceinline__ bool resolve_4cycle_e2_work_u32(
+    const uint32_t* __restrict__ e2_work_prefix,
+    const uint32_t* __restrict__ e2_col1,
+    const uint32_t* __restrict__ e3_col0,
+    const uint32_t* __restrict__ e3_col1,
+    uint32_t n_e3,
+    uint32_t e2_lo,
+    uint32_t e2_hi,
+    uint32_t local,
+    uint32_t* out_y,
+    uint32_t* out_z) {
+    if (e2_lo >= e2_hi) {
+        return false;
+    }
+    uint32_t target = e2_work_prefix[e2_lo] + local;
+    uint32_t span = e2_hi - e2_lo + 1;
+    uint32_t pos = upper_bound_u32(e2_work_prefix + e2_lo, span, target);
+    if (pos == 0) {
+        return false;
+    }
+    uint32_t j = e2_lo + pos - 1;
+    if (j >= e2_hi) {
+        return false;
+    }
+    uint32_t e3_offset = target - e2_work_prefix[j];
+    uint32_t y = e2_col1[j];
+    uint32_t e3_lo = lower_bound_u32(e3_col0, n_e3, y);
+    uint32_t e3_hi = upper_bound_u32(e3_col0, n_e3, y);
+    if (e3_offset >= e3_hi - e3_lo) {
+        return false;
+    }
+    *out_y = y;
+    *out_z = e3_col1[e3_lo + e3_offset];
+    return true;
+}
+
 }  // anonymous namespace
+
+extern "C" __global__ void wcoj_4cycle_build_e2_work_prefix_u32(
+    const uint32_t* __restrict__ e2_col1,
+    uint32_t n_e2,
+    const uint32_t* __restrict__ e3_col0,
+    uint32_t n_e3,
+    uint32_t* __restrict__ e2_work_prefix) {
+    uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i == 0) {
+        e2_work_prefix[n_e2] = 0;
+    }
+    if (i >= n_e2) {
+        return;
+    }
+    uint32_t y = e2_col1[i];
+    uint32_t e3_lo = lower_bound_u32(e3_col0, n_e3, y);
+    uint32_t e3_hi = upper_bound_u32(e3_col0, n_e3, y);
+    e2_work_prefix[i] = e3_hi - e3_lo;
+}
 
 extern "C" __global__ void wcoj_4cycle_build_hg_work_plan_u32(
     const uint32_t* __restrict__ e1_col1,
     uint32_t n_e1,
     const uint32_t* __restrict__ e2_col0,
-    const uint32_t* __restrict__ e2_col1,
     uint32_t n_e2,
-    const uint32_t* __restrict__ e3_col0,
-    uint32_t n_e3,
+    const uint32_t* __restrict__ e2_work_prefix,
     uint32_t* __restrict__ e1_work_prefix,
     uint32_t* __restrict__ e1_e2_start,
     uint32_t* __restrict__ e1_e2_end) {
@@ -1017,13 +1070,7 @@ extern "C" __global__ void wcoj_4cycle_build_hg_work_plan_u32(
     uint32_t x = e1_col1[i];
     uint32_t e2_lo = lower_bound_u32(e2_col0, n_e2, x);
     uint32_t e2_hi = upper_bound_u32(e2_col0, n_e2, x);
-    uint32_t work = 0;
-    for (uint32_t j = e2_lo; j < e2_hi; ++j) {
-        uint32_t y = e2_col1[j];
-        uint32_t e3_lo = lower_bound_u32(e3_col0, n_e3, y);
-        uint32_t e3_hi = upper_bound_u32(e3_col0, n_e3, y);
-        work += e3_hi - e3_lo;
-    }
+    uint32_t work = e2_work_prefix[e2_hi] - e2_work_prefix[e2_lo];
     e1_work_prefix[i] = work;
     e1_e2_start[i] = e2_lo;
     e1_e2_end[i] = e2_hi;
@@ -1041,6 +1088,7 @@ extern "C" __global__ void wcoj_4cycle_count_hg_u32(
     const uint32_t* __restrict__ e4_col1,
     uint32_t n_e4,
     const uint32_t* __restrict__ e1_work_prefix,
+    const uint32_t* __restrict__ e2_work_prefix,
     const uint32_t* __restrict__ e1_e2_start,
     const uint32_t* __restrict__ e1_e2_end,
     uint32_t total_work,
@@ -1074,20 +1122,12 @@ extern "C" __global__ void wcoj_4cycle_count_hg_u32(
         uint32_t w = e1_col0[e1_idx];
         uint32_t e2_lo = e1_e2_start[e1_idx];
         uint32_t e2_hi = e1_e2_end[e1_idx];
-        for (uint32_t j = e2_lo; j < e2_hi; ++j) {
-            uint32_t y = e2_col1[j];
-            uint32_t e3_lo = lower_bound_u32(e3_col0, n_e3, y);
-            uint32_t e3_hi = upper_bound_u32(e3_col0, n_e3, y);
-            uint32_t e3_len = e3_hi - e3_lo;
-            if (local >= e3_len) {
-                local -= e3_len;
-                continue;
-            }
-            uint32_t z = e3_col1[e3_lo + local];
-            if (contains_pair_u32(e4_col0, e4_col1, n_e4, z, w)) {
-                local_count += 1;
-            }
-            break;
+        uint32_t y = 0;
+        uint32_t z = 0;
+        if (resolve_4cycle_e2_work_u32(
+                e2_work_prefix, e2_col1, e3_col0, e3_col1, n_e3, e2_lo, e2_hi, local, &y, &z)
+            && contains_pair_u32(e4_col0, e4_col1, n_e4, z, w)) {
+            local_count += 1;
         }
     }
 
@@ -1117,6 +1157,7 @@ extern "C" __global__ void wcoj_4cycle_materialize_hg_u32(
     const uint32_t* __restrict__ e4_col1,
     uint32_t n_e4,
     const uint32_t* __restrict__ e1_work_prefix,
+    const uint32_t* __restrict__ e2_work_prefix,
     const uint32_t* __restrict__ e1_e2_start,
     const uint32_t* __restrict__ e1_e2_end,
     uint32_t total_work,
@@ -1152,20 +1193,12 @@ extern "C" __global__ void wcoj_4cycle_materialize_hg_u32(
         uint32_t w = e1_col0[e1_idx];
         uint32_t e2_lo = e1_e2_start[e1_idx];
         uint32_t e2_hi = e1_e2_end[e1_idx];
-        for (uint32_t j = e2_lo; j < e2_hi; ++j) {
-            uint32_t y = e2_col1[j];
-            uint32_t e3_lo = lower_bound_u32(e3_col0, n_e3, y);
-            uint32_t e3_hi = upper_bound_u32(e3_col0, n_e3, y);
-            uint32_t e3_len = e3_hi - e3_lo;
-            if (local >= e3_len) {
-                local -= e3_len;
-                continue;
-            }
-            uint32_t z = e3_col1[e3_lo + local];
-            if (contains_pair_u32(e4_col0, e4_col1, n_e4, z, w)) {
-                local_count += 1;
-            }
-            break;
+        uint32_t y = 0;
+        uint32_t z = 0;
+        if (resolve_4cycle_e2_work_u32(
+                e2_work_prefix, e2_col1, e3_col0, e3_col1, n_e3, e2_lo, e2_hi, local, &y, &z)
+            && contains_pair_u32(e4_col0, e4_col1, n_e4, z, w)) {
+            local_count += 1;
         }
     }
 
@@ -1203,27 +1236,19 @@ extern "C" __global__ void wcoj_4cycle_materialize_hg_u32(
         uint32_t x = e1_col1[e1_idx];
         uint32_t e2_lo = e1_e2_start[e1_idx];
         uint32_t e2_hi = e1_e2_end[e1_idx];
-        for (uint32_t j = e2_lo; j < e2_hi; ++j) {
-            uint32_t y = e2_col1[j];
-            uint32_t e3_lo = lower_bound_u32(e3_col0, n_e3, y);
-            uint32_t e3_hi = upper_bound_u32(e3_col0, n_e3, y);
-            uint32_t e3_len = e3_hi - e3_lo;
-            if (local >= e3_len) {
-                local -= e3_len;
-                continue;
+        uint32_t y = 0;
+        uint32_t z = 0;
+        if (resolve_4cycle_e2_work_u32(
+                e2_work_prefix, e2_col1, e3_col0, e3_col1, n_e3, e2_lo, e2_hi, local, &y, &z)
+            && contains_pair_u32(e4_col0, e4_col1, n_e4, z, w)) {
+            uint32_t out = thread_base + local_emit;
+            if (out < total_rows) {
+                out_w[out] = w;
+                out_x[out] = x;
+                out_y[out] = y;
+                out_z[out] = z;
             }
-            uint32_t z = e3_col1[e3_lo + local];
-            if (contains_pair_u32(e4_col0, e4_col1, n_e4, z, w)) {
-                uint32_t out = thread_base + local_emit;
-                if (out < total_rows) {
-                    out_w[out] = w;
-                    out_x[out] = x;
-                    out_y[out] = y;
-                    out_z[out] = z;
-                }
-                local_emit += 1;
-            }
-            break;
+            local_emit += 1;
         }
     }
 }

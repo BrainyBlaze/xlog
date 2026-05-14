@@ -141,5 +141,16 @@ shows two separate issues:
 2. G38 has an additional 4-cycle WCOJ regression relative to that same-machine
    old-branch run, especially `4cycle_N1000` and `4cycle_N2000`.
 
-No code fix was applied. Restoring W5.2-era direct 4-cycle behavior is a
-production WCOJ routing decision, not a safely local evidence/doc correction.
+An HG-preserving E2-prefix mitigation was later applied for the u32 4-cycle
+path. See `docs/evidence/2026-05-14-g38-int-mint4-e2-prefix-attempt.md`.
+
+That change fixes the G38-only large 4-cycle slowdown without restoring retired
+direct kernel symbols, but M_INT.4 remains red under the literal `+-10%`
+historical-baseline contract:
+
+- `4cycle_N1000` GPU time improved from `33,939,237 ns` to `1,075,469 ns`, but
+  the new ratio is `189.40%` of the historical W5.2 baseline ratio.
+- `4cycle_N2000` GPU time improved from `261,392,583 ns` to `1,718,195 ns`, but
+  the new ratio is `349.55%` of the historical W5.2 baseline ratio.
+- `5clique` and `pivot5` cells remain below the historical baseline window,
+  matching the baseline-reproducibility finding in the RCA.
