@@ -2,12 +2,12 @@
 
 **Objective:** `docs/plans/2026-05-14-supervisor-goal-038.md`
 **Audited branch:** `feat/w3-bundle-integration`
-**Audited code/evidence base:** Response 2 TSV-backed corpus checkpoint
-`651219c0` (`docs(g38): add M_INT.4 three-run TSV evidence`), before any later
-audit-anchor doc-only update. This supersedes the pre-rejection G_PURGE
-checkpoint `35b5a4f5`, G_INT checkpoint `d339b7c2`, initial Response 2
-remediation checkpoint `ae95ce13`, and prose-table three-run checkpoint
-`cb725279` for closure status; the earlier evidence remains valid only where
+**Audited code/evidence base:** Response 2 authorization packet checkpoint
+`0de0c202` (`docs(g38): add M_INT.4 authorization response options`). This
+supersedes the pre-rejection G_PURGE checkpoint `35b5a4f5`, G_INT checkpoint
+`d339b7c2`, initial Response 2 remediation checkpoint `ae95ce13`,
+prose-table three-run checkpoint `cb725279`, and TSV-backed corpus checkpoint
+`651219c0` for closure status; the earlier evidence remains valid only where
 explicitly noted below.
 **M_INT.4 follow-up series:** starts at `78cb41c8` and contains RCA,
 same-machine comparison TSV, amendment-packet, audit-metadata docs, E2-prefix
@@ -20,6 +20,8 @@ remediation/resubmission evidence.
 **Response 2 tally-correction commit:** `ae95ce13`
 **Response 2 three-run corpus commit:** `cb725279`
 **Response 2 three-run TSV evidence commit:** `651219c0`
+**Response 2 TSV audit-anchor commit:** `8de6b0b3`
+**Response 2 authorization-options commit:** `0de0c202`
 **Audit date:** 2026-05-14
 
 ## Source Note
@@ -146,7 +148,9 @@ See `docs/evidence/2026-05-14-g38-int-mint4-response2-three-run.tsv` for the
 
 See `docs/plans/2026-05-14-g38-mint4-response2-resubmission.md` for the
 selected Response 2 amendment path: re-baseline M_INT.4 to post-G1 actual
-measurements.
+measurements. That packet also records the response options and states that it
+does not authorize closure-board edits, goal-039 predecessor edits, merge, push,
+tag, or W3 DONE marking.
 
 See `docs/plans/2026-05-14-g38-mint4-amendment-packet.md` for the historical
 pre-Response-2 same-machine amendment text. The packet is superseded by the
