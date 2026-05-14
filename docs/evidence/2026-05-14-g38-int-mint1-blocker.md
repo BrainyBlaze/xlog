@@ -1,5 +1,10 @@
 # G38 G_INT M_INT.1 Blocker
 
+**Current status:** SUPERSEDED by the supervisor's post-dispatch M_INT.1
+correction and `docs/evidence/2026-05-14-g38-int-mint1-successor.md`. This file
+is retained as the historical missing-target record for the original
+`wcoj_w34_kernel_fusion` gate.
+
 **Goal document:** `docs/plans/2026-05-14-supervisor-goal-038.md`
 **Sub-goal:** G_INT
 **Metric:** M_INT.1 W3.4 re-validation
@@ -78,5 +83,7 @@ explicit decision artifact; in short, the supervisor must choose one of:
    for the retired W3.4 fused-count surface.
 3. Treat G_INT as STUCK under the current goal-038 contract.
 
-Later G_INT metrics were not run because S_INT.3 requires stopping on the first
-failure.
+Later G_INT metrics were not run at the time because S_INT.3 requires stopping
+on the first failure. After the supervisor corrected M_INT.1 to the successor
+`wcoj_w33_superhub` metric, G_INT resumed; M_INT.1-M_INT.3 passed and M_INT.4
+became the active blocker.

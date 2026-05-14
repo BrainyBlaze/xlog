@@ -1,5 +1,11 @@
 # G38 M_INT.1 Response Proposal
 
+**Current status:** SUPERSEDED. The supervisor selected the successor-metric
+path by correcting goal-038 M_INT.1 to `wcoj_w33_superhub`; the corrected M_INT.1
+passed in `docs/evidence/2026-05-14-g38-int-mint1-successor.md`. The active G_INT
+blocker is now M_INT.4, recorded in
+`docs/evidence/2026-05-14-g38-int-mint4-blocker.md`.
+
 **Branch:** `feat/w3-bundle-integration`
 **Current HEAD:** `cc875c64`
 **Blocked gate:** G_INT M_INT.1

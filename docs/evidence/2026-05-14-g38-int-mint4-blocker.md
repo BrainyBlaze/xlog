@@ -119,5 +119,10 @@ performance regression gate is red. All 12 current paired cells are outside the
 `+-10%` closure-baseline window, and the 4-cycle workload has lost its W5.2
 GPU-favored direction on all but `N=50`.
 
+This single integration rerun is sufficient to fail the 36/36 gate: once any
+cell is outside the `+-10%` window, M_INT.4 is red. Additional repeated W5.2
+reruns were not launched after the first red M_INT.4 evidence because S_INT.3
+requires stopping on the first failure.
+
 Later G_INT metrics were not run because S_INT.3 requires stopping on the first
 failure.

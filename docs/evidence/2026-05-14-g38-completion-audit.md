@@ -17,10 +17,11 @@ That file is not present on the audited integration branch. The main checkout
 currently has uncommitted edits to both goal-038 and goal-039, so this audit does
 not copy the plan into the integration branch.
 
-The main-checkout goal-038 diff was also inspected after the sibling-worktree
-scan. It adds Phase-1 out-of-bounds item 15 for M18 / M37-A surface
-preservation only; it does not amend M_INT.1 or the plan-named
-`wcoj_w34_kernel_fusion` command.
+The main-checkout goal-038 diff was later amended by the supervisor with a
+post-dispatch correction replacing M_INT.1's missing
+`wcoj_w34_kernel_fusion` target with the successor `wcoj_w33_superhub` metric.
+The same main-checkout diff also adds Phase-1 out-of-bounds item 15 for M18 /
+M37-A surface preservation.
 
 ## Objective Restatement
 
@@ -39,7 +40,7 @@ Goal 038 Phase 1 is complete only when all of the following hold together:
    goal-039.
 
 The current branch does not satisfy this definition of done. It is stopped at
-G_INT M_INT.1.
+G_INT M_INT.4.
 
 ## Prompt-To-Artifact Checklist
 
@@ -48,19 +49,21 @@ G_INT M_INT.1.
 | G_W35 M_W35.1-7 or S_W35.5 graceful-close | `docs/evidence/2026-05-14-w35-line6-fanout-g38/README.md`, `measurements.tsv` | CLOSED-AS-GRACEFUL. Final paper-class direct speedup `1.432992x` and Criterion `1.450661x` missed the `>= 1.5x` gate; parity Criterion `0.936408x` missed the `>= 0.95x` guard. Experimental production code was reverted and the paper-citation justification is present. |
 | G_W36 M_W36.1-5 or S_W36.3 graceful-close | `docs/evidence/2026-05-14-w36-line7-fanout-g38/README.md` | CLOSED-AS-GRACEFUL. G_W35 produced no accepted shared-memory predecessor baseline, so W3.6 has no accepted line-7 comparison baseline. |
 | G_W39 M_W39.1-9 | `docs/evidence/2026-05-14-w39-paper-class-integration-g38/README.md`, `measurements.tsv` | PASS. Three fixtures pass row equality, 5/5 bundle paths, CV `<= 5%`, peak VRAM below 38 GB, recursive growth 0, and geomean direct ratio `28.389319x`. |
-| G_INT M_INT.1 W3.4 re-validation | `docs/evidence/2026-05-14-g38-int-mint1-blocker.md`; fresh `cargo bench -p xlog-integration --bench wcoj_w34_kernel_fusion --no-run` | BLOCKED. The command exits 101 because no bench target named `wcoj_w34_kernel_fusion` exists in `xlog-integration`. |
-| Sibling-worktree check for already-completed W3.4 revalidation work | `git worktree list --porcelain`; `find /home/dev/projects/xlog/.worktrees ...`; old `w34-fusion-impl` files | No completed G38 work found. Old W3.4 worktrees contain `wcoj_fusion_bench.rs`, not the plan-named target, and current integration HEAD has no `w34` or `fusion` bench/test files. The old bench depends on the retired W3.4 fused production surface. |
-| Main-checkout plan edits | `git -C /home/dev/projects/xlog diff -- docs/plans/2026-05-14-supervisor-goal-038.md` | No M_INT.1 amendment found. The only goal-038 edit is the new M18 / M37-A preservation out-of-bounds item. |
-| G_INT M_INT.2-M_INT.11 | G38 plan S_INT.3 and M_INT.1 result | NOT RUN. S_INT.3 requires running M_INT.1 through M_INT.11 sequentially and stopping on the first failure. |
+| G_INT M_INT.1 W3.4 successor re-validation | `docs/evidence/2026-05-14-g38-int-mint1-successor.md` | PASS after supervisor correction. `wcoj_w33_superhub` compiled and ran; `superhub-50K` row equality passed with 29,539 rows and ratio `4.031791x`, above the corrected `>= 1.51x` gate. |
+| Historical M_INT.1 missing-target blocker | `docs/evidence/2026-05-14-g38-int-mint1-blocker.md`; `docs/plans/2026-05-14-g38-mint1-response-proposal.md` | SUPERSEDED by the supervisor correction. The original missing `wcoj_w34_kernel_fusion` target remains absent, but M_INT.1 now uses the successor metric. |
+| G_INT M_INT.2 W4.1 cert regression | `cargo test -p xlog-integration --test test_wcoj_recursive_dispatch` | PASS by coverage. The literal multi-filter command in the goal doc is invalid Cargo syntax, so the whole target was run; it passed 8/8 including `multirec_triangle`, `multirec_4cycle`, and `selfrec_triangle`. |
+| G_INT M_INT.3 W5.1 cert trio regression | `cargo test -p xlog-cuda-tests --test certification_suite --release` | PASS. Certification suite passed 1/1. |
+| G_INT M_INT.4 W5.2 bench corpus regression | `docs/evidence/2026-05-14-g38-int-mint4-blocker.md`; `cargo bench -p xlog-integration --bench w52_skewed_multiway_bench -- --output-format bencher` | BLOCKED. The registered W5.2 bench target exits 0 and parity is emitted, but all 12 paired current cells are outside the `+-10%` closure-baseline ratio window. |
+| G_INT M_INT.5-M_INT.11 | G38 plan S_INT.3 and M_INT.4 result | NOT RUN. S_INT.3 requires stopping on the first failure. |
 | G_PURGE M_PURGE.1-M_PURGE.9 | File search for G38 purge artifact | NOT STARTED. No `docs/evidence/2026-05-14-g38-dead-code-followup.md` exists on this branch, and G_PURGE is downstream of G_INT. |
 | G_CLOSE M_CLOSE.1-M_CLOSE.5 | File search for G38 closure proposal; `docs/v065-closure-board.md` | NOT STARTED. No G38 W3-bundle closure proposal exists, the board still lists W3.3/W3.5/W3.6/W3.7/W3.8/W3.9 as OPEN, and no explicit DONE approval has been applied. |
 | KPI-P1.1 W3 axis 9/9 DONE | `docs/v065-closure-board.md` | NOT MET. W3.3, W3.5, W3.6, W3.7, W3.8, and W3.9 remain OPEN on the board. |
 | KPI-P1.2 DoD items 1-7 | This audit table | NOT MET because G_INT, G_PURGE, and G_CLOSE are not green. |
-| KPI-P1.3 W3.4 revalidated `>= 1.51x` | Fresh M_INT.1 command | NOT MET. The plan-named bench target is missing. |
-| KPI-P1.4 W4.1 certs PASS | S_INT.3 stop rule | UNVERIFIED in G38 because M_INT.2 was not run after the M_INT.1 blocker. |
-| KPI-P1.5 W5.1 cert trio PASS | S_INT.3 stop rule | UNVERIFIED in G38 because M_INT.3 was not run after the M_INT.1 blocker. |
-| KPI-P1.6 W5.2 corpus within `+-10%` | S_INT.3 stop rule | UNVERIFIED in G38 because M_INT.4 was not run after the M_INT.1 blocker. |
-| KPI-P1.7 VRAM budget/growth | W35/W39 evidence; S_INT.3 stop rule | PARTIAL. W35 and W39 report VRAM within budget, but M_INT.11 was not run after the M_INT.1 blocker. |
+| KPI-P1.3 W3.4 revalidated `>= 1.51x` | M_INT.1 successor evidence | MET under the supervisor-corrected successor metric. |
+| KPI-P1.4 W4.1 certs PASS | M_INT.2 evidence | MET by running the full W4.1 recursive dispatch target. |
+| KPI-P1.5 W5.1 cert trio PASS | M_INT.3 evidence | MET by certification suite 1/1. |
+| KPI-P1.6 W5.2 corpus within `+-10%` | M_INT.4 evidence | NOT MET. M_INT.4 is the active blocker. |
+| KPI-P1.7 VRAM budget/growth | W35/W39 evidence; S_INT.3 stop rule | PARTIAL. W35 and W39 report VRAM within budget, but M_INT.11 was not run after the M_INT.4 blocker. |
 | W7.1 remains user-gated | `docs/v065-closure-board.md` | PRESERVED. W7.1 remains OPEN and tag-gated. |
 | Phase-2 ready-state | Goal-039 predecessor reference not audited from this branch | NOT MET. G_CLOSE has not produced the Phase-1 hand-off proposal or board update. |
 
@@ -71,21 +74,11 @@ git status --short --branch
 ## feat/w3-bundle-integration
 ```
 
-```text
-cargo bench -p xlog-integration --bench wcoj_w34_kernel_fusion --no-run
-EXIT 101
-error: no bench target named `wcoj_w34_kernel_fusion` in `xlog-integration` package
-```
+See `docs/evidence/2026-05-14-g38-int-mint1-blocker.md` for the historical
+missing-target check and `docs/evidence/2026-05-14-g38-int-mint1-successor.md`
+for the corrected successor pass.
 
-```text
-rg --files crates/xlog-integration/benches crates/xlog-cuda-tests/tests | rg 'w34|fusion'
-EXIT 1
-```
-
-```text
-git merge-base --is-ancestor 70d2cf5e HEAD
-EXIT 0
-```
+See `docs/evidence/2026-05-14-g38-int-mint4-blocker.md` for the active blocker.
 
 ## Other Worktree Findings
 
@@ -140,19 +133,21 @@ The branch has valid evidence for:
 - G_W35 closed-as-graceful.
 - G_W36 closed-as-graceful.
 - G_W39 green after integration.
+- Corrected G_INT M_INT.1 green.
+- G_INT M_INT.2 green.
+- G_INT M_INT.3 green.
 
 The branch is blocked at:
 
-- G_INT M_INT.1: the required W3.4 re-validation target is missing on
-  integration HEAD.
+- G_INT M_INT.4: W5.2 bench corpus regression is outside the `+-10%`
+  closure-baseline window.
 
 Per S_INT.3, later G_INT metrics, G_PURGE, and G_CLOSE should not be treated as
-complete until M_INT.1 is restored/replaced or the supervisor explicitly amends
-the acceptance cell.
+complete until M_INT.4 is fixed or the supervisor explicitly amends the
+acceptance cell.
 
 ## Response Options
 
-1. Restore or replace the W3.4 re-validation bench and rerun G_INT from M_INT.1.
-2. Amend M_INT.1 to a successor metric for the post-W33 replacement surface, then
-   rerun G_INT from the amended first metric.
-3. Treat G38 as STUCK under the current goal-038 contract.
+1. Root-cause and fix the W5.2 regression, then rerun G_INT from M_INT.4.
+2. Amend M_INT.4 if the supervisor accepts a changed W5.2 regression criterion.
+3. Treat G38 as STUCK at M_INT.4 under the current goal-038 contract.
