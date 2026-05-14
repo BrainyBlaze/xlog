@@ -107,6 +107,23 @@ pub struct RuntimeConfig {
     /// v0.6.5 slice 2 — kill switch for 4-cycle WCOJ. Same shape
     /// as triangle's kill switch: beats force + adaptive.
     pub wcoj_4cycle_dispatch_disabled: Option<bool>,
+    /// v0.6.5 W2.5 — selects the runtime WCOJ cost model.
+    /// `None` resolves by env/default precedence; see
+    /// [`RuntimeConfig::with_wcoj_cost_model`].
+    pub wcoj_cost_model: Option<CostModelKind>,
+}
+
+/// v0.6.5 W2.5 cost-model selector for WCOJ dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CostModelKind {
+    /// Legacy skew-classifier opt-out selector.
+    ///
+    /// On current G38 integration code the GPU classifier surface has been
+    /// removed, so this selector is implemented as a conservative opt-out from
+    /// stats/cardinality dispatch.
+    SkewClassifier,
+    /// Stats/cardinality-backed dispatch selector.
+    Cardinality,
 }
 
 impl Default for RuntimeConfig {
@@ -123,6 +140,7 @@ impl Default for RuntimeConfig {
             wcoj_4cycle_dispatch: None,
             wcoj_4cycle_dispatch_adaptive: None,
             wcoj_4cycle_dispatch_disabled: None,
+            wcoj_cost_model: None,
         }
     }
 }
@@ -192,6 +210,31 @@ impl RuntimeConfig {
     pub fn with_wcoj_4cycle_dispatch_disabled(mut self, override_value: Option<bool>) -> Self {
         self.wcoj_4cycle_dispatch_disabled = override_value;
         self
+    }
+
+    /// Select which WCOJ cost-model implementation the runtime consults.
+    ///
+    /// Precedence:
+    /// 1. Explicit config field set here.
+    /// 2. `XLOG_WCOJ_COST_MODEL=cardinality` or `skew`.
+    /// 3. Default `Cardinality`.
+    pub fn with_wcoj_cost_model(mut self, kind: Option<CostModelKind>) -> Self {
+        self.wcoj_cost_model = kind;
+        self
+    }
+
+    /// Resolve the effective WCOJ cost-model selector.
+    pub fn resolved_wcoj_cost_model(&self) -> CostModelKind {
+        if let Some(kind) = self.wcoj_cost_model {
+            return kind;
+        }
+        let raw = std::env::var("XLOG_WCOJ_COST_MODEL").ok();
+        let normalized = raw.as_deref().map(|s| s.trim().to_ascii_lowercase());
+        match normalized.as_deref() {
+            Some("cardinality") => CostModelKind::Cardinality,
+            Some("skew") | Some("skewclassifier") | Some(_) => CostModelKind::SkewClassifier,
+            None => CostModelKind::Cardinality,
+        }
     }
 }
 

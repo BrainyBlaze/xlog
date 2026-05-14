@@ -1,4 +1,4 @@
-use xlog_core::{RelId, RuntimeConfig};
+use xlog_core::{CostModelKind, RelId, RuntimeConfig};
 use xlog_cuda::device_runtime::StreamId;
 use xlog_stats::StatsManager;
 
@@ -19,6 +19,19 @@ pub(super) trait WcojCostModel: Send + Sync {
 
 pub(super) const MIN_CARDINALITY_BINARY_INTERMEDIATE: u64 = 4_096;
 pub(super) const LARGE_CARDINALITY_BINARY_INTERMEDIATE: u64 = 1_000_000;
+
+#[derive(Default)]
+pub(super) struct SkewClassifierCostModel;
+
+impl WcojCostModel for SkewClassifierCostModel {
+    fn should_dispatch_triangle(&self, _ctx: &WcojDispatchCtx) -> bool {
+        false
+    }
+
+    fn should_dispatch_4cycle(&self, _ctx: &WcojDispatchCtx) -> bool {
+        false
+    }
+}
 
 pub(super) struct CardinalityAwareCostModel {
     min_binary_intermediate: u64,
@@ -84,13 +97,17 @@ impl WcojCostModel for CardinalityAwareCostModel {
     }
 }
 
-pub(super) fn build_wcoj_cost_model(_config: &RuntimeConfig) -> Box<dyn WcojCostModel> {
-    Box::new(CardinalityAwareCostModel::default())
+pub(super) fn build_wcoj_cost_model(config: &RuntimeConfig) -> Box<dyn WcojCostModel> {
+    match config.resolved_wcoj_cost_model() {
+        CostModelKind::SkewClassifier => Box::new(SkewClassifierCostModel),
+        CostModelKind::Cardinality => Box::new(CardinalityAwareCostModel::default()),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
 
     fn triangle_ctx<'a>(stats: &'a StatsManager, slot_rels: &'a [RelId; 3]) -> WcojDispatchCtx<'a> {
         WcojDispatchCtx {
@@ -118,6 +135,42 @@ mod tests {
             stats.update_cardinality(rid, *c);
         }
         stats
+    }
+
+    fn cost_model_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct CostModelEnvSnapshot(Option<String>);
+
+    impl CostModelEnvSnapshot {
+        fn capture_and_clear() -> Self {
+            let prior = std::env::var("XLOG_WCOJ_COST_MODEL").ok();
+            unsafe {
+                std::env::remove_var("XLOG_WCOJ_COST_MODEL");
+            }
+            Self(prior)
+        }
+    }
+
+    impl Drop for CostModelEnvSnapshot {
+        fn drop(&mut self) {
+            unsafe {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("XLOG_WCOJ_COST_MODEL", value),
+                    None => std::env::remove_var("XLOG_WCOJ_COST_MODEL"),
+                }
+            }
+        }
+    }
+
+    fn with_cost_model_env<R>(f: impl FnOnce() -> R) -> R {
+        let _guard = cost_model_env_lock()
+            .lock()
+            .expect("cost-model env lock poisoned");
+        let _snapshot = CostModelEnvSnapshot::capture_and_clear();
+        f()
     }
 
     #[test]
@@ -171,5 +224,36 @@ mod tests {
         let ctx = cycle4_ctx(&stats, &slots);
         let m = CardinalityAwareCostModel::default();
         assert!(m.should_dispatch_4cycle(&ctx));
+    }
+
+    #[test]
+    fn test_w25_default_flip_factory_uses_cardinality_default() {
+        with_cost_model_env(|| {
+            let stats = stats_with_cards(&[1_000, 1_000, 1_000]);
+            let slots = [RelId(0), RelId(1), RelId(2)];
+            let ctx = triangle_ctx(&stats, &slots);
+            let model = build_wcoj_cost_model(&RuntimeConfig::default());
+            assert!(
+                model.should_dispatch_triangle(&ctx),
+                "bare default must use CardinalityAwareCostModel"
+            );
+        });
+    }
+
+    #[test]
+    fn test_w25_default_flip_factory_honors_env_skew_opt_out() {
+        with_cost_model_env(|| {
+            unsafe {
+                std::env::set_var("XLOG_WCOJ_COST_MODEL", "skew");
+            }
+            let stats = stats_with_cards(&[1_000, 1_000, 1_000]);
+            let slots = [RelId(0), RelId(1), RelId(2)];
+            let ctx = triangle_ctx(&stats, &slots);
+            let model = build_wcoj_cost_model(&RuntimeConfig::default());
+            assert!(
+                !model.should_dispatch_triangle(&ctx),
+                "env skew opt-out must bypass cardinality dispatch"
+            );
+        });
     }
 }

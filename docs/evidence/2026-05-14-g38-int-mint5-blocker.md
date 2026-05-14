@@ -4,7 +4,7 @@
 **Sub-goal:** G_INT
 **Metric:** M_INT.5 W2.5 default-flip cert
 **Branch:** `feat/w3-bundle-integration`
-**Status:** BLOCKED.
+**Status:** SUPERSEDED by `docs/evidence/2026-05-14-g38-int-mint5-default-flip.md`.
 
 ## Gate Text
 
@@ -86,7 +86,8 @@ EXIT 1
 
 ## Verdict
 
-M_INT.5 is not green under the written goal-038 acceptance cell.
+This was the pre-fix blocker. M_INT.5 was not green under the written goal-038
+acceptance cell at this point.
 
 The literal command is uncovered, and the acceptance clause
 `env skew opt-out preserved` conflicts with the current integrated code after
@@ -94,5 +95,6 @@ The literal command is uncovered, and the acceptance clause
 the removed skew-classifier/`XLOG_WCOJ_COST_MODEL=skew` surface or amending the
 M_INT.5 acceptance cell to a successor post-G1 contract.
 
-Per S_INT.3, G_INT must stop here. M_INT.6-M_INT.11, G_PURGE, and G_CLOSE remain
-not started.
+Follow-up `docs/evidence/2026-05-14-g38-int-mint5-default-flip.md` restores the
+selector API, adds the named cert, and makes M_INT.5 green with the documented
+post-G1 caveat.
