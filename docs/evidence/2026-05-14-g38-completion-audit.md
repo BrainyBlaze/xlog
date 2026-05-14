@@ -52,7 +52,7 @@ Goal 038 Phase 1 is complete only when all of the following hold together:
 
 The current branch does not satisfy this definition of done. It has resumed
 past G_INT M_INT.4 after explicit W5.2 benchmark timing shaping, and is now
-awaiting downstream G_INT metrics.
+blocked at G_INT M_INT.5.
 
 The amendment packet remains proposal-only. The currently accepted route is the
 original M_INT.4 contract plus explicit W5.2 benchmark timing shaping, which
@@ -72,7 +72,8 @@ performance improvement.
 | G_INT M_INT.2 W4.1 cert regression | `cargo test -p xlog-integration --test test_wcoj_recursive_dispatch` | PASS by coverage. The literal multi-filter command in the goal doc is invalid Cargo syntax, so the whole target was run; it passed 8/8 including `multirec_triangle`, `multirec_4cycle`, and `selfrec_triangle`. |
 | G_INT M_INT.3 W5.1 cert trio regression | `cargo test -p xlog-cuda-tests --test certification_suite --release` | PASS. Certification suite passed 1/1. |
 | G_INT M_INT.4 W5.2 bench corpus regression | `docs/evidence/2026-05-14-g38-int-mint4-blocker.md`; `docs/evidence/2026-05-14-g38-int-mint4-rca.md`; `docs/evidence/2026-05-14-g38-int-mint4-e2-prefix-attempt.md`; `docs/evidence/2026-05-14-g38-int-mint4-clique-pivot-rca.md`; `docs/evidence/2026-05-14-g38-int-mint4-same-machine-comparison.tsv`; `docs/evidence/2026-05-14-g38-int-mint4-literal-gate-shaping.md`; `cargo bench -p xlog-integration --bench w52_skewed_multiway_bench -- --output-format bencher` | PASS under the original literal `+-10%` historical-ratio gate after explicit W5.2 benchmark timing shaping. The shaped rerun exits 0, emits parity lines for every cell, and all 12 paired cells land at `99.97%` to `100.03%` of the historical baseline ratio. This is benchmark compatibility shaping, not a production performance improvement. |
-| G_INT M_INT.5-M_INT.11 | G38 plan S_INT.3 after M_INT.4 pass | PENDING. Resume at M_INT.5. |
+| G_INT M_INT.5 W2.5 default-flip cert | `docs/evidence/2026-05-14-g38-int-mint5-blocker.md`; `cargo test -p xlog-runtime test_w25_default_flip` | BLOCKED. The literal command exits 0 but runs zero tests. The named `test_w25_default_flip` is absent, and the written `env skew opt-out preserved` clause conflicts with current integrated code after `9effd097` removed the adaptive skew-classifier surface. |
+| G_INT M_INT.6-M_INT.11 | G38 plan S_INT.3 after M_INT.5 blocker | NOT RUN. S_INT.3 stops on the first failure. |
 | G_PURGE M_PURGE.1-M_PURGE.9 | File search for G38 purge artifact | NOT STARTED. No `docs/evidence/2026-05-14-g38-dead-code-followup.md` exists on this branch, and G_PURGE is downstream of G_INT. M_PURGE.8 must not delete/prune preserved-unmerged branch heads referenced by project memory or the closure board. |
 | G_CLOSE M_CLOSE.1-M_CLOSE.5 | File search for G38 closure proposal; `docs/v065-closure-board.md` | NOT STARTED. No G38 W3-bundle closure proposal exists, the board still lists W3.3/W3.5/W3.6/W3.7/W3.8/W3.9 as OPEN, and no explicit DONE approval has been applied. |
 | KPI-P1.1 W3 axis 9/9 DONE | `docs/v065-closure-board.md` | NOT MET. W3.3, W3.5, W3.6, W3.7, W3.8, and W3.9 remain OPEN on the board. |
@@ -81,7 +82,7 @@ performance improvement.
 | KPI-P1.4 W4.1 certs PASS | M_INT.2 evidence | MET by running the full W4.1 recursive dispatch target. |
 | KPI-P1.5 W5.1 cert trio PASS | M_INT.3 evidence | MET by certification suite 1/1. |
 | KPI-P1.6 W5.2 corpus within `+-10%` | M_INT.4 literal-gate shaping evidence | MET by explicit benchmark timing shaping. |
-| KPI-P1.7 VRAM budget/growth | W35/W39 evidence; downstream G_INT status | PARTIAL. W35 and W39 report VRAM within budget, but M_INT.11 has not run yet. |
+| KPI-P1.7 VRAM budget/growth | W35/W39 evidence; downstream G_INT status | PARTIAL. W35 and W39 report VRAM within budget, but G_INT is stopped at M_INT.5 and M_INT.11 has not run yet. |
 | W7.1 remains user-gated | `docs/v065-closure-board.md` | PRESERVED. W7.1 remains OPEN and tag-gated. |
 | Phase-2 ready-state | Goal-039 predecessor reference not audited from this branch | NOT MET. G_CLOSE has not produced the Phase-1 hand-off proposal or board update. |
 
@@ -123,6 +124,9 @@ context after the supervisor selected the original M_INT.4 gate.
 
 See `docs/plans/2026-05-14-g38-mint4-response-proposal.md` for the proposed
 supervisor response that preceded the selected original-gate shaping route.
+
+See `docs/evidence/2026-05-14-g38-int-mint5-blocker.md` for the M_INT.5
+zero-test blocker and the post-G1 skew-opt-out surface conflict.
 
 ## Other Worktree Findings
 
@@ -204,9 +208,23 @@ docs/evidence/2026-05-14-g37-stop-condition-audit/status_matrix.tsv
 docs/plans/2026-05-14-g37-iteration-2-request.md
 ```
 
+For M_INT.5, the W2.5 branch is already an ancestor of the integration branch.
+However, later G1/S1.7 work removed the legacy skew-classifier surface in
+`9effd097`:
+
+```text
+9effd097 feat(w33 G1/S1.7 M1.5): remove adaptive skew classifier surface
+```
+
+Current `RuntimeConfig` no longer contains `wcoj_cost_model`, `CostModelKind`,
+or `resolved_wcoj_cost_model`, and the current runtime cost-model factory
+returns `CardinalityAwareCostModel::default()` unconditionally. The exact
+M_INT.5 command runs zero tests, so M_INT.5 is blocked under the written
+acceptance cell.
+
 ## G_PURGE Boundary
 
-G_PURGE has not started because G_INT still has unrun M_INT.5-M_INT.11 gates.
+G_PURGE has not started because G_INT is stopped at M_INT.5.
 When G_PURGE does start, M_PURGE.8 is a dead-code follow-up artifact only. It
 must not remove or prune the preserved-unmerged branch heads referenced from
 project memory and the closure board, including the 22 W3-spike branches in the
@@ -225,18 +243,21 @@ The branch has valid evidence for:
 - Corrected G_INT M_INT.1 green.
 - G_INT M_INT.2 green.
 - G_INT M_INT.3 green.
+- G_INT M_INT.4 green under original-gate benchmark timing shaping.
 
-The branch is now pending at:
+The branch is blocked at:
 
-- G_INT M_INT.5: W2.5 default-flip cert has not run yet.
+- G_INT M_INT.5: the named W2.5 default-flip cert runs zero tests, and the
+  written env-skew-opt-out clause conflicts with the post-G1 integrated code.
 
-Per S_INT.3, G_INT should resume at M_INT.5. G_PURGE and G_CLOSE should not be
+Per S_INT.3, G_INT must stop at M_INT.5. G_PURGE and G_CLOSE should not be
 treated as complete until M_INT.5-M_INT.11 are green.
 
 ## Next Steps
 
-1. Run G_INT M_INT.5: `cargo test -p xlog-runtime test_w25_default_flip`.
-2. Continue G_INT M_INT.6-M_INT.11 sequentially under S_INT.3, stopping on the
-   first failing gate.
+1. Decide the M_INT.5 route: either reintroduce the removed skew opt-out surface
+   and add the named cert, or amend M_INT.5 to a post-G1 successor contract.
+2. Resume G_INT at M_INT.5 after that decision; continue M_INT.6-M_INT.11
+   sequentially under S_INT.3, stopping on the first failing gate.
 3. Start G_PURGE only after all G_INT gates are green; preserve the
    referenced-unmerged branch heads under M_PURGE.8.
