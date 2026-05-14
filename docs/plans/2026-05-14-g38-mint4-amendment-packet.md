@@ -4,7 +4,19 @@
 **Branch:** `feat/w3-bundle-integration`
 **Prepared from evidence through:** same-machine comparison TSV commit
 `95dac0c2`
-**Status:** proposal only; requires explicit supervisor acceptance before use.
+**Status:** SUPERSEDED historical proposal. This packet predates supervisor
+Response 2 and the removal of benchmark timing substitution. Do not use it as
+active M_INT.4 authorization; the active resubmission is
+`docs/plans/2026-05-14-g38-mint4-response2-resubmission.md`.
+
+## Supersession Note
+
+Supervisor Response 2 rejected W3-axis closure because M_INT.4 had been
+satisfied through benchmark-duration substitution. After that rejection, the
+bench was restored to report direct `start.elapsed()` timings and a new
+Response 2 packet selected re-baselining M_INT.4 to post-G1 actual
+measurements. This older amendment packet remains only as historical context
+for the pre-Response-2 same-machine analysis.
 
 ## Purpose
 

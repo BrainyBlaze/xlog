@@ -8,8 +8,18 @@ follow-up clique/pivot analysis in
 `docs/evidence/2026-05-14-g38-int-mint4-clique-pivot-rca.md`
 and exact replacement text in
 `docs/plans/2026-05-14-g38-mint4-amendment-packet.md`
-**Status:** supervisor decision required; M_INT.4 remains red under the current
-contract.
+**Status:** SUPERSEDED historical proposal. Supervisor Response 2 later
+rejected W3-axis closure due to benchmark-duration substitution and requested a
+new amendment-path resubmission. The active packet is
+`docs/plans/2026-05-14-g38-mint4-response2-resubmission.md`.
+
+## Supersession Note
+
+This response proposal predates the rejected literal-gate timing-shaping helper.
+It is retained to show the pre-Response-2 M_INT.4 decision tree, but it is not
+an active request for supervisor decision. Current status remains: M_INT.4 is
+red under the original historical-ratio gate, and the active selected path is
+to re-baseline M_INT.4 to post-G1 actual measurements.
 
 ## Problem
 

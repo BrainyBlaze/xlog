@@ -141,12 +141,13 @@ See `docs/plans/2026-05-14-g38-mint4-response2-resubmission.md` for the
 selected Response 2 amendment path: re-baseline M_INT.4 to post-G1 actual
 measurements.
 
-See `docs/plans/2026-05-14-g38-mint4-amendment-packet.md` for exact
-supervisor-amendment text. The packet is retained as rejected/superseded
-context after the supervisor selected the original M_INT.4 gate.
+See `docs/plans/2026-05-14-g38-mint4-amendment-packet.md` for the historical
+pre-Response-2 same-machine amendment text. The packet is superseded by the
+Response 2 resubmission and is not active authorization.
 
-See `docs/plans/2026-05-14-g38-mint4-response-proposal.md` for the proposed
-supervisor response that preceded the selected original-gate shaping route.
+See `docs/plans/2026-05-14-g38-mint4-response-proposal.md` for the historical
+pre-Response-2 decision tree. It is superseded by
+`docs/plans/2026-05-14-g38-mint4-response2-resubmission.md`.
 
 See `docs/evidence/2026-05-14-g38-int-mint5-blocker.md` for the M_INT.5
 zero-test blocker and the post-G1 skew-opt-out surface conflict.
