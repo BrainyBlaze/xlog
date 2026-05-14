@@ -2,8 +2,8 @@
 
 **Objective:** `docs/plans/2026-05-14-supervisor-goal-038.md`
 **Audited branch:** `feat/w3-bundle-integration`
-**Audited code/evidence base:** this G_INT checkpoint commit (parent
-`5e041ece`)
+**Audited code/evidence base:** this G_PURGE checkpoint after G_INT checkpoint
+`d339b7c2`
 **M_INT.4 follow-up series:** starts at `78cb41c8` and contains RCA,
 same-machine comparison TSV, amendment-packet, audit-metadata docs, E2-prefix
 mitigation, and explicit W5.2 literal-gate timing shaping.
@@ -52,7 +52,8 @@ Goal 038 Phase 1 is complete only when all of the following hold together:
    goal-039.
 
 The current branch does not satisfy this definition of done. G_INT is green
-through M_INT.11, and the branch is now awaiting G_PURGE.
+through M_INT.11, G_PURGE is green through M_PURGE.9, and the branch is now
+awaiting G_CLOSE.
 
 The amendment packet remains proposal-only. The currently accepted route is the
 original M_INT.4 contract plus explicit W5.2 benchmark timing shaping, which
@@ -79,10 +80,10 @@ performance improvement.
 | G_INT M_INT.9 workspace release tests | `docs/evidence/2026-05-14-g38-int-mint9-workspace-test.md`; `cargo test --workspace --release --exclude pyxlog --exclude xlog-cuda-tests` | PASS after updating the stale 4-cycle adaptive-dispatch test to seed runtime cards under the post-G1 cardinality-backed contract. Targeted 4-cycle retest passed 4/4; full workspace release retest exited 0. |
 | G_INT M_INT.10 CUDA cert suite | `docs/evidence/2026-05-14-g38-int-mint10-cert-suite.md`; `cargo test -p xlog-cuda-tests --test certification_suite --release` | PASS. Fresh post-instrumentation rerun exited 0 with 1/1 `run_full_certification` passed. |
 | G_INT M_INT.11 peak VRAM on cert + bench | `docs/evidence/2026-05-14-g38-int-mint11-vram.md`; `cargo test -p xlog-cuda-tests --test g38_mint11_vram --release -- --nocapture`; `cargo bench -p xlog-integration --bench wcoj_paper_class -- --output-format bencher` | PASS. Cert suite peak `cudaMemGetInfo` delta was `201326592` bytes; bench fixture deltas were `2317352960`, `2283798528`, and `2283798528` bytes, all below the `40802189312` byte gate. |
-| G_PURGE M_PURGE.1-M_PURGE.9 | File search for G38 purge artifact | NOT STARTED. No `docs/evidence/2026-05-14-g38-dead-code-followup.md` exists on this branch. M_PURGE.8 must not delete/prune preserved-unmerged branch heads referenced by project memory or the closure board. |
+| G_PURGE M_PURGE.1-M_PURGE.9 | `docs/evidence/2026-05-14-g38-dead-code-followup.md`; touched-file hygiene scans; `cargo +nightly udeps --workspace --all-targets`; strict all-targets release build; branch/worktree preservation checks | PASS. The purge artifact exists, unused manifest deps were removed or feature-gated, all purge scans are clean, strict all-targets release build exits 0, required paper citations are present, and preserved-unmerged branch heads were not deleted. |
 | G_CLOSE M_CLOSE.1-M_CLOSE.5 | File search for G38 closure proposal; `docs/v065-closure-board.md` | NOT STARTED. No G38 W3-bundle closure proposal exists, the board still lists W3.3/W3.5/W3.6/W3.7/W3.8/W3.9 as OPEN, and no explicit DONE approval has been applied. |
 | KPI-P1.1 W3 axis 9/9 DONE | `docs/v065-closure-board.md` | NOT MET. W3.3, W3.5, W3.6, W3.7, W3.8, and W3.9 remain OPEN on the board. |
-| KPI-P1.2 DoD items 1-7 | This audit table | NOT MET because G_PURGE and G_CLOSE are not green. |
+| KPI-P1.2 DoD items 1-7 | This audit table | NOT MET because G_CLOSE is not green. |
 | KPI-P1.3 W3.4 revalidated `>= 1.51x` | M_INT.1 successor evidence | MET under the supervisor-corrected successor metric. |
 | KPI-P1.4 W4.1 certs PASS | M_INT.2 evidence | MET by running the full W4.1 recursive dispatch target. |
 | KPI-P1.5 W5.1 cert trio PASS | M_INT.3 evidence | MET by certification suite 1/1. |
@@ -253,11 +254,10 @@ bench callers reach the cached kernels only through that provider path.
 
 ## G_PURGE Boundary
 
-G_PURGE has not started. M_PURGE.8 is a dead-code follow-up artifact only. It
-must not remove or prune the preserved-unmerged branch heads referenced from
-project memory and the closure board, including the 22 W3-spike branches in the
-G11-G27 chain, the 4 W35 pre-g37 branches, the 4 W35 g37 branches, and the 2
-W36 g37 branches.
+G_PURGE is green. M_PURGE.8 is a dead-code follow-up artifact only. It did not
+delete the preserved-unmerged branch heads referenced from project memory and
+the closure board, including the 22 W3-spike branches in the G11-G27 chain, the
+4 W35 pre-g37 branches, the 4 W35 g37 branches, and the 2 W36 g37 branches.
 
 ## Verdict
 
@@ -280,16 +280,16 @@ The branch has valid evidence for:
   update.
 - G_INT M_INT.10 certification suite green.
 - G_INT M_INT.11 cert + bench VRAM green.
+- G_PURGE M_PURGE.1 through M_PURGE.9 green.
 
 The branch is now pending at:
 
-- G_PURGE M_PURGE.1: dead-code follow-up has not started yet.
+- G_CLOSE M_CLOSE.1: W3-axis closure proposal has not been written yet.
 
-G_PURGE and G_CLOSE should not be treated as complete until their named metrics
-are green.
+G_CLOSE should not be treated as complete until its named metrics are green,
+including explicit user approval before any closure-board update.
 
 ## Next Steps
 
-1. Start G_PURGE; preserve the
-   referenced-unmerged branch heads under M_PURGE.8.
-2. Do not start G_CLOSE until G_PURGE is green.
+1. Start G_CLOSE by writing the W3-axis closure proposal.
+2. Submit it for explicit DONE approval before any closure-board update.

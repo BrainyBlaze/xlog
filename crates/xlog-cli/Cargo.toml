@@ -22,7 +22,7 @@ xlog-core.workspace = true
 xlog-cuda.workspace = true
 xlog-logic.workspace = true
 xlog-gpu.workspace = true
-xlog-prob.workspace = true
+xlog-prob = { workspace = true, optional = true }
 
 [dev-dependencies]
 assert_cmd = "2.0"
@@ -30,4 +30,4 @@ cudarc.workspace = true
 
 [features]
 default = []
-host-io = ["xlog-prob/host-io"]
+host-io = ["dep:xlog-prob", "xlog-prob/host-io"]

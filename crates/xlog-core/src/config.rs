@@ -118,8 +118,8 @@ pub struct RuntimeConfig {
 pub enum CostModelKind {
     /// Legacy skew-classifier opt-out selector.
     ///
-    /// On current G38 integration code the GPU classifier surface has been
-    /// removed, so this selector is implemented as a conservative opt-out from
+    /// On current G38 integration code the GPU classifier surface is absent,
+    /// so this selector is implemented as a conservative opt-out from
     /// stats/cardinality dispatch.
     SkewClassifier,
     /// Stats/cardinality-backed dispatch selector.
