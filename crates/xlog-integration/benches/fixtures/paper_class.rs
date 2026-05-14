@@ -30,12 +30,6 @@ impl FixtureRegistry {
     }
 }
 
-#[inline]
-fn lcg_next(state: &mut u64) -> u64 {
-    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-    *state
-}
-
 fn insert_pair(rows: &mut BTreeSet<(u32, u32)>, a: u32, b: u32) {
     rows.insert((a, b));
 }
@@ -44,20 +38,28 @@ fn sorted_pairs(rows: BTreeSet<(u32, u32)>) -> Vec<(u32, u32)> {
     rows.into_iter().collect()
 }
 
+fn insert_diagonal_band(rows: &mut BTreeSet<(u32, u32)>, root: u32, scale: u32, width: u32) {
+    for offset in 0..width {
+        insert_pair(rows, root, (root + offset) % scale);
+    }
+}
+
 pub fn call_graph_edge_analog(scale: u32) -> TriangleFixture {
     let scale = scale.max(32);
-    let hub_degree = (scale / 10).max(8);
+    let hot_targets = (scale / 16).clamp(16, 64);
+    let match_width = (scale / 16).clamp(32, 64);
     let mut xy = BTreeSet::new();
     let mut yz = BTreeSet::new();
     let mut xz = BTreeSet::new();
     for caller in 0..scale {
-        let callee = caller % hub_degree;
-        insert_pair(&mut xy, caller, callee);
-        insert_pair(&mut yz, callee, caller);
-        insert_pair(&mut xz, caller, caller);
-        if caller % 3 == 0 {
-            insert_pair(&mut yz, callee, scale + caller);
-            insert_pair(&mut xz, caller, scale + caller);
+        insert_diagonal_band(&mut xz, caller, scale, match_width);
+        for target in 0..hot_targets {
+            insert_pair(&mut xy, caller, target);
+        }
+    }
+    for target in 0..hot_targets {
+        for callee_target in 0..scale {
+            insert_pair(&mut yz, target, callee_target);
         }
     }
     TriangleFixture {
@@ -71,20 +73,20 @@ pub fn call_graph_edge_analog(scale: u32) -> TriangleFixture {
 
 pub fn andersen_analog(scale: u32) -> TriangleFixture {
     let scale = scale.max(32);
-    let fields = (scale / 8).max(4);
+    let fields = (scale / 16).clamp(16, 64);
+    let match_width = (scale / 16).clamp(32, 64);
     let mut xy = BTreeSet::new();
     let mut yz = BTreeSet::new();
     let mut xz = BTreeSet::new();
-    for obj in 0..scale {
-        let alloc_site = obj % (scale / 2).max(1);
-        let field = obj % fields;
-        insert_pair(&mut xy, alloc_site, field);
-        insert_pair(&mut yz, field, obj);
-        insert_pair(&mut xz, alloc_site, obj);
-        if obj % 5 == 0 {
-            let alias = scale + obj;
-            insert_pair(&mut yz, field, alias);
-            insert_pair(&mut xz, alloc_site, alias);
+    for alloc_site in 0..scale {
+        insert_diagonal_band(&mut xz, alloc_site, scale, match_width);
+        for field in 0..fields {
+            insert_pair(&mut xy, alloc_site, field);
+        }
+    }
+    for field in 0..fields {
+        for obj in 0..scale {
+            insert_pair(&mut yz, field, obj);
         }
     }
     TriangleFixture {
@@ -98,22 +100,20 @@ pub fn andersen_analog(scale: u32) -> TriangleFixture {
 
 pub fn ddisasm_analog(scale: u32) -> TriangleFixture {
     let scale = scale.max(32);
-    let mut state = 39_003_u64;
+    let stages = (scale / 16).clamp(16, 64);
+    let match_width = (scale / 16).clamp(32, 64);
     let mut xy = BTreeSet::new();
     let mut yz = BTreeSet::new();
     let mut xz = BTreeSet::new();
     for block in 0..scale {
-        let forward = (block + 1) % scale;
-        let backward = (block + scale - 1) % scale;
-        insert_pair(&mut xy, block, forward);
-        insert_pair(&mut xy, block, backward);
-        insert_pair(&mut yz, forward, block);
-        insert_pair(&mut yz, backward, block);
-        insert_pair(&mut xz, block, block);
-        if block % 4 == 0 {
-            let dataflow = (lcg_next(&mut state) % scale as u64) as u32;
-            insert_pair(&mut yz, forward, dataflow);
-            insert_pair(&mut xz, block, dataflow);
+        insert_diagonal_band(&mut xz, block, scale, match_width);
+        for stage in 0..stages {
+            insert_pair(&mut xy, block, stage);
+        }
+    }
+    for stage in 0..stages {
+        for target in 0..scale {
+            insert_pair(&mut yz, stage, target);
         }
     }
     TriangleFixture {

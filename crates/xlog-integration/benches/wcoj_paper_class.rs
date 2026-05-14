@@ -20,10 +20,13 @@ use xlog_cuda::device_runtime::{
 use xlog_cuda::memory::CudaBuffer;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager, JoinType};
 
-const SCALE: u32 = 256;
+const SCALE: u32 = 1024;
 const DEVICE_BUDGET_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const VRAM_GATE_BYTES: u64 = 38 * 1024 * 1024 * 1024;
 const DIRECT_TRIALS: usize = 10;
+const HASH_DIRECT_INNER_ITERS: usize = 20;
+const WCOJ_DIRECT_INNER_ITERS: usize = 10;
+const DIRECT_WARMUP_WINDOWS: usize = 20;
 
 #[derive(Default)]
 struct PeakSink {
@@ -75,6 +78,7 @@ impl LoggingSink for PeakSink {
 struct Provider {
     memory: Arc<GpuMemoryManager>,
     provider: Arc<CudaKernelProvider>,
+    runtime: Arc<XlogDeviceRuntime>,
     pool: Arc<StreamPool>,
     launch_stream: StreamId,
     peak: Arc<PeakSink>,
@@ -112,6 +116,7 @@ fn make_provider() -> Option<Provider> {
     Some(Provider {
         memory,
         provider,
+        runtime,
         pool,
         launch_stream,
         peak,
@@ -124,6 +129,11 @@ fn sync_launch_stream(prov: &Provider) {
         .expect("resolve paper-class stream")
         .synchronize()
         .expect("sync paper-class stream");
+}
+
+fn settle_runtime(prov: &Provider) {
+    sync_launch_stream(prov);
+    prov.runtime.reap_pending().expect("reap pending frees");
 }
 
 fn upload_2col_u32(memory: &Arc<GpuMemoryManager>, rows: &[(u32, u32)]) -> CudaBuffer {
@@ -237,16 +247,44 @@ fn assert_row_equality(prov: &Provider, fixture: &TriangleFixture) -> usize {
 
 fn measure_one(prov: &Provider, fixture: &TriangleFixture, use_wcoj: bool) -> Duration {
     let input = upload_fixture(prov, fixture);
+    measure_one_uploaded(prov, &input, use_wcoj)
+}
+
+fn measure_one_uploaded(prov: &Provider, input: &UploadedFixture, use_wcoj: bool) -> Duration {
+    settle_runtime(prov);
     let start = Instant::now();
     let out = if use_wcoj {
-        run_wcoj_triangle(prov, &input)
+        run_wcoj_triangle(prov, input)
     } else {
-        run_hash_triangle(prov, &input)
+        run_hash_triangle(prov, input)
     };
     sync_launch_stream(prov);
     let elapsed = start.elapsed();
     drop(out);
+    settle_runtime(prov);
     elapsed
+}
+
+fn measure_window_uploaded(prov: &Provider, input: &UploadedFixture, use_wcoj: bool) -> Duration {
+    let inner_iters = if use_wcoj {
+        WCOJ_DIRECT_INNER_ITERS
+    } else {
+        HASH_DIRECT_INNER_ITERS
+    };
+    settle_runtime(prov);
+    let start = Instant::now();
+    for _ in 0..inner_iters {
+        let out = if use_wcoj {
+            run_wcoj_triangle(prov, input)
+        } else {
+            run_hash_triangle(prov, input)
+        };
+        sync_launch_stream(prov);
+        drop(out);
+    }
+    let elapsed = start.elapsed();
+    settle_runtime(prov);
+    Duration::from_nanos((elapsed.as_nanos() / inner_iters as u128) as u64)
 }
 
 fn summarize(samples: &[Duration]) -> (f64, f64) {
@@ -264,21 +302,29 @@ fn summarize(samples: &[Duration]) -> (f64, f64) {
     (mean, cv)
 }
 
-fn direct_trials(prov: &Provider, fixture: &TriangleFixture) -> (f64, f64, f64, f64, f64) {
-    let mut hash = Vec::with_capacity(DIRECT_TRIALS);
-    let mut wcoj = Vec::with_capacity(DIRECT_TRIALS);
+fn direct_samples(fixture: &TriangleFixture, use_wcoj: bool) -> Vec<Duration> {
+    let prov = make_provider().expect("make direct-measurement provider");
+    let input = upload_fixture(&prov, fixture);
+    let mut samples = Vec::with_capacity(DIRECT_TRIALS);
+    for _ in 0..DIRECT_WARMUP_WINDOWS {
+        let _ = measure_window_uploaded(&prov, &input, use_wcoj);
+    }
+    for _ in 0..DIRECT_TRIALS {
+        samples.push(measure_window_uploaded(&prov, &input, use_wcoj));
+    }
+    samples
+}
+
+fn direct_trials(fixture: &TriangleFixture) -> (f64, f64, f64, f64, f64) {
+    eprintln!(
+        "W39_DIRECT_CONFIG {} trials={DIRECT_TRIALS} hash_inner_iters={HASH_DIRECT_INNER_ITERS} wcoj_inner_iters={WCOJ_DIRECT_INNER_ITERS} warmup_windows={DIRECT_WARMUP_WINDOWS}",
+        fixture.name
+    );
+    let hash = direct_samples(fixture, false);
+    let wcoj = direct_samples(fixture, true);
     for trial in 0..DIRECT_TRIALS {
-        let (h, w) = if trial % 2 == 0 {
-            (
-                measure_one(prov, fixture, false),
-                measure_one(prov, fixture, true),
-            )
-        } else {
-            (
-                measure_one(prov, fixture, false),
-                measure_one(prov, fixture, true),
-            )
-        };
+        let h = hash[trial];
+        let w = wcoj[trial];
         eprintln!(
             "W39_DIRECT_SAMPLE {} trial={} hash_ns={} wcoj_ns={}",
             fixture.name,
@@ -286,8 +332,6 @@ fn direct_trials(prov: &Provider, fixture: &TriangleFixture) -> (f64, f64, f64, 
             h.as_nanos(),
             w.as_nanos()
         );
-        hash.push(h);
-        wcoj.push(w);
     }
     let (hash_mean, hash_cv) = summarize(&hash);
     let (wcoj_mean, wcoj_cv) = summarize(&wcoj);
@@ -309,7 +353,7 @@ fn bench_fixture(
 ) -> f64 {
     let rows = assert_row_equality(prov, fixture);
     report_bundle_paths(fixture);
-    let (hash_mean, wcoj_mean, ratio, hash_cv, wcoj_cv) = direct_trials(prov, fixture);
+    let (hash_mean, wcoj_mean, ratio, hash_cv, wcoj_cv) = direct_trials(fixture);
     eprintln!(
         "W39_DIRECT_RESULT {} hash_mean_ns={hash_mean:.3} wcoj_mean_ns={wcoj_mean:.3} ratio={ratio:.6} hash_cv={hash_cv:.6} wcoj_cv={wcoj_cv:.6}",
         fixture.name
@@ -350,16 +394,16 @@ fn bench_fixture(
 }
 
 fn bench_w39_paper_class(c: &mut Criterion) {
-    let Some(prov) = make_provider() else {
-        eprintln!("Skipping wcoj_paper_class: CUDA unavailable");
-        return;
-    };
     let fixtures = paper_class_fixtures(SCALE);
     assert_eq!(fixtures.len(), 3, "M_W39.1 requires three fixtures");
     let mut group = c.benchmark_group("wcoj_paper_class");
     group.sample_size(10);
     let mut product = 1.0;
     for fixture in &fixtures {
+        let Some(prov) = make_provider() else {
+            eprintln!("Skipping wcoj_paper_class: CUDA unavailable");
+            return;
+        };
         product *= bench_fixture(&mut group, &prov, fixture).max(f64::MIN_POSITIVE);
     }
     let geomean = product.powf(1.0 / fixtures.len() as f64);
