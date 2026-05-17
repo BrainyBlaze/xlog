@@ -1,0 +1,36 @@
+G_W54 W5.4 widened-frontier replay gate
+branch=feat/w54-widened-frontier-replay-g39
+base=feat/g39-pre-profiler-trace@d7a82eca3fbfee09976559cb4354c1f5e8804621
+
+ARTIFACT_DISCOVERY PASS
+canonical_artifact_root=/home/dev/projects/dts-dlm/data/serving/v2
+schema_json=present
+promotion_json=present
+promotion_verdict=PASS
+promotion_version=2
+allowed_predicates=5
+predicate_arities=binary_5_of_5
+
+M_W54.1 PASS
+replay_harness=crates/xlog-integration/tests/test_widened_frontier_replay.rs
+
+M_W54.2 PASS
+command=cargo test -p xlog-integration --test test_widened_frontier_replay -- --nocapture
+raw=G_W54_REPLAY PASS artifact_source=dts-dlm:data/serving/v2 allowed_predicates=5 iterations=20 promoted_rows=2 reachable_rows=4 rollback_rows=1
+test_result=1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+M_W54.3 PASS
+evidence_log=docs/evidence/2026-05-14-g39-w54-widened-frontier-replay/run.log
+pass_marker=PASS
+
+M_W54.4 PASS
+cert_hook=crates/xlog-cuda-tests/src/categories/c15_determinism.rs::test_w54_widened_frontier_replay_representative
+command=cargo test -p xlog-cuda-tests --test category_isolation c15 -- --nocapture
+raw=[PASS] test_w54_widened_frontier_replay_representative (0.094s)
+category_summary=c15_determinism Passed: 9/9 Failed: 0 Skipped: 0
+
+TDD_RED_GATE PASS
+command=cargo test -p xlog-integration --test test_widened_frontier_replay -- --nocapture
+raw=test g_w54_replay_red_sentinel ... FAILED
+raw=G_W54 widened-frontier replay harness is not implemented yet
+raw=test result: FAILED. 0 passed; 1 failed
