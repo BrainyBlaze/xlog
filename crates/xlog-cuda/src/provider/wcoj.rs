@@ -1267,6 +1267,9 @@ impl CudaKernelProvider {
         let block_work_unit = crate::wcoj_metadata::WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT;
         let grid = n_leader.div_ceil(block_work_unit);
         let mut count_buf = self.memory.alloc::<u32>(grid as usize)?;
+        let mut thread_counts_buf = self
+            .memory
+            .alloc::<u32>((grid as usize) * (BLOCK_SIZE as usize))?;
         let mut offsets_buf = self.memory.alloc::<u32>(grid as usize)?;
         let d_total = self.memory.alloc::<u32>(1)?;
 
@@ -1280,6 +1283,7 @@ impl CudaKernelProvider {
         rec_count.read(&d_edge_col1);
         rec_count.read(&d_edge_n);
         rec_count.write(&count_buf);
+        rec_count.write(&thread_counts_buf);
         rec_count.write(&offsets_buf);
         rec_count.write(&d_total);
         rec_count.preflight(runtime).map_err(|e| {
@@ -1308,7 +1312,8 @@ impl CudaKernelProvider {
         //     const u32* edge_n,
         //     u32 leader_count,
         //     u32 block_work_unit,
-        //     u32* out_block_counts)
+        //     u32* out_block_counts,
+        //     u32* out_thread_counts)
         // Pointers all device-resident; preflight verified
         // cross-stream tracking.
         unsafe {
@@ -1324,6 +1329,7 @@ impl CudaKernelProvider {
                         n_leader,
                         block_work_unit,
                         &mut count_buf,
+                        &mut thread_counts_buf,
                     ),
                 )
                 .map_err(|e| {
@@ -1447,6 +1453,7 @@ impl CudaKernelProvider {
         rec_mat.read(&d_edge_col0);
         rec_mat.read(&d_edge_col1);
         rec_mat.read(&d_edge_n);
+        rec_mat.read(&thread_counts_buf);
         rec_mat.read(&offsets_buf);
         rec_mat.read(&d_out_cols);
         for buf in out_col_bufs.iter() {
@@ -1477,10 +1484,11 @@ impl CudaKernelProvider {
         //     const u32* edge_n,
         //     u32 leader_count,
         //     u32 block_work_unit,
+        //     const u32* thread_counts,
         //     const u32* block_offsets,
         //     u32 total_rows,
         //     T* const* out_cols)
-        // 8 args, fits the LaunchAsync tuple-launch.
+        // 9 args, fits the LaunchAsync tuple-launch.
         let mat_config = LaunchConfig {
             grid_dim: (grid, 1, 1),
             block_dim: (BLOCK_SIZE, 1, 1),
@@ -1498,6 +1506,7 @@ impl CudaKernelProvider {
                         &d_edge_n,
                         n_leader,
                         block_work_unit,
+                        &thread_counts_buf,
                         &offsets_buf,
                         total_rows,
                         &d_out_cols,

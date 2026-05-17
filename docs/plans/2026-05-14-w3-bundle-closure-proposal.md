@@ -1,16 +1,20 @@
-# W3 Axis Closure Proposal - G38 Phase 1 (Rejected)
+# W3 Axis Closure Proposal - G38 Phase 1 (Response 1 Reissued)
 
 **Date:** 2026-05-14
+**Reissued:** 2026-05-17
 **Branch:** `feat/w3-bundle-integration`
 **Governing plan:** `/home/dev/projects/xlog/docs/plans/2026-05-14-supervisor-goal-038.md`
 **Code/evidence checkpoint:** `35b5a4f5`
-**Status:** REJECTED by supervisor Response 2. Superseded by
-`docs/plans/2026-05-14-g38-mint4-response2-resubmission.md`.
+**Status:** Response 1 reissued after Response 2 remediation. M_INT.4 is green
+under the supervisor-authorized path-isolated exact-filter protocol in
+`docs/evidence/2026-05-14-g38-int-mint4-per-path-rerun.md`.
 
 This proposal previously staged W3.3, W3.5, W3.6, W3.7, W3.8, and W3.9 from
 `OPEN` to `DONE` for user approval. Supervisor Response 2 rejected that closure
-route because M_INT.4 was satisfied through benchmark-duration substitution.
-The W3-axis board items remain `OPEN`.
+route because M_INT.4 was satisfied through benchmark-duration substitution. The
+substitution helper has been removed, the HG algorithmic blocker has been
+addressed, and M_INT.4 now passes under the authorized measurement protocol.
+The W3-axis board items remain `OPEN` until this reissued response is accepted.
 
 ## Status
 
@@ -27,7 +31,8 @@ git rev-list --count f62188b7..35b5a4f5
 56
 ```
 
-Phase 1 is not DONE. This proposal no longer asks for closure approval.
+Phase 1 is not board-closed yet. This proposal reissues Response 1 for closure
+approval using corrected M_INT.4 evidence.
 
 ## Acceptance Evidence
 
@@ -39,7 +44,7 @@ Phase 1 is not DONE. This proposal no longer asks for closure approval.
 | G_INT M_INT.1 W3.4 successor re-validation | `docs/evidence/2026-05-14-g38-int-mint1-successor.md` | PASS. Corrected successor metric uses `wcoj_w33_superhub`; `superhub-50K` row equality passed with 29,539 rows and ratio `4.031791x`, above the `>= 1.51x` gate. |
 | G_INT M_INT.2 W4.1 cert regression | `cargo test -p xlog-integration --test test_wcoj_recursive_dispatch` | PASS. Full target passed 8/8. |
 | G_INT M_INT.3 W5.1 cert trio regression | `cargo test -p xlog-cuda-tests --test certification_suite --release` | PASS. Certification suite passed 1/1. |
-| G_INT M_INT.4 W5.2 bench corpus regression | `docs/evidence/2026-05-14-g38-int-mint4-literal-gate-shaping.md`; `docs/evidence/2026-05-14-g38-int-mint4-response2-remediation.md`; `docs/plans/2026-05-14-g38-mint4-response2-resubmission.md` | REJECTED/RED. The timing-shaping route is invalid closure evidence after supervisor Response 2. The helper has been removed; the direct measured rerun fails the original historical-ratio gate, and the selected amendment path is re-baseline to post-G1 actual measurements. |
+| G_INT M_INT.4 W5.2 bench corpus regression | `docs/evidence/2026-05-14-g38-int-mint4-response2-remediation.md`; `docs/evidence/2026-05-14-g38-int-mint4-per-path-rerun.md` | PASS. The timing-shaping helper has been removed, the source guard passes, and the K5/K6 HG materialize recount inefficiency has been remediated. The supervisor-authorized path-isolated exact-filter median-of-3 rerun passes the same-machine gate: 24/24 path medians pass, 12/12 GPU-WCOJ medians pass, 12/12 hash-chain medians pass, and 72/72 row-equality parity rows are present on each branch. |
 | G_INT M_INT.5 W2.5 default-flip cert | `docs/evidence/2026-05-14-g38-int-mint5-default-flip.md`; `cargo test -p xlog-runtime test_w25_default_flip` | PASS. Named command now runs 5 real tests and exits 0; the skew selector is a conservative post-G1 opt-out from cardinality dispatch. |
 | G_INT M_INT.6 cached-kernel resolution | `docs/evidence/2026-05-14-g38-int-cached-kernel-resolution.md` | PASS. Cached HG u32 triangle kernels are reachable from exactly one production provider launch path. |
 | G_INT M_INT.7 workspace fmt | `docs/evidence/2026-05-14-g38-int-mint7-workspace-fmt.md` | PASS. `cargo fmt --check --all` exited 0. |
@@ -60,8 +65,9 @@ Phase 1 is not DONE. This proposal no longer asks for closure approval.
 | W3.8 | DONE | Stream-mux AOT branch `feat/w38-stream-mux-aot-g37 @ 792cea72` merged into integration; G_W39 bundle-path assertion includes it. |
 | W3.9 | DONE | Paper-class harness committed and passing production-scale gates on integration. |
 
-No closure-board tally changes are authorized by this rejected proposal. The
-board remains at 14 DONE / 11 OPEN / 1 IN-PROGRESS, and W7.1 remains user-gated.
+No closure-board tally changes are authorized until this reissued proposal is
+accepted. The board remains at 14 DONE / 11 OPEN / 1 IN-PROGRESS, and W7.1
+remains user-gated.
 
 ## Documented Divergences - Not Blocking v0.6.5, Flagged For v0.7+
 
@@ -89,12 +95,19 @@ Phase 2 must not restore retired W3.4 fused-route compatibility shims to make
 old benchmarks compile. The Phase-1 invariant is the successor HG path on the
 same fixture geometry, not the old fused-count API surface.
 
-### W5.2 Literal Gate Shaping
+### W5.2 Literal Gate Shaping And Path-Isolated Protocol
 
 Supervisor Response 2 rejected the literal-gate timing-shaping route as
 benchmark substitution. The helper has been removed, direct measured durations
-are reported again, and M_INT.4 is red under the original historical-ratio gate
-until a supervisor amendment or new algorithmic resolution is authorized.
+are reported again, and the source guard
+`test_w52_measured_duration_source_audit` passes.
+
+The later supervisor amendments preserved the per-path absolute wall-time gate
+against a same-machine W5.2 branch baseline and authorized path-isolated
+per-cell exact-filter Criterion sampling. That corrected protocol was rerun in
+`docs/evidence/2026-05-14-g38-int-mint4-per-path-rerun.md` and passes:
+24/24 path medians are within the `1.10x` upper bound, with direct measured
+durations and row-equality parity for every sample.
 
 ### Post-G1 W2.5 Selector Shape
 
@@ -134,17 +147,17 @@ Phase 2 must preserve these Phase-1 invariants:
 | W3.4 successor metric | Keep the HG successor path passing on `superhub-50K`; no back-compat restoration of the retired fused-count surface. |
 | W4.1 recursive dispatch | Keep `test_wcoj_recursive_dispatch` green. |
 | W5.1 cert suite | Keep the CUDA certification suite green. |
-| W5.2 bench corpus | Do not reintroduce timing shaping. Use direct measured durations and the supervisor-authorized M_INT.4 gate. |
+| W5.2 bench corpus | Do not reintroduce timing shaping. Use direct measured durations and the supervisor-authorized path-isolated M_INT.4 gate; current amended evidence is green. |
 | W2.5 selector | Keep default `Cardinality`; keep `skew` as the post-G1 opt-out selector. |
 | VRAM | Keep peak VRAM below 38 GB on the Phase-1 cert and paper-class bench surfaces. |
 | M18 / M37-A surface | Preserve the neural-symbolic training surface; static dead-code cleanup must not remove it. |
 
 ## Post-Approval Follow-Up
 
-This proposal's Response 1 route is rejected. No follow-up closure-board commit
-is authorized from this document.
+This proposal's Response 1 route is reissued. No follow-up closure-board commit
+is authorized unless the reissued response is accepted.
 
-If a later corrected closure proposal is approved, the follow-up commit must:
+If this corrected closure proposal is approved, the follow-up commit must:
 
 1. Update `docs/v065-closure-board.md` for W3.3, W3.5, W3.6, W3.7, W3.8, and
    W3.9 from `OPEN` to `DONE`.
@@ -159,8 +172,8 @@ If a later corrected closure proposal is approved, the follow-up commit must:
 
 | Response | Option | Outcome |
 |---|---|---|
-| 1 | Accept as DONE | Rejected by supervisor Response 2. Do not execute. |
-| 2 | Reject closure | SELECTED. W3-axis board items stay OPEN; M_INT.4 timing substitution blocks closure. |
+| 1 | Accept as DONE | SELECTED FOR REISSUE. Response 2's M_INT.4 blocker is remediated under the authorized path-isolated protocol. Execute only after explicit acceptance. |
+| 2 | Reject closure | Available if supervisor rejects the corrected M_INT.4 evidence; W3-axis board items stay OPEN. |
 | 3 | Defer closure | Keep the W3-axis board items OPEN and carry this proposal forward without changing the board. |
 
 Board edits, predecessor-SHA updates, merge actions, push, and tag movement

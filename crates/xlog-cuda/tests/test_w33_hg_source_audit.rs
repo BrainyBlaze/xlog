@@ -311,6 +311,14 @@ fn clique_count_and_materialize_are_hg_block_slice() {
         materialize_template.contains("block_offsets[blockIdx.x]"),
         "clique materialize template must emit from the scanned HG block offset"
     );
+    assert!(
+        materialize_template.contains("thread_counts"),
+        "clique materialize template must consume per-thread counts from the count phase"
+    );
+    assert!(
+        !materialize_template.contains("wcoj_clique_template_count_t"),
+        "clique materialize template must not recursively recount just to compute thread offsets"
+    );
 }
 
 #[test]

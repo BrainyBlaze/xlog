@@ -49,6 +49,12 @@ const PIVOT5_EDGE_NAMES: [(&str, &str); 10] = [
     ("c", "d"),
 ];
 
+fn w52_selected_cell(cell: &str) -> bool {
+    std::env::var("XLOG_W52_ONLY_CELL")
+        .map(|selected| selected.split(',').any(|s| s.trim() == cell))
+        .unwrap_or(true)
+}
+
 struct DiscardSink;
 impl LoggingSink for DiscardSink {
     fn emit(&self, _record: LogRecord) -> Result<(), SinkError> {
@@ -495,10 +501,13 @@ fn bench_w52_skewed_multiway(c: &mut Criterion) {
     });
 
     for &n in FOUR_CYCLE_CELLS {
+        let cell = format!("4cycle_N{n}");
+        if !w52_selected_cell(&cell) {
+            continue;
+        }
         let rows = hub_filtered_4cycle(n);
         let inputs = upload_4cycle_fixture(&prov, &rows);
         assert_4cycle_parity(&prov, &inputs, n);
-        let cell = format!("4cycle_N{n}");
 
         group.bench_with_input(BenchmarkId::new("gpu_wcoj", &cell), &n, |b, _| {
             b.iter_custom(|iters| {
@@ -524,10 +533,13 @@ fn bench_w52_skewed_multiway(c: &mut Criterion) {
     }
 
     for &n in CLIQUE5_CELLS {
+        let cell = format!("5clique_N{n}");
+        if !w52_selected_cell(&cell) {
+            continue;
+        }
         let rows = diagonal_k5_fixture(n);
         let inputs = upload_clique5_fixture(&prov, &rows);
         assert_clique5_parity(&prov, &inputs, n);
-        let cell = format!("5clique_N{n}");
 
         group.bench_with_input(BenchmarkId::new("gpu_wcoj", &cell), &n, |b, _| {
             b.iter_custom(|iters| {
@@ -553,10 +565,13 @@ fn bench_w52_skewed_multiway(c: &mut Criterion) {
     }
 
     for &n in PIVOT5_CELLS {
+        let cell = format!("pivot5_N{n}");
+        if !w52_selected_cell(&cell) {
+            continue;
+        }
         let rows = pivot_heavy_k5_fixture(n);
         let inputs = upload_pivot5_fixture(&prov, &rows);
         assert_pivot5_parity(&prov, &inputs, n);
-        let cell = format!("pivot5_N{n}");
 
         group.bench_with_input(BenchmarkId::new("gpu_wcoj", &cell), &n, |b, _| {
             b.iter_custom(|iters| {
