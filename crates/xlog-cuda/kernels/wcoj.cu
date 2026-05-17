@@ -1626,6 +1626,12 @@ __device__ __forceinline__ int clique_edge_idx_unordered_t(int a, int b) {
     return clique_edge_idx_t<K_VAL>(lo, hi);
 }
 
+__device__ __forceinline__ int plan_or_identity_slot(
+    const uint8_t* order,
+    int fallback) {
+    return order == nullptr ? fallback : static_cast<int>(order[fallback]);
+}
+
 // Binary-search membership: does sorted [arr+lo, arr+hi) contain target?
 template <typename T>
 __device__ __forceinline__ bool contains_in_range_t(
@@ -1692,10 +1698,10 @@ __device__ __forceinline__ void clique_recurse_t(
         out(binding);
         return;
     } else {
-        int current = static_cast<int>(iteration_order[Level]);
-        int first = static_cast<int>(iteration_order[0]);
+        int current = plan_or_identity_slot(iteration_order, Level);
+        int first = plan_or_identity_slot(iteration_order, 0);
         int e0L = static_cast<int>(
-            edge_order[clique_edge_idx_unordered_t<K_VAL>(first, current)]);
+            plan_or_identity_slot(edge_order, clique_edge_idx_unordered_t<K_VAL>(first, current)));
         T v0 = binding[0];
         uint32_t lo0 = lower_bound_t<T>(edge_col0[e0L], edge_n[e0L], v0);
         uint32_t hi0 = upper_bound_t<T>(edge_col0[e0L], edge_n[e0L], v0);
@@ -1703,9 +1709,9 @@ __device__ __forceinline__ void clique_recurse_t(
             T candidate = edge_col1[e0L][k];
             bool all_match = true;
             for (int j = 1; j < Level; ++j) {
-                int prior = static_cast<int>(iteration_order[j]);
+                int prior = plan_or_identity_slot(iteration_order, j);
                 int eJL = static_cast<int>(
-                    edge_order[clique_edge_idx_unordered_t<K_VAL>(prior, current)]);
+                    plan_or_identity_slot(edge_order, clique_edge_idx_unordered_t<K_VAL>(prior, current)));
                 T vj = binding[j];
                 uint32_t loJ = lower_bound_t<T>(edge_col0[eJL], edge_n[eJL], vj);
                 uint32_t hiJ = upper_bound_t<T>(edge_col0[eJL], edge_n[eJL], vj);
