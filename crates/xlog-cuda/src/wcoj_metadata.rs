@@ -1,13 +1,45 @@
+use std::collections::BTreeMap;
+
 use cudarc::driver::DeviceRepr;
 
 use crate::memory::TrackedCudaSlice;
 
 pub const WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT: u32 = 1024;
 
+/// Candidate root variable identifier for WCOJ metadata planning.
+pub type VertexId = u8;
+
+/// Compact per-root heat distribution used by the K-clique planner.
+pub type HeatDist = Vec<f64>;
+
+/// Metadata cached for one candidate root variable.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RootMetadata {
+    /// Column permutation needed to expose this root as the leading key.
+    pub column_permutation: Vec<u8>,
+    /// Signature of the sorted layout used by this candidate root.
+    pub sorted_layout_signature: LayoutSignature,
+    /// Heavy-key heat distribution for this root.
+    pub heat_distribution: HeatDist,
+}
+
+/// Stable identity for a sorted relation layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutSignature {
+    /// Runtime relation identifier.
+    pub relation_id: u32,
+    /// Columns used as the sorted key prefix.
+    pub key_columns: Vec<usize>,
+    /// Logical rows in the sorted layout.
+    pub row_count: u32,
+}
+
 pub struct WcojRelationMetadata<K: DeviceRepr> {
     pub unique_keys: TrackedCudaSlice<K>,
     pub fan_out: TrackedCudaSlice<u32>,
     pub prefix_sum: TrackedCudaSlice<u32>,
+    /// Per-candidate-root metadata cached for planner reuse.
+    pub per_candidate_root: BTreeMap<VertexId, RootMetadata>,
     pub total: u64,
     pub key_count: u32,
     pub row_count: u32,

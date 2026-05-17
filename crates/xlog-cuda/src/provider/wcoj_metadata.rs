@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ffi::c_void;
 
 use cudarc::driver::sys;
@@ -2604,6 +2605,7 @@ impl CudaKernelProvider {
                 unique_keys: self.memory().alloc::<u32>(0)?,
                 fan_out: self.memory().alloc::<u32>(0)?,
                 prefix_sum: self.memory().alloc::<u32>(0)?,
+                per_candidate_root: BTreeMap::new(),
                 total: 0,
                 key_count: 0,
                 row_count: 0,
@@ -2643,6 +2645,7 @@ impl CudaKernelProvider {
             unique_keys,
             fan_out,
             prefix_sum,
+            per_candidate_root: BTreeMap::new(),
             total,
             key_count,
             row_count: n,
@@ -2662,6 +2665,7 @@ impl CudaKernelProvider {
                 unique_keys: self.memory().alloc::<u64>(0)?,
                 fan_out: self.memory().alloc::<u32>(0)?,
                 prefix_sum: self.memory().alloc::<u32>(0)?,
+                per_candidate_root: BTreeMap::new(),
                 total: 0,
                 key_count: 0,
                 row_count: 0,
@@ -2701,6 +2705,7 @@ impl CudaKernelProvider {
             unique_keys,
             fan_out,
             prefix_sum,
+            per_candidate_root: BTreeMap::new(),
             total,
             key_count,
             row_count: n,

@@ -94,4 +94,7 @@ pub use plan::{explain_plans, plan_rule, plan_rules, plan_scc_rules, PlanError, 
 pub use reference::{evaluate_rule, RefEvalError, RefRelation, RefRelationStore, RefValue};
 pub use scc::{evaluate_scc_fixpoint, SccFixpointError};
 pub use typed::{evaluate_fixpoint_typed, evaluate_rule_typed, evaluate_scc_fixpoint_typed};
-pub use var_order::{AppearanceOrder, VariableOrder};
+pub use var_order::{
+    plan_kclique_var_order, AppearanceOrder, CostPredictionRecord, FullVariableOrder, KCliqueEdge,
+    KCliqueShape, PredictedWinner, StatsSource, VariableOrder, VariableShare,
+};

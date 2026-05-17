@@ -21,6 +21,10 @@ pub struct RelationStats {
     pub byte_size: u64,
     /// Per-column statistics
     pub column_stats: Vec<ColumnStats>,
+    /// Per-column prefix fan-out statistics for trie-style WCOJ planning.
+    pub prefix_degrees: Vec<PrefixDegreeStats>,
+    /// Per-column key heat/skew summaries for skew-aware WCOJ planning.
+    pub key_heats: Vec<KeyHeatStats>,
     /// Access heat for LRU-style eviction (exponential moving average)
     pub heat: f32,
     /// Unix timestamp of last access
@@ -43,6 +47,8 @@ impl RelationStats {
             cardinality: 0,
             byte_size: 0,
             column_stats: Vec::new(),
+            prefix_degrees: Vec::new(),
+            key_heats: Vec::new(),
             heat: 0.0,
             last_access: 0,
             has_index: false,
@@ -125,6 +131,32 @@ impl RelationStats {
         self.column_stats.iter_mut().find(|c| c.col_idx == col_idx)
     }
 
+    /// Adds prefix-degree statistics for a join-key column.
+    ///
+    /// Existing entries for the same column are retained; consumers use the first
+    /// matching entry so snapshots can preserve historical observations.
+    pub fn add_prefix_degree(&mut self, prefix_degree: PrefixDegreeStats) {
+        self.prefix_degrees.push(prefix_degree);
+    }
+
+    /// Gets prefix-degree statistics by column index.
+    pub fn get_prefix_degree(&self, col_idx: usize) -> Option<&PrefixDegreeStats> {
+        self.prefix_degrees.iter().find(|p| p.col_idx == col_idx)
+    }
+
+    /// Adds key-heat statistics for a join-key column.
+    ///
+    /// This is distinct from relation-level [`RelationStats::heat`]: relation heat
+    /// tracks access frequency, while key heat tracks per-key skew for a column.
+    pub fn add_key_heat(&mut self, key_heat: KeyHeatStats) {
+        self.key_heats.push(key_heat);
+    }
+
+    /// Gets key-heat statistics by column index.
+    pub fn get_key_heat(&self, col_idx: usize) -> Option<&KeyHeatStats> {
+        self.key_heats.iter().find(|h| h.col_idx == col_idx)
+    }
+
     /// Estimates the selectivity for a given predicate cardinality.
     ///
     /// # Arguments
@@ -137,6 +169,58 @@ impl RelationStats {
             return 1.0;
         }
         (estimated_matches as f64 / self.cardinality as f64).clamp(0.0, 1.0)
+    }
+}
+
+/// Prefix fan-out statistics for one relation column.
+///
+/// WCOJ planners use this as the trie prefix-degree signal: lower average and
+/// bounded maximum fan-out usually mean less inner-loop work for a variable
+/// order that binds the column early.
+#[derive(Debug, Clone)]
+pub struct PrefixDegreeStats {
+    /// Column index within the relation.
+    pub col_idx: usize,
+    /// Average number of rows below one distinct prefix key.
+    pub avg_degree: f64,
+    /// High-water fan-out used as a skew guard.
+    pub max_degree: f64,
+}
+
+impl PrefixDegreeStats {
+    /// Creates prefix-degree statistics for a column.
+    pub fn new(col_idx: usize, avg_degree: f64, max_degree: f64) -> Self {
+        Self {
+            col_idx,
+            avg_degree,
+            max_degree,
+        }
+    }
+}
+
+/// Per-key heat/skew statistics for one relation column.
+///
+/// The value is a compact summary of key-frequency imbalance. A value near zero
+/// is cold/unskewed; larger values indicate pivot-heavy keys that should be
+/// demoted by a skew-aware WCOJ planner.
+#[derive(Debug, Clone)]
+pub struct KeyHeatStats {
+    /// Column index within the relation.
+    pub col_idx: usize,
+    /// Heat value for the heavy-key tail.
+    pub heat: f64,
+    /// Multiplicative skew factor for the heaviest observed keys.
+    pub skew_factor: f64,
+}
+
+impl KeyHeatStats {
+    /// Creates key-heat statistics for a column.
+    pub fn new(col_idx: usize, heat: f64, skew_factor: f64) -> Self {
+        Self {
+            col_idx,
+            heat,
+            skew_factor,
+        }
     }
 }
 
