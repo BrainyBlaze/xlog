@@ -889,6 +889,11 @@ pub struct CudaKernelProvider {
     /// confirm the fast-path actually fired vs. silently fell
     /// through to the existing dedup pipeline.
     wcoj_layout_fast_path_hit_count: AtomicU64,
+    /// Diagnostic counter for generic WCOJ layout-sort helper
+    /// invocations. Used by goal-038-B dispatch-plan certs to
+    /// prove K-clique runtime dispatch no longer routes every edge
+    /// through the old all-edge `wcoj_layout_sort_*_recorded` path.
+    wcoj_layout_sort_invocation_count: AtomicU64,
     /// W3.3 routing counter: successful triangle dispatches
     /// accepted through the histogram-guided block-slice provider
     /// entry.
@@ -982,6 +987,7 @@ impl CudaKernelProvider {
             recorded_op_stream: OnceLock::new(),
             csm_invocations: AtomicU64::new(0),
             wcoj_layout_fast_path_hit_count: AtomicU64::new(0),
+            wcoj_layout_sort_invocation_count: AtomicU64::new(0),
             wcoj_triangle_hg_dispatch_count: AtomicU64::new(0),
             #[cfg(feature = "wcoj-phase-timing")]
             last_triangle_phase_timing: std::sync::Mutex::new(None),
@@ -1222,11 +1228,31 @@ impl CudaKernelProvider {
             .store(0, Ordering::Relaxed);
     }
 
+    /// Number of calls to `wcoj_layout_sort_*_recorded` since the
+    /// last reset. Diagnostic-only; used by Step 4 dispatch-plan
+    /// certification.
+    pub fn wcoj_layout_sort_invocation_count(&self) -> u64 {
+        self.wcoj_layout_sort_invocation_count
+            .load(Ordering::Relaxed)
+    }
+
+    /// Reset the WCOJ layout-sort invocation counter to 0.
+    pub fn reset_wcoj_layout_sort_invocation_count(&self) {
+        self.wcoj_layout_sort_invocation_count
+            .store(0, Ordering::Relaxed);
+    }
+
     /// Internal: increment the fast-path counter. Called by
     /// `wcoj_layout_*_recorded` after a successful fast-path
     /// branch. Not part of any public stability guarantee.
     pub(crate) fn record_wcoj_layout_fast_path_hit(&self) {
         self.wcoj_layout_fast_path_hit_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Internal: increment the generic WCOJ layout-sort counter.
+    pub(crate) fn record_wcoj_layout_sort_invocation(&self) {
+        self.wcoj_layout_sort_invocation_count
             .fetch_add(1, Ordering::Relaxed);
     }
 

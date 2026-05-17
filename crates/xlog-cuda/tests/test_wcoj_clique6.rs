@@ -94,7 +94,7 @@ where
         .map(|rows| rows.iter().copied().collect())
         .collect();
     fn edge_idx(i: usize, j: usize, k: usize) -> usize {
-        i * (k - 1) - i * (i - 1) / 2 + (j - i - 1)
+        i * (k - 1) - i.saturating_sub(1) * i / 2 + (j - i - 1)
     }
     // Vertex set = union of all values in all edges.
     let mut vertices: BTreeSet<T> = BTreeSet::new();

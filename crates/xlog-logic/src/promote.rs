@@ -75,13 +75,23 @@
 //!   slice 5.
 
 use std::collections::{HashMap, HashSet};
-use xlog_core::RelId;
+use xlog_core::{RelId, ScalarType};
 use xlog_ir::plan::Scc;
-use xlog_ir::rir::ProjectExpr;
+use xlog_ir::rir::{
+    ColumnSwap, HelperSplitSpec, KCliqueVariableOrder, ProjectExpr, SortedLayoutSpec,
+    StreamGroupId, VariableOrder, K_CLIQUE_MAX_EDGES, K_CLIQUE_MAX_K,
+};
 use xlog_ir::{ExecutionPlan, JoinType, RirNode};
-use xlog_stats::StatsManager;
+use xlog_stats::{
+    ColumnStats, JoinSelectivity, KeyHeatStats, PrefixDegreeStats, RelationStats, StatsManager,
+    StatsSnapshot,
+};
 
 use crate::compiler_config::CompilerConfig;
+use crate::hypergraph::var_order::{
+    plan_kclique_var_order, FullVariableOrder, KCliqueEdge, KCliqueShape,
+};
+use crate::hypergraph::VertexId;
 use crate::wcoj_var_ordering::WcojVariableOrderingModel;
 
 /// Walk an `ExecutionPlan` and rewrite eligible triangle / 4-cycle
@@ -164,11 +174,11 @@ pub fn promote_multiway(
             // clique-keyed dispatch. Rejected in W3.2 — no
             // closure credit.
             if recursive_scan_count(&rule.body, &head_rel_set) == 0 {
-                if let Some(promoted) = try_promote_clique_k(&rule.body, 5) {
+                if let Some(promoted) = try_promote_clique_k(&rule.body, 5, stats) {
                     rule.body = promoted;
                     continue;
                 }
-                if let Some(promoted) = try_promote_clique_k(&rule.body, 6) {
+                if let Some(promoted) = try_promote_clique_k(&rule.body, 6, stats) {
                     rule.body = promoted;
                 }
             }
@@ -1069,7 +1079,7 @@ fn try_promote_4cycle(
 /// Canonical edge index for (i, j) with 0 <= i < j < k.
 fn clique_edge_idx(i: usize, j: usize, k: usize) -> usize {
     debug_assert!(i < j && j < k);
-    i * (k - 1) - i * (i - 1) / 2 + (j - i - 1)
+    i * (k - 1) - i.saturating_sub(1) * i / 2 + (j - i - 1)
 }
 
 /// Tiny union-find on atom-column slots (position space).
@@ -1171,7 +1181,7 @@ fn walk_clique_node(
 /// K_k validation. Robust to left-deep / right-deep / bushy.
 /// Rejects filter wrappers, reversed atoms, self-edges,
 /// constants, recursive bodies, and any non-canonical shape.
-fn try_promote_clique_k(body: &RirNode, k: usize) -> Option<RirNode> {
+fn try_promote_clique_k(body: &RirNode, k: usize, stats: &StatsManager) -> Option<RirNode> {
     if !(k == 5 || k == 6) {
         return None;
     }
@@ -1323,14 +1333,195 @@ fn try_promote_clique_k(body: &RirNode, k: usize) -> Option<RirNode> {
     };
     let output_columns = columns.clone();
     let fallback = Box::new(body.clone());
+    let shape = build_kclique_shape(k, &reordered_scans)?;
+    let planner_stats = kclique_planner_stats(&shape, stats);
+    let full_order = plan_kclique_var_order(&shape, &planner_stats)?;
+    let kclique_order = kclique_variable_order_from_plan(&shape, &full_order)?;
 
     Some(RirNode::MultiWayJoin {
         inputs,
         slot_vars,
         output_columns,
         fallback,
-        var_order: None,
+        var_order: Some(VariableOrder::kclique(kclique_order)),
     })
+}
+
+const KCLIQUE_DEFAULT_CARDINALITY: u64 = 1_000;
+const KCLIQUE_DEFAULT_NDV: u64 = 1_000;
+const KCLIQUE_DEFAULT_SELECTIVITY: f64 = 0.01;
+const KCLIQUE_DEFAULT_PREFIX_DEGREE: f64 = 1.0;
+const KCLIQUE_DEFAULT_HEAT: f64 = 0.0;
+
+fn build_kclique_shape(k: usize, rels: &[RelId]) -> Option<KCliqueShape> {
+    let mut edges = Vec::with_capacity(rels.len());
+    let mut idx = 0usize;
+    for i in 0..k {
+        for j in (i + 1)..k {
+            let rel_id = *rels.get(idx)?;
+            edges.push(KCliqueEdge {
+                rel_id,
+                left: VertexId(i),
+                right: VertexId(j),
+                left_col: 0,
+                right_col: 1,
+            });
+            idx += 1;
+        }
+    }
+    KCliqueShape::from_edges(k as u8, edges)
+}
+
+fn kclique_planner_stats(shape: &KCliqueShape, stats: &StatsManager) -> StatsSnapshot {
+    let mut snapshot = stats.snapshot();
+
+    for edge in shape.edges() {
+        let rel = ensure_relation_stats(&mut snapshot, edge.rel_id);
+        if rel.cardinality == 0 {
+            rel.update_cardinality(KCLIQUE_DEFAULT_CARDINALITY);
+        }
+        ensure_column_stats(rel, edge.left_col);
+        ensure_column_stats(rel, edge.right_col);
+        ensure_prefix_degree(rel, edge.left_col);
+        ensure_prefix_degree(rel, edge.right_col);
+        ensure_key_heat(rel, edge.left_col);
+        ensure_key_heat(rel, edge.right_col);
+    }
+
+    for (left_idx, left_edge) in shape.edges().iter().enumerate() {
+        for right_edge in shape.edges().iter().skip(left_idx + 1) {
+            if !left_edge.touches(right_edge) {
+                continue;
+            }
+            if !snapshot.join_selectivities.iter().any(|sel| {
+                let direct = sel.left_rel == left_edge.rel_id
+                    && sel.right_rel == right_edge.rel_id
+                    && sel.left_keys.as_slice() == [left_edge.left_col]
+                    && sel.right_keys.as_slice() == [right_edge.left_col];
+                let swapped = sel.left_rel == right_edge.rel_id
+                    && sel.right_rel == left_edge.rel_id
+                    && sel.left_keys.as_slice() == [right_edge.left_col]
+                    && sel.right_keys.as_slice() == [left_edge.left_col];
+                direct || swapped
+            }) {
+                let mut selectivity = JoinSelectivity::new(left_edge.rel_id, right_edge.rel_id);
+                selectivity.set_keys(vec![left_edge.left_col], vec![right_edge.left_col]);
+                selectivity.set_selectivity(KCLIQUE_DEFAULT_SELECTIVITY);
+                snapshot.join_selectivities.push(selectivity);
+            }
+        }
+    }
+
+    snapshot
+}
+
+fn ensure_relation_stats(snapshot: &mut StatsSnapshot, rel_id: RelId) -> &mut RelationStats {
+    if let Some(idx) = snapshot
+        .relations
+        .iter()
+        .position(|relation| relation.rel_id == rel_id)
+    {
+        return &mut snapshot.relations[idx];
+    }
+    snapshot.relations.push(RelationStats::new(rel_id));
+    snapshot
+        .relations
+        .last_mut()
+        .expect("pushed relation stats must exist")
+}
+
+fn ensure_column_stats(rel: &mut RelationStats, col_idx: usize) {
+    if rel.get_column(col_idx).is_some() {
+        if let Some(col) = rel.get_column_mut(col_idx) {
+            if col.distinct_estimate == 0 {
+                col.update_distinct(KCLIQUE_DEFAULT_NDV);
+            }
+        }
+        return;
+    }
+    let mut col = ColumnStats::new(col_idx, ScalarType::U32);
+    col.update_distinct(KCLIQUE_DEFAULT_NDV);
+    rel.add_column(col);
+}
+
+fn ensure_prefix_degree(rel: &mut RelationStats, col_idx: usize) {
+    if rel.get_prefix_degree(col_idx).is_none() {
+        rel.add_prefix_degree(PrefixDegreeStats::new(
+            col_idx,
+            KCLIQUE_DEFAULT_PREFIX_DEGREE,
+            KCLIQUE_DEFAULT_PREFIX_DEGREE,
+        ));
+    }
+}
+
+fn ensure_key_heat(rel: &mut RelationStats, col_idx: usize) {
+    if rel.get_key_heat(col_idx).is_none() {
+        rel.add_key_heat(KeyHeatStats::new(
+            col_idx,
+            KCLIQUE_DEFAULT_HEAT,
+            KCLIQUE_DEFAULT_HEAT,
+        ));
+    }
+}
+
+fn kclique_variable_order_from_plan(
+    shape: &KCliqueShape,
+    plan: &FullVariableOrder,
+) -> Option<KCliqueVariableOrder> {
+    let k = shape.variable_count();
+    let expected_edges = usize::from(k) * usize::from(k - 1) / 2;
+    if plan.variable_order.len() != usize::from(k) || plan.edge_permutation.len() != expected_edges
+    {
+        return None;
+    }
+
+    let mut variable_positions = [u8::MAX; K_CLIQUE_MAX_K];
+    for (position, variable) in plan.variable_order.iter().enumerate() {
+        if variable.0 >= usize::from(k) {
+            return None;
+        }
+        variable_positions[variable.0] = position as u8;
+    }
+
+    let mut edge_permutation = [u8::MAX; K_CLIQUE_MAX_EDGES];
+    let mut column_swaps = Vec::new();
+    let mut leader_slot = None;
+    for (slot, edge_idx) in plan.edge_permutation.iter().copied().enumerate() {
+        let edge = shape.edges().get(edge_idx)?;
+        let left_pos = variable_positions[edge.left.0];
+        let right_pos = variable_positions[edge.right.0];
+        if left_pos == u8::MAX || right_pos == u8::MAX {
+            return None;
+        }
+        edge_permutation[slot] = edge_idx as u8;
+        if left_pos > right_pos {
+            column_swaps.push(ColumnSwap {
+                edge_slot: slot as u8,
+                swap_cols: true,
+            });
+        }
+        if [left_pos, right_pos].into_iter().min() == Some(0)
+            && [left_pos, right_pos].into_iter().max() == Some(1)
+        {
+            leader_slot = Some(slot as u8);
+        }
+    }
+
+    let sorted_edge_slots = vec![leader_slot.unwrap_or(0)];
+    let sorted_layout_requirements = SortedLayoutSpec {
+        edge_slots: sorted_edge_slots,
+        key_columns: vec![vec![0, 1]],
+    };
+
+    Some(KCliqueVariableOrder::new(
+        k,
+        variable_positions,
+        edge_permutation,
+        column_swaps,
+        sorted_layout_requirements,
+        Vec::<HelperSplitSpec>::new(),
+        StreamGroupId(0),
+    ))
 }
 
 #[cfg(test)]

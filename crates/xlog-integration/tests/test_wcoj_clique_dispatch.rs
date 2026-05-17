@@ -415,9 +415,15 @@ fn clique5_dispatch_counter_advances_and_row_set_matches_fallback_body() {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
     };
+    fix.provider.reset_wcoj_layout_sort_invocation_count();
     run_counter_advance_test(&fix, CLIQUE5_SRC, "clique5", 5, |e| {
         e.wcoj_clique5_dispatch_count()
     });
+    let sort_count = fix.provider.wcoj_layout_sort_invocation_count();
+    assert!(
+        sort_count < 10,
+        "K5 planned dispatch must use fewer than the old 10 layout-sort calls; got {sort_count}"
+    );
 }
 
 #[test]

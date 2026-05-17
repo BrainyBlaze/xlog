@@ -225,6 +225,20 @@ impl KCliqueShape {
         })
     }
 
+    /// Creates a K-clique-family shape from explicit relation edges.
+    ///
+    /// Used by the production promoter after it has validated the lowered RIR
+    /// as a complete clique and recovered the actual relation IDs from scan
+    /// leaves. The edge list must already be in deterministic shape order.
+    pub fn from_edges(variable_count: u8, edges: Vec<KCliqueEdge>) -> Option<Self> {
+        valid_variable_count(variable_count)?;
+        (!edges.is_empty()).then_some(())?;
+        Some(Self {
+            variable_count,
+            edges,
+        })
+    }
+
     /// Creates the W5.2 4-cycle shape used by the predecessor WCOJ path.
     pub fn cycle4(first_rel_id: RelId) -> Option<Self> {
         let variable_count = 4;

@@ -250,6 +250,7 @@ impl CudaKernelProvider {
         input: &CudaBuffer,
         launch_stream: StreamId,
     ) -> Result<CudaBuffer> {
+        self.record_wcoj_layout_sort_invocation();
         if self.memory().runtime().is_none() {
             return Err(XlogError::Kernel(
                 "wcoj_layout_sort_u32_recorded requires a runtime-backed \
@@ -473,6 +474,7 @@ impl CudaKernelProvider {
         input: &CudaBuffer,
         launch_stream: StreamId,
     ) -> Result<CudaBuffer> {
+        self.record_wcoj_layout_sort_invocation();
         if self.memory().runtime().is_none() {
             return Err(XlogError::Kernel(
                 "wcoj_layout_sort_u64_recorded requires a runtime-backed \
@@ -1119,6 +1121,9 @@ impl CudaKernelProvider {
         &self,
         k: usize,
         edges: &[&CudaBuffer],
+        leader_edge_idx: u32,
+        edge_order: &[u8],
+        iteration_order: &[u8],
         width_class: CliqueWidthClass,
         launch_stream: StreamId,
         entry_label: &str,
@@ -1154,6 +1159,17 @@ impl CudaKernelProvider {
                 edges.len()
             )));
         }
+        if usize::try_from(leader_edge_idx)
+            .ok()
+            .is_none_or(|idx| idx >= expected_edges)
+        {
+            return Err(XlogError::Kernel(format!(
+                "{}: leader_edge_idx {} out of range for {} edges",
+                entry_label, leader_edge_idx, expected_edges
+            )));
+        }
+        validate_clique_u8_permutation(edge_order, expected_edges, "edge_order", entry_label)?;
+        validate_clique_u8_permutation(iteration_order, k, "iteration_order", entry_label)?;
 
         // Validate every edge: 2-column, in width-class.
         for (i, buf) in edges.iter().enumerate() {
@@ -1185,28 +1201,17 @@ impl CudaKernelProvider {
             }
         }
 
-        // Build output schema: K columns, types taken from a
-        // canonical-edge column. For vertex i (head var i), pick
-        // the type from the canonical edge containing i with i in
-        // first position: edge (0, i) for i >= 1, edge (0, 1) for
-        // i == 0. Locked per D6 canonical edge layout.
-        // Edge (0, i) has its col1 = vertex i for i >= 1; col0 =
-        // vertex 0. Edge (0, 1) has col0 = vertex 0, col1 = vertex 1.
+        // Build output schema in kernel binding order. The runtime
+        // projects this buffer back to rule-head order when the plan
+        // chooses a non-identity variable order.
         let mut head_types = Vec::with_capacity(k);
-        // vertex 0 type from edge (0, 1).col0
-        head_types.push(edges[0].schema.column_type(0).expect("validated"));
-        // vertex 1 type from edge (0, 1).col1
-        head_types.push(edges[0].schema.column_type(1).expect("validated"));
-        // vertex i (for i >= 2) type from edge (0, i).col1.
-        // Edge index for (0, i) = (i - 1) under canonical lex.
+        let leader_slot = edge_order[0] as usize;
+        head_types.push(edges[leader_slot].schema.column_type(0).expect("validated"));
+        head_types.push(edges[leader_slot].schema.column_type(1).expect("validated"));
         for i in 2..k {
-            let edge_idx_0_i = i - 1; // (0, i) for i >= 1 has edge index i-1
-            head_types.push(
-                edges[edge_idx_0_i]
-                    .schema
-                    .column_type(1)
-                    .expect("validated"),
-            );
+            let logical_edge = i - 1;
+            let edge_slot = edge_order[logical_edge] as usize;
+            head_types.push(edges[edge_slot].schema.column_type(1).expect("validated"));
         }
         let out_schema = Schema::new(
             head_types
@@ -1216,8 +1221,8 @@ impl CudaKernelProvider {
                 .collect(),
         );
 
-        // n_leader = row count of edge (0, 1) = edges[0].
-        let n_leader = self.logical_row_count_u32(edges[0])?;
+        let leader_slot = usize::try_from(leader_edge_idx).expect("validated");
+        let n_leader = self.logical_row_count_u32(edges[leader_slot])?;
         if n_leader == 0 {
             return self.create_empty_buffer(out_schema);
         }
@@ -1240,6 +1245,8 @@ impl CudaKernelProvider {
         let mut d_edge_col0 = self.memory.alloc::<u64>(expected_edges)?;
         let mut d_edge_col1 = self.memory.alloc::<u64>(expected_edges)?;
         let mut d_edge_n = self.memory.alloc::<u32>(expected_edges)?;
+        let mut d_edge_order = self.memory.alloc::<u8>(expected_edges)?;
+        let mut d_iteration_order = self.memory.alloc::<u8>(k)?;
         let device = self.device.inner();
         device
             .htod_sync_copy_into(&edge_col0_ptrs, &mut d_edge_col0)
@@ -1262,6 +1269,19 @@ impl CudaKernelProvider {
             .map_err(|e| {
                 XlogError::Kernel(format!("{}: htod edge_n failed: {}", entry_label, e))
             })?;
+        device
+            .htod_sync_copy_into(edge_order, &mut d_edge_order)
+            .map_err(|e| {
+                XlogError::Kernel(format!("{}: htod edge_order failed: {}", entry_label, e))
+            })?;
+        device
+            .htod_sync_copy_into(iteration_order, &mut d_iteration_order)
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "{}: htod iteration_order failed: {}",
+                    entry_label, e
+                ))
+            })?;
 
         // Phase 1: HG block counts + scan + total.
         let block_work_unit = crate::wcoj_metadata::WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT;
@@ -1282,6 +1302,8 @@ impl CudaKernelProvider {
         rec_count.read(&d_edge_col0);
         rec_count.read(&d_edge_col1);
         rec_count.read(&d_edge_n);
+        rec_count.read(&d_edge_order);
+        rec_count.read(&d_iteration_order);
         rec_count.write(&count_buf);
         rec_count.write(&thread_counts_buf);
         rec_count.write(&offsets_buf);
@@ -1310,6 +1332,9 @@ impl CudaKernelProvider {
         //     const T* const* edge_col0,
         //     const T* const* edge_col1,
         //     const u32* edge_n,
+        //     u32 leader_edge_idx,
+        //     const u8* edge_order,
+        //     const u8* iteration_order,
         //     u32 leader_count,
         //     u32 block_work_unit,
         //     u32* out_block_counts,
@@ -1326,6 +1351,9 @@ impl CudaKernelProvider {
                         &d_edge_col0,
                         &d_edge_col1,
                         &d_edge_n,
+                        leader_edge_idx,
+                        &d_edge_order,
+                        &d_iteration_order,
                         n_leader,
                         block_work_unit,
                         &mut count_buf,
@@ -1453,6 +1481,8 @@ impl CudaKernelProvider {
         rec_mat.read(&d_edge_col0);
         rec_mat.read(&d_edge_col1);
         rec_mat.read(&d_edge_n);
+        rec_mat.read(&d_edge_order);
+        rec_mat.read(&d_iteration_order);
         rec_mat.read(&thread_counts_buf);
         rec_mat.read(&offsets_buf);
         rec_mat.read(&d_out_cols);
@@ -1482,6 +1512,9 @@ impl CudaKernelProvider {
         //     const T* const* edge_col0,
         //     const T* const* edge_col1,
         //     const u32* edge_n,
+        //     u32 leader_edge_idx,
+        //     const u8* edge_order,
+        //     const u8* iteration_order,
         //     u32 leader_count,
         //     u32 block_work_unit,
         //     const u32* thread_counts,
@@ -1504,6 +1537,9 @@ impl CudaKernelProvider {
                         &d_edge_col0,
                         &d_edge_col1,
                         &d_edge_n,
+                        leader_edge_idx,
+                        &d_edge_order,
+                        &d_iteration_order,
                         n_leader,
                         block_work_unit,
                         &thread_counts_buf,
@@ -1545,12 +1581,38 @@ impl CudaKernelProvider {
         edges: &[&CudaBuffer; 10],
         launch_stream: StreamId,
     ) -> Result<CudaBuffer> {
+        let edge_order = default_clique_u8_order(10);
+        let iteration_order = default_clique_u8_order(5);
         self.wcoj_clique_recorded_inner(
             5,
             edges,
+            0,
+            &edge_order,
+            &iteration_order,
             CliqueWidthClass::FourByte,
             launch_stream,
             "wcoj_clique5_u32_recorded",
+        )
+    }
+
+    /// 5-clique WCOJ at 4-byte width-class using plan-derived launch params.
+    pub fn wcoj_clique5_u32_recorded_planned(
+        &self,
+        edges: &[&CudaBuffer; 10],
+        leader_edge_idx: u32,
+        edge_order: &[u8],
+        iteration_order: &[u8],
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        self.wcoj_clique_recorded_inner(
+            5,
+            edges,
+            leader_edge_idx,
+            edge_order,
+            iteration_order,
+            CliqueWidthClass::FourByte,
+            launch_stream,
+            "wcoj_clique5_u32_recorded_planned",
         )
     }
 
@@ -1560,12 +1622,38 @@ impl CudaKernelProvider {
         edges: &[&CudaBuffer; 10],
         launch_stream: StreamId,
     ) -> Result<CudaBuffer> {
+        let edge_order = default_clique_u8_order(10);
+        let iteration_order = default_clique_u8_order(5);
         self.wcoj_clique_recorded_inner(
             5,
             edges,
+            0,
+            &edge_order,
+            &iteration_order,
             CliqueWidthClass::EightByte,
             launch_stream,
             "wcoj_clique5_u64_recorded",
+        )
+    }
+
+    /// 5-clique WCOJ at 8-byte width-class using plan-derived launch params.
+    pub fn wcoj_clique5_u64_recorded_planned(
+        &self,
+        edges: &[&CudaBuffer; 10],
+        leader_edge_idx: u32,
+        edge_order: &[u8],
+        iteration_order: &[u8],
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        self.wcoj_clique_recorded_inner(
+            5,
+            edges,
+            leader_edge_idx,
+            edge_order,
+            iteration_order,
+            CliqueWidthClass::EightByte,
+            launch_stream,
+            "wcoj_clique5_u64_recorded_planned",
         )
     }
 
@@ -1579,12 +1667,38 @@ impl CudaKernelProvider {
         edges: &[&CudaBuffer; 15],
         launch_stream: StreamId,
     ) -> Result<CudaBuffer> {
+        let edge_order = default_clique_u8_order(15);
+        let iteration_order = default_clique_u8_order(6);
         self.wcoj_clique_recorded_inner(
             6,
             edges,
+            0,
+            &edge_order,
+            &iteration_order,
             CliqueWidthClass::FourByte,
             launch_stream,
             "wcoj_clique6_u32_recorded",
+        )
+    }
+
+    /// 6-clique WCOJ at 4-byte width-class using plan-derived launch params.
+    pub fn wcoj_clique6_u32_recorded_planned(
+        &self,
+        edges: &[&CudaBuffer; 15],
+        leader_edge_idx: u32,
+        edge_order: &[u8],
+        iteration_order: &[u8],
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        self.wcoj_clique_recorded_inner(
+            6,
+            edges,
+            leader_edge_idx,
+            edge_order,
+            iteration_order,
+            CliqueWidthClass::FourByte,
+            launch_stream,
+            "wcoj_clique6_u32_recorded_planned",
         )
     }
 
@@ -1594,12 +1708,79 @@ impl CudaKernelProvider {
         edges: &[&CudaBuffer; 15],
         launch_stream: StreamId,
     ) -> Result<CudaBuffer> {
+        let edge_order = default_clique_u8_order(15);
+        let iteration_order = default_clique_u8_order(6);
         self.wcoj_clique_recorded_inner(
             6,
             edges,
+            0,
+            &edge_order,
+            &iteration_order,
             CliqueWidthClass::EightByte,
             launch_stream,
             "wcoj_clique6_u64_recorded",
         )
     }
+
+    /// 6-clique WCOJ at 8-byte width-class using plan-derived launch params.
+    pub fn wcoj_clique6_u64_recorded_planned(
+        &self,
+        edges: &[&CudaBuffer; 15],
+        leader_edge_idx: u32,
+        edge_order: &[u8],
+        iteration_order: &[u8],
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        self.wcoj_clique_recorded_inner(
+            6,
+            edges,
+            leader_edge_idx,
+            edge_order,
+            iteration_order,
+            CliqueWidthClass::EightByte,
+            launch_stream,
+            "wcoj_clique6_u64_recorded_planned",
+        )
+    }
+}
+
+fn default_clique_u8_order(len: usize) -> Vec<u8> {
+    (0..len)
+        .map(|idx| u8::try_from(idx).expect("clique order index fits in u8"))
+        .collect()
+}
+
+fn validate_clique_u8_permutation(
+    values: &[u8],
+    len: usize,
+    label: &str,
+    entry_label: &str,
+) -> Result<()> {
+    if values.len() != len {
+        return Err(XlogError::Kernel(format!(
+            "{}: {} length {} must equal {}",
+            entry_label,
+            label,
+            values.len(),
+            len
+        )));
+    }
+    let mut seen = vec![false; len];
+    for &value in values {
+        let idx = usize::from(value);
+        if idx >= len {
+            return Err(XlogError::Kernel(format!(
+                "{}: {} value {} out of range 0..{}",
+                entry_label, label, value, len
+            )));
+        }
+        if seen[idx] {
+            return Err(XlogError::Kernel(format!(
+                "{}: {} duplicates value {}",
+                entry_label, label, value
+            )));
+        }
+        seen[idx] = true;
+    }
+    Ok(())
 }

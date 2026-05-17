@@ -73,11 +73,13 @@
 //!   slots stays on the binary-join path).
 //! * Multi-recursive WCOJ (≥ 2 in-SCC body Scans) — slice 4.2.
 
+use std::collections::HashSet;
+
 use xlog_core::{RelId, Result, ScalarType, Schema};
 use xlog_cuda::device_runtime::StreamId;
 use xlog_cuda::CudaBuffer;
 use xlog_ir::{
-    rir::{ProjectExpr, VariableOrder},
+    rir::{KCliqueVariableOrder, ProjectExpr, VariableOrder},
     CompiledRule, RirNode,
 };
 
@@ -1748,12 +1750,19 @@ impl Executor {
     ) -> Result<Option<CudaBuffer>> {
         let expected_edges = k * (k - 1) / 2;
         // 1. Shape match: MultiWayJoin with inputs.len() == C(k, 2).
-        let RirNode::MultiWayJoin { inputs, .. } = body else {
+        let RirNode::MultiWayJoin {
+            inputs, var_order, ..
+        } = body
+        else {
             return Ok(None);
         };
         if inputs.len() != expected_edges {
             return Ok(None);
         }
+        let kclique = match var_order.as_ref().and_then(|order| order.kclique.as_ref()) {
+            Some(plan) if usize::from(plan.k) == k => plan,
+            _ => return Ok(None),
+        };
         // 2. Extract RelIds from each input (must all be Scans).
         let mut rel_ids: Vec<RelId> = Vec::with_capacity(expected_edges);
         for input in inputs {
@@ -1794,17 +1803,48 @@ impl Executor {
         if !is_u64 && !is_4byte {
             return Ok(None);
         }
-        // 6. Layout-sort + dedup each edge unconditionally
-        // through W3.1. Per fix #7 — no provider-side sortedness
-        // checker; dispatcher always layouts.
+        let Some(plan_params) = kclique_dispatch_params(kclique, k) else {
+            return Ok(None);
+        };
+        let head_schema = match build_kclique_head_schema(&raw_bufs, k) {
+            Some(schema) => schema,
+            None => return Ok(None),
+        };
+        let output_perm = match kclique_output_perm(kclique, k) {
+            Some(perm) => perm,
+            None => return Ok(None),
+        };
+        // 6. Orient edges according to KCliqueVariableOrder, then
+        // layout only the plan-required physical slots through the
+        // generic layout-sort helper. Remaining 2-column slots use
+        // the narrower WCOJ layout entry, which preserves correctness
+        // and can take the sorted-unique fast path.
         let mut laid_out: Vec<CudaBuffer> = Vec::with_capacity(expected_edges);
-        for buf in &raw_bufs {
-            let res = if is_u64 {
+        for (slot, &input_idx) in plan_params.edge_permutation.iter().enumerate() {
+            let src = raw_bufs[input_idx];
+            let swapped = if plan_params.swap_slots.contains(&slot) {
+                Some(
+                    self.provider
+                        .wcoj_project_2col_swap_recorded(src, launch_stream)?,
+                )
+            } else {
+                None
+            };
+            let oriented = swapped.as_ref().unwrap_or(src);
+            let res = if plan_params.required_sort_slots.contains(&slot) {
+                if is_u64 {
+                    self.provider
+                        .wcoj_layout_sort_u64_recorded(oriented, launch_stream)
+                } else {
+                    self.provider
+                        .wcoj_layout_sort_u32_recorded(oriented, launch_stream)
+                }
+            } else if is_u64 {
                 self.provider
-                    .wcoj_layout_sort_u64_recorded(buf, launch_stream)
+                    .wcoj_layout_u64_recorded(oriented, launch_stream)
             } else {
                 self.provider
-                    .wcoj_layout_sort_u32_recorded(buf, launch_stream)
+                    .wcoj_layout_u32_recorded(oriented, launch_stream)
             };
             match res {
                 Ok(b) => laid_out.push(b),
@@ -1821,28 +1861,52 @@ impl Executor {
                     Ok(a) => a,
                     Err(_) => return Ok(None),
                 };
-                self.provider.wcoj_clique5_u32_recorded(arr, launch_stream)
+                self.provider.wcoj_clique5_u32_recorded_planned(
+                    arr,
+                    plan_params.leader_edge_idx,
+                    &plan_params.edge_order,
+                    &plan_params.iteration_order,
+                    launch_stream,
+                )
             }
             (5, true) => {
                 let arr: &[&CudaBuffer; 10] = match edge_refs.as_slice().try_into() {
                     Ok(a) => a,
                     Err(_) => return Ok(None),
                 };
-                self.provider.wcoj_clique5_u64_recorded(arr, launch_stream)
+                self.provider.wcoj_clique5_u64_recorded_planned(
+                    arr,
+                    plan_params.leader_edge_idx,
+                    &plan_params.edge_order,
+                    &plan_params.iteration_order,
+                    launch_stream,
+                )
             }
             (6, false) => {
                 let arr: &[&CudaBuffer; 15] = match edge_refs.as_slice().try_into() {
                     Ok(a) => a,
                     Err(_) => return Ok(None),
                 };
-                self.provider.wcoj_clique6_u32_recorded(arr, launch_stream)
+                self.provider.wcoj_clique6_u32_recorded_planned(
+                    arr,
+                    plan_params.leader_edge_idx,
+                    &plan_params.edge_order,
+                    &plan_params.iteration_order,
+                    launch_stream,
+                )
             }
             (6, true) => {
                 let arr: &[&CudaBuffer; 15] = match edge_refs.as_slice().try_into() {
                     Ok(a) => a,
                     Err(_) => return Ok(None),
                 };
-                self.provider.wcoj_clique6_u64_recorded(arr, launch_stream)
+                self.provider.wcoj_clique6_u64_recorded_planned(
+                    arr,
+                    plan_params.leader_edge_idx,
+                    &plan_params.edge_order,
+                    &plan_params.iteration_order,
+                    launch_stream,
+                )
             }
             _ => return Ok(None),
         };
@@ -1850,6 +1914,16 @@ impl Executor {
         // silent fallback (no counter advance).
         match result {
             Ok(buf) => {
+                let buf = if output_perm.iter().copied().eq(0..output_perm.len()) {
+                    buf
+                } else {
+                    self.provider.wcoj_project_output_columns_recorded(
+                        &buf,
+                        &output_perm,
+                        head_schema,
+                        launch_stream,
+                    )?
+                };
                 if k == 5 {
                     self.wcoj_clique5_dispatch_count += 1;
                 } else {
@@ -1860,6 +1934,148 @@ impl Executor {
             Err(_) => Ok(None),
         }
     }
+}
+
+#[derive(Debug)]
+struct KCliqueDispatchParams {
+    edge_permutation: Vec<usize>,
+    edge_order: Vec<u8>,
+    iteration_order: Vec<u8>,
+    leader_edge_idx: u32,
+    swap_slots: HashSet<usize>,
+    required_sort_slots: HashSet<usize>,
+}
+
+fn kclique_dispatch_params(plan: &KCliqueVariableOrder, k: usize) -> Option<KCliqueDispatchParams> {
+    let expected_edges = k * (k - 1) / 2;
+    let edge_permutation = live_kclique_edge_permutation(plan, expected_edges)?;
+    let positions = live_kclique_variable_positions(plan, k)?;
+    let mut edge_order = vec![u8::MAX; expected_edges];
+
+    for (slot, &edge_idx) in edge_permutation.iter().enumerate() {
+        let (left, right) = clique_edge_pair(edge_idx, k)?;
+        let left_pos = positions[left];
+        let right_pos = positions[right];
+        let logical_edge =
+            clique_edge_idx_runtime(left_pos.min(right_pos), left_pos.max(right_pos), k)?;
+        edge_order[logical_edge] = u8::try_from(slot).ok()?;
+    }
+    if edge_order.iter().any(|slot| *slot == u8::MAX) {
+        return None;
+    }
+    let leader_edge_idx = u32::from(edge_order[clique_edge_idx_runtime(0, 1, k)?]);
+    let iteration_order: Vec<u8> = (0..k)
+        .map(|idx| u8::try_from(idx).ok())
+        .collect::<Option<_>>()?;
+
+    let swap_slots: HashSet<usize> = plan
+        .column_swaps
+        .iter()
+        .filter(|swap| swap.swap_cols)
+        .map(|swap| usize::from(swap.edge_slot))
+        .collect();
+    if swap_slots.iter().any(|slot| *slot >= expected_edges) {
+        return None;
+    }
+    let required_sort_slots: HashSet<usize> = plan
+        .sorted_layout_requirements
+        .edge_slots
+        .iter()
+        .copied()
+        .map(usize::from)
+        .collect();
+    if required_sort_slots
+        .iter()
+        .any(|slot| *slot >= expected_edges)
+    {
+        return None;
+    }
+
+    Some(KCliqueDispatchParams {
+        edge_permutation,
+        edge_order,
+        iteration_order,
+        leader_edge_idx,
+        swap_slots,
+        required_sort_slots,
+    })
+}
+
+fn live_kclique_edge_permutation(
+    plan: &KCliqueVariableOrder,
+    expected_edges: usize,
+) -> Option<Vec<usize>> {
+    let values: Vec<usize> = plan
+        .edge_permutation
+        .iter()
+        .copied()
+        .take_while(|value| *value != u8::MAX)
+        .map(usize::from)
+        .collect();
+    if values.len() != expected_edges {
+        return None;
+    }
+    let mut seen = vec![false; expected_edges];
+    for &value in &values {
+        if value >= expected_edges || seen[value] {
+            return None;
+        }
+        seen[value] = true;
+    }
+    Some(values)
+}
+
+fn live_kclique_variable_positions(plan: &KCliqueVariableOrder, k: usize) -> Option<Vec<usize>> {
+    let mut positions = Vec::with_capacity(k);
+    let mut seen = vec![false; k];
+    for original_var in 0..k {
+        let pos = usize::from(*plan.variable_positions.get(original_var)?);
+        if pos >= k || seen[pos] {
+            return None;
+        }
+        seen[pos] = true;
+        positions.push(pos);
+    }
+    Some(positions)
+}
+
+fn clique_edge_idx_runtime(i: usize, j: usize, k: usize) -> Option<usize> {
+    if !(i < j && j < k) {
+        return None;
+    }
+    Some(i * (k - 1) - i.saturating_sub(1) * i / 2 + (j - i - 1))
+}
+
+fn clique_edge_pair(edge_idx: usize, k: usize) -> Option<(usize, usize)> {
+    let mut idx = 0usize;
+    for i in 0..k {
+        for j in (i + 1)..k {
+            if idx == edge_idx {
+                return Some((i, j));
+            }
+            idx += 1;
+        }
+    }
+    None
+}
+
+fn build_kclique_head_schema(raw_bufs: &[&CudaBuffer], k: usize) -> Option<Schema> {
+    let mut columns = Vec::with_capacity(k);
+    for variable in 0..k {
+        let (edge_idx, col_idx) = if variable == 0 {
+            (clique_edge_idx_runtime(0, 1, k)?, 0)
+        } else {
+            (clique_edge_idx_runtime(0, variable, k)?, 1)
+        };
+        let ty = raw_bufs.get(edge_idx)?.schema.column_type(col_idx)?;
+        columns.push((format!("col{}", variable), ty));
+    }
+    Some(Schema::new(columns))
+}
+
+fn kclique_output_perm(plan: &KCliqueVariableOrder, k: usize) -> Option<Vec<usize>> {
+    let positions = live_kclique_variable_positions(plan, k)?;
+    Some(positions)
 }
 
 #[cfg(test)]
