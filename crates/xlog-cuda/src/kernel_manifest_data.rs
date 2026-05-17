@@ -478,7 +478,7 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "wcoj_4cycle_build_hg_work_plan_u64",
             "wcoj_4cycle_count_hg_u64",
             "wcoj_4cycle_materialize_hg_u64",
-            // W3.2 — General-arity clique kernel (k=5, k=6 from
+            // W3.2/W6.4 — General-arity clique kernel (k=5..8 from
             // single C++ template; ABI wrappers below are
             // template-call-only per Tier-1 source-audit).
             "wcoj_clique5_count_hg_u32",
@@ -489,6 +489,14 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "wcoj_clique6_materialize_hg_u32",
             "wcoj_clique6_count_hg_u64",
             "wcoj_clique6_materialize_hg_u64",
+            "wcoj_clique7_count_hg_u32",
+            "wcoj_clique7_materialize_hg_u32",
+            "wcoj_clique7_count_hg_u64",
+            "wcoj_clique7_materialize_hg_u64",
+            "wcoj_clique8_count_hg_u32",
+            "wcoj_clique8_materialize_hg_u32",
+            "wcoj_clique8_count_hg_u64",
+            "wcoj_clique8_materialize_hg_u64",
         ],
     },
 ];

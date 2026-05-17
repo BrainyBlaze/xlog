@@ -169,7 +169,7 @@ impl Executor {
                             continue;
                         }
 
-                        // W3.2 — k=5 / k=6 clique dispatch.
+                        // W3.2/W6.4 — k=5..k=8 clique dispatch.
                         // Same shape-gated default-dispatch
                         // pattern as triangle / 4-cycle; silent
                         // fallback to MultiWayJoin.fallback on
@@ -184,6 +184,24 @@ impl Executor {
                             continue;
                         }
                         if let Some(wcoj_result) = self.try_dispatch_wcoj_clique6(rule)? {
+                            if let Some(existing) = self.store.get(&rule.head) {
+                                let merged = self.provider.union_gpu(existing, &wcoj_result)?;
+                                self.store_put(&rule.head, merged);
+                            } else {
+                                self.store_put(&rule.head, wcoj_result);
+                            }
+                            continue;
+                        }
+                        if let Some(wcoj_result) = self.try_dispatch_wcoj_clique7(rule)? {
+                            if let Some(existing) = self.store.get(&rule.head) {
+                                let merged = self.provider.union_gpu(existing, &wcoj_result)?;
+                                self.store_put(&rule.head, merged);
+                            } else {
+                                self.store_put(&rule.head, wcoj_result);
+                            }
+                            continue;
+                        }
+                        if let Some(wcoj_result) = self.try_dispatch_wcoj_clique8(rule)? {
                             if let Some(existing) = self.store.get(&rule.head) {
                                 let merged = self.provider.union_gpu(existing, &wcoj_result)?;
                                 self.store_put(&rule.head, merged);

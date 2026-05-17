@@ -154,22 +154,18 @@ pub fn promote_multiway(
                 rule.body = promoted;
                 continue;
             }
-            // W3.2 — k=5 / k=6 clique promotion. Tree-flatten +
+            // W3.2 / W6.4 — k=5..k=8 clique promotion. Tree-flatten +
             // complete-K_k validation. Robust to left-deep /
             // right-deep / bushy. Order is doc anchor only;
-            // a body matching k=5 cannot also match k=6
+            // a body matching one K cannot also match another
             // (different scan count). Recursive clique bodies
-            // (any scan in the head SCC) are rejected — W3.2
-            // does not extend the recursive WCOJ helper for
-            // clique-keyed dispatch. Rejected in W3.2 — no
-            // closure credit.
+            // (any scan in the head SCC) are rejected here.
             if recursive_scan_count(&rule.body, &head_rel_set) == 0 {
-                if let Some(promoted) = try_promote_clique_k(&rule.body, 5) {
-                    rule.body = promoted;
-                    continue;
-                }
-                if let Some(promoted) = try_promote_clique_k(&rule.body, 6) {
-                    rule.body = promoted;
+                for k in 5..=8 {
+                    if let Some(promoted) = try_promote_clique_k(&rule.body, k) {
+                        rule.body = promoted;
+                        break;
+                    }
                 }
             }
         }
@@ -1051,7 +1047,7 @@ fn try_promote_4cycle(
 }
 
 // ===============================================================
-// W3.2 — K-clique promoter (k = 5, k = 6).
+// W3.2/W6.4 — K-clique promoter (k = 5..8).
 //
 // Tree-flatten + complete-K_k validation. Robust to left-deep /
 // right-deep / bushy lowered trees. Rejects:
@@ -1069,7 +1065,7 @@ fn try_promote_4cycle(
 /// Canonical edge index for (i, j) with 0 <= i < j < k.
 fn clique_edge_idx(i: usize, j: usize, k: usize) -> usize {
     debug_assert!(i < j && j < k);
-    i * (k - 1) - i * (i - 1) / 2 + (j - i - 1)
+    i * (2 * k - i - 1) / 2 + (j - i - 1)
 }
 
 /// Tiny union-find on atom-column slots (position space).
@@ -1165,14 +1161,14 @@ fn walk_clique_node(
     }
 }
 
-/// W3.2 K-clique promoter for k ∈ {5, 6}.
+/// W3.2/W6.4 K-clique promoter for k ∈ {5, 6, 7, 8}.
 ///
 /// Per the W3.2 plan iteration 4 lock: tree-flatten + complete-
 /// K_k validation. Robust to left-deep / right-deep / bushy.
 /// Rejects filter wrappers, reversed atoms, self-edges,
 /// constants, recursive bodies, and any non-canonical shape.
 fn try_promote_clique_k(body: &RirNode, k: usize) -> Option<RirNode> {
-    if !(k == 5 || k == 6) {
+    if !(5..=8).contains(&k) {
         return None;
     }
     let expected_edges = k * (k - 1) / 2;

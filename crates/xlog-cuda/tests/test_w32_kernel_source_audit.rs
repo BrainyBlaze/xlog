@@ -1,23 +1,23 @@
 // crates/xlog-cuda/tests/test_w32_kernel_source_audit.rs
-//! W3.2 — Source-audit certs for the k=6 templated clique kernel.
+//! W3.2/W6.4 — Source-audit certs for templated clique kernels.
 //!
 //! Two-tier audit of `crates/xlog-cuda/kernels/wcoj.cu`:
 //!
-//!   * **Tier 1** (4 cells) — each of the four
-//!     `wcoj_clique6_{count,materialize}_{u32,u64}` ABI wrapper
+//!   * **Tier 1** — each K-specific
+//!     `wcoj_clique{K}_{count,materialize}_{u32,u64}` ABI wrapper
 //!     bodies must contain exactly one statement that calls the
 //!     shared template. No loops, no conditionals, no
 //!     hand-written body inside the wrapper.
 //!
 //!   * **Tier 2** (4 cells) — file-wide forbidden-pattern audit:
-//!     no `template <>` specialization for K=5 or K=6, no
-//!     `if constexpr (K == 6)` (or K==5) branch, no `clique6`
+//!     no `template <>` specialization for K=5..K=8, no
+//!     `if constexpr (K == N)` branch, no `cliqueN`
 //!     helper function body outside the four ABI wrappers, no
-//!     hardcoded `5` / `6` literal in the shared template body.
+//!     hardcoded `5` / `6` / `7` / `8` literal in the shared template body.
 //!
 //! Together these enforce the board contract verbatim:
-//! "the only allowed k=6-specific `.cu` text should be ABI
-//! wrapper names plus calls/instantiations using `<6>`."
+//! "the only allowed K-specific `.cu` text should be ABI
+//! wrapper names plus calls/instantiations using `<K>`."
 
 use std::fs;
 use std::path::PathBuf;
@@ -215,6 +215,40 @@ fn k6_materialize_u64_wrapper_is_template_call_only() {
     );
 }
 
+fn assert_wrapper_family_is_template_call_only(k_val: usize) {
+    let src = wcoj_cu_source();
+    for (wrapper_name, grid_template) in [
+        (
+            format!("wcoj_clique{}_count_hg_u32", k_val),
+            "wcoj_clique_template_count_hg_grid_t",
+        ),
+        (
+            format!("wcoj_clique{}_count_hg_u64", k_val),
+            "wcoj_clique_template_count_hg_grid_t",
+        ),
+        (
+            format!("wcoj_clique{}_materialize_hg_u32", k_val),
+            "wcoj_clique_template_materialize_hg_grid_t",
+        ),
+        (
+            format!("wcoj_clique{}_materialize_hg_u64", k_val),
+            "wcoj_clique_template_materialize_hg_grid_t",
+        ),
+    ] {
+        assert_wrapper_is_single_template_call(&src, &wrapper_name, grid_template, k_val);
+    }
+}
+
+#[test]
+fn k7_wrappers_are_template_call_only() {
+    assert_wrapper_family_is_template_call_only(7);
+}
+
+#[test]
+fn k8_wrappers_are_template_call_only() {
+    assert_wrapper_family_is_template_call_only(8);
+}
+
 // ===============================================================
 // Tier 2 — file-wide forbidden-pattern audit (4 cells)
 // ===============================================================
@@ -236,20 +270,18 @@ fn no_explicit_k6_template_specialization() {
         let mut start = 0;
         while let Some(pos) = compact[start..].find(phrase) {
             let abs = start + pos;
-            // Look in the next 200 chars for any "<6" — explicit
-            // K=6 specialization.
+            // Look in the next 200 chars for any K-specific
+            // specialization.
             let window_end = (abs + 200).min(compact.len());
             let window = &compact[abs..window_end];
-            assert!(
-                !window.contains("<6"),
-                "Forbidden: explicit template specialization for K=6 detected. Window:\n{}",
-                window
-            );
-            assert!(
-                !window.contains("<5"),
-                "Forbidden: explicit template specialization for K=5 detected. Window:\n{}",
-                window
-            );
+            for k_val in 5..=8 {
+                assert!(
+                    !window.contains(&format!("<{}", k_val)),
+                    "Forbidden: explicit template specialization for K={} detected. Window:\n{}",
+                    k_val,
+                    window
+                );
+            }
             start = abs + phrase.len();
         }
     }
@@ -259,18 +291,16 @@ fn no_explicit_k6_template_specialization() {
 fn no_if_constexpr_k_equals_6_branch() {
     let src = strip_comments(&wcoj_cu_source());
     let compact: String = src.split_whitespace().collect::<Vec<_>>().join(" ");
-    // Forbidden patterns: `if constexpr (K == 6)`, `if constexpr (K == 5)`,
-    // `if (K == 6)`, `if (K == 5)`, plus minor whitespace variants.
-    let forbidden = [
-        "if constexpr (K == 6)",
-        "if constexpr (K == 5)",
-        "if constexpr (K_VAL == 6)",
-        "if constexpr (K_VAL == 5)",
-        "if (K == 6)",
-        "if (K == 5)",
-        "if (K_VAL == 6)",
-        "if (K_VAL == 5)",
-    ];
+    let forbidden: Vec<String> = (5..=8)
+        .flat_map(|k| {
+            [
+                format!("if constexpr (K == {})", k),
+                format!("if constexpr (K_VAL == {})", k),
+                format!("if (K == {})", k),
+                format!("if (K_VAL == {})", k),
+            ]
+        })
+        .collect();
     for phrase in &forbidden {
         assert!(
             !compact.contains(phrase),
@@ -287,21 +317,36 @@ fn no_if_constexpr_k_equals_6_branch() {
 
 #[test]
 fn no_clique6_helper_function_body() {
+    assert_no_clique_helper_function_body(6);
+}
+
+#[test]
+fn no_clique7_helper_function_body() {
+    assert_no_clique_helper_function_body(7);
+}
+
+#[test]
+fn no_clique8_helper_function_body() {
+    assert_no_clique_helper_function_body(8);
+}
+
+fn assert_no_clique_helper_function_body(k_val: usize) {
     let src = strip_comments(&wcoj_cu_source());
-    // The four ABI wrappers are the only `clique6`-named entities
+    let clique_token = format!("clique{}", k_val);
+    // The four ABI wrappers are the only `cliqueN`-named entities
     // permitted to have a function body. Any other `clique6`
     // identifier with a `__device__` or `__global__` qualifier
     // followed by a non-empty body would be forbidden.
     let allowed_names = [
-        "wcoj_clique6_count_hg_u32",
-        "wcoj_clique6_count_hg_u64",
-        "wcoj_clique6_materialize_hg_u32",
-        "wcoj_clique6_materialize_hg_u64",
+        format!("wcoj_clique{}_count_hg_u32", k_val),
+        format!("wcoj_clique{}_count_hg_u64", k_val),
+        format!("wcoj_clique{}_materialize_hg_u32", k_val),
+        format!("wcoj_clique{}_materialize_hg_u64", k_val),
     ];
-    // Find every `clique6` substring; for each, check the
+    // Find every `cliqueN` substring; for each, check the
     // surrounding context against the allowed-name whitelist.
     let mut start = 0;
-    while let Some(pos) = src[start..].find("clique6") {
+    while let Some(pos) = src[start..].find(&clique_token) {
         let abs = start + pos;
         // Walk back to the start of the identifier (alphanumeric
         // + underscore tokens).
@@ -316,7 +361,7 @@ fn no_clique6_helper_function_body() {
             }
         }
         // Walk forward to the end of the identifier.
-        let mut id_end = abs + "clique6".len();
+        let mut id_end = abs + clique_token.len();
         while id_end < bytes.len() {
             let c = bytes[id_end];
             if c.is_ascii_alphanumeric() || c == b'_' {
@@ -331,7 +376,7 @@ fn no_clique6_helper_function_body() {
         // Otherwise, if the identifier appears as a function
         // declarator preceded by `__device__` or `__global__`
         // followed by a `{ ... }` body, it's forbidden.
-        if !allowed_names.contains(&ident) {
+        if !allowed_names.iter().any(|allowed| allowed == ident) {
             // Simple heuristic: look 80 chars back for
             // `__device__` or `__global__` qualifier, AND look
             // forward for `{`. If both, forbidden.
@@ -365,8 +410,8 @@ fn no_six_literal_in_template_body() {
     let template_names = [
         "wcoj_clique_template_count_t",
         "wcoj_clique_template_emit_t",
-        "wcoj_clique_template_count_grid_t",
-        "wcoj_clique_template_materialize_grid_t",
+        "wcoj_clique_template_count_hg_grid_t",
+        "wcoj_clique_template_materialize_hg_grid_t",
         "clique_recurse_t",
     ];
     for name in &template_names {
@@ -433,7 +478,7 @@ fn no_six_literal_in_template_body() {
             let mut k = 0;
             while k < bytes.len() {
                 let c = bytes[k];
-                if c == b'5' || c == b'6' {
+                if matches!(c, b'5' | b'6' | b'7' | b'8') {
                     let prev = if k == 0 { b' ' } else { bytes[k - 1] };
                     let next = if k + 1 < bytes.len() {
                         bytes[k + 1]

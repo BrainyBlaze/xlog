@@ -1,16 +1,19 @@
 // crates/xlog-integration/tests/test_wcoj_clique_dispatch.rs
-//! W3.2 — Runtime dispatch certs for k=5/k=6 clique WCOJ.
+//! W3.2/W6.4 — Runtime dispatch certs for k=5..k=8 clique WCOJ.
 //!
-//! 4 cells:
+//! Counter/parity cells:
 //!   1. clique5 counter advances + row set matches MultiWayJoin.fallback.
 //!   2. clique6 same at k=6.
-//!   3. clique5 dispatcher decline does NOT advance counter +
+//!   3. clique7 same at k=7.
+//!   4. clique8 same at k=8.
+//! Dispatcher-decline cells:
+//!   5. clique5 dispatcher decline does NOT advance counter +
 //!      row set matches fallback (malformed-schema dispatch path).
-//!   4. clique6 same.
+//!   6. clique6 same.
 //!
 //! Tests 1 + 2 build a small K-clique rule via the compiler, run
 //! under default config, assert
-//! `executor.wcoj_clique{5,6}_dispatch_count() >= 1` AND row set
+//! `executor.wcoj_clique{5,6,7,8}_dispatch_count() >= 1` AND row set
 //! equals the body that would result from `MultiWayJoin.fallback`
 //! (built via a test-only RIR rewrite helper that substitutes
 //! MultiWayJoin nodes with their fallback field). NO new
@@ -207,6 +210,46 @@ const CLIQUE6_SRC: &str = r#"
         e23(V2, V3), e24(V2, V4), e25(V2, V5),
         e34(V3, V4), e35(V3, V5),
         e45(V4, V5).
+"#;
+
+/// XLOG source for K_7 clique. 21 edges.
+const CLIQUE7_SRC: &str = r#"
+    pred e01(u32, u32). pred e02(u32, u32). pred e03(u32, u32).
+    pred e04(u32, u32). pred e05(u32, u32). pred e06(u32, u32).
+    pred e12(u32, u32). pred e13(u32, u32). pred e14(u32, u32). pred e15(u32, u32). pred e16(u32, u32).
+    pred e23(u32, u32). pred e24(u32, u32). pred e25(u32, u32). pred e26(u32, u32).
+    pred e34(u32, u32). pred e35(u32, u32). pred e36(u32, u32).
+    pred e45(u32, u32). pred e46(u32, u32).
+    pred e56(u32, u32).
+    pred clique7(u32, u32, u32, u32, u32, u32, u32).
+    clique7(V0, V1, V2, V3, V4, V5, V6) :-
+        e01(V0, V1), e02(V0, V2), e03(V0, V3), e04(V0, V4), e05(V0, V5), e06(V0, V6),
+        e12(V1, V2), e13(V1, V3), e14(V1, V4), e15(V1, V5), e16(V1, V6),
+        e23(V2, V3), e24(V2, V4), e25(V2, V5), e26(V2, V6),
+        e34(V3, V4), e35(V3, V5), e36(V3, V6),
+        e45(V4, V5), e46(V4, V6),
+        e56(V5, V6).
+"#;
+
+/// XLOG source for K_8 clique. 28 edges.
+const CLIQUE8_SRC: &str = r#"
+    pred e01(u32, u32). pred e02(u32, u32). pred e03(u32, u32).
+    pred e04(u32, u32). pred e05(u32, u32). pred e06(u32, u32). pred e07(u32, u32).
+    pred e12(u32, u32). pred e13(u32, u32). pred e14(u32, u32). pred e15(u32, u32). pred e16(u32, u32). pred e17(u32, u32).
+    pred e23(u32, u32). pred e24(u32, u32). pred e25(u32, u32). pred e26(u32, u32). pred e27(u32, u32).
+    pred e34(u32, u32). pred e35(u32, u32). pred e36(u32, u32). pred e37(u32, u32).
+    pred e45(u32, u32). pred e46(u32, u32). pred e47(u32, u32).
+    pred e56(u32, u32). pred e57(u32, u32).
+    pred e67(u32, u32).
+    pred clique8(u32, u32, u32, u32, u32, u32, u32, u32).
+    clique8(V0, V1, V2, V3, V4, V5, V6, V7) :-
+        e01(V0, V1), e02(V0, V2), e03(V0, V3), e04(V0, V4), e05(V0, V5), e06(V0, V6), e07(V0, V7),
+        e12(V1, V2), e13(V1, V3), e14(V1, V4), e15(V1, V5), e16(V1, V6), e17(V1, V7),
+        e23(V2, V3), e24(V2, V4), e25(V2, V5), e26(V2, V6), e27(V2, V7),
+        e34(V3, V4), e35(V3, V5), e36(V3, V6), e37(V3, V7),
+        e45(V4, V5), e46(V4, V6), e47(V4, V7),
+        e56(V5, V6), e57(V5, V7),
+        e67(V6, V7).
 "#;
 
 /// Build a complete-K_K fixture on K vertices. Returns
@@ -428,6 +471,28 @@ fn clique6_dispatch_counter_advances_and_row_set_matches_fallback_body() {
     };
     run_counter_advance_test(&fix, CLIQUE6_SRC, "clique6", 6, |e| {
         e.wcoj_clique6_dispatch_count()
+    });
+}
+
+#[test]
+fn clique7_dispatch_counter_advances_and_row_set_matches_fallback_body() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    run_counter_advance_test(&fix, CLIQUE7_SRC, "clique7", 7, |e| {
+        e.wcoj_clique7_dispatch_count()
+    });
+}
+
+#[test]
+fn clique8_dispatch_counter_advances_and_row_set_matches_fallback_body() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    run_counter_advance_test(&fix, CLIQUE8_SRC, "clique8", 8, |e| {
+        e.wcoj_clique8_dispatch_count()
     });
 }
 
