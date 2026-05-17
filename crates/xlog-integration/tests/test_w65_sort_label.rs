@@ -94,6 +94,7 @@ fn w65_runtime_query_result_sort_labels_follow_query_variables() {
 fn w65_pyxlog_logic_query_result_exposes_sort_labels() {
     let lib_src = include_str!("../../pyxlog/src/lib.rs");
     let logic_src = include_str!("../../pyxlog/src/logic.rs");
+    let native_stub = include_str!("../../pyxlog/python/pyxlog/_native.pyi");
 
     assert!(
         lib_src.contains("pub sort_labels: Vec<String>"),
@@ -102,5 +103,9 @@ fn w65_pyxlog_logic_query_result_exposes_sort_labels() {
     assert!(
         logic_src.contains("sort_labels: q.sort_labels"),
         "pyxlog result packing must preserve xlog-gpu query sort labels"
+    );
+    assert!(
+        native_stub.contains("sort_labels: list[str]"),
+        "pyxlog type stubs must expose LogicQueryResult.sort_labels"
     );
 }

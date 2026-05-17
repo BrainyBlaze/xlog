@@ -74,6 +74,8 @@ Implemented xlog-side certs:
   - `w65_query_output_sort_labels_follow_query_variables`
   - `w65_runtime_query_result_sort_labels_follow_query_variables`
   - `w65_pyxlog_logic_query_result_exposes_sort_labels`
+    - covers the native PyO3 field, result packing, and `_native.pyi` stub
+      surface for downstream type checkers.
 
 Static DTS-DLM unchanged check:
 
