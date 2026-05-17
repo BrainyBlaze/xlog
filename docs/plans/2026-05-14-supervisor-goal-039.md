@@ -3,7 +3,7 @@
 **Supervisor:** Claude Code.
 **Implementer:** Codex CLI on tmux session `codex-xlog`.
 **Predecessor:** `docs/plans/2026-05-14-supervisor-goal-038.md` (Phase 1: W3 axis closure).
-**Predecessor state at Phase-2 cut:** Phase 1 DONE — `feat/w3-bundle-integration` HEAD `<SET_AT_PHASE1_CLOSE>`; W3.3, W3.5, W3.6, W3.7, W3.8, W3.9 all DONE; W3.4 re-validated; W4.1/W5.1/W5.2/W2.5 regression-free; peak VRAM ≤ 38 GB.
+**Predecessor state at Phase-2 cut:** Phase 1 DONE — `feat/w3-bundle-integration` HEAD `eb9d53a62f1ae6ca0f255e5dbb16636cbe091d92` (cherry-picked to `main` as `5ffeca0a` 2026-05-17); W3.3, W3.5, W3.6, W3.7, W3.8, W3.9 all DONE per user-approved Phase-1 W3 axis closure 2026-05-17; W3.4 re-validated via `wcoj_w33_superhub` successor at 4.032× (M_INT.1); W4.1/W5.1/W5.2/W2.5 regression-free per M_INT.2/3/5; peak VRAM ≤ 38 GB per M_INT.11; M_INT.4 per-path absolute wall-time green via per-cell paired Criterion sampling (24/24 + 12/12 + 12/12 + 72/72 + 72/72 + 144/144 per Codex execution 2026-05-17 + supervisor decision artifact `docs/evidence/2026-05-14-g38-mint4-supervisor-amendment.md` Authorization 4).
 **Phase-2 launch precondition:** Phase 1 closed AND user has explicitly authorized Phase 2 dispatch.
 **Date:** 2026-05-14.
 **Methodology:** Basili–Caldiera–Rombach GQM + GQM+Strategies. References: https://en.wikipedia.org/wiki/GQM.
