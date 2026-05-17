@@ -18,7 +18,8 @@
 
 use xlog_logic::ast::{AggExpr, AggOp, Atom, BodyLiteral, CompOp, Comparison, IsExpr, Rule, Term};
 use xlog_logic::hypergraph::{
-    analyze, explain, AppearanceOrder, Boundary, Eligibility, HypergraphRule, VariableOrder,
+    analyze, explain, is_eligible, AppearanceOrder, Boundary, Eligibility, ExecutorContext,
+    HypergraphRule, VariableOrder,
 };
 
 // ---------------------------------------------------------------
@@ -176,9 +177,9 @@ fn eligible_triangle_query_is_eligible() {
         ],
     );
     let hg = HypergraphRule::from_rule(&r);
-    let v = analyze(&hg);
+    let v = analyze(&hg, ExecutorContext::HashFallback);
     assert_eq!(v, Eligibility::Eligible);
-    assert!(v.is_eligible());
+    assert!(is_eligible(&hg, ExecutorContext::HashFallback));
     assert!(v.boundaries().is_empty());
 }
 
@@ -194,7 +195,10 @@ fn eligible_two_atom_rule_is_eligible_per_pr_doc() {
             pos("e", vec![var("Y"), var("Z")]),
         ],
     );
-    let v = analyze(&HypergraphRule::from_rule(&r));
+    let v = analyze(
+        &HypergraphRule::from_rule(&r),
+        ExecutorContext::HashFallback,
+    );
     assert_eq!(v, Eligibility::Eligible);
 }
 
@@ -210,7 +214,10 @@ fn eligible_rule_with_filters_stays_eligible() {
             cmp(var("Y"), CompOp::Lt, int(10)),
         ],
     );
-    let v = analyze(&HypergraphRule::from_rule(&r));
+    let v = analyze(
+        &HypergraphRule::from_rule(&r),
+        ExecutorContext::HashFallback,
+    );
     assert_eq!(v, Eligibility::Eligible);
 }
 
@@ -222,7 +229,10 @@ fn eligible_rule_with_filters_stays_eligible() {
 #[test]
 fn ground_fact_is_ineligible_with_groundfact_boundary() {
     let r = rule_with(atom("edge", vec![int(1), int(2)]), vec![]);
-    let v = analyze(&HypergraphRule::from_rule(&r));
+    let v = analyze(
+        &HypergraphRule::from_rule(&r),
+        ExecutorContext::HashFallback,
+    );
     let bs = v.boundaries();
     assert!(bs.contains(&Boundary::GroundFact));
     // Also has InsufficientPositiveAtoms? — no, the analyzer skips
@@ -249,7 +259,10 @@ fn head_aggregation_triggers_headaggregation_boundary() {
             pos("e", vec![var("Y"), var("Z")]),
         ],
     );
-    let v = analyze(&HypergraphRule::from_rule(&r));
+    let v = analyze(
+        &HypergraphRule::from_rule(&r),
+        ExecutorContext::HashFallback,
+    );
     assert!(v.boundaries().contains(&Boundary::HeadAggregation));
 }
 
@@ -263,7 +276,10 @@ fn body_negation_triggers_bodynegation_boundary() {
             neg("f", vec![var("X"), var("Y")]),
         ],
     );
-    let v = analyze(&HypergraphRule::from_rule(&r));
+    let v = analyze(
+        &HypergraphRule::from_rule(&r),
+        ExecutorContext::HashFallback,
+    );
     assert!(v.boundaries().contains(&Boundary::BodyNegation));
 }
 
@@ -285,7 +301,10 @@ fn body_is_expr_triggers_bodyisexpr_boundary() {
             pos("q", vec![var("Z")]),
         ],
     );
-    let v = analyze(&HypergraphRule::from_rule(&r));
+    let v = analyze(
+        &HypergraphRule::from_rule(&r),
+        ExecutorContext::HashFallback,
+    );
     assert!(v.boundaries().contains(&Boundary::BodyIsExpr));
 }
 
@@ -296,7 +315,10 @@ fn single_atom_body_triggers_insufficientpositiveatoms_boundary() {
         atom("p", vec![var("X")]),
         vec![pos("e", vec![var("X"), var("Y")])],
     );
-    let v = analyze(&HypergraphRule::from_rule(&r));
+    let v = analyze(
+        &HypergraphRule::from_rule(&r),
+        ExecutorContext::HashFallback,
+    );
     assert!(v
         .boundaries()
         .contains(&Boundary::InsufficientPositiveAtoms { positive_count: 1 }));
@@ -306,7 +328,10 @@ fn single_atom_body_triggers_insufficientpositiveatoms_boundary() {
 fn comparison_only_body_triggers_insufficientpositiveatoms_boundary() {
     // q :- 1 < 2. — unusual but legal AST: zero positive atoms.
     let r = rule_with(atom("q", vec![]), vec![cmp(int(1), CompOp::Lt, int(2))]);
-    let v = analyze(&HypergraphRule::from_rule(&r));
+    let v = analyze(
+        &HypergraphRule::from_rule(&r),
+        ExecutorContext::HashFallback,
+    );
     assert!(v
         .boundaries()
         .contains(&Boundary::InsufficientPositiveAtoms { positive_count: 0 }));
@@ -326,11 +351,18 @@ fn five_join_keys_trigger_joinkeysexceedbinaryfallbacklimit_boundary() {
             pos("r5", vec![var("E"), var("A")]),
         ],
     );
-    let v = analyze(&HypergraphRule::from_rule(&r));
+    let v = analyze(
+        &HypergraphRule::from_rule(&r),
+        ExecutorContext::HashFallback,
+    );
     let bs = v.boundaries();
     assert!(bs.iter().any(|b| matches!(
         b,
-        Boundary::JoinKeysExceedBinaryFallbackLimit { count: 5, limit: 4 }
+        Boundary::JoinKeysExceedBinaryFallbackLimit {
+            context: ExecutorContext::HashFallback,
+            count: 5,
+            limit: 4,
+        }
     )));
 }
 
@@ -347,7 +379,10 @@ fn four_join_keys_stay_eligible() {
             pos("r4", vec![var("D"), var("A")]),
         ],
     );
-    let v = analyze(&HypergraphRule::from_rule(&r));
+    let v = analyze(
+        &HypergraphRule::from_rule(&r),
+        ExecutorContext::HashFallback,
+    );
     assert_eq!(v, Eligibility::Eligible);
 }
 
@@ -375,7 +410,7 @@ fn self_join_within_single_atom_counts_as_one_vertex_occurrence() {
     // And the rule analyzes as Eligible: only X is a join key (Y is
     // projection-only). Locks the eligibility invariant against a
     // future "simplification" that drops the dedup.
-    let v = analyze(&hg);
+    let v = analyze(&hg, ExecutorContext::HashFallback);
     assert_eq!(v, Eligibility::Eligible);
 }
 
@@ -394,7 +429,7 @@ fn projection_only_variables_do_not_count_as_join_keys() {
     );
     let hg = HypergraphRule::from_rule(&r);
     assert_eq!(hg.vertex_count(), 5);
-    let v = analyze(&hg);
+    let v = analyze(&hg, ExecutorContext::HashFallback);
     assert_eq!(v, Eligibility::Eligible);
 }
 
@@ -417,7 +452,10 @@ fn multiple_boundaries_are_reported_independently() {
             }),
         ],
     );
-    let v = analyze(&HypergraphRule::from_rule(&r));
+    let v = analyze(
+        &HypergraphRule::from_rule(&r),
+        ExecutorContext::HashFallback,
+    );
     let bs = v.boundaries();
     assert!(bs.contains(&Boundary::BodyNegation));
     assert!(bs.contains(&Boundary::BodyIsExpr));
@@ -473,7 +511,7 @@ fn explain_eligible_triangle_snapshot() {
         ],
     );
     let hg = HypergraphRule::from_rule(&r);
-    let v = analyze(&hg);
+    let v = analyze(&hg, ExecutorContext::HashFallback);
     let s = explain(&hg, &v, &AppearanceOrder);
     let expected = "\
 rule head=tri
@@ -506,7 +544,7 @@ fn explain_ineligible_aggregation_snapshot() {
         ],
     );
     let hg = HypergraphRule::from_rule(&r);
-    let v = analyze(&hg);
+    let v = analyze(&hg, ExecutorContext::HashFallback);
     let s = explain(&hg, &v, &AppearanceOrder);
     let expected = "\
 rule head=p
@@ -532,7 +570,7 @@ fn explain_ineligible_negation_snapshot() {
         ],
     );
     let hg = HypergraphRule::from_rule(&r);
-    let v = analyze(&hg);
+    let v = analyze(&hg, ExecutorContext::HashFallback);
     let s = explain(&hg, &v, &AppearanceOrder);
     let expected = "\
 rule head=p
@@ -561,7 +599,7 @@ fn explain_ineligible_keys_over_4_snapshot() {
         ],
     );
     let hg = HypergraphRule::from_rule(&r);
-    let v = analyze(&hg);
+    let v = analyze(&hg, ExecutorContext::HashFallback);
     let s = explain(&hg, &v, &AppearanceOrder);
     let expected = "\
 rule head=p
@@ -574,7 +612,7 @@ rule head=p
     r5(?E, ?A)
   filters: 0
   eligibility: Ineligible
-    JoinKeysExceedBinaryFallbackLimit(count=5, limit=4)
+    JoinKeysExceedBinaryFallbackLimit(context=HashFallback, count=5, limit=4)
   variable-order(appearance): [A B C D E]
 ";
     assert_eq!(s, expected);
@@ -587,7 +625,7 @@ fn explain_single_atom_snapshot() {
         vec![pos("e", vec![var("X"), var("Y")])],
     );
     let hg = HypergraphRule::from_rule(&r);
-    let v = analyze(&hg);
+    let v = analyze(&hg, ExecutorContext::HashFallback);
     let s = explain(&hg, &v, &AppearanceOrder);
     let expected = "\
 rule head=p
@@ -622,7 +660,7 @@ fn explain_multi_boundary_snapshot_locks_emission_order() {
         ],
     );
     let hg = HypergraphRule::from_rule(&r);
-    let v = analyze(&hg);
+    let v = analyze(&hg, ExecutorContext::HashFallback);
     let s = explain(&hg, &v, &AppearanceOrder);
     let expected = "\
 rule head=p
@@ -643,7 +681,7 @@ fn explain_ground_fact_snapshot() {
     // Pins the GroundFact format-boundary arm.
     let r = rule_with(atom("edge", vec![int(1), int(2)]), vec![]);
     let hg = HypergraphRule::from_rule(&r);
-    let v = analyze(&hg);
+    let v = analyze(&hg, ExecutorContext::HashFallback);
     let s = explain(&hg, &v, &AppearanceOrder);
     let expected = "\
 rule head=edge
@@ -677,7 +715,7 @@ fn explain_body_is_expr_snapshot() {
         ],
     );
     let hg = HypergraphRule::from_rule(&r);
-    let v = analyze(&hg);
+    let v = analyze(&hg, ExecutorContext::HashFallback);
     let s = explain(&hg, &v, &AppearanceOrder);
     let expected = "\
 rule head=p
@@ -704,7 +742,7 @@ fn explain_with_filters_and_anonymous_wildcards_snapshot() {
         ],
     );
     let hg = HypergraphRule::from_rule(&r);
-    let v = analyze(&hg);
+    let v = analyze(&hg, ExecutorContext::HashFallback);
     let s = explain(&hg, &v, &AppearanceOrder);
     let expected = "\
 rule head=p

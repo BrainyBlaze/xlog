@@ -10,7 +10,8 @@
 //!   - [`ir::HypergraphRule`] — vertices = body variables, hyperedges =
 //!     positive body atoms.
 //!   - [`eligibility::analyze`] / [`eligibility::analyze_typed`] —
-//!     decide Eligible vs Ineligible with a structured
+//!     decide Eligible vs Ineligible for an explicit
+//!     [`eligibility::ExecutorContext`] with a structured
 //!     [`eligibility::Boundary`] list explaining why.
 //!   - [`var_order::VariableOrder`] / [`var_order::AppearanceOrder`] —
 //!     trait + trivial impl. Cost models slot in here later.
@@ -81,7 +82,10 @@ pub mod scc;
 pub mod typed;
 pub mod var_order;
 
-pub use eligibility::{analyze, analyze_typed, Boundary, Eligibility, WCOJ_SUPPORTED_KEY_TYPES};
+pub use eligibility::{
+    analyze, analyze_typed, is_eligible, Boundary, Eligibility, ExecutorContext,
+    BINARY_FALLBACK_KEY_LIMIT, WCOJ_ELIGIBLE_KEY_LIMIT, WCOJ_SUPPORTED_KEY_TYPES,
+};
 pub use explain::explain;
 pub use fixpoint::{evaluate_fixpoint, FixpointConfig, FixpointError};
 pub use inference::{infer_scc_predicate_schemas, InferenceError, InferredSchemas};

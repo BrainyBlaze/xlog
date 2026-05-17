@@ -16,8 +16,8 @@ use std::collections::BTreeMap;
 use xlog_core::ScalarType;
 use xlog_logic::ast::{Atom, BodyLiteral, CompOp, Comparison, Rule, Term};
 use xlog_logic::hypergraph::{
-    analyze_typed, evaluate_rule, AppearanceOrder, Boundary, Eligibility, HypergraphRule,
-    RefEvalError, RefRelation, RefRelationStore, RefValue, VariableOrder, VertexId,
+    analyze_typed, evaluate_rule, AppearanceOrder, Boundary, Eligibility, ExecutorContext,
+    HypergraphRule, RefEvalError, RefRelation, RefRelationStore, RefValue, VariableOrder, VertexId,
 };
 
 // ---------------------------------------------------------------
@@ -79,7 +79,7 @@ fn unsupported_key_type_boundary_emitted_by_typed_analyzer() {
     types.insert("Y".to_string(), ScalarType::F64);
     types.insert("Z".to_string(), ScalarType::U32);
 
-    let v = analyze_typed(&hg, &types);
+    let v = analyze_typed(&hg, &types, ExecutorContext::HashFallback);
     let bs = v.boundaries();
     assert!(
         bs.iter().any(|b| matches!(
@@ -113,7 +113,7 @@ fn typed_analyzer_eligible_when_all_join_keys_are_supported_types() {
     types.insert("Y".to_string(), ScalarType::U32);
     types.insert("Z".to_string(), ScalarType::U32);
 
-    let v = analyze_typed(&hg, &types);
+    let v = analyze_typed(&hg, &types, ExecutorContext::HashFallback);
     assert_eq!(v, Eligibility::Eligible);
 }
 
@@ -497,7 +497,7 @@ fn typed_analyzer_ignores_unsupported_types_on_projection_only_variables() {
     types.insert("D".to_string(), ScalarType::F64);
     types.insert("E".to_string(), ScalarType::F64);
 
-    let v = analyze_typed(&hg, &types);
+    let v = analyze_typed(&hg, &types, ExecutorContext::HashFallback);
     assert_eq!(v, Eligibility::Eligible);
 }
 

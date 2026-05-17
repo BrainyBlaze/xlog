@@ -11,10 +11,9 @@
 //!
 //! "Ineligible" means at least one [`Boundary`] makes multiway
 //! planning either impossible (negation, aggregation in head) or
-//! unsupported by the binary-fallback executor we share constraints
-//! with today (>4 keys per `pack_keys_gpu_on_stream`). Each boundary
-//! is reported separately so the explain output and tests can lock
-//! in *why* a rule fell back.
+//! unsupported by the executor context under consideration. Each
+//! boundary is reported separately so the explain output and tests
+//! can lock in *why* a rule fell back.
 
 use super::ir::{HypergraphRule, VertexId};
 use std::collections::BTreeMap;
@@ -26,12 +25,35 @@ use xlog_core::ScalarType;
 /// `xlog-cuda/src/provider/relational.rs`.
 ///
 /// This is a **binary-fallback** constraint, not a hypergraph
-/// property. Future WCOJ kernels may have a different (or no) limit
-/// — when that happens, this constant is replaced by per-executor
-/// caps and the [`Boundary::JoinKeysExceedBinaryFallbackLimit`]
-/// variant grows an executor-context discriminator. PR 1 ships the
-/// single-executor world.
+/// property. WCOJ eligibility uses [`ExecutorContext::WcojEligible`]
+/// and a separate context limit; hash fallback continues to use
+/// this value verbatim.
 pub const BINARY_FALLBACK_KEY_LIMIT: usize = 4;
+
+/// The widest K-clique shape the WCOJ planner architecture admits at
+/// the eligibility layer. K=7 and K=8 are accepted here so the
+/// Phase-2 templates can inherit the same planner contract.
+pub const WCOJ_ELIGIBLE_KEY_LIMIT: usize = 8;
+
+/// Executor capability context for join-key width checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutorContext {
+    /// Existing hash/binary fallback executor. The 4-key
+    /// `pack_keys_gpu_on_stream` limit remains binding.
+    HashFallback,
+    /// WCOJ-capable planner path. K5 through K8 are admissible;
+    /// K9+ remains outside the current executor contract.
+    WcojEligible,
+}
+
+impl ExecutorContext {
+    fn join_key_limit(self) -> usize {
+        match self {
+            Self::HashFallback => BINARY_FALLBACK_KEY_LIMIT,
+            Self::WcojEligible => WCOJ_ELIGIBLE_KEY_LIMIT,
+        }
+    }
+}
 
 /// Verdict for a single rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,11 +71,6 @@ pub enum Eligibility {
 }
 
 impl Eligibility {
-    /// True for [`Eligibility::Eligible`].
-    pub fn is_eligible(&self) -> bool {
-        matches!(self, Eligibility::Eligible)
-    }
-
     /// Iterate over boundaries (empty for [`Eligibility::Eligible`]).
     pub fn boundaries(&self) -> &[Boundary] {
         match self {
@@ -101,10 +118,11 @@ pub enum Boundary {
     /// runtime value so the explain output can name the count.
     /// See [`BINARY_FALLBACK_KEY_LIMIT`].
     JoinKeysExceedBinaryFallbackLimit {
+        /// Executor context whose key-width cap was exceeded.
+        context: ExecutorContext,
         /// Observed distinct join-key count.
         count: usize,
-        /// Hard limit borrowed from the binary-fallback executor
-        /// (see [`BINARY_FALLBACK_KEY_LIMIT`]).
+        /// Hard limit for the selected executor context.
         limit: usize,
     },
     /// A join-key variable has a [`ScalarType`] not supported by
@@ -137,7 +155,7 @@ pub enum Boundary {
 /// the one-or-zero-positive-atoms check, which is reported with the
 /// observed `positive_count`). Order stability matters for the
 /// explain-output snapshot tests.
-pub fn analyze(hg: &HypergraphRule) -> Eligibility {
+pub fn analyze(hg: &HypergraphRule, context: ExecutorContext) -> Eligibility {
     let mut boundaries = Vec::new();
 
     if hg.is_fact {
@@ -157,17 +175,17 @@ pub fn analyze(hg: &HypergraphRule) -> Eligibility {
         boundaries.push(Boundary::InsufficientPositiveAtoms { positive_count });
     }
 
-    // Count distinct join-key variables. A "join-key variable" at
-    // PR 1 is any vertex shared by two or more hyperedges. (Variables
-    // that appear in only one atom contribute to projection / output
-    // schema but are not join keys.) The binary-fallback executor's
-    // pack_keys constraint applies to join keys specifically, so this
-    // is the right count to gate on.
+    // Count distinct join-key variables. A "join-key variable" is
+    // any vertex shared by two or more hyperedges. Variables that
+    // appear in only one atom contribute to projection / output
+    // schema but are not join keys.
     let join_key_count = count_join_keys(hg);
-    if join_key_count > BINARY_FALLBACK_KEY_LIMIT {
+    let join_key_limit = context.join_key_limit();
+    if join_key_count > join_key_limit {
         boundaries.push(Boundary::JoinKeysExceedBinaryFallbackLimit {
+            context,
             count: join_key_count,
-            limit: BINARY_FALLBACK_KEY_LIMIT,
+            limit: join_key_limit,
         });
     }
 
@@ -176,6 +194,12 @@ pub fn analyze(hg: &HypergraphRule) -> Eligibility {
     } else {
         Eligibility::Ineligible(boundaries)
     }
+}
+
+/// Return true when [`analyze`] says the rule is eligible in the
+/// selected executor context.
+pub fn is_eligible(hg: &HypergraphRule, context: ExecutorContext) -> bool {
+    matches!(analyze(hg, context), Eligibility::Eligible)
 }
 
 /// Count vertices that appear in two or more hyperedges. These are
@@ -232,10 +256,11 @@ pub const WCOJ_SUPPORTED_KEY_TYPES: &[ScalarType] =
 pub fn analyze_typed(
     hg: &HypergraphRule,
     vertex_types: &BTreeMap<String, ScalarType>,
+    context: ExecutorContext,
 ) -> Eligibility {
     // Start from the structural verdict so structural boundaries
     // (negation, aggregation, etc.) carry through.
-    let base = analyze(hg);
+    let base = analyze(hg, context);
     let mut boundaries: Vec<Boundary> = base.boundaries().to_vec();
 
     let join_key_ids = join_key_vertex_ids(hg);

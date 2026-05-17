@@ -55,8 +55,8 @@ use super::inference::{
 };
 use super::{
     analyze_typed, evaluate_fixpoint, evaluate_rule, evaluate_scc_fixpoint, Eligibility,
-    FixpointConfig, FixpointError, HypergraphRule, RefEvalError, RefRelation, RefRelationStore,
-    RefValue, SccFixpointError, VariableOrder,
+    ExecutorContext, FixpointConfig, FixpointError, HypergraphRule, RefEvalError, RefRelation,
+    RefRelationStore, RefValue, SccFixpointError, VariableOrder,
 };
 use crate::ast::{BodyLiteral, Rule, Term};
 use std::collections::BTreeMap;
@@ -316,7 +316,9 @@ fn typed_gate_with_inference(
 ) -> Result<(), RefEvalError> {
     let vertex_types = derive_vertex_types_with_inference(rule, relations, inferred)?;
     let hg = HypergraphRule::from_rule(rule);
-    if let Eligibility::Ineligible(bs) = analyze_typed(&hg, &vertex_types) {
+    if let Eligibility::Ineligible(bs) =
+        analyze_typed(&hg, &vertex_types, ExecutorContext::HashFallback)
+    {
         return Err(RefEvalError::Ineligible(bs));
     }
     Ok(())
@@ -357,7 +359,9 @@ fn nth_rule_index_with_head(rules: &[Rule], target: &str, n: usize) -> usize {
 fn typed_gate(rule: &Rule, relations: &RefRelationStore) -> Result<(), RefEvalError> {
     let vertex_types = derive_vertex_types(rule, relations)?;
     let hg = HypergraphRule::from_rule(rule);
-    if let Eligibility::Ineligible(bs) = analyze_typed(&hg, &vertex_types) {
+    if let Eligibility::Ineligible(bs) =
+        analyze_typed(&hg, &vertex_types, ExecutorContext::HashFallback)
+    {
         return Err(RefEvalError::Ineligible(bs));
     }
     Ok(())
