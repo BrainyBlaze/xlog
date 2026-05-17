@@ -201,3 +201,17 @@ relations (for example `wmir_body_0_len_1`) or add an explicit body-length/RId
 membership guard to each generated `support_N` clause.
 
 Under goal-039 lock 17, DTS-DLM source mutation is out of bounds for G_W65.
+
+## M_W65 Status
+
+| Metric | Status | Evidence |
+|---|---:|---|
+| M_W65.1 sort-map diagnostic count on m37c-prime replay | RED | 5-doc bounded replay: `SORT_WARNINGS=11`; warning counts `4 x 6`, `48 x 5`; all 264 default events classified as `binding_inactive`. |
+| M_W65.2 Schema-API regression | PASS | `cargo test -p xlog-integration --test test_w65_sort_label -- --nocapture` -> 4/4 PASS; `cargo check -p pyxlog -p xlog-integration --tests` -> PASS. |
+| M_W65.3 every output relation column has non-default sort label | PASS for xlog result boundary | `w65_query_output_sort_labels_follow_query_variables`, `w65_runtime_query_result_sort_labels_follow_query_variables`, and `w65_pyxlog_logic_query_result_exposes_sort_labels` verify compile-time schemas, runtime query results, PyO3 field packing, and `_native.pyi`. |
+| M_W65.4 DTS-DLM `xlog_executor.py:157` unchanged | PASS | `git -C /home/dev/projects/dts-dlm status --short -- src/dts_dlm/propagate/xlog_executor.py` and `git -C /home/dev/projects/dts-dlm diff -- src/dts_dlm/propagate/xlog_executor.py` produced no output; `rg -n "sort_labels" .../xlog_executor.py` has no matches. |
+| M_W65.5 RCA documented | PASS | This file. |
+
+W65 cannot close from xlog-only work because its only red metric requires a
+DTS-DLM source-generation correction, and goal-039 lock 17 forbids DTS-DLM repo
+mutation for G_W65.
