@@ -1278,7 +1278,8 @@ stream-safety contracts.
 
 ### Documentation
 
-- [ ] Add dedicated WCOJ architecture guide.
+- [ ] Add dedicated WCOJ architecture guide. Architecture reference:
+      `docs/wcoj-architecture-guide.md`.
 - [ ] Document WCOJ eligibility, fallback, and performance tuning in a
       user-facing guide rather than only code docs / benchmark docs.
 
