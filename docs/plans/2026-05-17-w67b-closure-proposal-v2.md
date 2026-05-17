@@ -10,6 +10,8 @@
 
 This proposal supersedes closure proposal `ef3fbc7e`. That proposal is preserved as evidence of the original 9-sub-goal state and is not deleted.
 
+The amended governing plan is recorded in `docs/plans/2026-05-14-supervisor-goal-038-B.md`. It captures the Authorization 5 11-sub-goal hierarchy, inserted `G_HIST_KC` and `G_HELP_KC` steps, superseded prior bench/integration/purge runs, preserved step-1 through step-5 heads, and the W6.7 board HOLD.
+
 Authorization 5 added two paper §5 alignment sub-goals:
 
 - `G_HIST_KC` step 6: runtime-histogram-driven block-slice for K-clique.
@@ -57,7 +59,7 @@ Goal-038-B makes the production K5/K6 WCOJ path planner-driven and paper §5-ali
 | M_BENCH38B.1-5 | PASS. Evidence at `docs/evidence/2026-05-17-w67b-bench38b/README.md`: `24/24` accepted path medians within `1.10x`, `12/12` GPU-WCOJ, `12/12` hash-chain, `126` current VRAM snapshots, max VRAM delta `234,881,024` bytes, max histogram metadata ratio `0.033099`, workspace build/test green. |
 | M_INT38B.1-15 | PASS. Evidence at `docs/evidence/2026-05-17-w67b-int38b/README.md`: W3.4 successor `6.609x`; W4.1 `8/8`; W5.1 trio `3/3`; W5.2 amended per-path green; W2.5 default flip `5/5`; K5/K6 clique cert `8/8`; workspace fmt/build/test green; CUDA release cert `206/206`; peak VRAM `201,326,592` bytes; DLPack/no-DtoH `7/7`; provenance `6/6`; M37-A surface-presence cert green; production K5/K6 planner source audit green. |
 | M_PURGE38B.1-11 | PASS. Evidence at `docs/evidence/2026-05-17-w67b-purge38b/README.md`: touched-file scope `52` paths; marker/churn/future scans `0` hits; `cargo +nightly udeps --workspace --all-targets` green; strict dead-code/import/variable release build green; paper-citation coverage green; K-clique hardcoded-leader audit `0` hits; promoter/runtime source audits green. |
-| M_CLOSE38B.1 | PASS once this proposal commit lands. |
+| M_CLOSE38B.1 | PASS once this proposal and the Authorization-5 amended governing plan are committed. |
 | M_CLOSE38B.2-4 | Pending explicit user approval and the follow-up W6.7 board-entry commit. |
 
 ## KPI Status
@@ -81,7 +83,7 @@ Goal-038-B makes the production K5/K6 WCOJ path planner-driven and paper §5-ali
 
 | ID | Source | Status | Blocked by | Required deliverable | Acceptance gate |
 |----|--------|--------|------------|----------------------|-----------------|
-| W6.7 | Goal-038-B | DONE | - | K5/K6 hypergraph planner as production planner: executor-aware eligibility, cost-aware K-clique planner, RIR variable-order surface, plan-consuming runtime/kernel dispatch, structured cost gate, K-clique runtime histogram refresh, K-clique helper-splitting invocation, bench/integration/purge evidence. | Goal-038-B commit chain `ef241c7f` -> `1e8a055f`; M_HG_ELIG.1-4, M_HG_PLAN.1-6, M_RIR_VO.1-4, M_DISP.1-6, M_GATE.1-5, M_HIST_KC.1-8, M_HELP_KC.1-8, M_BENCH38B.1-5, M_INT38B.1-15, M_PURGE38B.1-11 all green; user approval in thread. |
+| W6.7 | Goal-038-B | DONE | - | K5/K6 hypergraph planner as production planner: executor-aware eligibility, cost-aware K-clique planner, RIR variable-order surface, plan-consuming runtime/kernel dispatch, structured cost gate, K-clique runtime histogram refresh, K-clique helper-splitting invocation, bench/integration/purge evidence. | Goal-038-B amended plan `docs/plans/2026-05-14-supervisor-goal-038-B.md`; commit chain `ef241c7f` -> `1e8a055f`; M_HG_ELIG.1-4, M_HG_PLAN.1-6, M_RIR_VO.1-4, M_DISP.1-6, M_GATE.1-5, M_HIST_KC.1-8, M_HELP_KC.1-8, M_BENCH38B.1-5, M_INT38B.1-15, M_PURGE38B.1-11 all green; user approval in thread. |
 
 ## Approval Request
 
