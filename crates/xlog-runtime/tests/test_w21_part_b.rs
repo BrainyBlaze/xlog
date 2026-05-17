@@ -96,11 +96,7 @@ fn build_triangle_var_order(leader_idx: u8) -> VariableOrder {
         ),
         _ => panic!("triangle leader_idx must be in [0, 3): got {leader_idx}"),
     };
-    VariableOrder {
-        leader_idx,
-        lookup_perms,
-        kernel_output_cols,
-    }
+    VariableOrder::legacy(leader_idx, lookup_perms, kernel_output_cols)
 }
 
 fn build_cycle4_var_order(leader_idx: u8) -> VariableOrder {
@@ -140,11 +136,7 @@ fn build_cycle4_var_order(leader_idx: u8) -> VariableOrder {
         ],
         _ => unreachable!(),
     };
-    VariableOrder {
-        leader_idx,
-        lookup_perms,
-        kernel_output_cols,
-    }
+    VariableOrder::legacy(leader_idx, lookup_perms, kernel_output_cols)
 }
 
 // ---------------------------------------------------------------

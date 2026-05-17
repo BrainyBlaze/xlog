@@ -61,11 +61,7 @@ fn triangle_delta_var_order(leader_idx: u8) -> VariableOrder {
         ],
         _ => unreachable!("triangle leader_idx out of range"),
     };
-    VariableOrder {
-        leader_idx,
-        lookup_perms,
-        kernel_output_cols,
-    }
+    VariableOrder::legacy(leader_idx, lookup_perms, kernel_output_cols)
 }
 
 fn cycle4_delta_var_order(leader_idx: u8) -> VariableOrder {
@@ -102,11 +98,7 @@ fn cycle4_delta_var_order(leader_idx: u8) -> VariableOrder {
         ],
         _ => unreachable!("4-cycle leader_idx out of range"),
     };
-    VariableOrder {
-        leader_idx,
-        lookup_perms,
-        kernel_output_cols,
-    }
+    VariableOrder::legacy(leader_idx, lookup_perms, kernel_output_cols)
 }
 
 fn delta_outermost_var_order(

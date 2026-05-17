@@ -569,21 +569,21 @@ pub fn cycle4_kernel_output_cols(leader_idx: u8) -> Vec<ProjectExpr> {
 /// Promoter helper: build a complete `VariableOrder` for a triangle
 /// from the cost model's `leader_idx` decision.
 pub fn build_triangle_var_order(leader_idx: u8) -> VariableOrder {
-    VariableOrder {
+    VariableOrder::legacy(
         leader_idx,
-        lookup_perms: triangle_lookup_perms(leader_idx),
-        kernel_output_cols: triangle_kernel_output_cols(leader_idx),
-    }
+        triangle_lookup_perms(leader_idx),
+        triangle_kernel_output_cols(leader_idx),
+    )
 }
 
 /// Promoter helper: build a complete `VariableOrder` for a 4-cycle
 /// from the cost model's `leader_idx` decision.
 pub fn build_cycle4_var_order(leader_idx: u8) -> VariableOrder {
-    VariableOrder {
+    VariableOrder::legacy(
         leader_idx,
-        lookup_perms: cycle4_lookup_perms(leader_idx),
-        kernel_output_cols: cycle4_kernel_output_cols(leader_idx),
-    }
+        cycle4_lookup_perms(leader_idx),
+        cycle4_kernel_output_cols(leader_idx),
+    )
 }
 
 /// Promoter helper: 4-cycle locked permutation table.

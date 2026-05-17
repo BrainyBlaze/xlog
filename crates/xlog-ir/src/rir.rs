@@ -105,6 +105,87 @@ pub struct LookupPerm {
     pub swap_cols: bool,
 }
 
+/// Maximum K supported by the 38-B K-clique variable-order plan.
+pub const K_CLIQUE_MAX_K: usize = 8;
+
+/// Maximum edge count for K=8 complete binary-edge clique, C(8, 2).
+pub const K_CLIQUE_MAX_EDGES: usize = 28;
+
+/// Column-order rewrite for one K-clique input edge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnSwap {
+    /// Edge slot to rewrite after edge permutation.
+    pub edge_slot: u8,
+    /// Whether the two source columns should be swapped.
+    pub swap_cols: bool,
+}
+
+/// Sorted-layout requirements carried by a K-clique plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SortedLayoutSpec {
+    /// Edge slots whose sorted layouts are required by the plan.
+    pub edge_slots: Vec<u8>,
+    /// Per-edge key-column order required by the sorted layout.
+    pub key_columns: Vec<Vec<u8>>,
+}
+
+/// Helper relation split requested by the K-clique plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelperSplitSpec {
+    /// Stable helper identifier within the plan.
+    pub helper_id: u8,
+    /// Variable whose prefix/fanout is split into the helper.
+    pub variable: u8,
+    /// Edge slots materialized into the helper relation.
+    pub edge_slots: Vec<u8>,
+}
+
+/// Stream group assigned to a K-clique plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StreamGroupId(pub u8);
+
+/// Full variable-order plan for K=5..K=8 clique-family WCOJ dispatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KCliqueVariableOrder {
+    /// Clique arity K.
+    pub k: u8,
+    /// Position for each variable id; unused entries are `u8::MAX`.
+    pub variable_positions: [u8; K_CLIQUE_MAX_K],
+    /// Edge-slot permutation; unused entries are `u8::MAX`.
+    pub edge_permutation: [u8; K_CLIQUE_MAX_EDGES],
+    /// Optional column swaps after edge permutation.
+    pub column_swaps: Vec<ColumnSwap>,
+    /// Sorted-layout requirements for runtime layout construction.
+    pub sorted_layout_requirements: SortedLayoutSpec,
+    /// Helper-split requests attached to this plan.
+    pub helper_split_specs: Vec<HelperSplitSpec>,
+    /// Stream group consumed by stream-mux scheduling.
+    pub stream_group: StreamGroupId,
+}
+
+impl KCliqueVariableOrder {
+    /// Creates a K-clique variable-order plan with all seven required fields.
+    pub fn new(
+        k: u8,
+        variable_positions: [u8; K_CLIQUE_MAX_K],
+        edge_permutation: [u8; K_CLIQUE_MAX_EDGES],
+        column_swaps: Vec<ColumnSwap>,
+        sorted_layout_requirements: SortedLayoutSpec,
+        helper_split_specs: Vec<HelperSplitSpec>,
+        stream_group: StreamGroupId,
+    ) -> Self {
+        Self {
+            k,
+            variable_positions,
+            edge_permutation,
+            column_swaps,
+            sorted_layout_requirements,
+            helper_split_specs,
+            stream_group,
+        }
+    }
+}
+
 /// Variable-ordering decision attached to a `MultiWayJoin`.
 ///
 /// `None` on the parent variant preserves slice 1/2/4/W2.2 dispatch
@@ -130,6 +211,35 @@ pub struct VariableOrder {
     /// identity but the field is omitted (`var_order = None`) — slice
     /// 1/2 keeps using `MultiWayJoin::output_columns` directly.
     pub kernel_output_cols: Vec<ProjectExpr>,
+    /// Full K-clique variable-order plan for K=5..K=8. `None`
+    /// preserves the legacy triangle/4-cycle leader-permutation path.
+    pub kclique: Option<KCliqueVariableOrder>,
+}
+
+impl VariableOrder {
+    /// Creates the legacy triangle/4-cycle leader-permutation form.
+    pub fn legacy(
+        leader_idx: u8,
+        lookup_perms: Vec<LookupPerm>,
+        kernel_output_cols: Vec<ProjectExpr>,
+    ) -> Self {
+        Self {
+            leader_idx,
+            lookup_perms,
+            kernel_output_cols,
+            kclique: None,
+        }
+    }
+
+    /// Creates the full K-clique variable-order form.
+    pub fn kclique(kclique: KCliqueVariableOrder) -> Self {
+        Self {
+            leader_idx: 0,
+            lookup_perms: Vec::new(),
+            kernel_output_cols: Vec::new(),
+            kclique: Some(kclique),
+        }
+    }
 }
 
 /// Comparison operators
