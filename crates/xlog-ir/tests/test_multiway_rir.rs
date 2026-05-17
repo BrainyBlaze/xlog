@@ -169,3 +169,31 @@ fn referenced_relations_handles_4_inputs() {
         );
     }
 }
+
+#[test]
+fn chain_join_is_not_a_leaf_and_walks_inputs_once() {
+    let left = RirNode::Scan { rel: RelId(101) };
+    let right = RirNode::Scan { rel: RelId(202) };
+    let fallback = RirNode::Project {
+        input: Box::new(RirNode::Join {
+            left: Box::new(left.clone()),
+            right: Box::new(right.clone()),
+            left_keys: vec![1],
+            right_keys: vec![0],
+            join_type: JoinType::Inner,
+        }),
+        columns: vec![ProjectExpr::Column(0), ProjectExpr::Column(3)],
+    };
+
+    let node = RirNode::ChainJoin {
+        left: Box::new(left),
+        right: Box::new(right),
+        left_key: 1,
+        right_key: 0,
+        output_columns: vec![ProjectExpr::Column(0), ProjectExpr::Column(3)],
+        fallback: Box::new(fallback),
+    };
+
+    assert!(!node.is_leaf());
+    assert_eq!(node.referenced_relations(), vec![RelId(101), RelId(202)]);
+}

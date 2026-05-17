@@ -1,12 +1,13 @@
-//! Goal-039 G_W63_CHAIN spike cert.
+//! Goal-039 G_W63_CHAIN cert.
 //!
-//! The spike reuses `RirNode::MultiWayJoin` as the chain-shape wrapper
-//! instead of adding the production `ChainJoin` enum variant. This cert
-//! proves the end-to-end path still has the required fallback identity:
+//! The production route emits `RirNode::ChainJoin`. This cert
+//! proves the end-to-end path has the required fallback identity:
 //! default-on chain dispatch and env-disabled fallback produce the same
 //! rows, while the dispatch counter distinguishes the paths.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,7 @@ use xlog_cuda::device_runtime::{
 };
 use xlog_cuda::memory::CudaBuffer;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_ir::ExecutionPlan;
 use xlog_logic::Compiler;
 use xlog_runtime::Executor;
 
@@ -38,6 +40,10 @@ struct RuntimeBackedFixture {
 }
 
 fn make_runtime_backed_fixture() -> Option<RuntimeBackedFixture> {
+    make_runtime_backed_fixture_with_budget(64 * 1024 * 1024)
+}
+
+fn make_runtime_backed_fixture_with_budget(budget_bytes: usize) -> Option<RuntimeBackedFixture> {
     let device = Arc::new(CudaDevice::new(0).ok()?);
     let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
     let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
@@ -48,7 +54,7 @@ fn make_runtime_backed_fixture() -> Option<RuntimeBackedFixture> {
         Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
     ));
     let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
-        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
+        Box::new(GlobalDeviceBudget::new(logging, budget_bytes));
     let runtime = Arc::new(XlogDeviceRuntime::with_resource(
         Arc::clone(&device),
         0,
@@ -57,7 +63,7 @@ fn make_runtime_backed_fixture() -> Option<RuntimeBackedFixture> {
     ));
     let memory = Arc::new(GpuMemoryManager::with_runtime(
         Arc::clone(&device),
-        MemoryBudget::with_limit(64 * 1024 * 1024),
+        MemoryBudget::with_limit(budget_bytes as u64),
         Arc::clone(&runtime),
     ));
     let provider =
@@ -171,11 +177,59 @@ fn chain_fixture_n(n: u32) -> BTreeMap<&'static str, Vec<(u32, u32)>> {
     m
 }
 
+fn g39_pre_trace_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/evidence/2026-05-14-g39-pre-profiler-trace/g39-pre-trace-50.jsonl")
+}
+
+fn load_m37c_chain_trace_subset(limit: usize) -> (Vec<u32>, u128) {
+    let text = fs::read_to_string(g39_pre_trace_path()).expect("read G_PRE trace");
+    let mut rows = Vec::with_capacity(limit);
+    let mut baseline_ns = 0u128;
+    for line in text.lines() {
+        let value: serde_json::Value = serde_json::from_str(line).expect("parse G_PRE JSONL row");
+        if value.get("kind").and_then(|v| v.as_str()) != Some("xlog_evaluate_step") {
+            continue;
+        }
+        if value.get("max_body_len").and_then(|v| v.as_u64()) != Some(2) {
+            continue;
+        }
+        let committed_rows = value
+            .get("committed_rows")
+            .and_then(|v| v.as_u64())
+            .expect("committed_rows") as u32;
+        let evaluate_ns = value
+            .get("evaluate_ns")
+            .and_then(|v| v.as_u64())
+            .expect("evaluate_ns") as u128;
+        rows.push(committed_rows);
+        baseline_ns += evaluate_ns;
+        if rows.len() == limit {
+            break;
+        }
+    }
+    assert!(
+        rows.len() >= limit,
+        "G_PRE trace must contain at least {limit} chain-shaped invocations"
+    );
+    (rows, baseline_ns)
+}
+
 fn run_chain(
     provider: Arc<CudaKernelProvider>,
     memory: &Arc<GpuMemoryManager>,
     inputs: &BTreeMap<&str, Vec<(u32, u32)>>,
 ) -> Executor {
+    let (plan, mut executor) = prepare_chain_executor(provider, memory, inputs);
+    executor.execute_plan(&plan).expect("execute chain");
+    executor
+}
+
+fn prepare_chain_executor(
+    provider: Arc<CudaKernelProvider>,
+    memory: &Arc<GpuMemoryManager>,
+    inputs: &BTreeMap<&str, Vec<(u32, u32)>>,
+) -> (ExecutionPlan, Executor) {
     let mut compiler = Compiler::new();
     let plan = compiler.compile(CHAIN_SOURCE).expect("compile chain");
     let mut executor = Executor::new_with_config(provider, RuntimeConfig::default());
@@ -185,8 +239,7 @@ fn run_chain(
     for (name, rows) in inputs {
         executor.put_relation(name, upload_binary_u32(memory, rows));
     }
-    executor.execute_plan(&plan).expect("execute chain");
-    executor
+    (plan, executor)
 }
 
 fn env_lock() -> &'static Mutex<()> {
@@ -243,23 +296,29 @@ fn chain_dispatch_default_on_matches_env_disabled_fallback() {
     assert_eq!(dispatched_rows, fallback_rows);
 }
 
-fn timed_chain_runs(
+fn timed_loaded_chain_runs(
     provider: Arc<CudaKernelProvider>,
     memory: &Arc<GpuMemoryManager>,
     inputs: &BTreeMap<&str, Vec<(u32, u32)>>,
     iterations: u32,
 ) -> (Duration, u64) {
+    let (plan, mut executor) = prepare_chain_executor(provider, memory, inputs);
+    let start_dispatches = executor.w63_chain_dispatch_count();
     let start = Instant::now();
-    let mut dispatches = 0;
     for _ in 0..iterations {
-        let executor = run_chain(Arc::clone(&provider), memory, inputs);
-        dispatches += executor.w63_chain_dispatch_count();
+        executor.store_mut().remove("out");
+        executor.execute_plan(&plan).expect("execute loaded chain");
     }
-    (start.elapsed(), dispatches)
+    (
+        start.elapsed(),
+        executor
+            .w63_chain_dispatch_count()
+            .saturating_sub(start_dispatches),
+    )
 }
 
 #[test]
-#[ignore = "performance smoke; run manually for W63 spike timing evidence"]
+#[ignore = "performance smoke; run manually for W63 timing evidence"]
 fn chain_dispatch_timing_smoke_sorted_threshold_cell() {
     let _guard = env_lock().lock().expect("W63 env lock poisoned");
     let old = std::env::var("XLOG_WCOJ_W63_CHAIN_ENABLE").ok();
@@ -274,13 +333,13 @@ fn chain_dispatch_timing_smoke_sorted_threshold_cell() {
         std::env::set_var("XLOG_WCOJ_W63_CHAIN_ENABLE", "0");
     }
     let (fallback_elapsed, fallback_dispatches) =
-        timed_chain_runs(Arc::clone(&fix.provider), &fix.memory, &inputs, iterations);
+        timed_loaded_chain_runs(Arc::clone(&fix.provider), &fix.memory, &inputs, iterations);
 
     unsafe {
         std::env::remove_var("XLOG_WCOJ_W63_CHAIN_ENABLE");
     }
     let (chain_elapsed, chain_dispatches) =
-        timed_chain_runs(Arc::clone(&fix.provider), &fix.memory, &inputs, iterations);
+        timed_loaded_chain_runs(Arc::clone(&fix.provider), &fix.memory, &inputs, iterations);
 
     unsafe {
         match old {
@@ -301,4 +360,105 @@ fn chain_dispatch_timing_smoke_sorted_threshold_cell() {
     );
     assert_eq!(fallback_dispatches, 0);
     assert_eq!(chain_dispatches, iterations as u64);
+}
+
+#[test]
+#[ignore = "acceptance timing; run manually for M_W63.2"]
+fn chain_dispatch_timing_synthetic_977k() {
+    let _guard = env_lock().lock().expect("W63 env lock poisoned");
+    let old = std::env::var("XLOG_WCOJ_W63_CHAIN_ENABLE").ok();
+    let Some(fix) = make_runtime_backed_fixture_with_budget(512 * 1024 * 1024) else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let inputs = chain_fixture_n(977_000);
+    let iterations = 3;
+
+    unsafe {
+        std::env::set_var("XLOG_WCOJ_W63_CHAIN_ENABLE", "0");
+    }
+    let (fallback_elapsed, fallback_dispatches) =
+        timed_loaded_chain_runs(Arc::clone(&fix.provider), &fix.memory, &inputs, iterations);
+
+    unsafe {
+        std::env::remove_var("XLOG_WCOJ_W63_CHAIN_ENABLE");
+    }
+    let (chain_elapsed, chain_dispatches) =
+        timed_loaded_chain_runs(Arc::clone(&fix.provider), &fix.memory, &inputs, iterations);
+
+    unsafe {
+        match old {
+            Some(v) => std::env::set_var("XLOG_WCOJ_W63_CHAIN_ENABLE", v),
+            None => std::env::remove_var("XLOG_WCOJ_W63_CHAIN_ENABLE"),
+        }
+    }
+
+    let ratio = fallback_elapsed.as_secs_f64() / chain_elapsed.as_secs_f64();
+    eprintln!(
+        "W63_CHAIN_TIMING synthetic_977k n=977000 iterations={} fallback_ms={:.3} chain_ms={:.3} ratio={:.6} fallback_dispatches={} chain_dispatches={}",
+        iterations,
+        fallback_elapsed.as_secs_f64() * 1000.0,
+        chain_elapsed.as_secs_f64() * 1000.0,
+        ratio,
+        fallback_dispatches,
+        chain_dispatches
+    );
+    assert_eq!(fallback_dispatches, 0);
+    assert_eq!(chain_dispatches, iterations as u64);
+    assert!(
+        ratio >= 1.5,
+        "M_W63.2 gate requires synthetic 977K ratio >= 1.5x, got {ratio:.6}x"
+    );
+}
+
+#[test]
+#[ignore = "acceptance timing; run manually for M_W63.1"]
+fn chain_dispatch_timing_m37c_trace_subset_128() {
+    let _guard = env_lock().lock().expect("W63 env lock poisoned");
+    let old = std::env::var("XLOG_WCOJ_W63_CHAIN_ENABLE").ok();
+    let Some(fix) = make_runtime_backed_fixture_with_budget(256 * 1024 * 1024) else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let (rows, baseline_ns) = load_m37c_chain_trace_subset(128);
+
+    unsafe {
+        std::env::remove_var("XLOG_WCOJ_W63_CHAIN_ENABLE");
+    }
+    let mut chain_elapsed = Duration::from_nanos(0);
+    let mut dispatches = 0u64;
+    let mut output_rows = 0u64;
+    for n in rows {
+        let inputs = chain_fixture_n(n);
+        let (plan, mut executor) =
+            prepare_chain_executor(Arc::clone(&fix.provider), &fix.memory, &inputs);
+        let start = Instant::now();
+        executor.execute_plan(&plan).expect("execute trace chain");
+        chain_elapsed += start.elapsed();
+        dispatches += executor.w63_chain_dispatch_count();
+        output_rows += fix
+            .provider
+            .device_row_count(executor.store().get("out").expect("out relation"))
+            .expect("out row count") as u64;
+    }
+
+    unsafe {
+        match old {
+            Some(v) => std::env::set_var("XLOG_WCOJ_W63_CHAIN_ENABLE", v),
+            None => std::env::remove_var("XLOG_WCOJ_W63_CHAIN_ENABLE"),
+        }
+    }
+
+    let baseline_ms = baseline_ns as f64 / 1_000_000.0;
+    let chain_ms = chain_elapsed.as_secs_f64() * 1000.0;
+    let ratio = baseline_ms / chain_ms;
+    eprintln!(
+        "W63_CHAIN_TIMING m37c_trace_subset invocations=128 baseline_ms={:.3} chain_ms={:.3} ratio={:.6} dispatches={} output_rows={}",
+        baseline_ms, chain_ms, ratio, dispatches, output_rows
+    );
+    assert_eq!(dispatches, 128);
+    assert!(
+        ratio >= 2.0,
+        "M_W63.1 gate requires m37c trace subset ratio >= 2.0x, got {ratio:.6}x"
+    );
 }

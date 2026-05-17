@@ -138,7 +138,7 @@ pub(super) fn wcoj_adaptive_enabled(config_override: Option<bool>) -> bool {
     config_override.unwrap_or(true)
 }
 
-/// Goal-039 G_W63_CHAIN spike gate. Default ON after G_PRE
+/// Goal-039 G_W63_CHAIN gate. Default ON after G_PRE
 /// measured `evaluate_pct >= 0.60`; `XLOG_WCOJ_W63_CHAIN_ENABLE=0`
 /// or `false` disables the route for A/B measurements.
 pub const ENV_WCOJ_W63_CHAIN_ENABLE: &str = "XLOG_WCOJ_W63_CHAIN_ENABLE";
@@ -225,53 +225,31 @@ pub(super) struct ChainRirMatch {
     pub output_columns: Vec<ProjectExpr>,
 }
 
-/// Goal-039 G_W63_CHAIN spike matcher. The chain shape is encoded
-/// as a two-input `MultiWayJoin` with one variable-class id shared
-/// between the two binary slots. Any non-scan input, non-binary slot,
-/// missing variable, or ambiguous shared variable declines dispatch.
-pub(super) fn match_multiway_chain(body: &RirNode) -> Option<ChainRirMatch> {
-    let RirNode::MultiWayJoin {
-        inputs,
-        slot_vars,
+/// Goal-039 G_W63_CHAIN production matcher. The chain shape is
+/// encoded as a first-class `ChainJoin`; malformed non-scan inputs
+/// decline dispatch and execute the captured fallback.
+pub(super) fn match_chain_join(body: &RirNode) -> Option<ChainRirMatch> {
+    let RirNode::ChainJoin {
+        left,
+        right,
+        left_key,
+        right_key,
         output_columns,
         ..
     } = body
     else {
         return None;
     };
-    if inputs.len() != 2 || slot_vars.len() != 2 {
+    if *left_key >= 2 || *right_key >= 2 {
         return None;
     }
-    let left_vars = &slot_vars[0];
-    let right_vars = &slot_vars[1];
-    if left_vars.len() != 2 || right_vars.len() != 2 {
-        return None;
-    }
-    let mut shared = Vec::new();
-    for (li, lv) in left_vars.iter().enumerate() {
-        let Some(lv) = lv else {
-            return None;
-        };
-        for (ri, rv) in right_vars.iter().enumerate() {
-            let Some(rv) = rv else {
-                return None;
-            };
-            if lv == rv {
-                shared.push((li, ri));
-            }
-        }
-    }
-    if shared.len() != 1 {
-        return None;
-    }
-    let rel_left = scan_rel(&inputs[0])?;
-    let rel_right = scan_rel(&inputs[1])?;
-    let (left_key, right_key) = shared[0];
+    let rel_left = scan_rel(left)?;
+    let rel_right = scan_rel(right)?;
     Some(ChainRirMatch {
         rel_left,
         rel_right,
-        left_key,
-        right_key,
+        left_key: *left_key,
+        right_key: *right_key,
         output_columns: output_columns.clone(),
     })
 }
@@ -1274,8 +1252,8 @@ impl Executor {
         self.wcoj_4cycle_dispatch_count
     }
 
-    /// Goal-039 G_W63_CHAIN spike — count of times a two-atom
-    /// chain-shaped `MultiWayJoin` routed through the chain
+    /// Goal-039 G_W63_CHAIN — count of times a two-atom
+    /// `ChainJoin` routed through the chain
     /// dispatcher instead of the embedded binary fallback.
     pub fn w63_chain_dispatch_count(&self) -> u64 {
         self.w63_chain_dispatch_count
@@ -1291,8 +1269,8 @@ impl Executor {
         self.nested_loop_dispatch_count
     }
 
-    /// Goal-039 G_W63_CHAIN spike dispatch. Shape match is done on
-    /// the two-input `MultiWayJoin` emitted by the spike promoter.
+    /// Goal-039 G_W63_CHAIN dispatch. Shape match is done on the
+    /// production `ChainJoin` emitted by the promoter.
     ///
     /// Route order:
     ///   1. sorted eligible U32/Symbol inputs -> W4.3 sort-merge
@@ -1308,7 +1286,7 @@ impl Executor {
         if !w63_chain_enabled() {
             return Ok(None);
         }
-        let Some(matched) = match_multiway_chain(body) else {
+        let Some(matched) = match_chain_join(body) else {
             return Ok(None);
         };
 
@@ -1343,7 +1321,7 @@ impl Executor {
             Some(WcojKeyWidth::FourByte)
         );
 
-        let joined = if four_byte && in_threshold {
+        let joined = if four_byte {
             let left_sorted = self
                 .provider
                 .is_sorted_ascending_u32(left, matched.left_key)
@@ -1353,18 +1331,37 @@ impl Executor {
                 .is_sorted_ascending_u32(right, matched.right_key)
                 .unwrap_or(false);
             if left_sorted && right_sorted {
-                self.provider.sort_merge_join_v2_inner_u32_1key(
+                if in_threshold {
+                    self.provider.sort_merge_join_v2_inner_u32_1key(
+                        left,
+                        right,
+                        matched.left_key,
+                        matched.right_key,
+                    )
+                } else {
+                    let capacity = usize::try_from(num_left.min(num_right)).unwrap_or(usize::MAX);
+                    self.provider.sort_merge_join_v2_inner_u32_1key_bounded(
+                        left,
+                        right,
+                        matched.left_key,
+                        matched.right_key,
+                        capacity,
+                    )
+                }
+            } else if in_threshold {
+                self.provider.nested_loop_join_v2_inner_u32_1key(
                     left,
                     right,
                     matched.left_key,
                     matched.right_key,
                 )
             } else {
-                self.provider.nested_loop_join_v2_inner_u32_1key(
+                self.provider.hash_join_v2(
                     left,
                     right,
-                    matched.left_key,
-                    matched.right_key,
+                    &[matched.left_key],
+                    &[matched.right_key],
+                    CudaJoinType::Inner,
                 )
             }
         } else {
@@ -1384,6 +1381,14 @@ impl Executor {
             Ok(buf) => buf,
             Err(_) => return Ok(None),
         };
+        self.stats.record_join_result(
+            matched.rel_left,
+            matched.rel_right,
+            vec![matched.left_key],
+            vec![matched.right_key],
+            num_left.saturating_mul(num_right),
+            joined.num_rows(),
+        );
         self.w63_chain_dispatch_count += 1;
         Ok(Some(projected))
     }
@@ -2279,7 +2284,7 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use super::{
-        match_multiway_chain, match_multiway_triangle, w63_chain_enabled, wcoj_adaptive_enabled,
+        match_chain_join, match_multiway_triangle, w63_chain_enabled, wcoj_adaptive_enabled,
         wcoj_gate_enabled, ENV_USE_WCOJ_TRIANGLE_U32, ENV_WCOJ_W63_CHAIN_ENABLE,
     };
     use xlog_core::RelId;
@@ -2309,24 +2314,21 @@ mod tests {
         }
     }
 
-    fn canonical_chain_multiway() -> RirNode {
-        RirNode::MultiWayJoin {
-            inputs: vec![
-                RirNode::Scan { rel: RelId(1) },
-                RirNode::Scan { rel: RelId(2) },
-            ],
-            slot_vars: vec![vec![Some(0u32), Some(1)], vec![Some(1u32), Some(2)]],
+    fn canonical_chain_join() -> RirNode {
+        RirNode::ChainJoin {
+            left: Box::new(RirNode::Scan { rel: RelId(1) }),
+            right: Box::new(RirNode::Scan { rel: RelId(2) }),
+            left_key: 1,
+            right_key: 0,
             output_columns: vec![ProjectExpr::Column(0), ProjectExpr::Column(3)],
             fallback: Box::new(RirNode::Unit),
-            plan: None,
-            var_order: None,
         }
     }
 
     #[test]
     fn match_chain_returns_two_rels_and_keys() {
-        let node = canonical_chain_multiway();
-        let m = match_multiway_chain(&node).expect("must match canonical chain");
+        let node = canonical_chain_join();
+        let m = match_chain_join(&node).expect("must match canonical chain");
         assert_eq!(m.rel_left, RelId(1));
         assert_eq!(m.rel_right, RelId(2));
         assert_eq!(m.left_key, 1);
@@ -2338,12 +2340,18 @@ mod tests {
     }
 
     #[test]
-    fn match_chain_rejects_ambiguous_shared_variable() {
-        let mut node = canonical_chain_multiway();
-        if let RirNode::MultiWayJoin { slot_vars, .. } = &mut node {
-            *slot_vars = vec![vec![Some(0u32), Some(1)], vec![Some(1u32), Some(0)]];
+    fn match_chain_rejects_non_scan_inputs() {
+        let mut node = canonical_chain_join();
+        if let RirNode::ChainJoin { left, .. } = &mut node {
+            *left = Box::new(RirNode::Unit);
         }
-        assert!(match_multiway_chain(&node).is_none());
+        assert!(match_chain_join(&node).is_none());
+    }
+
+    #[test]
+    fn match_chain_rejects_multiway_triangle() {
+        let node = canonical_multiway();
+        assert!(match_chain_join(&node).is_none());
     }
 
     #[test]

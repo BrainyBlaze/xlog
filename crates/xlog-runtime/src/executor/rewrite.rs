@@ -250,7 +250,9 @@ impl Executor {
                 // v0.6.5: walk the fallback. The promoter only wraps
                 // already-monotonic triangle subtrees in v1, but the
                 // fallback is the load-bearing source of truth.
-                RirNode::MultiWayJoin { fallback, .. } => contains_non_monotonic_ops(fallback),
+                RirNode::MultiWayJoin { fallback, .. } | RirNode::ChainJoin { fallback, .. } => {
+                    contains_non_monotonic_ops(fallback)
+                }
             }
         }
 
@@ -361,7 +363,9 @@ impl Executor {
             RirNode::Filter { input, .. } | RirNode::Project { input, .. } => {
                 Self::collect_scan_rels(input, out);
             }
-            RirNode::Join { left, right, .. } | RirNode::Diff { left, right } => {
+            RirNode::Join { left, right, .. }
+            | RirNode::ChainJoin { left, right, .. }
+            | RirNode::Diff { left, right } => {
                 Self::collect_scan_rels(left, out);
                 Self::collect_scan_rels(right, out);
             }
@@ -595,6 +599,40 @@ impl Executor {
             RirNode::TensorMaskedJoin { .. } => {
                 // TensorMaskedJoin is a leaf node — no child scans to rewrite.
                 (node.clone(), false)
+            }
+            RirNode::ChainJoin {
+                left,
+                right,
+                left_key,
+                right_key,
+                output_columns,
+                fallback,
+            } => {
+                let starting_remaining = *remaining;
+                let mut inputs_remaining = starting_remaining;
+                let (new_left, replaced_left) =
+                    Self::rewrite_scan_nth_impl(left, target, &mut inputs_remaining, replacement);
+                let (new_right, replaced_right) =
+                    Self::rewrite_scan_nth_impl(right, target, &mut inputs_remaining, replacement);
+                let mut fallback_remaining = starting_remaining;
+                let (new_fallback, fallback_replaced) = Self::rewrite_scan_nth_impl(
+                    fallback,
+                    target,
+                    &mut fallback_remaining,
+                    replacement,
+                );
+                *remaining = inputs_remaining;
+                (
+                    RirNode::ChainJoin {
+                        left: Box::new(new_left),
+                        right: Box::new(new_right),
+                        left_key: *left_key,
+                        right_key: *right_key,
+                        output_columns: output_columns.clone(),
+                        fallback: Box::new(new_fallback),
+                    },
+                    replaced_left || replaced_right || fallback_replaced,
+                )
             }
             // W4.1 (paper P1): rewrite `inputs` and `fallback` with
             // SEPARATE `remaining` counter copies — both views are the
@@ -987,6 +1025,29 @@ mod w41_rewrite_scan_nth_occurrence_identity_tests {
     use xlog_ir::rir::ProjectExpr;
     use xlog_ir::JoinType;
 
+    fn chain_join(left_rel: RelId, right_rel: RelId) -> RirNode {
+        let left = RirNode::Scan { rel: left_rel };
+        let right = RirNode::Scan { rel: right_rel };
+        let fallback = RirNode::Project {
+            input: Box::new(RirNode::Join {
+                left: Box::new(left.clone()),
+                right: Box::new(right.clone()),
+                left_keys: vec![1],
+                right_keys: vec![0],
+                join_type: JoinType::Inner,
+            }),
+            columns: vec![ProjectExpr::Column(0), ProjectExpr::Column(3)],
+        };
+        RirNode::ChainJoin {
+            left: Box::new(left),
+            right: Box::new(right),
+            left_key: 1,
+            right_key: 0,
+            output_columns: vec![ProjectExpr::Column(0), ProjectExpr::Column(3)],
+            fallback: Box::new(fallback),
+        }
+    }
+
     /// Build a synthetic `MultiWayJoin` whose `inputs` are 3 same-
     /// predicate Scans (`Scan { rel: target_rel }` × 3) plus a fallback
     /// that mirrors the same 3 Scans inside a left-deep Join chain.
@@ -1061,6 +1122,16 @@ mod w41_rewrite_scan_nth_occurrence_identity_tests {
                 collect_scans_in_order(left, out);
                 collect_scans_in_order(right, out);
             }
+            RirNode::ChainJoin {
+                left,
+                right,
+                fallback,
+                ..
+            } => {
+                collect_scans_in_order(left, out);
+                collect_scans_in_order(right, out);
+                collect_scans_in_order(fallback, out);
+            }
             RirNode::Union { inputs } => {
                 for n in inputs {
                     collect_scans_in_order(n, out);
@@ -1086,6 +1157,35 @@ mod w41_rewrite_scan_nth_occurrence_identity_tests {
                 collect_scans_in_order(fallback, out);
             }
         }
+    }
+
+    #[test]
+    fn chain_join_rewrite_scan_nth_updates_dispatch_shape_and_fallback() {
+        let target = RelId(7);
+        let delta = RelId(700);
+        let body = chain_join(target, RelId(8));
+        let rewritten =
+            Executor::rewrite_scan_nth(&body, target, 0, delta).expect("target scan must rewrite");
+
+        let mut scans = Vec::new();
+        collect_scans_in_order(&rewritten, &mut scans);
+        assert_eq!(
+            scans,
+            vec![delta, RelId(8), delta, RelId(8)],
+            "ChainJoin dispatch inputs and fallback must target the same occurrence"
+        );
+
+        let RirNode::ChainJoin { left, fallback, .. } = rewritten else {
+            panic!("expected rewritten ChainJoin");
+        };
+        assert!(matches!(left.as_ref(), RirNode::Scan { rel } if *rel == delta));
+        let RirNode::Project { input, .. } = fallback.as_ref() else {
+            panic!("expected ChainJoin fallback Project");
+        };
+        let RirNode::Join { left, .. } = input.as_ref() else {
+            panic!("expected ChainJoin fallback Join");
+        };
+        assert!(matches!(left.as_ref(), RirNode::Scan { rel } if *rel == delta));
     }
 
     /// Pre-W4.1 bug pin: with 3 occurrences of `target` in `inputs`

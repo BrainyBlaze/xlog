@@ -1,9 +1,11 @@
 //! v0.6.5 slice 1 — `MultiWayJoin` promotion pass.
+//! Goal-039 W6.3 — `ChainJoin` promotion for 2-atom chains.
 //! v0.6.5 slice 4 — recursive-SCC promotion gated on linear recursion.
 //!
 //! Walks an [`ExecutionPlan`] (post-lowering, post-optimizer) and
-//! rewrites recognized triangle / 4-cycle subtrees in `rule.body` to
-//! [`RirNode::MultiWayJoin`]. Idempotent.
+//! rewrites recognized triangle / 4-cycle / K-clique subtrees in
+//! `rule.body` to [`RirNode::MultiWayJoin`], plus recognized 2-atom
+//! chains to [`RirNode::ChainJoin`]. Idempotent.
 //!
 //! ## Eligibility
 //!
@@ -135,12 +137,12 @@ pub fn promote_multiway(
             // after the W4.1 `rewrite_scan_nth` fix at
             // `crates/xlog-runtime/src/executor/rewrite.rs:303-311 +
             // :477-504`.
-            // Goal-039 G_W63_CHAIN spike: a 2-atom chain is not
+            // Goal-039 G_W63_CHAIN: a 2-atom chain is not
             // paper-prescribed WCOJ; it is xlog-original routing
-            // motivated by the G_PRE trace. Reuse the existing
-            // `MultiWayJoin` fallback wrapper for the spike so the
-            // runtime can dispatch or decline without broadening the
-            // RIR enum surface.
+            // motivated by the G_PRE trace. Production emits a
+            // first-class `ChainJoin` so walkers and dispatchers can
+            // distinguish the chain route from paper-derived
+            // `MultiWayJoin` shapes.
             if let Some(promoted) = try_promote_chain(&rule.body) {
                 rule.body = promoted;
                 continue;
@@ -686,15 +688,9 @@ fn try_promote_triangle(
     })
 }
 
-/// Goal-039 G_W63_CHAIN spike: recognize a 2-atom inner chain
+/// Goal-039 G_W63_CHAIN: recognize a 2-atom inner chain
 /// `Project(Join(Scan, Scan))` with exactly one shared key column
-/// and wrap it as a shape-tagged `MultiWayJoin`.
-///
-/// This intentionally uses the existing `MultiWayJoin.fallback`
-/// identity contract instead of introducing the production
-/// `ChainJoin` RIR variant during the spike. The runtime can route
-/// the shape and silently fall back to the captured binary plan on
-/// any mismatch.
+/// and wrap it as a production `ChainJoin`.
 fn try_promote_chain(node: &RirNode) -> Option<RirNode> {
     let RirNode::Project { input, columns } = node else {
         return None;
@@ -727,21 +723,13 @@ fn try_promote_chain(node: &RirNode) -> Option<RirNode> {
         return None;
     };
 
-    let left_vars = vec![Some(0u32), Some(1u32)];
-    let shared = left_vars[left_key];
-    let mut right_vars = vec![Some(2u32), Some(2u32)];
-    right_vars[right_key] = shared;
-
-    Some(RirNode::MultiWayJoin {
-        inputs: vec![
-            RirNode::Scan { rel: *rel_left },
-            RirNode::Scan { rel: *rel_right },
-        ],
-        slot_vars: vec![left_vars, right_vars],
+    Some(RirNode::ChainJoin {
+        left: Box::new(RirNode::Scan { rel: *rel_left }),
+        right: Box::new(RirNode::Scan { rel: *rel_right }),
+        left_key,
+        right_key,
         output_columns: columns.clone(),
         fallback: Box::new(node.clone()),
-        plan: None,
-        var_order: None,
     })
 }
 
@@ -1552,27 +1540,25 @@ mod tests {
         );
         let body = &plan.rules_by_scc[0][0].body;
         match body {
-            RirNode::MultiWayJoin {
-                inputs,
-                slot_vars,
+            RirNode::ChainJoin {
+                left,
+                right,
+                left_key,
+                right_key,
                 output_columns,
                 fallback,
-                ..
             } => {
-                assert_eq!(inputs.len(), 2);
-                assert!(matches!(inputs[0], RirNode::Scan { rel: RelId(1) }));
-                assert!(matches!(inputs[1], RirNode::Scan { rel: RelId(2) }));
-                assert_eq!(
-                    slot_vars,
-                    &vec![vec![Some(0u32), Some(1)], vec![Some(1u32), Some(2)]]
-                );
+                assert!(matches!(left.as_ref(), RirNode::Scan { rel: RelId(1) }));
+                assert!(matches!(right.as_ref(), RirNode::Scan { rel: RelId(2) }));
+                assert_eq!(*left_key, 1);
+                assert_eq!(*right_key, 0);
                 assert_eq!(
                     output_columns,
                     &vec![ProjectExpr::Column(0), ProjectExpr::Column(3)]
                 );
                 assert!(matches!(fallback.as_ref(), RirNode::Project { .. }));
             }
-            other => panic!("expected chain MultiWayJoin, got {:?}", other),
+            other => panic!("expected ChainJoin, got {:?}", other),
         }
     }
 

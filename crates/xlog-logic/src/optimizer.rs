@@ -436,11 +436,10 @@ impl Optimizer {
 
             RirNode::TensorMaskedJoin { .. } => node, // Leaf-like: no pushdown
 
-            // v0.6.5: `MultiWayJoin` is produced by `xlog-logic::promote`
-            // *after* the optimizer runs, so this arm is unreachable in
-            // production. Required for compile safety and as a no-op
-            // fallback if the call order ever changes.
-            RirNode::MultiWayJoin { .. } => node,
+            // Promoted physical-shape nodes are produced after the
+            // optimizer runs. Required for compile safety and as a
+            // no-op fallback if the call order ever changes.
+            RirNode::MultiWayJoin { .. } | RirNode::ChainJoin { .. } => node,
         }
     }
 
@@ -593,6 +592,7 @@ impl Optimizer {
             RirNode::Join { left, right, .. } => {
                 self.estimate_width(left) + self.estimate_width(right)
             }
+            RirNode::ChainJoin { output_columns, .. } => output_columns.len(),
             RirNode::GroupBy { key_cols, aggs, .. } => key_cols.len() + aggs.len(),
             RirNode::Union { inputs } => {
                 inputs.first().map(|i| self.estimate_width(i)).unwrap_or(0)
@@ -816,6 +816,28 @@ impl Optimizer {
                 self.estimate_join_cost(
                     left_cost, right_cost, left, right, left_keys, right_keys, *join_type,
                 )
+            }
+
+            RirNode::ChainJoin {
+                left,
+                right,
+                left_key,
+                right_key,
+                output_columns,
+                ..
+            } => {
+                let left_cost = self.estimate_cost(left);
+                let right_cost = self.estimate_cost(right);
+                let join_cost = self.estimate_join_cost(
+                    left_cost,
+                    right_cost,
+                    left,
+                    right,
+                    &[*left_key],
+                    &[*right_key],
+                    JoinType::Inner,
+                );
+                self.estimate_project_cost(join_cost, output_columns)
             }
 
             RirNode::GroupBy {
@@ -2169,7 +2191,7 @@ mod helper_split_pass_tests {
     fn contains_scan(node: &RirNode, rel: RelId) -> bool {
         match node {
             RirNode::Scan { rel: scan_rel } => *scan_rel == rel,
-            RirNode::Join { left, right, .. } => {
+            RirNode::Join { left, right, .. } | RirNode::ChainJoin { left, right, .. } => {
                 contains_scan(left, rel) || contains_scan(right, rel)
             }
             RirNode::Project { input, .. }

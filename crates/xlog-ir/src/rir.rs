@@ -368,6 +368,27 @@ pub enum RirNode {
         join_type: JoinType,
     },
 
+    /// Production W6.3 two-atom chain join:
+    /// `head(...) :- left(..., Z, ...), right(..., Z, ...)`.
+    ///
+    /// The executor MAY dispatch this node through a specialized
+    /// physical route. On dispatch decline, it must execute `fallback`,
+    /// the IR-equivalent binary join captured at promotion time.
+    ChainJoin {
+        /// Left relation input. The W6.3 promoter emits a Scan.
+        left: Box<RirNode>,
+        /// Right relation input. The W6.3 promoter emits a Scan.
+        right: Box<RirNode>,
+        /// Join key column in `left`.
+        left_key: usize,
+        /// Join key column in `right`.
+        right_key: usize,
+        /// Output projection in head-tuple order.
+        output_columns: Vec<ProjectExpr>,
+        /// IR-equivalent binary-join plan for fallback execution.
+        fallback: Box<RirNode>,
+    },
+
     /// Group by with aggregation
     GroupBy {
         /// Input relation subtree to aggregate.
@@ -522,7 +543,9 @@ impl RirNode {
             RirNode::Filter { input, .. } | RirNode::Project { input, .. } => {
                 input.collect_relations(rels);
             }
-            RirNode::Join { left, right, .. } | RirNode::Diff { left, right } => {
+            RirNode::Join { left, right, .. }
+            | RirNode::ChainJoin { left, right, .. }
+            | RirNode::Diff { left, right } => {
                 left.collect_relations(rels);
                 right.collect_relations(rels);
             }
