@@ -97,6 +97,9 @@ pub struct Executor {
     /// produced a result and the executor installed it. Tracks
     /// 4-cycle dispatches separately from triangle.
     pub(super) wcoj_4cycle_dispatch_count: u64,
+    /// Goal-039 G_W63_CHAIN spike — count of times the chain
+    /// dispatcher produced a result and the executor installed it.
+    pub(super) w63_chain_dispatch_count: u64,
     /// W3.2 — count of times `try_dispatch_wcoj_clique5` produced
     /// a result and the executor installed it. Public accessor:
     /// `Executor::wcoj_clique5_dispatch_count(&self) -> u64`.
@@ -244,6 +247,7 @@ impl Executor {
             ilp_last_result: None,
             wcoj_triangle_dispatch_count: 0,
             wcoj_4cycle_dispatch_count: 0,
+            w63_chain_dispatch_count: 0,
             wcoj_clique5_dispatch_count: 0,
             wcoj_clique6_dispatch_count: 0,
             kclique_histogram_refresh_count: 0,

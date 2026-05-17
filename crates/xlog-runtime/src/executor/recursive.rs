@@ -42,8 +42,8 @@ impl Executor {
     /// once per rule per call.
     fn execute_wcoj_or_fallback_node(&mut self, node: &RirNode) -> Result<CudaBuffer> {
         if let RirNode::MultiWayJoin { .. } = node {
-            // Triangle first, then 4-cycle. Slice 1 ordering — a
-            // body cannot match both shapes (different atom
+            // Chain first, then triangle, then 4-cycle. A body
+            // cannot match more than one shape (different atom
             // counts). The dispatcher's own gate handles env-var
             // / config / adaptive decisions; this site is purely
             // structural. The dispatcher increments
@@ -51,6 +51,9 @@ impl Executor {
             // kernel result, so the helper just returns the
             // buffer and lets the caller fold it into the rule's
             // output.
+            if let Some(buf) = self.try_dispatch_w63_chain_on_body(node)? {
+                return Ok(buf);
+            }
             if let Some(buf) = self.try_dispatch_wcoj_triangle_on_body(node)? {
                 return Ok(buf);
             }
@@ -178,6 +181,24 @@ impl Executor {
                 } else {
                     // Non-recursive SCC: execute rules once, union results for same predicate.
                     for rule in rules {
+                        // Goal-039 G_W63_CHAIN spike — route
+                        // two-atom chain-shaped MultiWayJoin
+                        // bodies before the triangle/4-cycle/KC
+                        // attempts. The dispatcher silently
+                        // declines on non-chain bodies or when the
+                        // env gate disables the spike route.
+                        if let Some(chain_result) =
+                            self.try_dispatch_w63_chain_on_body(&rule.body)?
+                        {
+                            if let Some(existing) = self.store.get(&rule.head) {
+                                let merged = self.provider.union_gpu(existing, &chain_result)?;
+                                self.store_put(&rule.head, merged);
+                            } else {
+                                self.store_put(&rule.head, chain_result);
+                            }
+                            continue;
+                        }
+
                         // v0.6.2 WCOJ triangle dispatch — env-gated.
                         // Try to short-circuit the rule via the GPU
                         // 3-way kernel. On Some(_), install the

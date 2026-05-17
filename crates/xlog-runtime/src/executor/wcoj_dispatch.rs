@@ -77,7 +77,9 @@ use std::collections::HashSet;
 
 use xlog_core::{RelId, Result, ScalarType, Schema};
 use xlog_cuda::device_runtime::StreamId;
+use xlog_cuda::provider::NESTED_LOOP_TOTAL_THRESHOLD;
 use xlog_cuda::CudaBuffer;
+use xlog_cuda::JoinType as CudaJoinType;
 use xlog_ir::{
     rir::{KCliqueVariableOrder, MultiwayPlan, ProjectExpr, VariableOrder},
     CompiledRule, RirNode,
@@ -134,6 +136,17 @@ pub(super) fn wcoj_block_work_unit() -> u32 {
 
 pub(super) fn wcoj_adaptive_enabled(config_override: Option<bool>) -> bool {
     config_override.unwrap_or(true)
+}
+
+/// Goal-039 G_W63_CHAIN spike gate. Default ON after G_PRE
+/// measured `evaluate_pct >= 0.60`; `XLOG_WCOJ_W63_CHAIN_ENABLE=0`
+/// or `false` disables the route for A/B measurements.
+pub const ENV_WCOJ_W63_CHAIN_ENABLE: &str = "XLOG_WCOJ_W63_CHAIN_ENABLE";
+
+pub(super) fn w63_chain_enabled() -> bool {
+    std::env::var(ENV_WCOJ_W63_CHAIN_ENABLE)
+        .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false")))
+        .unwrap_or(true)
 }
 
 // -----------------------------------------------------------------
@@ -200,6 +213,67 @@ pub(super) fn wcoj_4cycle_disabled(config_override: Option<bool>) -> bool {
 enum DispatchMode {
     Force,
     CostModel,
+}
+
+/// Two rel IDs and key positions extracted from a matched W63 chain
+/// RIR. Inputs are in the promoter's left/right order.
+pub(super) struct ChainRirMatch {
+    pub rel_left: RelId,
+    pub rel_right: RelId,
+    pub left_key: usize,
+    pub right_key: usize,
+    pub output_columns: Vec<ProjectExpr>,
+}
+
+/// Goal-039 G_W63_CHAIN spike matcher. The chain shape is encoded
+/// as a two-input `MultiWayJoin` with one variable-class id shared
+/// between the two binary slots. Any non-scan input, non-binary slot,
+/// missing variable, or ambiguous shared variable declines dispatch.
+pub(super) fn match_multiway_chain(body: &RirNode) -> Option<ChainRirMatch> {
+    let RirNode::MultiWayJoin {
+        inputs,
+        slot_vars,
+        output_columns,
+        ..
+    } = body
+    else {
+        return None;
+    };
+    if inputs.len() != 2 || slot_vars.len() != 2 {
+        return None;
+    }
+    let left_vars = &slot_vars[0];
+    let right_vars = &slot_vars[1];
+    if left_vars.len() != 2 || right_vars.len() != 2 {
+        return None;
+    }
+    let mut shared = Vec::new();
+    for (li, lv) in left_vars.iter().enumerate() {
+        let Some(lv) = lv else {
+            return None;
+        };
+        for (ri, rv) in right_vars.iter().enumerate() {
+            let Some(rv) = rv else {
+                return None;
+            };
+            if lv == rv {
+                shared.push((li, ri));
+            }
+        }
+    }
+    if shared.len() != 1 {
+        return None;
+    }
+    let rel_left = scan_rel(&inputs[0])?;
+    let rel_right = scan_rel(&inputs[1])?;
+    let (left_key, right_key) = shared[0];
+    Some(ChainRirMatch {
+        rel_left,
+        rel_right,
+        left_key,
+        right_key,
+        output_columns: output_columns.clone(),
+    })
 }
 
 /// Three rel IDs extracted from a matched triangle RIR. The
@@ -1200,6 +1274,13 @@ impl Executor {
         self.wcoj_4cycle_dispatch_count
     }
 
+    /// Goal-039 G_W63_CHAIN spike — count of times a two-atom
+    /// chain-shaped `MultiWayJoin` routed through the chain
+    /// dispatcher instead of the embedded binary fallback.
+    pub fn w63_chain_dispatch_count(&self) -> u64 {
+        self.w63_chain_dispatch_count
+    }
+
     /// W4.2 — count of times `execute_join` routed an inner-join
     /// to the nested-loop provider entry point because the
     /// eligibility predicate + Cartesian-product threshold both
@@ -1208,6 +1289,103 @@ impl Executor {
     /// same answer.
     pub fn nested_loop_dispatch_count(&self) -> u64 {
         self.nested_loop_dispatch_count
+    }
+
+    /// Goal-039 G_W63_CHAIN spike dispatch. Shape match is done on
+    /// the two-input `MultiWayJoin` emitted by the spike promoter.
+    ///
+    /// Route order:
+    ///   1. sorted eligible U32/Symbol inputs -> W4.3 sort-merge
+    ///   2. threshold eligible U32/Symbol inputs -> W4.2 nested loop
+    ///   3. otherwise -> existing hash_join_v2 provider path
+    ///
+    /// The final projection uses the captured `output_columns`, so
+    /// row semantics match `MultiWayJoin.fallback`.
+    pub(super) fn try_dispatch_w63_chain_on_body(
+        &mut self,
+        body: &RirNode,
+    ) -> Result<Option<CudaBuffer>> {
+        if !w63_chain_enabled() {
+            return Ok(None);
+        }
+        let Some(matched) = match_multiway_chain(body) else {
+            return Ok(None);
+        };
+
+        let name_left = match self.get_rel_name(matched.rel_left) {
+            Some(s) => s.to_string(),
+            None => return Ok(None),
+        };
+        let name_right = match self.get_rel_name(matched.rel_right) {
+            Some(s) => s.to_string(),
+            None => return Ok(None),
+        };
+        let left = match self.store.get(&name_left) {
+            Some(buf) => buf,
+            None => return Ok(None),
+        };
+        let right = match self.store.get(&name_right) {
+            Some(buf) => buf,
+            None => return Ok(None),
+        };
+
+        let num_left = self.provider.device_row_count(left)? as u64;
+        let num_right = self.provider.device_row_count(right)? as u64;
+        let in_threshold = num_left
+            .checked_mul(num_right)
+            .map(|p| p <= NESTED_LOOP_TOTAL_THRESHOLD)
+            .unwrap_or(false);
+        let four_byte = matches!(
+            classify_two_col_wcoj_width(left),
+            Some(WcojKeyWidth::FourByte)
+        ) && matches!(
+            classify_two_col_wcoj_width(right),
+            Some(WcojKeyWidth::FourByte)
+        );
+
+        let joined = if four_byte && in_threshold {
+            let left_sorted = self
+                .provider
+                .is_sorted_ascending_u32(left, matched.left_key)
+                .unwrap_or(false);
+            let right_sorted = self
+                .provider
+                .is_sorted_ascending_u32(right, matched.right_key)
+                .unwrap_or(false);
+            if left_sorted && right_sorted {
+                self.provider.sort_merge_join_v2_inner_u32_1key(
+                    left,
+                    right,
+                    matched.left_key,
+                    matched.right_key,
+                )
+            } else {
+                self.provider.nested_loop_join_v2_inner_u32_1key(
+                    left,
+                    right,
+                    matched.left_key,
+                    matched.right_key,
+                )
+            }
+        } else {
+            self.provider.hash_join_v2(
+                left,
+                right,
+                &[matched.left_key],
+                &[matched.right_key],
+                CudaJoinType::Inner,
+            )
+        };
+
+        let Ok(joined) = joined else {
+            return Ok(None);
+        };
+        let projected = match self.execute_project(&joined, &matched.output_columns) {
+            Ok(buf) => buf,
+            Err(_) => return Ok(None),
+        };
+        self.w63_chain_dispatch_count += 1;
+        Ok(Some(projected))
     }
 
     /// v0.6.5 slice 2 — try to dispatch a non-recursive rule
@@ -2101,8 +2279,8 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use super::{
-        match_multiway_triangle, wcoj_adaptive_enabled, wcoj_gate_enabled,
-        ENV_USE_WCOJ_TRIANGLE_U32,
+        match_multiway_chain, match_multiway_triangle, w63_chain_enabled, wcoj_adaptive_enabled,
+        wcoj_gate_enabled, ENV_USE_WCOJ_TRIANGLE_U32, ENV_WCOJ_W63_CHAIN_ENABLE,
     };
     use xlog_core::RelId;
     use xlog_ir::rir::ProjectExpr;
@@ -2128,6 +2306,74 @@ mod tests {
             fallback: Box::new(RirNode::Unit),
             plan: None,
             var_order: None,
+        }
+    }
+
+    fn canonical_chain_multiway() -> RirNode {
+        RirNode::MultiWayJoin {
+            inputs: vec![
+                RirNode::Scan { rel: RelId(1) },
+                RirNode::Scan { rel: RelId(2) },
+            ],
+            slot_vars: vec![vec![Some(0u32), Some(1)], vec![Some(1u32), Some(2)]],
+            output_columns: vec![ProjectExpr::Column(0), ProjectExpr::Column(3)],
+            fallback: Box::new(RirNode::Unit),
+            plan: None,
+            var_order: None,
+        }
+    }
+
+    #[test]
+    fn match_chain_returns_two_rels_and_keys() {
+        let node = canonical_chain_multiway();
+        let m = match_multiway_chain(&node).expect("must match canonical chain");
+        assert_eq!(m.rel_left, RelId(1));
+        assert_eq!(m.rel_right, RelId(2));
+        assert_eq!(m.left_key, 1);
+        assert_eq!(m.right_key, 0);
+        assert_eq!(
+            m.output_columns,
+            vec![ProjectExpr::Column(0), ProjectExpr::Column(3)]
+        );
+    }
+
+    #[test]
+    fn match_chain_rejects_ambiguous_shared_variable() {
+        let mut node = canonical_chain_multiway();
+        if let RirNode::MultiWayJoin { slot_vars, .. } = &mut node {
+            *slot_vars = vec![vec![Some(0u32), Some(1)], vec![Some(1u32), Some(0)]];
+        }
+        assert!(match_multiway_chain(&node).is_none());
+    }
+
+    #[test]
+    fn w63_chain_env_defaults_on_and_can_disable() {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let old = std::env::var(ENV_WCOJ_W63_CHAIN_ENABLE).ok();
+        // SAFETY: This test holds a local mutex while mutating the
+        // process-global W63 env var, and restores it before unlock.
+        unsafe {
+            std::env::remove_var(ENV_WCOJ_W63_CHAIN_ENABLE);
+        }
+        assert!(w63_chain_enabled());
+        unsafe {
+            std::env::set_var(ENV_WCOJ_W63_CHAIN_ENABLE, "0");
+        }
+        assert!(!w63_chain_enabled());
+        unsafe {
+            std::env::set_var(ENV_WCOJ_W63_CHAIN_ENABLE, "false");
+        }
+        assert!(!w63_chain_enabled());
+        unsafe {
+            std::env::set_var(ENV_WCOJ_W63_CHAIN_ENABLE, "1");
+        }
+        assert!(w63_chain_enabled());
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var(ENV_WCOJ_W63_CHAIN_ENABLE, v),
+                None => std::env::remove_var(ENV_WCOJ_W63_CHAIN_ENABLE),
+            }
         }
     }
 

@@ -135,6 +135,16 @@ pub fn promote_multiway(
             // after the W4.1 `rewrite_scan_nth` fix at
             // `crates/xlog-runtime/src/executor/rewrite.rs:303-311 +
             // :477-504`.
+            // Goal-039 G_W63_CHAIN spike: a 2-atom chain is not
+            // paper-prescribed WCOJ; it is xlog-original routing
+            // motivated by the G_PRE trace. Reuse the existing
+            // `MultiWayJoin` fallback wrapper for the spike so the
+            // runtime can dispatch or decline without broadening the
+            // RIR enum surface.
+            if let Some(promoted) = try_promote_chain(&rule.body) {
+                rule.body = promoted;
+                continue;
+            }
             // W2.6 robustness: the lowerer's bushy DP planner may
             // emit a right-deep `Project(Join(Scan, Join(Scan,
             // Scan)))` triangle for small-card inputs (snapshot-driven
@@ -673,6 +683,65 @@ fn try_promote_triangle(
         fallback,
         plan: None,
         var_order,
+    })
+}
+
+/// Goal-039 G_W63_CHAIN spike: recognize a 2-atom inner chain
+/// `Project(Join(Scan, Scan))` with exactly one shared key column
+/// and wrap it as a shape-tagged `MultiWayJoin`.
+///
+/// This intentionally uses the existing `MultiWayJoin.fallback`
+/// identity contract instead of introducing the production
+/// `ChainJoin` RIR variant during the spike. The runtime can route
+/// the shape and silently fall back to the captured binary plan on
+/// any mismatch.
+fn try_promote_chain(node: &RirNode) -> Option<RirNode> {
+    let RirNode::Project { input, columns } = node else {
+        return None;
+    };
+    let RirNode::Join {
+        left,
+        right,
+        left_keys,
+        right_keys,
+        join_type,
+    } = input.as_ref()
+    else {
+        return None;
+    };
+    if !matches!(join_type, JoinType::Inner) {
+        return None;
+    }
+    if left_keys.len() != 1 || right_keys.len() != 1 {
+        return None;
+    }
+    let left_key = left_keys[0];
+    let right_key = right_keys[0];
+    if left_key >= 2 || right_key >= 2 {
+        return None;
+    }
+    let RirNode::Scan { rel: rel_left } = left.as_ref() else {
+        return None;
+    };
+    let RirNode::Scan { rel: rel_right } = right.as_ref() else {
+        return None;
+    };
+
+    let left_vars = vec![Some(0u32), Some(1u32)];
+    let shared = left_vars[left_key];
+    let mut right_vars = vec![Some(2u32), Some(2u32)];
+    right_vars[right_key] = shared;
+
+    Some(RirNode::MultiWayJoin {
+        inputs: vec![
+            RirNode::Scan { rel: *rel_left },
+            RirNode::Scan { rel: *rel_right },
+        ],
+        slot_vars: vec![left_vars, right_vars],
+        output_columns: columns.clone(),
+        fallback: Box::new(node.clone()),
+        plan: None,
+        var_order: None,
     })
 }
 
@@ -1456,6 +1525,83 @@ mod tests {
             },
         );
         builder.build()
+    }
+
+    fn canonical_chain_tree() -> RirNode {
+        let join = RirNode::Join {
+            left: Box::new(RirNode::Scan { rel: RelId(1) }),
+            right: Box::new(RirNode::Scan { rel: RelId(2) }),
+            left_keys: vec![1],
+            right_keys: vec![0],
+            join_type: JoinType::Inner,
+        };
+        RirNode::Project {
+            input: Box::new(join),
+            columns: vec![ProjectExpr::Column(0), ProjectExpr::Column(3)],
+        }
+    }
+
+    #[test]
+    fn promotes_canonical_chain() {
+        let mut plan = plan_with_body(canonical_chain_tree());
+        promote_multiway(
+            &mut plan,
+            &HashMap::new(),
+            &StatsManager::new(),
+            &CompilerConfig::default(),
+        );
+        let body = &plan.rules_by_scc[0][0].body;
+        match body {
+            RirNode::MultiWayJoin {
+                inputs,
+                slot_vars,
+                output_columns,
+                fallback,
+                ..
+            } => {
+                assert_eq!(inputs.len(), 2);
+                assert!(matches!(inputs[0], RirNode::Scan { rel: RelId(1) }));
+                assert!(matches!(inputs[1], RirNode::Scan { rel: RelId(2) }));
+                assert_eq!(
+                    slot_vars,
+                    &vec![vec![Some(0u32), Some(1)], vec![Some(1u32), Some(2)]]
+                );
+                assert_eq!(
+                    output_columns,
+                    &vec![ProjectExpr::Column(0), ProjectExpr::Column(3)]
+                );
+                assert!(matches!(fallback.as_ref(), RirNode::Project { .. }));
+            }
+            other => panic!("expected chain MultiWayJoin, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn chain_promotion_rejects_non_inner_join() {
+        let mut body = canonical_chain_tree();
+        if let RirNode::Project { input, .. } = &mut body {
+            if let RirNode::Join { join_type, .. } = input.as_mut() {
+                *join_type = JoinType::LeftOuter;
+            }
+        }
+        assert!(try_promote_chain(&body).is_none());
+    }
+
+    #[test]
+    fn chain_promotion_rejects_multi_key_join() {
+        let mut body = canonical_chain_tree();
+        if let RirNode::Project { input, .. } = &mut body {
+            if let RirNode::Join {
+                left_keys,
+                right_keys,
+                ..
+            } = input.as_mut()
+            {
+                *left_keys = vec![0, 1];
+                *right_keys = vec![0, 1];
+            }
+        }
+        assert!(try_promote_chain(&body).is_none());
     }
 
     #[test]
