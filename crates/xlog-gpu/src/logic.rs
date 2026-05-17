@@ -179,10 +179,11 @@ impl LogicProgram {
                 ))
             })?;
 
+            let columns = query_output_vars(query);
             queries.push(LogicQueryResult {
                 relation_name,
-                columns: query_output_vars(query),
-                sort_labels: buffer.schema().sort_labels().to_vec(),
+                sort_labels: columns.clone(),
+                columns,
                 buffer,
             });
         }
@@ -259,10 +260,11 @@ impl LogicProgram {
                 ))
             })?;
 
+            let columns = query_output_vars(query);
             queries.push(LogicQueryResult {
                 relation_name,
-                columns: query_output_vars(query),
-                sort_labels: buffer.schema().sort_labels().to_vec(),
+                sort_labels: columns.clone(),
+                columns,
                 buffer,
             });
         }

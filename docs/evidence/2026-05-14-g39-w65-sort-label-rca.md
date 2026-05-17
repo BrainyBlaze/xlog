@@ -72,6 +72,7 @@ Implemented xlog-side certs:
 - `crates/xlog-integration/tests/test_w65_sort_label.rs`
   - `w65_schema_new_assigns_non_default_sort_labels`
   - `w65_query_output_sort_labels_follow_query_variables`
+  - `w65_runtime_query_result_sort_labels_follow_query_variables`
   - `w65_pyxlog_logic_query_result_exposes_sort_labels`
 
 Static DTS-DLM unchanged check:
@@ -116,6 +117,32 @@ SORT_WARNINGS=11
 Sort enrichment warning counts: 4 x 6 calls, 48 x 5 calls
 Total default events: 264
 ```
+
+After hardening the xlog result boundary so
+`LogicQueryResult.sort_labels == LogicQueryResult.columns`, the same frozen DTS
+support query exposes variable labels instead of executor-internal `cN` labels:
+
+```text
+query 0 columns=['H','A0','A1','R','W0P','W0A0','W0A1']
+query 0 sort_labels=['H','A0','A1','R','W0P','W0A0','W0A1']
+query 1 columns=['H','A0','A1','R','W0P','W0A0','W0A1','W1P','W1A0','W1A1']
+query 1 sort_labels=['H','A0','A1','R','W0P','W0A0','W0A1','W1P','W1A0','W1A1']
+query 2 columns=['P','A0','A1']
+query 2 sort_labels=['P','A0','A1']
+```
+
+The bounded DTS replay was repeated with that branch-local pyxlog build:
+
+```text
+run_id=g39-w65-5doc-20260517-r2
+RC=0
+SORT_WARNINGS=11
+6 calls: Sort enrichment: 4 sort-map misses ...
+5 calls: Sort enrichment: 48 sort-map misses ...
+```
+
+This verifies that M_W65.3 is covered at the xlog result boundary while M_W65.1
+remains blocked by the DTS support-clause/source-generation issue below.
 
 An in-process diagnostic wrapper around
 `dts_dlm.propagate.xlog_executor.enrich_support_sorts` classified every warning

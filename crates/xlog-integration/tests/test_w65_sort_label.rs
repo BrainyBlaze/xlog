@@ -1,5 +1,18 @@
+#![allow(clippy::arc_with_non_send_sync)]
+
+use std::sync::Arc;
+
+use xlog_core::MemoryBudget;
 use xlog_core::{ScalarType, Schema};
+use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_gpu::logic::LogicProgram;
+
+fn w65_test_provider() -> Option<Arc<CudaKernelProvider>> {
+    let device = Arc::new(CudaDevice::new(0).ok()?);
+    let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
+    let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
+    Some(Arc::new(CudaKernelProvider::new(device, memory).ok()?))
+}
 
 #[test]
 fn w65_schema_new_assigns_non_default_sort_labels() {
@@ -46,6 +59,35 @@ fn w65_query_output_sort_labels_follow_query_variables() {
     assert_eq!(usable_schema.sort_labels(), ["P", "A0", "A1"]);
     assert!(support_schema.has_authoritative_sort_labels());
     assert!(usable_schema.has_authoritative_sort_labels());
+}
+
+#[test]
+fn w65_runtime_query_result_sort_labels_follow_query_variables() {
+    let Some(provider) = w65_test_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let source = r#"
+        pred edge(u32, u32).
+        pred reach(u32, u32).
+
+        edge(1, 2).
+        edge(2, 3).
+        reach(X, Y) :- edge(X, Y).
+        reach(X, Z) :- reach(X, Y), edge(Y, Z).
+
+        ?- reach(Source, Target).
+    "#;
+
+    let program = LogicProgram::compile(source).expect("compile recursive W65 fixture");
+    let result = program
+        .evaluate(provider, std::collections::HashMap::new())
+        .expect("evaluate recursive W65 fixture");
+
+    assert_eq!(result.queries.len(), 1);
+    assert_eq!(result.queries[0].columns, ["Source", "Target"]);
+    assert_eq!(result.queries[0].sort_labels, ["Source", "Target"]);
 }
 
 #[test]
