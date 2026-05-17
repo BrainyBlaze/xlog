@@ -48,11 +48,11 @@ any contrary slice-internal decision.
 
 | State | Count |
 |-------|-------|
-| DONE | 20 (W2.4, W2.2, W2.1, W2.3, W2.5, W2.6, W3.1, W3.2, W3.3, W3.4, W3.5, W3.6, W3.7, W3.8, W3.9, W4.1, W4.2, W4.3, W5.1, W5.2) |
+| DONE | 21 (W2.4, W2.2, W2.1, W2.3, W2.5, W2.6, W3.1, W3.2, W3.3, W3.4, W3.5, W3.6, W3.7, W3.8, W3.9, W4.1, W4.2, W4.3, W5.1, W5.2, W6.7) |
 | IN-PROGRESS | 1 (W1.1) |
 | BLOCKED | 0 (—) |
 | OPEN | 5 (W5.3, W5.4, W6.1, W6.2, W7.1) |
-| **Total** | **26** |
+| **Total** | **27** |
 
 The 4 ROADMAP items already DONE from slices 1, 2, 4 are
 recorded in ROADMAP.md and the slice evidence READMEs; they're
@@ -115,6 +115,7 @@ prior shipped work.
 |----|--------|--------|------------|----------------------|-----------------|
 | W6.1 | ROADMAP item #21 | OPEN | — | Dedicated WCOJ architecture guide. Covers RIR, promoter, dispatch, cost model, recursive integration. | New file `docs/wcoj-architecture-guide.md`; cross-linked from ROADMAP. |
 | W6.2 | ROADMAP item #22 | OPEN | — | User-facing WCOJ eligibility / fallback / performance tuning guide. NOT just code-doc rehash. | New file `docs/wcoj-user-guide.md`; covers env vars, config builders, when to opt into cardinality, threshold tuning, troubleshooting. |
+| W6.7 | Goal-038-B | DONE | — | K5/K6 hypergraph planner as production planner: executor-aware eligibility, cost-aware K-clique planner, RIR variable-order surface, plan-consuming runtime/kernel dispatch, structured cost gate, K-clique runtime histogram refresh, K-clique helper-splitting invocation, bench/integration/purge evidence. | DONE — Goal-038-B amended plan `docs/plans/2026-05-14-supervisor-goal-038-B.md`; closure proposal v2 `5f11138e` supersedes preserved proposal `ef3fbc7e`; amended commit chain `ef241c7f` -> `1e8a055f`; M_HG_ELIG.1-4, M_HG_PLAN.1-6, M_RIR_VO.1-4, M_DISP.1-6, M_GATE.1-5, M_HIST_KC.1-8, M_HELP_KC.1-8, M_BENCH38B.1-5, M_INT38B.1-15, M_PURGE38B.1-11 all green. User-approved DONE in thread. |
 
 ### Wave 7 — Release
 
