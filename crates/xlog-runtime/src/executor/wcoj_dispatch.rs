@@ -2201,28 +2201,52 @@ impl Executor {
                     Ok(a) => a,
                     Err(_) => return Ok(None),
                 };
-                self.provider.wcoj_clique7_u32_recorded(arr, launch_stream)
+                self.provider.wcoj_clique7_u32_recorded_planned(
+                    arr,
+                    plan_params.leader_edge_idx,
+                    &plan_params.edge_order,
+                    &plan_params.iteration_order,
+                    launch_stream,
+                )
             }
             (7, true) => {
                 let arr: &[&CudaBuffer; 21] = match edge_refs.as_slice().try_into() {
                     Ok(a) => a,
                     Err(_) => return Ok(None),
                 };
-                self.provider.wcoj_clique7_u64_recorded(arr, launch_stream)
+                self.provider.wcoj_clique7_u64_recorded_planned(
+                    arr,
+                    plan_params.leader_edge_idx,
+                    &plan_params.edge_order,
+                    &plan_params.iteration_order,
+                    launch_stream,
+                )
             }
             (8, false) => {
                 let arr: &[&CudaBuffer; 28] = match edge_refs.as_slice().try_into() {
                     Ok(a) => a,
                     Err(_) => return Ok(None),
                 };
-                self.provider.wcoj_clique8_u32_recorded(arr, launch_stream)
+                self.provider.wcoj_clique8_u32_recorded_planned(
+                    arr,
+                    plan_params.leader_edge_idx,
+                    &plan_params.edge_order,
+                    &plan_params.iteration_order,
+                    launch_stream,
+                )
             }
             (8, true) => {
                 let arr: &[&CudaBuffer; 28] = match edge_refs.as_slice().try_into() {
                     Ok(a) => a,
                     Err(_) => return Ok(None),
                 };
-                self.provider.wcoj_clique8_u64_recorded(arr, launch_stream)
+                self.provider.wcoj_clique8_u64_recorded_planned(
+                    arr,
+                    plan_params.leader_edge_idx,
+                    &plan_params.edge_order,
+                    &plan_params.iteration_order,
+                    launch_stream,
+                )
             }
             _ => return Ok(None),
         };

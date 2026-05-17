@@ -1146,9 +1146,9 @@ fn validate_clique_metadata_leader<'a>(
     width_class: CliqueWidthClass,
     entry_label: &str,
 ) -> Result<&'a CudaBuffer> {
-    if !(k == 5 || k == 6) {
+    if !(5..=8).contains(&k) {
         return Err(XlogError::Kernel(format!(
-            "{}: k must be 5 or 6, got {}",
+            "{}: k must be 5..8, got {}",
             entry_label, k
         )));
     }
@@ -2100,6 +2100,27 @@ impl CudaKernelProvider {
         )
     }
 
+    /// W6.4 — 7-clique WCOJ at 4-byte width-class using plan-derived launch params.
+    pub fn wcoj_clique7_u32_recorded_planned(
+        &self,
+        edges: &[&CudaBuffer; 21],
+        leader_edge_idx: u32,
+        edge_order: &[u8],
+        iteration_order: &[u8],
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        self.wcoj_clique_recorded_inner(
+            7,
+            edges,
+            leader_edge_idx,
+            Some(edge_order),
+            Some(iteration_order),
+            CliqueWidthClass::FourByte,
+            launch_stream,
+            "wcoj_clique7_u32_recorded_planned",
+        )
+    }
+
     /// W6.4 — 7-clique WCOJ at 8-byte width-class (U64 only).
     pub fn wcoj_clique7_u64_recorded(
         &self,
@@ -2115,6 +2136,27 @@ impl CudaKernelProvider {
             CliqueWidthClass::EightByte,
             launch_stream,
             "wcoj_clique7_u64_recorded",
+        )
+    }
+
+    /// W6.4 — 7-clique WCOJ at 8-byte width-class using plan-derived launch params.
+    pub fn wcoj_clique7_u64_recorded_planned(
+        &self,
+        edges: &[&CudaBuffer; 21],
+        leader_edge_idx: u32,
+        edge_order: &[u8],
+        iteration_order: &[u8],
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        self.wcoj_clique_recorded_inner(
+            7,
+            edges,
+            leader_edge_idx,
+            Some(edge_order),
+            Some(iteration_order),
+            CliqueWidthClass::EightByte,
+            launch_stream,
+            "wcoj_clique7_u64_recorded_planned",
         )
     }
 
@@ -2136,6 +2178,27 @@ impl CudaKernelProvider {
         )
     }
 
+    /// W6.4 — 8-clique WCOJ at 4-byte width-class using plan-derived launch params.
+    pub fn wcoj_clique8_u32_recorded_planned(
+        &self,
+        edges: &[&CudaBuffer; 28],
+        leader_edge_idx: u32,
+        edge_order: &[u8],
+        iteration_order: &[u8],
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        self.wcoj_clique_recorded_inner(
+            8,
+            edges,
+            leader_edge_idx,
+            Some(edge_order),
+            Some(iteration_order),
+            CliqueWidthClass::FourByte,
+            launch_stream,
+            "wcoj_clique8_u32_recorded_planned",
+        )
+    }
+
     /// W6.4 — 8-clique WCOJ at 8-byte width-class (U64 only).
     pub fn wcoj_clique8_u64_recorded(
         &self,
@@ -2151,6 +2214,27 @@ impl CudaKernelProvider {
             CliqueWidthClass::EightByte,
             launch_stream,
             "wcoj_clique8_u64_recorded",
+        )
+    }
+
+    /// W6.4 — 8-clique WCOJ at 8-byte width-class using plan-derived launch params.
+    pub fn wcoj_clique8_u64_recorded_planned(
+        &self,
+        edges: &[&CudaBuffer; 28],
+        leader_edge_idx: u32,
+        edge_order: &[u8],
+        iteration_order: &[u8],
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        self.wcoj_clique_recorded_inner(
+            8,
+            edges,
+            leader_edge_idx,
+            Some(edge_order),
+            Some(iteration_order),
+            CliqueWidthClass::EightByte,
+            launch_stream,
+            "wcoj_clique8_u64_recorded_planned",
         )
     }
 }

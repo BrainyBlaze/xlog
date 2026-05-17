@@ -175,7 +175,10 @@ pub fn promote_multiway(
             // (different scan count). Recursive clique bodies are
             // admitted so the runtime can rebuild leader-edge
             // metadata from the current semi-naive store state.
-            if let Some(promoted) = (5..=8).find_map(|k| try_promote_clique_k(&rule.body, k, stats))
+            if let Some(promoted) = try_promote_clique_k(&rule.body, 5, stats)
+                .or_else(|| try_promote_clique_k(&rule.body, 6, stats))
+                .or_else(|| try_promote_clique_k(&rule.body, 7, stats))
+                .or_else(|| try_promote_clique_k(&rule.body, 8, stats))
             {
                 rule.body = promoted;
                 continue;
