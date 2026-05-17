@@ -218,6 +218,28 @@ membership guard to each generated `support_N` clause.
 
 Under goal-039 lock 17, DTS-DLM source mutation is out of bounds for G_W65.
 
+## Escalation State
+
+G_W65 is not closed. The active Goal-039 DAG cannot advance from G_W65 to G_W66
+under the current acceptance contract because:
+
+- goal-039 lock 14 makes `Sort enrichment: N sort-map misses` an error condition
+  for Phase 2, not a tolerated warning;
+- M_W65.1 requires a 50-doc m37c-prime replay with zero sort-map miss
+  diagnostics;
+- the reproduced warning source is DTS-DLM support-clause source generation,
+  not an xlog output-schema or pyxlog result-boundary defect;
+- goal-039 lock 17 forbids DTS-DLM source mutation during G_W65.
+
+The actionable supervisor decision is therefore one of:
+
+1. Amend Goal-039 with an authorized DTS-DLM source-generation fix sub-goal
+   before G_W66.
+2. Amend G_W65 acceptance to gracefully defer M_W65.1 while preserving this RCA
+   as the lock-conflict evidence.
+3. Keep the current contract unchanged, in which case Goal-039 remains halted at
+   G_W65.
+
 ## M_W65 Status
 
 | Metric | Status | Evidence |
