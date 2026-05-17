@@ -32,14 +32,19 @@ The inherited 10 locks (see goal-037 §0):
 
 Phase-2 extensions:
 
-11. **DTS-DLM consumer-contract preservation.** Every pyxlog API DTS-DLM consumes (`LogicProgram.compile`, `program.session`, `session.put_relation`, `session.evaluate`, `session.export_relation`, `IlpProgramFactory.compile`, `train_on_compiled_relations`, `TrainConfig`, `StrictTrainResult`) is **frozen**. New optional parameters with defaults are permitted iff they do not change pre-existing call sites. No signature changes, no behavioral changes outside the documented `deterministic=True` + seed-pin contract.
-12. **Determinism contract preservation.** WP2.6 memoization-safety contract: `deterministic=True` + seed-pin produces bit-exact relation output across `evaluate()` calls and across `pipeline_run` instances. G_W53 is the explicit cert.
+11. **DTS-DLM consumer-contract preservation.** Every pyxlog API DTS-DLM consumes is **frozen**. New optional parameters with defaults are permitted iff they do not change pre-existing call sites. No signature changes, no behavioral changes outside the documented `deterministic=True` + seed-pin contract. The frozen surface spans two contract groups:
+    - **Group A — Stage 4/5 active surface** (DTS-DLM xlog usage dump Scenarios 1+2+3, expanded R6 per supervisor amendment 2026-05-17 for M37-F readiness): `LogicProgram.compile`, `program.session`, `session.put_relation`, `session.evaluate`, `session.export_relation`, `IlpProgramFactory.compile`, `train_on_compiled_relations`, `TrainConfig`, `StrictTrainResult`, `LogicSessionAdapter` (Scenario 3 persistent session wrapper), **`train_and_promote`** (xlog-induce meta-API on top of `train_on_compiled_relations`; consumes the same `TrainConfig`/produces same `StrictTrainResult`; adds promotion-gate evaluation: convergence + novel-rate + regression + holdout-F1 gates per FINAL-REPORT M37-F candidate scope; M37-F dILP rule discovery consumer queued post-M37-A).
+    - **Group B — M18 / M37-A neural-symbolic training surface** (DTS-DLM xlog usage dump Scenario 4 + M37-A queued per `dts-dlm/docs/plans/2026-05-11-m37c-prime-narrow-recalibration-plan-freeze.md` §8; expanded R7 per supervisor amendment 2026-05-17 to cover v0.4.0-beta/ga/v0.5.x surfaces per FINAL-REPORT Stone #9): `nn/4` neural predicate Datalog syntax (`nn(network, [inputs], output, [labels]) :: predicate(args)`), `register_network(name, nn_module, optimizer)`, `forward_backward_tensor(query)` (returns CUDA tensor loss with zero host reads — strict GPU-native contract), `train_epoch(queries, batch_size=N)`, XGCF GPU forward+backward weighted model counting, circuit caching (100× speedup on repeated queries — performance contract quantified per R8 + KPI-9), probabilistic queries `P(Query|Evidence)` with per-query gradient output, **`register_embedding(name, embedding_module)`** (term embeddings per FINAL-REPORT Stone #9 v0.4.0-beta/ga shipped surface), **training controls**: gradient-clipping parameters (`max_grad_norm`, clip strategy), early-stopping criteria (patience, min-delta), scheduler config (StepLR/CosineLR/Plateau), learning-rate override on `register_network`, **Bounded Exact Induction** (`xlog-induce` crate public API: `bounded_exact_induce(program, examples, budget)` + result types) per v0.4.0-beta/ga shipped surface. Group B is **proven by M18 phases A–D** (`xlog_alpha_source.py` source emitter); v0.5.x extensions proven via xlog `examples/neural/` reference suite (MNIST-Add 99.07% with addition-only supervision). M37-A and M37-F are the two queued consumers of the expanded Group B surface.
+12. **Determinism contract preservation** (extended R9 per supervisor amendment 2026-05-17 for M37-A dynamic rule injection scenario). WP2.6 memoization-safety contract: `deterministic=True` + seed-pin produces bit-exact relation output under three regimes:
+    - (a) **Stateless evaluation** across `evaluate()` calls on an unchanged program — bit-exact across 100 replays (G_W53 M_W53.3).
+    - (b) **Repeated `register_network`** calls in the same session with the same `nn.Module` and `torch.optim.Optimizer` — bit-exact gradient output across 100 invocations (G_W53 new sub-test per R9).
+    - (c) **Program mutation between `evaluate()` calls** — when Stage 5 ILP induction injects a new rule via `train_and_promote` or M37-A injects a learned rule mid-session, subsequent `evaluate()` calls with the same seed produce bit-exact output across runs (G_W53 new sub-test per R9 — dynamic rule injection scenario). xlog internal random state (hash-seed for relation indexing, search-tie-breaking, optimizer initialization) MUST be deterministic under seed-pin or expose configuration to be made deterministic.
 13. **Possibilistic-vs-probabilistic separation.** xlog kernels are agnostic to (pro, contra) confidence channels. xlog provides structural derivation; xlog MUST NOT introduce probabilistic-sum aggregation into Stage 4 kernels (DTS-DLM plan-freeze §2.2(e)). Stage 5 ILP induction sandbox (`pyxlog.ilp`) is the only locus where probabilistic-sum is permitted, and it is OUT OF SCOPE for Phase 2.
 14. **Sort-label metadata is consumer-visible.** Every output relation MUST emit per-column sort labels. The `Sort enrichment: N sort-map misses` diagnostic in DTS-DLM `xlog_executor.py:157` becomes an error condition for Phase 2 (G_W65), not a tolerated warning.
 15. **m37c-prime trace replay is the canonical DTS-DLM fixture.** Pilot trace at `/home/dev/projects/dts-dlm/out/m37c-prime/` is source of truth for Stage 4 rule-shape distribution. Synthetic DTS-DLM-analog fixtures reproduce this distribution; final G_E2E validation runs on m37c-prime directly.
 16. **No DTS-DLM repo mutations** except (a) read-only profiler-trace instrumentation in G_PRE (reverted after trace), (b) maturin-built xlog wheel reinstall for G_E2E. No DTS-DLM source code changes outside these two precisely-scoped exceptions.
 17. **No changes to `xlog-induce` crate.** Stage 5 ILP path is untouched. W6.x scope is xlog-cuda / xlog-runtime / xlog-logic only.
-18. **No changes to `xlog-prob`, `xlog-neural`, `xlog-solve`, `xlog-gpu`, `xlog-stats`, `xlog-cli`, `xlog-core`, `xlog-ir`, `pyxlog` crates** beyond what G_W65 (sort labels), G_W66 (CUDA Graphs in xlog-cuda), and G_E2E (pyxlog rebuild) strictly require AND lock 11 permits.
+18. **No changes to `xlog-prob`, `xlog-neural`, `xlog-solve`, `xlog-gpu`, `xlog-stats`, `xlog-cli`, `xlog-core`, `xlog-ir`, `pyxlog` crates** beyond what G_W65 (sort labels), G_W66 (CUDA Graphs in xlog-cuda), G_E2E (pyxlog rebuild), and G_M37A_SURFACE (M37-A surface regression cert — NO code edits; cert-only) strictly require AND lock 11 permits. Critically, `xlog-prob` (XGCF + circuit caching) and `xlog-neural` (`nn/4` + `register_network` + `train_epoch`) must be preserved verbatim: their existing behavior is M37-A's substrate. G_PURGE2 MUST NOT remove any Group B symbol even if no Phase-2 call site references it — Group B has a queued downstream consumer (M37-A, queued unconditionally per m37c-prime plan-freeze §8). Resolution if static analysis flags Group B symbols as dead: add a smoke test that exercises the symbol in `crates/xlog-integration/tests/test_m37a_surface_preservation.rs`, do NOT remove the symbol.
 19. **No re-opening of Phase-1 W3 axis.** Phase-2 work that reveals a Phase-1 regression escalates; does NOT silently revert Phase-1 commits.
 20. **No re-validation of W3.4 inside Phase 2.** Phase 2 regression-checks W3.4 as part of G_INT2. Phase-2-introduced regression is root-caused in Phase-2 scope.
 21. **No xlog tag pushes inside Phase 2.** v0.6.5 tag remains W7.1-gated, user-authorized. Phase 2 produces tag-ready HEAD only.
@@ -78,7 +83,9 @@ Phase-2 extensions:
 > **KPI-4:** Closure board reaches 0 OPEN (W3.x via Phase 1 + W5.3/W5.4/W6.1/W6.2/W6.3/W6.4/W6.5/W6.6 via Phase 2) excluding W7.1 release tag; W7.1 cleared for user-authorized firing.
 > **KPI-5:** Peak VRAM on m37c-prime full replay ≤ 80% of 48 GB (≤ 38 GB).
 > **KPI-6:** Witness-chain recoverability: every fact in WMIR-derived relation has a recoverable witness chain via `choice_sources` / `leaf_atoms` accessors (100% on 50 docs).
-> **KPI-7:** DLPack zero-copy preserved: zero `cudaMemcpyDtoH` / `cudaMemcpyHtoD` outside `enrich_support_sorts` on Stage 4 hot path.
+> **KPI-7** (extended R10 per supervisor amendment 2026-05-17): DLPack zero-copy preserved on Stage 4 hot path AND Stage 5 witness-chain traversal path. Zero `cudaMemcpyDtoH` / `cudaMemcpyHtoD` outside `enrich_support_sorts` on Stage 4 hot path. Zero `cudaMemcpyDtoH` / `HtoD` on `choice_sources` / `leaf_atoms` accessor traversal during Stage 5 governance for m37c-prime 50-doc replay. Cert: G_E2E adds CUDA-event trace assertion for Stage-5 witness traversal path.
+> **KPI-8:** M18 / M37-A neural-symbolic training surface preserved: `nn/4` + `register_network` + `forward_backward_tensor` + `train_epoch` + XGCF + circuit caching + `register_embedding` + training controls + Bounded Exact Induction all functional on Phase-2 HEAD; M18-D verified config reproduces AUROC gains 0.387 / 0.387 / 0.463 with ≥ 99.8% coverage on the slice referenced in `dts-dlm/docs/research/2026-05-08-pre-m37/04-FINAL-REPORT.md` Stone #9.
+> **KPI-9** (NEW R8 per supervisor amendment 2026-05-17): Circuit caching performance contract quantified. Cache scope = per `program.session()`. Cache survives across `forward_backward_tensor()` invocations within a session. Cache-hit speedup ≥ 50× on repeated identical query (gate; paper claims 100× as headline). Cache-hit rate ≥ 95% on M18-D verified config replay over 10 epochs (since M18-D rule program is constant across epochs, all repeat-queries should hit cache). M37-F `train_and_promote` per-attempt repeated queries also hit cache. Cert: G_M37A_SURFACE M_M37A.5 extended to gate cache-hit rate explicitly.
 
 ---
 
@@ -103,6 +110,8 @@ BG0 — DTS-DLM v3 ship with v0.6.5 xlog
  │
  ├── G_W39_DTSDLM — Phase-1 G_W39 harness extension (DTS-DLM-analog fixture)
  │
+ ├── G_M37A_SURFACE — M18 / M37-A neural-symbolic training surface preservation cert (KPI-8)
+ │
  ├── G_INT2 — Phase-2 integration gate (W3.4/W4.1/W5.1/W5.2/W2.5 regression-free)
  │
  ├── G_PURGE2 — Phase-2 cross-cutting refactor + dead-code/comment purge
@@ -112,7 +121,7 @@ BG0 — DTS-DLM v3 ship with v0.6.5 xlog
  └── G_E2E — DTS-DLM end-to-end validation (KPI-1..KPI-7) → W7.1 tag-ready handoff
 ```
 
-15 sub-goals (1 prerequisite + 4 existing OPEN + 4 new W6.x + 1 harness extension + 3 closure + 1 E2E + 1 final). Dependency DAG at §4.
+16 sub-goals (1 prerequisite + 4 existing OPEN + 4 new W6.x + 1 harness extension + 1 M37-A surface cert + 3 closure + 1 E2E + 1 final). Dependency DAG at §4.
 
 ---
 
@@ -459,7 +468,63 @@ BG0 — DTS-DLM v3 ship with v0.6.5 xlog
 
 ---
 
-### 3.11 G_INT2 — Phase-2 integration gate
+### 3.11 G_M37A_SURFACE — M18 / M37-A neural-symbolic training surface preservation cert
+
+**Goal.** Analyze the xlog v0.4.0-alpha neural-symbolic training surface (`nn/4`, `register_network`, `forward_backward_tensor`, `train_epoch`, XGCF, circuit caching) for the purpose of certifying functional + behavioral + performance preservation on Phase-2 HEAD with respect to KPI-8 + process lock 11 Group B from the viewpoint of M37-A queued-consumer readiness in the context of post-v0.6.5 DTS-DLM milestone progression.
+
+**Scope discipline.** G_M37A_SURFACE is **cert-only**, NOT new development. M37-A itself is DTS-DLM-side work executed POST v0.6.5 tag (per `dts-dlm/docs/plans/2026-05-11-m37c-prime-narrow-recalibration-plan-freeze.md` §8 unconditional queue). Phase 2's responsibility is preserving the surface, not consuming it. Any cert finding that requires xlog code changes escalates to supervisor and may invoke a separate post-Phase-2 fix bundle rather than expanding goal-039 scope.
+
+**Anchor.** M18 phases A–D verified configurations:
+- M18-B: 3 `nn/4` predicates (predicate, arg0, arg1) composed via `fact_compiled(X,P,A0,A1)` — PASS
+- M18-C: AUROC gains 0.626 / 0.161 / 0.703 on 3 slots; attribution-cleanliness held — PASS
+- M18-D: AUROC gains 0.387 / 0.387 / 0.463 with ≥ 99.8% coverage on expanded label space (15 preds / 44 entities) via warmup pre-pass — PASS
+
+**Questions.**
+- **Q_M37A.1** Does the M18-D verified `xlog_alpha_source.py` α-shape source emitter still compile + execute under Phase-2 xlog wheel?
+- **Q_M37A.2** Do the M18-D PASS metrics (AUROC 0.387/0.387/0.463, coverage ≥99.8%) reproduce within ±5% on Phase-2 HEAD?
+- **Q_M37A.3** Is the strict-GPU-native contract of `forward_backward_tensor` preserved (zero host reads during loss computation)?
+- **Q_M37A.4** Is XGCF circuit caching preserved (100× speedup on repeated query — performance contract)?
+- **Q_M37A.5** Do the 6 reference examples shipped with v0.4.0-alpha still pass (MNIST-Add 99.07% accuracy with addition-only supervision as canonical canary)?
+- **Q_M37A.6** Are `nn/4` Datalog syntax, `register_network` PyTorch integration, and `train_epoch` batch API functional?
+
+**Metrics.**
+
+| Metric | Definition | Target |
+|---|---|---|
+| **M_M37A.1** | `xlog_alpha_source.py` compiles + executes against Phase-2 wheel without API errors | EXIT 0 |
+| **M_M37A.2** | M18-D verified config reproduces AUROC gains within ±5% of baseline (0.387/0.387/0.463) | 3/3 within ±5% |
+| **M_M37A.3** | M18-D coverage reproduces ≥ 99.8% | ≥ 99.8% |
+| **M_M37A.4** | `forward_backward_tensor` zero-host-reads cert: CUDA event trace shows no `cudaMemcpyDtoH` during loss computation | 0 host reads |
+| **M_M37A.5** (extended R8 per supervisor amendment 2026-05-17 + KPI-9 quantification) | XGCF circuit caching cert: (a) second call to same query returns ≥ 50× faster than first call (100× is paper-claim; 50× gate floor accounting for system variance); (b) cache scope verified per `program.session()` (cache misses across sessions even with same query — cert: 2 sessions, same query, both first-call latencies > 50× their respective second-call latencies); (c) cache survives `forward_backward_tensor()` invocations (cert: forward_backward followed by repeat query returns cache-hit); (d) cache-hit rate ≥ 95% on M18-D verified config 10-epoch replay (cert: counter on `Program::cache_hit_count` / `Program::cache_miss_count` ratio); (e) M37-F `train_and_promote` per-attempt query repeat hits cache (cert: same `train_and_promote` invocation's internal repeat queries show ≥ 50× speedup on second hit) | (a) ratio ≥ 50× per-query; (b) cross-session miss cert PASS; (c) post-forward-backward cache-hit cert PASS; (d) ≥ 95% hit rate; (e) `train_and_promote` internal repeat ≥ 50× |
+| **M_M37A.6** | MNIST-Add reference example reproduces ≥ 99.0% accuracy (verbatim 99.07% claim from v0.4.0-alpha; allow 99.0% gate) | ≥ 99.0% |
+| **M_M37A.7** | `nn/4` Datalog parser accepts `nn(name, [inputs], output, [labels]) :: predicate(args)` syntax | parse PASS |
+| **M_M37A.8** | `register_network(name, nn_module, optimizer)` accepts a `torch.nn.Module` + `torch.optim.Optimizer` and registers the network for forward + backward | registration PASS + retrieval PASS |
+| **M_M37A.9** | `train_epoch(queries, batch_size=32)` runs an epoch and produces a loss trajectory | trajectory non-empty + decreasing on canonical MNIST-Add fixture |
+| **M_M37A.10** (extended R11 per supervisor amendment 2026-05-17 — full Group B symbol enumeration) | Symbol-preservation cert (smoke test): if no Phase-2 production call site references a Group B symbol, the smoke test in `crates/xlog-integration/tests/test_m37a_surface_preservation.rs` exercises it; G_PURGE2 cannot remove the symbol. **Smoke test MUST instantiate each of the following Group B symbols at least once** (per lock 11 Group B expanded under R7): `nn/4` Datalog syntax parse + compile; `register_network(name, nn::Linear, optim::Adam)` roundtrip; `forward_backward_tensor(query)` returning CUDA tensor; `train_epoch(queries, batch_size=8)` running one epoch; XGCF query producing gradient; circuit caching ≥ 50× per-query speedup; P(Query|Evidence) probabilistic query returning per-query gradient; `register_embedding(name, nn::Embedding)` roundtrip; training-controls APIs (gradient-clipping via `register_network` with `max_grad_norm`; early-stopping via `train_epoch` patience param; scheduler via `register_network` with `StepLR`; LR override via `register_network` keyword arg); `bounded_exact_induce(program, examples, budget)` returning at least one rule. **11 explicit instantiations**, one per Group B symbol family. Source-audit cert: every Group B symbol in lock 11 list appears at least once in the smoke test source file. | 11/11 instantiations PASS; source-audit cert PASS |
+
+**Strategies.**
+- **S_M37A.1** Cut `feat/m37a-surface-cert-g39` from `feat/w6-bundle-integration` HEAD (after G_W39_DTSDLM merge, before G_INT2 final gate).
+- **S_M37A.2** Build Phase-2 xlog wheel via `maturin develop --release`.
+- **S_M37A.3** Run `xlog_alpha_source.py` (M18 source emitter on DTS-DLM side, read-only) against Phase-2 wheel; capture pass/fail + any API drift.
+- **S_M37A.4** Reproduce M18-D config on the canonical M18-D fixture; measure AUROC + coverage; compare against `dts-dlm/docs/plans/2026-05-*-m18d-*.md` baseline.
+- **S_M37A.5** Add xlog-side cert: `crates/xlog-integration/tests/test_m37a_surface_preservation.rs` exercises the 10 metrics above.
+- **S_M37A.6** Run 6 reference examples from `.worktrees/v0.4.0-alpha-integrated` (or equivalent path; verify worktree exists per project memory).
+- **S_M37A.7** XGCF circuit caching: time first vs second invocation of identical query; assert ratio ≥ 50×.
+- **S_M37A.8** Document M37-A readiness in `docs/evidence/2026-05-14-g39-m37a-surface-preservation/report.md` with reproduced metrics + any deviations from M18 baseline.
+
+**Acceptance.** All M_M37A.* gates met. G_M37A_SURFACE GREEN gates G_INT2's final regression sweep.
+
+**Out-of-scope (M37-A consumer-side work, NOT in goal-039):**
+- M37-A plan-freeze authoring (DTS-DLM side; references `04-FINAL-REPORT.md` lines 176-186 and §8 of m37c-prime plan-freeze)
+- M37-A bridge architecture (LearnedBridge from M21-0 or new design)
+- M37-A training-loop wire-up (`target_committed_fact(F)` supervision query)
+- M22 100-doc training corpus + M25 corpus_n500 evaluation runs
+- 5-label verdict assignment (RECOVERS / PARTIAL / NO_EFFECT / REGRESSES / STRUCTURAL_NULL)
+- Belnap-aware reward extension (M37-B)
+
+---
+
+### 3.12 G_INT2 — Phase-2 integration gate
 
 **Goal.** Analyze the Phase-2-integrated bundle for the purpose of verifying composition-time correctness with respect to ALL prior closure metrics (W3.4, W4.1, W5.1, W5.2, W2.5) regression-free + workspace cleanliness + VRAM safety + memory pool sizing from the viewpoint of Phase-2 DoD gate in the context of pre-closure-proposal validation.
 
@@ -469,7 +534,7 @@ BG0 — DTS-DLM v3 ship with v0.6.5 xlog
 
 | Metric | Target |
 |---|---|
-| **M_INT2.1** W3.4 re-validation post-Phase-2 | ratio ≥ 1.51× |
+| **M_INT2.1** W3.4 successor re-validation post-Phase-2 (via `wcoj_w33_superhub` bench on the W3.4-canonical superhub-50K fixture; W3.4 original `wcoj_fusion_bench.rs` retired by Phase-1 G1 S1.4 per process lock 2) | ratio ≥ 1.51× (1.590× × 0.95) |
 | **M_INT2.2** W4.1 cert regression | 3/3 PASS |
 | **M_INT2.3** W5.1 cert trio EXACT counter/row-set match | 3/3 EXACT |
 | **M_INT2.4** W5.2 bench corpus within ±10% | 36/36 |
@@ -493,7 +558,7 @@ BG0 — DTS-DLM v3 ship with v0.6.5 xlog
 
 ---
 
-### 3.12 G_PURGE2 — Phase-2 cross-cutting refactor + purge
+### 3.13 G_PURGE2 — Phase-2 cross-cutting refactor + purge
 
 **Goal.** Analyze the Phase-2-integrated codebase for the purpose of removing all dead code/comments/env vars/deps introduced by Phase 2 from the viewpoint of process locks 5 + 6 + Karpathy 3 in the context of pre-closure cleanup.
 
@@ -503,7 +568,7 @@ Inherits goal-038 §5.5 G_PURGE; applied on `feat/w6-bundle-integration` HEAD po
 
 ---
 
-### 3.13 G_CLOSE2 — Phase-2 closure proposal + user approval + board update
+### 3.14 G_CLOSE2 — Phase-2 closure proposal + user approval + board update
 
 **Goal.** Analyze Phase-2-integrated bundle for the purpose of obtaining user approval to (a) mark W5.3, W5.4, W6.1, W6.2 DONE on existing board entries AND (b) ADD new W6.3, W6.4, W6.5, W6.6 entries to the board as DONE from the viewpoint of process rule 1 in the context of Phase-2 closure.
 
@@ -520,7 +585,7 @@ Inherits goal-038 §5.5 G_PURGE; applied on `feat/w6-bundle-integration` HEAD po
 
 ---
 
-### 3.14 G_E2E — DTS-DLM end-to-end validation (BG0 satisfaction)
+### 3.15 G_E2E — DTS-DLM end-to-end validation (BG0 satisfaction)
 
 **Goal.** Analyze m37c-prime pilot end-to-end on the Phase-2-integrated bundle for the purpose of confirming BG0 + KPI-1..KPI-7 from the viewpoint of organizational milestone closure in the context of v0.6.5 tag-readiness.
 
@@ -571,7 +636,7 @@ Inherits goal-038 §5.5 G_PURGE; applied on `feat/w6-bundle-integration` HEAD po
 
 ---
 
-### 3.15 G_TAG — W7.1 release tag handoff (NOT executed in Phase 2)
+### 3.16 G_TAG — W7.1 release tag handoff (NOT executed in Phase 2)
 
 **Goal.** Analyze Phase-2-DONE state for the purpose of preparing W7.1 release-tag handoff with respect to user-authorization-required gate from the viewpoint of process rule 1 in the context of v0.6.5 final ship.
 
@@ -611,6 +676,9 @@ Inherits goal-038 §5.5 G_PURGE; applied on `feat/w6-bundle-integration` HEAD po
                                       G_W39_DTSDLM
                                             │
                                             ▼
+                                    G_M37A_SURFACE (Group B cert)
+                                            │
+                                            ▼
                               feat/w6-bundle-integration
                                             │
                                             ▼
@@ -648,6 +716,7 @@ Phase 2 is DONE when ALL hold simultaneously:
    - G_W65: M_W65.1–5 green
    - G_W66: M_W66.1–6 green
    - G_W39_DTSDLM: M_W39D.1–8 green
+   - G_M37A_SURFACE: M_M37A.1–10 green (KPI-8 satisfied)
    - G_INT2: M_INT2.1–13 green
    - G_PURGE2: M_PURGE2.1–9 green
    - G_CLOSE2: M_CLOSE2.1–6 green
@@ -720,6 +789,7 @@ STUCK (escalate) when:
 [ ] DTS-DLM repo unchanged except authorized exceptions (lock 16)
 [ ] Witness-chain recoverable (KPI-6; G_E2E M_E2E.7)
 [ ] DLPack zero-copy preserved (KPI-7; G_E2E M_E2E.8)
+[ ] M37-A Group B surface preserved (KPI-8; G_M37A_SURFACE M_M37A.1–10)
 [ ] Peak VRAM ≤ 38 GB (KPI-5)
 [ ] No co-authored-by trailers
 [ ] No v0.6.6 references (except authorized W6.3 LOW-priority defer note if invoked)
@@ -751,6 +821,7 @@ Tab → Enter to confirm. Never `C-c` on idle codex. `codex resume <UUID>` on de
 | Amendment | Severity | Section addressed |
 |---|---|---|
 | A-2: W5.1 + W5.2 regression gates | HIGH | M_INT2.3 + M_INT2.4 |
+| **M37-A surface preservation** (post-M37-C′ informational addendum) | **HIGH** | Lock 11 Group B + Lock 18 explicit + KPI-8 + G_M37A_SURFACE §3.11 + M_M37A.1–10 |
 | A-3: Explicit M_E2E.W4.1 (not just implicit) | MEDIUM | M_E2E.12 |
 | A-4: M_E2E.DLPACK zero-host-transfer cert | HIGH | M_E2E.8 + KPI-7 |
 | A-5: M_E2E.WITNESS witness-chain recoverability | HIGH | M_E2E.7 + KPI-6 |
@@ -781,7 +852,11 @@ Tab → Enter to confirm. Never `C-c` on idle codex. `codex resume <UUID>` on de
   - Persistent session: `src/dts_dlm/integrations/pyxlog/session.py`
   - Sort enrichment: `src/dts_dlm/propagate/xlog_executor.py:157`
   - DTS-DLM xlog usage dump: prior conversation message (Scenarios 1–4, contracts, math)
-- **Validation audit (goal-038/039):** prior conversation message (13 amendments A-1..A-13 + M-1/M-2)
+- **M37-A queued milestone (DTS-DLM next):**
+  - `dts-dlm/docs/research/2026-05-08-pre-m37/04-FINAL-REPORT.md` — Stone #9 motivation (lines 99–119), M37-A proposal (lines 176–186), cost/risk/novelty (Medium / Medium / High)
+  - `dts-dlm/docs/plans/2026-05-11-m37c-prime-narrow-recalibration-plan-freeze.md` §8 — M37-A queued unconditionally
+  - M18 phases A–D plans + α-shape source emitter `dts-dlm/src/dts_dlm/learn/xlog_alpha_source.py`
+- **Validation audit (goal-038/039):** prior conversation message (13 amendments A-1..A-13 + M-1/M-2) + M37-A surface-preservation amendment (this update)
 - **Karpathy guidelines:** https://x.com/karpathy/status/2015883857489522876.
 
 ---
