@@ -32,6 +32,7 @@ cudarc = { version = "0.19.4", features = ["cuda-13010"] }
 pest = "2.7"
 pest_derive = "2.7"
 pyo3 = { version = "0.24.1" }
+<<<<<<< Updated upstream
 xlog-cli = { version = "0.5.2", path = "crates/xlog-cli" }
 xlog-core = { version = "0.5.2", path = "crates/xlog-core" }
 xlog-cuda = { version = "0.5.2", path = "crates/xlog-cuda" }
@@ -44,6 +45,20 @@ xlog-prob = { version = "0.5.2", path = "crates/xlog-prob" }
 xlog-runtime = { version = "0.5.2", path = "crates/xlog-runtime" }
 xlog-solve = { version = "0.5.2", path = "crates/xlog-solve" }
 xlog-stats = { version = "0.5.2", path = "crates/xlog-stats" }
+=======
+xlog-cli = { version = "0.6.2", path = "crates/xlog-cli" }
+xlog-core = { version = "0.6.2", path = "crates/xlog-core" }
+xlog-cuda = { version = "0.6.2", path = "crates/xlog-cuda" }
+xlog-gpu = { version = "0.6.2", path = "crates/xlog-gpu" }
+xlog-induce = { version = "0.6.0", path = "crates/xlog-induce" }
+xlog-ir = { version = "0.6.2", path = "crates/xlog-ir" }
+xlog-logic = { version = "0.6.2", path = "crates/xlog-logic" }
+xlog-neural = { version = "0.6.0", path = "crates/xlog-neural" }
+xlog-prob = { version = "0.6.2", path = "crates/xlog-prob" }
+xlog-runtime = { version = "0.6.2", path = "crates/xlog-runtime" }
+xlog-solve = { version = "0.6.2", path = "crates/xlog-solve" }
+xlog-stats = { version = "0.6.2", path = "crates/xlog-stats" }
+>>>>>>> Stashed changes
 
 [profile.dev]
 incremental = false
