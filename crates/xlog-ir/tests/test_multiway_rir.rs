@@ -62,6 +62,7 @@ fn canonical_triangle_multiway() -> RirNode {
             ProjectExpr::Column(3),
         ],
         fallback: Box::new(fallback),
+        plan: None,
         var_order: None,
     }
 }
@@ -112,6 +113,7 @@ fn multiway_join_with_empty_inputs_collects_nothing() {
         slot_vars: vec![],
         output_columns: vec![],
         fallback: Box::new(stub_fallback),
+        plan: None,
         var_order: None,
     };
     assert!(node.referenced_relations().is_empty());
@@ -147,6 +149,7 @@ fn referenced_relations_handles_4_inputs() {
         // Stub fallback — the test does not execute this; it only
         // exercises the IR walker.
         fallback: Box::new(RirNode::Unit),
+        plan: None,
         var_order: None,
     };
     let rels = node.referenced_relations();

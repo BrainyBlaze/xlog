@@ -76,6 +76,7 @@ fn k5_k6_orders_round_trip_through_multiway_var_order() {
                 .map(|idx| ProjectExpr::Column(idx as usize))
                 .collect(),
             fallback: Box::new(RirNode::Unit),
+            plan: None,
             var_order: Some(VariableOrder::kclique(plan.clone())),
         };
 

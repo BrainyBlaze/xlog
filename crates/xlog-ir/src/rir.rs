@@ -186,6 +186,48 @@ impl KCliqueVariableOrder {
     }
 }
 
+/// Cost evidence carried with a planned WCOJ-vs-hash route.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CostPredictionRecord {
+    /// Estimated WCOJ work under the selected plan.
+    pub wcoj_cost: f64,
+    /// Estimated hash-chain work under the captured fallback plan.
+    pub hash_cost: f64,
+}
+
+impl CostPredictionRecord {
+    /// Stable evidence for incomplete stats: hash is the safe default route.
+    pub fn empty() -> Self {
+        Self {
+            wcoj_cost: f64::INFINITY,
+            hash_cost: 0.0,
+        }
+    }
+}
+
+/// Auditable reason for a structured hash route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlannedHashReason {
+    /// Planner had complete stats and predicted hash lower-cost.
+    PlannerPredictsHashWins,
+    /// Planner could not build a complete stats-backed plan.
+    IncompleteStatsSafeDefault,
+}
+
+/// Route chosen for a recognized multiway shape.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MultiwayPlan {
+    /// Execute the WCOJ path with the attached K-clique plan.
+    WcojWithPlan(KCliqueVariableOrder),
+    /// Execute the captured fallback as a planned hash route.
+    PlannedHashRoute {
+        /// Why the recognized shape routes to hash.
+        reason: PlannedHashReason,
+        /// Cost evidence that made the route auditable.
+        planner_evidence: CostPredictionRecord,
+    },
+}
+
 /// Variable-ordering decision attached to a `MultiWayJoin`.
 ///
 /// `None` on the parent variant preserves slice 1/2/4/W2.2 dispatch
@@ -415,6 +457,10 @@ pub enum RirNode {
         /// decline. Captured from the post-optimizer tree by the
         /// promoter; never synthesized.
         fallback: Box<RirNode>,
+        /// Structured route for recognized multiway shapes. K-clique
+        /// cost-gated hash routes are positive plans, not promoter
+        /// inability to handle the shape.
+        plan: Option<MultiwayPlan>,
         /// Optional W2.1 variable-ordering decision.
         ///
         /// `None` preserves slice 1/2/4/W2.2 behavior bit-identically:

@@ -3901,6 +3901,7 @@ mod tests {
                 ProjectExpr::Column(3),
             ],
             fallback: Box::new(fallback),
+            plan: None,
             var_order: None,
         }
     }
@@ -3940,6 +3941,7 @@ mod tests {
             slot_vars,
             output_columns,
             fallback: Box::new(fallback),
+            plan: None,
             var_order: None,
         }
     }

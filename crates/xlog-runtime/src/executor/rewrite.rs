@@ -608,6 +608,7 @@ impl Executor {
                 slot_vars,
                 output_columns,
                 fallback,
+                plan,
                 var_order,
             } => {
                 let starting_remaining = *remaining;
@@ -643,6 +644,7 @@ impl Executor {
                         slot_vars: slot_vars.clone(),
                         output_columns: output_columns.clone(),
                         fallback: Box::new(new_fallback),
+                        plan: plan.clone(),
                         var_order: delta_outermost_var_order(
                             input_count,
                             replaced_input_idx,
@@ -706,6 +708,7 @@ mod multiway_walker_tests {
                 ProjectExpr::Column(3),
             ],
             fallback: Box::new(fallback),
+            plan: None,
             var_order: None,
         }
     }
@@ -840,6 +843,7 @@ mod multiway_walker_tests {
                 xlog_ir::rir::ProjectExpr::Column(3),
             ],
             fallback: Box::new(fallback),
+            plan: None,
             var_order: None,
         }
     }
@@ -1033,6 +1037,7 @@ mod w41_rewrite_scan_nth_occurrence_identity_tests {
                 ProjectExpr::Column(2),
             ],
             fallback: Box::new(fallback),
+            plan: None,
             var_order: None,
         }
     }

@@ -1,5 +1,9 @@
+use xlog_core::{RelId, ScalarType};
 use xlog_ir::RirNode;
 use xlog_logic::Compiler;
+use xlog_stats::{
+    ColumnStats, JoinSelectivity, KeyHeatStats, PrefixDegreeStats, RelationStats, StatsSnapshot,
+};
 
 const CLIQUE5_SRC: &str = r#"
     pred e01(u32, u32). pred e02(u32, u32). pred e03(u32, u32). pred e04(u32, u32).
@@ -34,7 +38,10 @@ const CLIQUE6_SRC: &str = r#"
 fn promoter_attaches_kclique_var_order_for_k5_and_k6() {
     for (source, k) in [(CLIQUE5_SRC, 5u8), (CLIQUE6_SRC, 6u8)] {
         let mut compiler = Compiler::new();
-        let plan = compiler.compile(source).expect("compile clique");
+        let snapshot = named_clique_stats(k);
+        let plan = compiler
+            .compile_with_stats_snapshot(source, Some(&snapshot))
+            .expect("compile clique");
         let order = find_kclique_order(&plan).unwrap_or_else(|| {
             panic!("K{k} promotion must attach KCliqueVariableOrder, not var_order None")
         });
@@ -111,4 +118,43 @@ fn live_prefix(values: &[u8]) -> Vec<u8> {
 
 fn edge_count(k: u8) -> usize {
     usize::from(k) * usize::from(k - 1) / 2
+}
+
+fn named_clique_stats(k: u8) -> StatsSnapshot {
+    let mut snapshot = StatsSnapshot::default();
+    let mut edges = Vec::new();
+    let mut rel_id = 1u32;
+
+    for i in 0..k {
+        for j in (i + 1)..k {
+            let rel = RelId(rel_id);
+            rel_id += 1;
+            snapshot.rel_names.push((rel, format!("e{i}{j}")));
+            edges.push((rel, i, j));
+
+            let mut stats = RelationStats::new(rel);
+            stats.update_cardinality(2_000 + u64::from(k));
+            for col_idx in [0usize, 1usize] {
+                let mut col = ColumnStats::new(col_idx, ScalarType::U32);
+                col.update_distinct(1_000 + u64::from(k));
+                stats.add_column(col);
+                stats.add_prefix_degree(PrefixDegreeStats::new(col_idx, 2.0, 2.5));
+                stats.add_key_heat(KeyHeatStats::new(col_idx, 0.75, 0.75));
+            }
+            snapshot.relations.push(stats);
+        }
+    }
+
+    for (left_idx, (left_rel, left_i, left_j)) in edges.iter().enumerate() {
+        for (right_rel, right_i, right_j) in edges.iter().skip(left_idx + 1) {
+            if left_i == right_i || left_i == right_j || left_j == right_i || left_j == right_j {
+                let mut sel = JoinSelectivity::new(*left_rel, *right_rel);
+                sel.set_keys(vec![0], vec![0]);
+                sel.set_selectivity(0.001);
+                snapshot.join_selectivities.push(sel);
+            }
+        }
+    }
+
+    snapshot
 }

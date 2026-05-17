@@ -46,6 +46,29 @@ use xlog_stats::StatsManager;
 
 use crate::compiler_config::{CompilerConfig, WcojVarOrderingKind};
 
+/// Named K-clique WCOJ-vs-hash gate parameters.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WcojCostGateParams {
+    /// WCOJ routes only when estimated WCOJ work is no greater than
+    /// this multiple of estimated hash-chain work. The equality
+    /// boundary keeps the gate one-sided and mirrors the planner's
+    /// lower-cost winner semantics.
+    pub wcoj_to_hash_cost_ratio_ceiling: f64,
+}
+
+/// Default K-clique cost-gate policy.
+pub const WCOJ_COST_GATE_PARAMS: WcojCostGateParams = WcojCostGateParams {
+    wcoj_to_hash_cost_ratio_ceiling: 1.0,
+};
+
+/// Returns true when the named K-clique cost-gate policy routes WCOJ.
+pub fn wcoj_cost_gate_predicts_wcoj(wcoj_cost: f64, hash_cost: f64) -> bool {
+    if !wcoj_cost.is_finite() || !hash_cost.is_finite() || hash_cost <= 0.0 {
+        return false;
+    }
+    wcoj_cost / hash_cost <= WCOJ_COST_GATE_PARAMS.wcoj_to_hash_cost_ratio_ceiling
+}
+
 /// Trait that picks a leader slot for triangle / 4-cycle WCOJ.
 ///
 /// Implementations look at relation cardinalities (or other stats)

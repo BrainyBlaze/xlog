@@ -75,24 +75,22 @@
 //!   slice 5.
 
 use std::collections::{HashMap, HashSet};
-use xlog_core::{RelId, ScalarType};
+use xlog_core::RelId;
 use xlog_ir::plan::Scc;
 use xlog_ir::rir::{
-    ColumnSwap, HelperSplitSpec, KCliqueVariableOrder, ProjectExpr, SortedLayoutSpec,
+    ColumnSwap, CostPredictionRecord as RirCostPredictionRecord, HelperSplitSpec,
+    KCliqueVariableOrder, MultiwayPlan, PlannedHashReason, ProjectExpr, SortedLayoutSpec,
     StreamGroupId, VariableOrder, K_CLIQUE_MAX_EDGES, K_CLIQUE_MAX_K,
 };
 use xlog_ir::{ExecutionPlan, JoinType, RirNode};
-use xlog_stats::{
-    ColumnStats, JoinSelectivity, KeyHeatStats, PrefixDegreeStats, RelationStats, StatsManager,
-    StatsSnapshot,
-};
+use xlog_stats::{StatsManager, StatsSnapshot};
 
 use crate::compiler_config::CompilerConfig;
 use crate::hypergraph::var_order::{
     plan_kclique_var_order, FullVariableOrder, KCliqueEdge, KCliqueShape,
 };
 use crate::hypergraph::VertexId;
-use crate::wcoj_var_ordering::WcojVariableOrderingModel;
+use crate::wcoj_var_ordering::{wcoj_cost_gate_predicts_wcoj, WcojVariableOrderingModel};
 
 /// Walk an `ExecutionPlan` and rewrite eligible triangle / 4-cycle
 /// subtrees in each rule body to `RirNode::MultiWayJoin`. Idempotent.
@@ -734,6 +732,7 @@ fn try_promote_triangle(
         slot_vars,
         output_columns,
         fallback,
+        plan: None,
         var_order,
     })
 }
@@ -1056,6 +1055,7 @@ fn try_promote_4cycle(
         slot_vars,
         output_columns,
         fallback,
+        plan: None,
         var_order,
     })
 }
@@ -1334,24 +1334,49 @@ fn try_promote_clique_k(body: &RirNode, k: usize, stats: &StatsManager) -> Optio
     let output_columns = columns.clone();
     let fallback = Box::new(body.clone());
     let shape = build_kclique_shape(k, &reordered_scans)?;
-    let planner_stats = kclique_planner_stats(&shape, stats);
-    let full_order = plan_kclique_var_order(&shape, &planner_stats)?;
-    let kclique_order = kclique_variable_order_from_plan(&shape, &full_order)?;
+    let planner_stats = kclique_planner_stats(stats);
+
+    // Cost-planned K-clique routing follows paper §7.3's
+    // conditional-win-on-skew caveat and lock 29: recognized
+    // paper-aligned shapes emit a positive route. Hash is represented
+    // by `PlannedHashRoute`, never by a post-recognition raw decline.
+    let (plan, var_order) = match plan_kclique_var_order(&shape, &planner_stats) {
+        Some(full_order) => {
+            let evidence = rir_cost_prediction(&full_order);
+            if wcoj_cost_gate_predicts_wcoj(evidence.wcoj_cost, evidence.hash_cost) {
+                let kclique_order = kclique_variable_order_from_plan(&shape, &full_order)?;
+                (
+                    MultiwayPlan::WcojWithPlan(kclique_order.clone()),
+                    Some(VariableOrder::kclique(kclique_order)),
+                )
+            } else {
+                (
+                    MultiwayPlan::PlannedHashRoute {
+                        reason: PlannedHashReason::PlannerPredictsHashWins,
+                        planner_evidence: evidence,
+                    },
+                    None,
+                )
+            }
+        }
+        None => (
+            MultiwayPlan::PlannedHashRoute {
+                reason: PlannedHashReason::IncompleteStatsSafeDefault,
+                planner_evidence: RirCostPredictionRecord::empty(),
+            },
+            None,
+        ),
+    };
 
     Some(RirNode::MultiWayJoin {
         inputs,
         slot_vars,
         output_columns,
         fallback,
-        var_order: Some(VariableOrder::kclique(kclique_order)),
+        plan: Some(plan),
+        var_order,
     })
 }
-
-const KCLIQUE_DEFAULT_CARDINALITY: u64 = 1_000;
-const KCLIQUE_DEFAULT_NDV: u64 = 1_000;
-const KCLIQUE_DEFAULT_SELECTIVITY: f64 = 0.01;
-const KCLIQUE_DEFAULT_PREFIX_DEGREE: f64 = 1.0;
-const KCLIQUE_DEFAULT_HEAT: f64 = 0.0;
 
 fn build_kclique_shape(k: usize, rels: &[RelId]) -> Option<KCliqueShape> {
     let mut edges = Vec::with_capacity(rels.len());
@@ -1372,95 +1397,14 @@ fn build_kclique_shape(k: usize, rels: &[RelId]) -> Option<KCliqueShape> {
     KCliqueShape::from_edges(k as u8, edges)
 }
 
-fn kclique_planner_stats(shape: &KCliqueShape, stats: &StatsManager) -> StatsSnapshot {
-    let mut snapshot = stats.snapshot();
-
-    for edge in shape.edges() {
-        let rel = ensure_relation_stats(&mut snapshot, edge.rel_id);
-        if rel.cardinality == 0 {
-            rel.update_cardinality(KCLIQUE_DEFAULT_CARDINALITY);
-        }
-        ensure_column_stats(rel, edge.left_col);
-        ensure_column_stats(rel, edge.right_col);
-        ensure_prefix_degree(rel, edge.left_col);
-        ensure_prefix_degree(rel, edge.right_col);
-        ensure_key_heat(rel, edge.left_col);
-        ensure_key_heat(rel, edge.right_col);
-    }
-
-    for (left_idx, left_edge) in shape.edges().iter().enumerate() {
-        for right_edge in shape.edges().iter().skip(left_idx + 1) {
-            if !left_edge.touches(right_edge) {
-                continue;
-            }
-            if !snapshot.join_selectivities.iter().any(|sel| {
-                let direct = sel.left_rel == left_edge.rel_id
-                    && sel.right_rel == right_edge.rel_id
-                    && sel.left_keys.as_slice() == [left_edge.left_col]
-                    && sel.right_keys.as_slice() == [right_edge.left_col];
-                let swapped = sel.left_rel == right_edge.rel_id
-                    && sel.right_rel == left_edge.rel_id
-                    && sel.left_keys.as_slice() == [right_edge.left_col]
-                    && sel.right_keys.as_slice() == [left_edge.left_col];
-                direct || swapped
-            }) {
-                let mut selectivity = JoinSelectivity::new(left_edge.rel_id, right_edge.rel_id);
-                selectivity.set_keys(vec![left_edge.left_col], vec![right_edge.left_col]);
-                selectivity.set_selectivity(KCLIQUE_DEFAULT_SELECTIVITY);
-                snapshot.join_selectivities.push(selectivity);
-            }
-        }
-    }
-
-    snapshot
+fn kclique_planner_stats(stats: &StatsManager) -> StatsSnapshot {
+    stats.snapshot()
 }
 
-fn ensure_relation_stats(snapshot: &mut StatsSnapshot, rel_id: RelId) -> &mut RelationStats {
-    if let Some(idx) = snapshot
-        .relations
-        .iter()
-        .position(|relation| relation.rel_id == rel_id)
-    {
-        return &mut snapshot.relations[idx];
-    }
-    snapshot.relations.push(RelationStats::new(rel_id));
-    snapshot
-        .relations
-        .last_mut()
-        .expect("pushed relation stats must exist")
-}
-
-fn ensure_column_stats(rel: &mut RelationStats, col_idx: usize) {
-    if rel.get_column(col_idx).is_some() {
-        if let Some(col) = rel.get_column_mut(col_idx) {
-            if col.distinct_estimate == 0 {
-                col.update_distinct(KCLIQUE_DEFAULT_NDV);
-            }
-        }
-        return;
-    }
-    let mut col = ColumnStats::new(col_idx, ScalarType::U32);
-    col.update_distinct(KCLIQUE_DEFAULT_NDV);
-    rel.add_column(col);
-}
-
-fn ensure_prefix_degree(rel: &mut RelationStats, col_idx: usize) {
-    if rel.get_prefix_degree(col_idx).is_none() {
-        rel.add_prefix_degree(PrefixDegreeStats::new(
-            col_idx,
-            KCLIQUE_DEFAULT_PREFIX_DEGREE,
-            KCLIQUE_DEFAULT_PREFIX_DEGREE,
-        ));
-    }
-}
-
-fn ensure_key_heat(rel: &mut RelationStats, col_idx: usize) {
-    if rel.get_key_heat(col_idx).is_none() {
-        rel.add_key_heat(KeyHeatStats::new(
-            col_idx,
-            KCLIQUE_DEFAULT_HEAT,
-            KCLIQUE_DEFAULT_HEAT,
-        ));
+fn rir_cost_prediction(plan: &FullVariableOrder) -> RirCostPredictionRecord {
+    RirCostPredictionRecord {
+        wcoj_cost: plan.cost_prediction.wcoj_cost,
+        hash_cost: plan.cost_prediction.hash_cost,
     }
 }
 
@@ -1590,6 +1534,7 @@ mod tests {
                 output_columns,
                 fallback,
                 var_order: _,
+                ..
             } => {
                 assert_eq!(inputs.len(), 3);
                 assert!(matches!(inputs[0], RirNode::Scan { rel: RelId(1) }));
@@ -2217,6 +2162,7 @@ mod tests {
                 output_columns,
                 fallback,
                 var_order: _,
+                ..
             } => {
                 assert_eq!(inputs.len(), 4);
                 assert!(matches!(inputs[0], RirNode::Scan { rel: RelId(1) }));

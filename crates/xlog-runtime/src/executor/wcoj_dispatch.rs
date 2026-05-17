@@ -79,7 +79,7 @@ use xlog_core::{RelId, Result, ScalarType, Schema};
 use xlog_cuda::device_runtime::StreamId;
 use xlog_cuda::CudaBuffer;
 use xlog_ir::{
-    rir::{KCliqueVariableOrder, ProjectExpr, VariableOrder},
+    rir::{KCliqueVariableOrder, MultiwayPlan, ProjectExpr, VariableOrder},
     CompiledRule, RirNode,
 };
 
@@ -1751,11 +1751,17 @@ impl Executor {
         let expected_edges = k * (k - 1) / 2;
         // 1. Shape match: MultiWayJoin with inputs.len() == C(k, 2).
         let RirNode::MultiWayJoin {
-            inputs, var_order, ..
+            inputs,
+            plan,
+            var_order,
+            ..
         } = body
         else {
             return Ok(None);
         };
+        if matches!(plan, Some(MultiwayPlan::PlannedHashRoute { .. })) {
+            return Ok(None);
+        }
         if inputs.len() != expected_edges {
             return Ok(None);
         }
@@ -2108,6 +2114,7 @@ mod tests {
                 ProjectExpr::Column(3),
             ],
             fallback: Box::new(RirNode::Unit),
+            plan: None,
             var_order: None,
         }
     }
@@ -2454,6 +2461,7 @@ mod tests {
                 ProjectExpr::Column(5),
             ],
             fallback: Box::new(RirNode::Unit),
+            plan: None,
             var_order: None,
         }
     }
@@ -2493,6 +2501,7 @@ mod tests {
                 ProjectExpr::Column(3),
             ],
             fallback: Box::new(RirNode::Unit),
+            plan: None,
             var_order: None,
         };
         assert!(match_multiway_4cycle(&triangle).is_none());
