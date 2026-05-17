@@ -7,8 +7,8 @@
 //!   leader change vs the LeaderCardinality baseline on the same
 //!   snapshot. Row-set parity vs binary-join reference holds.
 //! * Part D (2 tests): default `CompilerConfig::default()` preserves
-//!   row-set parity across the W2.3 skew baseline and W2.5 cardinality
-//!   runtime default; W2.4 feedback's canonical `(slot_rels[0],
+//!   row-set parity under the cardinality runtime default; W2.4
+//!   feedback's canonical `(slot_rels[0],
 //!   slot_rels[1])` pair with `[1]/[0]` keys is preserved when
 //!   `var_order = None`.
 //! * Part E (1 test): when HeatAware emits a non-default leader
@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use cudarc::driver::sys;
-use xlog_core::{CostModelKind, MemoryBudget, RelId, RuntimeConfig, ScalarType, Schema};
+use xlog_core::{MemoryBudget, RelId, RuntimeConfig, ScalarType, Schema};
 use xlog_cuda::device_runtime::{
     AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
     LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
@@ -1046,11 +1046,11 @@ fn cycle4_real_observed_selectivity_drives_heat_aware_leader_to_idx_2() {
 }
 
 // ===============================================================
-// Part D.1 — default compiler config row parity across runtime cost models
+// Part D.1 — default compiler config row parity under stats mode
 // ===============================================================
 
 #[test]
-fn default_compiler_config_preserves_rows_across_runtime_cost_models() {
+fn default_compiler_config_preserves_rows_under_stats_mode() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
@@ -1084,42 +1084,9 @@ fn default_compiler_config_preserves_rows_across_runtime_cost_models() {
         "gate-OFF must not dispatch"
     );
 
-    // Explicit legacy skew runtime: W2.3 baseline counter remains pinned.
-    let mut compiler_skew = Compiler::new();
-    let plan_skew = compiler_skew
-        .compile_with_config_and_stats_snapshot(
-            LINEAR_REC_TRIANGLE,
-            &CompilerConfig::default(),
-            None,
-        )
-        .expect("compile explicit skew");
-    let mut executor_skew = build_executor(
-        Arc::clone(&fix.provider),
-        &fix.memory,
-        RuntimeConfig::default().with_wcoj_cost_model(Some(CostModelKind::SkewClassifier)),
-        &compiler_skew,
-        &inputs,
-        &BTreeMap::new(),
-    );
-    let _ = executor_skew
-        .execute_plan(&plan_skew)
-        .expect("execute explicit skew");
-    let rows_skew = download_triples(executor_skew.store().get("tri").expect("tri skew"));
-    // Slice-4 anchor: 1 seeding + 1 e1_delta(1,3) + 1 e1_delta(1,4)
-    // = 3 dispatches (last iter has empty delta, skips).
-    assert_eq!(
-        executor_skew.wcoj_triangle_dispatch_count(),
-        3,
-        "explicit skew slice-4 baseline counter must remain at 3"
-    );
-    assert_eq!(
-        rows_skew, rows_ref,
-        "explicit skew row set must match binary-join reference"
-    );
-
-    // Bare W2.5 runtime default: CardinalityAwareCostModel sees the
-    // small scan-populated cards in this linear-recursive fixture and
-    // keeps the binary path, while preserving row-set parity.
+    // The default cardinality model sees the small scan-populated
+    // cards in this linear-recursive fixture and keeps the binary
+    // path, while preserving row-set parity.
     let mut compiler_def = Compiler::new();
     let plan_def = compiler_def
         .compile_with_config_and_stats_snapshot(

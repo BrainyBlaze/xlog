@@ -32,7 +32,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use cudarc::driver::sys;
-use xlog_core::{CostModelKind, MemoryBudget, RuntimeConfig, ScalarType, Schema};
+use xlog_core::{MemoryBudget, RuntimeConfig, ScalarType, Schema};
 use xlog_cuda::device_runtime::{
     AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
     LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
@@ -352,7 +352,7 @@ fn triangle_dispatch_records_join_result_into_stats_manager() {
     let (mut executor, slot_a, slot_b) = build_executor_with_seeded_stats(
         Arc::clone(&fix.provider),
         &fix.memory,
-        RuntimeConfig::default().with_wcoj_cost_model(Some(CostModelKind::Cardinality)),
+        RuntimeConfig::default(),
         STABLE_TRIANGLE_RECURSIVE,
         &triangle_inputs(),
         &seeded,
@@ -432,9 +432,7 @@ fn cycle4_dispatch_records_join_result_into_stats_manager() {
     let (mut executor, slot_a, slot_b) = build_executor_with_seeded_stats(
         Arc::clone(&fix.provider),
         &fix.memory,
-        RuntimeConfig::default()
-            .with_wcoj_cost_model(Some(CostModelKind::Cardinality))
-            .with_wcoj_4cycle_dispatch_adaptive(Some(true)),
+        RuntimeConfig::default().with_wcoj_4cycle_dispatch_adaptive(Some(true)),
         STABLE_4CYCLE_RECURSIVE,
         &cycle4_inputs(),
         &seeded,

@@ -105,8 +105,14 @@ fn format_boundary(b: &Boundary) -> String {
         Boundary::InsufficientPositiveAtoms { positive_count } => {
             format!("InsufficientPositiveAtoms(positive_count={positive_count})")
         }
-        Boundary::JoinKeysExceedBinaryFallbackLimit { count, limit } => {
-            format!("JoinKeysExceedBinaryFallbackLimit(count={count}, limit={limit})")
+        Boundary::JoinKeysExceedBinaryFallbackLimit {
+            context,
+            count,
+            limit,
+        } => {
+            format!(
+                "JoinKeysExceedBinaryFallbackLimit(context={context:?}, count={count}, limit={limit})"
+            )
         }
         Boundary::UnsupportedKeyType { var, ty } => {
             format!("UnsupportedKeyType(var={var}, ty={ty:?})")

@@ -43,9 +43,10 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use cudarc::driver::sys;
-use xlog_core::{MemoryBudget, RuntimeConfig, ScalarType, Schema};
+use xlog_core::{MemoryBudget, RelId, RuntimeConfig, ScalarType, Schema};
 use xlog_cuda::device_runtime::{
     AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
     LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
@@ -55,6 +56,9 @@ use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_ir::{ExecutionPlan, RirNode};
 use xlog_logic::Compiler;
 use xlog_runtime::Executor;
+use xlog_stats::{
+    ColumnStats, JoinSelectivity, KeyHeatStats, PrefixDegreeStats, RelationStats, StatsSnapshot,
+};
 
 struct DiscardSink;
 impl LoggingSink for DiscardSink {
@@ -302,6 +306,55 @@ fn plan_contains_multiway_with_arity(plan: &ExecutionPlan, arity: usize) -> bool
         .any(|rules| rules.iter().any(|rule| walk(&rule.body, arity)))
 }
 
+fn plan_contains_multiway_scan(plan: &ExecutionPlan, arity: usize, target_rel: RelId) -> bool {
+    fn contains_scan(node: &RirNode, target_rel: RelId) -> bool {
+        match node {
+            RirNode::Scan { rel } => *rel == target_rel,
+            RirNode::Project { input, .. }
+            | RirNode::Filter { input, .. }
+            | RirNode::Distinct { input, .. }
+            | RirNode::GroupBy { input, .. } => contains_scan(input, target_rel),
+            RirNode::Join { left, right, .. } | RirNode::Diff { left, right } => {
+                contains_scan(left, target_rel) || contains_scan(right, target_rel)
+            }
+            RirNode::Union { inputs } => {
+                inputs.iter().any(|input| contains_scan(input, target_rel))
+            }
+            RirNode::MultiWayJoin { inputs, .. } => {
+                inputs.iter().any(|input| contains_scan(input, target_rel))
+            }
+            _ => false,
+        }
+    }
+
+    fn walk(node: &RirNode, arity: usize, target_rel: RelId) -> bool {
+        match node {
+            RirNode::MultiWayJoin { inputs, .. } if inputs.len() == arity => {
+                inputs.iter().any(|input| contains_scan(input, target_rel))
+            }
+            RirNode::MultiWayJoin {
+                inputs, fallback, ..
+            } => {
+                inputs.iter().any(|input| walk(input, arity, target_rel))
+                    || walk(fallback, arity, target_rel)
+            }
+            RirNode::Project { input, .. }
+            | RirNode::Filter { input, .. }
+            | RirNode::Distinct { input, .. }
+            | RirNode::GroupBy { input, .. } => walk(input, arity, target_rel),
+            RirNode::Join { left, right, .. } | RirNode::Diff { left, right } => {
+                walk(left, arity, target_rel) || walk(right, arity, target_rel)
+            }
+            RirNode::Union { inputs } => inputs.iter().any(|input| walk(input, arity, target_rel)),
+            _ => false,
+        }
+    }
+
+    plan.rules_by_scc
+        .iter()
+        .any(|rules| rules.iter().any(|rule| walk(&rule.body, arity, target_rel)))
+}
+
 fn download_k_row_set(buf: &CudaBuffer, k: usize) -> std::collections::BTreeSet<Vec<u32>> {
     let n = match buf.cached_row_count() {
         Some(c) => c as usize,
@@ -362,7 +415,10 @@ fn run_counter_advance_test(
 
     // 1. Dispatch path: compile + run under default dispatch.
     let mut compiler = Compiler::new();
-    let plan = compiler.compile(src).expect("compile");
+    let snapshot = named_clique_stats(k as u8);
+    let plan = compiler
+        .compile_with_stats_snapshot(src, Some(&snapshot))
+        .expect("compile");
     let mut executor =
         Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
     for (name, rid) in compiler.rel_ids().clone() {
@@ -385,7 +441,9 @@ fn run_counter_advance_test(
     //    exercises the binary-join path without any new
     //    force/kill/adaptive knobs (per W3.2 D8 lock).
     let mut compiler_ref = Compiler::new();
-    let plan_ref = compiler_ref.compile(src).expect("compile ref");
+    let plan_ref = compiler_ref
+        .compile_with_stats_snapshot(src, Some(&snapshot))
+        .expect("compile ref");
     let fallback_plan = replace_multiway_with_fallback(plan_ref);
     let mut executor_ref =
         Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
@@ -409,15 +467,338 @@ fn run_counter_advance_test(
     );
 }
 
+fn named_clique_stats(k: u8) -> StatsSnapshot {
+    named_clique_stats_with_hot_variable(k, None)
+}
+
+fn named_clique_stats_with_hot_variable(k: u8, hot: Option<(u8, f64)>) -> StatsSnapshot {
+    let mut snapshot = StatsSnapshot::default();
+    let mut edges = Vec::new();
+    let mut rel_id = 1u32;
+
+    for i in 0..k {
+        for j in (i + 1)..k {
+            let rel = RelId(rel_id);
+            rel_id += 1;
+            snapshot.rel_names.push((rel, format!("e{i}{j}")));
+            edges.push((rel, i, j));
+
+            let mut stats = RelationStats::new(rel);
+            stats.update_cardinality(2_000 + u64::from(k));
+            for (col_idx, variable) in [(0usize, i), (1usize, j)] {
+                let mut col = ColumnStats::new(col_idx, ScalarType::U32);
+                col.update_distinct(1_000 + u64::from(k));
+                stats.add_column(col);
+                stats.add_prefix_degree(PrefixDegreeStats::new(col_idx, 2.0, 2.5));
+                let heat = match hot {
+                    Some((hot_variable, hot_heat)) if hot_variable == variable => hot_heat,
+                    _ => 0.75,
+                };
+                stats.add_key_heat(KeyHeatStats::new(col_idx, heat, heat));
+            }
+            snapshot.relations.push(stats);
+        }
+    }
+
+    for (left_idx, (left_rel, left_i, left_j)) in edges.iter().enumerate() {
+        for (right_rel, right_i, right_j) in edges.iter().skip(left_idx + 1) {
+            if left_i == right_i || left_i == right_j || left_j == right_i || left_j == right_j {
+                let mut sel = JoinSelectivity::new(*left_rel, *right_rel);
+                sel.set_keys(vec![0], vec![0]);
+                sel.set_selectivity(0.001);
+                snapshot.join_selectivities.push(sel);
+            }
+        }
+    }
+
+    snapshot
+}
+
+#[test]
+fn helper_split_k5_matches_direct_kclique_and_refreshes_metadata() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let inputs = k_clique_inputs(5);
+
+    let mut helper_compiler = Compiler::new();
+    let helper_snapshot = named_clique_stats_with_hot_variable(5, Some((3, 5.0)));
+    let helper_plan = helper_compiler
+        .compile_with_stats_snapshot(CLIQUE5_SRC, Some(&helper_snapshot))
+        .expect("compile helper-split K5");
+    let helpers: Vec<_> = helper_compiler
+        .rel_ids()
+        .iter()
+        .filter(|(name, _)| name.starts_with("__w37_helper_"))
+        .map(|(name, rel)| (name.clone(), *rel))
+        .collect();
+    assert_eq!(
+        helpers.len(),
+        1,
+        "buried-skew K5 must allocate exactly one helper relation"
+    );
+    assert!(
+        plan_contains_multiway_scan(&helper_plan, 10, helpers[0].1),
+        "outer K5 MultiWayJoin must consume the helper relation"
+    );
+
+    fix.provider.reset_kclique_metadata_build_metrics();
+    let mut helper_executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rid) in helper_compiler.rel_ids().clone() {
+        helper_executor.register_relation(rid, &name);
+    }
+    for (name, rows) in &inputs {
+        helper_executor.put_relation(name, upload_binary_u32(&fix.memory, rows));
+    }
+    helper_executor
+        .execute_plan(&helper_plan)
+        .expect("execute helper-split K5");
+    let helper_rows = download_k_row_set(
+        helper_executor
+            .store()
+            .get("clique5")
+            .expect("helper clique5"),
+        5,
+    );
+    let metadata_build_count = fix.provider.kclique_metadata_build_count();
+    let metadata_build_nanos = fix.provider.kclique_metadata_build_nanos();
+
+    let mut direct_compiler = Compiler::new();
+    let direct_plan = direct_compiler
+        .compile_with_stats_snapshot(CLIQUE5_SRC, Some(&named_clique_stats(5)))
+        .expect("compile direct K5");
+    assert!(
+        !direct_compiler
+            .rel_ids()
+            .keys()
+            .any(|name| name.starts_with("__w37_helper_")),
+        "uniform K5 reference must keep the direct K-clique path"
+    );
+    let mut direct_executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rid) in direct_compiler.rel_ids().clone() {
+        direct_executor.register_relation(rid, &name);
+    }
+    for (name, rows) in &inputs {
+        direct_executor.put_relation(name, upload_binary_u32(&fix.memory, rows));
+    }
+    direct_executor
+        .execute_plan(&direct_plan)
+        .expect("execute direct K5");
+    let direct_rows = download_k_row_set(
+        direct_executor
+            .store()
+            .get("clique5")
+            .expect("direct clique5"),
+        5,
+    );
+
+    assert_eq!(
+        helper_rows, direct_rows,
+        "helper-split K5 row set must equal direct K-clique row set"
+    );
+    assert!(
+        helper_executor.wcoj_clique5_dispatch_count() >= 1,
+        "helper-split K5 must dispatch through the K-clique kernel"
+    );
+    assert!(
+        metadata_build_count >= 1,
+        "post-split helper K5 path must build K-clique metadata"
+    );
+    eprintln!(
+        "M_HELP_KC helper K5: helper_relations={} dispatch_count={} metadata_build_count={} metadata_build_nanos={} rows={}",
+        helpers.len(),
+        helper_executor.wcoj_clique5_dispatch_count(),
+        metadata_build_count,
+        metadata_build_nanos,
+        helper_rows.len()
+    );
+}
+
+const RECURSIVE_K5_HISTOGRAM_SRC: &str = r#"
+    pred seed01(u32, u32).
+    pred path01(u32, u32).
+    pred e02(u32, u32). pred e03(u32, u32). pred e04(u32, u32).
+    pred e12(u32, u32). pred e13(u32, u32). pred e14(u32, u32).
+    pred e23(u32, u32). pred e24(u32, u32).
+    pred e34(u32, u32).
+    pred clique5(u32, u32, u32, u32, u32).
+
+    path01(A, B) :- seed01(A, B).
+    clique5(A, B, C, D, E) :-
+        path01(A, B), e02(A, C), e03(A, D), e04(A, E),
+        e12(B, C), e13(B, D), e14(B, E),
+        e23(C, D), e24(C, E),
+        e34(D, E).
+    path01(A, C) :- clique5(A, B, C, D, E).
+"#;
+
+fn recursive_k5_inputs() -> BTreeMap<String, Vec<(u32, u32)>> {
+    BTreeMap::from([
+        ("seed01".to_string(), vec![(1, 2)]),
+        ("e02".to_string(), vec![(1, 3), (1, 4), (1, 5)]),
+        ("e03".to_string(), vec![(1, 4), (1, 5), (1, 6)]),
+        ("e04".to_string(), vec![(1, 5), (1, 6), (1, 7)]),
+        ("e12".to_string(), vec![(2, 3), (3, 4), (4, 5)]),
+        ("e13".to_string(), vec![(2, 4), (3, 5), (4, 6)]),
+        ("e14".to_string(), vec![(2, 5), (3, 6), (4, 7)]),
+        ("e23".to_string(), vec![(3, 4), (4, 5), (5, 6)]),
+        ("e24".to_string(), vec![(3, 5), (4, 6), (5, 7)]),
+        ("e34".to_string(), vec![(4, 5), (5, 6), (6, 7)]),
+    ])
+}
+
+fn recursive_k5_stats(rel_ids: &BTreeMap<String, RelId>) -> StatsSnapshot {
+    let mut snapshot = StatsSnapshot::default();
+    let canonical_edges = [
+        ("path01", 0u8, 1u8),
+        ("e02", 0, 2),
+        ("e03", 0, 3),
+        ("e04", 0, 4),
+        ("e12", 1, 2),
+        ("e13", 1, 3),
+        ("e14", 1, 4),
+        ("e23", 2, 3),
+        ("e24", 2, 4),
+        ("e34", 3, 4),
+    ];
+    for name in [
+        "seed01", "path01", "e02", "e03", "e04", "e12", "e13", "e14", "e23", "e24", "e34",
+    ] {
+        let rel = *rel_ids.get(name).expect("relation id");
+        snapshot.rel_names.push((rel, name.to_string()));
+        let mut stats = RelationStats::new(rel);
+        stats.update_cardinality(if name == "seed01" { 1 } else { 2_005 });
+        for col_idx in [0usize, 1usize] {
+            let mut col = ColumnStats::new(col_idx, ScalarType::U32);
+            col.update_distinct(1_005);
+            stats.add_column(col);
+            stats.add_prefix_degree(PrefixDegreeStats::new(col_idx, 2.0, 2.5));
+            stats.add_key_heat(KeyHeatStats::new(col_idx, 0.75, 0.75));
+        }
+        snapshot.relations.push(stats);
+    }
+    for (left_idx, (left_name, left_i, left_j)) in canonical_edges.iter().enumerate() {
+        let left_rel = *rel_ids.get(*left_name).expect("left relation id");
+        for (right_name, right_i, right_j) in canonical_edges.iter().skip(left_idx + 1) {
+            if left_i == right_i || left_i == right_j || left_j == right_i || left_j == right_j {
+                let right_rel = *rel_ids.get(*right_name).expect("right relation id");
+                let mut sel = JoinSelectivity::new(left_rel, right_rel);
+                sel.set_keys(vec![0], vec![0]);
+                sel.set_selectivity(0.001);
+                snapshot.join_selectivities.push(sel);
+            }
+        }
+    }
+    snapshot
+}
+
+fn run_recursive_k5(
+    fix: &RuntimeBackedFixture,
+    fallback: bool,
+) -> (Executor, std::collections::BTreeSet<Vec<u32>>) {
+    let inputs = recursive_k5_inputs();
+    let mut id_compiler = Compiler::new();
+    let _ = id_compiler
+        .compile(RECURSIVE_K5_HISTOGRAM_SRC)
+        .expect("compile recursive k5 ids");
+    let rel_ids: BTreeMap<String, RelId> = id_compiler
+        .rel_ids()
+        .iter()
+        .map(|(name, rel)| (name.clone(), *rel))
+        .collect();
+    let snapshot = recursive_k5_stats(&rel_ids);
+    let mut compiler = Compiler::new();
+    let plan = compiler
+        .compile_with_stats_snapshot(RECURSIVE_K5_HISTOGRAM_SRC, Some(&snapshot))
+        .expect("compile recursive k5");
+    assert!(
+        plan_contains_multiway_with_arity(&plan, 10),
+        "recursive K5 plan must contain a 10-input MultiWayJoin"
+    );
+    let plan = if fallback {
+        replace_multiway_with_fallback(plan)
+    } else {
+        plan
+    };
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rid) in compiler.rel_ids().clone() {
+        executor.register_relation(rid, &name);
+    }
+    for (name, rows) in &inputs {
+        executor.put_relation(name, upload_binary_u32(&fix.memory, rows));
+    }
+    executor.execute_plan(&plan).expect("execute recursive k5");
+    let rows = download_k_row_set(executor.store().get("path01").expect("path01"), 2);
+    (executor, rows)
+}
+
+#[test]
+fn recursive_k5_refreshes_histogram_metadata_and_matches_fallback() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    fix.provider.reset_kclique_metadata_build_metrics();
+    let wall_start = Instant::now();
+    let (dispatched, dispatch_rows) = run_recursive_k5(&fix, false);
+    let dispatch_wall = wall_start.elapsed();
+    let metadata_build_count = fix.provider.kclique_metadata_build_count();
+    let metadata_build_nanos = fix.provider.kclique_metadata_build_nanos();
+    let (_fallback, fallback_rows) = run_recursive_k5(&fix, true);
+    assert_eq!(
+        dispatch_rows, fallback_rows,
+        "recursive K5 metadata-refresh path must match fallback fixpoint output"
+    );
+    assert!(
+        dispatched.wcoj_clique5_dispatch_count() >= 2,
+        "recursive K5 must dispatch on seeding and at least one semi-naive variant; got {}",
+        dispatched.wcoj_clique5_dispatch_count()
+    );
+    assert!(
+        dispatched.kclique_histogram_refresh_count() >= 1,
+        "recursive Merge phase must mark at least one K-clique histogram refresh"
+    );
+    let metadata_ratio = metadata_build_nanos as f64 / (dispatch_wall.as_nanos() as f64).max(1.0);
+    eprintln!(
+        "M_HIST_KC recursive K5: dispatch_count={} refresh_count={} metadata_build_count={} metadata_build_nanos={} wall_nanos={} metadata_ratio={:.6}",
+        dispatched.wcoj_clique5_dispatch_count(),
+        dispatched.kclique_histogram_refresh_count(),
+        metadata_build_count,
+        metadata_build_nanos,
+        dispatch_wall.as_nanos(),
+        metadata_ratio
+    );
+    assert!(
+        metadata_ratio <= 0.05,
+        "metadata build cost ratio must stay <= 5%; got {:.6}",
+        metadata_ratio
+    );
+    assert_eq!(
+        dispatch_rows.len(),
+        4,
+        "recursive K5 fixture should derive the seed plus three transitive path01 rows"
+    );
+}
+
 #[test]
 fn clique5_dispatch_counter_advances_and_row_set_matches_fallback_body() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
         return;
     };
+    fix.provider.reset_wcoj_layout_sort_invocation_count();
     run_counter_advance_test(&fix, CLIQUE5_SRC, "clique5", 5, |e| {
         e.wcoj_clique5_dispatch_count()
     });
+    let sort_count = fix.provider.wcoj_layout_sort_invocation_count();
+    assert!(
+        sort_count < 10,
+        "K5 planned dispatch must use fewer than the old 10 layout-sort calls; got {sort_count}"
+    );
 }
 
 #[test]

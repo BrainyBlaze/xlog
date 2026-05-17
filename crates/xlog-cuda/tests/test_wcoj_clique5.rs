@@ -94,7 +94,7 @@ where
         .map(|rows| rows.iter().copied().collect())
         .collect();
     fn edge_idx(i: usize, j: usize, k: usize) -> usize {
-        i * (k - 1) - i * (i - 1) / 2 + (j - i - 1)
+        i * (k - 1) - i.saturating_sub(1) * i / 2 + (j - i - 1)
     }
     // Vertex set = union of all values in all edges.
     let mut vertices: BTreeSet<T> = BTreeSet::new();
@@ -418,4 +418,43 @@ fn clique5_u64_round_trips_against_cpu_oracle() {
             col_idx
         );
     }
+}
+
+#[test]
+fn clique5_u32_metadata_path_is_bit_exact_for_100_runs() {
+    let Some(fix) = make_runtime_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let host_edges = k5_fixture_u32();
+    let raw_bufs: Vec<CudaBuffer> = host_edges
+        .iter()
+        .map(|rows| upload_2col_u32(&fix.memory, rows, ScalarType::U32))
+        .collect();
+    let stream = fix.pool.acquire().expect("stream");
+    let laid_out: Vec<CudaBuffer> = raw_bufs
+        .iter()
+        .map(|b| {
+            fix.provider
+                .wcoj_layout_sort_u32_recorded(b, stream)
+                .expect("layout sort")
+        })
+        .collect();
+    let edge_refs: Vec<&CudaBuffer> = laid_out.iter().collect();
+    let arr: &[&CudaBuffer; 10] = edge_refs.as_slice().try_into().expect("10 edges");
+    let mut expected: Option<Vec<[u32; 5]>> = None;
+    let mut pass_count = 0usize;
+    for run in 0..100 {
+        let out = fix
+            .provider
+            .wcoj_clique5_u32_recorded(arr, stream)
+            .unwrap_or_else(|e| panic!("clique5 u32 run {run} failed: {e}"));
+        let rows = download_k5_u32(&out);
+        match &expected {
+            Some(first) => assert_eq!(&rows, first, "run {run} drifted from run 0"),
+            None => expected = Some(rows),
+        }
+        pass_count += 1;
+    }
+    assert_eq!(pass_count, 100, "M_HIST_KC.4 K5 raw pass count");
 }

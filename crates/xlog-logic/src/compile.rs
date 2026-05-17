@@ -320,6 +320,26 @@ impl Compiler {
             .collect();
 
         let stats_arc = Arc::new(mgr);
+
+        crate::optimizer::helper_split_pass::run(
+            &mut plan,
+            &schemas_by_rel_id,
+            &stats_arc,
+            |schema| self.lowerer.create_helper_relation(schema),
+        );
+
+        let schemas_by_rel_id: HashMap<RelId, Schema> = self
+            .lowerer
+            .rel_ids()
+            .iter()
+            .filter_map(|(pred, rel_id)| {
+                self.lowerer
+                    .schemas()
+                    .get(pred)
+                    .map(|schema| (*rel_id, schema.clone()))
+            })
+            .collect();
+
         let mut optimizer = Optimizer::new(Arc::clone(&stats_arc));
         optimizer.set_schemas(schemas_by_rel_id);
         for rules in &mut plan.rules_by_scc {
@@ -331,7 +351,7 @@ impl Compiler {
         // v0.6.5 slice 3: selectivity-aware reordering pass. Runs
         // BETWEEN the optimizer loop and promote_multiway.
         // Locked compile-pipeline ordering:
-        //   lower → optimizer → selectivity_pass → promote_multiway
+        //   lower → helper_split_pass → optimizer → selectivity_pass → promote_multiway
         //
         // v0.6.5 W2.2: takes `rel_ids` so per-body Scans can be
         // resolved against `StatsManager`. Behavior on empty
@@ -353,6 +373,24 @@ impl Compiler {
         // (`Disabled`), the promoter never sets `var_order` and
         // slice 1/2/4/W2.2 dispatch is bit-identical.
         crate::promote::promote_multiway(&mut plan, self.lowerer.rel_ids(), &stats_arc, config);
+
+        let schemas_by_rel_id: HashMap<RelId, Schema> = self
+            .lowerer
+            .rel_ids()
+            .iter()
+            .filter_map(|(pred, rel_id)| {
+                self.lowerer
+                    .schemas()
+                    .get(pred)
+                    .map(|schema| (*rel_id, schema.clone()))
+            })
+            .collect();
+
+        crate::optimizer::helper_split_pass::run_kclique_specs(
+            &mut plan,
+            &schemas_by_rel_id,
+            |schema| self.lowerer.create_helper_relation(schema),
+        );
 
         Ok(plan)
     }
@@ -429,7 +467,7 @@ fn desugar_queries_and_constraints(program: &Program) -> Program {
 
 /// Convenience function to compile source in one call.
 ///
-/// This creates a temporary compiler and compiles the source.
+/// This creates a short-lived compiler and compiles the source.
 /// For multiple compilations, prefer creating a `Compiler` instance directly.
 ///
 /// # Example
@@ -484,6 +522,7 @@ mod tests {
     use super::*;
     use xlog_core::ScalarType;
     use xlog_ir::RirNode;
+    use xlog_stats::ColumnStats;
     use xlog_stats::RelationStats;
     use xlog_stats::StatsManager;
 
@@ -816,6 +855,121 @@ mod tests {
                 assert!(matches!(**right, RirNode::Scan { rel } if rel == edge_id));
             }
             other => panic!("Expected Join node, got {:?}", other),
+        }
+    }
+
+    fn helper_split_source() -> &'static str {
+        r#"
+            ab(0, 0). bc(0, 0). cd(0, 0). de(0, 0). ef(0, 0). af(0, 0).
+            out(A, B, C, D, F) :-
+                ab(A, B),
+                bc(B, C),
+                cd(C, D),
+                de(D, E),
+                ef(E, F),
+                af(A, F).
+        "#
+    }
+
+    fn helper_split_snapshot(distinct_d: u64) -> StatsSnapshot {
+        let mut snapshot_relations = Vec::new();
+        for (idx, name) in ["ab", "bc", "cd", "de", "ef", "af"].iter().enumerate() {
+            let mut rel_stats = RelationStats::new(RelId(idx as u32));
+            rel_stats.update_cardinality(8192);
+            if *name == "de" {
+                let mut d_col = ColumnStats::new(0, ScalarType::U32);
+                d_col.update_distinct(distinct_d);
+                rel_stats.add_column(d_col);
+            }
+            snapshot_relations.push(rel_stats);
+        }
+        StatsSnapshot {
+            relations: snapshot_relations,
+            join_selectivities: Vec::new(),
+            rel_names: ["ab", "bc", "cd", "de", "ef", "af"]
+                .iter()
+                .enumerate()
+                .map(|(idx, name)| (RelId(idx as u32), (*name).to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn test_compile_with_named_stats_snapshot_creates_helper_relation() {
+        let mut compiler = Compiler::new();
+        let snapshot = helper_split_snapshot(1);
+        let plan = compiler
+            .compile_with_stats_snapshot(helper_split_source(), Some(&snapshot))
+            .expect("compile with helper stats");
+        let helper = compiler
+            .rel_ids()
+            .iter()
+            .find_map(|(name, rel)| {
+                name.starts_with("__w37_helper_")
+                    .then_some((name.clone(), *rel))
+            })
+            .expect("helper relation allocated");
+
+        let helper_rule_count = plan
+            .rules_by_scc
+            .iter()
+            .flatten()
+            .filter(|rule| rule.head == helper.0)
+            .count();
+        assert_eq!(helper_rule_count, 1);
+
+        let out_rule = plan
+            .rules_by_scc
+            .iter()
+            .flatten()
+            .find(|rule| rule.head == "out")
+            .expect("out rule");
+        assert!(contains_scan(&out_rule.body, helper.1));
+    }
+
+    #[test]
+    fn test_compile_with_flat_named_stats_keeps_original_rule() {
+        let mut compiler = Compiler::new();
+        let snapshot = helper_split_snapshot(8192);
+        let plan = compiler
+            .compile_with_stats_snapshot(helper_split_source(), Some(&snapshot))
+            .expect("compile with flat stats");
+
+        assert!(!compiler
+            .rel_ids()
+            .keys()
+            .any(|name| name.starts_with("__w37_helper_")));
+        let out_rules = plan
+            .rules_by_scc
+            .iter()
+            .flatten()
+            .filter(|rule| rule.head == "out")
+            .count();
+        assert_eq!(out_rules, 1);
+    }
+
+    fn contains_scan(node: &RirNode, rel: RelId) -> bool {
+        match node {
+            RirNode::Scan { rel: scan_rel } => *scan_rel == rel,
+            RirNode::Join { left, right, .. } => {
+                contains_scan(left, rel) || contains_scan(right, rel)
+            }
+            RirNode::Project { input, .. }
+            | RirNode::Filter { input, .. }
+            | RirNode::Distinct { input, .. }
+            | RirNode::GroupBy { input, .. } => contains_scan(input, rel),
+            RirNode::Union { inputs } => inputs.iter().any(|input| contains_scan(input, rel)),
+            RirNode::Diff { left, right } => contains_scan(left, rel) || contains_scan(right, rel),
+            RirNode::Fixpoint {
+                base, recursive, ..
+            } => contains_scan(base, rel) || contains_scan(recursive, rel),
+            RirNode::MultiWayJoin { inputs, .. } => {
+                inputs.iter().any(|input| contains_scan(input, rel))
+            }
+            RirNode::TensorMaskedJoin { rel_index, .. } => {
+                rel_index.iter().any(|(input_rel, _)| *input_rel == rel)
+            }
+            RirNode::Unit => false,
         }
     }
 }

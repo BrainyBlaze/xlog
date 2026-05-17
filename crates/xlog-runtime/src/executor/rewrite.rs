@@ -3,10 +3,124 @@
 use std::collections::{HashMap, HashSet};
 
 use xlog_core::{RelId, Result, XlogError};
+use xlog_ir::rir::{LookupPerm, ProjectExpr, VariableOrder};
 use xlog_ir::{ExecutionPlan, JoinType, RirNode};
 
 use super::Executor;
 use super::RelationDelta;
+
+fn triangle_delta_var_order(leader_idx: u8) -> VariableOrder {
+    let lookup_perms = match leader_idx {
+        0 => vec![
+            LookupPerm {
+                input_idx: 1,
+                swap_cols: false,
+            },
+            LookupPerm {
+                input_idx: 2,
+                swap_cols: false,
+            },
+        ],
+        1 => vec![
+            LookupPerm {
+                input_idx: 2,
+                swap_cols: true,
+            },
+            LookupPerm {
+                input_idx: 0,
+                swap_cols: true,
+            },
+        ],
+        2 => vec![
+            LookupPerm {
+                input_idx: 1,
+                swap_cols: true,
+            },
+            LookupPerm {
+                input_idx: 0,
+                swap_cols: false,
+            },
+        ],
+        _ => unreachable!("triangle leader_idx out of range"),
+    };
+    let kernel_output_cols = match leader_idx {
+        0 => vec![
+            ProjectExpr::Column(0),
+            ProjectExpr::Column(1),
+            ProjectExpr::Column(2),
+        ],
+        1 => vec![
+            ProjectExpr::Column(2),
+            ProjectExpr::Column(0),
+            ProjectExpr::Column(1),
+        ],
+        2 => vec![
+            ProjectExpr::Column(0),
+            ProjectExpr::Column(2),
+            ProjectExpr::Column(1),
+        ],
+        _ => unreachable!("triangle leader_idx out of range"),
+    };
+    VariableOrder::legacy(leader_idx, lookup_perms, kernel_output_cols)
+}
+
+fn cycle4_delta_var_order(leader_idx: u8) -> VariableOrder {
+    let lookup_perms = (1..4)
+        .map(|offset| LookupPerm {
+            input_idx: ((leader_idx as usize + offset) % 4) as u8,
+            swap_cols: false,
+        })
+        .collect();
+    let kernel_output_cols = match leader_idx {
+        0 => vec![
+            ProjectExpr::Column(0),
+            ProjectExpr::Column(1),
+            ProjectExpr::Column(2),
+            ProjectExpr::Column(3),
+        ],
+        1 => vec![
+            ProjectExpr::Column(3),
+            ProjectExpr::Column(0),
+            ProjectExpr::Column(1),
+            ProjectExpr::Column(2),
+        ],
+        2 => vec![
+            ProjectExpr::Column(2),
+            ProjectExpr::Column(3),
+            ProjectExpr::Column(0),
+            ProjectExpr::Column(1),
+        ],
+        3 => vec![
+            ProjectExpr::Column(1),
+            ProjectExpr::Column(2),
+            ProjectExpr::Column(3),
+            ProjectExpr::Column(0),
+        ],
+        _ => unreachable!("4-cycle leader_idx out of range"),
+    };
+    VariableOrder::legacy(leader_idx, lookup_perms, kernel_output_cols)
+}
+
+fn delta_outermost_var_order(
+    input_count: usize,
+    replaced_input_idx: Option<usize>,
+    current: Option<&VariableOrder>,
+) -> Option<VariableOrder> {
+    let Some(idx) = replaced_input_idx else {
+        return current.cloned();
+    };
+    if current.and_then(|order| order.kclique.as_ref()).is_some() {
+        return current.cloned();
+    }
+    if idx == 0 {
+        return None;
+    }
+    match input_count {
+        3 if idx < 3 => Some(triangle_delta_var_order(idx as u8)),
+        4 if idx < 4 => Some(cycle4_delta_var_order(idx as u8)),
+        _ => current.cloned(),
+    }
+}
 
 impl Executor {
     /// Apply base-relation deltas and recompute affected SCCs (no recompilation).
@@ -497,13 +611,15 @@ impl Executor {
                 slot_vars,
                 output_columns,
                 fallback,
+                plan,
                 var_order,
             } => {
                 let starting_remaining = *remaining;
                 let mut inputs_remaining = starting_remaining;
                 let mut new_inputs = Vec::with_capacity(inputs.len());
                 let mut any_replaced = false;
-                for inp in inputs {
+                let mut replaced_input_idx = None;
+                for (idx, inp) in inputs.iter().enumerate() {
                     let (new_inp, replaced) = Self::rewrite_scan_nth_impl(
                         inp,
                         target,
@@ -511,6 +627,9 @@ impl Executor {
                         replacement,
                     );
                     any_replaced |= replaced;
+                    if replaced {
+                        replaced_input_idx = Some(idx);
+                    }
                     new_inputs.push(new_inp);
                 }
                 let mut fallback_remaining = starting_remaining;
@@ -521,13 +640,19 @@ impl Executor {
                     replacement,
                 );
                 *remaining = inputs_remaining;
+                let input_count = new_inputs.len();
                 (
                     RirNode::MultiWayJoin {
                         inputs: new_inputs,
                         slot_vars: slot_vars.clone(),
                         output_columns: output_columns.clone(),
                         fallback: Box::new(new_fallback),
-                        var_order: var_order.clone(),
+                        plan: plan.clone(),
+                        var_order: delta_outermost_var_order(
+                            input_count,
+                            replaced_input_idx,
+                            var_order.as_ref(),
+                        ),
                     },
                     any_replaced || fallback_replaced,
                 )
@@ -586,6 +711,7 @@ mod multiway_walker_tests {
                 ProjectExpr::Column(3),
             ],
             fallback: Box::new(fallback),
+            plan: None,
             var_order: None,
         }
     }
@@ -720,6 +846,7 @@ mod multiway_walker_tests {
                 xlog_ir::rir::ProjectExpr::Column(3),
             ],
             fallback: Box::new(fallback),
+            plan: None,
             var_order: None,
         }
     }
@@ -794,6 +921,37 @@ mod multiway_walker_tests {
             Executor::rewrite_scan_nth(&node, RelId(40), 1, RelId(99)).is_none(),
             "occ=1 must return None — RelId(40) has only 1 occurrence per view"
         );
+    }
+
+    #[test]
+    fn delta_outermost_leader_selection_rebinds_triangle_variant() {
+        let node = triangle_multiway(RelId(10), RelId(20), RelId(30));
+        let rewritten =
+            Executor::rewrite_scan_nth(&node, RelId(20), 0, RelId(99)).expect("rewrite must hit");
+        let RirNode::MultiWayJoin { var_order, .. } = rewritten else {
+            panic!("expected MultiWayJoin");
+        };
+        let var_order = var_order.expect("rewritten input 1 must become leader");
+        assert_eq!(var_order.leader_idx, 1);
+        assert_eq!(var_order.lookup_perms.len(), 2);
+        assert_eq!(var_order.lookup_perms[0].input_idx, 2);
+        assert_eq!(var_order.lookup_perms[1].input_idx, 0);
+    }
+
+    #[test]
+    fn delta_outermost_leader_selection_rebinds_4cycle_variant() {
+        let node = fourway_multiway(RelId(10), RelId(20), RelId(30), RelId(40));
+        let rewritten =
+            Executor::rewrite_scan_nth(&node, RelId(40), 0, RelId(99)).expect("rewrite must hit");
+        let RirNode::MultiWayJoin { var_order, .. } = rewritten else {
+            panic!("expected MultiWayJoin");
+        };
+        let var_order = var_order.expect("rewritten input 3 must become leader");
+        assert_eq!(var_order.leader_idx, 3);
+        assert_eq!(var_order.lookup_perms.len(), 3);
+        assert_eq!(var_order.lookup_perms[0].input_idx, 0);
+        assert_eq!(var_order.lookup_perms[1].input_idx, 1);
+        assert_eq!(var_order.lookup_perms[2].input_idx, 2);
     }
 }
 
@@ -882,6 +1040,7 @@ mod w41_rewrite_scan_nth_occurrence_identity_tests {
                 ProjectExpr::Column(2),
             ],
             fallback: Box::new(fallback),
+            plan: None,
             var_order: None,
         }
     }

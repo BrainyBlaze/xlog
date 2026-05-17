@@ -48,7 +48,19 @@ name = "w52_skewed_multiway_bench"
 harness = false
 
 [[bench]]
-name = "wcoj_fusion_bench"
+name = "wcoj_w33_superhub"
+harness = false
+
+[[bench]]
+name = "wcoj_paper_class"
+harness = false
+
+[[bench]]
+name = "wcoj_w37_helper_split"
+harness = false
+
+[[bench]]
+name = "wcoj_w38_stream_mux"
 harness = false
 
 [[bin]]

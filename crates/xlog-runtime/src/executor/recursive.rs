@@ -1,6 +1,7 @@
 //! Recursive SCC execution using semi-naive fixpoint iteration.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::time::Instant;
 
 use xlog_core::{RelId, Result, Schema, XlogError};
 use xlog_cuda::CudaBuffer;
@@ -29,7 +30,7 @@ impl Executor {
     /// dispatch). Multi-recursive bodies — both distinct-
     /// recursive-predicate and same-predicate self-recursive
     /// (paper P1, arXiv:2604.20073) — DO reach a `MultiWayJoin`
-    /// here after W4.1 removed the `recursive_scan_count > 1`
+    /// here after W4.1 eliminated the `recursive_scan_count > 1`
     /// promoter cutoff at `crates/xlog-logic/src/promote.rs:114`;
     /// the per-variant rewrite loop builds N variants (one per
     /// recursive occurrence with a non-empty delta) and
@@ -56,15 +57,64 @@ impl Executor {
             if let Some(buf) = self.try_dispatch_wcoj_4cycle_on_body(node)? {
                 return Ok(buf);
             }
-            // W3.2 plan §177: the recursive WCOJ helper is NOT
-            // extended for clique-keyed dispatch. Recursive
-            // clique bodies are rejected at the promoter level
-            // (`promote_multiway` gates clique promotion on
-            // `recursive_scan_count == 0`), so they fall through
-            // to the binary-join path here. No `try_dispatch_wcoj_clique*`
-            // call site in this helper.
+            // Authorization 5 G_HIST_KC: recursive clique bodies
+            // must use the same launch-local metadata builders as
+            // non-recursive K-clique dispatch, so rewritten
+            // semi-naive variants are eligible here too.
+            if let Some(buf) = self.try_dispatch_wcoj_clique5_on_body(node)? {
+                return Ok(buf);
+            }
+            if let Some(buf) = self.try_dispatch_wcoj_clique6_on_body(node)? {
+                return Ok(buf);
+            }
         }
         self.execute_node(node)
+    }
+
+    fn refresh_kclique_edge_metadata_after_merge(
+        &mut self,
+        rules: &[xlog_ir::CompiledRule],
+        pred: &str,
+    ) {
+        let start = Instant::now();
+        let affected_rules = rules
+            .iter()
+            .filter(|rule| self.kclique_body_mentions_pred(&rule.body, pred))
+            .count() as u64;
+        self.record_kclique_histogram_refresh_time(start, affected_rules);
+    }
+
+    fn record_kclique_histogram_refresh_time(&mut self, start: Instant, affected_rules: u64) {
+        if affected_rules == 0 {
+            return;
+        }
+        self.kclique_histogram_refresh_count = self
+            .kclique_histogram_refresh_count
+            .saturating_add(affected_rules);
+        self.kclique_histogram_refresh_nanos = self
+            .kclique_histogram_refresh_nanos
+            .saturating_add(start.elapsed().as_nanos());
+    }
+
+    fn kclique_body_mentions_pred(&self, node: &RirNode, pred: &str) -> bool {
+        let RirNode::MultiWayJoin {
+            inputs, var_order, ..
+        } = node
+        else {
+            return false;
+        };
+        let Some(order) = var_order.as_ref().and_then(|order| order.kclique.as_ref()) else {
+            return false;
+        };
+        if !matches!(order.k, 5 | 6) {
+            return false;
+        }
+        inputs.iter().any(|input| {
+            let RirNode::Scan { rel } = input else {
+                return false;
+            };
+            self.rel_names.get(rel).is_some_and(|name| name == pred)
+        })
     }
 
     /// Stub: always returns an error directing callers to use `execute_plan` instead.
@@ -739,6 +789,7 @@ impl Executor {
                     self.stats
                         .update_cardinality(full_rel, full_new_rows_phase4);
                 }
+                self.refresh_kclique_edge_metadata_after_merge(rules, pred);
 
                 // W2.3 trace seam — gated on `recursive-stats-trace`.
                 #[cfg(feature = "recursive-stats-trace")]

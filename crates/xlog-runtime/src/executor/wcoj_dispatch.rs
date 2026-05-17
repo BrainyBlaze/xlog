@@ -1,27 +1,17 @@
 //! v0.6.2 WCOJ triangle dispatch — runtime hook.
 //!
-//! Wires the GPU 3-way WCOJ kernel into the executor's per-rule
-//! loop. **Default-on** (post-A2-lite default flip): the
-//! adaptive classifier runs on every matching non-recursive
-//! triangle rule and dispatches WCOJ when the per-key skew
-//! score clears [`WCOJ_ADAPTIVE_SKEW_THRESHOLD`]. Production
-//! callers leave `RuntimeConfig::default()` and accept the
-//! adaptive path.
+//! Wires the GPU WCOJ kernels into the executor's per-rule loop.
+//! Production callers leave `RuntimeConfig::default()` and use
+//! the stats-backed dispatch model.
 //!
 //! Override knobs (config + env, highest precedence first):
 //!
-//!   1. **Hard kill switch** — `wcoj_triangle_dispatch_disabled` /
-//!      [`ENV_DISABLE_WCOJ_TRIANGLE`]. Pins all dispatch off,
-//!      including force. Ops emergency knob.
-//!   2. **Force-WCOJ** — `wcoj_triangle_dispatch=Some(true)` /
-//!      [`ENV_USE_WCOJ_TRIANGLE_U32`]. Bypasses classifier.
-//!   3. **Explicit force-off** —
+//!   1. **Force-WCOJ** — `wcoj_triangle_dispatch=Some(true)` /
+//!      [`ENV_USE_WCOJ_TRIANGLE_U32`]. Bypasses stats decision.
+//!   2. **Explicit force-off** —
 //!      `wcoj_triangle_dispatch=Some(false)`. Used by bench
 //!      `Mode::Off` cells and any test that wants binary-join.
-//!   4. **Adaptive opt-out** —
-//!      `wcoj_triangle_dispatch_adaptive=Some(false)`. Disables
-//!      the default-on classifier without a global env var.
-//!   5. **Default**: classifier runs.
+//!   3. **Default**: stats-backed dispatch model.
 //!
 //! ## Recognized RIR shape (v0.6.5)
 //!
@@ -49,10 +39,9 @@
 //! caller takes the embedded `fallback` path.
 //!
 //! Width branching: 4-byte (U32 / Symbol) inputs go to
-//! `wcoj_layout_u32_recorded` + `wcoj_triangle_u32_recorded`;
+//! `wcoj_layout_u32_recorded` + `wcoj_triangle_hg_u32_recorded`;
 //! 8-byte (U64) inputs go to the `_u64_recorded` siblings. All
-//! three slots must share a width — mixed-width triangles fall
-//! back to the binary-join path.
+//! three slots must share a width.
 //!
 //! ## Failure handling
 //!
@@ -82,14 +71,15 @@
 //! * Cost model — slice 5.
 //! * Mixed-width admission (a triangle with both U32 and U64
 //!   slots stays on the binary-join path).
-//! * Histogram-guided block dispatch (B1 heavy-row offload).
 //! * Multi-recursive WCOJ (≥ 2 in-SCC body Scans) — slice 4.2.
 
-use xlog_core::{RelId, Result, ScalarType, Schema, ENV_WCOJ_W34_THRESHOLD, W34_FUSION_THRESHOLD};
+use std::collections::HashSet;
+
+use xlog_core::{RelId, Result, ScalarType, Schema};
 use xlog_cuda::device_runtime::StreamId;
 use xlog_cuda::CudaBuffer;
 use xlog_ir::{
-    rir::{ProjectExpr, VariableOrder},
+    rir::{KCliqueVariableOrder, MultiwayPlan, ProjectExpr, VariableOrder},
     CompiledRule, RirNode,
 };
 
@@ -115,67 +105,35 @@ pub(super) fn wcoj_gate_enabled(config_override: Option<bool>) -> bool {
         .unwrap_or(false)
 }
 
-/// Env variable controlling the adaptive WCOJ dispatch.
-/// `"1"` / case-insensitive `"true"` → ON. Anything else
-/// (including unset) is *not* a hard off — the resolver
-/// defaults to ON when this env is unset (post-default-on
-/// flip). To explicitly disable adaptive, use
-/// `RuntimeConfig::wcoj_triangle_dispatch_adaptive = Some(false)`.
-pub const ENV_USE_WCOJ_TRIANGLE_ADAPTIVE: &str = "XLOG_USE_WCOJ_TRIANGLE_ADAPTIVE";
+pub const ENV_WCOJ_BLOCK_WORK_UNIT: &str = "XLOG_WCOJ_BLOCK_WORK_UNIT";
+pub(super) const WCOJ_BLOCK_WORK_UNIT_DEFAULT: u32 = 1024;
+pub(super) const WCOJ_BLOCK_WORK_UNIT_MAX: u32 = 8192;
 
-/// Env variable for the hard kill switch. `"1"` / case-
-/// insensitive `"true"` → kill. Beats every other flag.
-pub const ENV_DISABLE_WCOJ_TRIANGLE: &str = "XLOG_DISABLE_WCOJ_TRIANGLE";
-
-/// Resolve the adaptive dispatch gate. Precedence:
-///   * `config_override = Some(b)` → `b` (test-only knob).
-///   * `XLOG_USE_WCOJ_TRIANGLE_ADAPTIVE=1` → `true`.
-///   * `XLOG_USE_WCOJ_TRIANGLE_ADAPTIVE` set to any other
-///     value (`"0"`, `"false"`, …) → `false`.
-///   * Unset → `true` (default-on flip).
-pub(super) fn wcoj_adaptive_enabled(config_override: Option<bool>) -> bool {
-    if let Some(v) = config_override {
-        return v;
-    }
-    match std::env::var(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE) {
-        Ok(v) => v == "1" || v.eq_ignore_ascii_case("true"),
-        // Default-on: when env is unset, adaptive runs.
-        Err(_) => true,
-    }
-}
-
-/// Resolve the kill switch. Same precedence shape as
-/// `wcoj_gate_enabled` (config override > env > false).
-/// Returns `true` when dispatch should be hard-disabled.
-pub(super) fn wcoj_disabled(config_override: Option<bool>) -> bool {
-    if let Some(v) = config_override {
-        return v;
-    }
-    std::env::var(ENV_DISABLE_WCOJ_TRIANGLE)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-}
-
-/// Resolve the W3.4 layout+count fusion threshold.
-///
-/// The threshold metric is total logical input rows across the
-/// canonical triangle slots. `XLOG_WCOJ_W34_THRESHOLD` may override
-/// the const for bench/cert calibration; invalid values fall back to
-/// [`W34_FUSION_THRESHOLD`].
-pub(super) fn w34_fusion_threshold() -> u64 {
-    match std::env::var(ENV_WCOJ_W34_THRESHOLD) {
+pub(super) fn wcoj_block_work_unit() -> u32 {
+    match std::env::var(ENV_WCOJ_BLOCK_WORK_UNIT) {
         Ok(raw) => match raw.trim().parse::<u32>() {
-            Ok(v) => u64::from(v),
+            Ok(v @ 1..=WCOJ_BLOCK_WORK_UNIT_MAX) => v,
+            Ok(v) => {
+                eprintln!(
+                    "warning: {ENV_WCOJ_BLOCK_WORK_UNIT}={v} is outside 1..={WCOJ_BLOCK_WORK_UNIT_MAX}; \
+                     using {WCOJ_BLOCK_WORK_UNIT_DEFAULT}"
+                );
+                WCOJ_BLOCK_WORK_UNIT_DEFAULT
+            }
             Err(_) => {
                 eprintln!(
-                    "warning: {ENV_WCOJ_W34_THRESHOLD}={raw:?} is not a u32; \
-                     falling back to W34_FUSION_THRESHOLD={W34_FUSION_THRESHOLD}"
+                    "warning: {ENV_WCOJ_BLOCK_WORK_UNIT}={raw:?} is not a u32; \
+                     using {WCOJ_BLOCK_WORK_UNIT_DEFAULT}"
                 );
-                u64::from(W34_FUSION_THRESHOLD)
+                WCOJ_BLOCK_WORK_UNIT_DEFAULT
             }
         },
-        Err(_) => u64::from(W34_FUSION_THRESHOLD),
+        Err(_) => WCOJ_BLOCK_WORK_UNIT_DEFAULT,
     }
+}
+
+pub(super) fn wcoj_adaptive_enabled(config_override: Option<bool>) -> bool {
+    config_override.unwrap_or(true)
 }
 
 // -----------------------------------------------------------------
@@ -237,50 +195,11 @@ pub(super) fn wcoj_4cycle_disabled(config_override: Option<bool>) -> bool {
         .unwrap_or(false)
 }
 
-/// Threshold at which a classifier score routes the rule to the
-/// WCOJ pipeline rather than the binary-join fallback. Locked
-/// from the v0.6.2 baseline probe in
-/// `docs/evidence/2026-05-01-wcoj-bench-baseline/`: uniform/empty
-/// fixtures score ≤ 0.04, super-hub fixtures score ≥ 0.18.
-/// Threshold of 0.10 sits in the gap with ≥1.7× headroom on each
-/// side — robust to bench/kernel noise.
-pub(super) const WCOJ_ADAPTIVE_SKEW_THRESHOLD: f64 = 0.10;
-
-/// v0.6.5 slice 2 — threshold for the 4-cycle adaptive
-/// classifier. Reduction across the four join positions is
-/// `max(score_per_position)`, which keeps the score in the same
-/// `[0, 1]` range as the triangle classifier — so the same `0.10`
-/// threshold transfers directly. Bench evidence under
-/// `docs/evidence/2026-05-?-wcoj-4cycle-bench-baseline/`
-/// (slice 2 step 10) verifies the gap has ≥1.7× headroom on
-/// each side; if the evidence shows a different threshold is
-/// warranted, lock the new value before merging.
-pub(super) const WCOJ_ADAPTIVE_4CYCLE_SKEW_THRESHOLD: f64 = 0.10;
-
 /// Resolved dispatch mode after consulting both gates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DispatchMode {
-    /// Force-WCOJ: classifier is bypassed entirely; dispatch
-    /// fires whenever the RIR + buffers + width all match.
-    /// Set by `wcoj_triangle_dispatch=Some(true)` or env=1.
     Force,
-    /// Adaptive: run the GPU skew classifier; dispatch only
-    /// when the score clears [`WCOJ_ADAPTIVE_SKEW_THRESHOLD`].
-    /// Set by `wcoj_triangle_dispatch_adaptive=Some(true)` (and
-    /// force is not on).
-    Adaptive,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum W34FusionRoute {
-    Fused,
-    Unfused,
-}
-
-fn logical_rows_for_threshold(buf: &CudaBuffer) -> u64 {
-    buf.cached_row_count()
-        .map(u64::from)
-        .unwrap_or_else(|| buf.num_rows())
+    CostModel,
 }
 
 /// Three rel IDs extracted from a matched triangle RIR. The
@@ -841,20 +760,14 @@ impl Executor {
         let wall_start = Instant::now();
         // 1. Gate resolution. Decision tree (highest → lowest):
         //
-        //    a. Hard kill switch
-        //       (`wcoj_triangle_dispatch_disabled` /
-        //       `XLOG_DISABLE_WCOJ_TRIANGLE=1`) → no dispatch.
-        //       Beats every other flag including force.
+        //    a. Runtime disable flag → no dispatch.
         //    b. If `wcoj_triangle_dispatch` resolves to true
-        //       (config Some(true) or env=1) → force WCOJ;
-        //       classifier is bypassed entirely (mode = Force).
+        //       (config Some(true) or env=1) → force WCOJ.
         //    c. Force = Some(false) → explicit off.
-        //    d. Else if `wcoj_triangle_dispatch_adaptive`
-        //       resolves to true (config / env / default-on) →
-        //       run classifier; dispatch only when score ≥
-        //       threshold (mode = Adaptive).
+        //    d. Else if stats mode resolves to true, consult
+        //       the cardinality model.
         //    e. Else → no dispatch.
-        if wcoj_disabled(self.config.wcoj_triangle_dispatch_disabled) {
+        if self.config.wcoj_triangle_dispatch_disabled.unwrap_or(false) {
             return Ok(None);
         }
         let force_override = self.config.wcoj_triangle_dispatch;
@@ -862,16 +775,16 @@ impl Executor {
         let mode = if force_on {
             DispatchMode::Force
         } else {
-            // Force-Some(false) is "explicitly off" — adaptive
-            // does NOT resurrect it. Only when force is None or
-            // env-default-off do we consult the adaptive gate.
+            // Force-Some(false) is "explicitly off". Only when
+            // force is None or env-default-off do we consult the
+            // stats gate.
             let force_explicit_off = matches!(force_override, Some(false));
             if force_explicit_off {
                 return Ok(None);
             }
             let adaptive_override = self.config.wcoj_triangle_dispatch_adaptive;
             if wcoj_adaptive_enabled(adaptive_override) {
-                DispatchMode::Adaptive
+                DispatchMode::CostModel
             } else {
                 return Ok(None);
             }
@@ -941,26 +854,13 @@ impl Executor {
             None => return Ok(None),
         };
 
-        // 6. Adaptive mode only: run the classifier on the same
-        // launch_stream as the eventual WCOJ pipeline. Classifier
-        // failures (Ok(None) from the provider) silently fall
-        // back to binary-join — classifier is optimization, not
-        // correctness. A score below
-        // `WCOJ_ADAPTIVE_SKEW_THRESHOLD` likewise falls back.
-        // v0.6.5 slice 3: route the adaptive decision through the
-        // WcojCostModel seam. Default impl is SkewClassifierCostModel,
-        // which is a verbatim wrap of the v0.6.5 slice 2 inline
-        // logic — dispatch counts are preserved bit-for-bit.
+        // 6. Stats-backed mode only: resolve the WCOJ cost model
+        // on the same launch stream as the eventual GPU pipeline.
         #[cfg(feature = "wcoj-phase-timing")]
         let mut classifier_ms: f32 = 0.0;
-        if mode == DispatchMode::Adaptive {
+        if mode == DispatchMode::CostModel {
             #[cfg(feature = "wcoj-phase-timing")]
             let cls_start = Instant::now();
-            // Slice 5: factory selects per RuntimeConfig precedence.
-            // Default (slice 1–4 behavior) is `SkewClassifierCostModel`;
-            // opt-in via `XLOG_WCOJ_COST_MODEL=cardinality` or
-            // `RuntimeConfig::with_wcoj_cost_model(...)` selects
-            // `CardinalityAwareCostModel`.
             let model = super::wcoj_cost_model::build_wcoj_cost_model(&self.config);
             let slot_rels = [matched.rel_xy, matched.rel_yz, matched.rel_xz];
             let ctx = super::wcoj_cost_model::WcojDispatchCtx {
@@ -969,13 +869,7 @@ impl Executor {
                 width,
                 slot_rels: &slot_rels,
             };
-            let scorer = super::wcoj_cost_model::TriangleScorer {
-                provider: self.provider.as_ref(),
-                e_xy: buf_xy,
-                e_yz: buf_yz,
-                e_xz: buf_xz,
-            };
-            let dispatch = model.should_dispatch_triangle(&ctx, &scorer);
+            let dispatch = model.should_dispatch_triangle(&ctx);
             #[cfg(feature = "wcoj-phase-timing")]
             {
                 classifier_ms = cls_start.elapsed().as_secs_f64() as f32 * 1000.0;
@@ -1095,29 +989,6 @@ impl Executor {
                 vo,
             );
         }
-        let w34_route = if matches!(width, WcojKeyWidth::FourByte) {
-            let total_input_rows = logical_rows_for_threshold(buf_xy)
-                .saturating_add(logical_rows_for_threshold(buf_yz))
-                .saturating_add(logical_rows_for_threshold(buf_xz));
-            if total_input_rows >= w34_fusion_threshold() {
-                W34FusionRoute::Fused
-            } else {
-                W34FusionRoute::Unfused
-            }
-        } else {
-            W34FusionRoute::Unfused
-        };
-        if w34_route == W34FusionRoute::Fused {
-            if let Ok(buf) = self.provider.wcoj_triangle_fused_lc_u32_recorded(
-                buf_xy,
-                buf_yz,
-                buf_xz,
-                launch_stream,
-            ) {
-                self.provider.record_wcoj_triangle_fused_dispatch();
-                return Ok(buf);
-            }
-        }
         #[cfg(feature = "wcoj-phase-timing")]
         let mut time_layout =
             |f: &dyn Fn() -> Result<CudaBuffer>, slot: usize| -> Result<CudaBuffer> {
@@ -1165,13 +1036,14 @@ impl Executor {
                 let layout_xz = self
                     .provider
                     .wcoj_layout_u32_recorded(buf_xz, launch_stream)?;
-                let out = self.provider.wcoj_triangle_u32_recorded(
+                let out = self.provider.wcoj_triangle_hg_u32_recorded(
                     &layout_xy,
                     &layout_yz,
                     &layout_xz,
+                    wcoj_block_work_unit(),
                     launch_stream,
                 )?;
-                self.provider.record_wcoj_triangle_unfused_dispatch();
+                self.provider.record_wcoj_triangle_hg_dispatch();
                 Ok(out)
             }
             WcojKeyWidth::EightByte => {
@@ -1278,8 +1150,15 @@ impl Executor {
                 let l2 = self
                     .provider
                     .wcoj_layout_u32_recorded(&slot_inputs[2], launch_stream)?;
-                self.provider
-                    .wcoj_triangle_u32_recorded(&l0, &l1, &l2, launch_stream)?
+                let out = self.provider.wcoj_triangle_hg_u32_recorded(
+                    &l0,
+                    &l1,
+                    &l2,
+                    wcoj_block_work_unit(),
+                    launch_stream,
+                )?;
+                self.provider.record_wcoj_triangle_hg_dispatch();
+                out
             }
             WcojKeyWidth::EightByte => {
                 let l0 = self
@@ -1340,11 +1219,8 @@ impl Executor {
     ///   2. Force gate (`wcoj_4cycle_dispatch=Some(true)` /
     ///      `XLOG_USE_WCOJ_4CYCLE=1`) → kernel runs.
     ///   3. Force-Some(false) → no dispatch.
-    ///   4. Adaptive opt-in (config / env, default off) →
-    ///      classifier integration lands in slice 2 step 9;
-    ///      until then, the adaptive branch returns Ok(None)
-    ///      (no dispatch). Per the slice 2 plan, ship force +
-    ///      adaptive together; this step just plumbs the gates.
+    ///   4. Stats opt-in (config / env, default off) →
+    ///      cardinality model decides whether the kernel runs.
     ///
     /// Returns `Ok(Some(buffer))` on dispatch; `Ok(None)`
     /// silently otherwise. The caller installs the buffer or
@@ -1383,7 +1259,7 @@ impl Executor {
             }
             let adaptive_override = self.config.wcoj_4cycle_dispatch_adaptive;
             if wcoj_4cycle_adaptive_enabled(adaptive_override) {
-                DispatchMode::Adaptive
+                DispatchMode::CostModel
             } else {
                 return Ok(None);
             }
@@ -1451,11 +1327,9 @@ impl Executor {
             None => return Ok(None),
         };
 
-        // 7. v0.6.5 slice 3: route the adaptive decision through
-        // the WcojCostModel seam. Default impl is
-        // SkewClassifierCostModel — verbatim wrap of the v0.6.5
-        // slice 2 inline logic; dispatch counts preserved.
-        if mode == DispatchMode::Adaptive {
+        // 7. Stats-backed mode: route the decision through
+        // the cardinality WCOJ cost model.
+        if mode == DispatchMode::CostModel {
             // Slice 5: factory selects per RuntimeConfig precedence.
             let model = super::wcoj_cost_model::build_wcoj_cost_model(&self.config);
             let slot_rels = [
@@ -1470,14 +1344,7 @@ impl Executor {
                 width,
                 slot_rels: &slot_rels,
             };
-            let scorer = super::wcoj_cost_model::Cycle4Scorer {
-                provider: self.provider.as_ref(),
-                e1: buf_e1,
-                e2: buf_e2,
-                e3: buf_e3,
-                e4: buf_e4,
-            };
-            let dispatch = model.should_dispatch_4cycle(&ctx, &scorer);
+            let dispatch = model.should_dispatch_4cycle(&ctx);
             if !dispatch {
                 return Ok(None);
             }
@@ -1840,6 +1707,18 @@ impl Executor {
         self.wcoj_clique6_dispatch_count
     }
 
+    /// Authorization 5 G_HIST_KC — number of recursive Merge
+    /// boundaries where K-clique metadata was marked for refresh.
+    pub fn kclique_histogram_refresh_count(&self) -> u64 {
+        self.kclique_histogram_refresh_count
+    }
+
+    /// Authorization 5 G_HIST_KC — cumulative refresh accounting
+    /// time in nanoseconds.
+    pub fn kclique_histogram_refresh_nanos(&self) -> u128 {
+        self.kclique_histogram_refresh_nanos
+    }
+
     /// W3.2 — Try k=5-clique dispatch. Wrapper for rule-keyed
     /// callers (recursive engine + non-recursive scc).
     pub(super) fn try_dispatch_wcoj_clique5(
@@ -1883,12 +1762,25 @@ impl Executor {
     ) -> Result<Option<CudaBuffer>> {
         let expected_edges = k * (k - 1) / 2;
         // 1. Shape match: MultiWayJoin with inputs.len() == C(k, 2).
-        let RirNode::MultiWayJoin { inputs, .. } = body else {
+        let RirNode::MultiWayJoin {
+            inputs,
+            plan,
+            var_order,
+            ..
+        } = body
+        else {
             return Ok(None);
         };
+        if matches!(plan, Some(MultiwayPlan::PlannedHashRoute { .. })) {
+            return Ok(None);
+        }
         if inputs.len() != expected_edges {
             return Ok(None);
         }
+        let kclique = match var_order.as_ref().and_then(|order| order.kclique.as_ref()) {
+            Some(plan) if usize::from(plan.k) == k => plan,
+            _ => return Ok(None),
+        };
         // 2. Extract RelIds from each input (must all be Scans).
         let mut rel_ids: Vec<RelId> = Vec::with_capacity(expected_edges);
         for input in inputs {
@@ -1929,17 +1821,48 @@ impl Executor {
         if !is_u64 && !is_4byte {
             return Ok(None);
         }
-        // 6. Layout-sort + dedup each edge unconditionally
-        // through W3.1. Per fix #7 — no provider-side sortedness
-        // checker; dispatcher always layouts.
+        let Some(plan_params) = kclique_dispatch_params(kclique, k) else {
+            return Ok(None);
+        };
+        let head_schema = match build_kclique_head_schema(&raw_bufs, k) {
+            Some(schema) => schema,
+            None => return Ok(None),
+        };
+        let output_perm = match kclique_output_perm(kclique, k) {
+            Some(perm) => perm,
+            None => return Ok(None),
+        };
+        // 6. Orient edges according to KCliqueVariableOrder, then
+        // layout only the plan-required physical slots through the
+        // generic layout-sort helper. Remaining 2-column slots use
+        // the narrower WCOJ layout entry, which preserves correctness
+        // and can take the sorted-unique fast path.
         let mut laid_out: Vec<CudaBuffer> = Vec::with_capacity(expected_edges);
-        for buf in &raw_bufs {
-            let res = if is_u64 {
+        for (slot, &input_idx) in plan_params.edge_permutation.iter().enumerate() {
+            let src = raw_bufs[input_idx];
+            let swapped = if plan_params.swap_slots.contains(&slot) {
+                Some(
+                    self.provider
+                        .wcoj_project_2col_swap_recorded(src, launch_stream)?,
+                )
+            } else {
+                None
+            };
+            let oriented = swapped.as_ref().unwrap_or(src);
+            let res = if plan_params.required_sort_slots.contains(&slot) {
+                if is_u64 {
+                    self.provider
+                        .wcoj_layout_sort_u64_recorded(oriented, launch_stream)
+                } else {
+                    self.provider
+                        .wcoj_layout_sort_u32_recorded(oriented, launch_stream)
+                }
+            } else if is_u64 {
                 self.provider
-                    .wcoj_layout_sort_u64_recorded(buf, launch_stream)
+                    .wcoj_layout_u64_recorded(oriented, launch_stream)
             } else {
                 self.provider
-                    .wcoj_layout_sort_u32_recorded(buf, launch_stream)
+                    .wcoj_layout_u32_recorded(oriented, launch_stream)
             };
             match res {
                 Ok(b) => laid_out.push(b),
@@ -1956,28 +1879,52 @@ impl Executor {
                     Ok(a) => a,
                     Err(_) => return Ok(None),
                 };
-                self.provider.wcoj_clique5_u32_recorded(arr, launch_stream)
+                self.provider.wcoj_clique5_u32_recorded_planned(
+                    arr,
+                    plan_params.leader_edge_idx,
+                    &plan_params.edge_order,
+                    &plan_params.iteration_order,
+                    launch_stream,
+                )
             }
             (5, true) => {
                 let arr: &[&CudaBuffer; 10] = match edge_refs.as_slice().try_into() {
                     Ok(a) => a,
                     Err(_) => return Ok(None),
                 };
-                self.provider.wcoj_clique5_u64_recorded(arr, launch_stream)
+                self.provider.wcoj_clique5_u64_recorded_planned(
+                    arr,
+                    plan_params.leader_edge_idx,
+                    &plan_params.edge_order,
+                    &plan_params.iteration_order,
+                    launch_stream,
+                )
             }
             (6, false) => {
                 let arr: &[&CudaBuffer; 15] = match edge_refs.as_slice().try_into() {
                     Ok(a) => a,
                     Err(_) => return Ok(None),
                 };
-                self.provider.wcoj_clique6_u32_recorded(arr, launch_stream)
+                self.provider.wcoj_clique6_u32_recorded_planned(
+                    arr,
+                    plan_params.leader_edge_idx,
+                    &plan_params.edge_order,
+                    &plan_params.iteration_order,
+                    launch_stream,
+                )
             }
             (6, true) => {
                 let arr: &[&CudaBuffer; 15] = match edge_refs.as_slice().try_into() {
                     Ok(a) => a,
                     Err(_) => return Ok(None),
                 };
-                self.provider.wcoj_clique6_u64_recorded(arr, launch_stream)
+                self.provider.wcoj_clique6_u64_recorded_planned(
+                    arr,
+                    plan_params.leader_edge_idx,
+                    &plan_params.edge_order,
+                    &plan_params.iteration_order,
+                    launch_stream,
+                )
             }
             _ => return Ok(None),
         };
@@ -1985,6 +1932,16 @@ impl Executor {
         // silent fallback (no counter advance).
         match result {
             Ok(buf) => {
+                let buf = if output_perm.iter().copied().eq(0..output_perm.len()) {
+                    buf
+                } else {
+                    self.provider.wcoj_project_output_columns_recorded(
+                        &buf,
+                        &output_perm,
+                        head_schema,
+                        launch_stream,
+                    )?
+                };
                 if k == 5 {
                     self.wcoj_clique5_dispatch_count += 1;
                 } else {
@@ -1997,13 +1954,155 @@ impl Executor {
     }
 }
 
+#[derive(Debug)]
+struct KCliqueDispatchParams {
+    edge_permutation: Vec<usize>,
+    edge_order: Vec<u8>,
+    iteration_order: Vec<u8>,
+    leader_edge_idx: u32,
+    swap_slots: HashSet<usize>,
+    required_sort_slots: HashSet<usize>,
+}
+
+fn kclique_dispatch_params(plan: &KCliqueVariableOrder, k: usize) -> Option<KCliqueDispatchParams> {
+    let expected_edges = k * (k - 1) / 2;
+    let edge_permutation = live_kclique_edge_permutation(plan, expected_edges)?;
+    let positions = live_kclique_variable_positions(plan, k)?;
+    let mut edge_order = vec![u8::MAX; expected_edges];
+
+    for (slot, &edge_idx) in edge_permutation.iter().enumerate() {
+        let (left, right) = clique_edge_pair(edge_idx, k)?;
+        let left_pos = positions[left];
+        let right_pos = positions[right];
+        let logical_edge =
+            clique_edge_idx_runtime(left_pos.min(right_pos), left_pos.max(right_pos), k)?;
+        edge_order[logical_edge] = u8::try_from(slot).ok()?;
+    }
+    if edge_order.iter().any(|slot| *slot == u8::MAX) {
+        return None;
+    }
+    let leader_edge_idx = u32::from(edge_order[clique_edge_idx_runtime(0, 1, k)?]);
+    let iteration_order: Vec<u8> = (0..k)
+        .map(|idx| u8::try_from(idx).ok())
+        .collect::<Option<_>>()?;
+
+    let swap_slots: HashSet<usize> = plan
+        .column_swaps
+        .iter()
+        .filter(|swap| swap.swap_cols)
+        .map(|swap| usize::from(swap.edge_slot))
+        .collect();
+    if swap_slots.iter().any(|slot| *slot >= expected_edges) {
+        return None;
+    }
+    let required_sort_slots: HashSet<usize> = plan
+        .sorted_layout_requirements
+        .edge_slots
+        .iter()
+        .copied()
+        .map(usize::from)
+        .collect();
+    if required_sort_slots
+        .iter()
+        .any(|slot| *slot >= expected_edges)
+    {
+        return None;
+    }
+
+    Some(KCliqueDispatchParams {
+        edge_permutation,
+        edge_order,
+        iteration_order,
+        leader_edge_idx,
+        swap_slots,
+        required_sort_slots,
+    })
+}
+
+fn live_kclique_edge_permutation(
+    plan: &KCliqueVariableOrder,
+    expected_edges: usize,
+) -> Option<Vec<usize>> {
+    let values: Vec<usize> = plan
+        .edge_permutation
+        .iter()
+        .copied()
+        .take_while(|value| *value != u8::MAX)
+        .map(usize::from)
+        .collect();
+    if values.len() != expected_edges {
+        return None;
+    }
+    let mut seen = vec![false; expected_edges];
+    for &value in &values {
+        if value >= expected_edges || seen[value] {
+            return None;
+        }
+        seen[value] = true;
+    }
+    Some(values)
+}
+
+fn live_kclique_variable_positions(plan: &KCliqueVariableOrder, k: usize) -> Option<Vec<usize>> {
+    let mut positions = Vec::with_capacity(k);
+    let mut seen = vec![false; k];
+    for original_var in 0..k {
+        let pos = usize::from(*plan.variable_positions.get(original_var)?);
+        if pos >= k || seen[pos] {
+            return None;
+        }
+        seen[pos] = true;
+        positions.push(pos);
+    }
+    Some(positions)
+}
+
+fn clique_edge_idx_runtime(i: usize, j: usize, k: usize) -> Option<usize> {
+    if !(i < j && j < k) {
+        return None;
+    }
+    Some(i * (k - 1) - i.saturating_sub(1) * i / 2 + (j - i - 1))
+}
+
+fn clique_edge_pair(edge_idx: usize, k: usize) -> Option<(usize, usize)> {
+    let mut idx = 0usize;
+    for i in 0..k {
+        for j in (i + 1)..k {
+            if idx == edge_idx {
+                return Some((i, j));
+            }
+            idx += 1;
+        }
+    }
+    None
+}
+
+fn build_kclique_head_schema(raw_bufs: &[&CudaBuffer], k: usize) -> Option<Schema> {
+    let mut columns = Vec::with_capacity(k);
+    for variable in 0..k {
+        let (edge_idx, col_idx) = if variable == 0 {
+            (clique_edge_idx_runtime(0, 1, k)?, 0)
+        } else {
+            (clique_edge_idx_runtime(0, variable, k)?, 1)
+        };
+        let ty = raw_bufs.get(edge_idx)?.schema.column_type(col_idx)?;
+        columns.push((format!("col{}", variable), ty));
+    }
+    Some(Schema::new(columns))
+}
+
+fn kclique_output_perm(plan: &KCliqueVariableOrder, k: usize) -> Option<Vec<usize>> {
+    let positions = live_kclique_variable_positions(plan, k)?;
+    Some(positions)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use super::{
-        match_multiway_triangle, wcoj_adaptive_enabled, wcoj_disabled, wcoj_gate_enabled,
-        ENV_DISABLE_WCOJ_TRIANGLE, ENV_USE_WCOJ_TRIANGLE_ADAPTIVE, ENV_USE_WCOJ_TRIANGLE_U32,
+        match_multiway_triangle, wcoj_adaptive_enabled, wcoj_gate_enabled,
+        ENV_USE_WCOJ_TRIANGLE_U32,
     };
     use xlog_core::RelId;
     use xlog_ir::rir::ProjectExpr;
@@ -2027,6 +2126,7 @@ mod tests {
                 ProjectExpr::Column(3),
             ],
             fallback: Box::new(RirNode::Unit),
+            plan: None,
             var_order: None,
         }
     }
@@ -2157,24 +2257,18 @@ mod tests {
 
     struct EnvSnapshot {
         force: Option<String>,
-        adaptive: Option<String>,
-        disable: Option<String>,
     }
 
     impl EnvSnapshot {
         fn capture_and_clear() -> Self {
             let snapshot = Self {
                 force: std::env::var(ENV_USE_WCOJ_TRIANGLE_U32).ok(),
-                adaptive: std::env::var(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE).ok(),
-                disable: std::env::var(ENV_DISABLE_WCOJ_TRIANGLE).ok(),
             };
 
             // SAFETY: The caller holds `env_lock`, serializing mutation of
-            // these process-global WCOJ env vars.
+            // this process-global WCOJ env var.
             unsafe {
                 std::env::remove_var(ENV_USE_WCOJ_TRIANGLE_U32);
-                std::env::remove_var(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE);
-                std::env::remove_var(ENV_DISABLE_WCOJ_TRIANGLE);
             }
 
             snapshot
@@ -2189,14 +2283,6 @@ mod tests {
                 match self.force.take() {
                     Some(v) => std::env::set_var(ENV_USE_WCOJ_TRIANGLE_U32, v),
                     None => std::env::remove_var(ENV_USE_WCOJ_TRIANGLE_U32),
-                }
-                match self.adaptive.take() {
-                    Some(v) => std::env::set_var(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE, v),
-                    None => std::env::remove_var(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE),
-                }
-                match self.disable.take() {
-                    Some(v) => std::env::set_var(ENV_DISABLE_WCOJ_TRIANGLE, v),
-                    None => std::env::remove_var(ENV_DISABLE_WCOJ_TRIANGLE),
                 }
             }
         }
@@ -2217,7 +2303,7 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_resolver_defaults_on_when_env_unset() {
+    fn stats_gate_defaults_on_when_env_unset() {
         with_wcoj_env(|| {
             assert!(wcoj_adaptive_enabled(None));
             assert!(wcoj_adaptive_enabled(Some(true)));
@@ -2226,45 +2312,10 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_resolver_env_can_disable_or_enable() {
+    fn config_controls_stats_gate() {
         with_wcoj_env(|| {
-            set_env(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE, "0");
-            assert!(!wcoj_adaptive_enabled(None));
-
-            set_env(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE, "false");
-            assert!(!wcoj_adaptive_enabled(None));
-
-            set_env(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE, "true");
-            assert!(wcoj_adaptive_enabled(None));
-
-            set_env(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE, "1");
-            assert!(wcoj_adaptive_enabled(None));
-        });
-    }
-
-    #[test]
-    fn config_overrides_adaptive_env() {
-        with_wcoj_env(|| {
-            set_env(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE, "0");
             assert!(wcoj_adaptive_enabled(Some(true)));
-
-            set_env(ENV_USE_WCOJ_TRIANGLE_ADAPTIVE, "1");
             assert!(!wcoj_adaptive_enabled(Some(false)));
-        });
-    }
-
-    #[test]
-    fn kill_switch_resolver_honors_env_and_config_precedence() {
-        with_wcoj_env(|| {
-            assert!(!wcoj_disabled(None));
-
-            set_env(ENV_DISABLE_WCOJ_TRIANGLE, "1");
-            assert!(wcoj_disabled(None));
-            assert!(!wcoj_disabled(Some(false)));
-
-            set_env(ENV_DISABLE_WCOJ_TRIANGLE, "0");
-            assert!(!wcoj_disabled(None));
-            assert!(wcoj_disabled(Some(true)));
         });
     }
 
@@ -2422,6 +2473,7 @@ mod tests {
                 ProjectExpr::Column(5),
             ],
             fallback: Box::new(RirNode::Unit),
+            plan: None,
             var_order: None,
         }
     }
@@ -2461,6 +2513,7 @@ mod tests {
                 ProjectExpr::Column(3),
             ],
             fallback: Box::new(RirNode::Unit),
+            plan: None,
             var_order: None,
         };
         assert!(match_multiway_4cycle(&triangle).is_none());

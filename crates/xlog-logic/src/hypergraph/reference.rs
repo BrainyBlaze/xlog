@@ -29,7 +29,7 @@
 
 use super::ir::{Hyperedge, HypergraphRule, VertexId};
 use super::var_order::VariableOrder;
-use super::{analyze, Eligibility};
+use super::{analyze, Eligibility, ExecutorContext};
 use crate::ast::{Atom, BodyLiteral, CompOp, Comparison, Rule, Term};
 use std::collections::BTreeMap;
 use xlog_core::ScalarType;
@@ -260,7 +260,7 @@ pub fn evaluate_rule(
     order: &dyn VariableOrder,
 ) -> Result<Vec<Vec<RefValue>>, RefEvalError> {
     let hg = HypergraphRule::from_rule(rule);
-    match analyze(&hg) {
+    match analyze(&hg, ExecutorContext::HashFallback) {
         Eligibility::Eligible => {}
         Eligibility::Ineligible(bs) => return Err(RefEvalError::Ineligible(bs)),
     }

@@ -104,6 +104,12 @@ pub struct Executor {
     /// W3.2 — count of times `try_dispatch_wcoj_clique6` produced
     /// a result and the executor installed it.
     pub(super) wcoj_clique6_dispatch_count: u64,
+    /// Authorization 5 G_HIST_KC — number of recursive Merge-phase
+    /// K-clique histogram refresh boundaries observed.
+    pub(super) kclique_histogram_refresh_count: u64,
+    /// Authorization 5 G_HIST_KC — cumulative nanoseconds spent in
+    /// recursive Merge-phase K-clique histogram refresh accounting.
+    pub(super) kclique_histogram_refresh_nanos: u128,
     /// W4.2 — count of times `execute_join` routed an inner-join
     /// to the nested-loop provider entry point
     /// (`CudaKernelProvider::nested_loop_join_v2_inner_u32_1key`)
@@ -240,6 +246,8 @@ impl Executor {
             wcoj_4cycle_dispatch_count: 0,
             wcoj_clique5_dispatch_count: 0,
             wcoj_clique6_dispatch_count: 0,
+            kclique_histogram_refresh_count: 0,
+            kclique_histogram_refresh_nanos: 0,
             nested_loop_dispatch_count: 0,
             wcoj_dispatch_stream: OnceLock::new(),
             #[cfg(feature = "wcoj-phase-timing")]

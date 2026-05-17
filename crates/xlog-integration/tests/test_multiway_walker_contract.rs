@@ -306,6 +306,7 @@ fn build_canonical_triangle_body(rel_xy: u32, rel_yz: u32, rel_xz: u32) -> RirNo
             ProjectExpr::Column(3),
         ],
         fallback: Box::new(fallback),
+        plan: None,
         var_order: None,
     }
 }
@@ -572,7 +573,7 @@ fn c6_pyxlog_walk_tmj_has_explicit_multiway_arm() {
         src.contains(needle),
         "pyxlog::ilp::walk_tmj must contain the explicit MultiWayJoin -> walk_tmj(fallback, …) \
          arm. Source-string contract for v0.6.5 slice 2 walker hardening of pyxlog::ilp; \
-         if the arm is removed or reformatted, walk_tmj will silently miss any TMJ wrapped \
+         if the arm is deleted or reformatted, walk_tmj will silently miss any TMJ wrapped \
          inside a promoted MultiWayJoin's fallback (the catch-all `_ => None` would swallow it)."
     );
 }

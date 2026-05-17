@@ -69,20 +69,27 @@
 //! ## Out of scope
 //!
 //! * Cost model, selectivity reordering, variable-ordering choices.
-//! * Recursive-clique promotion — W3.2 excluded recursive cliques;
-//!   the clique gate at `recursive_scan_count == 0` is unchanged.
+//! * Stream-aligned multiplexing and adaptive histogram resolution
+//!   for recursive cliques.
 //! * 4-way / general-arity admission beyond triangle / 4-cycle —
 //!   slice 5.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use xlog_core::RelId;
-use xlog_ir::plan::Scc;
-use xlog_ir::rir::ProjectExpr;
+use xlog_ir::rir::{
+    ColumnSwap, CostPredictionRecord as RirCostPredictionRecord, KCliqueVariableOrder,
+    MultiwayPlan, PlannedHashReason, ProjectExpr, SortedLayoutSpec, StreamGroupId, VariableOrder,
+    K_CLIQUE_MAX_EDGES, K_CLIQUE_MAX_K,
+};
 use xlog_ir::{ExecutionPlan, JoinType, RirNode};
-use xlog_stats::StatsManager;
+use xlog_stats::{StatsManager, StatsSnapshot};
 
 use crate::compiler_config::CompilerConfig;
-use crate::wcoj_var_ordering::WcojVariableOrderingModel;
+use crate::hypergraph::var_order::{
+    plan_kclique_var_order, FullVariableOrder, KCliqueEdge, KCliqueShape,
+};
+use crate::hypergraph::VertexId;
+use crate::wcoj_var_ordering::{wcoj_cost_gate_predicts_wcoj, WcojVariableOrderingModel};
 
 /// Walk an `ExecutionPlan` and rewrite eligible triangle / 4-cycle
 /// subtrees in each rule body to `RirNode::MultiWayJoin`. Idempotent.
@@ -106,22 +113,17 @@ use crate::wcoj_var_ordering::WcojVariableOrderingModel;
 /// W4.1 `rewrite_scan_nth` occurrence-identity fix.
 pub fn promote_multiway(
     plan: &mut ExecutionPlan,
-    rel_ids: &HashMap<String, RelId>,
+    _rel_ids: &HashMap<String, RelId>,
     stats: &StatsManager,
     config: &CompilerConfig,
 ) {
-    // Snapshot SCCs by index so we can pass &Scc into helpers
-    // while holding `&mut plan.rules_by_scc`.
-    let sccs_snapshot: Vec<Scc> = plan.sccs.clone();
     for (scc_id, rules) in plan.rules_by_scc.iter_mut().enumerate() {
-        let head_scc = match sccs_snapshot.get(scc_id) {
-            Some(scc) => scc,
-            None => continue,
-        };
-        let head_rel_set = build_head_rel_set(head_scc, rel_ids);
+        if plan.sccs.get(scc_id).is_none() {
+            continue;
+        }
         for rule in rules.iter_mut() {
             // W4.1 gate: the slice-4 `recursive_scan_count > 1`
-            // cutoff is removed (paper P1 — admit occurrence-level
+            // cutoff is absent (paper P1 — admit occurrence-level
             // multi-recursion). The triangle / 4-cycle shape gates
             // (try_promote_*) cap atom count at 3 / 4, implicitly
             // bounding the recursive-Scan count at the rule's atom
@@ -154,76 +156,21 @@ pub fn promote_multiway(
                 rule.body = promoted;
                 continue;
             }
-            // W3.2 — k=5 / k=6 clique promotion. Tree-flatten +
+            // W3.2 + Authorization 5 — k=5 / k=6 clique promotion. Tree-flatten +
             // complete-K_k validation. Robust to left-deep /
             // right-deep / bushy. Order is doc anchor only;
             // a body matching k=5 cannot also match k=6
-            // (different scan count). Recursive clique bodies
-            // (any scan in the head SCC) are rejected — W3.2
-            // does not extend the recursive WCOJ helper for
-            // clique-keyed dispatch. Rejected in W3.2 — no
-            // closure credit.
-            if recursive_scan_count(&rule.body, &head_rel_set) == 0 {
-                if let Some(promoted) = try_promote_clique_k(&rule.body, 5) {
-                    rule.body = promoted;
-                    continue;
-                }
-                if let Some(promoted) = try_promote_clique_k(&rule.body, 6) {
-                    rule.body = promoted;
-                }
+            // (different scan count). Recursive clique bodies are
+            // admitted so the runtime can rebuild leader-edge
+            // metadata from the current semi-naive store state.
+            if let Some(promoted) = try_promote_clique_k(&rule.body, 5, stats) {
+                rule.body = promoted;
+                continue;
+            }
+            if let Some(promoted) = try_promote_clique_k(&rule.body, 6, stats) {
+                rule.body = promoted;
             }
         }
-    }
-}
-
-/// Resolve the head SCC's predicates to the set of RelIds that
-/// would count as "recursive" Scans inside its rule bodies. Returns
-/// an empty set when the SCC's predicates aren't in `rel_ids` (e.g.
-/// in synthetic test plans without a real lowerer); empty set means
-/// every Scan resolves to non-recursive, which is the correct
-/// default for slice 1–3 byte-preservation.
-fn build_head_rel_set(scc: &Scc, rel_ids: &HashMap<String, RelId>) -> HashSet<RelId> {
-    scc.predicates
-        .iter()
-        .filter_map(|p| rel_ids.get(p).copied())
-        .collect()
-}
-
-/// Count Scans in `body` whose RelId is in `head_rel_set`. Walks
-/// every RIR variant including `MultiWayJoin` inputs and fallback;
-/// idempotent on already-promoted bodies.
-fn recursive_scan_count(body: &RirNode, head_rel_set: &HashSet<RelId>) -> usize {
-    match body {
-        RirNode::Unit => 0,
-        RirNode::Scan { rel } => usize::from(head_rel_set.contains(rel)),
-        RirNode::Filter { input, .. }
-        | RirNode::Project { input, .. }
-        | RirNode::GroupBy { input, .. }
-        | RirNode::Distinct { input, .. } => recursive_scan_count(input, head_rel_set),
-        RirNode::Join { left, right, .. } | RirNode::Diff { left, right } => {
-            recursive_scan_count(left, head_rel_set) + recursive_scan_count(right, head_rel_set)
-        }
-        RirNode::Union { inputs } => inputs
-            .iter()
-            .map(|n| recursive_scan_count(n, head_rel_set))
-            .sum(),
-        RirNode::Fixpoint {
-            base, recursive, ..
-        } => {
-            recursive_scan_count(base, head_rel_set) + recursive_scan_count(recursive, head_rel_set)
-        }
-        RirNode::TensorMaskedJoin { rel_index, .. } => rel_index
-            .iter()
-            .filter(|(rid, _)| head_rel_set.contains(rid))
-            .count(),
-        // For an already-promoted body, count from `inputs` —
-        // matches the `collect_scan_rels` invariant. The fallback
-        // subtree references the same RelId set by promoter
-        // construction, so counting both would double-count.
-        RirNode::MultiWayJoin { inputs, .. } => inputs
-            .iter()
-            .map(|n| recursive_scan_count(n, head_rel_set))
-            .sum(),
     }
 }
 
@@ -724,6 +671,7 @@ fn try_promote_triangle(
         slot_vars,
         output_columns,
         fallback,
+        plan: None,
         var_order,
     })
 }
@@ -1046,6 +994,7 @@ fn try_promote_4cycle(
         slot_vars,
         output_columns,
         fallback,
+        plan: None,
         var_order,
     })
 }
@@ -1069,7 +1018,7 @@ fn try_promote_4cycle(
 /// Canonical edge index for (i, j) with 0 <= i < j < k.
 fn clique_edge_idx(i: usize, j: usize, k: usize) -> usize {
     debug_assert!(i < j && j < k);
-    i * (k - 1) - i * (i - 1) / 2 + (j - i - 1)
+    i * (k - 1) - i.saturating_sub(1) * i / 2 + (j - i - 1)
 }
 
 /// Tiny union-find on atom-column slots (position space).
@@ -1171,7 +1120,7 @@ fn walk_clique_node(
 /// K_k validation. Robust to left-deep / right-deep / bushy.
 /// Rejects filter wrappers, reversed atoms, self-edges,
 /// constants, recursive bodies, and any non-canonical shape.
-fn try_promote_clique_k(body: &RirNode, k: usize) -> Option<RirNode> {
+fn try_promote_clique_k(body: &RirNode, k: usize, stats: &StatsManager) -> Option<RirNode> {
     if !(k == 5 || k == 6) {
         return None;
     }
@@ -1323,14 +1272,141 @@ fn try_promote_clique_k(body: &RirNode, k: usize) -> Option<RirNode> {
     };
     let output_columns = columns.clone();
     let fallback = Box::new(body.clone());
+    let shape = build_kclique_shape(k, &reordered_scans)?;
+    let planner_stats = kclique_planner_stats(stats);
+
+    // Cost-planned K-clique routing follows paper §7.3's
+    // conditional-win-on-skew caveat and lock 29: recognized
+    // paper-aligned shapes emit a positive route. Hash is represented
+    // by `PlannedHashRoute`, never by a post-recognition raw decline.
+    let (plan, var_order) = match plan_kclique_var_order(&shape, &planner_stats) {
+        Some(full_order) => {
+            let evidence = rir_cost_prediction(&full_order);
+            if wcoj_cost_gate_predicts_wcoj(evidence.wcoj_cost, evidence.hash_cost) {
+                let kclique_order = kclique_variable_order_from_plan(&shape, &full_order)?;
+                (
+                    MultiwayPlan::WcojWithPlan(kclique_order.clone()),
+                    Some(VariableOrder::kclique(kclique_order)),
+                )
+            } else {
+                (
+                    MultiwayPlan::PlannedHashRoute {
+                        reason: PlannedHashReason::PlannerPredictsHashWins,
+                        planner_evidence: evidence,
+                    },
+                    None,
+                )
+            }
+        }
+        None => (
+            MultiwayPlan::PlannedHashRoute {
+                reason: PlannedHashReason::IncompleteStatsSafeDefault,
+                planner_evidence: RirCostPredictionRecord::empty(),
+            },
+            None,
+        ),
+    };
 
     Some(RirNode::MultiWayJoin {
         inputs,
         slot_vars,
         output_columns,
         fallback,
-        var_order: None,
+        plan: Some(plan),
+        var_order,
     })
+}
+
+fn build_kclique_shape(k: usize, rels: &[RelId]) -> Option<KCliqueShape> {
+    let mut edges = Vec::with_capacity(rels.len());
+    let mut idx = 0usize;
+    for i in 0..k {
+        for j in (i + 1)..k {
+            let rel_id = *rels.get(idx)?;
+            edges.push(KCliqueEdge {
+                rel_id,
+                left: VertexId(i),
+                right: VertexId(j),
+                left_col: 0,
+                right_col: 1,
+            });
+            idx += 1;
+        }
+    }
+    KCliqueShape::from_edges(k as u8, edges)
+}
+
+fn kclique_planner_stats(stats: &StatsManager) -> StatsSnapshot {
+    stats.snapshot()
+}
+
+fn rir_cost_prediction(plan: &FullVariableOrder) -> RirCostPredictionRecord {
+    RirCostPredictionRecord {
+        wcoj_cost: plan.cost_prediction.wcoj_cost,
+        hash_cost: plan.cost_prediction.hash_cost,
+    }
+}
+
+fn kclique_variable_order_from_plan(
+    shape: &KCliqueShape,
+    plan: &FullVariableOrder,
+) -> Option<KCliqueVariableOrder> {
+    let k = shape.variable_count();
+    let expected_edges = usize::from(k) * usize::from(k - 1) / 2;
+    if plan.variable_order.len() != usize::from(k) || plan.edge_permutation.len() != expected_edges
+    {
+        return None;
+    }
+
+    let mut variable_positions = [u8::MAX; K_CLIQUE_MAX_K];
+    for (position, variable) in plan.variable_order.iter().enumerate() {
+        if variable.0 >= usize::from(k) {
+            return None;
+        }
+        variable_positions[variable.0] = position as u8;
+    }
+
+    let mut edge_permutation = [u8::MAX; K_CLIQUE_MAX_EDGES];
+    let mut column_swaps = Vec::new();
+    let mut leader_slot = None;
+    for (slot, edge_idx) in plan.edge_permutation.iter().copied().enumerate() {
+        let edge = shape.edges().get(edge_idx)?;
+        let left_pos = variable_positions[edge.left.0];
+        let right_pos = variable_positions[edge.right.0];
+        if left_pos == u8::MAX || right_pos == u8::MAX {
+            return None;
+        }
+        edge_permutation[slot] = edge_idx as u8;
+        if left_pos > right_pos {
+            column_swaps.push(ColumnSwap {
+                edge_slot: slot as u8,
+                swap_cols: true,
+            });
+        }
+        if [left_pos, right_pos].into_iter().min() == Some(0)
+            && [left_pos, right_pos].into_iter().max() == Some(1)
+        {
+            leader_slot = Some(slot as u8);
+        }
+    }
+
+    let sorted_edge_slots = vec![leader_slot.unwrap_or(0)];
+    let sorted_layout_requirements = SortedLayoutSpec {
+        edge_slots: sorted_edge_slots,
+        key_columns: vec![vec![0, 1]],
+    };
+
+    // Paper §5 Figure 3: Helper-relation splitting elevates buried inner-variable skew per Authorization 5 (2026-05-17)
+    let helper_split_specs = plan.helper_split_specs.clone();
+    Some(KCliqueVariableOrder::new(
+        k,
+        variable_positions,
+        edge_permutation,
+        column_swaps,
+        sorted_layout_requirements,
+        helper_split_specs,
+        StreamGroupId(0),
+    ))
 }
 
 #[cfg(test)]
@@ -1399,6 +1475,7 @@ mod tests {
                 output_columns,
                 fallback,
                 var_order: _,
+                ..
             } => {
                 assert_eq!(inputs.len(), 3);
                 assert!(matches!(inputs[0], RirNode::Scan { rel: RelId(1) }));
@@ -2026,6 +2103,7 @@ mod tests {
                 output_columns,
                 fallback,
                 var_order: _,
+                ..
             } => {
                 assert_eq!(inputs.len(), 4);
                 assert!(matches!(inputs[0], RirNode::Scan { rel: RelId(1) }));

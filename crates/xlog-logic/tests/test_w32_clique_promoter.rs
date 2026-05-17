@@ -483,7 +483,7 @@ fn clique5_with_filter_wrapper_rejected() {
 }
 
 #[test]
-fn linear_recursive_clique5_does_not_promote() {
+fn linear_recursive_clique5_promotes_for_histogram_refresh() {
     // Linear-recursive clique body: one atom resolves to a
     // recursive RelId. The W3.2 promoter checks
     // recursive_scan_count via the slice-4 gate; if any input
@@ -522,13 +522,9 @@ fn linear_recursive_clique5_does_not_promote() {
     );
     let scc0 = &plan.rules_by_scc[0];
     let body_after = &scc0[0].body;
-    // Multi-recursive (count > 1) bodies skip promotion. Linear
-    // recursive (count == 1) is allowed by the slice-4 gate but
-    // our W3.2 logic doesn't inject MultiWayJoin for clique
-    // recursive bodies anyway. Either way: not a MultiWayJoin.
     assert!(
-        !matches!(body_after, RirNode::MultiWayJoin { .. }),
-        "linear-recursive clique5 body must NOT promote"
+        matches!(body_after, RirNode::MultiWayJoin { inputs, fallback, .. } if inputs.len() == 10 && !matches!(fallback.as_ref(), RirNode::Unit)),
+        "Authorization 5 requires linear-recursive clique5 bodies to promote for runtime histogram refresh"
     );
 }
 

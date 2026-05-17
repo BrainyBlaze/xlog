@@ -382,9 +382,11 @@ fn wiring_gate_on_dispatches_and_matches_binary_join_output() {
         &inputs,
     );
     assert_eq!(counter_off, 0);
+    assert_eq!(fix.provider.wcoj_triangle_hg_dispatch_count(), 0);
     let reference_rows = download_triples(exec_off.store().get("tri").expect("tri"));
 
     // ----- gate on: WCOJ dispatch must fire AND match the reference -----
+    let hg_before = fix.provider.wcoj_triangle_hg_dispatch_count();
     let config_on = RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(true));
     let (exec_on, counter_on) = run_program(
         Arc::clone(&fix.provider),
@@ -398,6 +400,11 @@ fn wiring_gate_on_dispatches_and_matches_binary_join_output() {
         "gate=Some(true) on the triangle rule must dispatch exactly once; \
          got counter {counter_on} (likely the RIR matcher silently fell back, \
          leaving the binary path to produce the answer)"
+    );
+    assert_eq!(
+        fix.provider.wcoj_triangle_hg_dispatch_count(),
+        hg_before + 1,
+        "gate=Some(true) must route the u32 triangle through the HG block-slice provider entry"
     );
     let dispatch_rows = download_triples(exec_on.store().get("tri").expect("tri"));
     assert_eq!(

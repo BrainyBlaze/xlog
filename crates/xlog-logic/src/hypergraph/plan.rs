@@ -43,7 +43,7 @@
 //! rules. Locked by
 //! `explain_plans_is_canonical_under_same_head_reorder`.
 
-use super::eligibility::{analyze_typed, Boundary, Eligibility};
+use super::eligibility::{analyze_typed, Boundary, Eligibility, ExecutorContext};
 use super::inference::{
     derive_vertex_types_with_inference, infer_scc_predicate_schemas, InferenceError,
 };
@@ -208,7 +208,7 @@ pub fn plan_rule(rule: &Rule, base_relations: &RefRelationStore) -> Result<RuleP
         }
     };
     let hypergraph = HypergraphRule::from_rule(rule);
-    match analyze_typed(&hypergraph, &vertex_types) {
+    match analyze_typed(&hypergraph, &vertex_types, ExecutorContext::HashFallback) {
         Eligibility::Eligible => {
             let variable_order = AppearanceOrder.order(&hypergraph);
             Ok(RulePlan::MultiwayCandidate {
@@ -355,20 +355,21 @@ pub fn plan_scc_rules(
                     ),
                 };
             let hypergraph = HypergraphRule::from_rule(rule);
-            let plan = match analyze_typed(&hypergraph, &vertex_types) {
-                Eligibility::Eligible => {
-                    let variable_order = AppearanceOrder.order(&hypergraph);
-                    RulePlan::MultiwayCandidate {
-                        head_predicate: rule.head.predicate.clone(),
-                        hypergraph,
-                        variable_order,
+            let plan =
+                match analyze_typed(&hypergraph, &vertex_types, ExecutorContext::HashFallback) {
+                    Eligibility::Eligible => {
+                        let variable_order = AppearanceOrder.order(&hypergraph);
+                        RulePlan::MultiwayCandidate {
+                            head_predicate: rule.head.predicate.clone(),
+                            hypergraph,
+                            variable_order,
+                        }
                     }
-                }
-                Eligibility::Ineligible(boundaries) => RulePlan::BinaryFallback {
-                    head_predicate: rule.head.predicate.clone(),
-                    boundaries,
-                },
-            };
+                    Eligibility::Ineligible(boundaries) => RulePlan::BinaryFallback {
+                        head_predicate: rule.head.predicate.clone(),
+                        boundaries,
+                    },
+                };
             plans.push(plan);
         }
         out.insert(predicate.clone(), plans);

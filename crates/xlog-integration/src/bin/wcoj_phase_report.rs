@@ -22,8 +22,9 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Instant;
 
-use xlog_core::{MemoryBudget, RuntimeConfig, ScalarType, Schema};
+use xlog_core::{MemoryBudget, RelId, RuntimeConfig, ScalarType, Schema};
 use xlog_cuda::device_runtime::{
     AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
     LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
@@ -33,8 +34,28 @@ use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_logic::Compiler;
 use xlog_runtime::executor::wcoj_phase_timing::WcojDispatchPhaseTiming;
 use xlog_runtime::Executor;
+use xlog_stats::{
+    ColumnStats, JoinSelectivity, KeyHeatStats, PrefixDegreeStats, RelationStats, StatsSnapshot,
+};
 
 const SOURCE: &str = "tri(X, Y, Z) :- e1(X, Y), e2(Y, Z), e3(X, Z).";
+const RECURSIVE_K5_HISTOGRAM_SOURCE: &str = r#"
+    pred seed01(u32, u32).
+    pred path01(u32, u32).
+    pred e02(u32, u32). pred e03(u32, u32). pred e04(u32, u32).
+    pred e12(u32, u32). pred e13(u32, u32). pred e14(u32, u32).
+    pred e23(u32, u32). pred e24(u32, u32).
+    pred e34(u32, u32).
+    pred clique5(u32, u32, u32, u32, u32).
+
+    path01(A, B) :- seed01(A, B).
+    clique5(A, B, C, D, E) :-
+        path01(A, B), e02(A, C), e03(A, D), e04(A, E),
+        e12(B, C), e13(B, D), e14(B, E),
+        e23(C, D), e24(C, E),
+        e34(D, E).
+    path01(A, C) :- clique5(A, B, C, D, E).
+"#;
 /// Per-cell sample count. Each iteration uploads inputs, runs
 /// `execute_plan`, reads timing. We discard the first N as
 /// warmup, take median of the rest.
@@ -235,6 +256,17 @@ struct CellMedians {
     samples: usize,
 }
 
+#[derive(Default)]
+struct KCliqueHistogramReport {
+    dispatch_count: u64,
+    merge_refresh_count: u64,
+    merge_refresh_nanos: u128,
+    metadata_build_count: u64,
+    metadata_build_nanos: u64,
+    execute_plan_wall_nanos: u128,
+    output_rows: u64,
+}
+
 fn measure_cell(fix: &Fix, rows: u32, width: Width) -> CellMedians {
     let inputs_host = build_superhub_inputs(rows);
 
@@ -288,6 +320,113 @@ fn measure_cell(fix: &Fix, rows: u32, width: Width) -> CellMedians {
         execute_plan_wall_ms: pull(|t| t.execute_plan_wall_ms),
         residual_overhead_ms: pull(|t| t.residual_overhead_ms),
         samples: samples.len(),
+    }
+}
+
+fn recursive_k5_inputs() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
+    BTreeMap::from([
+        ("seed01", vec![(1, 2)]),
+        ("e02", vec![(1, 3), (1, 4), (1, 5)]),
+        ("e03", vec![(1, 4), (1, 5), (1, 6)]),
+        ("e04", vec![(1, 5), (1, 6), (1, 7)]),
+        ("e12", vec![(2, 3), (3, 4), (4, 5)]),
+        ("e13", vec![(2, 4), (3, 5), (4, 6)]),
+        ("e14", vec![(2, 5), (3, 6), (4, 7)]),
+        ("e23", vec![(3, 4), (4, 5), (5, 6)]),
+        ("e24", vec![(3, 5), (4, 6), (5, 7)]),
+        ("e34", vec![(4, 5), (5, 6), (6, 7)]),
+    ])
+}
+
+fn recursive_k5_stats(rel_ids: &BTreeMap<String, RelId>) -> StatsSnapshot {
+    let mut snapshot = StatsSnapshot::default();
+    let canonical_edges = [
+        ("path01", 0u8, 1u8),
+        ("e02", 0, 2),
+        ("e03", 0, 3),
+        ("e04", 0, 4),
+        ("e12", 1, 2),
+        ("e13", 1, 3),
+        ("e14", 1, 4),
+        ("e23", 2, 3),
+        ("e24", 2, 4),
+        ("e34", 3, 4),
+    ];
+    for name in [
+        "seed01", "path01", "e02", "e03", "e04", "e12", "e13", "e14", "e23", "e24", "e34",
+    ] {
+        let rel = *rel_ids.get(name).expect("relation id");
+        snapshot.rel_names.push((rel, name.to_string()));
+        let mut stats = RelationStats::new(rel);
+        stats.update_cardinality(if name == "seed01" { 1 } else { 2_005 });
+        for col_idx in [0usize, 1usize] {
+            let mut col = ColumnStats::new(col_idx, ScalarType::U32);
+            col.update_distinct(1_005);
+            stats.add_column(col);
+            stats.add_prefix_degree(PrefixDegreeStats::new(col_idx, 2.0, 2.5));
+            stats.add_key_heat(KeyHeatStats::new(col_idx, 0.75, 0.75));
+        }
+        snapshot.relations.push(stats);
+    }
+    for (left_idx, (left_name, left_i, left_j)) in canonical_edges.iter().enumerate() {
+        let left_rel = *rel_ids.get(*left_name).expect("left relation id");
+        for (right_name, right_i, right_j) in canonical_edges.iter().skip(left_idx + 1) {
+            if left_i == right_i || left_i == right_j || left_j == right_i || left_j == right_j {
+                let right_rel = *rel_ids.get(*right_name).expect("right relation id");
+                let mut sel = JoinSelectivity::new(left_rel, right_rel);
+                sel.set_keys(vec![0], vec![0]);
+                sel.set_selectivity(0.001);
+                snapshot.join_selectivities.push(sel);
+            }
+        }
+    }
+    snapshot
+}
+
+fn measure_recursive_k5_histogram_refresh(fix: &Fix) -> KCliqueHistogramReport {
+    let inputs = recursive_k5_inputs();
+    let mut id_compiler = Compiler::new();
+    let _ = id_compiler
+        .compile(RECURSIVE_K5_HISTOGRAM_SOURCE)
+        .expect("compile recursive k5 ids");
+    let rel_ids: BTreeMap<String, RelId> = id_compiler
+        .rel_ids()
+        .iter()
+        .map(|(name, rel)| (name.clone(), *rel))
+        .collect();
+    let snapshot = recursive_k5_stats(&rel_ids);
+
+    let mut compiler = Compiler::new();
+    let plan = compiler
+        .compile_with_stats_snapshot(RECURSIVE_K5_HISTOGRAM_SOURCE, Some(&snapshot))
+        .expect("compile recursive k5");
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in compiler.rel_ids() {
+        executor.register_relation(*rel_id, name);
+    }
+    for (name, rows) in inputs {
+        executor.put_relation(name, upload(&fix.memory, &rows, Width::U32));
+    }
+
+    fix.provider.reset_kclique_metadata_build_metrics();
+    let wall = Instant::now();
+    executor.execute_plan(&plan).expect("execute recursive k5");
+    let execute_plan_wall_nanos = wall.elapsed().as_nanos();
+    let output_rows = executor
+        .store()
+        .get("path01")
+        .and_then(|buf| buf.cached_row_count())
+        .unwrap_or(0) as u64;
+
+    KCliqueHistogramReport {
+        dispatch_count: executor.wcoj_clique5_dispatch_count(),
+        merge_refresh_count: executor.kclique_histogram_refresh_count(),
+        merge_refresh_nanos: executor.kclique_histogram_refresh_nanos(),
+        metadata_build_count: fix.provider.kclique_metadata_build_count(),
+        metadata_build_nanos: fix.provider.kclique_metadata_build_nanos(),
+        execute_plan_wall_nanos,
+        output_rows,
     }
 }
 
@@ -395,6 +534,53 @@ fn print_cell(label: &str, c: &CellMedians) {
     println!();
 }
 
+fn print_kclique_histogram_refresh_report(c: &KCliqueHistogramReport) {
+    let wall = c.execute_plan_wall_nanos.max(1);
+    let pct = |nanos: u128| (nanos as f64 / wall as f64) * 100.0;
+    let avg_merge_refresh = if c.merge_refresh_count == 0 {
+        0.0
+    } else {
+        c.merge_refresh_nanos as f64 / c.merge_refresh_count as f64
+    };
+    let avg_metadata_build = if c.metadata_build_count == 0 {
+        0.0
+    } else {
+        c.metadata_build_nanos as f64 / c.metadata_build_count as f64
+    };
+
+    println!("## K-clique Histogram Refresh");
+    println!();
+    println!("Synthetic recursive K=5 fixture for Goal-038-B G_HIST_KC S_HIST_KC.7.");
+    println!();
+    println!("| bucket | raw | ns | ns/call | % wall |");
+    println!("|---|---:|---:|---:|---:|");
+    println!(
+        "| recursive_k5_dispatch | {} | 0 | 0.0 | 0.0% |",
+        c.dispatch_count
+    );
+    println!(
+        "| merge_histogram_refresh | {} | {} | {:.1} | {:.3}% |",
+        c.merge_refresh_count,
+        c.merge_refresh_nanos,
+        avg_merge_refresh,
+        pct(c.merge_refresh_nanos)
+    );
+    println!(
+        "| leader_metadata_build | {} | {} | {:.1} | {:.3}% |",
+        c.metadata_build_count,
+        c.metadata_build_nanos,
+        avg_metadata_build,
+        pct(c.metadata_build_nanos as u128)
+    );
+    println!(
+        "| execute_plan_wall | 1 | {} | {}.0 | 100.000% |",
+        c.execute_plan_wall_nanos, c.execute_plan_wall_nanos
+    );
+    println!();
+    println!("Output rows: {}", c.output_rows);
+    println!();
+}
+
 fn main() {
     println!("# WCOJ Phase Timing Report\n");
     println!(
@@ -422,6 +608,9 @@ fn main() {
         print_cell(label, &c);
         verdicts.insert(label, classify(&c));
     }
+
+    let kclique_hist = measure_recursive_k5_histogram_refresh(&fix);
+    print_kclique_histogram_refresh_report(&kclique_hist);
 
     println!("---\n");
     println!("## Cross-cell verdict\n");

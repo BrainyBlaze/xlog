@@ -33,6 +33,7 @@ mod probabilistic;
 mod relational;
 mod transfer;
 mod wcoj;
+mod wcoj_metadata;
 mod wcoj_project;
 
 /// Per-module PTX load timing (populated only when XLOG_WARMUP_PROFILE=1).
@@ -167,8 +168,8 @@ impl<'a, T> RawCudaView<'a, T> {
     /// `None` for views built from external memory or legacy
     /// paths.
     ///
-    /// Public API placeholder for the upcoming filter-class
-    /// migration; no production caller exists yet.
+    /// Public API reserved for the filter-class migration; no
+    /// production caller exists yet.
     #[allow(dead_code)]
     pub fn runtime_block(&self) -> Option<&'a crate::device_runtime::DeviceBlock> {
         self.source_block
@@ -261,32 +262,42 @@ const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 23);
 
 /// Kernel function names in the GPU WCOJ module.
 pub mod wcoj_kernels {
-    pub const WCOJ_TRIANGLE_COUNT: &str = "wcoj_triangle_count";
-    pub const WCOJ_TRIANGLE_FUSED_LC_COUNT: &str = "wcoj_triangle_fused_lc_count";
+    pub const WCOJ_BUILD_METADATA_MARK_BOUNDARIES_U32: &str =
+        "wcoj_build_metadata_mark_boundaries_u32";
+    pub const WCOJ_BUILD_METADATA_MARK_BOUNDARIES_U64: &str =
+        "wcoj_build_metadata_mark_boundaries_u64";
+    pub const WCOJ_BUILD_METADATA_SCATTER_U32: &str = "wcoj_build_metadata_scatter_u32";
+    pub const WCOJ_BUILD_METADATA_SCATTER_U64: &str = "wcoj_build_metadata_scatter_u64";
+    pub const WCOJ_TRIANGLE_BUILD_HG_WORK_PLAN_U32: &str = "wcoj_triangle_build_hg_work_plan_u32";
+    pub const WCOJ_TRIANGLE_COUNT_HG_U32: &str = "wcoj_triangle_count_hg_u32";
+    pub const WCOJ_TRIANGLE_MATERIALIZE_HG_U32: &str = "wcoj_triangle_materialize_hg_u32";
+    pub const WCOJ_TRIANGLE_BUILD_HG_WORK_PLAN_U64: &str = "wcoj_triangle_build_hg_work_plan_u64";
+    pub const WCOJ_TRIANGLE_COUNT_HG_U64: &str = "wcoj_triangle_count_hg_u64";
+    pub const WCOJ_TRIANGLE_MATERIALIZE_HG_U64: &str = "wcoj_triangle_materialize_hg_u64";
+    pub const WCOJ_TRIANGLE_COUNT_HG_CACHED_U32: &str = "wcoj_triangle_count_hg_cached_u32";
+    pub const WCOJ_TRIANGLE_MATERIALIZE_HG_CACHED_U32: &str =
+        "wcoj_triangle_materialize_hg_cached_u32";
+    pub const WCOJ_SCAN_HG_BLOCK_COUNTS_U32: &str = "wcoj_scan_hg_block_counts_u32";
     pub const WCOJ_COMPUTE_TOTAL: &str = "wcoj_compute_total";
-    pub const WCOJ_TRIANGLE_MATERIALIZE: &str = "wcoj_triangle_materialize";
-    pub const WCOJ_TRIANGLE_COUNT_U64: &str = "wcoj_triangle_count_u64";
-    pub const WCOJ_TRIANGLE_MATERIALIZE_U64: &str = "wcoj_triangle_materialize_u64";
-    pub const WCOJ_TRIANGLE_SKEW_HISTOGRAM_U32: &str = "wcoj_triangle_skew_histogram_u32";
-    pub const WCOJ_TRIANGLE_SKEW_HISTOGRAM_U64: &str = "wcoj_triangle_skew_histogram_u64";
     pub const WCOJ_LAYOUT_CHECK_SORTED_UNIQUE_U32: &str = "wcoj_layout_check_sorted_unique_u32";
     pub const WCOJ_LAYOUT_CHECK_SORTED_UNIQUE_U64: &str = "wcoj_layout_check_sorted_unique_u64";
-    // v0.6.5 slice 2 — 4-cycle WCOJ.
-    pub const WCOJ_4CYCLE_COUNT: &str = "wcoj_4cycle_count";
-    pub const WCOJ_4CYCLE_MATERIALIZE: &str = "wcoj_4cycle_materialize";
-    pub const WCOJ_4CYCLE_COUNT_U64: &str = "wcoj_4cycle_count_u64";
-    pub const WCOJ_4CYCLE_MATERIALIZE_U64: &str = "wcoj_4cycle_materialize_u64";
-    pub const WCOJ_4CYCLE_SKEW_HISTOGRAM_U32: &str = "wcoj_4cycle_skew_histogram_u32";
-    pub const WCOJ_4CYCLE_SKEW_HISTOGRAM_U64: &str = "wcoj_4cycle_skew_histogram_u64";
+    pub const WCOJ_4CYCLE_BUILD_E2_WORK_PREFIX_U32: &str = "wcoj_4cycle_build_e2_work_prefix_u32";
+    pub const WCOJ_4CYCLE_BUILD_HG_WORK_PLAN_U32: &str = "wcoj_4cycle_build_hg_work_plan_u32";
+    pub const WCOJ_4CYCLE_COUNT_HG_U32: &str = "wcoj_4cycle_count_hg_u32";
+    pub const WCOJ_4CYCLE_MATERIALIZE_HG_U32: &str = "wcoj_4cycle_materialize_hg_u32";
+    pub const WCOJ_4CYCLE_BUILD_E2_WORK_PREFIX_U64: &str = "wcoj_4cycle_build_e2_work_prefix_u64";
+    pub const WCOJ_4CYCLE_BUILD_HG_WORK_PLAN_U64: &str = "wcoj_4cycle_build_hg_work_plan_u64";
+    pub const WCOJ_4CYCLE_COUNT_HG_U64: &str = "wcoj_4cycle_count_hg_u64";
+    pub const WCOJ_4CYCLE_MATERIALIZE_HG_U64: &str = "wcoj_4cycle_materialize_hg_u64";
     // W3.2 — General-arity clique kernels (k=5, k=6 from single template).
-    pub const WCOJ_CLIQUE5_COUNT_U32: &str = "wcoj_clique5_count_u32";
-    pub const WCOJ_CLIQUE5_MATERIALIZE_U32: &str = "wcoj_clique5_materialize_u32";
-    pub const WCOJ_CLIQUE5_COUNT_U64: &str = "wcoj_clique5_count_u64";
-    pub const WCOJ_CLIQUE5_MATERIALIZE_U64: &str = "wcoj_clique5_materialize_u64";
-    pub const WCOJ_CLIQUE6_COUNT_U32: &str = "wcoj_clique6_count_u32";
-    pub const WCOJ_CLIQUE6_MATERIALIZE_U32: &str = "wcoj_clique6_materialize_u32";
-    pub const WCOJ_CLIQUE6_COUNT_U64: &str = "wcoj_clique6_count_u64";
-    pub const WCOJ_CLIQUE6_MATERIALIZE_U64: &str = "wcoj_clique6_materialize_u64";
+    pub const WCOJ_CLIQUE5_COUNT_HG_U32: &str = "wcoj_clique5_count_hg_u32";
+    pub const WCOJ_CLIQUE5_MATERIALIZE_HG_U32: &str = "wcoj_clique5_materialize_hg_u32";
+    pub const WCOJ_CLIQUE5_COUNT_HG_U64: &str = "wcoj_clique5_count_hg_u64";
+    pub const WCOJ_CLIQUE5_MATERIALIZE_HG_U64: &str = "wcoj_clique5_materialize_hg_u64";
+    pub const WCOJ_CLIQUE6_COUNT_HG_U32: &str = "wcoj_clique6_count_hg_u32";
+    pub const WCOJ_CLIQUE6_MATERIALIZE_HG_U32: &str = "wcoj_clique6_materialize_hg_u32";
+    pub const WCOJ_CLIQUE6_COUNT_HG_U64: &str = "wcoj_clique6_count_hg_u64";
+    pub const WCOJ_CLIQUE6_MATERIALIZE_HG_U64: &str = "wcoj_clique6_materialize_hg_u64";
 }
 
 /// Kernel function names in the Monte Carlo sampling module
@@ -878,15 +889,21 @@ pub struct CudaKernelProvider {
     /// confirm the fast-path actually fired vs. silently fell
     /// through to the existing dedup pipeline.
     wcoj_layout_fast_path_hit_count: AtomicU64,
-    /// W3.4 routing counter: number of successful triangle
-    /// dispatches that used the layout+count fused provider entry.
-    /// Incremented by xlog-runtime after the dispatch result is
-    /// accepted, not by the provider method itself.
-    wcoj_triangle_fused_dispatch_count: AtomicU64,
-    /// W3.4 routing counter: number of successful triangle
-    /// dispatches that used the existing unfused WCOJ pipeline
-    /// after the W3.4 threshold branch selected or fell back to it.
-    wcoj_triangle_unfused_dispatch_count: AtomicU64,
+    /// Diagnostic counter for generic WCOJ layout-sort helper
+    /// invocations. Used by goal-038-B dispatch-plan certs to
+    /// prove K-clique runtime dispatch no longer routes every edge
+    /// through the old all-edge `wcoj_layout_sort_*_recorded` path.
+    wcoj_layout_sort_invocation_count: AtomicU64,
+    /// Authorization 5 G_HIST_KC diagnostic counter: number of
+    /// K-clique leader-edge metadata builds.
+    kclique_metadata_build_count: AtomicU64,
+    /// Authorization 5 G_HIST_KC diagnostic counter: cumulative
+    /// nanoseconds spent building K-clique leader-edge metadata.
+    kclique_metadata_build_nanos: AtomicU64,
+    /// W3.3 routing counter: successful triangle dispatches
+    /// accepted through the histogram-guided block-slice provider
+    /// entry.
+    wcoj_triangle_hg_dispatch_count: AtomicU64,
     /// Diagnostic-only: last WCOJ triangle dispatch's per-phase
     /// CUDA-event timings, populated by `wcoj_triangle_*_recorded`
     /// when the `wcoj-phase-timing` Cargo feature is on. Read by
@@ -976,8 +993,10 @@ impl CudaKernelProvider {
             recorded_op_stream: OnceLock::new(),
             csm_invocations: AtomicU64::new(0),
             wcoj_layout_fast_path_hit_count: AtomicU64::new(0),
-            wcoj_triangle_fused_dispatch_count: AtomicU64::new(0),
-            wcoj_triangle_unfused_dispatch_count: AtomicU64::new(0),
+            wcoj_layout_sort_invocation_count: AtomicU64::new(0),
+            kclique_metadata_build_count: AtomicU64::new(0),
+            kclique_metadata_build_nanos: AtomicU64::new(0),
+            wcoj_triangle_hg_dispatch_count: AtomicU64::new(0),
             #[cfg(feature = "wcoj-phase-timing")]
             last_triangle_phase_timing: std::sync::Mutex::new(None),
         })
@@ -1125,7 +1144,7 @@ impl CudaKernelProvider {
     /// generated API docs; the symbol remains callable from
     /// integration tests within this crate but production callers
     /// must not depend on it. May be renamed, gated behind a cargo
-    /// feature, or removed in any release without notice.
+    /// feature, or withdrawn in any release without notice.
     #[doc(hidden)]
     pub fn csm_invocations(&self) -> u64 {
         self.csm_invocations.load(Ordering::Relaxed)
@@ -1183,6 +1202,7 @@ impl CudaKernelProvider {
     /// dispatch. Overwrites any prior unread slot — the report
     /// binary is expected to read after every `execute_plan`.
     #[cfg(feature = "wcoj-phase-timing")]
+    #[allow(dead_code)]
     pub(crate) fn put_wcoj_triangle_phase_timing(
         &self,
         timing: crate::wcoj_phase_timing::WcojTrianglePhaseTiming,
@@ -1202,24 +1222,51 @@ impl CudaKernelProvider {
         self.wcoj_layout_fast_path_hit_count.load(Ordering::Relaxed)
     }
 
-    /// W3.4 test/diagnostic counter: successful triangle WCOJ
-    /// dispatches that routed through `wcoj_triangle_fused_lc_*`.
-    pub fn wcoj_triangle_fused_dispatch_count(&self) -> u64 {
-        self.wcoj_triangle_fused_dispatch_count
-            .load(Ordering::Relaxed)
-    }
-
-    /// W3.4 test/diagnostic counter: successful triangle WCOJ
-    /// dispatches that routed through the existing unfused pipeline.
-    pub fn wcoj_triangle_unfused_dispatch_count(&self) -> u64 {
-        self.wcoj_triangle_unfused_dispatch_count
-            .load(Ordering::Relaxed)
+    /// W3.3 test/diagnostic counter: successful triangle WCOJ
+    /// dispatches that routed through the HG block-slice provider
+    /// entry.
+    pub fn wcoj_triangle_hg_dispatch_count(&self) -> u64 {
+        self.wcoj_triangle_hg_dispatch_count.load(Ordering::Relaxed)
     }
 
     /// Reset the fast-path hit counter to 0. Tests use this to
     /// scope counter assertions to a single dispatch.
     pub fn reset_wcoj_layout_fast_path_hit_count(&self) {
         self.wcoj_layout_fast_path_hit_count
+            .store(0, Ordering::Relaxed);
+    }
+
+    /// Number of calls to `wcoj_layout_sort_*_recorded` since the
+    /// last reset. Diagnostic-only; used by Step 4 dispatch-plan
+    /// certification.
+    pub fn wcoj_layout_sort_invocation_count(&self) -> u64 {
+        self.wcoj_layout_sort_invocation_count
+            .load(Ordering::Relaxed)
+    }
+
+    /// Reset the WCOJ layout-sort invocation counter to 0.
+    pub fn reset_wcoj_layout_sort_invocation_count(&self) {
+        self.wcoj_layout_sort_invocation_count
+            .store(0, Ordering::Relaxed);
+    }
+
+    /// Number of K-clique leader-edge metadata builds since the
+    /// last reset.
+    pub fn kclique_metadata_build_count(&self) -> u64 {
+        self.kclique_metadata_build_count.load(Ordering::Relaxed)
+    }
+
+    /// Cumulative nanoseconds spent building K-clique leader-edge
+    /// metadata since the last reset.
+    pub fn kclique_metadata_build_nanos(&self) -> u64 {
+        self.kclique_metadata_build_nanos.load(Ordering::Relaxed)
+    }
+
+    /// Reset K-clique metadata build diagnostics.
+    pub fn reset_kclique_metadata_build_metrics(&self) {
+        self.kclique_metadata_build_count
+            .store(0, Ordering::Relaxed);
+        self.kclique_metadata_build_nanos
             .store(0, Ordering::Relaxed);
     }
 
@@ -1231,22 +1278,26 @@ impl CudaKernelProvider {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// W3.4 runtime hook: record a successful fused triangle
-    /// dispatch. Public because `xlog-runtime` owns the dispatch
-    /// decision; not a stable application API.
-    #[doc(hidden)]
-    pub fn record_wcoj_triangle_fused_dispatch(&self) {
-        self.wcoj_triangle_fused_dispatch_count
+    /// Internal: increment the generic WCOJ layout-sort counter.
+    pub(crate) fn record_wcoj_layout_sort_invocation(&self) {
+        self.wcoj_layout_sort_invocation_count
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    /// W3.4 runtime hook: record a successful unfused triangle
-    /// dispatch selected by the W3.4 threshold branch. Public
-    /// because `xlog-runtime` owns the dispatch decision; not a
-    /// stable application API.
+    /// Internal: record a K-clique leader-edge metadata build.
+    pub(crate) fn record_kclique_metadata_build_nanos(&self, nanos: u128) {
+        self.kclique_metadata_build_count
+            .fetch_add(1, Ordering::Relaxed);
+        let nanos = u64::try_from(nanos).unwrap_or(u64::MAX);
+        self.kclique_metadata_build_nanos
+            .fetch_add(nanos, Ordering::Relaxed);
+    }
+
+    /// W3.3 runtime hook: record a successful HG block-slice
+    /// triangle dispatch.
     #[doc(hidden)]
-    pub fn record_wcoj_triangle_unfused_dispatch(&self) {
-        self.wcoj_triangle_unfused_dispatch_count
+    pub fn record_wcoj_triangle_hg_dispatch(&self) {
+        self.wcoj_triangle_hg_dispatch_count
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -2982,7 +3033,7 @@ mod tests {
     }
 
     #[test]
-    fn test_diff_all_removed() {
+    fn test_diff_all_filtered_out() {
         let provider = match create_test_provider() {
             Some(p) => p,
             None => {

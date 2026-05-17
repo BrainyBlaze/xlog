@@ -1,0 +1,5 @@
+fixture	rows	bundle_paths	direct_hash_mean_ns	direct_wcoj_mean_ns	direct_ratio	hash_cv	wcoj_cv	criterion_hash_ns	criterion_wcoj_ns	criterion_ratio	peak_vram_bytes	recursive_vram_growth	verdict
+call_graph_edge_analog	342	3/5	1366652.500	597661.700	2.286666	0.151557	0.297827	1481287	729578	2.030334	148532	NA	RED_M_W39_2_M_W39_4_M_W39_6
+andersen_analog	308	3/5	1635055.900	682100.200	2.397090	0.073860	0.072152	1585222	896835	1.767575	148532	NA	RED_M_W39_2_M_W39_4_M_W39_6
+ddisasm_analog	575	3/5	1855012.500	1005114.700	1.845573	0.064703	0.079753	1863909	1172208	1.589231	148532	0.000000	RED_M_W39_2_M_W39_4_M_W39_6
+geomean	NA	3/5	NA	NA	2.162749	NA	NA	NA	NA	NA	148532	0.000000	RED_M_W39_4

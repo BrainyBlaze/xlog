@@ -105,6 +105,129 @@ pub struct LookupPerm {
     pub swap_cols: bool,
 }
 
+/// Maximum K supported by the 38-B K-clique variable-order plan.
+pub const K_CLIQUE_MAX_K: usize = 8;
+
+/// Maximum edge count for K=8 complete binary-edge clique, C(8, 2).
+pub const K_CLIQUE_MAX_EDGES: usize = 28;
+
+/// Column-order rewrite for one K-clique input edge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnSwap {
+    /// Edge slot to rewrite after edge permutation.
+    pub edge_slot: u8,
+    /// Whether the two source columns should be swapped.
+    pub swap_cols: bool,
+}
+
+/// Sorted-layout requirements carried by a K-clique plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SortedLayoutSpec {
+    /// Edge slots whose sorted layouts are required by the plan.
+    pub edge_slots: Vec<u8>,
+    /// Per-edge key-column order required by the sorted layout.
+    pub key_columns: Vec<Vec<u8>>,
+}
+
+/// Helper relation split requested by the K-clique plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelperSplitSpec {
+    /// Stable helper identifier within the plan.
+    pub helper_id: u8,
+    /// Variable whose prefix/fanout is split into the helper.
+    pub variable: u8,
+    /// Edge slots materialized into the helper relation.
+    pub edge_slots: Vec<u8>,
+}
+
+/// Stream group assigned to a K-clique plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StreamGroupId(pub u8);
+
+/// Full variable-order plan for K=5..K=8 clique-family WCOJ dispatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KCliqueVariableOrder {
+    /// Clique arity K.
+    pub k: u8,
+    /// Position for each variable id; unused entries are `u8::MAX`.
+    pub variable_positions: [u8; K_CLIQUE_MAX_K],
+    /// Edge-slot permutation; unused entries are `u8::MAX`.
+    pub edge_permutation: [u8; K_CLIQUE_MAX_EDGES],
+    /// Optional column swaps after edge permutation.
+    pub column_swaps: Vec<ColumnSwap>,
+    /// Sorted-layout requirements for runtime layout construction.
+    pub sorted_layout_requirements: SortedLayoutSpec,
+    /// Helper-split requests attached to this plan.
+    pub helper_split_specs: Vec<HelperSplitSpec>,
+    /// Stream group consumed by stream-mux scheduling.
+    pub stream_group: StreamGroupId,
+}
+
+impl KCliqueVariableOrder {
+    /// Creates a K-clique variable-order plan with all seven required fields.
+    pub fn new(
+        k: u8,
+        variable_positions: [u8; K_CLIQUE_MAX_K],
+        edge_permutation: [u8; K_CLIQUE_MAX_EDGES],
+        column_swaps: Vec<ColumnSwap>,
+        sorted_layout_requirements: SortedLayoutSpec,
+        helper_split_specs: Vec<HelperSplitSpec>,
+        stream_group: StreamGroupId,
+    ) -> Self {
+        Self {
+            k,
+            variable_positions,
+            edge_permutation,
+            column_swaps,
+            sorted_layout_requirements,
+            helper_split_specs,
+            stream_group,
+        }
+    }
+}
+
+/// Cost evidence carried with a planned WCOJ-vs-hash route.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CostPredictionRecord {
+    /// Estimated WCOJ work under the selected plan.
+    pub wcoj_cost: f64,
+    /// Estimated hash-chain work under the captured fallback plan.
+    pub hash_cost: f64,
+}
+
+impl CostPredictionRecord {
+    /// Stable evidence for incomplete stats: hash is the safe default route.
+    pub fn empty() -> Self {
+        Self {
+            wcoj_cost: f64::INFINITY,
+            hash_cost: 0.0,
+        }
+    }
+}
+
+/// Auditable reason for a structured hash route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlannedHashReason {
+    /// Planner had complete stats and predicted hash lower-cost.
+    PlannerPredictsHashWins,
+    /// Planner could not build a complete stats-backed plan.
+    IncompleteStatsSafeDefault,
+}
+
+/// Route chosen for a recognized multiway shape.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MultiwayPlan {
+    /// Execute the WCOJ path with the attached K-clique plan.
+    WcojWithPlan(KCliqueVariableOrder),
+    /// Execute the captured fallback as a planned hash route.
+    PlannedHashRoute {
+        /// Why the recognized shape routes to hash.
+        reason: PlannedHashReason,
+        /// Cost evidence that made the route auditable.
+        planner_evidence: CostPredictionRecord,
+    },
+}
+
 /// Variable-ordering decision attached to a `MultiWayJoin`.
 ///
 /// `None` on the parent variant preserves slice 1/2/4/W2.2 dispatch
@@ -130,6 +253,35 @@ pub struct VariableOrder {
     /// identity but the field is omitted (`var_order = None`) — slice
     /// 1/2 keeps using `MultiWayJoin::output_columns` directly.
     pub kernel_output_cols: Vec<ProjectExpr>,
+    /// Full K-clique variable-order plan for K=5..K=8. `None`
+    /// preserves the legacy triangle/4-cycle leader-permutation path.
+    pub kclique: Option<KCliqueVariableOrder>,
+}
+
+impl VariableOrder {
+    /// Creates the legacy triangle/4-cycle leader-permutation form.
+    pub fn legacy(
+        leader_idx: u8,
+        lookup_perms: Vec<LookupPerm>,
+        kernel_output_cols: Vec<ProjectExpr>,
+    ) -> Self {
+        Self {
+            leader_idx,
+            lookup_perms,
+            kernel_output_cols,
+            kclique: None,
+        }
+    }
+
+    /// Creates the full K-clique variable-order form.
+    pub fn kclique(kclique: KCliqueVariableOrder) -> Self {
+        Self {
+            leader_idx: 0,
+            lookup_perms: Vec::new(),
+            kernel_output_cols: Vec::new(),
+            kclique: Some(kclique),
+        }
+    }
 }
 
 /// Comparison operators
@@ -244,7 +396,7 @@ pub enum RirNode {
     Diff {
         /// Left-hand input relation.
         left: Box<RirNode>,
-        /// Right-hand input relation whose rows are removed from the left input.
+        /// Right-hand input relation whose rows are excluded from the left input.
         right: Box<RirNode>,
     },
 
@@ -272,7 +424,7 @@ pub enum RirNode {
     /// specialized dispatch.
     ///
     /// v0.6.5 slice 1 only emits this for the certified triangle shape;
-    /// 4-way and general-arity admission are deferred to later slices.
+    /// 4-way and general-arity admission land in later slices.
     ///
     /// # Walker contract
     ///
@@ -305,6 +457,10 @@ pub enum RirNode {
         /// decline. Captured from the post-optimizer tree by the
         /// promoter; never synthesized.
         fallback: Box<RirNode>,
+        /// Structured route for recognized multiway shapes. K-clique
+        /// cost-gated hash routes are positive plans, not promoter
+        /// inability to handle the shape.
+        plan: Option<MultiwayPlan>,
         /// Optional W2.1 variable-ordering decision.
         ///
         /// `None` preserves slice 1/2/4/W2.2 behavior bit-identically:

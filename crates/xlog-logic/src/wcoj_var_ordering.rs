@@ -46,6 +46,29 @@ use xlog_stats::StatsManager;
 
 use crate::compiler_config::{CompilerConfig, WcojVarOrderingKind};
 
+/// Named K-clique WCOJ-vs-hash gate parameters.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WcojCostGateParams {
+    /// WCOJ routes only when estimated WCOJ work is no greater than
+    /// this multiple of estimated hash-chain work. The equality
+    /// boundary keeps the gate one-sided and mirrors the planner's
+    /// lower-cost winner semantics.
+    pub wcoj_to_hash_cost_ratio_ceiling: f64,
+}
+
+/// Default K-clique cost-gate policy.
+pub const WCOJ_COST_GATE_PARAMS: WcojCostGateParams = WcojCostGateParams {
+    wcoj_to_hash_cost_ratio_ceiling: 1.0,
+};
+
+/// Returns true when the named K-clique cost-gate policy routes WCOJ.
+pub fn wcoj_cost_gate_predicts_wcoj(wcoj_cost: f64, hash_cost: f64) -> bool {
+    if !wcoj_cost.is_finite() || !hash_cost.is_finite() || hash_cost <= 0.0 {
+        return false;
+    }
+    wcoj_cost / hash_cost <= WCOJ_COST_GATE_PARAMS.wcoj_to_hash_cost_ratio_ceiling
+}
+
 /// Trait that picks a leader slot for triangle / 4-cycle WCOJ.
 ///
 /// Implementations look at relation cardinalities (or other stats)
@@ -569,21 +592,21 @@ pub fn cycle4_kernel_output_cols(leader_idx: u8) -> Vec<ProjectExpr> {
 /// Promoter helper: build a complete `VariableOrder` for a triangle
 /// from the cost model's `leader_idx` decision.
 pub fn build_triangle_var_order(leader_idx: u8) -> VariableOrder {
-    VariableOrder {
+    VariableOrder::legacy(
         leader_idx,
-        lookup_perms: triangle_lookup_perms(leader_idx),
-        kernel_output_cols: triangle_kernel_output_cols(leader_idx),
-    }
+        triangle_lookup_perms(leader_idx),
+        triangle_kernel_output_cols(leader_idx),
+    )
 }
 
 /// Promoter helper: build a complete `VariableOrder` for a 4-cycle
 /// from the cost model's `leader_idx` decision.
 pub fn build_cycle4_var_order(leader_idx: u8) -> VariableOrder {
-    VariableOrder {
+    VariableOrder::legacy(
         leader_idx,
-        lookup_perms: cycle4_lookup_perms(leader_idx),
-        kernel_output_cols: cycle4_kernel_output_cols(leader_idx),
-    }
+        cycle4_lookup_perms(leader_idx),
+        cycle4_kernel_output_cols(leader_idx),
+    )
 }
 
 /// Promoter helper: 4-cycle locked permutation table.

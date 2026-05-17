@@ -6,10 +6,12 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use cudarc::driver::result::mem_get_info;
 
 use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::device_runtime::{
@@ -21,6 +23,7 @@ use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager, JoinType};
 
 const BENCH_GROUP: &str = "w52_skewed_multiway";
 const DEVICE_BUDGET_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const VRAM_GATE_BYTES: u64 = 38 * 1024 * 1024 * 1024;
 const FOUR_CYCLE_CELLS: &[u32] = &[50, 250, 1000, 2000];
 const CLIQUE5_CELLS: &[u32] = &[10, 25, 50, 100];
 const PIVOT5_CELLS: &[u32] = &[10, 20, 30, 40];
@@ -49,6 +52,12 @@ const PIVOT5_EDGE_NAMES: [(&str, &str); 10] = [
     ("c", "d"),
 ];
 
+fn w52_selected_cell(cell: &str) -> bool {
+    std::env::var("XLOG_W52_ONLY_CELL")
+        .map(|selected| selected.split(',').any(|s| s.trim() == cell))
+        .unwrap_or(true)
+}
+
 struct DiscardSink;
 impl LoggingSink for DiscardSink {
     fn emit(&self, _record: LogRecord) -> Result<(), SinkError> {
@@ -63,6 +72,69 @@ struct Provider {
     provider: Arc<CudaKernelProvider>,
     pool: Arc<StreamPool>,
     launch_stream: StreamId,
+    mem_info: Arc<CudaMemInfoTracker>,
+}
+
+struct CudaMemInfoTracker {
+    baseline_free: AtomicU64,
+    total: AtomicU64,
+    min_free: AtomicU64,
+}
+
+impl CudaMemInfoTracker {
+    fn new() -> Option<Self> {
+        let (free, total) = mem_get_info().ok()?;
+        let free = free as u64;
+        Some(Self {
+            baseline_free: AtomicU64::new(free),
+            total: AtomicU64::new(total as u64),
+            min_free: AtomicU64::new(free),
+        })
+    }
+
+    fn reset(&self) {
+        let Ok((free, total)) = mem_get_info() else {
+            return;
+        };
+        let free = free as u64;
+        self.baseline_free.store(free, Ordering::Relaxed);
+        self.total.store(total as u64, Ordering::Relaxed);
+        self.min_free.store(free, Ordering::Relaxed);
+    }
+
+    fn sample(&self) {
+        let Ok((free, _total)) = mem_get_info() else {
+            return;
+        };
+        let free = free as u64;
+        let mut observed = self.min_free.load(Ordering::Relaxed);
+        while free < observed {
+            match self.min_free.compare_exchange_weak(
+                observed,
+                free,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(next) => observed = next,
+            }
+        }
+    }
+
+    fn report(&self, cell: &str) {
+        self.sample();
+        let baseline = self.baseline_free.load(Ordering::Relaxed);
+        let min_free = self.min_free.load(Ordering::Relaxed);
+        let total = self.total.load(Ordering::Relaxed);
+        let delta = baseline.saturating_sub(min_free);
+        eprintln!(
+            "W67B_BENCH38B_VRAM cell={cell} delta_bytes={delta} gate_bytes={VRAM_GATE_BYTES} total_bytes={total}"
+        );
+        assert!(
+            delta <= VRAM_GATE_BYTES,
+            "W67B bench VRAM delta {delta} exceeds gate {VRAM_GATE_BYTES}"
+        );
+    }
 }
 
 fn make_provider() -> Option<Provider> {
@@ -92,6 +164,7 @@ fn make_provider() -> Option<Provider> {
     ));
     let provider =
         Arc::new(CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory)).ok()?);
+    let mem_info = Arc::new(CudaMemInfoTracker::new()?);
     let launch_stream = pool.acquire().ok()?;
     Some(Provider {
         _device: device,
@@ -100,6 +173,7 @@ fn make_provider() -> Option<Provider> {
         provider,
         pool,
         launch_stream,
+        mem_info,
     })
 }
 
@@ -339,6 +413,20 @@ fn gpu_wcoj_clique5_path(prov: &Provider, inputs: &[CudaBuffer; 10]) -> CudaBuff
     out
 }
 
+fn report_kclique_metadata_cost(prov: &Provider, workload: &str, n: u32, wall: Duration) {
+    let metadata_build_count = prov.provider.kclique_metadata_build_count();
+    let metadata_build_nanos = prov.provider.kclique_metadata_build_nanos();
+    let wall_nanos = wall.as_nanos().max(1);
+    let ratio = metadata_build_nanos as f64 / wall_nanos as f64;
+    eprintln!(
+        "  [hist-kc] workload={workload} N={n:>4} metadata_build_count={metadata_build_count} metadata_build_nanos={metadata_build_nanos} wall_nanos={wall_nanos} metadata_ratio={ratio:.6}"
+    );
+    assert!(
+        ratio <= 0.05,
+        "G_HIST_KC M_HIST_KC.7 metadata build cost must stay <= 5% of W52 K-clique wall-time; workload={workload} N={n} ratio={ratio:.6}"
+    );
+}
+
 fn hash_clique5_chain_path(prov: &Provider, inputs: &[CudaBuffer; 10]) -> CudaBuffer {
     let j02 = prov
         .provider
@@ -440,7 +528,10 @@ fn hash_pivot5_chain_path(prov: &Provider, inputs: &[CudaBuffer; 10]) -> CudaBuf
 }
 
 fn assert_clique5_parity(prov: &Provider, inputs: &[CudaBuffer; 10], n: u32) {
+    prov.provider.reset_kclique_metadata_build_metrics();
+    let wcoj_start = Instant::now();
     let wcoj = gpu_wcoj_clique5_path(prov, inputs);
+    report_kclique_metadata_cost(prov, "5clique", n, wcoj_start.elapsed());
     let hash = hash_clique5_chain_path(prov, inputs);
     let wcoj_rows = download_u32_rows(&wcoj, &prov.provider, 5);
     let hash_rows = download_u32_rows(&hash, &prov.provider, 5);
@@ -455,7 +546,10 @@ fn assert_clique5_parity(prov: &Provider, inputs: &[CudaBuffer; 10], n: u32) {
 }
 
 fn assert_pivot5_parity(prov: &Provider, inputs: &[CudaBuffer; 10], n: u32) {
+    prov.provider.reset_kclique_metadata_build_metrics();
+    let wcoj_start = Instant::now();
     let wcoj = gpu_wcoj_clique5_path(prov, inputs);
+    report_kclique_metadata_cost(prov, "pivot5", n, wcoj_start.elapsed());
     let hash = hash_pivot5_chain_path(prov, inputs);
     let wcoj_rows = download_u32_rows(&wcoj, &prov.provider, 5);
     let hash_rows = download_u32_rows(&hash, &prov.provider, 5);
@@ -495,10 +589,14 @@ fn bench_w52_skewed_multiway(c: &mut Criterion) {
     });
 
     for &n in FOUR_CYCLE_CELLS {
+        let cell = format!("4cycle_N{n}");
+        if !w52_selected_cell(&cell) {
+            continue;
+        }
         let rows = hub_filtered_4cycle(n);
         let inputs = upload_4cycle_fixture(&prov, &rows);
         assert_4cycle_parity(&prov, &inputs, n);
-        let cell = format!("4cycle_N{n}");
+        prov.mem_info.reset();
 
         group.bench_with_input(BenchmarkId::new("gpu_wcoj", &cell), &n, |b, _| {
             b.iter_custom(|iters| {
@@ -507,7 +605,9 @@ fn bench_w52_skewed_multiway(c: &mut Criterion) {
                     let out = gpu_wcoj_4cycle_path(&prov, &inputs);
                     black_box(out.cached_row_count());
                 }
-                start.elapsed()
+                let elapsed = start.elapsed();
+                prov.mem_info.sample();
+                elapsed
             })
         });
 
@@ -518,16 +618,23 @@ fn bench_w52_skewed_multiway(c: &mut Criterion) {
                     let out = hash_4cycle_chain_path(&prov, &inputs);
                     black_box(out.cached_row_count());
                 }
-                start.elapsed()
+                let elapsed = start.elapsed();
+                prov.mem_info.sample();
+                elapsed
             })
         });
+        prov.mem_info.report(&cell);
     }
 
     for &n in CLIQUE5_CELLS {
+        let cell = format!("5clique_N{n}");
+        if !w52_selected_cell(&cell) {
+            continue;
+        }
         let rows = diagonal_k5_fixture(n);
         let inputs = upload_clique5_fixture(&prov, &rows);
         assert_clique5_parity(&prov, &inputs, n);
-        let cell = format!("5clique_N{n}");
+        prov.mem_info.reset();
 
         group.bench_with_input(BenchmarkId::new("gpu_wcoj", &cell), &n, |b, _| {
             b.iter_custom(|iters| {
@@ -536,7 +643,9 @@ fn bench_w52_skewed_multiway(c: &mut Criterion) {
                     let out = gpu_wcoj_clique5_path(&prov, &inputs);
                     black_box(out.cached_row_count());
                 }
-                start.elapsed()
+                let elapsed = start.elapsed();
+                prov.mem_info.sample();
+                elapsed
             })
         });
 
@@ -547,16 +656,23 @@ fn bench_w52_skewed_multiway(c: &mut Criterion) {
                     let out = hash_clique5_chain_path(&prov, &inputs);
                     black_box(out.cached_row_count());
                 }
-                start.elapsed()
+                let elapsed = start.elapsed();
+                prov.mem_info.sample();
+                elapsed
             })
         });
+        prov.mem_info.report(&cell);
     }
 
     for &n in PIVOT5_CELLS {
+        let cell = format!("pivot5_N{n}");
+        if !w52_selected_cell(&cell) {
+            continue;
+        }
         let rows = pivot_heavy_k5_fixture(n);
         let inputs = upload_pivot5_fixture(&prov, &rows);
         assert_pivot5_parity(&prov, &inputs, n);
-        let cell = format!("pivot5_N{n}");
+        prov.mem_info.reset();
 
         group.bench_with_input(BenchmarkId::new("gpu_wcoj", &cell), &n, |b, _| {
             b.iter_custom(|iters| {
@@ -565,7 +681,9 @@ fn bench_w52_skewed_multiway(c: &mut Criterion) {
                     let out = gpu_wcoj_clique5_path(&prov, &inputs);
                     black_box(out.cached_row_count());
                 }
-                start.elapsed()
+                let elapsed = start.elapsed();
+                prov.mem_info.sample();
+                elapsed
             })
         });
 
@@ -576,9 +694,12 @@ fn bench_w52_skewed_multiway(c: &mut Criterion) {
                     let out = hash_pivot5_chain_path(&prov, &inputs);
                     black_box(out.cached_row_count());
                 }
-                start.elapsed()
+                let elapsed = start.elapsed();
+                prov.mem_info.sample();
+                elapsed
             })
         });
+        prov.mem_info.report(&cell);
     }
 
     group.finish();

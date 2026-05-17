@@ -1,5 +1,5 @@
 // crates/xlog-cuda/tests/test_wcoj_4cycle_u64.rs
-//! v0.6.5 slice 2 — 4-cycle WCOJ kernel (u64) provider tests.
+//! 4-cycle HG WCOJ kernel (u64) provider tests.
 //!
 //! Locks the provider entry
 //! `CudaKernelProvider::wcoj_4cycle_u64_recorded(e1, e2, e3, e4, launch_stream)`
