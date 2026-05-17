@@ -2,6 +2,7 @@
 
 pub mod arrow_device;
 pub mod cuda_compat;
+pub mod cuda_graph;
 pub mod device;
 pub mod device_pool;
 pub mod device_runtime;

@@ -1,18 +1,11 @@
 mod common;
 
 use cudarc::driver::sys;
+use xlog_cuda::cuda_graph::CapturedCudaGraph;
 use xlog_cuda::device_runtime::Access;
 
 const BYTES: usize = 4096;
 const PATTERN: u8 = 0x5a;
-
-fn assert_cuda_success(site: &str, result: sys::CUresult) {
-    assert_eq!(
-        result,
-        sys::CUresult::CUDA_SUCCESS,
-        "{site} failed: {result:?}"
-    );
-}
 
 #[test]
 fn cuda_graph_replays_runtime_backed_memset_on_launch_stream() {
@@ -38,40 +31,26 @@ fn cuda_graph_replays_runtime_backed_memset_on_launch_stream() {
         .prepare_first_use(&buf, launch_stream_id, Access::Write)
         .expect("prepare graph write");
 
-    let mut graph: sys::CUgraph = std::ptr::null_mut();
-    let mut exec: sys::CUgraphExec = std::ptr::null_mut();
-
-    unsafe {
-        assert_cuda_success(
-            "cuStreamBeginCapture_v2",
-            sys::cuStreamBeginCapture_v2(
-                launch_stream.cu_stream(),
-                sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL,
-            ),
-        );
-        assert_cuda_success(
-            "cuMemsetD8Async",
-            sys::cuMemsetD8Async(*buf.device_ptr(), PATTERN, BYTES, launch_stream.cu_stream()),
-        );
-        assert_cuda_success(
-            "cuStreamEndCapture",
-            sys::cuStreamEndCapture(launch_stream.cu_stream(), &mut graph),
-        );
-        assert!(!graph.is_null(), "capture should return a graph");
-        assert_cuda_success(
-            "cuGraphInstantiateWithFlags",
-            sys::cuGraphInstantiateWithFlags(&mut exec, graph, 0),
-        );
-        assert!(
-            !exec.is_null(),
-            "instantiate should return an executable graph"
-        );
-        for _ in 0..3 {
-            assert_cuda_success(
-                "cuGraphLaunch",
-                sys::cuGraphLaunch(exec, launch_stream.cu_stream()),
-            );
+    let graph = CapturedCudaGraph::capture_on_stream(&launch_stream, || unsafe {
+        let result =
+            sys::cuMemsetD8Async(*buf.device_ptr(), PATTERN, BYTES, launch_stream.cu_stream());
+        if result == sys::CUresult::CUDA_SUCCESS {
+            Ok(())
+        } else {
+            Err(xlog_core::XlogError::Kernel(format!(
+                "cuMemsetD8Async failed: {result:?}"
+            )))
         }
+    })
+    .expect("capture memset graph");
+    assert_eq!(graph.node_count().expect("graph node count"), 1);
+    assert!(!graph.graph().is_null(), "capture should return a graph");
+    assert!(
+        !graph.exec().is_null(),
+        "instantiate should return an executable graph"
+    );
+    for _ in 0..3 {
+        graph.launch(&launch_stream).expect("graph launch");
     }
 
     handles
@@ -79,11 +58,6 @@ fn cuda_graph_replays_runtime_backed_memset_on_launch_stream() {
         .finish_first_use(&buf, launch_stream_id, Access::Write)
         .expect("finish graph write");
     launch_stream.synchronize().expect("graph stream sync");
-
-    unsafe {
-        assert_cuda_success("cuGraphExecDestroy", sys::cuGraphExecDestroy(exec));
-        assert_cuda_success("cuGraphDestroy", sys::cuGraphDestroy(graph));
-    }
 
     let host = handles
         .provider
