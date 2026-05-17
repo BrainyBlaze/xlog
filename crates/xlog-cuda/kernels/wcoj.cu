@@ -1603,7 +1603,7 @@ extern "C" __global__ void wcoj_layout_check_sorted_unique_u64(
 // algorithm body. Tier-2 source-audit (test_w32_kernel_source_audit)
 // enforces this contract.
 //
-// Algorithm: each thread fixes one plan-selected leader-edge row.
+// Paper §5: each thread fixes one plan-selected leader-edge row.
 // The first two binding positions are read from the selected row.
 // Recursively bind the remaining positions via level-keyed template
 // recursion. At each level L, the candidate set is the L-way

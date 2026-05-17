@@ -123,7 +123,7 @@ pub fn promote_multiway(
         }
         for rule in rules.iter_mut() {
             // W4.1 gate: the slice-4 `recursive_scan_count > 1`
-            // cutoff is removed (paper P1 — admit occurrence-level
+            // cutoff is absent (paper P1 — admit occurrence-level
             // multi-recursion). The triangle / 4-cycle shape gates
             // (try_promote_*) cap atom count at 3 / 4, implicitly
             // bounding the recursive-Scan count at the rule's atom

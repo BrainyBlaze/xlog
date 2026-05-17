@@ -467,7 +467,7 @@ fn desugar_queries_and_constraints(program: &Program) -> Program {
 
 /// Convenience function to compile source in one call.
 ///
-/// This creates a temporary compiler and compiles the source.
+/// This creates a short-lived compiler and compiles the source.
 /// For multiple compilations, prefer creating a `Compiler` instance directly.
 ///
 /// # Example

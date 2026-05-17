@@ -30,7 +30,7 @@ impl Executor {
     /// dispatch). Multi-recursive bodies — both distinct-
     /// recursive-predicate and same-predicate self-recursive
     /// (paper P1, arXiv:2604.20073) — DO reach a `MultiWayJoin`
-    /// here after W4.1 removed the `recursive_scan_count > 1`
+    /// here after W4.1 eliminated the `recursive_scan_count > 1`
     /// promoter cutoff at `crates/xlog-logic/src/promote.rs:114`;
     /// the per-variant rewrite loop builds N variants (one per
     /// recursive occurrence with a non-empty delta) and

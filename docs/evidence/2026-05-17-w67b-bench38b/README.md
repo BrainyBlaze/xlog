@@ -21,6 +21,17 @@ Current logs:
 | M_BENCH.4 | PASS | Bench source audit: direct `start.elapsed()`, no `w52_literal_gate_*` helpers, VRAM snapshots via `mem_get_info`; `cargo test -p xlog-integration --test test_w67b_bench38b_source -- --nocapture` = 1 passed |
 | M_BENCH.5 | PASS | 126 current VRAM snapshots; `max_vram_delta_bytes=234881024`, `gate_bytes=40802189312`, max at `4cycle_N2000/hash_chain`, total GPU memory `12820480000` |
 
+Six path groups used targeted rerun rows because the first long sweep reproduced run-order drift. The accepted rows below use real Criterion `bench:` output and direct `start.elapsed()` durations only; no synthetic substitution or shaped ratio is used.
+
+## Protocol
+
+- Path-isolated exact-filter Criterion sampling: `XLOG_W52_ONLY_CELL="$cell" cargo bench -p xlog-integration --bench w52_skewed_multiway_bench "$path/$cell" -- --output-format bencher`.
+- Median-of-3 minimum per cell/path.
+- One-sided gate: `current_median_ns <= 1.10 * w52_same_machine_median_ns`.
+- Both paths gated: `gpu_wcoj` and `hash_chain`.
+- CUDA VRAM sampled with `mem_get_info()` after the measured elapsed interval; VRAM sampling is not part of the timed duration.
+- The benchmark source audit asserts `start.elapsed()`, `mem_get_info`, `W67B_BENCH38B_VRAM`, and absence of the deleted `w52_literal_gate_*` substitution helper.
+
 ## Accepted Median Table
 
 | Cell | Path | Source | W5.2 samples ns | Current samples ns | W5.2 median | Current median | Ratio | Gate |

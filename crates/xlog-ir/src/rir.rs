@@ -396,7 +396,7 @@ pub enum RirNode {
     Diff {
         /// Left-hand input relation.
         left: Box<RirNode>,
-        /// Right-hand input relation whose rows are removed from the left input.
+        /// Right-hand input relation whose rows are excluded from the left input.
         right: Box<RirNode>,
     },
 
@@ -424,7 +424,7 @@ pub enum RirNode {
     /// specialized dispatch.
     ///
     /// v0.6.5 slice 1 only emits this for the certified triangle shape;
-    /// 4-way and general-arity admission are deferred to later slices.
+    /// 4-way and general-arity admission land in later slices.
     ///
     /// # Walker contract
     ///

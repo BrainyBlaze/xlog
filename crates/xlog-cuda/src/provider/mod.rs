@@ -168,8 +168,8 @@ impl<'a, T> RawCudaView<'a, T> {
     /// `None` for views built from external memory or legacy
     /// paths.
     ///
-    /// Public API placeholder for the upcoming filter-class
-    /// migration; no production caller exists yet.
+    /// Public API reserved for the filter-class migration; no
+    /// production caller exists yet.
     #[allow(dead_code)]
     pub fn runtime_block(&self) -> Option<&'a crate::device_runtime::DeviceBlock> {
         self.source_block
@@ -1144,7 +1144,7 @@ impl CudaKernelProvider {
     /// generated API docs; the symbol remains callable from
     /// integration tests within this crate but production callers
     /// must not depend on it. May be renamed, gated behind a cargo
-    /// feature, or removed in any release without notice.
+    /// feature, or withdrawn in any release without notice.
     #[doc(hidden)]
     pub fn csm_invocations(&self) -> u64 {
         self.csm_invocations.load(Ordering::Relaxed)
@@ -3033,7 +3033,7 @@ mod tests {
     }
 
     #[test]
-    fn test_diff_all_removed() {
+    fn test_diff_all_filtered_out() {
         let provider = match create_test_provider() {
             Some(p) => p,
             None => {
