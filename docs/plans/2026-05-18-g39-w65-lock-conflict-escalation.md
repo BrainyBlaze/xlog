@@ -2,7 +2,7 @@
 
 Date: 2026-05-18.
 Branch: `feat/w65-sort-label-propagation-g39`.
-Current W65 HEAD: `e9ebf78b87e31c0a596ca4b6b306740131795e03`.
+Escalation base W65 HEAD: `e9ebf78b87e31c0a596ca4b6b306740131795e03`.
 Governing plan: `docs/plans/2026-05-14-supervisor-goal-039.md`.
 
 ## Status
