@@ -527,18 +527,29 @@ impl Executor {
             }
         }
 
-        // Combine all single-column buffers into a multi-column buffer
-        self.provider.combine_columns(result_buffers, result_types)
+        let projected_schema = self.project_schema(input.schema(), columns)?;
+        let mut output = self
+            .provider
+            .combine_columns(result_buffers, result_types)?;
+        output.schema = projected_schema;
+        Ok(output)
     }
 
     /// Build a projected schema from ProjectExpr list
     pub(crate) fn project_schema(&self, input: &Schema, columns: &[ProjectExpr]) -> Result<Schema> {
         let mut projected_columns: Vec<(String, ScalarType)> = Vec::with_capacity(columns.len());
+        let mut projected_sort_labels: Vec<String> = Vec::with_capacity(columns.len());
         for proj_expr in columns {
             match proj_expr {
                 ProjectExpr::Column(col_idx) => {
                     if let Some((name, ty)) = input.columns.get(*col_idx) {
                         projected_columns.push((name.clone(), *ty));
+                        projected_sort_labels.push(
+                            input
+                                .column_sort_label(*col_idx)
+                                .unwrap_or(name)
+                                .to_string(),
+                        );
                     } else {
                         return Err(XlogError::Execution(format!(
                             "Column index {} out of bounds",
@@ -550,9 +561,12 @@ impl Executor {
                     // Computed columns get a generated name
                     let col_name = format!("computed_{}", projected_columns.len());
                     projected_columns.push((col_name, *result_type));
+                    projected_sort_labels.push(format!("computed_{}", projected_sort_labels.len()));
                 }
             }
         }
-        Ok(Schema::new(projected_columns))
+        Schema::new(projected_columns)
+            .with_sort_labels(projected_sort_labels)
+            .map_err(XlogError::Execution)
     }
 }

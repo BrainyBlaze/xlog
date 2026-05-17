@@ -2300,7 +2300,11 @@ impl CudaKernelProvider {
     fn combine_schemas(&self, left: &Schema, right: &Schema) -> Schema {
         let mut columns = left.columns.clone();
         columns.extend(right.columns.iter().cloned());
+        let mut sort_labels = left.sort_labels().to_vec();
+        sort_labels.extend(right.sort_labels().iter().cloned());
         Schema::new(columns)
+            .with_sort_labels(sort_labels)
+            .expect("combined schema sort labels match column arity")
     }
 
     /// Check if two schemas have compatible types (same arity and column types)

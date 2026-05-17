@@ -80,6 +80,8 @@ class LogicQueryResult:
     """Name of the queried relation."""
     columns: list[str]
     """Column names; empty for 0-arity (boolean) queries."""
+    sort_labels: list[str]
+    """Per-column sort labels; follows query output variable names."""
     tensors: list[Any]
     """DLPack column capsules; empty when *columns* is empty."""
     num_rows: int

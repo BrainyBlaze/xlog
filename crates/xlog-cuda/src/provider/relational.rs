@@ -132,12 +132,22 @@ impl super::CudaKernelProvider {
         // Natural-join output: all left columns + right non-key columns.
         let right_key_set: std::collections::HashSet<usize> = right_keys.iter().copied().collect();
         let mut result_columns_schema = left.schema().columns.clone();
+        let mut result_sort_labels = left.schema().sort_labels().to_vec();
         for (idx, col) in right.schema().columns.iter().enumerate() {
             if !right_key_set.contains(&idx) {
                 result_columns_schema.push(col.clone());
+                result_sort_labels.push(
+                    right
+                        .schema()
+                        .column_sort_label(idx)
+                        .unwrap_or(&col.0)
+                        .to_string(),
+                );
             }
         }
-        let result_schema = Schema::new(result_columns_schema);
+        let result_schema = Schema::new(result_columns_schema)
+            .with_sort_labels(result_sort_labels)
+            .expect("natural join sort labels match result schema arity");
 
         // Handle empty inputs
         if left.is_empty() || right.is_empty() {

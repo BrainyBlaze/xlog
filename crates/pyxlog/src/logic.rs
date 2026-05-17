@@ -307,6 +307,7 @@ fn pack_logic_result_with_provider(
             LogicQueryResult {
                 relation_name: q.relation_name,
                 columns: q.columns,
+                sort_labels: q.sort_labels,
                 tensors,
                 num_rows,
                 is_true,

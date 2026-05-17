@@ -659,6 +659,15 @@ impl super::CudaKernelProvider {
             .iter()
             .filter_map(|&i| input.columns.get(i).cloned())
             .collect();
+        let mut sort_labels: Vec<String> = key_cols
+            .iter()
+            .filter_map(|&i| {
+                input
+                    .column_sort_label(i)
+                    .map(ToString::to_string)
+                    .or_else(|| input.columns.get(i).map(|(name, _)| name.clone()))
+            })
+            .collect();
 
         for (i, &(_value_col, agg_op)) in aggs.iter().enumerate() {
             let agg_name = match agg_op {
@@ -677,9 +686,12 @@ impl super::CudaKernelProvider {
                 AggOp::LogSumExp => ScalarType::F64,
             };
             columns.push((agg_name, agg_type));
+            sort_labels.push(format!("aggregate_{}", i));
         }
 
         Schema::new(columns)
+            .with_sort_labels(sort_labels)
+            .expect("groupby result sort labels match column arity")
     }
 
     // ======================================================================

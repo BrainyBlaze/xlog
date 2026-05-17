@@ -50,6 +50,25 @@ Phase-2 extensions:
 21. **No xlog tag pushes inside Phase 2.** v0.6.5 tag remains W7.1-gated, user-authorized. Phase 2 produces tag-ready HEAD only.
 22. **No behavioral drift on frozen API.** Same-signature same-name pyxlog methods must produce semantically-equivalent output across xlog versions. Cert: G_E2E captures reference output set on `main @ f62188b7` via DTS-DLM `pyxlog`-roundtrip test; replays on Phase-2 HEAD; asserts bit-exact.
 
+### 0.1 User authorization amendment — W65 DTS source fix
+
+On 2026-05-18, after the W65 lock-conflict escalation, the user explicitly
+authorized DTS-DLM repository mutation to deliver the full production-grade xlog
+and DTS system. For G_W65 only, this supersedes lock 16's DTS-DLM mutation
+prohibition and the original M_W65.4 unchanged-file check for the specific
+support-source defect documented in
+`docs/evidence/2026-05-14-g39-w65-sort-label-rca.md`.
+
+Required W65 supersession evidence:
+
+- preserve the original RCA and escalation artifacts;
+- commit the DTS fix on an isolated DTS-DLM branch;
+- record DTS branch SHA and exact diff scope;
+- rerun 5-doc and 50-doc m37c-prime arm-C replays with
+  `Sort enrichment` count equal to zero;
+- keep the pyxlog API and xlog-side sort-label certs green;
+- do not push, tag, merge, or edit the closure board from this amendment alone.
+
 ---
 
 ## 1. Strategic context (GQM+Strategies)
@@ -373,7 +392,7 @@ BG0 — DTS-DLM v3 ship with v0.6.5 xlog
 
 **Questions.**
 - **Q_W65.1** Root cause of un-inferred sort labels on padding columns?
-- **Q_W65.2** Does fixing schema layer eliminate diagnostic, or does DTS-DLM `enrich_support_sorts` also need updating? (Per lock 16, DTS-DLM source is frozen except for G_PRE; xlog-side fix only.)
+- **Q_W65.2** Does fixing schema layer eliminate diagnostic, or does DTS-DLM `enrich_support_sorts` also need updating? (Pre-amendment: xlog-side fix only. Post-2026-05-18 authorization: DTS-DLM source fix is in scope only for the documented W65 support-source defect.)
 - **Q_W65.3** Does fix preserve existing schema call sites?
 
 **Metrics.**
@@ -383,7 +402,7 @@ BG0 — DTS-DLM v3 ship with v0.6.5 xlog
 | **M_W65.1** `Sort enrichment: N sort-map misses` diagnostic count on m37c-prime 50-doc replay | **0** |
 | **M_W65.2** Schema-API regression test: all existing relation-schema call sites pass | 100% PASS |
 | **M_W65.3** Sort label coverage: every output relation column has non-default sort label | 100% coverage cert |
-| **M_W65.4** DTS-DLM `xlog_executor.py:157` unchanged | grep verification: file unchanged |
+| **M_W65.4** DTS-DLM mutation boundary | Pre-amendment unchanged check preserved; post-amendment DTS fix SHA recorded |
 | **M_W65.5** RCA documented | `docs/evidence/2026-05-14-g39-w65-sort-label-rca.md` present |
 
 **Strategies.**
@@ -394,6 +413,9 @@ BG0 — DTS-DLM v3 ship with v0.6.5 xlog
   - (b) elide padding columns entirely if no downstream consumer
 - **S_W65.4** Run small subset (5 docs) to confirm M_W65.1 = 0.
 - **S_W65.5** Full m37c-prime 50-doc replay; confirm M_W65.1 = 0.
+- **S_W65.6** If RCA proves DTS-DLM source-generation is the remaining warning
+  source, apply only the authorized DTS support-source fix and record the branch
+  SHA, diff scope, and replay numbers in W65 evidence.
 
 **Acceptance.** All M_W65.* green.
 

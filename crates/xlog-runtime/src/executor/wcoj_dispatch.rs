@@ -626,11 +626,29 @@ fn build_triangle_head_schema(buf_xy: &CudaBuffer, buf_yz: &CudaBuffer) -> Resul
     let z_type = buf_yz.schema.column_type(1).ok_or_else(|| {
         xlog_core::XlogError::Kernel("build_triangle_head_schema: e_yz.col1 type missing".into())
     })?;
-    Ok(Schema::new(vec![
+    Schema::new(vec![
         ("col0".to_string(), x_type),
         ("col1".to_string(), y_type),
         ("col2".to_string(), z_type),
-    ]))
+    ])
+    .with_sort_labels(vec![
+        buf_xy
+            .schema
+            .column_sort_label(0)
+            .unwrap_or("col0")
+            .to_string(),
+        buf_xy
+            .schema
+            .column_sort_label(1)
+            .unwrap_or("col1")
+            .to_string(),
+        buf_yz
+            .schema
+            .column_sort_label(1)
+            .unwrap_or("col2")
+            .to_string(),
+    ])
+    .map_err(xlog_core::XlogError::Kernel)
 }
 
 /// W2.1: build the canonical 4-cycle head schema
@@ -659,12 +677,35 @@ fn build_4cycle_head_schema(
     // referenced in this scope (kept here for explicitness in case
     // a future change adds a width check).
     let _: ScalarType = w_type;
-    Ok(Schema::new(vec![
+    Schema::new(vec![
         ("col0".to_string(), w_type),
         ("col1".to_string(), x_type),
         ("col2".to_string(), y_type),
         ("col3".to_string(), z_type),
-    ]))
+    ])
+    .with_sort_labels(vec![
+        buf_e1
+            .schema
+            .column_sort_label(0)
+            .unwrap_or("col0")
+            .to_string(),
+        buf_e1
+            .schema
+            .column_sort_label(1)
+            .unwrap_or("col1")
+            .to_string(),
+        buf_e2
+            .schema
+            .column_sort_label(1)
+            .unwrap_or("col2")
+            .to_string(),
+        buf_e3
+            .schema
+            .column_sort_label(1)
+            .unwrap_or("col3")
+            .to_string(),
+    ])
+    .map_err(xlog_core::XlogError::Kernel)
 }
 
 impl Executor {
