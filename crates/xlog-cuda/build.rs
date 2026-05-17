@@ -82,6 +82,12 @@ fn write_embedded_kernel_data(out_dir: &Path) {
         .expect("write embedded kernel metadata");
 }
 
+fn push_wcoj_register_cap(args: &mut Vec<String>, name: &str) {
+    if name == "wcoj" {
+        args.push("--maxrregcount=64".to_string());
+    }
+}
+
 fn main() {
     let nvcc = find_nvcc();
 
@@ -121,19 +127,23 @@ fn main() {
         if !no_cubin {
             for arch in &cubin_archs {
                 let cubin_path = out_dir.join(format!("{name}.{arch}.cubin"));
+                let mut args = vec![
+                    "--cubin".to_string(),
+                    format!("-arch={arch}"),
+                    "-O3".to_string(),
+                    "-o".to_string(),
+                    cubin_path
+                        .to_str()
+                        .expect("cubin output path must be valid UTF-8")
+                        .to_string(),
+                    cu_path
+                        .to_str()
+                        .expect("kernel source path must be valid UTF-8")
+                        .to_string(),
+                ];
+                push_wcoj_register_cap(&mut args, name);
                 let status = Command::new(&nvcc)
-                    .args([
-                        "--cubin",
-                        &format!("-arch={arch}"),
-                        "-O3",
-                        "-o",
-                        cubin_path
-                            .to_str()
-                            .expect("cubin output path must be valid UTF-8"),
-                        cu_path
-                            .to_str()
-                            .expect("kernel source path must be valid UTF-8"),
-                    ])
+                    .args(&args)
                     .status()
                     .unwrap_or_else(|e| panic!("failed to run nvcc for {name}.{arch}.cubin: {e}"));
 
@@ -145,19 +155,23 @@ fn main() {
 
         // (b) Always generate portable PTX (sm_75 baseline — lowest arch in CUDA 13+).
         let ptx_path = out_dir.join(format!("{name}.portable.ptx"));
+        let mut args = vec![
+            "--ptx".to_string(),
+            "-arch=sm_75".to_string(),
+            "-O3".to_string(),
+            "-o".to_string(),
+            ptx_path
+                .to_str()
+                .expect("ptx output path must be valid UTF-8")
+                .to_string(),
+            cu_path
+                .to_str()
+                .expect("kernel source path must be valid UTF-8")
+                .to_string(),
+        ];
+        push_wcoj_register_cap(&mut args, name);
         let status = Command::new(&nvcc)
-            .args([
-                "--ptx",
-                "-arch=sm_75",
-                "-O3",
-                "-o",
-                ptx_path
-                    .to_str()
-                    .expect("ptx output path must be valid UTF-8"),
-                cu_path
-                    .to_str()
-                    .expect("kernel source path must be valid UTF-8"),
-            ])
+            .args(&args)
             .status()
             .unwrap_or_else(|e| panic!("failed to run nvcc for {name}.portable.ptx: {e}"));
 

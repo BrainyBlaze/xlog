@@ -107,6 +107,12 @@ pub struct Executor {
     /// W3.2 — count of times `try_dispatch_wcoj_clique6` produced
     /// a result and the executor installed it.
     pub(super) wcoj_clique6_dispatch_count: u64,
+    /// W6.4 — count of times `try_dispatch_wcoj_clique7` produced
+    /// a result and the executor installed it.
+    pub(super) wcoj_clique7_dispatch_count: u64,
+    /// W6.4 — count of times `try_dispatch_wcoj_clique8` produced
+    /// a result and the executor installed it.
+    pub(super) wcoj_clique8_dispatch_count: u64,
     /// Authorization 5 G_HIST_KC — number of recursive Merge-phase
     /// K-clique histogram refresh boundaries observed.
     pub(super) kclique_histogram_refresh_count: u64,
@@ -250,6 +256,8 @@ impl Executor {
             w63_chain_dispatch_count: 0,
             wcoj_clique5_dispatch_count: 0,
             wcoj_clique6_dispatch_count: 0,
+            wcoj_clique7_dispatch_count: 0,
+            wcoj_clique8_dispatch_count: 0,
             kclique_histogram_refresh_count: 0,
             kclique_histogram_refresh_nanos: 0,
             nested_loop_dispatch_count: 0,

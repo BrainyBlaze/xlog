@@ -168,19 +168,17 @@ pub fn promote_multiway(
                 rule.body = promoted;
                 continue;
             }
-            // W3.2 + Authorization 5 — k=5 / k=6 clique promotion. Tree-flatten +
+            // W3.2/W6.4 + Authorization 5 — k=5..k=8 clique promotion. Tree-flatten +
             // complete-K_k validation. Robust to left-deep /
             // right-deep / bushy. Order is doc anchor only;
-            // a body matching k=5 cannot also match k=6
+            // a body matching one K cannot also match another
             // (different scan count). Recursive clique bodies are
             // admitted so the runtime can rebuild leader-edge
             // metadata from the current semi-naive store state.
-            if let Some(promoted) = try_promote_clique_k(&rule.body, 5, stats) {
+            if let Some(promoted) = (5..=8).find_map(|k| try_promote_clique_k(&rule.body, k, stats))
+            {
                 rule.body = promoted;
                 continue;
-            }
-            if let Some(promoted) = try_promote_clique_k(&rule.body, 6, stats) {
-                rule.body = promoted;
             }
         }
     }
@@ -1057,7 +1055,7 @@ fn try_promote_4cycle(
 }
 
 // ===============================================================
-// W3.2 — K-clique promoter (k = 5, k = 6).
+// W3.2/W6.4 — K-clique promoter (k = 5..8).
 //
 // Tree-flatten + complete-K_k validation. Robust to left-deep /
 // right-deep / bushy lowered trees. Rejects:
@@ -1068,14 +1066,15 @@ fn try_promote_4cycle(
 //     i < j) — W3.2 does not implement column-swap layout for
 //     clique edges.
 //   * Constants in atom positions.
-//   * Recursive scan bodies (recursive_scan_count >= 1).
+//   * Recursive scan bodies are admitted for Auth-5 K-clique
+//     metadata refresh during semi-naive fixpoint.
 //   * Atom multisets that don't form the complete K_k edge set.
 // ===============================================================
 
 /// Canonical edge index for (i, j) with 0 <= i < j < k.
 fn clique_edge_idx(i: usize, j: usize, k: usize) -> usize {
     debug_assert!(i < j && j < k);
-    i * (k - 1) - i.saturating_sub(1) * i / 2 + (j - i - 1)
+    i * (2 * k - i - 1) / 2 + (j - i - 1)
 }
 
 /// Tiny union-find on atom-column slots (position space).
@@ -1171,14 +1170,15 @@ fn walk_clique_node(
     }
 }
 
-/// W3.2 K-clique promoter for k ∈ {5, 6}.
+/// W3.2/W6.4 K-clique promoter for k ∈ {5, 6, 7, 8}.
 ///
 /// Per the W3.2 plan iteration 4 lock: tree-flatten + complete-
 /// K_k validation. Robust to left-deep / right-deep / bushy.
 /// Rejects filter wrappers, reversed atoms, self-edges,
-/// constants, recursive bodies, and any non-canonical shape.
+/// constants, and any non-canonical shape; admits recursive
+/// bodies so runtime metadata refresh can observe each merge.
 fn try_promote_clique_k(body: &RirNode, k: usize, stats: &StatsManager) -> Option<RirNode> {
-    if !(k == 5 || k == 6) {
+    if !(5..=8).contains(&k) {
         return None;
     }
     let expected_edges = k * (k - 1) / 2;

@@ -1046,11 +1046,11 @@ impl CudaKernelProvider {
 }
 
 // ===============================================================
-// W3.2 — General-arity clique WCOJ (k = 5, k = 6) provider.
+// W3.2/W6.4 — General-arity clique WCOJ (k = 5..8) provider.
 //
-// Four thin public methods (k=5/k=6 × u32/u64) delegate to a
+// Thin public methods (k=5..8 × u32/u64) delegate to a
 // single generic helper `wcoj_clique_recorded_inner`. Width-class
-// (4-byte = U32+Symbol mixable, 8-byte = U64) and K (5 or 6)
+// (4-byte = U32+Symbol mixable, 8-byte = U64) and K
 // drive kernel-name selection and per-row element-size; otherwise
 // the orchestration is identical: validate → upload edge-pointer
 // arrays → count → scan → total → materialize → output.
@@ -1100,7 +1100,15 @@ fn clique_kernel_name(k: usize, materialize: bool, w: CliqueWidthClass) -> &'sta
         (6, true, CliqueWidthClass::FourByte) => wcoj_kernels::WCOJ_CLIQUE6_MATERIALIZE_HG_U32,
         (6, false, CliqueWidthClass::EightByte) => wcoj_kernels::WCOJ_CLIQUE6_COUNT_HG_U64,
         (6, true, CliqueWidthClass::EightByte) => wcoj_kernels::WCOJ_CLIQUE6_MATERIALIZE_HG_U64,
-        _ => panic!("clique_kernel_name: K must be 5 or 6, got {}", k),
+        (7, false, CliqueWidthClass::FourByte) => wcoj_kernels::WCOJ_CLIQUE7_COUNT_HG_U32,
+        (7, true, CliqueWidthClass::FourByte) => wcoj_kernels::WCOJ_CLIQUE7_MATERIALIZE_HG_U32,
+        (7, false, CliqueWidthClass::EightByte) => wcoj_kernels::WCOJ_CLIQUE7_COUNT_HG_U64,
+        (7, true, CliqueWidthClass::EightByte) => wcoj_kernels::WCOJ_CLIQUE7_MATERIALIZE_HG_U64,
+        (8, false, CliqueWidthClass::FourByte) => wcoj_kernels::WCOJ_CLIQUE8_COUNT_HG_U32,
+        (8, true, CliqueWidthClass::FourByte) => wcoj_kernels::WCOJ_CLIQUE8_MATERIALIZE_HG_U32,
+        (8, false, CliqueWidthClass::EightByte) => wcoj_kernels::WCOJ_CLIQUE8_COUNT_HG_U64,
+        (8, true, CliqueWidthClass::EightByte) => wcoj_kernels::WCOJ_CLIQUE8_MATERIALIZE_HG_U64,
+        _ => panic!("clique_kernel_name: K must be 5..8, got {}", k),
     }
 }
 
@@ -1295,8 +1303,8 @@ impl CudaKernelProvider {
     ///
     /// Caller pre-conditions:
     ///   * Manager runtime-backed (validated here too).
-    ///   * `K ∈ {5, 6}` (validated; panic-free `Err` otherwise).
-    ///   * `edges.len() == K * (K - 1) / 2` (10 for k=5, 15 for k=6).
+    ///   * `K ∈ {5, 6, 7, 8}` (validated; panic-free `Err` otherwise).
+    ///   * `edges.len() == K * (K - 1) / 2`.
     ///   * Each edge is 2-column with all columns in `width_class`.
     ///   * Each edge is lex-sorted+deduped on `(col0, col1)` —
     ///     same contract as `wcoj_triangle_*_recorded`. The
@@ -1329,9 +1337,9 @@ impl CudaKernelProvider {
                     entry_label, launch_stream.0
                 ))
             })?;
-        if !(k == 5 || k == 6) {
+        if !(5..=8).contains(&k) {
             return Err(XlogError::Kernel(format!(
-                "{}: k must be 5 or 6, got {}",
+                "{}: k must be 5..8, got {}",
                 entry_label, k
             )));
         }
@@ -2071,6 +2079,78 @@ impl CudaKernelProvider {
             CliqueWidthClass::EightByte,
             launch_stream,
             "wcoj_clique6_u64_recorded_planned",
+        )
+    }
+
+    /// W6.4 — 7-clique WCOJ at 4-byte width-class.
+    pub fn wcoj_clique7_u32_recorded(
+        &self,
+        edges: &[&CudaBuffer; 21],
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        self.wcoj_clique_recorded_inner(
+            7,
+            edges,
+            0,
+            None,
+            None,
+            CliqueWidthClass::FourByte,
+            launch_stream,
+            "wcoj_clique7_u32_recorded",
+        )
+    }
+
+    /// W6.4 — 7-clique WCOJ at 8-byte width-class (U64 only).
+    pub fn wcoj_clique7_u64_recorded(
+        &self,
+        edges: &[&CudaBuffer; 21],
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        self.wcoj_clique_recorded_inner(
+            7,
+            edges,
+            0,
+            None,
+            None,
+            CliqueWidthClass::EightByte,
+            launch_stream,
+            "wcoj_clique7_u64_recorded",
+        )
+    }
+
+    /// W6.4 — 8-clique WCOJ at 4-byte width-class.
+    pub fn wcoj_clique8_u32_recorded(
+        &self,
+        edges: &[&CudaBuffer; 28],
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        self.wcoj_clique_recorded_inner(
+            8,
+            edges,
+            0,
+            None,
+            None,
+            CliqueWidthClass::FourByte,
+            launch_stream,
+            "wcoj_clique8_u32_recorded",
+        )
+    }
+
+    /// W6.4 — 8-clique WCOJ at 8-byte width-class (U64 only).
+    pub fn wcoj_clique8_u64_recorded(
+        &self,
+        edges: &[&CudaBuffer; 28],
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        self.wcoj_clique_recorded_inner(
+            8,
+            edges,
+            0,
+            None,
+            None,
+            CliqueWidthClass::EightByte,
+            launch_stream,
+            "wcoj_clique8_u64_recorded",
         )
     }
 }

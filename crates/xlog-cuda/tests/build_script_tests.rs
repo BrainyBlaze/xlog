@@ -77,3 +77,19 @@ fn test_build_script_generates_embedded_portable_ptx_fallback() {
         "embedded kernel metadata should be included from Cargo OUT_DIR"
     );
 }
+
+#[test]
+fn test_build_script_caps_wcoj_register_count() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    let build_rs = manifest_dir.join("build.rs");
+    let build_contents = fs::read_to_string(&build_rs).expect("read build.rs");
+    assert!(
+        build_contents.contains("--maxrregcount=64"),
+        "build.rs should cap WCOJ ptxas register allocation for G_W64 M_W64.6"
+    );
+    assert!(
+        build_contents.contains("name == \"wcoj\""),
+        "the register cap should be scoped to the WCOJ kernel module"
+    );
+}

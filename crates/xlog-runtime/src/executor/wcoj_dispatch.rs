@@ -1863,7 +1863,7 @@ impl Executor {
 }
 
 // ===============================================================
-// W3.2 — K-clique dispatch (k = 5, k = 6).
+// W3.2/W6.4 — K-clique dispatch (k = 5..8).
 //
 // Default-dispatch on shape match. No force / kill / adaptive
 // knobs (those are out of scope for W3.2 per the locked plan).
@@ -1888,6 +1888,20 @@ impl Executor {
     /// `wcoj_clique5_dispatch_count`.
     pub fn wcoj_clique6_dispatch_count(&self) -> u64 {
         self.wcoj_clique6_dispatch_count
+    }
+
+    /// W6.4 — Number of times the WCOJ k=7-clique hook produced
+    /// a result. Same observability contract as
+    /// `wcoj_clique5_dispatch_count`.
+    pub fn wcoj_clique7_dispatch_count(&self) -> u64 {
+        self.wcoj_clique7_dispatch_count
+    }
+
+    /// W6.4 — Number of times the WCOJ k=8-clique hook produced
+    /// a result. Same observability contract as
+    /// `wcoj_clique5_dispatch_count`.
+    pub fn wcoj_clique8_dispatch_count(&self) -> u64 {
+        self.wcoj_clique8_dispatch_count
     }
 
     /// Authorization 5 G_HIST_KC — number of recursive Merge
@@ -1919,6 +1933,22 @@ impl Executor {
         self.try_dispatch_wcoj_clique6_on_body(&rule.body)
     }
 
+    /// W6.4 — Try k=7-clique dispatch.
+    pub(super) fn try_dispatch_wcoj_clique7(
+        &mut self,
+        rule: &CompiledRule,
+    ) -> Result<Option<CudaBuffer>> {
+        self.try_dispatch_wcoj_clique7_on_body(&rule.body)
+    }
+
+    /// W6.4 — Try k=8-clique dispatch.
+    pub(super) fn try_dispatch_wcoj_clique8(
+        &mut self,
+        rule: &CompiledRule,
+    ) -> Result<Option<CudaBuffer>> {
+        self.try_dispatch_wcoj_clique8_on_body(&rule.body)
+    }
+
     /// W3.2 — Body-keyed k=5-clique dispatch.
     pub(super) fn try_dispatch_wcoj_clique5_on_body(
         &mut self,
@@ -1935,7 +1965,23 @@ impl Executor {
         self.try_dispatch_wcoj_clique_k_on_body(body, 6)
     }
 
-    /// W3.2 — Generic K-clique dispatch shared by k=5 and k=6
+    /// W6.4 — Body-keyed k=7-clique dispatch.
+    pub(super) fn try_dispatch_wcoj_clique7_on_body(
+        &mut self,
+        body: &RirNode,
+    ) -> Result<Option<CudaBuffer>> {
+        self.try_dispatch_wcoj_clique_k_on_body(body, 7)
+    }
+
+    /// W6.4 — Body-keyed k=8-clique dispatch.
+    pub(super) fn try_dispatch_wcoj_clique8_on_body(
+        &mut self,
+        body: &RirNode,
+    ) -> Result<Option<CudaBuffer>> {
+        self.try_dispatch_wcoj_clique_k_on_body(body, 8)
+    }
+
+    /// W3.2/W6.4 — Generic K-clique dispatch shared by k=5..8
     /// entries. Returns `Ok(Some(buffer))` on dispatch;
     /// `Ok(None)` on decline / fallback.
     fn try_dispatch_wcoj_clique_k_on_body(
@@ -2109,6 +2155,34 @@ impl Executor {
                     launch_stream,
                 )
             }
+            (7, false) => {
+                let arr: &[&CudaBuffer; 21] = match edge_refs.as_slice().try_into() {
+                    Ok(a) => a,
+                    Err(_) => return Ok(None),
+                };
+                self.provider.wcoj_clique7_u32_recorded(arr, launch_stream)
+            }
+            (7, true) => {
+                let arr: &[&CudaBuffer; 21] = match edge_refs.as_slice().try_into() {
+                    Ok(a) => a,
+                    Err(_) => return Ok(None),
+                };
+                self.provider.wcoj_clique7_u64_recorded(arr, launch_stream)
+            }
+            (8, false) => {
+                let arr: &[&CudaBuffer; 28] = match edge_refs.as_slice().try_into() {
+                    Ok(a) => a,
+                    Err(_) => return Ok(None),
+                };
+                self.provider.wcoj_clique8_u32_recorded(arr, launch_stream)
+            }
+            (8, true) => {
+                let arr: &[&CudaBuffer; 28] = match edge_refs.as_slice().try_into() {
+                    Ok(a) => a,
+                    Err(_) => return Ok(None),
+                };
+                self.provider.wcoj_clique8_u64_recorded(arr, launch_stream)
+            }
             _ => return Ok(None),
         };
         // 9. On success: counter++, return Some. On error:
@@ -2125,10 +2199,12 @@ impl Executor {
                         launch_stream,
                     )?
                 };
-                if k == 5 {
-                    self.wcoj_clique5_dispatch_count += 1;
-                } else {
-                    self.wcoj_clique6_dispatch_count += 1;
+                match k {
+                    5 => self.wcoj_clique5_dispatch_count += 1,
+                    6 => self.wcoj_clique6_dispatch_count += 1,
+                    7 => self.wcoj_clique7_dispatch_count += 1,
+                    8 => self.wcoj_clique8_dispatch_count += 1,
+                    _ => {}
                 }
                 Ok(Some(buf))
             }

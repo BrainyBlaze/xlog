@@ -5,11 +5,12 @@
 //! sequential-join with explicit shared-variable keys) and
 //! verifies the promoter's positive + negative shape contracts.
 //!
-//! Positive (6): left-deep / right-deep / bushy × k=5 / k=6.
+//! Positive (8): left-deep / right-deep / bushy × k=5 / k=6,
+//! plus K=7/K=8 Phase-2 acceptance sentinels.
 //! Negative (8): missing-edge, self-edge, cycle-5, disconnected,
 //! constant-in-atom, reversed-atom, filter-wrapped,
 //! linear-recursive.
-//! k=7 sentinel: shape-rejected.
+//! k=9 sentinel: shape-rejected.
 
 use std::collections::HashMap;
 use xlog_core::RelId;
@@ -149,6 +150,14 @@ fn k5_rels() -> Vec<RelId> {
 
 fn k6_rels() -> Vec<RelId> {
     (1..=15u32).map(RelId).collect()
+}
+
+fn k7_rels() -> Vec<RelId> {
+    (1..=21u32).map(RelId).collect()
+}
+
+fn k8_rels() -> Vec<RelId> {
+    (1..=28u32).map(RelId).collect()
 }
 
 // ============================================================
@@ -529,17 +538,33 @@ fn linear_recursive_clique5_promotes_for_histogram_refresh() {
 }
 
 // ============================================================
-// k=7 unsupported sentinel
+// Phase-2 K=7/K=8 positive cells + K=9 rejection sentinel
 // ============================================================
 
 #[test]
-fn clique7_does_not_promote() {
-    // K_7 has C(7, 2) = 21 atoms. W3.2 promoter only supports
-    // k ∈ {5, 6}; 21-atom body falls through.
-    let rels: Vec<RelId> = (1..=21u32).map(RelId).collect();
-    let body = build_left_deep_clique(7, &rels);
+fn clique7_left_deep_promotes() {
+    let body = build_left_deep_clique(7, &k7_rels());
+    let promoted = promote_and_check(body).expect("k=7 left-deep must promote");
+    if let RirNode::MultiWayJoin { inputs, .. } = promoted {
+        assert_eq!(inputs.len(), 21);
+    }
+}
+
+#[test]
+fn clique8_left_deep_promotes() {
+    let body = build_left_deep_clique(8, &k8_rels());
+    let promoted = promote_and_check(body).expect("k=8 left-deep must promote");
+    if let RirNode::MultiWayJoin { inputs, .. } = promoted {
+        assert_eq!(inputs.len(), 28);
+    }
+}
+
+#[test]
+fn clique9_does_not_promote() {
+    let rels: Vec<RelId> = (1..=36u32).map(RelId).collect();
+    let body = build_left_deep_clique(9, &rels);
     assert!(
         promote_and_check(body).is_none(),
-        "k=7 clique body must NOT promote (W3.2 only handles k ∈ {{5, 6}})"
+        "k=9 clique body must NOT promote (G_W64 only handles k <= 8)"
     );
 }
