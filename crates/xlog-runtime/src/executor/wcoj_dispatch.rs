@@ -1707,6 +1707,18 @@ impl Executor {
         self.wcoj_clique6_dispatch_count
     }
 
+    /// Authorization 5 G_HIST_KC — number of recursive Merge
+    /// boundaries where K-clique metadata was marked for refresh.
+    pub fn kclique_histogram_refresh_count(&self) -> u64 {
+        self.kclique_histogram_refresh_count
+    }
+
+    /// Authorization 5 G_HIST_KC — cumulative refresh accounting
+    /// time in nanoseconds.
+    pub fn kclique_histogram_refresh_nanos(&self) -> u128 {
+        self.kclique_histogram_refresh_nanos
+    }
+
     /// W3.2 — Try k=5-clique dispatch. Wrapper for rule-keyed
     /// callers (recursive engine + non-recursive scc).
     pub(super) fn try_dispatch_wcoj_clique5(

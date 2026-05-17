@@ -69,14 +69,13 @@
 //! ## Out of scope
 //!
 //! * Cost model, selectivity reordering, variable-ordering choices.
-//! * Recursive-clique promotion — W3.2 excluded recursive cliques;
-//!   the clique gate at `recursive_scan_count == 0` is unchanged.
+//! * Stream-aligned multiplexing and adaptive histogram resolution
+//!   for recursive cliques.
 //! * 4-way / general-arity admission beyond triangle / 4-cycle —
 //!   slice 5.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use xlog_core::RelId;
-use xlog_ir::plan::Scc;
 use xlog_ir::rir::{
     ColumnSwap, CostPredictionRecord as RirCostPredictionRecord, HelperSplitSpec,
     KCliqueVariableOrder, MultiwayPlan, PlannedHashReason, ProjectExpr, SortedLayoutSpec,
@@ -114,19 +113,14 @@ use crate::wcoj_var_ordering::{wcoj_cost_gate_predicts_wcoj, WcojVariableOrderin
 /// W4.1 `rewrite_scan_nth` occurrence-identity fix.
 pub fn promote_multiway(
     plan: &mut ExecutionPlan,
-    rel_ids: &HashMap<String, RelId>,
+    _rel_ids: &HashMap<String, RelId>,
     stats: &StatsManager,
     config: &CompilerConfig,
 ) {
-    // Snapshot SCCs by index so we can pass &Scc into helpers
-    // while holding `&mut plan.rules_by_scc`.
-    let sccs_snapshot: Vec<Scc> = plan.sccs.clone();
     for (scc_id, rules) in plan.rules_by_scc.iter_mut().enumerate() {
-        let head_scc = match sccs_snapshot.get(scc_id) {
-            Some(scc) => scc,
-            None => continue,
-        };
-        let head_rel_set = build_head_rel_set(head_scc, rel_ids);
+        if plan.sccs.get(scc_id).is_none() {
+            continue;
+        }
         for rule in rules.iter_mut() {
             // W4.1 gate: the slice-4 `recursive_scan_count > 1`
             // cutoff is removed (paper P1 — admit occurrence-level
@@ -162,76 +156,21 @@ pub fn promote_multiway(
                 rule.body = promoted;
                 continue;
             }
-            // W3.2 — k=5 / k=6 clique promotion. Tree-flatten +
+            // W3.2 + Authorization 5 — k=5 / k=6 clique promotion. Tree-flatten +
             // complete-K_k validation. Robust to left-deep /
             // right-deep / bushy. Order is doc anchor only;
             // a body matching k=5 cannot also match k=6
-            // (different scan count). Recursive clique bodies
-            // (any scan in the head SCC) are rejected — W3.2
-            // does not extend the recursive WCOJ helper for
-            // clique-keyed dispatch. Rejected in W3.2 — no
-            // closure credit.
-            if recursive_scan_count(&rule.body, &head_rel_set) == 0 {
-                if let Some(promoted) = try_promote_clique_k(&rule.body, 5, stats) {
-                    rule.body = promoted;
-                    continue;
-                }
-                if let Some(promoted) = try_promote_clique_k(&rule.body, 6, stats) {
-                    rule.body = promoted;
-                }
+            // (different scan count). Recursive clique bodies are
+            // admitted so the runtime can rebuild leader-edge
+            // metadata from the current semi-naive store state.
+            if let Some(promoted) = try_promote_clique_k(&rule.body, 5, stats) {
+                rule.body = promoted;
+                continue;
+            }
+            if let Some(promoted) = try_promote_clique_k(&rule.body, 6, stats) {
+                rule.body = promoted;
             }
         }
-    }
-}
-
-/// Resolve the head SCC's predicates to the set of RelIds that
-/// would count as "recursive" Scans inside its rule bodies. Returns
-/// an empty set when the SCC's predicates aren't in `rel_ids` (e.g.
-/// in synthetic test plans without a real lowerer); empty set means
-/// every Scan resolves to non-recursive, which is the correct
-/// default for slice 1–3 byte-preservation.
-fn build_head_rel_set(scc: &Scc, rel_ids: &HashMap<String, RelId>) -> HashSet<RelId> {
-    scc.predicates
-        .iter()
-        .filter_map(|p| rel_ids.get(p).copied())
-        .collect()
-}
-
-/// Count Scans in `body` whose RelId is in `head_rel_set`. Walks
-/// every RIR variant including `MultiWayJoin` inputs and fallback;
-/// idempotent on already-promoted bodies.
-fn recursive_scan_count(body: &RirNode, head_rel_set: &HashSet<RelId>) -> usize {
-    match body {
-        RirNode::Unit => 0,
-        RirNode::Scan { rel } => usize::from(head_rel_set.contains(rel)),
-        RirNode::Filter { input, .. }
-        | RirNode::Project { input, .. }
-        | RirNode::GroupBy { input, .. }
-        | RirNode::Distinct { input, .. } => recursive_scan_count(input, head_rel_set),
-        RirNode::Join { left, right, .. } | RirNode::Diff { left, right } => {
-            recursive_scan_count(left, head_rel_set) + recursive_scan_count(right, head_rel_set)
-        }
-        RirNode::Union { inputs } => inputs
-            .iter()
-            .map(|n| recursive_scan_count(n, head_rel_set))
-            .sum(),
-        RirNode::Fixpoint {
-            base, recursive, ..
-        } => {
-            recursive_scan_count(base, head_rel_set) + recursive_scan_count(recursive, head_rel_set)
-        }
-        RirNode::TensorMaskedJoin { rel_index, .. } => rel_index
-            .iter()
-            .filter(|(rid, _)| head_rel_set.contains(rid))
-            .count(),
-        // For an already-promoted body, count from `inputs` —
-        // matches the `collect_scan_rels` invariant. The fallback
-        // subtree references the same RelId set by promoter
-        // construction, so counting both would double-count.
-        RirNode::MultiWayJoin { inputs, .. } => inputs
-            .iter()
-            .map(|n| recursive_scan_count(n, head_rel_set))
-            .sum(),
     }
 }
 

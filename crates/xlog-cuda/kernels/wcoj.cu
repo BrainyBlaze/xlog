@@ -1774,6 +1774,40 @@ __device__ __forceinline__ uint32_t wcoj_clique_template_emit_t(
     return emitted;
 }
 
+// Paper §5 Algorithm 1 Phase 1: Histograms maintained alongside data; refreshed during Merge per Authorization 5 (2026-05-17)
+template <typename T>
+__device__ __forceinline__ uint32_t wcoj_clique_metadata_leader_work_total(
+    const T* unique_keys,
+    const uint32_t* fan_out,
+    const uint32_t* prefix_sum,
+    uint32_t total) {
+    (void)unique_keys;
+    if (total == 0u || fan_out == nullptr || prefix_sum == nullptr) {
+        return 0u;
+    }
+    uint32_t last = total - 1u;
+    return prefix_sum[last] + fan_out[last];
+}
+
+__device__ __forceinline__ uint32_t wcoj_clique_metadata_leader_idx(
+    const uint32_t* fan_out,
+    const uint32_t* prefix_sum,
+    uint32_t total,
+    uint32_t work_idx) {
+    if (total == 0u || fan_out == nullptr || prefix_sum == nullptr) {
+        return work_idx;
+    }
+    uint32_t upper = upper_bound_u32(prefix_sum, total, work_idx);
+    uint32_t key_idx = (upper == 0u) ? 0u : upper - 1u;
+    uint32_t group_start = prefix_sum[key_idx];
+    uint32_t group_degree = fan_out[key_idx];
+    uint32_t in_group = work_idx - group_start;
+    if (in_group >= group_degree) {
+        return work_idx;
+    }
+    return group_start + in_group;
+}
+
 // ---------------------------------------------------------------
 // Grid-level templates — absorb thread-idx + bound checks so the
 // `extern "C"` ABI wrappers below are single-statement
@@ -1791,11 +1825,20 @@ __device__ __forceinline__ void wcoj_clique_template_count_hg_grid_t(
     const uint8_t* edge_order,
     const uint8_t* iteration_order,
     uint32_t leader_count,
+    const T* unique_keys,
+    const uint32_t* fan_out,
+    const uint32_t* prefix_sum,
+    uint32_t total,
     uint32_t block_work_unit,
     uint32_t* out_block_counts,
     uint32_t* out_thread_counts) {
+    uint32_t leader_work_total = wcoj_clique_metadata_leader_work_total<T>(
+        unique_keys, fan_out, prefix_sum, total);
+    if (leader_work_total == 0u || leader_work_total > leader_count) {
+        leader_work_total = leader_count;
+    }
     uint32_t block_start = blockIdx.x * block_work_unit;
-    if (block_start >= leader_count) {
+    if (block_start >= leader_work_total) {
         out_thread_counts[blockIdx.x * blockDim.x + threadIdx.x] = 0;
         if (threadIdx.x == 0) {
             out_block_counts[blockIdx.x] = 0;
@@ -1803,14 +1846,15 @@ __device__ __forceinline__ void wcoj_clique_template_count_hg_grid_t(
         return;
     }
     uint32_t block_end = block_start + block_work_unit;
-    if (block_end < block_start || block_end > leader_count) {
-        block_end = leader_count;
+    if (block_end < block_start || block_end > leader_work_total) {
+        block_end = leader_work_total;
     }
 
     uint32_t local_count = 0;
-    for (uint32_t i = block_start + threadIdx.x;
-         i < block_end;
-         i += blockDim.x) {
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t i = wcoj_clique_metadata_leader_idx(fan_out, prefix_sum, total, work_idx);
         local_count += wcoj_clique_template_count_t<K_VAL, T>(
             edge_col0, edge_col1, edge_n, leader_edge_idx, edge_order, iteration_order, i);
     }
@@ -1839,18 +1883,27 @@ __device__ __forceinline__ void wcoj_clique_template_materialize_hg_grid_t(
     const uint8_t* edge_order,
     const uint8_t* iteration_order,
     uint32_t leader_count,
+    const T* unique_keys,
+    const uint32_t* fan_out,
+    const uint32_t* prefix_sum,
+    uint32_t total,
     uint32_t block_work_unit,
     const uint32_t* __restrict__ thread_counts,
     const uint32_t* __restrict__ block_offsets,
     uint32_t total_rows,
     T* const* out_cols) {
+    uint32_t leader_work_total = wcoj_clique_metadata_leader_work_total<T>(
+        unique_keys, fan_out, prefix_sum, total);
+    if (leader_work_total == 0u || leader_work_total > leader_count) {
+        leader_work_total = leader_count;
+    }
     uint32_t block_start = blockIdx.x * block_work_unit;
-    if (block_start >= leader_count) {
+    if (block_start >= leader_work_total) {
         return;
     }
     uint32_t block_end = block_start + block_work_unit;
-    if (block_end < block_start || block_end > leader_count) {
-        block_end = leader_count;
+    if (block_end < block_start || block_end > leader_work_total) {
+        block_end = leader_work_total;
     }
 
     uint32_t local_count = thread_counts[blockIdx.x * blockDim.x + threadIdx.x];
@@ -1874,9 +1927,10 @@ __device__ __forceinline__ void wcoj_clique_template_materialize_hg_grid_t(
     }
 
     uint32_t local_emit = 0;
-    for (uint32_t i = block_start + threadIdx.x;
-         i < block_end;
-         i += blockDim.x) {
+    for (uint32_t work_idx = block_start + threadIdx.x;
+         work_idx < block_end;
+         work_idx += blockDim.x) {
+        uint32_t i = wcoj_clique_metadata_leader_idx(fan_out, prefix_sum, total, work_idx);
         uint32_t emitted = wcoj_clique_template_emit_t<K_VAL, T>(
             edge_col0, edge_col1, edge_n, leader_edge_idx, edge_order, iteration_order, i, out_cols, thread_base + local_emit);
         local_emit += emitted;
@@ -1905,10 +1959,14 @@ extern "C" __global__ void wcoj_clique5_count_hg_u32(
     const uint8_t* edge_order,
     const uint8_t* iteration_order,
     uint32_t leader_count,
+    const uint32_t* unique_keys,
+    const uint32_t* fan_out,
+    const uint32_t* prefix_sum,
+    uint32_t total,
     uint32_t block_work_unit,
     uint32_t* out_block_counts,
     uint32_t* out_thread_counts) {
-    wcoj_clique_template_count_hg_grid_t<5, uint32_t>(edge_col0, edge_col1, edge_n, leader_edge_idx, edge_order, iteration_order, leader_count, block_work_unit, out_block_counts, out_thread_counts);
+    wcoj_clique_template_count_hg_grid_t<5, uint32_t>(edge_col0, edge_col1, edge_n, leader_edge_idx, edge_order, iteration_order, leader_count, unique_keys, fan_out, prefix_sum, total, block_work_unit, out_block_counts, out_thread_counts);
 }
 
 extern "C" __global__ void wcoj_clique5_materialize_hg_u32(
@@ -1919,12 +1977,16 @@ extern "C" __global__ void wcoj_clique5_materialize_hg_u32(
     const uint8_t* edge_order,
     const uint8_t* iteration_order,
     uint32_t leader_count,
+    const uint32_t* unique_keys,
+    const uint32_t* fan_out,
+    const uint32_t* prefix_sum,
+    uint32_t total,
     uint32_t block_work_unit,
     const uint32_t* __restrict__ thread_counts,
     const uint32_t* __restrict__ block_offsets,
     uint32_t total_rows,
     uint32_t* const* out_cols) {
-    wcoj_clique_template_materialize_hg_grid_t<5, uint32_t>(edge_col0, edge_col1, edge_n, leader_edge_idx, edge_order, iteration_order, leader_count, block_work_unit, thread_counts, block_offsets, total_rows, out_cols);
+    wcoj_clique_template_materialize_hg_grid_t<5, uint32_t>(edge_col0, edge_col1, edge_n, leader_edge_idx, edge_order, iteration_order, leader_count, unique_keys, fan_out, prefix_sum, total, block_work_unit, thread_counts, block_offsets, total_rows, out_cols);
 }
 
 extern "C" __global__ void wcoj_clique5_count_hg_u64(
@@ -1935,10 +1997,14 @@ extern "C" __global__ void wcoj_clique5_count_hg_u64(
     const uint8_t* edge_order,
     const uint8_t* iteration_order,
     uint32_t leader_count,
+    const uint64_t* unique_keys,
+    const uint32_t* fan_out,
+    const uint32_t* prefix_sum,
+    uint32_t total,
     uint32_t block_work_unit,
     uint32_t* out_block_counts,
     uint32_t* out_thread_counts) {
-    wcoj_clique_template_count_hg_grid_t<5, uint64_t>(edge_col0, edge_col1, edge_n, leader_edge_idx, edge_order, iteration_order, leader_count, block_work_unit, out_block_counts, out_thread_counts);
+    wcoj_clique_template_count_hg_grid_t<5, uint64_t>(edge_col0, edge_col1, edge_n, leader_edge_idx, edge_order, iteration_order, leader_count, unique_keys, fan_out, prefix_sum, total, block_work_unit, out_block_counts, out_thread_counts);
 }
 
 extern "C" __global__ void wcoj_clique5_materialize_hg_u64(
@@ -1949,12 +2015,16 @@ extern "C" __global__ void wcoj_clique5_materialize_hg_u64(
     const uint8_t* edge_order,
     const uint8_t* iteration_order,
     uint32_t leader_count,
+    const uint64_t* unique_keys,
+    const uint32_t* fan_out,
+    const uint32_t* prefix_sum,
+    uint32_t total,
     uint32_t block_work_unit,
     const uint32_t* __restrict__ thread_counts,
     const uint32_t* __restrict__ block_offsets,
     uint32_t total_rows,
     uint64_t* const* out_cols) {
-    wcoj_clique_template_materialize_hg_grid_t<5, uint64_t>(edge_col0, edge_col1, edge_n, leader_edge_idx, edge_order, iteration_order, leader_count, block_work_unit, thread_counts, block_offsets, total_rows, out_cols);
+    wcoj_clique_template_materialize_hg_grid_t<5, uint64_t>(edge_col0, edge_col1, edge_n, leader_edge_idx, edge_order, iteration_order, leader_count, unique_keys, fan_out, prefix_sum, total, block_work_unit, thread_counts, block_offsets, total_rows, out_cols);
 }
 
 extern "C" __global__ void wcoj_clique6_count_hg_u32(
@@ -1965,10 +2035,14 @@ extern "C" __global__ void wcoj_clique6_count_hg_u32(
     const uint8_t* edge_order,
     const uint8_t* iteration_order,
     uint32_t leader_count,
+    const uint32_t* unique_keys,
+    const uint32_t* fan_out,
+    const uint32_t* prefix_sum,
+    uint32_t total,
     uint32_t block_work_unit,
     uint32_t* out_block_counts,
     uint32_t* out_thread_counts) {
-    wcoj_clique_template_count_hg_grid_t<6, uint32_t>(edge_col0, edge_col1, edge_n, leader_edge_idx, edge_order, iteration_order, leader_count, block_work_unit, out_block_counts, out_thread_counts);
+    wcoj_clique_template_count_hg_grid_t<6, uint32_t>(edge_col0, edge_col1, edge_n, leader_edge_idx, edge_order, iteration_order, leader_count, unique_keys, fan_out, prefix_sum, total, block_work_unit, out_block_counts, out_thread_counts);
 }
 
 extern "C" __global__ void wcoj_clique6_materialize_hg_u32(
@@ -1979,12 +2053,16 @@ extern "C" __global__ void wcoj_clique6_materialize_hg_u32(
     const uint8_t* edge_order,
     const uint8_t* iteration_order,
     uint32_t leader_count,
+    const uint32_t* unique_keys,
+    const uint32_t* fan_out,
+    const uint32_t* prefix_sum,
+    uint32_t total,
     uint32_t block_work_unit,
     const uint32_t* __restrict__ thread_counts,
     const uint32_t* __restrict__ block_offsets,
     uint32_t total_rows,
     uint32_t* const* out_cols) {
-    wcoj_clique_template_materialize_hg_grid_t<6, uint32_t>(edge_col0, edge_col1, edge_n, leader_edge_idx, edge_order, iteration_order, leader_count, block_work_unit, thread_counts, block_offsets, total_rows, out_cols);
+    wcoj_clique_template_materialize_hg_grid_t<6, uint32_t>(edge_col0, edge_col1, edge_n, leader_edge_idx, edge_order, iteration_order, leader_count, unique_keys, fan_out, prefix_sum, total, block_work_unit, thread_counts, block_offsets, total_rows, out_cols);
 }
 
 extern "C" __global__ void wcoj_clique6_count_hg_u64(
@@ -1995,10 +2073,14 @@ extern "C" __global__ void wcoj_clique6_count_hg_u64(
     const uint8_t* edge_order,
     const uint8_t* iteration_order,
     uint32_t leader_count,
+    const uint64_t* unique_keys,
+    const uint32_t* fan_out,
+    const uint32_t* prefix_sum,
+    uint32_t total,
     uint32_t block_work_unit,
     uint32_t* out_block_counts,
     uint32_t* out_thread_counts) {
-    wcoj_clique_template_count_hg_grid_t<6, uint64_t>(edge_col0, edge_col1, edge_n, leader_edge_idx, edge_order, iteration_order, leader_count, block_work_unit, out_block_counts, out_thread_counts);
+    wcoj_clique_template_count_hg_grid_t<6, uint64_t>(edge_col0, edge_col1, edge_n, leader_edge_idx, edge_order, iteration_order, leader_count, unique_keys, fan_out, prefix_sum, total, block_work_unit, out_block_counts, out_thread_counts);
 }
 
 extern "C" __global__ void wcoj_clique6_materialize_hg_u64(
@@ -2009,10 +2091,14 @@ extern "C" __global__ void wcoj_clique6_materialize_hg_u64(
     const uint8_t* edge_order,
     const uint8_t* iteration_order,
     uint32_t leader_count,
+    const uint64_t* unique_keys,
+    const uint32_t* fan_out,
+    const uint32_t* prefix_sum,
+    uint32_t total,
     uint32_t block_work_unit,
     const uint32_t* __restrict__ thread_counts,
     const uint32_t* __restrict__ block_offsets,
     uint32_t total_rows,
     uint64_t* const* out_cols) {
-    wcoj_clique_template_materialize_hg_grid_t<6, uint64_t>(edge_col0, edge_col1, edge_n, leader_edge_idx, edge_order, iteration_order, leader_count, block_work_unit, thread_counts, block_offsets, total_rows, out_cols);
+    wcoj_clique_template_materialize_hg_grid_t<6, uint64_t>(edge_col0, edge_col1, edge_n, leader_edge_idx, edge_order, iteration_order, leader_count, unique_keys, fan_out, prefix_sum, total, block_work_unit, thread_counts, block_offsets, total_rows, out_cols);
 }

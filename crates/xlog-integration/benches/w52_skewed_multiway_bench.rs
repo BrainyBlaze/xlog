@@ -345,6 +345,20 @@ fn gpu_wcoj_clique5_path(prov: &Provider, inputs: &[CudaBuffer; 10]) -> CudaBuff
     out
 }
 
+fn report_kclique_metadata_cost(prov: &Provider, workload: &str, n: u32, wall: Duration) {
+    let metadata_build_count = prov.provider.kclique_metadata_build_count();
+    let metadata_build_nanos = prov.provider.kclique_metadata_build_nanos();
+    let wall_nanos = wall.as_nanos().max(1);
+    let ratio = metadata_build_nanos as f64 / wall_nanos as f64;
+    eprintln!(
+        "  [hist-kc] workload={workload} N={n:>4} metadata_build_count={metadata_build_count} metadata_build_nanos={metadata_build_nanos} wall_nanos={wall_nanos} metadata_ratio={ratio:.6}"
+    );
+    assert!(
+        ratio <= 0.05,
+        "G_HIST_KC M_HIST_KC.7 metadata build cost must stay <= 5% of W52 K-clique wall-time; workload={workload} N={n} ratio={ratio:.6}"
+    );
+}
+
 fn hash_clique5_chain_path(prov: &Provider, inputs: &[CudaBuffer; 10]) -> CudaBuffer {
     let j02 = prov
         .provider
@@ -446,7 +460,10 @@ fn hash_pivot5_chain_path(prov: &Provider, inputs: &[CudaBuffer; 10]) -> CudaBuf
 }
 
 fn assert_clique5_parity(prov: &Provider, inputs: &[CudaBuffer; 10], n: u32) {
+    prov.provider.reset_kclique_metadata_build_metrics();
+    let wcoj_start = Instant::now();
     let wcoj = gpu_wcoj_clique5_path(prov, inputs);
+    report_kclique_metadata_cost(prov, "5clique", n, wcoj_start.elapsed());
     let hash = hash_clique5_chain_path(prov, inputs);
     let wcoj_rows = download_u32_rows(&wcoj, &prov.provider, 5);
     let hash_rows = download_u32_rows(&hash, &prov.provider, 5);
@@ -461,7 +478,10 @@ fn assert_clique5_parity(prov: &Provider, inputs: &[CudaBuffer; 10], n: u32) {
 }
 
 fn assert_pivot5_parity(prov: &Provider, inputs: &[CudaBuffer; 10], n: u32) {
+    prov.provider.reset_kclique_metadata_build_metrics();
+    let wcoj_start = Instant::now();
     let wcoj = gpu_wcoj_clique5_path(prov, inputs);
+    report_kclique_metadata_cost(prov, "pivot5", n, wcoj_start.elapsed());
     let hash = hash_pivot5_chain_path(prov, inputs);
     let wcoj_rows = download_u32_rows(&wcoj, &prov.provider, 5);
     let hash_rows = download_u32_rows(&hash, &prov.provider, 5);

@@ -48,6 +48,7 @@
 //!     responsibility.
 //!
 use std::ffi::c_void;
+use std::time::Instant;
 
 use cudarc::driver::sys;
 use xlog_core::{Result, ScalarType, Schema, XlogError};
@@ -56,8 +57,9 @@ use super::{wcoj_kernels, CudaKernelProvider, WCOJ_MODULE};
 use crate::device_runtime::StreamId;
 use crate::launch::LaunchRecorder;
 use crate::memory::{CudaColumn, TrackedCudaSlice};
+use crate::wcoj_metadata::WcojRelationMetadata;
 use crate::CudaBuffer;
-use crate::{LaunchAsync, LaunchConfig};
+use crate::{AsKernelParam, LaunchAsync, LaunchConfig};
 
 const BLOCK_SIZE: u32 = 256;
 
@@ -1102,7 +1104,191 @@ fn clique_kernel_name(k: usize, materialize: bool, w: CliqueWidthClass) -> &'sta
     }
 }
 
+enum CliqueLeaderMetadata {
+    U32(WcojRelationMetadata<u32>),
+    U64(WcojRelationMetadata<u64>),
+}
+
+impl CliqueLeaderMetadata {
+    fn total_rows_u32(&self, entry_label: &str) -> Result<u32> {
+        let total = match self {
+            CliqueLeaderMetadata::U32(metadata) => metadata.total,
+            CliqueLeaderMetadata::U64(metadata) => metadata.total,
+        };
+        u32::try_from(total).map_err(|_| {
+            XlogError::Kernel(format!(
+                "{}: leader metadata total {} exceeds u32 kernel surface",
+                entry_label, total
+            ))
+        })
+    }
+
+    fn key_count(&self) -> u32 {
+        match self {
+            CliqueLeaderMetadata::U32(metadata) => metadata.key_count,
+            CliqueLeaderMetadata::U64(metadata) => metadata.key_count,
+        }
+    }
+}
+
+fn validate_clique_metadata_leader<'a>(
+    k: usize,
+    edges: &'a [&CudaBuffer],
+    leader_edge_idx: u32,
+    width_class: CliqueWidthClass,
+    entry_label: &str,
+) -> Result<&'a CudaBuffer> {
+    if !(k == 5 || k == 6) {
+        return Err(XlogError::Kernel(format!(
+            "{}: k must be 5 or 6, got {}",
+            entry_label, k
+        )));
+    }
+    let expected_edges = k * (k - 1) / 2;
+    if edges.len() != expected_edges {
+        return Err(XlogError::Kernel(format!(
+            "{}: expected {} edges (= C({}, 2)), got {}",
+            entry_label,
+            expected_edges,
+            k,
+            edges.len()
+        )));
+    }
+    let leader_slot = usize::try_from(leader_edge_idx)
+        .ok()
+        .filter(|idx| *idx < expected_edges)
+        .ok_or_else(|| {
+            XlogError::Kernel(format!(
+                "{}: leader_edge_idx {} out of range for {} edges",
+                entry_label, leader_edge_idx, expected_edges
+            ))
+        })?;
+    let leader = edges[leader_slot];
+    if leader.arity() != 2 {
+        return Err(XlogError::Kernel(format!(
+            "{}: leader edge must be 2-column, got arity {}",
+            entry_label,
+            leader.arity()
+        )));
+    }
+    let ty = leader.schema.column_type(0).ok_or_else(|| {
+        XlogError::Kernel(format!(
+            "{}: leader edge column 0 type missing",
+            entry_label
+        ))
+    })?;
+    if !width_class.validate_col_type(ty) {
+        return Err(XlogError::Kernel(format!(
+            "{}: leader edge column 0 type {:?} not in {} width-class",
+            entry_label,
+            ty,
+            width_class.label()
+        )));
+    }
+    Ok(leader)
+}
+
 impl CudaKernelProvider {
+    fn wcoj_clique_metadata_recorded_u32_inner(
+        &self,
+        k: usize,
+        edges: &[&CudaBuffer],
+        leader_edge_idx: u32,
+        launch_stream: StreamId,
+        entry_label: &str,
+    ) -> Result<WcojRelationMetadata<u32>> {
+        let leader = validate_clique_metadata_leader(
+            k,
+            edges,
+            leader_edge_idx,
+            CliqueWidthClass::FourByte,
+            entry_label,
+        )?;
+        self.wcoj_build_metadata_u32_recorded(leader, 0, launch_stream)
+    }
+
+    fn wcoj_clique_metadata_recorded_u64_inner(
+        &self,
+        k: usize,
+        edges: &[&CudaBuffer],
+        leader_edge_idx: u32,
+        launch_stream: StreamId,
+        entry_label: &str,
+    ) -> Result<WcojRelationMetadata<u64>> {
+        let leader = validate_clique_metadata_leader(
+            k,
+            edges,
+            leader_edge_idx,
+            CliqueWidthClass::EightByte,
+            entry_label,
+        )?;
+        self.wcoj_build_metadata_u64_recorded(leader, 0, launch_stream)
+    }
+
+    /// Build leader-edge runtime metadata for a 5-clique 4-byte-width dispatch.
+    pub fn wcoj_clique5_metadata_recorded_u32(
+        &self,
+        edges: &[&CudaBuffer; 10],
+        leader_edge_idx: u32,
+        launch_stream: StreamId,
+    ) -> Result<WcojRelationMetadata<u32>> {
+        self.wcoj_clique_metadata_recorded_u32_inner(
+            5,
+            edges,
+            leader_edge_idx,
+            launch_stream,
+            "wcoj_clique5_metadata_recorded_u32",
+        )
+    }
+
+    /// Build leader-edge runtime metadata for a 5-clique 8-byte-width dispatch.
+    pub fn wcoj_clique5_metadata_recorded_u64(
+        &self,
+        edges: &[&CudaBuffer; 10],
+        leader_edge_idx: u32,
+        launch_stream: StreamId,
+    ) -> Result<WcojRelationMetadata<u64>> {
+        self.wcoj_clique_metadata_recorded_u64_inner(
+            5,
+            edges,
+            leader_edge_idx,
+            launch_stream,
+            "wcoj_clique5_metadata_recorded_u64",
+        )
+    }
+
+    /// Build leader-edge runtime metadata for a 6-clique 4-byte-width dispatch.
+    pub fn wcoj_clique6_metadata_recorded_u32(
+        &self,
+        edges: &[&CudaBuffer; 15],
+        leader_edge_idx: u32,
+        launch_stream: StreamId,
+    ) -> Result<WcojRelationMetadata<u32>> {
+        self.wcoj_clique_metadata_recorded_u32_inner(
+            6,
+            edges,
+            leader_edge_idx,
+            launch_stream,
+            "wcoj_clique6_metadata_recorded_u32",
+        )
+    }
+
+    /// Build leader-edge runtime metadata for a 6-clique 8-byte-width dispatch.
+    pub fn wcoj_clique6_metadata_recorded_u64(
+        &self,
+        edges: &[&CudaBuffer; 15],
+        leader_edge_idx: u32,
+        launch_stream: StreamId,
+    ) -> Result<WcojRelationMetadata<u64>> {
+        self.wcoj_clique_metadata_recorded_u64_inner(
+            6,
+            edges,
+            leader_edge_idx,
+            launch_stream,
+            "wcoj_clique6_metadata_recorded_u64",
+        )
+    }
+
     /// W3.2 — generic clique provider helper. Orchestrates count
     /// → scan → total → materialize for K-clique on K*(K-1)/2
     /// 2-column edges in the given width-class.
@@ -1226,6 +1412,40 @@ impl CudaKernelProvider {
         if n_leader == 0 {
             return self.create_empty_buffer(out_schema);
         }
+        // Paper §5 Algorithm 1 Phase 1: Histograms maintained alongside data; refreshed during Merge per Authorization 5 (2026-05-17)
+        let metadata_start = Instant::now();
+        let leader_metadata = match width_class {
+            CliqueWidthClass::FourByte => {
+                CliqueLeaderMetadata::U32(self.wcoj_clique_metadata_recorded_u32_inner(
+                    k,
+                    edges,
+                    leader_edge_idx,
+                    launch_stream,
+                    entry_label,
+                )?)
+            }
+            CliqueWidthClass::EightByte => {
+                CliqueLeaderMetadata::U64(self.wcoj_clique_metadata_recorded_u64_inner(
+                    k,
+                    edges,
+                    leader_edge_idx,
+                    launch_stream,
+                    entry_label,
+                )?)
+            }
+        };
+        self.record_kclique_metadata_build_nanos(metadata_start.elapsed().as_nanos());
+        let leader_work_total = leader_metadata.total_rows_u32(entry_label)?;
+        if leader_work_total != n_leader {
+            return Err(XlogError::Kernel(format!(
+                "{}: leader metadata total {} does not match leader row count {}",
+                entry_label, leader_work_total, n_leader
+            )));
+        }
+        let leader_metadata_key_count = leader_metadata.key_count();
+        if leader_metadata_key_count == 0 {
+            return self.create_empty_buffer(out_schema);
+        }
 
         // Build host-side per-edge pointer arrays + row-count
         // array. These get htod'd to small device buffers that
@@ -1285,7 +1505,7 @@ impl CudaKernelProvider {
 
         // Phase 1: HG block counts + scan + total.
         let block_work_unit = crate::wcoj_metadata::WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT;
-        let grid = n_leader.div_ceil(block_work_unit);
+        let grid = leader_work_total.div_ceil(block_work_unit);
         let mut count_buf = self.memory.alloc::<u32>(grid as usize)?;
         let mut thread_counts_buf = self
             .memory
@@ -1304,6 +1524,18 @@ impl CudaKernelProvider {
         rec_count.read(&d_edge_n);
         rec_count.read(&d_edge_order);
         rec_count.read(&d_iteration_order);
+        match &leader_metadata {
+            CliqueLeaderMetadata::U32(leader_metadata) => {
+                rec_count.read(&leader_metadata.unique_keys);
+                rec_count.read(&leader_metadata.fan_out);
+                rec_count.read(&leader_metadata.prefix_sum);
+            }
+            CliqueLeaderMetadata::U64(leader_metadata) => {
+                rec_count.read(&leader_metadata.unique_keys);
+                rec_count.read(&leader_metadata.fan_out);
+                rec_count.read(&leader_metadata.prefix_sum);
+            }
+        }
         rec_count.write(&count_buf);
         rec_count.write(&thread_counts_buf);
         rec_count.write(&offsets_buf);
@@ -1336,30 +1568,54 @@ impl CudaKernelProvider {
         //     const u8* edge_order,
         //     const u8* iteration_order,
         //     u32 leader_count,
+        //     const T* unique_keys,
+        //     const u32* fan_out,
+        //     const u32* prefix_sum,
+        //     u32 metadata_key_count,
         //     u32 block_work_unit,
         //     u32* out_block_counts,
         //     u32* out_thread_counts)
         // Pointers all device-resident; preflight verified
-        // cross-stream tracking.
+        // cross-stream tracking. Raw params are required because
+        // the metadata-extended ABI exceeds the tuple-launch arity.
         unsafe {
+            let mut params: Vec<*mut c_void> = match &leader_metadata {
+                CliqueLeaderMetadata::U32(leader_metadata) => vec![
+                    (&d_edge_col0).as_kernel_param(),
+                    (&d_edge_col1).as_kernel_param(),
+                    (&d_edge_n).as_kernel_param(),
+                    (&leader_edge_idx).as_kernel_param(),
+                    (&d_edge_order).as_kernel_param(),
+                    (&d_iteration_order).as_kernel_param(),
+                    (&n_leader).as_kernel_param(),
+                    (&leader_metadata.unique_keys).as_kernel_param(),
+                    (&leader_metadata.fan_out).as_kernel_param(),
+                    (&leader_metadata.prefix_sum).as_kernel_param(),
+                    (&leader_metadata_key_count).as_kernel_param(),
+                    (&block_work_unit).as_kernel_param(),
+                    (&mut count_buf).as_kernel_param(),
+                    (&mut thread_counts_buf).as_kernel_param(),
+                ],
+                CliqueLeaderMetadata::U64(leader_metadata) => vec![
+                    (&d_edge_col0).as_kernel_param(),
+                    (&d_edge_col1).as_kernel_param(),
+                    (&d_edge_n).as_kernel_param(),
+                    (&leader_edge_idx).as_kernel_param(),
+                    (&d_edge_order).as_kernel_param(),
+                    (&d_iteration_order).as_kernel_param(),
+                    (&n_leader).as_kernel_param(),
+                    (&leader_metadata.unique_keys).as_kernel_param(),
+                    (&leader_metadata.fan_out).as_kernel_param(),
+                    (&leader_metadata.prefix_sum).as_kernel_param(),
+                    (&leader_metadata_key_count).as_kernel_param(),
+                    (&block_work_unit).as_kernel_param(),
+                    (&mut count_buf).as_kernel_param(),
+                    (&mut thread_counts_buf).as_kernel_param(),
+                ],
+            };
             count_kernel
                 .clone()
-                .launch_on_stream(
-                    &cu_stream,
-                    count_config,
-                    (
-                        &d_edge_col0,
-                        &d_edge_col1,
-                        &d_edge_n,
-                        leader_edge_idx,
-                        &d_edge_order,
-                        &d_iteration_order,
-                        n_leader,
-                        block_work_unit,
-                        &mut count_buf,
-                        &mut thread_counts_buf,
-                    ),
-                )
+                .launch_on_stream(&cu_stream, count_config, &mut params)
                 .map_err(|e| {
                     XlogError::Kernel(format!(
                         "{}: count kernel launch failed: {}",
@@ -1483,6 +1739,18 @@ impl CudaKernelProvider {
         rec_mat.read(&d_edge_n);
         rec_mat.read(&d_edge_order);
         rec_mat.read(&d_iteration_order);
+        match &leader_metadata {
+            CliqueLeaderMetadata::U32(leader_metadata) => {
+                rec_mat.read(&leader_metadata.unique_keys);
+                rec_mat.read(&leader_metadata.fan_out);
+                rec_mat.read(&leader_metadata.prefix_sum);
+            }
+            CliqueLeaderMetadata::U64(leader_metadata) => {
+                rec_mat.read(&leader_metadata.unique_keys);
+                rec_mat.read(&leader_metadata.fan_out);
+                rec_mat.read(&leader_metadata.prefix_sum);
+            }
+        }
         rec_mat.read(&thread_counts_buf);
         rec_mat.read(&offsets_buf);
         rec_mat.read(&d_out_cols);
@@ -1516,38 +1784,64 @@ impl CudaKernelProvider {
         //     const u8* edge_order,
         //     const u8* iteration_order,
         //     u32 leader_count,
+        //     const T* unique_keys,
+        //     const u32* fan_out,
+        //     const u32* prefix_sum,
+        //     u32 metadata_key_count,
         //     u32 block_work_unit,
         //     const u32* thread_counts,
         //     const u32* block_offsets,
         //     u32 total_rows,
         //     T* const* out_cols)
-        // 9 args, fits the LaunchAsync tuple-launch.
+        // Raw params are required because the metadata-extended ABI
+        // exceeds the tuple-launch arity.
         let mat_config = LaunchConfig {
             grid_dim: (grid, 1, 1),
             block_dim: (BLOCK_SIZE, 1, 1),
             shared_mem_bytes: 0,
         };
         unsafe {
+            let mut params: Vec<*mut c_void> = match &leader_metadata {
+                CliqueLeaderMetadata::U32(leader_metadata) => vec![
+                    (&d_edge_col0).as_kernel_param(),
+                    (&d_edge_col1).as_kernel_param(),
+                    (&d_edge_n).as_kernel_param(),
+                    (&leader_edge_idx).as_kernel_param(),
+                    (&d_edge_order).as_kernel_param(),
+                    (&d_iteration_order).as_kernel_param(),
+                    (&n_leader).as_kernel_param(),
+                    (&leader_metadata.unique_keys).as_kernel_param(),
+                    (&leader_metadata.fan_out).as_kernel_param(),
+                    (&leader_metadata.prefix_sum).as_kernel_param(),
+                    (&leader_metadata_key_count).as_kernel_param(),
+                    (&block_work_unit).as_kernel_param(),
+                    (&thread_counts_buf).as_kernel_param(),
+                    (&offsets_buf).as_kernel_param(),
+                    (&total_rows).as_kernel_param(),
+                    (&d_out_cols).as_kernel_param(),
+                ],
+                CliqueLeaderMetadata::U64(leader_metadata) => vec![
+                    (&d_edge_col0).as_kernel_param(),
+                    (&d_edge_col1).as_kernel_param(),
+                    (&d_edge_n).as_kernel_param(),
+                    (&leader_edge_idx).as_kernel_param(),
+                    (&d_edge_order).as_kernel_param(),
+                    (&d_iteration_order).as_kernel_param(),
+                    (&n_leader).as_kernel_param(),
+                    (&leader_metadata.unique_keys).as_kernel_param(),
+                    (&leader_metadata.fan_out).as_kernel_param(),
+                    (&leader_metadata.prefix_sum).as_kernel_param(),
+                    (&leader_metadata_key_count).as_kernel_param(),
+                    (&block_work_unit).as_kernel_param(),
+                    (&thread_counts_buf).as_kernel_param(),
+                    (&offsets_buf).as_kernel_param(),
+                    (&total_rows).as_kernel_param(),
+                    (&d_out_cols).as_kernel_param(),
+                ],
+            };
             materialize_kernel
                 .clone()
-                .launch_on_stream(
-                    &cu_stream,
-                    mat_config,
-                    (
-                        &d_edge_col0,
-                        &d_edge_col1,
-                        &d_edge_n,
-                        leader_edge_idx,
-                        &d_edge_order,
-                        &d_iteration_order,
-                        n_leader,
-                        block_work_unit,
-                        &thread_counts_buf,
-                        &offsets_buf,
-                        total_rows,
-                        &d_out_cols,
-                    ),
-                )
+                .launch_on_stream(&cu_stream, mat_config, &mut params)
                 .map_err(|e| {
                     XlogError::Kernel(format!("{}: materialize launch failed: {}", entry_label, e))
                 })?;

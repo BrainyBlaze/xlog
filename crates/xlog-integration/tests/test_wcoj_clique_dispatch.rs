@@ -43,6 +43,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use cudarc::driver::sys;
 use xlog_core::{MemoryBudget, RelId, RuntimeConfig, ScalarType, Schema};
@@ -454,6 +455,173 @@ fn named_clique_stats(k: u8) -> StatsSnapshot {
     }
 
     snapshot
+}
+
+const RECURSIVE_K5_HISTOGRAM_SRC: &str = r#"
+    pred seed01(u32, u32).
+    pred path01(u32, u32).
+    pred e02(u32, u32). pred e03(u32, u32). pred e04(u32, u32).
+    pred e12(u32, u32). pred e13(u32, u32). pred e14(u32, u32).
+    pred e23(u32, u32). pred e24(u32, u32).
+    pred e34(u32, u32).
+    pred clique5(u32, u32, u32, u32, u32).
+
+    path01(A, B) :- seed01(A, B).
+    clique5(A, B, C, D, E) :-
+        path01(A, B), e02(A, C), e03(A, D), e04(A, E),
+        e12(B, C), e13(B, D), e14(B, E),
+        e23(C, D), e24(C, E),
+        e34(D, E).
+    path01(A, C) :- clique5(A, B, C, D, E).
+"#;
+
+fn recursive_k5_inputs() -> BTreeMap<String, Vec<(u32, u32)>> {
+    BTreeMap::from([
+        ("seed01".to_string(), vec![(1, 2)]),
+        ("e02".to_string(), vec![(1, 3), (1, 4), (1, 5)]),
+        ("e03".to_string(), vec![(1, 4), (1, 5), (1, 6)]),
+        ("e04".to_string(), vec![(1, 5), (1, 6), (1, 7)]),
+        ("e12".to_string(), vec![(2, 3), (3, 4), (4, 5)]),
+        ("e13".to_string(), vec![(2, 4), (3, 5), (4, 6)]),
+        ("e14".to_string(), vec![(2, 5), (3, 6), (4, 7)]),
+        ("e23".to_string(), vec![(3, 4), (4, 5), (5, 6)]),
+        ("e24".to_string(), vec![(3, 5), (4, 6), (5, 7)]),
+        ("e34".to_string(), vec![(4, 5), (5, 6), (6, 7)]),
+    ])
+}
+
+fn recursive_k5_stats(rel_ids: &BTreeMap<String, RelId>) -> StatsSnapshot {
+    let mut snapshot = StatsSnapshot::default();
+    let canonical_edges = [
+        ("path01", 0u8, 1u8),
+        ("e02", 0, 2),
+        ("e03", 0, 3),
+        ("e04", 0, 4),
+        ("e12", 1, 2),
+        ("e13", 1, 3),
+        ("e14", 1, 4),
+        ("e23", 2, 3),
+        ("e24", 2, 4),
+        ("e34", 3, 4),
+    ];
+    for name in [
+        "seed01", "path01", "e02", "e03", "e04", "e12", "e13", "e14", "e23", "e24", "e34",
+    ] {
+        let rel = *rel_ids.get(name).expect("relation id");
+        snapshot.rel_names.push((rel, name.to_string()));
+        let mut stats = RelationStats::new(rel);
+        stats.update_cardinality(if name == "seed01" { 1 } else { 2_005 });
+        for col_idx in [0usize, 1usize] {
+            let mut col = ColumnStats::new(col_idx, ScalarType::U32);
+            col.update_distinct(1_005);
+            stats.add_column(col);
+            stats.add_prefix_degree(PrefixDegreeStats::new(col_idx, 2.0, 2.5));
+            stats.add_key_heat(KeyHeatStats::new(col_idx, 0.75, 0.75));
+        }
+        snapshot.relations.push(stats);
+    }
+    for (left_idx, (left_name, left_i, left_j)) in canonical_edges.iter().enumerate() {
+        let left_rel = *rel_ids.get(*left_name).expect("left relation id");
+        for (right_name, right_i, right_j) in canonical_edges.iter().skip(left_idx + 1) {
+            if left_i == right_i || left_i == right_j || left_j == right_i || left_j == right_j {
+                let right_rel = *rel_ids.get(*right_name).expect("right relation id");
+                let mut sel = JoinSelectivity::new(left_rel, right_rel);
+                sel.set_keys(vec![0], vec![0]);
+                sel.set_selectivity(0.001);
+                snapshot.join_selectivities.push(sel);
+            }
+        }
+    }
+    snapshot
+}
+
+fn run_recursive_k5(
+    fix: &RuntimeBackedFixture,
+    fallback: bool,
+) -> (Executor, std::collections::BTreeSet<Vec<u32>>) {
+    let inputs = recursive_k5_inputs();
+    let mut id_compiler = Compiler::new();
+    let _ = id_compiler
+        .compile(RECURSIVE_K5_HISTOGRAM_SRC)
+        .expect("compile recursive k5 ids");
+    let rel_ids: BTreeMap<String, RelId> = id_compiler
+        .rel_ids()
+        .iter()
+        .map(|(name, rel)| (name.clone(), *rel))
+        .collect();
+    let snapshot = recursive_k5_stats(&rel_ids);
+    let mut compiler = Compiler::new();
+    let plan = compiler
+        .compile_with_stats_snapshot(RECURSIVE_K5_HISTOGRAM_SRC, Some(&snapshot))
+        .expect("compile recursive k5");
+    assert!(
+        plan_contains_multiway_with_arity(&plan, 10),
+        "recursive K5 plan must contain a 10-input MultiWayJoin"
+    );
+    let plan = if fallback {
+        replace_multiway_with_fallback(plan)
+    } else {
+        plan
+    };
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rid) in compiler.rel_ids().clone() {
+        executor.register_relation(rid, &name);
+    }
+    for (name, rows) in &inputs {
+        executor.put_relation(name, upload_binary_u32(&fix.memory, rows));
+    }
+    executor.execute_plan(&plan).expect("execute recursive k5");
+    let rows = download_k_row_set(executor.store().get("path01").expect("path01"), 2);
+    (executor, rows)
+}
+
+#[test]
+fn recursive_k5_refreshes_histogram_metadata_and_matches_fallback() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    fix.provider.reset_kclique_metadata_build_metrics();
+    let wall_start = Instant::now();
+    let (dispatched, dispatch_rows) = run_recursive_k5(&fix, false);
+    let dispatch_wall = wall_start.elapsed();
+    let metadata_build_count = fix.provider.kclique_metadata_build_count();
+    let metadata_build_nanos = fix.provider.kclique_metadata_build_nanos();
+    let (_fallback, fallback_rows) = run_recursive_k5(&fix, true);
+    assert_eq!(
+        dispatch_rows, fallback_rows,
+        "recursive K5 metadata-refresh path must match fallback fixpoint output"
+    );
+    assert!(
+        dispatched.wcoj_clique5_dispatch_count() >= 2,
+        "recursive K5 must dispatch on seeding and at least one semi-naive variant; got {}",
+        dispatched.wcoj_clique5_dispatch_count()
+    );
+    assert!(
+        dispatched.kclique_histogram_refresh_count() >= 1,
+        "recursive Merge phase must mark at least one K-clique histogram refresh"
+    );
+    let metadata_ratio = metadata_build_nanos as f64 / (dispatch_wall.as_nanos() as f64).max(1.0);
+    eprintln!(
+        "M_HIST_KC recursive K5: dispatch_count={} refresh_count={} metadata_build_count={} metadata_build_nanos={} wall_nanos={} metadata_ratio={:.6}",
+        dispatched.wcoj_clique5_dispatch_count(),
+        dispatched.kclique_histogram_refresh_count(),
+        metadata_build_count,
+        metadata_build_nanos,
+        dispatch_wall.as_nanos(),
+        metadata_ratio
+    );
+    assert!(
+        metadata_ratio <= 0.05,
+        "metadata build cost ratio must stay <= 5%; got {:.6}",
+        metadata_ratio
+    );
+    assert_eq!(
+        dispatch_rows.len(),
+        4,
+        "recursive K5 fixture should derive the seed plus three transitive path01 rows"
+    );
 }
 
 #[test]

@@ -419,3 +419,42 @@ fn clique6_u64_round_trips_against_cpu_oracle() {
         );
     }
 }
+
+#[test]
+fn clique6_u32_metadata_path_is_bit_exact_for_100_runs() {
+    let Some(fix) = make_runtime_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let host_edges = k6_fixture_u32();
+    let raw_bufs: Vec<CudaBuffer> = host_edges
+        .iter()
+        .map(|rows| upload_2col_u32(&fix.memory, rows, ScalarType::U32))
+        .collect();
+    let stream = fix.pool.acquire().expect("stream");
+    let laid_out: Vec<CudaBuffer> = raw_bufs
+        .iter()
+        .map(|b| {
+            fix.provider
+                .wcoj_layout_sort_u32_recorded(b, stream)
+                .expect("layout sort")
+        })
+        .collect();
+    let edge_refs: Vec<&CudaBuffer> = laid_out.iter().collect();
+    let arr: &[&CudaBuffer; 15] = edge_refs.as_slice().try_into().expect("15 edges");
+    let mut expected: Option<Vec<[u32; 6]>> = None;
+    let mut pass_count = 0usize;
+    for run in 0..100 {
+        let out = fix
+            .provider
+            .wcoj_clique6_u32_recorded(arr, stream)
+            .unwrap_or_else(|e| panic!("clique6 u32 run {run} failed: {e}"));
+        let rows = download_k6_u32(&out);
+        match &expected {
+            Some(first) => assert_eq!(&rows, first, "run {run} drifted from run 0"),
+            None => expected = Some(rows),
+        }
+        pass_count += 1;
+    }
+    assert_eq!(pass_count, 100, "M_HIST_KC.4 K6 raw pass count");
+}

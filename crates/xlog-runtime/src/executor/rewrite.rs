@@ -109,6 +109,9 @@ fn delta_outermost_var_order(
     let Some(idx) = replaced_input_idx else {
         return current.cloned();
     };
+    if current.and_then(|order| order.kclique.as_ref()).is_some() {
+        return current.cloned();
+    }
     if idx == 0 {
         return None;
     }

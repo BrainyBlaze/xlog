@@ -894,6 +894,12 @@ pub struct CudaKernelProvider {
     /// prove K-clique runtime dispatch no longer routes every edge
     /// through the old all-edge `wcoj_layout_sort_*_recorded` path.
     wcoj_layout_sort_invocation_count: AtomicU64,
+    /// Authorization 5 G_HIST_KC diagnostic counter: number of
+    /// K-clique leader-edge metadata builds.
+    kclique_metadata_build_count: AtomicU64,
+    /// Authorization 5 G_HIST_KC diagnostic counter: cumulative
+    /// nanoseconds spent building K-clique leader-edge metadata.
+    kclique_metadata_build_nanos: AtomicU64,
     /// W3.3 routing counter: successful triangle dispatches
     /// accepted through the histogram-guided block-slice provider
     /// entry.
@@ -988,6 +994,8 @@ impl CudaKernelProvider {
             csm_invocations: AtomicU64::new(0),
             wcoj_layout_fast_path_hit_count: AtomicU64::new(0),
             wcoj_layout_sort_invocation_count: AtomicU64::new(0),
+            kclique_metadata_build_count: AtomicU64::new(0),
+            kclique_metadata_build_nanos: AtomicU64::new(0),
             wcoj_triangle_hg_dispatch_count: AtomicU64::new(0),
             #[cfg(feature = "wcoj-phase-timing")]
             last_triangle_phase_timing: std::sync::Mutex::new(None),
@@ -1242,6 +1250,26 @@ impl CudaKernelProvider {
             .store(0, Ordering::Relaxed);
     }
 
+    /// Number of K-clique leader-edge metadata builds since the
+    /// last reset.
+    pub fn kclique_metadata_build_count(&self) -> u64 {
+        self.kclique_metadata_build_count.load(Ordering::Relaxed)
+    }
+
+    /// Cumulative nanoseconds spent building K-clique leader-edge
+    /// metadata since the last reset.
+    pub fn kclique_metadata_build_nanos(&self) -> u64 {
+        self.kclique_metadata_build_nanos.load(Ordering::Relaxed)
+    }
+
+    /// Reset K-clique metadata build diagnostics.
+    pub fn reset_kclique_metadata_build_metrics(&self) {
+        self.kclique_metadata_build_count
+            .store(0, Ordering::Relaxed);
+        self.kclique_metadata_build_nanos
+            .store(0, Ordering::Relaxed);
+    }
+
     /// Internal: increment the fast-path counter. Called by
     /// `wcoj_layout_*_recorded` after a successful fast-path
     /// branch. Not part of any public stability guarantee.
@@ -1254,6 +1282,15 @@ impl CudaKernelProvider {
     pub(crate) fn record_wcoj_layout_sort_invocation(&self) {
         self.wcoj_layout_sort_invocation_count
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Internal: record a K-clique leader-edge metadata build.
+    pub(crate) fn record_kclique_metadata_build_nanos(&self, nanos: u128) {
+        self.kclique_metadata_build_count
+            .fetch_add(1, Ordering::Relaxed);
+        let nanos = u64::try_from(nanos).unwrap_or(u64::MAX);
+        self.kclique_metadata_build_nanos
+            .fetch_add(nanos, Ordering::Relaxed);
     }
 
     /// W3.3 runtime hook: record a successful HG block-slice
