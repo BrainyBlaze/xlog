@@ -7,6 +7,12 @@ Governing plan: `docs/plans/2026-05-14-supervisor-goal-039.md`.
 
 ## Status
 
+**Superseded 2026-05-18.** The user subsequently authorized DTS-DLM
+repository mutation for the full production-grade xlog + DTS goal. The halted
+state below remains preserved as evidence of the pre-authorization xlog-only
+contract conflict. The superseding W65 evidence is
+`docs/evidence/2026-05-18-g39-w65-authorized-dts-fix.md`.
+
 G_W65_SORT is halted, not closed. The xlog-side sort-label work is implemented
 and covered by focused certs, but M_W65.1 remains RED:
 

@@ -6,6 +6,11 @@ Base: `feat/w3-bundle-integration @ c1689d70`.
 
 ## Summary
 
+**Superseded 2026-05-18.** This RCA remains the preserved pre-authorization
+xlog-only diagnosis. The user later authorized the DTS-DLM source mutation
+needed to close M_W65.1; see
+`docs/evidence/2026-05-18-g39-w65-authorized-dts-fix.md`.
+
 W6.5's "sort-map misses" flood is not caused by an existing xlog sort-label
 field being dropped. Before this step, xlog had no per-column sort-label field:
 `Schema` carried only column name/type pairs plus key columns, and pyxlog query
