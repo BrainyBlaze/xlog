@@ -1282,6 +1282,7 @@ stream-safety contracts.
       `docs/wcoj-architecture-guide.md`.
 - [ ] Document WCOJ eligibility, fallback, and performance tuning in a
       user-facing guide rather than only code docs / benchmark docs.
+      User guide reference: `docs/wcoj-user-guide.md`.
 
 ### v0.6.5 Status (as of 2026-05-04)
 
