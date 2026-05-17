@@ -173,7 +173,10 @@ impl Lowerer {
                         (format!("c{}", i), ty)
                     })
                     .collect();
-                self.schemas.insert(pred.clone(), Schema::new(columns));
+                let schema = Schema::new(columns)
+                    .with_sort_labels(sort_labels_from_terms(&rule.head.terms))
+                    .expect("rule head sort labels match inferred schema arity");
+                self.schemas.insert(pred.clone(), schema);
             }
         }
 
@@ -194,7 +197,10 @@ impl Lowerer {
                     .enumerate()
                     .map(|(i, term)| (format!("c{}", i), infer_term_type(term)))
                     .collect();
-                self.schemas.insert(pred.clone(), Schema::new(columns));
+                let schema = Schema::new(columns)
+                    .with_sort_labels(sort_labels_from_terms(&atom.terms))
+                    .expect("body sort labels match inferred schema arity");
+                self.schemas.insert(pred.clone(), schema);
             }
         }
 
@@ -2063,6 +2069,18 @@ fn infer_term_type(term: &Term) -> ScalarType {
             AggOp::LogSumExp => ScalarType::F64,
         },
     }
+}
+
+fn sort_labels_from_terms(terms: &[Term]) -> Vec<String> {
+    terms
+        .iter()
+        .enumerate()
+        .map(|(idx, term)| match term {
+            Term::Variable(name) if !name.trim().is_empty() => name.clone(),
+            Term::Aggregate(agg) => format!("{:?}_{}", agg.op, agg.variable),
+            _ => format!("c{}", idx),
+        })
+        .collect()
 }
 
 /// Convert a term to a constant value (if it is a constant)

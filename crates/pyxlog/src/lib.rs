@@ -344,6 +344,8 @@ pub struct LogicQueryResult {
     #[pyo3(get)]
     pub columns: Vec<String>,
     #[pyo3(get)]
+    pub sort_labels: Vec<String>,
+    #[pyo3(get)]
     pub tensors: Vec<PyObject>,
     #[pyo3(get)]
     pub num_rows: usize,

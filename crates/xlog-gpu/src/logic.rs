@@ -14,6 +14,8 @@ pub struct LogicQueryResult {
     pub relation_name: String,
     /// Output variable names in column order.
     pub columns: Vec<String>,
+    /// Per-output-column sort labels in column order.
+    pub sort_labels: Vec<String>,
     /// GPU-resident column buffer with the result tuples.
     pub buffer: CudaBuffer,
 }
@@ -180,6 +182,7 @@ impl LogicProgram {
             queries.push(LogicQueryResult {
                 relation_name,
                 columns: query_output_vars(query),
+                sort_labels: buffer.schema().sort_labels().to_vec(),
                 buffer,
             });
         }
@@ -259,6 +262,7 @@ impl LogicProgram {
             queries.push(LogicQueryResult {
                 relation_name,
                 columns: query_output_vars(query),
+                sort_labels: buffer.schema().sort_labels().to_vec(),
                 buffer,
             });
         }

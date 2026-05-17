@@ -133,16 +133,36 @@ pub struct Schema {
     pub columns: Vec<(String, ScalarType)>,
     /// Indices of columns that form the key (for dedup/indexing)
     pub key_columns: Vec<usize>,
+    /// Per-column sort labels used by consumers that need typed output metadata.
+    sort_labels: Vec<String>,
 }
 
 impl Schema {
     /// Create a new schema with all columns as keys
     pub fn new(columns: Vec<(String, ScalarType)>) -> Self {
         let key_columns = (0..columns.len()).collect();
+        let sort_labels = default_sort_labels(&columns);
         Self {
             columns,
             key_columns,
+            sort_labels,
         }
+    }
+
+    /// Return a copy of this schema with explicit per-column sort labels.
+    pub fn with_sort_labels(
+        mut self,
+        sort_labels: Vec<String>,
+    ) -> std::result::Result<Self, String> {
+        if sort_labels.len() != self.columns.len() {
+            return Err(format!(
+                "sort label arity mismatch: expected {}, got {}",
+                self.columns.len(),
+                sort_labels.len()
+            ));
+        }
+        self.sort_labels = normalize_sort_labels(&self.columns, sort_labels);
+        Ok(self)
     }
 
     /// Number of columns
@@ -163,6 +183,58 @@ impl Schema {
     /// Get column index by name
     pub fn column_index(&self, name: &str) -> Option<usize> {
         self.columns.iter().position(|(n, _)| n == name)
+    }
+
+    /// Return per-column sort labels in schema column order.
+    pub fn sort_labels(&self) -> &[String] {
+        &self.sort_labels
+    }
+
+    /// Get the sort label for a column by index.
+    pub fn column_sort_label(&self, index: usize) -> Option<&str> {
+        self.sort_labels.get(index).map(|s| s.as_str())
+    }
+
+    /// Return true when every schema column has a non-empty sort label.
+    pub fn has_authoritative_sort_labels(&self) -> bool {
+        self.sort_labels.len() == self.columns.len()
+            && self
+                .sort_labels
+                .iter()
+                .all(|label| !label.trim().is_empty())
+    }
+}
+
+fn default_sort_labels(columns: &[(String, ScalarType)]) -> Vec<String> {
+    columns
+        .iter()
+        .enumerate()
+        .map(|(idx, (name, _))| fallback_sort_label(name, idx))
+        .collect()
+}
+
+fn normalize_sort_labels(
+    columns: &[(String, ScalarType)],
+    sort_labels: Vec<String>,
+) -> Vec<String> {
+    sort_labels
+        .into_iter()
+        .enumerate()
+        .map(|(idx, label)| {
+            if label.trim().is_empty() {
+                fallback_sort_label(&columns[idx].0, idx)
+            } else {
+                label
+            }
+        })
+        .collect()
+}
+
+fn fallback_sort_label(column_name: &str, index: usize) -> String {
+    if column_name.trim().is_empty() {
+        format!("col{}", index)
+    } else {
+        column_name.to_string()
     }
 }
 
@@ -219,27 +291,43 @@ mod tests {
 
     #[test]
     fn test_schema_total_row_size() {
-        let schema = Schema {
-            columns: vec![
-                ("a".to_string(), ScalarType::U32),
-                ("b".to_string(), ScalarType::U64),
-            ],
-            key_columns: vec![0],
-        };
+        let mut schema = Schema::new(vec![
+            ("a".to_string(), ScalarType::U32),
+            ("b".to_string(), ScalarType::U64),
+        ]);
+        schema.key_columns = vec![0];
         assert_eq!(schema.row_size_bytes(), 12);
     }
 
     #[test]
     fn test_schema_arity() {
-        let schema = Schema {
-            columns: vec![
-                ("x".to_string(), ScalarType::U32),
-                ("y".to_string(), ScalarType::U32),
-                ("z".to_string(), ScalarType::U32),
-            ],
-            key_columns: vec![0, 1, 2],
-        };
+        let schema = Schema::new(vec![
+            ("x".to_string(), ScalarType::U32),
+            ("y".to_string(), ScalarType::U32),
+            ("z".to_string(), ScalarType::U32),
+        ]);
         assert_eq!(schema.arity(), 3);
+    }
+
+    #[test]
+    fn test_schema_sort_labels_default_from_column_names() {
+        let schema = Schema::new(vec![
+            ("pred".to_string(), ScalarType::I64),
+            ("arg0".to_string(), ScalarType::I64),
+            ("arg1".to_string(), ScalarType::I64),
+        ]);
+        assert_eq!(schema.sort_labels(), ["pred", "arg0", "arg1"]);
+        assert_eq!(schema.column_sort_label(1), Some("arg0"));
+        assert!(schema.has_authoritative_sort_labels());
+    }
+
+    #[test]
+    fn test_schema_sort_label_arity_is_checked() {
+        let schema = Schema::new(vec![("c0".to_string(), ScalarType::U32)]);
+        let err = schema
+            .with_sort_labels(vec!["a".to_string(), "b".to_string()])
+            .unwrap_err();
+        assert!(err.contains("sort label arity mismatch"));
     }
 
     #[test]

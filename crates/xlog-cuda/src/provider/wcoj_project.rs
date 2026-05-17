@@ -95,7 +95,18 @@ impl CudaKernelProvider {
         let swapped_schema = Schema::new(vec![
             src.schema.columns[1].clone(),
             src.schema.columns[0].clone(),
-        ]);
+        ])
+        .with_sort_labels(vec![
+            src.schema
+                .column_sort_label(1)
+                .unwrap_or("col1")
+                .to_string(),
+            src.schema
+                .column_sort_label(0)
+                .unwrap_or("col0")
+                .to_string(),
+        ])
+        .expect("swapped sort labels match schema arity");
 
         // Empty buffer fast-path: arity=2 with row_cap=0 produces
         // an empty owned buffer with the swapped schema. No DtoD
