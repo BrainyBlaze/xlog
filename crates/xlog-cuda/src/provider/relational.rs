@@ -3160,6 +3160,160 @@ impl super::CudaKernelProvider {
         self.buffer_from_columns(result_columns, output_rows as u64, combined_schema)
     }
 
+    /// Sorted-chain variant of [`Self::sort_merge_join_v2_inner_u32_1key`].
+    ///
+    /// The W4.3 operator is product-thresholded because it allocates
+    /// `|left| * |right|` candidate pairs. W6.3 chain routing uses this
+    /// bounded variant only for sorted large inputs where the expected
+    /// fanout is one-to-one; capacity is caller supplied and the kernel's
+    /// logical output counter is checked after launch. If duplicates make
+    /// the true output exceed `output_capacity`, this returns an error so
+    /// the caller can fail closed to the hash fallback.
+    pub fn sort_merge_join_v2_inner_u32_1key_bounded(
+        &self,
+        left: &CudaBuffer,
+        right: &CudaBuffer,
+        left_key: usize,
+        right_key: usize,
+        output_capacity: usize,
+    ) -> Result<CudaBuffer> {
+        let num_left = self.device_row_count(left)?;
+        let num_right = self.device_row_count(right)?;
+
+        if num_left == 0 || num_right == 0 {
+            let combined_schema = self.combine_schemas(left.schema(), right.schema());
+            return self.create_empty_buffer(combined_schema);
+        }
+        if num_left > u32::MAX as usize || num_right > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "sort_merge_bounded: row counts exceed u32 surface: left={} right={}",
+                num_left, num_right
+            )));
+        }
+        if output_capacity == 0 || output_capacity > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "sort_merge_bounded: invalid output capacity {}",
+                output_capacity
+            )));
+        }
+        if left.arity() <= left_key {
+            return Err(XlogError::Kernel(format!(
+                "sort_merge_bounded: left_key={} out of bounds (arity={})",
+                left_key,
+                left.arity()
+            )));
+        }
+        if right.arity() <= right_key {
+            return Err(XlogError::Kernel(format!(
+                "sort_merge_bounded: right_key={} out of bounds (arity={})",
+                right_key,
+                right.arity()
+            )));
+        }
+        let lt = left.schema().column_type(left_key);
+        let rt = right.schema().column_type(right_key);
+        if lt != rt || !matches!(lt, Some(ScalarType::U32) | Some(ScalarType::Symbol)) {
+            return Err(XlogError::Kernel(format!(
+                "sort_merge_bounded: key types must be equal U32/Symbol; got left={:?} right={:?}",
+                lt, rt
+            )));
+        }
+
+        let left_col = left.column(left_key).ok_or_else(|| {
+            XlogError::Kernel(format!("sort_merge_bounded: left.column({})", left_key))
+        })?;
+        let right_col = right.column(right_key).ok_or_else(|| {
+            XlogError::Kernel(format!("sort_merge_bounded: right.column({})", right_key))
+        })?;
+        let required_left_bytes = num_left
+            .checked_mul(4)
+            .ok_or_else(|| XlogError::Kernel("sort_merge_bounded: left byte overflow".into()))?;
+        let required_right_bytes = num_right
+            .checked_mul(4)
+            .ok_or_else(|| XlogError::Kernel("sort_merge_bounded: right byte overflow".into()))?;
+        if left_col.num_bytes() < required_left_bytes {
+            return Err(XlogError::Kernel(format!(
+                "sort_merge_bounded: left key column has {} bytes; require at least {}",
+                left_col.num_bytes(),
+                required_left_bytes
+            )));
+        }
+        if right_col.num_bytes() < required_right_bytes {
+            return Err(XlogError::Kernel(format!(
+                "sort_merge_bounded: right key column has {} bytes; require at least {}",
+                right_col.num_bytes(),
+                required_right_bytes
+            )));
+        }
+
+        let mut d_output_left_idx = self.memory.alloc::<u32>(output_capacity)?;
+        let mut d_output_right_idx = self.memory.alloc::<u32>(output_capacity)?;
+        let mut d_output_count = self.memory.alloc::<u32>(1)?;
+        self.device
+            .inner()
+            .memset_zeros(&mut d_output_count)
+            .map_err(|e| XlogError::Kernel(format!("sort_merge_bounded: counter zero: {}", e)))?;
+
+        let func = self
+            .device
+            .inner()
+            .get_func(
+                JOIN_MODULE,
+                join_kernels::SORT_MERGE_JOIN_INNER_U32_1KEY_PAIRS,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel("sort_merge_join_inner_u32_1key_pairs kernel not found".into())
+            })?;
+
+        let num_left_u32 = num_left as u32;
+        let num_right_u32 = num_right as u32;
+        let output_capacity_u32 = output_capacity as u32;
+        let block_size = 256u32;
+        let grid_size = num_left_u32.div_ceil(block_size);
+        let config = LaunchConfig {
+            grid_dim: (grid_size, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        unsafe {
+            func.clone()
+                .launch(
+                    config,
+                    (
+                        left_col,
+                        right_col,
+                        num_left_u32,
+                        num_right_u32,
+                        &mut d_output_left_idx,
+                        &mut d_output_right_idx,
+                        &mut d_output_count,
+                        output_capacity_u32,
+                    ),
+                )
+                .map_err(|e| XlogError::Kernel(format!("sort_merge_bounded launch: {}", e)))?;
+        }
+
+        self.device.synchronize()?;
+        let output_rows = self.dtoh_scalar_untracked(&d_output_count, 0)?;
+        if output_rows as usize > output_capacity {
+            return Err(XlogError::Kernel(format!(
+                "sort_merge_bounded: output {} exceeded bounded capacity {}",
+                output_rows, output_capacity
+            )));
+        }
+
+        let gathered_left = self.gather_buffer_by_indices(left, &d_output_left_idx, output_rows)?;
+        let gathered_right =
+            self.gather_buffer_by_indices(right, &d_output_right_idx, output_rows)?;
+
+        let combined_schema = self.combine_schemas(left.schema(), right.schema());
+        let mut result_columns = Vec::with_capacity(combined_schema.arity());
+        result_columns.extend(gathered_left.columns.into_iter());
+        result_columns.extend(gathered_right.columns.into_iter());
+        self.buffer_from_columns(result_columns, output_rows as u64, combined_schema)
+    }
+
     /// Build a cached join index for the right/build side of v2 hash join.
     pub fn build_join_index_v2(
         &self,

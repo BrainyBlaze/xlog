@@ -280,7 +280,9 @@ impl Executor {
             // The non-recursive arm in `recursive.rs` short-circuits
             // dispatch-eligible bodies before reaching here; this
             // arm is the safety net for everyone else.
-            RirNode::MultiWayJoin { fallback, .. } => self.execute_node(fallback),
+            RirNode::MultiWayJoin { fallback, .. } | RirNode::ChainJoin { fallback, .. } => {
+                self.execute_node(fallback)
+            }
         }
     }
 

@@ -918,6 +918,17 @@ mod tests {
             .count();
         assert_eq!(helper_rule_count, 1);
 
+        let helper_rule = plan
+            .rules_by_scc
+            .iter()
+            .flatten()
+            .find(|rule| rule.head == helper.0)
+            .expect("helper rule");
+        assert!(
+            matches!(helper_rule.body, RirNode::ChainJoin { .. }),
+            "helper split output should be eligible for W63 ChainJoin promotion"
+        );
+
         let out_rule = plan
             .rules_by_scc
             .iter()
@@ -951,7 +962,7 @@ mod tests {
     fn contains_scan(node: &RirNode, rel: RelId) -> bool {
         match node {
             RirNode::Scan { rel: scan_rel } => *scan_rel == rel,
-            RirNode::Join { left, right, .. } => {
+            RirNode::Join { left, right, .. } | RirNode::ChainJoin { left, right, .. } => {
                 contains_scan(left, rel) || contains_scan(right, rel)
             }
             RirNode::Project { input, .. }
