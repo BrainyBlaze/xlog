@@ -6,9 +6,28 @@
 
 use crate::harness::xgcf;
 use crate::harness::{CategoryResult, TestContext, TestResult};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 use std::time::Instant;
-use xlog_core::{ScalarType, Schema};
+use xlog_core::{RuntimeConfig, ScalarType, Schema};
+use xlog_cuda::{CudaBuffer, CudaKernelProvider};
+use xlog_logic::Compiler;
+use xlog_runtime::Executor;
+
+const W54_REPLAY_SOURCE: &str = r#"
+    pred frontier_pred(u32).
+    pred widened_pred(u32).
+    pred frontier_edge(u32, u32).
+    pred blocked_pred(u32).
+    pred promoted(u32).
+    pred replay_reachable(u32).
+    pred rollback_hit(u32).
+
+    promoted(P) :- frontier_pred(P), widened_pred(P).
+    replay_reachable(P) :- promoted(P).
+    replay_reachable(Q) :- replay_reachable(P), frontier_edge(P, Q), frontier_pred(Q).
+    rollback_hit(P) :- replay_reachable(P), blocked_pred(P).
+"#;
 
 /// Run all tests in this category.
 pub fn run_all(ctx: &TestContext) -> CategoryResult {
@@ -23,9 +42,166 @@ pub fn run_all(ctx: &TestContext) -> CategoryResult {
     results.add_result(test_mc_sample_reproducibility(ctx));
     results.add_result(test_xgcf_forward_reproducibility(ctx));
     results.add_result(test_xgcf_backward_reproducibility(ctx));
+    results.add_result(test_w54_widened_frontier_replay_representative(ctx));
 
     results.set_duration(start.elapsed());
     results
+}
+
+fn w54_unary_schema() -> Schema {
+    Schema::new(vec![("c0".to_string(), ScalarType::U32)])
+}
+
+fn w54_binary_schema() -> Schema {
+    Schema::new(vec![
+        ("c0".to_string(), ScalarType::U32),
+        ("c1".to_string(), ScalarType::U32),
+    ])
+}
+
+fn w54_upload_unary(provider: &CudaKernelProvider, values: &[u32]) -> Result<CudaBuffer, String> {
+    provider
+        .create_buffer_from_u32_columns(&[values], w54_unary_schema())
+        .map_err(|e| format!("upload unary failed: {}", e))
+}
+
+fn w54_upload_binary(
+    provider: &CudaKernelProvider,
+    values: &[(u32, u32)],
+) -> Result<CudaBuffer, String> {
+    let col0: Vec<u32> = values.iter().map(|(a, _)| *a).collect();
+    let col1: Vec<u32> = values.iter().map(|(_, b)| *b).collect();
+    provider
+        .create_buffer_from_u32_columns(&[&col0, &col1], w54_binary_schema())
+        .map_err(|e| format!("upload binary failed: {}", e))
+}
+
+fn w54_download_rows(
+    provider: &CudaKernelProvider,
+    buffer: &CudaBuffer,
+) -> Result<Vec<Vec<u32>>, String> {
+    let columns: Vec<Vec<u32>> = (0..buffer.arity())
+        .map(|col| {
+            provider
+                .download_column::<u32>(buffer, col)
+                .map_err(|e| format!("download column {} failed: {}", col, e))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if columns.is_empty() {
+        return Ok(Vec::new());
+    }
+    let row_count = columns[0].len();
+    let mut rows: Vec<Vec<u32>> = (0..row_count)
+        .map(|row| columns.iter().map(|col| col[row]).collect())
+        .collect();
+    rows.sort();
+    Ok(rows)
+}
+
+fn w54_run_replay(
+    provider: Arc<CudaKernelProvider>,
+) -> Result<BTreeMap<String, Vec<Vec<u32>>>, String> {
+    let mut compiler = Compiler::new();
+    let plan = compiler
+        .compile(W54_REPLAY_SOURCE)
+        .map_err(|e| format!("compile replay failed: {}", e))?;
+    let mut executor = Executor::new_with_config(
+        Arc::clone(&provider),
+        RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(false)),
+    );
+    for (name, rel_id) in compiler.rel_ids() {
+        executor.register_relation(*rel_id, name);
+    }
+
+    let frontier_pred = [1, 2, 3, 4, 5];
+    let widened_pred = [2, 4];
+    let blocked_pred = [5];
+    let frontier_edge = [(2, 3), (3, 5), (4, 5)];
+    executor.put_relation(
+        "frontier_pred",
+        w54_upload_unary(&provider, &frontier_pred)?,
+    );
+    executor.put_relation("widened_pred", w54_upload_unary(&provider, &widened_pred)?);
+    executor.put_relation("blocked_pred", w54_upload_unary(&provider, &blocked_pred)?);
+    executor.put_relation(
+        "frontier_edge",
+        w54_upload_binary(&provider, &frontier_edge)?,
+    );
+    executor
+        .execute_plan(&plan)
+        .map_err(|e| format!("execute replay failed: {}", e))?;
+
+    let mut out = BTreeMap::new();
+    for name in ["promoted", "replay_reachable", "rollback_hit"] {
+        let buffer = executor
+            .store()
+            .get(name)
+            .ok_or_else(|| format!("missing replay relation {}", name))?;
+        out.insert(name.to_string(), w54_download_rows(&provider, buffer)?);
+    }
+    Ok(out)
+}
+
+/// W5.4 cert hook: minimal widened-frontier replay representative is deterministic
+/// inside the CUDA certification suite.
+fn test_w54_widened_frontier_replay_representative(ctx: &TestContext) -> TestResult {
+    let start = Instant::now();
+    let provider = match CudaKernelProvider::new(ctx.device.clone(), ctx.memory.clone()) {
+        Ok(p) => Arc::new(p),
+        Err(e) => {
+            return TestResult::error(
+                "test_w54_widened_frontier_replay_representative",
+                start.elapsed(),
+                format!("provider init failed: {}", e),
+            )
+        }
+    };
+    let first = match w54_run_replay(Arc::clone(&provider)) {
+        Ok(snapshot) => snapshot,
+        Err(e) => {
+            return TestResult::error(
+                "test_w54_widened_frontier_replay_representative",
+                start.elapsed(),
+                e,
+            )
+        }
+    };
+    let second = match w54_run_replay(provider) {
+        Ok(snapshot) => snapshot,
+        Err(e) => {
+            return TestResult::error(
+                "test_w54_widened_frontier_replay_representative",
+                start.elapsed(),
+                e,
+            )
+        }
+    };
+
+    if first != second {
+        return TestResult::error(
+            "test_w54_widened_frontier_replay_representative",
+            start.elapsed(),
+            format!(
+                "replay representative diverged: first={:?}, second={:?}",
+                first, second
+            ),
+        );
+    }
+    if first["promoted"].len() != 2
+        || first["replay_reachable"].len() != 4
+        || first["rollback_hit"].len() != 1
+    {
+        return TestResult::error(
+            "test_w54_widened_frontier_replay_representative",
+            start.elapsed(),
+            format!("unexpected replay row counts: {:?}", first),
+        );
+    }
+
+    TestResult::passed(
+        "test_w54_widened_frontier_replay_representative",
+        start.elapsed(),
+    )
 }
 
 /// Test 6: MC sampling is deterministic for a fixed seed.

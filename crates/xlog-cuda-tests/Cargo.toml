@@ -11,6 +11,8 @@ publish = false
 [dependencies]
 xlog-cuda.workspace = true
 xlog-core.workspace = true
+xlog-logic.workspace = true
+xlog-runtime.workspace = true
 xlog-solve.workspace = true
 cudarc = { workspace = true }
 rand = "0.8"
