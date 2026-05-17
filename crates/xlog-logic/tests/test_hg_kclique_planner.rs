@@ -133,6 +133,46 @@ fn w52_baseline_prediction_precision_is_36_of_36() {
 }
 
 #[test]
+fn buried_inner_variable_skew_emits_helper_split_spec() {
+    let shape = KCliqueShape::complete(5, RelId(70_000)).unwrap();
+    let stats = complete_stats_with_variable_heat(&shape, dense_wcoj_profile(10_000), 3, 5.0);
+
+    let plan = plan_kclique_var_order(&shape, &stats).expect("complete stats should plan");
+
+    assert_ne!(
+        plan.variable_order.first(),
+        Some(&VertexId(3)),
+        "hot variable must be buried behind the selected leader for this cert"
+    );
+    assert_eq!(
+        plan.helper_split_specs.len(),
+        1,
+        "heat ratio >= 3x must emit one helper split spec"
+    );
+    let spec = &plan.helper_split_specs[0];
+    assert_eq!(spec.helper_id, 0);
+    assert_eq!(spec.variable, 3);
+    assert_eq!(
+        spec.edge_slots.len(),
+        3,
+        "K-clique helper split materializes a triangle around the buried variable"
+    );
+}
+
+#[test]
+fn uniform_heat_keeps_helper_split_specs_empty() {
+    let shape = KCliqueShape::complete(5, RelId(80_000)).unwrap();
+    let stats = complete_stats(&shape, dense_wcoj_profile(10_000));
+
+    let plan = plan_kclique_var_order(&shape, &stats).expect("complete stats should plan");
+
+    assert!(
+        plan.helper_split_specs.is_empty(),
+        "uniform heat must preserve the pre-G_HELP_KC empty helper spec behavior"
+    );
+}
+
+#[test]
 fn planner_source_uses_existing_stats_surfaces_only() {
     let source = include_str!("../src/hypergraph/var_order.rs");
     assert!(source.contains("xlog_stats::"));
@@ -182,6 +222,66 @@ fn complete_stats(shape: &KCliqueShape, profile: FixtureProfile) -> StatsSnapsho
             profile.heat,
             profile.heat,
         ));
+
+        snapshot.relations.push(rel);
+    }
+
+    for (left_idx, left_edge) in shape.edges().iter().enumerate() {
+        for right_edge in shape.edges().iter().skip(left_idx + 1) {
+            if left_edge.touches(right_edge) {
+                let mut sel = JoinSelectivity::new(left_edge.rel_id, right_edge.rel_id);
+                sel.set_keys(vec![left_edge.left_col], vec![right_edge.left_col]);
+                sel.set_selectivity(profile.selectivity);
+                snapshot.join_selectivities.push(sel);
+            }
+        }
+    }
+
+    snapshot
+}
+
+fn complete_stats_with_variable_heat(
+    shape: &KCliqueShape,
+    profile: FixtureProfile,
+    hot_variable: usize,
+    hot_heat: f64,
+) -> StatsSnapshot {
+    let mut snapshot = StatsSnapshot::default();
+
+    for edge in shape.edges() {
+        let mut rel = RelationStats::new(edge.rel_id);
+        rel.update_cardinality(profile.rows);
+
+        let mut left_col = ColumnStats::new(edge.left_col, ScalarType::U32);
+        left_col.update_distinct(profile.ndv);
+        let mut right_col = ColumnStats::new(edge.right_col, ScalarType::U32);
+        right_col.update_distinct(profile.ndv);
+        rel.add_column(left_col);
+        rel.add_column(right_col);
+
+        rel.add_prefix_degree(PrefixDegreeStats::new(
+            edge.left_col,
+            profile.prefix_degree,
+            profile.prefix_degree * 1.25,
+        ));
+        rel.add_prefix_degree(PrefixDegreeStats::new(
+            edge.right_col,
+            profile.prefix_degree,
+            profile.prefix_degree * 1.25,
+        ));
+
+        let left_heat = if edge.left.0 == hot_variable {
+            hot_heat
+        } else {
+            profile.heat
+        };
+        let right_heat = if edge.right.0 == hot_variable {
+            hot_heat
+        } else {
+            profile.heat
+        };
+        rel.add_key_heat(KeyHeatStats::new(edge.left_col, left_heat, left_heat));
+        rel.add_key_heat(KeyHeatStats::new(edge.right_col, right_heat, right_heat));
 
         snapshot.relations.push(rel);
     }

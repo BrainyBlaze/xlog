@@ -1320,6 +1320,7 @@ pub mod helper_split_pass {
     use std::collections::{HashMap, HashSet};
 
     use xlog_core::{RelId, ScalarType, Schema};
+    use xlog_ir::rir::{HelperSplitSpec, KCliqueVariableOrder};
     use xlog_ir::{CompiledRule, ExecutionPlan, JoinType, ProjectExpr, RirMeta, RirNode, Scc};
     use xlog_stats::StatsManager;
 
@@ -1372,6 +1373,14 @@ pub mod helper_split_pass {
         spec: HelperRelationSpec,
     }
 
+    #[derive(Clone, Copy)]
+    struct KCliqueHelperEdge {
+        slot: usize,
+        rel: RelId,
+        left: usize,
+        right: usize,
+    }
+
     /// Rewrite eligible rules in-place and return the helper relations introduced.
     pub fn run<F>(
         plan: &mut ExecutionPlan,
@@ -1389,6 +1398,45 @@ pub mod helper_split_pass {
                 let rewrite = {
                     let rule = &plan.rules_by_scc[scc_idx][rule_idx];
                     try_rewrite_rule(rule, schemas, stats, &mut allocate)
+                };
+                if let Some(rewrite) = rewrite {
+                    let helper_rule = CompiledRule {
+                        head: rewrite.spec.name.clone(),
+                        body: rewrite.helper_body,
+                        meta: RirMeta::with_schema(rewrite.spec.schema.clone()),
+                    };
+                    plan.rules_by_scc[scc_idx].insert(rule_idx, helper_rule);
+                    rule_idx += 1;
+                    plan.rules_by_scc[scc_idx][rule_idx].body = rewrite.outer_body;
+                    add_helper_to_scc(&mut plan.sccs, scc_idx, &rewrite.spec.name);
+                    specs.push(rewrite.spec);
+                }
+                rule_idx += 1;
+            }
+        }
+        specs
+    }
+
+    /// Authorization 5 G_HELP_KC entry for K-clique plans that
+    /// already carry planner-produced `HelperSplitSpec`s. The pass
+    /// reuses the Phase-1 G4 helper-relation lifecycle: emit a helper
+    /// rule before the consumer rule, allocate a compiler-owned helper
+    /// relation, and rewrite the consumer to scan that helper.
+    pub fn run_kclique_specs<F>(
+        plan: &mut ExecutionPlan,
+        schemas: &HashMap<RelId, Schema>,
+        mut allocate: F,
+    ) -> Vec<HelperRelationSpec>
+    where
+        F: FnMut(Schema) -> (String, RelId),
+    {
+        let mut specs = Vec::new();
+        for scc_idx in 0..plan.rules_by_scc.len() {
+            let mut rule_idx = 0;
+            while rule_idx < plan.rules_by_scc[scc_idx].len() {
+                let rewrite = {
+                    let rule = &plan.rules_by_scc[scc_idx][rule_idx];
+                    try_rewrite_kclique_rule(rule, schemas, &mut allocate)
                 };
                 if let Some(rewrite) = rewrite {
                     let helper_rule = CompiledRule {
@@ -1443,6 +1491,164 @@ pub mod helper_split_pass {
                 ],
             },
         })
+    }
+
+    fn try_rewrite_kclique_rule<F>(
+        rule: &CompiledRule,
+        schemas: &HashMap<RelId, Schema>,
+        allocate: &mut F,
+    ) -> Option<Rewrite>
+    where
+        F: FnMut(Schema) -> (String, RelId),
+    {
+        let mut outer_body = rule.body.clone();
+        let RirNode::MultiWayJoin {
+            inputs, var_order, ..
+        } = &mut outer_body
+        else {
+            return None;
+        };
+        let kclique = var_order.as_ref()?.kclique.as_ref()?;
+        let spec = kclique.helper_split_specs.first()?;
+        let (hot_left, hot_right, target) = kclique_helper_edges(inputs, kclique, spec)?;
+        let helper_schema = schemas.get(&target.rel)?.clone();
+        let (helper_name, helper_rel) = allocate(helper_schema.clone());
+        let helper_body = build_kclique_helper_body(spec, hot_left, hot_right, target)?;
+        *inputs.get_mut(target.slot)? = RirNode::Scan { rel: helper_rel };
+        Some(Rewrite {
+            helper_body,
+            outer_body,
+            spec: HelperRelationSpec {
+                name: helper_name,
+                rel_id: helper_rel,
+                schema: helper_schema,
+                source_rels: [hot_left.rel, hot_right.rel],
+            },
+        })
+    }
+
+    fn kclique_helper_edges(
+        inputs: &[RirNode],
+        kclique: &KCliqueVariableOrder,
+        spec: &HelperSplitSpec,
+    ) -> Option<(KCliqueHelperEdge, KCliqueHelperEdge, KCliqueHelperEdge)> {
+        let k = usize::from(kclique.k);
+        let hot = usize::from(spec.variable);
+        let mut hot_edges = Vec::new();
+        let mut target = None;
+        for &slot in &spec.edge_slots {
+            let slot = usize::from(slot);
+            let (left, right) = kclique_edge_pair(slot, k)?;
+            let RirNode::Scan { rel } = inputs.get(slot)? else {
+                return None;
+            };
+            let edge = KCliqueHelperEdge {
+                slot,
+                rel: *rel,
+                left,
+                right,
+            };
+            if left == hot || right == hot {
+                hot_edges.push(edge);
+            } else {
+                target = Some(edge);
+            }
+        }
+        if hot_edges.len() != 2 {
+            return None;
+        }
+        Some((hot_edges[0], hot_edges[1], target?))
+    }
+
+    fn build_kclique_helper_body(
+        spec: &HelperSplitSpec,
+        hot_left: KCliqueHelperEdge,
+        hot_right: KCliqueHelperEdge,
+        target: KCliqueHelperEdge,
+    ) -> Option<RirNode> {
+        let hot = usize::from(spec.variable);
+        let target_left = target.left;
+        let target_right = target.right;
+        let first_other = kclique_other_endpoint(hot_left, hot)?;
+        let second_other = kclique_other_endpoint(hot_right, hot)?;
+        if ![first_other, second_other].contains(&target_left)
+            || ![first_other, second_other].contains(&target_right)
+        {
+            return None;
+        }
+
+        let first_scan = RirNode::Scan { rel: hot_left.rel };
+        let second_scan = RirNode::Scan { rel: hot_right.rel };
+        let target_scan = RirNode::Scan { rel: target.rel };
+        let first_hot_col = kclique_endpoint_col(hot_left, hot)?;
+        let second_hot_col = kclique_endpoint_col(hot_right, hot)?;
+        let first_other_col = kclique_endpoint_col(hot_left, first_other)?;
+        let second_other_col = 2 + kclique_endpoint_col(hot_right, second_other)?;
+
+        let target_left_in_join = if first_other == target_left {
+            first_other_col
+        } else {
+            second_other_col
+        };
+        let target_right_in_join = if first_other == target_right {
+            first_other_col
+        } else {
+            second_other_col
+        };
+        let target_left_col = kclique_endpoint_col(target, target_left)?;
+        let target_right_col = kclique_endpoint_col(target, target_right)?;
+
+        let hot_join = RirNode::Join {
+            left: Box::new(first_scan),
+            right: Box::new(second_scan),
+            left_keys: vec![first_hot_col],
+            right_keys: vec![second_hot_col],
+            join_type: JoinType::Inner,
+        };
+        let helper_join = RirNode::Join {
+            left: Box::new(hot_join),
+            right: Box::new(target_scan),
+            left_keys: vec![target_left_in_join, target_right_in_join],
+            right_keys: vec![target_left_col, target_right_col],
+            join_type: JoinType::Inner,
+        };
+        Some(RirNode::Project {
+            input: Box::new(helper_join),
+            columns: vec![ProjectExpr::Column(4), ProjectExpr::Column(5)],
+        })
+    }
+
+    fn kclique_edge_pair(edge_idx: usize, k: usize) -> Option<(usize, usize)> {
+        let mut idx = 0usize;
+        for left in 0..k {
+            for right in (left + 1)..k {
+                if idx == edge_idx {
+                    return Some((left, right));
+                }
+                idx += 1;
+            }
+        }
+        None
+    }
+
+    fn kclique_endpoint_col(edge: KCliqueHelperEdge, variable: usize) -> Option<usize> {
+        if edge.left == variable {
+            Some(0)
+        } else if edge.right == variable {
+            Some(1)
+        } else {
+            None
+        }
+    }
+
+    fn kclique_other_endpoint(edge: KCliqueHelperEdge, variable: usize) -> Option<usize> {
+        if edge.left == variable {
+            Some(edge.right)
+        } else if edge.right == variable {
+            Some(edge.left)
+        } else {
+            None
+        }
     }
 
     fn linearize_project_body(

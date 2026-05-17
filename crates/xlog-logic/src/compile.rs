@@ -374,6 +374,24 @@ impl Compiler {
         // slice 1/2/4/W2.2 dispatch is bit-identical.
         crate::promote::promote_multiway(&mut plan, self.lowerer.rel_ids(), &stats_arc, config);
 
+        let schemas_by_rel_id: HashMap<RelId, Schema> = self
+            .lowerer
+            .rel_ids()
+            .iter()
+            .filter_map(|(pred, rel_id)| {
+                self.lowerer
+                    .schemas()
+                    .get(pred)
+                    .map(|schema| (*rel_id, schema.clone()))
+            })
+            .collect();
+
+        crate::optimizer::helper_split_pass::run_kclique_specs(
+            &mut plan,
+            &schemas_by_rel_id,
+            |schema| self.lowerer.create_helper_relation(schema),
+        );
+
         Ok(plan)
     }
 

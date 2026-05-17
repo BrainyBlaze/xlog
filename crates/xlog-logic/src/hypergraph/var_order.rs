@@ -18,7 +18,10 @@
 
 use super::ir::{HypergraphRule, VertexId};
 use xlog_core::RelId;
+use xlog_ir::rir::HelperSplitSpec;
 use xlog_stats::StatsSnapshot;
+
+const DEFAULT_BURIED_SKEW_THRESHOLD: f64 = 3.0;
 
 /// Compute a variable order for a [`HypergraphRule`].
 ///
@@ -290,6 +293,8 @@ pub struct FullVariableOrder {
     pub cost_prediction: CostPredictionRecord,
     /// Predicted winner for the measured W5.2-style path comparison.
     pub predicted_winner: PredictedWinner,
+    /// Helper-relation split requests for buried inner-variable skew.
+    pub helper_split_specs: Vec<HelperSplitSpec>,
 }
 
 /// Per-variable share allocated by the planner.
@@ -346,6 +351,7 @@ pub fn plan_kclique_var_order<S: StatsSource>(
     } else {
         PredictedWinner::HashPath
     };
+    let helper_split_specs = helper_split_specs_for_buried_skew(shape, stats, &variable_order)?;
 
     Some(FullVariableOrder {
         variable_order,
@@ -353,6 +359,7 @@ pub fn plan_kclique_var_order<S: StatsSource>(
         variable_share_allocation,
         cost_prediction,
         predicted_winner,
+        helper_split_specs,
     })
 }
 
@@ -508,6 +515,99 @@ fn edge_permutation(shape: &KCliqueShape, variable_order: &[VertexId]) -> Vec<us
         .collect();
     indexed.sort_by_key(|(_, max_pos, min_pos, rel_id)| (*max_pos, *min_pos, *rel_id));
     indexed.into_iter().map(|(idx, _, _, _)| idx).collect()
+}
+
+fn helper_split_specs_for_buried_skew<S: StatsSource>(
+    shape: &KCliqueShape,
+    stats: &S,
+    variable_order: &[VertexId],
+) -> Option<Vec<HelperSplitSpec>> {
+    let leader = *variable_order.first()?;
+    let variable_heat = per_variable_heat(shape, stats)?;
+    let leader_heat = variable_heat
+        .iter()
+        .find(|(variable, _)| *variable == leader)
+        .map(|(_, heat)| *heat)?
+        .max(f64::EPSILON);
+    let (hot_variable, hot_heat) = variable_heat
+        .iter()
+        .copied()
+        .filter(|(variable, _)| *variable != leader)
+        .max_by(|left, right| {
+            left.1
+                .total_cmp(&right.1)
+                .then_with(|| right.0.cmp(&left.0))
+        })?;
+    let threshold = buried_skew_threshold();
+    if hot_heat / leader_heat < threshold {
+        return Some(Vec::new());
+    }
+
+    let helper_vertices: Vec<VertexId> = variable_order
+        .iter()
+        .copied()
+        .filter(|variable| *variable != hot_variable)
+        .take(2)
+        .collect();
+    if helper_vertices.len() != 2 {
+        return Some(Vec::new());
+    }
+    let edge_hot_left = clique_edge_idx_for_vars(shape, hot_variable, helper_vertices[0])?;
+    let edge_hot_right = clique_edge_idx_for_vars(shape, hot_variable, helper_vertices[1])?;
+    let leader_edge = clique_edge_idx_for_vars(shape, helper_vertices[0], helper_vertices[1])?;
+
+    Some(vec![HelperSplitSpec {
+        helper_id: 0,
+        variable: u8::try_from(hot_variable.0).ok()?,
+        edge_slots: vec![
+            u8::try_from(edge_hot_left).ok()?,
+            u8::try_from(edge_hot_right).ok()?,
+            u8::try_from(leader_edge).ok()?,
+        ],
+    }])
+}
+
+fn buried_skew_threshold() -> f64 {
+    std::env::var("XLOG_BURIED_SKEW_THRESHOLD")
+        .ok()
+        .and_then(|raw| raw.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(DEFAULT_BURIED_SKEW_THRESHOLD)
+}
+
+fn per_variable_heat<S: StatsSource>(
+    shape: &KCliqueShape,
+    stats: &S,
+) -> Option<Vec<(VertexId, f64)>> {
+    let mut heats = Vec::new();
+    for variable in shape.variables() {
+        let mut heat = 0.0f64;
+        for edge in shape.edges() {
+            let Some(col_idx) = edge.endpoint_col(variable) else {
+                continue;
+            };
+            let (key_heat, skew_factor) = checked_heat(stats, edge.rel_id, col_idx)?;
+            heat = heat.max(key_heat.max(skew_factor));
+        }
+        heats.push((variable, heat.max(f64::EPSILON)));
+    }
+    Some(heats)
+}
+
+fn clique_edge_idx_for_vars(
+    shape: &KCliqueShape,
+    left: VertexId,
+    right: VertexId,
+) -> Option<usize> {
+    let (left, right) = if left <= right {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    shape
+        .edges()
+        .iter()
+        .position(|edge| edge.left == left && edge.right == right)
 }
 
 fn share_allocation(root_scores: &[(VertexId, f64)]) -> Vec<VariableShare> {

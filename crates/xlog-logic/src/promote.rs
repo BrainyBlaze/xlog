@@ -77,9 +77,9 @@
 use std::collections::HashMap;
 use xlog_core::RelId;
 use xlog_ir::rir::{
-    ColumnSwap, CostPredictionRecord as RirCostPredictionRecord, HelperSplitSpec,
-    KCliqueVariableOrder, MultiwayPlan, PlannedHashReason, ProjectExpr, SortedLayoutSpec,
-    StreamGroupId, VariableOrder, K_CLIQUE_MAX_EDGES, K_CLIQUE_MAX_K,
+    ColumnSwap, CostPredictionRecord as RirCostPredictionRecord, KCliqueVariableOrder,
+    MultiwayPlan, PlannedHashReason, ProjectExpr, SortedLayoutSpec, StreamGroupId, VariableOrder,
+    K_CLIQUE_MAX_EDGES, K_CLIQUE_MAX_K,
 };
 use xlog_ir::{ExecutionPlan, JoinType, RirNode};
 use xlog_stats::{StatsManager, StatsSnapshot};
@@ -1396,13 +1396,15 @@ fn kclique_variable_order_from_plan(
         key_columns: vec![vec![0, 1]],
     };
 
+    // Paper §5 Figure 3: Helper-relation splitting elevates buried inner-variable skew per Authorization 5 (2026-05-17)
+    let helper_split_specs = plan.helper_split_specs.clone();
     Some(KCliqueVariableOrder::new(
         k,
         variable_positions,
         edge_permutation,
         column_swaps,
         sorted_layout_requirements,
-        Vec::<HelperSplitSpec>::new(),
+        helper_split_specs,
         StreamGroupId(0),
     ))
 }
