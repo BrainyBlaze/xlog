@@ -91,6 +91,62 @@ fn w65_runtime_query_result_sort_labels_follow_query_variables() {
 }
 
 #[test]
+fn w65_dts_style_support_source_emits_partial_unary_rows_by_semantics() {
+    let Some(provider) = w65_test_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let source = r#"
+        pred wmir_committed(i64, i64, i64).
+        pred wmir_body_0(i64, i64, i64).
+        pred wmir_body_1(i64, i64, i64).
+        pred usable(i64, i64, i64).
+        pred support_1(i64, i64, i64, i64, i64, i64, i64).
+        pred support_2(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64).
+
+        wmir_body_0(4, 10006, 10012).
+        wmir_body_1(4, 10006, 10012).
+        wmir_committed(10012, 10022, 10022).
+
+        usable(P, A0, A1) :- wmir_committed(P, A0, A1).
+
+        support_1(Head, V0, V1, RId, W0P, V0, V1) :-
+            wmir_body_0(RId, Head, W0P), usable(W0P, V0, V1).
+
+        support_2(Head, V0, V1, RId, W0P, V0, V2, W1P, V2, V1) :-
+            wmir_body_0(RId, Head, W0P),
+            usable(W0P, V0, V2),
+            wmir_body_1(RId, Head, W1P),
+            usable(W1P, V2, V1).
+
+        ?- support_1(H, A0, A1, R, W0P, W0A0, W0A1).
+        ?- support_2(H, A0, A1, R, W0P, W0A0, W0A1, W1P, W1A0, W1A1).
+    "#;
+
+    let program = LogicProgram::compile(source).expect("compile DTS-style W65 fixture");
+    let result = program
+        .evaluate(provider, std::collections::HashMap::new())
+        .expect("evaluate DTS-style W65 fixture");
+
+    assert_eq!(result.queries.len(), 2);
+    assert_eq!(
+        result.queries[0].columns,
+        ["H", "A0", "A1", "R", "W0P", "W0A0", "W0A1"]
+    );
+    assert_eq!(
+        result.queries[0].sort_labels,
+        ["H", "A0", "A1", "R", "W0P", "W0A0", "W0A1"]
+    );
+    assert_eq!(
+        result.queries[0].buffer.num_rows(),
+        1,
+        "Datalog semantics require support_1 to emit the partial row because the source asks for wmir_body_0-only support"
+    );
+    assert_eq!(result.queries[1].buffer.num_rows(), 1);
+}
+
+#[test]
 fn w65_pyxlog_logic_query_result_exposes_sort_labels() {
     let lib_src = include_str!("../../pyxlog/src/lib.rs");
     let logic_src = include_str!("../../pyxlog/src/logic.rs");
