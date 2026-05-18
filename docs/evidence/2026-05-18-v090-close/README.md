@@ -49,7 +49,7 @@ Earlier ref checks after `git fetch origin --prune` showed:
 | G090_EIR | PARTIAL | EIR is explicit and executable-plan lowering reaches reduced production runtime plans, but accepted epistemic forms still lack production GPU runtime dispatch. |
 | G090_G91 | PASS for semantic oracle | Compatibility fixtures pass, but GPU parity remains unproven. |
 | G090_FAEEL | PASS for semantic oracle | Foundedness fixtures pass, but GPU parity remains unproven. |
-| G090_GPT | PARTIAL | CPU trace fixtures pass; GPU-resident candidate generation, propagation staging, candidate-buffer validation, arity 0-3 tuple-source model-membership staging with fixed arity-one/two/three row-scoped ground key comparison, generic arity-N variable-bound tuple matching, bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, final-row map construction, and final tuple materialization exist; broader semantic parity and multi-binding final-row filtering remain missing. |
+| G090_GPT | PARTIAL | CPU trace fixtures pass; GPU-resident candidate generation, propagation staging, candidate-buffer validation, arity 0-3 tuple-source model-membership staging with fixed arity-one/two/three row-scoped ground key comparison, generic arity-N variable-bound tuple matching, bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, final-row map construction, and final tuple materialization exist; unary/binary final-row filtering fixtures pass, but broader semantic parity and multiple-epistemic-literal final-row filtering remain missing. |
 | G090_SPLIT | PARTIAL | CPU split/recompose fixtures pass; GPU split execution is missing. |
 | G090_GPU | BLOCKED | GPU-plan, reduced-runtime-plan, workspace allocation/reset, bounded candidate-generation, propagation, candidate-validation, arity 0-3 tuple-source model-membership staging with fixed arity-one/two/three row-scoped ground key comparison over existing relation buffers, generic arity-N variable-bound tuple matching, world-view-validation, accepted-candidate materialization, final-result flag, final-row map/final tuple materialization kernels, accepted K5 WCOJ dispatch, and hot-path transfer-budget trace with CUDA-event elapsed timing/runtime-preflight/fail-closed WCOJ gate/reduced-plan trace contracts exist, but full semantic kernel-buffer parity, solver wiring, probability wiring, and broader fixture coverage remain missing. |
 | G090_SOLVER | BLOCKED | Accepted GPU runtime evidence can gate GPU CDCL SAT/UNSAT, but MaxSAT, portfolio execution, and full assumption lifecycle traces are not wired to epistemic candidates. |
@@ -91,8 +91,8 @@ The branch contains useful scaffolding:
   world-view result slots;
 - bounded final tuple materialization kernel with device row-count read/write
   metadata, zero host writes, and a device-resident final-output `CudaBuffer`;
-- bounded final-row map construction that filters accepted unary nonzero-arity
-  output rows by bound tuple-key membership on device;
+- bounded final-row map construction that filters accepted unary and binary
+  nonzero-arity output rows by bound tuple-key membership on device;
 - runtime preflight that rejects nonzero CPU fallback counters and records
   WCOJ/K-clique/helper route metadata before launch;
 - runtime counter guard that refuses to certify WCOJ evidence from preflight

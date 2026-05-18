@@ -151,6 +151,36 @@ fn download_unary_u32(provider: &CudaKernelProvider, buffer: &CudaBuffer) -> Vec
         .collect()
 }
 
+fn download_binary_u32(provider: &CudaKernelProvider, buffer: &CudaBuffer) -> Vec<(u32, u32)> {
+    let rows = read_device_row_count(provider, buffer).expect("device row count");
+    if rows == 0 {
+        return Vec::new();
+    }
+    let mut col0 = vec![0u8; rows * std::mem::size_of::<u32>()];
+    let mut col1 = vec![0u8; rows * std::mem::size_of::<u32>()];
+    unsafe {
+        sys::cuMemcpyDtoH_v2(
+            col0.as_mut_ptr() as *mut _,
+            *buffer.column(0).expect("binary column 0").device_ptr(),
+            col0.len(),
+        );
+        sys::cuMemcpyDtoH_v2(
+            col1.as_mut_ptr() as *mut _,
+            *buffer.column(1).expect("binary column 1").device_ptr(),
+            col1.len(),
+        );
+    }
+    col0.chunks_exact(std::mem::size_of::<u32>())
+        .zip(col1.chunks_exact(std::mem::size_of::<u32>()))
+        .map(|(a, b)| {
+            (
+                u32::from_le_bytes(a.try_into().unwrap()),
+                u32::from_le_bytes(b.try_into().unwrap()),
+            )
+        })
+        .collect()
+}
+
 #[test]
 fn accepted_epistemic_k5_execution_certifies_production_wcoj_dispatch() {
     let Some(fix) = make_runtime_backed_fixture() else {
@@ -255,6 +285,55 @@ fn accepted_nonzero_arity_membership_filters_final_rows_by_bound_tuple_key() {
         download_unary_u32(&fix.provider, &result.final_output),
         vec![1],
         "final output must keep only reduced rows whose bound tuple key appears in the stable model"
+    );
+}
+
+#[test]
+fn accepted_binary_membership_filters_final_rows_by_bound_tuple_key() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred pair(u32, u32).
+        pred edge(u32, u32).
+        pred accepted(u32, u32).
+        accepted(X, Y) :- pair(X, Y), know edge(X, Y).
+        "#,
+    )
+    .expect("parse binary epistemic fixture");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile binary epistemic executable");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &executable.relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation("pair", upload_binary_u32(&fix.memory, &[(1, 2), (2, 3)]));
+    executor.put_relation("edge", upload_binary_u32(&fix.memory, &[(1, 2)]));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 2,
+            },
+        )
+        .expect("execute binary epistemic fixture");
+
+    assert_eq!(
+        result.model_membership.membership_source,
+        EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+    );
+    assert_eq!(
+        download_binary_u32(&fix.provider, &result.final_output),
+        vec![(1, 2)],
+        "final output must keep only reduced rows whose binary tuple key appears in the stable model"
     );
 }
 
