@@ -82,3 +82,24 @@ distinction without routing epistemic programs through RIR.
 Non-epistemic programs remain isolated from mode selection. A program with no
 `BodyLiteral::Epistemic` compiles to the same RIR plan under the default mode
 and under `#pragma epistemic_mode = g91`.
+
+## FAEEL Default Fixture Semantics
+
+`faeel` is the default epistemic mode. The bounded FAEEL layer in
+`crates/xlog-logic/src/epistemic.rs` evaluates parsed epistemic literals against
+an `EpistemicInterpretation` and returns `FaeelCandidateResult`.
+
+The current executable fixture core is intentionally small:
+
+- `know p(...)` succeeds only when `p/arity` is in `known`;
+- `possible p(...)` succeeds only when `p/arity` is in `known`;
+- a `possible` atom that is only in the compatibility `possible` set is rejected
+  as `FaeelNoModelReason::UnfoundedPossible`;
+- an atom present in both `known` and `rejected` is rejected as
+  `FaeelNoModelReason::Contradiction`;
+- any other unsatisfied epistemic literal returns
+  `FaeelNoModelReason::UnsatisfiedLiteral`.
+
+The bounded FAEEL evaluator is a certification fixture for foundedness and
+no-model behavior. It is not yet the full Generate-Propagate-Test executor; that
+pipeline is owned by `G090_GPT`.
