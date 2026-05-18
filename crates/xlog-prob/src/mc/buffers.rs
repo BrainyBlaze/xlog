@@ -9,8 +9,8 @@ use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{mc_eval_kernels, MC_EVAL_MODULE};
 use xlog_cuda::{CudaBuffer, CudaKernelProvider, LaunchAsync};
 use xlog_logic::ast::{
-    AggOp, Atom, BodyLiteral, Evidence, PredColumn, PredDecl, ProbFact, ProbQuery, Program, Term,
-    TypeRef,
+    AggOp, Atom, BodyLiteral, Evidence, PredColumn, PredDecl, ProbFact, ProbQuery, Program, Rule,
+    Term, TypeRef,
 };
 use xlog_runtime::Executor;
 
@@ -597,7 +597,7 @@ pub(super) fn ensure_predicate_decls(program: &mut Program) -> Result<()> {
         );
     }
 
-    let mut inferred: HashMap<String, Vec<ScalarType>> = HashMap::new();
+    let mut inferred: HashMap<String, Vec<ScalarType>> = declared.clone();
 
     let mut record_atom = |atom: &Atom| {
         let types: Vec<ScalarType> = atom
@@ -605,33 +605,11 @@ pub(super) fn ensure_predicate_decls(program: &mut Program) -> Result<()> {
             .iter()
             .map(infer_term_scalar_type)
             .collect::<Result<_>>()?;
-        match inferred.get(&atom.predicate) {
-            Some(existing) if *existing != types => Err(XlogError::Compilation(format!(
-                "Inconsistent predicate types for {}",
-                atom.predicate
-            ))),
-            Some(_) => Ok(()),
-            None => {
-                inferred.insert(atom.predicate.clone(), types);
-                Ok(())
-            }
-        }
+        record_predicate_types(&mut inferred, &atom.predicate, types).map(|_| ())
     };
 
     for fact in program.facts() {
         record_atom(&fact.head)?;
-    }
-
-    for rule in &program.rules {
-        record_atom(&rule.head)?;
-        for lit in &rule.body {
-            match lit {
-                BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
-                    record_atom(atom)?;
-                }
-                BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {}
-            }
-        }
     }
 
     for pf in &program.prob_facts {
@@ -644,11 +622,21 @@ pub(super) fn ensure_predicate_decls(program: &mut Program) -> Result<()> {
         }
     }
 
+    for _ in 0..=program.rules.len() {
+        let mut changed = false;
+        for rule in program.proper_rules() {
+            changed |= record_rule_types(rule, &mut inferred)?;
+        }
+        if !changed {
+            break;
+        }
+    }
+
     for ProbQuery { atom } in &program.prob_queries {
-        record_atom(atom)?;
+        record_atom_if_unknown(&mut inferred, atom)?;
     }
     for Evidence { atom, .. } in &program.evidence {
-        record_atom(atom)?;
+        record_atom_if_unknown(&mut inferred, atom)?;
     }
 
     for (pred, types) in inferred {
@@ -670,6 +658,123 @@ pub(super) fn ensure_predicate_decls(program: &mut Program) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn record_rule_types(rule: &Rule, inferred: &mut HashMap<String, Vec<ScalarType>>) -> Result<bool> {
+    let mut var_types: HashMap<String, ScalarType> = HashMap::new();
+
+    for lit in &rule.body {
+        match lit {
+            BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
+                if let Some(types) = inferred.get(&atom.predicate) {
+                    bind_atom_variable_types(atom, types, &mut var_types)?;
+                }
+            }
+            BodyLiteral::IsExpr(is_expr) => {
+                var_types
+                    .entry(is_expr.target.clone())
+                    .or_insert(ScalarType::U64);
+            }
+            BodyLiteral::Comparison(_) | BodyLiteral::Univ(_) => {}
+        }
+    }
+
+    for lit in &rule.body {
+        match lit {
+            BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
+                let types = infer_atom_types(atom, &var_types)?;
+                record_predicate_types(inferred, &atom.predicate, types)?;
+            }
+            BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {}
+        }
+    }
+
+    let head_types = infer_atom_types(&rule.head, &var_types)?;
+    record_predicate_types(inferred, &rule.head.predicate, head_types)
+}
+
+fn bind_atom_variable_types(
+    atom: &Atom,
+    types: &[ScalarType],
+    var_types: &mut HashMap<String, ScalarType>,
+) -> Result<()> {
+    if atom.terms.len() != types.len() {
+        return Err(XlogError::Compilation(format!(
+            "Arity mismatch while inferring predicate types for {}",
+            atom.predicate
+        )));
+    }
+    for (term, typ) in atom.terms.iter().zip(types.iter().copied()) {
+        if let Term::Variable(name) = term {
+            bind_variable_type(var_types, name, typ)?;
+        }
+    }
+    Ok(())
+}
+
+fn bind_variable_type(
+    var_types: &mut HashMap<String, ScalarType>,
+    name: &str,
+    typ: ScalarType,
+) -> Result<()> {
+    match var_types.get(name) {
+        Some(existing) if *existing != typ => Err(XlogError::Compilation(format!(
+            "Inconsistent inferred type for variable {}",
+            name
+        ))),
+        Some(_) => Ok(()),
+        None => {
+            var_types.insert(name.to_string(), typ);
+            Ok(())
+        }
+    }
+}
+
+fn infer_atom_types(
+    atom: &Atom,
+    var_types: &HashMap<String, ScalarType>,
+) -> Result<Vec<ScalarType>> {
+    atom.terms
+        .iter()
+        .map(|term| match term {
+            Term::Variable(name) => Ok(var_types.get(name).copied().unwrap_or(ScalarType::U64)),
+            _ => infer_term_scalar_type(term),
+        })
+        .collect()
+}
+
+fn record_atom_if_unknown(
+    inferred: &mut HashMap<String, Vec<ScalarType>>,
+    atom: &Atom,
+) -> Result<()> {
+    if inferred.contains_key(&atom.predicate) {
+        return Ok(());
+    }
+    let types: Vec<ScalarType> = atom
+        .terms
+        .iter()
+        .map(infer_term_scalar_type)
+        .collect::<Result<_>>()?;
+    inferred.insert(atom.predicate.clone(), types);
+    Ok(())
+}
+
+fn record_predicate_types(
+    inferred: &mut HashMap<String, Vec<ScalarType>>,
+    predicate: &str,
+    types: Vec<ScalarType>,
+) -> Result<bool> {
+    match inferred.get(predicate) {
+        Some(existing) if *existing != types => Err(XlogError::Compilation(format!(
+            "Inconsistent predicate types for {}",
+            predicate
+        ))),
+        Some(_) => Ok(false),
+        None => {
+            inferred.insert(predicate.to_string(), types);
+            Ok(true)
+        }
+    }
 }
 
 fn scalar_decl_types_for_prob(
@@ -758,7 +863,7 @@ fn infer_term_scalar_type(term: &Term) -> Result<ScalarType> {
         Term::Float(_) => Ok(ScalarType::F64),
         Term::String(_) | Term::Symbol(_) => Ok(ScalarType::Symbol),
         Term::Aggregate(agg) => Ok(match agg.op {
-            AggOp::Count => ScalarType::U32,
+            AggOp::Count => ScalarType::U64,
             AggOp::Sum => ScalarType::U64,
             AggOp::Min | AggOp::Max => ScalarType::U32,
             AggOp::LogSumExp => ScalarType::F64,

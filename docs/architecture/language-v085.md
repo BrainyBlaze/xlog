@@ -1,6 +1,6 @@
 # v0.8.5 Language Architecture Contract
 
-**Status:** implementation snapshot through `G085_MAGIC`.
+**Status:** implementation snapshot through `G085_PROB_AGG`.
 **Branch:** `feat/v085-language-completeness`.
 **Scope:** language, parser, term, probabilistic, and CLI surfaces required by
 the v0.8.5 language-completeness release.
@@ -51,7 +51,7 @@ normalize them to finite typed relation layouts or reject them before execution.
 | `G085_META` | Support safe `ground`, `var`, `nonvar`, `functor`, `=..`, `findall`, and unary/binary `maplist` | Static expansion and finite collection; no unrestricted `call/N` |
 | `G085_NAF` | Make deterministic NAF distinct from probabilistic WFS | Existing `not atom` remains stratified closed-world negation in deterministic programs; compiler-path diagnostics reject unsafe source-order binders and deterministic cycles |
 | `G085_MAGIC` | Rewrite bound recursive queries with adornments and magic predicates | Source-level rewrite before stratification/lowering/optimizer for the safe positive-recursion subset; `auto` declines and `on` fails if equivalence cannot be proven |
-| `G085_PROB_AGG` | Support finite probabilistic aggregates in exact and MC modes | Exact provenance/PIR or MC sampling plus deterministic aggregate execution |
+| `G085_PROB_AGG` | Support finite probabilistic aggregates in exact and MC modes | Exact finite outcome enumeration into provenance/PIR, sharing aggregate operator semantics with MC deterministic aggregate execution |
 | `G085_AGG_LIFT` | Lift compact finite-domain aggregate computations | Use only when equivalent to finite exact enumeration |
 | `G085_APPROX` | Promote MC configuration and reporting to source and CLI | Source pragmas plus CLI override/merge rules with deterministic fixed-seed replay |
 | `G085_INC_PARSE` | Cache statement-level parses with spans and invalidation | Shared by explain, REPL, and watch |
@@ -95,11 +95,11 @@ semantics.
 
 ## Source-Audit Snapshot
 
-Current implementation status through `G085_MAGIC`:
+Current implementation status through `G085_PROB_AGG`:
 
 - `docs/language-reference.md` has been updated to the v0.8.5 contract and now
-  records the shipped `G085_LIST`, `G085_META`, `G085_NAF`, and `G085_MAGIC`
-  subsets.
+  records the shipped `G085_LIST`, `G085_META`, `G085_NAF`, `G085_MAGIC`, and
+  `G085_PROB_AGG` subsets.
 - `crates/xlog-logic/src/grammar.pest` accepts finite list literals, cons
   patterns, compound terms, named predicate columns, and `list<T>` declarations.
 - `crates/xlog-logic/src/ast.rs` represents list, cons, compound, and static
@@ -123,8 +123,14 @@ Current implementation status through `G085_MAGIC`:
   unsupported SIPS cases.
 - `xlog-gpu` stores the normalized program so helper relation facts are loaded
   through the normal relation-store path.
-- `crates/xlog-prob/src/provenance.rs` still rejects aggregate terms in
-  provenance extraction.
+- `crates/xlog-prob/src/provenance.rs` accepts finite probabilistic aggregate
+  rules for `count`, `sum`, `min`, `max`, and `logsumexp` by enumerating exact
+  aggregate outcomes into PIR formulas. The exact cap is 16 uncertain
+  contributing rows per group; exceeding it reports a typed
+  `v0.8.5 prob_aggregate error` with MC/domain-reduction remediation.
+- `crates/xlog-prob/src/aggregates.rs` centralizes aggregate operator state so
+  exact provenance enumeration and MC deterministic aggregate execution share
+  `count`, `sum`, `min`, `max`, and `logsumexp` semantics.
 - `crates/xlog-cli/src/main.rs` now exposes `run`, `prob`, and a minimal
   `explain` command for magic-set status/report rendering in text/json/dot
   formats.

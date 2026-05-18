@@ -1356,14 +1356,18 @@ XLOG supports two inference engines:
   two-valued evaluation for deterministic `not atom` programs
 - **Probabilistic non-monotone negation**: Well-Founded Semantics (WFS) for
   accepted cyclic probabilistic programs
+- **Finite probabilistic aggregates**: `count`, `sum`, `min`, `max`, and
+  `logsumexp` aggregate outputs compiled through provenance/PIR when the exact
+  finite domain cap is respected
 - **Gradients**: Correct gradient flow through negated literals
 
 **Probabilistic aggregates in v0.8.5:** finite `count`, `sum`, `min`, `max`,
-and `logsumexp` aggregate programs are part of the v0.8.5 contract for exact
-and MC inference. At the `G085_DOCREF` source-audit checkpoint, the current
-exact provenance extractor still rejects aggregate terms; `G085_PROB_AGG` must
-replace that generic rejection with supported execution or a typed per-case
-decline.
+and `logsumexp` aggregate programs are supported for exact and MC inference in
+the finite `G085_PROB_AGG` subset. Exact mode enumerates finite aggregate
+outcomes into provenance/PIR formulas, so `query` and `evidence` may reference
+aggregate output tuples. Exact enumeration is capped at 16 uncertain
+contributing rows per group; cap excess fails with a typed
+`v0.8.5 prob_aggregate error` that recommends MC or reducing the finite domain.
 
 **Monte Carlo** supports probabilistic rules and non-monotone recursion.
 Aggregate support follows the v0.8.5 probabilistic aggregate contract and must
@@ -1386,10 +1390,10 @@ out_degree(X, count(Y)) :- edge(X, Y).
 query(out_degree(1, 2)).
 ```
 
-Exact mode must either compile the finite aggregate outcomes into provenance
-without host-only recomputation or fail with a typed diagnostic that explains
-the unsupported operator, domain, or cap. MC mode may sample worlds and execute
-the deterministic aggregate path for each accepted sample batch.
+Exact mode compiles each supported finite aggregate outcome into a Boolean PIR
+formula over contributing row-presence formulas. Empty probabilistic groups do
+not materialize `count(..., 0)` tuples. MC mode samples worlds on the GPU and
+executes the shared deterministic aggregate path for each accepted sample batch.
 
 ### Aggregate Lifting
 

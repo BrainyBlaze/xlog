@@ -13,6 +13,7 @@ use xlog_logic::stratify::{
 
 use crate::wfs::{evaluate_wfs_rules, WfsAtom, WfsConfig, WfsLiteral, WfsRule};
 
+use crate::aggregates::AggState;
 use crate::pir::{ChoiceVarId, LeafId, PirGraph, PirNodeId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -412,11 +413,6 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
 
     let mut rules_by_head: BTreeMap<String, Vec<Rule>> = BTreeMap::new();
     for rule in program.proper_rules() {
-        if rule.has_aggregation() {
-            return Err(XlogError::Compilation(
-                "Provenance extraction does not support aggregation".to_string(),
-            ));
-        }
         // Note: Negation is now supported via stratified evaluation and negate_provenance()
         rules_by_head
             .entry(rule.head.predicate.clone())
@@ -1194,15 +1190,283 @@ fn eval_rule(
         }
     }
 
-    let mut out: BTreeMap<Vec<Value>, PirNodeId> = BTreeMap::new();
-    for (binding, prov) in states {
-        let head_tuple = materialize_head(&rule.head, &binding)?;
-        let entry = out
-            .entry(head_tuple)
-            .or_insert_with(|| builder.const_false());
-        *entry = builder.or(vec![*entry, prov]);
+    if rule.has_aggregation() {
+        eval_aggregate_head_provenance(&rule.head, states, builder)
+    } else {
+        let mut out: BTreeMap<Vec<Value>, PirNodeId> = BTreeMap::new();
+        for (binding, prov) in states {
+            let head_tuple = materialize_head(&rule.head, &binding)?;
+            let entry = out
+                .entry(head_tuple)
+                .or_insert_with(|| builder.const_false());
+            *entry = builder.or(vec![*entry, prov]);
+        }
+        Ok(out)
     }
+}
+
+const MAX_EXACT_PROB_AGG_UNCERTAIN_ROWS: usize = 16;
+
+#[derive(Debug, Clone)]
+struct AggregateProvRow {
+    binding: HashMap<String, Value>,
+    prov: PirNodeId,
+}
+
+fn eval_aggregate_head_provenance(
+    head: &Atom,
+    states: Vec<(HashMap<String, Value>, PirNodeId)>,
+    builder: &mut PirBuilder,
+) -> Result<BTreeMap<Vec<Value>, PirNodeId>> {
+    let (key_vars, key_var_to_pos, agg_specs, agg_to_pos) = aggregate_head_plan(head)?;
+
+    let mut deduped_states: BTreeMap<Vec<(String, Value)>, AggregateProvRow> = BTreeMap::new();
+    for (binding, prov) in states {
+        let key = canonical_binding_key(&binding);
+        match deduped_states.get_mut(&key) {
+            Some(row) => {
+                row.prov = builder.or(vec![row.prov, prov]);
+            }
+            None => {
+                deduped_states.insert(key, AggregateProvRow { binding, prov });
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct GroupRows {
+        key: Vec<Value>,
+        rows: Vec<AggregateProvRow>,
+    }
+
+    let mut groups: BTreeMap<Vec<Value>, GroupRows> = BTreeMap::new();
+    for row in deduped_states.into_values() {
+        let mut key: Vec<Value> = Vec::with_capacity(key_vars.len());
+        for name in &key_vars {
+            let v = row
+                .binding
+                .get(name)
+                .ok_or_else(|| XlogError::UnsafeVariable(name.clone()))?;
+            key.push(v.clone());
+        }
+        groups
+            .entry(key.clone())
+            .or_insert_with(|| GroupRows {
+                key,
+                rows: Vec::new(),
+            })
+            .rows
+            .push(row);
+    }
+
+    let mut out: BTreeMap<Vec<Value>, PirNodeId> = BTreeMap::new();
+    for group in groups.into_values() {
+        let mut always_rows: Vec<AggregateProvRow> = Vec::new();
+        let mut uncertain_rows: Vec<AggregateProvRow> = Vec::new();
+        for row in group.rows {
+            match pir_const_value(builder, row.prov) {
+                Some(true) => always_rows.push(row),
+                Some(false) => {}
+                None => uncertain_rows.push(row),
+            }
+        }
+
+        if always_rows.is_empty() && uncertain_rows.is_empty() {
+            continue;
+        }
+        if uncertain_rows.len() > MAX_EXACT_PROB_AGG_UNCERTAIN_ROWS {
+            return Err(XlogError::Compilation(format!(
+                "v0.8.5 prob_aggregate error: exact aggregate domain cap exceeded for predicate {} group {:?}: {} uncertain rows > cap {}; use prob_engine = mc or reduce the finite aggregate domain",
+                head.predicate,
+                group.key,
+                uncertain_rows.len(),
+                MAX_EXACT_PROB_AGG_UNCERTAIN_ROWS
+            )));
+        }
+
+        let mask_count = 1usize << uncertain_rows.len();
+        for mask in 0..mask_count {
+            if always_rows.is_empty() && mask == 0 {
+                continue;
+            }
+
+            let mut agg_states: Vec<AggState> =
+                agg_specs.iter().map(|(op, _)| AggState::new(*op)).collect();
+            for row in &always_rows {
+                update_aggregate_states(&mut agg_states, &agg_specs, row)?;
+            }
+
+            let mut proof_terms: Vec<PirNodeId> = Vec::with_capacity(uncertain_rows.len());
+            for (idx, row) in uncertain_rows.iter().enumerate() {
+                if (mask & (1usize << idx)) != 0 {
+                    proof_terms.push(row.prov);
+                    update_aggregate_states(&mut agg_states, &agg_specs, row)?;
+                } else {
+                    proof_terms.push(negate_provenance(row.prov, builder));
+                }
+            }
+
+            let tuple = materialize_aggregate_tuple(
+                head,
+                &group.key,
+                &key_var_to_pos,
+                &agg_specs,
+                &agg_to_pos,
+                &agg_states,
+            )?;
+            let proof = builder.and(proof_terms);
+            let entry = out.entry(tuple).or_insert_with(|| builder.const_false());
+            *entry = builder.or(vec![*entry, proof]);
+        }
+    }
+
     Ok(out)
+}
+
+type AggregatePlan = (
+    Vec<String>,
+    HashMap<String, usize>,
+    Vec<(AggOp, String)>,
+    HashMap<(AggOp, String), usize>,
+);
+
+fn aggregate_head_plan(head: &Atom) -> Result<AggregatePlan> {
+    let mut key_vars: Vec<String> = Vec::new();
+    let mut key_var_to_pos: HashMap<String, usize> = HashMap::new();
+    let mut agg_specs: Vec<(AggOp, String)> = Vec::new();
+    let mut agg_to_pos: HashMap<(AggOp, String), usize> = HashMap::new();
+
+    for term in &head.terms {
+        match term {
+            Term::Variable(name) => {
+                if !key_var_to_pos.contains_key(name) {
+                    let pos = key_vars.len();
+                    key_vars.push(name.clone());
+                    key_var_to_pos.insert(name.clone(), pos);
+                }
+            }
+            Term::Aggregate(agg) => {
+                let key = (agg.op, agg.variable.clone());
+                if !agg_to_pos.contains_key(&key) {
+                    let pos = agg_specs.len();
+                    agg_specs.push(key.clone());
+                    agg_to_pos.insert(key, pos);
+                }
+            }
+            Term::Integer(_) | Term::Float(_) | Term::String(_) | Term::Symbol(_) => {}
+            Term::Anonymous => {
+                return Err(XlogError::Compilation(format!(
+                    "Anonymous variable in aggregate head of {} is not supported",
+                    head.predicate
+                )));
+            }
+            Term::List(_) => return Err(v085_prob_term_error("aggregate head planning", "list")),
+            Term::Cons { .. } => {
+                return Err(v085_prob_term_error("aggregate head planning", "cons"));
+            }
+            Term::Compound { .. } => {
+                return Err(v085_prob_term_error("aggregate head planning", "compound"));
+            }
+            Term::PredRef(_) => {
+                return Err(v085_prob_term_error("aggregate head planning", "predref"));
+            }
+        }
+    }
+
+    Ok((key_vars, key_var_to_pos, agg_specs, agg_to_pos))
+}
+
+fn canonical_binding_key(binding: &HashMap<String, Value>) -> Vec<(String, Value)> {
+    let mut key: Vec<(String, Value)> = binding
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    key.sort();
+    key
+}
+
+fn pir_const_value(builder: &PirBuilder, node: PirNodeId) -> Option<bool> {
+    match builder.pir.node(node) {
+        Some(crate::pir::PirNode::Const(value)) => Some(*value),
+        _ => None,
+    }
+}
+
+fn update_aggregate_states(
+    states: &mut [AggState],
+    agg_specs: &[(AggOp, String)],
+    row: &AggregateProvRow,
+) -> Result<()> {
+    for (idx, (op, var)) in agg_specs.iter().enumerate() {
+        let v = row
+            .binding
+            .get(var)
+            .ok_or_else(|| XlogError::UnsafeVariable(var.clone()))?;
+        states[idx].update(*op, v)?;
+    }
+    Ok(())
+}
+
+fn materialize_aggregate_tuple(
+    head: &Atom,
+    group_key: &[Value],
+    key_var_to_pos: &HashMap<String, usize>,
+    agg_specs: &[(AggOp, String)],
+    agg_to_pos: &HashMap<(AggOp, String), usize>,
+    agg_states: &[AggState],
+) -> Result<Vec<Value>> {
+    let mut tuple: Vec<Value> = Vec::with_capacity(head.terms.len());
+    for term in &head.terms {
+        match term {
+            Term::Variable(name) => {
+                let pos = *key_var_to_pos.get(name).ok_or_else(|| {
+                    XlogError::Compilation(format!(
+                        "Aggregate head variable {} is not a group key",
+                        name
+                    ))
+                })?;
+                tuple.push(group_key[pos].clone());
+            }
+            Term::Aggregate(AggExpr { op, variable }) => {
+                let idx = *agg_to_pos
+                    .get(&(*op, variable.clone()))
+                    .expect("agg_to_pos missing");
+                let spec = agg_specs
+                    .get(idx)
+                    .expect("aggregate state index should have a spec");
+                tuple.push(agg_states[idx].finish(spec.0)?);
+            }
+            Term::Integer(_) | Term::Float(_) | Term::String(_) | Term::Symbol(_) => {
+                tuple.push(value_from_term(term)?);
+            }
+            Term::Anonymous => unreachable!("aggregate head plan rejects anonymous terms"),
+            Term::List(_) => {
+                return Err(v085_prob_term_error(
+                    "aggregate head materialization",
+                    "list",
+                ));
+            }
+            Term::Cons { .. } => {
+                return Err(v085_prob_term_error(
+                    "aggregate head materialization",
+                    "cons",
+                ));
+            }
+            Term::Compound { .. } => {
+                return Err(v085_prob_term_error(
+                    "aggregate head materialization",
+                    "compound",
+                ));
+            }
+            Term::PredRef(_) => {
+                return Err(v085_prob_term_error(
+                    "aggregate head materialization",
+                    "predref",
+                ));
+            }
+        }
+    }
+    Ok(tuple)
 }
 
 fn select_relation<'a>(

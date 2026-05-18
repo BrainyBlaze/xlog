@@ -1497,7 +1497,8 @@ WCOJ, and CLI paths.
 
 ### Probabilistic And Approximate Inference
 
-- [ ] Add aggregate support in probabilistic programs.
+- [x] Add aggregate support in probabilistic programs.
+      Evidence: `docs/evidence/2026-05-19-v085-prob-aggregates/README.md`.
 - [ ] Add aggregate lifting for small domains.
 - [ ] Add approximate inference engine pragmas, CLI configuration, and
       confidence reporting.

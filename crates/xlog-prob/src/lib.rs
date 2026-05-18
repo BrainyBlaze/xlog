@@ -1,6 +1,7 @@
 //! Probabilistic reasoning tier for XLOG (Phase 4).
 #![warn(missing_docs)]
 
+mod aggregates;
 #[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
 pub mod cnf;
 #[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)

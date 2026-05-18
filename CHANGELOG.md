@@ -26,6 +26,9 @@ All notable changes to this project are documented in this file.
 - Added v0.8.5 magic-set rewriting for safe bound deterministic recursive
   queries, including `#pragma magic_sets = auto|on|off`, generated magic
   predicates, row-reduction evidence, and typed decline diagnostics.
+- Added v0.8.5 probabilistic aggregate support for finite `count`, `sum`,
+  `min`, `max`, and `logsumexp` outcomes in exact provenance/PIR and MC
+  deterministic aggregate execution, with typed exact-domain cap diagnostics.
 
 ### Fixed
 
