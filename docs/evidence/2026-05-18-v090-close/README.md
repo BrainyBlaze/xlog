@@ -51,8 +51,8 @@ Earlier ref checks after `git fetch origin --prune` showed:
 | G090_FAEEL | PASS for semantic oracle | Foundedness fixtures pass, but GPU parity remains unproven. |
 | G090_GPT | PARTIAL | CPU trace fixtures pass; GPU-resident candidate generation, propagation staging, candidate-buffer validation, arity 0-3 tuple-source model-membership staging with fixed arity-one/two/three row-scoped ground key comparison, generic arity-N variable-bound tuple matching, bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, final-row map construction, and final tuple materialization exist; unary/binary final-row filtering fixtures pass, but broader semantic parity and multiple-epistemic-literal final-row filtering remain missing. |
 | G090_SPLIT | PARTIAL | CPU split/recompose fixtures pass; GPU split execution is missing. |
-| G090_GPU | BLOCKED | GPU-plan, reduced-runtime-plan, workspace allocation/reset, bounded candidate-generation, propagation, candidate-validation, arity 0-3 tuple-source model-membership staging with fixed arity-one/two/three row-scoped ground key comparison over existing relation buffers, generic arity-N variable-bound tuple matching, world-view-validation, accepted-candidate materialization, final-result flag, final-row map/final tuple materialization kernels, accepted K5 WCOJ dispatch, and hot-path transfer-budget trace with CUDA-event elapsed timing/runtime-preflight/fail-closed WCOJ gate/reduced-plan trace contracts exist, but full semantic kernel-buffer parity, solver MaxSAT/portfolio/lifecycle wiring, probability wiring, and broader fixture coverage remain missing. |
-| G090_SOLVER | BLOCKED | Accepted GPU runtime evidence can gate GPU CDCL SAT/UNSAT and reusable workspace-backed UNSAT, but MaxSAT, portfolio execution, and full assumption lifecycle traces are not wired to epistemic candidates. |
+| G090_GPU | BLOCKED | GPU-plan, reduced-runtime-plan, workspace allocation/reset, bounded candidate-generation, propagation, candidate-validation, arity 0-3 tuple-source model-membership staging with fixed arity-one/two/three row-scoped ground key comparison over existing relation buffers, generic arity-N variable-bound tuple matching, world-view-validation, accepted-candidate materialization, final-result flag, final-row map/final tuple materialization kernels, accepted K5 WCOJ dispatch, and hot-path transfer-budget trace with CUDA-event elapsed timing/runtime-preflight/fail-closed WCOJ gate/reduced-plan trace contracts exist, but full semantic kernel-buffer parity, solver MaxSAT/portfolio/full lifecycle wiring, probability wiring, and broader fixture coverage remain missing. |
+| G090_SOLVER | BLOCKED | Accepted GPU runtime evidence can gate GPU CDCL SAT/UNSAT, reusable workspace-backed UNSAT, and one bounded push/solve/retract lifecycle, but MaxSAT, portfolio execution, and broader learned-clause lifecycle traces are not wired to epistemic candidates. |
 | G090_PROB | BLOCKED | Accepted GPU runtime evidence can gate source/program exact compilation, PIR/CNF encoding, and query/gradient evaluation through the existing GPU-native path, but broader probabilistic knowledge-compilation/end-to-end execution on accepted world views is incomplete. |
 | G090_CERT | BLOCKED | Missing complete accepted-execution kernel timing, WCOJ evidence, zero CPU fallback counters, and post-v0.8 rerun. |
 | G090_DOC | PARTIAL | Guide documents semantic oracle and blockers; production GPU/WCOJ path is not implemented. |
@@ -102,8 +102,9 @@ The branch contains useful scaffolding:
   deltas without resetting shared provider telemetry;
 - reduced-plan execution trace API that wraps `execute_plan` with before/after
   production counter snapshots;
-- accepted solver production adapters that gate GPU CDCL SAT/UNSAT and
-  reusable workspace-backed UNSAT on accepted GPU runtime evidence;
+- accepted solver production adapters that gate GPU CDCL SAT/UNSAT, reusable
+  workspace-backed UNSAT, and a bounded push/solve/retract lifecycle on
+  accepted GPU runtime evidence;
 - G91 and FAEEL fixture evaluators;
 - Generate-Propagate-Test phase traces;
 - world-view operator fixtures for `know`, `possible`, and `not know`;
@@ -129,7 +130,7 @@ Closure remains blocked until certification includes all of the following:
   dispatch beyond the current accepted K5 fixture, including layout and
   helper-splitting evidence where applicable;
 - GPU-native MaxSAT/portfolio assumption lifecycle evidence plus broader
-  accepted SAT/UNSAT workspace lifecycle traces with distinct SAT, UNSAT,
+  accepted SAT/UNSAT learned-clause lifecycle traces with distinct SAT, UNSAT,
   UNKNOWN, and TIMEOUT handling;
 - accepted-world-view evidence flowing through broader GPU-native
   knowledge-compilation/end-to-end evaluation with zero CPU-only probability

@@ -265,12 +265,16 @@ assignment/MaxSAT enumeration counters in `GpuSolverProductionTrace`.
 require stable tuple-source membership, GPU model-membership, world-view, and
 materialization traces, zero hot-path transfers, and non-empty final device
 output, then dispatch SAT/UNSAT through GPU CDCL.
+`solve_assumption_lifecycle_with_gpu_execution_result` applies the same
+accepted runtime boundary before recording balanced push/retract counters and
+dispatching a bounded SAT/UNSAT lifecycle through existing GPU CDCL calls and a
+reusable workspace.
 `xlog_solve::production_capabilities` reports that GPU CDCL SAT/UNSAT is
 available while GPU-native MaxSAT and SAT/MaxSAT portfolio execution are blocked.
 
-The adapter is partial v0.9 evidence only. It does not yet wire incremental
-push/retract assumption lifecycles across accepted runtime candidates, and it
-does not implement GPU-native MaxSAT or portfolio solving.
+The adapter is partial v0.9 evidence only. It does not yet wire broader
+multi-candidate learned-clause lifecycle semantics, and it does not implement
+GPU-native MaxSAT or portfolio solving.
 
 `xlog_solve::SolverService` provides the bounded solver API used by semantic
 fixtures:

@@ -20,6 +20,12 @@ fn production_solver_adapter_reuses_gpu_cdcl_not_cpu_oracle() {
     assert!(
         production.contains("solve_expect_unsat_with_branch_limit_ws_with_gpu_execution_result")
     );
+    assert!(production.contains("solve_assumption_lifecycle_with_gpu_execution_result"));
+    assert!(production.contains("GpuSolverProductionLifecycleStep"));
+    assert!(production.contains("GpuSolverProductionExpectation"));
+    assert!(production.contains("gpu_assumption_pushes"));
+    assert!(production.contains("gpu_assumption_retractions"));
+    assert!(production.contains("gpu_lifecycle_workspace_reuses"));
     assert!(production.contains("accepted_gpu_candidate_evidence_consumed"));
     assert!(production.contains("read_device_row_count"));
     assert!(production.contains("require_stable_model_tuple_source"));

@@ -39,6 +39,39 @@ pub struct GpuSolverProductionCapabilities {
     pub gpu_portfolio_blocker: &'static str,
 }
 
+/// Expected GPU CDCL result for one production lifecycle step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuSolverProductionExpectation {
+    /// The step must be SAT under the currently pushed assumptions.
+    Sat,
+    /// The step must be UNSAT under the currently pushed assumptions.
+    Unsat,
+}
+
+/// One accepted solver lifecycle step backed by existing GPU CDCL inputs.
+#[derive(Clone, Copy)]
+pub struct GpuSolverProductionLifecycleStep<'a> {
+    /// Device-resident CNF for this step, including any assumption clauses.
+    pub cnf: &'a GpuCnf,
+    /// Device-resident branch limit passed to the GPU CDCL solver.
+    pub branch_var_limit: &'a TrackedCudaSlice<u32>,
+    /// Expected SAT/UNSAT status for the step.
+    pub expectation: GpuSolverProductionExpectation,
+}
+
+/// Summary of an accepted solver lifecycle run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GpuSolverProductionLifecycleReport {
+    /// Number of lifecycle steps executed.
+    pub steps: u64,
+    /// Number of assumption pushes recorded before GPU solves.
+    pub assumption_pushes: u64,
+    /// Number of assumption retractions recorded after GPU solves.
+    pub assumption_retractions: u64,
+    /// Number of UNSAT steps that reused the provided GPU CDCL workspace allocation.
+    pub workspace_reuses: u64,
+}
+
 /// Return the current production solver capability report.
 pub fn production_capabilities() -> GpuSolverProductionCapabilities {
     GpuSolverProductionCapabilities {
@@ -62,6 +95,12 @@ pub struct GpuSolverProductionTrace {
     pub gpu_cdcl_unsat_solves: u64,
     /// Number of UNSAT expectations dispatched with a reusable GPU workspace.
     pub gpu_cdcl_workspace_unsat_solves: u64,
+    /// Number of assumption pushes recorded for accepted lifecycle steps.
+    pub gpu_assumption_pushes: u64,
+    /// Number of assumption retractions recorded for accepted lifecycle steps.
+    pub gpu_assumption_retractions: u64,
+    /// Number of lifecycle UNSAT steps that reused the same GPU CDCL workspace.
+    pub gpu_lifecycle_workspace_reuses: u64,
     /// CPU exhaustive assignment enumerations performed by this adapter.
     pub cpu_assignment_enumerations: u64,
     /// CPU MaxSAT assignment enumerations performed by this adapter.
@@ -191,6 +230,92 @@ impl GpuSolverProductionAdapter {
             .accepted_gpu_candidate_evidence_consumed
             .saturating_add(1);
         self.trace.require_zero_cpu_search()
+    }
+
+    /// Execute an accepted push/solve/retract lifecycle through existing GPU CDCL calls.
+    pub fn solve_assumption_lifecycle_with_gpu_execution_result(
+        &mut self,
+        provider: &CudaKernelProvider,
+        result: &EpistemicGpuExecutionResult,
+        workspace: &mut GpuCdclWorkspace,
+        steps: &[GpuSolverProductionLifecycleStep<'_>],
+    ) -> Result<GpuSolverProductionLifecycleReport> {
+        if steps.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production lifecycle".to_string(),
+                context: "accepted solver lifecycle requires at least one step".to_string(),
+            });
+        }
+
+        require_accepted_gpu_solver_evidence(provider, result)?;
+
+        let pushes_before = self.trace.gpu_assumption_pushes;
+        let retractions_before = self.trace.gpu_assumption_retractions;
+        let workspace_reuses_before = self.trace.gpu_lifecycle_workspace_reuses;
+
+        for step in steps {
+            self.trace.gpu_assumption_pushes = self.trace.gpu_assumption_pushes.saturating_add(1);
+            let solve_result = match step.expectation {
+                GpuSolverProductionExpectation::Sat => self
+                    .solver
+                    .solve_expect_sat_with_branch_limit(step.cnf, step.branch_var_limit)
+                    .map(|_| {
+                        self.trace.gpu_cdcl_sat_solves =
+                            self.trace.gpu_cdcl_sat_solves.saturating_add(1);
+                    }),
+                GpuSolverProductionExpectation::Unsat => {
+                    let assign_ptr_before = workspace.assign_device_ptr();
+                    self.solve_expect_unsat_with_branch_limit_ws(
+                        workspace,
+                        step.cnf,
+                        step.branch_var_limit,
+                    )
+                    .map(|_| {
+                        if workspace.assign_device_ptr() == assign_ptr_before {
+                            self.trace.gpu_lifecycle_workspace_reuses =
+                                self.trace.gpu_lifecycle_workspace_reuses.saturating_add(1);
+                        }
+                    })
+                }
+            };
+            self.trace.gpu_assumption_retractions =
+                self.trace.gpu_assumption_retractions.saturating_add(1);
+            solve_result?;
+        }
+
+        let assumption_pushes = self
+            .trace
+            .gpu_assumption_pushes
+            .saturating_sub(pushes_before);
+        let assumption_retractions = self
+            .trace
+            .gpu_assumption_retractions
+            .saturating_sub(retractions_before);
+        if assumption_pushes != assumption_retractions {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production lifecycle".to_string(),
+                context: format!(
+                    "assumption push/retract mismatch: pushes={} retractions={}",
+                    assumption_pushes, assumption_retractions
+                ),
+            });
+        }
+
+        self.trace.accepted_gpu_candidate_evidence_consumed = self
+            .trace
+            .accepted_gpu_candidate_evidence_consumed
+            .saturating_add(1);
+        self.trace.require_zero_cpu_search()?;
+
+        Ok(GpuSolverProductionLifecycleReport {
+            steps: steps.len() as u64,
+            assumption_pushes,
+            assumption_retractions,
+            workspace_reuses: self
+                .trace
+                .gpu_lifecycle_workspace_reuses
+                .saturating_sub(workspace_reuses_before),
+        })
     }
 }
 

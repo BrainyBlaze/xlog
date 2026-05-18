@@ -47,6 +47,12 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(solver.contains("solve_expect_sat_with_gpu_execution_result"));
     assert!(solver.contains("solve_expect_unsat_with_gpu_execution_result"));
     assert!(solver.contains("solve_expect_unsat_with_branch_limit_ws_with_gpu_execution_result"));
+    assert!(solver.contains("solve_assumption_lifecycle_with_gpu_execution_result"));
+    assert!(solver.contains("GpuSolverProductionLifecycleStep"));
+    assert!(solver.contains("GpuSolverProductionExpectation"));
+    assert!(solver.contains("gpu_assumption_pushes"));
+    assert!(solver.contains("gpu_assumption_retractions"));
+    assert!(solver.contains("gpu_lifecycle_workspace_reuses"));
     assert!(solver.contains("accepted_gpu_candidate_evidence_consumed"));
     assert!(solver.contains("read_device_row_count"));
     assert!(solver.contains("require_stable_model_tuple_source"));
