@@ -334,4 +334,92 @@ The `XLOG_W52_ONLY_CELL` selector patch on the W5.2 baseline worktree is current
 
 ---
 
-**End of supervisor decision artifact.** Authoritative reference for Codex when executing M_INT.4 remediation + 38-B dispatch + Phase-2 (goal-039 with R6-R11) dispatch + Phase-1 W3 axis board flip (with selector-patch traceability addendum per Authorization 4).
+---
+
+## Authorization 5 — Goal-038-B W6.7 closure HOLD + 2 new sub-goals (2026-05-17)
+
+### Decision
+
+W6.7 closure-board flip is **HELD** pending two new sub-goals added to goal-038-B: **G_HIST_KC** (runtime-histogram-driven block-slice for K-clique, extending Phase-1 G1's `WcojRelationMetadata` mechanism to K=5..K=8) and **G_HELP_KC** (helper-splitting K-clique invocation, wiring Phase-1 G4's helper-split pass into K-clique promotion). Goal-038-B grows from 9 sub-goals to 11. Closure proposal `ef3fbc7e` (G_HIST_KC + G_HELP_KC not yet implemented) is superseded; a new closure proposal will be written after both new sub-goals + re-validated G_BENCH38B / G_INT38B / G_PURGE38B close.
+
+### Rationale
+
+Supervisor validation of 38-B closure proposal `ef3fbc7e` on 2026-05-17 surfaced two implementation gaps not caught by the 9-sub-goal acceptance gates:
+
+1. **Skew scheduling for K-clique is plan-driven (HoneyComb-style), NOT runtime-histogram-driven (paper §5 Algorithm 1 Phase 1).** `WcojRelationMetadata` (Phase-1 G1's per-relation histogram maintained during Merge) is NOT built in the K-clique provider path. `leader_count` is populated from compile-time plan stats. For non-recursive K-clique this is functionally equivalent; for recursive K-clique within semi-naïve fixpoint, paper §5 mandates per-iteration histogram refresh. Goal-038-B G_HG_PLAN cited HoneyComb cost model as algorithm reference (S_HG_PLAN.7) — that's correct for COMPILE-TIME planning, but does NOT obviate the runtime-histogram requirement at the KERNEL LAUNCH level per paper §5.
+
+2. **Helper-relation splitting for K-clique NOT WIRED.** `HelperSplitSpec` type imported (`promote.rs:81`) per R2 plan-IR field expansion; K-clique promoter at `promote.rs:1466` emits `Vec::<HelperSplitSpec>::new()` (always empty). Phase-1 G4's helper-split pass operates at AST→RIR boundary on full rules — does NOT invoke from within K-clique promotion. K-clique rules with buried-skew at non-leader variables cannot expose that skew via helper-splitting in 38-B as shipped.
+
+These gaps are **architecturally significant**: paper §5 + §7.3 alignment requires both. User-supervisor framing on 2026-05-17 chose option (b) "hold W6.7; require runtime-histogram extension to K-clique + helper-split K-clique invocation before flipping" over (a) approve with documented divergences or (c) split into W6.7/W6.8/W6.9 entries.
+
+### New sub-goals (per Authorization 5)
+
+#### G_HIST_KC — Runtime-histogram-driven block-slice for K-clique (new step 6)
+
+Extends Phase-1 G1's `WcojRelationMetadata` mechanism (originally for triangle + 4-cycle) to K=5..K=8 clique relations.
+
+Sub-goal scope:
+- Extend `wcoj_build_metadata_recorded` provider entry to K-clique edge relations (per-edge histogram via existing `multiblock_scan_u32_inplace_on_stream` mechanism)
+- Extend K-clique HG kernel template signatures (`wcoj_clique_template_count_hg_grid_t<K, T>`, `wcoj_clique_template_materialize_hg_grid_t<K, T>`) to accept `WcojRelationMetadata` launch params for the leader edge (per `KCliqueVariableOrder.leader_edge_idx`)
+- Update K-clique provider entries (`wcoj_clique5_u32_recorded_planned`, etc.) to build metadata for the leader edge before kernel launch
+- In recursive context, refresh metadata during Merge phase per Phase-1 G1 mechanism
+- Determinism preservation under metadata refresh
+
+Acceptance metrics:
+- M_HIST_KC.1: `WcojRelationMetadata` builder extends to K-clique edge relations (provider entry cert, 4 entries: u32/u64 × count/materialize)
+- M_HIST_KC.2: K-clique HG kernels accept runtime histogram launch params (kernel signature audit)
+- M_HIST_KC.3: K-clique dispatch builds metadata before kernel launch (source audit)
+- M_HIST_KC.4: Determinism preserved (bit-exact across 100 runs with `XLOG_DETERMINISTIC=1` + seed-pin on K5/K6 fixtures)
+- M_HIST_KC.5: Histogram refresh in recursive context — semi-naïve fixpoint with K-clique recursive body produces bit-exact output across iterations (paper P1 + P4 alignment)
+- M_HIST_KC.6: No regression on W5.2 36-cell routing prediction (still 36/36 correct)
+- M_HIST_KC.7: Per-iteration histogram refresh cost bounded ≤ 5% of iteration wall-time on `wcoj_w52_skewed_multiway` (bench)
+- M_HIST_KC.8: Paper §5 Algorithm 1 Phase 1 source-citation comment present in K-clique kernel + provider path
+
+#### G_HELP_KC — Helper-splitting K-clique invocation (new step 7)
+
+Wires Phase-1 G4's helper-split pass into K-clique promotion when planner detects buried inner-variable skew.
+
+Sub-goal scope:
+- Extend HoneyComb-style planner (G_HG_PLAN's `plan_kclique_var_order`) to detect buried-skew condition: heat distribution at non-leader variable significantly higher than leader (configurable threshold, default ratio ≥ 3×)
+- When buried skew detected, planner emits `HelperSplitSpec` describing which sub-clique to extract and which variable to elevate
+- K-clique promoter at `promote.rs:1466` calls helper_split_pass with the spec, replacing empty-vec emission
+- Helper relations correctly emit additional plans that compose with K-clique plan
+- Row equality preserved across split vs non-split paths
+
+Acceptance metrics:
+- M_HELP_KC.1: Planner detects buried inner-variable skew (heat-distribution cert: positive case + negative case)
+- M_HELP_KC.2: K-clique promoter invokes helper_split_pass when planner emits non-empty `HelperSplitSpec` (source audit)
+- M_HELP_KC.3: `helper_split_specs` populated non-empty when buried skew present (cert: synthetic K5 fixture with buried-skew variable)
+- M_HELP_KC.4: Helper relations emit additional plans that compose with K-clique plan (integration cert)
+- M_HELP_KC.5: Row equality on K-clique-with-helper-split vs direct K-clique (bit-exact cert on synthetic fixture)
+- M_HELP_KC.6: No regression on K-clique-without-buried-skew (helper-split not invoked → empty vec → same as pre-G_HELP_KC behavior; W5.2 36/36 routing preserved)
+- M_HELP_KC.7: Paper §5 Figure 3 helper-relation-splitting source-citation comment present
+- M_HELP_KC.8: Integration with G_HIST_KC — helper-split + runtime histogram compose correctly (post-split histogram refresh works)
+
+### Sequencing
+
+DAG insertion between G_COST_GATE (step 5) and G_BENCH38B (now step 8):
+- Step 6 (NEW): G_HIST_KC — runtime histogram for K-clique
+- Step 7 (NEW): G_HELP_KC — helper-splitting for K-clique
+- Step 8 (was step 6): G_BENCH38B — re-runs with new mechanisms active
+- Step 9 (was step 7): G_INT38B — re-validates W3.4/W4.1/W5.1/W5.2/W2.5 with new mechanisms
+- Step 10 (was step 8): G_PURGE38B — cleanup
+- Step 11 (was step 9): G_CLOSE38B — new closure proposal supersedes `ef3fbc7e`
+
+G_HELP_KC must close after G_HIST_KC because helper-split decisions modify relation shapes that the runtime histogram must refresh against.
+
+### What's preserved from current 38-B state
+
+The 9 sub-goal commits already on integration branch (`ef241c7f` through `32dd43c7`) are PRESERVED. They are correctly architectured for the planner foundation; they just don't fully implement paper §5 for K-clique. The new sub-goals build on top, not replace.
+
+Closure proposal `ef3fbc7e` is SUPERSEDED (not deleted) — preserved as evidence of the 9-sub-goal closure state pre-Authorization-5. Final closure proposal includes G_HIST_KC + G_HELP_KC + re-validated downstream sub-goals.
+
+### Out-of-scope (defer to v0.7+ per Authorization 5)
+
+- Stream-aligned multiplexing for K-clique (Phase-1 G5 covers triangle/4-cycle; K-clique stream-mux extension is v0.7+)
+- Paper §5 helper-relation splitting BEYOND K-clique into arbitrary deep-join trees (Phase-1 G4 covers chain/triangle/4-cycle; K-clique is Authorization-5 scope; deeper structures are v0.7+)
+- Adaptive histogram resolution (per-key heat thresholds tuned dynamically) — Authorization-5 uses static thresholds; adaptive is v0.7+
+
+---
+
+**End of supervisor decision artifact.** Authoritative reference for Codex when executing M_INT.4 remediation + 38-B dispatch (with Authorization-5 extension to 11 sub-goals) + Phase-2 (goal-039 with R6-R11) dispatch + Phase-1 W3 axis board flip (with selector-patch traceability addendum per Authorization 4).

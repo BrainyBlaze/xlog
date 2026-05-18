@@ -95,19 +95,25 @@ BG38B — K5/K6 hypergraph-planner-as-production-planner (organizational)
  ├── G_COST_GATE  — Step 5: cost gate — promoter declines OR runtime routes-to-hash based on planner verdict
  │      │
  │      ▼
- ├── G_BENCH38B   — Validate against W5.2 36-cell corpus + DTS-DLM dILP-shape fixture
+ ├── G_HIST_KC    — Step 6 (NEW per Authorization 5, 2026-05-17): runtime-histogram-driven block-slice for K-clique
  │      │
  │      ▼
- ├── G_INT38B     — Integration gate: W3.4/W4.1/W5.1/W5.2/W2.5 regression-free post-B
+ ├── G_HELP_KC    — Step 7 (NEW per Authorization 5, 2026-05-17): helper-splitting K-clique invocation
  │      │
  │      ▼
- ├── G_PURGE38B   — Cross-cutting refactor + dead-code/comment purge
+ ├── G_BENCH38B   — Step 8 (renumbered): validate against W5.2 36-cell corpus + DTS-DLM dILP-shape fixture
  │      │
  │      ▼
- └── G_CLOSE38B   — Closure proposal + user approval + W6.7 board entry → DONE
+ ├── G_INT38B     — Step 9 (renumbered): integration gate W3.4/W4.1/W5.1/W5.2/W2.5 regression-free post-B + new sub-goal mechanisms
+ │      │
+ │      ▼
+ ├── G_PURGE38B   — Step 10 (renumbered): cross-cutting refactor + dead-code/comment purge
+ │      │
+ │      ▼
+ └── G_CLOSE38B   — Step 11 (renumbered): closure proposal (supersedes `ef3fbc7e` 9-sub-goal proposal) + user approval + W6.7 board entry → DONE
 ```
 
-9 G-nodes. Strictly sequential (each step's surface is the next step's substrate). Dependency DAG at §4.
+11 G-nodes (was 9; Authorization 5 added G_HIST_KC + G_HELP_KC). Strictly sequential (each step's surface is the next step's substrate). Dependency DAG at §4.
 
 ---
 
@@ -274,7 +280,89 @@ BG38B — K5/K6 hypergraph-planner-as-production-planner (organizational)
 
 ---
 
-### 3.6 G_BENCH38B — Validate against W5.2 36-cell corpus + DTS-DLM dILP-shape fixture
+### 3.6 G_HIST_KC — Runtime-histogram-driven block-slice for K-clique (added Authorization 5, 2026-05-17)
+
+**Goal.** Analyze the K-clique HG kernel launch surface for the purpose of extending Phase-1 G1's `WcojRelationMetadata` runtime-histogram mechanism (originally for triangle + 4-cycle) to K=5..K=8 cliques with respect to paper §5 Algorithm 1 Phase 1 alignment (histogram maintained during Merge phase; consumed at kernel launch) from the viewpoint of full paper-§5 substrate completeness for K-clique in the context of W6.7 closure conditional on this and G_HELP_KC.
+
+**Anchor.** Supervisor decision artifact Authorization 5 (`docs/evidence/2026-05-14-g38-mint4-supervisor-amendment.md`). Paper §5 Algorithm 1 Phase 1: *"Histograms maintained alongside data; computed incrementally during Merge; consumed at kernel launch-time to assign balanced thread-block work-unit slices."*
+
+**Predecessor state (Authorization 5 finding).** K-clique HG kernels post-G_COST_GATE (step 5) accept `leader_count` as launch param populated from compile-time plan (HoneyComb cost model via `plan_kclique_var_order`). `WcojRelationMetadata` is NOT built in K-clique provider path. For non-recursive K-clique this is functionally equivalent; for recursive K-clique within semi-naïve fixpoint, paper §5 mandates per-iteration histogram refresh.
+
+**Questions.**
+- **Q_HIST_KC.1** Does `wcoj_build_metadata_recorded` provider entry extend to K-clique edge relations?
+- **Q_HIST_KC.2** Do K-clique HG kernels accept `WcojRelationMetadata` launch params for the leader edge (per `KCliqueVariableOrder.leader_edge_idx`)?
+- **Q_HIST_KC.3** Does runtime dispatch build metadata before kernel launch in non-recursive context?
+- **Q_HIST_KC.4** Does histogram refresh during Merge phase work in recursive context (semi-naïve fixpoint with K-clique recursive body)?
+- **Q_HIST_KC.5** Is determinism preserved under metadata refresh?
+- **Q_HIST_KC.6** Does per-iteration histogram refresh cost stay bounded?
+
+**Metrics.**
+
+| Metric | Definition | Target |
+|---|---|---|
+| **M_HIST_KC.1** | `WcojRelationMetadata` builder extends to K-clique edge relations; provider entries `wcoj_clique{5,6}_metadata_recorded_{u32,u64}` | 4 entries present |
+| **M_HIST_KC.2** | K-clique HG kernels accept runtime histogram launch params (signature includes `WcojRelationMetadata`-derived `{unique_keys, fan_out, prefix_sum, total}` per leader edge) | kernel signature audit cert PASS |
+| **M_HIST_KC.3** | K-clique dispatch builds metadata before kernel launch in non-recursive context | source audit + provider trace cert PASS |
+| **M_HIST_KC.4** | Determinism: bit-exact across 100 runs with `XLOG_DETERMINISTIC=1` + seed-pin on K5/K6 fixtures | 100/100 PASS |
+| **M_HIST_KC.5** | Histogram refresh in recursive context — semi-naïve fixpoint with K-clique recursive body (synthetic dILP-induced K=5 transitive-closure-style fixture) produces bit-exact output across iterations | recursive cert PASS; paper P1 + P4 alignment preserved |
+| **M_HIST_KC.6** | No regression on W5.2 36-cell routing prediction | 36/36 routing prediction preserved |
+| **M_HIST_KC.7** | Per-iteration histogram refresh cost on `wcoj_w52_skewed_multiway` bench | ≤ 5% of iteration wall-time |
+| **M_HIST_KC.8** | Paper §5 Algorithm 1 Phase 1 source-citation comment present in K-clique kernel + provider | `// Paper §5 Algorithm 1 Phase 1: Histograms maintained alongside data; refreshed during Merge per Authorization 5 (2026-05-17)` |
+
+**Strategies.**
+- **S_HIST_KC.1** Cut `feat/w67b-step6-hist-kc` from `feat/w67b-step5-costgate @ 77106ea0`. Worktree: `.worktrees/w67b-step6-hist-kc`.
+- **S_HIST_KC.2** Extend `crates/xlog-cuda/src/provider/wcoj.rs` with K-clique-edge metadata builders. Reuse Phase-1 G1's `multiblock_scan_u32_inplace_on_stream` mechanism; new entry: `wcoj_clique{5,6}_metadata_recorded_{u32,u64}`.
+- **S_HIST_KC.3** Extend `wcoj_clique_template_count_hg_grid_t<K, T>` and `wcoj_clique_template_materialize_hg_grid_t<K, T>` to accept additional launch params: `const T* unique_keys, const uint32_t* fan_out, const uint32_t* prefix_sum, uint32_t total`. Use prefix_sum + total to drive block-slice at the leader edge instead of `leader_count` alone.
+- **S_HIST_KC.4** Update K-clique provider entries to build metadata before kernel launch via the new builders.
+- **S_HIST_KC.5** Recursive integration: extend `crates/xlog-runtime/src/executor/recursive.rs` to refresh K-clique edge metadata during Merge phase (mirrors Phase-1 G1 mechanism for triangle/4-cycle).
+- **S_HIST_KC.6** Synthetic recursive K=5 fixture for M_HIST_KC.5: transitive-closure-style rule over K=5 clique structure.
+- **S_HIST_KC.7** Per-iteration cost measurement: extend `wcoj_phase_report` feature to expose histogram-refresh time per Merge call.
+
+**Acceptance.** All M_HIST_KC.* green.
+
+---
+
+### 3.7 G_HELP_KC — Helper-splitting K-clique invocation (added Authorization 5, 2026-05-17)
+
+**Goal.** Analyze the K-clique promoter helper-split emission for the purpose of replacing always-empty `Vec::<HelperSplitSpec>::new()` (`promote.rs:1466`) with planner-driven non-empty emission when buried inner-variable skew is detected with respect to paper §5 Figure 3 helper-relation-splitting alignment from the viewpoint of full paper-§5 substrate completeness for K-clique in the context of W6.7 closure conditional on this and G_HIST_KC.
+
+**Anchor.** Supervisor decision artifact Authorization 5. Paper §5 Figure 3 (CallGraphEdge example): *"By factoring only these specific clauses into an independent HelpNT relation, the previously buried skew keys (sn, dsc, h) are exposed as top-level columns in the newly generated rule."*
+
+**Predecessor state (Authorization 5 finding).** `HelperSplitSpec` type imported (`promote.rs:81`) per R2; K-clique promoter at `promote.rs:1466` emits empty `Vec`. Phase-1 G4's helper-split pass operates at AST→RIR boundary on full rules. K-clique rules with buried-skew at non-leader variables cannot expose that skew via helper-splitting in 38-B as currently shipped.
+
+**Questions.**
+- **Q_HELP_KC.1** Can the planner (from G_HG_PLAN) detect buried inner-variable skew via the new per-key heat infrastructure (per R7 + lock 28)?
+- **Q_HELP_KC.2** Does K-clique promoter invoke helper_split_pass when planner emits a non-empty `HelperSplitSpec`?
+- **Q_HELP_KC.3** Do helper relations correctly compose with K-clique plans (helper-split-then-K-clique-on-helper-rule)?
+- **Q_HELP_KC.4** Is row equality preserved across split vs non-split paths?
+- **Q_HELP_KC.5** Does G_HELP_KC compose with G_HIST_KC's runtime histogram (post-split relations get fresh histograms)?
+
+**Metrics.**
+
+| Metric | Definition | Target |
+|---|---|---|
+| **M_HELP_KC.1** | Planner buried-inner-variable-skew detection cert | 2/2 (positive: heat ratio ≥ 3× at non-leader variable; negative: uniform heat) |
+| **M_HELP_KC.2** | K-clique promoter invokes helper_split_pass when planner emits non-empty `HelperSplitSpec` (source audit) | source-audit cert PASS; line 1466 emission is conditional, not always-empty |
+| **M_HELP_KC.3** | `helper_split_specs` populated non-empty when buried skew present | synthetic K=5 buried-skew fixture cert PASS |
+| **M_HELP_KC.4** | Helper relations emit additional plans that compose with K-clique plan | integration cert PASS |
+| **M_HELP_KC.5** | Row equality on K-clique-with-helper-split vs direct K-clique on equivalent input | bit-exact cert on synthetic fixture |
+| **M_HELP_KC.6** | No regression on K-clique-without-buried-skew (helper-split NOT invoked → empty vec → same as pre-G_HELP_KC behavior) | W5.2 36/36 routing preserved |
+| **M_HELP_KC.7** | Paper §5 Figure 3 helper-relation-splitting source-citation comment present in promoter | `// Paper §5 Figure 3: Helper-relation splitting elevates buried inner-variable skew per Authorization 5 (2026-05-17)` |
+| **M_HELP_KC.8** | Integration with G_HIST_KC — post-split helper relations get fresh `WcojRelationMetadata` builds | integration cert PASS |
+
+**Strategies.**
+- **S_HELP_KC.1** Cut `feat/w67b-step7-help-kc` from `feat/w67b-step6-hist-kc` HEAD (G_HIST_KC must close first).
+- **S_HELP_KC.2** Extend `plan_kclique_var_order` in `crates/xlog-logic/src/hypergraph/var_order.rs` to detect buried-skew condition: compute heat ratio = `max(per_variable_heat) / heat[leader_variable]`; if ≥ `BURIED_SKEW_THRESHOLD` (default 3.0, configurable via `XLOG_BURIED_SKEW_THRESHOLD`), emit `HelperSplitSpec` describing which sub-clique to extract.
+- **S_HELP_KC.3** Update K-clique promoter at `promote.rs:1466` to invoke `helper_split_pass(spec)` when planner emits non-empty spec; otherwise preserve empty-vec emission for the non-buried-skew case (avoids regression per M_HELP_KC.6).
+- **S_HELP_KC.4** Helper relations emit via existing Phase-1 G4 `helper_split_pass` infrastructure; extend to accept K-clique-class specs.
+- **S_HELP_KC.5** Synthetic K=5 buried-skew fixture: K=5 clique with one variable (v3) bound to a high-fanout relation while other variables are uniform.
+- **S_HELP_KC.6** G_HIST_KC composition: post-split helper relations are NEW relations; runtime dispatch builds metadata for them via the new builders from G_HIST_KC.
+
+**Acceptance.** All M_HELP_KC.* green.
+
+---
+
+### 3.8 G_BENCH38B — Validate against W5.2 36-cell corpus + DTS-DLM dILP-shape fixture
 
 **Goal.** Analyze the 5-step architecture's end-to-end behavior for the purpose of validating cost-aware routing decisions on production fixtures with respect to W5.2 corpus + DTS-DLM dILP-shape from the viewpoint of KPI-38B.2 + KPI-38B.4 + KPI-38B.5 in the context of pre-integration acceptance.
 
@@ -304,7 +392,7 @@ BG38B — K5/K6 hypergraph-planner-as-production-planner (organizational)
 
 ---
 
-### 3.7 G_INT38B — Integration gate: W3.4 / W4.1 / W5.1 / W5.2 / W2.5 regression-free post-B
+### 3.9 G_INT38B — Integration gate: W3.4 / W4.1 / W5.1 / W5.2 / W2.5 regression-free post-B (renumbered Authorization 5)
 
 **Goal.** Analyze the integrated 38-B branch for the purpose of verifying composition-time correctness with respect to all prior closure metrics (W3.4, W4.1, W5.1, W5.2 amended per goal-038 M_INT.4, W2.5) regression-free from the viewpoint of Phase-1 + Phase-2 closure preservation in the context of pre-closure-proposal validation.
 
@@ -339,7 +427,7 @@ BG38B — K5/K6 hypergraph-planner-as-production-planner (organizational)
 
 ---
 
-### 3.8 G_PURGE38B — Cross-cutting refactor + dead-code/comment purge
+### 3.10 G_PURGE38B — Cross-cutting refactor + dead-code/comment purge (renumbered Authorization 5)
 
 **Goal.** Analyze the 38-B-integrated codebase for the purpose of removing all dead code/comments/env vars introduced by 38-B from the viewpoint of process locks 5 + 6 + Karpathy 3 in the context of pre-closure cleanup.
 
@@ -357,7 +445,7 @@ Inherits goal-038 §5.5 G_PURGE methodology; applied on `feat/w67b-integration` 
 
 ---
 
-### 3.9 G_CLOSE38B — Closure proposal + user approval + W6.7 board entry → DONE
+### 3.11 G_CLOSE38B — Closure proposal + user approval + W6.7 board entry → DONE (renumbered Authorization 5; supersedes proposal `ef3fbc7e` from 9-sub-goal state)
 
 **Goal.** Analyze the integrated, purged 38-B bundle for the purpose of obtaining user approval to ADD W6.7 closure-board entry as DONE from the viewpoint of process rule 1 in the context of 38-B closure.
 
@@ -382,34 +470,40 @@ Inherits goal-038 §5.5 G_PURGE methodology; applied on `feat/w67b-integration` 
 Phase-1 integration HEAD (feat/w3-bundle-integration, post-goal-038 DONE)
     │
     ▼
-G_HG_ELIG   (Step 1: eligibility executor-aware)
+G_HG_ELIG   (Step 1: eligibility executor-aware)             [DONE @ ef241c7f]
     │
     ▼
-G_HG_PLAN   (Step 2: cost-aware planner)
+G_HG_PLAN   (Step 2: cost-aware planner)                     [DONE @ 9c77c7d4]
     │
     ▼
-G_RIR_VO    (Step 3: RIR VariableOrder surface)
+G_RIR_VO    (Step 3: RIR VariableOrder surface)              [DONE @ 3ea3c657]
     │
     ▼
-G_DISPATCH_PLAN (Step 4: promoter + runtime + kernel consume plan)
+G_DISPATCH_PLAN (Step 4: promoter + runtime + kernel)        [DONE @ 5e69adc4]
     │
     ▼
-G_COST_GATE (Step 5: cost gate)
+G_COST_GATE (Step 5: cost gate)                              [DONE @ 77106ea0]
     │
     ▼
-G_BENCH38B  (validate routing + per-path wall-time)
+G_HIST_KC   (Step 6 NEW Authorization 5: runtime histogram)  [PENDING]
     │
     ▼
-feat/w67b-integration
+G_HELP_KC   (Step 7 NEW Authorization 5: helper splitting)   [PENDING]
     │
     ▼
-G_INT38B    (regression-free integration)
+G_BENCH38B  (Step 8 renumbered: validate routing + wall-time + new mechanisms)
     │
     ▼
-G_PURGE38B  (cleanup)
+feat/w67b-integration (re-cut post Authorization 5 sub-goals)
     │
     ▼
-G_CLOSE38B  (closure proposal + user approval + W6.7 board entry → DONE)
+G_INT38B    (Step 9 renumbered: regression-free integration with new mechanisms)
+    │
+    ▼
+G_PURGE38B  (Step 10 renumbered: cleanup)
+    │
+    ▼
+G_CLOSE38B  (Step 11 renumbered: closure proposal v2 supersedes ef3fbc7e; user approval + W6.7 board entry → DONE)
 ```
 
 **Strictly sequential.** Each step's deliverable is the next step's substrate. No parallelization opportunities until G_BENCH38B (which can technically run as the steps complete, but its gate requires all 5 steps in place).
@@ -433,16 +527,18 @@ Supervisor picks at dispatch time. Recommended: option 2 (Phase 2 first, since D
 
 38-B is DONE when ALL hold simultaneously:
 
-1. **Per-sub-goal metrics green:**
-   - G_HG_ELIG: M_HG_ELIG.1–4 green
-   - G_HG_PLAN: M_HG_PLAN.1–6 green
-   - G_RIR_VO: M_RIR_VO.1–4 green
-   - G_DISPATCH_PLAN: M_DISP.1–6 green
-   - G_COST_GATE: M_GATE.1–5 green
-   - G_BENCH38B: M_BENCH.1–5 green
-   - G_INT38B: M_INT38B.1–15 green
-   - G_PURGE38B: M_PURGE38B.1–11 green
-   - G_CLOSE38B: M_CLOSE38B.1–4 green
+1. **Per-sub-goal metrics green (11 sub-goals post-Authorization 5):**
+   - G_HG_ELIG: M_HG_ELIG.1–4 green ✅ DONE @ ef241c7f
+   - G_HG_PLAN: M_HG_PLAN.1–6 green ✅ DONE @ 9c77c7d4
+   - G_RIR_VO: M_RIR_VO.1–4 green ✅ DONE @ 3ea3c657
+   - G_DISPATCH_PLAN: M_DISP.1–6 green ✅ DONE @ 5e69adc4
+   - G_COST_GATE: M_GATE.1–5 green ✅ DONE @ 77106ea0
+   - **G_HIST_KC: M_HIST_KC.1–8 green** (NEW Authorization 5; pending)
+   - **G_HELP_KC: M_HELP_KC.1–8 green** (NEW Authorization 5; pending)
+   - G_BENCH38B: M_BENCH.1–5 green (re-validation with G_HIST_KC + G_HELP_KC mechanisms active; prior run @ 1c8415f1 superseded)
+   - G_INT38B: M_INT38B.1–15 green (re-validation; prior run @ b2eebb10 superseded)
+   - G_PURGE38B: M_PURGE38B.1–11 green (re-validation; prior run @ 32dd43c7 superseded)
+   - G_CLOSE38B: M_CLOSE38B.1–4 green (proposal v2 supersedes `ef3fbc7e`)
 2. **KPI satisfaction:** KPI-38B.1 through KPI-38B.6 all hold.
 3. **Closure board:** W6.7 ADDED as DONE.
 4. **User explicit DONE approval** in thread per process rule 1.
