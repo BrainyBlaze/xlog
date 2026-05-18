@@ -61,6 +61,18 @@ class LogicRelationSession:
         """Evaluate the program against all currently stored relations."""
         ...
 
+    def host_transfer_stats(self) -> dict[str, int]:
+        """Return ``{dtoh_bytes: int, ...}`` transfer statistics."""
+        ...
+
+    def reset_host_transfer_stats(self) -> None:
+        """Reset all host-transfer statistics."""
+        ...
+
+    def cuda_graph_stats(self) -> dict[str, int]:
+        """Return CUDA Graph capture, launch, fallback, and cache-hit counters."""
+        ...
+
     def export_relation(self, name: str) -> list[Any]:
         """Export the named relation as a list of DLPack column capsules."""
         ...

@@ -1,0 +1,23 @@
+{
+  "bit_exact_replays": 100,
+  "cuda_available": true,
+  "failures": [],
+  "fingerprint": "9ec5de862e335390dae697a818b08d6913367c9a2ed35bc7c0749c0dbf33f402",
+  "graph_stats_last_replay": {
+    "csm_cuda_graph_cache_hits": 0,
+    "csm_cuda_graph_captures": 0,
+    "csm_cuda_graph_fallbacks": 0,
+    "csm_cuda_graph_launches": 0
+  },
+  "max_host_transfer_stats_after_reset_evaluate": {
+    "dtoh_bytes": 0,
+    "dtoh_calls": 0,
+    "htod_bytes": 0,
+    "htod_calls": 0
+  },
+  "pyxlog_file": "/tmp/xlog-v080-cert-venv/lib/python3.10/site-packages/pyxlog/__init__.py",
+  "pyxlog_version": "0.7.0",
+  "replays": 100,
+  "row_count": 8,
+  "torch_version": "2.10.0+cu128"
+}
