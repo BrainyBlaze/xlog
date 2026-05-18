@@ -9,9 +9,10 @@ use xlog_ir::{
 };
 use xlog_runtime::{
     EpistemicGpuCandidateGenerationTrace, EpistemicGpuCandidateValidationTrace,
-    EpistemicGpuKernelTimingTrace, EpistemicGpuMaterializationTrace,
-    EpistemicGpuModelMembershipTrace, EpistemicGpuPropagationTrace, EpistemicGpuRuntimeCounters,
-    EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace, EpistemicGpuRuntimeWcojCertification,
+    EpistemicGpuFinalResultMaterializationTrace, EpistemicGpuKernelTimingTrace,
+    EpistemicGpuMaterializationTrace, EpistemicGpuModelMembershipTrace,
+    EpistemicGpuPropagationTrace, EpistemicGpuRuntimeCounters, EpistemicGpuRuntimePreflight,
+    EpistemicGpuRuntimeTrace, EpistemicGpuRuntimeWcojCertification,
     EpistemicGpuWorkspaceCapacities, EpistemicGpuWorkspaceLayout, EpistemicGpuWorkspaceResetTrace,
     EpistemicGpuWorldViewValidationTrace,
 };
@@ -548,6 +549,18 @@ fn materialization_trace_records_device_kernel_without_host_writes() {
 }
 
 #[test]
+fn final_result_materialization_trace_records_device_row_count_read_without_host_writes() {
+    let trace = EpistemicGpuFinalResultMaterializationTrace::for_count(8).unwrap();
+
+    assert_eq!(trace.materialized_candidates, 8);
+    assert_eq!(trace.output_row_count_device_reads, 1);
+    assert_eq!(trace.world_view_slots_written, 8);
+    assert_eq!(trace.kernel_launches, 1);
+    assert_eq!(trace.host_write_ops, 0);
+    assert!(!trace.kernel_timing.is_recorded());
+}
+
+#[test]
 fn staging_runtime_paths_record_cuda_event_timing_for_each_kernel() {
     let source = include_str!("../src/executor/epistemic_workspace.rs");
 
@@ -562,6 +575,7 @@ fn staging_runtime_paths_record_cuda_event_timing_for_each_kernel() {
         "epistemic GPU model membership",
         "epistemic GPU world-view validation",
         "epistemic GPU candidate materialization",
+        "epistemic GPU final result materialization",
     ] {
         assert!(
             source.match_indices(label).any(|(label_pos, _)| {
@@ -574,7 +588,7 @@ fn staging_runtime_paths_record_cuda_event_timing_for_each_kernel() {
     }
     assert_eq!(
         source.matches(".with_kernel_timing(kernel_timing)").count(),
-        6
+        7
     );
 }
 
@@ -595,22 +609,50 @@ fn materialization_runtime_path_launches_epistemic_kernel_not_host_writes() {
 }
 
 #[test]
-fn execution_result_records_materialization_kernel_trace_after_world_view_validation() {
+fn final_result_materialization_runtime_path_uses_output_device_row_count_not_host_count() {
+    let source = include_str!("../src/executor/epistemic_workspace.rs");
+    let cuda = include_str!("../../xlog-cuda/kernels/epistemic.cu");
+    let manifest = include_str!("../../xlog-cuda/src/kernel_manifest_data.rs");
+
+    assert!(source.contains("fn materialize_epistemic_gpu_final_results"));
+    assert!(source.contains("EPISTEMIC_MATERIALIZE_FINAL_RESULT_FLAGS_U8"));
+    assert!(source.contains("output.num_rows_device()"));
+    assert!(source.contains("&workspace.rejection_reasons"));
+    assert!(source.contains("&mut workspace.world_views"));
+    assert!(cuda.contains("epistemic_materialize_final_result_flags_u8"));
+    assert!(manifest.contains("\"epistemic_materialize_final_result_flags_u8\""));
+    assert!(!source.contains("upload_epistemic_final_results"));
+    assert!(!source.contains("copy_epistemic_final_results_from_host"));
+    assert!(!source.contains("cached_row_count().expect(\"epistemic"));
+    assert!(!source.contains("dtoh_epistemic_final_result_row_count"));
+}
+
+#[test]
+fn execution_result_records_materialization_kernels_after_world_view_validation() {
     let source = include_str!("../src/executor/epistemic_workspace.rs");
 
     assert!(source.contains("pub materialization: EpistemicGpuMaterializationTrace"));
+    assert!(source
+        .contains("pub final_result_materialization: EpistemicGpuFinalResultMaterializationTrace"));
     assert!(source.contains("let materialization ="));
     assert!(source.contains("self.materialize_epistemic_gpu_candidates"));
+    assert!(source.contains("let final_result_materialization ="));
+    assert!(source.contains("self.materialize_epistemic_gpu_final_results"));
     assert!(source.contains("materialization,"));
+    assert!(source.contains("final_result_materialization,"));
 
     let world_validation_pos = source
         .find("let world_view_validation = self.validate_epistemic_gpu_world_views")
         .expect("world-view validation launch in execution path");
     let materialization_pos = source
         .find("self.materialize_epistemic_gpu_candidates")
-        .expect("materialization launch in execution path");
+        .expect("candidate materialization launch in execution path");
+    let final_materialization_pos = source
+        .find("self.materialize_epistemic_gpu_final_results")
+        .expect("final-result materialization launch in execution path");
 
     assert!(world_validation_pos < materialization_pos);
+    assert!(materialization_pos < final_materialization_pos);
 }
 
 fn epistemic_literal(predicate: &str, op: EirEpistemicOp) -> EirEpistemicLiteral {

@@ -408,6 +408,10 @@ pub mod epistemic_kernels {
     /// Device-side accepted-candidate materialization staging kernel.
     pub const EPISTEMIC_MATERIALIZE_ACCEPTED_CANDIDATES_U8: &str =
         "epistemic_materialize_accepted_candidates_u8";
+
+    /// Device-side final-result flag materialization staging kernel.
+    pub const EPISTEMIC_MATERIALIZE_FINAL_RESULT_FLAGS_U8: &str =
+        "epistemic_materialize_final_result_flags_u8";
 }
 
 /// Kernel function names in the neural fast-path module.

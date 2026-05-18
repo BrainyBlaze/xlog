@@ -12,7 +12,8 @@ mod statistics;
 
 pub use executor::{
     EpistemicGpuCandidateGenerationTrace, EpistemicGpuCandidateValidationTrace,
-    EpistemicGpuExecutionResult, EpistemicGpuKernelTimingTrace, EpistemicGpuMaterializationTrace,
+    EpistemicGpuExecutionResult, EpistemicGpuFinalResultMaterializationTrace,
+    EpistemicGpuKernelTimingTrace, EpistemicGpuMaterializationTrace,
     EpistemicGpuModelMembershipTrace, EpistemicGpuPreparedExecution, EpistemicGpuPropagationTrace,
     EpistemicGpuRuntimeCounters, EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace,
     EpistemicGpuRuntimeWcojCertification, EpistemicGpuWorkspace, EpistemicGpuWorkspaceCapacities,

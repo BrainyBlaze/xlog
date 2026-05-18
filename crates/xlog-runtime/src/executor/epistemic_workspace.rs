@@ -181,6 +181,23 @@ pub struct EpistemicGpuMaterializationTrace {
     pub kernel_timing: EpistemicGpuKernelTimingTrace,
 }
 
+/// Trace proving final result flags were materialized from device-side output metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EpistemicGpuFinalResultMaterializationTrace {
+    /// Number of candidate rows materialized on device.
+    pub materialized_candidates: usize,
+    /// Device output row-count scalars read by the kernel.
+    pub output_row_count_device_reads: u32,
+    /// World-view result slots written by the kernel.
+    pub world_view_slots_written: usize,
+    /// Final-result materialization kernel launches.
+    pub kernel_launches: u32,
+    /// Host writes used by final-result materialization. Accepted execution requires zero.
+    pub host_write_ops: u32,
+    /// CUDA-event timing for the launched kernel.
+    pub kernel_timing: EpistemicGpuKernelTimingTrace,
+}
+
 /// Trace proving model-membership staging was performed by a GPU kernel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EpistemicGpuModelMembershipTrace {
@@ -356,6 +373,34 @@ impl EpistemicGpuMaterializationTrace {
 
         Ok(Self {
             materialized_candidates: candidate_count,
+            world_view_slots_written: candidate_count,
+            kernel_launches: 1,
+            host_write_ops: 0,
+            kernel_timing: EpistemicGpuKernelTimingTrace::unrecorded(),
+        })
+    }
+
+    /// Attach CUDA-event timing captured by the runtime launch path.
+    pub const fn with_kernel_timing(
+        mut self,
+        kernel_timing: EpistemicGpuKernelTimingTrace,
+    ) -> Self {
+        self.kernel_timing = kernel_timing;
+        self
+    }
+}
+
+impl EpistemicGpuFinalResultMaterializationTrace {
+    /// Build a final-result materialization trace for a bounded device launch.
+    pub fn for_count(candidate_count: usize) -> Result<Self> {
+        require_positive(
+            candidate_count,
+            "epistemic GPU final-result materialization candidates",
+        )?;
+
+        Ok(Self {
+            materialized_candidates: candidate_count,
+            output_row_count_device_reads: 1,
             world_view_slots_written: candidate_count,
             kernel_launches: 1,
             host_write_ops: 0,
@@ -761,6 +806,8 @@ pub struct EpistemicGpuExecutionResult {
     pub world_view_validation: EpistemicGpuWorldViewValidationTrace,
     /// Accepted-candidate materialization trace captured after world-view validation.
     pub materialization: EpistemicGpuMaterializationTrace,
+    /// Final result materialization trace captured from reduced output metadata.
+    pub final_result_materialization: EpistemicGpuFinalResultMaterializationTrace,
     /// Output buffer returned by the reduced production execution plan.
     pub output: CudaBuffer,
     /// Runtime counter trace for the reduced production plan dispatch.
@@ -1438,6 +1485,86 @@ impl Executor {
         Ok(trace.with_kernel_timing(kernel_timing))
     }
 
+    /// Materialize final result flags from the reduced runtime output row count.
+    pub fn materialize_epistemic_gpu_final_results(
+        &self,
+        workspace: &mut EpistemicGpuWorkspace,
+        output: &CudaBuffer,
+        candidate_count: usize,
+    ) -> Result<EpistemicGpuFinalResultMaterializationTrace> {
+        let trace = EpistemicGpuFinalResultMaterializationTrace::for_count(candidate_count)?;
+        if trace.world_view_slots_written > workspace.layout.world_view_bytes {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU final-result world-view workspace".to_string(),
+                estimated_bytes: trace.world_view_slots_written as u64,
+                budget_bytes: workspace.layout.world_view_bytes as u64,
+            });
+        }
+        if candidate_count > workspace.layout.rejection_reason_slots {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU final-result rejection workspace".to_string(),
+                estimated_bytes: candidate_count as u64,
+                budget_bytes: workspace.layout.rejection_reason_slots as u64,
+            });
+        }
+        if candidate_count > u32::MAX as usize {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU final-result launch".to_string(),
+                estimated_bytes: candidate_count as u64,
+                budget_bytes: u32::MAX as u64,
+            });
+        }
+
+        let world_stride =
+            workspace.layout.world_view_bytes / workspace.layout.rejection_reason_slots;
+        if world_stride == 0 || world_stride > u32::MAX as usize {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU final-result world stride".to_string(),
+                estimated_bytes: world_stride as u64,
+                budget_bytes: u32::MAX as u64,
+            });
+        }
+
+        let candidate_count = candidate_count as u32;
+        let world_stride = world_stride as u32;
+        let func = self
+            .provider
+            .device()
+            .inner()
+            .get_func(
+                EPISTEMIC_MODULE,
+                epistemic_kernels::EPISTEMIC_MATERIALIZE_FINAL_RESULT_FLAGS_U8,
+            )
+            .ok_or_else(|| {
+                XlogError::Execution(
+                    "epistemic final-result materialization kernel not found".to_string(),
+                )
+            })?;
+        let config = LaunchConfig::for_num_elems(candidate_count);
+
+        let kernel_timing = self.time_epistemic_gpu_kernel_launch(
+            "epistemic GPU final result materialization",
+            || unsafe {
+                // SAFETY: kernel arguments match the PTX signature; the capacity checks
+                // above prove world-view and rejection buffers cover all accesses, and
+                // output.num_rows_device() is the runtime-owned device scalar for output
+                // row count metadata.
+                func.clone().launch(
+                    config,
+                    (
+                        candidate_count,
+                        world_stride,
+                        output.num_rows_device(),
+                        &workspace.rejection_reasons,
+                        &mut workspace.world_views,
+                    ),
+                )
+            },
+        )?;
+
+        Ok(trace.with_kernel_timing(kernel_timing))
+    }
+
     /// Prepare runtime-owned GPU buffers for an epistemic executable plan.
     pub fn prepare_epistemic_gpu_execution(
         &self,
@@ -1504,6 +1631,11 @@ impl Executor {
         )?;
         let materialization =
             self.materialize_epistemic_gpu_candidates(&mut prepared.workspace, candidate_count)?;
+        let final_result_materialization = self.materialize_epistemic_gpu_final_results(
+            &mut prepared.workspace,
+            &output,
+            candidate_count,
+        )?;
 
         Ok(EpistemicGpuExecutionResult {
             prepared,
@@ -1513,6 +1645,7 @@ impl Executor {
             model_membership,
             world_view_validation,
             materialization,
+            final_result_materialization,
             output,
             trace,
         })

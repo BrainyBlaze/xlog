@@ -61,15 +61,21 @@ staging.
 `epistemic_materialize_accepted_candidates_u8` CUDA kernel and records
 `EpistemicGpuMaterializationTrace` with one kernel launch, zero host writes, and
 CUDA-event elapsed timing for accepted-candidate materialization staging.
+`Executor::materialize_epistemic_gpu_final_results` launches the
+`epistemic_materialize_final_result_flags_u8` CUDA kernel and records
+`EpistemicGpuFinalResultMaterializationTrace` with one device row-count read
+from `output.num_rows_device()`, one kernel launch, zero host writes, and
+CUDA-event elapsed timing for final-result flag staging.
 `EpistemicGpuRuntimeWcojCertification` then requires actual production WCOJ
 counter deltas before WCOJ evidence can be certified.
 `Executor::execute_epistemic_gpu_execution` wraps the reduced production
 runtime plan with preflight, workspace allocation, candidate-generation,
 propagation, candidate-validation, `execute_plan` plus before/after counter
 tracing, then model-membership staging, world-view validation staging, and
-materialization-staging kernel launches. That is still incomplete for the
-epistemic hot path; actual reduced-runtime stable-model membership population,
-solver coupling, and final query-result materialization do not dispatch yet.
+accepted-candidate plus final-result flag materialization-staging kernel
+launches. That is still incomplete for the epistemic hot path; actual
+reduced-runtime stable-model membership population, solver coupling, and full
+final tuple/query-result materialization do not dispatch yet.
 
 ## GPU And WCOJ Scope
 
@@ -82,7 +88,9 @@ through:
 - WCOJ layout construction;
 - skew-aware scheduling;
 - helper splitting;
-- GPU-resident world-view/candidate buffers;
+- semantic population of GPU-resident world-view/candidate buffers from actual
+  reduced stable-model output;
+- full final query tuple materialization;
 - GPU portfolio SAT/MaxSAT dispatch.
 
 Those paths are required G090_GPU/G090_SOLVER/G090_PROB work before v0.9.0 can
@@ -90,7 +98,7 @@ close. Existing non-epistemic programs continue to use the normal parser,
 stratifier, RIR lowering, runtime, and WCOJ infrastructure where eligible. The
 current epistemic branch proves semantic boundary, fixture contracts, GPU-plan,
 reduced-runtime-plan, workspace, runtime-preflight, dispatch-counter guard, and
-reduced-plan execution-trace contracts only.
+reduced-plan execution-trace contracts plus bounded staging kernels only.
 
 The reduced-runtime-plan contract reuses the Goal-038-B WCOJ surfaces. K-clique
 epistemic reductions must pass through `MultiwayPlan`, `KCliqueVariableOrder`,
@@ -103,7 +111,7 @@ Release certification must replace the current CPU fixture hot paths with:
 - runtime allocation/use of GPU-resident candidate, world-view,
   model-membership, and rejection buffers;
 - GPU kernels for candidate generation, propagation, validation, and
-  materialization;
+  materialization, including full final tuple materialization;
 - WCOJ planner eligibility, layout construction, skew scheduling, and helper
   splitting for eligible epistemic reductions;
 - GPU-native SAT/MaxSAT/portfolio solving or documented GPU-backed adapters;
@@ -255,6 +263,7 @@ Current semantic-oracle validation snapshot:
 
 ```bash
 cargo fmt --check
+cargo test -p xlog-runtime --test test_epistemic_gpu_workspace
 cargo test -p xlog-logic --test test_epistemic_eir --test test_epistemic_g91 --test test_epistemic_faeel --test test_epistemic_gpt --test test_epistemic_split
 cargo test -p xlog-logic --test test_epistemic_examples
 cargo test -p xlog-solve --test solver_service_semantics
@@ -262,6 +271,7 @@ cargo test -p xlog-prob --test epistemic_prob
 cargo test -p xlog-logic --lib
 cargo test -p xlog-solve --lib
 cargo test -p xlog-prob --lib
+cargo check -p xlog-cuda -p xlog-runtime -p xlog-logic -p xlog-ir
 cargo check -p xlog-logic -p xlog-ir -p xlog-solve -p xlog-prob
 cargo check -p pyxlog
 ```

@@ -141,3 +141,18 @@ extern "C" __global__ void epistemic_materialize_accepted_candidates_u8(
     world_views[candidate * world_stride] =
         (rejection_reasons[candidate] == 0u) ? 1u : 0u;
 }
+
+extern "C" __global__ void epistemic_materialize_final_result_flags_u8(
+    uint32_t candidate_count,
+    uint32_t world_stride,
+    const uint32_t* __restrict__ output_row_count,
+    const uint32_t* __restrict__ rejection_reasons,
+    uint8_t* __restrict__ world_views
+) {
+    uint32_t candidate = blockIdx.x * blockDim.x + threadIdx.x;
+    if (candidate >= candidate_count) return;
+
+    uint8_t has_output = (output_row_count[0] > 0u) ? 1u : 0u;
+    world_views[candidate * world_stride] =
+        (rejection_reasons[candidate] == 0u && has_output != 0u) ? 1u : 0u;
+}

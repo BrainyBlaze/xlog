@@ -33,7 +33,8 @@ mod wcoj_dispatch;
 pub mod wcoj_phase_timing;
 pub use epistemic_workspace::{
     EpistemicGpuCandidateGenerationTrace, EpistemicGpuCandidateValidationTrace,
-    EpistemicGpuExecutionResult, EpistemicGpuKernelTimingTrace, EpistemicGpuMaterializationTrace,
+    EpistemicGpuExecutionResult, EpistemicGpuFinalResultMaterializationTrace,
+    EpistemicGpuKernelTimingTrace, EpistemicGpuMaterializationTrace,
     EpistemicGpuModelMembershipTrace, EpistemicGpuPreparedExecution, EpistemicGpuPropagationTrace,
     EpistemicGpuRuntimeCounters, EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace,
     EpistemicGpuRuntimeWcojCertification, EpistemicGpuWorkspace, EpistemicGpuWorkspaceCapacities,
