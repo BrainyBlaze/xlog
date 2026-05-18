@@ -34,6 +34,7 @@ decision.
 | `cargo test -p xlog-logic --test test_epistemic_gpu_plan` | PASS, 8 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_executable_plan` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 47 passed, 0 failed |
+| `cargo test -p xlog-runtime --test test_epistemic_production_reuse_audit -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_eir --test test_epistemic_g91 --test test_epistemic_faeel --test test_epistemic_gpt --test test_epistemic_split --test test_epistemic_world_view --test test_epistemic_examples` | PASS, 23 passed, 0 failed |
 | `cargo test -p xlog-solve --test gpu_solver_production_reuse` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-solve --test solver_service_semantics` | PASS, 5 passed, 0 failed |
@@ -68,7 +69,7 @@ decision.
 | M090_CERT.10 nonzero-arity membership | certification includes GPU tuple-key membership evidence for arity >= 1 predicates | PARTIAL | EIR/GPU-plan tests preserve source tuple terms, and runtime source/trace tests require arity-one, arity-two, arity-three, and generic arity-N tuple-key kernels over existing relation columns with encoded expected key bits/type codes, device metadata arrays for wider keys, reduced-output bound-value column metadata for variable keys, and device byte comparison for ground and variable-bound keys; semantic parity fixtures are still missing. |
 | M090_CERT.11 solver production reuse | certification includes traces proving accepted SAT/MaxSAT work used existing GPU solver production paths | PARTIAL | `GpuSolverProductionAdapter` reuses existing `GpuCdclSolver` SAT/UNSAT APIs and exposes zero CPU search counters; `production_capabilities` blocks MaxSAT/portfolio until existing production paths exist. |
 | M090_CERT.12 prob production reuse | certification includes traces proving accepted probabilistic evidence used existing GPU exact/provenance paths | PARTIAL | `EpistemicProbProductionAdapter` requires accepted evidence before calling `ExactDdnnfProgram` GPU exact/provenance APIs and exposes zero CPU recompute counters; accepted runtime trace is missing. |
-| M090_CERT.13 no parallel engines | source audit reports zero new epistemic-only WCOJ, solver-search, probability-inference, or tuple-store engines in accepted paths | PARTIAL | This slice reuses `CudaBuffer` relation columns, adds a thin `GpuCdclSolver` adapter rather than a parallel solver-search engine, and adds a thin `ExactDdnnfProgram` adapter rather than a parallel probability-inference engine; accepted-path audits remain missing. |
+| M090_CERT.13 no parallel engines | source audit reports zero new epistemic-only WCOJ, solver-search, probability-inference, or tuple-store engines in accepted paths | PARTIAL | `docs/evidence/2026-05-18-v090-production-reuse-audit/README.md` plus `test_epistemic_production_reuse_audit` source-check the accepted runtime, tuple-membership, solver, and probability paths for reuse of existing RIR/WCOJ metadata, `CudaBuffer` relation columns, `GpuCdclSolver`, and `ExactDdnnfProgram`; this is still partial because successful accepted WCOJ dispatch, MaxSAT/portfolio, and accepted probabilistic runtime traces remain blocked. |
 
 ## Required GPU-Native Evidence Before Closure
 
