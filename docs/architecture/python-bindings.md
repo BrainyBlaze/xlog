@@ -162,6 +162,62 @@ The persistent session path is additive:
 - `evaluate(dlpack_inputs=...)` remains the stateless one-shot API
 - `session()` exposes a mutable named relation store with schema-checked DLPack import/export
 
+#### v0.8.0 Runtime Controls And Diagnostics
+
+Long-running DTS-DLM callers can submit logic or probabilistic evaluations to a
+background Python worker with `evaluate_async(...)`. The returned
+`AsyncEvaluation` is awaitable and also exposes `done()`, `cancel()`,
+`exception()`, and `result(timeout=None)` for synchronous orchestration.
+
+```python
+handle = session.evaluate_async(memory_mb=512)
+result = handle.result(timeout=30)
+```
+
+Large logic outputs can be consumed as DLPack-compatible CUDA tensor chunks:
+
+```python
+for chunk in session.evaluate_stream(memory_mb=512, chunk_rows=1024):
+    cols = chunk.tensors  # torch CUDA tensor views, DLPack-compatible
+    print(chunk.relation_name, chunk.offset, chunk.num_rows, cols)
+```
+
+The same chunking is available from an already materialized result:
+
+```python
+result = session.evaluate()
+for chunk in result.iter_query_chunks(chunk_rows=1024):
+    ...
+```
+
+Per-call `memory_mb` is accepted by `CompiledLogicProgram.evaluate`,
+`LogicRelationSession.evaluate`, `CompiledProgram.evaluate`, and
+`CompiledProgram.evaluate_device`. A zero limit raises `ValueError`; a limit
+below the provider's current tracked allocation raises `MemoryError` before the
+evaluation starts. The provider-level compile-time budget remains the hard GPU
+allocator budget.
+
+Runtime progress and diagnostics are exposed as stable dictionaries:
+
+```python
+session.progress_stats()
+session.memory_stats()
+session.host_transfer_stats()
+session.cuda_graph_stats()
+
+program.progress_stats()
+program.memory_stats()
+program.host_transfer_stats()
+program.cuda_graph_stats()
+```
+
+`memory_stats()` reports `allocated_bytes`, `memory_limit_bytes`,
+`peak_memory_bytes`, and `status`. CUDA Graph stats report
+`csm_cuda_graph_captures`, `csm_cuda_graph_launches`,
+`csm_cuda_graph_fallbacks`, and `csm_cuda_graph_cache_hits`. Environments that
+cannot provide a future diagnostic must report an explicit unavailable status or
+error rather than fabricating a zero-valued probe.
+
 ### Program (Probabilistic)
 
 ```python

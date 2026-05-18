@@ -7,7 +7,7 @@
     "runtime_evidence": "docs/evidence/2026-05-18-v080-cert/runtime_probe.json",
     "source_guard": "python/tests/test_logic_dts_frozen_replay_determinism.py"
   },
-  "generated_at": "2026-05-18T15:44:46.474208+00:00",
+  "generated_at": "2026-05-18T15:55:59.470731+00:00",
   "goal": "G080_CERT",
   "graph_telemetry": {
     "counters": [
@@ -32,7 +32,7 @@
     "htod_bytes": 0,
     "htod_calls": 0
   },
-  "repo_head": "6c9a08c79872de3d75ba25f5a222b47c60fd84ca",
+  "repo_head": "1cde68b51cf5e6fd53d85444bd9f291ae0d73f9f",
   "required_symbols": [
     {
       "class": "LogicProgram",
@@ -69,7 +69,7 @@
       "exported": true,
       "function": "evaluate",
       "present": true,
-      "signature": "def evaluate(self) -> LogicEvalResult",
+      "signature": "def evaluate(self, memory_mb: Optional[int]=None) -> LogicEvalResult",
       "signature_status": "compatible",
       "source": "crates/pyxlog/python/pyxlog/_native.pyi",
       "symbol": "LogicRelationSession.evaluate"

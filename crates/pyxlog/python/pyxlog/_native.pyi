@@ -37,6 +37,7 @@ class CompiledLogicProgram:
     def evaluate(
         self,
         dlpack_inputs: Optional[dict[str, Any]] = None,
+        memory_mb: Optional[int] = None,
     ) -> LogicEvalResult:
         """Evaluate the program, optionally supplying DLPack input relations.
 
@@ -44,6 +45,10 @@ class CompiledLogicProgram:
         Returns a :class:`LogicEvalResult` containing one :class:`LogicQueryResult`
         per query atom in the program.
         """
+        ...
+
+    def memory_stats(self) -> dict[str, Any]:
+        """Return memory-limit, current-allocation, and peak-memory diagnostics."""
         ...
 
     def session(self) -> LogicRelationSession:
@@ -57,7 +62,7 @@ class LogicRelationSession:
         """Upload a relation as a sequence of DLPack column capsules."""
         ...
 
-    def evaluate(self) -> LogicEvalResult:
+    def evaluate(self, memory_mb: Optional[int] = None) -> LogicEvalResult:
         """Evaluate the program against all currently stored relations."""
         ...
 
@@ -71,6 +76,10 @@ class LogicRelationSession:
 
     def cuda_graph_stats(self) -> dict[str, int]:
         """Return CUDA Graph capture, launch, fallback, and cache-hit counters."""
+        ...
+
+    def memory_stats(self) -> dict[str, Any]:
+        """Return memory-limit, current-allocation, and peak-memory diagnostics."""
         ...
 
     def export_relation(self, name: str) -> list[Any]:
@@ -157,6 +166,7 @@ class CompiledProgram:
         confidence: float = 0.95,
         max_nonmonotone_iterations: int = 1024,
         sampling_method: Optional[str] = None,
+        memory_mb: Optional[int] = None,
     ) -> EvalResult:
         """Evaluate the program and return probabilities (host-side).
 
@@ -175,11 +185,28 @@ class CompiledProgram:
         confidence: float = 0.95,
         max_nonmonotone_iterations: int = 1024,
         sampling_method: Optional[str] = None,
+        memory_mb: Optional[int] = None,
     ) -> McDeviceEvalResult:
         """GPU-native MC evaluation — result counts stay on the device.
 
         Only valid for programs compiled with ``prob_engine="mc"``.
         """
+        ...
+
+    def host_transfer_stats(self) -> dict[str, int]:
+        """Return ``{dtoh_bytes: int, ...}`` transfer statistics."""
+        ...
+
+    def reset_host_transfer_stats(self) -> None:
+        """Reset all host-transfer statistics."""
+        ...
+
+    def cuda_graph_stats(self) -> dict[str, int]:
+        """Return CUDA Graph capture, launch, fallback, and cache-hit counters."""
+        ...
+
+    def memory_stats(self) -> dict[str, Any]:
+        """Return memory-limit, current-allocation, and peak-memory diagnostics."""
         ...
 
     # ------------------------------------------------------------------

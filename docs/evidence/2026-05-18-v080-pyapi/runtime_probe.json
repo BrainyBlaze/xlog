@@ -1,0 +1,95 @@
+{
+  "async_done_after_result": true,
+  "async_logic_result_type": "LogicEvalResult",
+  "chunk_rows": [
+    3,
+    3,
+    2
+  ],
+  "chunk_tensors_cuda": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    true
+  ],
+  "large_memory_stats_before_overlimit": {
+    "allocated_bytes": 3200012,
+    "memory_limit_bytes": 536870912,
+    "peak_memory_bytes": 3200012,
+    "status": "available"
+  },
+  "large_rows": 200000,
+  "logic_rows": 8,
+  "program_async_atoms": [
+    "rain()"
+  ],
+  "program_cuda_graph_stats_keys": [
+    "csm_cuda_graph_cache_hits",
+    "csm_cuda_graph_captures",
+    "csm_cuda_graph_fallbacks",
+    "csm_cuda_graph_launches"
+  ],
+  "program_host_transfer_stats_keys": [
+    "dtoh_bytes",
+    "dtoh_calls",
+    "htod_bytes",
+    "htod_calls"
+  ],
+  "program_memory_stats": {
+    "allocated_bytes": 24,
+    "memory_limit_bytes": 536870912,
+    "peak_memory_bytes": 24,
+    "status": "available"
+  },
+  "program_progress_after_async": {
+    "evaluations_completed": 1,
+    "evaluations_failed": 0,
+    "evaluations_started": 1,
+    "last_error": null,
+    "last_rows": 0
+  },
+  "pyxlog_file": "/tmp/xlog-v080-cert-venv/lib/python3.10/site-packages/pyxlog/__init__.py",
+  "pyxlog_version": "0.7.0",
+  "session_cuda_graph_stats_keys": [
+    "csm_cuda_graph_cache_hits",
+    "csm_cuda_graph_captures",
+    "csm_cuda_graph_fallbacks",
+    "csm_cuda_graph_launches"
+  ],
+  "session_host_transfer_stats_keys": [
+    "dtoh_bytes",
+    "dtoh_calls",
+    "htod_bytes",
+    "htod_calls"
+  ],
+  "session_memory_stats": {
+    "allocated_bytes": 272,
+    "memory_limit_bytes": 536870912,
+    "peak_memory_bytes": 272,
+    "status": "available"
+  },
+  "session_progress_after_async": {
+    "evaluations_completed": 1,
+    "evaluations_failed": 0,
+    "evaluations_started": 1,
+    "last_error": null,
+    "last_rows": 8
+  },
+  "stream_chunk_rows": [
+    3,
+    3,
+    2
+  ],
+  "stream_chunk_tensors_cuda": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    true
+  ],
+  "typed_memory_limit_error": "MemoryError",
+  "typed_memory_limit_message": "per-call memory limit exceeded before evaluation: allocated_bytes=3200012 memory_limit_bytes=1048576"
+}

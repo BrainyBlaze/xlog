@@ -16,9 +16,10 @@ use std::collections::HashMap as StdHashMap;
 
 use super::neural_registry::NeuralPredicateRegistry;
 use super::{
-    dlpack_capsule_from_tensor, dlpack_from_py, parse_prob_engine_override, provider_from_config,
-    types, CompiledLogicProgram, CompiledProbProgram, CompiledProgram, LogicEvalResult,
-    LogicProgram, LogicQueryResult, LogicRelationSession, Program,
+    dlpack_capsule_from_tensor, dlpack_from_py, enforce_call_memory_limit,
+    parse_prob_engine_override, provider_from_config, provider_memory_stats, types,
+    CompiledLogicProgram, CompiledProbProgram, CompiledProgram, LogicEvalResult, LogicProgram,
+    LogicQueryResult, LogicRelationSession, Program,
 };
 
 #[pymethods]
@@ -130,12 +131,14 @@ impl LogicProgram {
 
 #[pymethods]
 impl CompiledLogicProgram {
-    #[pyo3(signature = (dlpack_inputs=None))]
+    #[pyo3(signature = (dlpack_inputs=None, memory_mb=None))]
     pub fn evaluate(
         &self,
         py: Python<'_>,
         dlpack_inputs: Option<&Bound<'_, PyDict>>,
+        memory_mb: Option<u64>,
     ) -> PyResult<LogicEvalResult> {
+        enforce_call_memory_limit(&self.provider, memory_mb)?;
         let mut inputs: HashMap<String, xlog_cuda::CudaBuffer> = HashMap::new();
 
         if let Some(dict) = dlpack_inputs {
@@ -183,6 +186,11 @@ impl CompiledLogicProgram {
             relation_store,
         })
     }
+
+    /// Return memory diagnostics including allocated_bytes and memory_limit_bytes.
+    pub fn memory_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+        provider_memory_stats(py, &self.provider)
+    }
 }
 
 impl CompiledLogicProgram {}
@@ -218,7 +226,9 @@ impl LogicRelationSession {
         Ok(())
     }
 
-    pub fn evaluate(&self, py: Python<'_>) -> PyResult<LogicEvalResult> {
+    #[pyo3(signature = (memory_mb=None))]
+    pub fn evaluate(&self, py: Python<'_>, memory_mb: Option<u64>) -> PyResult<LogicEvalResult> {
+        enforce_call_memory_limit(&self.provider, memory_mb)?;
         let result = self
             .program
             .evaluate_with_relation_store(self.provider.clone(), &self.relation_store, false)
@@ -259,6 +269,11 @@ impl LogicRelationSession {
 
     pub fn reset_host_transfer_stats(&self) {
         self.provider.reset_host_transfer_stats()
+    }
+
+    /// Return memory diagnostics including allocated_bytes and memory_limit_bytes.
+    pub fn memory_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+        provider_memory_stats(py, &self.provider)
     }
 
     pub fn export_relation(&mut self, py: Python<'_>, name: &str) -> PyResult<Vec<PyObject>> {

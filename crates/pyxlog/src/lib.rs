@@ -5,8 +5,9 @@ use std::collections::{HashMap, HashSet};
 use std::os::raw::{c_char, c_void};
 use std::sync::Arc;
 
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyMemoryError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 use xlog_core::{MemoryBudget, Schema};
 use xlog_cuda::{
@@ -225,6 +226,40 @@ pub(crate) fn provider_from_config(config: GpuConfig) -> xlog_core::Result<CudaK
         runtime,
     ));
     CudaKernelProvider::with_runtime(device, memory)
+}
+
+pub(crate) fn enforce_call_memory_limit(
+    provider: &Arc<CudaKernelProvider>,
+    memory_mb: Option<u64>,
+) -> PyResult<()> {
+    let Some(memory_mb) = memory_mb else {
+        return Ok(());
+    };
+    if memory_mb == 0 {
+        return Err(PyValueError::new_err("memory_mb must be > 0"));
+    }
+    let memory_limit_bytes = memory_mb.saturating_mul(1024 * 1024);
+    let allocated_bytes = provider.memory().allocated_bytes();
+    if allocated_bytes > memory_limit_bytes {
+        return Err(PyMemoryError::new_err(format!(
+            "per-call memory limit exceeded before evaluation: allocated_bytes={} memory_limit_bytes={}",
+            allocated_bytes, memory_limit_bytes
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn provider_memory_stats(
+    py: Python<'_>,
+    provider: &Arc<CudaKernelProvider>,
+) -> PyResult<PyObject> {
+    let dict = PyDict::new(py);
+    let memory = provider.memory();
+    dict.set_item("allocated_bytes", memory.allocated_bytes())?;
+    dict.set_item("memory_limit_bytes", memory.budget().device_bytes)?;
+    dict.set_item("peak_memory_bytes", memory.allocated_bytes())?;
+    dict.set_item("status", "available")?;
+    Ok(dict.into())
 }
 
 pub(crate) fn parse_prob_engine_override(s: &str) -> PyResult<ProbEngine> {
