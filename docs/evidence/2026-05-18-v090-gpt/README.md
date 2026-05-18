@@ -46,7 +46,7 @@ Predecessor evidence:
 | `cargo test -p xlog-logic --test test_epistemic_gpt` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_faeel` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_g91` | PASS, 3 passed, 0 failed |
-| `cargo test -p xlog-logic --test test_epistemic_eir` | PASS, 3 passed, 0 failed |
+| `cargo test -p xlog-logic --test test_epistemic_eir` | PASS, 4 passed, 0 failed |
 | `cargo test -p xlog-logic --lib` | PASS, 238 passed, 0 failed |
 | `cargo check -p xlog-logic -p xlog-ir -p xlog-solve -p xlog-prob` | PASS |
 | `cargo check -p pyxlog` | PASS |

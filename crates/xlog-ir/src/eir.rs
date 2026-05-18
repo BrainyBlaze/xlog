@@ -18,6 +18,30 @@ pub enum EirEpistemicOp {
     Possible,
 }
 
+/// Term representation preserved at the epistemic boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EirTerm {
+    /// Named logic variable.
+    Variable(String),
+    /// Anonymous wildcard.
+    Anonymous,
+    /// Integer literal.
+    Integer(i64),
+    /// Floating-point literal represented by its IEEE-754 bits.
+    FloatBits(u64),
+    /// Quoted string literal.
+    String(String),
+    /// Interned symbol identifier.
+    Symbol(u32),
+    /// Aggregate term preserved from a rule head.
+    Aggregate {
+        /// Aggregate operator name.
+        op: String,
+        /// Variable being aggregated.
+        variable: String,
+    },
+}
+
 /// Atom summary carried across the EIR boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EirAtom {
@@ -25,6 +49,8 @@ pub struct EirAtom {
     pub predicate: String,
     /// Predicate arity.
     pub arity: usize,
+    /// Source atom terms preserved for tuple-key matching.
+    pub terms: Vec<EirTerm>,
 }
 
 /// Explicit epistemic body literal.

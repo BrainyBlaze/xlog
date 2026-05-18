@@ -3,10 +3,12 @@
 use xlog_core::Result;
 use xlog_ir::{
     EirAtom, EirBodyLiteral, EirEpistemicLiteral, EirEpistemicMode, EirEpistemicOp, EirProgram,
-    EirRule,
+    EirRule, EirTerm,
 };
 
-use crate::ast::{Atom, BodyLiteral, EpistemicMode, EpistemicOp, Program, Rule as AstRule};
+use crate::ast::{
+    AggOp, Atom, BodyLiteral, EpistemicMode, EpistemicOp, Program, Rule as AstRule, Term,
+};
 
 /// Build EIR from parsed frontend AST without lowering to RIR.
 pub fn build_eir(program: &Program) -> Result<EirProgram> {
@@ -47,6 +49,32 @@ fn convert_atom(atom: &Atom) -> EirAtom {
     EirAtom {
         predicate: atom.predicate.clone(),
         arity: atom.arity(),
+        terms: atom.terms.iter().map(convert_term).collect(),
+    }
+}
+
+fn convert_term(term: &Term) -> EirTerm {
+    match term {
+        Term::Variable(name) => EirTerm::Variable(name.clone()),
+        Term::Anonymous => EirTerm::Anonymous,
+        Term::Integer(value) => EirTerm::Integer(*value),
+        Term::Float(value) => EirTerm::FloatBits(value.to_bits()),
+        Term::String(value) => EirTerm::String(value.clone()),
+        Term::Symbol(id) => EirTerm::Symbol(*id),
+        Term::Aggregate(agg) => EirTerm::Aggregate {
+            op: convert_agg_op(agg.op).to_string(),
+            variable: agg.variable.clone(),
+        },
+    }
+}
+
+fn convert_agg_op(op: AggOp) -> &'static str {
+    match op {
+        AggOp::Count => "count",
+        AggOp::Sum => "sum",
+        AggOp::Min => "min",
+        AggOp::Max => "max",
+        AggOp::LogSumExp => "logsumexp",
     }
 }
 

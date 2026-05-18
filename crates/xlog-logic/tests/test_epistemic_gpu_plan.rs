@@ -1,5 +1,5 @@
 use xlog_ir::{
-    EirEpistemicMode, EirEpistemicOp, EpistemicGpuBufferKind, EpistemicGpuHotPathPhase,
+    EirEpistemicMode, EirEpistemicOp, EirTerm, EpistemicGpuBufferKind, EpistemicGpuHotPathPhase,
     EpistemicWcojReductionStatus,
 };
 use xlog_logic::epistemic::plan_epistemic_gpu_execution;
@@ -115,6 +115,26 @@ fn epistemic_gpu_plan_records_identity_tuple_key_columns_for_nonzero_arity() {
     assert_eq!(plan.tuple_membership_bindings[0].key_columns, vec![0, 1]);
     plan.validate_tuple_membership_bindings()
         .expect("identity key-column metadata should validate");
+}
+
+#[test]
+fn epistemic_gpu_plan_records_tuple_key_terms_for_membership_bindings() {
+    let program = parse_program(
+        r#"
+        accepted(X) :- node(X), know edge(X, 42).
+        "#,
+    )
+    .unwrap();
+
+    let plan = plan_epistemic_gpu_execution(&program).unwrap();
+
+    assert_eq!(plan.tuple_membership_bindings.len(), 1);
+    assert_eq!(
+        plan.tuple_membership_bindings[0].key_terms,
+        vec![EirTerm::Variable("X".to_string()), EirTerm::Integer(42)]
+    );
+    plan.validate_tuple_membership_bindings()
+        .expect("tuple key terms should validate against the epistemic literal");
 }
 
 #[test]

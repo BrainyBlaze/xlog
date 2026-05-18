@@ -1033,6 +1033,7 @@ fn epistemic_literal(predicate: &str, op: EirEpistemicOp) -> EirEpistemicLiteral
         atom: EirAtom {
             predicate: predicate.to_string(),
             arity: 0,
+            terms: Vec::new(),
         },
     }
 }

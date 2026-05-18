@@ -54,8 +54,9 @@ bindings and arity-specific tuple-key kernels for arity-one and arity-two
 bindings. It records `EpistemicGpuModelMembershipTrace` with stable tuple
 source row-count reads, tuple-key column device reads, zero reduced-output
 row-count reads, zero host writes, and CUDA-event elapsed timing. This slice
-certifies fixed arity 0-2 reduced stable-model tuple sources from named GPU
-relation buffers and existing `CudaBuffer` columns. Arity greater than two and
+preserves source tuple terms in EIR/GPU-plan metadata and certifies fixed arity
+0-2 reduced stable-model tuple-source staging from named GPU relation buffers
+and existing `CudaBuffer` columns. Complete value-level tuple-key matching and
 full semantic parity still fail closed.
 `Executor::validate_epistemic_gpu_world_views` launches the
 `epistemic_validate_world_views_u8` CUDA kernel and records

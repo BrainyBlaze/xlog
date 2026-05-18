@@ -1,6 +1,6 @@
 //! GPU-native epistemic execution planning contracts.
 
-use crate::eir::{EirEpistemicLiteral, EirEpistemicMode, EirEpistemicOp};
+use crate::eir::{EirEpistemicLiteral, EirEpistemicMode, EirEpistemicOp, EirTerm};
 use crate::plan::ExecutionPlan;
 
 /// Generate-Propagate-Test hot-path phase that must execute on GPU.
@@ -85,6 +85,8 @@ pub struct EpistemicTupleMembershipBinding {
     pub arity: usize,
     /// Source relation columns that form the tuple key for this epistemic atom.
     pub key_columns: Vec<usize>,
+    /// Source atom terms that must be matched against the stable-model tuple key.
+    pub key_terms: Vec<EirTerm>,
     /// Epistemic operator whose membership semantics are being checked.
     pub op: EirEpistemicOp,
     /// Whether the epistemic literal is explicitly negated.
@@ -126,6 +128,7 @@ impl EpistemicGpuPlan {
                 predicate: literal.atom.predicate.clone(),
                 arity: literal.atom.arity,
                 key_columns: (0..literal.atom.arity).collect(),
+                key_terms: literal.atom.terms.clone(),
                 op: literal.op,
                 negated: literal.negated,
             })
@@ -232,6 +235,28 @@ impl EpistemicGpuPlan {
                         binding.literal_index,
                         binding.key_columns.len(),
                         binding.arity
+                    ),
+                });
+            }
+
+            if binding.key_terms.len() != binding.arity {
+                return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic GPU tuple membership binding".to_string(),
+                    context: format!(
+                        "binding for literal_index {} has {} key terms for arity {}",
+                        binding.literal_index,
+                        binding.key_terms.len(),
+                        binding.arity
+                    ),
+                });
+            }
+
+            if binding.key_terms != literal.atom.terms {
+                return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic GPU tuple membership binding".to_string(),
+                    context: format!(
+                        "key terms for literal_index {} do not match epistemic literal",
+                        binding.literal_index
                     ),
                 });
             }

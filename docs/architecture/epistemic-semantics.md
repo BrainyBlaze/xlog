@@ -180,10 +180,11 @@ relations in the executor store and launches
 `epistemic_populate_model_membership_from_tuple_source_u8` for zero-arity
 bindings and fixed arity-specific tuple-key kernels for arity-one and arity-two
 bindings. `EpistemicTupleMembershipBinding::key_columns` records identity
-tuple-key column metadata derived from the EIR atom arity, and the runtime
-resolves those column references through the existing `CudaBuffer` schema,
-relation columns, and
-device row-count buffers. `EpistemicGpuModelMembershipTrace` records zero
+tuple-key column metadata derived from the EIR atom arity, while `key_terms`
+preserves the source atom terms required for value-level tuple-key comparison.
+The runtime currently resolves the column references through the existing
+`CudaBuffer` schema, relation columns, and device row-count buffers.
+`EpistemicGpuModelMembershipTrace` records zero
 reduced-output row-count reads, tuple-source row-count reads, tuple-key column
 device reads, zero host writes, `StableModelTupleBuffer`, and CUDA-event
 elapsed timing. The old `ReducedOutputRowCountOnly` trace remains as a

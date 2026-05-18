@@ -9,7 +9,7 @@ pub mod rir;
 
 pub use eir::{
     EirAtom, EirBodyLiteral, EirEpistemicLiteral, EirEpistemicMode, EirEpistemicOp, EirProgram,
-    EirRule,
+    EirRule, EirTerm,
 };
 pub use epistemic_plan::{
     EpistemicCpuFallbackCounters, EpistemicExecutablePlan, EpistemicGpuBufferKind,
