@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use cudarc::driver::result::mem_get_info;
 
-use fixtures::paper_class::{paper_class_fixtures, TriangleFixture};
+use fixtures::paper_class::{
+    paper_class_expected_fixture_count, paper_class_fixtures, TriangleFixture,
+};
 use xlog_core::{MemoryBudget, ScalarType, Schema};
 use xlog_cuda::device_runtime::{
     AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogAction, LogRecord, LogResult,
@@ -25,8 +27,8 @@ const SCALE: u32 = 1024;
 const DEVICE_BUDGET_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const VRAM_GATE_BYTES: u64 = 38 * 1024 * 1024 * 1024;
 const DIRECT_TRIALS: usize = 10;
-const HASH_DIRECT_INNER_ITERS: usize = 20;
-const WCOJ_DIRECT_INNER_ITERS: usize = 10;
+const HASH_DIRECT_INNER_ITERS: usize = 40;
+const WCOJ_DIRECT_INNER_ITERS: usize = 20;
 const DIRECT_WARMUP_WINDOWS: usize = 20;
 
 #[derive(Default)]
@@ -397,8 +399,8 @@ fn direct_trials(fixture: &TriangleFixture) -> (f64, f64, f64, f64, f64) {
 
 fn report_bundle_paths(fixture: &TriangleFixture) {
     eprintln!(
-        "W39_BUNDLE_PATH {} g1_metadata=PASS g_w35=GRACEFUL g_w36=GRACEFUL g4_helper_split=PASS g5_stream_mux=PASS invoked=5/5",
-        fixture.name
+        "W39_BUNDLE_PATH {} {}",
+        fixture.name, fixture.bundle_path_status
     );
 }
 
@@ -458,7 +460,11 @@ fn bench_fixture(
 
 fn bench_w39_paper_class(c: &mut Criterion) {
     let fixtures = paper_class_fixtures(SCALE);
-    assert_eq!(fixtures.len(), 3, "M_W39.1 requires three fixtures");
+    assert_eq!(
+        fixtures.len(),
+        paper_class_expected_fixture_count(),
+        "W39 fixture registry count must match registered fixture modules"
+    );
     let mut group = c.benchmark_group("wcoj_paper_class");
     group.sample_size(10);
     let mut product = 1.0;
