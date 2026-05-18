@@ -9,8 +9,8 @@ use xlog_ir::{
 };
 use xlog_runtime::{
     EpistemicGpuCandidateGenerationTrace, EpistemicGpuCandidateValidationTrace,
-    EpistemicGpuPropagationTrace, EpistemicGpuRuntimeCounters, EpistemicGpuRuntimePreflight,
-    EpistemicGpuRuntimeTrace, EpistemicGpuRuntimeWcojCertification,
+    EpistemicGpuMaterializationTrace, EpistemicGpuPropagationTrace, EpistemicGpuRuntimeCounters,
+    EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace, EpistemicGpuRuntimeWcojCertification,
     EpistemicGpuWorkspaceCapacities, EpistemicGpuWorkspaceLayout, EpistemicGpuWorkspaceResetTrace,
 };
 
@@ -412,6 +412,55 @@ fn execution_result_records_validation_kernel_trace_before_reduced_dispatch() {
 
     assert!(propagation_pos < validation_pos);
     assert!(validation_pos < reduced_dispatch_pos);
+}
+
+#[test]
+fn materialization_trace_records_device_kernel_without_host_writes() {
+    let trace = EpistemicGpuMaterializationTrace::for_count(8).unwrap();
+
+    assert_eq!(trace.materialized_candidates, 8);
+    assert_eq!(trace.world_view_slots_written, 8);
+    assert_eq!(trace.kernel_launches, 1);
+    assert_eq!(trace.host_write_ops, 0);
+}
+
+#[test]
+fn materialization_runtime_path_launches_epistemic_kernel_not_host_writes() {
+    let source = include_str!("../src/executor/epistemic_workspace.rs");
+    let cuda = include_str!("../../xlog-cuda/kernels/epistemic.cu");
+    let manifest = include_str!("../../xlog-cuda/src/kernel_manifest_data.rs");
+
+    assert!(source.contains("fn materialize_epistemic_gpu_candidates"));
+    assert!(source.contains("EPISTEMIC_MATERIALIZE_ACCEPTED_CANDIDATES_U8"));
+    assert!(source.contains("&workspace.rejection_reasons"));
+    assert!(source.contains("&mut workspace.world_views"));
+    assert!(cuda.contains("epistemic_materialize_accepted_candidates_u8"));
+    assert!(manifest.contains("\"epistemic_materialize_accepted_candidates_u8\""));
+    assert!(!source.contains("upload_epistemic_materialization"));
+    assert!(!source.contains("copy_epistemic_materialization_from_host"));
+}
+
+#[test]
+fn execution_result_records_materialization_kernel_trace_before_reduced_dispatch() {
+    let source = include_str!("../src/executor/epistemic_workspace.rs");
+
+    assert!(source.contains("pub materialization: EpistemicGpuMaterializationTrace"));
+    assert!(source.contains("let materialization ="));
+    assert!(source.contains("self.materialize_epistemic_gpu_candidates"));
+    assert!(source.contains("materialization,"));
+
+    let validation_pos = source
+        .find("let candidate_validation = self.validate_epistemic_gpu_candidates")
+        .expect("candidate-validation launch in execution path");
+    let materialization_pos = source
+        .find("self.materialize_epistemic_gpu_candidates")
+        .expect("materialization launch in execution path");
+    let reduced_dispatch_pos = source
+        .find("let output = self.execute_plan(&executable.reduced_runtime_plan)?")
+        .expect("reduced production runtime dispatch");
+
+    assert!(validation_pos < materialization_pos);
+    assert!(materialization_pos < reduced_dispatch_pos);
 }
 
 fn epistemic_literal(predicate: &str, op: EirEpistemicOp) -> EirEpistemicLiteral {

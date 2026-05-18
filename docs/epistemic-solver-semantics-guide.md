@@ -48,14 +48,18 @@ world-view/rejection staging.
 `epistemic_validate_candidate_bits_u8` CUDA kernel and records
 `EpistemicGpuCandidateValidationTrace` with one kernel launch and zero host
 writes for candidate-buffer validation.
+`Executor::materialize_epistemic_gpu_candidates` launches the
+`epistemic_materialize_accepted_candidates_u8` CUDA kernel and records
+`EpistemicGpuMaterializationTrace` with one kernel launch and zero host writes
+for accepted-candidate materialization staging.
 `EpistemicGpuRuntimeWcojCertification` then requires actual production WCOJ
 counter deltas before WCOJ evidence can be certified.
 `Executor::execute_epistemic_gpu_execution` wraps the reduced production
 runtime plan with preflight, workspace allocation, candidate-generation,
-propagation, and candidate-validation kernel launches, `execute_plan`, and
-before/after counter tracing. That is still incomplete for the epistemic hot
-path; accepted stable-model world-view validation, solver coupling, and result
-materialization do not dispatch yet.
+propagation, candidate-validation, and materialization-staging kernel launches,
+`execute_plan`, and before/after counter tracing. That is still incomplete for
+the epistemic hot path; accepted stable-model world-view validation, solver
+coupling, and final query-result materialization do not dispatch yet.
 
 ## GPU And WCOJ Scope
 

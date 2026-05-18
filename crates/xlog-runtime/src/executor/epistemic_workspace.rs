@@ -145,6 +145,19 @@ pub struct EpistemicGpuCandidateValidationTrace {
     pub host_write_ops: u32,
 }
 
+/// Trace proving accepted-candidate materialization staging used a GPU kernel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EpistemicGpuMaterializationTrace {
+    /// Number of candidate rows materialized on device.
+    pub materialized_candidates: usize,
+    /// World-view slots written by the kernel.
+    pub world_view_slots_written: usize,
+    /// Materialization kernel launches.
+    pub kernel_launches: u32,
+    /// Host writes used by materialization. Accepted GPU execution requires zero.
+    pub host_write_ops: u32,
+}
+
 /// Trace proving candidate propagation staging was performed by a GPU kernel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EpistemicGpuPropagationTrace {
@@ -206,6 +219,20 @@ impl EpistemicGpuCandidateValidationTrace {
             candidate_assumption_bytes_checked: checked_product(literal_count, candidate_count)?,
             world_view_bytes_checked: candidate_count,
             rejection_reason_slots_written: candidate_count,
+            kernel_launches: 1,
+            host_write_ops: 0,
+        })
+    }
+}
+
+impl EpistemicGpuMaterializationTrace {
+    /// Build a materialization trace for a bounded device launch.
+    pub fn for_count(candidate_count: usize) -> Result<Self> {
+        require_positive(candidate_count, "epistemic GPU materialization candidates")?;
+
+        Ok(Self {
+            materialized_candidates: candidate_count,
+            world_view_slots_written: candidate_count,
             kernel_launches: 1,
             host_write_ops: 0,
         })
@@ -482,6 +509,8 @@ pub struct EpistemicGpuExecutionResult {
     pub propagation: EpistemicGpuPropagationTrace,
     /// Candidate-validation trace captured before reduced-plan dispatch.
     pub candidate_validation: EpistemicGpuCandidateValidationTrace,
+    /// Accepted-candidate materialization trace captured before reduced-plan dispatch.
+    pub materialization: EpistemicGpuMaterializationTrace,
     /// Output buffer returned by the reduced production execution plan.
     pub output: CudaBuffer,
     /// Runtime counter trace for the reduced production plan dispatch.
@@ -833,6 +862,86 @@ impl Executor {
         Ok(trace)
     }
 
+    /// Materialize accepted candidate flags into the GPU world-view buffer.
+    pub fn materialize_epistemic_gpu_candidates(
+        &self,
+        workspace: &mut EpistemicGpuWorkspace,
+        candidate_count: usize,
+    ) -> Result<EpistemicGpuMaterializationTrace> {
+        let trace = EpistemicGpuMaterializationTrace::for_count(candidate_count)?;
+        if trace.world_view_slots_written > workspace.layout.world_view_bytes {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU materialization world-view workspace".to_string(),
+                estimated_bytes: trace.world_view_slots_written as u64,
+                budget_bytes: workspace.layout.world_view_bytes as u64,
+            });
+        }
+        if candidate_count > workspace.layout.rejection_reason_slots {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU materialization rejection workspace".to_string(),
+                estimated_bytes: candidate_count as u64,
+                budget_bytes: workspace.layout.rejection_reason_slots as u64,
+            });
+        }
+        if candidate_count > u32::MAX as usize {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU materialization launch".to_string(),
+                estimated_bytes: candidate_count as u64,
+                budget_bytes: u32::MAX as u64,
+            });
+        }
+
+        let world_stride =
+            workspace.layout.world_view_bytes / workspace.layout.rejection_reason_slots;
+        if world_stride == 0 || world_stride > u32::MAX as usize {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU materialization world stride".to_string(),
+                estimated_bytes: world_stride as u64,
+                budget_bytes: u32::MAX as u64,
+            });
+        }
+
+        let candidate_count = candidate_count as u32;
+        let world_stride = world_stride as u32;
+        let func = self
+            .provider
+            .device()
+            .inner()
+            .get_func(
+                EPISTEMIC_MODULE,
+                epistemic_kernels::EPISTEMIC_MATERIALIZE_ACCEPTED_CANDIDATES_U8,
+            )
+            .ok_or_else(|| {
+                XlogError::Execution(
+                    "epistemic candidate materialization kernel not found".to_string(),
+                )
+            })?;
+        let config = LaunchConfig::for_num_elems(candidate_count);
+
+        // SAFETY: kernel arguments match the PTX signature; the capacity checks
+        // above prove world-view and rejection buffers cover all accesses.
+        unsafe {
+            func.clone().launch(
+                config,
+                (
+                    candidate_count,
+                    world_stride,
+                    &workspace.rejection_reasons,
+                    &mut workspace.world_views,
+                ),
+            )
+        }
+        .map_err(|e| {
+            XlogError::execution_ctx(
+                "epistemic GPU candidate materialization",
+                "launch kernel",
+                &e,
+            )
+        })?;
+
+        Ok(trace)
+    }
+
     /// Prepare runtime-owned GPU buffers for an epistemic executable plan.
     pub fn prepare_epistemic_gpu_execution(
         &self,
@@ -875,6 +984,8 @@ impl Executor {
             literal_count,
             candidate_count,
         )?;
+        let materialization =
+            self.materialize_epistemic_gpu_candidates(&mut prepared.workspace, candidate_count)?;
         let counters_before = self.epistemic_gpu_runtime_counters();
         let output = self.execute_plan(&executable.reduced_runtime_plan)?;
         let counters_after = self.epistemic_gpu_runtime_counters();
@@ -889,6 +1000,7 @@ impl Executor {
             candidate_generation,
             propagation,
             candidate_validation,
+            materialization,
             output,
             trace,
         })

@@ -400,6 +400,9 @@ pub mod epistemic_kernels {
     pub const EPISTEMIC_PROPAGATE_CANDIDATES_U8: &str = "epistemic_propagate_candidates_u8";
     /// Device-side epistemic candidate bit validation kernel.
     pub const EPISTEMIC_VALIDATE_CANDIDATE_BITS_U8: &str = "epistemic_validate_candidate_bits_u8";
+    /// Device-side accepted-candidate materialization staging kernel.
+    pub const EPISTEMIC_MATERIALIZE_ACCEPTED_CANDIDATES_U8: &str =
+        "epistemic_materialize_accepted_candidates_u8";
 }
 
 /// Kernel function names in the neural fast-path module.

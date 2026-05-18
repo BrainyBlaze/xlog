@@ -156,9 +156,13 @@ world-view and rejection-reason buffers, recording
 `epistemic_validate_candidate_bits_u8` to validate staged candidate bitsets and
 world-view activity in device buffers, recording
 `EpistemicGpuCandidateValidationTrace` with one kernel launch and zero host
-writes. These are candidate-buffer invariants only; stable-model world-view
-validation, solver coupling, and result materialization remain missing GPU
-phases.
+writes. `Executor::materialize_epistemic_gpu_candidates` launches
+`epistemic_materialize_accepted_candidates_u8` to stage accepted-candidate flags
+back into the world-view buffer from rejection codes, recording
+`EpistemicGpuMaterializationTrace` with one kernel launch and zero host writes.
+These are candidate-buffer invariants and materialization staging only;
+stable-model world-view validation, solver coupling, and final query-result
+materialization remain missing GPU phases.
 
 `EpistemicGpuRuntimePreflight::for_executable_plan` consumes an
 `EpistemicExecutablePlan` before launch. It computes the workspace layout,
@@ -171,16 +175,17 @@ around a future epistemic dispatch, and
 when required K-clique dispatch counters do not advance.
 `Executor::execute_epistemic_gpu_execution` now wraps the reduced production
 runtime plan with preflight, workspace allocation, candidate-generation,
-propagation, and candidate-validation kernel launches, `execute_plan`, and a
-before/after counter trace.
+propagation, candidate-validation, and materialization-staging kernel launches,
+`execute_plan`, and a before/after counter trace.
 
 This workspace is still pre-kernel plumbing. It proves the buffer categories are
 allocatable, initialized on device, and inspectable on the runtime side and
 that WCOJ certification is tied to actual counter deltas around the production
 reduced-plan dispatch. Candidate-assumption generation, propagation staging,
-and candidate-buffer validation now have bounded CUDA kernels, but the runtime
-does not yet validate stable-model world views, materialize accepted results, or
-produce full epistemic timing evidence.
+candidate-buffer validation, and accepted-candidate materialization staging now
+have bounded CUDA kernels, but the runtime does not yet validate stable-model
+world views, materialize final query results, or produce full epistemic timing
+evidence.
 
 ## G91 Compatibility Fixture Semantics
 

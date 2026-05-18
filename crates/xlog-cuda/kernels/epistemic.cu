@@ -61,3 +61,16 @@ extern "C" __global__ void epistemic_validate_candidate_bits_u8(
 
     rejection_reasons[candidate] = reason;
 }
+
+extern "C" __global__ void epistemic_materialize_accepted_candidates_u8(
+    uint32_t candidate_count,
+    uint32_t world_stride,
+    const uint32_t* __restrict__ rejection_reasons,
+    uint8_t* __restrict__ world_views
+) {
+    uint32_t candidate = blockIdx.x * blockDim.x + threadIdx.x;
+    if (candidate >= candidate_count) return;
+
+    world_views[candidate * world_stride] =
+        (rejection_reasons[candidate] == 0u) ? 1u : 0u;
+}
