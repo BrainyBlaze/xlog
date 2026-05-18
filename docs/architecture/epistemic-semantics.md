@@ -103,3 +103,23 @@ The current executable fixture core is intentionally small:
 The bounded FAEEL evaluator is a certification fixture for foundedness and
 no-model behavior. It is not yet the full Generate-Propagate-Test executor; that
 pipeline is owned by `G090_GPT`.
+
+## Generate-Propagate-Test Fixture Execution
+
+`run_generate_propagate_test` in `crates/xlog-logic/src/epistemic.rs` provides a
+bounded fixture implementation of the Generate-Propagate-Test pipeline:
+
+1. **Generate:** accept an explicit candidate list and enforce
+   `GeneratePropagateTestConfig::max_candidates`;
+2. **Propagate:** prune candidates with immediate known/rejected
+   contradictions;
+3. **Test:** evaluate surviving candidates with the bounded FAEEL evaluator.
+
+The outcome carries `GeneratePropagateTestTrace` with generated, propagated,
+pruned, tested, accepted, and rejected counts. If the generate phase exceeds the
+configured candidate budget, it returns `XlogError::ResourceExhausted` with
+context `epistemic GPT candidate guard`.
+
+This fixture makes the phase boundary auditable. It does not yet enumerate
+candidate worlds from arbitrary EIR programs; later solver and splitting work can
+replace the explicit candidate input while preserving the trace contract.

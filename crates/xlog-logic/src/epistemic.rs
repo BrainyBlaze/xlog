@@ -56,6 +56,10 @@ impl EpistemicInterpretation {
         self.rejected.insert((predicate.into(), arity));
         self
     }
+
+    fn has_contradiction(&self) -> bool {
+        self.known.iter().any(|key| self.rejected.contains(key))
+    }
 }
 
 /// Result of bounded FAEEL candidate evaluation.
@@ -91,6 +95,39 @@ pub enum FaeelNoModelReason {
         /// Predicate arity.
         arity: usize,
     },
+}
+
+/// Configuration for bounded Generate-Propagate-Test fixture execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GeneratePropagateTestConfig {
+    /// Maximum candidate count accepted by the generate phase.
+    pub max_candidates: usize,
+}
+
+/// Phase counters emitted by bounded Generate-Propagate-Test execution.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GeneratePropagateTestTrace {
+    /// Number of generated candidates.
+    pub generated: usize,
+    /// Number of candidates that survived propagation.
+    pub propagated: usize,
+    /// Number of candidates pruned during propagation.
+    pub pruned: usize,
+    /// Number of candidates tested.
+    pub tested: usize,
+    /// Number of accepted candidates.
+    pub accepted: usize,
+    /// Number of rejected candidates.
+    pub rejected: usize,
+}
+
+/// Result of bounded Generate-Propagate-Test fixture execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratePropagateTestOutcome {
+    /// Phase counts.
+    pub trace: GeneratePropagateTestTrace,
+    /// Original indices of accepted candidates.
+    pub accepted_candidate_indices: Vec<usize>,
 }
 
 /// Evaluate a single parsed epistemic literal against a bounded interpretation.
@@ -157,4 +194,52 @@ pub fn evaluate_faeel_candidate(
     }
 
     Ok(FaeelCandidateResult::Model)
+}
+
+/// Run bounded Generate-Propagate-Test execution over explicit candidates.
+pub fn run_generate_propagate_test(
+    program: &Program,
+    candidates: Vec<EpistemicInterpretation>,
+    config: GeneratePropagateTestConfig,
+) -> Result<GeneratePropagateTestOutcome> {
+    if candidates.len() > config.max_candidates {
+        return Err(xlog_core::XlogError::ResourceExhausted {
+            context: "epistemic GPT candidate guard".to_string(),
+            estimated_bytes: candidates.len() as u64,
+            budget_bytes: config.max_candidates as u64,
+        });
+    }
+
+    let generated = candidates.len();
+    let propagated_candidates: Vec<(usize, EpistemicInterpretation)> = candidates
+        .into_iter()
+        .enumerate()
+        .filter(|(_, candidate)| !candidate.has_contradiction())
+        .collect();
+
+    let mut trace = GeneratePropagateTestTrace {
+        generated,
+        propagated: propagated_candidates.len(),
+        pruned: generated.saturating_sub(propagated_candidates.len()),
+        ..GeneratePropagateTestTrace::default()
+    };
+    let mut accepted_candidate_indices = Vec::new();
+
+    for (idx, candidate) in &propagated_candidates {
+        trace.tested += 1;
+        match evaluate_faeel_candidate(program, candidate)? {
+            FaeelCandidateResult::Model => {
+                trace.accepted += 1;
+                accepted_candidate_indices.push(*idx);
+            }
+            FaeelCandidateResult::NoModel(_) => {
+                trace.rejected += 1;
+            }
+        }
+    }
+
+    Ok(GeneratePropagateTestOutcome {
+        trace,
+        accepted_candidate_indices,
+    })
 }
