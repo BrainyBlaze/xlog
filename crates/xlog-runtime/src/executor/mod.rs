@@ -32,11 +32,11 @@ mod wcoj_dispatch;
 #[cfg(feature = "wcoj-phase-timing")]
 pub mod wcoj_phase_timing;
 pub use epistemic_workspace::{
-    EpistemicGpuCandidateGenerationTrace, EpistemicGpuExecutionResult,
-    EpistemicGpuPreparedExecution, EpistemicGpuPropagationTrace, EpistemicGpuRuntimeCounters,
-    EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace, EpistemicGpuRuntimeWcojCertification,
-    EpistemicGpuWorkspace, EpistemicGpuWorkspaceCapacities, EpistemicGpuWorkspaceLayout,
-    EpistemicGpuWorkspaceResetTrace,
+    EpistemicGpuCandidateGenerationTrace, EpistemicGpuCandidateValidationTrace,
+    EpistemicGpuExecutionResult, EpistemicGpuPreparedExecution, EpistemicGpuPropagationTrace,
+    EpistemicGpuRuntimeCounters, EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace,
+    EpistemicGpuRuntimeWcojCertification, EpistemicGpuWorkspace, EpistemicGpuWorkspaceCapacities,
+    EpistemicGpuWorkspaceLayout, EpistemicGpuWorkspaceResetTrace,
 };
 use join_cache::JoinIndexCache;
 

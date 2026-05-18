@@ -34,3 +34,30 @@ extern "C" __global__ void epistemic_propagate_candidates_u8(
     world_views[candidate * world_stride] = (observed == 255u) ? 0u : 1u;
     rejection_reasons[candidate] = 0u;
 }
+
+extern "C" __global__ void epistemic_validate_candidate_bits_u8(
+    uint32_t literal_count,
+    uint32_t candidate_count,
+    uint32_t world_stride,
+    const uint8_t* __restrict__ candidate_assumptions,
+    const uint8_t* __restrict__ world_views,
+    uint32_t* __restrict__ rejection_reasons
+) {
+    uint32_t candidate = blockIdx.x * blockDim.x + threadIdx.x;
+    if (candidate >= candidate_count) return;
+
+    uint32_t reason = 0u;
+    if (world_views[candidate * world_stride] == 0u) {
+        reason = 2u;
+    }
+
+    uint32_t base = candidate * literal_count;
+    for (uint32_t literal = 0; literal < literal_count; ++literal) {
+        uint8_t value = candidate_assumptions[base + literal];
+        if (value > 1u) {
+            reason = 3u;
+        }
+    }
+
+    rejection_reasons[candidate] = reason;
+}

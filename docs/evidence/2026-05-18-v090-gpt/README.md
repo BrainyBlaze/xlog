@@ -23,7 +23,8 @@ Predecessor evidence:
 | Bounded behavior | `GeneratePropagateTestConfig::max_candidates` rejects oversized candidate sets with `XlogError::ResourceExhausted`. |
 | GPU candidate generation | `epistemic_generate_candidate_assumptions_u8` populates bounded candidate-assumption bitsets in the runtime workspace. |
 | GPU propagation staging | `epistemic_propagate_candidates_u8` stages generated candidates into world-view/rejection buffers in the runtime workspace. |
-| GPU residency | Candidate-assumption generation and propagation staging are implemented as bounded CUDA kernels; world-view validation and materialization are still CPU-oracle/runtime gaps. |
+| GPU candidate validation | `epistemic_validate_candidate_bits_u8` validates staged candidate bitsets and world-view activity in the runtime workspace. |
+| GPU residency | Candidate-assumption generation, propagation staging, and candidate-buffer validation are implemented as bounded CUDA kernels; stable-model world-view validation and materialization are still CPU-oracle/runtime gaps. |
 | Documentation | `docs/architecture/epistemic-semantics.md` documents the GPT phase contract and guard. |
 
 ## Validation
@@ -33,7 +34,9 @@ Predecessor evidence:
 | `cargo fmt --check` | PASS |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace candidate_generation` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace propagation` | PASS, 3 passed, 0 failed |
-| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 14 passed, 0 failed |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace candidate_validation` | PASS, 2 passed, 0 failed |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace validation` | PASS, 3 passed, 0 failed |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 17 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_gpt` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_faeel` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_g91` | PASS, 3 passed, 0 failed |
@@ -47,14 +50,14 @@ Predecessor evidence:
 | Metric | Target | Status | Evidence |
 |---|---|---|---|
 | M090_GPT.1 phase separation | generate, propagate, test boundaries visible in code | PASS for oracle | `run_generate_propagate_test` implementation and test fixture. |
-| M090_GPT.2 trace output | debug/trace mode reports phase counts and GPU launch counters | PARTIAL | CPU trace counts are asserted; candidate-generation and propagation traces each record one GPU launch, but full GPT timing counters are missing. |
+| M090_GPT.2 trace output | debug/trace mode reports phase counts and GPU launch counters | PARTIAL | CPU trace counts are asserted; candidate-generation, propagation, and candidate-validation traces each record one GPU launch, but full GPT timing counters are missing. |
 | M090_GPT.3 correctness fixtures | accepted/rejected candidate fixtures pass | PASS for oracle | `test_epistemic_gpt`: 2/2 passed. |
 | M090_GPT.4 bounded behavior | candidate explosion guard implemented or explicitly scoped | PASS for oracle | `ResourceExhausted` guard fixture. |
 | M090_GPT.5 world-view validation | trace records guess count, reduced-program model count, accepted world-view count, and rejection reasons | PASS for oracle | CPU trace fields are asserted in `test_epistemic_gpt`. |
-| M090_GPT.6 GPU residency | candidate generation, propagation, and world-view validation hot path uses GPU-resident buffers | PARTIAL | Candidate-assumption generation and propagation staging write GPU-resident workspace buffers through CUDA kernels; world-view validation still uses CPU oracle fixtures. |
+| M090_GPT.6 GPU residency | candidate generation, propagation, and world-view validation hot path uses GPU-resident buffers | PARTIAL | Candidate-assumption generation, propagation staging, and candidate-buffer validation write GPU-resident workspace buffers through CUDA kernels; stable-model world-view validation still uses CPU oracle fixtures. |
 
 ## Coordination Notes
 
-- Candidate generation and propagation staging are now available as bounded GPU workspace kernels, but arbitrary EIR world enumeration plus world-view validation/test phases remain required production scope.
+- Candidate generation, propagation staging, and candidate-buffer validation are now available as bounded GPU workspace kernels, but arbitrary EIR world enumeration plus stable-model world-view validation/test phases remain required production scope.
 - No pyxlog public API signatures were changed.
 - No push, tag, release-board update, or merge was performed.

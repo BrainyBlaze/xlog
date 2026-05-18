@@ -458,6 +458,7 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
         kernels: &[
             "epistemic_generate_candidate_assumptions_u8",
             "epistemic_propagate_candidates_u8",
+            "epistemic_validate_candidate_bits_u8",
         ],
     },
     KernelModuleSpec {

@@ -10,10 +10,10 @@ Branch: `feat/v090-epistemic-solver-semantics`
 
 This slice connects `EpistemicExecutablePlan` to `xlog-runtime` preflight, adds
 a device-side workspace reset trace, adds bounded GPU candidate generation,
-adds bounded GPU propagation staging, adds a certification guard tying WCOJ
-evidence to actual production counter deltas, and exposes a reduced-plan
-execution trace around `execute_plan`. It is still incomplete for the epistemic
-hot path and does not close `G090_GPU`.
+adds bounded GPU propagation staging, adds bounded candidate-buffer validation,
+adds a certification guard tying WCOJ evidence to actual production counter
+deltas, and exposes a reduced-plan execution trace around `execute_plan`. It is
+still incomplete for the epistemic hot path and does not close `G090_GPU`.
 
 ## Implementation Summary
 
@@ -30,9 +30,11 @@ hot path and does not close `G090_GPU`.
 | Candidate generation trace | `EpistemicGpuCandidateGenerationTrace` records literal count, generated candidates, candidate bytes, `kernel_launches = 1`, and `host_write_ops = 0`. |
 | Propagation staging kernel | `epistemic_propagate_candidates_u8` stages generated candidates into GPU world-view/rejection buffers. |
 | Propagation staging trace | `EpistemicGpuPropagationTrace` records propagated candidates, world-view bytes, rejection-reason slots, `kernel_launches = 1`, and `host_write_ops = 0`. |
+| Candidate validation kernel | `epistemic_validate_candidate_bits_u8` checks staged candidate bits and world-view activity in GPU buffers. |
+| Candidate validation trace | `EpistemicGpuCandidateValidationTrace` records validated candidates, checked bytes, rejection-reason slots, `kernel_launches = 1`, and `host_write_ops = 0`. |
 | Runtime WCOJ counter snapshot | `Executor::epistemic_gpu_runtime_counters` snapshots existing production WCOJ, layout-sort, and K-clique metadata counters. |
 | Preflight-only WCOJ evidence rejected | `EpistemicGpuRuntimeWcojCertification` reports `MissingRequiredWcojDispatch` when a K-clique WCOJ plan exists but runtime WCOJ counters do not advance. |
-| Reduced-plan execution trace | `Executor::execute_epistemic_gpu_execution` prepares workspace, launches candidate generation and propagation, executes the reduced production runtime plan with `execute_plan`, and captures before/after counter deltas in `EpistemicGpuRuntimeTrace`. |
+| Reduced-plan execution trace | `Executor::execute_epistemic_gpu_execution` prepares workspace, launches candidate generation, propagation, and candidate validation, executes the reduced production runtime plan with `execute_plan`, and captures before/after counter deltas in `EpistemicGpuRuntimeTrace`. |
 
 ## Validation
 
@@ -40,7 +42,7 @@ hot path and does not close `G090_GPU`.
 |---|---|
 | `cargo fmt --check` | PASS |
 | `git diff --check` | PASS |
-| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 14 passed, 0 failed |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 17 passed, 0 failed |
 | `cargo test -p xlog-cuda --test build_script_tests -- --nocapture` | PASS, 4 passed, 0 failed |
 | `cargo test -p xlog-runtime --lib` | PASS, 125 passed, 0 failed |
 | `cargo check -p xlog-cuda -p xlog-runtime -p xlog-logic -p xlog-ir` | PASS |
@@ -50,16 +52,16 @@ hot path and does not close `G090_GPU`.
 
 | Metric | Target | Status | Evidence |
 |---|---|---|---|
-| M090_GPU.1 production lowering | accepted epistemic fixture runs through production runtime dispatch | PARTIAL | Runtime API launches candidate generation and propagation before reduced production-plan execution with counter tracing; validation/materialization dispatch is still missing. |
+| M090_GPU.1 production lowering | accepted epistemic fixture runs through production runtime dispatch | PARTIAL | Runtime API launches candidate generation, propagation, and candidate validation before reduced production-plan execution with counter tracing; semantic validation/materialization dispatch is still missing. |
 | M090_GPU.2 WCOJ eligibility | at least one epistemic reduction uses the WCOJ planner/path where eligible | PARTIAL | Preflight records WCOJ/K-clique/helper metadata, and the counter guard rejects preflight-only evidence; no dispatch launch evidence yet. |
-| M090_GPU.3 GPU buffers | candidate, world-view, and rejection state have GPU-resident representations | PARTIAL | Prepare API combines preflight with workspace allocation and device-side reset; candidate and propagation staging buffers can be populated by bounded CUDA kernels; model-membership and semantic validation population are still missing. |
-| M090_GPU.4 kernel coverage | GPU kernels cover candidate generation, propagation, validation, and materialization hot paths | PARTIAL | Candidate generation has `epistemic_generate_candidate_assumptions_u8`; propagation staging has `epistemic_propagate_candidates_u8`; validation and materialization kernels are missing. |
-| M090_GPU.5 CPU fallback ban | accepted trace records zero CPU candidate/world-view fallbacks | PARTIAL | Preflight rejects nonzero fallback counters, and candidate/propagation traces record zero host writes; validation fallback evidence remains missing. |
-| M090_GPU.6 launch evidence | nonzero GPU launch counts and timings | PARTIAL | Candidate-generation and propagation traces record nonzero launches; timing evidence is still missing. |
+| M090_GPU.3 GPU buffers | candidate, world-view, and rejection state have GPU-resident representations | PARTIAL | Prepare API combines preflight with workspace allocation and device-side reset; candidate, propagation, and candidate-validation buffers can be populated by bounded CUDA kernels; model-membership and stable-model validation population are still missing. |
+| M090_GPU.4 kernel coverage | GPU kernels cover candidate generation, propagation, validation, and materialization hot paths | PARTIAL | Candidate generation has `epistemic_generate_candidate_assumptions_u8`; propagation staging has `epistemic_propagate_candidates_u8`; candidate-buffer validation has `epistemic_validate_candidate_bits_u8`; stable-model validation and materialization kernels are missing. |
+| M090_GPU.5 CPU fallback ban | accepted trace records zero CPU candidate/world-view fallbacks | PARTIAL | Preflight rejects nonzero fallback counters, and candidate/propagation/validation traces record zero host writes; stable-model validation fallback evidence remains missing. |
+| M090_GPU.6 launch evidence | nonzero GPU launch counts and timings | PARTIAL | Candidate-generation, propagation, and candidate-validation traces record nonzero launches; timing evidence is still missing. |
 
 ## Remaining Blocker
 
 The next slice must move from allocation/reset/candidate generation/propagation
-staging/counter tracing to actual epistemic runtime dispatch: validate world
-views, materialize accepted results, and emit full launch counters/timing plus
-zero CPU fallback counters.
+staging/candidate-buffer validation/counter tracing to actual epistemic runtime
+dispatch: validate stable-model world views, materialize accepted results, and
+emit full launch counters/timing plus zero CPU fallback counters.

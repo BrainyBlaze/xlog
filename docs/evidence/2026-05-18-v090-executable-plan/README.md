@@ -10,8 +10,8 @@ Branch: `feat/v090-epistemic-solver-semantics`
 
 This slice added the first production-facing lowering route after the explicit
 epistemic semantic contract was built. Later runtime evidence adds bounded
-candidate-generation and propagation kernels; this file alone is not a GPU
-execution claim and does not close `G090_GPU`.
+candidate-generation, propagation, and candidate-buffer validation kernels;
+this file alone is not a GPU execution claim and does not close `G090_GPU`.
 
 ## Reuse Audit
 
@@ -52,13 +52,13 @@ The prior closure/evidence docs were inspected before finalizing this slice:
 | Metric | Target | Status | Evidence |
 |---|---|---|---|
 | M090_EIR.6 production route | accepted epistemic forms have a production lowering route | PARTIAL | Executable route exists after the semantic contract; direct `xlog run` lowering still rejects epistemic literals. |
-| M090_GPU.1 production lowering | accepted epistemic fixture runs through production runtime dispatch | PARTIAL | Reduced runtime plan is produced through the production compiler; later runtime evidence launches candidate generation/propagation before reduced-plan dispatch, but validation/materialization dispatch is not implemented. |
+| M090_GPU.1 production lowering | accepted epistemic fixture runs through production runtime dispatch | PARTIAL | Reduced runtime plan is produced through the production compiler; later runtime evidence launches candidate generation/propagation/candidate validation before reduced-plan dispatch, but stable-model validation/materialization dispatch is not implemented. |
 | M090_GPU.2 WCOJ eligibility | at least one epistemic reduction uses the WCOJ planner/path where eligible | PARTIAL | Reduced fixtures reach `RirNode::MultiWayJoin` and K-clique `MultiwayPlan`; no runtime dispatch evidence yet. |
-| M090_GPU.4 kernel coverage | kernels cover GPT hot paths | PARTIAL | Later runtime evidence launches candidate-generation and propagation-staging kernels; validation/materialization kernels are missing. |
-| M090_GPU.6 launch evidence | nonzero GPU launches and timing | PARTIAL | Later runtime traces record candidate-generation and propagation launches; timing evidence is missing. |
+| M090_GPU.4 kernel coverage | kernels cover GPT hot paths | PARTIAL | Later runtime evidence launches candidate-generation, propagation-staging, and candidate-buffer validation kernels; stable-model validation/materialization kernels are missing. |
+| M090_GPU.6 launch evidence | nonzero GPU launches and timing | PARTIAL | Later runtime traces record candidate-generation, propagation, and candidate-validation launches; timing evidence is missing. |
 
 ## Remaining Blocker
 
-The next runtime slice must add world-view validation and materialization
-kernels or GPU-backed adapters, then report launch counters/timings plus zero
-CPU fallback counters.
+The next runtime slice must add stable-model world-view validation and
+materialization kernels or GPU-backed adapters, then report launch
+counters/timings plus zero CPU fallback counters.

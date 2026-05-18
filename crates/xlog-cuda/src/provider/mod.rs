@@ -398,6 +398,8 @@ pub mod epistemic_kernels {
         "epistemic_generate_candidate_assumptions_u8";
     /// Device-side epistemic candidate propagation staging kernel.
     pub const EPISTEMIC_PROPAGATE_CANDIDATES_U8: &str = "epistemic_propagate_candidates_u8";
+    /// Device-side epistemic candidate bit validation kernel.
+    pub const EPISTEMIC_VALIDATE_CANDIDATE_BITS_U8: &str = "epistemic_validate_candidate_bits_u8";
 }
 
 /// Kernel function names in the neural fast-path module.
