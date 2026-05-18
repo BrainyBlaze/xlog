@@ -2,6 +2,53 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.7.0] — 2026-05-18
+
+General WCOJ Architecture and Runtime Expansion. This release
+retargets the completed feature pack originally planned as v0.6.5
+to v0.7.0 because the delivered surface is a full WCOJ subsystem
+expansion: cost-aware planning, recursive integration, K-clique
+coverage, paper-aligned helper/runtime mechanisms, DTS-DLM hot-loop
+integration, and release-board closure.
+
+### Added
+
+- First-class `MultiWayJoin` / WCOJ RIR and promoter surface for
+  eligible multiway rules, with deterministic fallback preservation.
+- WCOJ variable-ordering and cardinality/selectivity-aware cost-model
+  integration, including per-iteration recursive SCC statistics.
+- General WCOJ CUDA/runtime coverage beyond triangle: 4-cycle,
+  K=5/K=6 hypergraph planner production path, K=7/K=8 template
+  coverage, runtime histogram refresh, and helper-splitting invocation.
+- Adaptive join closure: nested-loop dispatch for small eligible joins
+  and preserved provider-level sort-merge operator certification.
+- Certification and benchmark surfaces for GPU Same Generation,
+  skewed multiway, deep-recursive WCOJ, deterministic mixed execution,
+  widened-frontier replay, and paper-class production-scale fixtures.
+- DTS-DLM Phase-2 integration evidence for chain-shaped joins,
+  sort-label propagation, CUDA Graph capture/replay, M37-A surface
+  preservation, and m37c-prime end-to-end validation.
+- Dedicated WCOJ architecture and user guides.
+
+### Changed
+
+- Workspace package version and internal xlog crate dependency
+  constraints now target `0.7.0`.
+- Closure-board and tag-handoff release surfaces now use `v0.7.0`;
+  historical evidence may still say the work was originally targeted
+  as `v0.6.5`.
+- Roadmap release trains move forward: the completed WCOJ expansion is
+  v0.7.0, Epistemic/Solver Semantics moves to v0.8.0, Multi-GPU and
+  Out-of-Core moves to v0.9.0, and Language/ML/Product backlog moves
+  to v0.10.0.
+
+### Release Status
+
+- Closure board: 30 DONE, 0 IN-PROGRESS, 0 BLOCKED, 1 OPEN (W7.1 tag
+  authorization).
+- W7.1 still requires explicit user authorization before creating or
+  pushing the `v0.7.0` tag.
+
 ## [0.6.0] — 2026-04-29
 
 Stream-Safe GPU Runtime And Execution Discipline. Infrastructure
@@ -125,7 +172,7 @@ unchanged; the new path is opt-in via
   device-mask case for runtime-backed callers.
 - **ILP / ILP-exact view helpers + operators recorded
   migration**. Re-opens when tensorized ILP /
-  exact-induction downstream consumer work resumes (v0.9.0
+  exact-induction downstream consumer work resumes (v0.10.0
   "Bounded Exact Induction" backlog) and requires
   runtime-backed stream safety.
 - **Sub-slice 3 LeftOuter CSM** (commit `b90ae77f`, never
@@ -145,7 +192,7 @@ unchanged; the new path is opt-in via
   `XLOG_USE_RECORDED_OPS`, one runtime per thread, no v0.6
   code in the call chain). Bug class: pre-existing
   same-process multi-executor concurrency against one CUDA
-  primary context. Tracked under v0.7.0 "Concurrency
+  primary context. Tracked under v0.8.0 "Concurrency
   Hardening" in `ROADMAP.md`. The v0.6.0 release gate is
   **A4 fork-isolated stress + cert suite + umbrella ×50**,
   not "A3 zero drift".

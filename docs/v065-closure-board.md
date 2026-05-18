@@ -1,14 +1,14 @@
-# v0.6.5 Closure Board
+# v0.7.0 Closure Board
 
-**Status:** v0.6.5 is tag-ready at the board level; W7.1 remains
-OPEN pending explicit user authorization to tag `v0.6.5`.
+**Status:** v0.7.0 is tag-ready at the board level; W7.1 remains
+OPEN pending explicit user authorization to tag `v0.7.0`.
 **Source of truth:** ROADMAP.md §1203–1268 + internal commitments
 created during slices 4–5 + Goal-038-B / Goal-039 amendments.
 **Last updated:** 2026-05-18.
 
 ## Process Rules (durable)
 
-These rules govern all work toward v0.6.5 closure. They override
+These rules govern all work toward v0.7.0 closure. They override
 any contrary slice-internal decision.
 
 1. **No item is marked DONE without explicit user approval in
@@ -32,14 +32,14 @@ any contrary slice-internal decision.
    for each closed item) but does NOT mark DONE itself. The
    user reviews and approves; a separate commit applies the
    approved DONE markings.
-5. **No `v0.6.6` reference in any new file, comment, plan,
+5. **No `v0.7.1` reference in any new file, comment, plan,
    evidence README, or commit message until this board has
    zero OPEN items.** Existing `v0.6.6` references in shipped
    slices stay (rewriting history is its own risk); new ones
    are forbidden.
-6. **Push and tag gated on this board.** `v0.6.5` tag fires
+6. **Push and tag gated on this board.** `v0.7.0` tag fires
    only after every board item is DONE AND the user explicitly
-   says "tag v0.6.5." No silent push, no silent tag.
+   says "tag v0.7.0." No silent push, no silent tag.
 7. **`BLOCKED` is a real state.** An item is `BLOCKED` when
    another board item must complete first. The blocker IDs
    are listed in the item's row. `BLOCKED` items do not move
@@ -126,7 +126,7 @@ prior shipped work.
 
 | ID | Status | Blocked by | Required deliverable | Acceptance gate |
 |----|--------|------------|----------------------|-----------------|
-| W7.1 | OPEN | user tag authorization | Full workspace gate + CUDA cert + real_world replay; tag `v0.6.5` only after every other board item is DONE AND user explicitly authorizes the tag. | All non-W7.1 board items are DONE; user says "tag v0.6.5"; tag pushed. |
+| W7.1 | OPEN | user tag authorization | Full workspace gate + CUDA cert + real_world replay; tag `v0.7.0` only after every other board item is DONE AND user explicitly authorizes the tag. | All non-W7.1 board items are DONE; user says "tag v0.7.0"; tag pushed. |
 
 ## Completed
 
@@ -139,8 +139,9 @@ prior shipped work.
 
 ## Provenance
 
-- ROADMAP.md §1203–1268: initial 22 v0.6.5 items, 4 already DONE in
-  shipped slices 1/2/4, 18 initially tracked here as W2–W6 entries.
+- ROADMAP.md §1203–1268: initial 22 WCOJ expansion items were
+  originally targeted as v0.6.5; this board retargets the completed
+  feature pack to v0.7.0.
 - Goal-038-B / Goal-039 amendments expanded the board with W6.3,
   W6.4, W6.5, W6.6, and W6.7, bringing the tracked total to 31.
 - Internal commitments tracked in slice plans/evidence:

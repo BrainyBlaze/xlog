@@ -1,6 +1,6 @@
 # XLOG Development Roadmap
 
-Last updated: May 3, 2026
+Last updated: May 18, 2026
 Current tagged release: v0.6.2. v0.6.0 shipped the stream-safe runtime
 and recorded launch discipline. v0.6.1 shipped recorded CSM hash-join
 dispatch and explicit CSM cert-mode labeling. v0.6.2 shipped the first
@@ -8,8 +8,8 @@ productized WCOJ slice: hypergraph planner / oracle foundations plus
 default-on adaptive GPU triangle WCOJ for `U32`, `Symbol`, and `U64`
 inputs. v0.6.2 deliberately does **not** claim general-arity WCOJ,
 recursive/SCC WCOJ execution, a cost model, or a dedicated
-`MultiWayJoin` / `WcojJoin` RIR node. Remaining WCOJ expansion work is
-targeted to v0.6.5.
+`MultiWayJoin` / `WcojJoin` RIR node. The completed WCOJ expansion
+pack is targeted to v0.7.0.
 
 This roadmap is version-oriented so planned work is not hidden inside subsystem
 sections. Historical and current-main work uses checked boxes. Future work uses
@@ -618,11 +618,11 @@ relocated to the release where the work actually belongs:
     WCOJ).
   * Native exact-induction tensorized integration + 449/449
     liveness reproduction + committed `ilp_exact.ptx` →
-    **v0.9.0 Bounded Exact Induction** (gated on a named
+    **v0.10.0 Bounded Exact Induction** (gated on a named
     downstream consumer materializing).
   * Per-call Python memory limit + query progress API →
-    **v0.9.0 Python API**.
-  * CLI explain/plan visualization → **v0.9.0 CLI**.
+    **v0.10.0 Python API**.
+  * CLI explain/plan visualization → **v0.10.0 CLI**.
 
 ## v0.6.0 - Stream-Safe GPU Runtime And Execution Discipline
 
@@ -745,7 +745,7 @@ execution.
       Legacy ILP / ILP-exact path stays as-is; runtime block
       identity is not propagated through ILP view helpers.
       **Re-open trigger**: tensorized ILP / exact-induction
-      downstream consumer work resumes (v0.9.0 "Bounded Exact
+      downstream consumer work resumes (v0.10.0 "Bounded Exact
       Induction" backlog) and requires runtime-backed stream
       safety. Without that consumer, the current legacy path
       is correct and migration would add complexity for no
@@ -863,7 +863,7 @@ execution.
       same-process multi-executor/provider concurrency against
       one CUDA primary context. Re-scoped as a non-blocking
       residual; see "Known Non-Blocking Residuals" below and
-      the future-version backlog item in v0.7.0.
+      the future-version backlog item in v0.8.0.
 - [x] Public certification of the recorded launch discipline
       against the cert suite. (Commit `3361785b`.)
       `XLOG_USE_DEVICE_RUNTIME=1 XLOG_USE_RECORDED_OPS=1 cargo
@@ -914,7 +914,7 @@ blockers later.
   runtime), which means no v0.6 code path is in the call
   chain. The bug class is pre-existing same-process
   multi-executor/provider concurrency against a shared CUDA
-  primary context. Tracked for v0.7.0+ under "Certify
+  primary context. Tracked for v0.8.0+ under "Certify
   same-process multi-executor concurrency against one CUDA
   primary context".
 
@@ -1025,7 +1025,7 @@ blockers later.
        release path begins consuming host-provided masks**.
      * ILP / ILP-exact recorded migration re-opens **when
        the tensorized ILP / exact-induction downstream
-       consumer work resumes (v0.9.0 "Bounded Exact
+       consumer work resumes (v0.10.0 "Bounded Exact
        Induction" backlog) and requires runtime-backed
        stream safety**.
    Both items are now annotated under Recorded Launch Paths
@@ -1200,9 +1200,9 @@ for legacy callers is unchanged; the new path is opt-in via
       pre-fast-path phase timing, and post-fast-path phase timing in
       `docs/evidence/2026-05-01-wcoj-bench-baseline/`.
 
-## v0.6.5 - General WCOJ Architecture and Runtime Expansion
+## v0.7.0 - General WCOJ Architecture and Runtime Expansion
 
-v0.6.5 owns the WCOJ work intentionally left out of the v0.6.2
+v0.7.0 owns the WCOJ work intentionally left out of the v0.6.2
 triangle release. The goal is to turn the certified triangle accelerator
 into a broader WCOJ subsystem without weakening the v0.6.2 fallback and
 stream-safety contracts.
@@ -1212,84 +1212,87 @@ stream-safety contracts.
 - [x] Lower eligible plans to a dedicated `MultiWayJoin` /
       `WcojJoin` RIR node. v0.6.2 executor wiring pattern-matches the
       current lowered triangle RIR directly; a first-class RIR node is
-      deferred to this release. **Done v0.6.5 slice 1 — `RirNode::MultiWayJoin`
+      deferred to this release. **Done in the WCOJ expansion pack
+      originally tracked as v0.6.5 slice 1 — `RirNode::MultiWayJoin`
       with `inputs`/`slot_vars`/`output_columns`/`fallback`; promoted post-
       optimizer in `xlog-logic::promote::promote_multiway`.**
-- [ ] Add variable-ordering cost model for WCOJ. v0.6.2 ships only
+- [x] Add variable-ordering cost model for WCOJ. v0.6.2 ships only
       deterministic appearance-order planning plus a trait boundary for
       future cost models.
-- [ ] Add join reordering based on selectivity estimates.
+- [x] Add join reordering based on selectivity estimates.
 
 ### xlog-runtime
 
 - [x] Integrate WCOJ into semi-naive recursive evaluation.
-      **Done v0.6.5 slice 4 — `Executor::execute_wcoj_or_fallback_node`
+      **Done in the WCOJ expansion pack originally tracked as v0.6.5
+      slice 4 — `Executor::execute_wcoj_or_fallback_node`
       hooks both the seeding pass and per-variant evaluation in
       `execute_recursive_scc`; promoter gates per-rule on in-SCC
-      Scan count (≤ 1 promotes; ≥ 2 multi-recursive STILL OPEN
-      below).**
+      Scan count.**
 - [x] Preserve deterministic mixed execution across WCOJ and
       binary-join rules inside recursive SCCs. v0.6.2 preserves
       deterministic fallback for unsupported recursive shapes.
-      **Done v0.6.5 slice 4 — `MultiWayJoin.fallback` identity
+      **Done in the WCOJ expansion pack originally tracked as v0.6.5
+      slice 4 — `MultiWayJoin.fallback` identity
       invariant + body-keyed `try_dispatch_wcoj_*_on_body`
       preserve binary-join behavior bit-identically when the
       cost model declines or the shape doesn't match.**
-- [ ] Add statistics integration into recursive SCC evaluation.
+- [x] Add statistics integration into recursive SCC evaluation.
 
 ### xlog-cuda
 
-- [ ] Add sorted relation accessors beyond the triangle layout helper.
+- [x] Add sorted relation accessors beyond the triangle layout helper.
 - [x] Add deterministic WCOJ kernels for 4-way conjunctive joins.
-      **Done v0.6.5 slice 2 — `wcoj_4cycle_count` / `wcoj_4cycle_materialize`
+      **Done in the WCOJ expansion pack originally tracked as v0.6.5
+      slice 2 — `wcoj_4cycle_count` / `wcoj_4cycle_materialize`
       kernels (u32 + u64 + Symbol parity); skew classifier with
       max-reduction over the four join positions; force gate +
       adaptive opt-in.**
-- [ ] Add general-arity WCOJ after 3-way and 4-way certification.
-- [ ] Add histogram-guided block scheduling / heavy-row offload.
+- [x] Add general-arity WCOJ after 3-way and 4-way certification.
+- [x] Add histogram-guided block scheduling / heavy-row offload.
       v0.6.2 measured this and deferred it: after the layout
       fast-path, materialize is a plausible future target but no
       longer the obvious next slice.
-- [ ] Add kernel fusion where benchmarks show materialization overhead
+- [x] Add kernel fusion where benchmarks show materialization overhead
       dominates.
-- [ ] Add shared-memory optimization for small relations.
-- [ ] Add warp-level primitives for small-relation optimization.
+- [x] Add shared-memory optimization for small relations.
+- [x] Add warp-level primitives for small-relation optimization.
 
 ### Adaptive Indexing
 
-- [ ] Add nested-loop join for small relations.
-- [ ] Add general sort-merge join for pre-sorted binary relations.
-- [ ] Feed selectivity and heat statistics into WCOJ variable ordering.
+- [x] Add nested-loop join for small relations.
+- [x] Add general sort-merge join for pre-sorted binary relations.
+- [x] Feed selectivity and heat statistics into WCOJ variable ordering.
 
 ### Tests and Certification
 
-- [ ] Add GPU Same Generation / skewed multiway / deep-recursive WCOJ
+- [x] Add GPU Same Generation / skewed multiway / deep-recursive WCOJ
       execution gates. v0.6.2 certifies these at the oracle layer,
       not through GPU WCOJ kernels.
-- [ ] Add skewed multi-way GPU benchmark suite beyond triangle.
-- [ ] Preserve deterministic mixed execution across WCOJ,
+- [x] Add skewed multi-way GPU benchmark suite beyond triangle.
+- [x] Preserve deterministic mixed execution across WCOJ,
       binary-join, and recursive rules under a single test
       harness. (The binary-join + recursive determinism part
       is already in `xlog-runtime`; v0.6.2 covers non-recursive
       triangle WCOJ only.)
-- [ ] Add downstream widened-frontier stress replay clean gate.
+- [x] Add downstream widened-frontier stress replay clean gate.
       (No replay harness is committed today; the harness needs
       to be built alongside the benchmarks above.)
 
 ### Documentation
 
-- [ ] Add dedicated WCOJ architecture guide. Architecture reference:
+- [x] Add dedicated WCOJ architecture guide. Architecture reference:
       `docs/wcoj-architecture-guide.md`.
-- [ ] Document WCOJ eligibility, fallback, and performance tuning in a
+- [x] Document WCOJ eligibility, fallback, and performance tuning in a
       user-facing guide rather than only code docs / benchmark docs.
       User guide reference: `docs/wcoj-user-guide.md`.
 
-### v0.6.5 Status (as of 2026-05-04)
+### v0.7.0 Status (as of 2026-05-18)
 
-**4/22 ROADMAP items DONE** (slices 1, 2, 4 above).
-**18/22 ROADMAP items OPEN** — required for v0.6.5 tag.
-**3 internal commitments OPEN** — created during slices 4–5,
-folded into v0.6.5 closure (NOT deferred):
+**22/22 ROADMAP items DONE** for the General WCOJ Architecture and
+Runtime Expansion pack.
+**3 internal commitments DONE** — created during slices 4–5,
+folded into v0.7.0 closure (NOT deferred):
 
   * `record_join_result` feedback wiring from WCOJ output back
     into `xlog-stats::StatsManager`.
@@ -1297,17 +1300,17 @@ folded into v0.6.5 closure (NOT deferred):
     `SkewClassifier` to `Cardinality`.
   * Multi-recursive WCOJ (≥ 2 in-SCC body Scans).
 
-**Total open for v0.6.5 tag: 21 items** (18 ROADMAP + 3
-internal). v0.6.5 is **NOT releasable** until the closure
-board reaches zero OPEN.
+**Total open for v0.7.0 tag: 1 item** — W7.1 release-tag
+authorization. The closure board is tag-ready at the board level:
+all non-W7.1 rows are DONE.
 
 **Closure board:** [`docs/v065-closure-board.md`](docs/v065-closure-board.md)
 — authoritative tracker. Process rules, wave grouping, and
-per-item acceptance gates live there. Any further v0.6.5 work
+per-item acceptance gates live there. Any further v0.7.0 work
 references board IDs (W2.x, W3.x, …).
 
-**Slices already shipped against this section** (FF-merged on
-local main, 20 commits ahead of `origin/main`, no push, no tag):
+**Historical slices originally shipped against this section before
+the v0.7.0 retarget**:
 
   * Slice 1: `MultiWayJoin` RIR + promoter (item #1).
   * Slice 2: 4-cycle WCOJ kernels + adaptive opt-in (item #8).
@@ -1315,7 +1318,7 @@ local main, 20 commits ahead of `origin/main`, no push, no tag):
   * Slice 4: Recursive-arm WCOJ dispatch (items #4, #5).
   * Slice 5: `CardinalityAwareCostModel` opt-in.
 
-## v0.7.0 - Epistemic and Solver Semantics
+## v0.8.0 - Epistemic and Solver Semantics
 
 ### xlog-logic
 
@@ -1366,7 +1369,7 @@ local main, 20 commits ahead of `origin/main`, no push, no tag):
       `per_thread` and `shared` fixture modes (matrix run
       via `XLOG_A3_FIXTURE_MODE=...`).
 
-## v0.8.0 - Multi-GPU and Out-of-Core Execution
+## v0.9.0 - Multi-GPU and Out-of-Core Execution
 
 ### Runtime and Memory
 
@@ -1407,7 +1410,7 @@ local main, 20 commits ahead of `origin/main`, no push, no tag):
 - [ ] Add PyTorch integration tests.
 - [ ] Add multi-GPU partitioning, skew, and recovery certification.
 
-## v0.9.0 - Language, ML, and Product Backlog
+## v0.10.0 - Language, ML, and Product Backlog
 
 ### xlog-logic
 
@@ -1502,11 +1505,11 @@ local main, 20 commits ahead of `origin/main`, no push, no tag):
 - [ ] WCOJ planner and kernel scope can expand beyond the release window without strict 3-way/4-way certification gates.
 - [ ] WCOJ kernels must not land before the operators they depend on are migrated to recorded launch discipline; otherwise multi-stream WCOJ execution would re-introduce the cross-stream use-after-free class v0.6.0 just closed.
 
-### v0.7.0 Risks
+### v0.8.0 Risks
 
 - [ ] Epistemic semantics can introduce high complexity and must remain isolated from stable Datalog execution.
 - [ ] D4 and solver integration must preserve deterministic certification paths.
 
-### v0.8.0 Risks
+### v0.9.0 Risks
 
 - [ ] Multi-GPU synchronization and skew handling can dominate performance if partitioning policy is not benchmark-driven.
