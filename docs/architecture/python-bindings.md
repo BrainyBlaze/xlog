@@ -592,6 +592,42 @@ Contract notes:
   `host_transfer_stats()` / `reset_host_transfer_stats()` when enforcing that contract in tests
 - Unsigned metadata/count tensors are exported as DLPack `int32` for broad framework compatibility
 
+### Bounded Exact Induction API
+
+`pyxlog.ilp.induce_exact(..., backend="native")` exposes the GPU-native
+bounded exact-induction scorer used by DTS-DLM tensorized ILP consumers. The
+public entry point returns an `ExactInductionResult` containing
+`ScoredCandidate` rows grouped by topology order: `chain`, `star`, `fanout`,
+then `fanin`.
+
+```python
+from pyxlog.ilp import induce_exact
+
+result = induce_exact(
+    prog,
+    head_relation="p_A",
+    candidate_relations=["p_B", "p_C", "p_D"],
+    positive_arg0=pos_a0,
+    positive_arg1=pos_a1,
+    negative_arg0=neg_a0,
+    negative_arg1=neg_a1,
+    k_per_topology=2,
+    deterministic=True,
+    backend="native",
+)
+```
+
+The native backend scores each topology independently in one batched CUDA
+pass. The Python reference can be used for parity checks with
+`backend="python", strict_per_topology=True`; leaving `strict_per_topology`
+at its default preserves legacy prototype behavior and is not semantically
+equivalent to native scoring.
+
+Current type policy is intentionally narrow: exact induction supports
+`u64` pair relations. `U32` and `Symbol` exact-induction dispatch are deferred
+until a downstream consumer requires them. Generated `ilp_exact.portable.ptx`
+and `.cubin` files are packaged build artifacts, not checked-in source files.
+
 ### Sparse Mask APIs
 
 `CompiledIlpProgram` exposes two sparse mask setters:

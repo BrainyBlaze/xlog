@@ -1,0 +1,47 @@
+{
+  "d2h_counter": {
+    "allowed_slack": 2,
+    "large_candidate_count": 5,
+    "large_dtoh_calls": 2,
+    "large_total_scored": 100,
+    "small_candidate_count": 2,
+    "small_dtoh_calls": 2,
+    "small_total_scored": 16,
+    "within_gate": true
+  },
+  "device": "NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU",
+  "dts_phase1_liveness_evidence": {
+    "both_heads_alive_449_449": true,
+    "exists": true,
+    "path": "/home/dev/projects/dts-dlm/docs/evidence/2026-04-17-m8-phase1-engine-integration.md",
+    "quarantine_rate_zero": true,
+    "rollback_rate_zero": true
+  },
+  "first_native_candidate": {
+    "head_relation": "p_A",
+    "left_relation": "p_B",
+    "local_rank": 0,
+    "negatives_covered": 0,
+    "next_negatives_covered": 0,
+    "next_positives_covered": 0,
+    "positives_covered": 2,
+    "right_relation": "p_C",
+    "tie_class_size": 1,
+    "topology": "chain"
+  },
+  "native_candidate_count_n3": 3,
+  "native_candidate_count_output_n3": 6,
+  "native_parity_with_strict_python": true,
+  "native_total_scored_n3": 36,
+  "packaged_ilp_exact_kernels": [
+    "ilp_exact.portable.ptx",
+    "ilp_exact.sm_120.cubin"
+  ],
+  "pyxlog_version": "0.7.0",
+  "torch_version": "2.10.0+cu128",
+  "type_policy": {
+    "symbol": "deferred for exact-induction kernel; Symbol is supported elsewhere as u32 ids, but exact kernel is U64-only today",
+    "u32": "deferred for exact-induction kernel; DLPack signedness support exists generally, but xlog-induce validates exact buffers as U64 today",
+    "u64": "supported and runtime-probed"
+  }
+}

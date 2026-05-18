@@ -624,7 +624,8 @@ relocated to the release where the work actually belongs:
     **v0.6.2 Tests and Certification** (no target operator without
     WCOJ).
   * Native exact-induction tensorized integration + 449/449
-    liveness reproduction + committed `ilp_exact.ptx` →
+    liveness reproduction + documented no-checked-in-PTX packaging
+    policy with generated portable PTX staging →
     **v0.8.0 Bounded Exact Induction** (gated on a named
     downstream consumer materializing).
   * Per-call Python memory limit + query progress API →
@@ -1415,24 +1416,27 @@ release-certification consumer depends on them.
 
 - [ ] Add column-type dispatch beyond `U64`, including `U32` and
       `Symbol` callers when needed by downstream tensorized ILP.
-- [ ] Integrate native exact-induction backend into the downstream
+- [x] Integrate native exact-induction backend into the downstream
       tensorized ILP consumer path. (Native `kernels/ilp_exact.cu` +
       manifest registration + `crates/pyxlog/src/ilp_exact.rs` wrapper
-      exist; the downstream tensorized consumer integration is the
-      missing piece.)
-- [ ] Reproduce the downstream 449/449 liveness benchmark with native
-      exact induction. (Referenced as a historical Phase 0d baseline in
-      `crates/pyxlog/python/pyxlog/ilp/exact_induce.py:111`; no current
-      reproduction harness.)
-- [ ] Decide and document the strict-per-topology compatibility policy
+      exist; DTS-DLM's `tensorized_ilp.py` calls the public
+      `pyxlog.ilp.exact_induce.induce_exact(..., backend="native")`
+      surface directly.)
+- [x] Reproduce the downstream 449/449 liveness benchmark with native
+      exact induction. (DTS-DLM evidence
+      `docs/evidence/2026-04-17-m8-phase1-engine-integration.md`
+      records native `both_heads_alive == 449/449`, head 0/1
+      `449/449`, rollback `0.0`, and quarantine `0.0`.)
+- [x] Decide and document the strict-per-topology compatibility policy
       for DTS-DLM, including how legacy Python-prototype behavior is
       compared against native per-topology-isolated scoring.
 - [ ] Add chain-topology shared-memory caching of L rows after profiling
       confirms it is a hot path.
-- [ ] Add committed `kernels/ilp_exact.ptx` artifact once the kernel
-      packaging policy is finalized and aligned with the existing
-      ILP-family kernel convention. (The `.cu` is committed; the `.ptx`
-      is built but not checked in, unlike the rest of the ILP-family.)
+- [x] Resolve `ilp_exact.ptx` packaging policy: `kernels/ilp_exact.cu`
+      is source; generated `ilp_exact.portable.ptx` and `.cubin`
+      artifacts are staged into `pyxlog/kernels/` and embedded by the
+      xlog-cuda build, matching the current `ilp.cu` / `ilp_credit.cu`
+      convention rather than checking generated PTX into git.
 
 ### Profile-Gated Optimizer Work
 
