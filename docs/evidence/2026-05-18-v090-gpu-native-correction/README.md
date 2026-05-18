@@ -23,7 +23,7 @@ release gate.
 | GPT | CPU fixture records guesses, reduced models, accepted world views, and rejection reasons. | PARTIAL: candidate generation, propagation staging, candidate-buffer validation, tuple-source model-membership staging with specialized arity-one/two/three and generic arity-N row-scoped ground-key comparison plus generic arity-N variable-bound comparison, bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, final-row map construction, and membership-gated final tuple materialization use GPU-resident buffers; broader accepted semantic parity remains missing. |
 | Splitting | CPU split/recompose fixtures pass. | PARTIAL until valid split components execute through GPU-native subplans. |
 | Solver | `SolverService` is a CPU fixture facade with SAT/UNSAT/UNKNOWN/TIMEOUT/Optimal statuses; `GpuSolverProductionAdapter` is a thin SAT/UNSAT adapter over the existing `GpuCdclSolver` production path with accepted-runtime SAT/UNSAT plus reusable workspace-backed UNSAT gates and zero CPU search counters; `production_capabilities` explicitly blocks GPU-native MaxSAT and SAT/MaxSAT portfolio execution. | PARTIAL for accepted-runtime SAT, UNSAT, and workspace-backed UNSAT production reuse; BLOCKED until GPU-native MaxSAT, portfolio execution, and full accepted candidate lifecycle traces are wired to epistemic candidates. |
-| Probabilistic | `AcceptedWorldViewEvidence` guards evidence conditioning in fixtures; `EpistemicProbProductionAdapter` can construct evidence from an accepted `EpistemicGpuExecutionResult`, route source and parsed programs into the existing `ExactDdnnfProgram` GPU exact/provenance compile and gradient-evaluation paths, and record zero CPU recompute counters. | PARTIAL for production exact compile/evaluation reuse; BLOCKED until broader probabilistic query, PIR, and knowledge-compilation traces over accepted runtime world views exist. |
+| Probabilistic | `AcceptedWorldViewEvidence` guards evidence conditioning in fixtures; `EpistemicProbProductionAdapter` can construct evidence from an accepted `EpistemicGpuExecutionResult`, route source and parsed programs into the existing `ExactDdnnfProgram` GPU exact/provenance compile plus query/gradient-evaluation paths, and record zero CPU recompute counters. | PARTIAL for production exact compile/evaluation reuse; BLOCKED until broader probabilistic query, PIR, and knowledge-compilation traces over accepted runtime world views exist. |
 | Certification | Semantic-oracle, GPU-plan contract, and accepted K5 WCOJ execution tests can pass locally. | BLOCKED until full accepted-execution GPU timing, solver/probability traces, semantic parity, and zero CPU fallback counters exist. |
 
 ## Explicit Non-Closure Items
@@ -80,8 +80,9 @@ The next production slice should start at the lowering/runtime boundary:
    PARTIAL through `EpistemicProbProductionAdapter`,
    `compile_source_with_gpu_execution_result`,
    `compile_program_with_gpu_execution_result`, and
+   `evaluate_with_gpu_execution_result` plus
    `evaluate_gpu_with_grads_with_gpu_execution_result`; broader probabilistic
-   query, PIR, and knowledge-compilation traces remain open.
+   PIR and knowledge-compilation traces remain open.
 
 ## Validation Status
 
@@ -92,7 +93,7 @@ The next production slice should start at the lowering/runtime boundary:
 | `cargo test -p xlog-logic --test test_epistemic_gpu_plan` | PASS, 8 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_executable_plan` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 47 passed, 0 failed |
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 9 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 10 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_eir --test test_epistemic_g91 --test test_epistemic_faeel --test test_epistemic_gpt --test test_epistemic_split --test test_epistemic_world_view --test test_epistemic_examples` | PASS, 23 passed, 0 failed |
 | `cargo test -p xlog-solve --test gpu_solver_production_reuse` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-solve --test solver_service_semantics` | PASS, 5 passed, 0 failed |

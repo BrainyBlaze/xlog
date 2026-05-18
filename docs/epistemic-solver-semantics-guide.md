@@ -321,6 +321,8 @@ probability recomputation counters in `EpistemicProbProductionTrace`.
 `EpistemicGpuExecutionResult` only after stable-model tuple-source membership,
 GPU model-membership/world-view/final-result/final-tuple kernel traces, zero
 hot-path transfers, and non-empty final device output are proven.
+`evaluate_with_gpu_execution_result` applies the same accepted runtime boundary
+before calling `ExactDdnnfProgram::evaluate`.
 `evaluate_gpu_with_grads_with_gpu_execution_result` applies the same accepted
 runtime boundary before calling `ExactDdnnfProgram::evaluate_gpu_with_grads`.
 

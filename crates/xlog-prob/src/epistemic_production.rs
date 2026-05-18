@@ -10,9 +10,9 @@ use xlog_logic::ast::Program;
 use xlog_runtime::EpistemicGpuExecutionResult;
 
 use crate::epistemic::{AcceptedWorldViewEvidence, EpistemicAssumption};
-#[cfg(feature = "host-io")]
-use crate::exact::ExactResultWithGrads;
 use crate::exact::{ExactDdnnfProgram, GpuConfig};
+#[cfg(feature = "host-io")]
+use crate::exact::{ExactResult, ExactResultWithGrads};
 
 /// Trace counters proving the production adapter stayed on the GPU exact path.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -23,6 +23,8 @@ pub struct EpistemicProbProductionTrace {
     pub gpu_exact_program_compiles: u64,
     /// Number of accepted world-view evidence objects consumed as a gate.
     pub accepted_world_view_evidence_consumed: u64,
+    /// Number of GPU exact query evaluations routed through `ExactDdnnfProgram`.
+    pub gpu_exact_query_evaluations: u64,
     /// Number of GPU gradient evaluations routed through `ExactDdnnfProgram`.
     pub gpu_exact_gradient_evaluations: u64,
     /// CPU-only probability recomputations performed by this adapter.
@@ -123,6 +125,35 @@ impl EpistemicProbProductionAdapter {
         let evidence =
             AcceptedWorldViewEvidence::from_gpu_execution_result(provider, result, assumptions)?;
         self.compile_program_with_accepted_world_view(program, &evidence)
+    }
+
+    /// Evaluate GPU exact query probabilities after accepted world-view evidence was consumed.
+    #[cfg(feature = "host-io")]
+    pub fn evaluate(
+        &mut self,
+        program: &ExactDdnnfProgram,
+        evidence: &AcceptedWorldViewEvidence,
+    ) -> Result<ExactResult> {
+        self.consume_accepted_evidence(evidence)?;
+        let result = program.evaluate()?;
+        self.trace.gpu_exact_query_evaluations =
+            self.trace.gpu_exact_query_evaluations.saturating_add(1);
+        self.trace.require_zero_cpu_recompute()?;
+        Ok(result)
+    }
+
+    /// Evaluate GPU exact query probabilities after accepted GPU epistemic execution.
+    #[cfg(feature = "host-io")]
+    pub fn evaluate_with_gpu_execution_result(
+        &mut self,
+        program: &ExactDdnnfProgram,
+        provider: &CudaKernelProvider,
+        result: &EpistemicGpuExecutionResult,
+        assumptions: Vec<EpistemicAssumption>,
+    ) -> Result<ExactResult> {
+        let evidence =
+            AcceptedWorldViewEvidence::from_gpu_execution_result(provider, result, assumptions)?;
+        self.evaluate(program, &evidence)
     }
 
     /// Evaluate GPU exact gradients after accepted world-view evidence was consumed.
