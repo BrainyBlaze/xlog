@@ -13,6 +13,7 @@ xlog-ir.workspace = true
 xlog-logic.workspace = true
 xlog-prob.workspace = true
 xlog-runtime.workspace = true
+xlog-solve.workspace = true
 xlog-stats.workspace = true
 bytemuck = "1.14"
 

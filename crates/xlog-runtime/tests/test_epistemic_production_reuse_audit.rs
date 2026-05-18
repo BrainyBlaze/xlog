@@ -44,6 +44,10 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(runtime.contains("output.column(bound_col_index)"));
     assert!(solver.contains("GpuCdclSolver::new"));
     assert!(solver.contains("solve_expect_sat(cnf)"));
+    assert!(solver.contains("solve_expect_sat_with_gpu_execution_result"));
+    assert!(solver.contains("accepted_gpu_candidate_evidence_consumed"));
+    assert!(solver.contains("read_device_row_count"));
+    assert!(solver.contains("require_stable_model_tuple_source"));
     assert!(solver.contains("cpu_assignment_enumerations: 0"));
     assert!(prob.contains("ExactDdnnfProgram::compile_source_with_gpu"));
     assert!(prob.contains("ExactDdnnfProgram::compile_from_program"));

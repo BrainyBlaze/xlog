@@ -32,7 +32,7 @@ on device. This is not a closure claim for `G090_GPU`, `G090_CERT`, or
 
 | Command | Result |
 |---|---|
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 2 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 4 passed, 0 failed |
 
 ## Non-Closure Notes
 
@@ -42,6 +42,6 @@ on device. This is not a closure claim for `G090_GPU`, `G090_CERT`, or
   fixture.
 - It does not prove the full G91, FAEEL, GPT, and splitting semantic parity
   matrix.
-- It does not close GPU-native MaxSAT/portfolio or accepted probabilistic
-  runtime integration.
+- It does not close GPU-native MaxSAT/portfolio, full solver lifecycle traces,
+  or broader accepted probabilistic query/evaluation integration.
 - No closure-board edit, merge, push, or tag is implied.

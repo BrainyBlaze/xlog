@@ -9,6 +9,7 @@ use std::sync::Arc;
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::CudaKernelProvider;
+use xlog_runtime::{read_device_row_count, EpistemicGpuExecutionResult};
 
 use crate::{GpuCdclConfig, GpuCdclSolver, GpuCdclWorkspace, GpuCnf};
 
@@ -53,6 +54,8 @@ pub fn production_capabilities() -> GpuSolverProductionCapabilities {
 /// Trace counters proving the production adapter stayed on the GPU CDCL path.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GpuSolverProductionTrace {
+    /// Number of accepted GPU epistemic candidate evidence records consumed.
+    pub accepted_gpu_candidate_evidence_consumed: u64,
     /// Number of SAT expectations dispatched through `GpuCdclSolver`.
     pub gpu_cdcl_sat_solves: u64,
     /// Number of UNSAT expectations dispatched through `GpuCdclSolver`.
@@ -118,6 +121,23 @@ impl GpuSolverProductionAdapter {
         Ok(assignment)
     }
 
+    /// Solve SAT through GPU CDCL after an accepted GPU epistemic execution result.
+    pub fn solve_expect_sat_with_gpu_execution_result(
+        &mut self,
+        provider: &CudaKernelProvider,
+        result: &EpistemicGpuExecutionResult,
+        cnf: &GpuCnf,
+    ) -> Result<TrackedCudaSlice<i8>> {
+        require_accepted_gpu_solver_evidence(provider, result)?;
+        let assignment = self.solve_expect_sat(cnf)?;
+        self.trace.accepted_gpu_candidate_evidence_consumed = self
+            .trace
+            .accepted_gpu_candidate_evidence_consumed
+            .saturating_add(1);
+        self.trace.require_zero_cpu_search()?;
+        Ok(assignment)
+    }
+
     /// Solve and enforce UNSAT entirely on GPU.
     pub fn solve_expect_unsat(&mut self, cnf: &GpuCnf) -> Result<()> {
         self.solver.solve_expect_unsat(cnf)?;
@@ -138,4 +158,86 @@ impl GpuSolverProductionAdapter {
             self.trace.gpu_cdcl_workspace_unsat_solves.saturating_add(1);
         self.trace.require_zero_cpu_search()
     }
+}
+
+fn require_accepted_gpu_solver_evidence(
+    provider: &CudaKernelProvider,
+    result: &EpistemicGpuExecutionResult,
+) -> Result<()> {
+    if !result.prepared.preflight.cpu_fallbacks.is_zero() {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "accepted GPU solver candidate evidence".to_string(),
+            context: "solver evidence requires zero epistemic CPU fallback counters".to_string(),
+        });
+    }
+    result
+        .model_membership
+        .require_stable_model_tuple_source()?;
+    require_gpu_kernel_trace(
+        "model membership",
+        result.model_membership.kernel_launches,
+        result.model_membership.host_write_ops,
+    )?;
+    require_gpu_kernel_trace(
+        "world-view validation",
+        result.world_view_validation.kernel_launches,
+        result.world_view_validation.host_write_ops,
+    )?;
+    require_gpu_kernel_trace(
+        "accepted-candidate materialization",
+        result.materialization.kernel_launches,
+        result.materialization.host_write_ops,
+    )?;
+    require_gpu_kernel_trace(
+        "final-result materialization",
+        result.final_result_materialization.kernel_launches,
+        result.final_result_materialization.host_write_ops,
+    )?;
+    require_gpu_kernel_trace(
+        "final tuple materialization",
+        result.final_tuple_materialization.kernel_launches,
+        result.final_tuple_materialization.host_write_ops,
+    )?;
+    if result.transfer_budget.tracked_dtoh_calls != 0
+        || result.transfer_budget.tracked_htod_calls != 0
+        || result.transfer_budget.per_candidate_host_round_trips != 0
+    {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "accepted GPU solver candidate evidence".to_string(),
+            context: format!(
+                "solver evidence requires zero hot-path transfers, got dtoh_calls={}, \
+                 htod_calls={}, per_candidate_round_trips={}",
+                result.transfer_budget.tracked_dtoh_calls,
+                result.transfer_budget.tracked_htod_calls,
+                result.transfer_budget.per_candidate_host_round_trips
+            ),
+        });
+    }
+
+    let accepted_rows = read_device_row_count(provider, &result.final_output)?;
+    if accepted_rows == 0 {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "accepted GPU solver candidate evidence".to_string(),
+            context: "solver evidence requires non-empty accepted GPU final output".to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+fn require_gpu_kernel_trace(
+    phase: &'static str,
+    kernel_launches: u32,
+    host_write_ops: u32,
+) -> Result<()> {
+    if kernel_launches == 0 || host_write_ops != 0 {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "accepted GPU solver candidate evidence".to_string(),
+            context: format!(
+                "solver evidence requires GPU {phase} trace with nonzero launches and \
+                 zero host writes, got launches={kernel_launches}, host_writes={host_write_ops}"
+            ),
+        });
+    }
+    Ok(())
 }

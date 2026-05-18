@@ -2399,6 +2399,7 @@ dependencies = [
  "xlog-logic",
  "xlog-prob",
  "xlog-runtime",
+ "xlog-solve",
  "xlog-stats",
 ]
 
@@ -2466,6 +2467,7 @@ dependencies = [
  "cudarc",
  "xlog-core",
  "xlog-cuda",
+ "xlog-runtime",
 ]
 
 [[package]]
