@@ -174,7 +174,12 @@ launches `epistemic_populate_model_membership_u8` to stage candidate-scoped
 model-membership bytes from candidate assumptions, world-view activity, and
 the reduced output's device row-count scalar, recording
 `EpistemicGpuModelMembershipTrace` with one output row-count device read, one
-kernel launch, zero host writes, and CUDA-event elapsed timing.
+kernel launch, zero host writes, CUDA-event elapsed timing, and
+`EpistemicGpuModelMembershipSource::ReducedOutputRowCountOnly`. That source is
+an explicit non-semantic staging marker:
+`EpistemicGpuModelMembershipTrace::require_stable_model_tuple_source` fails
+closed until membership bytes are populated from actual reduced stable-model
+tuple buffers.
 `Executor::validate_epistemic_gpu_world_views` launches
 `epistemic_validate_world_views_u8` to check staged model-membership bytes
 against active candidate world views and update rejection codes on device,
@@ -233,9 +238,10 @@ reduced-plan dispatch. Candidate-assumption generation, propagation staging,
 candidate-buffer validation, model-membership staging, bounded world-view
 validation staging, accepted-candidate materialization staging, and final-result
 flag plus final tuple materialization staging now have CUDA kernels, and the
-bounded hot path records zero tracked host transfers. The runtime does not yet
-map actual reduced stable-model tuples into model-membership bytes or produce
-full accepted-execution timing evidence.
+bounded hot path records zero tracked host transfers. The runtime now also
+rejects row-count-only model-membership staging before returning accepted
+epistemic execution. It does not yet map actual reduced stable-model tuples into
+model-membership bytes or produce full accepted-execution timing evidence.
 
 ## G91 Compatibility Fixture Semantics
 

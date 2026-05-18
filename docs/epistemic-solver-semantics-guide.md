@@ -52,7 +52,10 @@ writes, and CUDA-event elapsed timing for candidate-buffer validation.
 `epistemic_populate_model_membership_u8` CUDA kernel and records
 `EpistemicGpuModelMembershipTrace` with one kernel launch, zero host writes,
 one reduced-output device row-count read, and CUDA-event elapsed timing for
-candidate-scoped model-membership staging.
+candidate-scoped model-membership staging. The trace source remains
+`ReducedOutputRowCountOnly`, and
+`require_stable_model_tuple_source()` rejects that staging marker before the
+runtime may return accepted epistemic execution.
 `Executor::validate_epistemic_gpu_world_views` launches the
 `epistemic_validate_world_views_u8` CUDA kernel and records
 `EpistemicGpuWorldViewValidationTrace` with one kernel launch, zero host
@@ -82,8 +85,9 @@ accepted-candidate, final-result flag, and final tuple materialization-staging
 kernel launches. It also snapshots provider host-transfer counters around the hot path
 and records `EpistemicGpuTransferBudgetTrace`, which rejects tracked data-plane
 H2D/D2H deltas instead of resetting shared telemetry. That is still incomplete
-for the epistemic hot path; actual reduced stable-model tuple membership
-population and solver coupling do not dispatch yet.
+for the epistemic hot path; row-count-only model-membership staging now fails
+closed, and actual reduced stable-model tuple membership population plus solver
+coupling do not dispatch yet.
 
 ## GPU And WCOJ Scope
 

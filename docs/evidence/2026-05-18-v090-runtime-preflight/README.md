@@ -36,7 +36,8 @@ incomplete for the epistemic hot path and does not close `G090_GPU`.
 | Candidate validation kernel | `epistemic_validate_candidate_bits_u8` checks staged candidate bits and world-view activity in GPU buffers. |
 | Candidate validation trace | `EpistemicGpuCandidateValidationTrace` records validated candidates, checked bytes, rejection-reason slots, `kernel_launches = 1`, CUDA-event elapsed timing, and `host_write_ops = 0`. |
 | Model-membership staging kernel | `epistemic_populate_model_membership_u8` writes candidate-scoped model-membership bytes from candidate assumptions, world-view activity, rejection codes, and the reduced output device row-count scalar. |
-| Model-membership staging trace | `EpistemicGpuModelMembershipTrace` records checked candidates, reductions, models per reduction, model-membership bytes, one output row-count device read, rejection slots, `kernel_launches = 1`, CUDA-event elapsed timing, and `host_write_ops = 0`. |
+| Model-membership staging trace | `EpistemicGpuModelMembershipTrace` records checked candidates, reductions, models per reduction, model-membership bytes, one output row-count device read, rejection slots, `membership_source = ReducedOutputRowCountOnly`, `kernel_launches = 1`, CUDA-event elapsed timing, and `host_write_ops = 0`. |
+| Stable-model membership gate | `EpistemicGpuModelMembershipTrace::require_stable_model_tuple_source` rejects row-count-only staging before the runtime returns accepted epistemic execution. |
 | World-view validation staging kernel | `epistemic_validate_world_views_u8` checks staged model-membership bytes against active world-view slots and updates rejection codes. |
 | World-view validation staging trace | `EpistemicGpuWorldViewValidationTrace` records checked candidates, reductions, models per reduction, membership bytes, world-view slots, rejection slots, `kernel_launches = 1`, CUDA-event elapsed timing, and `host_write_ops = 0`. |
 | Materialization staging kernel | `epistemic_materialize_accepted_candidates_u8` writes accepted-candidate flags from rejection codes into GPU world-view slots. |
@@ -57,7 +58,7 @@ incomplete for the epistemic hot path and does not close `G090_GPU`.
 |---|---|
 | `cargo fmt --check` | PASS |
 | `git diff --check` | PASS |
-| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 36 passed, 0 failed |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 38 passed, 0 failed |
 | `cargo test -p xlog-cuda --test build_script_tests -- --nocapture` | PASS, 4 passed, 0 failed |
 | `cargo test -p xlog-runtime --lib` | PASS, 125 passed, 0 failed |
 | `cargo check -p xlog-cuda -p xlog-runtime -p xlog-logic -p xlog-ir` | PASS |
@@ -67,7 +68,7 @@ incomplete for the epistemic hot path and does not close `G090_GPU`.
 
 | Metric | Target | Status | Evidence |
 |---|---|---|---|
-| M090_GPU.1 production lowering | accepted epistemic fixture runs through production runtime dispatch | PARTIAL | Runtime API launches candidate generation, propagation, and candidate validation before reduced production-plan execution with counter tracing, then launches row-count-gated model-membership, world-view validation, accepted-candidate materialization, final-result flag staging, and final tuple materialization; actual reduced stable-model tuple membership population is still missing. |
+| M090_GPU.1 production lowering | accepted epistemic fixture runs through production runtime dispatch | PARTIAL | Runtime API launches candidate generation, propagation, and candidate validation before reduced production-plan execution with counter tracing, then launches row-count-gated model-membership, world-view validation, accepted-candidate materialization, final-result flag staging, and final tuple materialization; row-count-only model membership now fails closed before return, and actual reduced stable-model tuple membership population is still missing. |
 | M090_GPU.2 WCOJ eligibility | at least one epistemic reduction uses the WCOJ planner/path where eligible | PARTIAL | Preflight records WCOJ/K-clique/helper metadata, and the runtime WCOJ gate rejects preflight-only evidence before model-membership/world-view staging; no certified successful dispatch evidence yet. |
 | M090_GPU.3 GPU buffers | candidate, world-view, and rejection state have GPU-resident representations | PARTIAL | Prepare API combines preflight with workspace allocation and device-side reset; candidate, propagation, candidate-validation, row-count-gated model-membership, bounded world-view-validation, accepted-candidate materialization, and final-result flag buffers can be populated or checked by CUDA kernels; actual stable-model tuple membership population is still missing. |
 | M090_GPU.4 kernel coverage | GPU kernels cover candidate generation, propagation, validation, and materialization hot paths | PARTIAL | Candidate generation has `epistemic_generate_candidate_assumptions_u8`; propagation staging has `epistemic_propagate_candidates_u8`; candidate-buffer validation has `epistemic_validate_candidate_bits_u8`; model-membership staging has `epistemic_populate_model_membership_u8`; bounded world-view validation has `epistemic_validate_world_views_u8`; materialization staging has `epistemic_materialize_accepted_candidates_u8`; final-result flag staging has `epistemic_materialize_final_result_flags_u8`; final tuple materialization has `epistemic_materialize_final_tuple_column_u8`; semantic tuple materialization from actual accepted stable-model membership is still missing. |

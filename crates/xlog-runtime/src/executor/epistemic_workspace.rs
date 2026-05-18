@@ -255,12 +255,23 @@ pub struct EpistemicGpuModelMembershipTrace {
     pub output_row_count_device_reads: u32,
     /// Rejection-reason slots checked by the kernel.
     pub rejection_reason_slots_checked: usize,
+    /// Source used to populate model-membership bytes.
+    pub membership_source: EpistemicGpuModelMembershipSource,
     /// Model-membership staging kernel launches.
     pub kernel_launches: u32,
     /// Host writes used by model-membership staging. Accepted execution requires zero.
     pub host_write_ops: u32,
     /// CUDA-event timing for the launched kernel.
     pub kernel_timing: EpistemicGpuKernelTimingTrace,
+}
+
+/// Source of GPU model-membership bytes for epistemic world-view validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EpistemicGpuModelMembershipSource {
+    /// Current bounded staging only proves the reduced output has rows.
+    ReducedOutputRowCountOnly,
+    /// Model-membership bytes were populated from reduced stable-model tuple buffers.
+    StableModelTupleBuffer,
 }
 
 /// Trace proving staged model memberships were validated against world views on GPU.
@@ -584,6 +595,7 @@ impl EpistemicGpuModelMembershipTrace {
             model_membership_bytes_written,
             output_row_count_device_reads: 1,
             rejection_reason_slots_checked: candidate_count,
+            membership_source: EpistemicGpuModelMembershipSource::ReducedOutputRowCountOnly,
             kernel_launches: 1,
             host_write_ops: 0,
             kernel_timing: EpistemicGpuKernelTimingTrace::unrecorded(),
@@ -597,6 +609,23 @@ impl EpistemicGpuModelMembershipTrace {
     ) -> Self {
         self.kernel_timing = kernel_timing;
         self
+    }
+
+    /// Require semantic stable-model tuple membership before accepting execution.
+    pub fn require_stable_model_tuple_source(&self) -> Result<()> {
+        if self.membership_source != EpistemicGpuModelMembershipSource::StableModelTupleBuffer {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU stable-model membership certification".to_string(),
+                context: format!(
+                    "model-membership source {:?} is bounded staging only; actual reduced \
+                     stable-model tuple membership is required before returning accepted \
+                     epistemic execution",
+                    self.membership_source
+                ),
+            });
+        }
+
+        Ok(())
     }
 }
 
@@ -1933,6 +1962,7 @@ impl Executor {
             transfer_budget_start,
             transfer_budget_end,
         )?;
+        model_membership.require_stable_model_tuple_source()?;
 
         Ok(EpistemicGpuExecutionResult {
             prepared,

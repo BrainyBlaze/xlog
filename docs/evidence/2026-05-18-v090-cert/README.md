@@ -32,7 +32,7 @@ the final release decision.
 | `cargo fmt --check` | PASS |
 | `cargo test -p xlog-logic --test test_epistemic_gpu_plan` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_executable_plan` | PASS, 3 passed, 0 failed |
-| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 36 passed, 0 failed |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 38 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_eir --test test_epistemic_g91 --test test_epistemic_faeel --test test_epistemic_gpt --test test_epistemic_split --test test_epistemic_world_view --test test_epistemic_examples` | PASS, 22 passed, 0 failed |
 | `cargo test -p xlog-solve --test solver_service_semantics` | PASS, 5 passed, 0 failed |
 | `cargo test -p xlog-prob --test epistemic_prob` | PASS, 5 passed, 0 failed |
@@ -56,7 +56,7 @@ the final release decision.
 | M090_CERT.5 formatting | `cargo fmt --check` pass | PASS | Post-correction formatting gate passed. |
 | M090_CERT.6 workspace health | agreed cargo test subset pass | PASS for oracle | Runtime, logic, solve, and prob fixture/lib suites plus cross-crate checks passed. |
 | M090_CERT.7 semantic trace fixtures | GPT traces include generated, accepted, and rejected candidate counts | PARTIAL | CPU traces include generated/guess/reduced-model/accepted-world-view/rejection reason fields; candidate-generation, propagation, candidate-validation, row-count-gated model-membership, world-view-validation, accepted-candidate materialization, final-result flag, and final tuple traces include GPU launch counts with CUDA-event elapsed timing, but full reduced stable-model tuple membership trace counters are missing. |
-| M090_CERT.8 GPU-native evidence | GPU launch counts, kernel timings, and zero CPU fallback counters | BLOCKED | GPU-plan, workspace allocation/reset, bounded candidate-generation, propagation, candidate-validation, row-count-gated model-membership, world-view-validation, accepted-candidate materialization, final-result flag, final tuple materialization kernels, hot-path transfer-budget trace, preflight, counter-guard, and reduced-plan trace contracts exist, but actual stable-model tuple membership population and complete accepted-execution timing are missing. |
+| M090_CERT.8 GPU-native evidence | GPU launch counts, kernel timings, and zero CPU fallback counters | BLOCKED | GPU-plan, workspace allocation/reset, bounded candidate-generation, propagation, candidate-validation, row-count-gated model-membership with fail-closed tuple-source certification, world-view-validation, accepted-candidate materialization, final-result flag, final tuple materialization kernels, hot-path transfer-budget trace, preflight, counter-guard, and reduced-plan trace contracts exist, but actual stable-model tuple membership population and complete accepted-execution timing are missing. |
 | M090_CERT.9 WCOJ evidence | at least one WCOJ-eligible epistemic reduction proves WCOJ planner/runtime dispatch | PARTIAL | Executable-plan and runtime-preflight fixtures prove WCOJ promotion plus 38-B K-clique planner/layout/helper-split metadata, and the runtime gate now fails closed when a WCOJ-required reduction lacks counter deltas; certified successful dispatch and launch evidence are still missing. |
 
 ## Required GPU-Native Evidence Before Closure

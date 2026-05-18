@@ -42,7 +42,7 @@ Predecessor evidence:
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace candidate_validation` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace validation` | PASS, 7 passed, 0 failed |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace materialization` | PASS, 5 passed, 0 failed |
-| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 36 passed, 0 failed |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 38 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_gpt` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_faeel` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_g91` | PASS, 3 passed, 0 failed |
@@ -64,6 +64,6 @@ Predecessor evidence:
 
 ## Coordination Notes
 
-- Candidate generation, propagation staging, candidate-buffer validation, row-count-gated model-membership staging, bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, and final tuple materialization are now available as bounded GPU workspace/output kernels, but arbitrary EIR world enumeration plus actual reduced-runtime stable-model membership/test phases remain required production scope.
+- Candidate generation, propagation staging, candidate-buffer validation, row-count-gated model-membership staging, bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, and final tuple materialization are now available as bounded GPU workspace/output kernels. Row-count-only membership now fails closed before accepted runtime return; arbitrary EIR world enumeration plus actual reduced-runtime stable-model membership/test phases remain required production scope.
 - No pyxlog public API signatures were changed.
 - No push, tag, release-board update, or merge was performed.

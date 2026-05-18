@@ -12,8 +12,9 @@ use xlog_runtime::{
     EpistemicGpuCandidateGenerationTrace, EpistemicGpuCandidateValidationTrace,
     EpistemicGpuFinalResultMaterializationTrace, EpistemicGpuFinalTupleMaterializationTrace,
     EpistemicGpuKernelTimingTrace, EpistemicGpuMaterializationTrace,
-    EpistemicGpuModelMembershipTrace, EpistemicGpuPropagationTrace, EpistemicGpuRuntimeCounters,
-    EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace, EpistemicGpuRuntimeWcojCertification,
+    EpistemicGpuModelMembershipSource, EpistemicGpuModelMembershipTrace,
+    EpistemicGpuPropagationTrace, EpistemicGpuRuntimeCounters, EpistemicGpuRuntimePreflight,
+    EpistemicGpuRuntimeTrace, EpistemicGpuRuntimeWcojCertification,
     EpistemicGpuTransferBudgetTrace, EpistemicGpuWorkspaceCapacities, EpistemicGpuWorkspaceLayout,
     EpistemicGpuWorkspaceResetTrace, EpistemicGpuWorldViewValidationTrace,
 };
@@ -472,6 +473,31 @@ fn model_membership_trace_records_device_kernel_without_host_writes() {
 }
 
 #[test]
+fn model_membership_trace_fails_closed_until_stable_model_tuple_source_exists() {
+    let trace = EpistemicGpuModelMembershipTrace::for_counts(3, 8, 2, 4).unwrap();
+
+    assert_eq!(
+        trace.membership_source,
+        EpistemicGpuModelMembershipSource::ReducedOutputRowCountOnly
+    );
+    let err = trace
+        .require_stable_model_tuple_source()
+        .expect_err("row-count-gated staging is not semantic model membership");
+
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
+            assert_eq!(
+                construct,
+                "epistemic GPU stable-model membership certification"
+            );
+            assert!(context.contains("ReducedOutputRowCountOnly"));
+            assert!(context.contains("actual reduced stable-model tuple membership"));
+        }
+        other => panic!("expected model-membership certification error, got {other:?}"),
+    }
+}
+
+#[test]
 fn model_membership_runtime_path_launches_epistemic_kernel_not_host_writes() {
     let source = include_str!("../src/executor/epistemic_workspace.rs");
     let cuda = include_str!("../../xlog-cuda/kernels/epistemic.cu");
@@ -850,6 +876,30 @@ fn execution_result_records_materialization_kernels_after_world_view_validation(
     assert!(world_validation_pos < materialization_pos);
     assert!(materialization_pos < final_materialization_pos);
     assert!(final_materialization_pos < final_tuple_pos);
+}
+
+#[test]
+fn execution_path_requires_actual_stable_model_membership_before_return() {
+    let source = include_str!("../src/executor/epistemic_workspace.rs");
+
+    assert!(source.contains("model_membership.require_stable_model_tuple_source()?"));
+
+    let model_membership_pos = source
+        .find("let model_membership = self.populate_epistemic_gpu_model_membership")
+        .expect("model-membership launch in execution path");
+    let final_tuple_pos = source
+        .find("let (final_output, final_tuple_materialization)")
+        .expect("final tuple materialization launch in execution path");
+    let certification_pos = source
+        .find("model_membership.require_stable_model_tuple_source()?")
+        .expect("stable-model membership certification gate");
+    let return_pos = source
+        .find("Ok(EpistemicGpuExecutionResult")
+        .expect("execution result return");
+
+    assert!(model_membership_pos < certification_pos);
+    assert!(final_tuple_pos < certification_pos);
+    assert!(certification_pos < return_pos);
 }
 
 fn epistemic_literal(predicate: &str, op: EirEpistemicOp) -> EirEpistemicLiteral {
