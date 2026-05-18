@@ -136,9 +136,16 @@ number of epistemic literals, reductions, candidate capacity, world capacity,
 and reduced-model capacity. Zero capacities are rejected with typed resource
 errors so the accepted path cannot silently use empty host-side structures.
 
+`EpistemicGpuRuntimePreflight::for_executable_plan` consumes an
+`EpistemicExecutablePlan` before launch. It computes the workspace layout,
+rejects nonzero forbidden CPU fallback counters, and records the reduced
+runtime rule count plus WCOJ route surfaces, including K-clique WCOJ plans,
+planned-hash routes, sorted-layout requirements, and helper-splitting specs.
+
 This workspace is still pre-kernel plumbing. It proves the buffer categories are
-allocatable on the runtime side; it does not yet populate them, launch
-Generate-Propagate-Test kernels, or produce certification launch counters.
+allocatable and inspectable on the runtime side; it does not yet populate them,
+launch Generate-Propagate-Test kernels, or produce certification launch
+counters.
 
 ## G91 Compatibility Fixture Semantics
 

@@ -1,8 +1,15 @@
 use xlog_ir::{
-    EirAtom, EirEpistemicLiteral, EirEpistemicMode, EirEpistemicOp, EpistemicGpuPlan,
-    EpistemicReductionPlan, EpistemicWcojReductionStatus,
+    rir::{
+        HelperSplitSpec, KCliqueVariableOrder, MultiwayPlan, ProjectExpr, RirNode,
+        SortedLayoutSpec, StreamGroupId,
+    },
+    CompiledRule, EirAtom, EirEpistemicLiteral, EirEpistemicMode, EirEpistemicOp,
+    EpistemicExecutablePlan, EpistemicGpuPlan, EpistemicReductionPlan,
+    EpistemicWcojReductionStatus, ExecutionPlan, RirMeta, Scc,
 };
-use xlog_runtime::{EpistemicGpuWorkspaceCapacities, EpistemicGpuWorkspaceLayout};
+use xlog_runtime::{
+    EpistemicGpuRuntimePreflight, EpistemicGpuWorkspaceCapacities, EpistemicGpuWorkspaceLayout,
+};
 
 #[test]
 fn workspace_layout_sizes_all_required_epistemic_gpu_buffers() {
@@ -72,6 +79,54 @@ fn workspace_layout_rejects_zero_candidate_capacity() {
     }
 }
 
+#[test]
+fn runtime_preflight_records_workspace_and_wcoj_route_surfaces() {
+    let executable = executable_with_kclique_wcoj_plan();
+
+    let preflight = EpistemicGpuRuntimePreflight::for_executable_plan(
+        &executable,
+        EpistemicGpuWorkspaceCapacities {
+            max_candidates: 8,
+            max_worlds: 4,
+            max_models_per_reduction: 6,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(preflight.workspace_layout.total_bytes(), 78);
+    assert_eq!(preflight.reduced_runtime_rule_count, 1);
+    assert_eq!(preflight.multiway_reduction_count, 1);
+    assert_eq!(preflight.kclique_wcoj_plan_count, 1);
+    assert_eq!(preflight.planned_hash_route_count, 0);
+    assert_eq!(preflight.sorted_layout_requirement_count, 2);
+    assert_eq!(preflight.helper_split_spec_count, 1);
+    assert!(preflight.cpu_fallbacks.is_zero());
+}
+
+#[test]
+fn runtime_preflight_rejects_nonzero_cpu_fallback_counters() {
+    let mut executable = executable_with_kclique_wcoj_plan();
+    executable.gpu_plan.cpu_fallbacks.candidate_enumeration = 1;
+
+    let err = EpistemicGpuRuntimePreflight::for_executable_plan(
+        &executable,
+        EpistemicGpuWorkspaceCapacities {
+            max_candidates: 8,
+            max_worlds: 4,
+            max_models_per_reduction: 6,
+        },
+    )
+    .unwrap_err();
+
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
+            assert_eq!(construct, "epistemic GPU runtime preflight");
+            assert!(context.contains("nonzero CPU fallback counters"));
+        }
+        other => panic!("expected typed fallback counter error, got {other:?}"),
+    }
+}
+
 fn epistemic_literal(predicate: &str, op: EirEpistemicOp) -> EirEpistemicLiteral {
     EirEpistemicLiteral {
         op,
@@ -81,4 +136,71 @@ fn epistemic_literal(predicate: &str, op: EirEpistemicOp) -> EirEpistemicLiteral
             arity: 0,
         },
     }
+}
+
+fn executable_with_kclique_wcoj_plan() -> EpistemicExecutablePlan {
+    let gpu_plan = EpistemicGpuPlan::new(
+        EirEpistemicMode::Faeel,
+        vec![epistemic_literal("gate", EirEpistemicOp::Know)],
+        vec![EpistemicReductionPlan {
+            rule_index: 0,
+            relational_body_atoms: 10,
+            wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
+        }],
+    );
+
+    EpistemicExecutablePlan {
+        gpu_plan,
+        reduced_runtime_plan: runtime_plan_with_kclique_wcoj(),
+    }
+}
+
+fn runtime_plan_with_kclique_wcoj() -> ExecutionPlan {
+    let mut plan = ExecutionPlan::new(vec![Scc {
+        id: 0,
+        predicates: vec!["clique5".to_string()],
+        is_recursive: false,
+    }]);
+    plan.rules_by_scc = vec![vec![CompiledRule {
+        head: "clique5".to_string(),
+        body: RirNode::MultiWayJoin {
+            inputs: (1..=10)
+                .map(|rel| RirNode::Scan {
+                    rel: xlog_core::RelId(rel),
+                })
+                .collect(),
+            slot_vars: vec![vec![Some(0), Some(1)]; 10],
+            output_columns: vec![ProjectExpr::Column(0)],
+            fallback: Box::new(RirNode::Unit),
+            plan: Some(MultiwayPlan::WcojWithPlan(kclique_order())),
+            var_order: Some(xlog_ir::rir::VariableOrder::kclique(kclique_order())),
+        },
+        meta: RirMeta::default(),
+    }]];
+    plan
+}
+
+fn kclique_order() -> KCliqueVariableOrder {
+    let mut variable_positions = [u8::MAX; xlog_ir::rir::K_CLIQUE_MAX_K];
+    variable_positions[..5].copy_from_slice(&[0, 1, 2, 3, 4]);
+
+    let mut edge_permutation = [u8::MAX; xlog_ir::rir::K_CLIQUE_MAX_EDGES];
+    edge_permutation[..10].copy_from_slice(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+
+    KCliqueVariableOrder::new(
+        5,
+        variable_positions,
+        edge_permutation,
+        Vec::new(),
+        SortedLayoutSpec {
+            edge_slots: vec![0, 1],
+            key_columns: vec![vec![0, 1], vec![1, 0]],
+        },
+        vec![HelperSplitSpec {
+            helper_id: 0,
+            variable: 3,
+            edge_slots: vec![2, 5],
+        }],
+        StreamGroupId(0),
+    )
 }

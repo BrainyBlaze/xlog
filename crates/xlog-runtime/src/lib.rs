@@ -11,7 +11,8 @@ pub mod relation;
 mod statistics;
 
 pub use executor::{
-    EpistemicGpuWorkspace, EpistemicGpuWorkspaceCapacities, EpistemicGpuWorkspaceLayout, Executor,
+    EpistemicGpuPreparedExecution, EpistemicGpuRuntimePreflight, EpistemicGpuWorkspace,
+    EpistemicGpuWorkspaceCapacities, EpistemicGpuWorkspaceLayout, Executor,
 };
 pub use ilp_registry::{read_device_row_count, IlpRegistry, IlpTagEntry, IlpTaggedResult};
 pub use profiler::{ExecutionStats, MeasureGuard, OpStats, Profiler, StratumStats};
