@@ -13,7 +13,7 @@ use crate::CudaBuffer;
 impl super::CudaKernelProvider {
     /// Perform groupby aggregation
     ///
-    /// Assumes input is sorted by key columns (sorting is complex, deferred).
+    /// Assumes input is already sorted by key columns.
     ///
     /// # Arguments
     /// * `input` - The input buffer
@@ -699,10 +699,10 @@ impl super::CudaKernelProvider {
     //
     // Strict-recorder, launch_stream-routed sibling of `groupby_multi_agg`.
     // Scope-narrow per the slice directive:
-    //   * U32 / Symbol key columns only (defers to sort_recorded which has
+    //   * U32 / Symbol key columns only (delegates to sort_recorded which has
     //     the same constraint).
     //   * Aggs: Count, Sum, Min, Max only. LogSumExp is a multi-kernel
-    //     chain (max → sumexp → final) and is deferred.
+    //     chain (max → sumexp → final) and is outside this API surface.
     //   * No legacy default-routed code is touched. The legacy
     //     `groupby_multi_agg` and `groupby_agg` keep their semantics
     //     bit-for-bit; runtime/planner wiring is NOT included.
@@ -920,7 +920,7 @@ impl super::CudaKernelProvider {
     ///   constraint).
     /// * Aggs: Count, Sum, Min, Max. LogSumExp is rejected with
     ///   a structured error — its multi-kernel chain is
-    ///   deferred to a future slice.
+    ///   outside this recorded provider surface.
     /// * Manager must be runtime-backed.
     pub fn groupby_multi_agg_recorded(
         &self,

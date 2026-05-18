@@ -494,7 +494,7 @@ fn test_diff_gpu_complete_overlap() {
     };
 
     // a = [1, 2, 3], b = [1, 2, 3]
-    // Diff: a - b = [] (all removed)
+    // Diff: a - b = [] (complete overlap)
     let a: Vec<u32> = vec![1, 2, 3];
     let b: Vec<u32> = vec![1, 2, 3];
     let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
@@ -783,7 +783,7 @@ fn test_diff_u64_complete_overlap() {
 
     let result = provider.diff_gpu(&a_buf, &b_buf).unwrap();
     let result_data = provider.download_column::<u64>(&result, 0).unwrap();
-    assert!(result_data.is_empty()); // All removed
+    assert!(result_data.is_empty()); // Complete overlap
 }
 
 #[test]

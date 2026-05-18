@@ -225,7 +225,7 @@ impl super::CudaKernelProvider {
     /// * `key_cols` - Column indices to use for duplicate detection
     ///
     /// # Returns
-    /// A buffer with duplicate rows removed
+    /// A buffer containing one row per duplicate-equivalence class
     ///
     /// # Errors
     /// Returns `XlogError::Kernel` if kernel execution fails
@@ -267,7 +267,7 @@ impl super::CudaKernelProvider {
     /// * `key_cols` - Column indices to use for duplicate detection
     ///
     /// # Returns
-    /// A buffer with duplicate rows removed
+    /// A buffer containing one row per duplicate-equivalence class
     pub fn dedup_sorted(&self, input: &CudaBuffer, key_cols: &[usize]) -> Result<CudaBuffer> {
         if input.is_empty() {
             return self.create_empty_buffer(input.schema().clone());
@@ -2973,11 +2973,9 @@ impl super::CudaKernelProvider {
     /// — the kernel can fail (allocation, launch, D2H), and
     /// `Err(_)` is preserved so callers can log or surface it
     /// at their abstraction level. There is no fail-closed
-    /// dispatch contract anymore (the iteration-1–5 fail-closed
-    /// `matches!(_, Ok(true))` pattern was removed by Step 4'
-    /// when the dispatch site was unwired). Future v0.6.6+
-    /// callers — if any — must decide their own Err-handling
-    /// policy.
+    /// dispatch contract anymore. Earlier fail-closed callers used
+    /// `matches!(_, Ok(true))`; after the dispatch site was unwired,
+    /// any later caller must decide its own Err-handling policy.
     pub fn is_sorted_ascending_u32(&self, buf: &CudaBuffer, key_col: usize) -> Result<bool> {
         // Empty / single-row fast path (per F-W43-4).
         let n = self.device_row_count(buf)?;
@@ -3074,13 +3072,10 @@ impl super::CudaKernelProvider {
     ///
     /// **Caller surface (per W4.3 plan iter-6 F-W43-14)**: this
     /// fn has NO executor-dispatch caller after iteration-6
-    /// unwiring (the iteration-1–5 dispatch site at
-    /// `execute_join` was removed when the Step 12 production
-    /// bench rejected D2 precedence and D7 #8). The fn is
-    /// preserved as graduated implementation work for any
-    /// future v0.6.6+ caller (e.g., a hypothetical sort-merge
-    /// dispatch path with kernel-perf improvements that recover
-    /// the spike's 1-col 2.5×–3.3× advantage on multi-col arity).
+    /// unwiring. Step 12 production evidence rejected D2 precedence
+    /// and D7 #8 for the iteration-1–5 dispatch site at
+    /// `execute_join`; this fn remains graduated operator work for
+    /// direct provider callers and certs.
     /// Current callers: operator-level certs in
     /// `crates/xlog-integration/tests/test_w43_sort_merge_dispatch.rs`
     /// (Cert A/E/F/G provider parity tests) and the Step 12
@@ -5944,8 +5939,8 @@ impl super::CudaKernelProvider {
     //
     // Strict-recorder, launch_stream-routed siblings of `sort` and
     // `dedup_full_row`. Scope-narrow per the slice directive:
-    //   * `sort_recorded` accepts only u32 / Symbol key columns; multi-type
-    //     recorded sort is deferred. Other key types return XlogError::Kernel
+    //   * `sort_recorded` accepts only u32 / Symbol key columns; other key
+    //     types return XlogError::Kernel
     //     before any kernel work is queued.
     //   * `dedup_full_row_recorded` requires every column to be u32 / Symbol
     //     (it composes sort_recorded internally). Mixed-type full-row dedup
@@ -6205,7 +6200,7 @@ impl super::CudaKernelProvider {
     ///   * `launch_stream` does not resolve.
     ///   * Empty `key_cols` or out-of-bounds index.
     ///   * Any key column type other than `U32` / `Symbol`
-    ///     (multi-type recorded sort is deferred).
+    ///     (multi-type recorded sort is outside this API surface).
     ///   * Preflight / kernel / commit failures.
     pub fn sort_recorded(
         &self,
@@ -6668,14 +6663,13 @@ impl super::CudaKernelProvider {
     //
     // Scope:
     //   * `JoinType::Inner` only. Semi/Anti/LeftOuter and the
-    //     indexed variant (`hash_join_v2_with_index`) are
-    //     deferred to follow-up sub-slices (#7B, #7C, #7D).
+    //     indexed variant (`hash_join_v2_with_index`) are outside
+    //     this recorded provider surface.
     //   * Pack-keys constraint of ≤4 columns inherits from
     //     `pack_keys_gpu_on_stream`.
     //   * Algorithm is unchanged: count-then-materialize
-    //     (two probe passes); the deferred GPU-resident
-    //     count-prefix-materialize prototype is NOT
-    //     reintroduced.
+    //     (two probe passes); the GPU-resident
+    //     count-prefix-materialize prototype is not reintroduced here.
 
     /// Stream-aware variant of `build_hash_table_v2`. Mirrors
     /// the legacy bucket-count → exclusive-scan → scatter chain
