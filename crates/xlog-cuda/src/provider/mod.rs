@@ -406,6 +406,12 @@ pub mod epistemic_kernels {
     /// Device-side tuple-source-backed model-membership kernel.
     pub const EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_FROM_TUPLE_SOURCE_U8: &str =
         "epistemic_populate_model_membership_from_tuple_source_u8";
+    /// Device-side arity-one tuple-key-backed model-membership kernel.
+    pub const EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_FROM_TUPLE_SOURCE_ARITY1_U8: &str =
+        "epistemic_populate_model_membership_from_tuple_source_arity1_u8";
+    /// Device-side arity-two tuple-key-backed model-membership kernel.
+    pub const EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_FROM_TUPLE_SOURCE_ARITY2_U8: &str =
+        "epistemic_populate_model_membership_from_tuple_source_arity2_u8";
     /// Device-side world-view validation kernel.
     pub const EPISTEMIC_VALIDATE_WORLD_VIEWS_U8: &str = "epistemic_validate_world_views_u8";
     /// Device-side accepted-candidate materialization staging kernel.

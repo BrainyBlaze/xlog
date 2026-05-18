@@ -535,6 +535,7 @@ fn model_membership_trace_accepts_stable_model_tuple_sources() {
     assert_eq!(trace.model_membership_bytes_written, 192);
     assert_eq!(trace.output_row_count_device_reads, 0);
     assert_eq!(trace.tuple_source_row_count_device_reads, 3);
+    assert_eq!(trace.tuple_source_key_column_device_reads, 0);
     assert_eq!(
         trace.membership_source,
         EpistemicGpuModelMembershipSource::StableModelTupleBuffer
@@ -544,6 +545,23 @@ fn model_membership_trace_accepts_stable_model_tuple_sources() {
     trace
         .require_stable_model_tuple_source()
         .expect("stable tuple-source traces should certify model membership");
+}
+
+#[test]
+fn model_membership_trace_records_nonzero_arity_tuple_key_column_reads() {
+    let trace = EpistemicGpuModelMembershipTrace::for_stable_model_tuple_sources_with_key_columns(
+        3, 8, 2, 4, 3, 4,
+    )
+    .unwrap();
+
+    assert_eq!(trace.output_row_count_device_reads, 0);
+    assert_eq!(trace.tuple_source_row_count_device_reads, 3);
+    assert_eq!(trace.tuple_source_key_column_device_reads, 4);
+    assert_eq!(trace.kernel_launches, 3);
+    assert_eq!(trace.host_write_ops, 0);
+    trace
+        .require_stable_model_tuple_source()
+        .expect("tuple-key traces should certify stable tuple source membership");
 }
 
 #[test]
@@ -570,6 +588,55 @@ fn model_membership_runtime_path_launches_tuple_source_kernel_not_host_writes() 
     assert!(!source.contains("copy_epistemic_model_membership_from_host"));
     assert!(!source.contains("dtoh_epistemic_model_membership_row_count"));
     assert!(!source.contains("cached_row_count().expect(\"epistemic model"));
+}
+
+#[test]
+fn model_membership_runtime_path_launches_arity_one_tuple_key_kernel_not_host_writes() {
+    let source = include_str!("../src/executor/epistemic_workspace.rs");
+    let cuda = include_str!("../../xlog-cuda/kernels/epistemic.cu");
+    let provider = include_str!("../../xlog-cuda/src/provider/mod.rs");
+    let manifest = include_str!("../../xlog-cuda/src/kernel_manifest_data.rs");
+
+    assert!(source.contains("TupleSourceLaunch::ArityOne"));
+    assert!(source.contains("binding.key_columns.as_slice()"));
+    assert!(source.contains("source_relation.column(key_col)"));
+    assert!(source.contains("column_type(key_col)"));
+    assert!(source.contains(".map(|ty| ty.size_bytes())"));
+    assert!(source.contains("tuple_source_key_column_device_reads"));
+    assert!(source.contains("EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_FROM_TUPLE_SOURCE_ARITY1_U8"));
+    assert!(provider.contains("EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_FROM_TUPLE_SOURCE_ARITY1_U8"));
+    assert!(cuda.contains("epistemic_populate_model_membership_from_tuple_source_arity1_u8"));
+    assert!(cuda.contains("tuple_key_col0"));
+    assert!(cuda.contains("tuple_key_col0_width"));
+    assert!(
+        manifest.contains("\"epistemic_populate_model_membership_from_tuple_source_arity1_u8\"")
+    );
+    assert!(!source.contains("current GPU tuple-source kernel only certifies zero-arity tuples"));
+    assert!(!source.contains("copy_epistemic_tuple_keys_from_host"));
+    assert!(!source.contains("dtoh_epistemic_tuple_key"));
+}
+
+#[test]
+fn model_membership_runtime_path_launches_arity_two_tuple_key_kernel_not_host_writes() {
+    let source = include_str!("../src/executor/epistemic_workspace.rs");
+    let cuda = include_str!("../../xlog-cuda/kernels/epistemic.cu");
+    let provider = include_str!("../../xlog-cuda/src/provider/mod.rs");
+    let manifest = include_str!("../../xlog-cuda/src/kernel_manifest_data.rs");
+
+    assert!(source.contains("TupleSourceLaunch::ArityTwo"));
+    assert!(source.contains("&[key_col0, key_col1]"));
+    assert!(source.contains("source_relation.column(key_col0)"));
+    assert!(source.contains("source_relation.column(key_col1)"));
+    assert!(source.contains("EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_FROM_TUPLE_SOURCE_ARITY2_U8"));
+    assert!(provider.contains("EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_FROM_TUPLE_SOURCE_ARITY2_U8"));
+    assert!(cuda.contains("epistemic_populate_model_membership_from_tuple_source_arity2_u8"));
+    assert!(cuda.contains("tuple_key_col1"));
+    assert!(cuda.contains("tuple_key_col1_width"));
+    assert!(
+        manifest.contains("\"epistemic_populate_model_membership_from_tuple_source_arity2_u8\"")
+    );
+    assert!(!source.contains("copy_epistemic_tuple_keys_from_host"));
+    assert!(!source.contains("dtoh_epistemic_tuple_key"));
 }
 
 #[test]

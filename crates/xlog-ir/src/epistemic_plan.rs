@@ -83,6 +83,8 @@ pub struct EpistemicTupleMembershipBinding {
     pub predicate: String,
     /// Predicate arity whose stable-model tuples must be checked.
     pub arity: usize,
+    /// Source relation columns that form the tuple key for this epistemic atom.
+    pub key_columns: Vec<usize>,
     /// Epistemic operator whose membership semantics are being checked.
     pub op: EirEpistemicOp,
     /// Whether the epistemic literal is explicitly negated.
@@ -123,6 +125,7 @@ impl EpistemicGpuPlan {
                 reduction_index: literal_index.min(reductions.len().saturating_sub(1)),
                 predicate: literal.atom.predicate.clone(),
                 arity: literal.atom.arity,
+                key_columns: (0..literal.atom.arity).collect(),
                 op: literal.op,
                 negated: literal.negated,
             })
@@ -219,6 +222,41 @@ impl EpistemicGpuPlan {
                         binding.literal_index
                     ),
                 });
+            }
+
+            if binding.key_columns.len() != binding.arity {
+                return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic GPU tuple membership binding".to_string(),
+                    context: format!(
+                        "binding for literal_index {} has {} key columns for arity {}",
+                        binding.literal_index,
+                        binding.key_columns.len(),
+                        binding.arity
+                    ),
+                });
+            }
+
+            let mut seen_key_columns = vec![false; binding.arity];
+            for &key_col in &binding.key_columns {
+                if key_col >= binding.arity {
+                    return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                        construct: "epistemic GPU tuple membership binding".to_string(),
+                        context: format!(
+                            "key column {} exceeds arity {} for literal_index {}",
+                            key_col, binding.arity, binding.literal_index
+                        ),
+                    });
+                }
+                if seen_key_columns[key_col] {
+                    return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                        construct: "epistemic GPU tuple membership binding".to_string(),
+                        context: format!(
+                            "duplicate key column {} for literal_index {}",
+                            key_col, binding.literal_index
+                        ),
+                    });
+                }
+                seen_key_columns[key_col] = true;
             }
         }
 

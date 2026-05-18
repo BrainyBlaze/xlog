@@ -1,10 +1,13 @@
 //! Epistemic GPU workspace allocation.
 
+use std::ffi::c_void;
+
 use cudarc::driver::LaunchConfig;
 use xlog_core::{Result, XlogError};
 use xlog_cuda::provider::{epistemic_kernels, HostTransferStats, EPISTEMIC_MODULE};
 use xlog_cuda::{
-    memory::TrackedCudaSlice, sys, CudaBuffer, CudaColumn, DeviceSlice, DriverError, LaunchAsync,
+    memory::TrackedCudaSlice, sys, AsKernelParam, CudaBuffer, CudaColumn, DeviceSlice, DriverError,
+    LaunchAsync,
 };
 use xlog_ir::rir::{MultiwayPlan, RirNode};
 use xlog_ir::{EpistemicCpuFallbackCounters, EpistemicExecutablePlan, EpistemicGpuPlan};
@@ -255,6 +258,8 @@ pub struct EpistemicGpuModelMembershipTrace {
     pub output_row_count_device_reads: u32,
     /// Device tuple-source row-count scalars read by the kernel.
     pub tuple_source_row_count_device_reads: u32,
+    /// Device tuple-key columns read by tuple-source membership kernels.
+    pub tuple_source_key_column_device_reads: u32,
     /// Rejection-reason slots checked by the kernel.
     pub rejection_reason_slots_checked: usize,
     /// Source used to populate model-membership bytes.
@@ -597,6 +602,7 @@ impl EpistemicGpuModelMembershipTrace {
             model_membership_bytes_written,
             output_row_count_device_reads: 1,
             tuple_source_row_count_device_reads: 0,
+            tuple_source_key_column_device_reads: 0,
             rejection_reason_slots_checked: candidate_count,
             membership_source: EpistemicGpuModelMembershipSource::ReducedOutputRowCountOnly,
             kernel_launches: 1,
@@ -612,6 +618,25 @@ impl EpistemicGpuModelMembershipTrace {
         reduction_count: usize,
         models_per_reduction: usize,
         tuple_source_count: usize,
+    ) -> Result<Self> {
+        Self::for_stable_model_tuple_sources_with_key_columns(
+            literal_count,
+            candidate_count,
+            reduction_count,
+            models_per_reduction,
+            tuple_source_count,
+            0,
+        )
+    }
+
+    /// Build a model-membership trace backed by tuple sources and key columns.
+    pub fn for_stable_model_tuple_sources_with_key_columns(
+        literal_count: usize,
+        candidate_count: usize,
+        reduction_count: usize,
+        models_per_reduction: usize,
+        tuple_source_count: usize,
+        tuple_source_key_column_count: usize,
     ) -> Result<Self> {
         require_positive(literal_count, "epistemic GPU model-membership literals")?;
         require_positive(candidate_count, "epistemic GPU model-membership candidates")?;
@@ -631,6 +656,13 @@ impl EpistemicGpuModelMembershipTrace {
                 budget_bytes: u32::MAX as u64,
             });
         }
+        if tuple_source_key_column_count > u32::MAX as usize {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU model-membership tuple key columns".to_string(),
+                estimated_bytes: tuple_source_key_column_count as u64,
+                budget_bytes: u32::MAX as u64,
+            });
+        }
         let model_membership_bytes_written = checked_product(
             checked_product(
                 checked_product(candidate_count, reduction_count)?,
@@ -647,6 +679,7 @@ impl EpistemicGpuModelMembershipTrace {
             model_membership_bytes_written,
             output_row_count_device_reads: 0,
             tuple_source_row_count_device_reads: tuple_source_count as u32,
+            tuple_source_key_column_device_reads: tuple_source_key_column_count as u32,
             rejection_reason_slots_checked: candidate_count,
             membership_source: EpistemicGpuModelMembershipSource::StableModelTupleBuffer,
             kernel_launches: tuple_source_count as u32,
@@ -1089,6 +1122,30 @@ impl EpistemicGpuRuntimeWcojCertification {
             observed_metadata_builds: delta.kclique_metadata_build_count,
         }
     }
+}
+
+enum TupleSourceLaunch<'a> {
+    ArityZero {
+        literal_index: u32,
+        reduction_index: u32,
+        row_count: &'a TrackedCudaSlice<u32>,
+    },
+    ArityOne {
+        literal_index: u32,
+        reduction_index: u32,
+        row_count: &'a TrackedCudaSlice<u32>,
+        key_col0: &'a CudaColumn,
+        key_col0_width: u32,
+    },
+    ArityTwo {
+        literal_index: u32,
+        reduction_index: u32,
+        row_count: &'a TrackedCudaSlice<u32>,
+        key_col0: &'a CudaColumn,
+        key_col0_width: u32,
+        key_col1: &'a CudaColumn,
+        key_col1_width: u32,
+    },
 }
 
 impl Executor {
@@ -1558,13 +1615,21 @@ impl Executor {
 
         let literal_count = gpu_plan.epistemic_literals.len();
         let reduction_count = gpu_plan.reductions.len();
-        let trace = EpistemicGpuModelMembershipTrace::for_stable_model_tuple_sources(
-            literal_count,
-            candidate_count,
-            reduction_count,
-            models_per_reduction,
-            gpu_plan.tuple_membership_bindings.len(),
-        )?;
+        let tuple_source_key_column_count = gpu_plan
+            .tuple_membership_bindings
+            .iter()
+            .try_fold(0usize, |acc, binding| {
+                checked_sum(acc, binding.key_columns.len())
+            })?;
+        let trace =
+            EpistemicGpuModelMembershipTrace::for_stable_model_tuple_sources_with_key_columns(
+                literal_count,
+                candidate_count,
+                reduction_count,
+                models_per_reduction,
+                gpu_plan.tuple_membership_bindings.len(),
+                tuple_source_key_column_count,
+            )?;
         let candidate_assumption_bytes = checked_product(literal_count, candidate_count)?;
         if candidate_assumption_bytes > workspace.layout.candidate_assumption_bytes {
             return Err(XlogError::ResourceExhausted {
@@ -1637,16 +1702,6 @@ impl Executor {
 
         let mut tuple_sources = Vec::with_capacity(gpu_plan.tuple_membership_bindings.len());
         for binding in &gpu_plan.tuple_membership_bindings {
-            if binding.arity != 0 {
-                return Err(XlogError::UnsupportedEpistemicConstruct {
-                    construct: "epistemic GPU stable-model tuple membership".to_string(),
-                    context: format!(
-                        "predicate {} arity {} requires tuple-key matching metadata; \
-                         current GPU tuple-source kernel only certifies zero-arity tuples",
-                        binding.predicate, binding.arity
-                    ),
-                });
-            }
             let source_relation =
                 self.store()
                     .get(binding.predicate.as_str())
@@ -1668,11 +1723,118 @@ impl Executor {
                     ),
                 });
             }
-            tuple_sources.push((
-                binding.literal_index as u32,
-                binding.reduction_index as u32,
-                source_relation.num_rows_device(),
-            ));
+            match binding.key_columns.as_slice() {
+                [] => tuple_sources.push(TupleSourceLaunch::ArityZero {
+                    literal_index: binding.literal_index as u32,
+                    reduction_index: binding.reduction_index as u32,
+                    row_count: source_relation.num_rows_device(),
+                }),
+                &[key_col] => {
+                    let key_col0 = source_relation.column(key_col).ok_or_else(|| {
+                        XlogError::UnsupportedEpistemicConstruct {
+                            construct: "epistemic GPU stable-model tuple membership".to_string(),
+                            context: format!(
+                                "tuple source relation {} missing key column {}",
+                                binding.predicate, key_col
+                            ),
+                        }
+                    })?;
+                    let key_col0_width = source_relation
+                        .schema()
+                        .column_type(key_col)
+                        .map(|ty| ty.size_bytes())
+                        .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                            construct: "epistemic GPU stable-model tuple membership".to_string(),
+                            context: format!(
+                                "tuple source relation {} missing schema for key column {}",
+                                binding.predicate, key_col
+                            ),
+                        })?;
+                    if key_col0_width > u32::MAX as usize {
+                        return Err(XlogError::ResourceExhausted {
+                            context: "epistemic GPU tuple-key column width".to_string(),
+                            estimated_bytes: key_col0_width as u64,
+                            budget_bytes: u32::MAX as u64,
+                        });
+                    }
+                    tuple_sources.push(TupleSourceLaunch::ArityOne {
+                        literal_index: binding.literal_index as u32,
+                        reduction_index: binding.reduction_index as u32,
+                        row_count: source_relation.num_rows_device(),
+                        key_col0,
+                        key_col0_width: key_col0_width as u32,
+                    });
+                }
+                &[key_col0, key_col1] => {
+                    let key_col0_ref = source_relation.column(key_col0).ok_or_else(|| {
+                        XlogError::UnsupportedEpistemicConstruct {
+                            construct: "epistemic GPU stable-model tuple membership".to_string(),
+                            context: format!(
+                                "tuple source relation {} missing key column {}",
+                                binding.predicate, key_col0
+                            ),
+                        }
+                    })?;
+                    let key_col1_ref = source_relation.column(key_col1).ok_or_else(|| {
+                        XlogError::UnsupportedEpistemicConstruct {
+                            construct: "epistemic GPU stable-model tuple membership".to_string(),
+                            context: format!(
+                                "tuple source relation {} missing key column {}",
+                                binding.predicate, key_col1
+                            ),
+                        }
+                    })?;
+                    let key_col0_width = source_relation
+                        .schema()
+                        .column_type(key_col0)
+                        .map(|ty| ty.size_bytes())
+                        .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                            construct: "epistemic GPU stable-model tuple membership".to_string(),
+                            context: format!(
+                                "tuple source relation {} missing schema for key column {}",
+                                binding.predicate, key_col0
+                            ),
+                        })?;
+                    let key_col1_width = source_relation
+                        .schema()
+                        .column_type(key_col1)
+                        .map(|ty| ty.size_bytes())
+                        .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                            construct: "epistemic GPU stable-model tuple membership".to_string(),
+                            context: format!(
+                                "tuple source relation {} missing schema for key column {}",
+                                binding.predicate, key_col1
+                            ),
+                        })?;
+                    let max_width = key_col0_width.max(key_col1_width);
+                    if max_width > u32::MAX as usize {
+                        return Err(XlogError::ResourceExhausted {
+                            context: "epistemic GPU tuple-key column width".to_string(),
+                            estimated_bytes: max_width as u64,
+                            budget_bytes: u32::MAX as u64,
+                        });
+                    }
+                    tuple_sources.push(TupleSourceLaunch::ArityTwo {
+                        literal_index: binding.literal_index as u32,
+                        reduction_index: binding.reduction_index as u32,
+                        row_count: source_relation.num_rows_device(),
+                        key_col0: key_col0_ref,
+                        key_col0_width: key_col0_width as u32,
+                        key_col1: key_col1_ref,
+                        key_col1_width: key_col1_width as u32,
+                    });
+                }
+                _ => {
+                    return Err(XlogError::UnsupportedEpistemicConstruct {
+                        construct: "epistemic GPU stable-model tuple membership".to_string(),
+                        context: format!(
+                            "predicate {} arity {} requires multi-column tuple-key matching; \
+                             current GPU tuple-source kernels certify arity-zero through arity-two",
+                            binding.predicate, binding.arity
+                        ),
+                    });
+                }
+            }
         }
 
         let literal_count = literal_count as u32;
@@ -1693,32 +1855,128 @@ impl Executor {
                     "epistemic tuple-source model-membership kernel not found".to_string(),
                 )
             })?;
+        let func_arity1 = self
+            .provider
+            .device()
+            .inner()
+            .get_func(
+                EPISTEMIC_MODULE,
+                epistemic_kernels::EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_FROM_TUPLE_SOURCE_ARITY1_U8,
+            )
+            .ok_or_else(|| {
+                XlogError::Execution(
+                    "epistemic arity-one tuple-source model-membership kernel not found"
+                        .to_string(),
+                )
+            })?;
+        let func_arity2 = self
+            .provider
+            .device()
+            .inner()
+            .get_func(
+                EPISTEMIC_MODULE,
+                epistemic_kernels::EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_FROM_TUPLE_SOURCE_ARITY2_U8,
+            )
+            .ok_or_else(|| {
+                XlogError::Execution(
+                    "epistemic arity-two tuple-source model-membership kernel not found"
+                        .to_string(),
+                )
+            })?;
         let config = LaunchConfig::for_num_elems(per_binding_launch_elems as u32);
 
         let kernel_timing = self.time_epistemic_gpu_kernel_launch(
             "epistemic GPU tuple-source model membership",
             || unsafe {
-                for (literal_index, reduction_index, tuple_source_row_count) in &tuple_sources {
-                    // SAFETY: kernel arguments match the PTX signature; the capacity
-                    // checks above prove candidate, world-view, membership, rejection,
-                    // and tuple-source row-count buffers cover all accesses.
-                    func.clone().launch(
-                        config,
-                        (
-                            literal_count,
-                            candidate_count,
-                            reduction_count,
-                            models_per_reduction,
-                            world_stride,
-                            *literal_index,
-                            *reduction_index,
-                            *tuple_source_row_count,
-                            &workspace.candidate_assumptions,
-                            &workspace.world_views,
-                            &mut workspace.model_membership,
-                            &mut workspace.rejection_reasons,
-                        ),
-                    )?;
+                for tuple_source in &tuple_sources {
+                    match tuple_source {
+                        TupleSourceLaunch::ArityZero {
+                            literal_index,
+                            reduction_index,
+                            row_count,
+                        } => {
+                            // SAFETY: kernel arguments match the PTX signature; the capacity
+                            // checks above prove candidate, world-view, membership, rejection,
+                            // and tuple-source row-count buffers cover all accesses.
+                            func.clone().launch(
+                                config,
+                                (
+                                    literal_count,
+                                    candidate_count,
+                                    reduction_count,
+                                    models_per_reduction,
+                                    world_stride,
+                                    *literal_index,
+                                    *reduction_index,
+                                    *row_count,
+                                    &workspace.candidate_assumptions,
+                                    &workspace.world_views,
+                                    &mut workspace.model_membership,
+                                    &mut workspace.rejection_reasons,
+                                ),
+                            )?;
+                        }
+                        TupleSourceLaunch::ArityOne {
+                            literal_index,
+                            reduction_index,
+                            row_count,
+                            key_col0,
+                            key_col0_width,
+                        } => {
+                            // SAFETY: kernel arguments match the PTX signature; capacity checks
+                            // above cover workspace buffers, row_count comes from the named source
+                            // relation, and key_col0/key_col0_width are schema-validated.
+                            let mut params: Vec<*mut c_void> = vec![
+                                (&literal_count).as_kernel_param(),
+                                (&candidate_count).as_kernel_param(),
+                                (&reduction_count).as_kernel_param(),
+                                (&models_per_reduction).as_kernel_param(),
+                                (&world_stride).as_kernel_param(),
+                                literal_index.as_kernel_param(),
+                                reduction_index.as_kernel_param(),
+                                row_count.as_kernel_param(),
+                                key_col0.as_kernel_param(),
+                                key_col0_width.as_kernel_param(),
+                                (&workspace.candidate_assumptions).as_kernel_param(),
+                                (&workspace.world_views).as_kernel_param(),
+                                (&mut workspace.model_membership).as_kernel_param(),
+                                (&mut workspace.rejection_reasons).as_kernel_param(),
+                            ];
+                            func_arity1.clone().launch(config, &mut params)?;
+                        }
+                        TupleSourceLaunch::ArityTwo {
+                            literal_index,
+                            reduction_index,
+                            row_count,
+                            key_col0,
+                            key_col0_width,
+                            key_col1,
+                            key_col1_width,
+                        } => {
+                            // SAFETY: kernel arguments match the PTX signature; capacity checks
+                            // above cover workspace buffers, row_count comes from the named source
+                            // relation, and both key columns are schema-validated.
+                            let mut params: Vec<*mut c_void> = vec![
+                                (&literal_count).as_kernel_param(),
+                                (&candidate_count).as_kernel_param(),
+                                (&reduction_count).as_kernel_param(),
+                                (&models_per_reduction).as_kernel_param(),
+                                (&world_stride).as_kernel_param(),
+                                literal_index.as_kernel_param(),
+                                reduction_index.as_kernel_param(),
+                                row_count.as_kernel_param(),
+                                key_col0.as_kernel_param(),
+                                key_col0_width.as_kernel_param(),
+                                key_col1.as_kernel_param(),
+                                key_col1_width.as_kernel_param(),
+                                (&workspace.candidate_assumptions).as_kernel_param(),
+                                (&workspace.world_views).as_kernel_param(),
+                                (&mut workspace.model_membership).as_kernel_param(),
+                                (&mut workspace.rejection_reasons).as_kernel_param(),
+                            ];
+                            func_arity2.clone().launch(config, &mut params)?;
+                        }
+                    }
                 }
                 Ok(())
             },

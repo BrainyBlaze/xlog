@@ -177,13 +177,17 @@ writes, and CUDA-event elapsed timing.
 `Executor::populate_epistemic_gpu_model_membership_from_tuple_sources` resolves
 `EpistemicTupleMembershipBinding` entries to named reduced stable-model
 relations in the executor store and launches
-`epistemic_populate_model_membership_from_tuple_source_u8` once per binding.
-For the current arity-zero tuple-source slice, the kernel reads each source
-relation's device row-count scalar and writes candidate-scoped model-membership
-bytes with `EpistemicGpuModelMembershipSource::StableModelTupleBuffer`, zero
-output row-count reads, zero host writes, and CUDA-event elapsed timing. The old
-`ReducedOutputRowCountOnly` trace remains as a fail-closed staging marker for
-negative tests.
+`epistemic_populate_model_membership_from_tuple_source_u8` for zero-arity
+bindings and fixed arity-specific tuple-key kernels for arity-one and arity-two
+bindings. `EpistemicTupleMembershipBinding::key_columns` records identity
+tuple-key column metadata derived from the EIR atom arity, and the runtime
+resolves those column references through the existing `CudaBuffer` schema,
+relation columns, and
+device row-count buffers. `EpistemicGpuModelMembershipTrace` records zero
+reduced-output row-count reads, tuple-source row-count reads, tuple-key column
+device reads, zero host writes, `StableModelTupleBuffer`, and CUDA-event
+elapsed timing. The old `ReducedOutputRowCountOnly` trace remains as a
+fail-closed staging marker for negative tests.
 `Executor::validate_epistemic_gpu_world_views` launches
 `epistemic_validate_world_views_u8` to check staged model-membership bytes
 against active candidate world views and update rejection codes on device,
@@ -240,13 +244,14 @@ This workspace is still incomplete for full epistemic execution. It proves the
 buffer categories are allocatable, initialized on device, and inspectable on the
 runtime side and that WCOJ certification is tied to actual counter deltas around
 the production reduced-plan dispatch. Candidate-assumption generation,
-propagation staging, candidate-buffer validation, arity-zero stable-model
-tuple-source membership population, bounded world-view validation staging,
-accepted-candidate materialization staging, and final-result flag plus final
-tuple materialization staging now have CUDA kernels, and the bounded hot path
-records zero tracked host transfers. Nonzero-arity tuple-key matching, full
-world-view semantics, and complete accepted-execution timing evidence remain
-open.
+propagation staging, candidate-buffer validation, arity-zero through arity-two
+stable-model tuple-source model-membership staging over existing relation columns,
+bounded world-view validation staging, accepted-candidate materialization
+staging, and final-result flag plus final tuple materialization staging now have
+CUDA kernels, and the bounded hot path records zero tracked host transfers.
+Complete tuple-key matching, arbitrary arity, full world-view semantics,
+solver/probability production-path reuse, and complete accepted-execution
+timing evidence remain open.
 
 ## G91 Compatibility Fixture Semantics
 

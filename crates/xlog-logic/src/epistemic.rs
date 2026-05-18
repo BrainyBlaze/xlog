@@ -182,6 +182,7 @@ pub fn plan_epistemic_gpu_execution(program: &Program) -> Result<EpistemicGpuPla
                 reduction_index,
                 predicate: lit.atom.predicate.clone(),
                 arity: lit.atom.arity,
+                key_columns: (0..lit.atom.arity).collect(),
                 op: lit.op,
                 negated: lit.negated,
             });

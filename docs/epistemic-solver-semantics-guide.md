@@ -49,13 +49,14 @@ CUDA-event elapsed timing for world-view/rejection staging.
 `EpistemicGpuCandidateValidationTrace` with one kernel launch, zero host
 writes, and CUDA-event elapsed timing for candidate-buffer validation.
 `Executor::populate_epistemic_gpu_model_membership_from_tuple_sources` launches
-`epistemic_populate_model_membership_from_tuple_source_u8` once per certified
-tuple binding and records `EpistemicGpuModelMembershipTrace` with stable tuple
-source row-count reads, zero reduced-output row-count reads, zero host writes,
-and CUDA-event elapsed timing. This slice certifies arity-zero reduced
-stable-model tuple sources from named GPU relation buffers. Nonzero-arity
-tuple-key matching still fails closed until argument/key metadata and matching
-kernels are added.
+`epistemic_populate_model_membership_from_tuple_source_u8` for zero-arity
+bindings and arity-specific tuple-key kernels for arity-one and arity-two
+bindings. It records `EpistemicGpuModelMembershipTrace` with stable tuple
+source row-count reads, tuple-key column device reads, zero reduced-output
+row-count reads, zero host writes, and CUDA-event elapsed timing. This slice
+certifies fixed arity 0-2 reduced stable-model tuple sources from named GPU
+relation buffers and existing `CudaBuffer` columns. Arity greater than two and
+full semantic parity still fail closed.
 `Executor::validate_epistemic_gpu_world_views` launches the
 `epistemic_validate_world_views_u8` CUDA kernel and records
 `EpistemicGpuWorldViewValidationTrace` with one kernel launch, zero host
@@ -85,9 +86,10 @@ accepted-candidate, final-result flag, and final tuple materialization-staging
 kernel launches. It also snapshots provider host-transfer counters around the hot path
 and records `EpistemicGpuTransferBudgetTrace`, which rejects tracked data-plane
 H2D/D2H deltas instead of resetting shared telemetry. That is still incomplete
-for the epistemic hot path; arity-zero tuple-source membership is GPU-backed,
-but nonzero-arity tuple matching, full world-view semantics, and solver
-coupling do not dispatch yet.
+for the epistemic hot path; fixed arity 0-2 tuple-source staging is GPU-backed
+over existing relation buffers, but complete tuple-key matching, full
+world-view semantics, solver coupling, and probabilistic production-path reuse
+do not dispatch yet.
 
 ## GPU And WCOJ Scope
 

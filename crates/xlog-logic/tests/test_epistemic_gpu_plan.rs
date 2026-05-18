@@ -85,15 +85,61 @@ fn epistemic_gpu_plan_records_tuple_membership_bindings_for_each_literal() {
     assert_eq!(plan.tuple_membership_bindings[0].reduction_index, 0);
     assert_eq!(plan.tuple_membership_bindings[0].predicate, "edge");
     assert_eq!(plan.tuple_membership_bindings[0].arity, 1);
+    assert_eq!(plan.tuple_membership_bindings[0].key_columns, vec![0]);
     assert_eq!(plan.tuple_membership_bindings[0].op, EirEpistemicOp::Know);
     assert_eq!(plan.tuple_membership_bindings[1].literal_index, 1);
     assert_eq!(plan.tuple_membership_bindings[1].reduction_index, 1);
     assert_eq!(plan.tuple_membership_bindings[1].predicate, "label");
     assert_eq!(plan.tuple_membership_bindings[1].arity, 1);
+    assert_eq!(plan.tuple_membership_bindings[1].key_columns, vec![0]);
     assert_eq!(
         plan.tuple_membership_bindings[1].op,
         EirEpistemicOp::Possible
     );
+}
+
+#[test]
+fn epistemic_gpu_plan_records_identity_tuple_key_columns_for_nonzero_arity() {
+    let program = parse_program(
+        r#"
+        accepted(X, Y) :- link(X, Y), know edge(X, Y).
+        "#,
+    )
+    .unwrap();
+
+    let plan = plan_epistemic_gpu_execution(&program).unwrap();
+
+    assert_eq!(plan.tuple_membership_bindings.len(), 1);
+    assert_eq!(plan.tuple_membership_bindings[0].predicate, "edge");
+    assert_eq!(plan.tuple_membership_bindings[0].arity, 2);
+    assert_eq!(plan.tuple_membership_bindings[0].key_columns, vec![0, 1]);
+    plan.validate_tuple_membership_bindings()
+        .expect("identity key-column metadata should validate");
+}
+
+#[test]
+fn epistemic_gpu_plan_rejects_invalid_tuple_key_column_metadata() {
+    let program = parse_program(
+        r#"
+        accepted(X, Y) :- link(X, Y), know edge(X, Y).
+        "#,
+    )
+    .unwrap();
+
+    let mut plan = plan_epistemic_gpu_execution(&program).unwrap();
+    plan.tuple_membership_bindings[0].key_columns = vec![0, 2];
+
+    let err = plan
+        .validate_tuple_membership_bindings()
+        .expect_err("out-of-range tuple key column must fail closed");
+
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
+            assert_eq!(construct, "epistemic GPU tuple membership binding");
+            assert!(context.contains("key column 2 exceeds arity 2"));
+        }
+        other => panic!("expected tuple-key metadata error, got {other:?}"),
+    }
 }
 
 #[test]

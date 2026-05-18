@@ -42,7 +42,7 @@ The prior closure/evidence docs were inspected before finalizing this slice:
 | `cargo fmt --check` | PASS |
 | `cargo test -p xlog-logic --test test_epistemic_executable_plan` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_gpu_plan` | PASS, 5 passed, 0 failed |
-| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 40 passed, 0 failed |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 43 passed, 0 failed |
 | `cargo test -p xlog-ir --lib` | PASS, 14 passed, 0 failed |
 | `cargo test -p xlog-logic --lib` | PASS, 238 passed, 0 failed |
 | `cargo test -p xlog-runtime --lib` | PASS, 125 passed, 0 failed |
@@ -54,13 +54,14 @@ The prior closure/evidence docs were inspected before finalizing this slice:
 | Metric | Target | Status | Evidence |
 |---|---|---|---|
 | M090_EIR.6 production route | accepted epistemic forms have a production lowering route | PARTIAL | Executable route exists after the semantic contract; direct `xlog run` lowering still rejects epistemic literals. |
-| M090_GPU.1 production lowering | accepted epistemic fixture runs through production runtime dispatch | PARTIAL | Reduced runtime plan is produced through the production compiler; later runtime evidence launches candidate generation/propagation/candidate validation before reduced-plan dispatch, then arity-zero tuple-source model-membership/world-view-validation/materialization, final-result flag staging, and final tuple materialization; nonzero-arity tuple matching and full accepted semantics remain missing. |
+| M090_GPU.1 production lowering | accepted epistemic fixture runs through production runtime dispatch | PARTIAL | Reduced runtime plan is produced through the production compiler; later runtime evidence launches candidate generation/propagation/candidate validation before reduced-plan dispatch, then arity 0-2 tuple-source model-membership staging/world-view-validation/materialization, final-result flag staging, and final tuple materialization; complete tuple-key matching and full accepted semantics remain missing. |
 | M090_GPU.2 WCOJ eligibility | at least one epistemic reduction uses the WCOJ planner/path where eligible | PARTIAL | Reduced fixtures reach `RirNode::MultiWayJoin` and K-clique `MultiwayPlan`; later runtime evidence fails closed when a required K-clique WCOJ plan lacks counter deltas, but no certified successful dispatch evidence exists yet. |
-| M090_GPU.4 kernel coverage | kernels cover GPT hot paths | PARTIAL | Later runtime evidence launches candidate-generation, propagation-staging, candidate-buffer validation, arity-zero tuple-source model-membership staging, world-view-validation staging, materialization-staging, final-result flag, and final tuple materialization kernels; nonzero-arity semantic tuple matching remains missing. |
-| M090_GPU.6 launch evidence | nonzero GPU launches and timing | PARTIAL | Later runtime traces record candidate-generation, propagation, candidate-validation, arity-zero tuple-source model-membership, world-view-validation, accepted-candidate materialization, final-result flag, and final tuple materialization launches with CUDA-event elapsed timing; nonzero-arity stable-model membership timing is missing. |
+| M090_GPU.4 kernel coverage | kernels cover GPT hot paths | PARTIAL | Later runtime evidence launches candidate-generation, propagation-staging, candidate-buffer validation, arity 0-2 tuple-source model-membership staging, world-view-validation staging, materialization-staging, final-result flag, and final tuple materialization kernels; arbitrary-arity semantic tuple matching remains missing. |
+| M090_GPU.6 launch evidence | nonzero GPU launches and timing | PARTIAL | Later runtime traces record candidate-generation, propagation, candidate-validation, arity 0-2 tuple-source model-membership, world-view-validation, accepted-candidate materialization, final-result flag, and final tuple materialization launches with CUDA-event elapsed timing; arbitrary-arity stable-model membership timing is missing. |
 
 ## Remaining Blocker
 
-The next runtime slice must add nonzero-arity tuple-key matching metadata and
-kernels, semantically gate final query results with that membership, then report
-launch counters/timings plus zero CPU fallback counters.
+The next runtime slice must replace fixed arity 0-2 column-read staging with
+complete tuple-key matching, semantically gate final query results with that
+membership, then report launch
+counters/timings plus zero CPU fallback counters.
