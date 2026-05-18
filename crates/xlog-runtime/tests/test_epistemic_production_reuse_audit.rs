@@ -54,6 +54,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(prob.contains("ExactDdnnfProgram::compile_source_with_gpu"));
     assert!(prob.contains("ExactDdnnfProgram::compile_from_program"));
     assert!(prob.contains("compile_source_with_gpu_execution_result"));
+    assert!(prob.contains("compile_program_with_gpu_execution_result"));
     assert!(prob.contains("evaluate_gpu_with_grads_with_gpu_execution_result"));
     assert!(prob.contains("gpu_exact_gradient_evaluations"));
     assert!(prob.contains("cpu_only_probability_recomputations: 0"));

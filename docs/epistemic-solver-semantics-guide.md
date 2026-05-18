@@ -316,10 +316,11 @@ production-facing exact-path reuse adapter. It requires
 `AcceptedWorldViewEvidence`, then routes source or parsed programs through
 `ExactDdnnfProgram` GPU exact/provenance compilation and exposes zero CPU-only
 probability recomputation counters in `EpistemicProbProductionTrace`.
-`compile_source_with_gpu_execution_result` builds that evidence from an
-accepted `EpistemicGpuExecutionResult` only after stable-model tuple-source
-membership, GPU model-membership/world-view/final-result/final-tuple kernel
-traces, zero hot-path transfers, and non-empty final device output are proven.
+`compile_source_with_gpu_execution_result` and
+`compile_program_with_gpu_execution_result` build that evidence from an accepted
+`EpistemicGpuExecutionResult` only after stable-model tuple-source membership,
+GPU model-membership/world-view/final-result/final-tuple kernel traces, zero
+hot-path transfers, and non-empty final device output are proven.
 `evaluate_gpu_with_grads_with_gpu_execution_result` applies the same accepted
 runtime boundary before calling `ExactDdnnfProgram::evaluate_gpu_with_grads`.
 

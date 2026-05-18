@@ -112,6 +112,19 @@ impl EpistemicProbProductionAdapter {
         Ok(exact)
     }
 
+    /// Compile a parsed program through the GPU exact path after accepted GPU epistemic execution.
+    pub fn compile_program_with_gpu_execution_result(
+        &mut self,
+        program: &Program,
+        provider: &CudaKernelProvider,
+        result: &EpistemicGpuExecutionResult,
+        assumptions: Vec<EpistemicAssumption>,
+    ) -> Result<ExactDdnnfProgram> {
+        let evidence =
+            AcceptedWorldViewEvidence::from_gpu_execution_result(provider, result, assumptions)?;
+        self.compile_program_with_accepted_world_view(program, &evidence)
+    }
+
     /// Evaluate GPU exact gradients after accepted world-view evidence was consumed.
     #[cfg(feature = "host-io")]
     pub fn evaluate_gpu_with_grads(

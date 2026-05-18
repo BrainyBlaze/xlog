@@ -16,17 +16,17 @@ calls into the existing GPU-native `ExactDdnnfProgram` exact/provenance path
 without using the bounded fixture circuit.
 
 This remains partial evidence. The accepted epistemic runtime can now feed a
-validated `EpistemicGpuExecutionResult` into production exact compilation and
-one GPU gradient evaluation, but broader end-to-end probabilistic query,
-provenance, PIR, and knowledge-compilation traces over accepted world views are
-not complete.
+validated `EpistemicGpuExecutionResult` into source and parsed-program
+production exact compilation plus one GPU gradient evaluation, but broader
+end-to-end probabilistic query, provenance, PIR, and knowledge-compilation
+traces over accepted world views are not complete.
 
 | Requirement | Evidence |
 |---|---|
 | Accepted world-view evidence | `AcceptedWorldViewEvidence` is constructed from a non-empty `EpistemicWorldView`. |
 | Semantic contract | `xlog_prob::epistemic` represents accepted epistemic assumptions as probabilistic evidence conditions. |
 | Production exact adapter | `EpistemicProbProductionAdapter` gates on `AcceptedWorldViewEvidence` and compiles through `ExactDdnnfProgram::compile_source_with_gpu` or `ExactDdnnfProgram::compile_from_program`. |
-| Accepted runtime exact gate | `compile_source_with_gpu_execution_result` constructs `AcceptedWorldViewEvidence` from an accepted `EpistemicGpuExecutionResult`, requires stable-model tuple membership, GPU kernel traces, zero hot-path transfers, and non-empty final device output before exact compilation. |
+| Accepted runtime exact gates | `compile_source_with_gpu_execution_result` and `compile_program_with_gpu_execution_result` construct `AcceptedWorldViewEvidence` from an accepted `EpistemicGpuExecutionResult`, require stable-model tuple membership, GPU kernel traces, zero hot-path transfers, and non-empty final device output before exact compilation. |
 | Accepted runtime evaluation gate | `evaluate_gpu_with_grads_with_gpu_execution_result` reconstructs accepted evidence from the GPU runtime result before calling the existing `ExactDdnnfProgram::evaluate_gpu_with_grads` path. |
 | CPU probability isolation | `EpistemicProbProductionTrace` records zero CPU-only probability recomputation and zero fixture-circuit evaluations; the source guard rejects `EpistemicCircuit::compile` in the production adapter. |
 | Incremental circuit fixture | `EpistemicCircuit::apply_accepted_world_view` updates active evidence without changing the circuit fingerprint when the adapter supports incremental evidence. |
@@ -39,6 +39,7 @@ not complete.
 |---|---|
 | `cargo fmt --check` | PASS |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_gates_probabilistic_exact_path -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_gates_probabilistic_program_compile_path -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_gates_probabilistic_gradient_evaluation_path -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-prob --test epistemic_prob_production_reuse` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-prob --test epistemic_prob` | PASS, 5 passed, 0 failed |
@@ -58,17 +59,17 @@ not complete.
 | M090_PROB.3 compiler adapter | at least one alternative compiler adapter design or implementation | PASS for oracle | `external_ddnnf_text_compiler_adapter_is_explicitly_represented`. |
 | M090_PROB.4 numerical stability | deterministic fixture within documented tolerance | PASS for oracle | `log_space_conditional_probability_is_tolerance_bounded`. |
 | M090_PROB.5 evidence conditioning | probabilistic integration consumes accepted world views, not raw unvalidated guesses | PARTIAL | `AcceptedWorldViewEvidence` requires an `EpistemicWorldView` for oracle fixtures and can be constructed from an accepted GPU runtime result after stable tuple-source, kernel-trace, transfer-budget, and non-empty final-output checks. |
-| M090_PROB.6 GPU exact integration | accepted world-view evidence updates the GPU-native exact/provenance path | PARTIAL | Accepted GPU runtime evidence gates `ExactDdnnfProgram::compile_source_with_gpu` and `evaluate_gpu_with_grads`; broader query conditioning and execution coverage is still missing. |
-| M090_PROB.7 CPU recompute ban | accepted probabilistic epistemic path records zero CPU-only probability recomputation | PARTIAL | Production trace records zero CPU-only recomputation and zero fixture-circuit counters for accepted runtime source-compile and gradient-evaluation paths; broader probabilistic execution traces are missing. |
-| M090_PROB.8 production prob reuse | accepted probabilistic fixtures execute through existing GPU exact/provenance/PIR/knowledge-compilation APIs | PARTIAL | Source guard and integration fixtures prove accepted GPU runtime evidence compiles and evaluates gradients through the existing exact/provenance path; broader PIR, knowledge-compilation, and full query/evaluation coverage is missing. |
+| M090_PROB.6 GPU exact integration | accepted world-view evidence updates the GPU-native exact/provenance path | PARTIAL | Accepted GPU runtime evidence gates `ExactDdnnfProgram::compile_source_with_gpu`, `ExactDdnnfProgram::compile_from_program`, and `evaluate_gpu_with_grads`; broader query conditioning and execution coverage is still missing. |
+| M090_PROB.7 CPU recompute ban | accepted probabilistic epistemic path records zero CPU-only probability recomputation | PARTIAL | Production trace records zero CPU-only recomputation and zero fixture-circuit counters for accepted runtime source-compile, parsed-program compile, and gradient-evaluation paths; broader probabilistic execution traces are missing. |
+| M090_PROB.8 production prob reuse | accepted probabilistic fixtures execute through existing GPU exact/provenance/PIR/knowledge-compilation APIs | PARTIAL | Source guard and integration fixtures prove accepted GPU runtime evidence compiles source and parsed programs and evaluates gradients through the existing exact/provenance path; broader PIR, knowledge-compilation, and full query/evaluation coverage is missing. |
 | M090_PROB.9 fixture isolation | bounded epistemic probability fixtures are marked oracle-only and cannot satisfy closure metrics | PARTIAL | Evidence docs separate `EpistemicCircuit` fixtures from `EpistemicProbProductionAdapter`; an automated closure gate is still missing. |
 
 ## Coordination Notes
 
 - This file is not release-close evidence for `G090_PROB`.
 - Production WFS/provenance still rejects direct epistemic literals.
-- The production adapter is partial exact-compile and gradient-evaluation reuse
-  evidence only.
+- The production adapter is partial source/program exact-compile and
+  gradient-evaluation reuse evidence only.
 - The external Decision-DNNF adapter is a design contract, not a dispatch path.
 - No pyxlog public API signatures were changed.
 - No push, tag, release-board update, or merge was performed.
