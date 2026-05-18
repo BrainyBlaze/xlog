@@ -1342,73 +1342,70 @@ release-certification consumer depends on them.
 
 ### DTS-DLM Release Gates
 
-- [ ] Add a canonical DTS-DLM certification pack in xlog that replays
+- [x] Add a canonical DTS-DLM certification pack in xlog that replays
       the relevant Stage-4 and M37-A+B surfaces without requiring a full
-      DTS pilot by default.
-- [ ] Gate v0.8.0 on pyxlog public-surface preservation for DTS-DLM:
+      DTS pilot by default. (`docs/evidence/2026-05-18-v080-cert/`)
+- [x] Gate v0.8.0 on pyxlog public-surface preservation for DTS-DLM:
       `LogicProgram.compile`, `program.session`, `session.put_relation`,
       `session.evaluate`, `session.export_relation`,
       `IlpProgramFactory.compile`, `train_on_compiled_relations`,
       `Program.compile`, `register_network`, `register_embedding`,
       `add_tensor_source`, `forward_backward_tensor`, `train_epoch`, and
-      `optimizer_step`.
-- [ ] Add a machine-readable pyxlog API compatibility manifest and diff
+      `optimizer_step`. (`symbol_coverage=17/17`)
+- [x] Add a machine-readable pyxlog API compatibility manifest and diff
       check, modeled on the DTS-DLM pyxlog 0.7.0 surface evidence.
-- [ ] Add DTS-DLM zero-copy and determinism gates: no tracked hot-path
+- [x] Add DTS-DLM zero-copy and determinism gates: no tracked hot-path
       D2H/H2D transfers, stable CUDA Graph counters where graph mode is
       enabled, and bit-exact replay on fixed fixtures.
 
 ### Python Runtime And Session API
 
-- [ ] Add async evaluation API for `CompiledLogicProgram`,
+- [x] Add async evaluation API for `CompiledLogicProgram`,
       `LogicRelationSession`, and `CompiledProgram` where the underlying
       operation can run without blocking the Python caller.
-- [ ] Add streaming results API for large query outputs, preserving
+- [x] Add streaming results API for large query outputs, preserving
       DLPack zero-copy for chunked tensor columns.
-- [ ] Add per-call Python memory limit configuration.
-      (`MemoryBudget::with_limit(config.memory_bytes)` is applied at
-      provider construction in `crates/pyxlog/src/lib.rs:205`; per-call
-      override on `evaluate*` calls is not surfaced.)
-- [ ] Add query progress reporting for long recursive and neural-symbolic
+- [x] Add per-call Python memory limit configuration.
+- [x] Add query progress reporting for long recursive and neural-symbolic
       evaluations, with stable counters suitable for DTS-DLM pilot logs.
-- [ ] Expose production diagnostics for DTS-DLM: host-transfer stats,
+- [x] Expose production diagnostics for DTS-DLM: host-transfer stats,
       CUDA Graph stats, memory-budget usage, and peak-memory snapshots
       through documented pyxlog APIs. Do not fabricate no-op GPU memory
       probes on environments that cannot report them.
 
 ### Persistent Relation Maintenance
 
-- [ ] Surface relation delta APIs on `LogicRelationSession`: insert,
+- [x] Surface relation delta APIs on `LogicRelationSession`: insert,
       delete, and batch update via DLPack column tensors.
-- [ ] Connect Python session deltas to runtime
+- [x] Connect Python session deltas to runtime
       `RelationDelta` / `apply_deltas_and_recompute` so monotone
       insert-only SCCs avoid full recompute where the plan permits it.
 - [ ] Add batch update coalescing for repeated DTS-DLM Stage-4
       `wmir_committed` updates.
 - [ ] Add change notification callbacks for session-managed relations,
       scoped to explicit Python opt-in.
-- [ ] Add DTS-DLM Stage-4 fixture proving delta updates produce
+- [x] Add DTS-DLM Stage-4 fixture proving delta updates produce
       byte-identical output to full `put_relation` replacement while
       reducing full-table re-upload work.
 
 ### Neural-Symbolic Bridge Integration
 
-- [ ] Add term embedding inference path coverage to the pyxlog
+- [x] Add term embedding inference path coverage to the pyxlog
       compatibility manifest and DTS-DLM certification pack.
-- [ ] Add foreign tensor predicates suitable for DTS-DLM bridge features
+- [x] Add foreign tensor predicates suitable for DTS-DLM bridge features
       and other GPU-resident tensor inputs.
-- [ ] Add neural output caching with cache-hit telemetry and a documented
+- [x] Add neural output caching with cache-hit telemetry and a documented
       invalidation model.
-- [ ] Add top-k deterministic neural mode with fixed tie-breaking for
+- [x] Add top-k deterministic neural mode with fixed tie-breaking for
       seed-pinned DTS-DLM training and replay.
-- [ ] Add Belnap-aware dual-channel loss helpers for DTS-DLM M37-A+B:
+- [x] Add Belnap-aware dual-channel loss helpers for DTS-DLM M37-A+B:
       pro reward, contra penalty, quarantine penalty, and CFR-oriented
       diagnostics. These are Python/ML helpers; Stage-4 structural
       kernels remain agnostic to Belnap pro/contra semantics.
-- [ ] Add semantic loss functions required by M37-A+B, then add MSE,
+- [x] Add semantic loss functions required by M37-A+B, then add MSE,
       semantic, and infoloss variants only where a named consumer uses
       them.
-- [ ] Quantify circuit-cache behavior for repeated
+- [x] Quantify circuit-cache behavior for repeated
       `forward_backward_tensor` calls: cache-hit rate, hit/miss counters,
       and repeated-query speedup.
 
