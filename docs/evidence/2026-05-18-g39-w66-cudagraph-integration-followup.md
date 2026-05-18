@@ -84,23 +84,30 @@ Finished `release` profile [optimized] target(s) in 33.97s
 $ XLOG_CUBIN_DIR=target/release/build/xlog-cuda-43b482a33001fc07/out \
   PYTHONPATH=/home/dev/projects/dts-dlm/src:/tmp/pyxlog-w66 \
   python3 -m dts_dlm.pilots.m37c_xlog_graph_fixture \
-  --rows 256 --runs 100 --out /tmp/m37c_xlog_graph_fixture_w66_100.json
+  --mode graph --rows 256 --runs 100 \
+  --out /tmp/m37c_xlog_graph_fixture_w66_100_rebased_v2.json
 {
   "status": "passed",
   "rows": 256,
   "runs": 100,
+  "surface": "step",
+  "timing_source": "cuda_event",
+  "wall_seconds": 69.35122062201845,
+  "mean_wall_ms_per_run": 693.5122062201845,
+  "cuda_event_elapsed_ms": 69350.953125,
+  "mean_cuda_event_ms_per_run": 693.50953125,
   "deterministic": true,
   "unique_digest_count": 1,
   "support_rows_min": 256,
   "support_rows_max": 256,
   "usable_rows_min": 768,
   "usable_rows_max": 768,
-  "expected_graph_capture_topology_cap": 3,
+  "expected_graph_capture_topology_cap": 4,
   "graph_delta": {
-    "captures": 3,
-    "launches": 700,
+    "captures": 4,
+    "launches": 1000,
     "fallbacks": 0,
-    "cache_hits": 697
+    "cache_hits": 996
   },
   "host_transfer_delta": {
     "dtoh_bytes": 0,
@@ -111,6 +118,75 @@ $ XLOG_CUBIN_DIR=target/release/build/xlog-cuda-43b482a33001fc07/out \
   "peak_vram_gib_snapshot": 1.25836181640625
 }
 
+$ XLOG_CUBIN_DIR=target/release/build/xlog-cuda-43b482a33001fc07/out \
+  PYTHONPATH=/home/dev/projects/dts-dlm/src:/tmp/pyxlog-w66 \
+  python3 -m dts_dlm.pilots.m37c_xlog_graph_fixture \
+  --mode compare --surface evaluate --rows 96 --runs 100 --warmup-runs 5 \
+  --out /tmp/m37c_xlog_graph_fixture_w66_compare_96_evaluate_rebased_v2.json
+{
+  "status": "failed",
+  "rows": 96,
+  "runs": 100,
+  "warmup_runs": 5,
+  "surface": "evaluate",
+  "timing_source": "synchronized_wall",
+  "wall_speedup": 1.0095365191184626,
+  "timing_speedup": 1.0095365191184626,
+  "timing_reduction_pct": 0.9446433029277612,
+  "cuda_event_speedup": null,
+  "cuda_event_reduction_pct": null,
+  "structural_launch_reduction_pct": 75.0,
+  "graphable_launch_units": 1000,
+  "baseline": {
+    "wall_seconds": 70.01620508154156,
+    "mean_wall_ms_per_run": 700.1620508154156,
+    "timing_elapsed_ms": 70016.20508154156,
+    "mean_timing_ms_per_run": 700.1620508154156,
+    "timing_source": "synchronized_wall",
+    "cuda_event_elapsed_ms": null,
+    "mean_cuda_event_ms_per_run": null,
+    "graph_delta": {
+      "captures": 0,
+      "launches": 0,
+      "fallbacks": 0,
+      "cache_hits": 0
+    },
+    "host_transfer_delta": {
+      "dtoh_bytes": 0,
+      "dtoh_calls": 0,
+      "htod_bytes": 0,
+      "htod_calls": 0
+    },
+    "peak_vram_gib_snapshot": 1.23687744140625
+  },
+  "graph": {
+    "wall_seconds": 69.35480168927461,
+    "mean_wall_ms_per_run": 693.5480168927461,
+    "timing_elapsed_ms": 69354.80168927461,
+    "mean_timing_ms_per_run": 693.5480168927461,
+    "timing_source": "synchronized_wall",
+    "cuda_event_elapsed_ms": null,
+    "mean_cuda_event_ms_per_run": null,
+    "graph_delta": {
+      "captures": 0,
+      "launches": 1000,
+      "fallbacks": 0,
+      "cache_hits": 1000
+    },
+    "host_transfer_delta": {
+      "dtoh_bytes": 0,
+      "dtoh_calls": 0,
+      "htod_bytes": 0,
+      "htod_calls": 0
+    },
+    "peak_vram_gib_snapshot": 1.23687744140625
+  },
+  "failures": [
+    "expected wall_speedup>=1.2, got 1.009537",
+    "expected timing_reduction_pct>=50.0, got 0.944643"
+  ]
+}
+
 $ git diff --check
 exit 0
 ```
@@ -119,18 +195,24 @@ exit 0
 
 | Metric | Status | Raw result |
 |---|---:|---|
-| M_W66.1 m37c-prime Stage 4 speedup | PENDING | Bounded graph path exists; m37c-prime wall-time not run yet. |
-| M_W66.2 kernel launch overhead reduction | PENDING | CSM graph smoke captures Count -> Scan -> Total -> Materialize as one graph launch; m37c-prime overhead benchmark not run yet. |
+| M_W66.1 m37c-prime Stage 4 speedup | FAIL (bounded m37c-scale evaluate cert) | Paired DTS evaluate-surface comparison at the G_PRE median row scale (`rows=96`, `runs=100`, `warmup=5`) produced `wall_speedup=1.009537x`, below the `>=1.2x` gate. |
+| M_W66.2 kernel launch overhead reduction | FAIL (bounded m37c-scale evaluate cert) | Structural graphable-unit launch reduction is 75%, but measured synchronized-wall evaluate-surface timing reduction is `0.944643%`; CUDA-event timing is not available for the direct `session.evaluate` surface (`cuda_event_reduction_pct=null`). |
 | M_W66.3 determinism preserved | PASS (bounded DTS cert) | DTS Stage-4 analog fixture: 100/100 bit-exact, `unique_digest_count=1`. |
 | M_W66.4 DLPack zero-copy preserved | PASS (bounded DTS cert) | DTS Stage-4 analog fixture: `dtoh_bytes=0`, `dtoh_calls=0`, `htod_bytes=0`, `htod_calls=0`. |
-| M_W66.5 peak VRAM <= 38 GB | PARTIAL | DTS Stage-4 analog fixture peak snapshot 1.258 GiB; no m37c-prime profile yet. |
-| M_W66.6 recapture <= 1x per fixpoint iteration | PASS (bounded DTS cert) | DTS Stage-4 analog fixture: 3 captures for 3 graphable topologies, 700 launches, 697 cache hits, 0 fallbacks across 100 evaluate runs. |
+| M_W66.5 peak VRAM <= 38 GB | PARTIAL | DTS Stage-4 analog fixture peak snapshot 1.258 GiB; bounded evaluate comparison peak snapshot 1.237 GiB; no full m37c-prime profile yet. |
+| M_W66.6 recapture <= 1x per fixpoint iteration | PASS (bounded DTS cert) | DTS Stage-4 analog fixture on the W65-corrected DTS source: 4 captures for 4 graphable topologies, 1000 launches, 996 cache hits, 0 fallbacks across 100 evaluate runs. |
 
 ## Remaining Work
 
 W66 is no longer blocked at CUDA Graph primitives, scan scratch, bounded output
 protocol, same-topology replay caching, pyxlog runtime-backed construction, or
-DTS-DLM bounded graph-path certification. It still needs:
+DTS-DLM bounded graph-path certification. It is blocked on performance: the
+current graph capture unit is too narrow for the m37c-scale evaluate surface
+because recursive support evaluation still spends most of its time outside the
+captured CSM subsequence. The next viable implementation must either capture a
+broader Stage-4 sequence or replace the pyxlog session hot loop with a
+prepared, reusable Stage-4 execution surface whose launch/update boundary is
+large enough to affect wall time. It still needs:
 
-1. launch-overhead and Stage 4 wall-time measurements on m37c-prime;
+1. a broader Stage-4 execution/capture implementation that clears M_W66.1 and M_W66.2;
 2. m37c-prime VRAM profile.
