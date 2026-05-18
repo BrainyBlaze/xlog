@@ -147,19 +147,21 @@ for those kernels.
 `epistemic_generate_candidate_assumptions_u8` from the `xlog_epistemic` CUDA
 module to populate candidate-assumption bitsets directly in the workspace. The
 current kernel covers only bounded bit-mask candidate enumeration and records
-`EpistemicGpuCandidateGenerationTrace` with one kernel launch and zero host
-writes. `Executor::propagate_epistemic_gpu_candidates` then launches
+`EpistemicGpuCandidateGenerationTrace` with one kernel launch, zero host
+writes, and CUDA-event elapsed timing. `Executor::propagate_epistemic_gpu_candidates` then launches
 `epistemic_propagate_candidates_u8` to stage generated candidates into the
 world-view and rejection-reason buffers, recording
-`EpistemicGpuPropagationTrace` with one kernel launch and zero host writes.
+`EpistemicGpuPropagationTrace` with one kernel launch, zero host writes, and
+CUDA-event elapsed timing.
 `Executor::validate_epistemic_gpu_candidates` launches
 `epistemic_validate_candidate_bits_u8` to validate staged candidate bitsets and
 world-view activity in device buffers, recording
-`EpistemicGpuCandidateValidationTrace` with one kernel launch and zero host
-writes. `Executor::materialize_epistemic_gpu_candidates` launches
+`EpistemicGpuCandidateValidationTrace` with one kernel launch, zero host
+writes, and CUDA-event elapsed timing. `Executor::materialize_epistemic_gpu_candidates` launches
 `epistemic_materialize_accepted_candidates_u8` to stage accepted-candidate flags
 back into the world-view buffer from rejection codes, recording
-`EpistemicGpuMaterializationTrace` with one kernel launch and zero host writes.
+`EpistemicGpuMaterializationTrace` with one kernel launch, zero host writes, and
+CUDA-event elapsed timing.
 These are candidate-buffer invariants and materialization staging only;
 stable-model world-view validation, solver coupling, and final query-result
 materialization remain missing GPU phases.
@@ -184,8 +186,8 @@ that WCOJ certification is tied to actual counter deltas around the production
 reduced-plan dispatch. Candidate-assumption generation, propagation staging,
 candidate-buffer validation, and accepted-candidate materialization staging now
 have bounded CUDA kernels, but the runtime does not yet validate stable-model
-world views, materialize final query results, or produce full epistemic timing
-evidence.
+world views, materialize final query results, or produce full accepted-execution
+timing evidence.
 
 ## G91 Compatibility Fixture Semantics
 

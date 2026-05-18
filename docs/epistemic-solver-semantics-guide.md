@@ -38,20 +38,20 @@ with device `memset_zeros` calls and records `EpistemicGpuWorkspaceResetTrace`
 with `host_write_ops = 0`.
 `Executor::generate_epistemic_gpu_candidates` launches the
 `epistemic_generate_candidate_assumptions_u8` CUDA kernel and records
-`EpistemicGpuCandidateGenerationTrace` with one kernel launch and zero host
-writes for bounded candidate bitsets.
+`EpistemicGpuCandidateGenerationTrace` with one kernel launch, zero host
+writes, and CUDA-event elapsed timing for bounded candidate bitsets.
 `Executor::propagate_epistemic_gpu_candidates` launches the
 `epistemic_propagate_candidates_u8` CUDA kernel and records
-`EpistemicGpuPropagationTrace` with one kernel launch and zero host writes for
-world-view/rejection staging.
+`EpistemicGpuPropagationTrace` with one kernel launch, zero host writes, and
+CUDA-event elapsed timing for world-view/rejection staging.
 `Executor::validate_epistemic_gpu_candidates` launches the
 `epistemic_validate_candidate_bits_u8` CUDA kernel and records
-`EpistemicGpuCandidateValidationTrace` with one kernel launch and zero host
-writes for candidate-buffer validation.
+`EpistemicGpuCandidateValidationTrace` with one kernel launch, zero host
+writes, and CUDA-event elapsed timing for candidate-buffer validation.
 `Executor::materialize_epistemic_gpu_candidates` launches the
 `epistemic_materialize_accepted_candidates_u8` CUDA kernel and records
-`EpistemicGpuMaterializationTrace` with one kernel launch and zero host writes
-for accepted-candidate materialization staging.
+`EpistemicGpuMaterializationTrace` with one kernel launch, zero host writes, and
+CUDA-event elapsed timing for accepted-candidate materialization staging.
 `EpistemicGpuRuntimeWcojCertification` then requires actual production WCOJ
 counter deltas before WCOJ evidence can be certified.
 `Executor::execute_epistemic_gpu_execution` wraps the reduced production

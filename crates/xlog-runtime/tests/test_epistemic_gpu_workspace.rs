@@ -9,9 +9,10 @@ use xlog_ir::{
 };
 use xlog_runtime::{
     EpistemicGpuCandidateGenerationTrace, EpistemicGpuCandidateValidationTrace,
-    EpistemicGpuMaterializationTrace, EpistemicGpuPropagationTrace, EpistemicGpuRuntimeCounters,
-    EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace, EpistemicGpuRuntimeWcojCertification,
-    EpistemicGpuWorkspaceCapacities, EpistemicGpuWorkspaceLayout, EpistemicGpuWorkspaceResetTrace,
+    EpistemicGpuKernelTimingTrace, EpistemicGpuMaterializationTrace, EpistemicGpuPropagationTrace,
+    EpistemicGpuRuntimeCounters, EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace,
+    EpistemicGpuRuntimeWcojCertification, EpistemicGpuWorkspaceCapacities,
+    EpistemicGpuWorkspaceLayout, EpistemicGpuWorkspaceResetTrace,
 };
 
 #[test]
@@ -291,6 +292,29 @@ fn candidate_generation_trace_records_device_kernel_without_host_writes() {
     assert_eq!(trace.candidate_assumption_bytes, 24);
     assert_eq!(trace.kernel_launches, 1);
     assert_eq!(trace.host_write_ops, 0);
+    assert!(!trace.kernel_timing.is_recorded());
+}
+
+#[test]
+fn cuda_event_timing_trace_converts_milliseconds_to_nanoseconds() {
+    let timing = EpistemicGpuKernelTimingTrace::from_cuda_elapsed_ms(0.125).unwrap();
+
+    assert_eq!(timing.cuda_event_pairs, 1);
+    assert_eq!(timing.timing_sync_ops, 1);
+    assert_eq!(timing.kernel_elapsed_nanos, 125_000);
+    assert!(timing.is_recorded());
+}
+
+#[test]
+fn candidate_generation_trace_accepts_cuda_event_timing() {
+    let timing = EpistemicGpuKernelTimingTrace::from_cuda_elapsed_ms(0.25).unwrap();
+    let trace = EpistemicGpuCandidateGenerationTrace::for_counts(3, 8)
+        .unwrap()
+        .with_kernel_timing(timing);
+
+    assert_eq!(trace.kernel_timing.cuda_event_pairs, 1);
+    assert_eq!(trace.kernel_timing.timing_sync_ops, 1);
+    assert_eq!(trace.kernel_timing.kernel_elapsed_nanos, 250_000);
 }
 
 #[test]
@@ -318,6 +342,7 @@ fn propagation_trace_records_device_kernel_without_host_writes() {
     assert_eq!(trace.rejection_reason_slots_written, 8);
     assert_eq!(trace.kernel_launches, 1);
     assert_eq!(trace.host_write_ops, 0);
+    assert!(!trace.kernel_timing.is_recorded());
 }
 
 #[test]
@@ -373,6 +398,7 @@ fn candidate_validation_trace_records_device_kernel_without_host_writes() {
     assert_eq!(trace.rejection_reason_slots_written, 8);
     assert_eq!(trace.kernel_launches, 1);
     assert_eq!(trace.host_write_ops, 0);
+    assert!(!trace.kernel_timing.is_recorded());
 }
 
 #[test]
@@ -422,6 +448,33 @@ fn materialization_trace_records_device_kernel_without_host_writes() {
     assert_eq!(trace.world_view_slots_written, 8);
     assert_eq!(trace.kernel_launches, 1);
     assert_eq!(trace.host_write_ops, 0);
+    assert!(!trace.kernel_timing.is_recorded());
+}
+
+#[test]
+fn staging_runtime_paths_record_cuda_event_timing_for_each_kernel() {
+    let source = include_str!("../src/executor/epistemic_workspace.rs");
+
+    assert!(source.contains("fn time_epistemic_gpu_kernel_launch"));
+    assert!(source.contains("record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))"));
+    assert!(source.contains("EpistemicGpuKernelTimingTrace::from_cuda_elapsed_ms"));
+
+    assert!(source.contains(
+        "let kernel_timing = self.time_epistemic_gpu_kernel_launch(\n            \"epistemic GPU candidate generation\""
+    ));
+    assert!(source.contains(
+        "let kernel_timing = self.time_epistemic_gpu_kernel_launch(\n            \"epistemic GPU candidate propagation\""
+    ));
+    assert!(source.contains(
+        "let kernel_timing = self.time_epistemic_gpu_kernel_launch(\n            \"epistemic GPU candidate validation\""
+    ));
+    assert!(source.contains(
+        "let kernel_timing = self.time_epistemic_gpu_kernel_launch(\n            \"epistemic GPU candidate materialization\""
+    ));
+    assert_eq!(
+        source.matches(".with_kernel_timing(kernel_timing)").count(),
+        4
+    );
 }
 
 #[test]

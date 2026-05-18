@@ -51,10 +51,10 @@ Earlier ref checks after `git fetch origin --prune` showed:
 | G090_FAEEL | PASS for semantic oracle | Foundedness fixtures pass, but GPU parity remains unproven. |
 | G090_GPT | PARTIAL | CPU trace fixtures pass; GPU-resident candidate generation, propagation staging, candidate-buffer validation, and materialization staging exist, but stable-model world-view validation is missing. |
 | G090_SPLIT | PARTIAL | CPU split/recompose fixtures pass; GPU split execution is missing. |
-| G090_GPU | BLOCKED | GPU-plan, reduced-runtime-plan, workspace allocation/reset, bounded candidate-generation, propagation, candidate-validation, and materialization kernels, runtime-preflight, counter-guard, and reduced-plan trace contracts exist, but no production epistemic stable-model world-view validation/final materialization dispatch, full semantic kernel buffer use, or timing evidence exists. |
+| G090_GPU | BLOCKED | GPU-plan, reduced-runtime-plan, workspace allocation/reset, bounded candidate-generation, propagation, candidate-validation, and materialization kernels with CUDA-event elapsed timing, runtime-preflight, counter-guard, and reduced-plan trace contracts exist, but no production epistemic stable-model world-view validation/final materialization dispatch or full semantic kernel buffer use exists. |
 | G090_SOLVER | BLOCKED | `SolverService` is CPU fixture enumeration; GPU-native SAT/MaxSAT/portfolio execution is not wired to epistemic candidates. |
 | G090_PROB | BLOCKED | Accepted-world-view evidence fixtures exist, but accepted probabilistic epistemic execution is not proven on the GPU-native exact path. |
-| G090_CERT | BLOCKED | Missing GPU launch counts, kernel timings, WCOJ evidence, zero CPU fallback counters, and post-v0.8 rerun. |
+| G090_CERT | BLOCKED | Missing complete accepted-execution kernel timing, WCOJ evidence, zero CPU fallback counters, and post-v0.8 rerun. |
 | G090_DOC | PARTIAL | Guide documents semantic oracle and blockers; production GPU/WCOJ path is not implemented. |
 | G090_CLOSE | BLOCKED | Requires G090_GPU/G090_SOLVER/G090_PROB/G090_CERT plus v0.8 integration/rebase. |
 
@@ -100,8 +100,8 @@ implementation, but it cannot be used as release-close evidence.
 
 Closure remains blocked until certification includes all of the following:
 
-- nonzero GPU launch counts and kernel timings for epistemic candidate
-  generation, propagation, world-view validation, and result materialization;
+- nonzero GPU launch counts and kernel timings for stable-model world-view
+  validation and final result materialization, plus the existing staging timing;
 - GPU-resident candidate, world-view, model-membership, and rejection buffers;
 - zero CPU fallback counters for candidate enumeration and world-view
   validation;
