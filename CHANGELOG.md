@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Added the v0.8.5 language-completeness documentation contract, including
+  finite lists, safe meta-predicates, deterministic NAF, magic-set planning,
+  probabilistic aggregate semantics, aggregate lifting, approximate inference
+  configuration, incremental parsing, and `xlog explain` / `xlog repl` /
+  `xlog watch` boundaries. The implementation remains tracked by the
+  corresponding `G085_*` evidence gates.
+- Added `docs/architecture/language-v085.md` as the parser, term, probability,
+  CLI, and v0.9.0 handoff contract for the v0.8.5 branch.
+
 ### Fixed
 
 - Hardened the release example validator so every `.xlog`, probabilistic,

@@ -18,10 +18,12 @@ exact-induction integration, and DTS-focused examples.
 This roadmap is version-oriented so planned work is not hidden inside subsystem
 sections. Historical and current-main work uses checked boxes. Future work uses
 unchecked boxes and is assigned to a concrete future version.
-After the tagged v0.8.0 feature pack, v0.9.0 is the Epistemic/Solver
-Semantics train and v0.10.0 is the Multi-GPU / Out-of-Core train. The
-broader language / CLI / general-product backlog remains deferred until it
-has a named consumer.
+After the tagged v0.8.0 feature pack, v0.8.5 is the active Language
+Completeness and Developer Experience train. It promotes the previously
+deferred language / CLI / general-product backlog because general XLOG users,
+DTS-DLM future fixtures, and the v0.9.0 epistemic/solver branch now need the
+surface. v0.9.0 remains the Epistemic/Solver Semantics train and v0.10.0 is the
+Multi-GPU / Out-of-Core train.
 
 ## v0.0.1 - Workspace Foundation
 
@@ -1448,23 +1450,67 @@ release-certification consumer depends on them.
 
 ### Deferred Product Backlog
 
-These items are intentionally not v0.8.0 gates after the DTS-DLM
-scope review. Re-open them when they have a named consumer or become
-release-certification blockers.
+These items were intentionally not v0.8.0 gates after the DTS-DLM scope
+review. They are now promoted into v0.8.5 because they have named consumers:
+general XLOG users, DTS-DLM future fixtures, and the v0.9.0
+epistemic/solver branch. Their active tracking lives in the v0.8.5 section
+below.
 
-- [ ] Add incremental parsing for interactive use.
-- [ ] Add list syntax and list built-ins.
-- [ ] Add meta-predicates such as `ground`, `var`, `=..`, `functor`,
-      `findall`, and `maplist`.
-- [ ] Add negation-as-failure syntax and semantics where it is distinct
-      from existing WFS support.
-- [ ] Add magic sets transformation.
+## v0.8.5 - Language Completeness and Developer Experience
+
+v0.8.5 is a language-surface release. It refreshes the public language
+reference, adds finite term/list/meta constructs, makes negation contracts
+explicit, adds bound-query magic-set planning, lifts probabilistic aggregate
+support into exact and MC paths, promotes approximate inference configuration,
+and adds developer-facing explain/REPL/watch surfaces. Accepted execution must
+reuse the production parser, AST, RIR, probabilistic IR, optimizer, runtime,
+WCOJ, and CLI paths.
+
+### Documentation And Semantic Contract
+
+- [ ] Refresh `docs/language-reference.md` to the v0.8.5 language contract,
+      including unsupported forms and GPU-native execution guarantees.
+- [ ] Add `docs/architecture/language-v085.md` with parser, term, probability,
+      CLI, and v0.9.0 handoff contracts.
+
+### Type And Term Model
+
+- [ ] Add domain alias preservation, named predicate columns, `list<T>`,
+      finite `term`, finite `compound`, and static `predref` representation.
+- [ ] Reject non-finite or non-GPU-lowerable term forms with typed diagnostics.
+
+### Lists And Safe Meta-Predicates
+
+- [ ] Add finite list syntax and list built-ins.
+- [ ] Add meta-predicates such as `ground`, `var`, `nonvar`, `=..`, `functor`,
+      `findall`, and `maplist` with static finite safety checks.
+
+### Negation And Magic Sets
+
+- [ ] Add negation-as-failure syntax and semantics where it is distinct from
+      existing probabilistic WFS support.
+- [ ] Add magic sets transformation for safe bound recursive queries.
+
+### Probabilistic And Approximate Inference
+
 - [ ] Add aggregate support in probabilistic programs.
 - [ ] Add aggregate lifting for small domains.
-- [ ] Add approximate inference engine.
+- [ ] Add approximate inference engine pragmas, CLI configuration, and
+      confidence reporting.
+
+### Incremental Parsing And CLI Developer Experience
+
+- [ ] Add incremental parsing for interactive use.
 - [ ] Add interactive REPL.
 - [ ] Add watch mode.
 - [ ] Add CLI explain/plan visualization.
+
+### Examples And Certification
+
+- [ ] Add at least 10 advanced v0.8.5 `.xlog` examples covering every feature
+      node and at least 5 feature interactions.
+- [ ] Add `scripts/validate_v085_examples.py` or equivalent validation with
+      committed evidence JSON.
 
 ## v0.9.0 - Epistemic and Solver Semantics
 
