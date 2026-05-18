@@ -8,9 +8,9 @@ use xlog_ir::{
     EpistemicWcojReductionStatus, ExecutionPlan, RirMeta, Scc,
 };
 use xlog_runtime::{
-    EpistemicGpuRuntimeCounters, EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace,
-    EpistemicGpuRuntimeWcojCertification, EpistemicGpuWorkspaceCapacities,
-    EpistemicGpuWorkspaceLayout, EpistemicGpuWorkspaceResetTrace,
+    EpistemicGpuCandidateGenerationTrace, EpistemicGpuRuntimeCounters,
+    EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace, EpistemicGpuRuntimeWcojCertification,
+    EpistemicGpuWorkspaceCapacities, EpistemicGpuWorkspaceLayout, EpistemicGpuWorkspaceResetTrace,
 };
 
 #[test]
@@ -279,6 +279,32 @@ fn workspace_reset_runtime_path_uses_device_memsets_not_host_writes() {
     assert!(source.contains("memset_zeros(&mut workspace.rejection_reasons)"));
     assert!(!source.contains("upload_epistemic_gpu_workspace_reset"));
     assert!(!source.contains("copy_epistemic_gpu_workspace_reset_from_host"));
+}
+
+#[test]
+fn candidate_generation_trace_records_device_kernel_without_host_writes() {
+    let trace = EpistemicGpuCandidateGenerationTrace::for_counts(3, 8).unwrap();
+
+    assert_eq!(trace.literal_count, 3);
+    assert_eq!(trace.generated_candidates, 8);
+    assert_eq!(trace.candidate_assumption_bytes, 24);
+    assert_eq!(trace.kernel_launches, 1);
+    assert_eq!(trace.host_write_ops, 0);
+}
+
+#[test]
+fn candidate_generation_runtime_path_launches_epistemic_kernel_not_host_writes() {
+    let source = include_str!("../src/executor/epistemic_workspace.rs");
+    let cuda = include_str!("../../xlog-cuda/kernels/epistemic.cu");
+    let manifest = include_str!("../../xlog-cuda/src/kernel_manifest_data.rs");
+
+    assert!(source.contains("fn generate_epistemic_gpu_candidates"));
+    assert!(source.contains("EPISTEMIC_GENERATE_CANDIDATE_ASSUMPTIONS_U8"));
+    assert!(source.contains("func.clone().launch"));
+    assert!(cuda.contains("epistemic_generate_candidate_assumptions_u8"));
+    assert!(manifest.contains("\"epistemic_generate_candidate_assumptions_u8\""));
+    assert!(!source.contains("upload_epistemic_candidate_assumptions"));
+    assert!(!source.contains("copy_epistemic_candidates_from_host"));
 }
 
 fn epistemic_literal(predicate: &str, op: EirEpistemicOp) -> EirEpistemicLiteral {

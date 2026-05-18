@@ -294,10 +294,11 @@ pub const WEIGHTS_MODULE: &str = "xlog_weights";
 pub const ILP_MODULE: &str = "xlog_ilp";
 pub const ILP_CREDIT_MODULE: &str = "xlog_ilp_credit";
 pub const ILP_EXACT_MODULE: &str = "xlog_ilp_exact";
+pub const EPISTEMIC_MODULE: &str = "xlog_epistemic";
 pub const WCOJ_MODULE: &str = "xlog_wcoj";
 
-// Compile-time check: kernel manifest lists exactly 23 modules.
-const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 23);
+// Compile-time check: kernel manifest lists exactly 24 modules.
+const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 24);
 
 /// Kernel function names in the GPU WCOJ module.
 pub mod wcoj_kernels {
@@ -388,6 +389,13 @@ pub mod arith_kernels {
     pub const ARITH_SELECT_U32: &str = "arith_select_u32";
     pub const ARITH_SELECT_F64: &str = "arith_select_f64";
     pub const ARITH_SELECT_F32: &str = "arith_select_f32";
+}
+
+/// Kernel function names in the epistemic module.
+pub mod epistemic_kernels {
+    /// Device-side epistemic candidate-assumption generator.
+    pub const EPISTEMIC_GENERATE_CANDIDATE_ASSUMPTIONS_U8: &str =
+        "epistemic_generate_candidate_assumptions_u8";
 }
 
 /// Kernel function names in the neural fast-path module.

@@ -143,6 +143,14 @@ assumptions, world views, model membership, and rejection reasons, then records
 initial state for later Generate-Propagate-Test kernels; it is not a substitute
 for those kernels.
 
+`Executor::generate_epistemic_gpu_candidates` launches
+`epistemic_generate_candidate_assumptions_u8` from the `xlog_epistemic` CUDA
+module to populate candidate-assumption bitsets directly in the workspace. The
+current kernel covers only bounded bit-mask candidate enumeration and records
+`EpistemicGpuCandidateGenerationTrace` with one kernel launch and zero host
+writes. Propagation, world-view validation, solver coupling, and result
+materialization remain missing GPU phases.
+
 `EpistemicGpuRuntimePreflight::for_executable_plan` consumes an
 `EpistemicExecutablePlan` before launch. It computes the workspace layout,
 rejects nonzero forbidden CPU fallback counters, and records the reduced
@@ -159,9 +167,9 @@ before/after counter trace.
 This workspace is still pre-kernel plumbing. It proves the buffer categories are
 allocatable, initialized on device, and inspectable on the runtime side and
 that WCOJ certification is tied to actual counter deltas around the production
-reduced-plan dispatch; it does not yet populate epistemic buffers with candidate
-semantics, launch Generate-Propagate-Test kernels, or produce epistemic kernel
-timing evidence.
+reduced-plan dispatch. Candidate-assumption generation now has a bounded CUDA
+kernel, but the runtime does not yet propagate candidates, validate world views,
+materialize accepted results, or produce full epistemic timing evidence.
 
 ## G91 Compatibility Fixture Semantics
 

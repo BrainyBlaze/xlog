@@ -18,7 +18,7 @@ release gate.
 | Area | Current branch state | Release status |
 |---|---|---|
 | EIR/GPU plan | Epistemic syntax is represented explicitly; `EpistemicGpuPlan` records the GPU contract; `EpistemicExecutablePlan` carries the reduced production runtime plan. | PARTIAL until accepted forms execute through production runtime/GPU dispatch. |
-| GPU workspace | `EpistemicGpuWorkspace` maps required buffer categories to runtime `TrackedCudaSlice` handles; `EpistemicGpuWorkspaceResetTrace` records device-side reset with zero host writes; `EpistemicGpuRuntimePreflight` consumes executable plans and records WCOJ/helper route metadata; `EpistemicGpuRuntimeWcojCertification` rejects WCOJ evidence unless runtime counters advance; `EpistemicGpuRuntimeTrace` records reduced-plan counter deltas. | PARTIAL until kernels populate and consume those buffers with semantic state. |
+| GPU workspace | `EpistemicGpuWorkspace` maps required buffer categories to runtime `TrackedCudaSlice` handles; `EpistemicGpuWorkspaceResetTrace` records device-side reset with zero host writes; `EpistemicGpuCandidateGenerationTrace` records bounded candidate-assumption kernel launches; `EpistemicGpuRuntimePreflight` consumes executable plans and records WCOJ/helper route metadata; `EpistemicGpuRuntimeWcojCertification` rejects WCOJ evidence unless runtime counters advance; `EpistemicGpuRuntimeTrace` records reduced-plan counter deltas. | PARTIAL until kernels propagate candidates, validate world views, and materialize accepted results. |
 | World views | `EpistemicWorldView` fixtures test `know`, `possible`, and `not know`. | ORACLE ONLY until world views are generated/validated on GPU. |
 | GPT | CPU fixture records guesses, reduced models, accepted world views, and rejection reasons. | PARTIAL until candidate generation/propagation/validation use GPU-resident buffers. |
 | Splitting | CPU split/recompose fixtures pass. | PARTIAL until valid split components execute through GPU-native subplans. |
@@ -54,7 +54,8 @@ The next production slice should start at the lowering/runtime boundary:
    `compile_epistemic_gpu_execution` and its stats-aware variant; runtime
    dispatch remains open.
 4. Add GPU-resident candidate/world-view/rejection buffer population and launch
-   telemetry.
+   telemetry. PARTIAL for bounded candidate-assumption generation; world-view,
+   model-membership, and rejection-reason semantic population remain open.
 5. Route WCOJ-eligible reductions through existing planner/layout/dispatch
    machinery, including helper-splitting evidence where applicable.
 6. Replace CPU solver fixture search in accepted execution with GPU-native
@@ -79,7 +80,7 @@ The next production slice should start at the lowering/runtime boundary:
 | `cargo test -p xlog-solve --lib` | PASS, 111 passed, 0 failed |
 | `cargo test -p xlog-prob --lib` | PASS, 56 passed, 0 failed |
 | `cargo check -p xlog-logic -p xlog-ir -p xlog-solve -p xlog-prob` | PASS |
-| `cargo check -p xlog-runtime -p xlog-logic -p xlog-ir` | PASS |
+| `cargo check -p xlog-cuda -p xlog-runtime -p xlog-logic -p xlog-ir` | PASS |
 | `cargo check -p pyxlog` | PASS |
 
 These are semantic-oracle and workspace-health checks only. They do not satisfy

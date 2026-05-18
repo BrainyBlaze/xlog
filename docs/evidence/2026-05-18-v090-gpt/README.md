@@ -21,7 +21,8 @@ Predecessor evidence:
 | Trace output | `GeneratePropagateTestTrace` reports generated, guesses, propagated, pruned, reduced-program models, tested, accepted, accepted world views, rejected, and rejection reasons. |
 | Correctness fixtures | `test_epistemic_gpt.rs` covers one accepted candidate, one FAEEL-rejected candidate, and one propagation-pruned contradiction. |
 | Bounded behavior | `GeneratePropagateTestConfig::max_candidates` rejects oversized candidate sets with `XlogError::ResourceExhausted`. |
-| GPU residency | Not implemented in this CPU semantic-oracle fixture. |
+| GPU candidate generation | `epistemic_generate_candidate_assumptions_u8` populates bounded candidate-assumption bitsets in the runtime workspace. |
+| GPU residency | Candidate-assumption generation is implemented as a bounded CUDA kernel; propagation, world-view validation, and materialization are still CPU-oracle/runtime gaps. |
 | Documentation | `docs/architecture/epistemic-semantics.md` documents the GPT phase contract and guard. |
 
 ## Validation
@@ -29,6 +30,8 @@ Predecessor evidence:
 | Command | Result |
 |---|---|
 | `cargo fmt --check` | PASS |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace candidate_generation` | PASS, 2 passed, 0 failed |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 11 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_gpt` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_faeel` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_g91` | PASS, 3 passed, 0 failed |
@@ -42,14 +45,14 @@ Predecessor evidence:
 | Metric | Target | Status | Evidence |
 |---|---|---|---|
 | M090_GPT.1 phase separation | generate, propagate, test boundaries visible in code | PASS for oracle | `run_generate_propagate_test` implementation and test fixture. |
-| M090_GPT.2 trace output | debug/trace mode reports phase counts and GPU launch counters | PARTIAL | CPU trace counts are asserted; GPU launch counters are missing. |
+| M090_GPT.2 trace output | debug/trace mode reports phase counts and GPU launch counters | PARTIAL | CPU trace counts are asserted; candidate-generation trace records one GPU launch, but full GPT launch counters are missing. |
 | M090_GPT.3 correctness fixtures | accepted/rejected candidate fixtures pass | PASS for oracle | `test_epistemic_gpt`: 2/2 passed. |
 | M090_GPT.4 bounded behavior | candidate explosion guard implemented or explicitly scoped | PASS for oracle | `ResourceExhausted` guard fixture. |
 | M090_GPT.5 world-view validation | trace records guess count, reduced-program model count, accepted world-view count, and rejection reasons | PASS for oracle | CPU trace fields are asserted in `test_epistemic_gpt`. |
-| M090_GPT.6 GPU residency | candidate generation, propagation, and world-view validation hot path uses GPU-resident buffers | BLOCKED | Current GPT fixture uses explicit CPU candidate inputs. |
+| M090_GPT.6 GPU residency | candidate generation, propagation, and world-view validation hot path uses GPU-resident buffers | PARTIAL | Candidate-assumption generation writes GPU-resident workspace buffers through a CUDA kernel; propagation and world-view validation still use CPU oracle fixtures. |
 
 ## Coordination Notes
 
-- Candidate generation is explicit-input bounded fixture generation; arbitrary EIR world enumeration on GPU remains required production scope.
+- Candidate generation is now available as a bounded GPU workspace kernel, but arbitrary EIR world enumeration plus propagation/test phases remain required production scope.
 - No pyxlog public API signatures were changed.
 - No push, tag, release-board update, or merge was performed.
