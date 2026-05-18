@@ -8,7 +8,7 @@ use xlog_ir::{
     EpistemicWcojReductionStatus, ExecutionPlan, RirMeta, Scc,
 };
 use xlog_runtime::{
-    EpistemicGpuRuntimeCounters, EpistemicGpuRuntimePreflight,
+    EpistemicGpuRuntimeCounters, EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace,
     EpistemicGpuRuntimeWcojCertification, EpistemicGpuWorkspaceCapacities,
     EpistemicGpuWorkspaceLayout,
 };
@@ -179,6 +179,51 @@ fn runtime_wcoj_certification_accepts_actual_kclique_dispatch_delta() {
 
     assert_eq!(
         EpistemicGpuRuntimeWcojCertification::for_preflight_and_delta(&preflight, &delta),
+        EpistemicGpuRuntimeWcojCertification::Certified {
+            observed_wcoj_dispatches: 1,
+            observed_kclique_dispatches: 1,
+            observed_layout_sorts: 2,
+            observed_metadata_builds: 1,
+        }
+    );
+}
+
+#[test]
+fn runtime_trace_preserves_counter_snapshots_and_wcoj_certification() {
+    let executable = executable_with_kclique_wcoj_plan();
+    let preflight = EpistemicGpuRuntimePreflight::for_executable_plan(
+        &executable,
+        EpistemicGpuWorkspaceCapacities {
+            max_candidates: 8,
+            max_worlds: 4,
+            max_models_per_reduction: 6,
+        },
+    )
+    .unwrap();
+
+    let before = EpistemicGpuRuntimeCounters {
+        wcoj_clique5_dispatch_count: 2,
+        kclique_metadata_build_count: 4,
+        wcoj_layout_sort_invocation_count: 8,
+        ..EpistemicGpuRuntimeCounters::default()
+    };
+    let after = EpistemicGpuRuntimeCounters {
+        wcoj_clique5_dispatch_count: 3,
+        kclique_metadata_build_count: 5,
+        wcoj_layout_sort_invocation_count: 10,
+        ..EpistemicGpuRuntimeCounters::default()
+    };
+
+    let trace = EpistemicGpuRuntimeTrace::from_preflight_and_counters(preflight, before, after);
+
+    assert_eq!(trace.preflight.kclique_wcoj_plan_count, 1);
+    assert_eq!(trace.counters_before.wcoj_clique5_dispatch_count, 2);
+    assert_eq!(trace.counters_after.wcoj_clique5_dispatch_count, 3);
+    assert_eq!(trace.counter_delta.wcoj_clique5_dispatch_count, 1);
+    assert_eq!(trace.counter_delta.kclique_metadata_build_count, 1);
+    assert_eq!(trace.counter_delta.wcoj_layout_sort_invocation_count, 2);
+    assert_eq!(
+        trace.wcoj_certification,
         EpistemicGpuRuntimeWcojCertification::Certified {
             observed_wcoj_dispatches: 1,
             observed_kclique_dispatches: 1,

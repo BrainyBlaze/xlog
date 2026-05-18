@@ -1,7 +1,7 @@
 //! Epistemic GPU workspace allocation.
 
 use xlog_core::{Result, XlogError};
-use xlog_cuda::memory::TrackedCudaSlice;
+use xlog_cuda::{memory::TrackedCudaSlice, CudaBuffer};
 use xlog_ir::rir::{MultiwayPlan, RirNode};
 use xlog_ir::{EpistemicCpuFallbackCounters, EpistemicExecutablePlan, EpistemicGpuPlan};
 
@@ -162,6 +162,44 @@ pub struct EpistemicGpuPreparedExecution {
     pub workspace: EpistemicGpuWorkspace,
 }
 
+/// Counter trace captured around a reduced production runtime dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EpistemicGpuRuntimeTrace {
+    /// Static preflight summary for the executed plan.
+    pub preflight: EpistemicGpuRuntimePreflight,
+    /// Runtime counters before dispatch.
+    pub counters_before: EpistemicGpuRuntimeCounters,
+    /// Runtime counters after dispatch.
+    pub counters_after: EpistemicGpuRuntimeCounters,
+    /// Saturating counter delta for the dispatch window.
+    pub counter_delta: EpistemicGpuRuntimeCounters,
+    /// WCOJ certification result derived from preflight obligations and deltas.
+    pub wcoj_certification: EpistemicGpuRuntimeWcojCertification,
+}
+
+impl EpistemicGpuRuntimeTrace {
+    /// Build a trace from static preflight data and runtime counter snapshots.
+    pub fn from_preflight_and_counters(
+        preflight: EpistemicGpuRuntimePreflight,
+        counters_before: EpistemicGpuRuntimeCounters,
+        counters_after: EpistemicGpuRuntimeCounters,
+    ) -> Self {
+        let counter_delta = counters_after.saturating_delta_since(counters_before);
+        let wcoj_certification = EpistemicGpuRuntimeWcojCertification::for_preflight_and_delta(
+            &preflight,
+            &counter_delta,
+        );
+
+        Self {
+            preflight,
+            counters_before,
+            counters_after,
+            counter_delta,
+            wcoj_certification,
+        }
+    }
+}
+
 /// Runtime counters relevant to epistemic GPU certification.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct EpistemicGpuRuntimeCounters {
@@ -273,6 +311,16 @@ pub enum EpistemicGpuRuntimeWcojCertification {
     },
 }
 
+/// Output from executing the reduced production runtime plan for an epistemic program.
+pub struct EpistemicGpuExecutionResult {
+    /// Prepared workspace and preflight state.
+    pub prepared: EpistemicGpuPreparedExecution,
+    /// Output buffer returned by the reduced production execution plan.
+    pub output: CudaBuffer,
+    /// Runtime counter trace for the reduced production plan dispatch.
+    pub trace: EpistemicGpuRuntimeTrace,
+}
+
 impl EpistemicGpuRuntimeWcojCertification {
     /// Compare static preflight obligations with runtime counter deltas.
     pub fn for_preflight_and_delta(
@@ -354,6 +402,29 @@ impl Executor {
         Ok(EpistemicGpuPreparedExecution {
             preflight,
             workspace,
+        })
+    }
+
+    /// Execute the reduced production runtime plan and capture epistemic GPU evidence.
+    pub fn execute_epistemic_gpu_execution(
+        &mut self,
+        executable: &EpistemicExecutablePlan,
+        capacities: EpistemicGpuWorkspaceCapacities,
+    ) -> Result<EpistemicGpuExecutionResult> {
+        let prepared = self.prepare_epistemic_gpu_execution(executable, capacities)?;
+        let counters_before = self.epistemic_gpu_runtime_counters();
+        let output = self.execute_plan(&executable.reduced_runtime_plan)?;
+        let counters_after = self.epistemic_gpu_runtime_counters();
+        let trace = EpistemicGpuRuntimeTrace::from_preflight_and_counters(
+            prepared.preflight,
+            counters_before,
+            counters_after,
+        );
+
+        Ok(EpistemicGpuExecutionResult {
+            prepared,
+            output,
+            trace,
         })
     }
 }

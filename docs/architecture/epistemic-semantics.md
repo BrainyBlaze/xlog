@@ -145,11 +145,15 @@ planned-hash routes, sorted-layout requirements, and helper-splitting specs.
 around a future epistemic dispatch, and
 `EpistemicGpuRuntimeWcojCertification` rejects preflight-only WCOJ metadata
 when required K-clique dispatch counters do not advance.
+`Executor::execute_epistemic_gpu_execution` now wraps the reduced production
+runtime plan with preflight, workspace allocation, `execute_plan`, and a
+before/after counter trace.
 
 This workspace is still pre-kernel plumbing. It proves the buffer categories are
 allocatable and inspectable on the runtime side and that WCOJ certification is
-tied to actual counter deltas; it does not yet populate buffers, launch
-Generate-Propagate-Test kernels, or produce epistemic kernel timing evidence.
+tied to actual counter deltas around the production reduced-plan dispatch; it
+does not yet populate epistemic buffers, launch Generate-Propagate-Test kernels,
+or produce epistemic kernel timing evidence.
 
 ## G91 Compatibility Fixture Semantics
 
