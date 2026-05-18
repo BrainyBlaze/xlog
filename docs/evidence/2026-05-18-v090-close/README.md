@@ -96,7 +96,8 @@ The branch contains useful scaffolding:
 - runtime preflight that rejects nonzero CPU fallback counters and records
   WCOJ/K-clique/helper route metadata before launch;
 - runtime counter guard that refuses to certify WCOJ evidence from preflight
-  metadata unless production WCOJ counters advance, and is invoked before
+  metadata unless production WCOJ counters advance, while accepted K5 evidence
+  also requires sorted-layout and helper-split preflight metadata before
   model-membership/world-view staging;
 - hot-path transfer-budget trace that rejects tracked data-plane H2D/D2H
   deltas without resetting shared provider telemetry;

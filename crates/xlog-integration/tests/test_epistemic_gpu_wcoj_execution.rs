@@ -228,6 +228,8 @@ fn accepted_epistemic_k5_execution_certifies_production_wcoj_dispatch() {
         .expect("execute accepted epistemic K5");
 
     assert_eq!(result.prepared.preflight.kclique_wcoj_plan_count, 1);
+    assert_eq!(result.prepared.preflight.sorted_layout_requirement_count, 1);
+    assert_eq!(result.prepared.preflight.helper_split_spec_count, 1);
     assert_eq!(
         result.model_membership.membership_source,
         EpistemicGpuModelMembershipSource::StableModelTupleBuffer
