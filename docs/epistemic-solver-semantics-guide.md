@@ -51,17 +51,20 @@ writes, and CUDA-event elapsed timing for candidate-buffer validation.
 `Executor::populate_epistemic_gpu_model_membership_from_tuple_sources` launches
 `epistemic_populate_model_membership_from_tuple_source_u8` for zero-arity
 bindings and arity-specific tuple-key kernels for arity-one, arity-two, and
-arity-three bindings, plus a generic arity-N tuple-key kernel for wider ground
-tuples. It records `EpistemicGpuModelMembershipTrace` with stable tuple source
-row-count reads, tuple-key column device reads, zero reduced-output row-count
-reads, zero host writes, and CUDA-event elapsed timing. This slice preserves
-source tuple terms in EIR/GPU-plan metadata and certifies ground-key reduced
-stable-model tuple-source staging from named GPU relation buffers and existing
-`CudaBuffer` columns. Ground tuple keys are encoded as expected raw bits plus
-scalar type codes and compared against existing relation-cell bytes on device
-for the current model-slot row in the specialized arity-one/two/three kernels
-or the generic arity-N kernel. Variable-bound keys, anonymous keys, aggregate
-keys, and full semantic parity still fail closed.
+arity-three bindings, plus a generic arity-N tuple-key kernel for wider keys
+and variable-bound keys. It records `EpistemicGpuModelMembershipTrace` with
+stable tuple source row-count reads, tuple-key column device reads,
+reduced-output row-count reads for bound-variable tuple keys, zero host writes,
+and CUDA-event elapsed timing. This slice preserves source tuple terms in
+EIR/GPU-plan metadata and certifies row-scoped reduced stable-model
+tuple-source staging from named GPU relation buffers and existing `CudaBuffer`
+columns. Ground tuple keys are encoded as expected raw bits plus scalar type
+codes and compared against existing relation-cell bytes on device for the
+current model-slot row in the specialized arity-one/two/three kernels or the
+generic arity-N kernel. Variable-bound tuple keys are matched in the generic
+arity-N kernel against reduced-output `CudaBuffer` columns selected by the EIR
+variable name. Anonymous keys, aggregate keys, and full semantic parity still
+fail closed.
 `Executor::validate_epistemic_gpu_world_views` launches the
 `epistemic_validate_world_views_u8` CUDA kernel and records
 `EpistemicGpuWorldViewValidationTrace` with one kernel launch, zero host
@@ -91,11 +94,12 @@ accepted-candidate, final-result flag, and final tuple materialization-staging
 kernel launches. It also snapshots provider host-transfer counters around the hot path
 and records `EpistemicGpuTransferBudgetTrace`, which rejects tracked data-plane
 H2D/D2H deltas instead of resetting shared telemetry. That is still incomplete
-for the epistemic hot path; ground-key tuple-source staging is GPU-backed over
-existing relation buffers with row-scoped comparison through specialized
-arity-one/two/three kernels and a generic arity-N kernel, but bound-variable
-tuple-key matching, full world-view semantics, solver coupling, and
-probabilistic production-path reuse do not dispatch yet.
+for the epistemic hot path; tuple-source staging is GPU-backed over existing
+relation buffers with row-scoped ground-key comparison through specialized
+arity-one/two/three kernels and a generic arity-N kernel, plus row-scoped
+variable-bound comparison against reduced-output columns through the generic
+arity-N kernel. Full world-view semantics, solver coupling, and probabilistic
+production-path reuse do not dispatch yet.
 
 ## GPU And WCOJ Scope
 

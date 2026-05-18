@@ -161,6 +161,29 @@ static __device__ uint8_t epistemic_tuple_key_cell_matches(
     return ((actual_bits & mask) == (expected_bits & mask)) ? 1u : 0u;
 }
 
+static __device__ uint8_t epistemic_tuple_key_bound_cell_matches(
+    const uint8_t* __restrict__ tuple_key_col,
+    uint32_t tuple_key_col_width,
+    uint32_t tuple_row,
+    const uint8_t* __restrict__ bound_value_col,
+    uint32_t bound_value_col_width,
+    uint32_t bound_row
+) {
+    if (tuple_key_col == nullptr || bound_value_col == nullptr) return 0u;
+    if (tuple_key_col_width == 0u || tuple_key_col_width > 8u) return 0u;
+    if (tuple_key_col_width != bound_value_col_width) return 0u;
+
+    const volatile uint8_t* tuple_col = tuple_key_col;
+    const volatile uint8_t* bound_col = bound_value_col;
+    uint32_t tuple_base = tuple_row * tuple_key_col_width;
+    uint32_t bound_base = bound_row * bound_value_col_width;
+    for (uint32_t byte = 0; byte < tuple_key_col_width; ++byte) {
+        if (tuple_col[tuple_base + byte] != bound_col[bound_base + byte]) return 0u;
+    }
+
+    return 1u;
+}
+
 static __device__ uint8_t epistemic_tuple_key_row_matches_arity1(
     const uint8_t* __restrict__ tuple_key_col0,
     uint32_t tuple_key_col0_width,
@@ -435,8 +458,12 @@ static __device__ uint8_t epistemic_tuple_key_row_matches_arity_n(
     const uint32_t* __restrict__ tuple_key_col_widths,
     const uint64_t* __restrict__ expected_key_bits,
     const uint8_t* __restrict__ expected_key_type_codes,
+    const uint8_t* __restrict__ tuple_key_match_modes,
+    const uint64_t* __restrict__ bound_value_col_ptrs,
+    const uint32_t* __restrict__ bound_value_col_widths,
     uint32_t key_col_count,
-    uint32_t row
+    uint32_t tuple_row,
+    uint32_t bound_row
 ) {
     if (key_col_count == 0u) return 1u;
 
@@ -445,13 +472,28 @@ static __device__ uint8_t epistemic_tuple_key_row_matches_arity_n(
             reinterpret_cast<const uint8_t*>(tuple_key_col_ptrs[key]);
         if (tuple_key_col == nullptr) return 0u;
 
-        uint8_t matches = epistemic_tuple_key_cell_matches(
-            tuple_key_col,
-            tuple_key_col_widths[key],
-            row,
-            expected_key_bits[key],
-            expected_key_type_codes[key]
-        );
+        uint8_t match_mode = tuple_key_match_modes[key];
+        uint8_t matches = 0u;
+        if (match_mode == 1u) {
+            const uint8_t* bound_value_col =
+                reinterpret_cast<const uint8_t*>(bound_value_col_ptrs[key]);
+            matches = epistemic_tuple_key_bound_cell_matches(
+                tuple_key_col,
+                tuple_key_col_widths[key],
+                tuple_row,
+                bound_value_col,
+                bound_value_col_widths[key],
+                bound_row
+            );
+        } else if (match_mode == 0u) {
+            matches = epistemic_tuple_key_cell_matches(
+                tuple_key_col,
+                tuple_key_col_widths[key],
+                tuple_row,
+                expected_key_bits[key],
+                expected_key_type_codes[key]
+            );
+        }
         if (matches == 0u) return 0u;
     }
 
@@ -471,7 +513,12 @@ extern "C" __global__ void epistemic_populate_model_membership_from_tuple_source
     const uint32_t* __restrict__ tuple_key_col_widths,
     const uint64_t* __restrict__ expected_key_bits,
     const uint8_t* __restrict__ expected_key_type_codes,
+    const uint8_t* __restrict__ tuple_key_match_modes,
+    const uint64_t* __restrict__ bound_value_col_ptrs,
+    const uint32_t* __restrict__ bound_value_col_widths,
+    const uint32_t* __restrict__ bound_value_row_count,
     uint32_t key_col_count,
+    uint8_t has_bound_value_keys,
     const uint8_t* __restrict__ candidate_assumptions,
     const uint8_t* __restrict__ world_views,
     uint8_t* __restrict__ model_membership,
@@ -490,16 +537,24 @@ extern "C" __global__ void epistemic_populate_model_membership_from_tuple_source
         + literal_index;
 
     uint32_t tuple_rows = tuple_source_row_count[0];
+    uint32_t bound_rows =
+        (has_bound_value_keys != 0u && bound_value_row_count != nullptr)
+            ? bound_value_row_count[0]
+            : 0u;
     uint8_t active_world = world_views[candidate * world_stride];
     uint8_t accepted_so_far = (rejection_reasons[candidate] == 0u) ? 1u : 0u;
     uint8_t has_tuple_source =
-        (model < tuple_rows)
+        (model < tuple_rows && (has_bound_value_keys == 0u || model < bound_rows))
             ? epistemic_tuple_key_row_matches_arity_n(
                   tuple_key_col_ptrs,
                   tuple_key_col_widths,
                   expected_key_bits,
                   expected_key_type_codes,
+                  tuple_key_match_modes,
+                  bound_value_col_ptrs,
+                  bound_value_col_widths,
                   key_col_count,
+                  model,
                   model
               )
             : 0u;

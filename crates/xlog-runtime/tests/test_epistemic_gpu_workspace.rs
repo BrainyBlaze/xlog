@@ -699,6 +699,33 @@ fn model_membership_runtime_path_launches_generic_arity_tuple_key_kernel_not_hos
 }
 
 #[test]
+fn model_membership_runtime_path_uses_bound_output_columns_for_variable_tuple_keys() {
+    let source = include_str!("../src/executor/epistemic_workspace.rs");
+    let cuda = include_str!("../../xlog-cuda/kernels/epistemic.cu");
+
+    assert!(source.contains("output: &CudaBuffer"));
+    assert!(source.contains("let output = self.execute_plan(&executable.reduced_runtime_plan)?"));
+    assert!(source.contains("&output,"));
+    assert!(source.contains("EirTerm::Variable(variable_name)"));
+    assert!(source.contains("output.schema().column_index(variable_name)"));
+    assert!(source.contains("output.column(bound_col_index)"));
+    assert!(source.contains("tuple_key_match_modes"));
+    assert!(source.contains("bound_value_col_ptrs"));
+    assert!(source.contains("bound_value_col_widths"));
+    assert!(source.contains("bound_value_row_count: output.num_rows_device()"));
+    assert!(cuda.contains("tuple_key_match_modes"));
+    assert!(cuda.contains("bound_value_col_ptrs"));
+    assert!(cuda.contains("bound_value_col_widths"));
+    assert!(cuda.contains("bound_value_row_count"));
+    assert!(cuda.contains("epistemic_tuple_key_bound_cell_matches"));
+    assert!(
+        !source.contains("term {term:?} requires a bound value buffer for GPU tuple-key matching")
+    );
+    assert!(!source.contains("copy_epistemic_tuple_keys_from_host"));
+    assert!(!source.contains("dtoh_epistemic_tuple_key"));
+}
+
+#[test]
 fn world_view_validation_trace_records_device_kernel_without_host_writes() {
     let trace = EpistemicGpuWorldViewValidationTrace::for_counts(3, 8, 2, 4).unwrap();
 

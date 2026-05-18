@@ -1173,13 +1173,21 @@ enum TupleSourceLaunch<'a> {
         literal_index: u32,
         reduction_index: u32,
         row_count: &'a TrackedCudaSlice<u32>,
+        bound_value_row_count: &'a TrackedCudaSlice<u32>,
         key_col_count: u32,
         key_col_ptrs: TrackedCudaSlice<u64>,
         key_col_widths: TrackedCudaSlice<u32>,
         expected_key_bits: TrackedCudaSlice<u64>,
         expected_key_type_codes: TrackedCudaSlice<u8>,
+        tuple_key_match_modes: TrackedCudaSlice<u8>,
+        bound_value_col_ptrs: TrackedCudaSlice<u64>,
+        bound_value_col_widths: TrackedCudaSlice<u32>,
+        has_bound_value_keys: u8,
     },
 }
+
+const TUPLE_KEY_MATCH_MODE_GROUND: u8 = 0;
+const TUPLE_KEY_MATCH_MODE_BOUND_OUTPUT: u8 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TupleKeyExpectation {
@@ -1227,9 +1235,14 @@ impl TupleKeyExpectation {
             (EirTerm::FloatBits(bits), ScalarType::F32) => {
                 (f64::from_bits(*bits) as f32).to_bits() as u64
             }
-            (EirTerm::Variable(_) | EirTerm::Anonymous | EirTerm::Aggregate { .. }, _) => {
+            (EirTerm::Variable(_), _) => {
                 return Err(tuple_key_expectation_error(format!(
-                    "term {term:?} requires a bound value buffer for GPU tuple-key matching"
+                    "term {term:?} cannot be encoded as a ground tuple-key expectation"
+                )))
+            }
+            (EirTerm::Anonymous | EirTerm::Aggregate { .. }, _) => {
+                return Err(tuple_key_expectation_error(format!(
+                    "term {term:?} cannot be used for GPU tuple-key matching"
                 )))
             }
             _ => {
@@ -1712,6 +1725,7 @@ impl Executor {
     pub fn populate_epistemic_gpu_model_membership_from_tuple_sources(
         &self,
         workspace: &mut EpistemicGpuWorkspace,
+        output: &CudaBuffer,
         gpu_plan: &EpistemicGpuPlan,
         candidate_count: usize,
         models_per_reduction: usize,
@@ -1726,7 +1740,17 @@ impl Executor {
             .try_fold(0usize, |acc, binding| {
                 checked_sum(acc, binding.key_columns.len())
             })?;
-        let trace =
+        let bound_tuple_source_count = gpu_plan
+            .tuple_membership_bindings
+            .iter()
+            .filter(|binding| {
+                binding
+                    .key_terms
+                    .iter()
+                    .any(|term| matches!(term, EirTerm::Variable(_)))
+            })
+            .count();
+        let mut trace =
             EpistemicGpuModelMembershipTrace::for_stable_model_tuple_sources_with_key_columns(
                 literal_count,
                 candidate_count,
@@ -1735,6 +1759,14 @@ impl Executor {
                 gpu_plan.tuple_membership_bindings.len(),
                 tuple_source_key_column_count,
             )?;
+        if bound_tuple_source_count > u32::MAX as usize {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU bound tuple-key source count".to_string(),
+                estimated_bytes: bound_tuple_source_count as u64,
+                budget_bytes: u32::MAX as u64,
+            });
+        }
+        trace.output_row_count_device_reads = bound_tuple_source_count as u32;
         let candidate_assumption_bytes = checked_product(literal_count, candidate_count)?;
         if candidate_assumption_bytes > workspace.layout.candidate_assumption_bytes {
             return Err(XlogError::ResourceExhausted {
@@ -1828,13 +1860,17 @@ impl Executor {
                     ),
                 });
             }
+            let has_bound_value_keys = binding
+                .key_terms
+                .iter()
+                .any(|term| matches!(term, EirTerm::Variable(_)));
             match binding.key_columns.as_slice() {
                 [] => tuple_sources.push(TupleSourceLaunch::ArityZero {
                     literal_index: binding.literal_index as u32,
                     reduction_index: binding.reduction_index as u32,
                     row_count: source_relation.num_rows_device(),
                 }),
-                &[key_col] => {
+                &[key_col] if !has_bound_value_keys => {
                     let key_col0 = source_relation.column(key_col).ok_or_else(|| {
                         XlogError::UnsupportedEpistemicConstruct {
                             construct: "epistemic GPU stable-model tuple membership".to_string(),
@@ -1876,7 +1912,7 @@ impl Executor {
                         expected_key_col0_type_code: key_col0_expectation.type_code,
                     });
                 }
-                &[key_col0, key_col1] => {
+                &[key_col0, key_col1] if !has_bound_value_keys => {
                     let key_col0_ref = source_relation.column(key_col0).ok_or_else(|| {
                         XlogError::UnsupportedEpistemicConstruct {
                             construct: "epistemic GPU stable-model tuple membership".to_string(),
@@ -1947,7 +1983,7 @@ impl Executor {
                         expected_key_col1_type_code: key_col1_expectation.type_code,
                     });
                 }
-                &[key_col0, key_col1, key_col2] => {
+                &[key_col0, key_col1, key_col2] if !has_bound_value_keys => {
                     let key_col0_ref = source_relation.column(key_col0).ok_or_else(|| {
                         XlogError::UnsupportedEpistemicConstruct {
                             construct: "epistemic GPU stable-model tuple membership".to_string(),
@@ -2059,6 +2095,9 @@ impl Executor {
                     let mut key_col_widths_host = Vec::with_capacity(key_columns.len());
                     let mut expected_key_bits_host = Vec::with_capacity(key_columns.len());
                     let mut expected_key_type_codes_host = Vec::with_capacity(key_columns.len());
+                    let mut tuple_key_match_modes_host = Vec::with_capacity(key_columns.len());
+                    let mut bound_value_col_ptrs_host = Vec::with_capacity(key_columns.len());
+                    let mut bound_value_col_widths_host = Vec::with_capacity(key_columns.len());
                     for (term_index, &key_col) in key_columns.iter().enumerate() {
                         let key_col_ref = source_relation.column(key_col).ok_or_else(|| {
                             XlogError::UnsupportedEpistemicConstruct {
@@ -2089,15 +2128,82 @@ impl Executor {
                                 budget_bytes: u32::MAX as u64,
                             });
                         }
-                        let expectation = TupleKeyExpectation::from_term(
-                            &binding.key_terms[term_index],
-                            key_col_type,
-                        )?;
 
                         key_col_ptrs_host.push(*key_col_ref.device_ptr() as u64);
                         key_col_widths_host.push(key_col_width as u32);
-                        expected_key_bits_host.push(expectation.bits);
-                        expected_key_type_codes_host.push(expectation.type_code);
+                        match &binding.key_terms[term_index] {
+                            EirTerm::Variable(variable_name) => {
+                                let bound_col_index =
+                                    output.schema().column_index(variable_name).ok_or_else(
+                                        || XlogError::UnsupportedEpistemicConstruct {
+                                            construct: "epistemic GPU bound tuple-key matching"
+                                                .to_string(),
+                                            context: format!(
+                                                "reduced output is missing bound variable column \
+                                                 {variable_name}"
+                                            ),
+                                        },
+                                    )?;
+                                let bound_col =
+                                    output.column(bound_col_index).ok_or_else(|| {
+                                        XlogError::UnsupportedEpistemicConstruct {
+                                            construct: "epistemic GPU bound tuple-key matching"
+                                                .to_string(),
+                                            context: format!(
+                                                "reduced output is missing device column \
+                                             {bound_col_index} for variable {variable_name}"
+                                            ),
+                                        }
+                                    })?;
+                                let bound_col_type =
+                                    output.schema().column_type(bound_col_index).ok_or_else(
+                                        || XlogError::UnsupportedEpistemicConstruct {
+                                            construct: "epistemic GPU bound tuple-key matching"
+                                                .to_string(),
+                                            context: format!(
+                                                "reduced output is missing schema for variable \
+                                             {variable_name}"
+                                            ),
+                                        },
+                                    )?;
+                                if bound_col_type != key_col_type {
+                                    return Err(XlogError::UnsupportedEpistemicConstruct {
+                                        construct: "epistemic GPU bound tuple-key matching"
+                                            .to_string(),
+                                        context: format!(
+                                            "bound variable {variable_name} has output type \
+                                             {bound_col_type:?}, but tuple source {} key column \
+                                             {} has type {key_col_type:?}",
+                                            binding.predicate, key_col
+                                        ),
+                                    });
+                                }
+                                let bound_col_width = bound_col_type.size_bytes();
+                                if bound_col_width > u32::MAX as usize {
+                                    return Err(XlogError::ResourceExhausted {
+                                        context: "epistemic GPU bound tuple-key column width"
+                                            .to_string(),
+                                        estimated_bytes: bound_col_width as u64,
+                                        budget_bytes: u32::MAX as u64,
+                                    });
+                                }
+
+                                expected_key_bits_host.push(0);
+                                expected_key_type_codes_host.push(key_col_type.to_code());
+                                tuple_key_match_modes_host.push(TUPLE_KEY_MATCH_MODE_BOUND_OUTPUT);
+                                bound_value_col_ptrs_host.push(*bound_col.device_ptr() as u64);
+                                bound_value_col_widths_host.push(bound_col_width as u32);
+                            }
+                            term => {
+                                let expectation =
+                                    TupleKeyExpectation::from_term(term, key_col_type)?;
+                                expected_key_bits_host.push(expectation.bits);
+                                expected_key_type_codes_host.push(expectation.type_code);
+                                tuple_key_match_modes_host.push(TUPLE_KEY_MATCH_MODE_GROUND);
+                                bound_value_col_ptrs_host.push(0);
+                                bound_value_col_widths_host.push(0);
+                            }
+                        }
                     }
 
                     let memory = self.provider.memory();
@@ -2106,6 +2212,9 @@ impl Executor {
                     let mut key_col_widths = memory.alloc::<u32>(key_columns.len())?;
                     let mut expected_key_bits = memory.alloc::<u64>(key_columns.len())?;
                     let mut expected_key_type_codes = memory.alloc::<u8>(key_columns.len())?;
+                    let mut tuple_key_match_modes = memory.alloc::<u8>(key_columns.len())?;
+                    let mut bound_value_col_ptrs = memory.alloc::<u64>(key_columns.len())?;
+                    let mut bound_value_col_widths = memory.alloc::<u32>(key_columns.len())?;
                     device
                         .htod_sync_copy_into(&key_col_ptrs_host, &mut key_col_ptrs)
                         .map_err(|e| {
@@ -2145,16 +2254,54 @@ impl Executor {
                                 &e,
                             )
                         })?;
+                    device
+                        .htod_sync_copy_into(
+                            &tuple_key_match_modes_host,
+                            &mut tuple_key_match_modes,
+                        )
+                        .map_err(|e| {
+                            XlogError::execution_ctx(
+                                "epistemic GPU tuple-key metadata",
+                                "upload tuple key match modes",
+                                &e,
+                            )
+                        })?;
+                    device
+                        .htod_sync_copy_into(&bound_value_col_ptrs_host, &mut bound_value_col_ptrs)
+                        .map_err(|e| {
+                            XlogError::execution_ctx(
+                                "epistemic GPU tuple-key metadata",
+                                "upload bound value column pointers",
+                                &e,
+                            )
+                        })?;
+                    device
+                        .htod_sync_copy_into(
+                            &bound_value_col_widths_host,
+                            &mut bound_value_col_widths,
+                        )
+                        .map_err(|e| {
+                            XlogError::execution_ctx(
+                                "epistemic GPU tuple-key metadata",
+                                "upload bound value column widths",
+                                &e,
+                            )
+                        })?;
 
                     tuple_sources.push(TupleSourceLaunch::ArityN {
                         literal_index: binding.literal_index as u32,
                         reduction_index: binding.reduction_index as u32,
                         row_count: source_relation.num_rows_device(),
+                        bound_value_row_count: output.num_rows_device(),
                         key_col_count: key_columns.len() as u32,
                         key_col_ptrs,
                         key_col_widths,
                         expected_key_bits,
                         expected_key_type_codes,
+                        tuple_key_match_modes,
+                        bound_value_col_ptrs,
+                        bound_value_col_widths,
+                        has_bound_value_keys: has_bound_value_keys as u8,
                     });
                 }
             }
@@ -2391,16 +2538,21 @@ impl Executor {
                             literal_index,
                             reduction_index,
                             row_count,
+                            bound_value_row_count,
                             key_col_count,
                             key_col_ptrs,
                             key_col_widths,
                             expected_key_bits,
                             expected_key_type_codes,
+                            tuple_key_match_modes,
+                            bound_value_col_ptrs,
+                            bound_value_col_widths,
+                            has_bound_value_keys,
                         } => {
                             // SAFETY: kernel arguments match the PTX signature; capacity checks
                             // above cover workspace buffers, row_count comes from the named source
                             // relation, and pointer/width/expectation arrays are device-resident
-                            // launch metadata for existing relation columns.
+                            // launch metadata for existing relation and reduced-output columns.
                             let mut params: Vec<*mut c_void> = vec![
                                 (&literal_count).as_kernel_param(),
                                 (&candidate_count).as_kernel_param(),
@@ -2414,7 +2566,12 @@ impl Executor {
                                 key_col_widths.as_kernel_param(),
                                 expected_key_bits.as_kernel_param(),
                                 expected_key_type_codes.as_kernel_param(),
+                                tuple_key_match_modes.as_kernel_param(),
+                                bound_value_col_ptrs.as_kernel_param(),
+                                bound_value_col_widths.as_kernel_param(),
+                                bound_value_row_count.as_kernel_param(),
                                 key_col_count.as_kernel_param(),
+                                has_bound_value_keys.as_kernel_param(),
                                 (&workspace.candidate_assumptions).as_kernel_param(),
                                 (&workspace.world_views).as_kernel_param(),
                                 (&mut workspace.model_membership).as_kernel_param(),
@@ -2872,6 +3029,7 @@ impl Executor {
         trace.require_wcoj_certification()?;
         let model_membership = self.populate_epistemic_gpu_model_membership_from_tuple_sources(
             &mut prepared.workspace,
+            &output,
             &executable.gpu_plan,
             candidate_count,
             capacities.max_models_per_reduction,
@@ -3065,15 +3223,15 @@ mod tests {
     }
 
     #[test]
-    fn tuple_key_expectation_rejects_variable_until_binding_buffers_exist() {
+    fn tuple_key_expectation_rejects_variable_as_ground_expectation() {
         let err =
             TupleKeyExpectation::from_term(&EirTerm::Variable("X".to_string()), ScalarType::U32)
-                .expect_err("unbound variable tuple keys must fail closed");
+                .expect_err("variable tuple keys require bound-output matching");
 
         match err {
             XlogError::UnsupportedEpistemicConstruct { construct, context } => {
                 assert_eq!(construct, "epistemic GPU tuple-key expectation");
-                assert!(context.contains("requires a bound value buffer"));
+                assert!(context.contains("cannot be encoded as a ground tuple-key expectation"));
             }
             other => panic!("expected tuple-key expectation error, got {other:?}"),
         }
