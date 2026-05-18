@@ -93,6 +93,10 @@ pub struct EpistemicTupleMembershipBinding {
     pub key_columns: Vec<usize>,
     /// Source atom terms that must be matched against the stable-model tuple key.
     pub key_terms: Vec<EirTerm>,
+    /// Reduced output column for each variable tuple-key term.
+    ///
+    /// Ground terms use `None`; variable terms use `Some(column_index)`.
+    pub bound_output_columns: Vec<Option<usize>>,
     /// Epistemic operator whose membership semantics are being checked.
     pub op: EirEpistemicOp,
     /// Whether the epistemic literal is explicitly negated.
@@ -135,6 +139,7 @@ impl EpistemicGpuPlan {
                 arity: literal.atom.arity,
                 key_columns: (0..literal.atom.arity).collect(),
                 key_terms: literal.atom.terms.clone(),
+                bound_output_columns: vec![None; literal.atom.arity],
                 op: literal.op,
                 negated: literal.negated,
             })
@@ -265,6 +270,49 @@ impl EpistemicGpuPlan {
                         binding.literal_index
                     ),
                 });
+            }
+
+            if binding.bound_output_columns.len() != binding.arity {
+                return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic GPU tuple membership binding".to_string(),
+                    context: format!(
+                        "binding for literal_index {} has {} bound output columns for arity {}",
+                        binding.literal_index,
+                        binding.bound_output_columns.len(),
+                        binding.arity
+                    ),
+                });
+            }
+
+            for (term, bound_col) in binding
+                .key_terms
+                .iter()
+                .zip(binding.bound_output_columns.iter())
+            {
+                match (term, bound_col) {
+                    (EirTerm::Variable(_), Some(_)) => {}
+                    (EirTerm::Variable(variable), None) => {
+                        return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                            construct: "epistemic GPU tuple membership binding".to_string(),
+                            context: format!(
+                                "variable tuple key {variable} for literal_index {} is missing a \
+                                 reduced output column",
+                                binding.literal_index
+                            ),
+                        });
+                    }
+                    (_, None) => {}
+                    (_, Some(bound_col)) => {
+                        return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                            construct: "epistemic GPU tuple membership binding".to_string(),
+                            context: format!(
+                                "ground tuple key for literal_index {} unexpectedly binds \
+                                 reduced output column {}",
+                                binding.literal_index, bound_col
+                            ),
+                        });
+                    }
+                }
             }
 
             let mut seen_key_columns = vec![false; binding.arity];

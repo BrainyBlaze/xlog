@@ -468,6 +468,7 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "epistemic_validate_world_views_u8",
             "epistemic_materialize_accepted_candidates_u8",
             "epistemic_materialize_final_result_flags_u8",
+            "epistemic_build_final_tuple_row_map_u8",
             "epistemic_materialize_final_tuple_column_u8",
         ],
     },

@@ -713,8 +713,9 @@ fn model_membership_runtime_path_uses_bound_output_columns_for_variable_tuple_ke
     assert!(source.contains(".head_predicate"));
     assert!(source.contains("self.clone_buffer(reduced_output)?"));
     assert!(source.contains("&output,"));
+    assert!(source.contains("&executable.gpu_plan,"));
     assert!(source.contains("EirTerm::Variable(variable_name)"));
-    assert!(source.contains("output.schema().column_index(variable_name)"));
+    assert!(source.contains("binding.bound_output_columns[term_index]"));
     assert!(source.contains("output.column(bound_col_index)"));
     assert!(source.contains("tuple_key_match_modes"));
     assert!(source.contains("bound_value_col_ptrs"));
@@ -1059,13 +1060,18 @@ fn final_tuple_materialization_runtime_path_copies_output_columns_on_device() {
 
     assert!(source.contains("fn materialize_epistemic_gpu_final_tuples"));
     assert!(source.contains("EPISTEMIC_MATERIALIZE_FINAL_TUPLE_COLUMN_U8"));
+    assert!(source.contains("EPISTEMIC_BUILD_FINAL_TUPLE_ROW_MAP_U8"));
+    assert!(source.contains("let mut row_map ="));
+    assert!(source.contains("epistemic final tuple row-map kernel not found"));
     assert!(source.contains("output.num_rows_device()"));
     assert!(source.contains("output.column(col_idx)"));
     assert!(source.contains("CudaBuffer::from_columns"));
     assert!(source
         .contains("pub final_tuple_materialization: EpistemicGpuFinalTupleMaterializationTrace"));
     assert!(source.contains("pub final_output: CudaBuffer"));
+    assert!(cuda.contains("epistemic_build_final_tuple_row_map_u8"));
     assert!(cuda.contains("epistemic_materialize_final_tuple_column_u8"));
+    assert!(manifest.contains("\"epistemic_build_final_tuple_row_map_u8\""));
     assert!(manifest.contains("\"epistemic_materialize_final_tuple_column_u8\""));
     assert!(!source.contains("upload_epistemic_final_tuple"));
     assert!(!source.contains("copy_epistemic_final_tuple_from_host"));

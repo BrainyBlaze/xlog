@@ -656,6 +656,77 @@ static __device__ uint8_t epistemic_final_tuple_has_accepted_membership(
     return 0u;
 }
 
+extern "C" __global__ void epistemic_build_final_tuple_row_map_u8(
+    uint32_t output_row_capacity,
+    uint32_t literal_count,
+    uint32_t candidate_count,
+    uint32_t reduction_count,
+    uint32_t models_per_reduction,
+    uint32_t world_stride,
+    const uint32_t* __restrict__ output_row_count,
+    const uint32_t* __restrict__ rejection_reasons,
+    const uint8_t* __restrict__ model_membership,
+    const uint8_t* __restrict__ world_views,
+    const uint32_t* __restrict__ tuple_source_row_count,
+    const uint64_t* __restrict__ tuple_key_col_ptrs,
+    const uint32_t* __restrict__ tuple_key_col_widths,
+    const uint64_t* __restrict__ expected_key_bits,
+    const uint8_t* __restrict__ expected_key_type_codes,
+    const uint8_t* __restrict__ tuple_key_match_modes,
+    const uint64_t* __restrict__ bound_value_col_ptrs,
+    const uint32_t* __restrict__ bound_value_col_widths,
+    uint32_t key_col_count,
+    uint8_t row_filter_enabled,
+    uint32_t* __restrict__ row_map,
+    uint32_t* __restrict__ final_row_count
+) {
+    uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t rows = output_row_count[0];
+    if (row >= rows || row >= output_row_capacity) return;
+
+    uint8_t accepted_membership = epistemic_final_tuple_has_accepted_membership(
+        literal_count,
+        candidate_count,
+        reduction_count,
+        models_per_reduction,
+        world_stride,
+        rejection_reasons,
+        model_membership,
+        world_views
+    );
+    if (accepted_membership == 0u) return;
+
+    uint8_t row_matches = 1u;
+    if (row_filter_enabled != 0u) {
+        row_matches = 0u;
+        uint32_t tuple_rows = tuple_source_row_count[0];
+        for (uint32_t tuple_row = 0u; tuple_row < tuple_rows; ++tuple_row) {
+            if (epistemic_tuple_key_row_matches_arity_n(
+                    tuple_key_col_ptrs,
+                    tuple_key_col_widths,
+                    expected_key_bits,
+                    expected_key_type_codes,
+                    tuple_key_match_modes,
+                    bound_value_col_ptrs,
+                    bound_value_col_widths,
+                    key_col_count,
+                    tuple_row,
+                    row
+                ) != 0u) {
+                row_matches = 1u;
+                break;
+            }
+        }
+    }
+
+    if (row_matches != 0u) {
+        uint32_t out_row = atomicAdd(final_row_count, 1u);
+        if (out_row < output_row_capacity) {
+            row_map[out_row] = row;
+        }
+    }
+}
+
 extern "C" __global__ void epistemic_materialize_final_tuple_column_u8(
     uint32_t column_byte_len,
     uint32_t literal_count,
@@ -667,6 +738,7 @@ extern "C" __global__ void epistemic_materialize_final_tuple_column_u8(
     const uint32_t* __restrict__ rejection_reasons,
     const uint8_t* __restrict__ model_membership,
     const uint8_t* __restrict__ world_views,
+    const uint32_t* __restrict__ row_map,
     const uint8_t* __restrict__ source_column,
     uint8_t* __restrict__ final_column,
     uint32_t* __restrict__ final_row_count
@@ -674,21 +746,17 @@ extern "C" __global__ void epistemic_materialize_final_tuple_column_u8(
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
 
     uint32_t rows = output_row_count[0];
-    uint8_t accepted_membership = epistemic_final_tuple_has_accepted_membership(
-        literal_count,
-        candidate_count,
-        reduction_count,
-        models_per_reduction,
-        world_stride,
-        rejection_reasons,
-        model_membership,
-        world_views
-    );
-    uint8_t materialize = (accepted_membership != 0u && rows != 0u) ? 1u : 0u;
-    if (gid == 0u) {
-        final_row_count[0] = (materialize != 0u) ? rows : 0u;
-    }
+    uint32_t final_rows = final_row_count[0];
+    if (rows == 0u || final_rows == 0u || column_byte_len == 0u) return;
 
-    if (gid >= column_byte_len) return;
-    final_column[gid] = (materialize != 0u) ? source_column[gid] : 0u;
+    uint32_t row_width = column_byte_len / rows;
+    if (row_width == 0u) return;
+    uint32_t total = final_rows * row_width;
+    if (gid >= total) return;
+
+    uint32_t dst_row = gid / row_width;
+    uint32_t byte = gid - dst_row * row_width;
+    uint32_t src_row = row_map[dst_row];
+    if (src_row >= rows) return;
+    final_column[gid] = source_column[src_row * row_width + byte];
 }

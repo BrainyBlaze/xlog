@@ -62,9 +62,9 @@ columns. Ground tuple keys are encoded as expected raw bits plus scalar type
 codes and compared against existing relation-cell bytes on device for the
 current model-slot row in the specialized arity-one/two/three kernels or the
 generic arity-N kernel. Variable-bound tuple keys are matched in the generic
-arity-N kernel against reduced-output `CudaBuffer` columns selected by the EIR
-variable name. Anonymous keys, aggregate keys, and full semantic parity still
-fail closed.
+arity-N kernel against reduced-output `CudaBuffer` columns selected from the
+reduced rule head column binding. Anonymous keys, aggregate keys, and full
+semantic parity still fail closed.
 `Executor::validate_epistemic_gpu_world_views` launches the
 `epistemic_validate_world_views_u8` CUDA kernel and records
 `EpistemicGpuWorldViewValidationTrace` with one kernel launch, zero host
@@ -80,13 +80,15 @@ CUDA-event elapsed timing for accepted-candidate materialization staging.
 from `output.num_rows_device()`, one kernel launch, zero host writes, and
 CUDA-event elapsed timing for final-result flag staging.
 `Executor::materialize_epistemic_gpu_final_tuples` launches
+`epistemic_build_final_tuple_row_map_u8` followed by
 `epistemic_materialize_final_tuple_column_u8` and records
 `EpistemicGpuFinalTupleMaterializationTrace` for a device-resident final-output
 `CudaBuffer`, including covered tuple bytes, device row-count read/write
 metadata, model-membership bytes checked, world-view slots checked, kernel
-launches, zero host writes, and CUDA-event elapsed timing. The final tuple
-kernel materializes reduced output columns only when the GPU model-membership
-and world-view buffers contain an accepted membership.
+launches, zero host writes, and CUDA-event elapsed timing. The row-map kernel
+filters output rows by accepted membership, world-view state, and any
+variable-bound tuple-key relation match before the final tuple kernel compacts
+reduced output columns.
 `EpistemicGpuRuntimeWcojCertification` then requires actual production WCOJ
 counter deltas before WCOJ evidence can be certified.
 `Executor::execute_epistemic_gpu_execution` wraps the reduced production
@@ -101,9 +103,10 @@ for the epistemic hot path; tuple-source staging is GPU-backed over existing
 relation buffers with row-scoped ground-key comparison through specialized
 arity-one/two/three kernels and a generic arity-N kernel, plus row-scoped
 variable-bound comparison against reduced-output columns through the generic
-arity-N kernel, and final tuple output is gated by the staged membership and
-world-view buffers. Full world-view semantics, solver coupling, probabilistic
-production-path reuse, and accepted semantic parity do not dispatch yet.
+arity-N kernel. Final tuple output is gated by the staged membership,
+world-view buffers, and one accepted unary bound-key row-filter fixture. Full
+world-view semantics, solver coupling, probabilistic production-path reuse, and
+broader accepted semantic parity do not dispatch yet.
 
 ## GPU And WCOJ Scope
 

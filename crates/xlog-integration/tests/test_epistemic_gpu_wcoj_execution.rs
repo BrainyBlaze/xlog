@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use cudarc::driver::sys;
 use xlog_core::{MemoryBudget, RelId, RuntimeConfig, ScalarType, Schema};
 use xlog_cuda::device_runtime::{
     AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
@@ -88,6 +89,27 @@ fn upload_binary_u32(memory: &Arc<GpuMemoryManager>, rows: &[(u32, u32)]) -> Cud
     )
 }
 
+fn upload_unary_u32(memory: &Arc<GpuMemoryManager>, rows: &[u32]) -> CudaBuffer {
+    let n = rows.len() as u32;
+    let bytes = (n as usize).max(1) * std::mem::size_of::<u32>();
+    let mut col0 = memory.alloc::<u8>(bytes).expect("alloc unary col0");
+    let mut device_row_count = memory.alloc::<u32>(1).expect("alloc unary row count");
+    let dev = memory.device().inner();
+    if n > 0 {
+        let c0: Vec<u8> = rows.iter().flat_map(|value| value.to_le_bytes()).collect();
+        dev.htod_sync_copy_into(&c0, &mut col0).unwrap();
+    }
+    dev.htod_sync_copy_into(&[n], &mut device_row_count)
+        .unwrap();
+    CudaBuffer::from_columns_with_host_count(
+        vec![col0.into()],
+        n as u64,
+        device_row_count,
+        Schema::new(vec![("c0".to_string(), ScalarType::U32)]),
+        n,
+    )
+}
+
 fn upload_nullary(memory: &Arc<GpuMemoryManager>, rows: u32) -> CudaBuffer {
     let mut device_row_count = memory.alloc::<u32>(1).expect("alloc nullary row count");
     memory
@@ -102,6 +124,25 @@ fn upload_nullary(memory: &Arc<GpuMemoryManager>, rows: u32) -> CudaBuffer {
         Schema::new(vec![]),
         rows,
     )
+}
+
+fn download_unary_u32(provider: &CudaKernelProvider, buffer: &CudaBuffer) -> Vec<u32> {
+    let rows = read_device_row_count(provider, buffer).expect("device row count");
+    if rows == 0 {
+        return Vec::new();
+    }
+    let mut bytes = vec![0u8; rows * std::mem::size_of::<u32>()];
+    unsafe {
+        sys::cuMemcpyDtoH_v2(
+            bytes.as_mut_ptr() as *mut _,
+            *buffer.column(0).expect("unary column").device_ptr(),
+            bytes.len(),
+        );
+    }
+    bytes
+        .chunks_exact(std::mem::size_of::<u32>())
+        .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+        .collect()
 }
 
 #[test]
@@ -159,6 +200,55 @@ fn accepted_epistemic_k5_execution_certifies_production_wcoj_dispatch() {
         read_device_row_count(&fix.provider, &result.final_output).expect("final row count"),
         1,
         "accepted epistemic K5 final output must materialize the production WCOJ row"
+    );
+}
+
+#[test]
+fn accepted_nonzero_arity_membership_filters_final_rows_by_bound_tuple_key() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X).
+        "#,
+    )
+    .expect("parse nonzero-arity epistemic fixture");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile nonzero-arity epistemic executable");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &executable.relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation("node", upload_unary_u32(&fix.memory, &[1, 2]));
+    executor.put_relation("edge", upload_unary_u32(&fix.memory, &[1]));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 2,
+            },
+        )
+        .expect("execute nonzero-arity epistemic fixture");
+
+    assert_eq!(
+        result.model_membership.membership_source,
+        EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+    );
+    assert_eq!(
+        download_unary_u32(&fix.provider, &result.final_output),
+        vec![1],
+        "final output must keep only reduced rows whose bound tuple key appears in the stable model"
     );
 }
 

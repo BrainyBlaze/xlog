@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use xlog_core::Result;
 use xlog_ir::{
-    EirBodyLiteral, EpistemicExecutablePlan, EpistemicGpuPlan, EpistemicReductionPlan,
+    EirBodyLiteral, EirTerm, EpistemicExecutablePlan, EpistemicGpuPlan, EpistemicReductionPlan,
     EpistemicTupleMembershipBinding, EpistemicWcojReductionStatus,
 };
 use xlog_stats::StatsSnapshot;
@@ -184,6 +184,7 @@ pub fn plan_epistemic_gpu_execution(program: &Program) -> Result<EpistemicGpuPla
                 arity: lit.atom.arity,
                 key_columns: (0..lit.atom.arity).collect(),
                 key_terms: lit.atom.terms.clone(),
+                bound_output_columns: bound_output_columns_for_literal(&lit.atom.terms, rule),
                 op: lit.op,
                 negated: lit.negated,
             });
@@ -250,6 +251,21 @@ pub fn compile_epistemic_gpu_execution_with_stats_snapshot(
         relation_ids,
         reduced_runtime_plan,
     })
+}
+
+fn bound_output_columns_for_literal(
+    key_terms: &[EirTerm],
+    rule: &xlog_ir::EirRule,
+) -> Vec<Option<usize>> {
+    key_terms
+        .iter()
+        .map(|term| match term {
+            EirTerm::Variable(variable) => rule.head.terms.iter().position(
+                |head_term| matches!(head_term, EirTerm::Variable(name) if name == variable),
+            ),
+            _ => None,
+        })
+        .collect()
 }
 
 fn reduced_ordinary_program(program: &Program) -> Program {
