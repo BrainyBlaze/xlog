@@ -39,6 +39,7 @@ mod gpu_cdcl;
 #[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
 mod gpu_cnf;
 mod instance;
+mod production;
 mod proof;
 mod service;
 mod solver;
@@ -46,6 +47,7 @@ mod solver;
 pub use gpu_cdcl::{GpuCdclConfig, GpuCdclRawOutput, GpuCdclSolver, GpuCdclWorkspace};
 pub use gpu_cnf::GpuCnf;
 pub use instance::{Clause, Literal, Objective, SolveInstance};
+pub use production::{GpuSolverProductionAdapter, GpuSolverProductionTrace};
 pub use proof::{compute_checksum, SolveProof, SolveResult, SolveStats, SolveStatus};
 pub use service::{
     LearnedClauseTransfer, SolverPortfolioStatus, SolverService, SolverServiceBudget,

@@ -238,6 +238,16 @@ source rule order.
 
 ## Solver Services
 
+`xlog_solve::GpuSolverProductionAdapter` is the production-facing SAT/UNSAT
+reuse adapter for epistemic callers. It is a thin wrapper over the existing
+`GpuCdclSolver`; it dispatches `solve_expect_sat`, `solve_expect_unsat`, and
+workspace-backed UNSAT through the GPU CDCL path and exposes zero CPU
+assignment/MaxSAT enumeration counters in `GpuSolverProductionTrace`.
+
+The adapter is partial v0.9 evidence only. It does not yet wire epistemic
+candidate assumptions into the accepted runtime, and it does not implement
+GPU-native MaxSAT or portfolio solving.
+
 `xlog_solve::SolverService` provides the bounded solver API used by semantic
 fixtures:
 
@@ -255,9 +265,10 @@ fixtures:
 This facade enumerates assignments on CPU for bounded tests. It is not the
 GPU-native solver service required for v0.9.0 release certification.
 
-Run the solver service fixture:
+Run the solver service fixtures and production-adapter source guard:
 
 ```bash
+cargo test -p xlog-solve --test gpu_solver_production_reuse
 cargo test -p xlog-solve --test solver_service_semantics
 ```
 

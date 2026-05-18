@@ -113,6 +113,29 @@ The SAT PTX module also includes verifier helper kernels used by `xlog-solve` an
 - Equivalence query construction: `sat_cnf_copy_into`, `sat_xgcf_write_root_unit_clause`, `sat_not_phi_counts`,
   `sat_emit_not_phi`
 
+## Production Adapter For Epistemic Callers
+
+`xlog_solve::GpuSolverProductionAdapter` is the v0.9-facing thin adapter over
+the existing `GpuCdclSolver`. It exists to make solver production-path reuse
+auditable before accepted epistemic candidates are fully wired into the runtime.
+
+The adapter:
+
+- constructs and owns `GpuCdclSolver::new`;
+- dispatches SAT through `solve_expect_sat`;
+- dispatches UNSAT through `solve_expect_unsat`;
+- dispatches workspace-backed UNSAT through
+  `solve_expect_unsat_with_branch_limit_ws`;
+- exposes `GpuSolverProductionTrace` counters for GPU CDCL SAT/UNSAT calls;
+- exposes hard-zero CPU search counters:
+  `cpu_assignment_enumerations` and `cpu_maxsat_enumerations`.
+
+This is not a separate solver engine. It does not call `SolverService`, does not
+enumerate assignments on CPU, and does not introduce an epistemic-only search
+path. It is also not full `G090_SOLVER` closure: MaxSAT, portfolio solving,
+epistemic candidate assumption lifecycle, and accepted-world-view integration
+still have to be wired through GPU-native production paths.
+
 ## v0.9 Semantic-Oracle Solver Service Semantics
 
 The current v0.9 epistemic branch adds a CPU-side service facade for bounded
@@ -142,8 +165,8 @@ GPU portfolio solving is not implemented in the semantic-oracle facade and block
 
 Release certification must replace this CPU assignment enumeration path for
 accepted epistemic execution with GPU-native SAT/MaxSAT/portfolio services or a
-documented GPU-backed adapter, and must report zero CPU solver-search fallback
-counters.
+documented GPU-backed adapter such as `GpuSolverProductionAdapter`, and must
+report zero CPU solver-search fallback counters.
 
 ## Continuous Local Search (Optional, Non-Verifying)
 

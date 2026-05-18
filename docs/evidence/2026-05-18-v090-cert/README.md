@@ -19,7 +19,7 @@ the final release decision.
 | Gate | Evidence |
 |---|---|
 | Semantic golden fixtures | EIR, G91, FAEEL, GPT, split, examples, world-view, GPU-plan tuple-membership contract, executable-plan contract, GPU-workspace layout/reset, candidate-generation, propagation-staging, candidate-validation, model-membership staging, world-view validation staging, materialization-staging, final-result flag staging, final tuple materialization, WCOJ fail-closed gate, and transfer-budget contract fixtures pass locally. |
-| Solver service fixtures | SAT assumptions, learned transfer, MaxSAT, GPU-unimplemented status, and failure modes pass as CPU fixtures. |
+| Solver service fixtures | SAT assumptions, learned transfer, MaxSAT, GPU-unimplemented status, and failure modes pass as CPU fixtures; the production adapter source test proves SAT/UNSAT reuse of the existing GPU CDCL API without `SolverService`. |
 | Probabilistic coherence fixtures | Epistemic evidence, accepted-world-view evidence, incremental circuit update, adapter design, and tolerance fixtures pass locally. |
 | Parser diagnostics | Positive syntax and negative nested-epistemic typed diagnostics pass in `test_epistemic_eir`. |
 | Workspace health subset | Logic, solver, and probabilistic lib suites plus cross-crate checks are the local non-GPU health proxy. |
@@ -34,7 +34,9 @@ the final release decision.
 | `cargo test -p xlog-logic --test test_epistemic_executable_plan` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 44 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_eir --test test_epistemic_g91 --test test_epistemic_faeel --test test_epistemic_gpt --test test_epistemic_split --test test_epistemic_world_view --test test_epistemic_examples` | PASS, 23 passed, 0 failed |
+| `cargo test -p xlog-solve --test gpu_solver_production_reuse` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-solve --test solver_service_semantics` | PASS, 5 passed, 0 failed |
+| `cargo test -p xlog-solve --test no_dtoh_in_gpu_cdcl` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-prob --test epistemic_prob` | PASS, 5 passed, 0 failed |
 | `cargo test -p xlog-ir --lib` | PASS, 14 passed, 0 failed |
 | `cargo test -p xlog-runtime --lib` | PASS, 128 passed, 0 failed |
@@ -50,16 +52,18 @@ the final release decision.
 | Metric | Target | Status | Evidence |
 |---|---|---|---|
 | M090_CERT.1 semantic golden tests | 100 percent pass | PARTIAL | Semantic-oracle tests pass, but GPU parity is not proven. |
-| M090_CERT.2 solver tests | 100 percent pass for GPU-native solver scope | BLOCKED | Existing `solver_service_semantics` is CPU fixture enumeration, not GPU-native epistemic SAT/MaxSAT/portfolio solving. |
+| M090_CERT.2 solver tests | 100 percent pass for GPU-native solver scope | PARTIAL | `gpu_solver_production_reuse` proves SAT/UNSAT production-adapter reuse of `GpuCdclSolver`, but GPU-native MaxSAT, portfolio, and accepted epistemic candidate lifecycle tests are missing. |
 | M090_CERT.3 parser diagnostics | positive and negative syntax fixtures pass | PASS | `test_epistemic_eir` covers explicit syntax, source-term preservation, and typed nested-epistemic rejection. |
 | M090_CERT.4 v0.8 compatibility | v0.8 pyxlog/DTS cert subset rerun after rebase | BLOCKED | v0.8 integration/rebase has not happened. |
 | M090_CERT.5 formatting | `cargo fmt --check` pass | PASS | Post-correction formatting gate passed. |
 | M090_CERT.6 workspace health | agreed cargo test subset pass | PASS for oracle | Runtime, logic, solve, and prob fixture/lib suites plus cross-crate checks passed. |
 | M090_CERT.7 semantic trace fixtures | GPT traces include generated, accepted, and rejected candidate counts | PARTIAL | CPU traces include generated/guess/reduced-model/accepted-world-view/rejection reason fields; candidate-generation, propagation, candidate-validation, arity 0-3 tuple-source model-membership staging with fixed arity-one/two/three row-scoped ground key comparison, world-view-validation, accepted-candidate materialization, final-result flag, and final tuple traces include GPU launch counts with CUDA-event elapsed timing, but semantic parity trace counters are missing. |
-| M090_CERT.8 GPU-native evidence | GPU launch counts, kernel timings, and zero CPU fallback counters | BLOCKED | GPU-plan, workspace allocation/reset, bounded candidate-generation, propagation, candidate-validation, arity 0-3 tuple-source model-membership staging with row-scoped ground key comparison, world-view-validation, accepted-candidate materialization, final-result flag, final tuple materialization kernels, hot-path transfer-budget trace, preflight, counter-guard, and reduced-plan trace contracts exist, but bound-variable tuple matching, arbitrary arity, and complete accepted-execution timing are missing. |
+| M090_CERT.8 GPU-native evidence | GPU launch counts, kernel timings, and zero CPU fallback counters | BLOCKED | GPU-plan, workspace allocation/reset, bounded candidate-generation, propagation, candidate-validation, arity 0-3 tuple-source model-membership staging with row-scoped ground key comparison, world-view-validation, accepted-candidate materialization, final-result flag, final tuple materialization kernels, hot-path transfer-budget trace, preflight, counter-guard, reduced-plan trace contracts, and solver production-adapter zero CPU search counters exist, but bound-variable tuple matching, arbitrary arity, and complete accepted-execution timing are missing. |
 | M090_CERT.9 WCOJ evidence | at least one WCOJ-eligible epistemic reduction proves WCOJ planner/runtime dispatch | PARTIAL | Executable-plan and runtime-preflight fixtures prove WCOJ promotion plus 38-B K-clique planner/layout/helper-split metadata, and the runtime gate now fails closed when a WCOJ-required reduction lacks counter deltas; certified successful dispatch and launch evidence are still missing. |
 | M090_CERT.10 nonzero-arity membership | certification includes GPU tuple-key membership evidence for arity >= 1 predicates | PARTIAL | EIR/GPU-plan tests preserve source tuple terms, and runtime source/trace tests require arity-one, arity-two, and arity-three tuple-key kernels over existing relation columns with encoded expected key bits/type codes and device byte comparison for ground keys; semantic parity fixtures are still missing. |
-| M090_CERT.13 no parallel engines | source audit reports zero new epistemic-only WCOJ, solver-search, probability-inference, or tuple-store engines in accepted paths | PARTIAL | This slice reuses `CudaBuffer` relation columns and does not add a tuple store; solver and probabilistic production-path audits remain missing. |
+| M090_CERT.11 solver production reuse | certification includes traces proving accepted SAT/MaxSAT work used existing GPU solver production paths | PARTIAL | `GpuSolverProductionAdapter` reuses existing `GpuCdclSolver` SAT/UNSAT APIs and exposes zero CPU search counters; MaxSAT, portfolio, and accepted-path traces are missing. |
+| M090_CERT.12 prob production reuse | certification includes traces proving accepted probabilistic evidence used existing GPU exact/provenance paths | BLOCKED | Accepted world-view evidence is still fixture-level and not wired through the production probabilistic GPU path. |
+| M090_CERT.13 no parallel engines | source audit reports zero new epistemic-only WCOJ, solver-search, probability-inference, or tuple-store engines in accepted paths | PARTIAL | This slice reuses `CudaBuffer` relation columns and adds a thin `GpuCdclSolver` adapter rather than a parallel solver-search engine; probabilistic production-path audit remains missing. |
 
 ## Required GPU-Native Evidence Before Closure
 
