@@ -60,3 +60,25 @@ The probabilistic WFS/provenance code also rejects epistemic literals with
 typed `UnsupportedEpistemicConstruct` errors. `G090_PROB` owns the later
 semantic contract for combining epistemic assumptions with probabilistic
 queries and circuit updates.
+
+## G91 Compatibility Fixture Semantics
+
+`crates/xlog-logic/src/epistemic.rs` contains the current bounded fixture
+evaluator for mode-selection tests. It is not the full production epistemic
+executor. It exists to make the G91 compatibility mode testable before the
+later FAEEL and Generate-Propagate-Test sub-goals land.
+
+The fixture evaluator uses an `EpistemicInterpretation` with two predicate/arity
+sets:
+
+- `known`: facts known in both modes;
+- `possible`: compatibility-only possible facts.
+
+For `know p(...)`, both G91 and FAEEL require `p/arity` to be in `known`.
+For `possible p(...)`, G91 accepts either `known` or `possible`; FAEEL accepts
+only `known` in this bounded fixture layer. That gives a deterministic golden
+distinction without routing epistemic programs through RIR.
+
+Non-epistemic programs remain isolated from mode selection. A program with no
+`BodyLiteral::Epistemic` compiles to the same RIR plan under the default mode
+and under `#pragma epistemic_mode = g91`.
