@@ -13,10 +13,12 @@ fn production_prob_adapter_reuses_gpu_exact_path_not_fixture_circuit() {
     assert!(production.contains("EpistemicProbProductionAdapter"));
     assert!(production.contains("EpistemicProbProductionTrace"));
     assert!(production.contains("compile_source_with_gpu_execution_result"));
+    assert!(production.contains("evaluate_gpu_with_grads_with_gpu_execution_result"));
     assert!(production.contains("from_gpu_execution_result"));
     assert!(production.contains("ExactDdnnfProgram::compile_source_with_gpu"));
     assert!(production.contains("ExactDdnnfProgram::compile_from_program"));
     assert!(production.contains("evaluate_gpu_with_grads"));
+    assert!(production.contains("gpu_exact_gradient_evaluations"));
     assert!(production.contains("cpu_only_probability_recomputations: 0"));
     assert!(production.contains("fixture_circuit_evaluations: 0"));
     assert!(!production.contains("EpistemicCircuit::compile"));

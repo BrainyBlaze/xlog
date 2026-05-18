@@ -11,7 +11,7 @@ xlog-cuda.workspace = true
 xlog-gpu.workspace = true
 xlog-ir.workspace = true
 xlog-logic.workspace = true
-xlog-prob.workspace = true
+xlog-prob = { workspace = true, features = ["host-io"] }
 xlog-runtime.workspace = true
 xlog-solve.workspace = true
 xlog-stats.workspace = true

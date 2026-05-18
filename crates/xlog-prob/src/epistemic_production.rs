@@ -127,6 +127,20 @@ impl EpistemicProbProductionAdapter {
         Ok(result)
     }
 
+    /// Evaluate GPU exact gradients after accepted GPU epistemic execution.
+    #[cfg(feature = "host-io")]
+    pub fn evaluate_gpu_with_grads_with_gpu_execution_result(
+        &mut self,
+        program: &ExactDdnnfProgram,
+        provider: &CudaKernelProvider,
+        result: &EpistemicGpuExecutionResult,
+        assumptions: Vec<EpistemicAssumption>,
+    ) -> Result<ExactResultWithGrads> {
+        let evidence =
+            AcceptedWorldViewEvidence::from_gpu_execution_result(provider, result, assumptions)?;
+        self.evaluate_gpu_with_grads(program, &evidence)
+    }
+
     fn consume_accepted_evidence(&mut self, evidence: &AcceptedWorldViewEvidence) -> Result<()> {
         if evidence.world_count() == 0 {
             return Err(XlogError::UnsupportedEpistemicConstruct {
