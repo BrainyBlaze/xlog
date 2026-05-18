@@ -15,9 +15,9 @@
     true
   ],
   "large_memory_stats_before_overlimit": {
-    "allocated_bytes": 3200012,
+    "allocated_bytes": 3200004,
     "memory_limit_bytes": 536870912,
-    "peak_memory_bytes": 3200012,
+    "peak_memory_bytes": 3200004,
     "status": "available"
   },
   "large_rows": 200000,
@@ -26,15 +26,15 @@
     "rain()"
   ],
   "program_cuda_graph_stats_keys": [
-    "csm_cuda_graph_cache_hits",
     "csm_cuda_graph_captures",
+    "csm_cuda_graph_launches",
     "csm_cuda_graph_fallbacks",
-    "csm_cuda_graph_launches"
+    "csm_cuda_graph_cache_hits"
   ],
   "program_host_transfer_stats_keys": [
     "dtoh_bytes",
-    "dtoh_calls",
     "htod_bytes",
+    "dtoh_calls",
     "htod_calls"
   ],
   "program_memory_stats": {
@@ -50,24 +50,24 @@
     "last_error": null,
     "last_rows": 0
   },
-  "pyxlog_file": "/tmp/xlog-v080-cert-venv/lib/python3.10/site-packages/pyxlog/__init__.py",
+  "pyxlog_file": "/home/dev/projects/xlog/.worktrees/v080-dts/crates/pyxlog/python/pyxlog/__init__.py",
   "pyxlog_version": "0.7.0",
   "session_cuda_graph_stats_keys": [
-    "csm_cuda_graph_cache_hits",
     "csm_cuda_graph_captures",
+    "csm_cuda_graph_launches",
     "csm_cuda_graph_fallbacks",
-    "csm_cuda_graph_launches"
+    "csm_cuda_graph_cache_hits"
   ],
   "session_host_transfer_stats_keys": [
     "dtoh_bytes",
-    "dtoh_calls",
     "htod_bytes",
+    "dtoh_calls",
     "htod_calls"
   ],
   "session_memory_stats": {
-    "allocated_bytes": 272,
+    "allocated_bytes": 348,
     "memory_limit_bytes": 536870912,
-    "peak_memory_bytes": 272,
+    "peak_memory_bytes": 348,
     "status": "available"
   },
   "session_progress_after_async": {
@@ -90,6 +90,7 @@
     true,
     true
   ],
+  "torch_version": "2.10.0+cu128",
   "typed_memory_limit_error": "MemoryError",
-  "typed_memory_limit_message": "per-call memory limit exceeded before evaluation: allocated_bytes=3200012 memory_limit_bytes=1048576"
+  "typed_memory_limit_message": "per-call memory limit exceeded before evaluation: allocated_bytes=3200004 memory_limit_bytes=1048576"
 }

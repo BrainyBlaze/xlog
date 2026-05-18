@@ -2,13 +2,15 @@
 
 Date: 2026-05-18
 Branch: `feat/v080-dts-ml-python-productization`
-Last runtime-code commit: `3c63cdb2`
+Last runtime-code commit: `30995c1e`
 Integration evidence commit: `861f6a02`
-Closure evidence commit: reported by the final G080_CLOSE sub-goal report
+Closure evidence commit: `8cd6e095`
 
 ## Recommendation
 
-`MERGE_READY`, pending coordinator authorization for the actual merge.
+`MERGE_READY`, pending coordinator authorization for the actual merge and
+acceptance of the historical DTS-DLM 449-doc native-liveness evidence noted
+under M080_EXACT.2.
 
 This proposal does not authorize or perform a push, tag, release-board update,
 or merge. v0.9.0 work must rebase or merge after v0.8.0 lands because this
@@ -22,11 +24,11 @@ branch is the release train that must land first.
 | G080_CERT | `1cde68b5` | PASS | `docs/evidence/2026-05-18-v080-cert/README.md` |
 | G080_PYAPI | `f318ce5d` | PASS | `docs/evidence/2026-05-18-v080-pyapi/README.md` |
 | G080_DELTA | `9d659d41` | PASS | `docs/evidence/2026-05-18-v080-delta/README.md` |
-| G080_BRIDGE | `63ef0298` | PASS | `docs/evidence/2026-05-18-v080-bridge/README.md` |
+| G080_BRIDGE | `63ef0298` + reuse remediation `30995c1e` | PASS | `docs/evidence/2026-05-18-v080-bridge/README.md` |
 | G080_EXACT | `3c63cdb2` | PASS | `docs/evidence/2026-05-18-v080-exact/README.md` |
 | G080_PROFILE | `bfa20ef5` | PASS | `docs/evidence/2026-05-18-v080-profile/README.md` |
 | G080_INT | `861f6a02` | PASS | `docs/evidence/2026-05-18-v080-int/README.md` |
-| G080_CLOSE | final close sub-goal report | PASS when committed | `docs/evidence/2026-05-18-v080-close/README.md` |
+| G080_CLOSE | `8cd6e095` | PASS | `docs/evidence/2026-05-18-v080-close/README.md` |
 
 ## GQM Metric Table
 
@@ -56,11 +58,11 @@ branch is the release train that must land first.
 | M080_BRIDGE.1 gradient smoke | PASS | finite loss, `grad_norm=1.5468`, parameter update `0.3094` |
 | M080_BRIDGE.2 DTS-shaped module | PASS | LearnedBridge-shaped fixture works |
 | M080_BRIDGE.3 Belnap helper tests | PASS | documented formula values match |
-| M080_BRIDGE.4 deterministic top-k | PASS | tie input produces `[2,0,1]` |
+| M080_BRIDGE.4 deterministic top-k | PASS | tie input produces `[2,0,1]`; registered-network `k`/`det` modes are applied by direct, complex, and batched neural forward/backward paths in `30995c1e` |
 | M080_BRIDGE.5 neural cache telemetry | PASS | hits `3`, misses `1`, compile count `1` |
 | M080_BRIDGE.6 repeated-query speedup | PASS | `1536.0x` |
 | M080_EXACT.1 consumer path | PASS | DTS tensorized ILP calls public `induce_exact(..., backend=\"native\")` |
-| M080_EXACT.2 liveness | PASS | accepted DTS evidence records `449/449` native liveness |
+| M080_EXACT.2 liveness | PASS by accepted-evidence waiver | accepted DTS-DLM evidence records `449/449`; this xlog branch did not rerun the full DTS 449-doc job |
 | M080_EXACT.3 safety gates | PASS | `rollback_rate=0.0`, `quarantine_rate=0.0` |
 | M080_EXACT.4 type dispatch | PASS | `U64` retained; `U32` and `Symbol` explicitly deferred |
 | M080_EXACT.5 packaging | PASS | no checked-in generated PTX; packaged `ilp_exact.portable.ptx` and cubin present |
@@ -74,7 +76,7 @@ branch is the release train that must land first.
 | M080_INT.5 integration | PASS | cert verify `17/17`; M37-A `4`; WCOJ clique `7`; WCOJ recursive `8`; W32 promoter `15` |
 | M080_INT.6 docs | PASS | evidence JSON validates; cross-link scan passed |
 | M080_INT.7 git hygiene | PASS | clean before INT evidence; no bulk generated artifacts |
-| M080_CLOSE.1 sub-goal table | PASS | prior G080 nodes list commit SHAs; G080_CLOSE commit is reported by the final close sub-goal report |
+| M080_CLOSE.1 sub-goal table | PASS | every G080 node lists a commit SHA, including G080_CLOSE `8cd6e095` |
 | M080_CLOSE.2 unresolved issues | PASS | deferred items have dispositions below |
 | M080_CLOSE.3 release decision | PASS | `MERGE_READY` |
 | M080_CLOSE.4 no implicit release | PASS | no push, tag, board update, or merge performed |
@@ -92,7 +94,38 @@ branch is the release train that must land first.
   rebuild cost as a blocker.
 - The full DTS 449-doc native exact job was not relaunched in this xlog
   worktree. G080_EXACT anchors to accepted DTS-DLM evidence and reruns the
-  xlog native exact parity/D2H gates.
+  xlog native exact parity/D2H gates. If the coordinator requires a fresh
+  449-doc DTS-DLM replay rather than accepting the prior evidence, this
+  proposal should be treated as `HOLD_FOR_FIXES` until that rerun is complete.
+
+## Prior Goal Reuse Applied
+
+- G38 and Goal-039 closure proposals keep board edits, merge, push, and tag
+  actions outside the proposal until explicit approval. This proposal follows
+  the same gate split.
+- Goal-038-B and Goal-039 use explicit surface-presence / non-production-replay
+  language when a downstream replay is separate scope. M080_EXACT.2 uses the
+  same convention: it is a PASS only by accepting the historical DTS-DLM
+  449-doc evidence, not a claim that this xlog branch freshly replayed 449 docs.
+- Goal-039 M37-A evidence records bounded focused probes and notes which
+  long-running DTS artifacts were recomputed from canonical evidence instead of
+  mutated or rerun. The v0.8.0 runtime probes are treated the same way, with
+  `scripts/v080_pyxlog_runtime_probe.py` now committed for the PYAPI probe.
+- Goal-039 also preserved the M37-A neural-symbolic training surface as an
+  existing downstream substrate. Post-review code audit found that v0.8.0's
+  standalone deterministic-top-k helper did not consume the already shipped
+  `register_network(..., k=..., det=...)` configuration in neural training
+  paths. Commit `30995c1e` fixes that by reusing `NetworkHandle.k` and
+  `NetworkHandle.det` inside direct, complex, and batched forward/backward
+  probability handling rather than introducing a parallel helper-only mode.
+
+## Runtime Probe Auditability
+
+| Probe | Audit status |
+|-------|--------------|
+| G080_PYAPI | Reproducible from committed command: `/tmp/xlog-v080-cert-venv/bin/python scripts/v080_pyxlog_runtime_probe.py --probe pyapi --output docs/evidence/2026-05-18-v080-pyapi/runtime_probe.json`. |
+| G080_CERT | Manifest generation and verification are committed in `scripts/v080_dts_cert.py`; `runtime_probe.json` remains branch-local evidence consumed by that manifest. |
+| G080_DELTA / G080_BRIDGE / G080_EXACT | Raw probe JSON is committed as branch-local evidence. The closure claim relies on committed source/runtime gates for pass/fail status; probe timing or environment-specific values are treated as observed evidence rather than independently scripted release gates. |
 
 ## Remaining Risk
 

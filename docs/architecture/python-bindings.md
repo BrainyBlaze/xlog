@@ -440,6 +440,13 @@ configuration. `belnap_loss(...)` returns a dictionary containing `loss`,
 `pro_reward`, `contra_penalty`, `quarantine_penalty`, `cfr_regret_proxy`, and
 the formula string.
 
+Registered-network output modes reuse the existing `register_network(..., k=N,
+det=True)` configuration. `forward_backward_tensor(...)`,
+`forward_backward(...)`, and batched neural-query training apply the configured
+stable top-k or deterministic top-1 mode before NLL loss and cached circuit
+probability import. Deterministic mode uses a hard top-1 forward value with a
+straight-through gradient path through the selected probability.
+
 ### Optimizer and scheduler control
 
 ```python
@@ -867,8 +874,8 @@ for batch in data_loader:
 Current limitations:
 - Linux x86_64 + CUDA only
 - Published PyPI wheels follow tagged releases and may lag the current `main` branch workspace version
-- No async evaluation API
-- No per-call memory limit configuration
+- v0.8.0 async evaluation and per-call memory APIs require this branch's
+  workspace build until the next tagged wheel is published
 
 ## See Also
 

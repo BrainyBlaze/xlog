@@ -47,3 +47,18 @@ def test_rust_bindings_enforce_per_call_memory_and_expose_diagnostics() -> None:
         assert "memory_stats" in source
         assert "allocated_bytes" in source
         assert "memory_limit_bytes" in source
+
+
+def test_pyxlog_runtime_probe_reproducer_is_committed() -> None:
+    probe = (ROOT / "scripts/v080_pyxlog_runtime_probe.py").read_text()
+
+    for needle in [
+        "--probe",
+        "--output",
+        "run_pyapi_probe",
+        "evaluate_async",
+        "iter_query_chunks",
+        "memory_mb",
+        "progress_stats",
+    ]:
+        assert needle in probe
