@@ -412,6 +412,9 @@ pub mod epistemic_kernels {
     /// Device-side final-result flag materialization staging kernel.
     pub const EPISTEMIC_MATERIALIZE_FINAL_RESULT_FLAGS_U8: &str =
         "epistemic_materialize_final_result_flags_u8";
+    /// Device-side final tuple materialization kernel.
+    pub const EPISTEMIC_MATERIALIZE_FINAL_TUPLE_COLUMN_U8: &str =
+        "epistemic_materialize_final_tuple_column_u8";
 }
 
 /// Kernel function names in the neural fast-path module.

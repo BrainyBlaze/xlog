@@ -12,8 +12,8 @@ This slice added the first production-facing lowering route after the explicit
 epistemic semantic contract was built. Later runtime evidence adds bounded
 candidate-generation, propagation, candidate-buffer validation,
 model-membership, world-view-validation, materialization-staging, and
-final-result flag kernels; this file alone is not a GPU execution claim and
-does not close `G090_GPU`.
+final-result flag plus final tuple materialization kernels; this file alone is
+not a GPU execution claim and does not close `G090_GPU`.
 
 ## Reuse Audit
 
@@ -42,7 +42,7 @@ The prior closure/evidence docs were inspected before finalizing this slice:
 | `cargo fmt --check` | PASS |
 | `cargo test -p xlog-logic --test test_epistemic_executable_plan` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_gpu_plan` | PASS, 3 passed, 0 failed |
-| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 33 passed, 0 failed |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 36 passed, 0 failed |
 | `cargo test -p xlog-ir --lib` | PASS, 14 passed, 0 failed |
 | `cargo test -p xlog-logic --lib` | PASS, 238 passed, 0 failed |
 | `cargo test -p xlog-runtime --lib` | PASS, 125 passed, 0 failed |
@@ -54,14 +54,13 @@ The prior closure/evidence docs were inspected before finalizing this slice:
 | Metric | Target | Status | Evidence |
 |---|---|---|---|
 | M090_EIR.6 production route | accepted epistemic forms have a production lowering route | PARTIAL | Executable route exists after the semantic contract; direct `xlog run` lowering still rejects epistemic literals. |
-| M090_GPU.1 production lowering | accepted epistemic fixture runs through production runtime dispatch | PARTIAL | Reduced runtime plan is produced through the production compiler; later runtime evidence launches candidate generation/propagation/candidate validation before reduced-plan dispatch, then row-count-gated model-membership/world-view-validation/materialization and final-result flag staging, but actual stable-model tuple membership population/full final tuple materialization dispatch is not implemented. |
+| M090_GPU.1 production lowering | accepted epistemic fixture runs through production runtime dispatch | PARTIAL | Reduced runtime plan is produced through the production compiler; later runtime evidence launches candidate generation/propagation/candidate validation before reduced-plan dispatch, then row-count-gated model-membership/world-view-validation/materialization, final-result flag staging, and final tuple materialization, but actual stable-model tuple membership population is not implemented. |
 | M090_GPU.2 WCOJ eligibility | at least one epistemic reduction uses the WCOJ planner/path where eligible | PARTIAL | Reduced fixtures reach `RirNode::MultiWayJoin` and K-clique `MultiwayPlan`; later runtime evidence fails closed when a required K-clique WCOJ plan lacks counter deltas, but no certified successful dispatch evidence exists yet. |
-| M090_GPU.4 kernel coverage | kernels cover GPT hot paths | PARTIAL | Later runtime evidence launches candidate-generation, propagation-staging, candidate-buffer validation, row-count-gated model-membership staging, world-view-validation staging, materialization-staging, and final-result flag kernels; full final tuple materialization kernels are missing. |
-| M090_GPU.6 launch evidence | nonzero GPU launches and timing | PARTIAL | Later runtime traces record candidate-generation, propagation, candidate-validation, model-membership, world-view-validation, accepted-candidate materialization, and final-result flag launches with CUDA-event elapsed timing; full final tuple materialization timing is missing. |
+| M090_GPU.4 kernel coverage | kernels cover GPT hot paths | PARTIAL | Later runtime evidence launches candidate-generation, propagation-staging, candidate-buffer validation, row-count-gated model-membership staging, world-view-validation staging, materialization-staging, final-result flag, and final tuple materialization kernels; semantic tuple materialization from actual accepted stable-model membership is still missing. |
+| M090_GPU.6 launch evidence | nonzero GPU launches and timing | PARTIAL | Later runtime traces record candidate-generation, propagation, candidate-validation, model-membership, world-view-validation, accepted-candidate materialization, final-result flag, and final tuple materialization launches with CUDA-event elapsed timing; actual stable-model membership timing is missing. |
 
 ## Remaining Blocker
 
 The next runtime slice must map actual reduced-runtime stable-model tuples into
-model-membership bytes and add full final query-result materialization kernels
-or GPU-backed adapters, then report launch counters/timings plus zero CPU
-fallback counters.
+model-membership bytes and semantically gate final query results with that
+membership, then report launch counters/timings plus zero CPU fallback counters.

@@ -3,7 +3,9 @@
 use cudarc::driver::LaunchConfig;
 use xlog_core::{Result, XlogError};
 use xlog_cuda::provider::{epistemic_kernels, HostTransferStats, EPISTEMIC_MODULE};
-use xlog_cuda::{memory::TrackedCudaSlice, sys, CudaBuffer, DriverError, LaunchAsync};
+use xlog_cuda::{
+    memory::TrackedCudaSlice, sys, CudaBuffer, CudaColumn, DeviceSlice, DriverError, LaunchAsync,
+};
 use xlog_ir::rir::{MultiwayPlan, RirNode};
 use xlog_ir::{EpistemicCpuFallbackCounters, EpistemicExecutablePlan, EpistemicGpuPlan};
 
@@ -195,6 +197,27 @@ pub struct EpistemicGpuFinalResultMaterializationTrace {
     /// Host writes used by final-result materialization. Accepted execution requires zero.
     pub host_write_ops: u32,
     /// CUDA-event timing for the launched kernel.
+    pub kernel_timing: EpistemicGpuKernelTimingTrace,
+}
+
+/// Trace proving final query tuples were materialized into a device-resident buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EpistemicGpuFinalTupleMaterializationTrace {
+    /// Number of output columns copied into the final device buffer.
+    pub output_column_count: usize,
+    /// Row capacity of the final output buffer.
+    pub output_row_capacity: usize,
+    /// Device tuple bytes covered by the materialization kernels.
+    pub tuple_bytes_capacity: usize,
+    /// Device output row-count scalars read by the kernels.
+    pub output_row_count_device_reads: u32,
+    /// Device final row-count scalars written by the kernels.
+    pub final_row_count_device_writes: u32,
+    /// Final tuple materialization kernel launches.
+    pub kernel_launches: u32,
+    /// Host writes used by final tuple materialization. Accepted execution requires zero.
+    pub host_write_ops: u32,
+    /// CUDA-event timing for the launched kernel batch.
     pub kernel_timing: EpistemicGpuKernelTimingTrace,
 }
 
@@ -422,6 +445,43 @@ impl EpistemicGpuFinalResultMaterializationTrace {
             output_row_count_device_reads: 1,
             world_view_slots_written: candidate_count,
             kernel_launches: 1,
+            host_write_ops: 0,
+            kernel_timing: EpistemicGpuKernelTimingTrace::unrecorded(),
+        })
+    }
+
+    /// Attach CUDA-event timing captured by the runtime launch path.
+    pub const fn with_kernel_timing(
+        mut self,
+        kernel_timing: EpistemicGpuKernelTimingTrace,
+    ) -> Self {
+        self.kernel_timing = kernel_timing;
+        self
+    }
+}
+
+impl EpistemicGpuFinalTupleMaterializationTrace {
+    /// Build a final tuple materialization trace for a device-side output buffer.
+    pub fn for_counts(
+        output_column_count: usize,
+        output_row_capacity: usize,
+        tuple_bytes_capacity: usize,
+    ) -> Result<Self> {
+        if output_column_count > u32::MAX as usize {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU final-tuple output columns".to_string(),
+                estimated_bytes: output_column_count as u64,
+                budget_bytes: u32::MAX as u64,
+            });
+        }
+
+        Ok(Self {
+            output_column_count,
+            output_row_capacity,
+            tuple_bytes_capacity,
+            output_row_count_device_reads: 1,
+            final_row_count_device_writes: 1,
+            kernel_launches: output_column_count.max(1) as u32,
             host_write_ops: 0,
             kernel_timing: EpistemicGpuKernelTimingTrace::unrecorded(),
         })
@@ -902,8 +962,12 @@ pub struct EpistemicGpuExecutionResult {
     pub materialization: EpistemicGpuMaterializationTrace,
     /// Final result materialization trace captured from reduced output metadata.
     pub final_result_materialization: EpistemicGpuFinalResultMaterializationTrace,
+    /// Final query tuple materialization trace captured after final-result gating.
+    pub final_tuple_materialization: EpistemicGpuFinalTupleMaterializationTrace,
     /// Hot-path host-transfer budget trace for epistemic GPU execution.
     pub transfer_budget: EpistemicGpuTransferBudgetTrace,
+    /// Device-resident final query output buffer.
+    pub final_output: CudaBuffer,
     /// Output buffer returned by the reduced production execution plan.
     pub output: CudaBuffer,
     /// Runtime counter trace for the reduced production plan dispatch.
@@ -1663,6 +1727,126 @@ impl Executor {
         Ok(trace.with_kernel_timing(kernel_timing))
     }
 
+    /// Materialize final query tuples into a device-resident output buffer.
+    pub fn materialize_epistemic_gpu_final_tuples(
+        &self,
+        workspace: &EpistemicGpuWorkspace,
+        output: &CudaBuffer,
+        candidate_count: usize,
+    ) -> Result<(CudaBuffer, EpistemicGpuFinalTupleMaterializationTrace)> {
+        if candidate_count > workspace.layout.rejection_reason_slots {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU final-tuple rejection workspace".to_string(),
+                estimated_bytes: candidate_count as u64,
+                budget_bytes: workspace.layout.rejection_reason_slots as u64,
+            });
+        }
+        if candidate_count > u32::MAX as usize || output.num_rows() > u32::MAX as u64 {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU final-tuple dimensions".to_string(),
+                estimated_bytes: candidate_count.max(output.num_rows() as usize) as u64,
+                budget_bytes: u32::MAX as u64,
+            });
+        }
+
+        let mut tuple_bytes_capacity = 0usize;
+        let mut source_columns: Vec<(&CudaColumn, u32)> = Vec::with_capacity(output.arity());
+        let mut result_columns_raw: Vec<TrackedCudaSlice<u8>> = Vec::with_capacity(output.arity());
+        for col_idx in 0..output.arity() {
+            let src_col = output.column(col_idx).ok_or_else(|| {
+                XlogError::Execution(format!("epistemic final tuple missing column {col_idx}"))
+            })?;
+            if src_col.len() > u32::MAX as usize {
+                return Err(XlogError::ResourceExhausted {
+                    context: "epistemic GPU final-tuple column".to_string(),
+                    estimated_bytes: src_col.len() as u64,
+                    budget_bytes: u32::MAX as u64,
+                });
+            }
+            tuple_bytes_capacity = checked_sum(tuple_bytes_capacity, src_col.len())?;
+            source_columns.push((src_col, src_col.len() as u32));
+            result_columns_raw.push(self.provider.memory().alloc::<u8>(src_col.len())?);
+        }
+
+        let mut final_row_count = self.provider.memory().alloc::<u32>(1)?;
+        let trace = EpistemicGpuFinalTupleMaterializationTrace::for_counts(
+            output.arity(),
+            output.num_rows() as usize,
+            tuple_bytes_capacity,
+        )?;
+        let candidate_count_u32 = candidate_count as u32;
+        let func = self
+            .provider
+            .device()
+            .inner()
+            .get_func(
+                EPISTEMIC_MODULE,
+                epistemic_kernels::EPISTEMIC_MATERIALIZE_FINAL_TUPLE_COLUMN_U8,
+            )
+            .ok_or_else(|| {
+                XlogError::Execution(
+                    "epistemic final tuple materialization kernel not found".to_string(),
+                )
+            })?;
+
+        let scratch_src = self.provider.memory().alloc::<u8>(1)?;
+        let mut scratch_dst = self.provider.memory().alloc::<u8>(1)?;
+        let kernel_timing = self.time_epistemic_gpu_kernel_launch(
+            "epistemic GPU final tuple materialization",
+            || unsafe {
+                if source_columns.is_empty() {
+                    // SAFETY: the zero-column launch writes only the final row-count
+                    // scalar. The scratch pointers are valid one-byte device buffers,
+                    // and the column byte count is zero so no tuple bytes are read.
+                    return func.clone().launch(
+                        LaunchConfig::for_num_elems(1),
+                        (
+                            0u32,
+                            candidate_count_u32,
+                            output.num_rows_device(),
+                            &workspace.rejection_reasons,
+                            &scratch_src,
+                            &mut scratch_dst,
+                            &mut final_row_count,
+                        ),
+                    );
+                }
+
+                for ((src_col, column_byte_len), dst_col) in
+                    source_columns.iter().zip(result_columns_raw.iter_mut())
+                {
+                    // SAFETY: source and destination columns are valid device byte
+                    // buffers of identical length, the row-count scalar is
+                    // runtime-owned, and rejection reasons were capacity-checked.
+                    func.clone().launch(
+                        LaunchConfig::for_num_elems((*column_byte_len).max(1)),
+                        (
+                            *column_byte_len,
+                            candidate_count_u32,
+                            output.num_rows_device(),
+                            &workspace.rejection_reasons,
+                            *src_col,
+                            dst_col,
+                            &mut final_row_count,
+                        ),
+                    )?;
+                }
+                Ok(())
+            },
+        )?;
+
+        let result_columns: Vec<CudaColumn> =
+            result_columns_raw.into_iter().map(Into::into).collect();
+        let final_output = CudaBuffer::from_columns(
+            result_columns,
+            output.num_rows(),
+            final_row_count,
+            output.schema().clone(),
+        );
+
+        Ok((final_output, trace.with_kernel_timing(kernel_timing)))
+    }
+
     /// Prepare runtime-owned GPU buffers for an epistemic executable plan.
     pub fn prepare_epistemic_gpu_execution(
         &self,
@@ -1737,6 +1921,12 @@ impl Executor {
             &output,
             candidate_count,
         )?;
+        let (final_output, final_tuple_materialization) = self
+            .materialize_epistemic_gpu_final_tuples(
+                &prepared.workspace,
+                &output,
+                candidate_count,
+            )?;
         let transfer_budget_end = self.provider.host_transfer_stats();
         let transfer_budget = EpistemicGpuTransferBudgetTrace::from_host_transfer_stats(
             candidate_count,
@@ -1753,7 +1943,9 @@ impl Executor {
             world_view_validation,
             materialization,
             final_result_materialization,
+            final_tuple_materialization,
             transfer_budget,
+            final_output,
             output,
             trace,
         })
@@ -1844,6 +2036,14 @@ fn checked_product(left: usize, right: usize) -> Result<usize> {
     left.checked_mul(right).ok_or_else(|| {
         XlogError::Kernel(format!(
             "epistemic GPU workspace size overflow: {left} * {right}"
+        ))
+    })
+}
+
+fn checked_sum(left: usize, right: usize) -> Result<usize> {
+    left.checked_add(right).ok_or_else(|| {
+        XlogError::Kernel(format!(
+            "epistemic GPU workspace size overflow: {left} + {right}"
         ))
     })
 }

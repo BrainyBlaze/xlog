@@ -67,19 +67,23 @@ CUDA-event elapsed timing for accepted-candidate materialization staging.
 `EpistemicGpuFinalResultMaterializationTrace` with one device row-count read
 from `output.num_rows_device()`, one kernel launch, zero host writes, and
 CUDA-event elapsed timing for final-result flag staging.
+`Executor::materialize_epistemic_gpu_final_tuples` launches
+`epistemic_materialize_final_tuple_column_u8` and records
+`EpistemicGpuFinalTupleMaterializationTrace` for a device-resident final-output
+`CudaBuffer`, including covered tuple bytes, device row-count read/write
+metadata, kernel launches, zero host writes, and CUDA-event elapsed timing.
 `EpistemicGpuRuntimeWcojCertification` then requires actual production WCOJ
 counter deltas before WCOJ evidence can be certified.
 `Executor::execute_epistemic_gpu_execution` wraps the reduced production
 runtime plan with preflight, workspace allocation, candidate-generation,
 propagation, candidate-validation, `execute_plan` plus before/after counter
 tracing, then model-membership staging, world-view validation staging, and
-accepted-candidate plus final-result flag materialization-staging kernel
-launches. It also snapshots provider host-transfer counters around the hot path
+accepted-candidate, final-result flag, and final tuple materialization-staging
+kernel launches. It also snapshots provider host-transfer counters around the hot path
 and records `EpistemicGpuTransferBudgetTrace`, which rejects tracked data-plane
 H2D/D2H deltas instead of resetting shared telemetry. That is still incomplete
 for the epistemic hot path; actual reduced stable-model tuple membership
-population, solver coupling, and full final tuple/query-result materialization
-do not dispatch yet.
+population and solver coupling do not dispatch yet.
 
 ## GPU And WCOJ Scope
 
@@ -94,7 +98,7 @@ through:
 - helper splitting;
 - semantic population of GPU-resident world-view/candidate buffers from actual
   reduced stable-model tuples;
-- full final query tuple materialization;
+- semantic final query tuple materialization from accepted world views;
 - GPU portfolio SAT/MaxSAT dispatch.
 
 Those paths are required G090_GPU/G090_SOLVER/G090_PROB work before v0.9.0 can
@@ -136,7 +140,8 @@ Release certification must replace the current CPU fixture hot paths with:
 - runtime allocation/use of GPU-resident candidate, world-view,
   model-membership, and rejection buffers;
 - GPU kernels for candidate generation, propagation, validation, and
-  materialization, including full final tuple materialization;
+  materialization, including semantic final tuple materialization from accepted
+  world views;
 - WCOJ planner eligibility, layout construction, skew scheduling, and helper
   splitting for eligible epistemic reductions;
 - GPU-native SAT/MaxSAT/portfolio solving or documented GPU-backed adapters;

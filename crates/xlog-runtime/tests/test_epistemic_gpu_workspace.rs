@@ -10,10 +10,10 @@ use xlog_ir::{
 };
 use xlog_runtime::{
     EpistemicGpuCandidateGenerationTrace, EpistemicGpuCandidateValidationTrace,
-    EpistemicGpuFinalResultMaterializationTrace, EpistemicGpuKernelTimingTrace,
-    EpistemicGpuMaterializationTrace, EpistemicGpuModelMembershipTrace,
-    EpistemicGpuPropagationTrace, EpistemicGpuRuntimeCounters, EpistemicGpuRuntimePreflight,
-    EpistemicGpuRuntimeTrace, EpistemicGpuRuntimeWcojCertification,
+    EpistemicGpuFinalResultMaterializationTrace, EpistemicGpuFinalTupleMaterializationTrace,
+    EpistemicGpuKernelTimingTrace, EpistemicGpuMaterializationTrace,
+    EpistemicGpuModelMembershipTrace, EpistemicGpuPropagationTrace, EpistemicGpuRuntimeCounters,
+    EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace, EpistemicGpuRuntimeWcojCertification,
     EpistemicGpuTransferBudgetTrace, EpistemicGpuWorkspaceCapacities, EpistemicGpuWorkspaceLayout,
     EpistemicGpuWorkspaceResetTrace, EpistemicGpuWorldViewValidationTrace,
 };
@@ -605,6 +605,40 @@ fn final_result_materialization_trace_records_device_row_count_read_without_host
 }
 
 #[test]
+fn final_tuple_materialization_trace_records_device_tuple_buffer_without_host_writes() {
+    let trace = EpistemicGpuFinalTupleMaterializationTrace::for_counts(2, 16, 128).unwrap();
+
+    assert_eq!(trace.output_column_count, 2);
+    assert_eq!(trace.output_row_capacity, 16);
+    assert_eq!(trace.tuple_bytes_capacity, 128);
+    assert_eq!(trace.output_row_count_device_reads, 1);
+    assert_eq!(trace.final_row_count_device_writes, 1);
+    assert_eq!(trace.kernel_launches, 2);
+    assert_eq!(trace.host_write_ops, 0);
+    assert!(!trace.kernel_timing.is_recorded());
+}
+
+#[test]
+fn final_tuple_materialization_trace_rejects_launch_counter_overflow() {
+    let err =
+        EpistemicGpuFinalTupleMaterializationTrace::for_counts(u32::MAX as usize + 1, 16, 128)
+            .expect_err("final tuple trace must not truncate kernel launch counts");
+
+    match err {
+        xlog_core::XlogError::ResourceExhausted {
+            context,
+            estimated_bytes,
+            budget_bytes,
+        } => {
+            assert_eq!(context, "epistemic GPU final-tuple output columns");
+            assert_eq!(estimated_bytes, u32::MAX as u64 + 1);
+            assert_eq!(budget_bytes, u32::MAX as u64);
+        }
+        other => panic!("expected output-column overflow error, got {other:?}"),
+    }
+}
+
+#[test]
 fn transfer_budget_trace_rejects_tracked_host_transfers_in_gpu_hot_path() {
     let before = HostTransferStats {
         dtoh_bytes: 3,
@@ -671,6 +705,7 @@ fn staging_runtime_paths_record_cuda_event_timing_for_each_kernel() {
         "epistemic GPU world-view validation",
         "epistemic GPU candidate materialization",
         "epistemic GPU final result materialization",
+        "epistemic GPU final tuple materialization",
     ] {
         assert!(
             source.match_indices(label).any(|(label_pos, _)| {
@@ -683,7 +718,7 @@ fn staging_runtime_paths_record_cuda_event_timing_for_each_kernel() {
     }
     assert_eq!(
         source.matches(".with_kernel_timing(kernel_timing)").count(),
-        7
+        8
     );
 }
 
@@ -710,12 +745,17 @@ fn execution_result_records_hot_path_transfer_budget_without_resetting_stats() {
     let final_materialization_pos = source
         .find("self.materialize_epistemic_gpu_final_results")
         .expect("final-result flag materialization launch");
+    let final_tuple_pos = source
+        .find("let (final_output, final_tuple_materialization)")
+        .expect("final tuple materialization launch");
     let transfer_end_pos = source
         .find("let transfer_budget_end = self.provider.host_transfer_stats()")
         .expect("transfer-budget end snapshot");
 
     assert!(transfer_start_pos < candidate_generation_pos);
     assert!(final_materialization_pos < transfer_end_pos);
+    assert!(final_materialization_pos < final_tuple_pos);
+    assert!(final_tuple_pos < transfer_end_pos);
 }
 
 #[test]
@@ -754,18 +794,45 @@ fn final_result_materialization_runtime_path_uses_output_device_row_count_not_ho
 }
 
 #[test]
+fn final_tuple_materialization_runtime_path_copies_output_columns_on_device() {
+    let source = include_str!("../src/executor/epistemic_workspace.rs");
+    let cuda = include_str!("../../xlog-cuda/kernels/epistemic.cu");
+    let manifest = include_str!("../../xlog-cuda/src/kernel_manifest_data.rs");
+
+    assert!(source.contains("fn materialize_epistemic_gpu_final_tuples"));
+    assert!(source.contains("EPISTEMIC_MATERIALIZE_FINAL_TUPLE_COLUMN_U8"));
+    assert!(source.contains("output.num_rows_device()"));
+    assert!(source.contains("output.column(col_idx)"));
+    assert!(source.contains("CudaBuffer::from_columns"));
+    assert!(source
+        .contains("pub final_tuple_materialization: EpistemicGpuFinalTupleMaterializationTrace"));
+    assert!(source.contains("pub final_output: CudaBuffer"));
+    assert!(cuda.contains("epistemic_materialize_final_tuple_column_u8"));
+    assert!(manifest.contains("\"epistemic_materialize_final_tuple_column_u8\""));
+    assert!(!source.contains("upload_epistemic_final_tuple"));
+    assert!(!source.contains("copy_epistemic_final_tuple_from_host"));
+    assert!(!source.contains("dtoh_epistemic_final_tuple"));
+}
+
+#[test]
 fn execution_result_records_materialization_kernels_after_world_view_validation() {
     let source = include_str!("../src/executor/epistemic_workspace.rs");
 
     assert!(source.contains("pub materialization: EpistemicGpuMaterializationTrace"));
     assert!(source
         .contains("pub final_result_materialization: EpistemicGpuFinalResultMaterializationTrace"));
+    assert!(source
+        .contains("pub final_tuple_materialization: EpistemicGpuFinalTupleMaterializationTrace"));
     assert!(source.contains("let materialization ="));
     assert!(source.contains("self.materialize_epistemic_gpu_candidates"));
     assert!(source.contains("let final_result_materialization ="));
     assert!(source.contains("self.materialize_epistemic_gpu_final_results"));
+    assert!(source.contains("let (final_output, final_tuple_materialization) ="));
+    assert!(source.contains("materialize_epistemic_gpu_final_tuples("));
     assert!(source.contains("materialization,"));
     assert!(source.contains("final_result_materialization,"));
+    assert!(source.contains("final_tuple_materialization,"));
+    assert!(source.contains("final_output,"));
 
     let world_validation_pos = source
         .find("let world_view_validation = self.validate_epistemic_gpu_world_views")
@@ -776,9 +843,13 @@ fn execution_result_records_materialization_kernels_after_world_view_validation(
     let final_materialization_pos = source
         .find("self.materialize_epistemic_gpu_final_results")
         .expect("final-result materialization launch in execution path");
+    let final_tuple_pos = source
+        .find("let (final_output, final_tuple_materialization)")
+        .expect("final tuple materialization launch in execution path");
 
     assert!(world_validation_pos < materialization_pos);
     assert!(materialization_pos < final_materialization_pos);
+    assert!(final_materialization_pos < final_tuple_pos);
 }
 
 fn epistemic_literal(predicate: &str, op: EirEpistemicOp) -> EirEpistemicLiteral {

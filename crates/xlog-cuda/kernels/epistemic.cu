@@ -158,3 +158,29 @@ extern "C" __global__ void epistemic_materialize_final_result_flags_u8(
     world_views[candidate * world_stride] =
         (rejection_reasons[candidate] == 0u && has_output != 0u) ? 1u : 0u;
 }
+
+extern "C" __global__ void epistemic_materialize_final_tuple_column_u8(
+    uint32_t column_byte_len,
+    uint32_t candidate_count,
+    const uint32_t* __restrict__ output_row_count,
+    const uint32_t* __restrict__ rejection_reasons,
+    const uint8_t* __restrict__ source_column,
+    uint8_t* __restrict__ final_column,
+    uint32_t* __restrict__ final_row_count
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    uint8_t accepted_candidate = 0u;
+    for (uint32_t candidate = 0; candidate < candidate_count; ++candidate) {
+        accepted_candidate |= (rejection_reasons[candidate] == 0u) ? 1u : 0u;
+    }
+
+    uint32_t rows = output_row_count[0];
+    uint8_t materialize = (accepted_candidate != 0u && rows != 0u) ? 1u : 0u;
+    if (gid == 0u) {
+        final_row_count[0] = (materialize != 0u) ? rows : 0u;
+    }
+
+    if (gid >= column_byte_len) return;
+    final_column[gid] = (materialize != 0u) ? source_column[gid] : 0u;
+}

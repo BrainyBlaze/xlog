@@ -191,10 +191,17 @@ output's device row-count scalar with rejection codes and write final-result
 flags into world-view slots, recording
 `EpistemicGpuFinalResultMaterializationTrace` with one device row-count read,
 one kernel launch, zero host writes, and CUDA-event elapsed timing.
+`Executor::materialize_epistemic_gpu_final_tuples` launches
+`epistemic_materialize_final_tuple_column_u8` to copy reduced-output tuple
+columns into a device-resident final-output `CudaBuffer` and write the final
+row-count scalar on device, recording
+`EpistemicGpuFinalTupleMaterializationTrace` with output column count, row
+capacity, covered tuple bytes, one output row-count device read, one final
+row-count device write, kernel launches, zero host writes, and CUDA-event
+elapsed timing.
 These are bounded candidate-buffer invariants and validation/materialization
 staging only; coupling model-membership bytes to actual reduced-runtime stable
-model output, solver coupling, and full final tuple/query-result
-materialization remain missing GPU phases.
+model output and solver coupling remain missing GPU phases.
 
 `EpistemicGpuRuntimePreflight::for_executable_plan` consumes an
 `EpistemicExecutablePlan` before launch. It computes the workspace layout,
@@ -213,8 +220,8 @@ dispatch.
 runtime plan with preflight, workspace allocation, candidate-generation,
 propagation, candidate-validation, `execute_plan` plus before/after counter
 trace, then model-membership staging, world-view validation staging, and
-accepted-candidate plus final-result flag materialization-staging kernel
-launches. The same execution path snapshots provider host-transfer counters
+accepted-candidate, final-result flag, and final tuple materialization-staging
+kernel launches. The same execution path snapshots provider host-transfer counters
 around that hot path and records `EpistemicGpuTransferBudgetTrace`, rejecting
 tracked data-plane H2D/D2H deltas instead of resetting shared provider
 telemetry.
@@ -225,10 +232,10 @@ that WCOJ certification is tied to actual counter deltas around the production
 reduced-plan dispatch. Candidate-assumption generation, propagation staging,
 candidate-buffer validation, model-membership staging, bounded world-view
 validation staging, accepted-candidate materialization staging, and final-result
-flag staging now have CUDA kernels, and the bounded hot path records zero
-tracked host transfers. The runtime does not yet map actual reduced
-stable-model tuples into model-membership bytes, materialize full final tuple
-query results, or produce full accepted-execution timing evidence.
+flag plus final tuple materialization staging now have CUDA kernels, and the
+bounded hot path records zero tracked host transfers. The runtime does not yet
+map actual reduced stable-model tuples into model-membership bytes or produce
+full accepted-execution timing evidence.
 
 ## G91 Compatibility Fixture Semantics
 
