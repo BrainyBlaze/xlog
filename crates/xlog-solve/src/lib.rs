@@ -40,10 +40,15 @@ mod gpu_cdcl;
 mod gpu_cnf;
 mod instance;
 mod proof;
+mod service;
 mod solver;
 
 pub use gpu_cdcl::{GpuCdclConfig, GpuCdclRawOutput, GpuCdclSolver, GpuCdclWorkspace};
 pub use gpu_cnf::GpuCnf;
 pub use instance::{Clause, Literal, Objective, SolveInstance};
 pub use proof::{compute_checksum, SolveProof, SolveResult, SolveStats, SolveStatus};
+pub use service::{
+    LearnedClauseTransfer, SolverPortfolioStatus, SolverService, SolverServiceBudget,
+    SolverServiceResult, SolverServiceStatus, SolverServiceTrace,
+};
 pub use solver::{Solver, SolverConfig, SolverState};
