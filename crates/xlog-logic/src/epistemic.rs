@@ -4,11 +4,14 @@ use std::collections::BTreeSet;
 
 use xlog_core::Result;
 use xlog_ir::{
-    EirBodyLiteral, EpistemicGpuPlan, EpistemicReductionPlan, EpistemicWcojReductionStatus,
+    EirBodyLiteral, EpistemicExecutablePlan, EpistemicGpuPlan, EpistemicReductionPlan,
+    EpistemicWcojReductionStatus,
 };
+use xlog_stats::StatsSnapshot;
 
 use crate::ast::{BodyLiteral, EpistemicLiteral, EpistemicMode, EpistemicOp, Program};
 use crate::build_eir;
+use crate::compile::Compiler;
 
 /// Boolean truth value for bounded epistemic fixture evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,6 +196,55 @@ pub fn plan_epistemic_gpu_execution(program: &Program) -> Result<EpistemicGpuPla
         epistemic_literals,
         reductions,
     ))
+}
+
+/// Compile an epistemic program into its GPU contract and reduced runtime plan.
+///
+/// This is the first production-lowering boundary for epistemic execution. It
+/// removes epistemic literals only after `plan_epistemic_gpu_execution` proves
+/// the explicit EIR/GPU semantic contract, then sends the ordinary reduced
+/// program through the same compiler, optimizer, helper-splitting, and WCOJ
+/// promotion pipeline used by non-epistemic programs.
+pub fn compile_epistemic_gpu_execution(program: &Program) -> Result<EpistemicExecutablePlan> {
+    compile_epistemic_gpu_execution_with_stats_snapshot(program, None)
+}
+
+/// Compile an epistemic program with an optional production statistics snapshot.
+///
+/// This preserves the W2.x/W38-B planner contract for reduced ordinary bodies:
+/// cardinality, selectivity, heat, prefix-degree, sorted-layout, and
+/// helper-splitting decisions are owned by the existing production compiler
+/// pipeline rather than by an epistemic side planner.
+pub fn compile_epistemic_gpu_execution_with_stats_snapshot(
+    program: &Program,
+    stats_snapshot: Option<&StatsSnapshot>,
+) -> Result<EpistemicExecutablePlan> {
+    let gpu_plan = plan_epistemic_gpu_execution(program)?;
+    let reduced_program = reduced_ordinary_program(program);
+    let mut compiler = Compiler::new();
+    let reduced_runtime_plan =
+        compiler.compile_program_with_stats_snapshot(&reduced_program, stats_snapshot)?;
+
+    Ok(EpistemicExecutablePlan {
+        gpu_plan,
+        reduced_runtime_plan,
+    })
+}
+
+fn reduced_ordinary_program(program: &Program) -> Program {
+    let mut reduced = program.clone();
+
+    for rule in &mut reduced.rules {
+        rule.body
+            .retain(|lit| !matches!(lit, BodyLiteral::Epistemic(_)));
+    }
+    for constraint in &mut reduced.constraints {
+        constraint
+            .body
+            .retain(|lit| !matches!(lit, BodyLiteral::Epistemic(_)));
+    }
+
+    reduced
 }
 
 fn wcoj_status_for_reduction(

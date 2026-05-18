@@ -17,7 +17,7 @@ release gate.
 
 | Area | Current branch state | Release status |
 |---|---|---|
-| EIR/GPU plan | Epistemic syntax is represented explicitly and `EpistemicGpuPlan` records the first production-facing GPU contract. | PARTIAL until accepted forms execute through production runtime/GPU dispatch. |
+| EIR/GPU plan | Epistemic syntax is represented explicitly; `EpistemicGpuPlan` records the GPU contract; `EpistemicExecutablePlan` carries the reduced production runtime plan. | PARTIAL until accepted forms execute through production runtime/GPU dispatch. |
 | GPU workspace | `EpistemicGpuWorkspace` maps required buffer categories to runtime `TrackedCudaSlice` handles. | PARTIAL until kernels populate and consume those buffers. |
 | World views | `EpistemicWorldView` fixtures test `know`, `possible`, and `not know`. | ORACLE ONLY until world views are generated/validated on GPU. |
 | GPT | CPU fixture records guesses, reduced models, accepted world views, and rejection reasons. | PARTIAL until candidate generation/propagation/validation use GPU-resident buffers. |
@@ -49,7 +49,9 @@ The next production slice should start at the lowering/runtime boundary:
 2. Map plan buffer categories to runtime GPU workspace allocations. DONE for
    layout and `TrackedCudaSlice` handles; kernel use remains open.
 3. Lower accepted EIR into production runtime plans instead of the current
-   `UnsupportedEpistemicConstruct` boundary.
+   `UnsupportedEpistemicConstruct` boundary. DONE for
+   `compile_epistemic_gpu_execution` and its stats-aware variant; runtime
+   dispatch remains open.
 4. Add GPU-resident candidate/world-view/rejection buffer population and launch
    telemetry.
 5. Route WCOJ-eligible reductions through existing planner/layout/dispatch
@@ -66,6 +68,7 @@ The next production slice should start at the lowering/runtime boundary:
 | `git diff --check` | PASS |
 | `cargo fmt --check` | PASS |
 | `cargo test -p xlog-logic --test test_epistemic_gpu_plan` | PASS, 3 passed, 0 failed |
+| `cargo test -p xlog-logic --test test_epistemic_executable_plan` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_eir --test test_epistemic_g91 --test test_epistemic_faeel --test test_epistemic_gpt --test test_epistemic_split --test test_epistemic_world_view --test test_epistemic_examples` | PASS, 22 passed, 0 failed |
 | `cargo test -p xlog-solve --test solver_service_semantics` | PASS, 5 passed, 0 failed |

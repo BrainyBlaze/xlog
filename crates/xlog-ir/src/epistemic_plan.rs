@@ -1,6 +1,7 @@
 //! GPU-native epistemic execution planning contracts.
 
 use crate::eir::{EirEpistemicLiteral, EirEpistemicMode};
+use crate::plan::ExecutionPlan;
 
 /// Generate-Propagate-Test hot-path phase that must execute on GPU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,4 +115,13 @@ impl EpistemicGpuPlan {
             cpu_fallbacks: EpistemicCpuFallbackCounters::default(),
         }
     }
+}
+
+/// Production-facing executable plan for accepted epistemic lowering.
+#[derive(Debug, Clone)]
+pub struct EpistemicExecutablePlan {
+    /// GPU semantic contract for the epistemic hot path.
+    pub gpu_plan: EpistemicGpuPlan,
+    /// Ordinary reduced program compiled through the production runtime pipeline.
+    pub reduced_runtime_plan: ExecutionPlan,
 }

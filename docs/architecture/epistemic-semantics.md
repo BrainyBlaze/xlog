@@ -99,6 +99,27 @@ helper-splitting decisions.
 This is a planning boundary only. It does not launch kernels, dispatch runtime
 plans, or certify GPU execution.
 
+## Executable Lowering Contract
+
+`compile_epistemic_gpu_execution` and
+`compile_epistemic_gpu_execution_with_stats_snapshot` are the first
+production-facing lowering routes for accepted epistemic programs. They first
+build the explicit `EpistemicGpuPlan`; only after that semantic contract exists
+do they strip epistemic literals from the reduced ordinary program and send
+that reduced program through the normal `Compiler` pipeline.
+
+That means reduced ordinary bodies reuse production lowering, optimizer passes,
+statistics snapshots, helper splitting, and WCOJ promotion. A WCOJ-eligible
+epistemic reduction can therefore produce a `RirNode::MultiWayJoin` in the
+reduced runtime plan instead of bypassing the WCOJ planner surface. K-clique
+reductions reuse the Goal-038-B `MultiwayPlan::WcojWithPlan` /
+`PlannedHashRoute` route, `KCliqueVariableOrder`, sorted-layout requirements,
+and helper-splitting specs.
+
+This still does not execute epistemic semantics. Runtime kernels must populate
+and validate the candidate/world-view buffers before the reduced plan is a
+release path.
+
 ## GPU Workspace Contract
 
 `xlog-runtime` maps an `EpistemicGpuPlan` to an

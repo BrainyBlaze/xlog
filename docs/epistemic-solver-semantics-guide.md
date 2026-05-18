@@ -19,6 +19,14 @@ GPU-resident buffer categories, WCOJ planner obligations for eligible reduced
 ordinary bodies, and zero CPU fallback counters. It does not launch kernels or
 close the GPU-native gate.
 
+`compile_epistemic_gpu_execution` now adds a production-lowering step after the
+GPU contract is proven. The stats-aware
+`compile_epistemic_gpu_execution_with_stats_snapshot` variant forwards
+`StatsSnapshot` into the normal compiler pipeline, including optimizer passes,
+helper splitting, and WCOJ promotion. This proves the lowering route and WCOJ
+planner surface for eligible reductions; it still does not run
+Generate-Propagate-Test kernels or validate world views.
+
 `xlog-runtime` also exposes `EpistemicGpuWorkspaceLayout` and
 `Executor::allocate_epistemic_gpu_workspace`, which map the plan contract to
 device-buffer allocations for candidate assumptions, world views, model
@@ -43,11 +51,16 @@ Those paths are required G090_GPU/G090_SOLVER/G090_PROB work before v0.9.0 can
 close. Existing non-epistemic programs continue to use the normal parser,
 stratifier, RIR lowering, runtime, and WCOJ infrastructure where eligible. The
 current epistemic branch proves semantic boundary, fixture contracts, and the
-first GPU-plan contract only.
+GPU-plan, reduced-runtime-plan, and workspace contracts only.
+
+The reduced-runtime-plan contract reuses the Goal-038-B WCOJ surfaces. K-clique
+epistemic reductions must pass through `MultiwayPlan`, `KCliqueVariableOrder`,
+sorted-layout requirements, and helper-splitting specs rather than a parallel
+epistemic WCOJ planner.
 
 Release certification must replace the current CPU fixture hot paths with:
 
-- production lowering from accepted EIR into executable plans;
+- runtime dispatch from accepted EIR into executable GPU plans;
 - runtime allocation/use of GPU-resident candidate, world-view,
   model-membership, and rejection buffers;
 - GPU kernels for candidate generation, propagation, validation, and

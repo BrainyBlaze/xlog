@@ -12,8 +12,9 @@ pub use eir::{
     EirRule,
 };
 pub use epistemic_plan::{
-    EpistemicCpuFallbackCounters, EpistemicGpuBufferKind, EpistemicGpuHotPathPhase,
-    EpistemicGpuPlan, EpistemicReductionPlan, EpistemicWcojReductionStatus,
+    EpistemicCpuFallbackCounters, EpistemicExecutablePlan, EpistemicGpuBufferKind,
+    EpistemicGpuHotPathPhase, EpistemicGpuPlan, EpistemicReductionPlan,
+    EpistemicWcojReductionStatus,
 };
 pub use metadata::{LayoutHint, RirMeta, SkewSignature};
 pub use plan::{CompiledRule, ExecutionPlan, PlanBuilder, Scc, Stratum};

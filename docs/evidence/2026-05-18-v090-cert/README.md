@@ -18,7 +18,7 @@ the final release decision.
 
 | Gate | Evidence |
 |---|---|
-| Semantic golden fixtures | EIR, G91, FAEEL, GPT, split, examples, world-view, GPU-plan contract, and GPU-workspace layout fixtures pass locally. |
+| Semantic golden fixtures | EIR, G91, FAEEL, GPT, split, examples, world-view, GPU-plan contract, executable-plan contract, and GPU-workspace layout fixtures pass locally. |
 | Solver service fixtures | SAT assumptions, learned transfer, MaxSAT, GPU-unimplemented status, and failure modes pass as CPU fixtures. |
 | Probabilistic coherence fixtures | Epistemic evidence, accepted-world-view evidence, incremental circuit update, adapter design, and tolerance fixtures pass locally. |
 | Parser diagnostics | Positive syntax and negative nested-epistemic typed diagnostics pass in `test_epistemic_eir`. |
@@ -31,6 +31,7 @@ the final release decision.
 | `git diff --check` | PASS |
 | `cargo fmt --check` | PASS |
 | `cargo test -p xlog-logic --test test_epistemic_gpu_plan` | PASS, 3 passed, 0 failed |
+| `cargo test -p xlog-logic --test test_epistemic_executable_plan` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_eir --test test_epistemic_g91 --test test_epistemic_faeel --test test_epistemic_gpt --test test_epistemic_split --test test_epistemic_world_view --test test_epistemic_examples` | PASS, 22 passed, 0 failed |
 | `cargo test -p xlog-solve --test solver_service_semantics` | PASS, 5 passed, 0 failed |
@@ -56,7 +57,7 @@ the final release decision.
 | M090_CERT.6 workspace health | agreed cargo test subset pass | PASS for oracle | Runtime, logic, solve, and prob fixture/lib suites plus cross-crate checks passed. |
 | M090_CERT.7 semantic trace fixtures | GPT traces include generated, accepted, and rejected candidate counts | PARTIAL | CPU traces include generated/guess/reduced-model/accepted-world-view/rejection reason fields; GPU trace counters are missing. |
 | M090_CERT.8 GPU-native evidence | GPU launch counts, kernel timings, and zero CPU fallback counters | BLOCKED | GPU-plan and workspace contracts exist, but no epistemic GPU launch/counter evidence exists yet. |
-| M090_CERT.9 WCOJ evidence | at least one WCOJ-eligible epistemic reduction proves WCOJ planner/runtime dispatch | BLOCKED | Direct RIR lowering rejects epistemic literals; no epistemic reduction reaches WCOJ dispatch. |
+| M090_CERT.9 WCOJ evidence | at least one WCOJ-eligible epistemic reduction proves WCOJ planner/runtime dispatch | PARTIAL | Executable-plan fixtures prove WCOJ promotion to `RirNode::MultiWayJoin` and 38-B K-clique planner/layout/helper-split reuse; runtime dispatch and launch evidence are still missing. |
 
 ## Required GPU-Native Evidence Before Closure
 

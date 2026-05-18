@@ -46,12 +46,12 @@ Earlier ref checks after `git fetch origin --prune` showed:
 | Goal | Current Status | Evidence |
 |---|---|---|
 | G090_PRE | PASS for inventory | Preflight evidence committed. |
-| G090_EIR | PARTIAL | EIR is explicit and a GPU-plan contract exists, but accepted epistemic forms still lack production GPU runtime lowering. |
+| G090_EIR | PARTIAL | EIR is explicit and executable-plan lowering reaches reduced production runtime plans, but accepted epistemic forms still lack production GPU runtime dispatch. |
 | G090_G91 | PASS for semantic oracle | Compatibility fixtures pass, but GPU parity remains unproven. |
 | G090_FAEEL | PASS for semantic oracle | Foundedness fixtures pass, but GPU parity remains unproven. |
 | G090_GPT | PARTIAL | CPU trace fixtures pass; GPU-resident candidate generation/propagation/validation is missing. |
 | G090_SPLIT | PARTIAL | CPU split/recompose fixtures pass; GPU split execution is missing. |
-| G090_GPU | BLOCKED | GPU-plan and workspace contracts exist, but no production epistemic runtime dispatch, WCOJ-backed reduction, kernel buffer use, or launch evidence exists. |
+| G090_GPU | BLOCKED | GPU-plan, reduced-runtime-plan, and workspace contracts exist, but no production epistemic runtime dispatch, kernel buffer use, or launch evidence exists. |
 | G090_SOLVER | BLOCKED | `SolverService` is CPU fixture enumeration; GPU-native SAT/MaxSAT/portfolio execution is not wired to epistemic candidates. |
 | G090_PROB | BLOCKED | Accepted-world-view evidence fixtures exist, but accepted probabilistic epistemic execution is not proven on the GPU-native exact path. |
 | G090_CERT | BLOCKED | Missing GPU launch counts, kernel timings, WCOJ evidence, zero CPU fallback counters, and post-v0.8 rerun. |
@@ -65,6 +65,10 @@ The branch contains useful scaffolding:
 - explicit EIR and typed lowering boundary;
 - GPU execution plan contract with required phases, buffer categories, WCOJ
   planner obligations, and zero fallback counters;
+- executable lowering contract whose reduced ordinary program uses the normal
+  compiler pipeline and can promote WCOJ-eligible reductions to
+  `RirNode::MultiWayJoin`, including Goal-038-B K-clique planner, layout, and
+  helper-splitting metadata when statistics are supplied;
 - runtime GPU workspace layout/allocation API for candidate, world-view,
   model-membership, and rejection-reason buffers;
 - G91 and FAEEL fixture evaluators;
