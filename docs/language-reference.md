@@ -1402,6 +1402,20 @@ semantically identical to finite exact enumeration. Explain output must report
 the detected finite domain, cap, operator, and whether lifting fired, declined,
 or fell back to supported exact enumeration.
 
+In the `G085_AGG_LIFT` subset, finite probabilistic `count` aggregate heads use
+exact cardinality dynamic programming when every aggregate expression in the
+head is `count(...)`. The lift constructs formulas for exactly `k` contributing
+rows over the same row-presence formulas used by finite enumeration, so it does
+not change exact semantics. The count lift accepts up to 64 uncertain rows per
+group; larger count domains fail closed with a typed `v0.8.5 agg_lift error`.
+
+`sum`, `min`, `max`, and `logsumexp` remain on exact finite outcome enumeration
+in this subset. Their explain entries report `fallback_exact_enumeration` with a
+per-operator rationale and continue to use the 16-uncertain-row exact aggregate
+cap. `xlog explain --format json` emits an `aggregate_lifting` array containing
+the predicate, group key, operator, finite-domain source, domain size, cap,
+status, reason, naive outcome count, and dynamic-programming state count.
+
 ### Monte Carlo Sampling Methods (v0.5.0)
 
 The Monte Carlo engine supports two sampling methods:

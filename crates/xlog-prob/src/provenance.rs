@@ -69,6 +69,39 @@ pub struct ChoiceSource {
     pub source_id: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggregateLiftStatus {
+    Fired,
+    FallbackExactEnumeration,
+    Declined,
+}
+
+impl AggregateLiftStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AggregateLiftStatus::Fired => "fired",
+            AggregateLiftStatus::FallbackExactEnumeration => "fallback_exact_enumeration",
+            AggregateLiftStatus::Declined => "declined",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregateLiftReport {
+    pub predicate: String,
+    pub group_key: Vec<Value>,
+    pub operator: String,
+    pub finite_domain_source: String,
+    pub deterministic_rows: usize,
+    pub uncertain_rows: usize,
+    pub domain_size: usize,
+    pub cap: usize,
+    pub status: AggregateLiftStatus,
+    pub reason: String,
+    pub naive_outcomes: u128,
+    pub dynamic_programming_states: usize,
+}
+
 #[derive(Debug, Clone)]
 struct Relation {
     tuples: BTreeMap<Vec<Value>, PirNodeId>,
@@ -299,6 +332,7 @@ pub struct Provenance {
     pub evidence: Vec<(GroundAtom, bool)>,
     pub leaf_atoms: BTreeMap<LeafId, GroundAtom>,
     pub choice_sources: BTreeMap<ChoiceVarId, ChoiceSource>,
+    pub aggregate_lifting: Vec<AggregateLiftReport>,
 }
 
 impl Provenance {
@@ -336,6 +370,7 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
     let mut choice_probs: BTreeMap<ChoiceVarId, (f64, f64)> = BTreeMap::new();
     let mut leaf_atoms: BTreeMap<LeafId, GroundAtom> = BTreeMap::new();
     let mut choice_sources: BTreeMap<ChoiceVarId, ChoiceSource> = BTreeMap::new();
+    let mut aggregate_lifting: Vec<AggregateLiftReport> = Vec::new();
 
     let mut store: BTreeMap<String, Relation> = BTreeMap::new();
 
@@ -440,9 +475,20 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
         } else {
             let recursive = is_recursive_scc(&scc, &scc_rules);
             if recursive {
-                eval_recursive_scc(&scc, &scc_rules, &mut store, &mut builder)?;
+                eval_recursive_scc(
+                    &scc,
+                    &scc_rules,
+                    &mut store,
+                    &mut builder,
+                    &mut aggregate_lifting,
+                )?;
             } else {
-                eval_non_recursive_scc(&scc_rules, &mut store, &mut builder)?;
+                eval_non_recursive_scc(
+                    &scc_rules,
+                    &mut store,
+                    &mut builder,
+                    &mut aggregate_lifting,
+                )?;
             }
         }
     }
@@ -474,6 +520,7 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
         evidence,
         leaf_atoms,
         choice_sources,
+        aggregate_lifting,
     })
 }
 
@@ -638,9 +685,17 @@ fn eval_non_recursive_scc(
     rules: &[Rule],
     store: &mut BTreeMap<String, Relation>,
     builder: &mut PirBuilder,
+    aggregate_lifting: &mut Vec<AggregateLiftReport>,
 ) -> Result<()> {
     for rule in rules {
-        let derived = eval_rule(rule, store, &BTreeMap::new(), None, builder)?;
+        let derived = eval_rule(
+            rule,
+            store,
+            &BTreeMap::new(),
+            None,
+            builder,
+            aggregate_lifting,
+        )?;
         let rel = store
             .entry(rule.head.predicate.clone())
             .or_insert_with(Relation::new);
@@ -658,6 +713,7 @@ fn eval_recursive_scc(
     rules: &[Rule],
     store: &mut BTreeMap<String, Relation>,
     builder: &mut PirBuilder,
+    aggregate_lifting: &mut Vec<AggregateLiftReport>,
 ) -> Result<()> {
     let scc_set: std::collections::HashSet<&str> = scc.iter().map(|s| s.as_str()).collect();
 
@@ -671,7 +727,7 @@ fn eval_recursive_scc(
     // Seed: evaluate all rules once against the current full snapshot.
     let mut delta: BTreeMap<String, Relation> = BTreeMap::new();
     for rule in rules {
-        let derived = eval_rule(rule, store, &full, None, builder)?;
+        let derived = eval_rule(rule, store, &full, None, builder, aggregate_lifting)?;
         if derived.is_empty() {
             continue;
         }
@@ -721,8 +777,14 @@ fn eval_recursive_scc(
 
             let mut derived_all: BTreeMap<Vec<Value>, PirNodeId> = BTreeMap::new();
             for idx in body_indices {
-                let derived =
-                    eval_rule(rule, store, &full_prev, Some((idx, &delta_prev)), builder)?;
+                let derived = eval_rule(
+                    rule,
+                    store,
+                    &full_prev,
+                    Some((idx, &delta_prev)),
+                    builder,
+                    aggregate_lifting,
+                )?;
                 for (tuple, proof) in derived {
                     let entry = derived_all
                         .entry(tuple)
@@ -1072,6 +1134,7 @@ fn eval_rule(
     full_scc: &BTreeMap<String, Relation>,
     delta_scc: Option<(usize, &BTreeMap<String, Relation>)>,
     builder: &mut PirBuilder,
+    aggregate_lifting: &mut Vec<AggregateLiftReport>,
 ) -> Result<BTreeMap<Vec<Value>, PirNodeId>> {
     let mut states: Vec<(HashMap<String, Value>, PirNodeId)> = Vec::new();
     states.push((HashMap::new(), builder.const_true()));
@@ -1191,7 +1254,7 @@ fn eval_rule(
     }
 
     if rule.has_aggregation() {
-        eval_aggregate_head_provenance(&rule.head, states, builder)
+        eval_aggregate_head_provenance(&rule.head, states, builder, aggregate_lifting)
     } else {
         let mut out: BTreeMap<Vec<Value>, PirNodeId> = BTreeMap::new();
         for (binding, prov) in states {
@@ -1206,6 +1269,7 @@ fn eval_rule(
 }
 
 const MAX_EXACT_PROB_AGG_UNCERTAIN_ROWS: usize = 16;
+const MAX_EXACT_PROB_COUNT_LIFT_ROWS: usize = 64;
 
 #[derive(Debug, Clone)]
 struct AggregateProvRow {
@@ -1217,6 +1281,7 @@ fn eval_aggregate_head_provenance(
     head: &Atom,
     states: Vec<(HashMap<String, Value>, PirNodeId)>,
     builder: &mut PirBuilder,
+    aggregate_lifting: &mut Vec<AggregateLiftReport>,
 ) -> Result<BTreeMap<Vec<Value>, PirNodeId>> {
     let (key_vars, key_var_to_pos, agg_specs, agg_to_pos) = aggregate_head_plan(head)?;
 
@@ -1260,6 +1325,7 @@ fn eval_aggregate_head_provenance(
     }
 
     let mut out: BTreeMap<Vec<Value>, PirNodeId> = BTreeMap::new();
+    let count_only = agg_specs.iter().all(|(op, _)| *op == AggOp::Count);
     for group in groups.into_values() {
         let mut always_rows: Vec<AggregateProvRow> = Vec::new();
         let mut uncertain_rows: Vec<AggregateProvRow> = Vec::new();
@@ -1274,6 +1340,43 @@ fn eval_aggregate_head_provenance(
         if always_rows.is_empty() && uncertain_rows.is_empty() {
             continue;
         }
+        if count_only {
+            if uncertain_rows.len() > MAX_EXACT_PROB_COUNT_LIFT_ROWS {
+                return Err(XlogError::Compilation(format!(
+                    "v0.8.5 agg_lift error: count lift finite domain cap exceeded for predicate {} group {:?}: {} uncertain rows > cap {}; use prob_engine = mc or reduce the finite aggregate domain",
+                    head.predicate,
+                    group.key,
+                    uncertain_rows.len(),
+                    MAX_EXACT_PROB_COUNT_LIFT_ROWS
+                )));
+            }
+            validate_count_lift_rows(&agg_specs, &always_rows, &uncertain_rows)?;
+            record_aggregate_lift_reports(
+                aggregate_lifting,
+                head,
+                &group.key,
+                &agg_specs,
+                always_rows.len(),
+                uncertain_rows.len(),
+                AggregateLiftStatus::Fired,
+                "finite count domain lifted with exact cardinality dynamic programming",
+                MAX_EXACT_PROB_COUNT_LIFT_ROWS,
+                count_lift_dp_states(uncertain_rows.len()),
+            );
+            let count_formulas = count_lift_formulas(&uncertain_rows, builder);
+            for (selected_uncertain_rows, proof) in count_formulas.into_iter().enumerate() {
+                if always_rows.is_empty() && selected_uncertain_rows == 0 {
+                    continue;
+                }
+                let count_value = always_rows.len() + selected_uncertain_rows;
+                let tuple =
+                    materialize_count_lift_tuple(head, &group.key, &key_var_to_pos, count_value)?;
+                let entry = out.entry(tuple).or_insert_with(|| builder.const_false());
+                *entry = builder.or(vec![*entry, proof]);
+            }
+            continue;
+        }
+
         if uncertain_rows.len() > MAX_EXACT_PROB_AGG_UNCERTAIN_ROWS {
             return Err(XlogError::Compilation(format!(
                 "v0.8.5 prob_aggregate error: exact aggregate domain cap exceeded for predicate {} group {:?}: {} uncertain rows > cap {}; use prob_engine = mc or reduce the finite aggregate domain",
@@ -1283,6 +1386,18 @@ fn eval_aggregate_head_provenance(
                 MAX_EXACT_PROB_AGG_UNCERTAIN_ROWS
             )));
         }
+        record_aggregate_lift_reports(
+            aggregate_lifting,
+            head,
+            &group.key,
+            &agg_specs,
+            always_rows.len(),
+            uncertain_rows.len(),
+            AggregateLiftStatus::FallbackExactEnumeration,
+            "operator uses exact finite outcome enumeration; lifted implementation is not selected for this aggregate head",
+            MAX_EXACT_PROB_AGG_UNCERTAIN_ROWS,
+            0,
+        );
 
         let mask_count = 1usize << uncertain_rows.len();
         for mask in 0..mask_count {
@@ -1321,6 +1436,162 @@ fn eval_aggregate_head_provenance(
     }
 
     Ok(out)
+}
+
+fn validate_count_lift_rows(
+    agg_specs: &[(AggOp, String)],
+    always_rows: &[AggregateProvRow],
+    uncertain_rows: &[AggregateProvRow],
+) -> Result<()> {
+    for (_, var) in agg_specs {
+        for row in always_rows.iter().chain(uncertain_rows.iter()) {
+            if !row.binding.contains_key(var) {
+                return Err(XlogError::UnsafeVariable(var.clone()));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn count_lift_formulas(
+    uncertain_rows: &[AggregateProvRow],
+    builder: &mut PirBuilder,
+) -> Vec<PirNodeId> {
+    let n = uncertain_rows.len();
+    let mut dp = vec![builder.const_false(); n + 1];
+    dp[0] = builder.const_true();
+
+    for (idx, row) in uncertain_rows.iter().enumerate() {
+        let mut next = vec![builder.const_false(); n + 1];
+        let present = row.prov;
+        let absent = negate_provenance(row.prov, builder);
+        for selected in 0..=idx {
+            let absent_case = builder.and(vec![dp[selected], absent]);
+            next[selected] = builder.or(vec![next[selected], absent_case]);
+
+            let present_case = builder.and(vec![dp[selected], present]);
+            next[selected + 1] = builder.or(vec![next[selected + 1], present_case]);
+        }
+        dp = next;
+    }
+
+    dp
+}
+
+fn materialize_count_lift_tuple(
+    head: &Atom,
+    group_key: &[Value],
+    key_var_to_pos: &HashMap<String, usize>,
+    count_value: usize,
+) -> Result<Vec<Value>> {
+    let count_value: i64 = count_value
+        .try_into()
+        .map_err(|_| XlogError::Compilation("count() overflowed i64".to_string()))?;
+    let mut tuple: Vec<Value> = Vec::with_capacity(head.terms.len());
+    for term in &head.terms {
+        match term {
+            Term::Variable(name) => {
+                let pos = *key_var_to_pos.get(name).ok_or_else(|| {
+                    XlogError::Compilation(format!(
+                        "Aggregate head variable {} is not a group key",
+                        name
+                    ))
+                })?;
+                tuple.push(group_key[pos].clone());
+            }
+            Term::Aggregate(AggExpr {
+                op: AggOp::Count, ..
+            }) => tuple.push(Value::I64(count_value)),
+            Term::Aggregate(AggExpr { op, .. }) => {
+                return Err(XlogError::Compilation(format!(
+                    "Internal aggregate lift state mismatch for {}",
+                    agg_op_label(*op)
+                )));
+            }
+            Term::Integer(_) | Term::Float(_) | Term::String(_) | Term::Symbol(_) => {
+                tuple.push(value_from_term(term)?);
+            }
+            Term::Anonymous => unreachable!("aggregate head plan rejects anonymous terms"),
+            Term::List(_) => {
+                return Err(v085_prob_term_error(
+                    "aggregate head materialization",
+                    "list",
+                ));
+            }
+            Term::Cons { .. } => {
+                return Err(v085_prob_term_error(
+                    "aggregate head materialization",
+                    "cons",
+                ));
+            }
+            Term::Compound { .. } => {
+                return Err(v085_prob_term_error(
+                    "aggregate head materialization",
+                    "compound",
+                ));
+            }
+            Term::PredRef(_) => {
+                return Err(v085_prob_term_error(
+                    "aggregate head materialization",
+                    "predref",
+                ));
+            }
+        }
+    }
+    Ok(tuple)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_aggregate_lift_reports(
+    aggregate_lifting: &mut Vec<AggregateLiftReport>,
+    head: &Atom,
+    group_key: &[Value],
+    agg_specs: &[(AggOp, String)],
+    deterministic_rows: usize,
+    uncertain_rows: usize,
+    status: AggregateLiftStatus,
+    reason: &str,
+    cap: usize,
+    dynamic_programming_states: usize,
+) {
+    for (op, _) in agg_specs {
+        aggregate_lifting.push(AggregateLiftReport {
+            predicate: head.predicate.clone(),
+            group_key: group_key.to_vec(),
+            operator: agg_op_label(*op).to_string(),
+            finite_domain_source: "grounded body rows".to_string(),
+            deterministic_rows,
+            uncertain_rows,
+            domain_size: deterministic_rows + uncertain_rows,
+            cap,
+            status,
+            reason: reason.to_string(),
+            naive_outcomes: naive_outcome_count(uncertain_rows),
+            dynamic_programming_states,
+        });
+    }
+}
+
+fn agg_op_label(op: AggOp) -> &'static str {
+    match op {
+        AggOp::Count => "count",
+        AggOp::Sum => "sum",
+        AggOp::Min => "min",
+        AggOp::Max => "max",
+        AggOp::LogSumExp => "logsumexp",
+    }
+}
+
+fn naive_outcome_count(uncertain_rows: usize) -> u128 {
+    if uncertain_rows >= u128::BITS as usize {
+        u128::MAX
+    } else {
+        1u128 << uncertain_rows
+    }
+}
+
+fn count_lift_dp_states(uncertain_rows: usize) -> usize {
+    (uncertain_rows + 1) * (uncertain_rows + 2) / 2
 }
 
 type AggregatePlan = (

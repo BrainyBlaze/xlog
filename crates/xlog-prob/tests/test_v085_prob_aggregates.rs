@@ -128,25 +128,25 @@ query(score_max(1, 3)).
 #[test]
 fn exact_aggregate_domain_cap_reports_typed_diagnostic() {
     let source = r#"
-0.5::edge(1, 1).
-0.5::edge(1, 2).
-0.5::edge(1, 3).
-0.5::edge(1, 4).
-0.5::edge(1, 5).
-0.5::edge(1, 6).
-0.5::edge(1, 7).
-0.5::edge(1, 8).
-0.5::edge(1, 9).
-0.5::edge(1, 10).
-0.5::edge(1, 11).
-0.5::edge(1, 12).
-0.5::edge(1, 13).
-0.5::edge(1, 14).
-0.5::edge(1, 15).
-0.5::edge(1, 16).
-0.5::edge(1, 17).
-out_degree(X, count(Y)) :- edge(X, Y).
-query(out_degree(1, 17)).
+0.5::obs(1, 1).
+0.5::obs(1, 2).
+0.5::obs(1, 3).
+0.5::obs(1, 4).
+0.5::obs(1, 5).
+0.5::obs(1, 6).
+0.5::obs(1, 7).
+0.5::obs(1, 8).
+0.5::obs(1, 9).
+0.5::obs(1, 10).
+0.5::obs(1, 11).
+0.5::obs(1, 12).
+0.5::obs(1, 13).
+0.5::obs(1, 14).
+0.5::obs(1, 15).
+0.5::obs(1, 16).
+0.5::obs(1, 17).
+score_sum(X, sum(Y)) :- obs(X, Y).
+query(score_sum(1, 153)).
 "#;
 
     let err = extract_from_source(source).expect_err("exact aggregate cap should reject 17 rows");

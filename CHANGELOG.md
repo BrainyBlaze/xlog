@@ -29,6 +29,9 @@ All notable changes to this project are documented in this file.
 - Added v0.8.5 probabilistic aggregate support for finite `count`, `sum`,
   `min`, `max`, and `logsumexp` outcomes in exact provenance/PIR and MC
   deterministic aggregate execution, with typed exact-domain cap diagnostics.
+- Added v0.8.5 small-domain aggregate lifting for finite probabilistic `count`
+  heads using exact cardinality dynamic programming, plus explain metadata for
+  fired and exact-enumeration fallback aggregate operators.
 
 ### Fixed
 

@@ -29,7 +29,9 @@ pub mod wfs;
 pub mod xgcf;
 
 pub use pir::{ChoiceVarId, LeafId, PirGraph, PirNode, PirNodeId};
-pub use provenance::{ChoiceSource, GroundAtom, Provenance, Value};
+pub use provenance::{
+    AggregateLiftReport, AggregateLiftStatus, ChoiceSource, GroundAtom, Provenance, Value,
+};
 
 // Primary entry points (convenience re-exports)
 pub use compilation::{

@@ -8,6 +8,7 @@ use arrow::util::pretty::pretty_format_batches;
 use xlog_core::{symbol, MemoryBudget, Result, XlogError};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_gpu::logic::LogicProgram;
+use xlog_logic::ast::Program;
 use xlog_logic::compile::load_modules;
 use xlog_logic::{parse_program, rewrite_v085_magic_sets, MagicSetReport, MagicSetStatus};
 #[cfg(feature = "host-io")]
@@ -16,6 +17,7 @@ use xlog_prob::exact::ExactDdnnfProgram;
 use xlog_prob::exact::GpuConfig;
 #[cfg(feature = "host-io")]
 use xlog_prob::mc::{McEvalConfig, McProgram};
+use xlog_prob::provenance::{AggregateLiftReport, Value};
 
 #[derive(Parser)]
 #[command(author, version, about = "XLOG CLI")]
@@ -129,12 +131,41 @@ fn explain(args: ExplainArgs) -> Result<()> {
     })?;
     let program = parse_program(&source)?;
     let rewrite = rewrite_v085_magic_sets(&program)?;
+    let aggregate_lifting = explain_aggregate_lifting(&program)?;
     match args.format {
-        ExplainFormat::Text => print_magic_text(&rewrite.report),
-        ExplainFormat::Json => print_magic_json(&rewrite.report),
+        ExplainFormat::Text => print_explain_text(&rewrite.report, &aggregate_lifting),
+        ExplainFormat::Json => print_explain_json(&rewrite.report, &aggregate_lifting),
         ExplainFormat::Dot => print_magic_dot(&rewrite.report),
     }
     Ok(())
+}
+
+fn explain_aggregate_lifting(program: &Program) -> Result<Vec<AggregateLiftReport>> {
+    let has_probabilistic_source =
+        !program.prob_facts.is_empty() || !program.annotated_disjunctions.is_empty();
+    let has_aggregate_rule = program.proper_rules().any(|rule| rule.has_aggregation());
+    if !(has_probabilistic_source && has_aggregate_rule) {
+        return Ok(Vec::new());
+    }
+    Ok(xlog_prob::provenance::extract_from_program(program)?.aggregate_lifting)
+}
+
+fn print_explain_text(report: &MagicSetReport, aggregate_lifting: &[AggregateLiftReport]) {
+    print_magic_text(report);
+    if !aggregate_lifting.is_empty() {
+        println!("aggregate_lifting:");
+        for entry in aggregate_lifting {
+            println!(
+                "  - predicate: {} operator: {} status: {} domain: {} uncertain: {} cap: {}",
+                entry.predicate,
+                entry.operator,
+                entry.status.as_str(),
+                entry.domain_size,
+                entry.uncertain_rows,
+                entry.cap
+            );
+        }
+    }
 }
 
 fn print_magic_text(report: &MagicSetReport) {
@@ -160,7 +191,7 @@ fn print_magic_text(report: &MagicSetReport) {
     }
 }
 
-fn print_magic_json(report: &MagicSetReport) {
+fn print_explain_json(report: &MagicSetReport, aggregate_lifting: &[AggregateLiftReport]) {
     println!("{{");
     println!("  \"magic_sets\": {{");
     println!(
@@ -179,7 +210,45 @@ fn print_magic_json(report: &MagicSetReport) {
         "    \"declined_reasons\": {}",
         json_string_array(&report.declined_reasons)
     );
-    println!("  }}");
+    println!("  }},");
+    println!("  \"aggregate_lifting\": [");
+    for (idx, entry) in aggregate_lifting.iter().enumerate() {
+        let suffix = if idx + 1 == aggregate_lifting.len() {
+            ""
+        } else {
+            ","
+        };
+        println!("    {{");
+        println!(
+            "      \"predicate\": \"{}\",",
+            json_escape(&entry.predicate)
+        );
+        println!(
+            "      \"group_key\": {},",
+            json_value_array(&entry.group_key)
+        );
+        println!("      \"operator\": \"{}\",", json_escape(&entry.operator));
+        println!(
+            "      \"finite_domain_source\": \"{}\",",
+            json_escape(&entry.finite_domain_source)
+        );
+        println!(
+            "      \"deterministic_rows\": {},",
+            entry.deterministic_rows
+        );
+        println!("      \"uncertain_rows\": {},", entry.uncertain_rows);
+        println!("      \"domain_size\": {},", entry.domain_size);
+        println!("      \"cap\": {},", entry.cap);
+        println!("      \"status\": \"{}\",", entry.status.as_str());
+        println!("      \"reason\": \"{}\",", json_escape(&entry.reason));
+        println!("      \"naive_outcomes\": {},", entry.naive_outcomes);
+        println!(
+            "      \"dynamic_programming_states\": {}",
+            entry.dynamic_programming_states
+        );
+        println!("    }}{}", suffix);
+    }
+    println!("  ]");
     println!("}}");
 }
 
@@ -213,6 +282,27 @@ fn json_string_array(items: &[String]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("[{}]", values)
+}
+
+fn json_value_array(items: &[Value]) -> String {
+    let values = items.iter().map(json_value).collect::<Vec<_>>().join(", ");
+    format!("[{}]", values)
+}
+
+fn json_value(value: &Value) -> String {
+    match value {
+        Value::I64(v) => v.to_string(),
+        Value::F64(bits) => {
+            let v = f64::from_bits(*bits);
+            if v.is_finite() {
+                v.to_string()
+            } else {
+                format!("\"{}\"", json_escape(&v.to_string()))
+            }
+        }
+        Value::Symbol(id) => format!("\"{}\"", json_escape(&symbol::resolve(*id))),
+        Value::String(s) => format!("\"{}\"", json_escape(s)),
+    }
 }
 
 fn json_escape(value: &str) -> String {

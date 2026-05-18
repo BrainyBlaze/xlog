@@ -95,7 +95,7 @@ semantics.
 
 ## Source-Audit Snapshot
 
-Current implementation status through `G085_PROB_AGG`:
+Current implementation status through `G085_AGG_LIFT`:
 
 - `docs/language-reference.md` has been updated to the v0.8.5 contract and now
   records the shipped `G085_LIST`, `G085_META`, `G085_NAF`, `G085_MAGIC`, and
@@ -128,16 +128,22 @@ Current implementation status through `G085_PROB_AGG`:
   aggregate outcomes into PIR formulas. The exact cap is 16 uncertain
   contributing rows per group; exceeding it reports a typed
   `v0.8.5 prob_aggregate error` with MC/domain-reduction remediation.
+- `crates/xlog-prob/src/provenance.rs` also records aggregate-lifting metadata.
+  Count-only probabilistic aggregate heads over compact finite domains use exact
+  cardinality dynamic programming up to 64 uncertain rows per group and report
+  `fired`. `sum`, `min`, `max`, and `logsumexp` report
+  `fallback_exact_enumeration` while preserving the finite exact enumeration
+  path.
 - `crates/xlog-prob/src/aggregates.rs` centralizes aggregate operator state so
   exact provenance enumeration and MC deterministic aggregate execution share
   `count`, `sum`, `min`, `max`, and `logsumexp` semantics.
 - `crates/xlog-cli/src/main.rs` now exposes `run`, `prob`, and a minimal
   `explain` command for magic-set status/report rendering in text/json/dot
-  formats.
-- Derived-goal `findall`, non-literal `maplist` inputs, probabilistic
-  aggregates, approximate inference configuration, incremental parsing,
-  REPL/watch, and full CLI explain plan rendering remain gated to later
-  `G085_*` nodes.
+  formats. JSON/text explain output includes aggregate-lifting metadata for
+  accepted probabilistic aggregate programs.
+- Derived-goal `findall`, non-literal `maplist` inputs, approximate inference
+  configuration, incremental parsing, REPL/watch, and full CLI explain plan
+  rendering remain gated to later `G085_*` nodes.
 
 Each later implementation node must update this snapshot or link its evidence
 when it turns contract text into accepted source behavior.
