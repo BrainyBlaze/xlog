@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use xlog_core::Result;
+use xlog_core::{Result, XlogError};
 use xlog_ir::ExecutionPlan;
 use xlog_stats::{StatsManager, StatsSnapshot};
 
@@ -46,7 +46,7 @@ pub struct Compiler {
     lowerer: Lowerer,
 }
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use xlog_core::{RelId, Schema};
 
@@ -181,9 +181,10 @@ impl Compiler {
         let program = desugar_queries_and_constraints(program);
         let program = normalize_v085_meta(&program)?;
         let program = normalize_v085_lists(&program)?;
+        validate_v085_naf_safety(&program)?;
 
         // Phase 2: Stratify (analyze dependencies, detect cycles)
-        let strata = stratify(&program)?;
+        let strata = stratify(&program).map_err(map_stratification_to_naf_error)?;
 
         // Convert strata to the format expected by the lowerer
         let strata_preds: Vec<Vec<String>> = strata.into_iter().map(|s| s.predicates).collect();
@@ -469,6 +470,64 @@ fn desugar_queries_and_constraints(program: &Program) -> Program {
     out
 }
 
+fn validate_v085_naf_safety(program: &Program) -> Result<()> {
+    for rule in &program.rules {
+        validate_body_naf_safety(&rule.body, &format!("rule {}", rule.head.predicate))?;
+    }
+    for (idx, constraint) in program.constraints.iter().enumerate() {
+        validate_body_naf_safety(&constraint.body, &format!("constraint {}", idx))?;
+    }
+    for (idx, learnable) in program.learnable_rules.iter().enumerate() {
+        validate_body_naf_safety(&learnable.body, &format!("learnable rule {}", idx))?;
+    }
+    Ok(())
+}
+
+fn validate_body_naf_safety(body: &[BodyLiteral], context: &str) -> Result<()> {
+    let mut bound: HashSet<String> = HashSet::new();
+    for lit in body {
+        match lit {
+            BodyLiteral::Positive(atom) => {
+                for name in atom.variables() {
+                    bound.insert(name.to_string());
+                }
+            }
+            BodyLiteral::Negated(atom) => {
+                for name in atom.variables() {
+                    if !bound.contains(name) {
+                        return Err(naf_error(format!(
+                            "unbound variable {} in negated atom {}/{} in {}; bind it before not with a positive atom or deterministic is expression, or use '_' for existential positions",
+                            name,
+                            atom.predicate,
+                            atom.arity(),
+                            context
+                        )));
+                    }
+                }
+            }
+            BodyLiteral::IsExpr(is_expr) => {
+                bound.insert(is_expr.target.clone());
+            }
+            BodyLiteral::Comparison(_) | BodyLiteral::Univ(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn map_stratification_to_naf_error(err: XlogError) -> XlogError {
+    match err {
+        XlogError::StratificationCycle(cycle) => naf_error(format!(
+            "deterministic not atom must be stratified; cycle through negation or aggregation: {}",
+            cycle.join(" -> ")
+        )),
+        other => other,
+    }
+}
+
+fn naf_error(message: impl Into<String>) -> XlogError {
+    XlogError::Compilation(format!("v0.8.5 naf error: {}", message.into()))
+}
+
 /// Convenience function to compile source in one call.
 ///
 /// This creates a short-lived compiler and compiles the source.
@@ -591,7 +650,7 @@ mod tests {
             node(2).
             node(3).
             edge(1, 2).
-            isolated(X) :- node(X), not edge(X, Y).
+            isolated(X) :- node(X), not edge(X, _).
         "#,
         );
         assert!(

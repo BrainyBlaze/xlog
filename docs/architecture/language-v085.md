@@ -1,6 +1,6 @@
 # v0.8.5 Language Architecture Contract
 
-**Status:** `G085_DOCREF` contract and source-audit snapshot.
+**Status:** implementation snapshot through `G085_NAF`.
 **Branch:** `feat/v085-language-completeness`.
 **Scope:** language, parser, term, probabilistic, and CLI surfaces required by
 the v0.8.5 language-completeness release.
@@ -49,7 +49,7 @@ normalize them to finite typed relation layouts or reject them before execution.
 | `G085_TYPES` | Extend parser/AST/type metadata for aliases, named columns, lists, finite terms, compounds, and predicate references | Parser and semantic validation only until a construct has a lowering path |
 | `G085_LIST` | Accept finite list literals, safe cons patterns, and finite list built-ins | Desugar to helper relations and normal runtime operators |
 | `G085_META` | Support safe `ground`, `var`, `nonvar`, `functor`, `=..`, `findall`, and unary/binary `maplist` | Static expansion and finite collection; no unrestricted `call/N` |
-| `G085_NAF` | Make deterministic NAF distinct from probabilistic WFS | Existing `not atom` remains stratified closed-world negation in deterministic programs |
+| `G085_NAF` | Make deterministic NAF distinct from probabilistic WFS | Existing `not atom` remains stratified closed-world negation in deterministic programs; compiler-path diagnostics reject unsafe source-order binders and deterministic cycles |
 | `G085_MAGIC` | Rewrite bound recursive queries with adornments and magic predicates | Source/RIR rewrite before optimizer; decline if equivalence cannot be proven |
 | `G085_PROB_AGG` | Support finite probabilistic aggregates in exact and MC modes | Exact provenance/PIR or MC sampling plus deterministic aggregate execution |
 | `G085_AGG_LIFT` | Lift compact finite-domain aggregate computations | Use only when equivalent to finite exact enumeration |
@@ -95,10 +95,10 @@ semantics.
 
 ## Source-Audit Snapshot
 
-Current implementation status through `G085_META`:
+Current implementation status through `G085_NAF`:
 
 - `docs/language-reference.md` has been updated to the v0.8.5 contract and now
-  records the shipped `G085_LIST` and `G085_META` subsets.
+  records the shipped `G085_LIST`, `G085_META`, and `G085_NAF` subsets.
 - `crates/xlog-logic/src/grammar.pest` accepts finite list literals, cons
   patterns, compound terms, named predicate columns, and `list<T>` declarations.
 - `crates/xlog-logic/src/ast.rs` represents list, cons, compound, and static
@@ -110,6 +110,10 @@ Current implementation status through `G085_META`:
   `ground`, `var`, `nonvar`, `functor`, `=..`, `findall`, and unary/binary
   `maplist` forms into scalar term IDs and `__xlog_meta_*` helper relations
   before list normalization, stratification, and lowering.
+- `crates/xlog-logic/src/compile.rs` validates deterministic `not atom`
+  source-order safety after meta/list normalization and before stratification,
+  then maps compiler-path deterministic negation cycles to typed
+  `v0.8.5 naf error` diagnostics.
 - `xlog-gpu` stores the normalized program so helper relation facts are loaded
   through the normal relation-store path.
 - `crates/xlog-prob/src/provenance.rs` still rejects aggregate terms in

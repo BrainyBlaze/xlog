@@ -238,7 +238,7 @@ CPU-only fallback for a GPU-claimed path.
 | Incremental parsing | Statement-level `.xlog` source units with stable spans | Reuse unchanged statement parses and invalidate changed statements plus dependent module state | Editing one rule in a REPL/watch session preserves parse cache for unchanged facts | Cache reuse across changed module dependencies without invalidation | Parser/session cache only; no runtime execution |
 | List syntax and built-ins | `[]`, `[A, B]`, `[H|T]`, `list<T>` | Finite, typed lists normalize to helper relations | `has_member(X) :- member(X, [1,2,3]).` | Open-ended generators, cyclic lists, heterogeneous lists without a declared finite term type | AST/desugar to typed helper relations and normal runtime joins/aggregates |
 | Safe meta-predicates | `ground`, `var`, `nonvar`, `functor`, `=..`, `findall`, `maplist` | Static inspection and finite collection only | `xs(L) :- findall(X, edge(1, X), L).` | Unrestricted `call/N`, dynamic database mutation, runtime-variable predicate names | Compile-time/static expansion plus typed relational lowering |
-| Deterministic NAF | `not atom(...)` | Closed-world stratified negation over deterministic relations | `leaf(X) :- node(X), not edge(X, _).` | Unbound variables in negated atoms, unstratified deterministic cycles | Existing stratification and runtime anti-join paths |
+| Deterministic NAF | `not atom(...)` | Closed-world stratified negation over deterministic relations; named variables in the negated atom must be bound by a prior source-order binder | `leaf(X) :- node(X), not edge(X, _).` | Unbound variables in negated atoms, unstratified deterministic cycles | Existing stratification and runtime anti-join paths |
 | Magic sets | `#pragma magic_sets = on|off|auto` and CLI override | Bound recursive queries may be rewritten with adornments and magic predicates | `?- reach(1, Y).` specializes recursive reachability | Unsafe interaction with negation, aggregates, or meta constructs if equivalence cannot be proven | Source/RIR rewrite before optimizer and WCOJ planning |
 | Probabilistic aggregates | Aggregate heads and aggregate outputs in `query`/`evidence` | Finite aggregate outcomes in exact and MC inference | `query(out_degree(1, 2)).` over probabilistic `edge` facts | Exact aggregate domains over cap, unsupported numeric operator/domain pairs | Exact provenance/PIR or MC sampling plus deterministic aggregate execution |
 | Aggregate lifting | Finite-domain aggregate metadata and caps | Use lifted compact-domain computation when identical to finite exact enumeration | Small count/sum domains avoid naive enumeration | Domain cap exceeded, non-finite domains, unsupported floating tolerance | Probabilistic aggregate planner and exact/MC engines |
@@ -251,7 +251,8 @@ CPU-only fallback for a GPU-claimed path.
 
 Unsupported v0.8.5 forms must report:
 
-- the feature area, such as `list`, `meta`, `magic_sets`, or `prob_aggregate`;
+- the feature area, such as `list`, `meta`, `naf`, `magic_sets`, or
+  `prob_aggregate`;
 - the source span when available;
 - the reason the form is unsafe, unbounded, or not GPU-lowerable;
 - a remediation, such as adding a positive binder, a finite cap, or a static
@@ -262,6 +263,7 @@ Diagnostic examples:
 ```text
 list error at program.xlog:12: unbounded append/3 generation is unsupported; bind at least two list arguments or add a finite split mode.
 meta error at program.xlog:8: maplist predicate argument must be a static predref; replace runtime variable P with a named predicate.
+v0.8.5 naf error: unbound variable Y in negated atom edge/2; bind it before not with a positive atom or deterministic is expression, or use '_' for existential positions.
 magic_sets declined at program.xlog:21: recursive query crosses an aggregate boundary; run with #pragma magic_sets = off or isolate the aggregate.
 prob_aggregate error at program.xlog:17: exact aggregate domain exceeds cap 1024; add a finite cap or use prob_engine = mc.
 ```
@@ -615,7 +617,11 @@ safe_ratio(X, Y, R) :-
 
 ## Negation
 
-XLOG supports **stratified negation** using the `not` keyword. Negated atoms must be **stratifiable** (no cycles through negation).
+XLOG supports deterministic **negation as failure** using the `not` keyword.
+In deterministic programs, `not atom(...)` is closed-world, stratified
+negation. This is distinct from probabilistic nonmonotone negation, where exact
+inference may use Well-Founded Semantics (WFS) for accepted probabilistic
+programs.
 
 ### Syntax
 
@@ -660,18 +666,27 @@ childless(X) :- person(X), not has_child(X).
 p(X) :- q(X), not p(X).
 ```
 
-XLOG detects unstratifiable programs at compile time and reports an error.
+XLOG detects unstratifiable deterministic programs at compile time and reports
+a `v0.8.5 naf error`. Low-level stratification analysis still reports the
+underlying dependency cycle for callers that use it directly.
 
 ### Domain Safety
 
-Variables in negated atoms must be **bound** by positive atoms in the same rule:
+Named variables in negated atoms must be **bound** by a prior source-order
+binder in the same rule body. Positive atoms bind their named variables, and a
+deterministic `is` expression binds its target after the expression appears.
+Source order matters: a later positive atom does not make an earlier negated
+atom safe. Use `_` for existential positions inside negated atoms.
 
 ```xlog
 // Valid: X is bound by node(X) before used in not edge(X, _)
 leaf(X) :- node(X), not edge(X, _).
 
-// Invalid: Y is not bound by any positive atom
+// Invalid: Y is not bound by a prior source-order binder
 // bad(X) :- node(X), not edge(X, Y).  // ERROR
+
+// Invalid: X is bound too late
+// bad(X) :- not edge(X, _), node(X).  // ERROR
 ```
 
 ---
@@ -1310,8 +1325,10 @@ XLOG supports two inference engines:
 | **Monte Carlo** | `--prob-engine mc` | Sampling-based; approximate with confidence intervals |
 
 **Exact inference** supports:
-- **Stratified negation**: Automatic layer detection and two-valued evaluation
-- **Non-monotone negation**: Well-Founded Semantics (WFS) for cyclic programs
+- **Stratified deterministic negation**: Automatic layer detection and
+  two-valued evaluation for deterministic `not atom` programs
+- **Probabilistic non-monotone negation**: Well-Founded Semantics (WFS) for
+  accepted cyclic probabilistic programs
 - **Gradients**: Correct gradient flow through negated literals
 
 **Probabilistic aggregates in v0.8.5:** finite `count`, `sum`, `min`, `max`,
@@ -1369,7 +1386,8 @@ forceable, XLOG falls back to rejection sampling.
 
 ### Negation in Probabilistic Programs
 
-Exact inference supports both stratified and non-monotone negation:
+Probabilistic exact inference supports both stratified probabilistic negation
+and accepted non-monotone WFS profiles:
 
 ```xlog
 // Stratified negation (layered evaluation)

@@ -20,6 +20,9 @@ All notable changes to this project are documented in this file.
 - Added safe v0.8.5 meta-predicate normalization for finite `ground`, `var`,
   `nonvar`, `functor`, `=..`, source-fact `findall`, and unary/binary
   `maplist` through `__xlog_meta_*` helper relations.
+- Added v0.8.5 deterministic NAF safety diagnostics for source-order bound
+  `not atom` use while preserving probabilistic WFS as a separate exact
+  inference profile.
 
 ### Fixed
 
