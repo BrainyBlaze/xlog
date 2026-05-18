@@ -773,7 +773,7 @@ impl McProgram {
         let mut compiler = Compiler::new();
         let plan = compiler.compile_program(&expanded)?;
         let mut schemas = compiler.schemas().clone();
-        buffers::augment_schemas_for_program(&expanded, &mut schemas);
+        buffers::augment_schemas_for_program(&expanded, &mut schemas)?;
         let rel_ids = compiler.rel_ids().clone();
 
         let strat = analyze_stratification(&expanded);

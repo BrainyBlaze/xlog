@@ -203,7 +203,11 @@ fn build_hyperedge(
             | Term::Float(_)
             | Term::String(_)
             | Term::Symbol(_)
-            | Term::Aggregate(_) => None,
+            | Term::Aggregate(_)
+            | Term::List(_)
+            | Term::Cons { .. }
+            | Term::Compound { .. }
+            | Term::PredRef(_) => None,
         };
         positions.push(pos);
     }

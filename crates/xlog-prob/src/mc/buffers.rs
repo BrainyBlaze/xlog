@@ -9,7 +9,8 @@ use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{mc_eval_kernels, MC_EVAL_MODULE};
 use xlog_cuda::{CudaBuffer, CudaKernelProvider, LaunchAsync};
 use xlog_logic::ast::{
-    AggOp, Atom, BodyLiteral, Evidence, PredDecl, ProbFact, ProbQuery, Program, Term,
+    AggOp, Atom, BodyLiteral, Evidence, PredColumn, PredDecl, ProbFact, ProbQuery, Program, Term,
+    TypeRef,
 };
 use xlog_runtime::Executor;
 
@@ -545,16 +546,16 @@ pub(super) fn build_buffer_from_rows(
 pub(super) fn augment_schemas_for_program(
     program: &Program,
     schemas: &mut HashMap<String, Schema>,
-) {
+) -> Result<()> {
     for fact in program.facts() {
-        ensure_schema_for_atom(&fact.head, schemas);
+        ensure_schema_for_atom(&fact.head, schemas)?;
     }
 
     for rule in &program.rules {
         for lit in &rule.body {
             match lit {
                 BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
-                    ensure_schema_for_atom(atom, schemas);
+                    ensure_schema_for_atom(atom, schemas)?;
                 }
                 BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) => {}
             }
@@ -562,34 +563,48 @@ pub(super) fn augment_schemas_for_program(
     }
 
     for pf in &program.prob_facts {
-        ensure_schema_for_atom(&pf.atom, schemas);
+        ensure_schema_for_atom(&pf.atom, schemas)?;
     }
 
     for ad in &program.annotated_disjunctions {
         for choice in &ad.choices {
-            ensure_schema_for_atom(&choice.atom, schemas);
+            ensure_schema_for_atom(&choice.atom, schemas)?;
         }
     }
 
     for ProbQuery { atom } in &program.prob_queries {
-        ensure_schema_for_atom(atom, schemas);
+        ensure_schema_for_atom(atom, schemas)?;
     }
 
     for Evidence { atom, .. } in &program.evidence {
-        ensure_schema_for_atom(atom, schemas);
+        ensure_schema_for_atom(atom, schemas)?;
     }
+
+    Ok(())
 }
 
 pub(super) fn ensure_predicate_decls(program: &mut Program) -> Result<()> {
+    let domains: HashMap<String, ScalarType> = program
+        .domains
+        .iter()
+        .map(|domain| (domain.name.clone(), domain.typ))
+        .collect();
     let mut declared: HashMap<String, Vec<ScalarType>> = HashMap::new();
     for pred in &program.predicates {
-        declared.insert(pred.name.clone(), pred.types.clone());
+        declared.insert(
+            pred.name.clone(),
+            scalar_decl_types_for_prob(pred, &domains)?,
+        );
     }
 
     let mut inferred: HashMap<String, Vec<ScalarType>> = HashMap::new();
 
     let mut record_atom = |atom: &Atom| {
-        let types: Vec<ScalarType> = atom.terms.iter().map(infer_term_scalar_type).collect();
+        let types: Vec<ScalarType> = atom
+            .terms
+            .iter()
+            .map(infer_term_scalar_type)
+            .collect::<Result<_>>()?;
         match inferred.get(&atom.predicate) {
             Some(existing) if *existing != types => Err(XlogError::Compilation(format!(
                 "Inconsistent predicate types for {}",
@@ -648,7 +663,8 @@ pub(super) fn ensure_predicate_decls(program: &mut Program) -> Result<()> {
         }
         program.predicates.push(PredDecl {
             name: pred,
-            types,
+            types: types.iter().copied().map(TypeRef::Scalar).collect(),
+            columns: scalar_pred_columns(&types),
             is_private: false,
         });
     }
@@ -656,39 +672,109 @@ pub(super) fn ensure_predicate_decls(program: &mut Program) -> Result<()> {
     Ok(())
 }
 
-fn ensure_schema_for_atom(atom: &Atom, schemas: &mut HashMap<String, Schema>) {
+fn scalar_decl_types_for_prob(
+    pred: &PredDecl,
+    domains: &HashMap<String, ScalarType>,
+) -> Result<Vec<ScalarType>> {
+    let columns = if pred.columns.is_empty() {
+        pred.types
+            .iter()
+            .cloned()
+            .map(|typ| PredColumn { name: None, typ })
+            .collect()
+    } else {
+        pred.columns.clone()
+    };
+
+    columns
+        .iter()
+        .enumerate()
+        .map(|(idx, column)| resolve_prob_decl_type(&pred.name, idx, &column.typ, domains))
+        .collect()
+}
+
+fn scalar_pred_columns(types: &[ScalarType]) -> Vec<PredColumn> {
+    types
+        .iter()
+        .copied()
+        .map(|typ| PredColumn {
+            name: None,
+            typ: TypeRef::Scalar(typ),
+        })
+        .collect()
+}
+
+fn resolve_prob_decl_type(
+    predicate: &str,
+    index: usize,
+    typ: &TypeRef,
+    domains: &HashMap<String, ScalarType>,
+) -> Result<ScalarType> {
+    match typ {
+        TypeRef::Scalar(ty) => Ok(*ty),
+        TypeRef::Domain(name) => domains.get(name).copied().ok_or_else(|| {
+            XlogError::Compilation(format!(
+                "v0.8.5 unknown domain alias '{}' in probabilistic predicate '{}' column {}",
+                name, predicate, index
+            ))
+        }),
+        TypeRef::List(_) => Err(v085_prob_type_error(predicate, index, "list")),
+        TypeRef::Term => Err(v085_prob_type_error(predicate, index, "term")),
+        TypeRef::Compound => Err(v085_prob_type_error(predicate, index, "compound")),
+        TypeRef::PredRef => Err(v085_prob_type_error(predicate, index, "predref")),
+    }
+}
+
+fn v085_prob_type_error(predicate: &str, index: usize, kind: &str) -> XlogError {
+    XlogError::Compilation(format!(
+        "v0.8.5 type form '{}' in probabilistic predicate '{}' column {} is parsed but not supported by MC sampling before its G085 implementation node",
+        kind, predicate, index
+    ))
+}
+
+fn ensure_schema_for_atom(atom: &Atom, schemas: &mut HashMap<String, Schema>) -> Result<()> {
     if schemas.contains_key(&atom.predicate) {
-        return;
+        return Ok(());
     }
 
     let columns: Vec<(String, ScalarType)> = atom
         .terms
         .iter()
         .enumerate()
-        .map(|(i, term)| (format!("c{}", i), infer_term_scalar_type(term)))
-        .collect();
+        .map(|(i, term)| infer_term_scalar_type(term).map(|typ| (format!("c{}", i), typ)))
+        .collect::<Result<_>>()?;
     schemas.insert(atom.predicate.clone(), Schema::new(columns));
+    Ok(())
 }
 
-fn infer_term_scalar_type(term: &Term) -> ScalarType {
+fn infer_term_scalar_type(term: &Term) -> Result<ScalarType> {
     match term {
-        Term::Variable(_) | Term::Anonymous => ScalarType::U64,
-        Term::Integer(i) => {
-            if *i >= 0 && *i <= u32::MAX as i64 {
-                ScalarType::U32
-            } else {
-                ScalarType::I64
-            }
-        }
-        Term::Float(_) => ScalarType::F64,
-        Term::String(_) | Term::Symbol(_) => ScalarType::Symbol,
-        Term::Aggregate(agg) => match agg.op {
+        Term::Variable(_) | Term::Anonymous => Ok(ScalarType::U64),
+        Term::Integer(i) => Ok(if *i >= 0 && *i <= u32::MAX as i64 {
+            ScalarType::U32
+        } else {
+            ScalarType::I64
+        }),
+        Term::Float(_) => Ok(ScalarType::F64),
+        Term::String(_) | Term::Symbol(_) => Ok(ScalarType::Symbol),
+        Term::Aggregate(agg) => Ok(match agg.op {
             AggOp::Count => ScalarType::U32,
             AggOp::Sum => ScalarType::U64,
             AggOp::Min | AggOp::Max => ScalarType::U32,
             AggOp::LogSumExp => ScalarType::F64,
-        },
+        }),
+        Term::List(_) => Err(v085_prob_term_error("schema inference", "list")),
+        Term::Cons { .. } => Err(v085_prob_term_error("schema inference", "cons")),
+        Term::Compound { .. } => Err(v085_prob_term_error("schema inference", "compound")),
+        Term::PredRef(_) => Err(v085_prob_term_error("schema inference", "predref")),
     }
+}
+
+fn v085_prob_term_error(context: &str, kind: &str) -> XlogError {
+    XlogError::Compilation(format!(
+        "v0.8.5 term form '{}' is parsed but not supported by MC {} before its G085 implementation node",
+        kind, context
+    ))
 }
 
 fn infer_schema_from_values(rows: &[Vec<Value>]) -> Result<Schema> {

@@ -29,7 +29,10 @@ bool_lit = { "true" | "false" }
 prob_num = @{ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
 
 // Terms
-term = { var_or_anon | float_num | integer | string_lit | ident }
+list_literal = { "[" ~ (term ~ ("," ~ term)*)? ~ "]" }
+cons_pattern = { "[" ~ term ~ "|" ~ term ~ "]" }
+compound_term = { ident ~ "(" ~ term_list? ~ ")" }
+term = { var_or_anon | cons_pattern | list_literal | compound_term | float_num | integer | string_lit | ident }
 
 // Atoms
 atom = { ident ~ "(" ~ term_list? ~ ")" }
@@ -116,7 +119,9 @@ pragma = { pragma_prob_engine | pragma_prob_cache | pragma_max_recursion }
 
 // Domain declarations
 domain_decl = { "domain" ~ ident ~ ":" ~ type_spec ~ "." }
-type_spec = { "u32" | "u64" | "i32" | "i64" | "f32" | "f64" | "bool" | "symbol" }
+scalar_type = { "u32" | "u64" | "i32" | "i64" | "f32" | "f64" | "bool" | "symbol" }
+list_type = { "list" ~ "<" ~ type_spec ~ ">" }
+type_spec = { list_type | "term" | "compound" | "predref" | scalar_type | ident }
 
 // Type annotation for function parameters: X: f64
 type_annotation = { ":" ~ type_spec }
@@ -156,7 +161,8 @@ private_mod = { "private" }
 
 // Predicate declarations
 pred_decl = { private_mod? ~ "pred" ~ ident ~ "(" ~ type_list? ~ ")" ~ "." }
-type_list = { type_spec ~ ("," ~ type_spec)* }
+pred_column = { ident ~ ":" ~ type_spec | type_spec }
+type_list = { pred_column ~ ("," ~ pred_column)* }
 
 // Learnable rule: parameterized by a named tensor mask
 // mask_name starts with ASCII_ALPHA (upper OR lower), unlike ident which

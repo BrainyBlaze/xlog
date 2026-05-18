@@ -439,6 +439,14 @@ impl<'a> AtomSpec<'a> {
                         got: "aggregate in body atom".to_string(),
                     });
                 }
+                Term::List(_) | Term::Cons { .. } | Term::Compound { .. } | Term::PredRef(_) => {
+                    return Err(RefEvalError::ConstantTypeMismatch {
+                        predicate: atom.predicate.clone(),
+                        position: i,
+                        expected: relation.schema[i],
+                        got: format!("unsupported v0.8.5 term in body atom: {term:?}"),
+                    });
+                }
             };
             positions.push(p);
         }
@@ -610,7 +618,14 @@ fn enumerate(
                 }
                 Term::Integer(n) => row.push(RefValue::I64(*n)),
                 Term::String(s) => row.push(RefValue::Symbol(s.clone())),
-                Term::Anonymous | Term::Symbol(_) | Term::Float(_) | Term::Aggregate(_) => {
+                Term::Anonymous
+                | Term::Symbol(_)
+                | Term::Float(_)
+                | Term::Aggregate(_)
+                | Term::List(_)
+                | Term::Cons { .. }
+                | Term::Compound { .. }
+                | Term::PredRef(_) => {
                     // Heads with anonymous wildcards / interned
                     // symbols / floats / aggregates are out of scope
                     // for PR 2 — eligibility analyzer covers
@@ -706,13 +721,18 @@ fn resolve_term_for_comparison(
         }
         Term::Integer(n) => Ok(RefValue::I64(*n)),
         Term::String(s) => Ok(RefValue::Symbol(s.clone())),
-        Term::Anonymous | Term::Symbol(_) | Term::Float(_) | Term::Aggregate(_) => {
-            Err(RefEvalError::ComparisonTypeMismatch {
-                left: format!("{term:?}"),
-                right: "<n/a>".to_string(),
-                op: CompOp::Eq,
-            })
-        }
+        Term::Anonymous
+        | Term::Symbol(_)
+        | Term::Float(_)
+        | Term::Aggregate(_)
+        | Term::List(_)
+        | Term::Cons { .. }
+        | Term::Compound { .. }
+        | Term::PredRef(_) => Err(RefEvalError::ComparisonTypeMismatch {
+            left: format!("{term:?}"),
+            right: "<n/a>".to_string(),
+            op: CompOp::Eq,
+        }),
     }
 }
 

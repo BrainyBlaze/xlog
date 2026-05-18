@@ -17,6 +17,24 @@ pub enum Term {
     String(String),
     /// Interned symbol ID -- use `xlog_core::symbol::resolve(id)` to get the string.
     Symbol(u32),
+    /// Finite list literal.
+    List(Vec<Term>),
+    /// Finite cons pattern `[Head | Tail]`.
+    Cons {
+        /// Head term.
+        head: Box<Term>,
+        /// Tail term.
+        tail: Box<Term>,
+    },
+    /// Finite compound term.
+    Compound {
+        /// Functor name.
+        functor: String,
+        /// Compound arguments.
+        args: Vec<Term>,
+    },
+    /// Static predicate reference.
+    PredRef(String),
     /// Aggregate expression (e.g. `count(X)`).
     Aggregate(AggExpr),
 }
@@ -39,7 +57,15 @@ impl Term {
 
     /// Returns true if this is a ground (non-variable, non-aggregate) term.
     pub fn is_constant(&self) -> bool {
-        !self.is_any_variable() && !matches!(self, Term::Aggregate(_))
+        !self.is_any_variable()
+            && !matches!(
+                self,
+                Term::Aggregate(_)
+                    | Term::List(_)
+                    | Term::Cons { .. }
+                    | Term::Compound { .. }
+                    | Term::PredRef(_)
+            )
     }
 
     /// Returns the variable name, or None for anonymous/constants
@@ -47,6 +73,27 @@ impl Term {
         match self {
             Term::Variable(name) => Some(name),
             _ => None,
+        }
+    }
+
+    /// Return all named variables referenced by this term.
+    pub fn variables(&self) -> Vec<&str> {
+        match self {
+            Term::Variable(name) => vec![name.as_str()],
+            Term::List(items) => items.iter().flat_map(Term::variables).collect(),
+            Term::Cons { head, tail } => {
+                let mut vars = head.variables();
+                vars.extend(tail.variables());
+                vars
+            }
+            Term::Compound { args, .. } => args.iter().flat_map(Term::variables).collect(),
+            Term::Anonymous
+            | Term::Integer(_)
+            | Term::Float(_)
+            | Term::String(_)
+            | Term::Symbol(_)
+            | Term::PredRef(_)
+            | Term::Aggregate(_) => vec![],
         }
     }
 }
@@ -194,10 +241,7 @@ impl Atom {
 
     /// Collect all named variables in this atom.
     pub fn variables(&self) -> Vec<&str> {
-        self.terms
-            .iter()
-            .filter_map(|t| t.variable_name())
-            .collect()
+        self.terms.iter().flat_map(Term::variables).collect()
     }
 }
 
@@ -267,12 +311,8 @@ impl BodyLiteral {
             BodyLiteral::Positive(a) | BodyLiteral::Negated(a) => a.variables(),
             BodyLiteral::Comparison(c) => {
                 let mut vars = vec![];
-                if let Some(v) = c.left.variable_name() {
-                    vars.push(v);
-                }
-                if let Some(v) = c.right.variable_name() {
-                    vars.push(v);
-                }
+                vars.extend(c.left.variables());
+                vars.extend(c.right.variables());
                 vars
             }
             BodyLiteral::IsExpr(is_expr) => {
@@ -488,13 +528,41 @@ pub struct DomainDecl {
     pub typ: ScalarType,
 }
 
+/// A type reference in source declarations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeRef {
+    /// Built-in scalar type.
+    Scalar(ScalarType),
+    /// Domain alias resolved during semantic analysis.
+    Domain(String),
+    /// Finite homogeneous list type.
+    List(Box<TypeRef>),
+    /// Finite term type.
+    Term,
+    /// Finite compound term type.
+    Compound,
+    /// Static predicate reference type.
+    PredRef,
+}
+
+/// Predicate declaration column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PredColumn {
+    /// Optional source-level column name.
+    pub name: Option<String>,
+    /// Column type reference.
+    pub typ: TypeRef,
+}
+
 /// Predicate declaration
 #[derive(Debug, Clone, PartialEq)]
 pub struct PredDecl {
     /// Predicate name.
     pub name: String,
     /// Column types.
-    pub types: Vec<ScalarType>,
+    pub types: Vec<TypeRef>,
+    /// Declared columns, including optional names.
+    pub columns: Vec<PredColumn>,
     /// Whether this predicate is module-private.
     pub is_private: bool,
 }

@@ -514,7 +514,18 @@ pub(crate) fn value_from_term(term: &Term) -> Result<Value> {
         Term::Variable(_) | Term::Anonymous | Term::Aggregate(_) => Err(XlogError::Compilation(
             "Non-constant term cannot be converted to a value".to_string(),
         )),
+        Term::List(_) => Err(v085_prob_term_error("value conversion", "list")),
+        Term::Cons { .. } => Err(v085_prob_term_error("value conversion", "cons")),
+        Term::Compound { .. } => Err(v085_prob_term_error("value conversion", "compound")),
+        Term::PredRef(_) => Err(v085_prob_term_error("value conversion", "predref")),
     }
+}
+
+fn v085_prob_term_error(context: &str, kind: &str) -> XlogError {
+    XlogError::Compilation(format!(
+        "v0.8.5 term form '{}' is parsed but not supported in probabilistic {} before its G085 implementation node",
+        kind, context
+    ))
 }
 
 fn compile_annotated_disjunction(
@@ -1243,6 +1254,12 @@ pub(crate) fn unify_atom(
                     "Aggregation not supported in provenance extraction".to_string(),
                 ));
             }
+            Term::List(_) => return Err(v085_prob_term_error("unification", "list")),
+            Term::Cons { .. } => return Err(v085_prob_term_error("unification", "cons")),
+            Term::Compound { .. } => {
+                return Err(v085_prob_term_error("unification", "compound"));
+            }
+            Term::PredRef(_) => return Err(v085_prob_term_error("unification", "predref")),
         }
     }
     Ok(true)
@@ -1293,6 +1310,14 @@ fn materialize_head(head: &Atom, binding: &HashMap<String, Value>) -> Result<Vec
                 return Err(XlogError::Compilation(
                     "Aggregation not supported in provenance extraction".to_string(),
                 ));
+            }
+            Term::List(_) => return Err(v085_prob_term_error("head materialization", "list")),
+            Term::Cons { .. } => return Err(v085_prob_term_error("head materialization", "cons")),
+            Term::Compound { .. } => {
+                return Err(v085_prob_term_error("head materialization", "compound"));
+            }
+            Term::PredRef(_) => {
+                return Err(v085_prob_term_error("head materialization", "predref"));
             }
         }
     }
@@ -1355,6 +1380,10 @@ pub(crate) fn resolve_term(term: &Term, binding: &HashMap<String, Value>) -> Res
         Term::Aggregate(_) => Err(XlogError::Compilation(
             "Aggregation not supported in provenance extraction".to_string(),
         )),
+        Term::List(_) => Err(v085_prob_term_error("comparison", "list")),
+        Term::Cons { .. } => Err(v085_prob_term_error("comparison", "cons")),
+        Term::Compound { .. } => Err(v085_prob_term_error("comparison", "compound")),
+        Term::PredRef(_) => Err(v085_prob_term_error("comparison", "predref")),
     }
 }
 

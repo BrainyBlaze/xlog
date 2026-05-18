@@ -23,6 +23,14 @@ use super::{EvalStats, McProgram, Relation, SccKind, SccPlan};
 use xlog_logic::ast::Program;
 
 #[cfg(feature = "host-io")]
+fn v085_mc_result_term_error(context: &str, kind: &str) -> XlogError {
+    XlogError::Compilation(format!(
+        "v0.8.5 term form '{}' is parsed but not supported in MC result {} before its G085 implementation node",
+        kind, context
+    ))
+}
+
+#[cfg(feature = "host-io")]
 impl McProgram {
     pub(super) fn apply_sample_facts(
         &self,
@@ -568,6 +576,12 @@ fn atom_matches_bound(
                     "Aggregate not allowed in body atom".to_string(),
                 ));
             }
+            Term::List(_) => return Err(v085_mc_result_term_error("matching", "list")),
+            Term::Cons { .. } => return Err(v085_mc_result_term_error("matching", "cons")),
+            Term::Compound { .. } => {
+                return Err(v085_mc_result_term_error("matching", "compound"));
+            }
+            Term::PredRef(_) => return Err(v085_mc_result_term_error("matching", "predref")),
         }
     }
     Ok(true)
@@ -602,6 +616,30 @@ fn materialize_head_non_aggregate(
             Term::Aggregate(_) => {
                 return Err(XlogError::Compilation(
                     "Aggregate term in non-aggregate rule head".to_string(),
+                ));
+            }
+            Term::List(_) => {
+                return Err(v085_mc_result_term_error(
+                    "non-aggregate head materialization",
+                    "list",
+                ));
+            }
+            Term::Cons { .. } => {
+                return Err(v085_mc_result_term_error(
+                    "non-aggregate head materialization",
+                    "cons",
+                ));
+            }
+            Term::Compound { .. } => {
+                return Err(v085_mc_result_term_error(
+                    "non-aggregate head materialization",
+                    "compound",
+                ));
+            }
+            Term::PredRef(_) => {
+                return Err(v085_mc_result_term_error(
+                    "non-aggregate head materialization",
+                    "predref",
                 ));
             }
         }
@@ -832,6 +870,24 @@ fn eval_aggregate_head(
                 ));
             }
             Term::Integer(_) | Term::Float(_) | Term::String(_) | Term::Symbol(_) => {}
+            Term::List(_) => {
+                return Err(v085_mc_result_term_error("aggregate head planning", "list"));
+            }
+            Term::Cons { .. } => {
+                return Err(v085_mc_result_term_error("aggregate head planning", "cons"));
+            }
+            Term::Compound { .. } => {
+                return Err(v085_mc_result_term_error(
+                    "aggregate head planning",
+                    "compound",
+                ));
+            }
+            Term::PredRef(_) => {
+                return Err(v085_mc_result_term_error(
+                    "aggregate head planning",
+                    "predref",
+                ));
+            }
         }
     }
 
@@ -889,6 +945,30 @@ fn eval_aggregate_head(
                     tuple.push(value_from_term(term)?);
                 }
                 Term::Anonymous => unreachable!(),
+                Term::List(_) => {
+                    return Err(v085_mc_result_term_error(
+                        "aggregate head materialization",
+                        "list",
+                    ));
+                }
+                Term::Cons { .. } => {
+                    return Err(v085_mc_result_term_error(
+                        "aggregate head materialization",
+                        "cons",
+                    ));
+                }
+                Term::Compound { .. } => {
+                    return Err(v085_mc_result_term_error(
+                        "aggregate head materialization",
+                        "compound",
+                    ));
+                }
+                Term::PredRef(_) => {
+                    return Err(v085_mc_result_term_error(
+                        "aggregate head materialization",
+                        "predref",
+                    ));
+                }
             }
         }
         out.push(tuple);

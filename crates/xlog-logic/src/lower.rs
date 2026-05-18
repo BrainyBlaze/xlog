@@ -19,8 +19,8 @@ use xlog_ir::{
 };
 
 use crate::ast::{
-    AggOp, ArithExpr, Atom, BodyLiteral, CompOp, Comparison, IsExpr, LearnableRule, Program, Rule,
-    Term,
+    AggOp, ArithExpr, Atom, BodyLiteral, CompOp, Comparison, IsExpr, LearnableRule, PredColumn,
+    Program, Rule, Term, TypeRef,
 };
 use crate::stratify::{build_dependency_graph, find_sccs_for_lowering, DepType};
 
@@ -32,6 +32,154 @@ struct JoinPlan<'a> {
     width: usize,
     est_rows: f64,
     total_cost: f64,
+}
+
+fn pred_columns_for_decl(pred_decl: &crate::ast::PredDecl) -> Vec<PredColumn> {
+    if pred_decl.columns.is_empty() {
+        pred_decl
+            .types
+            .iter()
+            .cloned()
+            .map(|typ| PredColumn { name: None, typ })
+            .collect()
+    } else {
+        pred_decl.columns.clone()
+    }
+}
+
+fn resolve_pred_column_type(
+    predicate: &str,
+    index: usize,
+    typ: &TypeRef,
+    domains: &HashMap<String, ScalarType>,
+) -> Result<ScalarType> {
+    match typ {
+        TypeRef::Scalar(ty) => Ok(*ty),
+        TypeRef::Domain(name) => domains.get(name).copied().ok_or_else(|| {
+            XlogError::Compilation(format!(
+                "v0.8.5 unknown domain alias '{}' in predicate '{}' column {}",
+                name, predicate, index
+            ))
+        }),
+        TypeRef::List(_) => Err(v085_type_not_lowerable(predicate, index, "list")),
+        TypeRef::Term => Err(v085_type_not_lowerable(predicate, index, "term")),
+        TypeRef::Compound => Err(v085_type_not_lowerable(predicate, index, "compound")),
+        TypeRef::PredRef => Err(v085_type_not_lowerable(predicate, index, "predref")),
+    }
+}
+
+fn v085_type_not_lowerable(predicate: &str, index: usize, kind: &str) -> XlogError {
+    XlogError::Compilation(format!(
+        "v0.8.5 type form '{}' in predicate '{}' column {} is parsed but not lowerable before its G085 implementation node",
+        kind, predicate, index
+    ))
+}
+
+fn validate_lowerable_terms(program: &Program) -> Result<()> {
+    for rule in &program.rules {
+        validate_atom_terms(&rule.head, "rule head")?;
+        for lit in &rule.body {
+            match lit {
+                BodyLiteral::Positive(atom) => validate_atom_terms(atom, "positive body atom")?,
+                BodyLiteral::Negated(atom) => validate_atom_terms(atom, "negated body atom")?,
+                BodyLiteral::Comparison(cmp) => {
+                    validate_term_lowerable(&cmp.left, "comparison left operand")?;
+                    validate_term_lowerable(&cmp.right, "comparison right operand")?;
+                }
+                BodyLiteral::IsExpr(_) => {}
+            }
+        }
+    }
+    for constraint in &program.constraints {
+        for lit in &constraint.body {
+            match lit {
+                BodyLiteral::Positive(atom) => validate_atom_terms(atom, "constraint body atom")?,
+                BodyLiteral::Negated(atom) => {
+                    validate_atom_terms(atom, "constraint negated body atom")?
+                }
+                BodyLiteral::Comparison(cmp) => {
+                    validate_term_lowerable(&cmp.left, "constraint comparison left operand")?;
+                    validate_term_lowerable(&cmp.right, "constraint comparison right operand")?;
+                }
+                BodyLiteral::IsExpr(_) => {}
+            }
+        }
+    }
+    for query in &program.queries {
+        validate_atom_terms(&query.atom, "query atom")?;
+    }
+    for pf in &program.prob_facts {
+        validate_atom_terms(&pf.atom, "probabilistic fact")?;
+    }
+    for ad in &program.annotated_disjunctions {
+        for choice in &ad.choices {
+            validate_atom_terms(&choice.atom, "annotated disjunction choice")?;
+        }
+    }
+    for evidence in &program.evidence {
+        validate_atom_terms(&evidence.atom, "evidence atom")?;
+    }
+    for query in &program.prob_queries {
+        validate_atom_terms(&query.atom, "probabilistic query")?;
+    }
+    for neural in &program.neural_predicates {
+        validate_atom_terms(&neural.predicate, "neural predicate")?;
+    }
+    for learnable in &program.learnable_rules {
+        validate_atom_terms(&learnable.head, "learnable rule head")?;
+        for lit in &learnable.body {
+            if let BodyLiteral::Positive(atom) = lit {
+                validate_atom_terms(atom, "learnable rule body")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_atom_terms(atom: &Atom, context: &str) -> Result<()> {
+    for term in &atom.terms {
+        validate_term_lowerable(term, context)?;
+    }
+    Ok(())
+}
+
+fn validate_term_lowerable(term: &Term, context: &str) -> Result<()> {
+    match term {
+        Term::List(_) => Err(v085_term_not_lowerable(context, "list")),
+        Term::Cons { .. } => Err(v085_term_not_lowerable(context, "cons")),
+        Term::Compound { .. } => Err(v085_term_not_lowerable(context, "compound")),
+        Term::PredRef(_) => Err(v085_term_not_lowerable(context, "predref")),
+        Term::Variable(_)
+        | Term::Anonymous
+        | Term::Integer(_)
+        | Term::Float(_)
+        | Term::String(_)
+        | Term::Symbol(_)
+        | Term::Aggregate(_) => Ok(()),
+    }
+}
+
+fn v085_term_not_lowerable(context: &str, kind: &str) -> XlogError {
+    XlogError::Compilation(format!(
+        "v0.8.5 term form '{}' in {} is parsed but not lowerable before its G085 implementation node",
+        kind, context
+    ))
+}
+
+fn v085_term_kind(term: &Term) -> &'static str {
+    match term {
+        Term::List(_) => "list",
+        Term::Cons { .. } => "cons",
+        Term::Compound { .. } => "compound",
+        Term::PredRef(_) => "predref",
+        Term::Variable(_)
+        | Term::Anonymous
+        | Term::Integer(_)
+        | Term::Float(_)
+        | Term::String(_)
+        | Term::Symbol(_)
+        | Term::Aggregate(_) => "term",
+    }
 }
 
 /// Lowerer transforms AST programs into RIR execution plans.
@@ -122,15 +270,25 @@ impl Lowerer {
     }
 
     /// Infer schemas from facts and predicate declarations
-    fn infer_schemas(&mut self, program: &Program) {
+    fn infer_schemas(&mut self, program: &Program) -> Result<()> {
+        let domains: HashMap<String, ScalarType> = program
+            .domains
+            .iter()
+            .map(|domain| (domain.name.clone(), domain.typ))
+            .collect();
+
         // First, use explicit predicate declarations
         for pred_decl in &program.predicates {
-            let columns: Vec<(String, ScalarType)> = pred_decl
-                .types
+            let declared_columns = pred_columns_for_decl(pred_decl);
+            let columns: Vec<(String, ScalarType)> = declared_columns
                 .iter()
                 .enumerate()
-                .map(|(i, ty)| (format!("c{}", i), *ty))
-                .collect();
+                .map(|(i, col)| {
+                    let name = col.name.clone().unwrap_or_else(|| format!("c{}", i));
+                    resolve_pred_column_type(&pred_decl.name, i, &col.typ, &domains)
+                        .map(|ty| (name, ty))
+                })
+                .collect::<Result<Vec<_>>>()?;
             self.schemas
                 .insert(pred_decl.name.clone(), Schema::new(columns));
         }
@@ -236,6 +394,8 @@ impl Lowerer {
                 self.schemas.insert(pred.clone(), Schema::new(columns));
             }
         }
+
+        Ok(())
     }
 
     fn infer_head_term_type_from_body(&self, rule: &Rule, var_name: &str) -> Option<ScalarType> {
@@ -307,8 +467,9 @@ impl Lowerer {
 
     /// Lower an entire program to an execution plan
     pub fn lower_program(&mut self, program: &Program) -> Result<ExecutionPlan> {
+        validate_lowerable_terms(program)?;
         // Infer schemas
-        self.infer_schemas(program);
+        self.infer_schemas(program)?;
         self.infer_cardinalities(program);
 
         // Pre-allocate RelIds for declared predicates so schema-only programs
@@ -697,10 +858,9 @@ impl Lowerer {
     fn atom_vars(atom: &Atom) -> std::collections::HashSet<String> {
         atom.terms
             .iter()
-            .filter_map(|t| match t {
-                Term::Variable(name) if name != "_" => Some(name.clone()),
-                _ => None,
-            })
+            .flat_map(|t| t.variables().into_iter())
+            .filter(|name| *name != "_")
+            .map(ToOwned::to_owned)
             .collect()
     }
 
@@ -1397,6 +1557,9 @@ impl Lowerer {
             Term::Aggregate(_) => Err(XlogError::Compilation(
                 "Aggregates not allowed in comparisons".to_string(),
             )),
+            Term::List(_) | Term::Cons { .. } | Term::Compound { .. } | Term::PredRef(_) => {
+                Err(v085_term_not_lowerable("comparison", v085_term_kind(term)))
+            }
         }
     }
 
@@ -1523,6 +1686,12 @@ impl Lowerer {
                     let (expr, typ) = term_to_project_const_expr(term)?;
                     cols.push(ProjectExpr::Computed(expr, typ));
                 }
+                Term::List(_) | Term::Cons { .. } | Term::Compound { .. } | Term::PredRef(_) => {
+                    return Err(v085_term_not_lowerable(
+                        "rule head projection",
+                        v085_term_kind(term),
+                    ));
+                }
             }
         }
 
@@ -1595,6 +1764,12 @@ impl Lowerer {
                 }
                 Term::Integer(_) | Term::Float(_) | Term::String(_) | Term::Symbol(_) => {
                     // Constants are allowed in the head; they are projected after aggregation.
+                }
+                Term::List(_) | Term::Cons { .. } | Term::Compound { .. } | Term::PredRef(_) => {
+                    return Err(v085_term_not_lowerable(
+                        "aggregate rule head",
+                        v085_term_kind(term),
+                    ));
                 }
             }
         }
@@ -1688,6 +1863,12 @@ impl Lowerer {
                 Term::Integer(_) | Term::Float(_) | Term::String(_) | Term::Symbol(_) => {
                     let (expr, typ) = term_to_project_const_expr(term)?;
                     final_proj.push(ProjectExpr::Computed(expr, typ));
+                }
+                Term::List(_) | Term::Cons { .. } | Term::Compound { .. } | Term::PredRef(_) => {
+                    return Err(v085_term_not_lowerable(
+                        "aggregate rule projection",
+                        v085_term_kind(term),
+                    ));
                 }
             }
         }
@@ -2062,6 +2243,9 @@ fn infer_term_type(term: &Term) -> ScalarType {
         }
         Term::Float(_) => ScalarType::F64,
         Term::String(_) | Term::Symbol(_) => ScalarType::Symbol,
+        Term::List(_) | Term::Cons { .. } | Term::Compound { .. } | Term::PredRef(_) => {
+            ScalarType::U64
+        }
         Term::Aggregate(agg) => match agg.op {
             AggOp::Count => ScalarType::U32,
             AggOp::Sum => ScalarType::U64,
@@ -2078,6 +2262,10 @@ fn sort_labels_from_terms(terms: &[Term]) -> Vec<String> {
         .map(|(idx, term)| match term {
             Term::Variable(name) if !name.trim().is_empty() => name.clone(),
             Term::Aggregate(agg) => format!("{:?}_{}", agg.op, agg.variable),
+            Term::List(_) => format!("list{}", idx),
+            Term::Cons { .. } => format!("cons{}", idx),
+            Term::Compound { functor, .. } => functor.clone(),
+            Term::PredRef(name) => name.clone(),
             _ => format!("c{}", idx),
         })
         .collect()
@@ -2090,7 +2278,13 @@ fn term_to_const_value(term: &Term) -> Option<ConstValue> {
         Term::Float(f) => Some(ConstValue::F64(*f)),
         Term::String(s) => Some(ConstValue::Symbol(s.clone())),
         Term::Symbol(id) => Some(ConstValue::Symbol(symbol::resolve(*id))),
-        Term::Variable(_) | Term::Anonymous | Term::Aggregate(_) => None,
+        Term::Variable(_)
+        | Term::Anonymous
+        | Term::Aggregate(_)
+        | Term::List(_)
+        | Term::Cons { .. }
+        | Term::Compound { .. }
+        | Term::PredRef(_) => None,
     }
 }
 
@@ -2206,7 +2400,13 @@ fn term_to_typed_const_value(term: &Term, expected: ScalarType) -> Result<Option
                 )));
             }
         }
-        Term::Variable(_) | Term::Anonymous | Term::Aggregate(_) => return Ok(None),
+        Term::Variable(_)
+        | Term::Anonymous
+        | Term::Aggregate(_)
+        | Term::List(_)
+        | Term::Cons { .. }
+        | Term::Compound { .. }
+        | Term::PredRef(_) => return Ok(None),
     };
 
     Ok(Some(const_val))
@@ -2230,9 +2430,13 @@ fn term_to_project_const_expr(term: &Term) -> Result<(Expr, ScalarType)> {
             Expr::Const(ConstValue::Symbol(symbol::resolve(*id))),
             ScalarType::Symbol,
         )),
-        Term::Variable(_) | Term::Anonymous | Term::Aggregate(_) => {
-            Err(XlogError::Compilation("Expected constant term".to_string()))
-        }
+        Term::Variable(_)
+        | Term::Anonymous
+        | Term::Aggregate(_)
+        | Term::List(_)
+        | Term::Cons { .. }
+        | Term::Compound { .. }
+        | Term::PredRef(_) => Err(XlogError::Compilation("Expected constant term".to_string())),
     }
 }
 
@@ -2294,6 +2498,21 @@ mod tests {
     use super::*;
     use crate::ast::*;
 
+    fn pred_decl(name: &str, types: Vec<ScalarType>) -> PredDecl {
+        let type_refs: Vec<TypeRef> = types.into_iter().map(TypeRef::Scalar).collect();
+        let columns = type_refs
+            .iter()
+            .cloned()
+            .map(|typ| PredColumn { name: None, typ })
+            .collect();
+        PredDecl {
+            name: name.to_string(),
+            types: type_refs,
+            columns,
+            is_private: false,
+        }
+    }
+
     /// Helper to create a simple edge atom
     fn edge_atom(x: &str, y: &str) -> Atom {
         Atom {
@@ -2350,7 +2569,7 @@ mod tests {
         });
 
         let mut lowerer = Lowerer::new();
-        lowerer.infer_schemas(&program);
+        lowerer.infer_schemas(&program).unwrap();
 
         assert!(lowerer.schemas.contains_key("edge"));
         let schema = lowerer.schemas.get("edge").unwrap();
@@ -2889,17 +3108,14 @@ mod tests {
 
     #[test]
     fn test_u64_comparison_type_from_pred_decl() {
-        use crate::ast::PredDecl;
-
         // Test that u64 type from pred decl is preserved in comparison lowering
         let mut program = Program::new();
 
         // pred count_data(symbol, u64).
-        program.predicates.push(PredDecl {
-            name: "count_data".to_string(),
-            types: vec![ScalarType::Symbol, ScalarType::U64],
-            is_private: false,
-        });
+        program.predicates.push(pred_decl(
+            "count_data",
+            vec![ScalarType::Symbol, ScalarType::U64],
+        ));
 
         // count_data(alice, 5).
         program.rules.push(Rule {
@@ -2914,11 +3130,10 @@ mod tests {
         });
 
         // pred big_count(symbol, u64).
-        program.predicates.push(PredDecl {
-            name: "big_count".to_string(),
-            types: vec![ScalarType::Symbol, ScalarType::U64],
-            is_private: false,
-        });
+        program.predicates.push(pred_decl(
+            "big_count",
+            vec![ScalarType::Symbol, ScalarType::U64],
+        ));
 
         // big_count(Name, Count) :- count_data(Name, Count), Count >= 3.
         program.rules.push(Rule {
@@ -2946,7 +3161,7 @@ mod tests {
         });
 
         let mut lowerer = Lowerer::new();
-        lowerer.infer_schemas(&program);
+        lowerer.infer_schemas(&program).unwrap();
 
         // Verify schema has correct types
         let schema = lowerer
@@ -3011,17 +3226,16 @@ mod tests {
 
     #[test]
     fn test_u64_comparison_with_aggregation() {
-        use crate::ast::{AggExpr, PredDecl};
+        use crate::ast::AggExpr;
 
         // Test aggregation + comparison case
         let mut program = Program::new();
 
         // pred reports_to(symbol, symbol).
-        program.predicates.push(PredDecl {
-            name: "reports_to".to_string(),
-            types: vec![ScalarType::Symbol, ScalarType::Symbol],
-            is_private: false,
-        });
+        program.predicates.push(pred_decl(
+            "reports_to",
+            vec![ScalarType::Symbol, ScalarType::Symbol],
+        ));
 
         // reports_to facts
         program.rules.push(Rule {
@@ -3046,11 +3260,10 @@ mod tests {
         });
 
         // pred direct_count(symbol, u64).
-        program.predicates.push(PredDecl {
-            name: "direct_count".to_string(),
-            types: vec![ScalarType::Symbol, ScalarType::U64],
-            is_private: false,
-        });
+        program.predicates.push(pred_decl(
+            "direct_count",
+            vec![ScalarType::Symbol, ScalarType::U64],
+        ));
 
         // direct_count(Mgr, count(Emp)) :- reports_to(Emp, Mgr).
         program.rules.push(Rule {
@@ -3074,11 +3287,10 @@ mod tests {
         });
 
         // pred big_manager(symbol, u64).
-        program.predicates.push(PredDecl {
-            name: "big_manager".to_string(),
-            types: vec![ScalarType::Symbol, ScalarType::U64],
-            is_private: false,
-        });
+        program.predicates.push(pred_decl(
+            "big_manager",
+            vec![ScalarType::Symbol, ScalarType::U64],
+        ));
 
         // big_manager(Mgr, Count) :- direct_count(Mgr, Count), Count >= 2.
         program.rules.push(Rule {
@@ -3106,7 +3318,7 @@ mod tests {
         });
 
         let mut lowerer = Lowerer::new();
-        lowerer.infer_schemas(&program);
+        lowerer.infer_schemas(&program).unwrap();
 
         // Verify schema has correct types
         let schema = lowerer

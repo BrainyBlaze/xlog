@@ -12,8 +12,8 @@ use xlog_core::{symbol, Result, ScalarType, XlogError};
 use crate::ast::{
     AggExpr, AggOp, AnnotatedDisjunction, ArithExpr, Atom, BodyLiteral, CompOp, Comparison,
     CondExpr, Constraint, DomainDecl, Evidence, FuncBody, FuncDef, FuncParam, IsExpr,
-    LearnableRule, NeuralLabel, NeuralPredDecl, PredDecl, ProbCache, ProbEngine, ProbFact,
-    ProbQuery, Program, Query, Rule as AstRule, Term, UseDecl,
+    LearnableRule, NeuralLabel, NeuralPredDecl, PredColumn, PredDecl, ProbCache, ProbEngine,
+    ProbFact, ProbQuery, Program, Query, Rule as AstRule, Term, TypeRef, UseDecl,
 };
 
 /// Pest-based parser for XLOG Datalog syntax.
@@ -197,7 +197,7 @@ fn build_domain_decl(pair: Pair<'_, Rule>) -> Result<DomainDecl> {
     let type_pair = inner
         .next()
         .ok_or_else(|| XlogError::Parse("Missing domain type".to_string()))?;
-    let typ = build_type_spec(type_pair)?;
+    let typ = build_scalar_type_spec(type_pair, "domain alias")?;
 
     Ok(DomainDecl { name, typ })
 }
@@ -250,25 +250,92 @@ fn build_pred_decl(pair: Pair<'_, Rule>) -> Result<PredDecl> {
 
     let name = name_pair.as_str().to_string();
 
-    let mut types = Vec::new();
+    let mut columns = Vec::new();
     for type_pair in inner {
         if type_pair.as_rule() == Rule::type_list {
-            for t in type_pair.into_inner() {
-                types.push(build_type_spec(t)?);
+            for col in type_pair.into_inner() {
+                columns.push(build_pred_column(col)?);
             }
         }
     }
+    let types = columns.iter().map(|c| c.typ.clone()).collect();
 
     Ok(PredDecl {
         name,
         types,
+        columns,
         is_private,
     })
 }
 
-/// Build a type specification
-fn build_type_spec(pair: Pair<'_, Rule>) -> Result<ScalarType> {
-    let type_str = pair.as_str();
+fn build_pred_column(pair: Pair<'_, Rule>) -> Result<PredColumn> {
+    let mut inner = pair.into_inner();
+    let first = inner
+        .next()
+        .ok_or_else(|| XlogError::Parse("Empty predicate column".to_string()))?;
+
+    if first.as_rule() == Rule::ident {
+        let typ_pair = inner
+            .next()
+            .ok_or_else(|| XlogError::Parse("Missing named column type".to_string()))?;
+        Ok(PredColumn {
+            name: Some(first.as_str().to_string()),
+            typ: build_type_ref(typ_pair)?,
+        })
+    } else {
+        Ok(PredColumn {
+            name: None,
+            typ: build_type_ref(first)?,
+        })
+    }
+}
+
+/// Build a source type reference.
+fn build_type_ref(pair: Pair<'_, Rule>) -> Result<TypeRef> {
+    if pair.as_rule() == Rule::type_spec {
+        let raw = pair.as_str().to_string();
+        let mut inner = pair.into_inner();
+        if let Some(child) = inner.next() {
+            return build_type_ref(child);
+        }
+        return match raw.as_str() {
+            "term" => Ok(TypeRef::Term),
+            "compound" => Ok(TypeRef::Compound),
+            "predref" => Ok(TypeRef::PredRef),
+            other => Err(XlogError::Parse(format!("Unknown type: {}", other))),
+        };
+    }
+
+    match pair.as_rule() {
+        Rule::list_type => {
+            let item = pair
+                .into_inner()
+                .next()
+                .ok_or_else(|| XlogError::Parse("Missing list element type".to_string()))?;
+            Ok(TypeRef::List(Box::new(build_type_ref(item)?)))
+        }
+        Rule::scalar_type => build_scalar_type_name(pair.as_str()).map(TypeRef::Scalar),
+        Rule::ident => Ok(TypeRef::Domain(pair.as_str().to_string())),
+        _ => match pair.as_str() {
+            "term" => Ok(TypeRef::Term),
+            "compound" => Ok(TypeRef::Compound),
+            "predref" => Ok(TypeRef::PredRef),
+            other => Err(XlogError::Parse(format!("Unknown type: {}", other))),
+        },
+    }
+}
+
+fn build_scalar_type_spec(pair: Pair<'_, Rule>, context: &str) -> Result<ScalarType> {
+    match build_type_ref(pair)? {
+        TypeRef::Scalar(ty) => Ok(ty),
+        other => Err(XlogError::Parse(format!(
+            "v0.8.5 {} must use a scalar type, got {:?}",
+            context, other
+        ))),
+    }
+}
+
+fn build_scalar_type_name(type_str: &str) -> Result<ScalarType> {
     match type_str {
         "u32" => Ok(ScalarType::U32),
         "u64" => Ok(ScalarType::U64),
@@ -278,7 +345,10 @@ fn build_type_spec(pair: Pair<'_, Rule>) -> Result<ScalarType> {
         "f64" => Ok(ScalarType::F64),
         "bool" => Ok(ScalarType::Bool),
         "symbol" => Ok(ScalarType::Symbol),
-        _ => Err(XlogError::Parse(format!("Unknown type: {}", type_str))),
+        _ => Err(XlogError::Parse(format!(
+            "Unknown scalar type: {}",
+            type_str
+        ))),
     }
 }
 
@@ -294,10 +364,11 @@ fn parse_func_param(pair: Pair<'_, Rule>) -> Result<FuncParam> {
         .next()
         .map(|ta| {
             // type_annotation contains type_spec
-            build_type_spec(
+            build_scalar_type_spec(
                 ta.into_inner()
                     .next()
                     .expect("type_annotation must contain type_spec"),
+                "function parameter type annotation",
             )
         })
         .transpose()?;
@@ -434,10 +505,12 @@ fn parse_func_def(pair: Pair<'_, Rule>) -> Result<FuncDef> {
                     .collect::<Result<Vec<_>>>()?;
             }
             Rule::return_type => {
-                return_type =
-                    Some(build_type_spec(p.into_inner().next().ok_or_else(
-                        || XlogError::Parse("Missing return type".to_string()),
-                    )?)?);
+                return_type = Some(build_scalar_type_spec(
+                    p.into_inner()
+                        .next()
+                        .ok_or_else(|| XlogError::Parse("Missing return type".to_string()))?,
+                    "function return type annotation",
+                )?);
             }
             Rule::func_body => {
                 body = Some(parse_func_body(p)?);
@@ -896,6 +969,41 @@ fn build_term(pair: Pair<'_, Rule>) -> Result<Term> {
             let unquoted = &s[1..s.len() - 1];
             Ok(Term::String(unquoted.to_string()))
         }
+        Rule::list_literal => {
+            let items = inner
+                .into_inner()
+                .map(build_term)
+                .collect::<Result<Vec<_>>>()?;
+            Ok(Term::List(items))
+        }
+        Rule::cons_pattern => {
+            let mut parts = inner.into_inner();
+            let head = parts
+                .next()
+                .ok_or_else(|| XlogError::Parse("Missing cons head".to_string()))?;
+            let tail = parts
+                .next()
+                .ok_or_else(|| XlogError::Parse("Missing cons tail".to_string()))?;
+            Ok(Term::Cons {
+                head: Box::new(build_term(head)?),
+                tail: Box::new(build_term(tail)?),
+            })
+        }
+        Rule::compound_term => {
+            let mut parts = inner.into_inner();
+            let functor = parts
+                .next()
+                .ok_or_else(|| XlogError::Parse("Missing compound functor".to_string()))?
+                .as_str()
+                .to_string();
+            let mut args = Vec::new();
+            if let Some(term_list) = parts.next() {
+                for term in term_list.into_inner() {
+                    args.push(build_term(term)?);
+                }
+            }
+            Ok(Term::Compound { functor, args })
+        }
         Rule::ident => Ok(Term::Symbol(symbol::intern(inner.as_str()))),
         _ => Err(XlogError::Parse(format!(
             "Unknown term type: {:?}",
@@ -1045,7 +1153,7 @@ fn build_arith_primary(pair: Pair<'_, Rule>) -> Result<ArithExpr> {
                     let mut args_iter = args.into_iter();
                     let arg1 = build_arith_expr(args_iter.next().unwrap())?;
                     let type_pair = args_iter.next().unwrap();
-                    let target_type = build_type_spec(type_pair)?;
+                    let target_type = build_scalar_type_spec(type_pair, "cast target")?;
                     Ok(ArithExpr::Cast(Box::new(arg1), target_type))
                 }
                 _ => Err(XlogError::Parse(format!(
@@ -1295,8 +1403,14 @@ mod tests {
         assert_eq!(program.predicates.len(), 1);
         assert_eq!(program.predicates[0].name, "edge");
         assert_eq!(program.predicates[0].types.len(), 2);
-        assert_eq!(program.predicates[0].types[0], ScalarType::U32);
-        assert_eq!(program.predicates[0].types[1], ScalarType::U32);
+        assert_eq!(
+            program.predicates[0].types[0],
+            TypeRef::Scalar(ScalarType::U32)
+        );
+        assert_eq!(
+            program.predicates[0].types[1],
+            TypeRef::Scalar(ScalarType::U32)
+        );
     }
 
     #[test]
