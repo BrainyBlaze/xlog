@@ -5,6 +5,7 @@ Branch: `feat/v080-dts-ml-python-productization`
 Last runtime-code commit: `30995c1e`
 Integration evidence commit: `861f6a02`
 Closure evidence commit: `8cd6e095`
+Post-close examples addendum: `5314d532`
 
 ## Recommendation
 
@@ -29,6 +30,7 @@ branch is the release train that must land first.
 | G080_PROFILE | `bfa20ef5` | PASS | `docs/evidence/2026-05-18-v080-profile/README.md` |
 | G080_INT | `861f6a02` | PASS | `docs/evidence/2026-05-18-v080-int/README.md` |
 | G080_CLOSE | `8cd6e095` | PASS | `docs/evidence/2026-05-18-v080-close/README.md` |
+| G080_EXAMPLES | `5314d532` | PASS | `docs/evidence/2026-05-18-v080-examples/README.md` |
 
 ## GQM Metric Table
 
@@ -80,6 +82,12 @@ branch is the release train that must land first.
 | M080_CLOSE.2 unresolved issues | PASS | deferred items have dispositions below |
 | M080_CLOSE.3 release decision | PASS | `MERGE_READY` |
 | M080_CLOSE.4 no implicit release | PASS | no push, tag, board update, or merge performed |
+| M080_EXAMPLES.1 suite coverage | PASS | `example_count=5`; all five examples report `PASS` |
+| M080_EXAMPLES.2 async/streaming | PASS | async completion true; stream chunks `[3,3,1]` and materialized chunks `[2,2,2,1]` |
+| M080_EXAMPLES.3 relation deltas | PASS | insert/delete/mixed delta equivalence true; delta rows `4` vs full replacement rows `7` |
+| M080_EXAMPLES.4 neural bridge | PASS | deterministic top-k selected labels `["reject","accept"]`; registered network reports `top_k=2`, `deterministic=true` |
+| M080_EXAMPLES.5 native exact induction | PASS | Python/native parity `summary=true`, `ordered_candidates=true`; total scored `36` |
+| M080_EXAMPLES.6 diagnostics | PASS | CUDA tensor checks true where applicable; host-transfer diagnostics report `dtoh=0`, `htod=0` where exposed |
 
 ## Deferred Or Non-Blocking Items
 
@@ -126,6 +134,7 @@ branch is the release train that must land first.
 | G080_PYAPI | Reproducible from committed command: `/tmp/xlog-v080-cert-venv/bin/python scripts/v080_pyxlog_runtime_probe.py --probe pyapi --output docs/evidence/2026-05-18-v080-pyapi/runtime_probe.json`. |
 | G080_CERT | Manifest generation and verification are committed in `scripts/v080_dts_cert.py`; `runtime_probe.json` remains branch-local evidence consumed by that manifest. |
 | G080_DELTA / G080_BRIDGE / G080_EXACT | Raw probe JSON is committed as branch-local evidence. The closure claim relies on committed source/runtime gates for pass/fail status; probe timing or environment-specific values are treated as observed evidence rather than independently scripted release gates. |
+| G080_EXAMPLES | Reproducible from committed command: `/tmp/xlog-v080-cert-venv/bin/python scripts/validate_v080_examples.py --output docs/evidence/2026-05-18-v080-examples/validation_summary.json`. |
 
 ## Remaining Risk
 
