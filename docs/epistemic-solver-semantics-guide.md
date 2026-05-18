@@ -260,9 +260,11 @@ workspace-backed UNSAT through the GPU CDCL path and exposes zero CPU
 assignment/MaxSAT enumeration counters in `GpuSolverProductionTrace`.
 `solve_expect_sat_with_gpu_execution_result` and
 `solve_expect_unsat_with_gpu_execution_result` additionally accept an
-`EpistemicGpuExecutionResult`, require stable tuple-source membership, GPU
-model-membership/world-view/materialization traces, zero hot-path transfers, and
-non-empty final device output, then dispatch SAT/UNSAT through GPU CDCL.
+`EpistemicGpuExecutionResult`; the reusable-workspace variant is
+`solve_expect_unsat_with_branch_limit_ws_with_gpu_execution_result`. These gates
+require stable tuple-source membership, GPU model-membership, world-view, and
+materialization traces, zero hot-path transfers, and non-empty final device
+output, then dispatch SAT/UNSAT through GPU CDCL.
 `xlog_solve::production_capabilities` reports that GPU CDCL SAT/UNSAT is
 available while GPU-native MaxSAT and SAT/MaxSAT portfolio execution are blocked.
 

@@ -174,6 +174,24 @@ impl GpuSolverProductionAdapter {
             self.trace.gpu_cdcl_workspace_unsat_solves.saturating_add(1);
         self.trace.require_zero_cpu_search()
     }
+
+    /// Solve workspace-backed UNSAT through GPU CDCL after accepted GPU epistemic execution.
+    pub fn solve_expect_unsat_with_branch_limit_ws_with_gpu_execution_result(
+        &mut self,
+        provider: &CudaKernelProvider,
+        result: &EpistemicGpuExecutionResult,
+        workspace: &mut GpuCdclWorkspace,
+        cnf: &GpuCnf,
+        branch_var_limit: &TrackedCudaSlice<u32>,
+    ) -> Result<()> {
+        require_accepted_gpu_solver_evidence(provider, result)?;
+        self.solve_expect_unsat_with_branch_limit_ws(workspace, cnf, branch_var_limit)?;
+        self.trace.accepted_gpu_candidate_evidence_consumed = self
+            .trace
+            .accepted_gpu_candidate_evidence_consumed
+            .saturating_add(1);
+        self.trace.require_zero_cpu_search()
+    }
 }
 
 fn require_accepted_gpu_solver_evidence(
