@@ -287,9 +287,19 @@ cargo test -p xlog-solve --test solver_service_semantics
 - `conditional_probability_from_logs` normalizes probabilities with
   `EPISTEMIC_PROBABILITY_TOLERANCE = 1e-12`.
 
-Run the probabilistic fixture:
+`xlog_prob::epistemic_production::EpistemicProbProductionAdapter` is the
+production-facing exact-path reuse adapter. It requires
+`AcceptedWorldViewEvidence`, then routes source or parsed programs through
+`ExactDdnnfProgram` GPU exact/provenance compilation and exposes zero CPU-only
+probability recomputation counters in `EpistemicProbProductionTrace`.
+
+This adapter is partial v0.9 evidence only. It does not yet wire accepted
+runtime world views into probabilistic execution end to end.
+
+Run the probabilistic fixture and production-adapter source guard:
 
 ```bash
+cargo test -p xlog-prob --test epistemic_prob_production_reuse
 cargo test -p xlog-prob --test epistemic_prob
 ```
 

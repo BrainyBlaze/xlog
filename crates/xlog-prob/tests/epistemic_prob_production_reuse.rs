@@ -1,0 +1,23 @@
+use std::fs;
+use std::path::PathBuf;
+
+#[test]
+fn production_prob_adapter_reuses_gpu_exact_path_not_fixture_circuit() {
+    let lib = include_str!("../src/lib.rs");
+    let mut production_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    production_path.push("src");
+    production_path.push("epistemic_production.rs");
+    let production = fs::read_to_string(&production_path).unwrap_or_default();
+
+    assert!(lib.contains("epistemic_production"));
+    assert!(production.contains("EpistemicProbProductionAdapter"));
+    assert!(production.contains("EpistemicProbProductionTrace"));
+    assert!(production.contains("ExactDdnnfProgram::compile_source_with_gpu"));
+    assert!(production.contains("ExactDdnnfProgram::compile_from_program"));
+    assert!(production.contains("evaluate_gpu_with_grads"));
+    assert!(production.contains("cpu_only_probability_recomputations: 0"));
+    assert!(production.contains("fixture_circuit_evaluations: 0"));
+    assert!(!production.contains("EpistemicCircuit::compile"));
+    assert!(!production.contains("conditional_probability_from_logs"));
+    assert!(!production.contains("query_probability"));
+}

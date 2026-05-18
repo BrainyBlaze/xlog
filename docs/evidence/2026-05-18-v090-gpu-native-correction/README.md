@@ -23,7 +23,7 @@ release gate.
 | GPT | CPU fixture records guesses, reduced models, accepted world views, and rejection reasons. | PARTIAL: candidate generation, propagation staging, candidate-buffer validation, arity 0-3 tuple-source model-membership staging with row-scoped ground key comparison, bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, and final tuple materialization use GPU-resident buffers; bound-variable and arbitrary-arity tuple matching still do not. |
 | Splitting | CPU split/recompose fixtures pass. | PARTIAL until valid split components execute through GPU-native subplans. |
 | Solver | `SolverService` is a CPU fixture facade with SAT/UNSAT/UNKNOWN/TIMEOUT/Optimal statuses; `GpuSolverProductionAdapter` is a thin SAT/UNSAT adapter over the existing `GpuCdclSolver` production path with zero CPU search counters. | PARTIAL for SAT/UNSAT production reuse; BLOCKED until GPU-native MaxSAT, portfolio execution, and accepted candidate lifecycle traces are wired to epistemic candidates. |
-| Probabilistic | `AcceptedWorldViewEvidence` guards evidence conditioning in fixtures. | BLOCKED until accepted world-view evidence flows through the GPU-native exact/provenance path without CPU-only recomputation. |
+| Probabilistic | `AcceptedWorldViewEvidence` guards evidence conditioning in fixtures; `EpistemicProbProductionAdapter` requires accepted evidence before routing into the existing `ExactDdnnfProgram` GPU exact/provenance path and records zero CPU recompute counters. | PARTIAL for production exact-path reuse; BLOCKED until accepted runtime world views are wired to probabilistic execution end to end. |
 | Certification | Semantic-oracle and GPU-plan contract tests can pass locally. | BLOCKED until full accepted-execution GPU timing, WCOJ evidence, and zero CPU fallback counters exist. |
 
 ## Explicit Non-Closure Items
@@ -70,6 +70,8 @@ The next production slice should start at the lowering/runtime boundary:
    accepted candidate wiring remain open.
 7. Feed accepted world-view evidence into the existing GPU-native
    exact/provenance path and report zero CPU-only probability recomputation.
+   PARTIAL through `EpistemicProbProductionAdapter`; accepted runtime wiring and
+   end-to-end probabilistic traces remain open.
 
 ## Validation Status
 
@@ -84,12 +86,16 @@ The next production slice should start at the lowering/runtime boundary:
 | `cargo test -p xlog-solve --test gpu_solver_production_reuse` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-solve --test solver_service_semantics` | PASS, 5 passed, 0 failed |
 | `cargo test -p xlog-solve --test no_dtoh_in_gpu_cdcl` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-prob --test epistemic_prob_production_reuse` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-prob --test epistemic_prob` | PASS, 5 passed, 0 failed |
+| `cargo test -p xlog-prob --test no_cpu_d4_in_exact` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-prob --test no_dtoh_in_gpu_exact_path` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-runtime --lib` | PASS, 128 passed, 0 failed |
 | `cargo test -p xlog-logic --lib` | PASS, 238 passed, 0 failed |
 | `cargo test -p xlog-solve --lib` | PASS, 111 passed, 0 failed |
 | `cargo test -p xlog-prob --lib` | PASS, 56 passed, 0 failed |
 | `cargo check -p xlog-logic -p xlog-ir -p xlog-solve -p xlog-prob` | PASS |
+| `cargo check -p xlog-prob --features host-io` | PASS |
 | `cargo check -p xlog-cuda -p xlog-runtime -p xlog-logic -p xlog-ir` | PASS |
 | `cargo check -p pyxlog` | PASS |
 

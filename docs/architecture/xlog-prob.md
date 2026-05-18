@@ -105,10 +105,20 @@ updates active evidence without changing the circuit fingerprint or incrementing
 the compile count. Adapters that do not support incremental evidence must report
 a full rebuild. This preserves coherent query semantics for the semantic oracle.
 
+The production-facing bridge is
+`xlog_prob::epistemic_production::EpistemicProbProductionAdapter`. It is a thin
+adapter over `ExactDdnnfProgram`: callers must provide accepted world-view
+evidence before source or parsed programs are compiled through the existing
+GPU-native exact/provenance path. Its trace reports GPU exact compiles,
+accepted-evidence consumption, optional GPU gradient evaluations, and hard-zero
+CPU-only probability recomputation and fixture-circuit counters.
+
 The corrected v0.9.0 release gate is stricter: accepted world-view evidence must
 flow into the existing GPU-native exact/provenance path without CPU-only
 probability recomputation in the accepted execution path. The current
-`xlog_prob::epistemic` fixtures do not by themselves close that gate.
+`xlog_prob::epistemic` fixtures do not by themselves close that gate, and the
+production adapter is partial reuse evidence until accepted runtime world views
+are wired through it end to end.
 
 ---
 
