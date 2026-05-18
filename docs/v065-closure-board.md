@@ -1,7 +1,8 @@
 # v0.7.0 Closure Board
 
-**Status:** v0.7.0 is tag-ready at the board level; W7.1 remains
-OPEN pending explicit user authorization to tag `v0.7.0`.
+**Status:** v0.7.0 is tagged and pushed. W7.1 is DONE; the
+annotated `v0.7.0` tag points at release-retarget commit `0537348f`,
+and `main` is pushed through post-merge docs commit `94a8e5f8`.
 **Source of truth:** ROADMAP.md §1203–1268 + internal commitments
 created during slices 4–5 + Goal-038-B / Goal-039 amendments.
 **Last updated:** 2026-05-18.
@@ -49,10 +50,10 @@ any contrary slice-internal decision.
 
 | State | Count |
 |-------|-------|
-| DONE | 30 (W1.1, W2.4, W2.2, W2.1, W2.3, W2.5, W2.6, W3.1, W3.2, W3.3, W3.4, W3.5, W3.6, W3.7, W3.8, W3.9, W4.1, W4.2, W4.3, W5.1, W5.2, W5.3, W5.4, W6.1, W6.2, W6.3, W6.4, W6.5, W6.6, W6.7) |
+| DONE | 31 (W1.1, W2.4, W2.2, W2.1, W2.3, W2.5, W2.6, W3.1, W3.2, W3.3, W3.4, W3.5, W3.6, W3.7, W3.8, W3.9, W4.1, W4.2, W4.3, W5.1, W5.2, W5.3, W5.4, W6.1, W6.2, W6.3, W6.4, W6.5, W6.6, W6.7, W7.1) |
 | IN-PROGRESS | 0 (—) |
 | BLOCKED | 0 (—) |
-| OPEN | 1 (W7.1) |
+| OPEN | 0 (—) |
 | **Total** | **31** |
 
 The 4 ROADMAP items already DONE from slices 1, 2, 4 are
@@ -60,7 +61,7 @@ recorded in ROADMAP.md and the slice evidence READMEs; they're
 not on this board because the board tracks closure work, not
 prior shipped work.
 
-## Open Items
+## Board Items
 
 ### Wave 1 — Roadmap process
 
@@ -126,13 +127,14 @@ prior shipped work.
 
 | ID | Status | Blocked by | Required deliverable | Acceptance gate |
 |----|--------|------------|----------------------|-----------------|
-| W7.1 | OPEN | user tag authorization | Full workspace gate + CUDA cert + real_world replay; tag `v0.7.0` only after every other board item is DONE AND user explicitly authorizes the tag. | All non-W7.1 board items are DONE; user says "tag v0.7.0"; tag pushed. |
+| W7.1 | DONE | — | Full workspace gate + CUDA cert + real_world replay; tag `v0.7.0` only after every other board item is DONE AND user explicitly authorizes the tag. | DONE — user authorized "push and tag" in thread. `main` pushed to `origin/main` at `94a8e5f8`; annotated tag `v0.7.0` pushed to origin with tag object `d70785b5` and peeled target `0537348f` (`docs(w71): retarget release surfaces to v070`). |
 
 ## Completed
 
 | ID | Date | Commits | Notes |
 |----|------|---------|-------|
 | W2.4 | 2026-05-04 | `f586ce34` (impl), board-update commit | `record_join_result` feedback wired into both triangle and 4-cycle success arms via `Executor::record_wcoj_feedback`. Helper skips on unknown output count or missing input cards. User explicitly approved DONE in thread per process rule #1. |
+| W7.1 | 2026-05-18 | `0537348f` (tag target), `94a8e5f8` (main push tip), tag object `d70785b5` | Annotated `v0.7.0` release tag created and pushed after explicit user authorization; remote `main` pushed through post-merge docs commit. |
 | W2.2 | 2026-05-04 | `eea74612`, `40da5a71`, `2e25be37`, `d51afbd2`, `4af56c0a`, `0a61f3f0`, `2783c30b`, `593b30f8`, `c22585fd`, board-update commit | Real `selectivity_pass` reordering for triangle (3 inner-pair choices) + 4-cycle (2 valid bushy groupings) via variable-graph deduction with pair-derived join keys. Promoter (`try_promote_triangle` / `try_promote_4cycle`) extended with semantic-slot inference; runtime matcher widened to accept alt output_columns layouts. 12 selectivity_pass compile-time tests + 26 promoter tests + 6 Part B/C integration tests + 4 runtime matcher tests. User explicitly approved DONE in thread after two amendment cycles. |
 | W2.1 | 2026-05-04 | `d1b13951` (plan), `529b8a54` (step 1 IR), `ad2aea7c` (step 4 CompilerConfig), `547f2ae0` (step 3 cost-model trait), `b7bb2a4f` (step 5 promoter wiring), `031d19b4` (step 2 CUDA helpers), `e9a89762` (step 6 dispatcher reroute), `6341c716` (step 7 acceptance gates), `134c803e` (step 9 evidence), `0c826b6d` (Part A rename + count math), `c94541a7` (fmt + Part B `prepare_leader_inputs` extraction + per-slot schema/content tests), `54ef8e9f` (fmt re-pass + helper visibility doc), `f82f9995` (evidence commit count to 12 with explicit list), board-update commit | Variable-ordering cost model for WCOJ. `WcojVariableOrderingModel` trait + default `LeaderCardinalityModel` picks leader slot for triangle (3 leaders: e_xy / e_yz / e_xz) + 4-cycle (4 leaders: e_wx / e_xy / e_yz / e_zw) via locked permutation tables. New `CompilerConfig` (default `Disabled`) + composable API `Compiler::compile_with_config_and_stats_snapshot(...)`; threshold clamping at use-site via `effective_wcoj_var_ordering_threshold()`. New CUDA helpers `wcoj_project_2col_swap_recorded` + `wcoj_project_output_columns_recorded` with failure-drain on Err. New `Executor::prepare_leader_inputs(canonical, var_order, stream)` (pub) materializes owned slot inputs (DtoD-copy via the swap helper, double-swap for no-swap pass-through). Dispatcher reroute via `run_wcoj_*_pipeline_w21` rotates inputs + applies (triangle) col-swap + post-projects kernel-direct output to canonical head order. 32-test acceptance gate (Part A 10 + Part B 7 per-slot schema/content + Part C 7 row-set parity + Part D 2 stats divergence + Part E 2 threshold gate + resolver 4); workspace 1859 → 1914 = +55 W2.1 tests, 0 fail; CUDA cert 1/1. Default `CompilerConfig::default()` keeps slice 1/2/4/W2.2 dispatch bit-identical. User explicitly approved DONE in thread after multiple amendment cycles (fmt + Part B helper extraction + commit-count corrections). |
 | W2.3 | 2026-05-04 | `d10bb72a` (plan iteration 4), `77f3b843` (impl steps 1-6: audit + `name_to_rel_id` + trace seam + seed pass + Phase 2 + Phase 4 wiring), `2b6caff7` (step 7+8: 10 acceptance tests + `recursive-stats-trace` feature + warnings cleanup + fmt), `b52e9344` (step 9 evidence README), `cd2a8bf2` (Part B distinct `binary_est_for_variant` strengthening + Part C exact `== 4` counter + fixture filler inflation), `0872b49f` (Part A header fix: `cfg(test)` → feature-gated trace), `72988c6c` (plan-text scrub: removed `deferred` + replaced `cfg(test)` plan language with feature gate), board-update commit | Statistics integration into recursive SCC evaluation. Direction (b) per-iteration unconditional cardinality updates: seed pass writes `update_cardinality(full_rel, full_new_rows)` + `update_cardinality(delta_rel, buffer_row_count(delta_initial))` (the actual delta_initial row count, not full); fixpoint Phase 2 writes `update_cardinality(delta_rel, delta_new_rows)`; Phase 4 (post-merge+dedup) writes `update_cardinality(full_rel, full_new_rows_phase4)`. New `Executor::name_to_rel_id` private accessor wraps `self.name_to_rel.get`. `recursive-stats-trace` Cargo feature (default OFF) gates the per-iteration `RecursiveStatsTrace` seam — production zero overhead. `binary_est_for_variant` populated inline at Phase 2 for `pred == "e1"` via `estimate_join_cardinality(delta_e1, e2, &[1], &[0])` (must be inline; delta_rel is unregistered at fixpoint exit). 10-test acceptance gate on slice-4 linear-recursive triangle + 4-cycle fixtures (anchor: `LINEAR_REC_TRIANGLE` `:586`, `LINEAR_REC_4CYCLE` `:669`; fixtures' recursive predicate is `e1`, head-rule rewrite `Scan(e1) → Scan(delta_e1)`): Part A 3 (e1 full grows + e1 delta evolves + 4-cycle e1 full grows) + Part B 2 (`binary_est_for_variant` produces ≥ 2 distinct values across iterations — `{5, 1}` for both fixtures, with `e2` filler-inflated to clear formula floor) + Part C 4 (row-set + dispatch counter exact `== 4` slice-4 baseline) + Part D 1 (multirec_triangle slice-4 pattern with `r1`+`r2` recursive IDBs in head body — promoter gate stays at recursive_scan_count ≤ 1, counter `== 0`). Workspace 1914/0 default features (production zero overhead) → 1924/0 with feature on (+10 W2.3 tests). CUDA cert 1/1. Real CUDA gate verified on host (NVIDIA RTX PRO 3000 Blackwell, driver 591.59) — all 10 tests exercise GPU path, no skip output. User explicitly approved DONE in thread after multiple amendment cycles. |
@@ -143,7 +145,8 @@ prior shipped work.
   originally targeted as v0.6.5; this board retargets the completed
   feature pack to v0.7.0.
 - Goal-038-B / Goal-039 amendments expanded the board with W6.3,
-  W6.4, W6.5, W6.6, and W6.7, bringing the tracked total to 31.
+  W6.4, W6.5, W6.6, and W6.7, bringing the tracked total to 31;
+  W7.1 closed when the annotated `v0.7.0` tag was pushed.
 - Internal commitments tracked in slice plans/evidence:
   - Slice 4 plan §"Open Questions": multi-recursive deferral.
   - Slice 5 plan §"Out-of-Slice (Deferred)": `record_join_result`

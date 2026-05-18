@@ -1,15 +1,15 @@
 # XLOG Development Roadmap
 
 Last updated: May 18, 2026
-Current tagged release: v0.6.2. v0.6.0 shipped the stream-safe runtime
+Current tagged release: v0.7.0. v0.6.0 shipped the stream-safe runtime
 and recorded launch discipline. v0.6.1 shipped recorded CSM hash-join
 dispatch and explicit CSM cert-mode labeling. v0.6.2 shipped the first
 productized WCOJ slice: hypergraph planner / oracle foundations plus
 default-on adaptive GPU triangle WCOJ for `U32`, `Symbol`, and `U64`
-inputs. v0.6.2 deliberately does **not** claim general-arity WCOJ,
-recursive/SCC WCOJ execution, a cost model, or a dedicated
-`MultiWayJoin` / `WcojJoin` RIR node. The completed WCOJ expansion
-pack is targeted to v0.7.0.
+inputs. v0.7.0 ships the completed WCOJ expansion pack: first-class
+multiway RIR, WCOJ cost and variable-ordering models, recursive/SCC
+integration, K-clique production planning, K5-K8 CUDA coverage, CUDA
+Graph hot-loop support, and DTS-DLM end-to-end validation.
 
 This roadmap is version-oriented so planned work is not hidden inside subsystem
 sections. Historical and current-main work uses checked boxes. Future work uses
@@ -1300,14 +1300,14 @@ folded into v0.7.0 closure (NOT deferred):
     `SkewClassifier` to `Cardinality`.
   * Multi-recursive WCOJ (≥ 2 in-SCC body Scans).
 
-**Total open for v0.7.0 tag: 1 item** — W7.1 release-tag
-authorization. The closure board is tag-ready at the board level:
-all non-W7.1 rows are DONE.
+**Total open for v0.7.0 tag: 0 items.** W7.1 is DONE: the user
+authorized "push and tag"; `main` is pushed to `origin/main` through
+`94a8e5f8`, and annotated tag `v0.7.0` is pushed with peeled target
+`0537348f`.
 
 **Closure board:** [`docs/v065-closure-board.md`](docs/v065-closure-board.md)
 — authoritative tracker. Process rules, wave grouping, and
-per-item acceptance gates live there. Any further v0.7.0 work
-references board IDs (W2.x, W3.x, …).
+per-item acceptance gates live there. All v0.7.0 board rows are DONE.
 
 **Historical slices originally shipped against this section before
 the v0.7.0 retarget**:

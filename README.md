@@ -2,17 +2,16 @@
 
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
 [![CUDA Tests](https://img.shields.io/badge/CUDA%20tests-206%2F206-brightgreen.svg)](docs/architecture/cuda-certification.md)
-[![Version](https://img.shields.io/badge/version-v0.6.2-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.7.0-blue.svg)](CHANGELOG.md)
 
-> **Release status:** `v0.6.2` - Default-On Adaptive WCOJ Triangle Dispatch.
-> GPU 3-way WCOJ triangle execution for `u32`, `u64`, and `Symbol` keys is now
-> wired into the runtime behind a default-on adaptive skew classifier with a hard
-> kill switch (`XLOG_DISABLE_WCOJ_TRIANGLE=1`). The release also ships the
-> hypergraph planner / CPU oracle stack, planner-to-provider certification, WCOJ
-> sorted-layout construction, layout fast-path for already sorted+unique inputs,
-> phase-timing diagnostics, and benchmark evidence showing the layout fast-path
-> cuts super-hub WCOJ wall time by roughly 90-96% on the development GPU. See
-> `ROADMAP.md`, `CHANGELOG.md`, and `docs/BENCHMARKS.md`.
+> **Release status:** `v0.7.0` - General WCOJ Architecture and Runtime Expansion.
+> The release expands the v0.6.2 triangle accelerator into a production WCOJ
+> subsystem: first-class multiway RIR, variable-order and cardinality cost models,
+> recursive/SCC integration, K5-K8 clique coverage, runtime histogram block
+> slicing, helper splitting for buried skew, bounded CUDA Graph replay for the
+> DTS-DLM hot loop, and end-to-end DTS-DLM validation. See `ROADMAP.md`,
+> `CHANGELOG.md`, `docs/wcoj-architecture-guide.md`, and
+> `docs/wcoj-user-guide.md`.
 
 **XLOG is a GPU-native logic programming language for unified symbolic reasoning.**
 Neural-symbolic systems today keep symbolic reasoning on the CPU while neural computation runs on
@@ -286,6 +285,8 @@ flag reference.
 | [Architecture](docs/ARCHITECTURE.md) | System design, crate structure, IR layers, GPU execution model |
 | [Roadmap](ROADMAP.md) | Feature status, shipped milestones, and planned work |
 | [Benchmarks](docs/BENCHMARKS.md) | Performance methodology and benchmark artifacts |
+| [WCOJ architecture guide](docs/wcoj-architecture-guide.md) | RIR, promoter, dispatch, cost model, recursive integration, and Phase-2 WCOJ mechanisms |
+| [WCOJ user guide](docs/wcoj-user-guide.md) | Eligibility, fallback behavior, performance tuning, env vars, troubleshooting, and DTS-DLM guidance |
 | [Probabilistic tier](docs/architecture/xlog-prob.md) | Exact knowledge compilation and Monte Carlo inference |
 | [Solver services](docs/architecture/solver-services.md) | GPU CDCL verifier, SAT/MaxSAT services, workspace arena reuse |
 | [dILP training](docs/architecture/dilp-training.md) | Differentiable ILP trainer architecture and GPU hot-loop contract |
