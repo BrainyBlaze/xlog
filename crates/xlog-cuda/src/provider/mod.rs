@@ -403,6 +403,9 @@ pub mod epistemic_kernels {
     /// Device-side model-membership staging kernel.
     pub const EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_U8: &str =
         "epistemic_populate_model_membership_u8";
+    /// Device-side tuple-source-backed model-membership kernel.
+    pub const EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_FROM_TUPLE_SOURCE_U8: &str =
+        "epistemic_populate_model_membership_from_tuple_source_u8";
     /// Device-side world-view validation kernel.
     pub const EPISTEMIC_VALIDATE_WORLD_VIEWS_U8: &str = "epistemic_validate_world_views_u8";
     /// Device-side accepted-candidate materialization staging kernel.

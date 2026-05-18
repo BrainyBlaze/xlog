@@ -98,6 +98,46 @@ extern "C" __global__ void epistemic_populate_model_membership_u8(
     }
 }
 
+extern "C" __global__ void epistemic_populate_model_membership_from_tuple_source_u8(
+    uint32_t literal_count,
+    uint32_t candidate_count,
+    uint32_t reduction_count,
+    uint32_t models_per_reduction,
+    uint32_t world_stride,
+    uint32_t literal_index,
+    uint32_t reduction_index,
+    const uint32_t* __restrict__ tuple_source_row_count,
+    const uint8_t* __restrict__ candidate_assumptions,
+    const uint8_t* __restrict__ world_views,
+    uint8_t* __restrict__ model_membership,
+    uint32_t* __restrict__ rejection_reasons
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t total = candidate_count * models_per_reduction;
+    if (gid >= total) return;
+    if (literal_index >= literal_count || reduction_index >= reduction_count) return;
+
+    uint32_t candidate = gid / models_per_reduction;
+    uint32_t model = gid - candidate * models_per_reduction;
+    uint32_t membership_index =
+        (((candidate * reduction_count + reduction_index) * models_per_reduction + model)
+            * literal_count)
+        + literal_index;
+
+    uint8_t active_world = world_views[candidate * world_stride];
+    uint8_t accepted_so_far = (rejection_reasons[candidate] == 0u) ? 1u : 0u;
+    uint8_t has_tuple_source = (tuple_source_row_count[0] > 0u) ? 1u : 0u;
+    uint8_t candidate_bit = candidate_assumptions[candidate * literal_count + literal_index];
+    model_membership[membership_index] =
+        (active_world != 0u && accepted_so_far != 0u && has_tuple_source != 0u)
+            ? candidate_bit
+            : 0u;
+
+    if (model == 0u && active_world == 0u && rejection_reasons[candidate] == 0u) {
+        rejection_reasons[candidate] = 4u;
+    }
+}
+
 extern "C" __global__ void epistemic_validate_world_views_u8(
     uint32_t literal_count,
     uint32_t candidate_count,

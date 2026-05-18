@@ -524,20 +524,48 @@ fn model_membership_trace_fails_closed_until_stable_model_tuple_source_exists() 
 }
 
 #[test]
-fn model_membership_runtime_path_launches_epistemic_kernel_not_host_writes() {
+fn model_membership_trace_accepts_stable_model_tuple_sources() {
+    let trace =
+        EpistemicGpuModelMembershipTrace::for_stable_model_tuple_sources(3, 8, 2, 4, 3).unwrap();
+
+    assert_eq!(trace.literal_count, 3);
+    assert_eq!(trace.candidates_checked, 8);
+    assert_eq!(trace.reduction_count, 2);
+    assert_eq!(trace.models_per_reduction, 4);
+    assert_eq!(trace.model_membership_bytes_written, 192);
+    assert_eq!(trace.output_row_count_device_reads, 0);
+    assert_eq!(trace.tuple_source_row_count_device_reads, 3);
+    assert_eq!(
+        trace.membership_source,
+        EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+    );
+    assert_eq!(trace.kernel_launches, 3);
+    assert_eq!(trace.host_write_ops, 0);
+    trace
+        .require_stable_model_tuple_source()
+        .expect("stable tuple-source traces should certify model membership");
+}
+
+#[test]
+fn model_membership_runtime_path_launches_tuple_source_kernel_not_host_writes() {
     let source = include_str!("../src/executor/epistemic_workspace.rs");
     let cuda = include_str!("../../xlog-cuda/kernels/epistemic.cu");
     let manifest = include_str!("../../xlog-cuda/src/kernel_manifest_data.rs");
 
-    assert!(source.contains("fn populate_epistemic_gpu_model_membership"));
-    assert!(source.contains("EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_U8"));
-    assert!(source.contains("output.num_rows_device()"));
+    assert!(source.contains("fn populate_epistemic_gpu_model_membership_from_tuple_sources"));
+    assert!(source.contains("EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_FROM_TUPLE_SOURCE_U8"));
+    assert!(source.contains("gpu_plan.tuple_membership_bindings"));
+    assert!(source.contains("self.store()"));
+    assert!(source.contains("get(binding.predicate.as_str())"));
+    assert!(source.contains("source_relation.num_rows_device()"));
     assert!(source.contains("&workspace.candidate_assumptions"));
     assert!(source.contains("&workspace.world_views"));
     assert!(source.contains("&mut workspace.model_membership"));
     assert!(source.contains("&mut workspace.rejection_reasons"));
-    assert!(cuda.contains("epistemic_populate_model_membership_u8"));
-    assert!(manifest.contains("\"epistemic_populate_model_membership_u8\""));
+    assert!(source.contains("EpistemicGpuModelMembershipSource::StableModelTupleBuffer"));
+    assert!(cuda.contains("epistemic_populate_model_membership_from_tuple_source_u8"));
+    assert!(cuda.contains("tuple_source_row_count"));
+    assert!(manifest.contains("\"epistemic_populate_model_membership_from_tuple_source_u8\""));
     assert!(!source.contains("upload_epistemic_model_membership"));
     assert!(!source.contains("copy_epistemic_model_membership_from_host"));
     assert!(!source.contains("dtoh_epistemic_model_membership_row_count"));
@@ -583,7 +611,9 @@ fn execution_result_records_model_membership_and_world_view_validation_after_red
 
     assert!(source.contains("pub model_membership: EpistemicGpuModelMembershipTrace"));
     assert!(source.contains("pub world_view_validation: EpistemicGpuWorldViewValidationTrace"));
-    assert!(source.contains("let model_membership = self.populate_epistemic_gpu_model_membership"));
+    assert!(source.contains(
+        "let model_membership = self.populate_epistemic_gpu_model_membership_from_tuple_sources"
+    ));
     assert!(source.contains("let world_view_validation = self.validate_epistemic_gpu_world_views"));
     assert!(source.contains("model_membership,"));
     assert!(source.contains("world_view_validation,"));
@@ -595,7 +625,7 @@ fn execution_result_records_model_membership_and_world_view_validation_after_red
         .find("trace.require_wcoj_certification()?")
         .expect("runtime WCOJ certification gate");
     let membership_pos = source
-        .find("let model_membership = self.populate_epistemic_gpu_model_membership")
+        .find("let model_membership = self.populate_epistemic_gpu_model_membership_from_tuple_sources")
         .expect("model-membership launch in execution path");
     let world_validation_pos = source
         .find("let world_view_validation = self.validate_epistemic_gpu_world_views")
@@ -754,6 +784,7 @@ fn staging_runtime_paths_record_cuda_event_timing_for_each_kernel() {
         "epistemic GPU candidate propagation",
         "epistemic GPU candidate validation",
         "epistemic GPU model membership",
+        "epistemic GPU tuple-source model membership",
         "epistemic GPU world-view validation",
         "epistemic GPU candidate materialization",
         "epistemic GPU final result materialization",
@@ -770,7 +801,7 @@ fn staging_runtime_paths_record_cuda_event_timing_for_each_kernel() {
     }
     assert_eq!(
         source.matches(".with_kernel_timing(kernel_timing)").count(),
-        8
+        9
     );
 }
 
@@ -911,7 +942,7 @@ fn execution_path_requires_actual_stable_model_membership_before_return() {
     assert!(source.contains("model_membership.require_stable_model_tuple_source()?"));
 
     let model_membership_pos = source
-        .find("let model_membership = self.populate_epistemic_gpu_model_membership")
+        .find("let model_membership = self.populate_epistemic_gpu_model_membership_from_tuple_sources")
         .expect("model-membership launch in execution path");
     let final_tuple_pos = source
         .find("let (final_output, final_tuple_materialization)")

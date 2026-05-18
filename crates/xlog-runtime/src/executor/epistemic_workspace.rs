@@ -253,6 +253,8 @@ pub struct EpistemicGpuModelMembershipTrace {
     pub model_membership_bytes_written: usize,
     /// Device output row-count scalars read by the kernel.
     pub output_row_count_device_reads: u32,
+    /// Device tuple-source row-count scalars read by the kernel.
+    pub tuple_source_row_count_device_reads: u32,
     /// Rejection-reason slots checked by the kernel.
     pub rejection_reason_slots_checked: usize,
     /// Source used to populate model-membership bytes.
@@ -594,9 +596,60 @@ impl EpistemicGpuModelMembershipTrace {
             models_per_reduction,
             model_membership_bytes_written,
             output_row_count_device_reads: 1,
+            tuple_source_row_count_device_reads: 0,
             rejection_reason_slots_checked: candidate_count,
             membership_source: EpistemicGpuModelMembershipSource::ReducedOutputRowCountOnly,
             kernel_launches: 1,
+            host_write_ops: 0,
+            kernel_timing: EpistemicGpuKernelTimingTrace::unrecorded(),
+        })
+    }
+
+    /// Build a model-membership trace backed by reduced stable-model tuple sources.
+    pub fn for_stable_model_tuple_sources(
+        literal_count: usize,
+        candidate_count: usize,
+        reduction_count: usize,
+        models_per_reduction: usize,
+        tuple_source_count: usize,
+    ) -> Result<Self> {
+        require_positive(literal_count, "epistemic GPU model-membership literals")?;
+        require_positive(candidate_count, "epistemic GPU model-membership candidates")?;
+        require_positive(reduction_count, "epistemic GPU model-membership reductions")?;
+        require_positive(
+            models_per_reduction,
+            "epistemic GPU model-membership models",
+        )?;
+        require_positive(
+            tuple_source_count,
+            "epistemic GPU model-membership tuple sources",
+        )?;
+        if tuple_source_count > u32::MAX as usize {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU model-membership tuple sources".to_string(),
+                estimated_bytes: tuple_source_count as u64,
+                budget_bytes: u32::MAX as u64,
+            });
+        }
+        let model_membership_bytes_written = checked_product(
+            checked_product(
+                checked_product(candidate_count, reduction_count)?,
+                models_per_reduction,
+            )?,
+            literal_count,
+        )?;
+
+        Ok(Self {
+            literal_count,
+            candidates_checked: candidate_count,
+            reduction_count,
+            models_per_reduction,
+            model_membership_bytes_written,
+            output_row_count_device_reads: 0,
+            tuple_source_row_count_device_reads: tuple_source_count as u32,
+            rejection_reason_slots_checked: candidate_count,
+            membership_source: EpistemicGpuModelMembershipSource::StableModelTupleBuffer,
+            kernel_launches: tuple_source_count as u32,
             host_write_ops: 0,
             kernel_timing: EpistemicGpuKernelTimingTrace::unrecorded(),
         })
@@ -1493,6 +1546,187 @@ impl Executor {
         Ok(trace.with_kernel_timing(kernel_timing))
     }
 
+    /// Populate model-membership bytes from reduced stable-model tuple sources.
+    pub fn populate_epistemic_gpu_model_membership_from_tuple_sources(
+        &self,
+        workspace: &mut EpistemicGpuWorkspace,
+        gpu_plan: &EpistemicGpuPlan,
+        candidate_count: usize,
+        models_per_reduction: usize,
+    ) -> Result<EpistemicGpuModelMembershipTrace> {
+        gpu_plan.validate_tuple_membership_bindings()?;
+
+        let literal_count = gpu_plan.epistemic_literals.len();
+        let reduction_count = gpu_plan.reductions.len();
+        let trace = EpistemicGpuModelMembershipTrace::for_stable_model_tuple_sources(
+            literal_count,
+            candidate_count,
+            reduction_count,
+            models_per_reduction,
+            gpu_plan.tuple_membership_bindings.len(),
+        )?;
+        let candidate_assumption_bytes = checked_product(literal_count, candidate_count)?;
+        if candidate_assumption_bytes > workspace.layout.candidate_assumption_bytes {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU model-membership candidate workspace".to_string(),
+                estimated_bytes: candidate_assumption_bytes as u64,
+                budget_bytes: workspace.layout.candidate_assumption_bytes as u64,
+            });
+        }
+        if candidate_count > workspace.layout.world_view_bytes {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU model-membership world-view workspace".to_string(),
+                estimated_bytes: candidate_count as u64,
+                budget_bytes: workspace.layout.world_view_bytes as u64,
+            });
+        }
+        if trace.model_membership_bytes_written > workspace.layout.model_membership_bytes {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU model-membership workspace".to_string(),
+                estimated_bytes: trace.model_membership_bytes_written as u64,
+                budget_bytes: workspace.layout.model_membership_bytes as u64,
+            });
+        }
+        if trace.rejection_reason_slots_checked > workspace.layout.rejection_reason_slots {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU model-membership rejection workspace".to_string(),
+                estimated_bytes: trace.rejection_reason_slots_checked as u64,
+                budget_bytes: workspace.layout.rejection_reason_slots as u64,
+            });
+        }
+        if trace.model_membership_bytes_written > u32::MAX as usize {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU model-membership launch".to_string(),
+                estimated_bytes: trace.model_membership_bytes_written as u64,
+                budget_bytes: u32::MAX as u64,
+            });
+        }
+        if literal_count > u32::MAX as usize
+            || candidate_count > u32::MAX as usize
+            || reduction_count > u32::MAX as usize
+            || models_per_reduction > u32::MAX as usize
+        {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU model-membership dimensions".to_string(),
+                estimated_bytes: literal_count
+                    .max(candidate_count)
+                    .max(reduction_count)
+                    .max(models_per_reduction) as u64,
+                budget_bytes: u32::MAX as u64,
+            });
+        }
+
+        let world_stride =
+            workspace.layout.world_view_bytes / workspace.layout.rejection_reason_slots;
+        if world_stride == 0 || world_stride > u32::MAX as usize {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU model-membership world stride".to_string(),
+                estimated_bytes: world_stride as u64,
+                budget_bytes: u32::MAX as u64,
+            });
+        }
+
+        let per_binding_launch_elems = checked_product(candidate_count, models_per_reduction)?;
+        if per_binding_launch_elems > u32::MAX as usize {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU model-membership tuple-source launch".to_string(),
+                estimated_bytes: per_binding_launch_elems as u64,
+                budget_bytes: u32::MAX as u64,
+            });
+        }
+
+        let mut tuple_sources = Vec::with_capacity(gpu_plan.tuple_membership_bindings.len());
+        for binding in &gpu_plan.tuple_membership_bindings {
+            if binding.arity != 0 {
+                return Err(XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic GPU stable-model tuple membership".to_string(),
+                    context: format!(
+                        "predicate {} arity {} requires tuple-key matching metadata; \
+                         current GPU tuple-source kernel only certifies zero-arity tuples",
+                        binding.predicate, binding.arity
+                    ),
+                });
+            }
+            let source_relation =
+                self.store()
+                    .get(binding.predicate.as_str())
+                    .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                        construct: "epistemic GPU stable-model tuple membership".to_string(),
+                        context: format!(
+                            "missing reduced stable-model tuple source relation {}",
+                            binding.predicate
+                        ),
+                    })?;
+            if source_relation.arity() != binding.arity {
+                return Err(XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic GPU stable-model tuple membership".to_string(),
+                    context: format!(
+                        "tuple source relation {} arity {} does not match binding arity {}",
+                        binding.predicate,
+                        source_relation.arity(),
+                        binding.arity
+                    ),
+                });
+            }
+            tuple_sources.push((
+                binding.literal_index as u32,
+                binding.reduction_index as u32,
+                source_relation.num_rows_device(),
+            ));
+        }
+
+        let literal_count = literal_count as u32;
+        let candidate_count = candidate_count as u32;
+        let reduction_count = reduction_count as u32;
+        let models_per_reduction = models_per_reduction as u32;
+        let world_stride = world_stride as u32;
+        let func = self
+            .provider
+            .device()
+            .inner()
+            .get_func(
+                EPISTEMIC_MODULE,
+                epistemic_kernels::EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_FROM_TUPLE_SOURCE_U8,
+            )
+            .ok_or_else(|| {
+                XlogError::Execution(
+                    "epistemic tuple-source model-membership kernel not found".to_string(),
+                )
+            })?;
+        let config = LaunchConfig::for_num_elems(per_binding_launch_elems as u32);
+
+        let kernel_timing = self.time_epistemic_gpu_kernel_launch(
+            "epistemic GPU tuple-source model membership",
+            || unsafe {
+                for (literal_index, reduction_index, tuple_source_row_count) in &tuple_sources {
+                    // SAFETY: kernel arguments match the PTX signature; the capacity
+                    // checks above prove candidate, world-view, membership, rejection,
+                    // and tuple-source row-count buffers cover all accesses.
+                    func.clone().launch(
+                        config,
+                        (
+                            literal_count,
+                            candidate_count,
+                            reduction_count,
+                            models_per_reduction,
+                            world_stride,
+                            *literal_index,
+                            *reduction_index,
+                            *tuple_source_row_count,
+                            &workspace.candidate_assumptions,
+                            &workspace.world_views,
+                            &mut workspace.model_membership,
+                            &mut workspace.rejection_reasons,
+                        ),
+                    )?;
+                }
+                Ok(())
+            },
+        )?;
+
+        Ok(trace.with_kernel_timing(kernel_timing))
+    }
+
     /// Validate staged model memberships against candidate world views on device.
     pub fn validate_epistemic_gpu_world_views(
         &self,
@@ -1932,12 +2166,10 @@ impl Executor {
             counters_after,
         );
         trace.require_wcoj_certification()?;
-        let model_membership = self.populate_epistemic_gpu_model_membership(
+        let model_membership = self.populate_epistemic_gpu_model_membership_from_tuple_sources(
             &mut prepared.workspace,
-            &output,
-            literal_count,
+            &executable.gpu_plan,
             candidate_count,
-            executable.gpu_plan.reductions.len(),
             capacities.max_models_per_reduction,
         )?;
         let world_view_validation = self.validate_epistemic_gpu_world_views(

@@ -48,14 +48,14 @@ CUDA-event elapsed timing for world-view/rejection staging.
 `epistemic_validate_candidate_bits_u8` CUDA kernel and records
 `EpistemicGpuCandidateValidationTrace` with one kernel launch, zero host
 writes, and CUDA-event elapsed timing for candidate-buffer validation.
-`Executor::populate_epistemic_gpu_model_membership` launches the
-`epistemic_populate_model_membership_u8` CUDA kernel and records
-`EpistemicGpuModelMembershipTrace` with one kernel launch, zero host writes,
-one reduced-output device row-count read, and CUDA-event elapsed timing for
-candidate-scoped model-membership staging. The trace source remains
-`ReducedOutputRowCountOnly`, and
-`require_stable_model_tuple_source()` rejects that staging marker before the
-runtime may return accepted epistemic execution.
+`Executor::populate_epistemic_gpu_model_membership_from_tuple_sources` launches
+`epistemic_populate_model_membership_from_tuple_source_u8` once per certified
+tuple binding and records `EpistemicGpuModelMembershipTrace` with stable tuple
+source row-count reads, zero reduced-output row-count reads, zero host writes,
+and CUDA-event elapsed timing. This slice certifies arity-zero reduced
+stable-model tuple sources from named GPU relation buffers. Nonzero-arity
+tuple-key matching still fails closed until argument/key metadata and matching
+kernels are added.
 `Executor::validate_epistemic_gpu_world_views` launches the
 `epistemic_validate_world_views_u8` CUDA kernel and records
 `EpistemicGpuWorldViewValidationTrace` with one kernel launch, zero host
@@ -85,8 +85,8 @@ accepted-candidate, final-result flag, and final tuple materialization-staging
 kernel launches. It also snapshots provider host-transfer counters around the hot path
 and records `EpistemicGpuTransferBudgetTrace`, which rejects tracked data-plane
 H2D/D2H deltas instead of resetting shared telemetry. That is still incomplete
-for the epistemic hot path; row-count-only model-membership staging now fails
-closed, and actual reduced stable-model tuple membership population plus solver
+for the epistemic hot path; arity-zero tuple-source membership is GPU-backed,
+but nonzero-arity tuple matching, full world-view semantics, and solver
 coupling do not dispatch yet.
 
 ## GPU And WCOJ Scope

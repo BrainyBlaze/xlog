@@ -29,7 +29,7 @@ Predecessor evidence:
 | GPU materialization staging | `epistemic_materialize_accepted_candidates_u8` writes accepted-candidate flags from rejection codes into world-view slots. |
 | GPU final-result flag staging | `epistemic_materialize_final_result_flags_u8` writes final-result flags from reduced output device row-count metadata and rejection codes into world-view slots. |
 | GPU final tuple materialization | `epistemic_materialize_final_tuple_column_u8` writes a device-resident final-output tuple buffer and final row-count metadata from reduced output columns. |
-| GPU residency | Candidate-assumption generation, propagation staging, candidate-buffer validation, row-count-gated model-membership staging, bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, and final tuple materialization are implemented as bounded CUDA kernels; actual reduced stable-model tuple membership population remains a runtime gap. |
+| GPU residency | Candidate-assumption generation, propagation staging, candidate-buffer validation, arity-zero tuple-source model-membership staging, bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, and final tuple materialization are implemented as bounded CUDA kernels; nonzero-arity tuple matching remains a runtime gap. |
 | Documentation | `docs/architecture/epistemic-semantics.md` documents the GPT phase contract and guard. |
 
 ## Validation
@@ -42,7 +42,7 @@ Predecessor evidence:
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace candidate_validation` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace validation` | PASS, 7 passed, 0 failed |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace materialization` | PASS, 5 passed, 0 failed |
-| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 39 passed, 0 failed |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 40 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_gpt` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_faeel` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_g91` | PASS, 3 passed, 0 failed |
@@ -56,14 +56,14 @@ Predecessor evidence:
 | Metric | Target | Status | Evidence |
 |---|---|---|---|
 | M090_GPT.1 phase separation | generate, propagate, test boundaries visible in code | PASS for oracle | `run_generate_propagate_test` implementation and test fixture. |
-| M090_GPT.2 trace output | debug/trace mode reports phase counts and GPU launch counters | PARTIAL | CPU trace counts are asserted; candidate-generation, propagation, candidate-validation, row-count-gated model-membership, world-view-validation, accepted-candidate materialization, final-result flag, and final tuple traces each record GPU launches with CUDA-event elapsed timing, but full reduced-runtime stable-model tuple membership counters are missing. |
+| M090_GPT.2 trace output | debug/trace mode reports phase counts and GPU launch counters | PARTIAL | CPU trace counts are asserted; candidate-generation, propagation, candidate-validation, arity-zero tuple-source model-membership, world-view-validation, accepted-candidate materialization, final-result flag, and final tuple traces each record GPU launches with CUDA-event elapsed timing, but nonzero-arity tuple matching counters are missing. |
 | M090_GPT.3 correctness fixtures | accepted/rejected candidate fixtures pass | PASS for oracle | `test_epistemic_gpt`: 2/2 passed. |
 | M090_GPT.4 bounded behavior | candidate explosion guard implemented or explicitly scoped | PASS for oracle | `ResourceExhausted` guard fixture. |
 | M090_GPT.5 world-view validation | trace records guess count, reduced-program model count, accepted world-view count, and rejection reasons | PASS for oracle | CPU trace fields are asserted in `test_epistemic_gpt`. |
-| M090_GPT.6 GPU residency | candidate generation, propagation, and world-view validation hot path uses GPU-resident buffers | PARTIAL | Candidate-assumption generation, propagation staging, candidate-buffer validation, row-count-gated model-membership staging, bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, and final tuple materialization use GPU-resident workspace/output buffers through CUDA kernels; actual reduced stable-model tuple membership population is still not wired. |
+| M090_GPT.6 GPU residency | candidate generation, propagation, and world-view validation hot path uses GPU-resident buffers | PARTIAL | Candidate-assumption generation, propagation staging, candidate-buffer validation, arity-zero tuple-source model-membership staging, bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, and final tuple materialization use GPU-resident workspace/output buffers through CUDA kernels; nonzero-arity tuple matching is still not wired. |
 
 ## Coordination Notes
 
-- Candidate generation, propagation staging, candidate-buffer validation, row-count-gated model-membership staging, bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, and final tuple materialization are now available as bounded GPU workspace/output kernels. Row-count-only membership now fails closed before accepted runtime return; arbitrary EIR world enumeration plus actual reduced-runtime stable-model membership/test phases remain required production scope.
+- Candidate generation, propagation staging, candidate-buffer validation, arity-zero tuple-source model-membership staging, bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, and final tuple materialization are now available as bounded GPU workspace/output kernels. Nonzero-arity tuple matching, arbitrary EIR world enumeration, and full reduced-runtime stable-model test phases remain required production scope.
 - No pyxlog public API signatures were changed.
 - No push, tag, release-board update, or merge was performed.

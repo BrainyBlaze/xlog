@@ -173,17 +173,17 @@ CUDA-event elapsed timing.
 `epistemic_validate_candidate_bits_u8` to validate staged candidate bitsets and
 world-view activity in device buffers, recording
 `EpistemicGpuCandidateValidationTrace` with one kernel launch, zero host
-writes, and CUDA-event elapsed timing. `Executor::populate_epistemic_gpu_model_membership`
-launches `epistemic_populate_model_membership_u8` to stage candidate-scoped
-model-membership bytes from candidate assumptions, world-view activity, and
-the reduced output's device row-count scalar, recording
-`EpistemicGpuModelMembershipTrace` with one output row-count device read, one
-kernel launch, zero host writes, CUDA-event elapsed timing, and
-`EpistemicGpuModelMembershipSource::ReducedOutputRowCountOnly`. That source is
-an explicit non-semantic staging marker:
-`EpistemicGpuModelMembershipTrace::require_stable_model_tuple_source` fails
-closed until membership bytes are populated from actual reduced stable-model
-tuple buffers.
+writes, and CUDA-event elapsed timing.
+`Executor::populate_epistemic_gpu_model_membership_from_tuple_sources` resolves
+`EpistemicTupleMembershipBinding` entries to named reduced stable-model
+relations in the executor store and launches
+`epistemic_populate_model_membership_from_tuple_source_u8` once per binding.
+For the current arity-zero tuple-source slice, the kernel reads each source
+relation's device row-count scalar and writes candidate-scoped model-membership
+bytes with `EpistemicGpuModelMembershipSource::StableModelTupleBuffer`, zero
+output row-count reads, zero host writes, and CUDA-event elapsed timing. The old
+`ReducedOutputRowCountOnly` trace remains as a fail-closed staging marker for
+negative tests.
 `Executor::validate_epistemic_gpu_world_views` launches
 `epistemic_validate_world_views_u8` to check staged model-membership bytes
 against active candidate world views and update rejection codes on device,
@@ -236,17 +236,17 @@ around that hot path and records `EpistemicGpuTransferBudgetTrace`, rejecting
 tracked data-plane H2D/D2H deltas instead of resetting shared provider
 telemetry.
 
-This workspace is still pre-kernel plumbing. It proves the buffer categories are
-allocatable, initialized on device, and inspectable on the runtime side and
-that WCOJ certification is tied to actual counter deltas around the production
-reduced-plan dispatch. Candidate-assumption generation, propagation staging,
-candidate-buffer validation, model-membership staging, bounded world-view
-validation staging, accepted-candidate materialization staging, and final-result
-flag plus final tuple materialization staging now have CUDA kernels, and the
-bounded hot path records zero tracked host transfers. The runtime now also
-rejects row-count-only model-membership staging before returning accepted
-epistemic execution. It does not yet map actual reduced stable-model tuples into
-model-membership bytes or produce full accepted-execution timing evidence.
+This workspace is still incomplete for full epistemic execution. It proves the
+buffer categories are allocatable, initialized on device, and inspectable on the
+runtime side and that WCOJ certification is tied to actual counter deltas around
+the production reduced-plan dispatch. Candidate-assumption generation,
+propagation staging, candidate-buffer validation, arity-zero stable-model
+tuple-source membership population, bounded world-view validation staging,
+accepted-candidate materialization staging, and final-result flag plus final
+tuple materialization staging now have CUDA kernels, and the bounded hot path
+records zero tracked host transfers. Nonzero-arity tuple-key matching, full
+world-view semantics, and complete accepted-execution timing evidence remain
+open.
 
 ## G91 Compatibility Fixture Semantics
 
