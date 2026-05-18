@@ -368,6 +368,10 @@ pub struct CompiledProgram {
     pub(crate) query_signature_cache: HashMap<String, QuerySignature>,
     /// Cache of compiled circuits by template signature
     pub(crate) circuit_cache: HashMap<String, CachedCircuit>,
+    /// Number of circuit-template cache hits observed by neural training paths.
+    pub(crate) circuit_cache_hits: usize,
+    /// Number of circuit-template cache misses observed by neural training paths.
+    pub(crate) circuit_cache_misses: usize,
     /// Number of times the template compilation path executed.
     pub(crate) template_compile_count: usize,
     /// When true, batch queries sharing the same circuit template in training.

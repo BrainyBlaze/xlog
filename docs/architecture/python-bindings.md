@@ -408,6 +408,38 @@ batch_t = program.nll_loss_batch_tensor(queries)
 avg_loss = program.evaluate_loss(queries)
 ```
 
+### v0.8.0 DTS-DLM Bridge Helpers
+
+M37-A+B bridge training keeps Belnap pro/contra/quarantine semantics in the
+Python/ML layer. Stage-4 structural kernels remain oblivious to those channels.
+The helper surfaces operate on PyTorch tensors and preserve autograd unless the
+caller explicitly detaches inputs.
+
+```python
+top = program.deterministic_topk(scores, k=4)
+stats = program.neural_cache_stats()
+
+terms = program.belnap_loss(
+    pro=pro_scores,
+    contra=contra_scores,
+    quarantine=quarantine_scores,
+    pro_reward=1.0,
+    contra_penalty=2.0,
+    quarantine_penalty=0.5,
+)
+
+semantic = program.semantic_loss_tensor(violations, weight=1.5)
+mse = program.mse_loss_tensor(pred, target)
+info = program.infoloss_tensor(prob)
+```
+
+`deterministic_topk(...)` resolves ties by lower input index. `neural_cache_stats()`
+reports circuit-cache size, hit/miss counters, template compile count,
+query-signature cache size, and registered-network cache/top-k/deterministic
+configuration. `belnap_loss(...)` returns a dictionary containing `loss`,
+`pro_reward`, `contra_penalty`, `quarantine_penalty`, `cfr_regret_proxy`, and
+the formula string.
+
 ### Optimizer and scheduler control
 
 ```python

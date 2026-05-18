@@ -351,6 +351,14 @@ class CompiledProgram:
         """Number of times template compilation has been executed."""
         ...
 
+    def neural_cache_stats(self) -> dict[str, Any]:
+        """Return circuit-cache and registered-network cache telemetry."""
+        ...
+
+    def deterministic_topk(self, values: Any, k: int) -> dict[str, Any]:
+        """Stable top-k over a 1-D tensor, resolving ties by lower index."""
+        ...
+
     def set_batch_queries(self, enabled: bool = True) -> None:
         """Enable or disable multi-query batching for training."""
         ...
@@ -436,6 +444,48 @@ class CompiledProgram:
 
     def forward_backward_tensor(self, query: str, expected: bool = True) -> Any:
         """Forward + backward pass; returns the NLL loss as a CUDA tensor."""
+        ...
+
+    def belnap_loss(
+        self,
+        pro: Any,
+        contra: Any,
+        quarantine: Any,
+        pro_reward: float = 1.0,
+        contra_penalty: float = 1.0,
+        quarantine_penalty: float = 1.0,
+        reduction: str = "mean",
+    ) -> dict[str, Any]:
+        """Belnap/CFR-oriented loss terms for pro, contra, and quarantine channels."""
+        ...
+
+    def semantic_loss_tensor(
+        self,
+        violations: Any,
+        weight: float = 1.0,
+        reduction: str = "mean",
+    ) -> Any:
+        """Non-negative semantic violation loss."""
+        ...
+
+    def mse_loss_tensor(
+        self,
+        pred: Any,
+        target: Any,
+        weight: float = 1.0,
+        reduction: str = "mean",
+    ) -> Any:
+        """Weighted MSE tensor loss."""
+        ...
+
+    def infoloss_tensor(
+        self,
+        prob: Any,
+        weight: float = 1.0,
+        eps: float = ...,
+        reduction: str = "mean",
+    ) -> Any:
+        """Weighted information loss ``-log(prob)`` with clamping."""
         ...
 
     # ------------------------------------------------------------------

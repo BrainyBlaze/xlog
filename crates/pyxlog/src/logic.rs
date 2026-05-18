@@ -100,6 +100,8 @@ impl Program {
             _prob_engine: engine,
             query_signature_cache: StdHashMap::new(),
             circuit_cache: StdHashMap::new(),
+            circuit_cache_hits: 0,
+            circuit_cache_misses: 0,
             template_compile_count: 0,
             batch_queries: true,
             last_compile_profile: None,
