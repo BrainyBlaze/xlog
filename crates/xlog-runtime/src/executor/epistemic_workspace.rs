@@ -3121,6 +3121,7 @@ impl Executor {
             candidate_count,
             capacities.max_models_per_reduction,
         )?;
+        model_membership.require_stable_model_tuple_source()?;
         let world_view_validation = self.validate_epistemic_gpu_world_views(
             &mut prepared.workspace,
             literal_count,
@@ -3150,7 +3151,6 @@ impl Executor {
             transfer_budget_start,
             transfer_budget_end,
         )?;
-        model_membership.require_stable_model_tuple_source()?;
 
         Ok(EpistemicGpuExecutionResult {
             prepared,

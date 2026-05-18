@@ -19,7 +19,7 @@ decision.
 
 | Gate | Evidence |
 |---|---|
-| Semantic golden fixtures | EIR, G91, FAEEL, GPT, split, examples, world-view, GPU-plan tuple-membership contract, executable-plan contract, GPU-workspace layout/reset, candidate-generation, propagation-staging, candidate-validation, model-membership staging, world-view validation staging, materialization-staging, final-result flag staging, membership-gated final tuple materialization, WCOJ fail-closed gate, and transfer-budget contract fixtures pass locally. |
+| Semantic golden fixtures | EIR, G91, FAEEL, GPT, split, examples, world-view, GPU-plan tuple-membership contract, executable-plan contract, GPU-workspace layout/reset, candidate-generation, propagation-staging, candidate-validation, model-membership staging, pre-validation stable-tuple-source certification, world-view validation staging, materialization-staging, final-result flag staging, membership-gated final tuple materialization, WCOJ fail-closed gate, and transfer-budget contract fixtures pass locally. |
 | Solver service fixtures | SAT assumptions, learned transfer, MaxSAT, GPU-unimplemented status, and failure modes pass as CPU fixtures; the production adapter source test proves SAT/UNSAT reuse of the existing GPU CDCL API without `SolverService` and reports MaxSAT/portfolio as blocked production capabilities. |
 | Probabilistic coherence fixtures | Epistemic evidence, accepted-world-view evidence, incremental circuit update, adapter design, and tolerance fixtures pass locally; the production adapter source test proves accepted evidence gates the existing GPU exact path without `EpistemicCircuit`. |
 | Parser diagnostics | Positive syntax and negative nested-epistemic typed diagnostics pass in `test_epistemic_eir`. |

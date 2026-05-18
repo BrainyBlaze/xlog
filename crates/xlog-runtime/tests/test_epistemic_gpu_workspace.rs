@@ -1130,18 +1130,22 @@ fn execution_path_requires_actual_stable_model_membership_before_return() {
     let model_membership_pos = source
         .find("let model_membership = self.populate_epistemic_gpu_model_membership_from_tuple_sources")
         .expect("model-membership launch in execution path");
-    let final_tuple_pos = source
-        .find("let (final_output, final_tuple_materialization)")
-        .expect("final tuple materialization launch in execution path");
     let certification_pos = source
         .find("model_membership.require_stable_model_tuple_source()?")
         .expect("stable-model membership certification gate");
+    let world_validation_pos = source
+        .find("let world_view_validation = self.validate_epistemic_gpu_world_views")
+        .expect("world-view validation launch in execution path");
+    let final_tuple_pos = source
+        .find("let (final_output, final_tuple_materialization)")
+        .expect("final tuple materialization launch in execution path");
     let return_pos = source
         .find("Ok(EpistemicGpuExecutionResult")
         .expect("execution result return");
 
     assert!(model_membership_pos < certification_pos);
-    assert!(final_tuple_pos < certification_pos);
+    assert!(certification_pos < world_validation_pos);
+    assert!(certification_pos < final_tuple_pos);
     assert!(certification_pos < return_pos);
 }
 
