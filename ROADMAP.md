@@ -15,9 +15,12 @@ This roadmap is version-oriented so planned work is not hidden inside subsystem
 sections. Historical and current-main work uses checked boxes. Future work uses
 unchecked boxes and is assigned to a concrete future version.
 After the tagged v0.7.0 feature pack, future trains are reprioritized:
-the former v0.10.0 Language/ML/Product backlog moves up to v0.8.0,
-the former v0.8.0 Epistemic/Solver train moves to v0.9.0, and the
-former v0.9.0 Multi-GPU/Out-of-Core train moves to v0.10.0.
+v0.8.0 becomes the DTS-DLM ML/Python productization train, pulling the
+consumer-critical Python API, neural-symbolic, incremental-session, and
+native exact-induction work forward. The broader language / CLI /
+general-product backlog is deferred until it has a named consumer. The
+former v0.8.0 Epistemic/Solver train moves to v0.9.0, and the former
+v0.9.0 Multi-GPU/Out-of-Core train moves to v0.10.0.
 
 ## v0.0.1 - Workspace Foundation
 
@@ -625,8 +628,9 @@ relocated to the release where the work actually belongs:
     **v0.8.0 Bounded Exact Induction** (gated on a named
     downstream consumer materializing).
   * Per-call Python memory limit + query progress API →
-    **v0.8.0 Python API**.
-  * CLI explain/plan visualization → **v0.8.0 CLI**.
+    **v0.8.0 Python runtime/session API**.
+  * CLI explain/plan visualization → **post-v0.10 product backlog**
+    unless a DTS-DLM or release-certification consumer materializes.
 
 ## v0.6.0 - Stream-Safe GPU Runtime And Execution Discipline
 
@@ -749,8 +753,8 @@ execution.
       Legacy ILP / ILP-exact path stays as-is; runtime block
       identity is not propagated through ILP view helpers.
       **Re-open trigger**: tensorized ILP / exact-induction
-      downstream consumer work resumes (v0.8.0 "Bounded Exact
-      Induction" backlog) and requires runtime-backed stream
+      downstream consumer work resumes (v0.8.0 native exact-induction
+      consumer gate) and requires runtime-backed stream
       safety. Without that consumer, the current legacy path
       is correct and migration would add complexity for no
       observable gain.
@@ -1029,8 +1033,8 @@ blockers later.
        release path begins consuming host-provided masks**.
      * ILP / ILP-exact recorded migration re-opens **when
        the tensorized ILP / exact-induction downstream
-       consumer work resumes (v0.8.0 "Bounded Exact
-       Induction" backlog) and requires runtime-backed
+       consumer work resumes (v0.8.0 native exact-induction
+       consumer gate) and requires runtime-backed
        stream safety**.
    Both items are now annotated under Recorded Launch Paths
    above with the same trigger language.
@@ -1322,79 +1326,140 @@ the v0.7.0 retarget**:
   * Slice 4: Recursive-arm WCOJ dispatch (items #4, #5).
   * Slice 5: `CardinalityAwareCostModel` opt-in.
 
-## v0.8.0 - Language, ML, and Product Backlog
+## v0.8.0 - DTS-DLM ML/Python Productization
 
-### xlog-logic
+v0.8.0 is a DTS-DLM-first release train. Its acceptance target is not
+"more language surface"; it is whether DTS-DLM can execute the queued
+M37-A+B path with production-grade xlog support: stable pyxlog
+contracts, observable GPU memory / host-transfer behavior, incremental
+persistent sessions, native exact-induction consumer integration, and
+neural-symbolic bridge training hooks.
+
+Broad language, CLI, and general product conveniences remain valid
+backlog items, but they are not v0.8.0 gates unless a named DTS-DLM or
+release-certification consumer depends on them.
+
+### DTS-DLM Release Gates
+
+- [ ] Add a canonical DTS-DLM certification pack in xlog that replays
+      the relevant Stage-4 and M37-A+B surfaces without requiring a full
+      DTS pilot by default.
+- [ ] Gate v0.8.0 on pyxlog public-surface preservation for DTS-DLM:
+      `LogicProgram.compile`, `program.session`, `session.put_relation`,
+      `session.evaluate`, `session.export_relation`,
+      `IlpProgramFactory.compile`, `train_on_compiled_relations`,
+      `Program.compile`, `register_network`, `register_embedding`,
+      `add_tensor_source`, `forward_backward_tensor`, `train_epoch`, and
+      `optimizer_step`.
+- [ ] Add a machine-readable pyxlog API compatibility manifest and diff
+      check, modeled on the DTS-DLM pyxlog 0.7.0 surface evidence.
+- [ ] Add DTS-DLM zero-copy and determinism gates: no tracked hot-path
+      D2H/H2D transfers, stable CUDA Graph counters where graph mode is
+      enabled, and bit-exact replay on fixed fixtures.
+
+### Python Runtime And Session API
+
+- [ ] Add async evaluation API for `CompiledLogicProgram`,
+      `LogicRelationSession`, and `CompiledProgram` where the underlying
+      operation can run without blocking the Python caller.
+- [ ] Add streaming results API for large query outputs, preserving
+      DLPack zero-copy for chunked tensor columns.
+- [ ] Add per-call Python memory limit configuration.
+      (`MemoryBudget::with_limit(config.memory_bytes)` is applied at
+      provider construction in `crates/pyxlog/src/lib.rs:205`; per-call
+      override on `evaluate*` calls is not surfaced.)
+- [ ] Add query progress reporting for long recursive and neural-symbolic
+      evaluations, with stable counters suitable for DTS-DLM pilot logs.
+- [ ] Expose production diagnostics for DTS-DLM: host-transfer stats,
+      CUDA Graph stats, memory-budget usage, and peak-memory snapshots
+      through documented pyxlog APIs. Do not fabricate no-op GPU memory
+      probes on environments that cannot report them.
+
+### Persistent Relation Maintenance
+
+- [ ] Surface relation delta APIs on `LogicRelationSession`: insert,
+      delete, and batch update via DLPack column tensors.
+- [ ] Connect Python session deltas to runtime
+      `RelationDelta` / `apply_deltas_and_recompute` so monotone
+      insert-only SCCs avoid full recompute where the plan permits it.
+- [ ] Add batch update coalescing for repeated DTS-DLM Stage-4
+      `wmir_committed` updates.
+- [ ] Add change notification callbacks for session-managed relations,
+      scoped to explicit Python opt-in.
+- [ ] Add DTS-DLM Stage-4 fixture proving delta updates produce
+      byte-identical output to full `put_relation` replacement while
+      reducing full-table re-upload work.
+
+### Neural-Symbolic Bridge Integration
+
+- [ ] Add term embedding inference path coverage to the pyxlog
+      compatibility manifest and DTS-DLM certification pack.
+- [ ] Add foreign tensor predicates suitable for DTS-DLM bridge features
+      and other GPU-resident tensor inputs.
+- [ ] Add neural output caching with cache-hit telemetry and a documented
+      invalidation model.
+- [ ] Add top-k deterministic neural mode with fixed tie-breaking for
+      seed-pinned DTS-DLM training and replay.
+- [ ] Add Belnap-aware dual-channel loss helpers for DTS-DLM M37-A+B:
+      pro reward, contra penalty, quarantine penalty, and CFR-oriented
+      diagnostics. These are Python/ML helpers; Stage-4 structural
+      kernels remain agnostic to Belnap pro/contra semantics.
+- [ ] Add semantic loss functions required by M37-A+B, then add MSE,
+      semantic, and infoloss variants only where a named consumer uses
+      them.
+- [ ] Quantify circuit-cache behavior for repeated
+      `forward_backward_tensor` calls: cache-hit rate, hit/miss counters,
+      and repeated-query speedup.
+
+### Native Exact Induction Consumer Integration
+
+- [ ] Add column-type dispatch beyond `U64`, including `U32` and
+      `Symbol` callers when needed by downstream tensorized ILP.
+- [ ] Integrate native exact-induction backend into the downstream
+      tensorized ILP consumer path. (Native `kernels/ilp_exact.cu` +
+      manifest registration + `crates/pyxlog/src/ilp_exact.rs` wrapper
+      exist; the downstream tensorized consumer integration is the
+      missing piece.)
+- [ ] Reproduce the downstream 449/449 liveness benchmark with native
+      exact induction. (Referenced as a historical Phase 0d baseline in
+      `crates/pyxlog/python/pyxlog/ilp/exact_induce.py:111`; no current
+      reproduction harness.)
+- [ ] Decide and document the strict-per-topology compatibility policy
+      for DTS-DLM, including how legacy Python-prototype behavior is
+      compared against native per-topology-isolated scoring.
+- [ ] Add chain-topology shared-memory caching of L rows after profiling
+      confirms it is a hot path.
+- [ ] Add committed `kernels/ilp_exact.ptx` artifact once the kernel
+      packaging policy is finalized and aligned with the existing
+      ILP-family kernel convention. (The `.cu` is committed; the `.ptx`
+      is built but not checked in, unlike the rest of the ILP-family.)
+
+### Profile-Gated Optimizer Work
+
+- [ ] Add common subexpression elimination when DTS-DLM M37-A+B or
+      certification profiles show duplicated subplans on the hot path.
+- [ ] Add adaptive query re-optimization during execution when runtime
+      telemetry shows stable mis-planning on DTS-DLM fixtures.
+- [ ] Add persistent hash index manager with background building after a
+      DTS-DLM or pyxlog-session profile identifies index rebuild cost as
+      a release blocker.
+
+### Deferred Product Backlog
+
+These items are intentionally not v0.8.0 gates after the DTS-DLM
+scope review. Re-open them when they have a named consumer or become
+release-certification blockers.
 
 - [ ] Add incremental parsing for interactive use.
 - [ ] Add list syntax and list built-ins.
-- [ ] Add meta-predicates such as `ground`, `var`, `=..`, `functor`, `findall`, and `maplist`.
-- [ ] Add negation-as-failure syntax and semantics where it is distinct from existing WFS support.
-
-### xlog-ir and Optimizer
-
-- [ ] Add common subexpression elimination.
+- [ ] Add meta-predicates such as `ground`, `var`, `=..`, `functor`,
+      `findall`, and `maplist`.
+- [ ] Add negation-as-failure syntax and semantics where it is distinct
+      from existing WFS support.
 - [ ] Add magic sets transformation.
-- [ ] Add adaptive query re-optimization during execution.
-
-### Incremental Maintenance
-
-- [ ] Add delete support with efficient delta propagation.
-- [ ] Add batch update coalescing.
-- [ ] Add change notification callbacks.
-
-### Adaptive Indexing
-
-- [ ] Add persistent hash index manager with background building.
-
-### Probabilistic Reasoning
-
 - [ ] Add aggregate support in probabilistic programs.
 - [ ] Add aggregate lifting for small domains.
 - [ ] Add approximate inference engine.
-
-### Neural-Symbolic Integration
-
-- [ ] Add term embedding inference path.
-- [ ] Add foreign tensor predicates.
-- [ ] Add neural output caching.
-- [ ] Add top-k deterministic neural mode.
-- [ ] Add semantic loss functions.
-- [ ] Add MSE, semantic, and infoloss variants.
-
-### Bounded Exact Induction
-
-- [ ] Add column-type dispatch beyond `U64`, including `U32` and `Symbol` callers when needed.
-- [ ] Add chain-topology shared-memory caching of L rows after profiling confirms it is a hot path.
-- [ ] Integrate native exact-induction backend into the
-      downstream tensorized ILP consumer path. (Native
-      `kernels/ilp_exact.cu` + manifest registration +
-      `crates/pyxlog/src/ilp_exact.rs` wrapper exist; the
-      downstream tensorized consumer integration is the missing
-      piece. Gated on a named consumer materializing.)
-- [ ] Reproduce the downstream 449/449 liveness benchmark with
-      native exact induction. (Referenced as a historical
-      Phase 0d baseline in `crates/pyxlog/python/pyxlog/ilp/exact_induce.py:111`;
-      no current reproduction harness.)
-- [ ] Add committed `kernels/ilp_exact.ptx` artifact once the
-      kernel packaging policy is finalized and aligned with the
-      existing ILP-family kernel convention. (The `.cu` is
-      committed; the `.ptx` is built but not checked in, unlike
-      the rest of the ILP-family.)
-
-### Python API
-
-- [ ] Add async evaluation API.
-- [ ] Add streaming results API.
-- [ ] Add per-call Python memory limit configuration.
-      (`MemoryBudget::with_limit(config.memory_bytes)` is applied
-      at provider construction in `crates/pyxlog/src/lib.rs:205`;
-      per-call override on `evaluate*` calls is not surfaced.)
-- [ ] Add query progress reporting API. (No consumer; defer
-      until pyxlog or CLI has one.)
-
-### CLI
-
 - [ ] Add interactive REPL.
 - [ ] Add watch mode.
 - [ ] Add CLI explain/plan visualization.

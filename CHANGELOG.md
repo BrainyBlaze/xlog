@@ -52,9 +52,11 @@ integration, and release-board closure.
   historical evidence may still say the work was originally targeted
   as `v0.6.5`.
 - Roadmap release trains move forward: the completed WCOJ expansion is
-  v0.7.0, Language/ML/Product backlog moves to v0.8.0,
-  Epistemic/Solver Semantics moves to v0.9.0, and Multi-GPU /
-  Out-of-Core moves to v0.10.0.
+  v0.7.0, v0.8.0 is narrowed to DTS-DLM ML/Python
+  productization, Epistemic/Solver Semantics moves to v0.9.0,
+  and Multi-GPU / Out-of-Core moves to v0.10.0. The broader
+  language / CLI product backlog is deferred until it has a named
+  consumer.
 
 ### Release Status
 
@@ -185,7 +187,7 @@ unchanged; the new path is opt-in via
 - **ILP / ILP-exact view helpers + operators recorded
   migration**. Re-opens when tensorized ILP /
   exact-induction downstream consumer work resumes (v0.8.0
-  "Bounded Exact Induction" backlog) and requires
+  native exact-induction consumer gate) and requires
   runtime-backed stream safety.
 - **Sub-slice 3 LeftOuter CSM** (commit `b90ae77f`, never
   pushed; recovered into `.recovery/sub-slice-3-edits.md`).
