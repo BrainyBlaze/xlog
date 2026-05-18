@@ -3,8 +3,12 @@
 use std::collections::BTreeSet;
 
 use xlog_core::Result;
+use xlog_ir::{
+    EirBodyLiteral, EpistemicGpuPlan, EpistemicReductionPlan, EpistemicWcojReductionStatus,
+};
 
 use crate::ast::{BodyLiteral, EpistemicLiteral, EpistemicMode, EpistemicOp, Program};
+use crate::build_eir;
 
 /// Boolean truth value for bounded epistemic fixture evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +131,78 @@ impl EpistemicWorldView {
         };
 
         TruthValue::from_bool(if lit.negated { !value } else { value })
+    }
+}
+
+/// Build the production-facing GPU execution contract for an epistemic program.
+///
+/// This does not launch kernels. It proves that the semantic boundary can be
+/// represented as a GPU-native execution plan with explicit hot-path phases,
+/// required device buffers, WCOJ planning obligations, and zero CPU fallback
+/// counters.
+pub fn plan_epistemic_gpu_execution(program: &Program) -> Result<EpistemicGpuPlan> {
+    let eir = build_eir(program)?;
+    let mut epistemic_literals = Vec::new();
+    let mut reductions = Vec::new();
+
+    for (rule_index, rule) in eir.rules.iter().enumerate() {
+        let mut rule_epistemic_literals = Vec::new();
+        let mut relational_body_atoms = 0usize;
+        let mut has_negated_relational_atom = false;
+
+        for lit in &rule.body {
+            match lit {
+                EirBodyLiteral::Relational { negated, .. } => {
+                    if *negated {
+                        has_negated_relational_atom = true;
+                    } else {
+                        relational_body_atoms += 1;
+                    }
+                }
+                EirBodyLiteral::Epistemic(lit) => {
+                    rule_epistemic_literals.push(lit.clone());
+                }
+                EirBodyLiteral::Constraint | EirBodyLiteral::Binding => {}
+            }
+        }
+
+        if rule_epistemic_literals.is_empty() {
+            continue;
+        }
+
+        epistemic_literals.extend(rule_epistemic_literals);
+        reductions.push(EpistemicReductionPlan {
+            rule_index,
+            relational_body_atoms,
+            wcoj_status: wcoj_status_for_reduction(
+                relational_body_atoms,
+                has_negated_relational_atom,
+            ),
+        });
+    }
+
+    if epistemic_literals.is_empty() {
+        return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+            construct: "epistemic GPU execution plan".to_string(),
+            context: "requires at least one epistemic literal".to_string(),
+        });
+    }
+
+    Ok(EpistemicGpuPlan::new(
+        eir.mode,
+        epistemic_literals,
+        reductions,
+    ))
+}
+
+fn wcoj_status_for_reduction(
+    relational_body_atoms: usize,
+    has_negated_relational_atom: bool,
+) -> EpistemicWcojReductionStatus {
+    if relational_body_atoms >= 3 && !has_negated_relational_atom {
+        EpistemicWcojReductionStatus::RequiresPlannerEligibility
+    } else {
+        EpistemicWcojReductionStatus::NotWcojCandidate
     }
 }
 

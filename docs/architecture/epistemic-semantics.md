@@ -77,6 +77,28 @@ testable before production execution exists. They do not yet enumerate stable
 models, validate world views, or materialize accepted results through
 GPU-resident buffers.
 
+## GPU Execution Plan Contract
+
+`plan_epistemic_gpu_execution` builds a production-facing contract from parsed
+AST through EIR. It preserves epistemic literals, records one reduction summary
+per epistemic rule, requires the four GPU hot-path phases, and initializes the
+forbidden CPU fallback counters at zero:
+
+- candidate generation;
+- propagation;
+- world-view validation;
+- result materialization.
+
+The contract also requires GPU-resident candidate-assumption, world-view,
+model-membership, and rejection-reason buffers. A reduced ordinary body with
+three or more positive relational atoms is marked
+`RequiresPlannerEligibility`, which means it must still pass through the
+production WCOJ planner rather than bypassing eligibility, layout, scheduling, or
+helper-splitting decisions.
+
+This is a planning boundary only. It does not launch kernels, dispatch runtime
+plans, or certify GPU execution.
+
 ## G91 Compatibility Fixture Semantics
 
 `crates/xlog-logic/src/epistemic.rs` contains the current bounded fixture

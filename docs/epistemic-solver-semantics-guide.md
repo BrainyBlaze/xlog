@@ -13,6 +13,12 @@ still returns `UnsupportedEpistemicConstruct`, so `xlog run` is not the accepted
 execution path for epistemic programs yet. Use the fixture tests listed below as
 semantic oracle tests only.
 
+`plan_epistemic_gpu_execution` now builds a production-facing GPU execution
+contract from parsed AST/EIR. That contract records required GPU phases,
+GPU-resident buffer categories, WCOJ planner obligations for eligible reduced
+ordinary bodies, and zero CPU fallback counters. It does not launch kernels or
+close the GPU-native gate.
+
 ## GPU And WCOJ Scope
 
 The current epistemic algorithms are not fully GPU-native and do not use the
@@ -30,12 +36,14 @@ through:
 Those paths are required G090_GPU/G090_SOLVER/G090_PROB work before v0.9.0 can
 close. Existing non-epistemic programs continue to use the normal parser,
 stratifier, RIR lowering, runtime, and WCOJ infrastructure where eligible. The
-current epistemic branch proves semantic boundary and fixture contracts only.
+current epistemic branch proves semantic boundary, fixture contracts, and the
+first GPU-plan contract only.
 
 Release certification must replace the current CPU fixture hot paths with:
 
 - production lowering from accepted EIR into executable plans;
-- GPU-resident candidate, world-view, model-membership, and rejection buffers;
+- runtime allocation/use of GPU-resident candidate, world-view,
+  model-membership, and rejection buffers;
 - GPU kernels for candidate generation, propagation, validation, and
   materialization;
 - WCOJ planner eligibility, layout construction, skew scheduling, and helper

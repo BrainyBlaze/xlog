@@ -17,13 +17,13 @@ release gate.
 
 | Area | Current branch state | Release status |
 |---|---|---|
-| EIR | Epistemic syntax is represented explicitly. | PARTIAL until accepted forms lower into production executable plans. |
+| EIR/GPU plan | Epistemic syntax is represented explicitly and `EpistemicGpuPlan` records the first production-facing GPU contract. | PARTIAL until accepted forms execute through production runtime/GPU dispatch. |
 | World views | `EpistemicWorldView` fixtures test `know`, `possible`, and `not know`. | ORACLE ONLY until world views are generated/validated on GPU. |
 | GPT | CPU fixture records guesses, reduced models, accepted world views, and rejection reasons. | PARTIAL until candidate generation/propagation/validation use GPU-resident buffers. |
 | Splitting | CPU split/recompose fixtures pass. | PARTIAL until valid split components execute through GPU-native subplans. |
 | Solver | `SolverService` is a CPU fixture facade with SAT/UNSAT/UNKNOWN/TIMEOUT/Optimal statuses. | BLOCKED until GPU-native SAT/MaxSAT/portfolio execution is wired to epistemic candidates. |
 | Probabilistic | `AcceptedWorldViewEvidence` guards evidence conditioning in fixtures. | BLOCKED until accepted world-view evidence flows through the GPU-native exact/provenance path without CPU-only recomputation. |
-| Certification | Semantic-oracle tests can pass locally. | BLOCKED until GPU launch counts, kernel timings, WCOJ evidence, and zero CPU fallback counters exist. |
+| Certification | Semantic-oracle and GPU-plan contract tests can pass locally. | BLOCKED until GPU launch counts, kernel timings, WCOJ evidence, and zero CPU fallback counters exist. |
 
 ## Explicit Non-Closure Items
 
@@ -43,7 +43,8 @@ metrics are not implemented.
 The next production slice should start at the lowering/runtime boundary:
 
 1. Define an epistemic executable-plan representation that preserves the
-   `EpistemicWorldView` contract and attaches zero-fallback counters.
+   `EpistemicWorldView` contract and attaches zero-fallback counters. DONE for
+   the plan contract in `EpistemicGpuPlan`; runtime execution remains open.
 2. Lower accepted EIR into production runtime plans instead of the current
    `UnsupportedEpistemicConstruct` boundary.
 3. Add GPU-resident candidate/world-view/rejection buffers and launch telemetry.
@@ -60,6 +61,7 @@ The next production slice should start at the lowering/runtime boundary:
 |---|---|
 | `git diff --check` | PASS |
 | `cargo fmt --check` | PASS |
+| `cargo test -p xlog-logic --test test_epistemic_gpu_plan` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_eir --test test_epistemic_g91 --test test_epistemic_faeel --test test_epistemic_gpt --test test_epistemic_split --test test_epistemic_world_view --test test_epistemic_examples` | PASS, 22 passed, 0 failed |
 | `cargo test -p xlog-solve --test solver_service_semantics` | PASS, 5 passed, 0 failed |
 | `cargo test -p xlog-prob --test epistemic_prob` | PASS, 5 passed, 0 failed |

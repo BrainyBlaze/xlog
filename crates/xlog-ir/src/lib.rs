@@ -2,6 +2,7 @@
 #![warn(missing_docs)]
 
 pub mod eir;
+pub mod epistemic_plan;
 pub mod metadata;
 pub mod plan;
 pub mod rir;
@@ -9,6 +10,10 @@ pub mod rir;
 pub use eir::{
     EirAtom, EirBodyLiteral, EirEpistemicLiteral, EirEpistemicMode, EirEpistemicOp, EirProgram,
     EirRule,
+};
+pub use epistemic_plan::{
+    EpistemicCpuFallbackCounters, EpistemicGpuBufferKind, EpistemicGpuHotPathPhase,
+    EpistemicGpuPlan, EpistemicReductionPlan, EpistemicWcojReductionStatus,
 };
 pub use metadata::{LayoutHint, RirMeta, SkewSignature};
 pub use plan::{CompiledRule, ExecutionPlan, PlanBuilder, Scc, Stratum};

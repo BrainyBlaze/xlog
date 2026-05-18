@@ -46,12 +46,12 @@ Earlier ref checks after `git fetch origin --prune` showed:
 | Goal | Current Status | Evidence |
 |---|---|---|
 | G090_PRE | PASS for inventory | Preflight evidence committed. |
-| G090_EIR | PARTIAL | EIR is explicit, but accepted epistemic forms still lack production GPU lowering. |
+| G090_EIR | PARTIAL | EIR is explicit and a GPU-plan contract exists, but accepted epistemic forms still lack production GPU runtime lowering. |
 | G090_G91 | PASS for semantic oracle | Compatibility fixtures pass, but GPU parity remains unproven. |
 | G090_FAEEL | PASS for semantic oracle | Foundedness fixtures pass, but GPU parity remains unproven. |
 | G090_GPT | PARTIAL | CPU trace fixtures pass; GPU-resident candidate generation/propagation/validation is missing. |
 | G090_SPLIT | PARTIAL | CPU split/recompose fixtures pass; GPU split execution is missing. |
-| G090_GPU | BLOCKED | No production epistemic runtime dispatch, WCOJ-backed reduction, GPU world-view buffer, or zero-fallback evidence exists. |
+| G090_GPU | BLOCKED | GPU-plan contract exists, but no production epistemic runtime dispatch, WCOJ-backed reduction, GPU world-view buffer allocation/use, or launch evidence exists. |
 | G090_SOLVER | BLOCKED | `SolverService` is CPU fixture enumeration; GPU-native SAT/MaxSAT/portfolio execution is not wired to epistemic candidates. |
 | G090_PROB | BLOCKED | Accepted-world-view evidence fixtures exist, but accepted probabilistic epistemic execution is not proven on the GPU-native exact path. |
 | G090_CERT | BLOCKED | Missing GPU launch counts, kernel timings, WCOJ evidence, zero CPU fallback counters, and post-v0.8 rerun. |
@@ -63,6 +63,8 @@ Earlier ref checks after `git fetch origin --prune` showed:
 The branch contains useful scaffolding:
 
 - explicit EIR and typed lowering boundary;
+- GPU execution plan contract with required phases, buffer categories, WCOJ
+  planner obligations, and zero fallback counters;
 - G91 and FAEEL fixture evaluators;
 - Generate-Propagate-Test phase traces;
 - world-view operator fixtures for `know`, `possible`, and `not know`;

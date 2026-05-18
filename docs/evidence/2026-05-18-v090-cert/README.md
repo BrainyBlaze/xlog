@@ -18,7 +18,7 @@ the final release decision.
 
 | Gate | Evidence |
 |---|---|
-| Semantic golden fixtures | EIR, G91, FAEEL, GPT, split, examples, and world-view fixtures pass locally. |
+| Semantic golden fixtures | EIR, G91, FAEEL, GPT, split, examples, world-view, and GPU-plan contract fixtures pass locally. |
 | Solver service fixtures | SAT assumptions, learned transfer, MaxSAT, GPU-unimplemented status, and failure modes pass as CPU fixtures. |
 | Probabilistic coherence fixtures | Epistemic evidence, accepted-world-view evidence, incremental circuit update, adapter design, and tolerance fixtures pass locally. |
 | Parser diagnostics | Positive syntax and negative nested-epistemic typed diagnostics pass in `test_epistemic_eir`. |
@@ -30,9 +30,11 @@ the final release decision.
 |---|---|
 | `git diff --check` | PASS |
 | `cargo fmt --check` | PASS |
+| `cargo test -p xlog-logic --test test_epistemic_gpu_plan` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_eir --test test_epistemic_g91 --test test_epistemic_faeel --test test_epistemic_gpt --test test_epistemic_split --test test_epistemic_world_view --test test_epistemic_examples` | PASS, 22 passed, 0 failed |
 | `cargo test -p xlog-solve --test solver_service_semantics` | PASS, 5 passed, 0 failed |
 | `cargo test -p xlog-prob --test epistemic_prob` | PASS, 5 passed, 0 failed |
+| `cargo test -p xlog-ir --lib` | PASS, 14 passed, 0 failed |
 | `cargo test -p xlog-logic --lib` | PASS, 238 passed, 0 failed |
 | `cargo test -p xlog-solve --lib` | PASS, 111 passed, 0 failed |
 | `cargo test -p xlog-prob --lib` | PASS, 56 passed, 0 failed |
@@ -50,7 +52,7 @@ the final release decision.
 | M090_CERT.5 formatting | `cargo fmt --check` pass | PASS | Post-correction formatting gate passed. |
 | M090_CERT.6 workspace health | agreed cargo test subset pass | PASS for oracle | Logic/solve/prob fixture and lib suites plus cross-crate checks passed. |
 | M090_CERT.7 semantic trace fixtures | GPT traces include generated, accepted, and rejected candidate counts | PARTIAL | CPU traces include generated/guess/reduced-model/accepted-world-view/rejection reason fields; GPU trace counters are missing. |
-| M090_CERT.8 GPU-native evidence | GPU launch counts, kernel timings, and zero CPU fallback counters | BLOCKED | No epistemic GPU launch/counter evidence exists yet. |
+| M090_CERT.8 GPU-native evidence | GPU launch counts, kernel timings, and zero CPU fallback counters | BLOCKED | GPU-plan counters exist, but no epistemic GPU launch/counter evidence exists yet. |
 | M090_CERT.9 WCOJ evidence | at least one WCOJ-eligible epistemic reduction proves WCOJ planner/runtime dispatch | BLOCKED | Direct RIR lowering rejects epistemic literals; no epistemic reduction reaches WCOJ dispatch. |
 
 ## Required GPU-Native Evidence Before Closure
