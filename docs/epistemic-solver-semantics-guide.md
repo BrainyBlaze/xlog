@@ -73,9 +73,12 @@ runtime plan with preflight, workspace allocation, candidate-generation,
 propagation, candidate-validation, `execute_plan` plus before/after counter
 tracing, then model-membership staging, world-view validation staging, and
 accepted-candidate plus final-result flag materialization-staging kernel
-launches. That is still incomplete for the epistemic hot path; actual
-reduced-runtime stable-model membership population, solver coupling, and full
-final tuple/query-result materialization do not dispatch yet.
+launches. It also snapshots provider host-transfer counters around the hot path
+and records `EpistemicGpuTransferBudgetTrace`, which rejects tracked data-plane
+H2D/D2H deltas instead of resetting shared telemetry. That is still incomplete
+for the epistemic hot path; actual reduced-runtime stable-model membership
+population, solver coupling, and full final tuple/query-result materialization
+do not dispatch yet.
 
 ## GPU And WCOJ Scope
 

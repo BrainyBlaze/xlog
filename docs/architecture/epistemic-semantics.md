@@ -199,7 +199,10 @@ runtime plan with preflight, workspace allocation, candidate-generation,
 propagation, candidate-validation, `execute_plan` plus before/after counter
 trace, then model-membership staging, world-view validation staging, and
 accepted-candidate plus final-result flag materialization-staging kernel
-launches.
+launches. The same execution path snapshots provider host-transfer counters
+around that hot path and records `EpistemicGpuTransferBudgetTrace`, rejecting
+tracked data-plane H2D/D2H deltas instead of resetting shared provider
+telemetry.
 
 This workspace is still pre-kernel plumbing. It proves the buffer categories are
 allocatable, initialized on device, and inspectable on the runtime side and
@@ -207,9 +210,10 @@ that WCOJ certification is tied to actual counter deltas around the production
 reduced-plan dispatch. Candidate-assumption generation, propagation staging,
 candidate-buffer validation, model-membership staging, bounded world-view
 validation staging, accepted-candidate materialization staging, and final-result
-flag staging now have CUDA kernels, but the runtime does not yet populate model
-membership from actual stable-model output, materialize full final tuple query
-results, or produce full accepted-execution timing evidence.
+flag staging now have CUDA kernels, and the bounded hot path records zero
+tracked host transfers. The runtime does not yet populate model membership
+from actual stable-model output, materialize full final tuple query results, or
+produce full accepted-execution timing evidence.
 
 ## G91 Compatibility Fixture Semantics
 

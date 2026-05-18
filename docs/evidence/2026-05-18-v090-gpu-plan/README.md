@@ -47,7 +47,7 @@ alone does not close `G090_GPU`.
 | M090_GPU.5 CPU fallback ban | accepted execution trace records zero CPU candidate enumeration/world-view validation fallbacks | PARTIAL | Plan counters initialize to zero and runtime preflight rejects nonzero counters; actual stable-model membership population evidence is missing. |
 | M090_GPU.6 launch evidence | certification logs include nonzero GPU launch counts and kernel timing for epistemic execution | PARTIAL | Later runtime traces record candidate-generation, propagation, candidate-validation, model-membership, world-view-validation, accepted-candidate materialization, and final-result flag launches with CUDA-event elapsed timing; full final tuple materialization timing is missing. |
 | M090_GPU.7 parity | GPU output matches semantic oracle on all G91, FAEEL, GPT, and splitting fixtures | BLOCKED | No GPU output exists yet. |
-| M090_GPU.8 transfer budget | host-device transfers are bounded and reported; no per-candidate host round trip in hot path | BLOCKED | No execution transfer trace exists yet. |
+| M090_GPU.8 transfer budget | host-device transfers are bounded and reported; no per-candidate host round trip in hot path | PARTIAL | Later runtime evidence records hot-path provider transfer snapshots and rejects tracked H2D/D2H deltas; final-result transfer accounting is still missing. |
 
 ## Remaining Blocker
 

@@ -2,7 +2,7 @@
 
 use cudarc::driver::LaunchConfig;
 use xlog_core::{Result, XlogError};
-use xlog_cuda::provider::{epistemic_kernels, EPISTEMIC_MODULE};
+use xlog_cuda::provider::{epistemic_kernels, HostTransferStats, EPISTEMIC_MODULE};
 use xlog_cuda::{memory::TrackedCudaSlice, sys, CudaBuffer, DriverError, LaunchAsync};
 use xlog_ir::rir::{MultiwayPlan, RirNode};
 use xlog_ir::{EpistemicCpuFallbackCounters, EpistemicExecutablePlan, EpistemicGpuPlan};
@@ -196,6 +196,23 @@ pub struct EpistemicGpuFinalResultMaterializationTrace {
     pub host_write_ops: u32,
     /// CUDA-event timing for the launched kernel.
     pub kernel_timing: EpistemicGpuKernelTimingTrace,
+}
+
+/// Trace proving the epistemic GPU hot path avoided tracked host transfers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EpistemicGpuTransferBudgetTrace {
+    /// Number of candidate rows covered by this transfer-budget check.
+    pub candidate_count: usize,
+    /// Tracked device-to-host bytes observed inside the GPU hot path.
+    pub tracked_dtoh_bytes: u64,
+    /// Tracked host-to-device bytes observed inside the GPU hot path.
+    pub tracked_htod_bytes: u64,
+    /// Tracked device-to-host calls observed inside the GPU hot path.
+    pub tracked_dtoh_calls: u64,
+    /// Tracked host-to-device calls observed inside the GPU hot path.
+    pub tracked_htod_calls: u64,
+    /// Per-candidate host round trips observed inside the GPU hot path.
+    pub per_candidate_host_round_trips: u64,
 }
 
 /// Trace proving model-membership staging was performed by a GPU kernel.
@@ -416,6 +433,62 @@ impl EpistemicGpuFinalResultMaterializationTrace {
         self.kernel_timing = kernel_timing;
         self
     }
+}
+
+impl EpistemicGpuTransferBudgetTrace {
+    /// Build a hot-path transfer trace from provider host-transfer snapshots.
+    pub fn from_host_transfer_stats(
+        candidate_count: usize,
+        before: HostTransferStats,
+        after: HostTransferStats,
+    ) -> Result<Self> {
+        require_positive(candidate_count, "epistemic GPU transfer-budget candidates")?;
+
+        let tracked_dtoh_bytes =
+            transfer_counter_delta("dtoh_bytes", before.dtoh_bytes, after.dtoh_bytes)?;
+        let tracked_htod_bytes =
+            transfer_counter_delta("htod_bytes", before.htod_bytes, after.htod_bytes)?;
+        let tracked_dtoh_calls =
+            transfer_counter_delta("dtoh_calls", before.dtoh_calls, after.dtoh_calls)?;
+        let tracked_htod_calls =
+            transfer_counter_delta("htod_calls", before.htod_calls, after.htod_calls)?;
+
+        if tracked_dtoh_bytes != 0
+            || tracked_htod_bytes != 0
+            || tracked_dtoh_calls != 0
+            || tracked_htod_calls != 0
+        {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU transfer budget".to_string(),
+                context: format!(
+                    "tracked host transfer in GPU hot path: dtoh_bytes={tracked_dtoh_bytes}, \
+                     htod_bytes={tracked_htod_bytes}, dtoh_calls={tracked_dtoh_calls}, \
+                     htod_calls={tracked_htod_calls}"
+                ),
+            });
+        }
+
+        Ok(Self {
+            candidate_count,
+            tracked_dtoh_bytes,
+            tracked_htod_bytes,
+            tracked_dtoh_calls,
+            tracked_htod_calls,
+            per_candidate_host_round_trips: 0,
+        })
+    }
+}
+
+fn transfer_counter_delta(name: &str, before: u64, after: u64) -> Result<u64> {
+    after
+        .checked_sub(before)
+        .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+            construct: "epistemic GPU transfer budget".to_string(),
+            context: format!(
+                "host transfer counter decreased during GPU hot path: {name} before={before}, \
+                 after={after}"
+            ),
+        })
 }
 
 impl EpistemicGpuModelMembershipTrace {
@@ -808,6 +881,8 @@ pub struct EpistemicGpuExecutionResult {
     pub materialization: EpistemicGpuMaterializationTrace,
     /// Final result materialization trace captured from reduced output metadata.
     pub final_result_materialization: EpistemicGpuFinalResultMaterializationTrace,
+    /// Hot-path host-transfer budget trace for epistemic GPU execution.
+    pub transfer_budget: EpistemicGpuTransferBudgetTrace,
     /// Output buffer returned by the reduced production execution plan.
     pub output: CudaBuffer,
     /// Runtime counter trace for the reduced production plan dispatch.
@@ -1592,6 +1667,7 @@ impl Executor {
         let mut prepared = self.prepare_epistemic_gpu_execution(executable, capacities)?;
         let literal_count = executable.gpu_plan.epistemic_literals.len();
         let candidate_count = bounded_candidate_count(literal_count, capacities.max_candidates)?;
+        let transfer_budget_start = self.provider.host_transfer_stats();
         let candidate_generation = self.generate_epistemic_gpu_candidates(
             &mut prepared.workspace,
             literal_count,
@@ -1636,6 +1712,12 @@ impl Executor {
             &output,
             candidate_count,
         )?;
+        let transfer_budget_end = self.provider.host_transfer_stats();
+        let transfer_budget = EpistemicGpuTransferBudgetTrace::from_host_transfer_stats(
+            candidate_count,
+            transfer_budget_start,
+            transfer_budget_end,
+        )?;
 
         Ok(EpistemicGpuExecutionResult {
             prepared,
@@ -1646,6 +1728,7 @@ impl Executor {
             world_view_validation,
             materialization,
             final_result_materialization,
+            transfer_budget,
             output,
             trace,
         })

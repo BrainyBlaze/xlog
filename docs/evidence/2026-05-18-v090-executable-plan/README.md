@@ -42,7 +42,7 @@ The prior closure/evidence docs were inspected before finalizing this slice:
 | `cargo fmt --check` | PASS |
 | `cargo test -p xlog-logic --test test_epistemic_executable_plan` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_gpu_plan` | PASS, 3 passed, 0 failed |
-| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 30 passed, 0 failed |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 32 passed, 0 failed |
 | `cargo test -p xlog-ir --lib` | PASS, 14 passed, 0 failed |
 | `cargo test -p xlog-logic --lib` | PASS, 238 passed, 0 failed |
 | `cargo test -p xlog-runtime --lib` | PASS, 125 passed, 0 failed |

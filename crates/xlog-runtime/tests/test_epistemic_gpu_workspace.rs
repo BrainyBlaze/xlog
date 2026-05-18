@@ -1,3 +1,4 @@
+use xlog_cuda::provider::HostTransferStats;
 use xlog_ir::{
     rir::{
         HelperSplitSpec, KCliqueVariableOrder, MultiwayPlan, ProjectExpr, RirNode,
@@ -13,8 +14,8 @@ use xlog_runtime::{
     EpistemicGpuMaterializationTrace, EpistemicGpuModelMembershipTrace,
     EpistemicGpuPropagationTrace, EpistemicGpuRuntimeCounters, EpistemicGpuRuntimePreflight,
     EpistemicGpuRuntimeTrace, EpistemicGpuRuntimeWcojCertification,
-    EpistemicGpuWorkspaceCapacities, EpistemicGpuWorkspaceLayout, EpistemicGpuWorkspaceResetTrace,
-    EpistemicGpuWorldViewValidationTrace,
+    EpistemicGpuTransferBudgetTrace, EpistemicGpuWorkspaceCapacities, EpistemicGpuWorkspaceLayout,
+    EpistemicGpuWorkspaceResetTrace, EpistemicGpuWorldViewValidationTrace,
 };
 
 #[test]
@@ -561,6 +562,57 @@ fn final_result_materialization_trace_records_device_row_count_read_without_host
 }
 
 #[test]
+fn transfer_budget_trace_rejects_tracked_host_transfers_in_gpu_hot_path() {
+    let before = HostTransferStats {
+        dtoh_bytes: 3,
+        htod_bytes: 5,
+        dtoh_calls: 1,
+        htod_calls: 2,
+    };
+    let after = before;
+
+    let trace = EpistemicGpuTransferBudgetTrace::from_host_transfer_stats(8, before, after)
+        .expect("unchanged transfer stats are accepted");
+    assert_eq!(trace.candidate_count, 8);
+    assert_eq!(trace.tracked_dtoh_bytes, 0);
+    assert_eq!(trace.tracked_htod_bytes, 0);
+    assert_eq!(trace.tracked_dtoh_calls, 0);
+    assert_eq!(trace.tracked_htod_calls, 0);
+    assert_eq!(trace.per_candidate_host_round_trips, 0);
+
+    let after_with_dtoh = HostTransferStats {
+        dtoh_bytes: 7,
+        dtoh_calls: 2,
+        ..after
+    };
+    let err = EpistemicGpuTransferBudgetTrace::from_host_transfer_stats(8, before, after_with_dtoh)
+        .expect_err("tracked D2H is not allowed in the epistemic GPU hot path");
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
+            assert_eq!(construct, "epistemic GPU transfer budget");
+            assert!(context.contains("tracked host transfer in GPU hot path"));
+            assert!(context.contains("dtoh_calls=1"));
+        }
+        other => panic!("expected transfer-budget error, got {other:?}"),
+    }
+
+    let after_reset = HostTransferStats {
+        dtoh_bytes: 2,
+        ..after
+    };
+    let err = EpistemicGpuTransferBudgetTrace::from_host_transfer_stats(8, before, after_reset)
+        .expect_err("transfer counters must be monotonic during the hot path");
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
+            assert_eq!(construct, "epistemic GPU transfer budget");
+            assert!(context.contains("host transfer counter decreased"));
+            assert!(context.contains("dtoh_bytes"));
+        }
+        other => panic!("expected transfer-budget monotonicity error, got {other:?}"),
+    }
+}
+
+#[test]
 fn staging_runtime_paths_record_cuda_event_timing_for_each_kernel() {
     let source = include_str!("../src/executor/epistemic_workspace.rs");
 
@@ -590,6 +642,37 @@ fn staging_runtime_paths_record_cuda_event_timing_for_each_kernel() {
         source.matches(".with_kernel_timing(kernel_timing)").count(),
         7
     );
+}
+
+#[test]
+fn execution_result_records_hot_path_transfer_budget_without_resetting_stats() {
+    let source = include_str!("../src/executor/epistemic_workspace.rs");
+
+    assert!(source.contains("pub transfer_budget: EpistemicGpuTransferBudgetTrace"));
+    assert!(source.contains("let transfer_budget_start = self.provider.host_transfer_stats()"));
+    assert!(source.contains("let transfer_budget_end = self.provider.host_transfer_stats()"));
+    assert!(source.contains("EpistemicGpuTransferBudgetTrace::from_host_transfer_stats"));
+    assert!(source.contains("transfer_budget,"));
+    assert!(
+        !source.contains("reset_host_transfer_stats"),
+        "epistemic execution must snapshot the provider transfer counters, not reset shared stats"
+    );
+
+    let transfer_start_pos = source
+        .find("let transfer_budget_start = self.provider.host_transfer_stats()")
+        .expect("transfer-budget start snapshot");
+    let candidate_generation_pos = source
+        .find("let candidate_generation = self.generate_epistemic_gpu_candidates")
+        .expect("candidate-generation launch");
+    let final_materialization_pos = source
+        .find("self.materialize_epistemic_gpu_final_results")
+        .expect("final-result flag materialization launch");
+    let transfer_end_pos = source
+        .find("let transfer_budget_end = self.provider.host_transfer_stats()")
+        .expect("transfer-budget end snapshot");
+
+    assert!(transfer_start_pos < candidate_generation_pos);
+    assert!(final_materialization_pos < transfer_end_pos);
 }
 
 #[test]

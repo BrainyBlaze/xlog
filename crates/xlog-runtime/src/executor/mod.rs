@@ -37,8 +37,8 @@ pub use epistemic_workspace::{
     EpistemicGpuKernelTimingTrace, EpistemicGpuMaterializationTrace,
     EpistemicGpuModelMembershipTrace, EpistemicGpuPreparedExecution, EpistemicGpuPropagationTrace,
     EpistemicGpuRuntimeCounters, EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace,
-    EpistemicGpuRuntimeWcojCertification, EpistemicGpuWorkspace, EpistemicGpuWorkspaceCapacities,
-    EpistemicGpuWorkspaceLayout, EpistemicGpuWorkspaceResetTrace,
+    EpistemicGpuRuntimeWcojCertification, EpistemicGpuTransferBudgetTrace, EpistemicGpuWorkspace,
+    EpistemicGpuWorkspaceCapacities, EpistemicGpuWorkspaceLayout, EpistemicGpuWorkspaceResetTrace,
     EpistemicGpuWorldViewValidationTrace,
 };
 use join_cache::JoinIndexCache;

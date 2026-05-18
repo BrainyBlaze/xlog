@@ -41,6 +41,7 @@ flag staging from reduced-output device row-count metadata. It does not close
 | Runtime preflight | `EpistemicGpuRuntimePreflight::for_executable_plan` consumes `EpistemicExecutablePlan`, computes workspace layout, rejects nonzero CPU fallback counters, and records WCOJ/helper route metadata. |
 | Runtime counter guard | `EpistemicGpuRuntimeWcojCertification` requires actual WCOJ counter deltas before WCOJ evidence can certify a K-clique epistemic reduction. |
 | Reduced-plan execution trace | `Executor::execute_epistemic_gpu_execution` launches candidate generation, propagation, and candidate validation before the reduced production runtime plan, captures `EpistemicGpuRuntimeTrace` counter deltas, then launches model-membership, world-view validation, accepted-candidate materialization, and final-result flag staging. |
+| Hot-path transfer budget | `EpistemicGpuTransferBudgetTrace` snapshots provider host-transfer counters around the GPU hot path and rejects tracked H2D/D2H deltas without resetting shared stats. |
 | Capacity guard | Zero candidate/world/model capacities are rejected with typed `ResourceExhausted` errors. |
 
 ## Validation
@@ -48,7 +49,7 @@ flag staging from reduced-output device row-count metadata. It does not close
 | Command | Result |
 |---|---|
 | `cargo fmt` | PASS |
-| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 30 passed, 0 failed |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 32 passed, 0 failed |
 | `cargo test -p xlog-cuda --test build_script_tests -- --nocapture` | PASS, 4 passed, 0 failed |
 | `cargo test -p xlog-runtime --lib` | PASS, 125 passed, 0 failed |
 | `cargo check -p xlog-cuda -p xlog-runtime -p xlog-logic -p xlog-ir` | PASS |
@@ -65,7 +66,7 @@ flag staging from reduced-output device row-count metadata. It does not close
 | M090_GPU.5 CPU fallback ban | accepted execution trace records zero CPU candidate enumeration/world-view validation fallbacks | PARTIAL | Runtime preflight rejects nonzero forbidden CPU fallback counters, and candidate/propagation/validation/model-membership/world-view-validation/materialization/final-result traces record zero host writes; actual stable-model membership population evidence remains missing. |
 | M090_GPU.6 launch evidence | certification logs include nonzero GPU launch counts and kernel timing for epistemic execution | PARTIAL | Candidate-generation, propagation, candidate-validation, model-membership, world-view-validation, accepted-candidate materialization, and final-result flag traces each record a kernel launch with CUDA-event elapsed timing; full final tuple materialization timing evidence is missing. |
 | M090_GPU.7 parity | GPU output matches semantic oracle on all G91, FAEEL, GPT, and splitting fixtures | BLOCKED | No GPU output exists yet. |
-| M090_GPU.8 transfer budget | host-device transfers are bounded and reported; no per-candidate host round trip in hot path | BLOCKED | No execution transfer trace exists yet. |
+| M090_GPU.8 transfer budget | host-device transfers are bounded and reported; no per-candidate host round trip in hot path | PARTIAL | `EpistemicGpuTransferBudgetTrace` records zero tracked data-plane H2D/D2H calls in the bounded hot path and rejects tracked deltas; full accepted-execution final-result transfer accounting is still missing. |
 
 ## Remaining Blocker
 

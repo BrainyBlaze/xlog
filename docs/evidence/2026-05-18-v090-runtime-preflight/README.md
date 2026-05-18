@@ -45,6 +45,7 @@ incomplete for the epistemic hot path and does not close `G090_GPU`.
 | Runtime WCOJ counter snapshot | `Executor::epistemic_gpu_runtime_counters` snapshots existing production WCOJ, layout-sort, and K-clique metadata counters. |
 | Preflight-only WCOJ evidence rejected | `EpistemicGpuRuntimeWcojCertification` reports `MissingRequiredWcojDispatch` when a K-clique WCOJ plan exists but runtime WCOJ counters do not advance. |
 | Reduced-plan execution trace | `Executor::execute_epistemic_gpu_execution` prepares workspace, launches candidate generation, propagation, and candidate validation, executes the reduced production runtime plan with `execute_plan`, captures before/after counter deltas in `EpistemicGpuRuntimeTrace`, then launches model-membership, world-view validation, accepted-candidate materialization, and final-result flag staging. |
+| Hot-path transfer budget | `EpistemicGpuTransferBudgetTrace` snapshots provider host-transfer counters around the GPU hot path and rejects tracked H2D/D2H deltas without resetting shared stats. |
 
 ## Validation
 
@@ -52,7 +53,7 @@ incomplete for the epistemic hot path and does not close `G090_GPU`.
 |---|---|
 | `cargo fmt --check` | PASS |
 | `git diff --check` | PASS |
-| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 30 passed, 0 failed |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 32 passed, 0 failed |
 | `cargo test -p xlog-cuda --test build_script_tests -- --nocapture` | PASS, 4 passed, 0 failed |
 | `cargo test -p xlog-runtime --lib` | PASS, 125 passed, 0 failed |
 | `cargo check -p xlog-cuda -p xlog-runtime -p xlog-logic -p xlog-ir` | PASS |
@@ -68,9 +69,11 @@ incomplete for the epistemic hot path and does not close `G090_GPU`.
 | M090_GPU.4 kernel coverage | GPU kernels cover candidate generation, propagation, validation, and materialization hot paths | PARTIAL | Candidate generation has `epistemic_generate_candidate_assumptions_u8`; propagation staging has `epistemic_propagate_candidates_u8`; candidate-buffer validation has `epistemic_validate_candidate_bits_u8`; model-membership staging has `epistemic_populate_model_membership_u8`; bounded world-view validation has `epistemic_validate_world_views_u8`; materialization staging has `epistemic_materialize_accepted_candidates_u8`; final-result flag staging has `epistemic_materialize_final_result_flags_u8`; full final tuple materialization kernels are missing. |
 | M090_GPU.5 CPU fallback ban | accepted trace records zero CPU candidate/world-view fallbacks | PARTIAL | Preflight rejects nonzero fallback counters, and candidate/propagation/validation/model-membership/world-view-validation/materialization/final-result traces record zero host writes; actual stable-model membership population evidence remains missing. |
 | M090_GPU.6 launch evidence | nonzero GPU launch counts and timings | PARTIAL | Candidate-generation, propagation, candidate-validation, model-membership, world-view-validation, accepted-candidate materialization, and final-result flag traces record nonzero launches with CUDA-event elapsed timing; full final tuple materialization timing is still missing. |
+| M090_GPU.8 transfer budget | host-device transfers are bounded and reported; no per-candidate host round trip in hot path | PARTIAL | Hot-path provider transfer snapshots reject tracked data-plane H2D/D2H deltas; final result transfer accounting for complete accepted execution is still missing. |
 
 ## Remaining Blocker
 
 The next slice must populate model-membership from actual reduced-runtime
 stable-model output, materialize full final query tuple results, and emit full
-accepted-execution timing plus zero CPU fallback counters.
+accepted-execution timing, final transfer accounting, and zero CPU fallback
+counters.
