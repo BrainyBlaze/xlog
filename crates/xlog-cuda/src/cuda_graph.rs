@@ -18,6 +18,11 @@ pub struct CapturedCudaGraph {
     exec: sys::CUgraphExec,
 }
 
+// CUDA graph handles are context-owned driver handles. xlog stores them behind
+// provider-level synchronization when caching graph executions.
+unsafe impl Send for CapturedCudaGraph {}
+unsafe impl Sync for CapturedCudaGraph {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CudaGraphNodeKind {
     Kernel,
@@ -42,6 +47,9 @@ pub struct CudaGraphNode {
     pub raw: sys::CUgraphNode,
     pub kind: CudaGraphNodeKind,
 }
+
+unsafe impl Send for CudaGraphNode {}
+unsafe impl Sync for CudaGraphNode {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CsmCudaGraphJoinKind {

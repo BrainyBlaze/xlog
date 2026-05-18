@@ -3,10 +3,11 @@
 //! This module provides the `CudaKernelProvider` which manages pre-compiled
 //! PTX kernels for GPU execution of relational operations (join, dedup, groupby).
 
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use std::ffi::c_void;
 use xlog_core::{Result, Schema, XlogError};
@@ -16,6 +17,7 @@ use crate::{
         AsKernelParam, DeviceParamStorage, DevicePtr, DeviceRepr, DeviceSlice,
         IntoKernelParamStorage, LaunchAsync, LaunchConfig,
     },
+    cuda_graph::{CapturedCudaGraph, CsmCudaGraphKey, CudaGraphNode},
     memory::{validate_logical_row_count, CudaColumn, TrackedCudaSlice},
     CudaBuffer, CudaDevice, CudaStream, CudaViewMut, GpuMemoryManager,
 };
@@ -149,6 +151,27 @@ impl MultiblockScanScratchU32 {
     pub(crate) fn levels(&self) -> &[TrackedCudaSlice<u32>] {
         &self.levels
     }
+}
+
+pub(crate) struct CsmCudaGraphNodes {
+    pub(crate) count: CudaGraphNode,
+    pub(crate) total: CudaGraphNode,
+    pub(crate) materialize: CudaGraphNode,
+    pub(crate) node_count: usize,
+}
+
+pub(crate) struct CsmCudaGraphEntry {
+    pub(crate) graph: CapturedCudaGraph,
+    pub(crate) nodes: CsmCudaGraphNodes,
+    pub(crate) per_probe_count: TrackedCudaSlice<u32>,
+    pub(crate) per_probe_offsets: TrackedCudaSlice<u32>,
+    pub(crate) d_logical_count: TrackedCudaSlice<u32>,
+    pub(crate) d_overflow: TrackedCudaSlice<u8>,
+    pub(crate) d_output_left: TrackedCudaSlice<u32>,
+    pub(crate) d_output_right: TrackedCudaSlice<u32>,
+    pub(crate) scan_scratch: MultiblockScanScratchU32,
+    pub(crate) probe_capacity: u32,
+    pub(crate) output_capacity: u32,
 }
 
 impl<'a, T> DeviceSlice<T> for RawCudaView<'a, T> {
@@ -912,6 +935,10 @@ pub struct CudaKernelProvider {
     csm_cuda_graph_launches: AtomicU64,
     /// Diagnostic counter for W66 CSM CUDA Graph ineligibility fallbacks.
     csm_cuda_graph_fallbacks: AtomicU64,
+    /// Diagnostic counter for W66 bounded CSM CUDA Graph cache replays.
+    csm_cuda_graph_cache_hits: AtomicU64,
+    /// W66 bounded CSM CUDA Graph replay cache.
+    csm_cuda_graph_cache: Mutex<HashMap<CsmCudaGraphKey, CsmCudaGraphEntry>>,
     /// Per-process counter of WCOJ layout fast-path hits. The
     /// fast-path skips `dedup_full_row_recorded` when the input
     /// is already strictly lex-sorted and full-row unique.
@@ -1025,6 +1052,8 @@ impl CudaKernelProvider {
             csm_cuda_graph_captures: AtomicU64::new(0),
             csm_cuda_graph_launches: AtomicU64::new(0),
             csm_cuda_graph_fallbacks: AtomicU64::new(0),
+            csm_cuda_graph_cache_hits: AtomicU64::new(0),
+            csm_cuda_graph_cache: Mutex::new(HashMap::new()),
             wcoj_layout_fast_path_hit_count: AtomicU64::new(0),
             wcoj_layout_sort_invocation_count: AtomicU64::new(0),
             kclique_metadata_build_count: AtomicU64::new(0),
@@ -1205,6 +1234,11 @@ impl CudaKernelProvider {
     #[doc(hidden)]
     pub fn csm_cuda_graph_fallbacks(&self) -> u64 {
         self.csm_cuda_graph_fallbacks.load(Ordering::Relaxed)
+    }
+
+    #[doc(hidden)]
+    pub fn csm_cuda_graph_cache_hits(&self) -> u64 {
+        self.csm_cuda_graph_cache_hits.load(Ordering::Relaxed)
     }
 
     /// Lazily acquire one non-default launch stream from the

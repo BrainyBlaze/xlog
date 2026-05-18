@@ -109,6 +109,7 @@ fn csm_inner_join_uses_bounded_cuda_graph_when_enabled() {
     let captures_before = handles.provider.csm_cuda_graph_captures();
     let launches_before = handles.provider.csm_cuda_graph_launches();
     let fallbacks_before = handles.provider.csm_cuda_graph_fallbacks();
+    let cache_hits_before = handles.provider.csm_cuda_graph_cache_hits();
     let result = handles
         .provider
         .hash_join_inner_v2_count_scan_materialize_recorded(
@@ -127,6 +128,28 @@ fn csm_inner_join_uses_bounded_cuda_graph_when_enabled() {
         .expect("launch stream resolves");
     launch_stream.synchronize().expect("sync graph join");
 
+    let schema2 = Schema::new(vec![("k".to_string(), ScalarType::U32)]);
+    let left2 = handles
+        .provider
+        .create_buffer_from_slice(&[5u32, 7, 5, 9], schema2.clone())
+        .expect("left2 buffer");
+    let right2 = handles
+        .provider
+        .create_buffer_from_slice(&[5u32, 8, 5], schema2)
+        .expect("right2 buffer");
+    let result2 = handles
+        .provider
+        .hash_join_inner_v2_count_scan_materialize_recorded(
+            &left2,
+            &right2,
+            &[0],
+            &[0],
+            Some(16),
+            launch_stream_id,
+        )
+        .expect("cached CSM graph join");
+    launch_stream.synchronize().expect("sync cached graph join");
+
     assert_eq!(
         handles.provider.csm_cuda_graph_captures() - captures_before,
         1,
@@ -134,8 +157,13 @@ fn csm_inner_join_uses_bounded_cuda_graph_when_enabled() {
     );
     assert_eq!(
         handles.provider.csm_cuda_graph_launches() - launches_before,
+        2,
+        "bounded CSM graph path must launch both capture and cached replays"
+    );
+    assert_eq!(
+        handles.provider.csm_cuda_graph_cache_hits() - cache_hits_before,
         1,
-        "bounded CSM graph path must launch exactly once"
+        "second same-topology join must replay the cached graph"
     );
     assert_eq!(
         handles.provider.csm_cuda_graph_fallbacks(),
@@ -153,6 +181,18 @@ fn csm_inner_join_uses_bounded_cuda_graph_when_enabled() {
         .expect("right result key");
     assert_eq!(left_keys, vec![2, 2, 2, 2]);
     assert_eq!(right_keys, vec![2, 2, 2, 2]);
+
+    assert_eq!(result2.num_rows(), 4);
+    let left_keys2 = handles
+        .provider
+        .download_column::<u32>(&result2, 0)
+        .expect("left2 result key");
+    let right_keys2 = handles
+        .provider
+        .download_column::<u32>(&result2, 1)
+        .expect("right2 result key");
+    assert_eq!(left_keys2, vec![5, 5, 5, 5]);
+    assert_eq!(right_keys2, vec![5, 5, 5, 5]);
 }
 
 fn env_lock() -> &'static Mutex<()> {

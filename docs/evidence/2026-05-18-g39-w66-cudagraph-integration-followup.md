@@ -13,6 +13,9 @@ This integration follow-up implements the first bounded production path:
 - graph-exec node update wrappers for kernel and memset nodes;
 - explicit CSM graph cache-key model with capacity classes, scan topology, and
   `CSM_CUDA_GRAPH_NODE_LAYOUT_VERSION`;
+- provider-level bounded CSM CUDA Graph replay cache keyed by
+  `CsmCudaGraphKey`, with graph-owned count/offset/output buffers and kernel
+  node param updates for new runtime pointers;
 - graph-owned recursive scan scratch for `multiblock_scan_u32_inplace_on_stream`;
 - opt-in bounded inner-CSM graph path behind `XLOG_USE_CSM_CUDA_GRAPH=1`;
 - no DLPack or Arrow staging copies on the graph path.
@@ -30,7 +33,7 @@ $ cargo fmt --check
 exit 0
 
 $ cargo check -p xlog-cuda --tests
-Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.28s
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.06s
 
 $ cargo test -p xlog-cuda cuda_graph::tests --lib -- --nocapture
 running 2 tests
@@ -44,6 +47,10 @@ test cuda_graph_replays_runtime_backed_memset_on_launch_stream ... ok
 test csm_inner_join_uses_bounded_cuda_graph_when_enabled ... ok
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 
+The CSM graph smoke asserts `captures += 1`, `launches += 2`,
+`cache_hits += 1`, fallback count unchanged, and correct joined rows for two
+same-topology inputs with different device buffers.
+
 $ cargo test -p xlog-cuda --test test_csm_env_dispatch -- --nocapture
 running 9 tests
 test dispatch_does_not_route_to_csm_when_no_recorded_env_is_set ... ok
@@ -56,6 +63,9 @@ test dispatch_routes_to_csm_for_left_outer_non_indexed_with_umbrella_env ... ok
 test dispatch_short_circuits_before_csm_for_more_than_four_keys ... ok
 test dispatch_routes_to_csm_when_recorded_csm_env_is_set_directly ... ok
 test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+$ git diff --check
+exit 0
 ```
 
 ## Metric Status
@@ -67,16 +77,15 @@ test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 | M_W66.3 determinism preserved | PARTIAL | Memset graph replay and bounded inner-CSM graph fixture pass; 100/100 subset cert not run yet. |
 | M_W66.4 DLPack zero-copy preserved | PARTIAL | Graph implementation does not stage/copy DLPack or Arrow columns; true external pointer event interop remains graceful-fallback territory. |
 | M_W66.5 peak VRAM <= 38 GB | NOT RUN | No m37c-prime profile yet. |
-| M_W66.6 recapture <= 1x per fixpoint iteration | PARTIAL | Cache key/topology model exists and bounded fixture captures once; replay cache across repeated calls is not yet certified. |
+| M_W66.6 recapture <= 1x per fixpoint iteration | PARTIAL | Same-topology bounded CSM fixture captures once, launches twice, and records one cache hit; full fixpoint cert not run yet. |
 
 ## Remaining Work
 
 W66 is no longer blocked at CUDA Graph primitives, scan scratch, or bounded
-output protocol. It still needs:
+output protocol, or same-topology replay caching. It still needs:
 
-1. reusable replay cache using the new `CsmCudaGraphKey`;
-2. 100/100 deterministic subset run with `XLOG_USE_CSM_CUDA_GRAPH=1`;
-3. launch-overhead and Stage 4 wall-time measurements;
-4. m37c-prime VRAM profile;
-5. DTS-DLM analog fixture coverage for the graph path or a documented graceful
+1. 100/100 deterministic subset run with `XLOG_USE_CSM_CUDA_GRAPH=1`;
+2. launch-overhead and Stage 4 wall-time measurements;
+3. m37c-prime VRAM profile;
+4. DTS-DLM analog fixture coverage for the graph path or a documented graceful
    flag where true external DLPack event interop is unavailable.

@@ -3,15 +3,18 @@
 use std::ffi::c_void;
 use std::sync::atomic::Ordering;
 
-use crate::{cuda_graph::CapturedCudaGraph, AsKernelParam, DeviceSlice, LaunchAsync, LaunchConfig};
+use crate::{
+    cuda_graph::{CapturedCudaGraph, CsmCudaGraphKey, CudaGraphNodeKind},
+    AsKernelParam, DeviceSlice, LaunchAsync, LaunchConfig,
+};
 use xlog_core::{Result, ScalarType, Schema, XlogError};
 
 use super::{
     dedup_kernels, filter_kernels, ilp_kernels, join_kernels, pack_kernels, scan_kernels,
-    set_ops_kernels, sort_kernels, HashTableU64, JoinHashTableV2, JoinIndexV2, JoinType,
-    PackedKeyData, RadixSortScratch, DEDUP_MODULE, DEFAULT_JOIN_MAX_OUTPUT, FILTER_MODULE,
-    ILP_MODULE, JOIN_MODULE, NESTED_LOOP_TOTAL_THRESHOLD, PACK_MODULE, SCAN_MODULE, SET_OPS_MODULE,
-    SORT_MODULE,
+    set_ops_kernels, sort_kernels, CsmCudaGraphEntry, CsmCudaGraphNodes, HashTableU64,
+    JoinHashTableV2, JoinIndexV2, JoinType, PackedKeyData, RadixSortScratch, DEDUP_MODULE,
+    DEFAULT_JOIN_MAX_OUTPUT, FILTER_MODULE, ILP_MODULE, JOIN_MODULE, NESTED_LOOP_TOTAL_THRESHOLD,
+    PACK_MODULE, SCAN_MODULE, SET_OPS_MODULE, SORT_MODULE,
 };
 use crate::device_runtime::{Access, BlockId, StreamId};
 use crate::launch::LaunchRecorder;
@@ -7793,8 +7796,6 @@ impl super::CudaKernelProvider {
         max_output: Option<usize>,
         launch_stream: StreamId,
     ) -> Result<Option<CudaBuffer>> {
-        use crate::launch::LaunchRecorder;
-
         let runtime = self.memory.runtime().ok_or_else(|| {
             XlogError::Kernel(
                 "hash_join_inner_v2_count_scan_materialize_cuda_graph_recorded requires a \
@@ -7855,9 +7856,10 @@ impl super::CudaKernelProvider {
             }
         }
 
-        let probe_cap = left.num_rows() as u32;
+        let logical_probe_cap = left.num_rows() as u32;
+        let probe_cap = crate::cuda_graph::graph_capacity_class_u32(logical_probe_cap);
         let Some(output_capacity) =
-            Self::csm_cuda_graph_output_capacity(probe_cap, num_right as u32, max_output)?
+            Self::csm_cuda_graph_output_capacity(logical_probe_cap, num_right as u32, max_output)?
         else {
             return Ok(None);
         };
@@ -7870,6 +7872,12 @@ impl super::CudaKernelProvider {
             self.pack_keys_gpu_on_stream(left, left_keys, &cu_stream, launch_stream, runtime)?;
         let right_packed =
             self.pack_keys_gpu_on_stream(right, right_keys, &cu_stream, launch_stream, runtime)?;
+        let graph_key = CsmCudaGraphKey::inner(
+            left_keys.len(),
+            left_packed.key_bytes,
+            probe_cap,
+            output_capacity,
+        )?;
         let table = self.build_hash_table_v2_on_stream(
             &right_packed.hashes,
             num_right as u32,
@@ -7886,6 +7894,34 @@ impl super::CudaKernelProvider {
             block_dim: (block_size, 1, 1),
             shared_mem_bytes: 0,
         };
+
+        let materialize_capacity_bound: u64 = (probe_cap as u64).saturating_mul(num_right as u64);
+        let materialize_capacity_u32 = materialize_capacity_bound.min(u32::MAX as u64) as u32;
+
+        {
+            let mut cache = self.csm_cuda_graph_cache.lock().map_err(|e| {
+                XlogError::Kernel(format!("csm CUDA Graph cache lock poisoned: {}", e))
+            })?;
+            if let Some(entry) = cache.get_mut(&graph_key) {
+                let result = self.launch_csm_cuda_graph_entry(
+                    entry,
+                    left,
+                    right,
+                    &left_packed,
+                    &right_packed,
+                    &table,
+                    max_output,
+                    materialize_capacity_u32,
+                    probe_config,
+                    &cu_stream,
+                    launch_stream,
+                    runtime,
+                )?;
+                self.csm_cuda_graph_cache_hits
+                    .fetch_add(1, Ordering::Relaxed);
+                return Ok(Some(result));
+            }
+        }
 
         let per_probe_count = self.memory.alloc::<u32>(probe_cap as usize)?;
         let mut per_probe_offsets = self.memory.alloc::<u32>(probe_cap as usize)?;
@@ -7911,33 +7947,9 @@ impl super::CudaKernelProvider {
                 XlogError::Kernel("hash_join_probe_v2_materialize kernel not found".to_string())
             })?;
 
-        let mut rec_graph = LaunchRecorder::new_strict(launch_stream);
-        rec_graph.read(&left_packed.hashes);
-        rec_graph.read(&left_packed.packed_keys);
-        rec_graph.read(&right_packed.packed_keys);
-        rec_graph.read(&table.bucket_offsets);
-        rec_graph.read(&table.bucket_counts);
-        rec_graph.read(&table.bucket_entries);
-        rec_graph.read(&table.bucket_entry_hashes);
-        rec_graph.read(left.num_rows_device());
-        rec_graph.write(&per_probe_count);
-        rec_graph.write(&per_probe_offsets);
-        rec_graph.write(&d_logical_count);
-        rec_graph.write(&d_overflow);
-        rec_graph.write(&d_output_left);
-        rec_graph.write(&d_output_right);
-        for level in scan_scratch.levels() {
-            rec_graph.read_write(level);
-        }
-        rec_graph
-            .preflight(runtime)
-            .map_err(|e| XlogError::Kernel(format!("csm inner graph: preflight failed: {}", e)))?;
-
-        let materialize_capacity_bound: u64 = (probe_cap as u64).saturating_mul(num_right as u64);
-        let materialize_capacity_u32 = materialize_capacity_bound.min(u32::MAX as u64) as u32;
-
         let graph = CapturedCudaGraph::capture_on_stream(&cu_stream, || {
-            // SAFETY: runtime-backed scalar buffers; preflight above ordered their first writes.
+            // SAFETY: graph capture records these writes; replay preflight orders
+            // the runtime-backed buffers before the graph is launched.
             unsafe {
                 let res = cudarc::driver::sys::cuMemsetD8Async(
                     *d_overflow.device_ptr(),
@@ -8063,15 +8075,161 @@ impl super::CudaKernelProvider {
             }
             Ok(())
         })?;
-        let node_count = graph.node_count()?;
-        if node_count < 5 {
+        let nodes = Self::csm_cuda_graph_nodes(&graph)?;
+        let mut entry = CsmCudaGraphEntry {
+            graph,
+            nodes,
+            per_probe_count,
+            per_probe_offsets,
+            d_logical_count,
+            d_overflow,
+            d_output_left,
+            d_output_right,
+            scan_scratch,
+            probe_capacity: probe_cap,
+            output_capacity,
+        };
+        self.csm_cuda_graph_captures.fetch_add(1, Ordering::Relaxed);
+
+        let result = self.launch_csm_cuda_graph_entry(
+            &mut entry,
+            left,
+            right,
+            &left_packed,
+            &right_packed,
+            &table,
+            max_output,
+            materialize_capacity_u32,
+            probe_config,
+            &cu_stream,
+            launch_stream,
+            runtime,
+        )?;
+        self.csm_cuda_graph_cache
+            .lock()
+            .map_err(|e| XlogError::Kernel(format!("csm CUDA Graph cache lock poisoned: {}", e)))?
+            .insert(graph_key, entry);
+        Ok(Some(result))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_csm_cuda_graph_entry(
+        &self,
+        entry: &mut CsmCudaGraphEntry,
+        left: &CudaBuffer,
+        right: &CudaBuffer,
+        left_packed: &PackedKeyData,
+        right_packed: &PackedKeyData,
+        table: &JoinHashTableV2,
+        max_output: Option<usize>,
+        materialize_capacity_u32: u32,
+        probe_config: LaunchConfig,
+        cu_stream: &cudarc::driver::CudaStream,
+        launch_stream: StreamId,
+        runtime: &crate::device_runtime::XlogDeviceRuntime,
+    ) -> Result<CudaBuffer> {
+        let mut rec_graph = LaunchRecorder::new_strict(launch_stream);
+        rec_graph.read(&left_packed.hashes);
+        rec_graph.read(&left_packed.packed_keys);
+        rec_graph.read(&right_packed.packed_keys);
+        rec_graph.read(&table.bucket_offsets);
+        rec_graph.read(&table.bucket_counts);
+        rec_graph.read(&table.bucket_entries);
+        rec_graph.read(&table.bucket_entry_hashes);
+        rec_graph.read(left.num_rows_device());
+        rec_graph.read_write(&entry.per_probe_count);
+        rec_graph.read_write(&entry.per_probe_offsets);
+        rec_graph.read_write(&entry.d_logical_count);
+        rec_graph.read_write(&entry.d_overflow);
+        rec_graph.write(&entry.d_output_left);
+        rec_graph.write(&entry.d_output_right);
+        for level in entry.scan_scratch.levels() {
+            rec_graph.read_write(level);
+        }
+        rec_graph
+            .preflight(runtime)
+            .map_err(|e| XlogError::Kernel(format!("csm inner graph: preflight failed: {}", e)))?;
+
+        let probe_cap = entry.probe_capacity;
+        let output_capacity = entry.output_capacity;
+        if probe_config.grid_dim.0
+            != (probe_cap + probe_config.block_dim.0 - 1) / probe_config.block_dim.0
+        {
             return Err(XlogError::Kernel(format!(
-                "csm inner graph captured too few nodes: {}",
-                node_count
+                "csm CUDA Graph replay probe grid mismatch: graph probe_cap={}, grid={:?}",
+                probe_cap, probe_config.grid_dim
             )));
         }
-        self.csm_cuda_graph_captures.fetch_add(1, Ordering::Relaxed);
-        graph.launch(&cu_stream)?;
+        if entry.nodes.node_count < 5 {
+            return Err(XlogError::Kernel(format!(
+                "csm CUDA Graph replay node inventory too small: {}",
+                entry.nodes.node_count
+            )));
+        }
+
+        let mut count_params = entry.graph.kernel_node_params(entry.nodes.count)?;
+        let mut total_params = entry.graph.kernel_node_params(entry.nodes.total)?;
+        let mut materialize_params = entry.graph.kernel_node_params(entry.nodes.materialize)?;
+        let mut count_args: Vec<*mut c_void> = vec![
+            (&left_packed.hashes).as_kernel_param(),
+            left.num_rows_device().as_kernel_param(),
+            (&probe_cap).as_kernel_param(),
+            (&table.bucket_offsets).as_kernel_param(),
+            (&table.bucket_counts).as_kernel_param(),
+            (&table.bucket_entries).as_kernel_param(),
+            (&table.bucket_entry_hashes).as_kernel_param(),
+            (&table.bucket_mask).as_kernel_param(),
+            (&left_packed.packed_keys).as_kernel_param(),
+            (&right_packed.packed_keys).as_kernel_param(),
+            (&left_packed.key_bytes).as_kernel_param(),
+            (&entry.per_probe_count).as_kernel_param(),
+        ];
+        let mut total_args: Vec<*mut c_void> = vec![
+            (&entry.per_probe_offsets).as_kernel_param(),
+            (&entry.per_probe_count).as_kernel_param(),
+            left.num_rows_device().as_kernel_param(),
+            (&probe_cap).as_kernel_param(),
+            (&materialize_capacity_u32).as_kernel_param(),
+            (&entry.d_logical_count).as_kernel_param(),
+            (&entry.d_overflow).as_kernel_param(),
+        ];
+        let mut materialize_args: Vec<*mut c_void> = vec![
+            (&left_packed.hashes).as_kernel_param(),
+            left.num_rows_device().as_kernel_param(),
+            (&probe_cap).as_kernel_param(),
+            (&table.bucket_offsets).as_kernel_param(),
+            (&table.bucket_counts).as_kernel_param(),
+            (&table.bucket_entries).as_kernel_param(),
+            (&table.bucket_entry_hashes).as_kernel_param(),
+            (&table.bucket_mask).as_kernel_param(),
+            (&left_packed.packed_keys).as_kernel_param(),
+            (&right_packed.packed_keys).as_kernel_param(),
+            (&left_packed.key_bytes).as_kernel_param(),
+            (&entry.per_probe_offsets).as_kernel_param(),
+            (&output_capacity).as_kernel_param(),
+            (&entry.d_output_left).as_kernel_param(),
+            (&entry.d_output_right).as_kernel_param(),
+            (&entry.d_overflow).as_kernel_param(),
+        ];
+        count_params.kernelParams = count_args.as_mut_ptr();
+        count_params.extra = std::ptr::null_mut();
+        total_params.kernelParams = total_args.as_mut_ptr();
+        total_params.extra = std::ptr::null_mut();
+        materialize_params.kernelParams = materialize_args.as_mut_ptr();
+        materialize_params.extra = std::ptr::null_mut();
+        unsafe {
+            entry
+                .graph
+                .set_kernel_node_params(entry.nodes.count, &count_params)?;
+            entry
+                .graph
+                .set_kernel_node_params(entry.nodes.total, &total_params)?;
+            entry
+                .graph
+                .set_kernel_node_params(entry.nodes.materialize, &materialize_params)?;
+        }
+
+        entry.graph.launch(cu_stream)?;
         self.csm_cuda_graph_launches.fetch_add(1, Ordering::Relaxed);
         rec_graph
             .commit(runtime)
@@ -8080,13 +8238,13 @@ impl super::CudaKernelProvider {
         cu_stream.synchronize().map_err(|e| {
             XlogError::Kernel(format!("csm inner graph: sync (total read) failed: {}", e))
         })?;
-        let total = self.read_join_output_count_metadata(&d_logical_count)? as u64;
+        let total = self.read_join_output_count_metadata(&entry.d_logical_count)? as u64;
         let requested = max_output
             .map(|limit| (limit as u64).min(total))
             .unwrap_or(total);
         if requested == 0 {
             let combined_schema = self.combine_schemas(left.schema(), right.schema());
-            return self.create_empty_buffer(combined_schema).map(Some);
+            return self.create_empty_buffer(combined_schema);
         }
         if requested > output_capacity as u64 {
             return Err(XlogError::Kernel(format!(
@@ -8109,24 +8267,24 @@ impl super::CudaKernelProvider {
                 .ok_or_else(|| XlogError::Kernel(format!("Right column {} not found", col_idx)))?;
             rec_gather.read_column(c);
         }
-        rec_gather.read(&d_output_left);
-        rec_gather.read(&d_output_right);
+        rec_gather.read(&entry.d_output_left);
+        rec_gather.read(&entry.d_output_right);
         rec_gather.preflight(runtime).map_err(|e| {
             XlogError::Kernel(format!("csm inner graph: gather preflight failed: {}", e))
         })?;
         let gathered_left = self.gather_buffer_by_indices_on_stream(
             left,
-            &d_output_left,
+            &entry.d_output_left,
             output_rows,
-            &cu_stream,
+            cu_stream,
             launch_stream,
             runtime,
         )?;
         let gathered_right = self.gather_buffer_by_indices_on_stream(
             right,
-            &d_output_right,
+            &entry.d_output_right,
             output_rows,
-            &cu_stream,
+            cu_stream,
             launch_stream,
             runtime,
         )?;
@@ -8139,7 +8297,33 @@ impl super::CudaKernelProvider {
         result_columns.extend(gathered_left.columns.into_iter());
         result_columns.extend(gathered_right.columns.into_iter());
         self.buffer_from_columns(result_columns, output_rows as u64, combined_schema)
-            .map(Some)
+    }
+
+    fn csm_cuda_graph_nodes(graph: &CapturedCudaGraph) -> Result<CsmCudaGraphNodes> {
+        let nodes = graph.nodes()?;
+        if nodes.len() < 5 {
+            return Err(XlogError::Kernel(format!(
+                "csm inner graph captured too few nodes: {}",
+                nodes.len()
+            )));
+        }
+        let kernel_nodes: Vec<_> = nodes
+            .iter()
+            .copied()
+            .filter(|n| n.kind == CudaGraphNodeKind::Kernel)
+            .collect();
+        if kernel_nodes.len() < 3 {
+            return Err(XlogError::Kernel(format!(
+                "csm inner graph captured too few kernel nodes: {}",
+                kernel_nodes.len()
+            )));
+        }
+        Ok(CsmCudaGraphNodes {
+            count: kernel_nodes[0],
+            total: kernel_nodes[kernel_nodes.len() - 2],
+            materialize: kernel_nodes[kernel_nodes.len() - 1],
+            node_count: nodes.len(),
+        })
     }
 
     fn csm_cuda_graph_output_capacity(
