@@ -3567,11 +3567,6 @@ impl super::CudaKernelProvider {
         let packed_slice = self.memory.alloc::<u8>(packed_bytes as usize)?;
         let hash_slice = self.memory.alloc::<u64>(num_rows as usize)?;
 
-        // Upload column sizes to GPU
-        let mut col_sizes_slice = self.memory.alloc::<u32>(col_sizes.len())?;
-        self.htod_sync_copy_into_tracked(&col_sizes, &mut col_sizes_slice)
-            .map_err(|e| XlogError::Kernel(format!("Failed to upload col_sizes: {}", e)))?;
-
         // Get column device pointers as u64 values for the kernel
         // The kernel expects raw pointers as u64
         let mut col_ptrs: [u64; 4] = [0; 4];
@@ -3581,6 +3576,16 @@ impl super::CudaKernelProvider {
                 .ok_or_else(|| XlogError::Kernel(format!("Key column {} not found", col_idx)))?;
             // Get the device pointer as a raw u64 value
             col_ptrs[i] = *col.device_ptr() as u64;
+        }
+        let mut packed_col_sizes = 0u64;
+        for (i, size) in col_sizes.iter().copied().enumerate() {
+            if size > u16::MAX as u32 {
+                return Err(XlogError::Kernel(format!(
+                    "pack_keys_gpu: column element size {} exceeds 16-bit kernel argument",
+                    size
+                )));
+            }
+            packed_col_sizes |= (size as u64) << (i * 16);
         }
 
         // Get the kernel function
@@ -3601,7 +3606,7 @@ impl super::CudaKernelProvider {
 
         // Launch the fused pack+hash kernel
         // SAFETY: Kernel signature matches pack_and_hash_keys in pack.cu:
-        // pack_and_hash_keys(col0, col1, col2, col3, col_sizes, num_cols, num_rows, row_size, packed_output, hashes)
+        // pack_and_hash_keys(col0, col1, col2, col3, packed_col_sizes, num_cols, num_rows, row_size, packed_output, hashes)
         // Column pointers are passed as CudaSlice references - the kernel sees raw device pointers.
         // We pass column data as raw pointers cast to u8* in the kernel.
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
@@ -3614,7 +3619,7 @@ impl super::CudaKernelProvider {
                         col_ptrs[1],
                         col_ptrs[2],
                         col_ptrs[3],
-                        &col_sizes_slice,
+                        packed_col_sizes,
                         key_cols.len() as u32,
                         num_rows,
                         row_size,

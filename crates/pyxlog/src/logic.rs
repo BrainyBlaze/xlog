@@ -226,6 +226,41 @@ impl LogicRelationSession {
         pack_logic_result_with_provider(py, &self.provider, result)
     }
 
+    pub fn cuda_graph_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let dict = PyDict::new(py);
+        dict.set_item(
+            "csm_cuda_graph_captures",
+            self.provider.csm_cuda_graph_captures(),
+        )?;
+        dict.set_item(
+            "csm_cuda_graph_launches",
+            self.provider.csm_cuda_graph_launches(),
+        )?;
+        dict.set_item(
+            "csm_cuda_graph_fallbacks",
+            self.provider.csm_cuda_graph_fallbacks(),
+        )?;
+        dict.set_item(
+            "csm_cuda_graph_cache_hits",
+            self.provider.csm_cuda_graph_cache_hits(),
+        )?;
+        Ok(dict.into())
+    }
+
+    pub fn host_transfer_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let stats = self.provider.host_transfer_stats();
+        let dict = PyDict::new(py);
+        dict.set_item("dtoh_bytes", stats.dtoh_bytes)?;
+        dict.set_item("htod_bytes", stats.htod_bytes)?;
+        dict.set_item("dtoh_calls", stats.dtoh_calls)?;
+        dict.set_item("htod_calls", stats.htod_calls)?;
+        Ok(dict.into())
+    }
+
+    pub fn reset_host_transfer_stats(&self) {
+        self.provider.reset_host_transfer_stats()
+    }
+
     pub fn export_relation(&mut self, py: Python<'_>, name: &str) -> PyResult<Vec<PyObject>> {
         let existing = self.relation_store.get(name).ok_or_else(|| {
             PyValueError::new_err(format!(

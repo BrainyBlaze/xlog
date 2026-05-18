@@ -711,8 +711,7 @@ impl super::CudaKernelProvider {
     /// Stream-aware variant of `pack_keys_gpu` (≤4 columns).
     /// Mirrors the legacy fused `pack_and_hash_keys` launch on
     /// `launch_stream`, then records the kernel's intermediate
-    /// scratch (`col_sizes_slice`) and the returned outputs
-    /// (`packed_keys`, `hashes`) against the runtime so that
+    /// returned outputs (`packed_keys`, `hashes`) against the runtime so that
     /// downstream consumers / drops are correctly serialized
     /// against `launch_stream`.
     pub(super) fn pack_keys_gpu_on_stream(
@@ -768,13 +767,6 @@ impl super::CudaKernelProvider {
         let packed_bytes = (num_rows as u64) * (row_size as u64);
         let packed_slice = self.memory.alloc::<u8>(packed_bytes as usize)?;
         let hash_slice = self.memory.alloc::<u64>(num_rows as usize)?;
-        let mut col_sizes_slice = self.memory.alloc::<u32>(col_sizes_host.len())?;
-        // host → device (synchronous on default cudarc stream;
-        // happens before the launch_stream kernel sees it).
-        self.device
-            .inner()
-            .htod_sync_copy_into(&col_sizes_host, &mut col_sizes_slice)
-            .map_err(|e| XlogError::Kernel(format!("Failed to upload col_sizes: {}", e)))?;
 
         let mut col_ptrs: [u64; 4] = [0; 4];
         for (i, &col_idx) in key_cols.iter().enumerate() {
@@ -782,6 +774,16 @@ impl super::CudaKernelProvider {
                 .column(col_idx)
                 .ok_or_else(|| XlogError::Kernel(format!("Key column {} not found", col_idx)))?;
             col_ptrs[i] = *col.device_ptr() as u64;
+        }
+        let mut packed_col_sizes = 0u64;
+        for (i, size) in col_sizes_host.iter().copied().enumerate() {
+            if size > u16::MAX as u32 {
+                return Err(XlogError::Kernel(format!(
+                    "pack_keys_gpu_on_stream: column element size {} exceeds 16-bit kernel argument",
+                    size
+                )));
+            }
+            packed_col_sizes |= (size as u64) << (i * 16);
         }
 
         // The pack kernel takes raw column pointers (`u64`)
@@ -798,7 +800,6 @@ impl super::CudaKernelProvider {
                 .ok_or_else(|| XlogError::Kernel(format!("Key column {} not found", col_idx)))?;
             rec.read_column(col);
         }
-        rec.write(&col_sizes_slice);
         rec.write(&packed_slice);
         rec.write(&hash_slice);
         rec.preflight(runtime).map_err(|e| {
@@ -830,7 +831,7 @@ impl super::CudaKernelProvider {
                     col_ptrs[1],
                     col_ptrs[2],
                     col_ptrs[3],
-                    &col_sizes_slice,
+                    packed_col_sizes,
                     key_cols.len() as u32,
                     num_rows,
                     row_size,
@@ -842,13 +843,10 @@ impl super::CudaKernelProvider {
         .map_err(|e| XlogError::Kernel(format!("pack_and_hash_keys (on_stream) failed: {}", e)))?;
 
         // Record uses for buffers touched on launch_stream.
-        // `col_sizes_slice` is read by the pack kernel and
-        // drops at the end of this helper; `packed_slice` /
-        // `hash_slice` are fresh outputs that escape to the
-        // caller. The post-preflight-fresh path is valid for
-        // all three because they were allocated by this helper
-        // before preflight and first used by the queued pack
-        // launch.
+        // `packed_slice` / `hash_slice` are fresh outputs that
+        // escape to the caller. The post-preflight-fresh path is
+        // valid because they were allocated by this helper before
+        // preflight and first used by the queued pack launch.
         rec.commit(runtime).map_err(|e| {
             XlogError::Kernel(format!(
                 "pack_keys_gpu_on_stream: launch recorder commit failed: {}",
