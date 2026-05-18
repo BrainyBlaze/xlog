@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use xlog_core::Result;
 use xlog_ir::{
     EirBodyLiteral, EpistemicExecutablePlan, EpistemicGpuPlan, EpistemicReductionPlan,
-    EpistemicWcojReductionStatus,
+    EpistemicTupleMembershipBinding, EpistemicWcojReductionStatus,
 };
 use xlog_stats::StatsSnapshot;
 
@@ -147,6 +147,7 @@ pub fn plan_epistemic_gpu_execution(program: &Program) -> Result<EpistemicGpuPla
     let eir = build_eir(program)?;
     let mut epistemic_literals = Vec::new();
     let mut reductions = Vec::new();
+    let mut tuple_membership_bindings = Vec::new();
 
     for (rule_index, rule) in eir.rules.iter().enumerate() {
         let mut rule_epistemic_literals = Vec::new();
@@ -173,7 +174,19 @@ pub fn plan_epistemic_gpu_execution(program: &Program) -> Result<EpistemicGpuPla
             continue;
         }
 
-        epistemic_literals.extend(rule_epistemic_literals);
+        let reduction_index = reductions.len();
+        for lit in rule_epistemic_literals {
+            let literal_index = epistemic_literals.len();
+            tuple_membership_bindings.push(EpistemicTupleMembershipBinding {
+                literal_index,
+                reduction_index,
+                predicate: lit.atom.predicate.clone(),
+                arity: lit.atom.arity,
+                op: lit.op,
+                negated: lit.negated,
+            });
+            epistemic_literals.push(lit);
+        }
         reductions.push(EpistemicReductionPlan {
             rule_index,
             relational_body_atoms,
@@ -191,11 +204,10 @@ pub fn plan_epistemic_gpu_execution(program: &Program) -> Result<EpistemicGpuPla
         });
     }
 
-    Ok(EpistemicGpuPlan::new(
-        eir.mode,
-        epistemic_literals,
-        reductions,
-    ))
+    Ok(
+        EpistemicGpuPlan::new(eir.mode, epistemic_literals, reductions)
+            .with_tuple_membership_bindings(tuple_membership_bindings),
+    )
 }
 
 /// Compile an epistemic program into its GPU contract and reduced runtime plan.

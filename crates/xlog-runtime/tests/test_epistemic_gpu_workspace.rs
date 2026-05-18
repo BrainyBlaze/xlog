@@ -108,6 +108,7 @@ fn runtime_preflight_records_workspace_and_wcoj_route_surfaces() {
     assert_eq!(preflight.planned_hash_route_count, 0);
     assert_eq!(preflight.sorted_layout_requirement_count, 2);
     assert_eq!(preflight.helper_split_spec_count, 1);
+    assert_eq!(preflight.tuple_membership_binding_count, 1);
     assert!(preflight.cpu_fallbacks.is_zero());
 }
 
@@ -132,6 +133,31 @@ fn runtime_preflight_rejects_nonzero_cpu_fallback_counters() {
             assert!(context.contains("nonzero CPU fallback counters"));
         }
         other => panic!("expected typed fallback counter error, got {other:?}"),
+    }
+}
+
+#[test]
+fn runtime_preflight_rejects_missing_tuple_membership_bindings() {
+    let mut executable = executable_with_kclique_wcoj_plan();
+    executable.gpu_plan.tuple_membership_bindings.clear();
+
+    let err = EpistemicGpuRuntimePreflight::for_executable_plan(
+        &executable,
+        EpistemicGpuWorkspaceCapacities {
+            max_candidates: 8,
+            max_worlds: 4,
+            max_models_per_reduction: 6,
+        },
+    )
+    .expect_err("preflight must fail closed without tuple-membership bindings");
+
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
+            assert_eq!(construct, "epistemic GPU tuple membership binding");
+            assert!(context.contains("expected 1 bindings"));
+            assert!(context.contains("found 0"));
+        }
+        other => panic!("expected tuple-membership binding error, got {other:?}"),
     }
 }
 

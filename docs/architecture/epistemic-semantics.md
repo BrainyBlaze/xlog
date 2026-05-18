@@ -81,8 +81,9 @@ the full GPU-native execution path.
 
 `plan_epistemic_gpu_execution` builds a production-facing contract from parsed
 AST through EIR. It preserves epistemic literals, records one reduction summary
-per epistemic rule, requires the four GPU hot-path phases, and initializes the
-forbidden CPU fallback counters at zero:
+per epistemic rule, binds each epistemic literal to the reduced stable-model
+tuple predicate that must be checked, requires the four GPU hot-path phases,
+and initializes the forbidden CPU fallback counters at zero:
 
 - candidate generation;
 - propagation;
@@ -95,6 +96,9 @@ three or more positive relational atoms is marked
 `RequiresPlannerEligibility`, which means it must still pass through the
 production WCOJ planner rather than bypassing eligibility, layout, scheduling, or
 helper-splitting decisions.
+`EpistemicGpuPlan::validate_tuple_membership_bindings` requires exactly one
+matching `EpistemicTupleMembershipBinding` per epistemic literal before runtime
+preflight can proceed.
 
 This is a planning boundary only. It does not launch kernels, dispatch runtime
 plans, or certify GPU execution.
@@ -210,9 +214,10 @@ model output and solver coupling remain missing GPU phases.
 
 `EpistemicGpuRuntimePreflight::for_executable_plan` consumes an
 `EpistemicExecutablePlan` before launch. It computes the workspace layout,
-rejects nonzero forbidden CPU fallback counters, and records the reduced
-runtime rule count plus WCOJ route surfaces, including K-clique WCOJ plans,
-planned-hash routes, sorted-layout requirements, and helper-splitting specs.
+rejects nonzero forbidden CPU fallback counters, validates tuple-membership
+bindings, and records the reduced runtime rule count plus WCOJ route surfaces,
+including K-clique WCOJ plans, planned-hash routes, sorted-layout requirements,
+helper-splitting specs, and the certified tuple-membership binding count.
 `EpistemicGpuRuntimeCounters` snapshots the existing production WCOJ counters
 around a future epistemic dispatch, and
 `EpistemicGpuRuntimeWcojCertification` rejects preflight-only WCOJ metadata

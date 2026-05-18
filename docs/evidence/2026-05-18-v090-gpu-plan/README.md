@@ -21,6 +21,7 @@ but this plan-contract evidence alone does not close `G090_GPU`.
 | Accepted EIR reaches a production-facing plan contract | `plan_epistemic_gpu_execution` builds `EpistemicGpuPlan` from parsed AST/EIR. |
 | GPU hot-path phases are explicit | `EpistemicGpuHotPathPhase` requires candidate generation, propagation, world-view validation, and result materialization. |
 | GPU-resident buffers are explicit | `EpistemicGpuBufferKind` requires candidate assumptions, world views, model membership, and rejection reasons. |
+| Stable-model tuple membership bindings are explicit | `EpistemicTupleMembershipBinding` records the literal index, reduction index, predicate, arity, operator, and negation flag for each epistemic literal. |
 | CPU fallback counters are tracked | `EpistemicCpuFallbackCounters::is_zero()` covers candidate enumeration, world-view validation, solver search, and probabilistic recomputation. |
 | WCOJ planner obligation is visible | Multi-relation reduced bodies are marked `RequiresPlannerEligibility` rather than bypassing the WCOJ planner. |
 | Non-epistemic programs stay out of the epistemic plan path | Non-epistemic source returns a typed `UnsupportedEpistemicConstruct` error for this API. |
@@ -30,7 +31,7 @@ but this plan-contract evidence alone does not close `G090_GPU`.
 | Command | Result |
 |---|---|
 | `cargo fmt` | PASS |
-| `cargo test -p xlog-logic --test test_epistemic_gpu_plan` | PASS, 3 passed, 0 failed |
+| `cargo test -p xlog-logic --test test_epistemic_gpu_plan` | PASS, 5 passed, 0 failed |
 | `cargo test -p xlog-ir --lib` | PASS, 14 passed, 0 failed |
 | `cargo test -p xlog-logic --lib` | PASS, 238 passed, 0 failed |
 | `cargo check -p xlog-logic -p xlog-ir -p xlog-solve -p xlog-prob` | PASS |

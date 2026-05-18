@@ -751,6 +751,8 @@ pub struct EpistemicGpuRuntimePreflight {
     pub sorted_layout_requirement_count: usize,
     /// Helper-splitting specs carried by WCOJ plans.
     pub helper_split_spec_count: usize,
+    /// Tuple-membership bindings certified for stable-model membership checks.
+    pub tuple_membership_binding_count: usize,
     /// Forbidden CPU fallback counters copied from the GPU semantic contract.
     pub cpu_fallbacks: EpistemicCpuFallbackCounters,
 }
@@ -767,6 +769,7 @@ impl EpistemicGpuRuntimePreflight {
                 context: "nonzero CPU fallback counters".to_string(),
             });
         }
+        executable.gpu_plan.validate_tuple_membership_bindings()?;
 
         let workspace_layout =
             EpistemicGpuWorkspaceLayout::for_plan(&executable.gpu_plan, capacities)?;
@@ -791,6 +794,7 @@ impl EpistemicGpuRuntimePreflight {
             planned_hash_route_count: routes.planned_hash_route_count,
             sorted_layout_requirement_count: routes.sorted_layout_requirement_count,
             helper_split_spec_count: routes.helper_split_spec_count,
+            tuple_membership_binding_count: executable.gpu_plan.tuple_membership_bindings.len(),
             cpu_fallbacks: executable.gpu_plan.cpu_fallbacks,
         })
     }

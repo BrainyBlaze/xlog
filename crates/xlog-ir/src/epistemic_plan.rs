@@ -1,6 +1,6 @@
 //! GPU-native epistemic execution planning contracts.
 
-use crate::eir::{EirEpistemicLiteral, EirEpistemicMode};
+use crate::eir::{EirEpistemicLiteral, EirEpistemicMode, EirEpistemicOp};
 use crate::plan::ExecutionPlan;
 
 /// Generate-Propagate-Test hot-path phase that must execute on GPU.
@@ -72,6 +72,23 @@ pub struct EpistemicReductionPlan {
     pub wcoj_status: EpistemicWcojReductionStatus,
 }
 
+/// Binding from an epistemic literal to reduced stable-model tuple evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpistemicTupleMembershipBinding {
+    /// Index of the epistemic literal in `EpistemicGpuPlan::epistemic_literals`.
+    pub literal_index: usize,
+    /// Index of the reduced rule in `EpistemicGpuPlan::reductions`.
+    pub reduction_index: usize,
+    /// Predicate whose stable-model tuples must be checked.
+    pub predicate: String,
+    /// Predicate arity whose stable-model tuples must be checked.
+    pub arity: usize,
+    /// Epistemic operator whose membership semantics are being checked.
+    pub op: EirEpistemicOp,
+    /// Whether the epistemic literal is explicitly negated.
+    pub negated: bool,
+}
+
 /// Production-facing GPU execution contract for an epistemic program.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EpistemicGpuPlan {
@@ -85,6 +102,8 @@ pub struct EpistemicGpuPlan {
     pub required_buffers: Vec<EpistemicGpuBufferKind>,
     /// Reduced ordinary-program planning summaries.
     pub reductions: Vec<EpistemicReductionPlan>,
+    /// Per-literal stable-model tuple membership bindings.
+    pub tuple_membership_bindings: Vec<EpistemicTupleMembershipBinding>,
     /// Forbidden CPU fallback counters. Release certification must keep these zero.
     pub cpu_fallbacks: EpistemicCpuFallbackCounters,
 }
@@ -96,6 +115,19 @@ impl EpistemicGpuPlan {
         epistemic_literals: Vec<EirEpistemicLiteral>,
         reductions: Vec<EpistemicReductionPlan>,
     ) -> Self {
+        let tuple_membership_bindings = epistemic_literals
+            .iter()
+            .enumerate()
+            .map(|(literal_index, literal)| EpistemicTupleMembershipBinding {
+                literal_index,
+                reduction_index: literal_index.min(reductions.len().saturating_sub(1)),
+                predicate: literal.atom.predicate.clone(),
+                arity: literal.atom.arity,
+                op: literal.op,
+                negated: literal.negated,
+            })
+            .collect();
+
         Self {
             mode,
             epistemic_literals,
@@ -112,8 +144,85 @@ impl EpistemicGpuPlan {
                 EpistemicGpuBufferKind::RejectionReasons,
             ],
             reductions,
+            tuple_membership_bindings,
             cpu_fallbacks: EpistemicCpuFallbackCounters::default(),
         }
+    }
+
+    /// Replace inferred tuple-membership bindings with planner-derived bindings.
+    pub fn with_tuple_membership_bindings(
+        mut self,
+        tuple_membership_bindings: Vec<EpistemicTupleMembershipBinding>,
+    ) -> Self {
+        self.tuple_membership_bindings = tuple_membership_bindings;
+        self
+    }
+
+    /// Validate that every epistemic literal has a matching tuple-membership binding.
+    pub fn validate_tuple_membership_bindings(&self) -> xlog_core::Result<()> {
+        if self.tuple_membership_bindings.len() != self.epistemic_literals.len() {
+            return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU tuple membership binding".to_string(),
+                context: format!(
+                    "expected {} bindings for epistemic literals, found {}",
+                    self.epistemic_literals.len(),
+                    self.tuple_membership_bindings.len()
+                ),
+            });
+        }
+
+        let mut seen_literals = vec![false; self.epistemic_literals.len()];
+
+        for binding in &self.tuple_membership_bindings {
+            if binding.literal_index >= self.epistemic_literals.len() {
+                return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic GPU tuple membership binding".to_string(),
+                    context: format!(
+                        "literal_index {} exceeds literal count {}",
+                        binding.literal_index,
+                        self.epistemic_literals.len()
+                    ),
+                });
+            }
+            if seen_literals[binding.literal_index] {
+                return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic GPU tuple membership binding".to_string(),
+                    context: format!(
+                        "duplicate literal_index {} in tuple-membership bindings",
+                        binding.literal_index
+                    ),
+                });
+            }
+            seen_literals[binding.literal_index] = true;
+
+            if binding.reduction_index >= self.reductions.len() {
+                return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic GPU tuple membership binding".to_string(),
+                    context: format!(
+                        "reduction_index {} exceeds reduction count {}",
+                        binding.reduction_index,
+                        self.reductions.len()
+                    ),
+                });
+            }
+
+            let literal = &self.epistemic_literals[binding.literal_index];
+            if binding.predicate != literal.atom.predicate
+                || binding.arity != literal.atom.arity
+                || binding.op != literal.op
+                || binding.negated != literal.negated
+            {
+                return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic GPU tuple membership binding".to_string(),
+                    context: format!(
+                        "binding for literal_index {} does not match epistemic literal",
+                        binding.literal_index
+                    ),
+                });
+            }
+        }
+
+        Ok(())
     }
 }
 

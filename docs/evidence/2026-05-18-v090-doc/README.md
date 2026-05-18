@@ -33,7 +33,7 @@ Predecessor evidence:
 |---|---|
 | `cargo fmt --check` | PASS |
 | `cargo test -p xlog-logic --test test_epistemic_examples` | PASS, 5 passed, 0 failed |
-| `cargo test -p xlog-logic --test test_epistemic_gpu_plan` | PASS, 3 passed, 0 failed |
+| `cargo test -p xlog-logic --test test_epistemic_gpu_plan` | PASS, 5 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_eir --test test_epistemic_g91 --test test_epistemic_faeel --test test_epistemic_gpt --test test_epistemic_split --test test_epistemic_world_view --test test_epistemic_examples` | PASS, 22 passed, 0 failed |
 | `cargo test -p xlog-solve --test solver_service_semantics` | PASS, 5 passed, 0 failed |
 | `cargo test -p xlog-prob --test epistemic_prob` | PASS, 5 passed, 0 failed |

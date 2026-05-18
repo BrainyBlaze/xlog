@@ -18,7 +18,7 @@ the final release decision.
 
 | Gate | Evidence |
 |---|---|
-| Semantic golden fixtures | EIR, G91, FAEEL, GPT, split, examples, world-view, GPU-plan contract, executable-plan contract, GPU-workspace layout/reset, candidate-generation, propagation-staging, candidate-validation, model-membership staging, world-view validation staging, materialization-staging, final-result flag staging, final tuple materialization, WCOJ fail-closed gate, and transfer-budget contract fixtures pass locally. |
+| Semantic golden fixtures | EIR, G91, FAEEL, GPT, split, examples, world-view, GPU-plan tuple-membership contract, executable-plan contract, GPU-workspace layout/reset, candidate-generation, propagation-staging, candidate-validation, model-membership staging, world-view validation staging, materialization-staging, final-result flag staging, final tuple materialization, WCOJ fail-closed gate, and transfer-budget contract fixtures pass locally. |
 | Solver service fixtures | SAT assumptions, learned transfer, MaxSAT, GPU-unimplemented status, and failure modes pass as CPU fixtures. |
 | Probabilistic coherence fixtures | Epistemic evidence, accepted-world-view evidence, incremental circuit update, adapter design, and tolerance fixtures pass locally. |
 | Parser diagnostics | Positive syntax and negative nested-epistemic typed diagnostics pass in `test_epistemic_eir`. |
@@ -30,9 +30,9 @@ the final release decision.
 |---|---|
 | `git diff --check` | PASS |
 | `cargo fmt --check` | PASS |
-| `cargo test -p xlog-logic --test test_epistemic_gpu_plan` | PASS, 3 passed, 0 failed |
+| `cargo test -p xlog-logic --test test_epistemic_gpu_plan` | PASS, 5 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_executable_plan` | PASS, 3 passed, 0 failed |
-| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 38 passed, 0 failed |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 39 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_eir --test test_epistemic_g91 --test test_epistemic_faeel --test test_epistemic_gpt --test test_epistemic_split --test test_epistemic_world_view --test test_epistemic_examples` | PASS, 22 passed, 0 failed |
 | `cargo test -p xlog-solve --test solver_service_semantics` | PASS, 5 passed, 0 failed |
 | `cargo test -p xlog-prob --test epistemic_prob` | PASS, 5 passed, 0 failed |

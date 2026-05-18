@@ -136,7 +136,10 @@ layout, skew-scheduling, and helper-splitting path.
 The reduced-runtime-plan contract reuses the Goal-038-B WCOJ surfaces. K-clique
 epistemic reductions must pass through `MultiwayPlan`, `KCliqueVariableOrder`,
 sorted-layout requirements, and helper-splitting specs rather than a parallel
-epistemic WCOJ planner.
+epistemic WCOJ planner. The same plan contract now also records one
+`EpistemicTupleMembershipBinding` per epistemic literal so runtime preflight can
+reject plans that cannot identify the reduced stable-model tuple predicate to
+check.
 
 Release certification must replace the current CPU fixture hot paths with:
 
