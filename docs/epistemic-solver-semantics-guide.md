@@ -56,8 +56,11 @@ source row-count reads, tuple-key column device reads, zero reduced-output
 row-count reads, zero host writes, and CUDA-event elapsed timing. This slice
 preserves source tuple terms in EIR/GPU-plan metadata and certifies fixed arity
 0-2 reduced stable-model tuple-source staging from named GPU relation buffers
-and existing `CudaBuffer` columns. Complete value-level tuple-key matching and
-full semantic parity still fail closed.
+and existing `CudaBuffer` columns. Ground tuple keys are encoded as expected
+raw bits plus scalar type codes and compared against existing relation-cell
+bytes on device for the current model-slot row in arity-one and arity-two
+kernels. Variable-bound keys, anonymous keys, aggregate keys, arbitrary arity,
+and full semantic parity still fail closed.
 `Executor::validate_epistemic_gpu_world_views` launches the
 `epistemic_validate_world_views_u8` CUDA kernel and records
 `EpistemicGpuWorldViewValidationTrace` with one kernel launch, zero host
@@ -88,9 +91,9 @@ kernel launches. It also snapshots provider host-transfer counters around the ho
 and records `EpistemicGpuTransferBudgetTrace`, which rejects tracked data-plane
 H2D/D2H deltas instead of resetting shared telemetry. That is still incomplete
 for the epistemic hot path; fixed arity 0-2 tuple-source staging is GPU-backed
-over existing relation buffers, but complete tuple-key matching, full
-world-view semantics, solver coupling, and probabilistic production-path reuse
-do not dispatch yet.
+over existing relation buffers with row-scoped ground key comparison, but
+bound-variable tuple-key matching, arbitrary arity, full world-view semantics,
+solver coupling, and probabilistic production-path reuse do not dispatch yet.
 
 ## GPU And WCOJ Scope
 

@@ -14,7 +14,7 @@ Predecessor evidence: `docs/evidence/2026-05-18-v090-pre/README.md`
 |---|---|
 | Explicit AST representation | `crates/xlog-logic/src/ast.rs` adds `EpistemicMode`, `EpistemicOp`, `EpistemicLiteral`, `Directives::epistemic_mode`, and `BodyLiteral::Epistemic`. |
 | Parser syntax | `crates/xlog-logic/src/grammar.pest` and `crates/xlog-logic/src/parser.rs` add `#pragma epistemic_mode = faeel|g91`, `know atom(...)`, `possible atom(...)`, and negated forms. |
-| EIR representation | `crates/xlog-ir/src/eir.rs` adds `EirProgram`, `EirRule`, `EirBodyLiteral`, `EirEpistemicLiteral`, `EirEpistemicMode`, `EirEpistemicOp`, and `EirTerm`; `xlog_logic::build_eir` builds EIR without RIR lowering and preserves source atom terms for future tuple-key matching. |
+| EIR representation | `crates/xlog-ir/src/eir.rs` adds `EirProgram`, `EirRule`, `EirBodyLiteral`, `EirEpistemicLiteral`, `EirEpistemicMode`, `EirEpistemicOp`, and `EirTerm`; `xlog_logic::build_eir` builds EIR without RIR lowering and preserves source atom terms for GPU tuple-key matching. |
 | Typed diagnostics | `xlog_core::XlogError::UnsupportedEpistemicConstruct` is returned for nested epistemic literals and direct RIR/probabilistic lowering attempts. |
 | Lowering boundary | `docs/architecture/epistemic-semantics.md` documents that EIR is the required semantic boundary and that runtime GPU lowering is still missing after the plan contract. |
 | Compatibility handling | Existing non-epistemic paths remain exhaustive. Downstream `xlog-prob`, `xlog-gpu`, and `pyxlog` compile after adding explicit handling/rejection for the new AST variant. |

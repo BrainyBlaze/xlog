@@ -3,14 +3,14 @@
 use std::ffi::c_void;
 
 use cudarc::driver::LaunchConfig;
-use xlog_core::{Result, XlogError};
+use xlog_core::{Result, ScalarType, XlogError};
 use xlog_cuda::provider::{epistemic_kernels, HostTransferStats, EPISTEMIC_MODULE};
 use xlog_cuda::{
     memory::TrackedCudaSlice, sys, AsKernelParam, CudaBuffer, CudaColumn, DeviceSlice, DriverError,
     LaunchAsync,
 };
 use xlog_ir::rir::{MultiwayPlan, RirNode};
-use xlog_ir::{EpistemicCpuFallbackCounters, EpistemicExecutablePlan, EpistemicGpuPlan};
+use xlog_ir::{EirTerm, EpistemicCpuFallbackCounters, EpistemicExecutablePlan, EpistemicGpuPlan};
 
 use super::Executor;
 
@@ -1136,6 +1136,8 @@ enum TupleSourceLaunch<'a> {
         row_count: &'a TrackedCudaSlice<u32>,
         key_col0: &'a CudaColumn,
         key_col0_width: u32,
+        expected_key_col0_bits: u64,
+        expected_key_col0_type_code: u8,
     },
     ArityTwo {
         literal_index: u32,
@@ -1143,9 +1145,85 @@ enum TupleSourceLaunch<'a> {
         row_count: &'a TrackedCudaSlice<u32>,
         key_col0: &'a CudaColumn,
         key_col0_width: u32,
+        expected_key_col0_bits: u64,
+        expected_key_col0_type_code: u8,
         key_col1: &'a CudaColumn,
         key_col1_width: u32,
+        expected_key_col1_bits: u64,
+        expected_key_col1_type_code: u8,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TupleKeyExpectation {
+    bits: u64,
+    type_code: u8,
+}
+
+impl TupleKeyExpectation {
+    fn from_term(term: &EirTerm, column_type: ScalarType) -> Result<Self> {
+        let bits = match (term, column_type) {
+            (EirTerm::Integer(value), ScalarType::U32) => {
+                u32::try_from(*value).map(u64::from).map_err(|_| {
+                    tuple_key_expectation_error(format!(
+                        "integer {value} is out of range for U32 tuple-key column"
+                    ))
+                })?
+            }
+            (EirTerm::Integer(value), ScalarType::I32) => i32::try_from(*value)
+                .map(|v| v as u32 as u64)
+                .map_err(|_| {
+                    tuple_key_expectation_error(format!(
+                        "integer {value} is out of range for I32 tuple-key column"
+                    ))
+                })?,
+            (EirTerm::Integer(value), ScalarType::U64) => u64::try_from(*value).map_err(|_| {
+                tuple_key_expectation_error(format!(
+                    "integer {value} is out of range for U64 tuple-key column"
+                ))
+            })?,
+            (EirTerm::Integer(value), ScalarType::I64) => *value as u64,
+            (EirTerm::Integer(value), ScalarType::Bool) => match *value {
+                0 => 0,
+                1 => 1,
+                _ => {
+                    return Err(tuple_key_expectation_error(format!(
+                        "integer {value} is out of range for Bool tuple-key column"
+                    )))
+                }
+            },
+            (EirTerm::Symbol(value), ScalarType::Symbol) => u64::from(*value),
+            (EirTerm::String(value), ScalarType::Symbol) => {
+                u64::from(xlog_core::symbol::intern(value))
+            }
+            (EirTerm::FloatBits(bits), ScalarType::F64) => *bits,
+            (EirTerm::FloatBits(bits), ScalarType::F32) => {
+                (f64::from_bits(*bits) as f32).to_bits() as u64
+            }
+            (EirTerm::Variable(_) | EirTerm::Anonymous | EirTerm::Aggregate { .. }, _) => {
+                return Err(tuple_key_expectation_error(format!(
+                    "term {term:?} requires a bound value buffer for GPU tuple-key matching"
+                )))
+            }
+            _ => {
+                return Err(tuple_key_expectation_error(format!(
+                    "term {term:?} cannot be encoded for {column_type:?} tuple-key column"
+                )))
+            }
+        };
+
+        Ok(Self {
+            bits,
+            type_code: column_type.to_code(),
+        })
+    }
+}
+
+fn tuple_key_expectation_error(context: String) -> XlogError {
+    XlogError::UnsupportedEpistemicConstruct {
+        construct: "epistemic GPU tuple-key expectation".to_string(),
+        context,
+    }
 }
 
 impl Executor {
@@ -1739,17 +1817,21 @@ impl Executor {
                             ),
                         }
                     })?;
-                    let key_col0_width = source_relation
-                        .schema()
-                        .column_type(key_col)
-                        .map(|ty| ty.size_bytes())
-                        .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
-                            construct: "epistemic GPU stable-model tuple membership".to_string(),
-                            context: format!(
-                                "tuple source relation {} missing schema for key column {}",
-                                binding.predicate, key_col
-                            ),
-                        })?;
+                    let key_col0_type =
+                        source_relation
+                            .schema()
+                            .column_type(key_col)
+                            .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                                construct: "epistemic GPU stable-model tuple membership"
+                                    .to_string(),
+                                context: format!(
+                                    "tuple source relation {} missing schema for key column {}",
+                                    binding.predicate, key_col
+                                ),
+                            })?;
+                    let key_col0_width = key_col0_type.size_bytes();
+                    let key_col0_expectation =
+                        TupleKeyExpectation::from_term(&binding.key_terms[0], key_col0_type)?;
                     if key_col0_width > u32::MAX as usize {
                         return Err(XlogError::ResourceExhausted {
                             context: "epistemic GPU tuple-key column width".to_string(),
@@ -1763,6 +1845,8 @@ impl Executor {
                         row_count: source_relation.num_rows_device(),
                         key_col0,
                         key_col0_width: key_col0_width as u32,
+                        expected_key_col0_bits: key_col0_expectation.bits,
+                        expected_key_col0_type_code: key_col0_expectation.type_code,
                     });
                 }
                 &[key_col0, key_col1] => {
@@ -1784,28 +1868,36 @@ impl Executor {
                             ),
                         }
                     })?;
-                    let key_col0_width = source_relation
-                        .schema()
-                        .column_type(key_col0)
-                        .map(|ty| ty.size_bytes())
-                        .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
-                            construct: "epistemic GPU stable-model tuple membership".to_string(),
-                            context: format!(
-                                "tuple source relation {} missing schema for key column {}",
-                                binding.predicate, key_col0
-                            ),
-                        })?;
-                    let key_col1_width = source_relation
-                        .schema()
-                        .column_type(key_col1)
-                        .map(|ty| ty.size_bytes())
-                        .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
-                            construct: "epistemic GPU stable-model tuple membership".to_string(),
-                            context: format!(
-                                "tuple source relation {} missing schema for key column {}",
-                                binding.predicate, key_col1
-                            ),
-                        })?;
+                    let key_col0_type =
+                        source_relation
+                            .schema()
+                            .column_type(key_col0)
+                            .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                                construct: "epistemic GPU stable-model tuple membership"
+                                    .to_string(),
+                                context: format!(
+                                    "tuple source relation {} missing schema for key column {}",
+                                    binding.predicate, key_col0
+                                ),
+                            })?;
+                    let key_col1_type =
+                        source_relation
+                            .schema()
+                            .column_type(key_col1)
+                            .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                                construct: "epistemic GPU stable-model tuple membership"
+                                    .to_string(),
+                                context: format!(
+                                    "tuple source relation {} missing schema for key column {}",
+                                    binding.predicate, key_col1
+                                ),
+                            })?;
+                    let key_col0_width = key_col0_type.size_bytes();
+                    let key_col1_width = key_col1_type.size_bytes();
+                    let key_col0_expectation =
+                        TupleKeyExpectation::from_term(&binding.key_terms[0], key_col0_type)?;
+                    let key_col1_expectation =
+                        TupleKeyExpectation::from_term(&binding.key_terms[1], key_col1_type)?;
                     let max_width = key_col0_width.max(key_col1_width);
                     if max_width > u32::MAX as usize {
                         return Err(XlogError::ResourceExhausted {
@@ -1820,8 +1912,12 @@ impl Executor {
                         row_count: source_relation.num_rows_device(),
                         key_col0: key_col0_ref,
                         key_col0_width: key_col0_width as u32,
+                        expected_key_col0_bits: key_col0_expectation.bits,
+                        expected_key_col0_type_code: key_col0_expectation.type_code,
                         key_col1: key_col1_ref,
                         key_col1_width: key_col1_width as u32,
+                        expected_key_col1_bits: key_col1_expectation.bits,
+                        expected_key_col1_type_code: key_col1_expectation.type_code,
                     });
                 }
                 _ => {
@@ -1922,6 +2018,8 @@ impl Executor {
                             row_count,
                             key_col0,
                             key_col0_width,
+                            expected_key_col0_bits,
+                            expected_key_col0_type_code,
                         } => {
                             // SAFETY: kernel arguments match the PTX signature; capacity checks
                             // above cover workspace buffers, row_count comes from the named source
@@ -1937,6 +2035,8 @@ impl Executor {
                                 row_count.as_kernel_param(),
                                 key_col0.as_kernel_param(),
                                 key_col0_width.as_kernel_param(),
+                                expected_key_col0_bits.as_kernel_param(),
+                                expected_key_col0_type_code.as_kernel_param(),
                                 (&workspace.candidate_assumptions).as_kernel_param(),
                                 (&workspace.world_views).as_kernel_param(),
                                 (&mut workspace.model_membership).as_kernel_param(),
@@ -1950,8 +2050,12 @@ impl Executor {
                             row_count,
                             key_col0,
                             key_col0_width,
+                            expected_key_col0_bits,
+                            expected_key_col0_type_code,
                             key_col1,
                             key_col1_width,
+                            expected_key_col1_bits,
+                            expected_key_col1_type_code,
                         } => {
                             // SAFETY: kernel arguments match the PTX signature; capacity checks
                             // above cover workspace buffers, row_count comes from the named source
@@ -1967,8 +2071,12 @@ impl Executor {
                                 row_count.as_kernel_param(),
                                 key_col0.as_kernel_param(),
                                 key_col0_width.as_kernel_param(),
+                                expected_key_col0_bits.as_kernel_param(),
+                                expected_key_col0_type_code.as_kernel_param(),
                                 key_col1.as_kernel_param(),
                                 key_col1_width.as_kernel_param(),
+                                expected_key_col1_bits.as_kernel_param(),
+                                expected_key_col1_type_code.as_kernel_param(),
                                 (&workspace.candidate_assumptions).as_kernel_param(),
                                 (&workspace.world_views).as_kernel_param(),
                                 (&mut workspace.model_membership).as_kernel_param(),
@@ -2582,4 +2690,54 @@ fn bounded_candidate_count(literal_count: usize, max_candidates: usize) -> Resul
         });
     }
     Ok(max_candidates.min(1usize << literal_count))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xlog_core::ScalarType;
+    use xlog_ir::EirTerm;
+
+    #[test]
+    fn tuple_key_expectation_encodes_ground_integer_for_u32_column() {
+        let expectation =
+            TupleKeyExpectation::from_term(&EirTerm::Integer(42), ScalarType::U32).unwrap();
+
+        assert_eq!(
+            expectation,
+            TupleKeyExpectation {
+                bits: 42,
+                type_code: ScalarType::U32.to_code(),
+            }
+        );
+    }
+
+    #[test]
+    fn tuple_key_expectation_encodes_symbol_for_symbol_column() {
+        let expectation =
+            TupleKeyExpectation::from_term(&EirTerm::Symbol(7), ScalarType::Symbol).unwrap();
+
+        assert_eq!(
+            expectation,
+            TupleKeyExpectation {
+                bits: 7,
+                type_code: ScalarType::Symbol.to_code(),
+            }
+        );
+    }
+
+    #[test]
+    fn tuple_key_expectation_rejects_variable_until_binding_buffers_exist() {
+        let err =
+            TupleKeyExpectation::from_term(&EirTerm::Variable("X".to_string()), ScalarType::U32)
+                .expect_err("unbound variable tuple keys must fail closed");
+
+        match err {
+            XlogError::UnsupportedEpistemicConstruct { construct, context } => {
+                assert_eq!(construct, "epistemic GPU tuple-key expectation");
+                assert!(context.contains("requires a bound value buffer"));
+            }
+            other => panic!("expected tuple-key expectation error, got {other:?}"),
+        }
+    }
 }

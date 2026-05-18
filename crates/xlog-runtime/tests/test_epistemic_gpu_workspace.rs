@@ -601,7 +601,9 @@ fn model_membership_runtime_path_launches_arity_one_tuple_key_kernel_not_host_wr
     assert!(source.contains("binding.key_columns.as_slice()"));
     assert!(source.contains("source_relation.column(key_col)"));
     assert!(source.contains("column_type(key_col)"));
-    assert!(source.contains(".map(|ty| ty.size_bytes())"));
+    assert!(source.contains("key_col0_type.size_bytes()"));
+    assert!(source.contains("expected_key_col0_bits"));
+    assert!(source.contains("expected_key_col0_type_code"));
     assert!(source.contains("tuple_source_key_column_device_reads"));
     assert!(source.contains("EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_FROM_TUPLE_SOURCE_ARITY1_U8"));
     assert!(provider.contains("EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_FROM_TUPLE_SOURCE_ARITY1_U8"));
@@ -627,6 +629,8 @@ fn model_membership_runtime_path_launches_arity_two_tuple_key_kernel_not_host_wr
     assert!(source.contains("&[key_col0, key_col1]"));
     assert!(source.contains("source_relation.column(key_col0)"));
     assert!(source.contains("source_relation.column(key_col1)"));
+    assert!(source.contains("expected_key_col1_bits"));
+    assert!(source.contains("expected_key_col1_type_code"));
     assert!(source.contains("EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_FROM_TUPLE_SOURCE_ARITY2_U8"));
     assert!(provider.contains("EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_FROM_TUPLE_SOURCE_ARITY2_U8"));
     assert!(cuda.contains("epistemic_populate_model_membership_from_tuple_source_arity2_u8"));

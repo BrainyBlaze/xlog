@@ -182,8 +182,12 @@ bindings and fixed arity-specific tuple-key kernels for arity-one and arity-two
 bindings. `EpistemicTupleMembershipBinding::key_columns` records identity
 tuple-key column metadata derived from the EIR atom arity, while `key_terms`
 preserves the source atom terms required for value-level tuple-key comparison.
-The runtime currently resolves the column references through the existing
-`CudaBuffer` schema, relation columns, and device row-count buffers.
+The runtime resolves the column references through the existing `CudaBuffer`
+schema, relation columns, and device row-count buffers. For ground tuple keys,
+the runtime encodes expected raw bits and scalar type codes, then the arity-one
+and arity-two CUDA kernels compare the current model-slot relation-cell bytes
+against those encoded keys on device. Variable, anonymous, and aggregate tuple
+keys still fail closed until bound value buffers exist.
 `EpistemicGpuModelMembershipTrace` records zero
 reduced-output row-count reads, tuple-source row-count reads, tuple-key column
 device reads, zero host writes, `StableModelTupleBuffer`, and CUDA-event
@@ -246,11 +250,12 @@ buffer categories are allocatable, initialized on device, and inspectable on the
 runtime side and that WCOJ certification is tied to actual counter deltas around
 the production reduced-plan dispatch. Candidate-assumption generation,
 propagation staging, candidate-buffer validation, arity-zero through arity-two
-stable-model tuple-source model-membership staging over existing relation columns,
-bounded world-view validation staging, accepted-candidate materialization
-staging, and final-result flag plus final tuple materialization staging now have
-CUDA kernels, and the bounded hot path records zero tracked host transfers.
-Complete tuple-key matching, arbitrary arity, full world-view semantics,
+stable-model tuple-source model-membership staging with row-scoped ground key
+comparison over existing relation columns, bounded world-view validation staging,
+accepted-candidate materialization staging, and final-result flag plus final
+tuple materialization staging now have CUDA kernels, and the bounded hot path
+records zero tracked host transfers. Bound-variable tuple-key matching,
+arbitrary arity, full world-view semantics,
 solver/probability production-path reuse, and complete accepted-execution
 timing evidence remain open.
 

@@ -138,20 +138,43 @@ extern "C" __global__ void epistemic_populate_model_membership_from_tuple_source
     }
 }
 
-static __device__ uint8_t epistemic_tuple_key_row_materialized_arity1(
+static __device__ uint8_t epistemic_tuple_key_cell_matches(
+    const uint8_t* __restrict__ tuple_key_col,
+    uint32_t tuple_key_col_width,
+    uint32_t row,
+    uint64_t expected_bits,
+    uint8_t expected_type_code
+) {
+    if (tuple_key_col_width == 0u || tuple_key_col_width > 8u) return 0u;
+    if (expected_type_code > 7u) return 0u;
+
+    const volatile uint8_t* col = tuple_key_col;
+    uint64_t actual_bits = 0u;
+    uint32_t base = row * tuple_key_col_width;
+    for (uint32_t byte = 0; byte < tuple_key_col_width; ++byte) {
+        actual_bits |= static_cast<uint64_t>(col[base + byte]) << (byte * 8u);
+    }
+
+    uint64_t mask = (tuple_key_col_width >= 8u)
+        ? 0xffffffffffffffffull
+        : ((1ull << (tuple_key_col_width * 8u)) - 1ull);
+    return ((actual_bits & mask) == (expected_bits & mask)) ? 1u : 0u;
+}
+
+static __device__ uint8_t epistemic_tuple_key_row_matches_arity1(
     const uint8_t* __restrict__ tuple_key_col0,
     uint32_t tuple_key_col0_width,
+    uint64_t expected_key_col0_bits,
+    uint8_t expected_key_col0_type_code,
     uint32_t row
 ) {
-    if (tuple_key_col0_width == 0u) return 0u;
-
-    const volatile uint8_t* col0 = tuple_key_col0;
-    uint8_t checksum = 0u;
-    uint32_t base = row * tuple_key_col0_width;
-    for (uint32_t byte = 0; byte < tuple_key_col0_width; ++byte) {
-        checksum |= col0[base + byte];
-    }
-    return static_cast<uint8_t>((checksum | 1u) != 0u);
+    return epistemic_tuple_key_cell_matches(
+        tuple_key_col0,
+        tuple_key_col0_width,
+        row,
+        expected_key_col0_bits,
+        expected_key_col0_type_code
+    );
 }
 
 extern "C" __global__ void epistemic_populate_model_membership_from_tuple_source_arity1_u8(
@@ -165,6 +188,8 @@ extern "C" __global__ void epistemic_populate_model_membership_from_tuple_source
     const uint32_t* __restrict__ tuple_source_row_count,
     const uint8_t* __restrict__ tuple_key_col0,
     uint32_t tuple_key_col0_width,
+    uint64_t expected_key_col0_bits,
+    uint8_t expected_key_col0_type_code,
     const uint8_t* __restrict__ candidate_assumptions,
     const uint8_t* __restrict__ world_views,
     uint8_t* __restrict__ model_membership,
@@ -187,9 +212,11 @@ extern "C" __global__ void epistemic_populate_model_membership_from_tuple_source
     uint8_t accepted_so_far = (rejection_reasons[candidate] == 0u) ? 1u : 0u;
     uint8_t has_tuple_source =
         (model < tuple_rows)
-            ? epistemic_tuple_key_row_materialized_arity1(
+            ? epistemic_tuple_key_row_matches_arity1(
                   tuple_key_col0,
                   tuple_key_col0_width,
+                  expected_key_col0_bits,
+                  expected_key_col0_type_code,
                   model
               )
             : 0u;
@@ -204,27 +231,32 @@ extern "C" __global__ void epistemic_populate_model_membership_from_tuple_source
     }
 }
 
-static __device__ uint8_t epistemic_tuple_key_row_materialized_arity2(
+static __device__ uint8_t epistemic_tuple_key_row_matches_arity2(
     const uint8_t* __restrict__ tuple_key_col0,
     uint32_t tuple_key_col0_width,
+    uint64_t expected_key_col0_bits,
+    uint8_t expected_key_col0_type_code,
     const uint8_t* __restrict__ tuple_key_col1,
     uint32_t tuple_key_col1_width,
+    uint64_t expected_key_col1_bits,
+    uint8_t expected_key_col1_type_code,
     uint32_t row
 ) {
-    if (tuple_key_col0_width == 0u || tuple_key_col1_width == 0u) return 0u;
-
-    const volatile uint8_t* col0 = tuple_key_col0;
-    const volatile uint8_t* col1 = tuple_key_col1;
-    uint8_t checksum = 0u;
-    uint32_t base0 = row * tuple_key_col0_width;
-    uint32_t base1 = row * tuple_key_col1_width;
-    for (uint32_t byte = 0; byte < tuple_key_col0_width; ++byte) {
-        checksum |= col0[base0 + byte];
-    }
-    for (uint32_t byte = 0; byte < tuple_key_col1_width; ++byte) {
-        checksum |= col1[base1 + byte];
-    }
-    return static_cast<uint8_t>((checksum | 1u) != 0u);
+    uint8_t col0_matches = epistemic_tuple_key_cell_matches(
+        tuple_key_col0,
+        tuple_key_col0_width,
+        row,
+        expected_key_col0_bits,
+        expected_key_col0_type_code
+    );
+    uint8_t col1_matches = epistemic_tuple_key_cell_matches(
+        tuple_key_col1,
+        tuple_key_col1_width,
+        row,
+        expected_key_col1_bits,
+        expected_key_col1_type_code
+    );
+    return (col0_matches != 0u && col1_matches != 0u) ? 1u : 0u;
 }
 
 extern "C" __global__ void epistemic_populate_model_membership_from_tuple_source_arity2_u8(
@@ -238,8 +270,12 @@ extern "C" __global__ void epistemic_populate_model_membership_from_tuple_source
     const uint32_t* __restrict__ tuple_source_row_count,
     const uint8_t* __restrict__ tuple_key_col0,
     uint32_t tuple_key_col0_width,
+    uint64_t expected_key_col0_bits,
+    uint8_t expected_key_col0_type_code,
     const uint8_t* __restrict__ tuple_key_col1,
     uint32_t tuple_key_col1_width,
+    uint64_t expected_key_col1_bits,
+    uint8_t expected_key_col1_type_code,
     const uint8_t* __restrict__ candidate_assumptions,
     const uint8_t* __restrict__ world_views,
     uint8_t* __restrict__ model_membership,
@@ -262,11 +298,15 @@ extern "C" __global__ void epistemic_populate_model_membership_from_tuple_source
     uint8_t accepted_so_far = (rejection_reasons[candidate] == 0u) ? 1u : 0u;
     uint8_t has_tuple_source =
         (model < tuple_rows)
-            ? epistemic_tuple_key_row_materialized_arity2(
+            ? epistemic_tuple_key_row_matches_arity2(
                   tuple_key_col0,
                   tuple_key_col0_width,
+                  expected_key_col0_bits,
+                  expected_key_col0_type_code,
                   tuple_key_col1,
                   tuple_key_col1_width,
+                  expected_key_col1_bits,
+                  expected_key_col1_type_code,
                   model
               )
             : 0u;
