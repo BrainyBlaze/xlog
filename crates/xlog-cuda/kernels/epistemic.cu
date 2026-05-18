@@ -96,6 +96,39 @@ extern "C" __global__ void epistemic_populate_model_membership_u8(
     }
 }
 
+extern "C" __global__ void epistemic_validate_world_views_u8(
+    uint32_t literal_count,
+    uint32_t candidate_count,
+    uint32_t reduction_count,
+    uint32_t models_per_reduction,
+    uint32_t world_stride,
+    const uint8_t* __restrict__ model_membership,
+    const uint8_t* __restrict__ world_views,
+    uint32_t* __restrict__ rejection_reasons
+) {
+    uint32_t candidate = blockIdx.x * blockDim.x + threadIdx.x;
+    if (candidate >= candidate_count) return;
+
+    if (rejection_reasons[candidate] != 0u) return;
+
+    uint8_t active_world = world_views[candidate * world_stride];
+    if (active_world == 0u) {
+        rejection_reasons[candidate] = 5u;
+        return;
+    }
+
+    uint32_t per_candidate = reduction_count * models_per_reduction * literal_count;
+    uint32_t base = candidate * per_candidate;
+    uint8_t observed_membership = 0u;
+    for (uint32_t offset = 0; offset < per_candidate; ++offset) {
+        observed_membership |= model_membership[base + offset];
+    }
+
+    if (observed_membership == 0u) {
+        rejection_reasons[candidate] = 5u;
+    }
+}
+
 extern "C" __global__ void epistemic_materialize_accepted_candidates_u8(
     uint32_t candidate_count,
     uint32_t world_stride,

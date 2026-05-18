@@ -18,7 +18,7 @@ the final release decision.
 
 | Gate | Evidence |
 |---|---|
-| Semantic golden fixtures | EIR, G91, FAEEL, GPT, split, examples, world-view, GPU-plan contract, executable-plan contract, GPU-workspace layout/reset, candidate-generation, propagation-staging, candidate-validation, model-membership staging, and materialization-staging contract fixtures pass locally. |
+| Semantic golden fixtures | EIR, G91, FAEEL, GPT, split, examples, world-view, GPU-plan contract, executable-plan contract, GPU-workspace layout/reset, candidate-generation, propagation-staging, candidate-validation, model-membership staging, world-view validation staging, and materialization-staging contract fixtures pass locally. |
 | Solver service fixtures | SAT assumptions, learned transfer, MaxSAT, GPU-unimplemented status, and failure modes pass as CPU fixtures. |
 | Probabilistic coherence fixtures | Epistemic evidence, accepted-world-view evidence, incremental circuit update, adapter design, and tolerance fixtures pass locally. |
 | Parser diagnostics | Positive syntax and negative nested-epistemic typed diagnostics pass in `test_epistemic_eir`. |
@@ -32,7 +32,7 @@ the final release decision.
 | `cargo fmt --check` | PASS |
 | `cargo test -p xlog-logic --test test_epistemic_gpu_plan` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_executable_plan` | PASS, 3 passed, 0 failed |
-| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 26 passed, 0 failed |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 28 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_eir --test test_epistemic_g91 --test test_epistemic_faeel --test test_epistemic_gpt --test test_epistemic_split --test test_epistemic_world_view --test test_epistemic_examples` | PASS, 22 passed, 0 failed |
 | `cargo test -p xlog-solve --test solver_service_semantics` | PASS, 5 passed, 0 failed |
 | `cargo test -p xlog-prob --test epistemic_prob` | PASS, 5 passed, 0 failed |
@@ -55,8 +55,8 @@ the final release decision.
 | M090_CERT.4 v0.8 compatibility | v0.8 pyxlog/DTS cert subset rerun after rebase | BLOCKED | v0.8 integration/rebase has not happened. |
 | M090_CERT.5 formatting | `cargo fmt --check` pass | PASS | Post-correction formatting gate passed. |
 | M090_CERT.6 workspace health | agreed cargo test subset pass | PASS for oracle | Runtime, logic, solve, and prob fixture/lib suites plus cross-crate checks passed. |
-| M090_CERT.7 semantic trace fixtures | GPT traces include generated, accepted, and rejected candidate counts | PARTIAL | CPU traces include generated/guess/reduced-model/accepted-world-view/rejection reason fields; candidate-generation, propagation, candidate-validation, model-membership, and materialization traces include GPU launch counts with CUDA-event elapsed timing, but full stable-model validation/final materialization trace counters are missing. |
-| M090_CERT.8 GPU-native evidence | GPU launch counts, kernel timings, and zero CPU fallback counters | BLOCKED | GPU-plan, workspace allocation/reset, bounded candidate-generation, propagation, candidate-validation, model-membership, and materialization kernels with CUDA-event elapsed timing, preflight, counter-guard, and reduced-plan trace contracts exist, but stable-model validation/final materialization evidence and complete accepted-execution timing are missing. |
+| M090_CERT.7 semantic trace fixtures | GPT traces include generated, accepted, and rejected candidate counts | PARTIAL | CPU traces include generated/guess/reduced-model/accepted-world-view/rejection reason fields; candidate-generation, propagation, candidate-validation, model-membership, world-view-validation, and materialization traces include GPU launch counts with CUDA-event elapsed timing, but full reduced-runtime stable-model membership/final materialization trace counters are missing. |
+| M090_CERT.8 GPU-native evidence | GPU launch counts, kernel timings, and zero CPU fallback counters | BLOCKED | GPU-plan, workspace allocation/reset, bounded candidate-generation, propagation, candidate-validation, model-membership, world-view-validation, and materialization kernels with CUDA-event elapsed timing, preflight, counter-guard, and reduced-plan trace contracts exist, but actual stable-model membership population/final materialization evidence and complete accepted-execution timing are missing. |
 | M090_CERT.9 WCOJ evidence | at least one WCOJ-eligible epistemic reduction proves WCOJ planner/runtime dispatch | PARTIAL | Executable-plan and runtime-preflight fixtures prove WCOJ promotion plus 38-B K-clique planner/layout/helper-split metadata, and the counter guard rejects preflight-only WCOJ evidence; runtime dispatch and launch evidence are still missing. |
 
 ## Required GPU-Native Evidence Before Closure

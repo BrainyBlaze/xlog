@@ -49,9 +49,9 @@ Earlier ref checks after `git fetch origin --prune` showed:
 | G090_EIR | PARTIAL | EIR is explicit and executable-plan lowering reaches reduced production runtime plans, but accepted epistemic forms still lack production GPU runtime dispatch. |
 | G090_G91 | PASS for semantic oracle | Compatibility fixtures pass, but GPU parity remains unproven. |
 | G090_FAEEL | PASS for semantic oracle | Foundedness fixtures pass, but GPU parity remains unproven. |
-| G090_GPT | PARTIAL | CPU trace fixtures pass; GPU-resident candidate generation, propagation staging, candidate-buffer validation, model-membership staging, and materialization staging exist, but stable-model world-view validation is missing. |
+| G090_GPT | PARTIAL | CPU trace fixtures pass; GPU-resident candidate generation, propagation staging, candidate-buffer validation, model-membership staging, bounded world-view validation staging, and materialization staging exist, but actual reduced-runtime stable-model membership population is missing. |
 | G090_SPLIT | PARTIAL | CPU split/recompose fixtures pass; GPU split execution is missing. |
-| G090_GPU | BLOCKED | GPU-plan, reduced-runtime-plan, workspace allocation/reset, bounded candidate-generation, propagation, candidate-validation, model-membership, and materialization kernels with CUDA-event elapsed timing, runtime-preflight, counter-guard, and reduced-plan trace contracts exist, but no production epistemic stable-model world-view validation/final materialization dispatch or full semantic kernel buffer use exists. |
+| G090_GPU | BLOCKED | GPU-plan, reduced-runtime-plan, workspace allocation/reset, bounded candidate-generation, propagation, candidate-validation, model-membership, world-view-validation, and materialization kernels with CUDA-event elapsed timing, runtime-preflight, counter-guard, and reduced-plan trace contracts exist, but no production epistemic stable-model membership population/final materialization dispatch or full semantic kernel buffer use exists. |
 | G090_SOLVER | BLOCKED | `SolverService` is CPU fixture enumeration; GPU-native SAT/MaxSAT/portfolio execution is not wired to epistemic candidates. |
 | G090_PROB | BLOCKED | Accepted-world-view evidence fixtures exist, but accepted probabilistic epistemic execution is not proven on the GPU-native exact path. |
 | G090_CERT | BLOCKED | Missing complete accepted-execution kernel timing, WCOJ evidence, zero CPU fallback counters, and post-v0.8 rerun. |
@@ -81,6 +81,8 @@ The branch contains useful scaffolding:
   writes for staged candidate/world-view invariants;
 - bounded model-membership staging kernel with one launch and zero host writes
   for candidate-scoped model-membership bytes;
+- bounded world-view validation staging kernel with one launch and zero host
+  writes for staged model-membership/world-view rejection checks;
 - bounded materialization staging kernel with one launch and zero host writes
   for accepted-candidate world-view slots;
 - runtime preflight that rejects nonzero CPU fallback counters and records
@@ -102,8 +104,9 @@ implementation, but it cannot be used as release-close evidence.
 
 Closure remains blocked until certification includes all of the following:
 
-- nonzero GPU launch counts and kernel timings for stable-model world-view
-  validation and final result materialization, plus the existing staging timing;
+- nonzero GPU launch counts and kernel timings for actual stable-model
+  membership population and final result materialization, plus the existing
+  staging timing;
 - GPU-resident candidate, world-view, model-membership, and rejection buffers;
 - zero CPU fallback counters for candidate enumeration and world-view
   validation;

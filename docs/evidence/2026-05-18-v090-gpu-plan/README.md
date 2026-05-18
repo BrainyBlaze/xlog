@@ -10,8 +10,8 @@ Branch: `feat/v090-epistemic-solver-semantics`
 
 This slice adds a production-facing GPU execution plan contract. Later runtime
 evidence adds bounded candidate-generation, propagation, candidate-buffer
-validation, and materialization-staging kernels, but this plan-contract evidence
-alone does not close `G090_GPU`.
+validation, model-membership, world-view-validation, and materialization-staging
+kernels, but this plan-contract evidence alone does not close `G090_GPU`.
 
 ## Implementation Summary
 
@@ -39,18 +39,18 @@ alone does not close `G090_GPU`.
 
 | Metric | Target | Status | Evidence |
 |---|---|---|---|
-| M090_GPU.1 production lowering | accepted epistemic fixture runs through production runtime dispatch | PARTIAL | Plan contract exists; later runtime evidence launches candidate generation/propagation/candidate validation/model-membership/materialization staging before reduced-plan dispatch; stable-model validation/final materialization dispatch is still missing. |
+| M090_GPU.1 production lowering | accepted epistemic fixture runs through production runtime dispatch | PARTIAL | Plan contract exists; later runtime evidence launches candidate generation/propagation/candidate validation before reduced-plan dispatch, then model-membership/world-view-validation/materialization staging; actual stable-model membership population/final materialization dispatch is still missing. |
 | M090_GPU.2 WCOJ eligibility | at least one epistemic reduction uses the WCOJ planner/path where eligible | PARTIAL | Reduced body is marked `RequiresPlannerEligibility`; planner/runtime dispatch is not executed yet. |
-| M090_GPU.3 GPU buffers | candidate, world-view, and rejection state have GPU-resident representations | PARTIAL | Buffer categories are explicit; later runtime evidence allocates/resets them and uses bounded candidate/propagation/validation/model-membership/materialization kernels. |
-| M090_GPU.4 kernel coverage | GPU kernels cover candidate generation, propagation, validation, and materialization hot paths | PARTIAL | Later runtime evidence launches candidate-generation, propagation-staging, candidate-buffer validation, model-membership staging, and materialization-staging kernels; stable-model validation/final materialization kernels are missing. |
-| M090_GPU.5 CPU fallback ban | accepted execution trace records zero CPU candidate enumeration/world-view validation fallbacks | PARTIAL | Plan counters initialize to zero and runtime preflight rejects nonzero counters; stable-model validation fallback evidence is missing. |
-| M090_GPU.6 launch evidence | certification logs include nonzero GPU launch counts and kernel timing for epistemic execution | PARTIAL | Later runtime traces record candidate-generation, propagation, candidate-validation, model-membership, and materialization launches with CUDA-event elapsed timing; stable-model validation/final materialization timing is missing. |
+| M090_GPU.3 GPU buffers | candidate, world-view, and rejection state have GPU-resident representations | PARTIAL | Buffer categories are explicit; later runtime evidence allocates/resets them and uses bounded candidate/propagation/validation/model-membership/world-view-validation/materialization kernels. |
+| M090_GPU.4 kernel coverage | GPU kernels cover candidate generation, propagation, validation, and materialization hot paths | PARTIAL | Later runtime evidence launches candidate-generation, propagation-staging, candidate-buffer validation, model-membership staging, world-view-validation staging, and materialization-staging kernels; final materialization kernels are missing. |
+| M090_GPU.5 CPU fallback ban | accepted execution trace records zero CPU candidate enumeration/world-view validation fallbacks | PARTIAL | Plan counters initialize to zero and runtime preflight rejects nonzero counters; actual stable-model membership population evidence is missing. |
+| M090_GPU.6 launch evidence | certification logs include nonzero GPU launch counts and kernel timing for epistemic execution | PARTIAL | Later runtime traces record candidate-generation, propagation, candidate-validation, model-membership, world-view-validation, and materialization launches with CUDA-event elapsed timing; final materialization timing is missing. |
 | M090_GPU.7 parity | GPU output matches semantic oracle on all G91, FAEEL, GPT, and splitting fixtures | BLOCKED | No GPU output exists yet. |
 | M090_GPU.8 transfer budget | host-device transfers are bounded and reported; no per-candidate host round trip in hot path | BLOCKED | No execution transfer trace exists yet. |
 
 ## Remaining Blocker
 
-The next slice must complete runtime/CUDA execution with stable-model world-view
-validation, final result materialization, WCOJ planner dispatch evidence for
-eligible reductions, and a real accepted execution trace with full timing and
-zero CPU fallback counters.
+The next slice must populate model-membership from actual reduced-runtime
+stable-model output, add final result materialization, prove WCOJ planner
+dispatch evidence for eligible reductions, and produce a real accepted
+execution trace with full timing and zero CPU fallback counters.

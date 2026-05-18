@@ -13,6 +13,7 @@ use xlog_runtime::{
     EpistemicGpuModelMembershipTrace, EpistemicGpuPropagationTrace, EpistemicGpuRuntimeCounters,
     EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace, EpistemicGpuRuntimeWcojCertification,
     EpistemicGpuWorkspaceCapacities, EpistemicGpuWorkspaceLayout, EpistemicGpuWorkspaceResetTrace,
+    EpistemicGpuWorldViewValidationTrace,
 };
 
 #[test]
@@ -452,25 +453,65 @@ fn model_membership_runtime_path_launches_epistemic_kernel_not_host_writes() {
 }
 
 #[test]
-fn execution_result_records_model_membership_trace_before_materialization() {
+fn world_view_validation_trace_records_device_kernel_without_host_writes() {
+    let trace = EpistemicGpuWorldViewValidationTrace::for_counts(3, 8, 2, 4).unwrap();
+
+    assert_eq!(trace.literal_count, 3);
+    assert_eq!(trace.candidates_checked, 8);
+    assert_eq!(trace.reduction_count, 2);
+    assert_eq!(trace.models_per_reduction, 4);
+    assert_eq!(trace.model_membership_bytes_checked, 192);
+    assert_eq!(trace.world_view_slots_checked, 8);
+    assert_eq!(trace.rejection_reason_slots_written, 8);
+    assert_eq!(trace.kernel_launches, 1);
+    assert_eq!(trace.host_write_ops, 0);
+    assert!(!trace.kernel_timing.is_recorded());
+}
+
+#[test]
+fn world_view_validation_runtime_path_launches_epistemic_kernel_not_host_writes() {
+    let source = include_str!("../src/executor/epistemic_workspace.rs");
+    let cuda = include_str!("../../xlog-cuda/kernels/epistemic.cu");
+    let manifest = include_str!("../../xlog-cuda/src/kernel_manifest_data.rs");
+
+    assert!(source.contains("fn validate_epistemic_gpu_world_views"));
+    assert!(source.contains("EPISTEMIC_VALIDATE_WORLD_VIEWS_U8"));
+    assert!(source.contains("&workspace.model_membership"));
+    assert!(source.contains("&workspace.world_views"));
+    assert!(source.contains("&mut workspace.rejection_reasons"));
+    assert!(cuda.contains("epistemic_validate_world_views_u8"));
+    assert!(manifest.contains("\"epistemic_validate_world_views_u8\""));
+    assert!(!source.contains("upload_epistemic_world_view_validation"));
+    assert!(!source.contains("copy_epistemic_world_view_validation_from_host"));
+}
+
+#[test]
+fn execution_result_records_model_membership_and_world_view_validation_after_reduced_dispatch() {
     let source = include_str!("../src/executor/epistemic_workspace.rs");
 
     assert!(source.contains("pub model_membership: EpistemicGpuModelMembershipTrace"));
+    assert!(source.contains("pub world_view_validation: EpistemicGpuWorldViewValidationTrace"));
     assert!(source.contains("let model_membership = self.populate_epistemic_gpu_model_membership"));
+    assert!(source.contains("let world_view_validation = self.validate_epistemic_gpu_world_views"));
     assert!(source.contains("model_membership,"));
+    assert!(source.contains("world_view_validation,"));
 
-    let validation_pos = source
-        .find("let candidate_validation = self.validate_epistemic_gpu_candidates")
-        .expect("candidate-validation launch in execution path");
+    let reduced_dispatch_pos = source
+        .find("let output = self.execute_plan(&executable.reduced_runtime_plan)?")
+        .expect("reduced production runtime dispatch");
     let membership_pos = source
         .find("let model_membership = self.populate_epistemic_gpu_model_membership")
         .expect("model-membership launch in execution path");
+    let world_validation_pos = source
+        .find("let world_view_validation = self.validate_epistemic_gpu_world_views")
+        .expect("world-view validation launch in execution path");
     let materialization_pos = source
         .find("self.materialize_epistemic_gpu_candidates")
         .expect("materialization launch in execution path");
 
-    assert!(validation_pos < membership_pos);
-    assert!(membership_pos < materialization_pos);
+    assert!(reduced_dispatch_pos < membership_pos);
+    assert!(membership_pos < world_validation_pos);
+    assert!(world_validation_pos < materialization_pos);
 }
 
 #[test]
@@ -519,6 +560,7 @@ fn staging_runtime_paths_record_cuda_event_timing_for_each_kernel() {
         "epistemic GPU candidate propagation",
         "epistemic GPU candidate validation",
         "epistemic GPU model membership",
+        "epistemic GPU world-view validation",
         "epistemic GPU candidate materialization",
     ] {
         assert!(
@@ -532,7 +574,7 @@ fn staging_runtime_paths_record_cuda_event_timing_for_each_kernel() {
     }
     assert_eq!(
         source.matches(".with_kernel_timing(kernel_timing)").count(),
-        5
+        6
     );
 }
 
@@ -553,7 +595,7 @@ fn materialization_runtime_path_launches_epistemic_kernel_not_host_writes() {
 }
 
 #[test]
-fn execution_result_records_materialization_kernel_trace_before_reduced_dispatch() {
+fn execution_result_records_materialization_kernel_trace_after_world_view_validation() {
     let source = include_str!("../src/executor/epistemic_workspace.rs");
 
     assert!(source.contains("pub materialization: EpistemicGpuMaterializationTrace"));
@@ -561,18 +603,14 @@ fn execution_result_records_materialization_kernel_trace_before_reduced_dispatch
     assert!(source.contains("self.materialize_epistemic_gpu_candidates"));
     assert!(source.contains("materialization,"));
 
-    let validation_pos = source
-        .find("let candidate_validation = self.validate_epistemic_gpu_candidates")
-        .expect("candidate-validation launch in execution path");
+    let world_validation_pos = source
+        .find("let world_view_validation = self.validate_epistemic_gpu_world_views")
+        .expect("world-view validation launch in execution path");
     let materialization_pos = source
         .find("self.materialize_epistemic_gpu_candidates")
         .expect("materialization launch in execution path");
-    let reduced_dispatch_pos = source
-        .find("let output = self.execute_plan(&executable.reduced_runtime_plan)?")
-        .expect("reduced production runtime dispatch");
 
-    assert!(validation_pos < materialization_pos);
-    assert!(materialization_pos < reduced_dispatch_pos);
+    assert!(world_validation_pos < materialization_pos);
 }
 
 fn epistemic_literal(predicate: &str, op: EirEpistemicOp) -> EirEpistemicLiteral {

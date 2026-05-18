@@ -10,9 +10,9 @@ Branch: `feat/v090-epistemic-solver-semantics`
 
 This slice added the first production-facing lowering route after the explicit
 epistemic semantic contract was built. Later runtime evidence adds bounded
-candidate-generation, propagation, candidate-buffer validation, and
-materialization-staging kernels; this file alone is not a GPU execution claim
-and does not close `G090_GPU`.
+candidate-generation, propagation, candidate-buffer validation,
+model-membership, world-view-validation, and materialization-staging kernels;
+this file alone is not a GPU execution claim and does not close `G090_GPU`.
 
 ## Reuse Audit
 
@@ -53,13 +53,14 @@ The prior closure/evidence docs were inspected before finalizing this slice:
 | Metric | Target | Status | Evidence |
 |---|---|---|---|
 | M090_EIR.6 production route | accepted epistemic forms have a production lowering route | PARTIAL | Executable route exists after the semantic contract; direct `xlog run` lowering still rejects epistemic literals. |
-| M090_GPU.1 production lowering | accepted epistemic fixture runs through production runtime dispatch | PARTIAL | Reduced runtime plan is produced through the production compiler; later runtime evidence launches candidate generation/propagation/candidate validation/model-membership/materialization staging before reduced-plan dispatch, but stable-model validation/final materialization dispatch is not implemented. |
+| M090_GPU.1 production lowering | accepted epistemic fixture runs through production runtime dispatch | PARTIAL | Reduced runtime plan is produced through the production compiler; later runtime evidence launches candidate generation/propagation/candidate validation before reduced-plan dispatch, then model-membership/world-view-validation/materialization staging, but actual stable-model membership population/final materialization dispatch is not implemented. |
 | M090_GPU.2 WCOJ eligibility | at least one epistemic reduction uses the WCOJ planner/path where eligible | PARTIAL | Reduced fixtures reach `RirNode::MultiWayJoin` and K-clique `MultiwayPlan`; no runtime dispatch evidence yet. |
-| M090_GPU.4 kernel coverage | kernels cover GPT hot paths | PARTIAL | Later runtime evidence launches candidate-generation, propagation-staging, candidate-buffer validation, model-membership staging, and materialization-staging kernels; stable-model validation/final materialization kernels are missing. |
-| M090_GPU.6 launch evidence | nonzero GPU launches and timing | PARTIAL | Later runtime traces record candidate-generation, propagation, candidate-validation, model-membership, and materialization launches with CUDA-event elapsed timing; stable-model validation/final materialization timing is missing. |
+| M090_GPU.4 kernel coverage | kernels cover GPT hot paths | PARTIAL | Later runtime evidence launches candidate-generation, propagation-staging, candidate-buffer validation, model-membership staging, world-view-validation staging, and materialization-staging kernels; final materialization kernels are missing. |
+| M090_GPU.6 launch evidence | nonzero GPU launches and timing | PARTIAL | Later runtime traces record candidate-generation, propagation, candidate-validation, model-membership, world-view-validation, and materialization launches with CUDA-event elapsed timing; final materialization timing is missing. |
 
 ## Remaining Blocker
 
-The next runtime slice must add stable-model world-view validation and final
-query-result materialization kernels or GPU-backed adapters, then report launch
-counters/timings plus zero CPU fallback counters.
+The next runtime slice must populate model-membership from actual
+reduced-runtime stable-model output and add final query-result materialization
+kernels or GPU-backed adapters, then report launch counters/timings plus zero
+CPU fallback counters.

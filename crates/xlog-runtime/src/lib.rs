@@ -16,7 +16,8 @@ pub use executor::{
     EpistemicGpuModelMembershipTrace, EpistemicGpuPreparedExecution, EpistemicGpuPropagationTrace,
     EpistemicGpuRuntimeCounters, EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace,
     EpistemicGpuRuntimeWcojCertification, EpistemicGpuWorkspace, EpistemicGpuWorkspaceCapacities,
-    EpistemicGpuWorkspaceLayout, EpistemicGpuWorkspaceResetTrace, Executor,
+    EpistemicGpuWorkspaceLayout, EpistemicGpuWorkspaceResetTrace,
+    EpistemicGpuWorldViewValidationTrace, Executor,
 };
 pub use ilp_registry::{read_device_row_count, IlpRegistry, IlpTagEntry, IlpTaggedResult};
 pub use profiler::{ExecutionStats, MeasureGuard, OpStats, Profiler, StratumStats};
