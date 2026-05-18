@@ -3,8 +3,15 @@
 use std::sync::Arc;
 use xlog_core::{AggOp, MemoryBudget, ScalarType, Schema};
 use xlog_cuda::{
-    CudaDevice, CudaKernelProvider, GpuDevicePool, GpuMemoryManager, MultiGpuMemoryManager,
+    CudaBuffer, CudaDevice, CudaKernelProvider, GpuDevicePool, GpuMemoryManager,
+    MultiGpuMemoryManager,
 };
+
+fn logical_rows(provider: &CudaKernelProvider, buffer: &CudaBuffer) -> usize {
+    provider
+        .device_row_count(buffer)
+        .expect("read logical row count")
+}
 
 fn main() {
     println!("=== XLOG Comprehensive System Validation ===\n");
@@ -88,14 +95,16 @@ fn main() {
     let semi = provider
         .hash_join_v2(&left, &right, &[0], &[0], xlog_cuda::JoinType::Semi)
         .expect("Semi join failed");
-    assert_eq!(semi.num_rows(), 3);
-    println!("✓ Semi join: {} rows (keys in both)", semi.num_rows());
+    let semi_rows = logical_rows(&provider, &semi);
+    assert_eq!(semi_rows, 3);
+    println!("✓ Semi join: {} rows (keys in both)", semi_rows);
 
     let anti = provider
         .hash_join_v2(&left, &right, &[0], &[0], xlog_cuda::JoinType::Anti)
         .expect("Anti join failed");
-    assert_eq!(anti.num_rows(), 2);
-    println!("✓ Anti join: {} rows (keys only in left)", anti.num_rows());
+    let anti_rows = logical_rows(&provider, &anti);
+    assert_eq!(anti_rows, 2);
+    println!("✓ Anti join: {} rows (keys only in left)", anti_rows);
 
     // Test 4: GroupBy aggregation
     println!("\n--- Test 4: GroupBy Aggregation ---");
@@ -120,8 +129,9 @@ fn main() {
             &[(1, AggOp::Sum)], // sum second column
         )
         .expect("GroupBy failed");
-    assert_eq!(agg_result.num_rows(), 3, "Expected 3 groups");
-    println!("✓ GroupBy Sum: 10 rows → {} groups", agg_result.num_rows());
+    let agg_rows = logical_rows(&provider, &agg_result);
+    assert_eq!(agg_rows, 3, "Expected 3 groups");
+    println!("✓ GroupBy Sum: 10 rows → {} groups", agg_rows);
 
     // Test 5: Dedup
     println!("\n--- Test 5: Dedup ---");
@@ -134,8 +144,9 @@ fn main() {
         .create_buffer_from_slices(&[&dup_keys], dup_schema.clone())
         .expect("create dup buffer");
     let dedup_result = provider.dedup(&dup_buf, &[0]).expect("Dedup failed");
-    assert_eq!(dedup_result.num_rows(), 4, "Expected 4 unique keys");
-    println!("✓ Dedup: 10 rows → {} unique", dedup_result.num_rows());
+    let dedup_rows = logical_rows(&provider, &dedup_result);
+    assert_eq!(dedup_rows, 4, "Expected 4 unique keys");
+    println!("✓ Dedup: 10 rows → {} unique", dedup_rows);
 
     // Test 6: Union and Diff (set operations)
     println!("\n--- Test 6: Set Operations ---");
@@ -158,18 +169,15 @@ fn main() {
     let union_result = provider.union(&buf_a, &buf_b).expect("Union failed");
     println!(
         "✓ Union: {} ∪ {} = {} elements",
-        buf_a.num_rows(),
-        buf_b.num_rows(),
-        union_result.num_rows()
+        logical_rows(&provider, &buf_a),
+        logical_rows(&provider, &buf_b),
+        logical_rows(&provider, &union_result)
     );
 
     let diff_result = provider.diff(&buf_a, &buf_b).expect("Diff failed");
-    assert_eq!(
-        diff_result.num_rows(),
-        3,
-        "Expected 3 elements in A-B (1,2,3)"
-    );
-    println!("✓ Diff: A \\ B = {} elements", diff_result.num_rows());
+    let diff_rows = logical_rows(&provider, &diff_result);
+    assert_eq!(diff_rows, 3, "Expected 3 elements in A-B (1,2,3)");
+    println!("✓ Diff: A \\ B = {} elements", diff_rows);
 
     // Test 7: Sort
     println!("\n--- Test 7: Sort ---");
@@ -261,10 +269,11 @@ fn main() {
     let filtered = provider
         .filter_by_mask(&filter_buf, &filter_mask)
         .expect("Filter failed");
-    assert_eq!(filtered.num_rows(), 5);
+    let filtered_rows = logical_rows(&provider, &filtered);
+    assert_eq!(filtered_rows, 5);
     println!(
         "✓ Filter by mask: 10 rows → {} rows (even indices)",
-        filtered.num_rows()
+        filtered_rows
     );
 
     // Memory verification

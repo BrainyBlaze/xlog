@@ -248,14 +248,14 @@ formal cert gate. It runs in two modes:
   * **Legacy** (default): builds the test fixture via
     `GpuMemoryManager::new` + `CudaKernelProvider::new`. Env
     flags are no-ops. Locks the v0.5 surface against
-    regression. Pass: 206/206.
+    regression. Pass: 207/207.
   * **Runtime + recorded**:
     `XLOG_USE_DEVICE_RUNTIME=1 XLOG_USE_RECORDED_OPS=1`. The
     fixture builds the production decorator stack
     (`AsyncCudaResource → LoggingResource → GlobalDeviceBudget
     → XlogDeviceRuntime`). The categories that touch
     `provider.sort` / `filter_by_mask` / `hash_join_v2` /
-    etc. exercise the recorded path end-to-end. Pass: 206/206.
+    etc. exercise the recorded path end-to-end. Pass: 207/207.
 
 The cert harness reaps pending async frees between
 categories (`ctx.reap_pending()`) so a long sequence of

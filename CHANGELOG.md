@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- Hardened the release example validator so every `.xlog`, probabilistic,
+  Python, and neural example runs in release validation without depending on
+  an installed `pyxlog` wheel or optional external neural datasets.
+- Fixed recorded CUDA sort/groupby row-count handling so compacted buffers do
+  not cache row capacity as logical cardinality.
+- Hardened adaptive join-index reuse so stale index metadata is evicted and
+  falls back to the regular hash join instead of aborting valid queries.
+- Updated the public CUDA certification count to 207/207 after the current
+  full-suite and recorded-launch certification reruns.
+
 ## [0.7.0] — 2026-05-18
 
 General WCOJ Architecture and Runtime Expansion. This release
@@ -44,10 +58,8 @@ integration, and release-board closure.
 
 ### Release Status
 
-- Closure board: 30 DONE, 0 IN-PROGRESS, 0 BLOCKED, 1 OPEN (W7.1 tag
-  authorization).
-- W7.1 still requires explicit user authorization before creating or
-  pushing the `v0.7.0` tag.
+- Closure board: 31 DONE, 0 IN-PROGRESS, 0 BLOCKED, 0 OPEN.
+- W7.1 is complete: the annotated `v0.7.0` tag has been created and pushed.
 
 ## [0.6.0] — 2026-04-29
 

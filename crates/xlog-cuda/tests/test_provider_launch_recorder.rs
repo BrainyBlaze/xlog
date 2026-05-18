@@ -713,6 +713,111 @@ fn provider_sort_recorded_survives_drop_and_reuse() {
     );
 }
 
+/// Regression: `sort_recorded` preserves the input device logical
+/// row count but must not cache the input row capacity as the
+/// output's logical count. Recorded GroupBy reads this cache before
+/// packing keys; if it sees capacity instead of logical rows, it
+/// over-reads compacted buffers.
+#[test]
+fn provider_sort_recorded_keeps_logical_row_count_with_capacity_slack() {
+    use xlog_core::{ScalarType, Schema};
+    use xlog_cuda::CudaBuffer;
+
+    let Some(device) = CudaDevice::new(0).ok().map(Arc::new) else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
+        AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+    );
+    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
+        async_resource,
+        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
+    ));
+    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
+        Box::new(GlobalDeviceBudget::new(logging, 64 * 1024 * 1024));
+    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
+        Arc::clone(&device),
+        0,
+        Arc::clone(&pool),
+        budget,
+    ));
+    let memory = Arc::new(GpuMemoryManager::with_runtime(
+        Arc::clone(&device),
+        MemoryBudget::with_limit(64 * 1024 * 1024),
+        Arc::clone(&runtime),
+    ));
+    let provider = CudaKernelProvider::with_runtime(Arc::clone(&device), Arc::clone(&memory))
+        .expect("provider with_runtime");
+    let launch_stream = pool.acquire().expect("acquire launch_stream");
+    let launch_handle = pool.resolve(launch_stream).expect("resolve launch_stream");
+
+    const ROW_CAP: usize = 8;
+    const LOGICAL: usize = 3;
+    let keys = [3u32, 1, 2, 100, 101, 102, 103, 104];
+    let vals = [30u32, 10, 20, 900, 901, 902, 903, 904];
+    let mut key_bytes = memory.alloc::<u8>(ROW_CAP * 4).expect("alloc keys");
+    let mut val_bytes = memory.alloc::<u8>(ROW_CAP * 4).expect("alloc vals");
+    let key_host: Vec<u8> = keys.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let val_host: Vec<u8> = vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+    device
+        .inner()
+        .htod_sync_copy_into(&key_host, &mut key_bytes)
+        .expect("htod keys");
+    device
+        .inner()
+        .htod_sync_copy_into(&val_host, &mut val_bytes)
+        .expect("htod vals");
+    let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc rows");
+    device
+        .inner()
+        .htod_sync_copy_into(&[LOGICAL as u32], &mut d_num_rows)
+        .expect("htod rows");
+    let input = CudaBuffer::from_columns(
+        vec![key_bytes.into(), val_bytes.into()],
+        ROW_CAP as u64,
+        d_num_rows,
+        Schema::new(vec![
+            ("k".to_string(), ScalarType::U32),
+            ("v".to_string(), ScalarType::U32),
+        ]),
+    );
+
+    let sorted = provider
+        .sort_recorded(&input, &[0], launch_stream)
+        .expect("sort_recorded");
+    launch_handle.synchronize().expect("sync launch");
+
+    assert_eq!(
+        provider.device_row_count(&sorted).expect("logical rows"),
+        LOGICAL
+    );
+
+    let mut observed_keys = vec![0u8; LOGICAL * 4];
+    let mut observed_vals = vec![0u8; LOGICAL * 4];
+    unsafe {
+        dtoh_sync(
+            &mut observed_keys,
+            *sorted.column(0).expect("sorted key column").device_ptr(),
+        );
+        dtoh_sync(
+            &mut observed_vals,
+            *sorted.column(1).expect("sorted val column").device_ptr(),
+        );
+    }
+    let observed_keys: Vec<u32> = observed_keys
+        .chunks_exact(4)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect();
+    let observed_vals: Vec<u32> = observed_vals
+        .chunks_exact(4)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .collect();
+    assert_eq!(observed_keys, vec![1, 2, 3]);
+    assert_eq!(observed_vals, vec![10, 20, 30]);
+}
+
 /// Slice #5 dedup: drop+reuse test for `dedup_full_row_recorded`.
 /// Composes `sort_recorded` (typed sort on launch_stream) →
 /// on-stream `mark_unique_full_row_bytewise` → recorded

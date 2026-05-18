@@ -55,6 +55,15 @@ fn eligible_for_nested_loop(
     lt == rt && matches!(lt, Some(ScalarType::U32) | Some(ScalarType::Symbol))
 }
 
+fn is_join_index_mismatch(err: &XlogError) -> bool {
+    matches!(
+        err,
+        XlogError::Kernel(msg)
+            if msg.contains("Join index row count does not match right relation")
+                || msg.contains("Join index key columns do not match requested right_keys")
+    )
+}
+
 impl Executor {
     /// Execute a Scan node — looks up the relation by RelId and returns a clone.
     pub(super) fn execute_scan(&mut self, rel: RelId) -> Result<CudaBuffer> {
@@ -374,40 +383,54 @@ impl Executor {
                             key_cols: right_keys.to_vec(),
                         };
 
-                        if let Some(index) = self.join_index_cache.get(&key) {
-                            out = Some(self.provider.hash_join_v2_with_index(
-                                left,
-                                right,
-                                left_keys,
-                                right_keys,
-                                cuda_join_type,
-                                index,
-                                None,
-                            )?);
+                        let indexed_result = {
+                            self.join_index_cache.get(&key).map(|index| {
+                                self.provider.hash_join_v2_with_index(
+                                    left,
+                                    right,
+                                    left_keys,
+                                    right_keys,
+                                    cuda_join_type,
+                                    index,
+                                    None,
+                                )
+                            })
+                        };
+                        if let Some(indexed_result) = indexed_result {
+                            match indexed_result {
+                                Ok(joined) => out = Some(joined),
+                                Err(err) if is_join_index_mismatch(&err) => {
+                                    self.join_index_cache.remove(&key);
+                                }
+                                Err(err) => return Err(err),
+                            }
                         } else if should_index {
-                            if let Some(build_buf) = self.store.get(&build_name) {
-                                match self.provider.build_join_index_v2(build_buf, right_keys) {
-                                    Ok(index) => {
-                                        let joined = self.provider.hash_join_v2_with_index(
-                                            left,
-                                            right,
-                                            left_keys,
-                                            right_keys,
-                                            cuda_join_type,
-                                            &index,
-                                            None,
-                                        )?;
-                                        self.join_index_cache.insert(key, index);
-                                        if let Some(stats) =
-                                            self.stats.get_relation_stats_mut(build_rel)
-                                        {
-                                            stats.has_index = true;
+                            match self.provider.build_join_index_v2(right, right_keys) {
+                                Ok(index) => {
+                                    match self.provider.hash_join_v2_with_index(
+                                        left,
+                                        right,
+                                        left_keys,
+                                        right_keys,
+                                        cuda_join_type,
+                                        &index,
+                                        None,
+                                    ) {
+                                        Ok(joined) => {
+                                            self.join_index_cache.insert(key, index);
+                                            if let Some(stats) =
+                                                self.stats.get_relation_stats_mut(build_rel)
+                                            {
+                                                stats.has_index = true;
+                                            }
+                                            out = Some(joined);
                                         }
-                                        out = Some(joined);
+                                        Err(err) if is_join_index_mismatch(&err) => {}
+                                        Err(err) => return Err(err),
                                     }
-                                    Err(_) => {
-                                        // If indexing fails (e.g., memory pressure), fall back to normal join.
-                                    }
+                                }
+                                Err(_) => {
+                                    // If indexing fails (e.g., memory pressure), fall back to normal join.
                                 }
                             }
                         }

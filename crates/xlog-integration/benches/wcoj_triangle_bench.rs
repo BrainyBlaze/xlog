@@ -17,13 +17,13 @@
 //!   * **Off**:      `wcoj_triangle_dispatch=Some(false)`. Binary-
 //!                   join chain only. Baseline for speedup.
 //!   * **Force**:    `wcoj_triangle_dispatch=Some(true)`. WCOJ
-//!                   pipeline always; classifier bypassed. The
+//!                   pipeline always; adaptive model bypassed. The
 //!                   pre-A2-lite "gate-on" path.
 //!   * **Adaptive**: `wcoj_triangle_dispatch_adaptive=Some(true)`,
-//!                   force left None. Classifier runs first;
-//!                   dispatches WCOJ only when score ≥ 0.10.
-//!                   uniform/empty → routes to binary; superhub →
-//!                   routes to WCOJ.
+//!                   force left None. The default v0.7 cardinality
+//!                   cost model runs first. Bench cells seed stats
+//!                   to lock the intended route: uniform/empty
+//!                   route to binary; superhub routes to WCOJ.
 //!
 //! `WCOJ_BENCH_FULL=1` adds {100K, 250K} sizes for the same
 //! width/fixture cross-product. The full matrix is intentionally
@@ -83,7 +83,7 @@ use std::time::{Duration, Instant};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use cudarc::driver::sys;
 
-use xlog_core::{MemoryBudget, RuntimeConfig, ScalarType, Schema};
+use xlog_core::{MemoryBudget, RelId, RuntimeConfig, ScalarType, Schema};
 use xlog_cuda::memory::CudaBuffer;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_ir::ExecutionPlan;
@@ -402,11 +402,12 @@ fn make_provider(memory_mb: u64) -> Option<ProviderFixture> {
 ///   * `Off`      — `with_wcoj_triangle_dispatch(Some(false))`.
 ///                 Binary-join chain only. Baseline.
 ///   * `Force`    — `with_wcoj_triangle_dispatch(Some(true))`.
-///                 WCOJ pipeline always; classifier bypassed.
+///                 WCOJ pipeline always; adaptive model bypassed.
 ///                 The pre-A2-lite "gate-on" semantic.
 ///   * `Adaptive` — `with_wcoj_triangle_dispatch_adaptive(Some(true))`,
-///                 force left `None`. Classifier runs and
-///                 dispatches WCOJ only when score ≥ threshold.
+///                 force left `None`. The v0.7 cardinality model
+///                 runs and dispatches WCOJ when seeded stats
+///                 estimate a large binary intermediate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Off,
@@ -434,25 +435,52 @@ impl Mode {
     }
 }
 
+const ADAPTIVE_DISPATCH_CARDS: [u64; 3] = [100_000, 100_000, 100_000];
+const ADAPTIVE_FALLBACK_CARDS: [u64; 3] = [64, 64, 64];
+
+fn seed_adaptive_triangle_cards(
+    executor: &mut Executor,
+    rel_ids: [RelId; 3],
+    expects_adaptive_dispatch: bool,
+) {
+    let cards = if expects_adaptive_dispatch {
+        ADAPTIVE_DISPATCH_CARDS
+    } else {
+        ADAPTIVE_FALLBACK_CARDS
+    };
+    for (rel_id, card) in rel_ids.into_iter().zip(cards) {
+        executor.stats_mut().update_cardinality(rel_id, card);
+    }
+}
+
 fn build_executor(
     fix: &ProviderFixture,
     fixture: &Fixture,
     width: Width,
     mode: Mode,
-) -> (Executor, ExecutionPlan) {
+    expects_adaptive_dispatch: bool,
+) -> (Executor, ExecutionPlan, [RelId; 3]) {
     let mut compiler = Compiler::new();
     let plan = compiler.compile(TRIANGLE_SOURCE).expect("compile");
     let mut executor = Executor::new_with_config(Arc::clone(&fix.provider), mode.into_config());
     for (name, rel_id) in compiler.rel_ids() {
         executor.register_relation(*rel_id, name);
     }
+    let input_rels = [
+        *compiler.rel_ids().get("e1").expect("e1 rel id"),
+        *compiler.rel_ids().get("e2").expect("e2 rel id"),
+        *compiler.rel_ids().get("e3").expect("e3 rel id"),
+    ];
     let buf_e1 = upload_binary(&fix.memory, &fixture.e1, width);
     let buf_e2 = upload_binary(&fix.memory, &fixture.e2, width);
     let buf_e3 = upload_binary(&fix.memory, &fixture.e3, width);
     executor.put_relation("e1", buf_e1);
     executor.put_relation("e2", buf_e2);
     executor.put_relation("e3", buf_e3);
-    (executor, plan)
+    if mode == Mode::Adaptive {
+        seed_adaptive_triangle_cards(&mut executor, input_rels, expects_adaptive_dispatch);
+    }
+    (executor, plan, input_rels)
 }
 
 // ---------------------------------------------------------------
@@ -518,9 +546,8 @@ fn download_triples_u64(buf: &CudaBuffer) -> BTreeSet<(u64, u64, u64)> {
 /// cell: row sets from `Mode::Off` (binary-join) and `Mode::Force`
 /// (WCOJ pipeline) must agree, and the dispatch counter must
 /// reflect mode semantics. `expects_adaptive_dispatch` says
-/// whether the family's input distribution should clear the
-/// classifier threshold; the check uses that to assert
-/// `Mode::Adaptive` routes correctly.
+/// whether the cell's seeded v0.7 cardinality stats should route
+/// `Mode::Adaptive` through WCOJ.
 fn correctness_check(
     fix: &ProviderFixture,
     fixture: &Fixture,
@@ -529,7 +556,8 @@ fn correctness_check(
     expects_adaptive_dispatch: bool,
 ) {
     // Off path: counter==0, row set is the binary-join reference.
-    let (mut exec_off, plan_off) = build_executor(fix, fixture, width, Mode::Off);
+    let (mut exec_off, plan_off, _) =
+        build_executor(fix, fixture, width, Mode::Off, expects_adaptive_dispatch);
     exec_off.execute_plan(&plan_off).expect("execute Off");
     let off_counter = exec_off.wcoj_triangle_dispatch_count();
     assert_eq!(
@@ -545,7 +573,8 @@ fn correctness_check(
     };
 
     // Force path: counter==1, row set must equal Off's.
-    let (mut exec_force, plan_force) = build_executor(fix, fixture, width, Mode::Force);
+    let (mut exec_force, plan_force, _) =
+        build_executor(fix, fixture, width, Mode::Force, expects_adaptive_dispatch);
     exec_force.execute_plan(&plan_force).expect("execute Force");
     let force_counter = exec_force.wcoj_triangle_dispatch_count();
     assert_eq!(
@@ -572,12 +601,18 @@ fn correctness_check(
         "[{label}] row sets diverge between binary-join and WCOJ paths"
     );
 
-    // Adaptive path: counter is family-dependent.
-    //   * uniform/empty: classifier rejects → counter==0,
+    // Adaptive path: counter is seeded-stats-dependent.
+    //   * uniform/empty: small seeded cards → counter==0,
     //     row set must equal binary-join (Off).
-    //   * superhub: classifier accepts → counter==1, row set
+    //   * superhub: large seeded cards → counter==1, row set
     //     must equal WCOJ (Force).
-    let (mut exec_adapt, plan_adapt) = build_executor(fix, fixture, width, Mode::Adaptive);
+    let (mut exec_adapt, plan_adapt, _) = build_executor(
+        fix,
+        fixture,
+        width,
+        Mode::Adaptive,
+        expects_adaptive_dispatch,
+    );
     exec_adapt
         .execute_plan(&plan_adapt)
         .expect("execute Adaptive");
@@ -586,12 +621,12 @@ fn correctness_check(
     assert_eq!(
         adapt_counter,
         expected_adapt_counter,
-        "[{label}] Mode::Adaptive expected counter {expected_adapt_counter} (classifier should \
+        "[{label}] Mode::Adaptive expected counter {expected_adapt_counter} (cost model should \
          {}), got {adapt_counter}",
         if expects_adaptive_dispatch {
-            "accept"
+            "dispatch"
         } else {
-            "reject"
+            "fallback"
         }
     );
     let rows_adapt = {
@@ -645,7 +680,8 @@ fn bench_cell(
         // iteration so subsequent dispatches don't pay
         // `union_gpu(growing_tri, new_result)` cost — that
         // would bias the timing as iterations accumulate.
-        let (mut executor, plan) = build_executor(fix, fixture, width, mode);
+        let (mut executor, plan, input_rels) =
+            build_executor(fix, fixture, width, mode, expects_adaptive_dispatch);
         b.iter_custom(|iters| {
             // Counter delta lock: per-mode expectations. A
             // silent fallback anywhere in the hot loop would
@@ -655,9 +691,10 @@ fn bench_cell(
             //
             // Off:        delta == 0 (binary-join only).
             // Force:      delta == iters (WCOJ every iter).
-            // Adaptive:   delta == iters when classifier
-            //             accepts (super-hub); delta == 0 when
-            //             classifier rejects (uniform / empty).
+            // Adaptive:   delta == iters when seeded stats route
+            //             to WCOJ (super-hub); delta == 0 when
+            //             seeded stats route to fallback
+            //             (uniform / empty).
             let counter_before = executor.wcoj_triangle_dispatch_count();
             let mut total = Duration::ZERO;
             for _ in 0..iters {
@@ -665,6 +702,13 @@ fn bench_cell(
                 executor.put_relation("e1", upload_binary(&fix.memory, &fixture.e1, width));
                 executor.put_relation("e2", upload_binary(&fix.memory, &fixture.e2, width));
                 executor.put_relation("e3", upload_binary(&fix.memory, &fixture.e3, width));
+                if mode == Mode::Adaptive {
+                    seed_adaptive_triangle_cards(
+                        &mut executor,
+                        input_rels,
+                        expects_adaptive_dispatch,
+                    );
+                }
                 // Timed region: execute_plan only.
                 let start = Instant::now();
                 let _ = executor.execute_plan(&plan).expect("execute_plan");
@@ -761,9 +805,8 @@ fn bench_uniform(c: &mut Criterion) {
         eprintln!("Skipping bench_uniform: No CUDA device");
         return;
     };
-    // Uniform Erdős-Rényi: classifier expected to REJECT
-    // (score ≈ 0.02 < 0.10 threshold). Adaptive cells should
-    // route to binary join.
+    // Uniform Erdős-Rényi: adaptive cells seed small stats so the
+    // v0.7 cardinality model routes to binary join.
     run_family(c, &fix, "uniform", make_uniform, false);
 }
 
@@ -772,8 +815,8 @@ fn bench_superhub(c: &mut Criterion) {
         eprintln!("Skipping bench_superhub: No CUDA device");
         return;
     };
-    // Super-hub: classifier expected to ACCEPT (score ≈ 0.18 ≥
-    // 0.10 threshold). Adaptive cells should dispatch WCOJ.
+    // Super-hub: adaptive cells seed large stats so the v0.7
+    // cardinality model dispatches WCOJ.
     run_family(c, &fix, "superhub", make_superhub, true);
 }
 
@@ -782,8 +825,8 @@ fn bench_empty(c: &mut Criterion) {
         eprintln!("Skipping bench_empty: No CUDA device");
         return;
     };
-    // Disjoint key ranges: column distributions are uniform-
-    // shaped, classifier expected to REJECT.
+    // Disjoint key ranges: adaptive cells seed small stats so the
+    // v0.7 cardinality model routes to binary join.
     run_family(c, &fix, "empty", make_empty, false);
 }
 
@@ -802,8 +845,9 @@ fn bench_symbol_sanity(c: &mut Criterion) {
     group.sample_size(10);
     let rows = 10_000u32;
     let fixture = make_uniform(rows);
-    // Uniform-shaped → adaptive would reject. Pass false so the
-    // correctness check asserts adaptive counter == 0.
+    // Uniform-shaped sanity uses the binary-routed adaptive stats
+    // profile. Pass false so the correctness check asserts
+    // adaptive counter == 0.
     correctness_check(&fix, &fixture, Width::Symbol, "symbol-uniform-10K", false);
     bench_cell(
         &mut group,

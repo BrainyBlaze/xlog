@@ -19,7 +19,7 @@ xlog run --input edge=data.arrow examples/xlog/00-basics/01_tc_reachability.xlog
 The workspace also provides a small runner for examples:
 
 ```bash
-cargo run -p xlog-logic --release --example xlog_run -- examples/xlog/00-basics/01_tc_reachability.xlog
+cargo run -p xlog-integration --release --bin xlog_run -- examples/xlog/00-basics/01_tc_reachability.xlog
 ```
 
 By default the runner:
@@ -132,6 +132,10 @@ python train.py --epochs 10 --batch-size 32
 ```
 
 The network learns digit classification purely from sum labels — no individual digit labels provided!
+
+`scripts/validate_examples.py` smoke-runs the neural examples with deterministic
+fixture data when optional external datasets are absent. Set
+`XLOG_VALIDATE_NEURAL_FULL=1` to require the real datasets during validation.
 
 ---
 

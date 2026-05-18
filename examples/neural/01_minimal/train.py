@@ -27,9 +27,17 @@ Example:
 import argparse
 import os
 import random
+import sys
+from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from scripts.neural_training import class_pattern_tensor, neural_fixture_smoke_enabled
 
 
 def compute_improvement_percent(epoch_losses):
@@ -237,6 +245,18 @@ def load_mnist_test(data_path, limit=None):
     return _load_mnist_split(data_path, train=False, limit=limit)
 
 
+def _synthetic_mnist_split(train, limit=None):
+    if limit is None:
+        env_limit = os.environ.get("XLOG_PY_EXAMPLE_MNIST_LIMIT")
+        if env_limit:
+            limit = max(1, int(env_limit))
+        else:
+            limit = 256 if train else 128
+    n = max(1, int(limit))
+    labels = [i % 10 for i in range(n)]
+    return class_pattern_tensor(labels, 10, 1, 28, 28), labels
+
+
 def _load_mnist_split(data_path, train, limit=None):
     try:
         from torchvision import datasets, transforms
@@ -267,9 +287,17 @@ def _load_mnist_split(data_path, train, limit=None):
         return images, labels
 
     except ImportError as exc:
+        if neural_fixture_smoke_enabled():
+            print("INFO: using synthetic MNIST fixture; torchvision is unavailable")
+            return _synthetic_mnist_split(train, limit)
         raise RuntimeError(
             "torchvision is required to load MNIST datasets for this example."
         ) from exc
+    except Exception:
+        if neural_fixture_smoke_enabled():
+            print("INFO: using synthetic MNIST fixture; real MNIST load failed")
+            return _synthetic_mnist_split(train, limit)
+        raise
 
 
 def train_torch_addition(

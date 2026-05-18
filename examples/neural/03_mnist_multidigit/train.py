@@ -8,7 +8,9 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scripts.neural_datasets import DatasetManifest
 from scripts.neural_training import (
+    class_pattern_tensor,
     classification_accuracy,
+    neural_fixture_smoke_enabled,
     report_and_enforce_metric,
     resolve_epochs,
     resolve_min_accuracy,
@@ -43,9 +45,26 @@ def _read_bbox_field_values(h5, bbox_group, field: str):
     return [float(ds[i][0]) for i in range(ds.shape[0])]
 
 
+def _fixture_svhn_two_digit(mode: str):
+    import torch
+
+    manifest = DatasetManifest.load(MANIFEST)
+    if mode == "ci":
+        n = manifest.ci_subset.get("train", 64)
+    else:
+        n = 64
+    labels = [(i % 10, (i * 3 + 1) % 10) for i in range(n)]
+    left = class_pattern_tensor([l for l, _ in labels], 10, 3, 32, 32)
+    right = class_pattern_tensor([r for _, r in labels], 10, 3, 32, 32)
+    return manifest, torch.cat([left, right], dim=1), labels
+
+
 def load_svhn_two_digit(mode: str):
     mat_path = DATA / "train" / "digitStruct.mat"
     if not mat_path.exists():
+        if neural_fixture_smoke_enabled():
+            print("INFO: using synthetic SVHN two-digit fixture; dataset is unavailable")
+            return _fixture_svhn_two_digit(mode)
         raise SystemExit(
             "SVHN data missing. Place SVHN train/ with digitStruct.mat under examples/neural/03_mnist_multidigit/data/svhn"
         )
@@ -55,6 +74,9 @@ def load_svhn_two_digit(mode: str):
         from PIL import Image
         from torchvision import transforms
     except ImportError as exc:
+        if neural_fixture_smoke_enabled():
+            print("INFO: using synthetic SVHN two-digit fixture; dependency is unavailable")
+            return _fixture_svhn_two_digit(mode)
         raise SystemExit(f"Missing dependency: {exc}")
     import torch
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import time
 from pathlib import Path
@@ -9,6 +10,16 @@ from typing import List, Optional, Tuple
 import torch
 
 from scripts.neural_datasets import DatasetManifest
+
+
+def neural_fixture_smoke_enabled() -> bool:
+    """Return true when validators should use built-in neural smoke fixtures."""
+    return os.environ.get("XLOG_NEURAL_FIXTURE_SMOKE", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def set_seed(seed: int) -> None:
@@ -39,6 +50,8 @@ def resolve_min_accuracy(
     manifest: DatasetManifest,
     override: Optional[float],
 ) -> Optional[float]:
+    if neural_fixture_smoke_enabled():
+        return None
     if override is not None:
         return float(override)
     if mode != "release":
@@ -47,6 +60,56 @@ def resolve_min_accuracy(
     if value is None:
         return None
     return float(value)
+
+
+class TensorClassificationDataset:
+    """Small in-memory dataset with the ImageFolder fields used by examples."""
+
+    def __init__(self, images: torch.Tensor, targets: List[int], classes: List[str]):
+        if images.size(0) != len(targets):
+            raise ValueError("images and targets length mismatch")
+        self.images = images
+        self.targets = [int(t) for t in targets]
+        self.classes = list(classes)
+        self.samples = [(f"fixture-{i}", int(t)) for i, t in enumerate(self.targets)]
+
+    def __len__(self) -> int:
+        return len(self.targets)
+
+    def __getitem__(self, idx: int):
+        return self.images[idx], self.targets[idx]
+
+    def __iter__(self):
+        for idx in range(len(self)):
+            yield self[idx]
+
+
+def class_pattern_tensor(
+    labels: List[int],
+    num_classes: int,
+    channels: int,
+    height: int,
+    width: int,
+) -> torch.Tensor:
+    """Build deterministic visual fixtures with label-encoded patterns."""
+    images = torch.zeros((len(labels), channels, height, width), dtype=torch.float32)
+    stripe_w = max(1, width // max(num_classes, 1))
+    stripe_h = max(1, height // max(num_classes, 1))
+    for row, label in enumerate(labels):
+        cls = int(label) % max(num_classes, 1)
+        base = (cls + 1) / (num_classes + 1)
+        images[row].fill_(base * 0.35)
+        channel = cls % max(channels, 1)
+        x0 = min(width - 1, cls * stripe_w)
+        x1 = min(width, x0 + stripe_w)
+        y0 = min(height - 1, cls * stripe_h)
+        y1 = min(height, y0 + stripe_h)
+        images[row, channel, :, x0:x1] = 1.0
+        images[row, :, y0:y1, :] = torch.maximum(
+            images[row, :, y0:y1, :],
+            torch.full_like(images[row, :, y0:y1, :], 0.65),
+        )
+    return images
 
 
 def split_indices(

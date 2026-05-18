@@ -120,6 +120,12 @@ impl JoinIndexCache {
         );
     }
 
+    pub(crate) fn remove(&mut self, key: &JoinIndexKey) {
+        if let Some(prev) = self.entries.remove(key) {
+            self.total_bytes = self.total_bytes.saturating_sub(prev.bytes);
+        }
+    }
+
     pub(crate) fn invalidate_rel(&mut self, rel: RelId) {
         let keys: Vec<JoinIndexKey> = self
             .entries

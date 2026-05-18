@@ -98,6 +98,11 @@ unless overridden via `--min-accuracy`.
 - torchvision (for MNIST)
 - pyxlog (built with `maturin develop --release`)
 
+The repository validator uses `XLOG_NEURAL_FIXTURE_SMOKE=1` to execute every
+neural example entrypoint with deterministic in-memory fixtures when optional
+external datasets or torchvision are not installed. Real-dataset benchmark runs
+still use the paths documented above.
+
 ## API Reference
 
 ```python

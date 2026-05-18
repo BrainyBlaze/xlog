@@ -6475,12 +6475,11 @@ impl super::CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("sort_recorded: commit failed: {}", e)))?;
 
         let new_columns: Vec<CudaColumn> = dst_cols.into_iter().map(|s| s.into()).collect();
-        Ok(CudaBuffer::from_columns_with_host_count(
+        Ok(CudaBuffer::from_columns(
             new_columns,
             input.num_rows(),
             output_d_num_rows,
             input.schema.clone(),
-            n,
         ))
     }
 

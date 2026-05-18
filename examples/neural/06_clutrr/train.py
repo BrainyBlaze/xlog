@@ -10,6 +10,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from scripts.neural_datasets import DatasetManifest
 from scripts.neural_training import (
     classification_accuracy,
+    neural_fixture_smoke_enabled,
     report_and_enforce_metric,
     resolve_epochs,
     resolve_min_accuracy,
@@ -38,9 +39,26 @@ def encode(text, vocab, max_len=64):
     return tokens + [0] * (max_len - len(tokens))
 
 
+def _fixture_clutrr(mode: str):
+    manifest = DatasetManifest.load(MANIFEST)
+    if mode == "ci":
+        n = manifest.ci_subset.get("train", 64)
+    else:
+        n = 64
+    rows = []
+    for i in range(n):
+        label = LABELS[i % len(LABELS)]
+        story = f"{label} relation fixture person{i} token_{label} token_{label}"
+        rows.append((story, label))
+    return manifest, rows
+
+
 def load_clutrr(mode: str):
     data_file = DATA / "train.jsonl"
     if not data_file.exists():
+        if neural_fixture_smoke_enabled():
+            print("INFO: using synthetic CLUTRR fixture; dataset is unavailable")
+            return _fixture_clutrr(mode)
         raise SystemExit(
             "CLUTRR dataset missing. Place train.jsonl under examples/neural/06_clutrr/data/clutrr"
         )

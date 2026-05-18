@@ -8,7 +8,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scripts.neural_datasets import DatasetManifest
 from scripts.neural_training import (
+    TensorClassificationDataset,
+    class_pattern_tensor,
     classification_accuracy,
+    neural_fixture_smoke_enabled,
     report_and_enforce_metric,
     resolve_epochs,
     resolve_min_accuracy,
@@ -21,11 +24,32 @@ DATA = ROOT / "data"
 MANIFEST = ROOT / "dataset.json"
 
 
+def _fixture_dataset():
+    manifest = DatasetManifest.load(MANIFEST)
+    classes = ["heads", "tails"]
+    train_targets = [i % 2 for i in range(12)]
+    test_targets = [i % 2 for i in range(4)]
+    train_ds = TensorClassificationDataset(
+        class_pattern_tensor(train_targets, 2, 3, 64, 64),
+        train_targets,
+        classes,
+    )
+    test_ds = TensorClassificationDataset(
+        class_pattern_tensor(test_targets, 2, 3, 64, 64),
+        test_targets,
+        classes,
+    )
+    return manifest, train_ds, test_ds
+
+
 def load_dataset(mode: str):
     manifest = DatasetManifest.load(MANIFEST)
     train_dir = DATA / "coins" / "train"
     test_dir = DATA / "coins" / "test"
     if not train_dir.exists() or not test_dir.exists():
+        if neural_fixture_smoke_enabled():
+            print("INFO: using synthetic coins fixture; dataset is unavailable")
+            return _fixture_dataset()
         raise SystemExit(
             "Dataset missing: examples/neural/02_coins/data/coins with train/ and test/"
         )
@@ -33,6 +57,9 @@ def load_dataset(mode: str):
     try:
         from torchvision import datasets, transforms
     except ImportError as exc:
+        if neural_fixture_smoke_enabled():
+            print("INFO: using synthetic coins fixture; torchvision is unavailable")
+            return _fixture_dataset()
         raise SystemExit(f"Missing dependency: {exc}")
 
     transform = transforms.Compose([transforms.Resize((64, 64)), transforms.ToTensor()])

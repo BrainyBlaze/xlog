@@ -166,10 +166,17 @@ impl super::CudaKernelProvider {
             }
         }
 
-        let num_rows = num_rows as u32;
-
         // Step 1: Sort buffer by key columns
         let sorted = self.sort(buffer, key_cols)?;
+        let num_rows = self.device_row_count(&sorted)?;
+        if num_rows > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "GroupBy supports at most {} rows, got {}",
+                u32::MAX,
+                num_rows
+            )));
+        }
+        let num_rows = num_rows as u32;
 
         // Step 2: Detect boundaries using detect_group_boundaries kernel over packed key bytes
         let boundary_func = self
@@ -1029,7 +1036,14 @@ impl super::CudaKernelProvider {
 
         // Step 1: sort by key columns (recorded sort, U32/Symbol only).
         let sorted = self.sort_recorded(buffer, key_cols, launch_stream)?;
-
+        let num_rows = self.device_row_count(&sorted)?;
+        if num_rows > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "GroupBy supports at most {} rows, got {}",
+                u32::MAX,
+                num_rows
+            )));
+        }
         let num_rows = num_rows as u32;
         let row_cap_usize = num_rows as usize;
         let row_cap_u32 = num_rows;

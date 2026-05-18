@@ -6,11 +6,11 @@ This document describes the XLOG CUDA/PTX kernel certification test suite, which
 
 The certification suite is implemented in the `xlog-cuda-tests` crate and provides comprehensive coverage of all CUDA kernel operations.
 
-**As of:** April 2026 (`main` / current HEAD)
+**As of:** May 2026 (`main` / current HEAD)
 
 | Metric | Value |
 |--------|-------|
-| Total tests | 206 |
+| Total tests | 207 |
 | Categories | 33 (C01-C25 + G01-G08) |
 | PTX modules | 22 |
 | Execution mode | GPU-only (requires CUDA hardware) |
@@ -199,9 +199,9 @@ CPU reference implementations for all operations:
 
 | Category Group | Tests |
 |----------------|-------|
-| Core CUDA kernels (C01-C25) | 150 |
+| Core CUDA kernels (C01-C25) | 151 |
 | Probabilistic/Neural/Solver kernels (G01-G08) | 56 |
-| **Total** | **206** |
+| **Total** | **207** |
 
 ## Key Correctness Tests
 
