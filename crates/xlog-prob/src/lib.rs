@@ -5,6 +5,7 @@
 pub mod cnf;
 #[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
 pub mod compilation;
+pub mod epistemic;
 #[allow(missing_docs)] // TODO(v0.6): document or make pub(crate)
 pub mod exact;
 #[allow(dead_code)] // reserved: GPU-only exact compilation path (not yet wired to main pipeline)

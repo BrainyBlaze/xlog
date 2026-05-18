@@ -83,6 +83,18 @@ If a program uses aggregation, use `prob_engine=mc`.
 
 **Non-monotone SCC semantics:** `xlog_prob::mc::NONMONOTONE_SEMANTICS` (also surfaced to Python results).
 
+## v0.9 Epistemic Integration Contract
+
+The v0.9 epistemic work treats epistemic choices as probabilistic evidence conditions, not as hidden rewrites in the PIR or circuit layers. The bounded fixture API lives in `xlog_prob::epistemic` and documents the current contract:
+
+- `EpistemicAssumption` maps epistemic choices to compiler-facing evidence literals such as `know:rain/0=true`.
+- `EpistemicCircuit` keeps a compiled circuit fingerprint, active epistemic evidence, and deterministic query probability for fixture-scale integration tests.
+- `KnowledgeCompilerAdapter::gpu_d4()` represents the existing GPU-D4/XGCF path and supports incremental evidence updates.
+- `KnowledgeCompilerAdapter::external_ddnnf_text(...)` records an alternative external Decision-DNNF text adapter design. It consumes DIMACS CNF and emits Decision-DNNF text, but is explicitly `DesignOnly` in this slice.
+- `conditional_probability_from_logs` normalizes `log P(Q and E)` and `log P(E)` with `EPISTEMIC_PROBABILITY_TOLERANCE = 1e-12`, clamping only values within that documented tolerance.
+
+When an adapter supports incremental evidence, changing an epistemic assumption updates active evidence without changing the circuit fingerprint or incrementing the compile count. Adapters that do not support incremental evidence must report a full rebuild. This preserves coherent query semantics while keeping v0.9 bounded: production exact inference still uses the GPU-native compiler, and the external adapter is a documented compatibility design rather than a dispatch path.
+
 ---
 
 ## Exact Path (`ExactDdnnfProgram`)

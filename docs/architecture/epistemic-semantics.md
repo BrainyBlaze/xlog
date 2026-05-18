@@ -56,10 +56,11 @@ epistemic programs must flow through EIR-specific planning rather than the
 stable Datalog lowering path. Non-epistemic programs continue using the existing
 parser, stratifier, RIR lowering, runtime, and probabilistic paths.
 
-The probabilistic WFS/provenance code also rejects epistemic literals with
-typed `UnsupportedEpistemicConstruct` errors. `G090_PROB` owns the later
-semantic contract for combining epistemic assumptions with probabilistic
-queries and circuit updates.
+The probabilistic WFS/provenance code still rejects direct epistemic literals
+with typed `UnsupportedEpistemicConstruct` errors. The bounded `G090_PROB`
+contract lives in `xlog_prob::epistemic`: epistemic assumptions are compiled as
+probabilistic evidence conditions for fixture-scale circuit update tests, not
+as hidden rewrites in the production provenance path.
 
 ## G91 Compatibility Fixture Semantics
 
