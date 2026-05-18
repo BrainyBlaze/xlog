@@ -123,3 +123,23 @@ context `epistemic GPT candidate guard`.
 This fixture makes the phase boundary auditable. It does not yet enumerate
 candidate worlds from arbitrary EIR programs; later solver and splitting work can
 replace the explicit candidate input while preserving the trace contract.
+
+## Epistemic Splitting Fixture Contract
+
+`build_epistemic_dependency_graph` builds deterministic split components from
+source-order rules:
+
+- each component records sorted predicate names;
+- each component records source rule indices;
+- components are sorted lexicographically by predicate list.
+
+`split_epistemic_program` rejects a rule that couples more than one distinct
+epistemic body predicate. In this bounded split layer, such a rule would require
+cross-component solving and is rejected with
+`XlogError::UnsupportedEpistemicConstruct { construct: "epistemic splitting",
+... }`.
+
+For valid split fixtures, `EpistemicSplitPlan::recomposed_rule_indices` sorts the
+component rule indices and must equal the unsplit source rule order. This gives a
+stable recomposition certificate before later execution layers attach actual
+candidate solving to each component.

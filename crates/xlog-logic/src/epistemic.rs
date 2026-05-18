@@ -130,6 +130,42 @@ pub struct GeneratePropagateTestOutcome {
     pub accepted_candidate_indices: Vec<usize>,
 }
 
+/// One deterministic dependency component for epistemic splitting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpistemicDependencyComponent {
+    /// Sorted predicate names in the component.
+    pub predicates: Vec<String>,
+    /// Source rule indices owned by the component.
+    pub rule_indices: Vec<usize>,
+}
+
+/// Deterministic dependency graph used by bounded epistemic splitting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpistemicDependencyGraph {
+    /// Sorted components.
+    pub components: Vec<EpistemicDependencyComponent>,
+}
+
+/// Split plan for independently solvable epistemic components.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpistemicSplitPlan {
+    /// Components to solve independently.
+    pub components: Vec<EpistemicDependencyComponent>,
+}
+
+impl EpistemicSplitPlan {
+    /// Return the original rule order recovered from all components.
+    pub fn recomposed_rule_indices(&self) -> Vec<usize> {
+        let mut indices: Vec<usize> = self
+            .components
+            .iter()
+            .flat_map(|component| component.rule_indices.iter().copied())
+            .collect();
+        indices.sort_unstable();
+        indices
+    }
+}
+
 /// Evaluate a single parsed epistemic literal against a bounded interpretation.
 pub fn evaluate_epistemic_literal(
     mode: EpistemicMode,
@@ -241,5 +277,55 @@ pub fn run_generate_propagate_test(
     Ok(GeneratePropagateTestOutcome {
         trace,
         accepted_candidate_indices,
+    })
+}
+
+/// Build a deterministic dependency graph for bounded epistemic splitting.
+pub fn build_epistemic_dependency_graph(program: &Program) -> Result<EpistemicDependencyGraph> {
+    let mut components: Vec<EpistemicDependencyComponent> = Vec::new();
+
+    for (idx, rule) in program.rules.iter().enumerate() {
+        let mut predicates = BTreeSet::new();
+        predicates.insert(rule.head.predicate.clone());
+        for lit in &rule.body {
+            if let BodyLiteral::Epistemic(lit) = lit {
+                predicates.insert(lit.atom.predicate.clone());
+            }
+        }
+
+        components.push(EpistemicDependencyComponent {
+            predicates: predicates.into_iter().collect(),
+            rule_indices: vec![idx],
+        });
+    }
+
+    components.sort_by(|a, b| a.predicates.cmp(&b.predicates));
+    Ok(EpistemicDependencyGraph { components })
+}
+
+/// Split an epistemic program into independently solvable bounded components.
+pub fn split_epistemic_program(program: &Program) -> Result<EpistemicSplitPlan> {
+    for (idx, rule) in program.rules.iter().enumerate() {
+        let epistemic_predicates: BTreeSet<&str> = rule
+            .body
+            .iter()
+            .filter_map(|lit| match lit {
+                BodyLiteral::Epistemic(lit) => Some(lit.atom.predicate.as_str()),
+                _ => None,
+            })
+            .collect();
+        if epistemic_predicates.len() > 1 {
+            return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic splitting".to_string(),
+                context: format!(
+                    "rule[{idx}] couples epistemic predicates {:?}",
+                    epistemic_predicates
+                ),
+            });
+        }
+    }
+
+    Ok(EpistemicSplitPlan {
+        components: build_epistemic_dependency_graph(program)?.components,
     })
 }
