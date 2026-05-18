@@ -21,6 +21,7 @@ use crate::profiler::{ExecutionStats, Profiler};
 use crate::RelationStore;
 
 mod delta;
+mod epistemic_workspace;
 mod expression;
 mod join_cache;
 mod node_dispatch;
@@ -30,6 +31,9 @@ mod wcoj_cost_model;
 mod wcoj_dispatch;
 #[cfg(feature = "wcoj-phase-timing")]
 pub mod wcoj_phase_timing;
+pub use epistemic_workspace::{
+    EpistemicGpuWorkspace, EpistemicGpuWorkspaceCapacities, EpistemicGpuWorkspaceLayout,
+};
 use join_cache::JoinIndexCache;
 
 /// Incremental update for a base relation.

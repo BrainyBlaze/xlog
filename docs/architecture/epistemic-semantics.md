@@ -99,6 +99,26 @@ helper-splitting decisions.
 This is a planning boundary only. It does not launch kernels, dispatch runtime
 plans, or certify GPU execution.
 
+## GPU Workspace Contract
+
+`xlog-runtime` maps an `EpistemicGpuPlan` to an
+`EpistemicGpuWorkspaceLayout` and `EpistemicGpuWorkspace`. The workspace API
+allocates the required device buffers as `TrackedCudaSlice` values:
+
+- `candidate_assumptions: TrackedCudaSlice<u8>`;
+- `world_views: TrackedCudaSlice<u8>`;
+- `model_membership: TrackedCudaSlice<u8>`;
+- `rejection_reasons: TrackedCudaSlice<u32>`.
+
+`EpistemicGpuWorkspaceLayout::for_plan` computes concrete buffer sizes from the
+number of epistemic literals, reductions, candidate capacity, world capacity,
+and reduced-model capacity. Zero capacities are rejected with typed resource
+errors so the accepted path cannot silently use empty host-side structures.
+
+This workspace is still pre-kernel plumbing. It proves the buffer categories are
+allocatable on the runtime side; it does not yet populate them, launch
+Generate-Propagate-Test kernels, or produce certification launch counters.
+
 ## G91 Compatibility Fixture Semantics
 
 `crates/xlog-logic/src/epistemic.rs` contains the current bounded fixture

@@ -19,6 +19,12 @@ GPU-resident buffer categories, WCOJ planner obligations for eligible reduced
 ordinary bodies, and zero CPU fallback counters. It does not launch kernels or
 close the GPU-native gate.
 
+`xlog-runtime` also exposes `EpistemicGpuWorkspaceLayout` and
+`Executor::allocate_epistemic_gpu_workspace`, which map the plan contract to
+device-buffer allocations for candidate assumptions, world views, model
+membership, and rejection reasons. That is pre-kernel plumbing only; no
+epistemic runtime dispatch exists yet.
+
 ## GPU And WCOJ Scope
 
 The current epistemic algorithms are not fully GPU-native and do not use the
