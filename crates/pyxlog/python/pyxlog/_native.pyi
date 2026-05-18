@@ -66,6 +66,27 @@ class LogicRelationSession:
         """Evaluate the program against all currently stored relations."""
         ...
 
+    def insert_relation(self, name: str, dlpack_columns: Any) -> dict[str, Any]:
+        """Insert DLPack rows into a stored relation through the delta path."""
+        ...
+
+    def delete_relation(self, name: str, dlpack_columns: Any) -> dict[str, Any]:
+        """Delete DLPack rows from a stored relation through the delta path."""
+        ...
+
+    def apply_relation_delta(
+        self,
+        name: str,
+        insert_columns: Optional[Any] = None,
+        delete_columns: Optional[Any] = None,
+    ) -> dict[str, Any]:
+        """Apply insert and/or delete rows to a stored relation."""
+        ...
+
+    def delta_stats(self) -> dict[str, Any]:
+        """Return statistics from the most recent relation delta update."""
+        ...
+
     def host_transfer_stats(self) -> dict[str, int]:
         """Return ``{dtoh_bytes: int, ...}`` transfer statistics."""
         ...

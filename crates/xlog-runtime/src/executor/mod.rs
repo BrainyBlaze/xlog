@@ -47,6 +47,21 @@ impl RelationDelta {
     }
 }
 
+/// Runtime summary for a delta recomputation pass.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DeltaRecomputeStats {
+    /// Number of base relations changed by the delta map.
+    pub changed_relations: usize,
+    /// True when at least one relation supplied delete rows.
+    pub has_deletes: bool,
+    /// Number of SCCs whose dependency closure was affected.
+    pub affected_sccs: usize,
+    /// Number of affected SCCs that were cleared and fully recomputed.
+    pub recomputed_sccs: usize,
+    /// Number of affected SCCs updated without clearing prior output.
+    pub incremental_sccs: usize,
+}
+
 /// Query executor that interprets RIR nodes using GPU kernels
 ///
 /// The executor processes execution plans by iterating through strata and

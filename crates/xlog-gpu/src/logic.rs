@@ -6,7 +6,7 @@ use std::sync::Arc;
 use xlog_core::{symbol, Result, Schema, XlogError};
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 use xlog_logic::{BodyLiteral, Compiler, Program, Query, Term};
-use xlog_runtime::{ExecutionStats, Executor, RelationStore};
+use xlog_runtime::{DeltaRecomputeStats, ExecutionStats, Executor, RelationDelta, RelationStore};
 
 /// Result of evaluating a single query in a Datalog program.
 pub struct LogicQueryResult {
@@ -26,6 +26,24 @@ pub struct LogicEvalResult {
     pub queries: Vec<LogicQueryResult>,
     /// Execution statistics (populated when profiling is enabled).
     pub stats: Option<ExecutionStats>,
+}
+
+/// Summary for a persistent-session relation delta update.
+pub struct LogicDeltaReport {
+    /// Number of changed relation names in the delta batch.
+    pub changed_relations: usize,
+    /// Total inserted rows across all changed relations.
+    pub insert_rows: u64,
+    /// Total deleted rows across all changed relations.
+    pub delete_rows: u64,
+    /// True when at least one relation supplied delete rows.
+    pub has_deletes: bool,
+    /// Number of SCCs whose dependency closure was affected.
+    pub affected_sccs: usize,
+    /// Number of affected SCCs that were cleared and fully recomputed.
+    pub recomputed_sccs: usize,
+    /// Number of affected SCCs updated without clearing prior output.
+    pub incremental_sccs: usize,
 }
 
 /// A compiled Datalog program ready for GPU evaluation.
@@ -130,72 +148,93 @@ impl LogicProgram {
         relation_store: &RelationStore,
         profiling: bool,
     ) -> Result<LogicEvalResult> {
-        let mut executor = Executor::new(provider.clone());
-        executor.set_profiling(profiling);
-        for (name, rel_id) in &self.rel_ids {
-            executor.register_relation(*rel_id, name);
-        }
+        let (result, _) =
+            self.evaluate_with_relation_store_and_cache(provider, relation_store, profiling)?;
+        Ok(result)
+    }
 
-        for (name, schema) in &self.schemas {
-            executor
-                .store_mut()
-                .put(name, provider.create_empty_buffer(schema.clone())?);
-        }
-
-        for name in relation_store.names() {
-            let buffer = relation_store.get(name).ok_or_else(|| {
-                XlogError::Execution(format!(
-                    "Persistent relation {} disappeared during evaluation",
-                    name
-                ))
-            })?;
-            let schema = self.schemas.get(name).ok_or_else(|| {
-                XlogError::Execution(format!(
-                    "Persistent relation {} not declared in program schemas",
-                    name
-                ))
-            })?;
-            ensure_schema_type_compatible(schema, buffer.schema()).map_err(|e| {
-                XlogError::Execution(format!(
-                    "Persistent relation {} schema mismatch: {}",
-                    name, e
-                ))
-            })?;
-            executor
-                .store_mut()
-                .put(name, provider.clone_buffer(buffer)?);
-        }
-
+    /// Evaluate using a persistent relation store and return the complete runtime store.
+    pub fn evaluate_with_relation_store_and_cache(
+        &self,
+        provider: Arc<CudaKernelProvider>,
+        relation_store: &RelationStore,
+        profiling: bool,
+    ) -> Result<(LogicEvalResult, RelationStore)> {
+        let mut executor =
+            self.executor_from_relation_store(provider.clone(), relation_store, profiling)?;
         executor.execute_plan(&self.plan)?;
         self.enforce_constraints(&provider, &executor)?;
 
-        let mut queries: Vec<LogicQueryResult> = Vec::with_capacity(self.program.queries.len());
-        for (i, query) in self.program.queries.iter().enumerate() {
-            let relation_name = format!("__xlog_query_{}", i);
-            let buffer = executor.store_mut().remove(&relation_name).ok_or_else(|| {
-                XlogError::Execution(format!(
-                    "Missing query result relation {} (compiler bug?)",
-                    relation_name
-                ))
-            })?;
-
-            let columns = query_output_vars(query);
-            queries.push(LogicQueryResult {
-                relation_name,
-                sort_labels: columns.clone(),
-                columns,
-                buffer,
-            });
-        }
-
-        let total_output_rows: u64 = queries.iter().map(|q| q.buffer.num_rows()).sum();
+        let total_output_rows = self.total_query_rows(executor.store())?;
         let stats = if profiling {
             Some(executor.execution_stats(total_output_rows))
         } else {
             None
         };
 
-        Ok(LogicEvalResult { queries, stats })
+        let cached_store = self.clone_relation_store(&provider, executor.store())?;
+        let result = self.logic_result_from_store(provider.as_ref(), &cached_store, stats)?;
+        Ok((result, cached_store))
+    }
+
+    /// Build query results from an already materialized runtime store.
+    pub fn evaluate_cached_relation_store(
+        &self,
+        provider: Arc<CudaKernelProvider>,
+        relation_store: &RelationStore,
+    ) -> Result<LogicEvalResult> {
+        self.logic_result_from_store(provider.as_ref(), relation_store, None)
+    }
+
+    /// Apply relation deltas to a persistent session store through the runtime delta path.
+    pub fn apply_relation_deltas(
+        &self,
+        provider: Arc<CudaKernelProvider>,
+        relation_store: &mut RelationStore,
+        cached_store: &mut Option<RelationStore>,
+        deltas: HashMap<String, RelationDelta>,
+    ) -> Result<LogicDeltaReport> {
+        let insert_rows = deltas
+            .values()
+            .filter_map(|d| d.insert.as_ref())
+            .map(|b| b.num_rows())
+            .sum();
+        let delete_rows = deltas
+            .values()
+            .filter_map(|d| d.delete.as_ref())
+            .map(|b| b.num_rows())
+            .sum();
+
+        if cached_store.is_none() {
+            let (_, store) = self.evaluate_with_relation_store_and_cache(
+                provider.clone(),
+                relation_store,
+                false,
+            )?;
+            *cached_store = Some(store);
+        }
+
+        let store_before_delta = cached_store.as_ref().ok_or_else(|| {
+            XlogError::Execution("Missing cached relation store for delta update".to_string())
+        })?;
+        let mut executor =
+            self.executor_from_relation_store(provider.clone(), store_before_delta, false)?;
+        let delta_stats = executor.apply_deltas_and_recompute(&self.plan, &deltas)?;
+        self.enforce_constraints(&provider, &executor)?;
+
+        for name in deltas.keys() {
+            let updated = executor.store().get(name).ok_or_else(|| {
+                XlogError::Execution(format!(
+                    "Delta relation {} missing after runtime recompute",
+                    name
+                ))
+            })?;
+            relation_store.put(name, provider.clone_buffer(updated)?);
+        }
+
+        *cached_store = Some(self.clone_relation_store(&provider, executor.store())?);
+
+        Ok(logic_delta_report(delta_stats, insert_rows, delete_rows))
     }
 
     /// Evaluate the program with the given input relations (no profiling).
@@ -276,6 +315,109 @@ impl LogicProgram {
         } else {
             None
         };
+
+        Ok(LogicEvalResult { queries, stats })
+    }
+
+    fn executor_from_relation_store(
+        &self,
+        provider: Arc<CudaKernelProvider>,
+        relation_store: &RelationStore,
+        profiling: bool,
+    ) -> Result<Executor> {
+        let mut executor = Executor::new(provider.clone());
+        executor.set_profiling(profiling);
+        for (name, rel_id) in &self.rel_ids {
+            executor.register_relation(*rel_id, name);
+        }
+
+        for (name, schema) in &self.schemas {
+            executor
+                .store_mut()
+                .put(name, provider.create_empty_buffer(schema.clone())?);
+        }
+
+        for name in relation_store.names() {
+            let buffer = relation_store.get(name).ok_or_else(|| {
+                XlogError::Execution(format!(
+                    "Persistent relation {} disappeared during evaluation",
+                    name
+                ))
+            })?;
+            let schema = self.schemas.get(name).ok_or_else(|| {
+                XlogError::Execution(format!(
+                    "Persistent relation {} not declared in program schemas",
+                    name
+                ))
+            })?;
+            ensure_schema_type_compatible(schema, buffer.schema()).map_err(|e| {
+                XlogError::Execution(format!(
+                    "Persistent relation {} schema mismatch: {}",
+                    name, e
+                ))
+            })?;
+            executor
+                .store_mut()
+                .put(name, provider.clone_buffer(buffer)?);
+        }
+
+        Ok(executor)
+    }
+
+    fn clone_relation_store(
+        &self,
+        provider: &Arc<CudaKernelProvider>,
+        source: &RelationStore,
+    ) -> Result<RelationStore> {
+        let mut cloned = RelationStore::new(provider.clone());
+        for name in source.names() {
+            let buffer = source.get(name).ok_or_else(|| {
+                XlogError::Execution(format!("Relation {} disappeared during clone", name))
+            })?;
+            cloned.put(name, provider.clone_buffer(buffer)?);
+        }
+        Ok(cloned)
+    }
+
+    fn total_query_rows(&self, store: &RelationStore) -> Result<u64> {
+        let mut total = 0;
+        for i in 0..self.program.queries.len() {
+            let relation_name = format!("__xlog_query_{}", i);
+            let buffer = store.get(&relation_name).ok_or_else(|| {
+                XlogError::Execution(format!(
+                    "Missing query result relation {} (compiler bug?)",
+                    relation_name
+                ))
+            })?;
+            total += buffer.num_rows();
+        }
+        Ok(total)
+    }
+
+    fn logic_result_from_store(
+        &self,
+        provider: &CudaKernelProvider,
+        store: &RelationStore,
+        stats: Option<ExecutionStats>,
+    ) -> Result<LogicEvalResult> {
+        let mut queries: Vec<LogicQueryResult> = Vec::with_capacity(self.program.queries.len());
+        for (i, query) in self.program.queries.iter().enumerate() {
+            let relation_name = format!("__xlog_query_{}", i);
+            let buffer = store.get(&relation_name).ok_or_else(|| {
+                XlogError::Execution(format!(
+                    "Missing query result relation {} (compiler bug?)",
+                    relation_name
+                ))
+            })?;
+
+            let columns = query_output_vars(query);
+            queries.push(LogicQueryResult {
+                relation_name,
+                sort_labels: columns.clone(),
+                columns,
+                buffer: provider.clone_buffer(buffer)?,
+            });
+        }
 
         Ok(LogicEvalResult { queries, stats })
     }
@@ -376,6 +518,22 @@ impl LogicProgram {
 
 fn is_user_visible_relation(name: &str) -> bool {
     !name.starts_with("__")
+}
+
+fn logic_delta_report(
+    stats: DeltaRecomputeStats,
+    insert_rows: u64,
+    delete_rows: u64,
+) -> LogicDeltaReport {
+    LogicDeltaReport {
+        changed_relations: stats.changed_relations,
+        insert_rows,
+        delete_rows,
+        has_deletes: stats.has_deletes,
+        affected_sccs: stats.affected_sccs,
+        recomputed_sccs: stats.recomputed_sccs,
+        incremental_sccs: stats.incremental_sccs,
+    }
 }
 
 fn ensure_schema_type_compatible(expected: &Schema, actual: &Schema) -> Result<()> {

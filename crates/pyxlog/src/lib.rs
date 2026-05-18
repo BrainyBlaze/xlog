@@ -390,6 +390,19 @@ pub struct LogicRelationSession {
     pub(crate) program: gpu_logic::LogicProgram,
     pub(crate) provider: Arc<CudaKernelProvider>,
     pub(crate) relation_store: RelationStore,
+    pub(crate) evaluation_store: Option<RelationStore>,
+    pub(crate) last_delta_stats: Option<LogicDeltaStats>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LogicDeltaStats {
+    pub changed_relations: usize,
+    pub insert_rows: u64,
+    pub delete_rows: u64,
+    pub has_deletes: bool,
+    pub affected_sccs: usize,
+    pub recomputed_sccs: usize,
+    pub incremental_sccs: usize,
 }
 
 #[pyclass]

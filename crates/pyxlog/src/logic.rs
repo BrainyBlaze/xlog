@@ -11,6 +11,7 @@ use xlog_logic::ast::ProbEngine;
 use xlog_neural::{NetworkRegistry, TensorSourceRegistry};
 use xlog_prob::exact::{ExactDdnnfProgram, GpuConfig};
 use xlog_prob::mc::McProgram;
+use xlog_runtime::RelationDelta;
 
 use std::collections::HashMap as StdHashMap;
 
@@ -18,8 +19,8 @@ use super::neural_registry::NeuralPredicateRegistry;
 use super::{
     dlpack_capsule_from_tensor, dlpack_from_py, enforce_call_memory_limit,
     parse_prob_engine_override, provider_from_config, provider_memory_stats, types,
-    CompiledLogicProgram, CompiledProbProgram, CompiledProgram, LogicEvalResult, LogicProgram,
-    LogicQueryResult, LogicRelationSession, Program,
+    CompiledLogicProgram, CompiledProbProgram, CompiledProgram, LogicDeltaStats, LogicEvalResult,
+    LogicProgram, LogicQueryResult, LogicRelationSession, Program,
 };
 
 #[pymethods]
@@ -184,6 +185,8 @@ impl CompiledLogicProgram {
             program: self.program.clone(),
             provider: self.provider.clone(),
             relation_store,
+            evaluation_store: None,
+            last_delta_stats: None,
         })
     }
 
@@ -223,17 +226,89 @@ impl LogicRelationSession {
             .from_dlpack_tensors_with_schema(schema.clone(), tensors)
             .map_err(types::xlog_err)?;
         self.relation_store.put(&name, buffer);
+        self.evaluation_store = None;
+        self.last_delta_stats = None;
         Ok(())
     }
 
     #[pyo3(signature = (memory_mb=None))]
-    pub fn evaluate(&self, py: Python<'_>, memory_mb: Option<u64>) -> PyResult<LogicEvalResult> {
+    pub fn evaluate(
+        &mut self,
+        py: Python<'_>,
+        memory_mb: Option<u64>,
+    ) -> PyResult<LogicEvalResult> {
         enforce_call_memory_limit(&self.provider, memory_mb)?;
-        let result = self
-            .program
-            .evaluate_with_relation_store(self.provider.clone(), &self.relation_store, false)
-            .map_err(types::xlog_err)?;
+        let result = if let Some(store) = &self.evaluation_store {
+            self.program
+                .evaluate_cached_relation_store(self.provider.clone(), store)
+                .map_err(types::xlog_err)?
+        } else {
+            let (result, store) = self
+                .program
+                .evaluate_with_relation_store_and_cache(
+                    self.provider.clone(),
+                    &self.relation_store,
+                    false,
+                )
+                .map_err(types::xlog_err)?;
+            self.evaluation_store = Some(store);
+            result
+        };
         pack_logic_result_with_provider(py, &self.provider, result)
+    }
+
+    pub fn insert_relation(
+        &mut self,
+        py: Python<'_>,
+        name: String,
+        dlpack_columns: &Bound<'_, PyAny>,
+    ) -> PyResult<PyObject> {
+        let insert = self.relation_delta_buffer(&name, dlpack_columns)?;
+        self.apply_single_relation_delta(py, name, Some(insert), None)
+    }
+
+    pub fn delete_relation(
+        &mut self,
+        py: Python<'_>,
+        name: String,
+        dlpack_columns: &Bound<'_, PyAny>,
+    ) -> PyResult<PyObject> {
+        let delete = self.relation_delta_buffer(&name, dlpack_columns)?;
+        self.apply_single_relation_delta(py, name, None, Some(delete))
+    }
+
+    #[pyo3(signature = (name, insert_columns=None, delete_columns=None))]
+    pub fn apply_relation_delta(
+        &mut self,
+        py: Python<'_>,
+        name: String,
+        insert_columns: Option<&Bound<'_, PyAny>>,
+        delete_columns: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyObject> {
+        if insert_columns.is_none() && delete_columns.is_none() {
+            return Err(PyValueError::new_err(
+                "apply_relation_delta requires insert_columns, delete_columns, or both",
+            ));
+        }
+        let insert = insert_columns
+            .map(|columns| self.relation_delta_buffer(&name, columns))
+            .transpose()?;
+        let delete = delete_columns
+            .map(|columns| self.relation_delta_buffer(&name, columns))
+            .transpose()?;
+        self.apply_single_relation_delta(py, name, insert, delete)
+    }
+
+    pub fn delta_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+        match &self.last_delta_stats {
+            Some(stats) => pack_delta_stats(py, stats),
+            None => {
+                let dict = PyDict::new(py);
+                dict.set_item("status", "unavailable")?;
+                dict.set_item("reason", "no relation delta has been applied")?;
+                Ok(dict.into())
+            }
+        }
     }
 
     pub fn cuda_graph_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
@@ -295,12 +370,94 @@ impl LogicRelationSession {
     }
 
     pub fn remove_relation(&mut self, name: &str) -> bool {
-        self.relation_store.remove(name).is_some()
+        let removed = self.relation_store.remove(name).is_some();
+        if removed {
+            self.evaluation_store = None;
+            self.last_delta_stats = None;
+        }
+        removed
     }
 
     pub fn clear_relations(&mut self) {
         self.relation_store.clear();
+        self.evaluation_store = None;
+        self.last_delta_stats = None;
     }
+}
+
+impl LogicRelationSession {
+    fn relation_delta_buffer(
+        &self,
+        name: &str,
+        dlpack_columns: &Bound<'_, PyAny>,
+    ) -> PyResult<xlog_cuda::CudaBuffer> {
+        if name.starts_with("__") {
+            return Err(PyValueError::new_err(format!(
+                "Relation {} is internal and cannot be updated in a persistent session",
+                name
+            )));
+        }
+        let schema = self.program.schema(name).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "Unknown relation {} (not present in compiled schemas)",
+                name
+            ))
+        })?;
+        let tensors = collect_dlpack_columns(
+            dlpack_columns,
+            &format!(
+                "Relation {} delta must be a sequence of DLPack columns",
+                name
+            ),
+        )?;
+        self.provider
+            .from_dlpack_tensors_with_schema(schema.clone(), tensors)
+            .map_err(types::xlog_err)
+    }
+
+    fn apply_single_relation_delta(
+        &mut self,
+        py: Python<'_>,
+        name: String,
+        insert: Option<xlog_cuda::CudaBuffer>,
+        delete: Option<xlog_cuda::CudaBuffer>,
+    ) -> PyResult<PyObject> {
+        let mut deltas = HashMap::new();
+        deltas.insert(name, RelationDelta::new(insert, delete));
+        let report = self
+            .program
+            .apply_relation_deltas(
+                self.provider.clone(),
+                &mut self.relation_store,
+                &mut self.evaluation_store,
+                deltas,
+            )
+            .map_err(types::xlog_err)?;
+        let stats = LogicDeltaStats {
+            changed_relations: report.changed_relations,
+            insert_rows: report.insert_rows,
+            delete_rows: report.delete_rows,
+            has_deletes: report.has_deletes,
+            affected_sccs: report.affected_sccs,
+            recomputed_sccs: report.recomputed_sccs,
+            incremental_sccs: report.incremental_sccs,
+        };
+        self.last_delta_stats = Some(stats.clone());
+        pack_delta_stats(py, &stats)
+    }
+}
+
+fn pack_delta_stats(py: Python<'_>, stats: &LogicDeltaStats) -> PyResult<PyObject> {
+    let dict = PyDict::new(py);
+    dict.set_item("status", "ok")?;
+    dict.set_item("changed_relations", stats.changed_relations)?;
+    dict.set_item("insert_rows", stats.insert_rows)?;
+    dict.set_item("delete_rows", stats.delete_rows)?;
+    dict.set_item("has_deletes", stats.has_deletes)?;
+    dict.set_item("affected_sccs", stats.affected_sccs)?;
+    dict.set_item("recomputed_sccs", stats.recomputed_sccs)?;
+    dict.set_item("incremental_sccs", stats.incremental_sccs)?;
+    Ok(dict.into())
 }
 
 fn collect_dlpack_columns(

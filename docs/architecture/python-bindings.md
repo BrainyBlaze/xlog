@@ -162,6 +162,36 @@ The persistent session path is additive:
 - `evaluate(dlpack_inputs=...)` remains the stateless one-shot API
 - `session()` exposes a mutable named relation store with schema-checked DLPack import/export
 
+#### Persistent Relation Deltas
+
+Persistent sessions also support DLPack-backed relation deltas for DTS-DLM
+Stage-4 update loops. `insert_relation(...)`, `delete_relation(...)`, and
+`apply_relation_delta(...)` update the session relation store through the
+runtime `RelationDelta` / `apply_deltas_and_recompute` path. Insert-only
+monotone SCCs keep prior materialized output where the execution plan permits
+it; delete-containing deltas clear and recompute affected SCCs for correctness.
+
+```python
+session.put_relation("wmir_committed", [row_id, parent_id])
+session.evaluate()
+
+delta = session.insert_relation("wmir_committed", [new_row_id, new_parent_id])
+result = session.evaluate()          # returns the delta-updated cached store
+print(session.delta_stats(), delta)
+
+session.apply_relation_delta(
+    "wmir_committed",
+    insert_columns=[added_row_id, added_parent_id],
+    delete_columns=[removed_row_id, removed_parent_id],
+)
+```
+
+The delta stats dictionary contains `changed_relations`, `insert_rows`,
+`delete_rows`, `affected_sccs`, `recomputed_sccs`, and `incremental_sccs`.
+Direct `put_relation`, `remove_relation`, or `clear_relations` calls invalidate
+the cached runtime store and make the next `evaluate()` perform a full plan
+run before later deltas can reuse it.
+
 #### v0.8.0 Runtime Controls And Diagnostics
 
 Long-running DTS-DLM callers can submit logic or probabilistic evaluations to a
