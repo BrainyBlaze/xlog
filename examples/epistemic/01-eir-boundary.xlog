@@ -1,0 +1,10 @@
+// EIR boundary: the epistemic literal remains explicit.
+
+#pragma epistemic_mode = faeel
+
+pred node(u32).
+pred edge(u32).
+
+node(1).
+
+believed(X) :- node(X), know edge(X).
