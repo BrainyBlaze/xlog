@@ -68,6 +68,7 @@ extern "C" __global__ void epistemic_populate_model_membership_u8(
     uint32_t reduction_count,
     uint32_t models_per_reduction,
     uint32_t world_stride,
+    const uint32_t* __restrict__ output_row_count,
     const uint8_t* __restrict__ candidate_assumptions,
     const uint8_t* __restrict__ world_views,
     uint8_t* __restrict__ model_membership,
@@ -85,9 +86,10 @@ extern "C" __global__ void epistemic_populate_model_membership_u8(
 
     uint8_t active_world = world_views[candidate * world_stride];
     uint8_t accepted_so_far = (rejection_reasons[candidate] == 0u) ? 1u : 0u;
+    uint8_t has_reduced_output = (output_row_count[0] > 0u) ? 1u : 0u;
     uint8_t candidate_bit = candidate_assumptions[candidate * literal_count + literal];
     model_membership[gid] =
-        (active_world != 0u && accepted_so_far != 0u && model_slot < reduction_count * models_per_reduction)
+        (active_world != 0u && accepted_so_far != 0u && has_reduced_output != 0u && model_slot < reduction_count * models_per_reduction)
             ? candidate_bit
             : 0u;
 

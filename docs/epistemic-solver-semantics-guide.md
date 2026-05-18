@@ -51,7 +51,8 @@ writes, and CUDA-event elapsed timing for candidate-buffer validation.
 `Executor::populate_epistemic_gpu_model_membership` launches the
 `epistemic_populate_model_membership_u8` CUDA kernel and records
 `EpistemicGpuModelMembershipTrace` with one kernel launch, zero host writes,
-and CUDA-event elapsed timing for candidate-scoped model-membership staging.
+one reduced-output device row-count read, and CUDA-event elapsed timing for
+candidate-scoped model-membership staging.
 `Executor::validate_epistemic_gpu_world_views` launches the
 `epistemic_validate_world_views_u8` CUDA kernel and records
 `EpistemicGpuWorldViewValidationTrace` with one kernel launch, zero host
@@ -76,7 +77,7 @@ accepted-candidate plus final-result flag materialization-staging kernel
 launches. It also snapshots provider host-transfer counters around the hot path
 and records `EpistemicGpuTransferBudgetTrace`, which rejects tracked data-plane
 H2D/D2H deltas instead of resetting shared telemetry. That is still incomplete
-for the epistemic hot path; actual reduced-runtime stable-model membership
+for the epistemic hot path; actual reduced stable-model tuple membership
 population, solver coupling, and full final tuple/query-result materialization
 do not dispatch yet.
 
@@ -92,7 +93,7 @@ through:
 - skew-aware scheduling;
 - helper splitting;
 - semantic population of GPU-resident world-view/candidate buffers from actual
-  reduced stable-model output;
+  reduced stable-model tuples;
 - full final query tuple materialization;
 - GPU portfolio SAT/MaxSAT dispatch.
 

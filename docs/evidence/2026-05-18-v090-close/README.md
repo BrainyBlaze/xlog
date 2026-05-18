@@ -49,9 +49,9 @@ Earlier ref checks after `git fetch origin --prune` showed:
 | G090_EIR | PARTIAL | EIR is explicit and executable-plan lowering reaches reduced production runtime plans, but accepted epistemic forms still lack production GPU runtime dispatch. |
 | G090_G91 | PASS for semantic oracle | Compatibility fixtures pass, but GPU parity remains unproven. |
 | G090_FAEEL | PASS for semantic oracle | Foundedness fixtures pass, but GPU parity remains unproven. |
-| G090_GPT | PARTIAL | CPU trace fixtures pass; GPU-resident candidate generation, propagation staging, candidate-buffer validation, model-membership staging, bounded world-view validation staging, accepted-candidate materialization staging, and final-result flag staging exist, but actual reduced-runtime stable-model membership population is missing. |
+| G090_GPT | PARTIAL | CPU trace fixtures pass; GPU-resident candidate generation, propagation staging, candidate-buffer validation, row-count-gated model-membership staging, bounded world-view validation staging, accepted-candidate materialization staging, and final-result flag staging exist, but actual reduced-runtime stable-model tuple membership population is missing. |
 | G090_SPLIT | PARTIAL | CPU split/recompose fixtures pass; GPU split execution is missing. |
-| G090_GPU | BLOCKED | GPU-plan, reduced-runtime-plan, workspace allocation/reset, bounded candidate-generation, propagation, candidate-validation, model-membership, world-view-validation, accepted-candidate materialization, final-result flag kernels, and hot-path transfer-budget trace with CUDA-event elapsed timing/runtime-preflight/counter-guard/reduced-plan trace contracts exist, but no production epistemic stable-model membership population/full final tuple materialization dispatch or full semantic kernel buffer use exists. |
+| G090_GPU | BLOCKED | GPU-plan, reduced-runtime-plan, workspace allocation/reset, bounded candidate-generation, propagation, candidate-validation, row-count-gated model-membership, world-view-validation, accepted-candidate materialization, final-result flag kernels, and hot-path transfer-budget trace with CUDA-event elapsed timing/runtime-preflight/counter-guard/reduced-plan trace contracts exist, but no production epistemic stable-model tuple membership population/full final tuple materialization dispatch or full semantic kernel buffer use exists. |
 | G090_SOLVER | BLOCKED | `SolverService` is CPU fixture enumeration; GPU-native SAT/MaxSAT/portfolio execution is not wired to epistemic candidates. |
 | G090_PROB | BLOCKED | Accepted-world-view evidence fixtures exist, but accepted probabilistic epistemic execution is not proven on the GPU-native exact path. |
 | G090_CERT | BLOCKED | Missing complete accepted-execution kernel timing, WCOJ evidence, zero CPU fallback counters, and post-v0.8 rerun. |
@@ -79,8 +79,9 @@ The branch contains useful scaffolding:
   world-view/rejection buffers;
 - bounded candidate-buffer validation kernel with one launch and zero host
   writes for staged candidate/world-view invariants;
-- bounded model-membership staging kernel with one launch and zero host writes
-  for candidate-scoped model-membership bytes;
+- bounded model-membership staging kernel with one launch, one reduced-output
+  row-count device read, and zero host writes for candidate-scoped
+  model-membership bytes;
 - bounded world-view validation staging kernel with one launch and zero host
   writes for staged model-membership/world-view rejection checks;
 - bounded materialization staging kernel with one launch and zero host writes
@@ -109,7 +110,7 @@ implementation, but it cannot be used as release-close evidence.
 
 Closure remains blocked until certification includes all of the following:
 
-- nonzero GPU launch counts and kernel timings for actual stable-model
+- nonzero GPU launch counts and kernel timings for actual stable-model tuple
   membership population and full final tuple materialization, plus the existing
   staging timing;
 - final-result transfer accounting for complete accepted execution;

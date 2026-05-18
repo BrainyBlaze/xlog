@@ -430,6 +430,7 @@ fn model_membership_trace_records_device_kernel_without_host_writes() {
     assert_eq!(trace.reduction_count, 2);
     assert_eq!(trace.models_per_reduction, 4);
     assert_eq!(trace.model_membership_bytes_written, 192);
+    assert_eq!(trace.output_row_count_device_reads, 1);
     assert_eq!(trace.rejection_reason_slots_checked, 8);
     assert_eq!(trace.kernel_launches, 1);
     assert_eq!(trace.host_write_ops, 0);
@@ -444,6 +445,7 @@ fn model_membership_runtime_path_launches_epistemic_kernel_not_host_writes() {
 
     assert!(source.contains("fn populate_epistemic_gpu_model_membership"));
     assert!(source.contains("EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_U8"));
+    assert!(source.contains("output.num_rows_device()"));
     assert!(source.contains("&workspace.candidate_assumptions"));
     assert!(source.contains("&workspace.world_views"));
     assert!(source.contains("&mut workspace.model_membership"));
@@ -452,6 +454,8 @@ fn model_membership_runtime_path_launches_epistemic_kernel_not_host_writes() {
     assert!(manifest.contains("\"epistemic_populate_model_membership_u8\""));
     assert!(!source.contains("upload_epistemic_model_membership"));
     assert!(!source.contains("copy_epistemic_model_membership_from_host"));
+    assert!(!source.contains("dtoh_epistemic_model_membership_row_count"));
+    assert!(!source.contains("cached_row_count().expect(\"epistemic model"));
 }
 
 #[test]

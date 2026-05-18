@@ -228,6 +228,8 @@ pub struct EpistemicGpuModelMembershipTrace {
     pub models_per_reduction: usize,
     /// Model-membership bytes written by the kernel.
     pub model_membership_bytes_written: usize,
+    /// Device output row-count scalars read by the kernel.
+    pub output_row_count_device_reads: u32,
     /// Rejection-reason slots checked by the kernel.
     pub rejection_reason_slots_checked: usize,
     /// Model-membership staging kernel launches.
@@ -520,6 +522,7 @@ impl EpistemicGpuModelMembershipTrace {
             reduction_count,
             models_per_reduction,
             model_membership_bytes_written,
+            output_row_count_device_reads: 1,
             rejection_reason_slots_checked: candidate_count,
             kernel_launches: 1,
             host_write_ops: 0,
@@ -1258,6 +1261,7 @@ impl Executor {
     pub fn populate_epistemic_gpu_model_membership(
         &self,
         workspace: &mut EpistemicGpuWorkspace,
+        output: &CudaBuffer,
         literal_count: usize,
         candidate_count: usize,
         reduction_count: usize,
@@ -1362,6 +1366,7 @@ impl Executor {
                         reduction_count,
                         models_per_reduction,
                         world_stride,
+                        output.num_rows_device(),
                         &workspace.candidate_assumptions,
                         &workspace.world_views,
                         &mut workspace.model_membership,
@@ -1693,6 +1698,7 @@ impl Executor {
         );
         let model_membership = self.populate_epistemic_gpu_model_membership(
             &mut prepared.workspace,
+            &output,
             literal_count,
             candidate_count,
             executable.gpu_plan.reductions.len(),
