@@ -59,7 +59,13 @@ impl EpistemicGpuWorkspaceLayout {
         let candidate_assumption_bytes = checked_product(capacities.max_candidates, literal_count)?;
         let world_view_bytes = checked_product(capacities.max_candidates, capacities.max_worlds)?;
         let model_membership_bytes = checked_product(
-            checked_product(capacities.max_models_per_reduction, reduction_count)?,
+            checked_product(
+                checked_product(
+                    capacities.max_candidates,
+                    capacities.max_models_per_reduction,
+                )?,
+                reduction_count,
+            )?,
             literal_count,
         )?;
 
@@ -170,6 +176,29 @@ pub struct EpistemicGpuMaterializationTrace {
     /// Materialization kernel launches.
     pub kernel_launches: u32,
     /// Host writes used by materialization. Accepted GPU execution requires zero.
+    pub host_write_ops: u32,
+    /// CUDA-event timing for the launched kernel.
+    pub kernel_timing: EpistemicGpuKernelTimingTrace,
+}
+
+/// Trace proving model-membership staging was performed by a GPU kernel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EpistemicGpuModelMembershipTrace {
+    /// Number of epistemic literals represented per candidate/model.
+    pub literal_count: usize,
+    /// Number of candidate rows checked on device.
+    pub candidates_checked: usize,
+    /// Number of reduced-program summaries represented in the membership layout.
+    pub reduction_count: usize,
+    /// Maximum models represented per reduction.
+    pub models_per_reduction: usize,
+    /// Model-membership bytes written by the kernel.
+    pub model_membership_bytes_written: usize,
+    /// Rejection-reason slots checked by the kernel.
+    pub rejection_reason_slots_checked: usize,
+    /// Model-membership staging kernel launches.
+    pub kernel_launches: u32,
+    /// Host writes used by model-membership staging. Accepted execution requires zero.
     pub host_write_ops: u32,
     /// CUDA-event timing for the launched kernel.
     pub kernel_timing: EpistemicGpuKernelTimingTrace,
@@ -303,6 +332,52 @@ impl EpistemicGpuMaterializationTrace {
         Ok(Self {
             materialized_candidates: candidate_count,
             world_view_slots_written: candidate_count,
+            kernel_launches: 1,
+            host_write_ops: 0,
+            kernel_timing: EpistemicGpuKernelTimingTrace::unrecorded(),
+        })
+    }
+
+    /// Attach CUDA-event timing captured by the runtime launch path.
+    pub const fn with_kernel_timing(
+        mut self,
+        kernel_timing: EpistemicGpuKernelTimingTrace,
+    ) -> Self {
+        self.kernel_timing = kernel_timing;
+        self
+    }
+}
+
+impl EpistemicGpuModelMembershipTrace {
+    /// Build a model-membership trace for a bounded device launch.
+    pub fn for_counts(
+        literal_count: usize,
+        candidate_count: usize,
+        reduction_count: usize,
+        models_per_reduction: usize,
+    ) -> Result<Self> {
+        require_positive(literal_count, "epistemic GPU model-membership literals")?;
+        require_positive(candidate_count, "epistemic GPU model-membership candidates")?;
+        require_positive(reduction_count, "epistemic GPU model-membership reductions")?;
+        require_positive(
+            models_per_reduction,
+            "epistemic GPU model-membership models",
+        )?;
+        let model_membership_bytes_written = checked_product(
+            checked_product(
+                checked_product(candidate_count, reduction_count)?,
+                models_per_reduction,
+            )?,
+            literal_count,
+        )?;
+
+        Ok(Self {
+            literal_count,
+            candidates_checked: candidate_count,
+            reduction_count,
+            models_per_reduction,
+            model_membership_bytes_written,
+            rejection_reason_slots_checked: candidate_count,
             kernel_launches: 1,
             host_write_ops: 0,
             kernel_timing: EpistemicGpuKernelTimingTrace::unrecorded(),
@@ -599,6 +674,8 @@ pub struct EpistemicGpuExecutionResult {
     pub propagation: EpistemicGpuPropagationTrace,
     /// Candidate-validation trace captured before reduced-plan dispatch.
     pub candidate_validation: EpistemicGpuCandidateValidationTrace,
+    /// Model-membership staging trace captured before accepted-candidate materialization.
+    pub model_membership: EpistemicGpuModelMembershipTrace,
     /// Accepted-candidate materialization trace captured before reduced-plan dispatch.
     pub materialization: EpistemicGpuMaterializationTrace,
     /// Output buffer returned by the reduced production execution plan.
@@ -972,6 +1049,125 @@ impl Executor {
         Ok(trace.with_kernel_timing(kernel_timing))
     }
 
+    /// Populate candidate-scoped model-membership staging buffers on device.
+    pub fn populate_epistemic_gpu_model_membership(
+        &self,
+        workspace: &mut EpistemicGpuWorkspace,
+        literal_count: usize,
+        candidate_count: usize,
+        reduction_count: usize,
+        models_per_reduction: usize,
+    ) -> Result<EpistemicGpuModelMembershipTrace> {
+        let trace = EpistemicGpuModelMembershipTrace::for_counts(
+            literal_count,
+            candidate_count,
+            reduction_count,
+            models_per_reduction,
+        )?;
+        let candidate_assumption_bytes = checked_product(literal_count, candidate_count)?;
+        if candidate_assumption_bytes > workspace.layout.candidate_assumption_bytes {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU model-membership candidate workspace".to_string(),
+                estimated_bytes: candidate_assumption_bytes as u64,
+                budget_bytes: workspace.layout.candidate_assumption_bytes as u64,
+            });
+        }
+        if candidate_count > workspace.layout.world_view_bytes {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU model-membership world-view workspace".to_string(),
+                estimated_bytes: candidate_count as u64,
+                budget_bytes: workspace.layout.world_view_bytes as u64,
+            });
+        }
+        if trace.model_membership_bytes_written > workspace.layout.model_membership_bytes {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU model-membership workspace".to_string(),
+                estimated_bytes: trace.model_membership_bytes_written as u64,
+                budget_bytes: workspace.layout.model_membership_bytes as u64,
+            });
+        }
+        if trace.rejection_reason_slots_checked > workspace.layout.rejection_reason_slots {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU model-membership rejection workspace".to_string(),
+                estimated_bytes: trace.rejection_reason_slots_checked as u64,
+                budget_bytes: workspace.layout.rejection_reason_slots as u64,
+            });
+        }
+        if trace.model_membership_bytes_written > u32::MAX as usize {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU model-membership launch".to_string(),
+                estimated_bytes: trace.model_membership_bytes_written as u64,
+                budget_bytes: u32::MAX as u64,
+            });
+        }
+        if literal_count > u32::MAX as usize
+            || candidate_count > u32::MAX as usize
+            || reduction_count > u32::MAX as usize
+            || models_per_reduction > u32::MAX as usize
+        {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU model-membership dimensions".to_string(),
+                estimated_bytes: literal_count
+                    .max(candidate_count)
+                    .max(reduction_count)
+                    .max(models_per_reduction) as u64,
+                budget_bytes: u32::MAX as u64,
+            });
+        }
+
+        let world_stride =
+            workspace.layout.world_view_bytes / workspace.layout.rejection_reason_slots;
+        if world_stride == 0 || world_stride > u32::MAX as usize {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU model-membership world stride".to_string(),
+                estimated_bytes: world_stride as u64,
+                budget_bytes: u32::MAX as u64,
+            });
+        }
+
+        let literal_count = literal_count as u32;
+        let candidate_count = candidate_count as u32;
+        let reduction_count = reduction_count as u32;
+        let models_per_reduction = models_per_reduction as u32;
+        let world_stride = world_stride as u32;
+        let total = trace.model_membership_bytes_written as u32;
+        let func = self
+            .provider
+            .device()
+            .inner()
+            .get_func(
+                EPISTEMIC_MODULE,
+                epistemic_kernels::EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_U8,
+            )
+            .ok_or_else(|| {
+                XlogError::Execution("epistemic model-membership kernel not found".to_string())
+            })?;
+        let config = LaunchConfig::for_num_elems(total);
+
+        let kernel_timing =
+            self.time_epistemic_gpu_kernel_launch("epistemic GPU model membership", || unsafe {
+                // SAFETY: kernel arguments match the PTX signature; the capacity checks
+                // above prove candidate, world-view, membership, and rejection buffers
+                // cover all reads and writes.
+                func.clone().launch(
+                    config,
+                    (
+                        literal_count,
+                        candidate_count,
+                        reduction_count,
+                        models_per_reduction,
+                        world_stride,
+                        &workspace.candidate_assumptions,
+                        &workspace.world_views,
+                        &mut workspace.model_membership,
+                        &mut workspace.rejection_reasons,
+                    ),
+                )
+            })?;
+
+        Ok(trace.with_kernel_timing(kernel_timing))
+    }
+
     /// Materialize accepted candidate flags into the GPU world-view buffer.
     pub fn materialize_epistemic_gpu_candidates(
         &self,
@@ -1090,6 +1286,13 @@ impl Executor {
             literal_count,
             candidate_count,
         )?;
+        let model_membership = self.populate_epistemic_gpu_model_membership(
+            &mut prepared.workspace,
+            literal_count,
+            candidate_count,
+            executable.gpu_plan.reductions.len(),
+            capacities.max_models_per_reduction,
+        )?;
         let materialization =
             self.materialize_epistemic_gpu_candidates(&mut prepared.workspace, candidate_count)?;
         let counters_before = self.epistemic_gpu_runtime_counters();
@@ -1106,6 +1309,7 @@ impl Executor {
             candidate_generation,
             propagation,
             candidate_validation,
+            model_membership,
             materialization,
             output,
             trace,

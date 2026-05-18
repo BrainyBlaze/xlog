@@ -38,7 +38,7 @@ Predecessor evidence:
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace candidate_validation` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace validation` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace materialization` | PASS, 3 passed, 0 failed |
-| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 23 passed, 0 failed |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 26 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_gpt` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_faeel` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_g91` | PASS, 3 passed, 0 failed |
@@ -52,14 +52,14 @@ Predecessor evidence:
 | Metric | Target | Status | Evidence |
 |---|---|---|---|
 | M090_GPT.1 phase separation | generate, propagate, test boundaries visible in code | PASS for oracle | `run_generate_propagate_test` implementation and test fixture. |
-| M090_GPT.2 trace output | debug/trace mode reports phase counts and GPU launch counters | PARTIAL | CPU trace counts are asserted; candidate-generation, propagation, candidate-validation, and materialization traces each record one GPU launch with CUDA-event elapsed timing, but full stable-model validation/final materialization counters are missing. |
+| M090_GPT.2 trace output | debug/trace mode reports phase counts and GPU launch counters | PARTIAL | CPU trace counts are asserted; candidate-generation, propagation, candidate-validation, model-membership, and materialization traces each record one GPU launch with CUDA-event elapsed timing, but full stable-model validation/final materialization counters are missing. |
 | M090_GPT.3 correctness fixtures | accepted/rejected candidate fixtures pass | PASS for oracle | `test_epistemic_gpt`: 2/2 passed. |
 | M090_GPT.4 bounded behavior | candidate explosion guard implemented or explicitly scoped | PASS for oracle | `ResourceExhausted` guard fixture. |
 | M090_GPT.5 world-view validation | trace records guess count, reduced-program model count, accepted world-view count, and rejection reasons | PASS for oracle | CPU trace fields are asserted in `test_epistemic_gpt`. |
-| M090_GPT.6 GPU residency | candidate generation, propagation, and world-view validation hot path uses GPU-resident buffers | PARTIAL | Candidate-assumption generation, propagation staging, candidate-buffer validation, and materialization staging write GPU-resident workspace buffers through CUDA kernels; stable-model world-view validation still uses CPU oracle fixtures. |
+| M090_GPT.6 GPU residency | candidate generation, propagation, and world-view validation hot path uses GPU-resident buffers | PARTIAL | Candidate-assumption generation, propagation staging, candidate-buffer validation, model-membership staging, and materialization staging write GPU-resident workspace buffers through CUDA kernels; stable-model world-view validation still uses CPU oracle fixtures. |
 
 ## Coordination Notes
 
-- Candidate generation, propagation staging, candidate-buffer validation, and materialization staging are now available as bounded GPU workspace kernels, but arbitrary EIR world enumeration plus stable-model world-view validation/test phases remain required production scope.
+- Candidate generation, propagation staging, candidate-buffer validation, model-membership staging, and materialization staging are now available as bounded GPU workspace kernels, but arbitrary EIR world enumeration plus stable-model world-view validation/test phases remain required production scope.
 - No pyxlog public API signatures were changed.
 - No push, tag, release-board update, or merge was performed.

@@ -459,6 +459,7 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "epistemic_generate_candidate_assumptions_u8",
             "epistemic_propagate_candidates_u8",
             "epistemic_validate_candidate_bits_u8",
+            "epistemic_populate_model_membership_u8",
             "epistemic_materialize_accepted_candidates_u8",
         ],
     },

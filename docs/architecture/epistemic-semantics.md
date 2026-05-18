@@ -133,8 +133,10 @@ allocates the required device buffers as `TrackedCudaSlice` values:
 
 `EpistemicGpuWorkspaceLayout::for_plan` computes concrete buffer sizes from the
 number of epistemic literals, reductions, candidate capacity, world capacity,
-and reduced-model capacity. Zero capacities are rejected with typed resource
-errors so the accepted path cannot silently use empty host-side structures.
+and reduced-model capacity. Model-membership storage is candidate-scoped:
+`max_candidates * reductions * max_models_per_reduction * literal_count`.
+Zero capacities are rejected with typed resource errors so the accepted path
+cannot silently use empty host-side structures.
 
 `Executor::prepare_epistemic_gpu_execution` now initializes those workspace
 buffers on device. The reset path submits `memset_zeros` for candidate
@@ -157,7 +159,12 @@ CUDA-event elapsed timing.
 `epistemic_validate_candidate_bits_u8` to validate staged candidate bitsets and
 world-view activity in device buffers, recording
 `EpistemicGpuCandidateValidationTrace` with one kernel launch, zero host
-writes, and CUDA-event elapsed timing. `Executor::materialize_epistemic_gpu_candidates` launches
+writes, and CUDA-event elapsed timing. `Executor::populate_epistemic_gpu_model_membership`
+launches `epistemic_populate_model_membership_u8` to stage candidate-scoped
+model-membership bytes from candidate assumptions, world-view activity, and
+rejection codes, recording `EpistemicGpuModelMembershipTrace` with one kernel
+launch, zero host writes, and CUDA-event elapsed timing.
+`Executor::materialize_epistemic_gpu_candidates` launches
 `epistemic_materialize_accepted_candidates_u8` to stage accepted-candidate flags
 back into the world-view buffer from rejection codes, recording
 `EpistemicGpuMaterializationTrace` with one kernel launch, zero host writes, and
@@ -177,17 +184,18 @@ around a future epistemic dispatch, and
 when required K-clique dispatch counters do not advance.
 `Executor::execute_epistemic_gpu_execution` now wraps the reduced production
 runtime plan with preflight, workspace allocation, candidate-generation,
-propagation, candidate-validation, and materialization-staging kernel launches,
-`execute_plan`, and a before/after counter trace.
+propagation, candidate-validation, model-membership staging, and
+materialization-staging kernel launches, `execute_plan`, and a before/after
+counter trace.
 
 This workspace is still pre-kernel plumbing. It proves the buffer categories are
 allocatable, initialized on device, and inspectable on the runtime side and
 that WCOJ certification is tied to actual counter deltas around the production
 reduced-plan dispatch. Candidate-assumption generation, propagation staging,
-candidate-buffer validation, and accepted-candidate materialization staging now
-have bounded CUDA kernels, but the runtime does not yet validate stable-model
-world views, materialize final query results, or produce full accepted-execution
-timing evidence.
+candidate-buffer validation, model-membership staging, and accepted-candidate
+materialization staging now have bounded CUDA kernels, but the runtime does not
+yet validate stable-model world views, materialize final query results, or
+produce full accepted-execution timing evidence.
 
 ## G91 Compatibility Fixture Semantics
 

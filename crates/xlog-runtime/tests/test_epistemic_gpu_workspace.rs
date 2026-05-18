@@ -9,10 +9,10 @@ use xlog_ir::{
 };
 use xlog_runtime::{
     EpistemicGpuCandidateGenerationTrace, EpistemicGpuCandidateValidationTrace,
-    EpistemicGpuKernelTimingTrace, EpistemicGpuMaterializationTrace, EpistemicGpuPropagationTrace,
-    EpistemicGpuRuntimeCounters, EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace,
-    EpistemicGpuRuntimeWcojCertification, EpistemicGpuWorkspaceCapacities,
-    EpistemicGpuWorkspaceLayout, EpistemicGpuWorkspaceResetTrace,
+    EpistemicGpuKernelTimingTrace, EpistemicGpuMaterializationTrace,
+    EpistemicGpuModelMembershipTrace, EpistemicGpuPropagationTrace, EpistemicGpuRuntimeCounters,
+    EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace, EpistemicGpuRuntimeWcojCertification,
+    EpistemicGpuWorkspaceCapacities, EpistemicGpuWorkspaceLayout, EpistemicGpuWorkspaceResetTrace,
 };
 
 #[test]
@@ -42,9 +42,9 @@ fn workspace_layout_sizes_all_required_epistemic_gpu_buffers() {
 
     assert_eq!(layout.candidate_assumption_bytes, 16);
     assert_eq!(layout.world_view_bytes, 32);
-    assert_eq!(layout.model_membership_bytes, 12);
+    assert_eq!(layout.model_membership_bytes, 96);
     assert_eq!(layout.rejection_reason_slots, 8);
-    assert_eq!(layout.total_bytes(), 92);
+    assert_eq!(layout.total_bytes(), 176);
 }
 
 #[test]
@@ -97,7 +97,7 @@ fn runtime_preflight_records_workspace_and_wcoj_route_surfaces() {
     )
     .unwrap();
 
-    assert_eq!(preflight.workspace_layout.total_bytes(), 78);
+    assert_eq!(preflight.workspace_layout.total_bytes(), 120);
     assert_eq!(preflight.reduced_runtime_rule_count, 1);
     assert_eq!(preflight.multiway_reduction_count, 1);
     assert_eq!(preflight.kclique_wcoj_plan_count, 1);
@@ -263,9 +263,9 @@ fn workspace_reset_trace_records_device_zeroing_for_all_buffers() {
 
     assert_eq!(trace.candidate_assumption_bytes, 16);
     assert_eq!(trace.world_view_bytes, 32);
-    assert_eq!(trace.model_membership_bytes, 12);
+    assert_eq!(trace.model_membership_bytes, 96);
     assert_eq!(trace.rejection_reason_bytes, 32);
-    assert_eq!(trace.total_zeroed_bytes(), 92);
+    assert_eq!(trace.total_zeroed_bytes(), 176);
     assert_eq!(trace.device_zero_ops, 4);
     assert_eq!(trace.host_write_ops, 0);
 }
@@ -419,6 +419,61 @@ fn candidate_validation_runtime_path_launches_epistemic_kernel_not_host_writes()
 }
 
 #[test]
+fn model_membership_trace_records_device_kernel_without_host_writes() {
+    let trace = EpistemicGpuModelMembershipTrace::for_counts(3, 8, 2, 4).unwrap();
+
+    assert_eq!(trace.literal_count, 3);
+    assert_eq!(trace.candidates_checked, 8);
+    assert_eq!(trace.reduction_count, 2);
+    assert_eq!(trace.models_per_reduction, 4);
+    assert_eq!(trace.model_membership_bytes_written, 192);
+    assert_eq!(trace.rejection_reason_slots_checked, 8);
+    assert_eq!(trace.kernel_launches, 1);
+    assert_eq!(trace.host_write_ops, 0);
+    assert!(!trace.kernel_timing.is_recorded());
+}
+
+#[test]
+fn model_membership_runtime_path_launches_epistemic_kernel_not_host_writes() {
+    let source = include_str!("../src/executor/epistemic_workspace.rs");
+    let cuda = include_str!("../../xlog-cuda/kernels/epistemic.cu");
+    let manifest = include_str!("../../xlog-cuda/src/kernel_manifest_data.rs");
+
+    assert!(source.contains("fn populate_epistemic_gpu_model_membership"));
+    assert!(source.contains("EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_U8"));
+    assert!(source.contains("&workspace.candidate_assumptions"));
+    assert!(source.contains("&workspace.world_views"));
+    assert!(source.contains("&mut workspace.model_membership"));
+    assert!(source.contains("&mut workspace.rejection_reasons"));
+    assert!(cuda.contains("epistemic_populate_model_membership_u8"));
+    assert!(manifest.contains("\"epistemic_populate_model_membership_u8\""));
+    assert!(!source.contains("upload_epistemic_model_membership"));
+    assert!(!source.contains("copy_epistemic_model_membership_from_host"));
+}
+
+#[test]
+fn execution_result_records_model_membership_trace_before_materialization() {
+    let source = include_str!("../src/executor/epistemic_workspace.rs");
+
+    assert!(source.contains("pub model_membership: EpistemicGpuModelMembershipTrace"));
+    assert!(source.contains("let model_membership = self.populate_epistemic_gpu_model_membership"));
+    assert!(source.contains("model_membership,"));
+
+    let validation_pos = source
+        .find("let candidate_validation = self.validate_epistemic_gpu_candidates")
+        .expect("candidate-validation launch in execution path");
+    let membership_pos = source
+        .find("let model_membership = self.populate_epistemic_gpu_model_membership")
+        .expect("model-membership launch in execution path");
+    let materialization_pos = source
+        .find("self.materialize_epistemic_gpu_candidates")
+        .expect("materialization launch in execution path");
+
+    assert!(validation_pos < membership_pos);
+    assert!(membership_pos < materialization_pos);
+}
+
+#[test]
 fn execution_result_records_validation_kernel_trace_before_reduced_dispatch() {
     let source = include_str!("../src/executor/epistemic_workspace.rs");
 
@@ -459,21 +514,25 @@ fn staging_runtime_paths_record_cuda_event_timing_for_each_kernel() {
     assert!(source.contains("record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))"));
     assert!(source.contains("EpistemicGpuKernelTimingTrace::from_cuda_elapsed_ms"));
 
-    assert!(source.contains(
-        "let kernel_timing = self.time_epistemic_gpu_kernel_launch(\n            \"epistemic GPU candidate generation\""
-    ));
-    assert!(source.contains(
-        "let kernel_timing = self.time_epistemic_gpu_kernel_launch(\n            \"epistemic GPU candidate propagation\""
-    ));
-    assert!(source.contains(
-        "let kernel_timing = self.time_epistemic_gpu_kernel_launch(\n            \"epistemic GPU candidate validation\""
-    ));
-    assert!(source.contains(
-        "let kernel_timing = self.time_epistemic_gpu_kernel_launch(\n            \"epistemic GPU candidate materialization\""
-    ));
+    for label in [
+        "epistemic GPU candidate generation",
+        "epistemic GPU candidate propagation",
+        "epistemic GPU candidate validation",
+        "epistemic GPU model membership",
+        "epistemic GPU candidate materialization",
+    ] {
+        assert!(
+            source.match_indices(label).any(|(label_pos, _)| {
+                source[..label_pos]
+                    .rfind("time_epistemic_gpu_kernel_launch")
+                    .is_some_and(|timing_call_prefix| label_pos - timing_call_prefix < 96)
+            }),
+            "{label} must be passed directly to the timing launch helper"
+        );
+    }
     assert_eq!(
         source.matches(".with_kernel_timing(kernel_timing)").count(),
-        4
+        5
     );
 }
 
