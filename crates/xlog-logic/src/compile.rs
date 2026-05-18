@@ -19,6 +19,7 @@ use xlog_stats::{StatsManager, StatsSnapshot};
 use crate::compiler_config::CompilerConfig;
 use crate::list_normalize::normalize_v085_lists;
 use crate::lower::Lowerer;
+use crate::meta_normalize::normalize_v085_meta;
 use crate::module::ModuleError;
 use crate::optimizer::Optimizer;
 use crate::parser::parse_program;
@@ -178,6 +179,7 @@ impl Compiler {
         stats_snapshot: Option<&StatsSnapshot>,
     ) -> Result<ExecutionPlan> {
         let program = desugar_queries_and_constraints(program);
+        let program = normalize_v085_meta(&program)?;
         let program = normalize_v085_lists(&program)?;
 
         // Phase 2: Stratify (analyze dependencies, detect cycles)

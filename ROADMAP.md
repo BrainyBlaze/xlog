@@ -1483,8 +1483,9 @@ WCOJ, and CLI paths.
 
 - [x] Add finite list syntax and list built-ins.
       Evidence: `docs/evidence/2026-05-19-v085-lists/README.md`.
-- [ ] Add meta-predicates such as `ground`, `var`, `nonvar`, `=..`, `functor`,
+- [x] Add meta-predicates such as `ground`, `var`, `nonvar`, `=..`, `functor`,
       `findall`, and `maplist` with static finite safety checks.
+      Evidence: `docs/evidence/2026-05-19-v085-meta/README.md`.
 
 ### Negation And Magic Sets
 

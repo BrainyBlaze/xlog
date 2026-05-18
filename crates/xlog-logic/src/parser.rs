@@ -13,7 +13,7 @@ use crate::ast::{
     AggExpr, AggOp, AnnotatedDisjunction, ArithExpr, Atom, BodyLiteral, CompOp, Comparison,
     CondExpr, Constraint, DomainDecl, Evidence, FuncBody, FuncDef, FuncParam, IsExpr,
     LearnableRule, NeuralLabel, NeuralPredDecl, PredColumn, PredDecl, ProbCache, ProbEngine,
-    ProbFact, ProbQuery, Program, Query, Rule as AstRule, Term, TypeRef, UseDecl,
+    ProbFact, ProbQuery, Program, Query, Rule as AstRule, Term, TypeRef, Univ, UseDecl,
 };
 
 /// Pest-based parser for XLOG Datalog syntax.
@@ -878,11 +878,28 @@ fn build_body_literal(pair: Pair<'_, Rule>) -> Result<BodyLiteral> {
         Rule::atom => Ok(BodyLiteral::Positive(build_atom(inner)?)),
         Rule::comparison => Ok(BodyLiteral::Comparison(build_comparison(inner)?)),
         Rule::is_expr => Ok(BodyLiteral::IsExpr(build_is_expr(inner)?)),
+        Rule::univ => Ok(BodyLiteral::Univ(build_univ(inner)?)),
         _ => Err(XlogError::Parse(format!(
             "Unknown body literal: {:?}",
             inner.as_rule()
         ))),
     }
+}
+
+/// Build a finite univ literal.
+fn build_univ(pair: Pair<'_, Rule>) -> Result<Univ> {
+    let mut inner = pair.into_inner();
+    let term = build_term(
+        inner
+            .next()
+            .ok_or_else(|| XlogError::Parse("Missing univ term".to_string()))?,
+    )?;
+    let parts = build_term(
+        inner
+            .next()
+            .ok_or_else(|| XlogError::Parse("Missing univ parts".to_string()))?,
+    )?;
+    Ok(Univ { term, parts })
 }
 
 /// Build a comparison

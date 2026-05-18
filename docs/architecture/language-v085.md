@@ -95,10 +95,10 @@ semantics.
 
 ## Source-Audit Snapshot
 
-Current implementation status through `G085_LIST`:
+Current implementation status through `G085_META`:
 
 - `docs/language-reference.md` has been updated to the v0.8.5 contract and now
-  records the shipped `G085_LIST` subset.
+  records the shipped `G085_LIST` and `G085_META` subsets.
 - `crates/xlog-logic/src/grammar.pest` accepts finite list literals, cons
   patterns, compound terms, named predicate columns, and `list<T>` declarations.
 - `crates/xlog-logic/src/ast.rs` represents list, cons, compound, and static
@@ -106,12 +106,16 @@ Current implementation status through `G085_LIST`:
 - `crates/xlog-logic/src/list_normalize.rs` normalizes accepted finite list
   literals and list built-ins to scalar list identifiers plus
   `__xlog_list_*` helper relations before stratification/lowering.
+- `crates/xlog-logic/src/meta_normalize.rs` normalizes accepted finite
+  `ground`, `var`, `nonvar`, `functor`, `=..`, `findall`, and unary/binary
+  `maplist` forms into scalar term IDs and `__xlog_meta_*` helper relations
+  before list normalization, stratification, and lowering.
 - `xlog-gpu` stores the normalized program so helper relation facts are loaded
   through the normal relation-store path.
 - `crates/xlog-prob/src/provenance.rs` still rejects aggregate terms in
   provenance extraction.
 - `crates/xlog-cli/src/main.rs` still exposes only `run` and `prob`.
-- `term`, `compound`, `predref`, safe meta-predicates, magic sets,
+- Derived-goal `findall`, non-literal `maplist` inputs, magic sets,
   probabilistic aggregates, approximate inference configuration, incremental
   parsing, REPL/watch, and explain remain gated to later `G085_*` nodes.
 

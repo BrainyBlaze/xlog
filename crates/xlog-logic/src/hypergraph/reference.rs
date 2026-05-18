@@ -271,7 +271,7 @@ pub fn evaluate_rule(
     if rule
         .body
         .iter()
-        .any(|l| matches!(l, BodyLiteral::IsExpr(_)))
+        .any(|l| matches!(l, BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_)))
     {
         return Err(RefEvalError::IsExprNotSupported);
     }

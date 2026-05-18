@@ -64,7 +64,8 @@ impl LogicProgram {
         let max_recursion = program.directives.max_recursion_depth.unwrap_or(100);
         let expanded = xlog_logic::expand_program_functions(&program, max_recursion)
             .map_err(|e| XlogError::Compilation(e.to_string()))?;
-        let normalized = xlog_logic::normalize_v085_lists(&expanded)?;
+        let normalized = xlog_logic::normalize_v085_meta(&expanded)?;
+        let normalized = xlog_logic::normalize_v085_lists(&normalized)?;
 
         let mut compiler = Compiler::new();
         let plan = compiler.compile_program(&normalized)?;
@@ -102,7 +103,8 @@ impl LogicProgram {
         let max_recursion = merged.directives.max_recursion_depth.unwrap_or(100);
         let expanded = xlog_logic::expand_program_functions(&merged, max_recursion)
             .map_err(|e| XlogError::Compilation(e.to_string()))?;
-        let normalized = xlog_logic::normalize_v085_lists(&expanded)?;
+        let normalized = xlog_logic::normalize_v085_meta(&expanded)?;
+        let normalized = xlog_logic::normalize_v085_lists(&normalized)?;
 
         let mut compiler = Compiler::new();
         let plan = compiler.compile_program(&normalized)?;
@@ -720,6 +722,13 @@ fn format_constraint(body: &[BodyLiteral]) -> String {
             }
             BodyLiteral::Comparison(c) => format!("{:?} {:?} {:?}", c.left, c.op, c.right),
             BodyLiteral::IsExpr(is) => format!("{} is {:?}", is.target, is.expr),
+            BodyLiteral::Univ(univ) => {
+                format!(
+                    "{} =.. {}",
+                    format_term(&univ.term),
+                    format_term(&univ.parts)
+                )
+            }
         })
         .collect::<Vec<_>>()
         .join(", ");

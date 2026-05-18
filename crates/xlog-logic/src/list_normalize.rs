@@ -195,6 +195,11 @@ impl ListNormalizer {
                     }));
                 }
                 BodyLiteral::IsExpr(is_expr) => out.push(BodyLiteral::IsExpr(is_expr.clone())),
+                BodyLiteral::Univ(_) => {
+                    return Err(list_error(
+                        "univ literals must be normalized by G085_META before list normalization",
+                    ));
+                }
             }
         }
         Ok(out)
@@ -822,10 +827,9 @@ impl ListNormalizer {
                 .get(name)
                 .copied()
                 .ok_or_else(|| list_error(format!("unknown domain alias '{}' in list<T>", name))),
-            TypeRef::List(_) => Ok(LIST_ID_TYPE),
-            TypeRef::Term | TypeRef::Compound | TypeRef::PredRef => Err(list_error(
-                "list<T> elements of term, compound, or predref require later G085_META support",
-            )),
+            TypeRef::List(_) | TypeRef::Term | TypeRef::Compound | TypeRef::PredRef => {
+                Ok(LIST_ID_TYPE)
+            }
         }
     }
 }

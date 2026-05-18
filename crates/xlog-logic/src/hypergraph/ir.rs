@@ -135,6 +135,9 @@ impl HypergraphRule {
                 BodyLiteral::IsExpr(_) => {
                     has_is_expr = true;
                 }
+                BodyLiteral::Univ(_) => {
+                    comparison_count += 1;
+                }
             }
         }
 

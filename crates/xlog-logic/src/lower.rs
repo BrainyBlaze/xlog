@@ -61,18 +61,10 @@ fn resolve_pred_column_type(
                 name, predicate, index
             ))
         }),
-        TypeRef::List(_) => Ok(ScalarType::U64),
-        TypeRef::Term => Err(v085_type_not_lowerable(predicate, index, "term")),
-        TypeRef::Compound => Err(v085_type_not_lowerable(predicate, index, "compound")),
-        TypeRef::PredRef => Err(v085_type_not_lowerable(predicate, index, "predref")),
+        TypeRef::List(_) | TypeRef::Term | TypeRef::Compound | TypeRef::PredRef => {
+            Ok(ScalarType::U64)
+        }
     }
-}
-
-fn v085_type_not_lowerable(predicate: &str, index: usize, kind: &str) -> XlogError {
-    XlogError::Compilation(format!(
-        "v0.8.5 type form '{}' in predicate '{}' column {} is parsed but not lowerable before its G085 implementation node",
-        kind, predicate, index
-    ))
 }
 
 fn validate_lowerable_terms(program: &Program) -> Result<()> {
@@ -87,6 +79,12 @@ fn validate_lowerable_terms(program: &Program) -> Result<()> {
                     validate_term_lowerable(&cmp.right, "comparison right operand")?;
                 }
                 BodyLiteral::IsExpr(_) => {}
+                BodyLiteral::Univ(_) => {
+                    return Err(XlogError::Compilation(
+                        "v0.8.5 meta error: univ literal was not normalized before lowering"
+                            .to_string(),
+                    ));
+                }
             }
         }
     }
@@ -102,6 +100,12 @@ fn validate_lowerable_terms(program: &Program) -> Result<()> {
                     validate_term_lowerable(&cmp.right, "constraint comparison right operand")?;
                 }
                 BodyLiteral::IsExpr(_) => {}
+                BodyLiteral::Univ(_) => {
+                    return Err(XlogError::Compilation(
+                        "v0.8.5 meta error: univ literal was not normalized before lowering"
+                            .to_string(),
+                    ));
+                }
             }
         }
     }
@@ -343,7 +347,9 @@ impl Lowerer {
             for lit in &rule.body {
                 let atom = match lit {
                     BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => atom,
-                    BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) => continue,
+                    BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {
+                        continue
+                    }
                 };
                 let pred = &atom.predicate;
                 if self.schemas.contains_key(pred) {
@@ -402,7 +408,9 @@ impl Lowerer {
         for lit in &rule.body {
             let atom = match lit {
                 BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => atom,
-                BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) => continue,
+                BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {
+                    continue
+                }
             };
             let schema = self.schemas.get(&atom.predicate)?;
             for (idx, term) in atom.terms.iter().enumerate() {
@@ -769,7 +777,7 @@ impl Lowerer {
                 BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
                     self.get_or_create_rel_id(&atom.predicate);
                 }
-                BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) => {}
+                BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {}
             }
         }
 
@@ -849,6 +857,7 @@ impl Lowerer {
                 BodyLiteral::Negated(atom) => negated_atoms.push(atom),
                 BodyLiteral::Comparison(cmp) => comparisons.push(cmp),
                 BodyLiteral::IsExpr(is_expr) => is_exprs.push(is_expr),
+                BodyLiteral::Univ(_) => {}
             }
         }
 

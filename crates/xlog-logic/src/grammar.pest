@@ -75,7 +75,8 @@ is_expr = { variable ~ "is" ~ arith_expr }
 
 // Body literals
 negated_atom = { "not" ~ atom }
-body_literal = { negated_atom | atom | comparison | is_expr }
+univ = { term ~ "=.." ~ term }
+body_literal = { negated_atom | univ | atom | comparison | is_expr }
 body = { body_literal ~ ("," ~ body_literal)* }
 
 // Head with optional aggregate

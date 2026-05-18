@@ -263,6 +263,13 @@ fn format_constraint(body: &[BodyLiteral]) -> String {
             }
             BodyLiteral::Comparison(c) => format!("{:?} {:?} {:?}", c.left, c.op, c.right),
             BodyLiteral::IsExpr(is) => format!("{} is {:?}", is.target, is.expr),
+            BodyLiteral::Univ(univ) => {
+                format!(
+                    "{} =.. {}",
+                    format_term(&univ.term),
+                    format_term(&univ.parts)
+                )
+            }
         })
         .collect::<Vec<_>>()
         .join(", ");

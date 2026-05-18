@@ -473,6 +473,12 @@ fn eval_rule(
                     next_states.push(binding);
                 }
             }
+            BodyLiteral::Univ(_) => {
+                return Err(XlogError::Compilation(
+                    "v0.8.5 meta error: univ literal was not normalized before MC result materialization"
+                        .to_string(),
+                ));
+            }
         }
         states = next_states;
         if states.is_empty() {

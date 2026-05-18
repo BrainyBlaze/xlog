@@ -1,0 +1,9 @@
+pred edge(src: u32, dst: u32).
+edge(1, 2).
+edge(1, 3).
+edge(2, 4).
+
+out_neighbors(N) :- findall(X, edge(1, X), L), length(L, N).
+out_empty(N) :- findall(X, missing(X), L), length(L, N).
+
+?- out_neighbors(N).

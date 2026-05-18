@@ -943,6 +943,12 @@ fn ground_rule_for_wfs(
                     return Ok(Vec::new());
                 }
             }
+            BodyLiteral::Univ(_) => {
+                return Err(XlogError::Compilation(
+                    "v0.8.5 meta error: univ literal was not normalized before provenance extraction"
+                        .to_string(),
+                ));
+            }
         }
     }
 
@@ -1174,6 +1180,12 @@ fn eval_rule(
                         next_states.push((binding, new_prov));
                     }
                 }
+            }
+            BodyLiteral::Univ(_) => {
+                return Err(XlogError::Compilation(
+                    "v0.8.5 meta error: univ literal was not normalized before provenance extraction"
+                        .to_string(),
+                ));
             }
         }
         states = next_states;

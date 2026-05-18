@@ -17,6 +17,9 @@ All notable changes to this project are documented in this file.
 - Added finite list normalization for `list<T>` columns, list literals, safe
   cons patterns, and core list built-ins via `__xlog_list_*` helper relations
   that lower through the existing relational runtime path.
+- Added safe v0.8.5 meta-predicate normalization for finite `ground`, `var`,
+  `nonvar`, `functor`, `=..`, source-fact `findall`, and unary/binary
+  `maplist` through `__xlog_meta_*` helper relations.
 
 ### Fixed
 

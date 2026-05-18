@@ -94,16 +94,13 @@ fn named_scalar_and_domain_columns_lower_to_schema_labels() {
 }
 
 #[test]
-fn rejects_non_lowered_v085_type_and_term_forms_with_typed_errors() {
+fn rejects_remaining_non_lowered_v085_term_forms_with_typed_errors() {
     let invalid = [
         (
             "unknown alias",
             "pred bad(x: unknown_domain).",
             "unknown domain alias",
         ),
-        ("term column", "pred bad(t: term).", "term"),
-        ("compound column", "pred bad(c: compound).", "compound"),
-        ("predref column", "pred bad(p: predref).", "predref"),
         ("cons fact", "bad([H | T]).", "cons"),
         ("compound fact", "bad(pair(1, 2)).", "compound"),
         (

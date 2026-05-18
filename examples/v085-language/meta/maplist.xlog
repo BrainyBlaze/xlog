@@ -1,0 +1,11 @@
+pred good(value: u32).
+pred next(input: u32, output: u32).
+good(1).
+good(2).
+next(1, 10).
+next(2, 20).
+
+all_good(1) :- maplist(good, [1, 2]).
+mapped_len(N) :- maplist(next, [1, 2], L), length(L, N).
+
+?- mapped_len(N).

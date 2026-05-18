@@ -273,6 +273,15 @@ pub struct Comparison {
     pub right: Term,
 }
 
+/// A finite univ expression (`Term =.. Parts`) in a rule body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Univ {
+    /// Term side of the univ relation.
+    pub term: Term,
+    /// Parts-list side of the univ relation.
+    pub parts: Term,
+}
+
 /// A literal in the body of a rule
 #[derive(Debug, Clone, PartialEq)]
 pub enum BodyLiteral {
@@ -284,6 +293,8 @@ pub enum BodyLiteral {
     Comparison(Comparison),
     /// Is-expression binding (e.g. `Z is X + Y`).
     IsExpr(IsExpr),
+    /// Finite univ relation (`Term =.. Parts`).
+    Univ(Univ),
 }
 
 impl BodyLiteral {
@@ -301,7 +312,7 @@ impl BodyLiteral {
     pub fn atom(&self) -> Option<&Atom> {
         match self {
             BodyLiteral::Positive(a) | BodyLiteral::Negated(a) => Some(a),
-            BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) => None,
+            BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => None,
         }
     }
 
@@ -318,6 +329,11 @@ impl BodyLiteral {
             BodyLiteral::IsExpr(is_expr) => {
                 let mut vars = is_expr.expr.variables();
                 vars.push(is_expr.target.as_str());
+                vars
+            }
+            BodyLiteral::Univ(univ) => {
+                let mut vars = univ.term.variables();
+                vars.extend(univ.parts.variables());
                 vars
             }
         }

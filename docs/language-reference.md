@@ -788,13 +788,14 @@ v0.8.5 defines finite list syntax and list built-ins. Lists are accepted only
 when they are finite and typed; accepted programs lower to relation layouts and
 normal GPU-capable execution paths.
 
-Implementation status after `G085_LIST`: scalar, symbol, and nested finite list
-values are normalized to `u64` list identifiers plus `__xlog_list_*` helper
-relations. `list<T>` predicate columns lower to scalar list-id columns while
-helper relations carry length, item, cons, append, sort, msort, and set facts.
-The current implementation accepts finite literals, declared `list<T>` columns,
-safe `[Head | Tail]` patterns in declared list columns, and the built-ins below
-when their list argument has a finite literal or a known `list<T>` type.
+Implementation status after `G085_META`: scalar, symbol, nested finite list,
+and finite meta term IDs are normalized to `u64` list identifiers plus
+`__xlog_list_*` helper relations. `list<T>` predicate columns lower to scalar
+list-id columns while helper relations carry length, item, cons, append, sort,
+msort, and set facts. The current implementation accepts finite literals,
+declared `list<T>` columns, safe `[Head | Tail]` patterns in declared list
+columns, and the built-ins below when their list argument has a finite literal
+or a known `list<T>` type.
 
 ### Syntax
 
@@ -829,8 +830,9 @@ Current implementation limits:
   split generation such as `append(A, B, [1,2,3])` is rejected as unbounded;
 - `sort`, `msort`, and `list_to_set` require a finite input literal in this
   node;
-- `term`, `compound`, and `predref` list elements remain reserved for later
-  `G085_META` lowering.
+- `term`, `compound`, and `predref` list elements lower to finite `u64` meta
+  term IDs when they appear in declared `list<term>`, `list<compound>`, or
+  `list<predref>` contexts.
 
 ### Examples
 
@@ -867,6 +869,16 @@ v0.8.5 safe meta-predicates provide finite term inspection and static
 predicate mapping. They do not introduce an unrestricted Prolog dynamic
 database or unrestricted `call/N`.
 
+Implementation status after `G085_META`: accepted safe meta forms normalize
+before stratification and lowering into ordinary helper relations such as
+`__xlog_meta_functor`, `__xlog_meta_univ`, `__xlog_meta_findall_*`, and
+`__xlog_meta_maplist_*`. Finite `term`, `compound`, and `predref` predicate
+columns lower to `u64` term IDs; compound metadata and univ parts are stored in
+typed helper relations. `findall` and `maplist` currently accept finite source
+facts and finite list literals only; derived-goal collection and non-literal
+maplist inputs are explicitly rejected until an aggregate-backed collection
+path lands.
+
 ### Supported Meta-Predicates
 
 | Predicate | Contract |
@@ -886,21 +898,23 @@ database or unrestricted `call/N`.
 pred edge(u32, u32).
 pred fanout(u32, list<u32>).
 
-fanout(X, Ys) :- node(X), findall(Y, edge(X, Y), Ys).
+fanout(Ys) :- findall(Y, edge(1, Y), Ys).
 ```
 
 ```xlog
 pred positive(u32).
 pred all_positive(list<u32>).
 
-all_positive(L) :- maplist(positive, L).
+all_positive(1) :- maplist(positive, [1, 2, 3]).
 ```
 
 ### Unsupported Forms
 
 - runtime-variable predicate names in `maplist` or any future call-like form;
 - `assert`, `retract`, dynamic database mutation, or IO predicates;
-- `findall` over a goal that is not finite after static analysis;
+- `findall` over derived goals or goals with variables that are neither bound
+  before `findall` nor collected by the template;
+- non-literal `maplist` inputs in the current `G085_META` subset;
 - constructing recursive or open compound terms with `=..`;
 - higher-arity `maplist` unless explicitly implemented and tested.
 

@@ -1045,7 +1045,9 @@ impl McProgram {
                         BodyLiteral::Positive(a) | BodyLiteral::Negated(a) => {
                             referenced.insert(a.predicate.clone());
                         }
-                        BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) => {}
+                        BodyLiteral::Comparison(_)
+                        | BodyLiteral::IsExpr(_)
+                        | BodyLiteral::Univ(_) => {}
                     }
                 }
             }
