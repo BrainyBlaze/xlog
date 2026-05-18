@@ -136,6 +136,13 @@ number of epistemic literals, reductions, candidate capacity, world capacity,
 and reduced-model capacity. Zero capacities are rejected with typed resource
 errors so the accepted path cannot silently use empty host-side structures.
 
+`Executor::prepare_epistemic_gpu_execution` now initializes those workspace
+buffers on device. The reset path submits `memset_zeros` for candidate
+assumptions, world views, model membership, and rejection reasons, then records
+`EpistemicGpuWorkspaceResetTrace` with zero host writes. This is the required
+initial state for later Generate-Propagate-Test kernels; it is not a substitute
+for those kernels.
+
 `EpistemicGpuRuntimePreflight::for_executable_plan` consumes an
 `EpistemicExecutablePlan` before launch. It computes the workspace layout,
 rejects nonzero forbidden CPU fallback counters, and records the reduced
@@ -150,10 +157,11 @@ runtime plan with preflight, workspace allocation, `execute_plan`, and a
 before/after counter trace.
 
 This workspace is still pre-kernel plumbing. It proves the buffer categories are
-allocatable and inspectable on the runtime side and that WCOJ certification is
-tied to actual counter deltas around the production reduced-plan dispatch; it
-does not yet populate epistemic buffers, launch Generate-Propagate-Test kernels,
-or produce epistemic kernel timing evidence.
+allocatable, initialized on device, and inspectable on the runtime side and
+that WCOJ certification is tied to actual counter deltas around the production
+reduced-plan dispatch; it does not yet populate epistemic buffers with candidate
+semantics, launch Generate-Propagate-Test kernels, or produce epistemic kernel
+timing evidence.
 
 ## G91 Compatibility Fixture Semantics
 

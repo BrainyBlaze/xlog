@@ -13,7 +13,8 @@ mod statistics;
 pub use executor::{
     EpistemicGpuExecutionResult, EpistemicGpuPreparedExecution, EpistemicGpuRuntimeCounters,
     EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace, EpistemicGpuRuntimeWcojCertification,
-    EpistemicGpuWorkspace, EpistemicGpuWorkspaceCapacities, EpistemicGpuWorkspaceLayout, Executor,
+    EpistemicGpuWorkspace, EpistemicGpuWorkspaceCapacities, EpistemicGpuWorkspaceLayout,
+    EpistemicGpuWorkspaceResetTrace, Executor,
 };
 pub use ilp_registry::{read_device_row_count, IlpRegistry, IlpTagEntry, IlpTaggedResult};
 pub use profiler::{ExecutionStats, MeasureGuard, OpStats, Profiler, StratumStats};

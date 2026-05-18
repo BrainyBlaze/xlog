@@ -9,8 +9,8 @@ Branch: `feat/v090-epistemic-solver-semantics`
 ## Scope
 
 This slice maps `EpistemicGpuPlan` buffer requirements to runtime workspace
-layout and allocatable device-buffer handles. It is still pre-kernel plumbing
-and does not close `G090_GPU`.
+layout, allocatable device-buffer handles, and device-side workspace reset. It
+is still pre-kernel plumbing and does not close `G090_GPU`.
 
 ## Implementation Summary
 
@@ -19,6 +19,8 @@ and does not close `G090_GPU`.
 | Runtime workspace layout | `EpistemicGpuWorkspaceLayout::for_plan` computes candidate, world-view, model-membership, and rejection-reason buffer sizes. |
 | Device-resident handle types | `EpistemicGpuWorkspace` stores required buffers as `TrackedCudaSlice<u8>` and `TrackedCudaSlice<u32>`. |
 | Runtime allocation API | `Executor::allocate_epistemic_gpu_workspace` allocates all required buffers from the CUDA memory manager. |
+| Runtime reset API | `Executor::reset_epistemic_gpu_workspace` zeroes all required buffers with device `memset_zeros`. |
+| Reset trace | `EpistemicGpuWorkspaceResetTrace` records candidate/world/model/rejection bytes, `device_zero_ops = 4`, and `host_write_ops = 0`. |
 | Runtime preflight | `EpistemicGpuRuntimePreflight::for_executable_plan` consumes `EpistemicExecutablePlan`, computes workspace layout, rejects nonzero CPU fallback counters, and records WCOJ/helper route metadata. |
 | Runtime counter guard | `EpistemicGpuRuntimeWcojCertification` requires actual WCOJ counter deltas before WCOJ evidence can certify a K-clique epistemic reduction. |
 | Reduced-plan execution trace | `Executor::execute_epistemic_gpu_execution` executes the reduced production runtime plan and captures `EpistemicGpuRuntimeTrace` counter deltas. |
@@ -29,7 +31,7 @@ and does not close `G090_GPU`.
 | Command | Result |
 |---|---|
 | `cargo fmt` | PASS |
-| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 7 passed, 0 failed |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 9 passed, 0 failed |
 | `cargo test -p xlog-runtime --lib` | PASS, 125 passed, 0 failed |
 | `cargo check -p xlog-runtime -p xlog-logic -p xlog-ir` | PASS |
 | `cargo check -p pyxlog` | PASS |
@@ -40,7 +42,7 @@ and does not close `G090_GPU`.
 |---|---|---|---|
 | M090_GPU.1 production lowering | accepted epistemic fixture runs through production runtime dispatch | PARTIAL | Runtime API wraps reduced production-plan execution with counter tracing; accepted Generate-Propagate-Test dispatch is still missing. |
 | M090_GPU.2 WCOJ eligibility | at least one epistemic reduction uses the WCOJ planner/path where eligible | PARTIAL | Preflight records WCOJ/K-clique/helper route metadata and the counter guard rejects metadata-only evidence; runtime dispatch evidence is missing. |
-| M090_GPU.3 GPU buffers | candidate, world-view, and rejection state have GPU-resident representations | PARTIAL | Runtime workspace uses `TrackedCudaSlice` handles; kernels do not populate them yet. |
+| M090_GPU.3 GPU buffers | candidate, world-view, and rejection state have GPU-resident representations | PARTIAL | Runtime workspace uses `TrackedCudaSlice` handles and device-side reset; kernels do not populate them with semantic state yet. |
 | M090_GPU.4 kernel coverage | GPU kernels cover candidate generation, propagation, validation, and materialization hot paths | BLOCKED | No epistemic kernels are launched yet. |
 | M090_GPU.5 CPU fallback ban | accepted execution trace records zero CPU candidate enumeration/world-view validation fallbacks | PARTIAL | Runtime preflight rejects nonzero forbidden CPU fallback counters; accepted execution trace is missing. |
 | M090_GPU.6 launch evidence | certification logs include nonzero GPU launch counts and kernel timing for epistemic execution | BLOCKED | No launch or timing evidence exists yet. |
@@ -49,6 +51,6 @@ and does not close `G090_GPU`.
 
 ## Remaining Blocker
 
-The next slice must attach kernels or GPU-backed adapters to this workspace and
-produce a measured execution trace with launch counts, kernel timings, WCOJ
-dispatch evidence, and zero CPU fallback counters.
+The next slice must attach kernels or GPU-backed adapters to this initialized
+workspace and produce a measured execution trace with launch counts, kernel
+timings, WCOJ dispatch evidence, and zero CPU fallback counters.

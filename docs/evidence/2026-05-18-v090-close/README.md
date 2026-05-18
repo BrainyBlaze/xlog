@@ -51,7 +51,7 @@ Earlier ref checks after `git fetch origin --prune` showed:
 | G090_FAEEL | PASS for semantic oracle | Foundedness fixtures pass, but GPU parity remains unproven. |
 | G090_GPT | PARTIAL | CPU trace fixtures pass; GPU-resident candidate generation/propagation/validation is missing. |
 | G090_SPLIT | PARTIAL | CPU split/recompose fixtures pass; GPU split execution is missing. |
-| G090_GPU | BLOCKED | GPU-plan, reduced-runtime-plan, workspace, runtime-preflight, counter-guard, and reduced-plan trace contracts exist, but no production epistemic hot-path dispatch, kernel buffer use, or launch evidence exists. |
+| G090_GPU | BLOCKED | GPU-plan, reduced-runtime-plan, workspace allocation/reset, runtime-preflight, counter-guard, and reduced-plan trace contracts exist, but no production epistemic hot-path dispatch, semantic kernel buffer use, or launch evidence exists. |
 | G090_SOLVER | BLOCKED | `SolverService` is CPU fixture enumeration; GPU-native SAT/MaxSAT/portfolio execution is not wired to epistemic candidates. |
 | G090_PROB | BLOCKED | Accepted-world-view evidence fixtures exist, but accepted probabilistic epistemic execution is not proven on the GPU-native exact path. |
 | G090_CERT | BLOCKED | Missing GPU launch counts, kernel timings, WCOJ evidence, zero CPU fallback counters, and post-v0.8 rerun. |
@@ -71,6 +71,8 @@ The branch contains useful scaffolding:
   helper-splitting metadata when statistics are supplied;
 - runtime GPU workspace layout/allocation API for candidate, world-view,
   model-membership, and rejection-reason buffers;
+- device-side workspace reset trace with four `memset_zeros` operations and
+  zero host writes;
 - runtime preflight that rejects nonzero CPU fallback counters and records
   WCOJ/K-clique/helper route metadata before launch;
 - runtime counter guard that refuses to certify WCOJ evidence from preflight

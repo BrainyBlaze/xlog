@@ -10,7 +10,7 @@ use xlog_ir::{
 use xlog_runtime::{
     EpistemicGpuRuntimeCounters, EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace,
     EpistemicGpuRuntimeWcojCertification, EpistemicGpuWorkspaceCapacities,
-    EpistemicGpuWorkspaceLayout,
+    EpistemicGpuWorkspaceLayout, EpistemicGpuWorkspaceResetTrace,
 };
 
 #[test]
@@ -231,6 +231,54 @@ fn runtime_trace_preserves_counter_snapshots_and_wcoj_certification() {
             observed_metadata_builds: 1,
         }
     );
+}
+
+#[test]
+fn workspace_reset_trace_records_device_zeroing_for_all_buffers() {
+    let plan = EpistemicGpuPlan::new(
+        EirEpistemicMode::Faeel,
+        vec![
+            epistemic_literal("known_fact", EirEpistemicOp::Know),
+            epistemic_literal("possible_fact", EirEpistemicOp::Possible),
+        ],
+        vec![EpistemicReductionPlan {
+            rule_index: 0,
+            relational_body_atoms: 3,
+            wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
+        }],
+    );
+    let layout = EpistemicGpuWorkspaceLayout::for_plan(
+        &plan,
+        EpistemicGpuWorkspaceCapacities {
+            max_candidates: 8,
+            max_worlds: 4,
+            max_models_per_reduction: 6,
+        },
+    )
+    .unwrap();
+
+    let trace = EpistemicGpuWorkspaceResetTrace::for_layout(layout);
+
+    assert_eq!(trace.candidate_assumption_bytes, 16);
+    assert_eq!(trace.world_view_bytes, 32);
+    assert_eq!(trace.model_membership_bytes, 12);
+    assert_eq!(trace.rejection_reason_bytes, 32);
+    assert_eq!(trace.total_zeroed_bytes(), 92);
+    assert_eq!(trace.device_zero_ops, 4);
+    assert_eq!(trace.host_write_ops, 0);
+}
+
+#[test]
+fn workspace_reset_runtime_path_uses_device_memsets_not_host_writes() {
+    let source = include_str!("../src/executor/epistemic_workspace.rs");
+
+    assert!(source.contains("fn reset_epistemic_gpu_workspace"));
+    assert!(source.contains("memset_zeros(&mut workspace.candidate_assumptions)"));
+    assert!(source.contains("memset_zeros(&mut workspace.world_views)"));
+    assert!(source.contains("memset_zeros(&mut workspace.model_membership)"));
+    assert!(source.contains("memset_zeros(&mut workspace.rejection_reasons)"));
+    assert!(!source.contains("upload_epistemic_gpu_workspace_reset"));
+    assert!(!source.contains("copy_epistemic_gpu_workspace_reset_from_host"));
 }
 
 fn epistemic_literal(predicate: &str, op: EirEpistemicOp) -> EirEpistemicLiteral {

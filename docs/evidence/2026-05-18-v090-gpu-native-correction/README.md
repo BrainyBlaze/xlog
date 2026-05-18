@@ -18,7 +18,7 @@ release gate.
 | Area | Current branch state | Release status |
 |---|---|---|
 | EIR/GPU plan | Epistemic syntax is represented explicitly; `EpistemicGpuPlan` records the GPU contract; `EpistemicExecutablePlan` carries the reduced production runtime plan. | PARTIAL until accepted forms execute through production runtime/GPU dispatch. |
-| GPU workspace | `EpistemicGpuWorkspace` maps required buffer categories to runtime `TrackedCudaSlice` handles; `EpistemicGpuRuntimePreflight` consumes executable plans and records WCOJ/helper route metadata; `EpistemicGpuRuntimeWcojCertification` rejects WCOJ evidence unless runtime counters advance; `EpistemicGpuRuntimeTrace` records reduced-plan counter deltas. | PARTIAL until kernels populate and consume those buffers. |
+| GPU workspace | `EpistemicGpuWorkspace` maps required buffer categories to runtime `TrackedCudaSlice` handles; `EpistemicGpuWorkspaceResetTrace` records device-side reset with zero host writes; `EpistemicGpuRuntimePreflight` consumes executable plans and records WCOJ/helper route metadata; `EpistemicGpuRuntimeWcojCertification` rejects WCOJ evidence unless runtime counters advance; `EpistemicGpuRuntimeTrace` records reduced-plan counter deltas. | PARTIAL until kernels populate and consume those buffers with semantic state. |
 | World views | `EpistemicWorldView` fixtures test `know`, `possible`, and `not know`. | ORACLE ONLY until world views are generated/validated on GPU. |
 | GPT | CPU fixture records guesses, reduced models, accepted world views, and rejection reasons. | PARTIAL until candidate generation/propagation/validation use GPU-resident buffers. |
 | Splitting | CPU split/recompose fixtures pass. | PARTIAL until valid split components execute through GPU-native subplans. |
@@ -47,7 +47,8 @@ The next production slice should start at the lowering/runtime boundary:
    `EpistemicWorldView` contract and attaches zero-fallback counters. DONE for
    the plan contract in `EpistemicGpuPlan`; runtime execution remains open.
 2. Map plan buffer categories to runtime GPU workspace allocations. DONE for
-   layout and `TrackedCudaSlice` handles; kernel use remains open.
+   layout, `TrackedCudaSlice` handles, and device-side reset; kernel use remains
+   open.
 3. Lower accepted EIR into production runtime plans instead of the current
    `UnsupportedEpistemicConstruct` boundary. DONE for
    `compile_epistemic_gpu_execution` and its stats-aware variant; runtime

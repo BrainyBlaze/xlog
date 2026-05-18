@@ -33,6 +33,9 @@ device-buffer allocations for candidate assumptions, world views, model
 membership, and rejection reasons. `EpistemicGpuRuntimePreflight` consumes an
 `EpistemicExecutablePlan`, computes the workspace layout, rejects nonzero CPU
 fallback counters, and records WCOJ route/helper metadata before launch.
+`Executor::prepare_epistemic_gpu_execution` resets all four workspace buffers
+with device `memset_zeros` calls and records `EpistemicGpuWorkspaceResetTrace`
+with `host_write_ops = 0`.
 `EpistemicGpuRuntimeWcojCertification` then requires actual production WCOJ
 counter deltas before WCOJ evidence can be certified.
 `Executor::execute_epistemic_gpu_execution` wraps the reduced production

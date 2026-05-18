@@ -92,6 +92,45 @@ pub struct EpistemicGpuWorkspace {
     pub rejection_reasons: TrackedCudaSlice<u32>,
 }
 
+/// Trace proving an epistemic GPU workspace was initialized on device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EpistemicGpuWorkspaceResetTrace {
+    /// Candidate-assumption bytes zeroed on device.
+    pub candidate_assumption_bytes: usize,
+    /// World-view bytes zeroed on device.
+    pub world_view_bytes: usize,
+    /// Model-membership bytes zeroed on device.
+    pub model_membership_bytes: usize,
+    /// Rejection-reason bytes zeroed on device.
+    pub rejection_reason_bytes: usize,
+    /// Device zeroing operations submitted by the reset path.
+    pub device_zero_ops: u32,
+    /// Host writes used by the reset path. Accepted GPU execution requires zero.
+    pub host_write_ops: u32,
+}
+
+impl EpistemicGpuWorkspaceResetTrace {
+    /// Build the reset trace implied by a workspace layout.
+    pub fn for_layout(layout: EpistemicGpuWorkspaceLayout) -> Self {
+        Self {
+            candidate_assumption_bytes: layout.candidate_assumption_bytes,
+            world_view_bytes: layout.world_view_bytes,
+            model_membership_bytes: layout.model_membership_bytes,
+            rejection_reason_bytes: layout.rejection_reason_slots * std::mem::size_of::<u32>(),
+            device_zero_ops: 4,
+            host_write_ops: 0,
+        }
+    }
+
+    /// Total bytes zeroed by the reset path.
+    pub fn total_zeroed_bytes(&self) -> usize {
+        self.candidate_assumption_bytes
+            + self.world_view_bytes
+            + self.model_membership_bytes
+            + self.rejection_reason_bytes
+    }
+}
+
 /// Runtime preflight summary for an epistemic executable plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EpistemicGpuRuntimePreflight {
@@ -160,6 +199,8 @@ pub struct EpistemicGpuPreparedExecution {
     pub preflight: EpistemicGpuRuntimePreflight,
     /// Device-resident workspace buffers.
     pub workspace: EpistemicGpuWorkspace,
+    /// Device-side initialization trace for the workspace buffers.
+    pub workspace_reset: EpistemicGpuWorkspaceResetTrace,
 }
 
 /// Counter trace captured around a reduced production runtime dispatch.
@@ -390,6 +431,51 @@ impl Executor {
         })
     }
 
+    /// Zero every epistemic workspace buffer on device before hot-path use.
+    pub fn reset_epistemic_gpu_workspace(
+        &self,
+        workspace: &mut EpistemicGpuWorkspace,
+    ) -> Result<EpistemicGpuWorkspaceResetTrace> {
+        let device = self.provider.device().inner();
+
+        device
+            .memset_zeros(&mut workspace.candidate_assumptions)
+            .map_err(|e| {
+                XlogError::execution_ctx(
+                    "epistemic GPU workspace reset",
+                    "candidate assumptions memset",
+                    &e,
+                )
+            })?;
+        device
+            .memset_zeros(&mut workspace.world_views)
+            .map_err(|e| {
+                XlogError::execution_ctx("epistemic GPU workspace reset", "world views memset", &e)
+            })?;
+        device
+            .memset_zeros(&mut workspace.model_membership)
+            .map_err(|e| {
+                XlogError::execution_ctx(
+                    "epistemic GPU workspace reset",
+                    "model membership memset",
+                    &e,
+                )
+            })?;
+        device
+            .memset_zeros(&mut workspace.rejection_reasons)
+            .map_err(|e| {
+                XlogError::execution_ctx(
+                    "epistemic GPU workspace reset",
+                    "rejection reasons memset",
+                    &e,
+                )
+            })?;
+
+        Ok(EpistemicGpuWorkspaceResetTrace::for_layout(
+            workspace.layout,
+        ))
+    }
+
     /// Prepare runtime-owned GPU buffers for an epistemic executable plan.
     pub fn prepare_epistemic_gpu_execution(
         &self,
@@ -397,11 +483,14 @@ impl Executor {
         capacities: EpistemicGpuWorkspaceCapacities,
     ) -> Result<EpistemicGpuPreparedExecution> {
         let preflight = EpistemicGpuRuntimePreflight::for_executable_plan(executable, capacities)?;
-        let workspace = self.allocate_epistemic_gpu_workspace(&executable.gpu_plan, capacities)?;
+        let mut workspace =
+            self.allocate_epistemic_gpu_workspace(&executable.gpu_plan, capacities)?;
+        let workspace_reset = self.reset_epistemic_gpu_workspace(&mut workspace)?;
 
         Ok(EpistemicGpuPreparedExecution {
             preflight,
             workspace,
+            workspace_reset,
         })
     }
 
