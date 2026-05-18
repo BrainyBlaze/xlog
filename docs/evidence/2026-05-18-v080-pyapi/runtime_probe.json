@@ -50,8 +50,8 @@
     "last_error": null,
     "last_rows": 0
   },
-  "pyxlog_file": "/home/dev/projects/xlog/.worktrees/v080-dts/crates/pyxlog/python/pyxlog/__init__.py",
-  "pyxlog_version": "0.7.0",
+  "pyxlog_file": "/home/dev/projects/xlog/crates/pyxlog/python/pyxlog/__init__.py",
+  "pyxlog_version": "0.8.0",
   "session_cuda_graph_stats_keys": [
     "csm_cuda_graph_captures",
     "csm_cuda_graph_launches",

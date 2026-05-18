@@ -100,7 +100,7 @@ def _run_pyapi_probe() -> dict[str, Any]:
         "program_memory_stats": prob_program.memory_stats(),
         "program_progress_after_async": prob_program.progress_stats(),
         "pyxlog_file": str(Path(pyxlog.__file__).resolve()),
-        "pyxlog_version": getattr(pyxlog, "__version__", "0.7.0"),
+        "pyxlog_version": getattr(pyxlog, "__version__", "0.8.0"),
         "session_cuda_graph_stats_keys": _stats_keys(session_graph),
         "session_host_transfer_stats_keys": _stats_keys(session_host),
         "session_memory_stats": session.memory_stats(),

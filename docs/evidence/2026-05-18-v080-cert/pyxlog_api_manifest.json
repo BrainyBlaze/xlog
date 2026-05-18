@@ -1,13 +1,13 @@
 {
   "determinism": {
     "bit_exact_replays": 100,
-    "fingerprint": "9ec5de862e335390dae697a818b08d6913367c9a2ed35bc7c0749c0dbf33f402",
+    "fingerprint": "e796641a15448d31d07df6b15c44ae6bcdf5fc4a141d283cd0951663fa53566f",
     "fixture": "v0.8.0 branch-local LogicRelationSession replay",
     "replays": 100,
     "runtime_evidence": "docs/evidence/2026-05-18-v080-cert/runtime_probe.json",
     "source_guard": "python/tests/test_logic_dts_frozen_replay_determinism.py"
   },
-  "generated_at": "2026-05-18T15:55:59.470731+00:00",
+  "generated_at": "2026-05-18T18:57:05.612524+00:00",
   "goal": "G080_CERT",
   "graph_telemetry": {
     "counters": [
@@ -32,7 +32,7 @@
     "htod_bytes": 0,
     "htod_calls": 0
   },
-  "repo_head": "1cde68b51cf5e6fd53d85444bd9f291ae0d73f9f",
+  "repo_head": "1cd61eb08eba9b283c9f65b8c161f946c03962a7",
   "required_symbols": [
     {
       "class": "LogicProgram",
@@ -208,8 +208,8 @@
   "runtime_probe": {
     "cuda_available": true,
     "path": "docs/evidence/2026-05-18-v080-cert/runtime_probe.json",
-    "pyxlog_file": "/tmp/xlog-v080-cert-venv/lib/python3.10/site-packages/pyxlog/__init__.py",
-    "pyxlog_version": "0.7.0",
+    "pyxlog_file": "/home/dev/projects/xlog/crates/pyxlog/python/pyxlog/__init__.py",
+    "pyxlog_version": "0.8.0",
     "torch_version": "2.10.0+cu128"
   },
   "schema_version": 1

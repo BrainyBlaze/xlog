@@ -16,6 +16,55 @@ All notable changes to this project are documented in this file.
 - Updated the public CUDA certification count to 207/207 after the current
   full-suite and recorded-launch certification reruns.
 
+## [0.8.0] — 2026-05-18
+
+DTS-DLM ML/Python Productization. This release pulls the consumer-critical
+Python, neural-symbolic, incremental-session, and native exact-induction work
+forward so DTS-DLM can execute the queued M37-A+B path against production xlog
+surfaces.
+
+### Added
+
+- `pyxlog` runtime/session controls for async evaluation, chunked streaming
+  results, per-call memory limits, progress counters, memory diagnostics,
+  CUDA Graph counters, and host-transfer counters.
+- Persistent relation delta APIs on `LogicRelationSession`, including insert,
+  delete, mixed `apply_relation_delta`, and `delta_stats` reporting backed by
+  runtime `RelationDelta` recomputation paths.
+- DTS-DLM neural bridge helpers: registered-network top-k and deterministic
+  output modes, stable top-k tie-breaking, neural cache telemetry, Belnap
+  pro/contra/quarantine loss helpers, semantic loss, MSE, and infoloss
+  surfaces.
+- Native exact-induction consumer integration through
+  `pyxlog.ilp.exact_induce.induce_exact(..., backend="native")` for the DTS
+  tensorized ILP `U64` path, with strict-per-topology compatibility policy and
+  packaging of `ilp_exact` CUDA artifacts through the normal `pyxlog/kernels`
+  wheel path.
+- A DTS-focused example suite under `examples/v080-dts/` plus
+  `scripts/validate_v080_examples.py`, covering async/streaming runtime
+  controls, relation deltas, neural bridge helpers, native exact induction, and
+  probabilistic async diagnostics.
+- A machine-readable v0.8.0 certification pack under
+  `docs/evidence/2026-05-18-v080-cert/` with `17/17` DTS-required pyxlog symbol
+  coverage and `signature_drift=0`.
+
+### Changed
+
+- Workspace package version and internal xlog crate dependency constraints now
+  target `0.8.0`.
+- README and roadmap release status now identify `v0.8.0` as the current
+  tagged release and route DTS-DLM users to the Python bindings and
+  `examples/v080-dts/` suite.
+- v0.9.0 is the next Epistemic/Solver Semantics train; v0.10.0 is the
+  Multi-GPU / Out-of-Core train.
+
+### Release Status
+
+- Closure proposal: `docs/plans/2026-05-18-v080-closure-proposal.md`.
+- Certification evidence: `docs/evidence/2026-05-18-v080-*/`.
+- DTS-DLM full 449-doc native-liveness replay is accepted by historical
+  evidence waiver; it was not freshly rerun inside the xlog release worktree.
+
 ## [0.7.0] — 2026-05-18
 
 General WCOJ Architecture and Runtime Expansion. This release

@@ -59,7 +59,7 @@ def test_v080_manifest_records_certification_metric_evidence() -> None:
         assert manifest["runtime_probe"]["path"] == str(
             runtime_probe.relative_to(ROOT)
         )
-        assert manifest["runtime_probe"]["pyxlog_version"] == "0.7.0"
+        assert manifest["runtime_probe"]["pyxlog_version"] == "0.8.0"
     assert manifest["graph_telemetry"]["status"] in {"available", "unavailable"}
     if manifest["graph_telemetry"]["status"] == "unavailable":
         assert manifest["graph_telemetry"]["reason"]

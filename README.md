@@ -2,16 +2,15 @@
 
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
 [![CUDA Tests](https://img.shields.io/badge/CUDA%20tests-207%2F207-brightgreen.svg)](docs/architecture/cuda-certification.md)
-[![Version](https://img.shields.io/badge/version-v0.7.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.8.0-blue.svg)](CHANGELOG.md)
 
-> **Release status:** `v0.7.0` - General WCOJ Architecture and Runtime Expansion.
-> The release expands the v0.6.2 triangle accelerator into a production WCOJ
-> subsystem: first-class multiway RIR, variable-order and cardinality cost models,
-> recursive/SCC integration, K5-K8 clique coverage, runtime histogram block
-> slicing, helper splitting for buried skew, bounded CUDA Graph replay for the
-> DTS-DLM hot loop, and end-to-end DTS-DLM validation. See `ROADMAP.md`,
-> `CHANGELOG.md`, `docs/wcoj-architecture-guide.md`, and
-> `docs/wcoj-user-guide.md`.
+> **Release status:** `v0.8.0` - DTS-DLM ML/Python Productization.
+> The release productizes the DTS-DLM M37-A+B support surface: stable
+> `pyxlog` runtime/session APIs, async and streaming evaluation, relation
+> deltas, diagnostics, registered neural top-k/deterministic modes, Belnap
+> bridge helpers, native exact-induction integration, and certification-friendly
+> DTS examples. See `ROADMAP.md`, `CHANGELOG.md`,
+> `docs/architecture/python-bindings.md`, and `examples/v080-dts/`.
 
 **XLOG is a GPU-native logic programming language for unified symbolic reasoning.**
 Neural-symbolic systems today keep symbolic reasoning on the CPU while neural computation runs on

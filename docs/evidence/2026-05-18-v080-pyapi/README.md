@@ -10,7 +10,7 @@
 
 | Artifact | Purpose |
 |----------|---------|
-| `runtime_probe.json` | Isolated branch-local pyxlog 0.7.0 probe for async, streaming, progress, memory-limit, and diagnostics behavior. |
+| `runtime_probe.json` | Isolated branch-local pyxlog 0.8.0 probe for async, streaming, progress, memory-limit, and diagnostics behavior. |
 | `scripts/v080_pyxlog_runtime_probe.py` | Committed reproducer for the PYAPI runtime probe. |
 | `python/tests/test_v080_pyapi_source.py` | Source-surface regression test for new runtime/session API names and native memory hooks. |
 | `crates/pyxlog/python/pyxlog/__init__.py` | Python async wrapper, progress counters, and chunk streaming helpers. |
@@ -28,10 +28,10 @@
 | `cargo fmt --check` | exit 0 |
 | `cargo check -p pyxlog` | exit 0 |
 | `cargo test -p pyxlog --lib` | exit 0; 7 passed |
-| `/tmp/xlog-v080-cert-venv/bin/python` branch-local runtime probe | exit 0; pyxlog `0.7.0` |
+| `/tmp/xlog-v080-cert-venv/bin/python` branch-local runtime probe | exit 0; pyxlog `0.8.0` |
 
 The runtime probe uses the isolated virtualenv at `/tmp/xlog-v080-cert-venv`
-after reinstalling this branch's locally built `pyxlog-0.7.0` wheel. Some
+after reinstalling this branch's locally built `pyxlog-0.8.0` wheel. Some
 allocation byte counts are local CUDA-environment observations; the release
 gate is the behavior they evidence: async completion, CUDA chunk tensors,
 typed over-limit failure, progress counters, and diagnostics keys.
