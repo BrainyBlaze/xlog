@@ -32,7 +32,7 @@ on device. This is not a closure claim for `G090_GPU`, `G090_CERT`, or
 
 | Command | Result |
 |---|---|
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 4 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 5 passed, 0 failed |
 
 ## Non-Closure Notes
 

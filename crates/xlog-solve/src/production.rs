@@ -138,6 +138,22 @@ impl GpuSolverProductionAdapter {
         Ok(assignment)
     }
 
+    /// Solve UNSAT through GPU CDCL after an accepted GPU epistemic execution result.
+    pub fn solve_expect_unsat_with_gpu_execution_result(
+        &mut self,
+        provider: &CudaKernelProvider,
+        result: &EpistemicGpuExecutionResult,
+        cnf: &GpuCnf,
+    ) -> Result<()> {
+        require_accepted_gpu_solver_evidence(provider, result)?;
+        self.solve_expect_unsat(cnf)?;
+        self.trace.accepted_gpu_candidate_evidence_consumed = self
+            .trace
+            .accepted_gpu_candidate_evidence_consumed
+            .saturating_add(1);
+        self.trace.require_zero_cpu_search()
+    }
+
     /// Solve and enforce UNSAT entirely on GPU.
     pub fn solve_expect_unsat(&mut self, cnf: &GpuCnf) -> Result<()> {
         self.solver.solve_expect_unsat(cnf)?;

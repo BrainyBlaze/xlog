@@ -257,10 +257,11 @@ reuse adapter for epistemic callers. It is a thin wrapper over the existing
 `GpuCdclSolver`; it dispatches `solve_expect_sat`, `solve_expect_unsat`, and
 workspace-backed UNSAT through the GPU CDCL path and exposes zero CPU
 assignment/MaxSAT enumeration counters in `GpuSolverProductionTrace`.
-`solve_expect_sat_with_gpu_execution_result` additionally accepts an
-`EpistemicGpuExecutionResult`, requires stable tuple-source membership, GPU
+`solve_expect_sat_with_gpu_execution_result` and
+`solve_expect_unsat_with_gpu_execution_result` additionally accept an
+`EpistemicGpuExecutionResult`, require stable tuple-source membership, GPU
 model-membership/world-view/materialization traces, zero hot-path transfers, and
-non-empty final device output, then dispatches SAT through GPU CDCL.
+non-empty final device output, then dispatch SAT/UNSAT through GPU CDCL.
 `xlog_solve::production_capabilities` reports that GPU CDCL SAT/UNSAT is
 available while GPU-native MaxSAT and SAT/MaxSAT portfolio execution are blocked.
 

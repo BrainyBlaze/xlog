@@ -15,6 +15,7 @@ fn production_solver_adapter_reuses_gpu_cdcl_not_cpu_oracle() {
     assert!(production.contains("solve_expect_sat(cnf)"));
     assert!(production.contains("solve_expect_sat_with_gpu_execution_result"));
     assert!(production.contains("solve_expect_unsat(cnf)"));
+    assert!(production.contains("solve_expect_unsat_with_gpu_execution_result"));
     assert!(production.contains("solve_expect_unsat_with_branch_limit_ws"));
     assert!(production.contains("accepted_gpu_candidate_evidence_consumed"));
     assert!(production.contains("read_device_row_count"));
