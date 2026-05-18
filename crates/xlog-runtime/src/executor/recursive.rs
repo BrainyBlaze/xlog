@@ -468,21 +468,7 @@ impl Executor {
                 self.profiler.record_peak_memory(mem);
             }
 
-            let key_cols: Vec<usize> = (0..merged.arity()).collect();
-            let full_new = if self.buffer_row_count(&merged)? == 0 {
-                merged
-            } else {
-                let dedup_input = merged.num_rows();
-                let start = self.profiler.start_op();
-                let deduped = self.provider.dedup_sorted(&merged, &key_cols)?;
-                if let Some(start) = start {
-                    let mem = self.provider.memory().allocated_bytes();
-                    self.profiler
-                        .record_op("dedup", dedup_input, deduped.num_rows(), start, mem);
-                    self.profiler.record_peak_memory(mem);
-                }
-                deduped
-            };
+            let full_new = merged;
 
             let delta_name = delta_tracker.delta_name(pred)?;
 
@@ -788,26 +774,7 @@ impl Executor {
                     self.profiler.record_peak_memory(mem);
                 }
 
-                let key_cols: Vec<usize> = (0..merged.arity()).collect();
-                let full_new = if self.buffer_row_count(&merged)? == 0 {
-                    merged
-                } else {
-                    let dedup_input = merged.num_rows();
-                    let start = self.profiler.start_op();
-                    let deduped = self.provider.dedup_sorted(&merged, &key_cols)?;
-                    if let Some(start) = start {
-                        let mem = self.provider.memory().allocated_bytes();
-                        self.profiler.record_op(
-                            "dedup",
-                            dedup_input,
-                            deduped.num_rows(),
-                            start,
-                            mem,
-                        );
-                        self.profiler.record_peak_memory(mem);
-                    }
-                    deduped
-                };
+                let full_new = merged;
                 // W2.3 step 6 — Phase 4: capture full_new's row count
                 // BEFORE the store_put move; pre-resolve full_rel_opt
                 // before the &mut self stats borrow. delta_rows_phase4

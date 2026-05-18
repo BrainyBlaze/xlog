@@ -419,6 +419,89 @@ __device__ __forceinline__ int32_t xlog_typed_cmp_cell(
     return 0;
 }
 
+__device__ __forceinline__ int32_t xlog_typed_cmp_row(
+    const uint64_t* __restrict__ col_ptrs,
+    const uint32_t* __restrict__ col_sizes,
+    const uint8_t* __restrict__ col_types,
+    uint32_t num_cols,
+    uint32_t lhs_row,
+    uint32_t rhs_row
+) {
+    for (uint32_t c = 0; c < num_cols; c++) {
+        const uint8_t* col = (const uint8_t*)(uintptr_t)col_ptrs[c];
+        uint32_t sz = col_sizes[c];
+        const uint8_t* lhs = col + (uint64_t)lhs_row * sz;
+        const uint8_t* rhs = col + (uint64_t)rhs_row * sz;
+        int32_t cmp = xlog_typed_cmp_cell(lhs, rhs, col_types[c]);
+        if (cmp != 0) return cmp;
+    }
+    if (lhs_row < rhs_row) return -1;
+    if (lhs_row > rhs_row) return 1;
+    return 0;
+}
+
+__device__ __forceinline__ int32_t xlog_small_sort_cmp_index(
+    uint32_t lhs,
+    uint32_t rhs,
+    const uint64_t* __restrict__ col_ptrs,
+    const uint32_t* __restrict__ col_sizes,
+    const uint8_t* __restrict__ col_types,
+    uint32_t num_cols
+) {
+    const uint32_t sentinel = 0xffffffffu;
+    if (lhs == sentinel && rhs == sentinel) return 0;
+    if (lhs == sentinel) return 1;
+    if (rhs == sentinel) return -1;
+    return xlog_typed_cmp_row(col_ptrs, col_sizes, col_types, num_cols, lhs, rhs);
+}
+
+// Sort a small full-row relation by typed lexicographic order and return the
+// row permutation. This is intentionally capped at 1024 rows: it replaces the
+// many-launch radix multi-column path for W66's small recursive set-maintenance
+// buffers without changing large-relation behavior.
+extern "C" __global__ void small_sort_full_row_indices_typed(
+    const uint64_t* __restrict__ col_ptrs,
+    const uint32_t* __restrict__ col_sizes,
+    const uint8_t* __restrict__ col_types,
+    uint32_t num_cols,
+    const uint32_t* __restrict__ num_rows_device,
+    uint32_t row_cap,
+    uint32_t* __restrict__ out_indices
+) {
+    __shared__ uint32_t indices[1024];
+    const uint32_t sentinel = 0xffffffffu;
+    uint32_t tid = threadIdx.x;
+    uint32_t n = *num_rows_device;
+    if (n > row_cap) n = row_cap;
+    if (n > 1024u) n = 1024u;
+
+    indices[tid] = (tid < n) ? tid : sentinel;
+    __syncthreads();
+
+    for (uint32_t k = 2; k <= 1024u; k <<= 1) {
+        for (uint32_t j = k >> 1; j > 0; j >>= 1) {
+            uint32_t partner = tid ^ j;
+            if (partner > tid) {
+                bool ascending = ((tid & k) == 0);
+                uint32_t lhs = indices[tid];
+                uint32_t rhs = indices[partner];
+                int32_t cmp = xlog_small_sort_cmp_index(
+                    lhs, rhs, col_ptrs, col_sizes, col_types, num_cols);
+                bool swap = ascending ? (cmp > 0) : (cmp < 0);
+                if (swap) {
+                    indices[tid] = rhs;
+                    indices[partner] = lhs;
+                }
+            }
+            __syncthreads();
+        }
+    }
+
+    if (tid < n) {
+        out_indices[tid] = indices[tid];
+    }
+}
+
 // Mark rows of sorted, deduped buffer `a` that do NOT appear in sorted,
 // deduped buffer `b`. Each thread handles one a-row and performs a binary
 // search over b's row space using the typed per-column comparator above,

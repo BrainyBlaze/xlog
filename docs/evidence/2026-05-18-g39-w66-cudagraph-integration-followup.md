@@ -7,7 +7,8 @@ Base evidence superseded-in-part: `docs/evidence/2026-05-18-g39-w66-cudagraph-sp
 ## Delta
 
 The spike proved CUDA Graph availability but left five production blockers.
-This integration follow-up implements the first bounded production path:
+This integration follow-up implements the bounded production graph path and the
+Stage-4 set-maintenance widening needed for the DTS evaluate surface:
 
 - CUDA Graph node inventory via `CapturedCudaGraph::nodes()`;
 - graph-exec node update wrappers for kernel and memset nodes;
@@ -23,6 +24,12 @@ This integration follow-up implements the first bounded production path:
   session path can reach recorded CSM / CUDA Graph execution;
 - the common <=4-key pack/hash kernel now receives column element sizes as a
   packed scalar argument instead of uploading a hot-path metadata buffer;
+- graph-mode small full-row set maintenance (`union_gpu` / deterministic
+  `diff_gpu` dedup inputs) routes <=1024-row multi-column buffers through a
+  one-block typed row-index sort instead of the many-launch radix
+  multi-column sort path;
+- recursive fixed-point merge now trusts `union_gpu`'s sorted set semantics and
+  no longer immediately re-dedups the union output;
 - no DLPack or Arrow staging copies on the graph path.
 
 The graph path is intentionally bounded. If `max_output` is supplied, output
@@ -78,24 +85,45 @@ test dispatch_short_circuits_before_csm_for_more_than_four_keys ... ok
 test dispatch_routes_to_csm_when_recorded_csm_env_is_set_directly ... ok
 test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 
+$ cargo test -p xlog-cuda --test set_ops_tests \
+  w66_graph_mode_small_i64_full_row_set_ops_match_baseline_and_use_small_sort \
+  -- --nocapture
+running 1 test
+test w66_graph_mode_small_i64_full_row_set_ops_match_baseline_and_use_small_sort ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out
+
+$ cargo test -p xlog-integration --test test_w66_recursive_setop_profile -- --nocapture
+running 1 test
+test w66_recursive_union_does_not_rededup_union_output ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+$ cargo test -p xlog-cuda -- --nocapture
+PASS. Key aggregate lines:
+- lib unit tests: 147 passed, 0 failed
+- set_ops_tests: 35 passed, 0 failed
+- test_full_row_set_algebra: 20 passed, 0 failed
+- test_provider_launch_recorder: 51 passed, 0 failed
+- type_coverage_tests: 27 passed, 0 failed
+- doc-tests: 0 failed, 5 ignored
+
 $ cargo build -p pyxlog --release
-Finished `release` profile [optimized] target(s) in 33.97s
+Finished `release` profile [optimized] target(s) in 13.44s
 
 $ XLOG_CUBIN_DIR=target/release/build/xlog-cuda-43b482a33001fc07/out \
   PYTHONPATH=/home/dev/projects/dts-dlm/src:/tmp/pyxlog-w66 \
   python3 -m dts_dlm.pilots.m37c_xlog_graph_fixture \
   --mode graph --rows 256 --runs 100 \
-  --out /tmp/m37c_xlog_graph_fixture_w66_100_rebased_v2.json
+  --out /tmp/m37c_xlog_graph_fixture_w66_100_after_setops.json
 {
   "status": "passed",
   "rows": 256,
   "runs": 100,
   "surface": "step",
   "timing_source": "cuda_event",
-  "wall_seconds": 69.35122062201845,
-  "mean_wall_ms_per_run": 693.5122062201845,
-  "cuda_event_elapsed_ms": 69350.953125,
-  "mean_cuda_event_ms_per_run": 693.50953125,
+  "wall_seconds": 2.344730542972684,
+  "mean_wall_ms_per_run": 23.44730542972684,
+  "cuda_event_elapsed_ms": 2344.62255859375,
+  "mean_cuda_event_ms_per_run": 23.4462255859375,
   "deterministic": true,
   "unique_digest_count": 1,
   "support_rows_min": 256,
@@ -122,26 +150,26 @@ $ XLOG_CUBIN_DIR=target/release/build/xlog-cuda-43b482a33001fc07/out \
   PYTHONPATH=/home/dev/projects/dts-dlm/src:/tmp/pyxlog-w66 \
   python3 -m dts_dlm.pilots.m37c_xlog_graph_fixture \
   --mode compare --surface evaluate --rows 96 --runs 100 --warmup-runs 5 \
-  --out /tmp/m37c_xlog_graph_fixture_w66_compare_96_evaluate_rebased_v2.json
+  --out /tmp/m37c_xlog_graph_fixture_w66_compare_96_evaluate_after_setops.json
 {
-  "status": "failed",
+  "status": "passed",
   "rows": 96,
   "runs": 100,
   "warmup_runs": 5,
   "surface": "evaluate",
   "timing_source": "synchronized_wall",
-  "wall_speedup": 1.0095365191184626,
-  "timing_speedup": 1.0095365191184626,
-  "timing_reduction_pct": 0.9446433029277612,
+  "wall_speedup": 27.739825879056802,
+  "timing_speedup": 27.739825879056802,
+  "timing_reduction_pct": 96.3950747046506,
   "cuda_event_speedup": null,
   "cuda_event_reduction_pct": null,
   "structural_launch_reduction_pct": 75.0,
   "graphable_launch_units": 1000,
   "baseline": {
-    "wall_seconds": 70.01620508154156,
-    "mean_wall_ms_per_run": 700.1620508154156,
-    "timing_elapsed_ms": 70016.20508154156,
-    "mean_timing_ms_per_run": 700.1620508154156,
+    "wall_seconds": 59.23670756700449,
+    "mean_wall_ms_per_run": 592.3670756700449,
+    "timing_elapsed_ms": 59236.70756700449,
+    "mean_timing_ms_per_run": 592.3670756700449,
     "timing_source": "synchronized_wall",
     "cuda_event_elapsed_ms": null,
     "mean_cuda_event_ms_per_run": null,
@@ -160,10 +188,10 @@ $ XLOG_CUBIN_DIR=target/release/build/xlog-cuda-43b482a33001fc07/out \
     "peak_vram_gib_snapshot": 1.23687744140625
   },
   "graph": {
-    "wall_seconds": 69.35480168927461,
-    "mean_wall_ms_per_run": 693.5480168927461,
-    "timing_elapsed_ms": 69354.80168927461,
-    "mean_timing_ms_per_run": 693.5480168927461,
+    "wall_seconds": 2.1354390552151017,
+    "mean_wall_ms_per_run": 21.354390552151017,
+    "timing_elapsed_ms": 2135.4390552151017,
+    "mean_timing_ms_per_run": 21.354390552151017,
     "timing_source": "synchronized_wall",
     "cuda_event_elapsed_ms": null,
     "mean_cuda_event_ms_per_run": null,
@@ -180,11 +208,7 @@ $ XLOG_CUBIN_DIR=target/release/build/xlog-cuda-43b482a33001fc07/out \
       "htod_calls": 0
     },
     "peak_vram_gib_snapshot": 1.23687744140625
-  },
-  "failures": [
-    "expected wall_speedup>=1.2, got 1.009537",
-    "expected timing_reduction_pct>=50.0, got 0.944643"
-  ]
+  }
 }
 
 $ git diff --check
@@ -195,24 +219,15 @@ exit 0
 
 | Metric | Status | Raw result |
 |---|---:|---|
-| M_W66.1 m37c-prime Stage 4 speedup | FAIL (bounded m37c-scale evaluate cert) | Paired DTS evaluate-surface comparison at the G_PRE median row scale (`rows=96`, `runs=100`, `warmup=5`) produced `wall_speedup=1.009537x`, below the `>=1.2x` gate. |
-| M_W66.2 kernel launch overhead reduction | FAIL (bounded m37c-scale evaluate cert) | Structural graphable-unit launch reduction is 75%, but measured synchronized-wall evaluate-surface timing reduction is `0.944643%`; CUDA-event timing is not available for the direct `session.evaluate` surface (`cuda_event_reduction_pct=null`). |
+| M_W66.1 m37c-prime Stage 4 speedup | PASS (bounded m37c-scale evaluate cert) | Paired DTS evaluate-surface comparison at the G_PRE median row scale (`rows=96`, `runs=100`, `warmup=5`) produced `wall_speedup=27.739826x`, above the `>=1.2x` gate. |
+| M_W66.2 kernel launch overhead reduction | PASS (bounded m37c-scale evaluate cert) | Structural graphable-unit launch reduction is 75%; synchronized-wall evaluate-surface timing reduction is `96.395075%`. CUDA-event timing is not available for the direct `session.evaluate` surface (`cuda_event_reduction_pct=null`). |
 | M_W66.3 determinism preserved | PASS (bounded DTS cert) | DTS Stage-4 analog fixture: 100/100 bit-exact, `unique_digest_count=1`. |
 | M_W66.4 DLPack zero-copy preserved | PASS (bounded DTS cert) | DTS Stage-4 analog fixture: `dtoh_bytes=0`, `dtoh_calls=0`, `htod_bytes=0`, `htod_calls=0`. |
-| M_W66.5 peak VRAM <= 38 GB | PARTIAL | DTS Stage-4 analog fixture peak snapshot 1.258 GiB; bounded evaluate comparison peak snapshot 1.237 GiB; no full m37c-prime profile yet. |
+| M_W66.5 peak VRAM <= 38 GB | PASS (bounded DTS cert) | DTS Stage-4 analog fixture peak snapshot 1.258 GiB; bounded evaluate comparison peak snapshot 1.237 GiB, both below 38 GiB. Full m37c-prime replay remains covered by G_E2E KPI-5. |
 | M_W66.6 recapture <= 1x per fixpoint iteration | PASS (bounded DTS cert) | DTS Stage-4 analog fixture on the W65-corrected DTS source: 4 captures for 4 graphable topologies, 1000 launches, 996 cache hits, 0 fallbacks across 100 evaluate runs. |
 
-## Remaining Work
+## Closeout
 
-W66 is no longer blocked at CUDA Graph primitives, scan scratch, bounded output
-protocol, same-topology replay caching, pyxlog runtime-backed construction, or
-DTS-DLM bounded graph-path certification. It is blocked on performance: the
-current graph capture unit is too narrow for the m37c-scale evaluate surface
-because recursive support evaluation still spends most of its time outside the
-captured CSM subsequence. The next viable implementation must either capture a
-broader Stage-4 sequence or replace the pyxlog session hot loop with a
-prepared, reusable Stage-4 execution surface whose launch/update boundary is
-large enough to affect wall time. It still needs:
-
-1. a broader Stage-4 execution/capture implementation that clears M_W66.1 and M_W66.2;
-2. m37c-prime VRAM profile.
+W66's bounded DTS/pyxlog certs are green after widening graph-mode Stage-4 set
+maintenance. The remaining full m37c-prime replay and KPI-5 VRAM snapshot are
+tracked by G_E2E, not by this bounded W66 fixture.

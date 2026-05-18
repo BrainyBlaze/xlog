@@ -79,6 +79,7 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "compact_rows",
             "mark_unique_full_row_bytewise",
             "mark_diff_full_row_typed_sorted",
+            "small_sort_full_row_indices_typed",
         ],
     },
     KernelModuleSpec {

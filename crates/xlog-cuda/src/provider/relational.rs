@@ -33,6 +33,7 @@ const XLOG_TY_F32: u8 = 4;
 const XLOG_TY_F64: u8 = 5;
 const XLOG_TY_BOOL: u8 = 6;
 const XLOG_TY_SYMBOL: u8 = 7;
+const W66_SMALL_FULL_ROW_SORT_MAX_ROWS: usize = 1024;
 
 #[inline]
 fn scalar_type_code_dedup(ty: ScalarType) -> u8 {
@@ -801,6 +802,13 @@ impl super::CudaKernelProvider {
         }
 
         let concat = self.concat_buffers_gpu(a, b)?;
+        if Self::use_csm_cuda_graph_env()
+            && schema.arity() > 1
+            && a_rows.saturating_add(b_rows) <= W66_SMALL_FULL_ROW_SORT_MAX_ROWS
+        {
+            return self.dedup_full_row_deterministic(&concat);
+        }
+
         let sorted = self.sort(&concat, &key_cols)?;
         self.dedup_sorted(&sorted, &key_cols)
     }
@@ -1296,11 +1304,15 @@ impl super::CudaKernelProvider {
             return self.buffer_from_columns(Vec::new(), 1, input.schema().clone());
         }
 
-        let all_cols: Vec<usize> = (0..arity).collect();
-
         // Step 1: typed multi-column sort. Float columns use total-order
         // normalization; signed integers use sign-flipped unsigned compare.
-        let sorted = self.sort(input, &all_cols)?;
+        let sorted =
+            if Self::use_csm_cuda_graph_env() && row_count <= W66_SMALL_FULL_ROW_SORT_MAX_ROWS {
+                self.small_sort_full_row_deterministic(input, row_count)?
+            } else {
+                let all_cols: Vec<usize> = (0..arity).collect();
+                self.sort(input, &all_cols)?
+            };
 
         // Step 2: bytewise adjacent-equality mask on the sorted buffer.
         let n = self.device_row_count(&sorted)? as u32;
@@ -1382,6 +1394,126 @@ impl super::CudaKernelProvider {
             &d_prefix_sum,
             d_out_count,
         )
+    }
+
+    fn small_sort_full_row_deterministic(
+        &self,
+        input: &CudaBuffer,
+        row_count: usize,
+    ) -> Result<CudaBuffer> {
+        if row_count > W66_SMALL_FULL_ROW_SORT_MAX_ROWS {
+            return Err(XlogError::Kernel(format!(
+                "small full-row sort supports at most {} rows, got {}",
+                W66_SMALL_FULL_ROW_SORT_MAX_ROWS, row_count
+            )));
+        }
+        if row_count == 0 {
+            return self.create_empty_buffer(input.schema().clone());
+        }
+        if row_count == 1 {
+            return self.clone_buffer(input);
+        }
+
+        let arity = input.arity();
+        let device = self.device.inner();
+        let mut col_ptrs_host: Vec<u64> = Vec::with_capacity(arity);
+        let mut col_sizes_host: Vec<u32> = Vec::with_capacity(arity);
+        let mut col_types_host: Vec<u8> = Vec::with_capacity(arity);
+        for col_idx in 0..arity {
+            let col = input.column(col_idx).ok_or_else(|| {
+                XlogError::Kernel(format!("small full-row sort: column {} missing", col_idx))
+            })?;
+            let ty = input.schema().column_type(col_idx).ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "small full-row sort: column {} type missing",
+                    col_idx
+                ))
+            })?;
+            let elem_size = ty.size_bytes();
+            let expected_bytes_u64 =
+                input
+                    .num_rows()
+                    .checked_mul(elem_size as u64)
+                    .ok_or_else(|| {
+                        XlogError::Kernel(
+                            "small full-row sort: column byte-size overflow".to_string(),
+                        )
+                    })?;
+            let expected_bytes = usize::try_from(expected_bytes_u64).map_err(|_| {
+                XlogError::Kernel(format!(
+                    "small full-row sort: expected byte size {} exceeds usize::MAX",
+                    expected_bytes_u64
+                ))
+            })?;
+            if col.num_bytes() != expected_bytes {
+                return Err(XlogError::Kernel(format!(
+                    "small full-row sort: column {} has {} bytes but expected {}",
+                    col_idx,
+                    col.num_bytes(),
+                    expected_bytes
+                )));
+            }
+            col_ptrs_host.push(*col.device_ptr() as u64);
+            col_sizes_host.push(elem_size as u32);
+            col_types_host.push(scalar_type_code_dedup(ty));
+        }
+
+        let mut d_col_ptrs = self.memory.alloc::<u64>(arity)?;
+        let mut d_col_sizes = self.memory.alloc::<u32>(arity)?;
+        let mut d_col_types = self.memory.alloc::<u8>(arity)?;
+        device
+            .htod_sync_copy_into(&col_ptrs_host, &mut d_col_ptrs)
+            .map_err(|e| XlogError::Kernel(format!("small full-row sort ptr upload: {}", e)))?;
+        device
+            .htod_sync_copy_into(&col_sizes_host, &mut d_col_sizes)
+            .map_err(|e| XlogError::Kernel(format!("small full-row sort size upload: {}", e)))?;
+        device
+            .htod_sync_copy_into(&col_types_host, &mut d_col_types)
+            .map_err(|e| XlogError::Kernel(format!("small full-row sort type upload: {}", e)))?;
+
+        let mut d_indices = self.memory.alloc::<u32>(row_count)?;
+        let sort_fn = device
+            .get_func(
+                DEDUP_MODULE,
+                dedup_kernels::SMALL_SORT_FULL_ROW_INDICES_TYPED,
+            )
+            .ok_or_else(|| {
+                XlogError::Kernel("small_sort_full_row_indices_typed kernel not found".to_string())
+            })?;
+        let cfg = LaunchConfig {
+            grid_dim: (1, 1, 1),
+            block_dim: (W66_SMALL_FULL_ROW_SORT_MAX_ROWS as u32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        // SAFETY: kernel signature matches:
+        //   small_sort_full_row_indices_typed(col_ptrs, col_sizes, col_types,
+        //       num_cols, num_rows_device, row_cap, out_indices)
+        unsafe {
+            sort_fn.clone().launch(
+                cfg,
+                (
+                    &d_col_ptrs,
+                    &d_col_sizes,
+                    &d_col_types,
+                    arity as u32,
+                    input.num_rows_device(),
+                    row_count as u32,
+                    &mut d_indices,
+                ),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!(
+                "small_sort_full_row_indices_typed launch failed: {}",
+                e
+            ))
+        })?;
+        self.device.synchronize()?;
+        self.small_full_row_sort_invocations
+            .fetch_add(1, Ordering::Relaxed);
+
+        self.gather_buffer_by_indices(input, &d_indices, row_count as u32)
     }
 
     /// Run the multi-block exclusive-scan pipeline on a u8 mask of length

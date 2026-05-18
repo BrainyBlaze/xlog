@@ -563,6 +563,7 @@ pub mod dedup_kernels {
     pub const COMPACT_ROWS: &str = "compact_rows";
     pub const MARK_UNIQUE_FULL_ROW_BYTEWISE: &str = "mark_unique_full_row_bytewise";
     pub const MARK_DIFF_FULL_ROW_TYPED_SORTED: &str = "mark_diff_full_row_typed_sorted";
+    pub const SMALL_SORT_FULL_ROW_INDICES_TYPED: &str = "small_sort_full_row_indices_typed";
 }
 
 /// Kernel function names in the groupby module
@@ -937,6 +938,10 @@ pub struct CudaKernelProvider {
     csm_cuda_graph_fallbacks: AtomicU64,
     /// Diagnostic counter for W66 bounded CSM CUDA Graph cache replays.
     csm_cuda_graph_cache_hits: AtomicU64,
+    /// Diagnostic counter for W66 graph-mode small full-row set-maintenance
+    /// sorts. This is test telemetry only; production correctness must not
+    /// depend on the value.
+    small_full_row_sort_invocations: AtomicU64,
     /// W66 bounded CSM CUDA Graph replay cache.
     csm_cuda_graph_cache: Mutex<HashMap<CsmCudaGraphKey, CsmCudaGraphEntry>>,
     /// Per-process counter of WCOJ layout fast-path hits. The
@@ -1053,6 +1058,7 @@ impl CudaKernelProvider {
             csm_cuda_graph_launches: AtomicU64::new(0),
             csm_cuda_graph_fallbacks: AtomicU64::new(0),
             csm_cuda_graph_cache_hits: AtomicU64::new(0),
+            small_full_row_sort_invocations: AtomicU64::new(0),
             csm_cuda_graph_cache: Mutex::new(HashMap::new()),
             wcoj_layout_fast_path_hit_count: AtomicU64::new(0),
             wcoj_layout_sort_invocation_count: AtomicU64::new(0),
@@ -1239,6 +1245,11 @@ impl CudaKernelProvider {
     #[doc(hidden)]
     pub fn csm_cuda_graph_cache_hits(&self) -> u64 {
         self.csm_cuda_graph_cache_hits.load(Ordering::Relaxed)
+    }
+
+    #[doc(hidden)]
+    pub fn small_full_row_sort_invocations(&self) -> u64 {
+        self.small_full_row_sort_invocations.load(Ordering::Relaxed)
     }
 
     /// Lazily acquire one non-default launch stream from the
