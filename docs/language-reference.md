@@ -239,7 +239,7 @@ CPU-only fallback for a GPU-claimed path.
 | List syntax and built-ins | `[]`, `[A, B]`, `[H|T]`, `list<T>` | Finite, typed lists normalize to helper relations | `has_member(X) :- member(X, [1,2,3]).` | Open-ended generators, cyclic lists, heterogeneous lists without a declared finite term type | AST/desugar to typed helper relations and normal runtime joins/aggregates |
 | Safe meta-predicates | `ground`, `var`, `nonvar`, `functor`, `=..`, `findall`, `maplist` | Static inspection and finite collection only | `xs(L) :- findall(X, edge(1, X), L).` | Unrestricted `call/N`, dynamic database mutation, runtime-variable predicate names | Compile-time/static expansion plus typed relational lowering |
 | Deterministic NAF | `not atom(...)` | Closed-world stratified negation over deterministic relations; named variables in the negated atom must be bound by a prior source-order binder | `leaf(X) :- node(X), not edge(X, _).` | Unbound variables in negated atoms, unstratified deterministic cycles | Existing stratification and runtime anti-join paths |
-| Magic sets | `#pragma magic_sets = on|off|auto` and CLI override | Bound recursive queries may be rewritten with adornments and magic predicates | `?- reach(1, Y).` specializes recursive reachability | Unsafe interaction with negation, aggregates, or meta constructs if equivalence cannot be proven | Source/RIR rewrite before optimizer and WCOJ planning |
+| Magic sets | `#pragma magic_sets = on|off|auto` and compiler configuration override | Bound deterministic recursive queries may be rewritten with adornments and magic predicates | `?- reach(1, Y).` specializes recursive reachability | Unsafe interaction with negation, aggregates, meta/list helpers, mutual recursion, or SIPS cases if equivalence cannot be proven | Source/RIR rewrite before optimizer and WCOJ planning |
 | Probabilistic aggregates | Aggregate heads and aggregate outputs in `query`/`evidence` | Finite aggregate outcomes in exact and MC inference | `query(out_degree(1, 2)).` over probabilistic `edge` facts | Exact aggregate domains over cap, unsupported numeric operator/domain pairs | Exact provenance/PIR or MC sampling plus deterministic aggregate execution |
 | Aggregate lifting | Finite-domain aggregate metadata and caps | Use lifted compact-domain computation when identical to finite exact enumeration | Small count/sum domains avoid naive enumeration | Domain cap exceeded, non-finite domains, unsupported floating tolerance | Probabilistic aggregate planner and exact/MC engines |
 | Approximate inference | `#pragma prob_engine = mc`, samples, seed, confidence, method | MC estimates are reproducible under fixed seed and report uncertainty | `#pragma prob_samples = 10000` with `query(rain).` | Invalid confidence ranges, unsupported methods, hidden default override ambiguity | Existing MC engine with documented source/CLI precedence |
@@ -937,8 +937,10 @@ all_positive(1) :- maplist(positive, [1, 2, 3]).
 
 ## Magic Sets
 
-Magic-set rewriting specializes bound recursive queries by adding derived
-magic predicates and adorned rules before optimization.
+Magic-set rewriting specializes bound deterministic recursive queries by adding
+derived magic predicates and adorned rules before optimization. The accepted
+`G085_MAGIC` subset is a source-level rewrite over positive recursive rules
+that can be proven query-equivalent under the supported left-to-right SIPS.
 
 ### Configuration
 
@@ -949,9 +951,9 @@ magic predicates and adorned rules before optimization.
 ```
 
 `auto` lets the compiler apply the rewrite only when it can prove that the
-transformed program preserves output. `on` requests the rewrite and fails with
-a typed diagnostic if the compiler cannot safely apply it. `off` disables the
-rewrite.
+transformed program preserves query output. `on` requests the rewrite and fails
+with a typed `v0.8.5 magic_sets error` if the compiler cannot safely apply it.
+`off` disables the rewrite.
 
 ### Example
 
@@ -968,6 +970,31 @@ reach(X, Z) :- reach(X, Y), edge(Y, Z).
 The bound query argument `1` may seed a magic predicate so recursive evaluation
 does not materialize unreachable source components. `xlog explain` must show
 the adornment, generated magic predicates, and any declined-rewrite reason.
+
+The compiler currently emits helper predicates such as
+`__xlog_magic_reach_bf`, where `b` marks a bound argument and `f` marks a free
+argument. Accepted rules continue through the normal AST, stratification,
+lowering, optimizer, WCOJ, and runtime paths.
+
+### Supported Subset
+
+- deterministic programs with `?-` queries over recursive predicates;
+- at least one scalar constant in the queried recursive atom;
+- positive recursive rules over the same head predicate;
+- source-order binding propagation through prior positive body atoms;
+- `auto`, `on`, and `off` source pragmas.
+
+### Declined Forms
+
+`auto` leaves the program unchanged and records a decline reason. `on` fails
+with a typed diagnostic for:
+
+- unbound recursive calls under the supported SIPS;
+- rules with negation, aggregation, comparison, `is`, or unnormalized univ in
+  the recursive target;
+- recursive rules that cross v0.8.5 list/meta helper predicates;
+- mutual-recursive SCCs in the current subset;
+- probabilistic profiles, which remain governed by the probabilistic engine.
 
 ### Unsupported Forms
 
@@ -1673,10 +1700,10 @@ trainer.reset_host_transfer_stats()
 
 Pragmas configure compiler and runtime behavior.
 
-At the `G085_DOCREF` checkpoint, the current source grammar accepts
-`prob_engine`, `prob_cache`, and `max_recursion_depth`. The additional v0.8.5
-pragmas below define the release contract and remain implementation-gated until
-their corresponding `G085_*` nodes land.
+The current source grammar accepts `prob_engine`, `prob_cache`,
+`max_recursion_depth`, and `magic_sets`. The additional v0.8.5 pragmas below
+define the release contract and remain implementation-gated until their
+corresponding `G085_*` nodes land.
 
 ### Syntax
 
@@ -1730,10 +1757,15 @@ and interactive without changing the runtime execution contract.
 ### `xlog explain`
 
 ```bash
-xlog explain [--format text|json|dot] [--prob-engine exact_ddnnf|mc] <FILE>
+xlog explain [--format text|json|dot] <FILE>
 ```
 
-Explain output must include deterministic sections when applicable:
+The `G085_MAGIC` subset of explain reports magic-set status, adorned
+predicates, generated predicates, and declined reasons without requiring GPU
+access. Later `G085_CLI` work expands explain to the full deterministic and
+probabilistic plan surface.
+
+Full explain output must include deterministic sections when applicable:
 
 - parse and AST summary;
 - predicate declarations and schema metadata;

@@ -23,6 +23,9 @@ All notable changes to this project are documented in this file.
 - Added v0.8.5 deterministic NAF safety diagnostics for source-order bound
   `not atom` use while preserving probabilistic WFS as a separate exact
   inference profile.
+- Added v0.8.5 magic-set rewriting for safe bound deterministic recursive
+  queries, including `#pragma magic_sets = auto|on|off`, generated magic
+  predicates, row-reduction evidence, and typed decline diagnostics.
 
 ### Fixed
 

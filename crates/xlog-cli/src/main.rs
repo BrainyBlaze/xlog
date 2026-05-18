@@ -9,6 +9,7 @@ use xlog_core::{symbol, MemoryBudget, Result, XlogError};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_gpu::logic::LogicProgram;
 use xlog_logic::compile::load_modules;
+use xlog_logic::{parse_program, rewrite_v085_magic_sets, MagicSetReport, MagicSetStatus};
 #[cfg(feature = "host-io")]
 use xlog_prob::exact::ExactDdnnfProgram;
 #[cfg(feature = "host-io")]
@@ -27,6 +28,7 @@ pub struct Cli {
 enum Command {
     Run(RunArgs),
     Prob(ProbArgs),
+    Explain(ExplainArgs),
 }
 
 #[derive(Parser)]
@@ -84,6 +86,20 @@ struct ProbArgs {
     module_path: Vec<PathBuf>,
 }
 
+#[derive(Parser)]
+struct ExplainArgs {
+    source: PathBuf,
+    #[arg(long, value_enum, default_value = "text")]
+    format: ExplainFormat,
+}
+
+#[derive(Copy, Clone, ValueEnum)]
+enum ExplainFormat {
+    Text,
+    Json,
+    Dot,
+}
+
 #[derive(Copy, Clone, ValueEnum)]
 enum OutputFormat {
     Pretty,
@@ -103,7 +119,108 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Run(args) => run_deterministic(args),
         Command::Prob(args) => run_probabilistic(args),
+        Command::Explain(args) => explain(args),
     }
+}
+
+fn explain(args: ExplainArgs) -> Result<()> {
+    let source = std::fs::read_to_string(&args.source).map_err(|e| {
+        XlogError::Execution(format!("Failed to read {}: {}", args.source.display(), e))
+    })?;
+    let program = parse_program(&source)?;
+    let rewrite = rewrite_v085_magic_sets(&program)?;
+    match args.format {
+        ExplainFormat::Text => print_magic_text(&rewrite.report),
+        ExplainFormat::Json => print_magic_json(&rewrite.report),
+        ExplainFormat::Dot => print_magic_dot(&rewrite.report),
+    }
+    Ok(())
+}
+
+fn print_magic_text(report: &MagicSetReport) {
+    println!("magic_sets:");
+    println!("  status: {}", magic_status_label(report.status));
+    if !report.adorned_predicates.is_empty() {
+        println!("  adorned_predicates:");
+        for pred in &report.adorned_predicates {
+            println!("    - {}", pred);
+        }
+    }
+    if !report.generated_predicates.is_empty() {
+        println!("  generated_predicates:");
+        for pred in &report.generated_predicates {
+            println!("    - {}", pred);
+        }
+    }
+    if !report.declined_reasons.is_empty() {
+        println!("  declined_reasons:");
+        for reason in &report.declined_reasons {
+            println!("    - {}", reason);
+        }
+    }
+}
+
+fn print_magic_json(report: &MagicSetReport) {
+    println!("{{");
+    println!("  \"magic_sets\": {{");
+    println!(
+        "    \"status\": \"{}\",",
+        json_escape(magic_status_label(report.status))
+    );
+    println!(
+        "    \"adorned_predicates\": {},",
+        json_string_array(&report.adorned_predicates)
+    );
+    println!(
+        "    \"generated_predicates\": {},",
+        json_string_array(&report.generated_predicates)
+    );
+    println!(
+        "    \"declined_reasons\": {}",
+        json_string_array(&report.declined_reasons)
+    );
+    println!("  }}");
+    println!("}}");
+}
+
+fn print_magic_dot(report: &MagicSetReport) {
+    println!("digraph xlog_magic_sets {{");
+    println!(
+        "  status [label=\"status: {}\"];",
+        magic_status_label(report.status)
+    );
+    for pred in &report.generated_predicates {
+        println!("  \"{}\" [shape=box];", dot_escape(pred));
+    }
+    for pred in &report.adorned_predicates {
+        println!("  \"{}\" [shape=ellipse];", dot_escape(pred));
+    }
+    println!("}}");
+}
+
+fn magic_status_label(status: MagicSetStatus) -> &'static str {
+    match status {
+        MagicSetStatus::Disabled => "disabled",
+        MagicSetStatus::Applied => "applied",
+        MagicSetStatus::Declined => "declined",
+    }
+}
+
+fn json_string_array(items: &[String]) -> String {
+    let values = items
+        .iter()
+        .map(|item| format!("\"{}\"", json_escape(item)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{}]", values)
+}
+
+fn json_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn dot_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn make_provider(device: usize, memory_mb: u64) -> Result<Arc<CudaKernelProvider>> {

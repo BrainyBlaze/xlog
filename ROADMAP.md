@@ -1492,7 +1492,8 @@ WCOJ, and CLI paths.
 - [x] Add negation-as-failure syntax and semantics where it is distinct from
       existing probabilistic WFS support.
       Evidence: `docs/evidence/2026-05-19-v085-naf/README.md`.
-- [ ] Add magic sets transformation for safe bound recursive queries.
+- [x] Add magic sets transformation for safe bound recursive queries.
+      Evidence: `docs/evidence/2026-05-19-v085-magic-sets/README.md`.
 
 ### Probabilistic And Approximate Inference
 

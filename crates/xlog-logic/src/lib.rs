@@ -36,6 +36,7 @@ pub mod function;
 pub mod hypergraph;
 pub mod list_normalize;
 pub mod lower;
+pub mod magic_sets;
 pub mod meta_normalize;
 pub mod module;
 pub mod optimizer;
@@ -49,13 +50,14 @@ pub mod wcoj_var_ordering;
 
 // Re-export main types
 pub use ast::{
-    AnnotatedDisjunction, Atom, BodyLiteral, Constraint, Directives, Evidence, ProbCache,
-    ProbEngine, ProbFact, ProbQuery, Program, Query, Rule, Term, Univ,
+    AnnotatedDisjunction, Atom, BodyLiteral, Constraint, Directives, Evidence, MagicSetsMode,
+    ProbCache, ProbEngine, ProbFact, ProbQuery, Program, Query, Rule, Term, Univ,
 };
 pub use compile::{compile, Compiler};
 pub use expand::expand_program_functions;
 pub use list_normalize::normalize_v085_lists;
 pub use lower::Lowerer;
+pub use magic_sets::{rewrite_v085_magic_sets, MagicSetReport, MagicSetRewrite, MagicSetStatus};
 pub use meta_normalize::normalize_v085_meta;
 pub use optimizer::{Optimizer, OptimizerConfig, PlanCost};
 pub use parser::{parse_program, parse_statement};

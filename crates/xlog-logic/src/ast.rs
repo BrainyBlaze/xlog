@@ -419,6 +419,17 @@ pub enum ProbCache {
     Off,
 }
 
+/// Magic-set rewrite mode for bound recursive deterministic queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MagicSetsMode {
+    /// Apply the rewrite when the compiler can prove the supported safe subset.
+    Auto,
+    /// Require the rewrite and fail with a typed diagnostic if it is unsafe.
+    On,
+    /// Disable magic-set rewriting.
+    Off,
+}
+
 /// Compilation/evaluation directives (e.g., `#pragma ...`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Directives {
@@ -428,6 +439,8 @@ pub struct Directives {
     pub prob_cache: Option<ProbCache>,
     /// Maximum UDF recursion depth.
     pub max_recursion_depth: Option<u32>,
+    /// Magic-set rewrite mode.
+    pub magic_sets: Option<MagicSetsMode>,
 }
 
 impl Directives {

@@ -1,6 +1,6 @@
 # v0.8.5 Language Architecture Contract
 
-**Status:** implementation snapshot through `G085_NAF`.
+**Status:** implementation snapshot through `G085_MAGIC`.
 **Branch:** `feat/v085-language-completeness`.
 **Scope:** language, parser, term, probabilistic, and CLI surfaces required by
 the v0.8.5 language-completeness release.
@@ -50,7 +50,7 @@ normalize them to finite typed relation layouts or reject them before execution.
 | `G085_LIST` | Accept finite list literals, safe cons patterns, and finite list built-ins | Desugar to helper relations and normal runtime operators |
 | `G085_META` | Support safe `ground`, `var`, `nonvar`, `functor`, `=..`, `findall`, and unary/binary `maplist` | Static expansion and finite collection; no unrestricted `call/N` |
 | `G085_NAF` | Make deterministic NAF distinct from probabilistic WFS | Existing `not atom` remains stratified closed-world negation in deterministic programs; compiler-path diagnostics reject unsafe source-order binders and deterministic cycles |
-| `G085_MAGIC` | Rewrite bound recursive queries with adornments and magic predicates | Source/RIR rewrite before optimizer; decline if equivalence cannot be proven |
+| `G085_MAGIC` | Rewrite bound recursive queries with adornments and magic predicates | Source-level rewrite before stratification/lowering/optimizer for the safe positive-recursion subset; `auto` declines and `on` fails if equivalence cannot be proven |
 | `G085_PROB_AGG` | Support finite probabilistic aggregates in exact and MC modes | Exact provenance/PIR or MC sampling plus deterministic aggregate execution |
 | `G085_AGG_LIFT` | Lift compact finite-domain aggregate computations | Use only when equivalent to finite exact enumeration |
 | `G085_APPROX` | Promote MC configuration and reporting to source and CLI | Source pragmas plus CLI override/merge rules with deterministic fixed-seed replay |
@@ -95,10 +95,11 @@ semantics.
 
 ## Source-Audit Snapshot
 
-Current implementation status through `G085_NAF`:
+Current implementation status through `G085_MAGIC`:
 
 - `docs/language-reference.md` has been updated to the v0.8.5 contract and now
-  records the shipped `G085_LIST`, `G085_META`, and `G085_NAF` subsets.
+  records the shipped `G085_LIST`, `G085_META`, `G085_NAF`, and `G085_MAGIC`
+  subsets.
 - `crates/xlog-logic/src/grammar.pest` accepts finite list literals, cons
   patterns, compound terms, named predicate columns, and `list<T>` declarations.
 - `crates/xlog-logic/src/ast.rs` represents list, cons, compound, and static
@@ -114,14 +115,23 @@ Current implementation status through `G085_NAF`:
   source-order safety after meta/list normalization and before stratification,
   then maps compiler-path deterministic negation cycles to typed
   `v0.8.5 naf error` diagnostics.
+- `crates/xlog-logic/src/magic_sets.rs` parses and applies
+  `#pragma magic_sets = auto|on|off` for safe bound deterministic recursive
+  queries. It emits `__xlog_magic_*` seed and propagation rules, rewrites
+  recursive rules through the same AST/RIR path, and declines or fails closed
+  for unsafe negation, aggregate, meta/list-helper, mutual-recursion, and
+  unsupported SIPS cases.
 - `xlog-gpu` stores the normalized program so helper relation facts are loaded
   through the normal relation-store path.
 - `crates/xlog-prob/src/provenance.rs` still rejects aggregate terms in
   provenance extraction.
-- `crates/xlog-cli/src/main.rs` still exposes only `run` and `prob`.
-- Derived-goal `findall`, non-literal `maplist` inputs, magic sets,
-  probabilistic aggregates, approximate inference configuration, incremental
-  parsing, REPL/watch, and explain remain gated to later `G085_*` nodes.
+- `crates/xlog-cli/src/main.rs` now exposes `run`, `prob`, and a minimal
+  `explain` command for magic-set status/report rendering in text/json/dot
+  formats.
+- Derived-goal `findall`, non-literal `maplist` inputs, probabilistic
+  aggregates, approximate inference configuration, incremental parsing,
+  REPL/watch, and full CLI explain plan rendering remain gated to later
+  `G085_*` nodes.
 
 Each later implementation node must update this snapshot or link its evidence
 when it turns contract text into accepted source behavior.

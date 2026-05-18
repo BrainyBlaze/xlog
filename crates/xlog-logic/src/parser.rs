@@ -12,8 +12,8 @@ use xlog_core::{symbol, Result, ScalarType, XlogError};
 use crate::ast::{
     AggExpr, AggOp, AnnotatedDisjunction, ArithExpr, Atom, BodyLiteral, CompOp, Comparison,
     CondExpr, Constraint, DomainDecl, Evidence, FuncBody, FuncDef, FuncParam, IsExpr,
-    LearnableRule, NeuralLabel, NeuralPredDecl, PredColumn, PredDecl, ProbCache, ProbEngine,
-    ProbFact, ProbQuery, Program, Query, Rule as AstRule, Term, TypeRef, Univ, UseDecl,
+    LearnableRule, MagicSetsMode, NeuralLabel, NeuralPredDecl, PredColumn, PredDecl, ProbCache,
+    ProbEngine, ProbFact, ProbQuery, Program, Query, Rule as AstRule, Term, TypeRef, Univ, UseDecl,
 };
 
 /// Pest-based parser for XLOG Datalog syntax.
@@ -179,6 +179,24 @@ fn apply_pragma(pair: Pair<'_, Rule>, program: &mut Program) -> Result<()> {
                 ))
             })?;
             program.directives.max_recursion_depth = Some(depth);
+        }
+        Rule::pragma_magic_sets => {
+            let value = pragma
+                .into_inner()
+                .next()
+                .ok_or_else(|| XlogError::Parse("Missing magic_sets value".to_string()))?;
+            let mode = match value.as_str() {
+                "auto" => MagicSetsMode::Auto,
+                "on" => MagicSetsMode::On,
+                "off" => MagicSetsMode::Off,
+                other => {
+                    return Err(XlogError::Parse(format!(
+                        "Unknown magic_sets value: {}",
+                        other
+                    )))
+                }
+            };
+            program.directives.magic_sets = Some(mode);
         }
         _ => {}
     }
