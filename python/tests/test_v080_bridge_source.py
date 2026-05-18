@@ -45,6 +45,27 @@ def test_v080_bridge_native_helpers_keep_semantics_in_python_ml_layer() -> None:
         assert "contra_penalty" not in source
 
 
+def test_v080_bridge_reuses_registered_network_output_modes() -> None:
+    neural_rs = (ROOT / "crates/pyxlog/src/neural.rs").read_text()
+
+    assert "NetworkHandle" in neural_rs
+    assert "fn apply_network_output_mode(" in neural_rs
+    assert "if k == Some(0)" in neural_rs
+    assert "handle.det { Some(1) } else { handle.k }" in neural_rs
+
+    for fn_name in [
+        "fn forward_backward_direct_tensor",
+        "fn forward_backward_complex_tensor",
+        "fn forward_backward_batch_complex_tensor",
+    ]:
+        start = neural_rs.index(fn_name)
+        end = neural_rs.find("\n    fn ", start + 1)
+        if end == -1:
+            end = len(neural_rs)
+        body = neural_rs[start:end]
+        assert "apply_network_output_mode(py" in body
+
+
 def test_v080_bridge_has_evidence_package() -> None:
     evidence = ROOT / "docs/evidence/2026-05-18-v080-bridge/README.md"
     probe = ROOT / "docs/evidence/2026-05-18-v080-bridge/runtime_probe.json"
