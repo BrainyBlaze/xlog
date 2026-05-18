@@ -34,6 +34,7 @@ pub mod compiler_config;
 pub mod expand;
 pub mod function;
 pub mod hypergraph;
+pub mod list_normalize;
 pub mod lower;
 pub mod module;
 pub mod optimizer;
@@ -52,6 +53,7 @@ pub use ast::{
 };
 pub use compile::{compile, Compiler};
 pub use expand::expand_program_functions;
+pub use list_normalize::normalize_v085_lists;
 pub use lower::Lowerer;
 pub use optimizer::{Optimizer, OptimizerConfig, PlanCost};
 pub use parser::{parse_program, parse_statement};

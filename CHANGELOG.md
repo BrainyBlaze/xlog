@@ -14,6 +14,9 @@ All notable changes to this project are documented in this file.
   corresponding `G085_*` evidence gates.
 - Added `docs/architecture/language-v085.md` as the parser, term, probability,
   CLI, and v0.9.0 handoff contract for the v0.8.5 branch.
+- Added finite list normalization for `list<T>` columns, list literals, safe
+  cons patterns, and core list built-ins via `__xlog_list_*` helper relations
+  that lower through the existing relational runtime path.
 
 ### Fixed
 

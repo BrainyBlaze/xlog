@@ -1481,7 +1481,8 @@ WCOJ, and CLI paths.
 
 ### Lists And Safe Meta-Predicates
 
-- [ ] Add finite list syntax and list built-ins.
+- [x] Add finite list syntax and list built-ins.
+      Evidence: `docs/evidence/2026-05-19-v085-lists/README.md`.
 - [ ] Add meta-predicates such as `ground`, `var`, `nonvar`, `=..`, `functor`,
       `findall`, and `maplist` with static finite safety checks.
 

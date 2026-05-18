@@ -17,6 +17,7 @@ use xlog_ir::ExecutionPlan;
 use xlog_stats::{StatsManager, StatsSnapshot};
 
 use crate::compiler_config::CompilerConfig;
+use crate::list_normalize::normalize_v085_lists;
 use crate::lower::Lowerer;
 use crate::module::ModuleError;
 use crate::optimizer::Optimizer;
@@ -177,6 +178,7 @@ impl Compiler {
         stats_snapshot: Option<&StatsSnapshot>,
     ) -> Result<ExecutionPlan> {
         let program = desugar_queries_and_constraints(program);
+        let program = normalize_v085_lists(&program)?;
 
         // Phase 2: Stratify (analyze dependencies, detect cycles)
         let strata = stratify(&program)?;
@@ -442,9 +444,9 @@ fn desugar_queries_and_constraints(program: &Program) -> Program {
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
         for term in &atom.terms {
-            if let Term::Variable(name) = term {
-                if seen.insert(name.as_str()) {
-                    head_terms.push(Term::Variable(name.clone()));
+            for name in term.variables() {
+                if seen.insert(name) {
+                    head_terms.push(Term::Variable(name.to_string()));
                 }
             }
         }

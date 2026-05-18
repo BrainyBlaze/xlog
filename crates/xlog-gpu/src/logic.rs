@@ -64,11 +64,12 @@ impl LogicProgram {
         let max_recursion = program.directives.max_recursion_depth.unwrap_or(100);
         let expanded = xlog_logic::expand_program_functions(&program, max_recursion)
             .map_err(|e| XlogError::Compilation(e.to_string()))?;
+        let normalized = xlog_logic::normalize_v085_lists(&expanded)?;
 
         let mut compiler = Compiler::new();
-        let plan = compiler.compile_program(&expanded)?;
+        let plan = compiler.compile_program(&normalized)?;
         Ok(Self {
-            program: expanded,
+            program: normalized,
             plan,
             schemas: compiler.schemas().clone(),
             rel_ids: compiler.rel_ids().clone(),
@@ -101,11 +102,12 @@ impl LogicProgram {
         let max_recursion = merged.directives.max_recursion_depth.unwrap_or(100);
         let expanded = xlog_logic::expand_program_functions(&merged, max_recursion)
             .map_err(|e| XlogError::Compilation(e.to_string()))?;
+        let normalized = xlog_logic::normalize_v085_lists(&expanded)?;
 
         let mut compiler = Compiler::new();
-        let plan = compiler.compile_program(&expanded)?;
+        let plan = compiler.compile_program(&normalized)?;
         Ok(Self {
-            program: expanded,
+            program: normalized,
             plan,
             schemas: compiler.schemas().clone(),
             rel_ids: compiler.rel_ids().clone(),
@@ -129,7 +131,7 @@ impl LogicProgram {
     ) -> Result<RelationStore> {
         let mut store = RelationStore::new(provider.clone());
         for (name, schema) in &self.schemas {
-            if is_user_visible_relation(name) {
+            if is_user_visible_relation(name) || is_list_helper_relation(name) {
                 store.put(name, provider.create_empty_buffer(schema.clone())?);
             }
         }
@@ -520,6 +522,10 @@ fn is_user_visible_relation(name: &str) -> bool {
     !name.starts_with("__")
 }
 
+fn is_list_helper_relation(name: &str) -> bool {
+    name.starts_with("__xlog_list_")
+}
+
 fn logic_delta_report(
     stats: DeltaRecomputeStats,
     insert_rows: u64,
@@ -658,9 +664,9 @@ fn query_output_vars(Query { atom }: &Query) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for term in &atom.terms {
-        if let Term::Variable(name) = term {
-            if seen.insert(name.as_str()) {
-                out.push(name.clone());
+        for name in term.variables() {
+            if seen.insert(name) {
+                out.push(name.to_string());
             }
         }
     }

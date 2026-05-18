@@ -61,7 +61,7 @@ fn resolve_pred_column_type(
                 name, predicate, index
             ))
         }),
-        TypeRef::List(_) => Err(v085_type_not_lowerable(predicate, index, "list")),
+        TypeRef::List(_) => Ok(ScalarType::U64),
         TypeRef::Term => Err(v085_type_not_lowerable(predicate, index, "term")),
         TypeRef::Compound => Err(v085_type_not_lowerable(predicate, index, "compound")),
         TypeRef::PredRef => Err(v085_type_not_lowerable(predicate, index, "predref")),

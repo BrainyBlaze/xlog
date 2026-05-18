@@ -101,19 +101,16 @@ fn rejects_non_lowered_v085_type_and_term_forms_with_typed_errors() {
             "pred bad(x: unknown_domain).",
             "unknown domain alias",
         ),
-        ("list column", "pred bad(xs: list<u32>).", "list"),
-        (
-            "nested list column",
-            "pred bad(xs: list<list<u32>>).",
-            "list",
-        ),
         ("term column", "pred bad(t: term).", "term"),
         ("compound column", "pred bad(c: compound).", "compound"),
         ("predref column", "pred bad(p: predref).", "predref"),
-        ("list fact", "bad([1, 2]).", "list"),
         ("cons fact", "bad([H | T]).", "cons"),
         ("compound fact", "bad(pair(1, 2)).", "compound"),
-        ("list comparison", "bad(X) :- raw(X), X = [1, 2].", "list"),
+        (
+            "compound comparison",
+            "bad(X) :- raw(X), X = pair(1, 2).",
+            "compound",
+        ),
     ];
 
     for (label, src, needle) in invalid {

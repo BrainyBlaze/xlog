@@ -788,6 +788,14 @@ v0.8.5 defines finite list syntax and list built-ins. Lists are accepted only
 when they are finite and typed; accepted programs lower to relation layouts and
 normal GPU-capable execution paths.
 
+Implementation status after `G085_LIST`: scalar, symbol, and nested finite list
+values are normalized to `u64` list identifiers plus `__xlog_list_*` helper
+relations. `list<T>` predicate columns lower to scalar list-id columns while
+helper relations carry length, item, cons, append, sort, msort, and set facts.
+The current implementation accepts finite literals, declared `list<T>` columns,
+safe `[Head | Tail]` patterns in declared list columns, and the built-ins below
+when their list argument has a finite literal or a known `list<T>` type.
+
 ### Syntax
 
 ```xlog
@@ -814,6 +822,15 @@ list<u32>          // homogeneous finite list type
 Pair helpers may be added as typed helpers when they lower to finite relation
 columns. Unsupported helpers must be rejected with a typed diagnostic rather
 than simulated by a CPU term evaluator.
+
+Current implementation limits:
+
+- `append(A, B, C)` accepts finite first and second list literals in this node;
+  split generation such as `append(A, B, [1,2,3])` is rejected as unbounded;
+- `sort`, `msort`, and `list_to_set` require a finite input literal in this
+  node;
+- `term`, `compound`, and `predref` list elements remain reserved for later
+  `G085_META` lowering.
 
 ### Examples
 
