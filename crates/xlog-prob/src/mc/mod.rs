@@ -1045,6 +1045,9 @@ impl McProgram {
                         BodyLiteral::Positive(a) | BodyLiteral::Negated(a) => {
                             referenced.insert(a.predicate.clone());
                         }
+                        BodyLiteral::Epistemic(lit) => {
+                            referenced.insert(lit.atom.predicate.clone());
+                        }
                         BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) => {}
                     }
                 }

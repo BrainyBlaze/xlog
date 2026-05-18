@@ -902,6 +902,12 @@ fn ground_rule_for_wfs(
                     }
                 }
             }
+            BodyLiteral::Epistemic(lit) => {
+                return Err(XlogError::UnsupportedEpistemicConstruct {
+                    construct: "probabilistic WFS grounding".to_string(),
+                    context: format!("{:?} {}({})", lit.op, lit.atom.predicate, lit.atom.arity()),
+                });
+            }
             BodyLiteral::Comparison(cmp) => {
                 let mut next_bindings: Vec<(HashMap<String, Value>, PirNodeId)> = Vec::new();
                 for (binding, prov) in bindings {
@@ -1163,6 +1169,12 @@ fn eval_rule(
                         next_states.push((binding, new_prov));
                     }
                 }
+            }
+            BodyLiteral::Epistemic(lit) => {
+                return Err(XlogError::UnsupportedEpistemicConstruct {
+                    construct: "probabilistic provenance evaluation".to_string(),
+                    context: format!("{:?} {}({})", lit.op, lit.atom.predicate, lit.atom.arity()),
+                });
             }
         }
         states = next_states;

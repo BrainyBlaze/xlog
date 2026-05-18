@@ -71,8 +71,22 @@ arith_expr = { arith_term ~ (arith_op_add ~ arith_term)* }
 is_expr = { variable ~ "is" ~ arith_expr }
 
 // Body literals
+epistemic_op = { "know" | "possible" }
+unsupported_nested_epistemic_atom = { epistemic_op ~ epistemic_op ~ atom }
+negated_unsupported_nested_epistemic_atom = { "not" ~ unsupported_nested_epistemic_atom }
+epistemic_atom = { epistemic_op ~ atom }
+negated_epistemic_atom = { "not" ~ epistemic_atom }
 negated_atom = { "not" ~ atom }
-body_literal = { negated_atom | atom | comparison | is_expr }
+body_literal = {
+    negated_unsupported_nested_epistemic_atom
+    | unsupported_nested_epistemic_atom
+    | negated_epistemic_atom
+    | epistemic_atom
+    | negated_atom
+    | atom
+    | comparison
+    | is_expr
+}
 body = { body_literal ~ ("," ~ body_literal)* }
 
 // Head with optional aggregate
@@ -109,10 +123,12 @@ evidence_stmt = { "evidence" ~ "(" ~ atom ~ "," ~ bool_lit ~ ")" ~ "." }
 // Pragmas / directives
 prob_engine_value = { "exact_ddnnf" | "mc" }
 prob_cache_value = { "on" | "off" }
+epistemic_mode_value = { "g91" | "faeel" }
 pragma_prob_engine = { "#pragma" ~ "prob_engine" ~ "=" ~ prob_engine_value }
 pragma_prob_cache = { "#pragma" ~ "prob_cache" ~ "=" ~ prob_cache_value }
+pragma_epistemic_mode = { "#pragma" ~ "epistemic_mode" ~ "=" ~ epistemic_mode_value }
 pragma_max_recursion = { "#pragma" ~ "max_recursion_depth" ~ "=" ~ integer }
-pragma = { pragma_prob_engine | pragma_prob_cache | pragma_max_recursion }
+pragma = { pragma_prob_engine | pragma_prob_cache | pragma_epistemic_mode | pragma_max_recursion }
 
 // Domain declarations
 domain_decl = { "domain" ~ ident ~ ":" ~ type_spec ~ "." }

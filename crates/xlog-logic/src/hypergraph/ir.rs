@@ -129,6 +129,9 @@ impl HypergraphRule {
                 BodyLiteral::Negated(_) => {
                     has_negation = true;
                 }
+                BodyLiteral::Epistemic(_) => {
+                    has_negation = true;
+                }
                 BodyLiteral::Comparison(_) => {
                     comparison_count += 1;
                 }

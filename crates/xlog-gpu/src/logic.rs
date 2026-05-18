@@ -543,6 +543,21 @@ fn format_constraint(body: &[BodyLiteral]) -> String {
                     .join(", ");
                 format!("not {}({})", a.predicate, args)
             }
+            BodyLiteral::Epistemic(lit) => {
+                let args = lit
+                    .atom
+                    .terms
+                    .iter()
+                    .map(format_term)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let op = match lit.op {
+                    xlog_logic::EpistemicOp::Know => "know",
+                    xlog_logic::EpistemicOp::Possible => "possible",
+                };
+                let prefix = if lit.negated { "not " } else { "" };
+                format!("{prefix}{op} {}({})", lit.atom.predicate, args)
+            }
             BodyLiteral::Comparison(c) => format!("{:?} {:?} {:?}", c.left, c.op, c.right),
             BodyLiteral::IsExpr(is) => format!("{} is {:?}", is.target, is.expr),
         })

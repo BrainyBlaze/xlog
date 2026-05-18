@@ -185,7 +185,9 @@ impl Lowerer {
             for lit in &rule.body {
                 let atom = match lit {
                     BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => atom,
-                    BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) => continue,
+                    BodyLiteral::Epistemic(_)
+                    | BodyLiteral::Comparison(_)
+                    | BodyLiteral::IsExpr(_) => continue,
                 };
                 let pred = &atom.predicate;
                 if self.schemas.contains_key(pred) {
@@ -242,7 +244,9 @@ impl Lowerer {
         for lit in &rule.body {
             let atom = match lit {
                 BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => atom,
-                BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) => continue,
+                BodyLiteral::Epistemic(_) | BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) => {
+                    continue
+                }
             };
             let schema = self.schemas.get(&atom.predicate)?;
             for (idx, term) in atom.terms.iter().enumerate() {
@@ -597,6 +601,16 @@ impl Lowerer {
 
     /// Lower a single rule to an RIR node
     fn lower_rule(&mut self, rule: &Rule) -> Result<RirNode> {
+        if let Some(lit) = rule.body.iter().find_map(|lit| match lit {
+            BodyLiteral::Epistemic(lit) => Some(lit),
+            _ => None,
+        }) {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "RIR lowering boundary".to_string(),
+                context: format!("{:?} {}({})", lit.op, lit.atom.predicate, lit.atom.arity()),
+            });
+        }
+
         // Split body literals.
         let (positive_atoms, negated_atoms, comparisons, is_exprs) =
             Self::split_body_literals(&rule.body);
@@ -608,7 +622,8 @@ impl Lowerer {
                 BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
                     self.get_or_create_rel_id(&atom.predicate);
                 }
-                BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) => {}
+                BodyLiteral::Epistemic(_) | BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) => {
+                }
             }
         }
 
@@ -686,6 +701,7 @@ impl Lowerer {
             match lit {
                 BodyLiteral::Positive(atom) => positive_atoms.push(atom),
                 BodyLiteral::Negated(atom) => negated_atoms.push(atom),
+                BodyLiteral::Epistemic(_) => {}
                 BodyLiteral::Comparison(cmp) => comparisons.push(cmp),
                 BodyLiteral::IsExpr(is_expr) => is_exprs.push(is_expr),
             }

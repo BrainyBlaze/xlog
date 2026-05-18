@@ -31,6 +31,7 @@
 pub mod ast;
 pub mod compile;
 pub mod compiler_config;
+pub mod eir;
 pub mod expand;
 pub mod function;
 pub mod hypergraph;
@@ -47,10 +48,12 @@ pub mod wcoj_var_ordering;
 
 // Re-export main types
 pub use ast::{
-    AnnotatedDisjunction, Atom, BodyLiteral, Constraint, Directives, Evidence, ProbCache,
-    ProbEngine, ProbFact, ProbQuery, Program, Query, Rule, Term,
+    AnnotatedDisjunction, Atom, BodyLiteral, Constraint, Directives, EpistemicLiteral,
+    EpistemicMode, EpistemicOp, Evidence, ProbCache, ProbEngine, ProbFact, ProbQuery, Program,
+    Query, Rule, Term,
 };
 pub use compile::{compile, Compiler};
+pub use eir::build_eir;
 pub use expand::expand_program_functions;
 pub use lower::Lowerer;
 pub use optimizer::{Optimizer, OptimizerConfig, PlanCost};

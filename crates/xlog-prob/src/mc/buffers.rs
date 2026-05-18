@@ -556,6 +556,9 @@ pub(super) fn augment_schemas_for_program(
                 BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
                     ensure_schema_for_atom(atom, schemas);
                 }
+                BodyLiteral::Epistemic(lit) => {
+                    ensure_schema_for_atom(&lit.atom, schemas);
+                }
                 BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) => {}
             }
         }
@@ -613,6 +616,9 @@ pub(super) fn ensure_predicate_decls(program: &mut Program) -> Result<()> {
             match lit {
                 BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
                     record_atom(atom)?;
+                }
+                BodyLiteral::Epistemic(lit) => {
+                    record_atom(&lit.atom)?;
                 }
                 BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) => {}
             }

@@ -445,6 +445,12 @@ fn eval_rule(
                     }
                 }
             }
+            BodyLiteral::Epistemic(lit) => {
+                return Err(XlogError::UnsupportedEpistemicConstruct {
+                    construct: "host MC evaluation".to_string(),
+                    context: format!("{:?} {}({})", lit.op, lit.atom.predicate, lit.atom.arity()),
+                });
+            }
             BodyLiteral::Comparison(cmp) => {
                 for binding in states {
                     if eval_comparison(cmp.op, &cmp.left, &cmp.right, &binding)? {

@@ -238,6 +238,11 @@ impl<'a> ExpansionContext<'a> {
         match lit {
             BodyLiteral::Positive(atom) => BodyLiteral::Positive(self.substitute_atom(atom, subst)),
             BodyLiteral::Negated(atom) => BodyLiteral::Negated(self.substitute_atom(atom, subst)),
+            BodyLiteral::Epistemic(lit) => BodyLiteral::Epistemic(crate::ast::EpistemicLiteral {
+                op: lit.op,
+                negated: lit.negated,
+                atom: self.substitute_atom(&lit.atom, subst),
+            }),
             BodyLiteral::Comparison(cmp) => BodyLiteral::Comparison(Comparison {
                 left: self.substitute_term(&cmp.left, subst),
                 op: cmp.op,
@@ -519,6 +524,7 @@ fn expand_literal_functions(
     match lit {
         BodyLiteral::Positive(atom) => Ok(BodyLiteral::Positive(atom.clone())),
         BodyLiteral::Negated(atom) => Ok(BodyLiteral::Negated(atom.clone())),
+        BodyLiteral::Epistemic(lit) => Ok(BodyLiteral::Epistemic(lit.clone())),
         BodyLiteral::Comparison(cmp) => Ok(BodyLiteral::Comparison(cmp.clone())),
         BodyLiteral::IsExpr(is_expr) => {
             let expanded_expr = ctx.expand_expr_fully(&is_expr.expr)?;
