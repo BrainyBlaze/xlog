@@ -1,5 +1,9 @@
 //! GPU-native epistemic execution planning contracts.
 
+use std::collections::BTreeMap;
+
+use xlog_core::RelId;
+
 use crate::eir::{EirEpistemicLiteral, EirEpistemicMode, EirEpistemicOp, EirTerm};
 use crate::plan::ExecutionPlan;
 
@@ -66,6 +70,8 @@ impl EpistemicCpuFallbackCounters {
 pub struct EpistemicReductionPlan {
     /// Source-order rule index.
     pub rule_index: usize,
+    /// Head predicate materialized by the reduced production runtime plan.
+    pub head_predicate: String,
     /// Positive relational body atom count after removing epistemic literals.
     pub relational_body_atoms: usize,
     /// WCOJ planner status for the reduced ordinary body.
@@ -294,6 +300,8 @@ impl EpistemicGpuPlan {
 pub struct EpistemicExecutablePlan {
     /// GPU semantic contract for the epistemic hot path.
     pub gpu_plan: EpistemicGpuPlan,
+    /// Predicate-to-relation ID map produced by the reduced production compiler.
+    pub relation_ids: BTreeMap<String, RelId>,
     /// Ordinary reduced program compiled through the production runtime pipeline.
     pub reduced_runtime_plan: ExecutionPlan,
 }

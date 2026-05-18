@@ -31,6 +31,8 @@ The prior closure/evidence docs were inspected before finalizing this slice:
 |---|---|
 | Explicit semantic boundary first | `compile_epistemic_gpu_execution` calls `plan_epistemic_gpu_execution` before any reduced ordinary program is compiled. |
 | Production runtime plan route | The reduced ordinary program is compiled through `Compiler::compile_program_with_stats_snapshot`. |
+| Runtime registration metadata | `EpistemicExecutablePlan` carries the reduced compiler's predicate-to-`RelId` map so accepted runtime callers can register relation buffers against the same IDs used by the production plan. |
+| Reduced output boundary | `EpistemicReductionPlan` carries the reduced head predicate name so accepted runtime materialization uses the relation stored by `execute_plan`. |
 | WCOJ planner reuse | `test_epistemic_executable_plan` proves a WCOJ-eligible reduced body reaches `RirNode::MultiWayJoin`. |
 | 38-B K-clique reuse | The stats-aware K5 fixture proves `MultiwayPlan::WcojWithPlan`, `KCliqueVariableOrder`, sorted-layout requirements, and helper-splitting specs are preserved for epistemic reductions. |
 
@@ -41,6 +43,7 @@ The prior closure/evidence docs were inspected before finalizing this slice:
 | `git diff --check` | PASS |
 | `cargo fmt --check` | PASS |
 | `cargo test -p xlog-logic --test test_epistemic_executable_plan` | PASS, 3 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_gpu_plan` | PASS, 8 passed, 0 failed |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 47 passed, 0 failed |
 | `cargo test -p xlog-ir --lib` | PASS, 14 passed, 0 failed |
@@ -55,11 +58,11 @@ The prior closure/evidence docs were inspected before finalizing this slice:
 |---|---|---|---|
 | M090_EIR.6 production route | accepted epistemic forms have a production lowering route | PARTIAL | Executable route exists after the semantic contract; direct `xlog run` lowering still rejects epistemic literals. |
 | M090_GPU.1 production lowering | accepted epistemic fixture runs through production runtime dispatch | PARTIAL | Reduced runtime plan is produced through the production compiler; later runtime evidence launches candidate generation/propagation/candidate validation before reduced-plan dispatch, then tuple-source model-membership staging with fixed arity-one/two/three and generic arity-N row-scoped ground-key comparison plus generic arity-N variable-bound comparison, world-view-validation/materialization, final-result flag staging, and membership-gated final tuple materialization; full accepted semantics remain missing. |
-| M090_GPU.2 WCOJ eligibility | at least one epistemic reduction uses the WCOJ planner/path where eligible | PARTIAL | Reduced fixtures reach `RirNode::MultiWayJoin` and K-clique `MultiwayPlan`; later runtime evidence fails closed when a required K-clique WCOJ plan lacks counter deltas, but no certified successful dispatch evidence exists yet. |
+| M090_GPU.2 WCOJ eligibility | at least one epistemic reduction uses the WCOJ planner/path where eligible | PASS | Reduced fixtures reach `RirNode::MultiWayJoin` and K-clique `MultiwayPlan`; accepted runtime evidence now executes an epistemic K5 fixture and observes certified production WCOJ dispatch. |
 | M090_GPU.4 kernel coverage | kernels cover GPT hot paths | PARTIAL | Later runtime evidence launches candidate-generation, propagation-staging, candidate-buffer validation, tuple-source model-membership staging with fixed arity-one/two/three and generic arity-N row-scoped ground-key comparison plus generic arity-N variable-bound comparison, world-view-validation staging, materialization-staging, final-result flag, and membership-gated final tuple materialization kernels; accepted semantic parity remains missing. |
 | M090_GPU.6 launch evidence | nonzero GPU launches and timing | PARTIAL | Later runtime traces record candidate-generation, propagation, candidate-validation, tuple-source model-membership staging with fixed arity-one/two/three and generic arity-N row-scoped ground-key comparison plus generic arity-N variable-bound comparison, world-view-validation, accepted-candidate materialization, final-result flag, and membership-gated final tuple materialization launches with CUDA-event elapsed timing; accepted semantic parity timing is missing. |
 
 ## Remaining Blocker
 
-The next runtime slice must prove accepted semantic parity and report launch
-counters/timings plus zero CPU fallback counters.
+The next runtime slice must broaden accepted semantic parity beyond the K5 WCOJ
+fixture and complete solver/probability accepted-runtime traces.

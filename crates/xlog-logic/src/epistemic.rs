@@ -191,6 +191,7 @@ pub fn plan_epistemic_gpu_execution(program: &Program) -> Result<EpistemicGpuPla
         }
         reductions.push(EpistemicReductionPlan {
             rule_index,
+            head_predicate: rule.head.predicate.clone(),
             relational_body_atoms,
             wcoj_status: wcoj_status_for_reduction(
                 relational_body_atoms,
@@ -238,9 +239,15 @@ pub fn compile_epistemic_gpu_execution_with_stats_snapshot(
     let mut compiler = Compiler::new();
     let reduced_runtime_plan =
         compiler.compile_program_with_stats_snapshot(&reduced_program, stats_snapshot)?;
+    let relation_ids = compiler
+        .rel_ids()
+        .iter()
+        .map(|(name, rel)| (name.clone(), *rel))
+        .collect();
 
     Ok(EpistemicExecutablePlan {
         gpu_plan,
+        relation_ids,
         reduced_runtime_plan,
     })
 }

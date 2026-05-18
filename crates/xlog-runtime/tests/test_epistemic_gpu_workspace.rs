@@ -29,6 +29,7 @@ fn workspace_layout_sizes_all_required_epistemic_gpu_buffers() {
         ],
         vec![EpistemicReductionPlan {
             rule_index: 0,
+            head_predicate: "out".to_string(),
             relational_body_atoms: 3,
             wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
         }],
@@ -58,6 +59,7 @@ fn workspace_layout_rejects_zero_candidate_capacity() {
         vec![epistemic_literal("fact", EirEpistemicOp::Know)],
         vec![EpistemicReductionPlan {
             rule_index: 0,
+            head_predicate: "out".to_string(),
             relational_body_atoms: 1,
             wcoj_status: EpistemicWcojReductionStatus::NotWcojCandidate,
         }],
@@ -309,6 +311,7 @@ fn workspace_reset_trace_records_device_zeroing_for_all_buffers() {
         ],
         vec![EpistemicReductionPlan {
             rule_index: 0,
+            head_predicate: "out".to_string(),
             relational_body_atoms: 3,
             wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
         }],
@@ -444,7 +447,7 @@ fn execution_result_records_candidate_and_propagation_kernel_traces() {
         .find("let propagation = self.propagate_epistemic_gpu_candidates")
         .expect("propagation launch in execution path");
     let reduced_dispatch_pos = source
-        .find("let output = self.execute_plan(&executable.reduced_runtime_plan)?")
+        .find("let _reduced_return = self.execute_plan(&executable.reduced_runtime_plan)?")
         .expect("reduced production runtime dispatch");
 
     assert!(generation_pos < propagation_pos);
@@ -704,7 +707,11 @@ fn model_membership_runtime_path_uses_bound_output_columns_for_variable_tuple_ke
     let cuda = include_str!("../../xlog-cuda/kernels/epistemic.cu");
 
     assert!(source.contains("output: &CudaBuffer"));
-    assert!(source.contains("let output = self.execute_plan(&executable.reduced_runtime_plan)?"));
+    assert!(source
+        .contains("let _reduced_return = self.execute_plan(&executable.reduced_runtime_plan)?"));
+    assert!(source.contains("let output_relation = executable"));
+    assert!(source.contains(".head_predicate"));
+    assert!(source.contains("self.clone_buffer(reduced_output)?"));
     assert!(source.contains("&output,"));
     assert!(source.contains("EirTerm::Variable(variable_name)"));
     assert!(source.contains("output.schema().column_index(variable_name)"));
@@ -772,8 +779,11 @@ fn execution_result_records_model_membership_and_world_view_validation_after_red
     assert!(source.contains("world_view_validation,"));
 
     let reduced_dispatch_pos = source
-        .find("let output = self.execute_plan(&executable.reduced_runtime_plan)?")
+        .find("let _reduced_return = self.execute_plan(&executable.reduced_runtime_plan)?")
         .expect("reduced production runtime dispatch");
+    let reduced_output_clone_pos = source
+        .find("self.clone_buffer(reduced_output)?")
+        .expect("named reduced output clone");
     let wcoj_gate_pos = source
         .find("trace.require_wcoj_certification()?")
         .expect("runtime WCOJ certification gate");
@@ -790,6 +800,8 @@ fn execution_result_records_model_membership_and_world_view_validation_after_red
     assert!(reduced_dispatch_pos < membership_pos);
     assert!(reduced_dispatch_pos < wcoj_gate_pos);
     assert!(wcoj_gate_pos < membership_pos);
+    assert!(wcoj_gate_pos < reduced_output_clone_pos);
+    assert!(reduced_output_clone_pos < membership_pos);
     assert!(membership_pos < world_validation_pos);
     assert!(world_validation_pos < materialization_pos);
 }
@@ -809,7 +821,7 @@ fn execution_result_records_validation_kernel_trace_before_reduced_dispatch() {
         .find("let candidate_validation = self.validate_epistemic_gpu_candidates")
         .expect("candidate-validation launch in execution path");
     let reduced_dispatch_pos = source
-        .find("let output = self.execute_plan(&executable.reduced_runtime_plan)?")
+        .find("let _reduced_return = self.execute_plan(&executable.reduced_runtime_plan)?")
         .expect("reduced production runtime dispatch");
 
     assert!(propagation_pos < validation_pos);
@@ -1167,6 +1179,7 @@ fn executable_with_kclique_wcoj_plan() -> EpistemicExecutablePlan {
         vec![epistemic_literal("gate", EirEpistemicOp::Know)],
         vec![EpistemicReductionPlan {
             rule_index: 0,
+            head_predicate: "clique5".to_string(),
             relational_body_atoms: 10,
             wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
         }],
@@ -1174,6 +1187,7 @@ fn executable_with_kclique_wcoj_plan() -> EpistemicExecutablePlan {
 
     EpistemicExecutablePlan {
         gpu_plan,
+        relation_ids: std::collections::BTreeMap::new(),
         reduced_runtime_plan: runtime_plan_with_kclique_wcoj(),
     }
 }

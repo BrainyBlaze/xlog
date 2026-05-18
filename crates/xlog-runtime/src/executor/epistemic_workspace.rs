@@ -3106,7 +3106,7 @@ impl Executor {
             candidate_count,
         )?;
         let counters_before = self.epistemic_gpu_runtime_counters();
-        let output = self.execute_plan(&executable.reduced_runtime_plan)?;
+        let _reduced_return = self.execute_plan(&executable.reduced_runtime_plan)?;
         let counters_after = self.epistemic_gpu_runtime_counters();
         let trace = EpistemicGpuRuntimeTrace::from_preflight_and_counters(
             prepared.preflight,
@@ -3114,6 +3114,28 @@ impl Executor {
             counters_after,
         );
         trace.require_wcoj_certification()?;
+        let output_relation = executable
+            .gpu_plan
+            .reductions
+            .last()
+            .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU reduced output".to_string(),
+                context: "executable plan has no epistemic reductions".to_string(),
+            })?
+            .head_predicate
+            .as_str();
+        let output = {
+            let reduced_output = self.store().get(output_relation).ok_or_else(|| {
+                XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic GPU reduced output".to_string(),
+                    context: format!(
+                        "missing reduced output relation {output_relation} after production \
+                         runtime dispatch"
+                    ),
+                }
+            })?;
+            self.clone_buffer(reduced_output)?
+        };
         let model_membership = self.populate_epistemic_gpu_model_membership_from_tuple_sources(
             &mut prepared.workspace,
             &output,

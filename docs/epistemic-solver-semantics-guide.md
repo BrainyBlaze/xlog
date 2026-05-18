@@ -340,6 +340,7 @@ Current semantic-oracle validation snapshot:
 ```bash
 cargo fmt --check
 cargo test -p xlog-runtime --test test_epistemic_gpu_workspace
+cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture
 cargo test -p xlog-logic --test test_epistemic_eir --test test_epistemic_g91 --test test_epistemic_faeel --test test_epistemic_gpt --test test_epistemic_split
 cargo test -p xlog-logic --test test_epistemic_examples
 cargo test -p xlog-solve --test solver_service_semantics
@@ -353,10 +354,11 @@ cargo check -p pyxlog
 ```
 
 These commands validate the CPU-side semantic oracle only. They are not a
-substitute for the required GPU-native certification evidence, which must include
-GPU launch counts, kernel timings, WCOJ dispatch evidence, and zero CPU fallback
-counters. The v0.8 pyxlog/DTS compatibility subset still must be rerun after the
-v0.8 branch lands and this branch is rebased or merged onto it.
+substitute for the remaining GPU-native certification evidence, which must
+broaden launch counts, kernel timings, accepted semantic parity, solver and
+probability traces, and zero CPU fallback counters. The v0.8 pyxlog/DTS
+compatibility subset still must be rerun after the v0.8 branch lands and this
+branch is rebased or merged onto it.
 
 ## Roadmap Status
 

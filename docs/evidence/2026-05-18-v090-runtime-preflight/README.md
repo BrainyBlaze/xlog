@@ -16,13 +16,14 @@ flag staging from reduced-output device row-count metadata, adds final tuple
 materialization into a device-resident output buffer, adds a
 certification guard tying WCOJ evidence to actual production counter deltas, and
 exposes a reduced-plan execution trace around `execute_plan`. It is still
-incomplete for the epistemic hot path and does not close `G090_GPU`.
+incomplete for the full epistemic hot path and does not close `G090_GPU`.
 
 ## Implementation Summary
 
 | Requirement | Evidence |
 |---|---|
 | Runtime consumes executable plan | `EpistemicGpuRuntimePreflight::for_executable_plan` accepts `EpistemicExecutablePlan`. |
+| Executable registration metadata | `EpistemicExecutablePlan` carries reduced production compiler relation IDs for runtime registration. |
 | Workspace layout tied to executable plan | Preflight computes `EpistemicGpuWorkspaceLayout` from the GPU contract and capacity limits. |
 | CPU fallback ban starts at runtime boundary | Preflight rejects nonzero forbidden CPU fallback counters with typed `UnsupportedEpistemicConstruct`. |
 | Tuple-membership bindings are certified | Preflight calls `EpistemicGpuPlan::validate_tuple_membership_bindings` and records the tuple-membership binding count. |
@@ -50,7 +51,8 @@ incomplete for the epistemic hot path and does not close `G090_GPU`.
 | Runtime WCOJ counter snapshot | `Executor::epistemic_gpu_runtime_counters` snapshots existing production WCOJ, layout-sort, and K-clique metadata counters. |
 | Preflight-only WCOJ evidence rejected | `EpistemicGpuRuntimeWcojCertification` reports `MissingRequiredWcojDispatch` when a K-clique WCOJ plan exists but runtime WCOJ counters do not advance. |
 | Runtime WCOJ gate | `EpistemicGpuRuntimeTrace::require_wcoj_certification` returns a typed `UnsupportedEpistemicConstruct` error for required K-clique WCOJ plans with zero observed WCOJ dispatches. |
-| Reduced-plan execution trace | `Executor::execute_epistemic_gpu_execution` prepares workspace, launches candidate generation, propagation, and candidate validation, executes the reduced production runtime plan with `execute_plan`, captures before/after counter deltas in `EpistemicGpuRuntimeTrace`, requires WCOJ certification, then launches model-membership, world-view validation, accepted-candidate materialization, final-result flag staging, and final tuple materialization. |
+| Reduced-plan execution trace | `Executor::execute_epistemic_gpu_execution` prepares workspace, launches candidate generation, propagation, and candidate validation, executes the reduced production runtime plan with `execute_plan`, captures before/after counter deltas in `EpistemicGpuRuntimeTrace`, requires WCOJ certification, clones the named reduced output relation, then launches model-membership, world-view validation, accepted-candidate materialization, final-result flag staging, and final tuple materialization. |
+| Accepted WCOJ dispatch | `test_epistemic_gpu_wcoj_execution` proves one accepted K5 epistemic reduction reaches certified production WCOJ dispatch and final row materialization. |
 | Hot-path transfer budget | `EpistemicGpuTransferBudgetTrace` snapshots provider host-transfer counters around the GPU hot path and rejects tracked H2D/D2H deltas without resetting shared stats. |
 
 ## Validation
@@ -59,7 +61,8 @@ incomplete for the epistemic hot path and does not close `G090_GPU`.
 |---|---|
 | `cargo fmt --check` | PASS |
 | `git diff --check` | PASS |
-| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 44 passed, 0 failed |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 47 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-cuda --test build_script_tests -- --nocapture` | PASS, 4 passed, 0 failed |
 | `cargo test -p xlog-runtime --lib` | PASS, 128 passed, 0 failed |
 | `cargo check -p xlog-cuda -p xlog-runtime -p xlog-logic -p xlog-ir` | PASS |
@@ -70,7 +73,7 @@ incomplete for the epistemic hot path and does not close `G090_GPU`.
 | Metric | Target | Status | Evidence |
 |---|---|---|---|
 | M090_GPU.1 production lowering | accepted epistemic fixture runs through production runtime dispatch | PARTIAL | Runtime API launches candidate generation, propagation, and candidate validation before reduced production-plan execution with counter tracing, then launches arity 0-3 tuple-source-backed model-membership staging with row-scoped ground key comparison for arity one/two/three, world-view validation, accepted-candidate materialization, final-result flag staging, and final tuple materialization; bound-variable tuple-key matching, arbitrary arity, and full accepted semantics remain missing. |
-| M090_GPU.2 WCOJ eligibility | at least one epistemic reduction uses the WCOJ planner/path where eligible | PARTIAL | Preflight records WCOJ/K-clique/helper metadata, and the runtime WCOJ gate rejects preflight-only evidence before model-membership/world-view staging; no certified successful dispatch evidence yet. |
+| M090_GPU.2 WCOJ eligibility | at least one epistemic reduction uses the WCOJ planner/path where eligible | PASS | Accepted K5 fixture records WCOJ/K-clique/helper metadata, passes the runtime WCOJ certification gate, observes production K5 dispatch counters, and materializes one final accepted row. |
 | M090_GPU.3 GPU buffers | candidate, world-view, and rejection state have GPU-resident representations | PARTIAL | Prepare API combines preflight with workspace allocation and device-side reset; candidate, propagation, candidate-validation, arity 0-3 tuple-source model-membership staging with encoded ground key expectations, bounded world-view-validation, accepted-candidate materialization, and final-result flag buffers can be populated or checked by CUDA kernels; bound-variable and arbitrary-arity stable-model tuple matching are still missing. |
 | M090_GPU.4 kernel coverage | GPU kernels cover candidate generation, propagation, validation, and materialization hot paths | PARTIAL | Candidate generation has `epistemic_generate_candidate_assumptions_u8`; propagation staging has `epistemic_propagate_candidates_u8`; candidate-buffer validation has `epistemic_validate_candidate_bits_u8`; arity 0-3 tuple-source model membership has fixed kernels over existing relation columns and row-scoped ground-key byte comparison for arity one/two/three; bounded world-view validation has `epistemic_validate_world_views_u8`; materialization staging has `epistemic_materialize_accepted_candidates_u8`; final-result flag staging has `epistemic_materialize_final_result_flags_u8`; final tuple materialization has `epistemic_materialize_final_tuple_column_u8`; bound-variable and arbitrary-arity tuple matching remain missing. |
 | M090_GPU.5 CPU fallback ban | accepted trace records zero CPU candidate/world-view fallbacks | PARTIAL | Preflight rejects nonzero fallback counters, and candidate/propagation/validation/model-membership/world-view-validation/materialization/final-result traces record zero host writes; arity 0-3 tuple-source staging reads existing device relation buffers and compares row-scoped ground keys on device, while bound-value tuple matching remains missing. |
@@ -81,7 +84,6 @@ incomplete for the epistemic hot path and does not close `G090_GPU`.
 
 ## Remaining Blocker
 
-The next slice must extend fixed arity 0-3 ground-key matching to bound-value
-tuple keys and arbitrary arity, use that membership when producing final query
-results, and emit full accepted-execution timing, final transfer accounting,
-semantic parity fixtures, and zero CPU fallback counters.
+The next slice must broaden accepted-execution parity beyond the K5 WCOJ
+fixture, extend solver/probability accepted-runtime traces, and complete zero
+CPU fallback certification.

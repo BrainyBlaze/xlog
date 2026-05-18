@@ -12,8 +12,8 @@ use std::sync::Arc;
 use xlog_core::{symbol, MemoryBudget, Result, ScalarType, XlogError};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_logic::{
-    compile::load_modules, expand_program_functions, parse_program, BodyLiteral, Compiler, Query,
-    Term,
+    compile::load_modules, expand_program_functions, parse_program, BodyLiteral, Compiler,
+    EpistemicOp, Query, Term,
 };
 use xlog_runtime::Executor;
 
@@ -252,6 +252,21 @@ fn format_constraint(body: &[BodyLiteral]) -> String {
             }
             BodyLiteral::Comparison(c) => format!("{:?} {:?} {:?}", c.left, c.op, c.right),
             BodyLiteral::IsExpr(is) => format!("{} is {:?}", is.target, is.expr),
+            BodyLiteral::Epistemic(e) => {
+                let args = e
+                    .atom
+                    .terms
+                    .iter()
+                    .map(format_term)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let op = match e.op {
+                    EpistemicOp::Know => "know",
+                    EpistemicOp::Possible => "possible",
+                };
+                let prefix = if e.negated { "not " } else { "" };
+                format!("{prefix}{op} {}({})", e.atom.predicate, args)
+            }
         })
         .collect::<Vec<_>>()
         .join(", ");
