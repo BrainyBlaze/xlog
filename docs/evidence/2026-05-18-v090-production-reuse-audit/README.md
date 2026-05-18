@@ -32,11 +32,11 @@ tag gates remain separate user-authorized actions.
 
 | Area | Reused production path | Audit evidence | Remaining blocker |
 |---|---|---|---|
-| Runtime/WCOJ lowering | Existing logic compiler and runtime RIR execution | `compile_epistemic_gpu_execution` lowers reduced ordinary programs through `compile_program_with_stats_snapshot`; runtime calls `self.execute_plan(&executable.reduced_runtime_plan)` and records `EpistemicGpuRuntimePreflight`. | Certified successful WCOJ dispatch on an accepted epistemic reduction is still missing. |
-| WCOJ layout and scheduling | Existing WCOJ, K-clique, planned-hash, sorted-layout, and helper-split route metadata | `summarize_runtime_routes` inspects `MultiwayPlan::WcojWithPlan`, counts `helper_split_spec_count`, `planned_hash_route_count`, sorted-layout requirements, and runtime WCOJ dispatch deltas. | Current evidence includes fail-closed WCOJ-required certification but not a passing launch trace. |
+| Runtime/WCOJ lowering | Existing logic compiler and runtime RIR execution | `compile_epistemic_gpu_execution` lowers reduced ordinary programs through `compile_program_with_stats_snapshot`; runtime calls `self.execute_plan(&executable.reduced_runtime_plan)`, records `EpistemicGpuRuntimePreflight`, and certifies one accepted K5 WCOJ dispatch from production counter deltas. | Broader WCOJ-eligible epistemic reductions and semantic parity coverage are still missing. |
+| WCOJ layout and scheduling | Existing WCOJ, K-clique, planned-hash, sorted-layout, and helper-split route metadata | `summarize_runtime_routes` inspects `MultiwayPlan::WcojWithPlan`, counts `helper_split_spec_count`, `planned_hash_route_count`, sorted-layout requirements, and runtime WCOJ dispatch deltas; the accepted K5 fixture supplies a passing launch trace. | Layout/helper/skew coverage beyond the accepted K5 fixture is still missing. |
 | Tuple membership | Existing relation layouts and device buffers | Membership staging reads existing `CudaBuffer` relation columns via `source_relation.column(...)` and compares against reduced output columns via `output.column(bound_col_index)`. | Semantic parity fixtures for nonzero-arity accepted world views are still missing. |
 | Solver | Existing `xlog-solve` GPU CNF/CDCL production path | `GpuSolverProductionAdapter` wraps `GpuCdclSolver::new`, `solve_expect_sat(cnf)`, and UNSAT APIs while exposing zero CPU assignment and MaxSAT enumeration counters. | GPU-native MaxSAT and SAT/MaxSAT portfolio production paths are explicitly blocked. |
-| Probability | Existing `xlog-prob` GPU exact/provenance path | `EpistemicProbProductionAdapter` calls `ExactDdnnfProgram::compile_source_with_gpu`, `ExactDdnnfProgram::compile_from_program`, and `evaluate_gpu_with_grads`, with zero CPU-only probability recomputation counters. | Accepted runtime wiring from epistemic world-view evidence into this adapter is still missing. |
+| Probability | Existing `xlog-prob` GPU exact/provenance path | `EpistemicProbProductionAdapter` calls `compile_source_with_gpu_execution_result`, validates accepted `EpistemicGpuExecutionResult` evidence through `AcceptedWorldViewEvidence::from_gpu_execution_result`, then calls `ExactDdnnfProgram::compile_source_with_gpu`, `ExactDdnnfProgram::compile_from_program`, and `evaluate_gpu_with_grads`, with zero CPU-only probability recomputation counters. | End-to-end probabilistic query/evaluation traces over accepted runtime world views are still missing. |
 
 ## Forbidden Parallel Engines
 
@@ -65,8 +65,8 @@ accepted paths audited by the source test.
 ## Non-Closure Notes
 
 - This audit strengthens `M090_CERT.13`; it does not close `G090_CERT`.
-- `M090_GPU.11`, `M090_SOLVER.9`, `M090_PROB.8`, and full accepted execution
-  traces remain incomplete.
+- `M090_GPU.11`, `M090_SOLVER.9`, `M090_PROB.8`, and broader accepted
+  execution traces remain incomplete.
 - CPU semantic-oracle fixtures remain scaffolding evidence only and cannot
   satisfy release gates.
 - No closure-board edit, merge, push, or tag is implied.

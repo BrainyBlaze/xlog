@@ -12,6 +12,8 @@ fn production_prob_adapter_reuses_gpu_exact_path_not_fixture_circuit() {
     assert!(lib.contains("epistemic_production"));
     assert!(production.contains("EpistemicProbProductionAdapter"));
     assert!(production.contains("EpistemicProbProductionTrace"));
+    assert!(production.contains("compile_source_with_gpu_execution_result"));
+    assert!(production.contains("from_gpu_execution_result"));
     assert!(production.contains("ExactDdnnfProgram::compile_source_with_gpu"));
     assert!(production.contains("ExactDdnnfProgram::compile_from_program"));
     assert!(production.contains("evaluate_gpu_with_grads"));

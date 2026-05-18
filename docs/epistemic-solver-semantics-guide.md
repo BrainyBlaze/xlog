@@ -148,9 +148,10 @@ runtime actually touches:
   those surfaces.
 
 Today the epistemic runtime consumes 38-B route metadata and fails closed when a
-WCOJ-required K-clique reduction lacks production counter deltas. It does not
-yet certify a successful epistemic WCOJ dispatch through the full planner,
-layout, skew-scheduling, and helper-splitting path.
+WCOJ-required K-clique reduction lacks production counter deltas. It now
+certifies one accepted K5 WCOJ dispatch through production runtime counters,
+but broader layout, skew-scheduling, helper-splitting, and semantic parity
+coverage remain incomplete.
 
 The reduced-runtime-plan contract reuses the Goal-038-B WCOJ surfaces. K-clique
 epistemic reductions must pass through `MultiwayPlan`, `KCliqueVariableOrder`,
@@ -307,9 +308,13 @@ production-facing exact-path reuse adapter. It requires
 `AcceptedWorldViewEvidence`, then routes source or parsed programs through
 `ExactDdnnfProgram` GPU exact/provenance compilation and exposes zero CPU-only
 probability recomputation counters in `EpistemicProbProductionTrace`.
+`compile_source_with_gpu_execution_result` builds that evidence from an
+accepted `EpistemicGpuExecutionResult` only after stable-model tuple-source
+membership, GPU model-membership/world-view/final-result/final-tuple kernel
+traces, zero hot-path transfers, and non-empty final device output are proven.
 
 This adapter is partial v0.9 evidence only. It does not yet wire accepted
-runtime world views into probabilistic execution end to end.
+runtime world views into probabilistic query/evaluation execution end to end.
 
 Run the probabilistic fixture and production-adapter source guard:
 

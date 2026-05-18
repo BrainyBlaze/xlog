@@ -31,6 +31,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     let logic = read_workspace_file("crates/xlog-logic/src/epistemic.rs");
     let solver = read_workspace_file("crates/xlog-solve/src/production.rs");
     let prob = read_workspace_file("crates/xlog-prob/src/epistemic_production.rs");
+    let prob_epistemic = read_workspace_file("crates/xlog-prob/src/epistemic.rs");
 
     assert!(logic.contains("compile_epistemic_gpu_execution"));
     assert!(logic.contains("compile_program_with_stats_snapshot"));
@@ -46,7 +47,11 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(solver.contains("cpu_assignment_enumerations: 0"));
     assert!(prob.contains("ExactDdnnfProgram::compile_source_with_gpu"));
     assert!(prob.contains("ExactDdnnfProgram::compile_from_program"));
+    assert!(prob.contains("compile_source_with_gpu_execution_result"));
     assert!(prob.contains("cpu_only_probability_recomputations: 0"));
+    assert!(prob_epistemic.contains("from_gpu_execution_result"));
+    assert!(prob_epistemic.contains("read_device_row_count"));
+    assert!(prob_epistemic.contains("require_stable_model_tuple_source"));
 
     for (label, source) in [
         ("runtime", runtime.as_str()),

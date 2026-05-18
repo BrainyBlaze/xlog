@@ -5,9 +5,11 @@
 //! provenance path instead of using the bounded epistemic fixture circuit.
 
 use xlog_core::{Result, XlogError};
+use xlog_cuda::CudaKernelProvider;
 use xlog_logic::ast::Program;
+use xlog_runtime::EpistemicGpuExecutionResult;
 
-use crate::epistemic::AcceptedWorldViewEvidence;
+use crate::epistemic::{AcceptedWorldViewEvidence, EpistemicAssumption};
 #[cfg(feature = "host-io")]
 use crate::exact::ExactResultWithGrads;
 use crate::exact::{ExactDdnnfProgram, GpuConfig};
@@ -81,6 +83,19 @@ impl EpistemicProbProductionAdapter {
             self.trace.gpu_exact_source_compiles.saturating_add(1);
         self.trace.require_zero_cpu_recompute()?;
         Ok(program)
+    }
+
+    /// Compile source through the GPU exact path after accepted GPU epistemic execution.
+    pub fn compile_source_with_gpu_execution_result(
+        &mut self,
+        source: &str,
+        provider: &CudaKernelProvider,
+        result: &EpistemicGpuExecutionResult,
+        assumptions: Vec<EpistemicAssumption>,
+    ) -> Result<ExactDdnnfProgram> {
+        let evidence =
+            AcceptedWorldViewEvidence::from_gpu_execution_result(provider, result, assumptions)?;
+        self.compile_source_with_accepted_world_view(source, &evidence)
     }
 
     /// Compile a parsed program through the existing GPU-native exact/provenance path.

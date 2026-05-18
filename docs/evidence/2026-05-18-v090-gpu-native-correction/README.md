@@ -23,7 +23,7 @@ release gate.
 | GPT | CPU fixture records guesses, reduced models, accepted world views, and rejection reasons. | PARTIAL: candidate generation, propagation staging, candidate-buffer validation, tuple-source model-membership staging with specialized arity-one/two/three and generic arity-N row-scoped ground-key comparison plus generic arity-N variable-bound comparison, bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, final-row map construction, and membership-gated final tuple materialization use GPU-resident buffers; broader accepted semantic parity remains missing. |
 | Splitting | CPU split/recompose fixtures pass. | PARTIAL until valid split components execute through GPU-native subplans. |
 | Solver | `SolverService` is a CPU fixture facade with SAT/UNSAT/UNKNOWN/TIMEOUT/Optimal statuses; `GpuSolverProductionAdapter` is a thin SAT/UNSAT adapter over the existing `GpuCdclSolver` production path with zero CPU search counters; `production_capabilities` explicitly blocks GPU-native MaxSAT and SAT/MaxSAT portfolio execution. | PARTIAL for SAT/UNSAT production reuse; BLOCKED until GPU-native MaxSAT, portfolio execution, and accepted candidate lifecycle traces are wired to epistemic candidates. |
-| Probabilistic | `AcceptedWorldViewEvidence` guards evidence conditioning in fixtures; `EpistemicProbProductionAdapter` requires accepted evidence before routing into the existing `ExactDdnnfProgram` GPU exact/provenance path and records zero CPU recompute counters. | PARTIAL for production exact-path reuse; BLOCKED until accepted runtime world views are wired to probabilistic execution end to end. |
+| Probabilistic | `AcceptedWorldViewEvidence` guards evidence conditioning in fixtures; `EpistemicProbProductionAdapter` can construct evidence from an accepted `EpistemicGpuExecutionResult`, route into the existing `ExactDdnnfProgram` GPU exact/provenance compile path, and record zero CPU recompute counters. | PARTIAL for production exact-compile reuse; BLOCKED until end-to-end probabilistic query/evaluation traces over accepted runtime world views exist. |
 | Certification | Semantic-oracle, GPU-plan contract, and accepted K5 WCOJ execution tests can pass locally. | BLOCKED until full accepted-execution GPU timing, solver/probability traces, semantic parity, and zero CPU fallback counters exist. |
 
 ## Explicit Non-Closure Items
@@ -73,8 +73,9 @@ The next production slice should start at the lowering/runtime boundary:
    available, and accepted candidate wiring remains open.
 7. Feed accepted world-view evidence into the existing GPU-native
    exact/provenance path and report zero CPU-only probability recomputation.
-   PARTIAL through `EpistemicProbProductionAdapter`; accepted runtime wiring and
-   end-to-end probabilistic traces remain open.
+   PARTIAL through `EpistemicProbProductionAdapter` and
+   `compile_source_with_gpu_execution_result`; end-to-end probabilistic
+   query/evaluation traces remain open.
 
 ## Validation Status
 

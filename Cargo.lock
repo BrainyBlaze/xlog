@@ -2397,6 +2397,7 @@ dependencies = [
  "xlog-gpu",
  "xlog-ir",
  "xlog-logic",
+ "xlog-prob",
  "xlog-runtime",
  "xlog-stats",
 ]

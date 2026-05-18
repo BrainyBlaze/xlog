@@ -53,7 +53,7 @@ Earlier ref checks after `git fetch origin --prune` showed:
 | G090_SPLIT | PARTIAL | CPU split/recompose fixtures pass; GPU split execution is missing. |
 | G090_GPU | BLOCKED | GPU-plan, reduced-runtime-plan, workspace allocation/reset, bounded candidate-generation, propagation, candidate-validation, arity 0-3 tuple-source model-membership staging with fixed arity-one/two/three row-scoped ground key comparison over existing relation buffers, generic arity-N variable-bound tuple matching, world-view-validation, accepted-candidate materialization, final-result flag, final-row map/final tuple materialization kernels, accepted K5 WCOJ dispatch, and hot-path transfer-budget trace with CUDA-event elapsed timing/runtime-preflight/fail-closed WCOJ gate/reduced-plan trace contracts exist, but full semantic kernel-buffer parity, solver wiring, probability wiring, and broader fixture coverage remain missing. |
 | G090_SOLVER | BLOCKED | `SolverService` is CPU fixture enumeration; GPU-native SAT/MaxSAT/portfolio execution is not wired to epistemic candidates. |
-| G090_PROB | BLOCKED | Accepted-world-view evidence fixtures exist, but accepted probabilistic epistemic execution is not proven on the GPU-native exact path. |
+| G090_PROB | BLOCKED | Accepted GPU runtime evidence can gate exact compilation through the existing GPU-native path, but end-to-end probabilistic execution/evaluation on accepted world views is incomplete. |
 | G090_CERT | BLOCKED | Missing complete accepted-execution kernel timing, WCOJ evidence, zero CPU fallback counters, and post-v0.8 rerun. |
 | G090_DOC | PARTIAL | Guide documents semantic oracle and blockers; production GPU/WCOJ path is not implemented. |
 | G090_CLOSE | BLOCKED | Requires G090_GPU/G090_SOLVER/G090_PROB/G090_CERT plus v0.8 integration/rebase. |
@@ -126,8 +126,8 @@ Closure remains blocked until certification includes all of the following:
   helper-splitting evidence where applicable;
 - GPU-native SAT/MaxSAT/portfolio assumption lifecycle evidence with distinct
   SAT, UNSAT, UNKNOWN, and TIMEOUT handling;
-- accepted-world-view evidence flowing into GPU-native exact/provenance
-  execution with zero CPU-only probability recomputation;
+- accepted-world-view evidence flowing through GPU-native exact/provenance
+  query/evaluation with zero CPU-only probability recomputation;
 - post-v0.8 rebase compatibility evidence.
 
 ## Release Hygiene
