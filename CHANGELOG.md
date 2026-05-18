@@ -52,9 +52,9 @@ integration, and release-board closure.
   historical evidence may still say the work was originally targeted
   as `v0.6.5`.
 - Roadmap release trains move forward: the completed WCOJ expansion is
-  v0.7.0, Epistemic/Solver Semantics moves to v0.8.0, Multi-GPU and
-  Out-of-Core moves to v0.9.0, and Language/ML/Product backlog moves
-  to v0.10.0.
+  v0.7.0, Language/ML/Product backlog moves to v0.8.0,
+  Epistemic/Solver Semantics moves to v0.9.0, and Multi-GPU /
+  Out-of-Core moves to v0.10.0.
 
 ### Release Status
 
@@ -184,7 +184,7 @@ unchanged; the new path is opt-in via
   device-mask case for runtime-backed callers.
 - **ILP / ILP-exact view helpers + operators recorded
   migration**. Re-opens when tensorized ILP /
-  exact-induction downstream consumer work resumes (v0.10.0
+  exact-induction downstream consumer work resumes (v0.8.0
   "Bounded Exact Induction" backlog) and requires
   runtime-backed stream safety.
 - **Sub-slice 3 LeftOuter CSM** (commit `b90ae77f`, never
@@ -204,7 +204,7 @@ unchanged; the new path is opt-in via
   `XLOG_USE_RECORDED_OPS`, one runtime per thread, no v0.6
   code in the call chain). Bug class: pre-existing
   same-process multi-executor concurrency against one CUDA
-  primary context. Tracked under v0.8.0 "Concurrency
+  primary context. Tracked under v0.9.0 "Concurrency
   Hardening" in `ROADMAP.md`. The v0.6.0 release gate is
   **A4 fork-isolated stress + cert suite + umbrella ×50**,
   not "A3 zero drift".

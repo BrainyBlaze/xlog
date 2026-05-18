@@ -14,6 +14,10 @@ Graph hot-loop support, and DTS-DLM end-to-end validation.
 This roadmap is version-oriented so planned work is not hidden inside subsystem
 sections. Historical and current-main work uses checked boxes. Future work uses
 unchecked boxes and is assigned to a concrete future version.
+After the tagged v0.7.0 feature pack, future trains are reprioritized:
+the former v0.10.0 Language/ML/Product backlog moves up to v0.8.0,
+the former v0.8.0 Epistemic/Solver train moves to v0.9.0, and the
+former v0.9.0 Multi-GPU/Out-of-Core train moves to v0.10.0.
 
 ## v0.0.1 - Workspace Foundation
 
@@ -618,11 +622,11 @@ relocated to the release where the work actually belongs:
     WCOJ).
   * Native exact-induction tensorized integration + 449/449
     liveness reproduction + committed `ilp_exact.ptx` →
-    **v0.10.0 Bounded Exact Induction** (gated on a named
+    **v0.8.0 Bounded Exact Induction** (gated on a named
     downstream consumer materializing).
   * Per-call Python memory limit + query progress API →
-    **v0.10.0 Python API**.
-  * CLI explain/plan visualization → **v0.10.0 CLI**.
+    **v0.8.0 Python API**.
+  * CLI explain/plan visualization → **v0.8.0 CLI**.
 
 ## v0.6.0 - Stream-Safe GPU Runtime And Execution Discipline
 
@@ -745,7 +749,7 @@ execution.
       Legacy ILP / ILP-exact path stays as-is; runtime block
       identity is not propagated through ILP view helpers.
       **Re-open trigger**: tensorized ILP / exact-induction
-      downstream consumer work resumes (v0.10.0 "Bounded Exact
+      downstream consumer work resumes (v0.8.0 "Bounded Exact
       Induction" backlog) and requires runtime-backed stream
       safety. Without that consumer, the current legacy path
       is correct and migration would add complexity for no
@@ -863,7 +867,7 @@ execution.
       same-process multi-executor/provider concurrency against
       one CUDA primary context. Re-scoped as a non-blocking
       residual; see "Known Non-Blocking Residuals" below and
-      the future-version backlog item in v0.8.0.
+      the future-version backlog item in v0.9.0.
 - [x] Public certification of the recorded launch discipline
       against the cert suite. (Commit `3361785b`.)
       `XLOG_USE_DEVICE_RUNTIME=1 XLOG_USE_RECORDED_OPS=1 cargo
@@ -914,7 +918,7 @@ blockers later.
   runtime), which means no v0.6 code path is in the call
   chain. The bug class is pre-existing same-process
   multi-executor/provider concurrency against a shared CUDA
-  primary context. Tracked for v0.8.0+ under "Certify
+  primary context. Tracked for v0.9.0+ under "Certify
   same-process multi-executor concurrency against one CUDA
   primary context".
 
@@ -1025,7 +1029,7 @@ blockers later.
        release path begins consuming host-provided masks**.
      * ILP / ILP-exact recorded migration re-opens **when
        the tensorized ILP / exact-induction downstream
-       consumer work resumes (v0.10.0 "Bounded Exact
+       consumer work resumes (v0.8.0 "Bounded Exact
        Induction" backlog) and requires runtime-backed
        stream safety**.
    Both items are now annotated under Recorded Launch Paths
@@ -1318,99 +1322,7 @@ the v0.7.0 retarget**:
   * Slice 4: Recursive-arm WCOJ dispatch (items #4, #5).
   * Slice 5: `CardinalityAwareCostModel` opt-in.
 
-## v0.8.0 - Epistemic and Solver Semantics
-
-### xlog-logic
-
-- [ ] Add Epistemic Intermediate Representation (EIR).
-- [ ] Add G91 semantics as a compatibility mode for classic epistemic logic.
-- [ ] Add FAEEL semantics as the default Founded Autoepistemic Equilibrium Logic mode.
-- [ ] Add Generate-Propagate-Test execution.
-- [ ] Add epistemic splitting.
-- [ ] Integrate epistemic reasoning with probabilistic inference.
-
-### Solver Services
-
-- [ ] Integrate solver services with `xlog-logic` constraints.
-- [ ] Add incremental SAT semantics.
-- [ ] Add assumption-based solving.
-- [ ] Add learned-clause transfer for incremental SAT.
-- [ ] Add MaxSAT with soft constraints.
-- [ ] Add GPU portfolio solving.
-
-### Probabilistic Reasoning
-
-- [ ] Add incremental circuit updates for dynamic programs.
-- [ ] Add alternative knowledge compilers such as c2d and miniC2D.
-
-### Documentation and Tests
-
-- [ ] Add epistemic semantics guide.
-- [ ] Add solver-semantics certification tests.
-
-### Concurrency Hardening
-
-- [ ] **Certify same-process multi-executor concurrency
-      against one CUDA primary context.** Surfaced by the
-      v0.6.0 A3/A4 stress harness
-      (`crates/xlog-integration/tests/test_a3_a4_stress.rs`,
-      commit `27ec3bd9`): A3 in-process thread-of-N drift
-      (~3% on recursive Datalog workloads) is reproducible
-      against the legacy default path (no
-      `XLOG_USE_DEVICE_RUNTIME`, no `XLOG_USE_RECORDED_OPS`),
-      so it is NOT a v0.6.0 stream-safety bug — it is a
-      pre-existing same-process multi-executor /
-      multi-provider concurrency issue. Re-target candidates:
-      `xlog-runtime::Executor` mutability under thread
-      contention, `xlog-cuda::CudaKernelProvider` shared
-      kernel/index caches, cudarc primary-context module-load
-      semantics under concurrent first-launch. Pass criterion:
-      A3 thread-of-N drift drops to zero on the harness's
-      `per_thread` and `shared` fixture modes (matrix run
-      via `XLOG_A3_FIXTURE_MODE=...`).
-
-## v0.9.0 - Multi-GPU and Out-of-Core Execution
-
-### Runtime and Memory
-
-- [ ] Add out-of-core execution for relations exceeding GPU memory.
-- [ ] Add checkpointing and recovery.
-- [ ] Add out-of-core spilling.
-- [ ] Add memory-pool allocation reuse.
-- [ ] Add memory defragmentation.
-- [ ] Add memory-budget-aware index eviction policy.
-
-### Multi-GPU
-
-- [ ] Add `DistributedBuffer`.
-- [ ] Add hash partitioning across devices.
-- [ ] Add local joins on each device.
-- [ ] Add gather/concat for distributed results.
-- [ ] Add peer-to-peer copy when the GPU topology supports it.
-- [ ] Add host-staging fallback.
-- [ ] Add skew detection for distributed joins.
-- [ ] Add skew rebalancing.
-- [ ] Add network partition shuffle.
-- [ ] Add distributed coordinator.
-- [ ] Add fault tolerance and recovery.
-
-### CUDA Kernels
-
-- [ ] Add `distributed.cu` partitioning and shuffle kernels.
-- [ ] Add partitioning kernels for multi-GPU execution.
-
-### Data Interoperability
-
-- [ ] Add direct cuDF DataFrame interchange.
-- [ ] Add GPU-accelerated Parquet file reading.
-
-### Tests
-
-- [ ] Add cuDF integration tests.
-- [ ] Add PyTorch integration tests.
-- [ ] Add multi-GPU partitioning, skew, and recovery certification.
-
-## v0.10.0 - Language, ML, and Product Backlog
+## v0.8.0 - Language, ML, and Product Backlog
 
 ### xlog-logic
 
@@ -1487,6 +1399,98 @@ the v0.7.0 retarget**:
 - [ ] Add watch mode.
 - [ ] Add CLI explain/plan visualization.
 
+## v0.9.0 - Epistemic and Solver Semantics
+
+### xlog-logic
+
+- [ ] Add Epistemic Intermediate Representation (EIR).
+- [ ] Add G91 semantics as a compatibility mode for classic epistemic logic.
+- [ ] Add FAEEL semantics as the default Founded Autoepistemic Equilibrium Logic mode.
+- [ ] Add Generate-Propagate-Test execution.
+- [ ] Add epistemic splitting.
+- [ ] Integrate epistemic reasoning with probabilistic inference.
+
+### Solver Services
+
+- [ ] Integrate solver services with `xlog-logic` constraints.
+- [ ] Add incremental SAT semantics.
+- [ ] Add assumption-based solving.
+- [ ] Add learned-clause transfer for incremental SAT.
+- [ ] Add MaxSAT with soft constraints.
+- [ ] Add GPU portfolio solving.
+
+### Probabilistic Reasoning
+
+- [ ] Add incremental circuit updates for dynamic programs.
+- [ ] Add alternative knowledge compilers such as c2d and miniC2D.
+
+### Documentation and Tests
+
+- [ ] Add epistemic semantics guide.
+- [ ] Add solver-semantics certification tests.
+
+### Concurrency Hardening
+
+- [ ] **Certify same-process multi-executor concurrency
+      against one CUDA primary context.** Surfaced by the
+      v0.6.0 A3/A4 stress harness
+      (`crates/xlog-integration/tests/test_a3_a4_stress.rs`,
+      commit `27ec3bd9`): A3 in-process thread-of-N drift
+      (~3% on recursive Datalog workloads) is reproducible
+      against the legacy default path (no
+      `XLOG_USE_DEVICE_RUNTIME`, no `XLOG_USE_RECORDED_OPS`),
+      so it is NOT a v0.6.0 stream-safety bug — it is a
+      pre-existing same-process multi-executor /
+      multi-provider concurrency issue. Re-target candidates:
+      `xlog-runtime::Executor` mutability under thread
+      contention, `xlog-cuda::CudaKernelProvider` shared
+      kernel/index caches, cudarc primary-context module-load
+      semantics under concurrent first-launch. Pass criterion:
+      A3 thread-of-N drift drops to zero on the harness's
+      `per_thread` and `shared` fixture modes (matrix run
+      via `XLOG_A3_FIXTURE_MODE=...`).
+
+## v0.10.0 - Multi-GPU and Out-of-Core Execution
+
+### Runtime and Memory
+
+- [ ] Add out-of-core execution for relations exceeding GPU memory.
+- [ ] Add checkpointing and recovery.
+- [ ] Add out-of-core spilling.
+- [ ] Add memory-pool allocation reuse.
+- [ ] Add memory defragmentation.
+- [ ] Add memory-budget-aware index eviction policy.
+
+### Multi-GPU
+
+- [ ] Add `DistributedBuffer`.
+- [ ] Add hash partitioning across devices.
+- [ ] Add local joins on each device.
+- [ ] Add gather/concat for distributed results.
+- [ ] Add peer-to-peer copy when the GPU topology supports it.
+- [ ] Add host-staging fallback.
+- [ ] Add skew detection for distributed joins.
+- [ ] Add skew rebalancing.
+- [ ] Add network partition shuffle.
+- [ ] Add distributed coordinator.
+- [ ] Add fault tolerance and recovery.
+
+### CUDA Kernels
+
+- [ ] Add `distributed.cu` partitioning and shuffle kernels.
+- [ ] Add partitioning kernels for multi-GPU execution.
+
+### Data Interoperability
+
+- [ ] Add direct cuDF DataFrame interchange.
+- [ ] Add GPU-accelerated Parquet file reading.
+
+### Tests
+
+- [ ] Add cuDF integration tests.
+- [ ] Add PyTorch integration tests.
+- [ ] Add multi-GPU partitioning, skew, and recovery certification.
+
 ## Cross-Version Risk Register
 
 ### v0.5.5 Risks
@@ -1505,11 +1509,11 @@ the v0.7.0 retarget**:
 - [ ] WCOJ planner and kernel scope can expand beyond the release window without strict 3-way/4-way certification gates.
 - [ ] WCOJ kernels must not land before the operators they depend on are migrated to recorded launch discipline; otherwise multi-stream WCOJ execution would re-introduce the cross-stream use-after-free class v0.6.0 just closed.
 
-### v0.8.0 Risks
+### v0.9.0 Risks
 
 - [ ] Epistemic semantics can introduce high complexity and must remain isolated from stable Datalog execution.
 - [ ] D4 and solver integration must preserve deterministic certification paths.
 
-### v0.9.0 Risks
+### v0.10.0 Risks
 
 - [ ] Multi-GPU synchronization and skew handling can dominate performance if partitioning policy is not benchmark-driven.
