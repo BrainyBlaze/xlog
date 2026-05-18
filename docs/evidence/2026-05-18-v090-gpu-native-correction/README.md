@@ -18,9 +18,9 @@ release gate.
 | Area | Current branch state | Release status |
 |---|---|---|
 | EIR/GPU plan | Epistemic syntax is represented explicitly; `EpistemicGpuPlan` records the GPU contract; `EpistemicExecutablePlan` carries the reduced production runtime plan. | PARTIAL until accepted forms execute through production runtime/GPU dispatch. |
-| GPU workspace | `EpistemicGpuWorkspace` maps required buffer categories to runtime `TrackedCudaSlice` handles; `EpistemicGpuWorkspaceResetTrace` records device-side reset with zero host writes; `EpistemicGpuCandidateGenerationTrace` records bounded candidate-assumption kernel launches with CUDA-event elapsed timing; `EpistemicGpuPropagationTrace` records bounded propagation staging launches with CUDA-event elapsed timing; `EpistemicGpuCandidateValidationTrace` records bounded candidate-buffer validation launches with CUDA-event elapsed timing; `EpistemicGpuModelMembershipTrace` records arity 0-3 tuple-source model-membership launches with named reduced relation row-count device reads, tuple-key column device reads for arity one/two/three, encoded ground tuple-key expectations, `StableModelTupleBuffer` source, CUDA-event elapsed timing, and zero host writes while retaining row-count-only staging as a negative fixture; `EpistemicGpuWorldViewValidationTrace` records bounded model-membership/world-view validation launches with CUDA-event elapsed timing; `EpistemicGpuMaterializationTrace` records bounded accepted-candidate materialization launches with CUDA-event elapsed timing; `EpistemicGpuFinalResultMaterializationTrace` records final-result flag launches from reduced-output device row-count metadata with CUDA-event elapsed timing; `EpistemicGpuFinalTupleMaterializationTrace` records final-output tuple buffer launches with device row-count read/write metadata and CUDA-event elapsed timing; `EpistemicGpuTransferBudgetTrace` records zero tracked hot-path host transfers; `EpistemicGpuRuntimePreflight` consumes executable plans, certifies tuple-membership bindings, and records WCOJ/helper route metadata; `EpistemicGpuRuntimeWcojCertification` rejects WCOJ evidence unless runtime counters advance; `EpistemicGpuRuntimeTrace` records reduced-plan counter deltas and the runtime entry point now fails closed on missing required WCOJ dispatch evidence. | PARTIAL until bound-variable and arbitrary-arity tuple-key matching are implemented and final query results are semantically gated by that membership. |
+| GPU workspace | `EpistemicGpuWorkspace` maps required buffer categories to runtime `TrackedCudaSlice` handles; `EpistemicGpuWorkspaceResetTrace` records device-side reset with zero host writes; `EpistemicGpuCandidateGenerationTrace` records bounded candidate-assumption kernel launches with CUDA-event elapsed timing; `EpistemicGpuPropagationTrace` records bounded propagation staging launches with CUDA-event elapsed timing; `EpistemicGpuCandidateValidationTrace` records bounded candidate-buffer validation launches with CUDA-event elapsed timing; `EpistemicGpuModelMembershipTrace` records tuple-source model-membership launches with named reduced relation row-count device reads, tuple-key column device reads, encoded ground tuple-key expectations, specialized arity-one/two/three plus generic arity-N kernels, `StableModelTupleBuffer` source, CUDA-event elapsed timing, and zero host writes while retaining row-count-only staging as a negative fixture; `EpistemicGpuWorldViewValidationTrace` records bounded model-membership/world-view validation launches with CUDA-event elapsed timing; `EpistemicGpuMaterializationTrace` records bounded accepted-candidate materialization launches with CUDA-event elapsed timing; `EpistemicGpuFinalResultMaterializationTrace` records final-result flag launches from reduced-output device row-count metadata with CUDA-event elapsed timing; `EpistemicGpuFinalTupleMaterializationTrace` records final-output tuple buffer launches with device row-count read/write metadata and CUDA-event elapsed timing; `EpistemicGpuTransferBudgetTrace` records zero tracked hot-path host transfers; `EpistemicGpuRuntimePreflight` consumes executable plans, certifies tuple-membership bindings, and records WCOJ/helper route metadata; `EpistemicGpuRuntimeWcojCertification` rejects WCOJ evidence unless runtime counters advance; `EpistemicGpuRuntimeTrace` records reduced-plan counter deltas and the runtime entry point now fails closed on missing required WCOJ dispatch evidence. | PARTIAL until bound-variable tuple-key matching is implemented and final query results are semantically gated by that membership. |
 | World views | `EpistemicWorldView` fixtures test `know`, `possible`, and `not know`. | ORACLE ONLY until world views are generated/validated on GPU. |
-| GPT | CPU fixture records guesses, reduced models, accepted world views, and rejection reasons. | PARTIAL: candidate generation, propagation staging, candidate-buffer validation, arity 0-3 tuple-source model-membership staging with row-scoped ground key comparison, bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, and final tuple materialization use GPU-resident buffers; bound-variable and arbitrary-arity tuple matching still do not. |
+| GPT | CPU fixture records guesses, reduced models, accepted world views, and rejection reasons. | PARTIAL: candidate generation, propagation staging, candidate-buffer validation, tuple-source model-membership staging with specialized arity-one/two/three and generic arity-N row-scoped ground key comparison, bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, and final tuple materialization use GPU-resident buffers; bound-variable tuple matching still does not. |
 | Splitting | CPU split/recompose fixtures pass. | PARTIAL until valid split components execute through GPU-native subplans. |
 | Solver | `SolverService` is a CPU fixture facade with SAT/UNSAT/UNKNOWN/TIMEOUT/Optimal statuses; `GpuSolverProductionAdapter` is a thin SAT/UNSAT adapter over the existing `GpuCdclSolver` production path with zero CPU search counters; `production_capabilities` explicitly blocks GPU-native MaxSAT and SAT/MaxSAT portfolio execution. | PARTIAL for SAT/UNSAT production reuse; BLOCKED until GPU-native MaxSAT, portfolio execution, and accepted candidate lifecycle traces are wired to epistemic candidates. |
 | Probabilistic | `AcceptedWorldViewEvidence` guards evidence conditioning in fixtures; `EpistemicProbProductionAdapter` requires accepted evidence before routing into the existing `ExactDdnnfProgram` GPU exact/provenance path and records zero CPU recompute counters. | PARTIAL for production exact-path reuse; BLOCKED until accepted runtime world views are wired to probabilistic execution end to end. |
@@ -47,21 +47,21 @@ The next production slice should start at the lowering/runtime boundary:
    `EpistemicWorldView` contract and attaches zero-fallback counters. DONE for
    the plan contract in `EpistemicGpuPlan`; runtime execution remains open.
 2. Map plan buffer categories to runtime GPU workspace allocations. DONE for
-   layout, `TrackedCudaSlice` handles, and device-side reset; kernel use remains
-   open.
+   layout, `TrackedCudaSlice` handles, and device-side reset; accepted semantic
+   parity remains open.
 3. Lower accepted EIR into production runtime plans instead of the current
    `UnsupportedEpistemicConstruct` boundary. DONE for
-   `compile_epistemic_gpu_execution` and its stats-aware variant; runtime
-   dispatch remains open.
+   `compile_epistemic_gpu_execution` and its stats-aware variant; accepted
+   dispatch evidence remains open.
 4. Add GPU-resident candidate/world-view/rejection buffer population and launch
    telemetry. PARTIAL for bounded candidate-assumption generation, propagation
-   staging, candidate-buffer validation, arity 0-3 tuple-source
-   model-membership staging with row-scoped ground key comparison, bounded world-view
-   validation staging, accepted-candidate materialization staging, final-result
-   flag staging, final tuple materialization, CUDA-event elapsed timing for
-   those staging launches, and hot-path transfer-budget tracing; bound-variable
-   and arbitrary-arity stable-model tuple matching plus accepted rejection-reason
-   semantic population remain open.
+   staging, candidate-buffer validation, tuple-source model-membership staging
+   with specialized arity-one/two/three and generic arity-N row-scoped ground
+   key comparison, bounded world-view validation staging, accepted-candidate
+   materialization staging, final-result flag staging, final tuple
+   materialization, CUDA-event elapsed timing for those staging launches, and
+   hot-path transfer-budget tracing; bound-variable stable-model tuple matching
+   plus accepted rejection-reason semantic population remain open.
 5. Route WCOJ-eligible reductions through existing planner/layout/dispatch
    machinery, including helper-splitting evidence where applicable.
 6. Replace CPU solver fixture search in accepted execution with GPU-native
@@ -82,7 +82,7 @@ The next production slice should start at the lowering/runtime boundary:
 | `cargo fmt --check` | PASS |
 | `cargo test -p xlog-logic --test test_epistemic_gpu_plan` | PASS, 8 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_executable_plan` | PASS, 3 passed, 0 failed |
-| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 44 passed, 0 failed |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 45 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_eir --test test_epistemic_g91 --test test_epistemic_faeel --test test_epistemic_gpt --test test_epistemic_split --test test_epistemic_world_view --test test_epistemic_examples` | PASS, 23 passed, 0 failed |
 | `cargo test -p xlog-solve --test gpu_solver_production_reuse` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-solve --test solver_service_semantics` | PASS, 5 passed, 0 failed |

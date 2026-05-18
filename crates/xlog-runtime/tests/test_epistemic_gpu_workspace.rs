@@ -671,6 +671,34 @@ fn model_membership_runtime_path_launches_arity_three_tuple_key_kernel_not_host_
 }
 
 #[test]
+fn model_membership_runtime_path_launches_generic_arity_tuple_key_kernel_not_host_writes() {
+    let source = include_str!("../src/executor/epistemic_workspace.rs");
+    let cuda = include_str!("../../xlog-cuda/kernels/epistemic.cu");
+    let provider = include_str!("../../xlog-cuda/src/provider/mod.rs");
+    let manifest = include_str!("../../xlog-cuda/src/kernel_manifest_data.rs");
+
+    assert!(source.contains("TupleSourceLaunch::ArityN"));
+    assert!(source.contains("key_col_ptrs"));
+    assert!(source.contains("key_col_widths"));
+    assert!(source.contains("expected_key_bits"));
+    assert!(source.contains("expected_key_type_codes"));
+    assert!(source.contains("EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_FROM_TUPLE_SOURCE_ARITY_N_U8"));
+    assert!(provider.contains("EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_FROM_TUPLE_SOURCE_ARITY_N_U8"));
+    assert!(cuda.contains("epistemic_populate_model_membership_from_tuple_source_arity_n_u8"));
+    assert!(cuda.contains("epistemic_tuple_key_row_matches_arity_n"));
+    assert!(cuda.contains("tuple_key_col_ptrs"));
+    assert!(cuda.contains("tuple_key_col_widths"));
+    assert!(
+        manifest.contains("\"epistemic_populate_model_membership_from_tuple_source_arity_n_u8\"")
+    );
+    assert!(
+        !source.contains("current GPU tuple-source kernels certify arity-zero through arity-three")
+    );
+    assert!(!source.contains("copy_epistemic_tuple_keys_from_host"));
+    assert!(!source.contains("dtoh_epistemic_tuple_key"));
+}
+
+#[test]
 fn world_view_validation_trace_records_device_kernel_without_host_writes() {
     let trace = EpistemicGpuWorldViewValidationTrace::for_counts(3, 8, 2, 4).unwrap();
 
