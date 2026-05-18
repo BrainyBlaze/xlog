@@ -6,7 +6,7 @@ Goal node: `G090_CLOSE - Closure Proposal After v0.8.0 Rebase`
 
 Branch: `feat/v090-epistemic-solver-semantics`
 
-Head: `29516969` (`docs(v090): add epistemic solver guide`)
+Head: `ea4aa56f` (`docs(v090): record close gate audit`)
 
 ## Objective Audit
 
@@ -27,7 +27,7 @@ That final deliverable is blocked by the explicit sequencing requirement:
 | `main` | `656a8c6232f4611caf6c571eb0bcf1282e9a7339` |
 | `origin/main` | `c41f9701971beb698c53beba8eb09603bb48cdf6` |
 | `feat/v080-dts-ml-python-productization` | `63ef029891cc2f435cb45e524541002687ec39ee` |
-| `feat/v090-epistemic-solver-semantics` | `2951696938363fd9cdcc5dafba24f7a68d6a2a20` |
+| `feat/v090-epistemic-solver-semantics` | `ea4aa56f500dbc8e9a02ccedfddf55d7ca330023` |
 
 Ref checks after `git fetch origin --prune`:
 
