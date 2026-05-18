@@ -1,0 +1,7 @@
+nn(bridge_net, [X], Y, [accept, review, reject]) :: bridge_label(X, Y).
+
+approved(X) :- bridge_label(X, accept).
+needs_review(X) :- bridge_label(X, review).
+label_for(X, Y) :- bridge_label(X, Y).
+
+?- approved(X).
