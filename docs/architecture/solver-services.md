@@ -113,9 +113,13 @@ The SAT PTX module also includes verifier helper kernels used by `xlog-solve` an
 - Equivalence query construction: `sat_cnf_copy_into`, `sat_xgcf_write_root_unit_clause`, `sat_not_phi_counts`,
   `sat_emit_not_phi`
 
-## v0.9 Bounded Solver Service Semantics
+## v0.9 Semantic-Oracle Solver Service Semantics
 
-The v0.9 epistemic work adds a CPU-side service facade for bounded semantic fixtures. It is not the production verifier and it does not dispatch epistemic solving to a GPU portfolio.
+The current v0.9 epistemic branch adds a CPU-side service facade for bounded
+semantic fixtures. It is not the production verifier, it is not GPU-native
+epistemic solving, and it does not dispatch epistemic solving to a GPU
+portfolio. Under the corrected v0.9.0 goal, this facade is scaffolding evidence
+only and cannot close `G090_SOLVER`, `G090_CERT`, or `G090_CLOSE`.
 
 `SolverService` owns a `SolveInstance` and exposes:
 
@@ -123,17 +127,23 @@ The v0.9 epistemic work adds a CPU-side service facade for bounded semantic fixt
 - learned-clause transfer observability through `transfer_learned_clauses_to` and `SolverServiceTrace`
 - exact fixture-scale MaxSAT scoring for `SolveInstance::with_weights`
 - explicit service statuses: `Sat`, `Unsat`, `Unknown`, `Timeout`, and `Optimal`
-- an explicit GPU portfolio deferral through `gpu_portfolio_status`
+- an explicit GPU portfolio unimplemented status through `gpu_portfolio_status`
 
 Incremental assumptions are scoped. Clauses learned while temporary assumptions are active are only applied while those same assumption literals remain active, so retracting an assumption cannot leave behind an unconditional contradiction. Transfer records the number of learned clauses delivered to another service and preserves their scope.
 
 MaxSAT support is deliberately fixture-scale: `SolverService` enumerates assignments for bounded tests, treats weighted clauses as soft constraints, and returns the best integer score as `Optimal(score)`. The service separates non-search (`Unknown`) from exhausted UNSAT (`Unsat`) and zero-budget bounded search (`Timeout`) so callers can test failure-mode routing without relying on GPU availability.
 
-GPU portfolio solving remains deferred in v0.9. `gpu_portfolio_status` returns a `Deferred` status with this rationale:
+GPU portfolio solving is not implemented in this facade. `gpu_portfolio_status`
+returns a `Deferred` status with this rationale:
 
 ```text
-GPU portfolio solving requires an evidence-backed architecture after SAT assumptions and MaxSAT service semantics stabilize
+GPU portfolio solving is not implemented in the semantic-oracle facade and blocks G090_SOLVER closure
 ```
+
+Release certification must replace this CPU assignment enumeration path for
+accepted epistemic execution with GPU-native SAT/MaxSAT/portfolio services or a
+documented GPU-backed adapter, and must report zero CPU solver-search fallback
+counters.
 
 ## Continuous Local Search (Optional, Non-Verifying)
 

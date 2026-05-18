@@ -1,21 +1,17 @@
-# v0.9.0 G090_SOLVER Evidence
+# v0.9.0 G090_SOLVER Semantic-Oracle Evidence
 
 Date: 2026-05-18
 
-Goal node: `G090_SOLVER - SAT/MaxSAT Solver Services`
+Goal node: `G090_SOLVER - Solver-Service Integration`
 
 Branch: `feat/v090-epistemic-solver-semantics`
 
-Predecessor evidence:
-
-- `docs/evidence/2026-05-18-v090-pre/README.md`
-- `docs/evidence/2026-05-18-v090-eir/README.md`
-- `docs/evidence/2026-05-18-v090-g91/README.md`
-- `docs/evidence/2026-05-18-v090-faeel/README.md`
-- `docs/evidence/2026-05-18-v090-gpt/README.md`
-- `docs/evidence/2026-05-18-v090-split/README.md`
-
 ## Implementation Summary
+
+The current branch contains a bounded CPU fixture facade for solver semantics.
+It is useful for assumption lifecycle, learned-clause transfer, MaxSAT scoring,
+and failure-mode oracle tests. It is not the GPU-native SAT/MaxSAT/portfolio
+service required for v0.9.0 release closure.
 
 | Requirement | Evidence |
 |---|---|
@@ -23,9 +19,8 @@ Predecessor evidence:
 | Incremental SAT assumptions | `solver_service_semantics.rs` verifies assumption add/retract changes SAT status without stale learned contradictions. |
 | Learned-clause transfer | `transfer_learned_clauses_to` transfers scoped learned clauses and increments `SolverServiceTrace::learned_clause_transfers`. |
 | MaxSAT soft constraints | `SolveInstance::with_weights` fixture returns `SolverServiceStatus::Optimal(5)`. |
-| GPU portfolio scope | `gpu_portfolio_status` returns an explicit `Deferred` status with rationale. |
+| GPU portfolio status | `gpu_portfolio_status` reports that GPU portfolio solving is not implemented in the semantic-oracle facade. |
 | Failure modes | Fixtures distinguish `Unsat`, `Unknown`, and `Timeout`. |
-| Documentation | `docs/architecture/solver-services.md` documents the bounded service contract and GPU portfolio deferral. |
 
 ## Validation
 
@@ -41,17 +36,19 @@ Predecessor evidence:
 
 | Metric | Target | Status | Evidence |
 |---|---|---|---|
-| M090_SOLVER.1 service interface | public bounded service API | PASS | `SolverService`, `SolverServiceBudget`, `SolverServiceStatus`, `SolverPortfolioStatus`. |
-| M090_SOLVER.2 incremental SAT | assumption add/retract fixture | PASS | `incremental_assumptions_can_be_added_and_retracted`. |
-| M090_SOLVER.3 learned clauses | observable transfer | PASS | `learned_clause_transfer_is_observable`. |
-| M090_SOLVER.4 MaxSAT | weighted soft-constraint optimum | PASS | `maxsat_soft_constraints_return_expected_optimum`. |
-| M090_SOLVER.5 GPU portfolio | explicit deferral with rationale | PASS | `gpu_portfolio_scope_is_explicitly_deferred`. |
-| M090_SOLVER.6 failure modes | distinct UNSAT/UNKNOWN/TIMEOUT | PASS | `failure_modes_distinguish_unsat_unknown_and_timeout`. |
+| M090_SOLVER.1 interface | trait/API documented and tested | PARTIAL | CPU facade API exists; GPU-native interface to epistemic candidates is missing. |
+| M090_SOLVER.2 incremental SAT | add/retract assumption fixtures pass on GPU-native path | PARTIAL | CPU oracle fixture exists; GPU-native path is missing. |
+| M090_SOLVER.3 learned clauses | transfer observable in GPU trace or test double | PARTIAL | CPU test double observes transfer; GPU trace is missing. |
+| M090_SOLVER.4 MaxSAT | soft-constraint fixture returns expected optimum on GPU-native path | PARTIAL | CPU oracle fixture exists; GPU-native MaxSAT is missing. |
+| M090_SOLVER.5 GPU portfolio | portfolio dispatch executes on GPU or GPU-backed adapter with measured launch evidence | BLOCKED | Current status reports not implemented. |
+| M090_SOLVER.6 failure modes | UNSAT/UNKNOWN/TIMEOUT represented distinctly | PASS for oracle | CPU oracle fixtures distinguish the states. |
+| M090_SOLVER.7 assumption lifecycle | push, solve, retract, and reuse trace proves no assumption leak between candidates | PARTIAL | CPU lifecycle fixture exists; GPU candidate trace is missing. |
+| M090_SOLVER.8 CPU search ban | accepted solver path records zero CPU exhaustive assignment enumeration | BLOCKED | Current accepted fixture service enumerates assignments on CPU. |
 
 ## Coordination Notes
 
-- This is a bounded service facade for semantic fixtures, not the production GPU verifier path.
-- Learned clauses derived under active assumptions remain scoped to those assumptions.
-- GPU portfolio solving is explicitly deferred; no GPU dispatch path was added.
+- This file is not release-close evidence for `G090_SOLVER`.
+- GPU-native SAT/MaxSAT/portfolio execution remains required before v0.9.0 can
+  close.
 - No pyxlog public API signatures were changed.
 - No push, tag, release-board update, or merge was performed.

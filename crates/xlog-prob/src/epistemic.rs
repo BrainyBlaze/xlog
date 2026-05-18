@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use xlog_core::{Result, XlogError};
+use xlog_logic::epistemic::EpistemicWorldView;
 
 /// Default tolerance for deterministic probability fixtures.
 pub const EPISTEMIC_PROBABILITY_TOLERANCE: f64 = 1.0e-12;
@@ -198,6 +199,31 @@ pub struct CircuitUpdate {
     pub circuit_fingerprint: u64,
 }
 
+/// Evidence derived from an accepted epistemic world view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedWorldViewEvidence {
+    assumptions: Vec<EpistemicAssumption>,
+    world_count: usize,
+}
+
+impl AcceptedWorldViewEvidence {
+    /// Construct evidence from a non-empty accepted world view.
+    pub fn new(
+        world_view: &EpistemicWorldView,
+        assumptions: Vec<EpistemicAssumption>,
+    ) -> Result<Self> {
+        Ok(Self {
+            assumptions,
+            world_count: world_view.world_count(),
+        })
+    }
+
+    /// Number of worlds used to validate this evidence.
+    pub fn world_count(&self) -> usize {
+        self.world_count
+    }
+}
+
 /// Deterministic probability value with a comparison tolerance.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ProbabilityValue {
@@ -318,6 +344,23 @@ impl EpistemicCircuit {
         Ok(self.update_result(CircuitUpdateMode::FullRebuild))
     }
 
+    /// Apply epistemic evidence that has already passed world-view validation.
+    pub fn apply_accepted_world_view(
+        &mut self,
+        evidence: AcceptedWorldViewEvidence,
+    ) -> Result<CircuitUpdate> {
+        let mut mode = CircuitUpdateMode::Unchanged;
+        for assumption in evidence.assumptions {
+            let update = self.apply_assumption(assumption)?;
+            mode = combine_update_modes(mode, update.mode);
+        }
+        Ok(CircuitUpdate {
+            mode,
+            compile_count: self.compile_count,
+            circuit_fingerprint: self.circuit_fingerprint,
+        })
+    }
+
     /// Return the stable circuit fingerprint.
     pub fn circuit_fingerprint(&self) -> u64 {
         self.circuit_fingerprint
@@ -390,6 +433,19 @@ fn validate_tolerance(tolerance: f64) -> Result<()> {
         Err(XlogError::Compilation(format!(
             "epistemic probability tolerance must be finite and non-negative, got {tolerance}"
         )))
+    }
+}
+
+fn combine_update_modes(left: CircuitUpdateMode, right: CircuitUpdateMode) -> CircuitUpdateMode {
+    match (left, right) {
+        (CircuitUpdateMode::FullRebuild, _) | (_, CircuitUpdateMode::FullRebuild) => {
+            CircuitUpdateMode::FullRebuild
+        }
+        (CircuitUpdateMode::IncrementalEvidence, _)
+        | (_, CircuitUpdateMode::IncrementalEvidence) => CircuitUpdateMode::IncrementalEvidence,
+        (CircuitUpdateMode::Unchanged, CircuitUpdateMode::Unchanged) => {
+            CircuitUpdateMode::Unchanged
+        }
     }
 }
 

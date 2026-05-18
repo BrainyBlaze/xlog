@@ -53,13 +53,13 @@ fn maxsat_soft_constraints_return_expected_optimum() {
 }
 
 #[test]
-fn gpu_portfolio_scope_is_explicitly_deferred() {
+fn cpu_fixture_reports_gpu_portfolio_as_unimplemented_blocker() {
     let service = SolverService::new(SolveInstance::new(0, vec![]));
 
     assert_eq!(
         service.gpu_portfolio_status(),
         SolverPortfolioStatus::Deferred {
-            reason: "GPU portfolio solving requires an evidence-backed architecture after SAT assumptions and MaxSAT service semantics stabilize",
+            reason: "GPU portfolio solving is not implemented in the semantic-oracle facade and blocks G090_SOLVER closure",
         }
     );
 }

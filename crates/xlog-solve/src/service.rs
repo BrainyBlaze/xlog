@@ -53,10 +53,10 @@ pub struct LearnedClauseTransfer {
     pub clauses: usize,
 }
 
-/// GPU portfolio status for v0.9 bounded scope.
+/// GPU portfolio status for the semantic-oracle facade.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SolverPortfolioStatus {
-    /// GPU portfolio solving is explicitly deferred with rationale.
+    /// GPU portfolio solving is unavailable with rationale.
     Deferred {
         /// Deferral rationale.
         reason: &'static str,
@@ -147,10 +147,10 @@ impl SolverService {
         self.trace.borrow().clone()
     }
 
-    /// Report bounded GPU portfolio scope for v0.9.
+    /// Report that the semantic-oracle facade is not the GPU portfolio path.
     pub fn gpu_portfolio_status(&self) -> SolverPortfolioStatus {
         SolverPortfolioStatus::Deferred {
-            reason: "GPU portfolio solving requires an evidence-backed architecture after SAT assumptions and MaxSAT service semantics stabilize",
+            reason: "GPU portfolio solving is not implemented in the semantic-oracle facade and blocks G090_SOLVER closure",
         }
     }
 

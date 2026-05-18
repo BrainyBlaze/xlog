@@ -42,8 +42,8 @@ recognized as unsupported epistemic constructs and return a typed diagnostic.
 - `EirEpistemicOp`
 
 `xlog_logic::build_eir` converts parsed AST to EIR without lowering to RIR. This
-is the required entry point for future G91, FAEEL, Generate-Propagate-Test, and
-epistemic splitting work.
+is the required entry point for G91, FAEEL, Generate-Propagate-Test, epistemic
+splitting, and the still-missing production GPU lowering work.
 
 ## Lowering Boundary
 
@@ -51,16 +51,31 @@ Current RIR lowering rejects `BodyLiteral::Epistemic` with
 `XlogError::UnsupportedEpistemicConstruct { construct: "RIR lowering boundary",
 ... }`.
 
-That rejection is intentional for `G090_EIR`: until G91/FAEEL execution exists,
-epistemic programs must flow through EIR-specific planning rather than the
-stable Datalog lowering path. Non-epistemic programs continue using the existing
+That rejection is a current implementation boundary, not a release solution.
+Under the corrected v0.9.0 goal, accepted epistemic programs must lower from EIR
+into production executable plans and dispatch through GPU-native runtime and
+WCOJ paths where eligible. Non-epistemic programs continue using the existing
 parser, stratifier, RIR lowering, runtime, and probabilistic paths.
 
 The probabilistic WFS/provenance code still rejects direct epistemic literals
 with typed `UnsupportedEpistemicConstruct` errors. The bounded `G090_PROB`
-contract lives in `xlog_prob::epistemic`: epistemic assumptions are compiled as
-probabilistic evidence conditions for fixture-scale circuit update tests, not
-as hidden rewrites in the production provenance path.
+contract lives in `xlog_prob::epistemic`: accepted world views are compiled as
+probabilistic evidence conditions for fixture-scale circuit update tests, not as
+hidden rewrites in the production provenance path.
+
+## World-View Boundary
+
+`EpistemicWorldView` is the explicit semantic boundary object for current
+fixtures. It is a non-empty set of accepted stable models:
+
+- `know p/arity` is true when `p/arity` appears in every world;
+- `possible p/arity` is true when `p/arity` appears in at least one world;
+- `not know p/arity` is true when `know p/arity` is false.
+
+The current fixtures construct world views directly so operator behavior is
+testable before production execution exists. They do not yet enumerate stable
+models, validate world views, or materialize accepted results through
+GPU-resident buffers.
 
 ## G91 Compatibility Fixture Semantics
 
@@ -116,14 +131,19 @@ bounded fixture implementation of the Generate-Propagate-Test pipeline:
    contradictions;
 3. **Test:** evaluate surviving candidates with the bounded FAEEL evaluator.
 
-The outcome carries `GeneratePropagateTestTrace` with generated, propagated,
-pruned, tested, accepted, and rejected counts. If the generate phase exceeds the
-configured candidate budget, it returns `XlogError::ResourceExhausted` with
-context `epistemic GPT candidate guard`.
+The outcome carries `GeneratePropagateTestTrace` with generated, guess,
+propagated, pruned, reduced-program-model, tested, accepted,
+accepted-world-view, rejected, and rejection-reason counts. If the generate
+phase exceeds the configured candidate budget, it returns
+`XlogError::ResourceExhausted` with context `epistemic GPT candidate guard`.
 
 This fixture makes the phase boundary auditable. It does not yet enumerate
 candidate worlds from arbitrary EIR programs; later solver and splitting work can
 replace the explicit candidate input while preserving the trace contract.
+
+The release gate additionally requires these same Generate-Propagate-Test phases
+to run on GPU-resident buffers with launch counters, kernel timings, and zero CPU
+fallback counters.
 
 ## Epistemic Splitting Fixture Contract
 

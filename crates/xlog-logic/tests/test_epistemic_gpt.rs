@@ -1,6 +1,7 @@
 use xlog_core::XlogError;
 use xlog_logic::epistemic::{
-    run_generate_propagate_test, EpistemicInterpretation, GeneratePropagateTestConfig,
+    run_generate_propagate_test, EpistemicInterpretation, FaeelNoModelReason,
+    GeneratePropagateTestConfig,
 };
 use xlog_logic::parse_program;
 
@@ -28,6 +29,22 @@ fn gpt_reports_phase_counts_and_candidate_outcomes() {
     assert_eq!(outcome.trace.tested, 2);
     assert_eq!(outcome.trace.accepted, 1);
     assert_eq!(outcome.trace.rejected, 1);
+    assert_eq!(outcome.trace.guesses, 3);
+    assert_eq!(outcome.trace.reduced_program_models, 2);
+    assert_eq!(outcome.trace.accepted_world_views, 1);
+    assert_eq!(
+        outcome.trace.rejection_reasons,
+        vec![
+            FaeelNoModelReason::Contradiction {
+                predicate: "fact".to_string(),
+                arity: 0,
+            },
+            FaeelNoModelReason::UnsatisfiedLiteral {
+                predicate: "fact".to_string(),
+                arity: 0,
+            }
+        ]
+    );
     assert_eq!(outcome.accepted_candidate_indices, vec![0]);
 }
 

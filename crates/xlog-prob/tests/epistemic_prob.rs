@@ -1,7 +1,8 @@
+use xlog_logic::epistemic::{EpistemicWorld, EpistemicWorldView};
 use xlog_prob::epistemic::{
-    conditional_probability_from_logs, CircuitUpdateMode, CompilerAdapterKind,
-    CompilerAdapterSupport, CompilerInputFormat, CompilerOutputFormat, EpistemicAssumption,
-    EpistemicCircuit, EpistemicProbabilisticRole, KnowledgeCompilerAdapter,
+    conditional_probability_from_logs, AcceptedWorldViewEvidence, CircuitUpdateMode,
+    CompilerAdapterKind, CompilerAdapterSupport, CompilerInputFormat, CompilerOutputFormat,
+    EpistemicAssumption, EpistemicCircuit, EpistemicProbabilisticRole, KnowledgeCompilerAdapter,
     EPISTEMIC_PROBABILITY_TOLERANCE,
 };
 
@@ -82,4 +83,32 @@ fn log_space_conditional_probability_is_tolerance_bounded() {
     .unwrap();
 
     assert_eq!(clipped.probability, 1.0);
+}
+
+#[test]
+fn evidence_conditioning_consumes_accepted_world_view() {
+    let assumption = EpistemicAssumption::known("rain", 0, true);
+    let world_view = EpistemicWorldView::from_worlds(vec![
+        EpistemicWorld::new().with_fact("rain", 0),
+        EpistemicWorld::new().with_fact("rain", 0),
+    ])
+    .unwrap();
+    let evidence = AcceptedWorldViewEvidence::new(&world_view, vec![assumption.clone()]).unwrap();
+    assert_eq!(evidence.world_count(), 2);
+
+    let mut circuit = EpistemicCircuit::compile(
+        0.25,
+        vec![(assumption, 0.75)],
+        KnowledgeCompilerAdapter::gpu_d4(),
+    )
+    .unwrap();
+
+    let update = circuit.apply_accepted_world_view(evidence).unwrap();
+
+    assert_eq!(update.mode, CircuitUpdateMode::IncrementalEvidence);
+    assert_eq!(
+        circuit.compiler_evidence_literals(),
+        vec!["know:rain/0=true"]
+    );
+    assert!(circuit.query_probability().within_tolerance(0.75));
 }

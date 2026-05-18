@@ -57,8 +57,76 @@ impl EpistemicInterpretation {
         self
     }
 
-    fn has_contradiction(&self) -> bool {
-        self.known.iter().any(|key| self.rejected.contains(key))
+    fn first_contradiction(&self) -> Option<(String, usize)> {
+        self.known
+            .iter()
+            .find(|key| self.rejected.contains(*key))
+            .cloned()
+    }
+}
+
+/// One stable model in a bounded epistemic world-view fixture.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EpistemicWorld {
+    facts: BTreeSet<(String, usize)>,
+}
+
+impl EpistemicWorld {
+    /// Create an empty world.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a predicate/arity fact to this world.
+    pub fn with_fact(mut self, predicate: impl Into<String>, arity: usize) -> Self {
+        self.facts.insert((predicate.into(), arity));
+        self
+    }
+
+    fn contains(&self, predicate: &str, arity: usize) -> bool {
+        self.facts.contains(&(predicate.to_string(), arity))
+    }
+}
+
+/// Non-empty set of accepted stable models used as the epistemic boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpistemicWorldView {
+    worlds: Vec<EpistemicWorld>,
+}
+
+impl EpistemicWorldView {
+    /// Construct a non-empty world view.
+    pub fn from_worlds(worlds: Vec<EpistemicWorld>) -> Result<Self> {
+        if worlds.is_empty() {
+            return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                construct: "world view boundary".to_string(),
+                context: "world view requires at least one stable model".to_string(),
+            });
+        }
+        Ok(Self { worlds })
+    }
+
+    /// Return the number of worlds in this view.
+    pub fn world_count(&self) -> usize {
+        self.worlds.len()
+    }
+
+    /// Evaluate an epistemic literal over this world view.
+    pub fn evaluate(&self, lit: &EpistemicLiteral) -> TruthValue {
+        let predicate = lit.atom.predicate.as_str();
+        let arity = lit.atom.arity();
+        let value = match lit.op {
+            EpistemicOp::Know => self
+                .worlds
+                .iter()
+                .all(|world| world.contains(predicate, arity)),
+            EpistemicOp::Possible => self
+                .worlds
+                .iter()
+                .any(|world| world.contains(predicate, arity)),
+        };
+
+        TruthValue::from_bool(if lit.negated { !value } else { value })
     }
 }
 
@@ -109,16 +177,24 @@ pub struct GeneratePropagateTestConfig {
 pub struct GeneratePropagateTestTrace {
     /// Number of generated candidates.
     pub generated: usize,
+    /// Number of epistemic guesses generated.
+    pub guesses: usize,
     /// Number of candidates that survived propagation.
     pub propagated: usize,
     /// Number of candidates pruned during propagation.
     pub pruned: usize,
+    /// Number of reduced-program models inspected by the test phase.
+    pub reduced_program_models: usize,
     /// Number of candidates tested.
     pub tested: usize,
     /// Number of accepted candidates.
     pub accepted: usize,
+    /// Number of accepted world views.
+    pub accepted_world_views: usize,
     /// Number of rejected candidates.
     pub rejected: usize,
+    /// Rejection reasons observed during propagation and testing.
+    pub rejection_reasons: Vec<FaeelNoModelReason>,
 }
 
 /// Result of bounded Generate-Propagate-Test fixture execution.
@@ -247,16 +323,23 @@ pub fn run_generate_propagate_test(
     }
 
     let generated = candidates.len();
-    let propagated_candidates: Vec<(usize, EpistemicInterpretation)> = candidates
-        .into_iter()
-        .enumerate()
-        .filter(|(_, candidate)| !candidate.has_contradiction())
-        .collect();
+    let mut propagated_candidates = Vec::new();
+    let mut rejection_reasons = Vec::new();
+    for (idx, candidate) in candidates.into_iter().enumerate() {
+        if let Some((predicate, arity)) = candidate.first_contradiction() {
+            rejection_reasons.push(FaeelNoModelReason::Contradiction { predicate, arity });
+        } else {
+            propagated_candidates.push((idx, candidate));
+        }
+    }
 
     let mut trace = GeneratePropagateTestTrace {
         generated,
+        guesses: generated,
         propagated: propagated_candidates.len(),
         pruned: generated.saturating_sub(propagated_candidates.len()),
+        reduced_program_models: propagated_candidates.len(),
+        rejection_reasons,
         ..GeneratePropagateTestTrace::default()
     };
     let mut accepted_candidate_indices = Vec::new();
@@ -266,10 +349,12 @@ pub fn run_generate_propagate_test(
         match evaluate_faeel_candidate(program, candidate)? {
             FaeelCandidateResult::Model => {
                 trace.accepted += 1;
+                trace.accepted_world_views += 1;
                 accepted_candidate_indices.push(*idx);
             }
-            FaeelCandidateResult::NoModel(_) => {
+            FaeelCandidateResult::NoModel(reason) => {
                 trace.rejected += 1;
+                trace.rejection_reasons.push(reason);
             }
         }
     }

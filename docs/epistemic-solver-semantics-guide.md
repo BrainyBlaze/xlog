@@ -1,16 +1,61 @@
 # v0.9.0 Epistemic And Solver Semantics Guide
 
-This guide describes the bounded v0.9.0 semantics implemented on
-`feat/v090-epistemic-solver-semantics`. The current implementation is a
-semantic fixture layer: it makes EIR, epistemic modes, solver services, and
-probabilistic integration testable without routing epistemic programs through
-the production RIR/runtime path.
+This guide describes the bounded semantic-oracle layer currently implemented on
+`feat/v090-epistemic-solver-semantics`. The corrected v0.9.0 goal requires
+fully GPU-native accepted epistemic execution; this fixture layer is useful
+evidence, but it is not a release path and does not close `G090_GPU`,
+`G090_SOLVER`, `G090_PROB`, `G090_CERT`, or `G090_CLOSE`.
 
 ## Current Boundary
 
 Epistemic literals are parsed and represented explicitly. Direct lowering to RIR
-still returns `UnsupportedEpistemicConstruct`, so `xlog run` is not the execution
-path for these examples yet. Use the fixture tests listed below to run them.
+still returns `UnsupportedEpistemicConstruct`, so `xlog run` is not the accepted
+execution path for epistemic programs yet. Use the fixture tests listed below as
+semantic oracle tests only.
+
+## GPU And WCOJ Scope
+
+The current epistemic algorithms are not fully GPU-native and do not use the
+full WCOJ execution stack. In particular, the bounded v0.9 layer does not route
+epistemic Generate-Propagate-Test, splitting, or solver-service execution
+through:
+
+- WCOJ planner eligibility;
+- WCOJ layout construction;
+- skew-aware scheduling;
+- helper splitting;
+- GPU-resident world-view/candidate buffers;
+- GPU portfolio SAT/MaxSAT dispatch.
+
+Those paths are required G090_GPU/G090_SOLVER/G090_PROB work before v0.9.0 can
+close. Existing non-epistemic programs continue to use the normal parser,
+stratifier, RIR lowering, runtime, and WCOJ infrastructure where eligible. The
+current epistemic branch proves semantic boundary and fixture contracts only.
+
+Release certification must replace the current CPU fixture hot paths with:
+
+- production lowering from accepted EIR into executable plans;
+- GPU-resident candidate, world-view, model-membership, and rejection buffers;
+- GPU kernels for candidate generation, propagation, validation, and
+  materialization;
+- WCOJ planner eligibility, layout construction, skew scheduling, and helper
+  splitting for eligible epistemic reductions;
+- GPU-native SAT/MaxSAT/portfolio solving or documented GPU-backed adapters;
+- zero CPU fallback counters for candidate enumeration, world-view validation,
+  solver search, and probabilistic recomputation.
+
+## World-View Boundary
+
+`EpistemicWorldView` is the explicit semantic boundary object used by the
+fixtures. It is a non-empty set of accepted stable models. Over a world view:
+
+- `know p/arity` is true when `p/arity` appears in every world;
+- `possible p/arity` is true when `p/arity` appears in at least one world;
+- `not know p/arity` is true when `know p/arity` is false.
+
+The current implementation constructs these world views directly in tests. It
+does not yet derive them from arbitrary EIR through GPU-native
+Generate-Propagate-Test execution.
 
 ## Epistemic Source Surface
 
@@ -61,8 +106,11 @@ FAEEL is the default mode. In the bounded fixture evaluator:
 - propagate: prune immediate known/rejected contradictions;
 - test: evaluate remaining candidates under bounded FAEEL.
 
-The returned trace records generated, propagated, pruned, tested, accepted, and
-rejected counts.
+The returned trace records generated, guess, propagated, pruned,
+reduced-program-model, tested, accepted, accepted-world-view, rejected, and
+rejection-reason counts. These are CPU fixture counts; release certification
+still requires GPU launch counters, kernel timings, and zero CPU fallback
+counters for the same semantic phases.
 
 ## Epistemic Splitting
 
@@ -73,7 +121,7 @@ source rule order.
 
 ## Solver Services
 
-`xlog_solve::SolverService` provides the bounded solver API used by v0.9.0
+`xlog_solve::SolverService` provides the bounded solver API used by semantic
 fixtures:
 
 - `assume` and `retract_assumption` model incremental SAT assumptions;
@@ -84,7 +132,11 @@ fixtures:
 - `SolveInstance::with_weights` gives fixture-scale MaxSAT soft constraints;
 - `SolverServiceStatus` distinguishes `Sat`, `Unsat`, `Unknown`, `Timeout`, and
   `Optimal`;
-- GPU portfolio solving is explicitly deferred with rationale.
+- GPU portfolio solving is explicitly reported as not implemented for this
+  fixture facade.
+
+This facade enumerates assignments on CPU for bounded tests. It is not the
+GPU-native solver service required for v0.9.0 release certification.
 
 Run the solver service fixture:
 
@@ -96,7 +148,10 @@ cargo test -p xlog-solve --test solver_service_semantics
 
 `xlog_prob::epistemic` records the bounded probabilistic contract:
 
-- epistemic assumptions become probabilistic evidence literals such as
+- accepted world views become probabilistic evidence through
+  `AcceptedWorldViewEvidence`; raw unvalidated guesses must not be consumed as
+  evidence;
+- epistemic assumptions become fixture evidence literals such as
   `know:rain/0=true`;
 - GPU-D4/XGCF supports fixture-level incremental evidence updates without
   changing the circuit fingerprint;
@@ -130,7 +185,7 @@ cargo test -p xlog-logic --test test_epistemic_examples
 
 ## Certification Commands
 
-Current pre-rebase certification snapshot:
+Current semantic-oracle validation snapshot:
 
 ```bash
 cargo fmt --check
@@ -145,8 +200,11 @@ cargo check -p xlog-logic -p xlog-ir -p xlog-solve -p xlog-prob
 cargo check -p pyxlog
 ```
 
-The v0.8 pyxlog/DTS compatibility subset still must be rerun after the v0.8
-branch lands and this branch is rebased or merged onto it.
+These commands validate the CPU-side semantic oracle only. They are not a
+substitute for the required GPU-native certification evidence, which must include
+GPU launch counts, kernel timings, WCOJ dispatch evidence, and zero CPU fallback
+counters. The v0.8 pyxlog/DTS compatibility subset still must be rerun after the
+v0.8 branch lands and this branch is rebased or merged onto it.
 
 ## Roadmap Status
 

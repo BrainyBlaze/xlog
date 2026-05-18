@@ -18,9 +18,10 @@ Predecessor evidence:
 | Requirement | Evidence |
 |---|---|
 | Phase separation | `run_generate_propagate_test` has explicit generate, propagate, and test phases. |
-| Trace output | `GeneratePropagateTestTrace` reports generated, propagated, pruned, tested, accepted, and rejected counts. |
+| Trace output | `GeneratePropagateTestTrace` reports generated, guesses, propagated, pruned, reduced-program models, tested, accepted, accepted world views, rejected, and rejection reasons. |
 | Correctness fixtures | `test_epistemic_gpt.rs` covers one accepted candidate, one FAEEL-rejected candidate, and one propagation-pruned contradiction. |
 | Bounded behavior | `GeneratePropagateTestConfig::max_candidates` rejects oversized candidate sets with `XlogError::ResourceExhausted`. |
+| GPU residency | Not implemented in this CPU semantic-oracle fixture. |
 | Documentation | `docs/architecture/epistemic-semantics.md` documents the GPT phase contract and guard. |
 
 ## Validation
@@ -40,13 +41,15 @@ Predecessor evidence:
 
 | Metric | Target | Status | Evidence |
 |---|---|---|---|
-| M090_GPT.1 phase separation | generate, propagate, test boundaries visible in code | PASS | `run_generate_propagate_test` implementation and test fixture. |
-| M090_GPT.2 trace output | debug/trace mode reports phase counts | PASS | `GeneratePropagateTestTrace` counts asserted in tests. |
-| M090_GPT.3 correctness fixtures | accepted/rejected candidate fixtures pass | PASS | `test_epistemic_gpt`: 2/2 passed. |
-| M090_GPT.4 bounded behavior | candidate explosion guard implemented or explicitly scoped | PASS | `ResourceExhausted` guard fixture. |
+| M090_GPT.1 phase separation | generate, propagate, test boundaries visible in code | PASS for oracle | `run_generate_propagate_test` implementation and test fixture. |
+| M090_GPT.2 trace output | debug/trace mode reports phase counts and GPU launch counters | PARTIAL | CPU trace counts are asserted; GPU launch counters are missing. |
+| M090_GPT.3 correctness fixtures | accepted/rejected candidate fixtures pass | PASS for oracle | `test_epistemic_gpt`: 2/2 passed. |
+| M090_GPT.4 bounded behavior | candidate explosion guard implemented or explicitly scoped | PASS for oracle | `ResourceExhausted` guard fixture. |
+| M090_GPT.5 world-view validation | trace records guess count, reduced-program model count, accepted world-view count, and rejection reasons | PASS for oracle | CPU trace fields are asserted in `test_epistemic_gpt`. |
+| M090_GPT.6 GPU residency | candidate generation, propagation, and world-view validation hot path uses GPU-resident buffers | BLOCKED | Current GPT fixture uses explicit CPU candidate inputs. |
 
 ## Coordination Notes
 
-- Candidate generation is explicit-input bounded fixture generation; arbitrary EIR world enumeration remains future solver/splitting scope.
+- Candidate generation is explicit-input bounded fixture generation; arbitrary EIR world enumeration on GPU remains required production scope.
 - No pyxlog public API signatures were changed.
 - No push, tag, release-board update, or merge was performed.
