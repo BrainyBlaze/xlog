@@ -3,7 +3,7 @@
 use std::ffi::c_void;
 use std::sync::atomic::Ordering;
 
-use crate::{AsKernelParam, DeviceSlice, LaunchAsync, LaunchConfig};
+use crate::{cuda_graph::CapturedCudaGraph, AsKernelParam, DeviceSlice, LaunchAsync, LaunchConfig};
 use xlog_core::{Result, ScalarType, Schema, XlogError};
 
 use super::{
@@ -7356,6 +7356,23 @@ impl super::CudaKernelProvider {
         max_output: Option<usize>,
         launch_stream: StreamId,
     ) -> Result<CudaBuffer> {
+        if Self::use_csm_cuda_graph_env() {
+            if let Some(result) = self
+                .hash_join_inner_v2_count_scan_materialize_cuda_graph_recorded(
+                    left,
+                    right,
+                    left_keys,
+                    right_keys,
+                    max_output,
+                    launch_stream,
+                )?
+            {
+                return Ok(result);
+            }
+            self.csm_cuda_graph_fallbacks
+                .fetch_add(1, Ordering::Relaxed);
+        }
+
         use crate::launch::LaunchRecorder;
 
         let runtime = self.memory.runtime().ok_or_else(|| {
@@ -7765,6 +7782,396 @@ impl super::CudaKernelProvider {
         result_columns.extend(gathered_left.columns.into_iter());
         result_columns.extend(gathered_right.columns.into_iter());
         self.buffer_from_columns(result_columns, output_capacity as u64, combined_schema)
+    }
+
+    fn hash_join_inner_v2_count_scan_materialize_cuda_graph_recorded(
+        &self,
+        left: &CudaBuffer,
+        right: &CudaBuffer,
+        left_keys: &[usize],
+        right_keys: &[usize],
+        max_output: Option<usize>,
+        launch_stream: StreamId,
+    ) -> Result<Option<CudaBuffer>> {
+        use crate::launch::LaunchRecorder;
+
+        let runtime = self.memory.runtime().ok_or_else(|| {
+            XlogError::Kernel(
+                "hash_join_inner_v2_count_scan_materialize_cuda_graph_recorded requires a \
+                 runtime-backed GpuMemoryManager"
+                    .to_string(),
+            )
+        })?;
+        let cu_stream = runtime
+            .stream_pool()
+            .resolve(launch_stream)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "hash_join_inner_v2_count_scan_materialize_cuda_graph_recorded: \
+                     launch_stream StreamId({}) does not resolve",
+                    launch_stream.0
+                ))
+            })?;
+
+        let num_left = self.device_row_count(left)?;
+        let num_right = self.device_row_count(right)?;
+        if num_left > u32::MAX as usize || num_right > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "Join supports at most {} rows per side (left={}, right={})",
+                u32::MAX,
+                num_left,
+                num_right
+            )));
+        }
+        if num_left == 0 || num_right == 0 || max_output == Some(0) {
+            let combined_schema = self.combine_schemas(left.schema(), right.schema());
+            return self.create_empty_buffer(combined_schema).map(Some);
+        }
+        if left_keys.is_empty() || right_keys.is_empty() {
+            return Err(XlogError::Kernel(
+                "Join requires at least one key column".to_string(),
+            ));
+        }
+        if left_keys.len() != right_keys.len() {
+            return Err(XlogError::Kernel(
+                "Left and right key columns must have same length".to_string(),
+            ));
+        }
+        if left_keys.len() > 4 {
+            return Err(XlogError::Kernel(
+                "hash_join_inner_v2_count_scan_materialize_cuda_graph_recorded: max 4 key \
+                 columns supported (pack_keys constraint)"
+                    .to_string(),
+            ));
+        }
+        for (&l, &r) in left_keys.iter().zip(right_keys.iter()) {
+            let lt = left.schema().column_type(l);
+            let rt = right.schema().column_type(r);
+            if lt != rt {
+                return Err(XlogError::Kernel(format!(
+                    "Key column type mismatch: left[{}]={:?}, right[{}]={:?}",
+                    l, lt, r, rt
+                )));
+            }
+        }
+
+        let probe_cap = left.num_rows() as u32;
+        let Some(output_capacity) =
+            Self::csm_cuda_graph_output_capacity(probe_cap, num_right as u32, max_output)?
+        else {
+            return Ok(None);
+        };
+        if output_capacity == 0 {
+            let combined_schema = self.combine_schemas(left.schema(), right.schema());
+            return self.create_empty_buffer(combined_schema).map(Some);
+        }
+
+        let left_packed =
+            self.pack_keys_gpu_on_stream(left, left_keys, &cu_stream, launch_stream, runtime)?;
+        let right_packed =
+            self.pack_keys_gpu_on_stream(right, right_keys, &cu_stream, launch_stream, runtime)?;
+        let table = self.build_hash_table_v2_on_stream(
+            &right_packed.hashes,
+            num_right as u32,
+            &cu_stream,
+            launch_stream,
+            runtime,
+        )?;
+
+        let device = self.device.inner();
+        let block_size = 256u32;
+        let probe_grid = (probe_cap + block_size - 1) / block_size;
+        let probe_config = LaunchConfig {
+            grid_dim: (probe_grid, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let per_probe_count = self.memory.alloc::<u32>(probe_cap as usize)?;
+        let mut per_probe_offsets = self.memory.alloc::<u32>(probe_cap as usize)?;
+        let d_logical_count = self.memory.alloc::<u32>(1)?;
+        let d_overflow = self.memory.alloc::<u8>(1)?;
+        let d_output_left = self.memory.alloc::<u32>(output_capacity as usize)?;
+        let d_output_right = self.memory.alloc::<u32>(output_capacity as usize)?;
+        let mut scan_scratch = self.multiblock_scan_u32_scratch_for_len(probe_cap)?;
+
+        let count_func = device
+            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_PROBE_V2_COUNT_PER_ROW)
+            .ok_or_else(|| {
+                XlogError::Kernel("hash_join_probe_v2_count_per_row kernel not found".to_string())
+            })?;
+        let total_func = device
+            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_TOTAL_FROM_SCAN)
+            .ok_or_else(|| {
+                XlogError::Kernel("hash_join_total_from_scan kernel not found".to_string())
+            })?;
+        let materialize_func = device
+            .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_PROBE_V2_MATERIALIZE)
+            .ok_or_else(|| {
+                XlogError::Kernel("hash_join_probe_v2_materialize kernel not found".to_string())
+            })?;
+
+        let mut rec_graph = LaunchRecorder::new_strict(launch_stream);
+        rec_graph.read(&left_packed.hashes);
+        rec_graph.read(&left_packed.packed_keys);
+        rec_graph.read(&right_packed.packed_keys);
+        rec_graph.read(&table.bucket_offsets);
+        rec_graph.read(&table.bucket_counts);
+        rec_graph.read(&table.bucket_entries);
+        rec_graph.read(&table.bucket_entry_hashes);
+        rec_graph.read(left.num_rows_device());
+        rec_graph.write(&per_probe_count);
+        rec_graph.write(&per_probe_offsets);
+        rec_graph.write(&d_logical_count);
+        rec_graph.write(&d_overflow);
+        rec_graph.write(&d_output_left);
+        rec_graph.write(&d_output_right);
+        for level in scan_scratch.levels() {
+            rec_graph.read_write(level);
+        }
+        rec_graph
+            .preflight(runtime)
+            .map_err(|e| XlogError::Kernel(format!("csm inner graph: preflight failed: {}", e)))?;
+
+        let materialize_capacity_bound: u64 = (probe_cap as u64).saturating_mul(num_right as u64);
+        let materialize_capacity_u32 = materialize_capacity_bound.min(u32::MAX as u64) as u32;
+
+        let graph = CapturedCudaGraph::capture_on_stream(&cu_stream, || {
+            // SAFETY: runtime-backed scalar buffers; preflight above ordered their first writes.
+            unsafe {
+                let res = cudarc::driver::sys::cuMemsetD8Async(
+                    *d_overflow.device_ptr(),
+                    0,
+                    1,
+                    cu_stream.cu_stream(),
+                );
+                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "csm inner graph: cuMemsetD8Async (d_overflow) failed: {:?}",
+                        res
+                    )));
+                }
+                let res = cudarc::driver::sys::cuMemsetD8Async(
+                    *d_logical_count.device_ptr(),
+                    0,
+                    std::mem::size_of::<u32>(),
+                    cu_stream.cu_stream(),
+                );
+                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "csm inner graph: cuMemsetD8Async (d_logical_count) failed: {:?}",
+                        res
+                    )));
+                }
+            }
+
+            // SAFETY: 12-arg signature matches the PTX kernel.
+            unsafe {
+                count_func.clone().launch_on_stream(
+                    &cu_stream,
+                    probe_config,
+                    (
+                        &left_packed.hashes,
+                        left.num_rows_device(),
+                        probe_cap,
+                        &table.bucket_offsets,
+                        &table.bucket_counts,
+                        &table.bucket_entries,
+                        &table.bucket_entry_hashes,
+                        table.bucket_mask,
+                        &left_packed.packed_keys,
+                        &right_packed.packed_keys,
+                        left_packed.key_bytes,
+                        &per_probe_count,
+                    ),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("csm inner graph: count_per_row failed: {}", e))
+            })?;
+
+            // SAFETY: same length, both runtime-backed u32 buffers.
+            unsafe {
+                let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+                    *per_probe_offsets.device_ptr(),
+                    *per_probe_count.device_ptr(),
+                    (probe_cap as usize) * std::mem::size_of::<u32>(),
+                    cu_stream.cu_stream(),
+                );
+                if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                    return Err(XlogError::Kernel(format!(
+                        "csm inner graph: cuMemcpyDtoDAsync (count -> offsets) failed: {:?}",
+                        res
+                    )));
+                }
+            }
+            self.multiblock_scan_u32_inplace_on_stream_with_scratch(
+                &mut per_probe_offsets,
+                probe_cap,
+                &cu_stream,
+                &mut scan_scratch,
+            )?;
+
+            // SAFETY: 7-arg signature matches the PTX kernel.
+            unsafe {
+                total_func.clone().launch_on_stream(
+                    &cu_stream,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        &per_probe_offsets,
+                        &per_probe_count,
+                        left.num_rows_device(),
+                        probe_cap,
+                        materialize_capacity_u32,
+                        &d_logical_count,
+                        &d_overflow,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("csm inner graph: total failed: {}", e)))?;
+
+            // SAFETY: 16-arg signature; tuple form supports up to 12 elements, so use raw params.
+            unsafe {
+                let mut params: Vec<*mut c_void> = vec![
+                    (&left_packed.hashes).as_kernel_param(),
+                    left.num_rows_device().as_kernel_param(),
+                    (&probe_cap).as_kernel_param(),
+                    (&table.bucket_offsets).as_kernel_param(),
+                    (&table.bucket_counts).as_kernel_param(),
+                    (&table.bucket_entries).as_kernel_param(),
+                    (&table.bucket_entry_hashes).as_kernel_param(),
+                    (&table.bucket_mask).as_kernel_param(),
+                    (&left_packed.packed_keys).as_kernel_param(),
+                    (&right_packed.packed_keys).as_kernel_param(),
+                    (&left_packed.key_bytes).as_kernel_param(),
+                    (&per_probe_offsets).as_kernel_param(),
+                    (&output_capacity).as_kernel_param(),
+                    (&d_output_left).as_kernel_param(),
+                    (&d_output_right).as_kernel_param(),
+                    (&d_overflow).as_kernel_param(),
+                ];
+                materialize_func
+                    .clone()
+                    .launch_on_stream(&cu_stream, probe_config, &mut params)
+                    .map_err(|e| {
+                        XlogError::Kernel(format!("csm inner graph: materialize failed: {}", e))
+                    })?;
+            }
+            Ok(())
+        })?;
+        let node_count = graph.node_count()?;
+        if node_count < 5 {
+            return Err(XlogError::Kernel(format!(
+                "csm inner graph captured too few nodes: {}",
+                node_count
+            )));
+        }
+        self.csm_cuda_graph_captures.fetch_add(1, Ordering::Relaxed);
+        graph.launch(&cu_stream)?;
+        self.csm_cuda_graph_launches.fetch_add(1, Ordering::Relaxed);
+        rec_graph
+            .commit(runtime)
+            .map_err(|e| XlogError::Kernel(format!("csm inner graph: commit failed: {}", e)))?;
+
+        cu_stream.synchronize().map_err(|e| {
+            XlogError::Kernel(format!("csm inner graph: sync (total read) failed: {}", e))
+        })?;
+        let total = self.read_join_output_count_metadata(&d_logical_count)? as u64;
+        let requested = max_output
+            .map(|limit| (limit as u64).min(total))
+            .unwrap_or(total);
+        if requested == 0 {
+            let combined_schema = self.combine_schemas(left.schema(), right.schema());
+            return self.create_empty_buffer(combined_schema).map(Some);
+        }
+        if requested > output_capacity as u64 {
+            return Err(XlogError::Kernel(format!(
+                "csm inner graph produced {} rows but graph output capacity is {}",
+                requested, output_capacity
+            )));
+        }
+        let output_rows = requested as u32;
+
+        let mut rec_gather = LaunchRecorder::new_strict(launch_stream);
+        for col_idx in 0..left.columns.len() {
+            let c = left
+                .column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Left column {} not found", col_idx)))?;
+            rec_gather.read_column(c);
+        }
+        for col_idx in 0..right.columns.len() {
+            let c = right
+                .column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Right column {} not found", col_idx)))?;
+            rec_gather.read_column(c);
+        }
+        rec_gather.read(&d_output_left);
+        rec_gather.read(&d_output_right);
+        rec_gather.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!("csm inner graph: gather preflight failed: {}", e))
+        })?;
+        let gathered_left = self.gather_buffer_by_indices_on_stream(
+            left,
+            &d_output_left,
+            output_rows,
+            &cu_stream,
+            launch_stream,
+            runtime,
+        )?;
+        let gathered_right = self.gather_buffer_by_indices_on_stream(
+            right,
+            &d_output_right,
+            output_rows,
+            &cu_stream,
+            launch_stream,
+            runtime,
+        )?;
+        rec_gather.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!("csm inner graph: gather commit failed: {}", e))
+        })?;
+
+        let combined_schema = self.combine_schemas(left.schema(), right.schema());
+        let mut result_columns = Vec::with_capacity(combined_schema.arity());
+        result_columns.extend(gathered_left.columns.into_iter());
+        result_columns.extend(gathered_right.columns.into_iter());
+        self.buffer_from_columns(result_columns, output_rows as u64, combined_schema)
+            .map(Some)
+    }
+
+    fn csm_cuda_graph_output_capacity(
+        probe_cap: u32,
+        num_right: u32,
+        max_output: Option<usize>,
+    ) -> Result<Option<u32>> {
+        if let Some(limit) = max_output {
+            let limit = u32::try_from(limit).map_err(|_| {
+                XlogError::Kernel(format!(
+                    "csm CUDA Graph max_output {} exceeds u32::MAX",
+                    limit
+                ))
+            })?;
+            return Ok(Some(crate::cuda_graph::graph_capacity_class_u32(limit)));
+        }
+
+        let worst_case = (probe_cap as u64).saturating_mul(num_right as u64);
+        if worst_case > u32::MAX as u64 {
+            return Ok(None);
+        }
+        let auto_cap = std::env::var("XLOG_CSM_CUDA_GRAPH_AUTO_OUTPUT_CAP")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(1_000_000);
+        if worst_case <= auto_cap {
+            Ok(Some(crate::cuda_graph::graph_capacity_class_u32(
+                worst_case as u32,
+            )))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Non-indexed LeftOuter CSM (binary-join retake sub-slice 3).

@@ -135,6 +135,22 @@ pub(crate) struct RawCudaView<'a, T> {
     _marker: PhantomData<&'a [T]>,
 }
 
+/// Preallocated scratch layout for graph-capturable u32 multi-block scans.
+///
+/// The legacy stream-aware scan helper allocates recursive `block_sums`
+/// buffers inside the helper. CUDA Graph capture records concrete allocation
+/// addresses, so W66 needs the scan topology and scratch buffers to be fixed
+/// before capture begins.
+pub(crate) struct MultiblockScanScratchU32 {
+    levels: Vec<TrackedCudaSlice<u32>>,
+}
+
+impl MultiblockScanScratchU32 {
+    pub(crate) fn levels(&self) -> &[TrackedCudaSlice<u32>] {
+        &self.levels
+    }
+}
+
 impl<'a, T> DeviceSlice<T> for RawCudaView<'a, T> {
     fn len(&self) -> usize {
         self.len
@@ -890,6 +906,12 @@ pub struct CudaKernelProvider {
     /// was actually selected for eligible Inner / LeftOuter cases (and
     /// not selected for Semi / Anti or when the env gate is off).
     csm_invocations: AtomicU64,
+    /// Diagnostic counter for W66 bounded CSM CUDA Graph captures.
+    csm_cuda_graph_captures: AtomicU64,
+    /// Diagnostic counter for W66 bounded CSM CUDA Graph launches.
+    csm_cuda_graph_launches: AtomicU64,
+    /// Diagnostic counter for W66 CSM CUDA Graph ineligibility fallbacks.
+    csm_cuda_graph_fallbacks: AtomicU64,
     /// Per-process counter of WCOJ layout fast-path hits. The
     /// fast-path skips `dedup_full_row_recorded` when the input
     /// is already strictly lex-sorted and full-row unique.
@@ -1000,6 +1022,9 @@ impl CudaKernelProvider {
             deterministic_d2h_violations: AtomicU64::new(0),
             recorded_op_stream: OnceLock::new(),
             csm_invocations: AtomicU64::new(0),
+            csm_cuda_graph_captures: AtomicU64::new(0),
+            csm_cuda_graph_launches: AtomicU64::new(0),
+            csm_cuda_graph_fallbacks: AtomicU64::new(0),
             wcoj_layout_fast_path_hit_count: AtomicU64::new(0),
             wcoj_layout_sort_invocation_count: AtomicU64::new(0),
             kclique_metadata_build_count: AtomicU64::new(0),
@@ -1140,6 +1165,15 @@ impl CudaKernelProvider {
         Self::env_flag("XLOG_USE_RECORDED_CSM") || Self::env_flag("XLOG_USE_RECORDED_OPS")
     }
 
+    /// Whether W66's bounded CSM CUDA Graph path is enabled.
+    ///
+    /// This is narrower than `XLOG_USE_RECORDED_CSM`: callers must first select
+    /// the recorded CSM hash-join path, then opt into graph capture/replay with
+    /// `XLOG_USE_CSM_CUDA_GRAPH=1` (or the broader `XLOG_USE_CUDA_GRAPHS=1`).
+    pub(crate) fn use_csm_cuda_graph_env() -> bool {
+        Self::env_flag("XLOG_USE_CSM_CUDA_GRAPH") || Self::env_flag("XLOG_USE_CUDA_GRAPHS")
+    }
+
     /// Test/diagnostic-only telemetry: number of times the recorded
     /// hash-join dispatch routed through a CSM (count-scan-materialize)
     /// method since this provider was created. Increments once per
@@ -1156,6 +1190,21 @@ impl CudaKernelProvider {
     #[doc(hidden)]
     pub fn csm_invocations(&self) -> u64 {
         self.csm_invocations.load(Ordering::Relaxed)
+    }
+
+    #[doc(hidden)]
+    pub fn csm_cuda_graph_captures(&self) -> u64 {
+        self.csm_cuda_graph_captures.load(Ordering::Relaxed)
+    }
+
+    #[doc(hidden)]
+    pub fn csm_cuda_graph_launches(&self) -> u64 {
+        self.csm_cuda_graph_launches.load(Ordering::Relaxed)
+    }
+
+    #[doc(hidden)]
+    pub fn csm_cuda_graph_fallbacks(&self) -> u64 {
+        self.csm_cuda_graph_fallbacks.load(Ordering::Relaxed)
     }
 
     /// Lazily acquire one non-default launch stream from the
@@ -1824,6 +1873,155 @@ impl CudaKernelProvider {
                     .to_string(),
             ));
         }
+        Ok(())
+    }
+
+    /// Allocate every recursive `block_sums` buffer needed by
+    /// [`Self::multiblock_scan_u32_inplace_on_stream_with_scratch`].
+    pub(crate) fn multiblock_scan_u32_scratch_for_len(
+        &self,
+        mut n: u32,
+    ) -> Result<MultiblockScanScratchU32> {
+        let block_size = 256u32;
+        let mut levels = Vec::new();
+        while n > block_size {
+            let num_blocks = (n + block_size - 1) / block_size;
+            levels.push(self.memory.alloc::<u32>(num_blocks as usize)?);
+            n = num_blocks;
+        }
+        Ok(MultiblockScanScratchU32 { levels })
+    }
+
+    /// Stream-aware u32 scan with caller-owned scratch.
+    ///
+    /// This is the CUDA Graph compatible counterpart to
+    /// [`Self::multiblock_scan_u32_inplace_on_stream`]: all scratch buffers are
+    /// supplied by the caller, so graph capture sees a stable scan topology and
+    /// stable intermediate addresses.
+    pub(crate) fn multiblock_scan_u32_inplace_on_stream_with_scratch(
+        &self,
+        data: &mut crate::memory::TrackedCudaSlice<u32>,
+        n: u32,
+        cu_stream: &cudarc::driver::CudaStream,
+        scratch: &mut MultiblockScanScratchU32,
+    ) -> Result<()> {
+        self.multiblock_scan_u32_inplace_on_stream_with_scratch_levels(
+            data,
+            n,
+            cu_stream,
+            &mut scratch.levels,
+        )
+    }
+
+    fn multiblock_scan_u32_inplace_on_stream_with_scratch_levels(
+        &self,
+        data: &mut crate::memory::TrackedCudaSlice<u32>,
+        n: u32,
+        cu_stream: &cudarc::driver::CudaStream,
+        scratch_levels: &mut [TrackedCudaSlice<u32>],
+    ) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        let device = self.device.inner();
+        let block_size = 256u32;
+
+        if n <= block_size {
+            let phase2_fn = device
+                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE2)
+                .ok_or_else(|| {
+                    XlogError::Kernel("Failed to get multiblock_scan_phase2 kernel".to_string())
+                })?;
+            // SAFETY: kernel signature matches; data is mutated in place.
+            unsafe {
+                phase2_fn.clone().launch_on_stream(
+                    cu_stream,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (&mut *data, n),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "multiblock_scan_phase2 (graph scratch) failed: {}",
+                    e
+                ))
+            })?;
+            return Ok(());
+        }
+
+        let num_blocks = (n + block_size - 1) / block_size;
+        let (block_sums, rest) = scratch_levels.split_first_mut().ok_or_else(|| {
+            XlogError::Kernel(format!(
+                "multiblock_scan_u32_inplace_on_stream_with_scratch: missing scratch level \
+                 for n={n}, num_blocks={num_blocks}"
+            ))
+        })?;
+        if block_sums.len() < num_blocks as usize {
+            return Err(XlogError::Kernel(format!(
+                "multiblock_scan_u32_inplace_on_stream_with_scratch: scratch level too small \
+                 (have {}, need {})",
+                block_sums.len(),
+                num_blocks
+            )));
+        }
+
+        let phase1_u32_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_U32_PHASE1)
+            .ok_or_else(|| {
+                XlogError::Kernel("Failed to get multiblock_scan_u32_phase1 kernel".to_string())
+            })?;
+        // SAFETY: kernel signature matches.
+        unsafe {
+            phase1_u32_fn.clone().launch_on_stream(
+                cu_stream,
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&mut *data, &mut *block_sums, n),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!(
+                "multiblock_scan_u32_phase1 (graph scratch) failed: {}",
+                e
+            ))
+        })?;
+
+        if num_blocks > 1 {
+            self.multiblock_scan_u32_inplace_on_stream_with_scratch_levels(
+                block_sums, num_blocks, cu_stream, rest,
+            )?;
+        }
+
+        let phase3_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE3)
+            .ok_or_else(|| {
+                XlogError::Kernel("Failed to get multiblock_scan_phase3 kernel".to_string())
+            })?;
+        // SAFETY: kernel signature matches.
+        unsafe {
+            phase3_fn.clone().launch_on_stream(
+                cu_stream,
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&mut *data, &*block_sums, n),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!(
+                "multiblock_scan_phase3 (graph scratch) failed: {}",
+                e
+            ))
+        })?;
         Ok(())
     }
 
