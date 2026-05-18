@@ -4,15 +4,21 @@
 //! accepted world-view evidence, then routes into the existing GPU-native exact
 //! provenance path instead of using the bounded epistemic fixture circuit.
 
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
 use xlog_core::{Result, XlogError};
 use xlog_cuda::CudaKernelProvider;
 use xlog_logic::ast::Program;
 use xlog_runtime::EpistemicGpuExecutionResult;
 
+use crate::compilation::{encode_cnf_gpu, GpuPirGraph, GpuPirRoots};
 use crate::epistemic::{AcceptedWorldViewEvidence, EpistemicAssumption};
 use crate::exact::{ExactDdnnfProgram, GpuConfig};
 #[cfg(feature = "host-io")]
 use crate::exact::{ExactResult, ExactResultWithGrads};
+use crate::pir::{PirNode, PirNodeId};
+use crate::provenance::{extract_from_program, extract_from_source, Provenance};
 
 /// Trace counters proving the production adapter stayed on the GPU exact path.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -27,6 +33,10 @@ pub struct EpistemicProbProductionTrace {
     pub gpu_exact_query_evaluations: u64,
     /// Number of GPU gradient evaluations routed through `ExactDdnnfProgram`.
     pub gpu_exact_gradient_evaluations: u64,
+    /// Number of accepted PIR graphs uploaded through the existing GPU PIR layout.
+    pub gpu_pir_graph_uploads: u64,
+    /// Number of accepted PIR root sets encoded through the existing GPU CNF encoder.
+    pub gpu_cnf_encodes: u64,
     /// CPU-only probability recomputations performed by this adapter.
     pub cpu_only_probability_recomputations: u64,
     /// Fixture `EpistemicCircuit` evaluations performed by this adapter.
@@ -47,6 +57,21 @@ impl EpistemicProbProductionTrace {
         }
         Ok(())
     }
+}
+
+/// Device-side PIR/CNF evidence produced after accepted epistemic gating.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EpistemicProbPirCnfEvidence {
+    /// Number of host provenance PIR nodes uploaded to the GPU PIR layout.
+    pub pir_nodes: usize,
+    /// Number of roots supplied to GPU CNF encoding.
+    pub root_count: usize,
+    /// GPU CNF variable capacity emitted by `encode_cnf_gpu`.
+    pub cnf_var_cap: u32,
+    /// GPU CNF clause capacity emitted by `encode_cnf_gpu`.
+    pub cnf_clause_cap: u32,
+    /// GPU CNF literal capacity emitted by `encode_cnf_gpu`.
+    pub cnf_lit_cap: u32,
 }
 
 /// Thin adapter from accepted epistemic evidence to the existing GPU exact path.
@@ -127,6 +152,54 @@ impl EpistemicProbProductionAdapter {
         self.compile_program_with_accepted_world_view(program, &evidence)
     }
 
+    /// Encode source through the existing GPU PIR and CNF production path.
+    pub fn encode_source_pir_cnf_with_accepted_world_view(
+        &mut self,
+        source: &str,
+        provider: &Arc<CudaKernelProvider>,
+        evidence: &AcceptedWorldViewEvidence,
+    ) -> Result<EpistemicProbPirCnfEvidence> {
+        let provenance = extract_from_source(source)?;
+        self.encode_provenance_pir_cnf_with_accepted_world_view(provenance, provider, evidence)
+    }
+
+    /// Encode source PIR/CNF after accepted GPU epistemic execution.
+    pub fn encode_source_pir_cnf_with_gpu_execution_result(
+        &mut self,
+        source: &str,
+        provider: &Arc<CudaKernelProvider>,
+        result: &EpistemicGpuExecutionResult,
+        assumptions: Vec<EpistemicAssumption>,
+    ) -> Result<EpistemicProbPirCnfEvidence> {
+        let evidence =
+            AcceptedWorldViewEvidence::from_gpu_execution_result(provider, result, assumptions)?;
+        self.encode_source_pir_cnf_with_accepted_world_view(source, provider, &evidence)
+    }
+
+    /// Encode a parsed program through the existing GPU PIR and CNF production path.
+    pub fn encode_program_pir_cnf_with_accepted_world_view(
+        &mut self,
+        program: &Program,
+        provider: &Arc<CudaKernelProvider>,
+        evidence: &AcceptedWorldViewEvidence,
+    ) -> Result<EpistemicProbPirCnfEvidence> {
+        let provenance = extract_from_program(program)?;
+        self.encode_provenance_pir_cnf_with_accepted_world_view(provenance, provider, evidence)
+    }
+
+    /// Encode parsed-program PIR/CNF after accepted GPU epistemic execution.
+    pub fn encode_program_pir_cnf_with_gpu_execution_result(
+        &mut self,
+        program: &Program,
+        provider: &Arc<CudaKernelProvider>,
+        result: &EpistemicGpuExecutionResult,
+        assumptions: Vec<EpistemicAssumption>,
+    ) -> Result<EpistemicProbPirCnfEvidence> {
+        let evidence =
+            AcceptedWorldViewEvidence::from_gpu_execution_result(provider, result, assumptions)?;
+        self.encode_program_pir_cnf_with_accepted_world_view(program, provider, &evidence)
+    }
+
     /// Evaluate GPU exact query probabilities after accepted world-view evidence was consumed.
     #[cfg(feature = "host-io")]
     pub fn evaluate(
@@ -199,4 +272,65 @@ impl EpistemicProbProductionAdapter {
             .saturating_add(1);
         self.trace.require_zero_cpu_recompute()
     }
+
+    fn encode_provenance_pir_cnf_with_accepted_world_view(
+        &mut self,
+        provenance: Provenance,
+        provider: &Arc<CudaKernelProvider>,
+        evidence: &AcceptedWorldViewEvidence,
+    ) -> Result<EpistemicProbPirCnfEvidence> {
+        self.consume_accepted_evidence(evidence)?;
+        let roots = production_pir_roots(&provenance)?;
+        if roots.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "accepted probabilistic PIR/CNF production path".to_string(),
+                context: "GPU PIR/CNF evidence requires at least one query, evidence, or probabilistic variable root".to_string(),
+            });
+        }
+        let gpu_pir = GpuPirGraph::from_host(&provenance.pir, provider)?;
+        self.trace.gpu_pir_graph_uploads = self.trace.gpu_pir_graph_uploads.saturating_add(1);
+        let gpu_roots = GpuPirRoots::from_host(&roots, provider)?;
+        let encoding = encode_cnf_gpu(&gpu_pir, &gpu_roots, provider)?;
+        self.trace.gpu_cnf_encodes = self.trace.gpu_cnf_encodes.saturating_add(1);
+        self.trace.require_zero_cpu_recompute()?;
+        Ok(EpistemicProbPirCnfEvidence {
+            pir_nodes: provenance.pir.len(),
+            root_count: roots.len(),
+            cnf_var_cap: encoding.cnf.var_cap,
+            cnf_clause_cap: encoding.cnf.clause_cap,
+            cnf_lit_cap: encoding.cnf.lit_cap,
+        })
+    }
+}
+
+fn production_pir_roots(provenance: &Provenance) -> Result<Vec<PirNodeId>> {
+    let mut roots = BTreeSet::new();
+
+    for (atom, value) in &provenance.evidence {
+        if let Some(id) = provenance.query_formula(&atom.predicate, &atom.args) {
+            roots.insert(id);
+        } else if *value {
+            return Err(XlogError::Execution(format!(
+                "Exact inference error: evidence atom is never derivable: {}",
+                atom.predicate
+            )));
+        }
+    }
+
+    for atom in &provenance.queries {
+        if let Some(id) = provenance.query_formula(&atom.predicate, &atom.args) {
+            roots.insert(id);
+        }
+    }
+
+    for (idx, node) in provenance.pir.nodes().iter().enumerate() {
+        if matches!(
+            node,
+            PirNode::Decision { .. } | PirNode::Lit { .. } | PirNode::NegLit { .. }
+        ) {
+            roots.insert(PirNodeId::from_u32(idx as u32));
+        }
+    }
+
+    Ok(roots.into_iter().collect())
 }
