@@ -18,9 +18,9 @@ release gate.
 | Area | Current branch state | Release status |
 |---|---|---|
 | EIR/GPU plan | Epistemic syntax is represented explicitly; `EpistemicGpuPlan` records the GPU contract; `EpistemicExecutablePlan` carries the reduced production runtime plan. | PARTIAL until accepted forms execute through production runtime/GPU dispatch. |
-| GPU workspace | `EpistemicGpuWorkspace` maps required buffer categories to runtime `TrackedCudaSlice` handles; `EpistemicGpuWorkspaceResetTrace` records device-side reset with zero host writes; `EpistemicGpuCandidateGenerationTrace` records bounded candidate-assumption kernel launches; `EpistemicGpuRuntimePreflight` consumes executable plans and records WCOJ/helper route metadata; `EpistemicGpuRuntimeWcojCertification` rejects WCOJ evidence unless runtime counters advance; `EpistemicGpuRuntimeTrace` records reduced-plan counter deltas. | PARTIAL until kernels propagate candidates, validate world views, and materialize accepted results. |
+| GPU workspace | `EpistemicGpuWorkspace` maps required buffer categories to runtime `TrackedCudaSlice` handles; `EpistemicGpuWorkspaceResetTrace` records device-side reset with zero host writes; `EpistemicGpuCandidateGenerationTrace` records bounded candidate-assumption kernel launches; `EpistemicGpuPropagationTrace` records bounded propagation staging launches; `EpistemicGpuRuntimePreflight` consumes executable plans and records WCOJ/helper route metadata; `EpistemicGpuRuntimeWcojCertification` rejects WCOJ evidence unless runtime counters advance; `EpistemicGpuRuntimeTrace` records reduced-plan counter deltas. | PARTIAL until kernels validate world views and materialize accepted results. |
 | World views | `EpistemicWorldView` fixtures test `know`, `possible`, and `not know`. | ORACLE ONLY until world views are generated/validated on GPU. |
-| GPT | CPU fixture records guesses, reduced models, accepted world views, and rejection reasons. | PARTIAL until candidate generation/propagation/validation use GPU-resident buffers. |
+| GPT | CPU fixture records guesses, reduced models, accepted world views, and rejection reasons. | PARTIAL: candidate generation and propagation staging use GPU-resident buffers; world-view validation still does not. |
 | Splitting | CPU split/recompose fixtures pass. | PARTIAL until valid split components execute through GPU-native subplans. |
 | Solver | `SolverService` is a CPU fixture facade with SAT/UNSAT/UNKNOWN/TIMEOUT/Optimal statuses. | BLOCKED until GPU-native SAT/MaxSAT/portfolio execution is wired to epistemic candidates. |
 | Probabilistic | `AcceptedWorldViewEvidence` guards evidence conditioning in fixtures. | BLOCKED until accepted world-view evidence flows through the GPU-native exact/provenance path without CPU-only recomputation. |
@@ -54,8 +54,9 @@ The next production slice should start at the lowering/runtime boundary:
    `compile_epistemic_gpu_execution` and its stats-aware variant; runtime
    dispatch remains open.
 4. Add GPU-resident candidate/world-view/rejection buffer population and launch
-   telemetry. PARTIAL for bounded candidate-assumption generation; world-view,
-   model-membership, and rejection-reason semantic population remain open.
+   telemetry. PARTIAL for bounded candidate-assumption generation and
+   propagation staging; model-membership, world-view validation, and accepted
+   rejection-reason semantic population remain open.
 5. Route WCOJ-eligible reductions through existing planner/layout/dispatch
    machinery, including helper-splitting evidence where applicable.
 6. Replace CPU solver fixture search in accepted execution with GPU-native
@@ -71,7 +72,7 @@ The next production slice should start at the lowering/runtime boundary:
 | `cargo fmt --check` | PASS |
 | `cargo test -p xlog-logic --test test_epistemic_gpu_plan` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_executable_plan` | PASS, 3 passed, 0 failed |
-| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 7 passed, 0 failed |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 14 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_eir --test test_epistemic_g91 --test test_epistemic_faeel --test test_epistemic_gpt --test test_epistemic_split --test test_epistemic_world_view --test test_epistemic_examples` | PASS, 22 passed, 0 failed |
 | `cargo test -p xlog-solve --test solver_service_semantics` | PASS, 5 passed, 0 failed |
 | `cargo test -p xlog-prob --test epistemic_prob` | PASS, 5 passed, 0 failed |

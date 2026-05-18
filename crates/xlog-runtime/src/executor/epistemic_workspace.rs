@@ -126,6 +126,23 @@ pub struct EpistemicGpuCandidateGenerationTrace {
     pub host_write_ops: u32,
 }
 
+/// Trace proving candidate propagation staging was performed by a GPU kernel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EpistemicGpuPropagationTrace {
+    /// Number of epistemic literals represented per candidate.
+    pub literal_count: usize,
+    /// Number of candidate rows propagated on device.
+    pub propagated_candidates: usize,
+    /// World-view staging bytes written by the kernel.
+    pub world_view_bytes_written: usize,
+    /// Rejection-reason slots initialized by the kernel.
+    pub rejection_reason_slots_written: usize,
+    /// Candidate-propagation kernel launches.
+    pub kernel_launches: u32,
+    /// Host writes used by propagation. Accepted GPU execution requires zero.
+    pub host_write_ops: u32,
+}
+
 impl EpistemicGpuCandidateGenerationTrace {
     /// Build a candidate-generation trace for a bounded device launch.
     pub fn for_counts(literal_count: usize, candidate_count: usize) -> Result<Self> {
@@ -149,6 +166,23 @@ impl EpistemicGpuCandidateGenerationTrace {
             literal_count,
             generated_candidates: candidate_count,
             candidate_assumption_bytes: checked_product(literal_count, candidate_count)?,
+            kernel_launches: 1,
+            host_write_ops: 0,
+        })
+    }
+}
+
+impl EpistemicGpuPropagationTrace {
+    /// Build a propagation trace for a bounded device launch.
+    pub fn for_counts(literal_count: usize, candidate_count: usize) -> Result<Self> {
+        require_positive(literal_count, "epistemic GPU propagation literals")?;
+        require_positive(candidate_count, "epistemic GPU propagation candidates")?;
+
+        Ok(Self {
+            literal_count,
+            propagated_candidates: candidate_count,
+            world_view_bytes_written: candidate_count,
+            rejection_reason_slots_written: candidate_count,
             kernel_launches: 1,
             host_write_ops: 0,
         })
@@ -402,6 +436,10 @@ pub enum EpistemicGpuRuntimeWcojCertification {
 pub struct EpistemicGpuExecutionResult {
     /// Prepared workspace and preflight state.
     pub prepared: EpistemicGpuPreparedExecution,
+    /// Candidate-generation trace captured before reduced-plan dispatch.
+    pub candidate_generation: EpistemicGpuCandidateGenerationTrace,
+    /// Candidate-propagation trace captured before reduced-plan dispatch.
+    pub propagation: EpistemicGpuPropagationTrace,
     /// Output buffer returned by the reduced production execution plan.
     pub output: CudaBuffer,
     /// Runtime counter trace for the reduced production plan dispatch.
@@ -581,6 +619,92 @@ impl Executor {
         Ok(trace)
     }
 
+    /// Propagate generated candidates into GPU-resident world-view staging buffers.
+    pub fn propagate_epistemic_gpu_candidates(
+        &self,
+        workspace: &mut EpistemicGpuWorkspace,
+        literal_count: usize,
+        candidate_count: usize,
+    ) -> Result<EpistemicGpuPropagationTrace> {
+        let trace = EpistemicGpuPropagationTrace::for_counts(literal_count, candidate_count)?;
+        let candidate_assumption_bytes = checked_product(literal_count, candidate_count)?;
+        if candidate_assumption_bytes > workspace.layout.candidate_assumption_bytes {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU propagation candidate workspace".to_string(),
+                estimated_bytes: candidate_assumption_bytes as u64,
+                budget_bytes: workspace.layout.candidate_assumption_bytes as u64,
+            });
+        }
+        if trace.world_view_bytes_written > workspace.layout.world_view_bytes {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU propagation world-view workspace".to_string(),
+                estimated_bytes: trace.world_view_bytes_written as u64,
+                budget_bytes: workspace.layout.world_view_bytes as u64,
+            });
+        }
+        if trace.rejection_reason_slots_written > workspace.layout.rejection_reason_slots {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU propagation rejection workspace".to_string(),
+                estimated_bytes: trace.rejection_reason_slots_written as u64,
+                budget_bytes: workspace.layout.rejection_reason_slots as u64,
+            });
+        }
+        if literal_count > u32::MAX as usize || candidate_count > u32::MAX as usize {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU propagation launch".to_string(),
+                estimated_bytes: literal_count.max(candidate_count) as u64,
+                budget_bytes: u32::MAX as u64,
+            });
+        }
+
+        let world_stride =
+            workspace.layout.world_view_bytes / workspace.layout.rejection_reason_slots;
+        if world_stride == 0 || world_stride > u32::MAX as usize {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU propagation world stride".to_string(),
+                estimated_bytes: world_stride as u64,
+                budget_bytes: u32::MAX as u64,
+            });
+        }
+
+        let literal_count = literal_count as u32;
+        let candidate_count = candidate_count as u32;
+        let world_stride = world_stride as u32;
+        let func = self
+            .provider
+            .device()
+            .inner()
+            .get_func(
+                EPISTEMIC_MODULE,
+                epistemic_kernels::EPISTEMIC_PROPAGATE_CANDIDATES_U8,
+            )
+            .ok_or_else(|| {
+                XlogError::Execution("epistemic candidate propagation kernel not found".to_string())
+            })?;
+        let config = LaunchConfig::for_num_elems(candidate_count);
+
+        // SAFETY: kernel arguments match the PTX signature; the capacity checks
+        // above prove candidate, world-view, and rejection buffers cover all writes.
+        unsafe {
+            func.clone().launch(
+                config,
+                (
+                    literal_count,
+                    candidate_count,
+                    world_stride,
+                    &workspace.candidate_assumptions,
+                    &mut workspace.world_views,
+                    &mut workspace.rejection_reasons,
+                ),
+            )
+        }
+        .map_err(|e| {
+            XlogError::execution_ctx("epistemic GPU candidate propagation", "launch kernel", &e)
+        })?;
+
+        Ok(trace)
+    }
+
     /// Prepare runtime-owned GPU buffers for an epistemic executable plan.
     pub fn prepare_epistemic_gpu_execution(
         &self,
@@ -605,7 +729,19 @@ impl Executor {
         executable: &EpistemicExecutablePlan,
         capacities: EpistemicGpuWorkspaceCapacities,
     ) -> Result<EpistemicGpuExecutionResult> {
-        let prepared = self.prepare_epistemic_gpu_execution(executable, capacities)?;
+        let mut prepared = self.prepare_epistemic_gpu_execution(executable, capacities)?;
+        let literal_count = executable.gpu_plan.epistemic_literals.len();
+        let candidate_count = bounded_candidate_count(literal_count, capacities.max_candidates)?;
+        let candidate_generation = self.generate_epistemic_gpu_candidates(
+            &mut prepared.workspace,
+            literal_count,
+            candidate_count,
+        )?;
+        let propagation = self.propagate_epistemic_gpu_candidates(
+            &mut prepared.workspace,
+            literal_count,
+            candidate_count,
+        )?;
         let counters_before = self.epistemic_gpu_runtime_counters();
         let output = self.execute_plan(&executable.reduced_runtime_plan)?;
         let counters_after = self.epistemic_gpu_runtime_counters();
@@ -617,6 +753,8 @@ impl Executor {
 
         Ok(EpistemicGpuExecutionResult {
             prepared,
+            candidate_generation,
+            propagation,
             output,
             trace,
         })
@@ -709,4 +847,16 @@ fn checked_product(left: usize, right: usize) -> Result<usize> {
             "epistemic GPU workspace size overflow: {left} * {right}"
         ))
     })
+}
+
+fn bounded_candidate_count(literal_count: usize, max_candidates: usize) -> Result<usize> {
+    require_positive(literal_count, "epistemic GPU execution literals")?;
+    require_positive(max_candidates, "epistemic GPU execution candidates")?;
+    if literal_count > 31 {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "epistemic GPU execution candidate generation".to_string(),
+            context: format!("literal count {literal_count} exceeds 31-bit candidate mask"),
+        });
+    }
+    Ok(max_candidates.min(1usize << literal_count))
 }

@@ -8,9 +8,10 @@ use xlog_ir::{
     EpistemicWcojReductionStatus, ExecutionPlan, RirMeta, Scc,
 };
 use xlog_runtime::{
-    EpistemicGpuCandidateGenerationTrace, EpistemicGpuRuntimeCounters,
-    EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace, EpistemicGpuRuntimeWcojCertification,
-    EpistemicGpuWorkspaceCapacities, EpistemicGpuWorkspaceLayout, EpistemicGpuWorkspaceResetTrace,
+    EpistemicGpuCandidateGenerationTrace, EpistemicGpuPropagationTrace,
+    EpistemicGpuRuntimeCounters, EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace,
+    EpistemicGpuRuntimeWcojCertification, EpistemicGpuWorkspaceCapacities,
+    EpistemicGpuWorkspaceLayout, EpistemicGpuWorkspaceResetTrace,
 };
 
 #[test]
@@ -305,6 +306,60 @@ fn candidate_generation_runtime_path_launches_epistemic_kernel_not_host_writes()
     assert!(manifest.contains("\"epistemic_generate_candidate_assumptions_u8\""));
     assert!(!source.contains("upload_epistemic_candidate_assumptions"));
     assert!(!source.contains("copy_epistemic_candidates_from_host"));
+}
+
+#[test]
+fn propagation_trace_records_device_kernel_without_host_writes() {
+    let trace = EpistemicGpuPropagationTrace::for_counts(3, 8).unwrap();
+
+    assert_eq!(trace.literal_count, 3);
+    assert_eq!(trace.propagated_candidates, 8);
+    assert_eq!(trace.world_view_bytes_written, 8);
+    assert_eq!(trace.rejection_reason_slots_written, 8);
+    assert_eq!(trace.kernel_launches, 1);
+    assert_eq!(trace.host_write_ops, 0);
+}
+
+#[test]
+fn propagation_runtime_path_launches_epistemic_kernel_not_host_writes() {
+    let source = include_str!("../src/executor/epistemic_workspace.rs");
+    let cuda = include_str!("../../xlog-cuda/kernels/epistemic.cu");
+    let manifest = include_str!("../../xlog-cuda/src/kernel_manifest_data.rs");
+
+    assert!(source.contains("fn propagate_epistemic_gpu_candidates"));
+    assert!(source.contains("EPISTEMIC_PROPAGATE_CANDIDATES_U8"));
+    assert!(source.contains("&workspace.candidate_assumptions"));
+    assert!(source.contains("&mut workspace.world_views"));
+    assert!(source.contains("&mut workspace.rejection_reasons"));
+    assert!(cuda.contains("epistemic_propagate_candidates_u8"));
+    assert!(manifest.contains("\"epistemic_propagate_candidates_u8\""));
+    assert!(!source.contains("upload_epistemic_propagation"));
+    assert!(!source.contains("copy_epistemic_propagation_from_host"));
+}
+
+#[test]
+fn execution_result_records_candidate_and_propagation_kernel_traces() {
+    let source = include_str!("../src/executor/epistemic_workspace.rs");
+
+    assert!(source.contains("pub candidate_generation: EpistemicGpuCandidateGenerationTrace"));
+    assert!(source.contains("pub propagation: EpistemicGpuPropagationTrace"));
+    assert!(source.contains("let candidate_generation = self.generate_epistemic_gpu_candidates"));
+    assert!(source.contains("let propagation = self.propagate_epistemic_gpu_candidates"));
+    assert!(source.contains("candidate_generation,"));
+    assert!(source.contains("propagation,"));
+
+    let generation_pos = source
+        .find("let candidate_generation = self.generate_epistemic_gpu_candidates")
+        .expect("candidate-generation launch in execution path");
+    let propagation_pos = source
+        .find("let propagation = self.propagate_epistemic_gpu_candidates")
+        .expect("propagation launch in execution path");
+    let reduced_dispatch_pos = source
+        .find("let output = self.execute_plan(&executable.reduced_runtime_plan)?")
+        .expect("reduced production runtime dispatch");
+
+    assert!(generation_pos < propagation_pos);
+    assert!(propagation_pos < reduced_dispatch_pos);
 }
 
 fn epistemic_literal(predicate: &str, op: EirEpistemicOp) -> EirEpistemicLiteral {

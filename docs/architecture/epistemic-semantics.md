@@ -148,8 +148,12 @@ for those kernels.
 module to populate candidate-assumption bitsets directly in the workspace. The
 current kernel covers only bounded bit-mask candidate enumeration and records
 `EpistemicGpuCandidateGenerationTrace` with one kernel launch and zero host
-writes. Propagation, world-view validation, solver coupling, and result
-materialization remain missing GPU phases.
+writes. `Executor::propagate_epistemic_gpu_candidates` then launches
+`epistemic_propagate_candidates_u8` to stage generated candidates into the
+world-view and rejection-reason buffers, recording
+`EpistemicGpuPropagationTrace` with one kernel launch and zero host writes.
+This is propagation staging only; world-view validation, solver coupling, and
+result materialization remain missing GPU phases.
 
 `EpistemicGpuRuntimePreflight::for_executable_plan` consumes an
 `EpistemicExecutablePlan` before launch. It computes the workspace layout,
@@ -161,15 +165,15 @@ around a future epistemic dispatch, and
 `EpistemicGpuRuntimeWcojCertification` rejects preflight-only WCOJ metadata
 when required K-clique dispatch counters do not advance.
 `Executor::execute_epistemic_gpu_execution` now wraps the reduced production
-runtime plan with preflight, workspace allocation, `execute_plan`, and a
-before/after counter trace.
+runtime plan with preflight, workspace allocation, candidate-generation and
+propagation kernel launches, `execute_plan`, and a before/after counter trace.
 
 This workspace is still pre-kernel plumbing. It proves the buffer categories are
 allocatable, initialized on device, and inspectable on the runtime side and
 that WCOJ certification is tied to actual counter deltas around the production
-reduced-plan dispatch. Candidate-assumption generation now has a bounded CUDA
-kernel, but the runtime does not yet propagate candidates, validate world views,
-materialize accepted results, or produce full epistemic timing evidence.
+reduced-plan dispatch. Candidate-assumption generation and propagation staging
+now have bounded CUDA kernels, but the runtime does not yet validate world
+views, materialize accepted results, or produce full epistemic timing evidence.
 
 ## G91 Compatibility Fixture Semantics
 

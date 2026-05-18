@@ -455,7 +455,10 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
     KernelModuleSpec {
         cu_name: "epistemic",
         module_name: "xlog_epistemic",
-        kernels: &["epistemic_generate_candidate_assumptions_u8"],
+        kernels: &[
+            "epistemic_generate_candidate_assumptions_u8",
+            "epistemic_propagate_candidates_u8",
+        ],
     },
     KernelModuleSpec {
         cu_name: "wcoj",

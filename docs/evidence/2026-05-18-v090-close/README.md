@@ -49,9 +49,9 @@ Earlier ref checks after `git fetch origin --prune` showed:
 | G090_EIR | PARTIAL | EIR is explicit and executable-plan lowering reaches reduced production runtime plans, but accepted epistemic forms still lack production GPU runtime dispatch. |
 | G090_G91 | PASS for semantic oracle | Compatibility fixtures pass, but GPU parity remains unproven. |
 | G090_FAEEL | PASS for semantic oracle | Foundedness fixtures pass, but GPU parity remains unproven. |
-| G090_GPT | PARTIAL | CPU trace fixtures pass; GPU-resident candidate generation/propagation/validation is missing. |
+| G090_GPT | PARTIAL | CPU trace fixtures pass; GPU-resident candidate generation and propagation staging exist, but world-view validation is missing. |
 | G090_SPLIT | PARTIAL | CPU split/recompose fixtures pass; GPU split execution is missing. |
-| G090_GPU | BLOCKED | GPU-plan, reduced-runtime-plan, workspace allocation/reset, bounded candidate-generation kernel, runtime-preflight, counter-guard, and reduced-plan trace contracts exist, but no production epistemic propagation/validation/materialization dispatch, full semantic kernel buffer use, or timing evidence exists. |
+| G090_GPU | BLOCKED | GPU-plan, reduced-runtime-plan, workspace allocation/reset, bounded candidate-generation and propagation kernels, runtime-preflight, counter-guard, and reduced-plan trace contracts exist, but no production epistemic world-view validation/materialization dispatch, full semantic kernel buffer use, or timing evidence exists. |
 | G090_SOLVER | BLOCKED | `SolverService` is CPU fixture enumeration; GPU-native SAT/MaxSAT/portfolio execution is not wired to epistemic candidates. |
 | G090_PROB | BLOCKED | Accepted-world-view evidence fixtures exist, but accepted probabilistic epistemic execution is not proven on the GPU-native exact path. |
 | G090_CERT | BLOCKED | Missing GPU launch counts, kernel timings, WCOJ evidence, zero CPU fallback counters, and post-v0.8 rerun. |
@@ -75,6 +75,8 @@ The branch contains useful scaffolding:
   zero host writes;
 - bounded candidate-assumption generation kernel with one launch and zero host
   writes;
+- bounded propagation staging kernel with one launch and zero host writes for
+  world-view/rejection buffers;
 - runtime preflight that rejects nonzero CPU fallback counters and records
   WCOJ/K-clique/helper route metadata before launch;
 - runtime counter guard that refuses to certify WCOJ evidence from preflight

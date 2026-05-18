@@ -8,8 +8,9 @@ Branch: `feat/v090-epistemic-solver-semantics`
 
 ## Scope
 
-This slice adds a production-facing GPU execution plan contract. It is not GPU
-execution and does not close `G090_GPU`.
+This slice adds a production-facing GPU execution plan contract. Later runtime
+evidence adds bounded candidate-generation and propagation kernels, but this
+plan-contract evidence alone does not close `G090_GPU`.
 
 ## Implementation Summary
 
@@ -37,17 +38,17 @@ execution and does not close `G090_GPU`.
 
 | Metric | Target | Status | Evidence |
 |---|---|---|---|
-| M090_GPU.1 production lowering | accepted epistemic fixture runs through production runtime dispatch | PARTIAL | Plan contract exists; runtime dispatch is still missing. |
+| M090_GPU.1 production lowering | accepted epistemic fixture runs through production runtime dispatch | PARTIAL | Plan contract exists; later runtime evidence launches candidate generation/propagation before reduced-plan dispatch; validation/materialization dispatch is still missing. |
 | M090_GPU.2 WCOJ eligibility | at least one epistemic reduction uses the WCOJ planner/path where eligible | PARTIAL | Reduced body is marked `RequiresPlannerEligibility`; planner/runtime dispatch is not executed yet. |
-| M090_GPU.3 GPU buffers | candidate, world-view, and rejection state have GPU-resident representations | PARTIAL | Buffer categories are explicit; runtime allocation/use is missing. |
-| M090_GPU.4 kernel coverage | GPU kernels cover candidate generation, propagation, validation, and materialization hot paths | BLOCKED | No epistemic kernels are launched yet. |
-| M090_GPU.5 CPU fallback ban | accepted execution trace records zero CPU candidate enumeration/world-view validation fallbacks | PARTIAL | Plan counters initialize to zero; accepted execution trace is missing. |
-| M090_GPU.6 launch evidence | certification logs include nonzero GPU launch counts and kernel timing for epistemic execution | BLOCKED | No launch or timing evidence exists yet. |
+| M090_GPU.3 GPU buffers | candidate, world-view, and rejection state have GPU-resident representations | PARTIAL | Buffer categories are explicit; later runtime evidence allocates/resets them and uses bounded candidate/propagation kernels. |
+| M090_GPU.4 kernel coverage | GPU kernels cover candidate generation, propagation, validation, and materialization hot paths | PARTIAL | Later runtime evidence launches candidate-generation and propagation-staging kernels; validation/materialization kernels are missing. |
+| M090_GPU.5 CPU fallback ban | accepted execution trace records zero CPU candidate enumeration/world-view validation fallbacks | PARTIAL | Plan counters initialize to zero and runtime preflight rejects nonzero counters; validation fallback evidence is missing. |
+| M090_GPU.6 launch evidence | certification logs include nonzero GPU launch counts and kernel timing for epistemic execution | PARTIAL | Later runtime traces record candidate-generation and propagation launches; timing evidence is missing. |
 | M090_GPU.7 parity | GPU output matches semantic oracle on all G91, FAEEL, GPT, and splitting fixtures | BLOCKED | No GPU output exists yet. |
 | M090_GPU.8 transfer budget | host-device transfers are bounded and reported; no per-candidate host round trip in hot path | BLOCKED | No execution transfer trace exists yet. |
 
 ## Remaining Blocker
 
-The next slice must attach this contract to runtime/CUDA execution: device buffer
-allocation, kernel launch telemetry, WCOJ planner dispatch for eligible
-reductions, and a real accepted execution trace with zero CPU fallback counters.
+The next slice must complete runtime/CUDA execution with world-view validation,
+result materialization, WCOJ planner dispatch evidence for eligible reductions,
+and a real accepted execution trace with timing and zero CPU fallback counters.

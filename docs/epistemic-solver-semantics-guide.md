@@ -40,13 +40,17 @@ with `host_write_ops = 0`.
 `epistemic_generate_candidate_assumptions_u8` CUDA kernel and records
 `EpistemicGpuCandidateGenerationTrace` with one kernel launch and zero host
 writes for bounded candidate bitsets.
+`Executor::propagate_epistemic_gpu_candidates` launches the
+`epistemic_propagate_candidates_u8` CUDA kernel and records
+`EpistemicGpuPropagationTrace` with one kernel launch and zero host writes for
+world-view/rejection staging.
 `EpistemicGpuRuntimeWcojCertification` then requires actual production WCOJ
 counter deltas before WCOJ evidence can be certified.
 `Executor::execute_epistemic_gpu_execution` wraps the reduced production
-runtime plan with preflight, workspace allocation, `execute_plan`, and
-before/after counter tracing. That is still pre-kernel plumbing for the
-epistemic hot path; propagation, accepted world-view validation, solver
-coupling, and result materialization do not dispatch yet.
+runtime plan with preflight, workspace allocation, candidate-generation and
+propagation kernel launches, `execute_plan`, and before/after counter tracing.
+That is still incomplete for the epistemic hot path; accepted world-view
+validation, solver coupling, and result materialization do not dispatch yet.
 
 ## GPU And WCOJ Scope
 
