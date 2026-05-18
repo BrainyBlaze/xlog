@@ -841,12 +841,15 @@ fn final_result_materialization_trace_records_device_row_count_read_without_host
 
 #[test]
 fn final_tuple_materialization_trace_records_device_tuple_buffer_without_host_writes() {
-    let trace = EpistemicGpuFinalTupleMaterializationTrace::for_counts(2, 16, 128).unwrap();
+    let trace =
+        EpistemicGpuFinalTupleMaterializationTrace::for_counts(2, 16, 128, 3, 8, 2, 4).unwrap();
 
     assert_eq!(trace.output_column_count, 2);
     assert_eq!(trace.output_row_capacity, 16);
     assert_eq!(trace.tuple_bytes_capacity, 128);
     assert_eq!(trace.output_row_count_device_reads, 1);
+    assert_eq!(trace.model_membership_bytes_checked, 192);
+    assert_eq!(trace.world_view_slots_checked, 8);
     assert_eq!(trace.final_row_count_device_writes, 1);
     assert_eq!(trace.kernel_launches, 2);
     assert_eq!(trace.host_write_ops, 0);
@@ -855,9 +858,16 @@ fn final_tuple_materialization_trace_records_device_tuple_buffer_without_host_wr
 
 #[test]
 fn final_tuple_materialization_trace_rejects_launch_counter_overflow() {
-    let err =
-        EpistemicGpuFinalTupleMaterializationTrace::for_counts(u32::MAX as usize + 1, 16, 128)
-            .expect_err("final tuple trace must not truncate kernel launch counts");
+    let err = EpistemicGpuFinalTupleMaterializationTrace::for_counts(
+        u32::MAX as usize + 1,
+        16,
+        128,
+        3,
+        8,
+        2,
+        4,
+    )
+    .expect_err("final tuple trace must not truncate kernel launch counts");
 
     match err {
         xlog_core::XlogError::ResourceExhausted {
@@ -1048,6 +1058,29 @@ fn final_tuple_materialization_runtime_path_copies_output_columns_on_device() {
     assert!(!source.contains("upload_epistemic_final_tuple"));
     assert!(!source.contains("copy_epistemic_final_tuple_from_host"));
     assert!(!source.contains("dtoh_epistemic_final_tuple"));
+}
+
+#[test]
+fn final_tuple_materialization_runtime_path_is_gated_by_gpu_model_membership() {
+    let source = include_str!("../src/executor/epistemic_workspace.rs");
+    let cuda = include_str!("../../xlog-cuda/kernels/epistemic.cu");
+
+    assert!(source.contains("literal_count: usize"));
+    assert!(source.contains("reduction_count: usize"));
+    assert!(source.contains("models_per_reduction: usize"));
+    assert!(source.contains("&workspace.model_membership"));
+    assert!(source.contains("&workspace.world_views"));
+    assert!(source.contains("trace.model_membership_bytes_checked"));
+    assert!(source.contains("trace.world_view_slots_checked"));
+    assert!(source.contains("workspace.layout.model_membership_bytes"));
+    assert!(source.contains("literal_count,"));
+    assert!(source.contains("executable.gpu_plan.reductions.len(),"));
+    assert!(source.contains("capacities.max_models_per_reduction,"));
+    assert!(cuda.contains("epistemic_final_tuple_has_accepted_membership"));
+    assert!(cuda.contains("const uint8_t* __restrict__ model_membership"));
+    assert!(cuda.contains("const uint8_t* __restrict__ world_views"));
+    assert!(cuda.contains("reduction_count * models_per_reduction * literal_count"));
+    assert!(!cuda.contains("accepted_candidate |= (rejection_reasons[candidate] == 0u) ? 1u : 0u"));
 }
 
 #[test]

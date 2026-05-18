@@ -83,23 +83,27 @@ CUDA-event elapsed timing for final-result flag staging.
 `epistemic_materialize_final_tuple_column_u8` and records
 `EpistemicGpuFinalTupleMaterializationTrace` for a device-resident final-output
 `CudaBuffer`, including covered tuple bytes, device row-count read/write
-metadata, kernel launches, zero host writes, and CUDA-event elapsed timing.
+metadata, model-membership bytes checked, world-view slots checked, kernel
+launches, zero host writes, and CUDA-event elapsed timing. The final tuple
+kernel materializes reduced output columns only when the GPU model-membership
+and world-view buffers contain an accepted membership.
 `EpistemicGpuRuntimeWcojCertification` then requires actual production WCOJ
 counter deltas before WCOJ evidence can be certified.
 `Executor::execute_epistemic_gpu_execution` wraps the reduced production
 runtime plan with preflight, workspace allocation, candidate-generation,
 propagation, candidate-validation, `execute_plan` plus before/after counter
 tracing, then model-membership staging, world-view validation staging, and
-accepted-candidate, final-result flag, and final tuple materialization-staging
-kernel launches. It also snapshots provider host-transfer counters around the hot path
+accepted-candidate, final-result flag, and membership-gated final tuple
+materialization-staging kernel launches. It also snapshots provider host-transfer counters around the hot path
 and records `EpistemicGpuTransferBudgetTrace`, which rejects tracked data-plane
 H2D/D2H deltas instead of resetting shared telemetry. That is still incomplete
 for the epistemic hot path; tuple-source staging is GPU-backed over existing
 relation buffers with row-scoped ground-key comparison through specialized
 arity-one/two/three kernels and a generic arity-N kernel, plus row-scoped
 variable-bound comparison against reduced-output columns through the generic
-arity-N kernel. Full world-view semantics, solver coupling, and probabilistic
-production-path reuse do not dispatch yet.
+arity-N kernel, and final tuple output is gated by the staged membership and
+world-view buffers. Full world-view semantics, solver coupling, probabilistic
+production-path reuse, and accepted semantic parity do not dispatch yet.
 
 ## GPU And WCOJ Scope
 

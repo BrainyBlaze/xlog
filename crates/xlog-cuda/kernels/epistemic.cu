@@ -630,24 +630,61 @@ extern "C" __global__ void epistemic_materialize_final_result_flags_u8(
         (rejection_reasons[candidate] == 0u && has_output != 0u) ? 1u : 0u;
 }
 
+static __device__ uint8_t epistemic_final_tuple_has_accepted_membership(
+    uint32_t literal_count,
+    uint32_t candidate_count,
+    uint32_t reduction_count,
+    uint32_t models_per_reduction,
+    uint32_t world_stride,
+    const uint32_t* __restrict__ rejection_reasons,
+    const uint8_t* __restrict__ model_membership,
+    const uint8_t* __restrict__ world_views
+) {
+    if (literal_count == 0u || reduction_count == 0u || models_per_reduction == 0u) return 0u;
+
+    uint32_t per_candidate = reduction_count * models_per_reduction * literal_count;
+    for (uint32_t candidate = 0u; candidate < candidate_count; ++candidate) {
+        if (rejection_reasons[candidate] != 0u) continue;
+        if (world_views[candidate * world_stride] == 0u) continue;
+
+        uint32_t base = candidate * per_candidate;
+        for (uint32_t offset = 0u; offset < per_candidate; ++offset) {
+            if (model_membership[base + offset] != 0u) return 1u;
+        }
+    }
+
+    return 0u;
+}
+
 extern "C" __global__ void epistemic_materialize_final_tuple_column_u8(
     uint32_t column_byte_len,
+    uint32_t literal_count,
     uint32_t candidate_count,
+    uint32_t reduction_count,
+    uint32_t models_per_reduction,
+    uint32_t world_stride,
     const uint32_t* __restrict__ output_row_count,
     const uint32_t* __restrict__ rejection_reasons,
+    const uint8_t* __restrict__ model_membership,
+    const uint8_t* __restrict__ world_views,
     const uint8_t* __restrict__ source_column,
     uint8_t* __restrict__ final_column,
     uint32_t* __restrict__ final_row_count
 ) {
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
 
-    uint8_t accepted_candidate = 0u;
-    for (uint32_t candidate = 0; candidate < candidate_count; ++candidate) {
-        accepted_candidate |= (rejection_reasons[candidate] == 0u) ? 1u : 0u;
-    }
-
     uint32_t rows = output_row_count[0];
-    uint8_t materialize = (accepted_candidate != 0u && rows != 0u) ? 1u : 0u;
+    uint8_t accepted_membership = epistemic_final_tuple_has_accepted_membership(
+        literal_count,
+        candidate_count,
+        reduction_count,
+        models_per_reduction,
+        world_stride,
+        rejection_reasons,
+        model_membership,
+        world_views
+    );
+    uint8_t materialize = (accepted_membership != 0u && rows != 0u) ? 1u : 0u;
     if (gid == 0u) {
         final_row_count[0] = (materialize != 0u) ? rows : 0u;
     }

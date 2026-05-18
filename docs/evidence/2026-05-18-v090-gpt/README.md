@@ -28,8 +28,8 @@ Predecessor evidence:
 | GPU world-view validation staging | `epistemic_validate_world_views_u8` checks staged model-membership bytes against active world-view slots and updates rejection codes. |
 | GPU materialization staging | `epistemic_materialize_accepted_candidates_u8` writes accepted-candidate flags from rejection codes into world-view slots. |
 | GPU final-result flag staging | `epistemic_materialize_final_result_flags_u8` writes final-result flags from reduced output device row-count metadata and rejection codes into world-view slots. |
-| GPU final tuple materialization | `epistemic_materialize_final_tuple_column_u8` writes a device-resident final-output tuple buffer and final row-count metadata from reduced output columns. |
-| GPU residency | Candidate-assumption generation, propagation staging, candidate-buffer validation, tuple-source model-membership staging with fixed arity-one/two/three and generic arity-N row-scoped ground-key comparison plus generic arity-N variable-bound comparison, bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, and final tuple materialization are implemented as bounded CUDA kernels; accepted semantic parity remains a runtime gap. |
+| GPU final tuple materialization | `epistemic_materialize_final_tuple_column_u8` writes a device-resident final-output tuple buffer and final row-count metadata from reduced output columns after checking GPU model-membership and world-view buffers for an accepted membership. |
+| GPU residency | Candidate-assumption generation, propagation staging, candidate-buffer validation, tuple-source model-membership staging with fixed arity-one/two/three and generic arity-N row-scoped ground-key comparison plus generic arity-N variable-bound comparison, bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, and membership-gated final tuple materialization are implemented as bounded CUDA kernels; accepted semantic parity remains a runtime gap. |
 | Documentation | `docs/architecture/epistemic-semantics.md` documents the GPT phase contract and guard. |
 
 ## Validation
@@ -42,7 +42,7 @@ Predecessor evidence:
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace candidate_validation` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace validation` | PASS, 7 passed, 0 failed |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace materialization` | PASS, 5 passed, 0 failed |
-| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 46 passed, 0 failed |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 47 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_gpt` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_faeel` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_g91` | PASS, 3 passed, 0 failed |
@@ -56,14 +56,14 @@ Predecessor evidence:
 | Metric | Target | Status | Evidence |
 |---|---|---|---|
 | M090_GPT.1 phase separation | generate, propagate, test boundaries visible in code | PASS for oracle | `run_generate_propagate_test` implementation and test fixture. |
-| M090_GPT.2 trace output | debug/trace mode reports phase counts and GPU launch counters | PARTIAL | CPU trace counts are asserted; candidate-generation, propagation, candidate-validation, tuple-source model-membership staging with fixed arity-one/two/three and generic arity-N row-scoped ground-key comparison plus generic arity-N variable-bound comparison, world-view-validation, accepted-candidate materialization, final-result flag, and final tuple traces each record GPU launches with CUDA-event elapsed timing, but semantic parity counters are missing. |
+| M090_GPT.2 trace output | debug/trace mode reports phase counts and GPU launch counters | PARTIAL | CPU trace counts are asserted; candidate-generation, propagation, candidate-validation, tuple-source model-membership staging with fixed arity-one/two/three and generic arity-N row-scoped ground-key comparison plus generic arity-N variable-bound comparison, world-view-validation, accepted-candidate materialization, final-result flag, and membership-gated final tuple traces each record GPU launches with CUDA-event elapsed timing, but semantic parity counters are missing. |
 | M090_GPT.3 correctness fixtures | accepted/rejected candidate fixtures pass | PASS for oracle | `test_epistemic_gpt`: 2/2 passed. |
 | M090_GPT.4 bounded behavior | candidate explosion guard implemented or explicitly scoped | PASS for oracle | `ResourceExhausted` guard fixture. |
 | M090_GPT.5 world-view validation | trace records guess count, reduced-program model count, accepted world-view count, and rejection reasons | PASS for oracle | CPU trace fields are asserted in `test_epistemic_gpt`. |
-| M090_GPT.6 GPU residency | candidate generation, propagation, and world-view validation hot path uses GPU-resident buffers | PARTIAL | Candidate-assumption generation, propagation staging, candidate-buffer validation, tuple-source model-membership staging with fixed arity-one/two/three and generic arity-N row-scoped ground-key comparison plus generic arity-N variable-bound comparison, bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, and final tuple materialization use GPU-resident workspace/output buffers through CUDA kernels; accepted semantic parity is still not wired. |
+| M090_GPT.6 GPU residency | candidate generation, propagation, and world-view validation hot path uses GPU-resident buffers | PARTIAL | Candidate-assumption generation, propagation staging, candidate-buffer validation, tuple-source model-membership staging with fixed arity-one/two/three and generic arity-N row-scoped ground-key comparison plus generic arity-N variable-bound comparison, bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, and membership-gated final tuple materialization use GPU-resident workspace/output buffers through CUDA kernels; accepted semantic parity is still not wired. |
 
 ## Coordination Notes
 
-- Candidate generation, propagation staging, candidate-buffer validation, tuple-source model-membership staging with fixed arity-one/two/three and generic arity-N row-scoped ground-key comparison plus generic arity-N variable-bound comparison, bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, and final tuple materialization are now available as bounded GPU workspace/output kernels. Arbitrary EIR world enumeration, semantic parity, and full reduced-runtime stable-model test phases remain required production scope.
+- Candidate generation, propagation staging, candidate-buffer validation, tuple-source model-membership staging with fixed arity-one/two/three and generic arity-N row-scoped ground-key comparison plus generic arity-N variable-bound comparison, bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, and membership-gated final tuple materialization are now available as bounded GPU workspace/output kernels. Arbitrary EIR world enumeration, semantic parity, and full reduced-runtime stable-model test phases remain required production scope.
 - No pyxlog public API signatures were changed.
 - No push, tag, release-board update, or merge was performed.

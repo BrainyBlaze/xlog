@@ -214,6 +214,10 @@ pub struct EpistemicGpuFinalTupleMaterializationTrace {
     pub tuple_bytes_capacity: usize,
     /// Device output row-count scalars read by the kernels.
     pub output_row_count_device_reads: u32,
+    /// Model-membership bytes checked by the kernels before tuple materialization.
+    pub model_membership_bytes_checked: usize,
+    /// World-view slots checked by the kernels before tuple materialization.
+    pub world_view_slots_checked: usize,
     /// Device final row-count scalars written by the kernels.
     pub final_row_count_device_writes: u32,
     /// Final tuple materialization kernel launches.
@@ -484,6 +488,10 @@ impl EpistemicGpuFinalTupleMaterializationTrace {
         output_column_count: usize,
         output_row_capacity: usize,
         tuple_bytes_capacity: usize,
+        literal_count: usize,
+        candidate_count: usize,
+        reduction_count: usize,
+        models_per_reduction: usize,
     ) -> Result<Self> {
         if output_column_count > u32::MAX as usize {
             return Err(XlogError::ResourceExhausted {
@@ -492,12 +500,25 @@ impl EpistemicGpuFinalTupleMaterializationTrace {
                 budget_bytes: u32::MAX as u64,
             });
         }
+        require_positive(literal_count, "epistemic GPU final-tuple literals")?;
+        require_positive(candidate_count, "epistemic GPU final-tuple candidates")?;
+        require_positive(reduction_count, "epistemic GPU final-tuple reductions")?;
+        require_positive(models_per_reduction, "epistemic GPU final-tuple models")?;
+        let model_membership_bytes_checked = checked_product(
+            checked_product(
+                checked_product(candidate_count, reduction_count)?,
+                models_per_reduction,
+            )?,
+            literal_count,
+        )?;
 
         Ok(Self {
             output_column_count,
             output_row_capacity,
             tuple_bytes_capacity,
             output_row_count_device_reads: 1,
+            model_membership_bytes_checked,
+            world_view_slots_checked: candidate_count,
             final_row_count_device_writes: 1,
             kernel_launches: output_column_count.max(1) as u32,
             host_write_ops: 0,
@@ -2860,7 +2881,10 @@ impl Executor {
         &self,
         workspace: &EpistemicGpuWorkspace,
         output: &CudaBuffer,
+        literal_count: usize,
         candidate_count: usize,
+        reduction_count: usize,
+        models_per_reduction: usize,
     ) -> Result<(CudaBuffer, EpistemicGpuFinalTupleMaterializationTrace)> {
         if candidate_count > workspace.layout.rejection_reason_slots {
             return Err(XlogError::ResourceExhausted {
@@ -2869,10 +2893,19 @@ impl Executor {
                 budget_bytes: workspace.layout.rejection_reason_slots as u64,
             });
         }
-        if candidate_count > u32::MAX as usize || output.num_rows() > u32::MAX as u64 {
+        if literal_count > u32::MAX as usize
+            || candidate_count > u32::MAX as usize
+            || reduction_count > u32::MAX as usize
+            || models_per_reduction > u32::MAX as usize
+            || output.num_rows() > u32::MAX as u64
+        {
             return Err(XlogError::ResourceExhausted {
                 context: "epistemic GPU final-tuple dimensions".to_string(),
-                estimated_bytes: candidate_count.max(output.num_rows() as usize) as u64,
+                estimated_bytes: literal_count
+                    .max(candidate_count)
+                    .max(reduction_count)
+                    .max(models_per_reduction)
+                    .max(output.num_rows() as usize) as u64,
                 budget_bytes: u32::MAX as u64,
             });
         }
@@ -2901,8 +2934,47 @@ impl Executor {
             output.arity(),
             output.num_rows() as usize,
             tuple_bytes_capacity,
+            literal_count,
+            candidate_count,
+            reduction_count,
+            models_per_reduction,
         )?;
+        if trace.model_membership_bytes_checked > workspace.layout.model_membership_bytes {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU final-tuple membership workspace".to_string(),
+                estimated_bytes: trace.model_membership_bytes_checked as u64,
+                budget_bytes: workspace.layout.model_membership_bytes as u64,
+            });
+        }
+        if trace.world_view_slots_checked > workspace.layout.world_view_bytes {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU final-tuple world-view workspace".to_string(),
+                estimated_bytes: trace.world_view_slots_checked as u64,
+                budget_bytes: workspace.layout.world_view_bytes as u64,
+            });
+        }
+        if trace.model_membership_bytes_checked > u32::MAX as usize {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU final-tuple membership launch".to_string(),
+                estimated_bytes: trace.model_membership_bytes_checked as u64,
+                budget_bytes: u32::MAX as u64,
+            });
+        }
+
+        let world_stride =
+            workspace.layout.world_view_bytes / workspace.layout.rejection_reason_slots;
+        if world_stride == 0 || world_stride > u32::MAX as usize {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU final-tuple world stride".to_string(),
+                estimated_bytes: world_stride as u64,
+                budget_bytes: u32::MAX as u64,
+            });
+        }
+        let literal_count = literal_count as u32;
         let candidate_count_u32 = candidate_count as u32;
+        let reduction_count = reduction_count as u32;
+        let models_per_reduction = models_per_reduction as u32;
+        let world_stride = world_stride as u32;
         let func = self
             .provider
             .device()
@@ -2926,18 +2998,25 @@ impl Executor {
                     // SAFETY: the zero-column launch writes only the final row-count
                     // scalar. The scratch pointers are valid one-byte device buffers,
                     // and the column byte count is zero so no tuple bytes are read.
-                    return func.clone().launch(
-                        LaunchConfig::for_num_elems(1),
-                        (
-                            0u32,
-                            candidate_count_u32,
-                            output.num_rows_device(),
-                            &workspace.rejection_reasons,
-                            &scratch_src,
-                            &mut scratch_dst,
-                            &mut final_row_count,
-                        ),
-                    );
+                    let zero_column_byte_len = 0u32;
+                    let mut params: Vec<*mut c_void> = vec![
+                        (&zero_column_byte_len).as_kernel_param(),
+                        (&literal_count).as_kernel_param(),
+                        (&candidate_count_u32).as_kernel_param(),
+                        (&reduction_count).as_kernel_param(),
+                        (&models_per_reduction).as_kernel_param(),
+                        (&world_stride).as_kernel_param(),
+                        output.num_rows_device().as_kernel_param(),
+                        (&workspace.rejection_reasons).as_kernel_param(),
+                        (&workspace.model_membership).as_kernel_param(),
+                        (&workspace.world_views).as_kernel_param(),
+                        (&scratch_src).as_kernel_param(),
+                        (&mut scratch_dst).as_kernel_param(),
+                        (&mut final_row_count).as_kernel_param(),
+                    ];
+                    return func
+                        .clone()
+                        .launch(LaunchConfig::for_num_elems(1), &mut params);
                 }
 
                 for ((src_col, column_byte_len), dst_col) in
@@ -2945,18 +3024,26 @@ impl Executor {
                 {
                     // SAFETY: source and destination columns are valid device byte
                     // buffers of identical length, the row-count scalar is
-                    // runtime-owned, and rejection reasons were capacity-checked.
+                    // runtime-owned, and membership/world-view buffers were
+                    // capacity-checked.
+                    let mut params: Vec<*mut c_void> = vec![
+                        column_byte_len.as_kernel_param(),
+                        (&literal_count).as_kernel_param(),
+                        (&candidate_count_u32).as_kernel_param(),
+                        (&reduction_count).as_kernel_param(),
+                        (&models_per_reduction).as_kernel_param(),
+                        (&world_stride).as_kernel_param(),
+                        output.num_rows_device().as_kernel_param(),
+                        (&workspace.rejection_reasons).as_kernel_param(),
+                        (&workspace.model_membership).as_kernel_param(),
+                        (&workspace.world_views).as_kernel_param(),
+                        (*src_col).as_kernel_param(),
+                        dst_col.as_kernel_param(),
+                        (&mut final_row_count).as_kernel_param(),
+                    ];
                     func.clone().launch(
                         LaunchConfig::for_num_elems((*column_byte_len).max(1)),
-                        (
-                            *column_byte_len,
-                            candidate_count_u32,
-                            output.num_rows_device(),
-                            &workspace.rejection_reasons,
-                            *src_col,
-                            dst_col,
-                            &mut final_row_count,
-                        ),
+                        &mut params,
                     )?;
                 }
                 Ok(())
@@ -3052,7 +3139,10 @@ impl Executor {
             .materialize_epistemic_gpu_final_tuples(
                 &prepared.workspace,
                 &output,
+                literal_count,
                 candidate_count,
+                executable.gpu_plan.reductions.len(),
+                capacities.max_models_per_reduction,
             )?;
         let transfer_budget_end = self.provider.host_transfer_stats();
         let transfer_budget = EpistemicGpuTransferBudgetTrace::from_host_transfer_stats(
