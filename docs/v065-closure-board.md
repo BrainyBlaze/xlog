@@ -1,9 +1,10 @@
 # v0.6.5 Closure Board
 
-**Status:** v0.6.5 is NOT releasable. 23 open items required for tag.
+**Status:** v0.6.5 is tag-ready at the board level; W7.1 remains
+OPEN pending explicit user authorization to tag `v0.6.5`.
 **Source of truth:** ROADMAP.md §1203–1268 + internal commitments
-created during slices 4–5.
-**Last updated:** 2026-05-13.
+created during slices 4–5 + Goal-038-B / Goal-039 amendments.
+**Last updated:** 2026-05-18.
 
 ## Process Rules (durable)
 
@@ -48,11 +49,11 @@ any contrary slice-internal decision.
 
 | State | Count |
 |-------|-------|
-| DONE | 21 (W2.4, W2.2, W2.1, W2.3, W2.5, W2.6, W3.1, W3.2, W3.3, W3.4, W3.5, W3.6, W3.7, W3.8, W3.9, W4.1, W4.2, W4.3, W5.1, W5.2, W6.7) |
-| IN-PROGRESS | 1 (W1.1) |
+| DONE | 30 (W1.1, W2.4, W2.2, W2.1, W2.3, W2.5, W2.6, W3.1, W3.2, W3.3, W3.4, W3.5, W3.6, W3.7, W3.8, W3.9, W4.1, W4.2, W4.3, W5.1, W5.2, W5.3, W5.4, W6.1, W6.2, W6.3, W6.4, W6.5, W6.6, W6.7) |
+| IN-PROGRESS | 0 (—) |
 | BLOCKED | 0 (—) |
-| OPEN | 5 (W5.3, W5.4, W6.1, W6.2, W7.1) |
-| **Total** | **27** |
+| OPEN | 1 (W7.1) |
+| **Total** | **31** |
 
 The 4 ROADMAP items already DONE from slices 1, 2, 4 are
 recorded in ROADMAP.md and the slice evidence READMEs; they're
@@ -65,7 +66,7 @@ prior shipped work.
 
 | ID | Status | Required deliverable | Acceptance gate |
 |----|--------|----------------------|-----------------|
-| W1.1 | IN-PROGRESS | This closure board exists, committed, with all 24 open items enumerated after Path C expansion. Process rules locked. | This file committed on `main`; ROADMAP.md points to it. User approves tally + amendments; agent then commits referencing W1.1. |
+| W1.1 | DONE | This closure board exists, committed, with all 24 open items enumerated after Path C expansion. Process rules locked. | DONE — `docs/v065-closure-board.md` is committed, ROADMAP.md points to it, process rules are locked, and the user approved the Goal-039 Phase-2 tally + amendments in thread. This board-update commit records W1.1 closure. |
 
 ### Wave 2 — Foundation closure
 
@@ -106,22 +107,26 @@ prior shipped work.
 |----|--------|--------|------------|----------------------|-----------------|
 | W5.1 | ROADMAP item #17 | DONE | — | GPU Same Generation cert (currently oracle-only); skewed multiway GPU cert; deep-recursive WCOJ cert. | DONE — user-approved Response 1 (Accept as DONE). 5 implementation/evidence commits at closure-proposal anchor `c94fbc64` (`git rev-list --count ffe27f4d..c94fbc64 = 5`): `85d62e84` plan iteration 1 + `c9da65cb` Same Generation GPU 4-cycle witness cert + `ae0b4d66` skewed multiway GPU triangle cert + `69614707` deep-recursive WCOJ exact-counter cert + `c94fbc64` evidence README and closure proposal + this commit (board update) = **6 W5.1 commits**. Three new test files in `crates/xlog-integration/tests/`: `test_w51_same_generation_gpu_cert.rs`, `test_w51_skewed_multiway_gpu_cert.rs`, `test_w51_deep_recursive_wcoj_cert.rs`. Cert metrics: Same Generation row-set 14 pairs, CPU oracle `sg_reference`, GPU `sg_cert(W,Z)`, `wcoj_4cycle_dispatch_count == 1`, `wcoj_triangle_dispatch_count == 0`; skewed multiway row-set 4 triples, CPU oracle `evaluate_rule_typed`, `wcoj_triangle_dispatch_count == 1`, 4-cycle/clique counters 0; deep-recursive row-set 4 triples `((1,2,3),(1,3,4),(1,4,5),(1,5,6))`, CPU oracle host fixpoint walker, `wcoj_triangle_dispatch_count == 6`, 4-cycle/clique counters 0. D7 non-empty parity asserted before every GPU comparison; D7 + Acceptance Grid byte-for-byte match plan commit `85d62e84`. All gates green: targeted W5.1 cert gate exits 0 with three binaries each 1/0 pass/fail; `cargo fmt --check --all` exit 0; `cargo test -p xlog-cuda-tests --test certification_suite --release` 1/1; `RUSTFLAGS="-D warnings" cargo build --release --workspace --exclude pyxlog` exit 0; `cargo test --workspace --release --exclude pyxlog --exclude xlog-cuda-tests` exit 0. F-W43-12 + F-W43-15 exception note: no exception consumed; the three enumerated files (`test_wcoj_layout_fast_path.rs`, `test_wcoj_layout_u32.rs`, `test_wcoj_layout_u64.rs`) passed in the canonical run, and sibling `test_wcoj_layout_sort_*` files also passed. No benchmark ratio claim; W5.2 owns benchmark evidence. Evidence README at `docs/evidence/2026-05-11-w51-cert-trio/README.md`; closure proposal at `docs/plans/2026-05-11-w51-closure-proposal.md`. |
 | W5.2 | ROADMAP item #18 | DONE | — | Skewed multi-way GPU benchmark suite beyond triangle. Covers 4-cycle, 5-clique (W3.2), and a pivot-heavy multi-way pattern. | DONE — user-approved Response 1 (Accept as DONE). 7 implementation/evidence commits at closure-proposal anchor `8d993f82` (`git rev-list --count main..8d993f82 = 7`): `c2e7aaf4` plan iteration 1 + `4e4f6d15` bench skeleton + `1090a7af` 4-cycle hub-filtered bench + `12ed487c` 5-clique diagonal bench + `05fe9a0c` pivot-heavy K5 bench + `a2a259a1` cross-workload evidence summary + `8d993f82` closure proposal + this commit (board update) = **8 W5.2 commits**. Bench harness registered at `crates/xlog-integration/benches/w52_skewed_multiway_bench.rs`; evidence README at `docs/evidence/2026-05-12-w52-skewed-multiway-bench/README.md`; closure proposal at `docs/plans/2026-05-12-w52-closure-proposal.md`. LP-MULTI-RUN corpus: 36 cell-run measurements (3 workloads × 4 cells × 3 independent Criterion invocations), medians snapshotted from Criterion `new/estimates.json` before each next run per F-W52-6, with parity-before-timing and zero direction flips. Per-workload findings: 4-cycle hub-filtered `N={50,250,1000,2000}` GPU 12/12, ratio range 2.1156×–7.0174×, stable GPU threshold at or below `N=50`; 5-clique diagonal `N={10,25,50,100}` HASH 12/12, ratio range 0.4945×–0.5945×, stable no-GPU-crossover finding; pivot-heavy K5 `N={10,20,30,40}` HASH 12/12, ratio range 0.5365×–0.9098×, stable no-GPU-crossover finding with trend toward parity. D7 + Acceptance Grid byte-for-byte match plan commit `c2e7aaf4`; D8 satisfied by reporting stable no-crossover findings instead of inventing thresholds. F-W52 risks closed without over-broadening: F-W52-1 synthetic pivot K5 has exact expected rows; F-W52-2 single-run timing risk is closed by 3-run min/median/max; F-W52-3 5-clique direction asymmetry is reported as load-bearing evidence; F-W52-4 flake accounting stayed narrow; F-W52-5 no-crossover interpretation accepted; F-W52-6 snapshot discipline followed; F-W52-7 pivot-incident joins run first in the binary baseline. All gates green in supervisor audit: `cargo fmt --check --all` exit 0; `cargo bench -p xlog-integration --bench w52_skewed_multiway_bench --no-run` exit 0; `RUSTFLAGS="-D warnings" cargo build --release --workspace --exclude pyxlog` exit 0; `cargo test -p xlog-cuda-tests --test certification_suite --release` 1/1; canonical workspace command exit 0 in supervisor session. F-W43-12 + F-W43-15 exception accounting: codex's closure-proposal run consumed only the enumerated WCOJ layout-file exception (`test_wcoj_layout_u32.rs`, `test_wcoj_layout_fast_path.rs`), with targeted/non-exempt sweeps green; supervisor canonical rerun exited 0; `g04_transfer_efficiency` exception unused. Paper alignment P2/P5 only; no P1/P3/P4 claim, and P3 histogram-guided launch balancing remains W3.3-owned. |
-| W5.3 | ROADMAP item #19 | OPEN | — | Single test harness for WCOJ + binary-join + recursive determinism. Today the parts exist separately. | One test file that runs all three execution modes on the same fixture and asserts deterministic equality across runs. |
-| W5.4 | ROADMAP item #20 | OPEN | — | Downstream widened-frontier stress replay clean gate. Replay harness must be built — none exists today. | Replay harness committed; clean run logged in evidence; integration cert gates on replay determinism. |
+| W5.3 | ROADMAP item #19 | DONE | — | Single test harness for WCOJ + binary-join + recursive determinism. Today the parts exist separately. | DONE — `9839c039` implementation merged by `46806ba9`; `crates/xlog-integration/tests/test_cross_mode_determinism.rs` runs WCOJ, binary fallback, recursive equality, fixed-seed replay, dynamic rule injection, and Stage-5 rollback determinism. Evidence: `docs/evidence/2026-05-14-g39-w53-determinism-harness/report.md`; M_W53.1-6 green, including 100/100 deterministic replay gates. User-approved DONE in thread. |
+| W5.4 | ROADMAP item #20 | DONE | — | Downstream widened-frontier stress replay clean gate. Replay harness must be built — none exists today. | DONE — `08cbcb96` implementation merged by `614323f7`; `crates/xlog-integration/tests/test_widened_frontier_replay.rs` discovers DTS serving-v2 artifacts, replays widened-frontier fixtures, and gates replay determinism. Evidence: `docs/evidence/2026-05-14-g39-w54-widened-frontier-replay/run.log`; M_W54.1-4 green. User-approved DONE in thread. |
 
 ### Wave 6 — Documentation closure
 
 | ID | Source | Status | Blocked by | Required deliverable | Acceptance gate |
 |----|--------|--------|------------|----------------------|-----------------|
-| W6.1 | ROADMAP item #21 | OPEN | — | Dedicated WCOJ architecture guide. Covers RIR, promoter, dispatch, cost model, recursive integration. | New file `docs/wcoj-architecture-guide.md`; cross-linked from ROADMAP. |
-| W6.2 | ROADMAP item #22 | OPEN | — | User-facing WCOJ eligibility / fallback / performance tuning guide. NOT just code-doc rehash. | New file `docs/wcoj-user-guide.md`; covers env vars, config builders, when to opt into cardinality, threshold tuning, troubleshooting. |
+| W6.1 | ROADMAP item #21 | DONE | — | Dedicated WCOJ architecture guide. Covers RIR, promoter, dispatch, cost model, recursive integration. | DONE — `docs/wcoj-architecture-guide.md` authored at `3cd04302` and integrated by `00a888bc`; ROADMAP cross-link present; guide covers RIR, promoter, dispatch, cost model, recursive integration, Phase-1 mechanisms, and Phase-2 mechanisms. M_W61D.1-5 green. User-approved DONE in thread. |
+| W6.2 | ROADMAP item #22 | DONE | — | User-facing WCOJ eligibility / fallback / performance tuning guide. NOT just code-doc rehash. | DONE — `docs/wcoj-user-guide.md` authored at `471b7f06` and integrated by `ddf6cd61`; ROADMAP cross-link present; guide covers eligibility, fallback, config builders, env vars, threshold tuning, troubleshooting, and DTS-DLM consumer guidance. M_W62D.1-5 green. User-approved DONE in thread. |
+| W6.3 | Goal-039 G_W63_CHAIN | DONE | — | Chain-join WCOJ-shape promoter and runtime route for two-atom inner-chain rules. | DONE — production branch `feat/w63-chain-promoter-prod-g39` at `41f1447f`, merged by `bacca2ad`; evidence `docs/evidence/2026-05-14-g39-w63-chain-prod/report.md`; M_W63.1-8 green with documented M_W63.4 route/correctness caveat. User-approved DONE in thread. |
+| W6.4 | Goal-039 G_W64_K78 | DONE | — | K=7/K=8 clique provider/template/promoter/runtime coverage. | DONE — production branch `feat/w64-k78-template-prod-g39` at `7459f035`, merged by `1d17f48b`; evidence `docs/evidence/2026-05-18-g39-w64-k78-prod/README.md`; M_W64.1-7 green. User-approved DONE in thread. |
+| W6.5 | Goal-039 G_W65_SORT | DONE | — | Sort-label propagation and DTS-DLM support-source fix that eliminates m37c-prime sort-map warnings. | DONE — xlog branch `feat/w65-sort-label-propagation-g39` at `79f6f259`, merged by `9a3f3f92`; DTS-DLM fix `e0324fa`; evidence `docs/evidence/2026-05-18-g39-w65-authorized-dts-fix.md`; 50-doc replay `SORT_WARNINGS=0`, xlog certs green, DTS diff scope recorded. User-approved DONE in thread. |
+| W6.6 | Goal-039 G_W66_CUDAGRAPH | DONE | — | Bounded CUDA Graph capture/replay for Stage-4 hot-loop CSM paths. | DONE — CUDA Graph commits `3473736e`, `7aa61c5b`, `5830d217`, `678b3737`, `8b11922b`, and `f1933833`; evidence `docs/evidence/2026-05-18-g39-w66-cudagraph-integration-followup.md`; M_W66.1-6 green. User-approved DONE in thread. |
 | W6.7 | Goal-038-B | DONE | — | K5/K6 hypergraph planner as production planner: executor-aware eligibility, cost-aware K-clique planner, RIR variable-order surface, plan-consuming runtime/kernel dispatch, structured cost gate, K-clique runtime histogram refresh, K-clique helper-splitting invocation, bench/integration/purge evidence. | DONE — Goal-038-B amended plan `docs/plans/2026-05-14-supervisor-goal-038-B.md`; closure proposal v2 `5f11138e` supersedes preserved proposal `ef3fbc7e`; amended commit chain `ef241c7f` -> `1e8a055f`; M_HG_ELIG.1-4, M_HG_PLAN.1-6, M_RIR_VO.1-4, M_DISP.1-6, M_GATE.1-5, M_HIST_KC.1-8, M_HELP_KC.1-8, M_BENCH38B.1-5, M_INT38B.1-15, M_PURGE38B.1-11 all green. User-approved DONE in thread. |
 
 ### Wave 7 — Release
 
 | ID | Status | Blocked by | Required deliverable | Acceptance gate |
 |----|--------|------------|----------------------|-----------------|
-| W7.1 | OPEN | every other board item | Full workspace gate + CUDA cert + real_world replay; tag `v0.6.5` only after every other board item is DONE AND user explicitly authorizes the tag. | Board reaches 0 OPEN; user says "tag v0.6.5"; tag pushed. |
+| W7.1 | OPEN | user tag authorization | Full workspace gate + CUDA cert + real_world replay; tag `v0.6.5` only after every other board item is DONE AND user explicitly authorizes the tag. | All non-W7.1 board items are DONE; user says "tag v0.6.5"; tag pushed. |
 
 ## Completed
 
@@ -134,8 +139,10 @@ prior shipped work.
 
 ## Provenance
 
-- ROADMAP.md §1203–1268: 22 v0.6.5 items, 4 already DONE in
-  shipped slices 1/2/4, 18 open here as W2–W6 entries.
+- ROADMAP.md §1203–1268: initial 22 v0.6.5 items, 4 already DONE in
+  shipped slices 1/2/4, 18 initially tracked here as W2–W6 entries.
+- Goal-038-B / Goal-039 amendments expanded the board with W6.3,
+  W6.4, W6.5, W6.6, and W6.7, bringing the tracked total to 31.
 - Internal commitments tracked in slice plans/evidence:
   - Slice 4 plan §"Open Questions": multi-recursive deferral.
   - Slice 5 plan §"Out-of-Slice (Deferred)": `record_join_result`
