@@ -480,9 +480,8 @@ fn walk_tmj(node: &RirNode, target_mask: Option<&str>) -> Option<TmjMeta> {
         // promoted MultiWayJoin is still discoverable. The promoter does
         // not currently wrap TMJ-bearing trees, but the explicit arm
         // documents the contract instead of relying on the catch-all.
-        RirNode::MultiWayJoin { fallback, .. } | RirNode::ChainJoin { fallback, .. } => {
-            walk_tmj(fallback, target_mask)
-        }
+        RirNode::MultiWayJoin { fallback, .. } => walk_tmj(fallback, target_mask),
+        RirNode::ChainJoin { fallback, .. } => walk_tmj(fallback, target_mask),
         _ => None,
     }
 }

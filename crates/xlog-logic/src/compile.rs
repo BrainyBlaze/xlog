@@ -849,6 +849,30 @@ mod tests {
         }
 
         match node {
+            RirNode::ChainJoin {
+                left,
+                right,
+                fallback,
+                ..
+            } => {
+                // W63 wraps eligible two-atom joins after stats-aware
+                // ordering. The chain node and its captured fallback must
+                // agree on the build-side choice.
+                assert!(matches!(**left, RirNode::Scan { rel } if rel == foo_id));
+                assert!(matches!(**right, RirNode::Scan { rel } if rel == edge_id));
+
+                let mut fallback_node = fallback.as_ref();
+                while let RirNode::Project { input, .. } = fallback_node {
+                    fallback_node = input;
+                }
+                match fallback_node {
+                    RirNode::Join { left, right, .. } => {
+                        assert!(matches!(**left, RirNode::Scan { rel } if rel == foo_id));
+                        assert!(matches!(**right, RirNode::Scan { rel } if rel == edge_id));
+                    }
+                    other => panic!("Expected ChainJoin fallback Join node, got {:?}", other),
+                }
+            }
             RirNode::Join { left, right, .. } => {
                 // Prefer building on the smaller relation (right/build side).
                 assert!(matches!(**left, RirNode::Scan { rel } if rel == foo_id));

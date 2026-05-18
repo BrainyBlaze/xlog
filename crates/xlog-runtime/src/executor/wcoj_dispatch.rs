@@ -1362,6 +1362,7 @@ impl Executor {
             Some(WcojKeyWidth::FourByte)
         );
 
+        let mut used_nested_loop = false;
         let joined = if four_byte {
             let left_sorted = self
                 .provider
@@ -1390,6 +1391,7 @@ impl Executor {
                     )
                 }
             } else if in_threshold {
+                used_nested_loop = true;
                 self.provider.nested_loop_join_v2_inner_u32_1key(
                     left,
                     right,
@@ -1430,6 +1432,9 @@ impl Executor {
             num_left.saturating_mul(num_right),
             joined.num_rows(),
         );
+        if used_nested_loop {
+            self.nested_loop_dispatch_count += 1;
+        }
         self.w63_chain_dispatch_count += 1;
         Ok(Some(projected))
     }

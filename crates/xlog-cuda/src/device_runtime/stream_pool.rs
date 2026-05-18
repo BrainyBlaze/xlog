@@ -31,6 +31,25 @@ use crate::CudaDevice;
 /// so 16 leaves substantial headroom without burning device-state on
 /// idle streams.
 pub const DEFAULT_MAX_STREAMS: usize = 16;
+pub const ENV_WCOJ_POOL_MB_PER_STREAM: &str = "XLOG_WCOJ_POOL_MB_PER_STREAM";
+pub const DEFAULT_POOL_MB_PER_STREAM: u64 = 256;
+
+pub fn configured_pool_mb_per_stream() -> u64 {
+    std::env::var(ENV_WCOJ_POOL_MB_PER_STREAM)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|mb| *mb > 0)
+        .unwrap_or(DEFAULT_POOL_MB_PER_STREAM)
+}
+
+pub fn configured_pool_bytes_per_stream() -> u64 {
+    configured_pool_mb_per_stream().saturating_mul(1024 * 1024)
+}
+
+pub fn planned_pool_budget_bytes(arms: u64, streams: u64) -> u64 {
+    arms.saturating_mul(streams)
+        .saturating_mul(configured_pool_bytes_per_stream())
+}
 
 /// Errors returned by [`StreamPool::acquire`]. Both variants are hard
 /// failures; callers must not silently substitute [`StreamId::DEFAULT`].
@@ -64,6 +83,7 @@ impl std::error::Error for StreamPoolError {}
 pub struct StreamPool {
     device: Arc<CudaDevice>,
     max_streams: usize,
+    pool_bytes_per_stream: u64,
     /// Stream handles indexed by [`StreamId`]. The slot at index 0 is
     /// reserved for [`StreamId::DEFAULT`] and lazily-initialized to
     /// the device's default stream so synchronous codepaths keep
@@ -77,6 +97,7 @@ impl StreamPool {
         Self {
             device,
             max_streams: max_streams.max(1),
+            pool_bytes_per_stream: configured_pool_bytes_per_stream(),
             streams: Mutex::new(Vec::new()),
         }
     }
@@ -150,11 +171,19 @@ impl StreamPool {
     pub fn max_streams(&self) -> usize {
         self.max_streams
     }
+
+    /// Planned per-stream pool budget, in bytes, from
+    /// `XLOG_WCOJ_POOL_MB_PER_STREAM` or the 256 MiB default.
+    pub fn pool_bytes_per_stream(&self) -> u64 {
+        self.pool_bytes_per_stream
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn try_device() -> Option<Arc<CudaDevice>> {
         CudaDevice::new(0).ok().map(Arc::new)
@@ -216,5 +245,33 @@ mod tests {
         };
         let pool = StreamPool::with_defaults(device);
         assert!(pool.resolve(StreamId(99)).is_none());
+    }
+
+    #[test]
+    fn pool_mb_per_stream_env_overrides_default() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let old = std::env::var(ENV_WCOJ_POOL_MB_PER_STREAM).ok();
+        std::env::set_var(ENV_WCOJ_POOL_MB_PER_STREAM, "128");
+        assert_eq!(configured_pool_mb_per_stream(), 128);
+        match old {
+            Some(value) => std::env::set_var(ENV_WCOJ_POOL_MB_PER_STREAM, value),
+            None => std::env::remove_var(ENV_WCOJ_POOL_MB_PER_STREAM),
+        }
+    }
+
+    #[test]
+    fn planned_pool_budget_uses_default_4_by_4_contract() {
+        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
+        let old = std::env::var(ENV_WCOJ_POOL_MB_PER_STREAM).ok();
+        std::env::remove_var(ENV_WCOJ_POOL_MB_PER_STREAM);
+        assert_eq!(configured_pool_mb_per_stream(), DEFAULT_POOL_MB_PER_STREAM);
+        assert_eq!(
+            planned_pool_budget_bytes(4, 4),
+            4_u64 * 4 * 256 * 1024 * 1024
+        );
+        match old {
+            Some(value) => std::env::set_var(ENV_WCOJ_POOL_MB_PER_STREAM, value),
+            None => std::env::remove_var(ENV_WCOJ_POOL_MB_PER_STREAM),
+        }
     }
 }

@@ -193,7 +193,27 @@ impl Executor {
                                 let merged = self.provider.union_gpu(existing, &chain_result)?;
                                 self.store_put(&rule.head, merged);
                             } else {
-                                self.store_put(&rule.head, chain_result);
+                                let key_cols: Vec<usize> = (0..chain_result.arity()).collect();
+                                let deduped = if chain_result.is_empty() {
+                                    chain_result
+                                } else {
+                                    let dedup_input_rows = chain_result.num_rows();
+                                    let start = self.profiler.start_op();
+                                    let deduped = self.provider.dedup(&chain_result, &key_cols)?;
+                                    if let Some(start) = start {
+                                        let mem = self.provider.memory().allocated_bytes();
+                                        self.profiler.record_op(
+                                            "dedup",
+                                            dedup_input_rows,
+                                            deduped.num_rows(),
+                                            start,
+                                            mem,
+                                        );
+                                        self.profiler.record_peak_memory(mem);
+                                    }
+                                    deduped
+                                };
+                                self.store_put(&rule.head, deduped);
                             }
                             continue;
                         }
