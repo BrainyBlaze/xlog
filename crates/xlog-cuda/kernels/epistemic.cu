@@ -321,6 +321,115 @@ extern "C" __global__ void epistemic_populate_model_membership_from_tuple_source
     }
 }
 
+static __device__ uint8_t epistemic_tuple_key_row_matches_arity3(
+    const uint8_t* __restrict__ tuple_key_col0,
+    uint32_t tuple_key_col0_width,
+    uint64_t expected_key_col0_bits,
+    uint8_t expected_key_col0_type_code,
+    const uint8_t* __restrict__ tuple_key_col1,
+    uint32_t tuple_key_col1_width,
+    uint64_t expected_key_col1_bits,
+    uint8_t expected_key_col1_type_code,
+    const uint8_t* __restrict__ tuple_key_col2,
+    uint32_t tuple_key_col2_width,
+    uint64_t expected_key_col2_bits,
+    uint8_t expected_key_col2_type_code,
+    uint32_t row
+) {
+    uint8_t col0_matches = epistemic_tuple_key_cell_matches(
+        tuple_key_col0,
+        tuple_key_col0_width,
+        row,
+        expected_key_col0_bits,
+        expected_key_col0_type_code
+    );
+    uint8_t col1_matches = epistemic_tuple_key_cell_matches(
+        tuple_key_col1,
+        tuple_key_col1_width,
+        row,
+        expected_key_col1_bits,
+        expected_key_col1_type_code
+    );
+    uint8_t col2_matches = epistemic_tuple_key_cell_matches(
+        tuple_key_col2,
+        tuple_key_col2_width,
+        row,
+        expected_key_col2_bits,
+        expected_key_col2_type_code
+    );
+    return (col0_matches != 0u && col1_matches != 0u && col2_matches != 0u) ? 1u : 0u;
+}
+
+extern "C" __global__ void epistemic_populate_model_membership_from_tuple_source_arity3_u8(
+    uint32_t literal_count,
+    uint32_t candidate_count,
+    uint32_t reduction_count,
+    uint32_t models_per_reduction,
+    uint32_t world_stride,
+    uint32_t literal_index,
+    uint32_t reduction_index,
+    const uint32_t* __restrict__ tuple_source_row_count,
+    const uint8_t* __restrict__ tuple_key_col0,
+    uint32_t tuple_key_col0_width,
+    uint64_t expected_key_col0_bits,
+    uint8_t expected_key_col0_type_code,
+    const uint8_t* __restrict__ tuple_key_col1,
+    uint32_t tuple_key_col1_width,
+    uint64_t expected_key_col1_bits,
+    uint8_t expected_key_col1_type_code,
+    const uint8_t* __restrict__ tuple_key_col2,
+    uint32_t tuple_key_col2_width,
+    uint64_t expected_key_col2_bits,
+    uint8_t expected_key_col2_type_code,
+    const uint8_t* __restrict__ candidate_assumptions,
+    const uint8_t* __restrict__ world_views,
+    uint8_t* __restrict__ model_membership,
+    uint32_t* __restrict__ rejection_reasons
+) {
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t total = candidate_count * models_per_reduction;
+    if (gid >= total) return;
+    if (literal_index >= literal_count || reduction_index >= reduction_count) return;
+
+    uint32_t candidate = gid / models_per_reduction;
+    uint32_t model = gid - candidate * models_per_reduction;
+    uint32_t membership_index =
+        (((candidate * reduction_count + reduction_index) * models_per_reduction + model)
+            * literal_count)
+        + literal_index;
+
+    uint32_t tuple_rows = tuple_source_row_count[0];
+    uint8_t active_world = world_views[candidate * world_stride];
+    uint8_t accepted_so_far = (rejection_reasons[candidate] == 0u) ? 1u : 0u;
+    uint8_t has_tuple_source =
+        (model < tuple_rows)
+            ? epistemic_tuple_key_row_matches_arity3(
+                  tuple_key_col0,
+                  tuple_key_col0_width,
+                  expected_key_col0_bits,
+                  expected_key_col0_type_code,
+                  tuple_key_col1,
+                  tuple_key_col1_width,
+                  expected_key_col1_bits,
+                  expected_key_col1_type_code,
+                  tuple_key_col2,
+                  tuple_key_col2_width,
+                  expected_key_col2_bits,
+                  expected_key_col2_type_code,
+                  model
+              )
+            : 0u;
+    uint8_t candidate_bit = candidate_assumptions[candidate * literal_count + literal_index];
+    model_membership[membership_index] =
+        (active_world != 0u && accepted_so_far != 0u && has_tuple_source != 0u)
+            ? candidate_bit
+            : 0u;
+
+    if (model == 0u && active_world == 0u && rejection_reasons[candidate] == 0u) {
+        rejection_reasons[candidate] = 4u;
+    }
+}
+
 extern "C" __global__ void epistemic_validate_world_views_u8(
     uint32_t literal_count,
     uint32_t candidate_count,

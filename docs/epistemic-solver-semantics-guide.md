@@ -50,17 +50,17 @@ CUDA-event elapsed timing for world-view/rejection staging.
 writes, and CUDA-event elapsed timing for candidate-buffer validation.
 `Executor::populate_epistemic_gpu_model_membership_from_tuple_sources` launches
 `epistemic_populate_model_membership_from_tuple_source_u8` for zero-arity
-bindings and arity-specific tuple-key kernels for arity-one and arity-two
-bindings. It records `EpistemicGpuModelMembershipTrace` with stable tuple
+bindings and arity-specific tuple-key kernels for arity-one, arity-two, and
+arity-three bindings. It records `EpistemicGpuModelMembershipTrace` with stable tuple
 source row-count reads, tuple-key column device reads, zero reduced-output
 row-count reads, zero host writes, and CUDA-event elapsed timing. This slice
 preserves source tuple terms in EIR/GPU-plan metadata and certifies fixed arity
-0-2 reduced stable-model tuple-source staging from named GPU relation buffers
+0-3 reduced stable-model tuple-source staging from named GPU relation buffers
 and existing `CudaBuffer` columns. Ground tuple keys are encoded as expected
 raw bits plus scalar type codes and compared against existing relation-cell
-bytes on device for the current model-slot row in arity-one and arity-two
-kernels. Variable-bound keys, anonymous keys, aggregate keys, arbitrary arity,
-and full semantic parity still fail closed.
+bytes on device for the current model-slot row in arity-one, arity-two, and
+arity-three kernels. Variable-bound keys, anonymous keys, aggregate keys,
+arbitrary arity, and full semantic parity still fail closed.
 `Executor::validate_epistemic_gpu_world_views` launches the
 `epistemic_validate_world_views_u8` CUDA kernel and records
 `EpistemicGpuWorldViewValidationTrace` with one kernel launch, zero host
@@ -90,7 +90,7 @@ accepted-candidate, final-result flag, and final tuple materialization-staging
 kernel launches. It also snapshots provider host-transfer counters around the hot path
 and records `EpistemicGpuTransferBudgetTrace`, which rejects tracked data-plane
 H2D/D2H deltas instead of resetting shared telemetry. That is still incomplete
-for the epistemic hot path; fixed arity 0-2 tuple-source staging is GPU-backed
+for the epistemic hot path; fixed arity 0-3 tuple-source staging is GPU-backed
 over existing relation buffers with row-scoped ground key comparison, but
 bound-variable tuple-key matching, arbitrary arity, full world-view semantics,
 solver coupling, and probabilistic production-path reuse do not dispatch yet.

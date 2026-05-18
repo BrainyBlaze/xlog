@@ -463,6 +463,7 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "epistemic_populate_model_membership_from_tuple_source_u8",
             "epistemic_populate_model_membership_from_tuple_source_arity1_u8",
             "epistemic_populate_model_membership_from_tuple_source_arity2_u8",
+            "epistemic_populate_model_membership_from_tuple_source_arity3_u8",
             "epistemic_validate_world_views_u8",
             "epistemic_materialize_accepted_candidates_u8",
             "epistemic_materialize_final_result_flags_u8",
