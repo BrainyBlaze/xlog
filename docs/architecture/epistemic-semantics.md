@@ -141,11 +141,15 @@ errors so the accepted path cannot silently use empty host-side structures.
 rejects nonzero forbidden CPU fallback counters, and records the reduced
 runtime rule count plus WCOJ route surfaces, including K-clique WCOJ plans,
 planned-hash routes, sorted-layout requirements, and helper-splitting specs.
+`EpistemicGpuRuntimeCounters` snapshots the existing production WCOJ counters
+around a future epistemic dispatch, and
+`EpistemicGpuRuntimeWcojCertification` rejects preflight-only WCOJ metadata
+when required K-clique dispatch counters do not advance.
 
 This workspace is still pre-kernel plumbing. It proves the buffer categories are
-allocatable and inspectable on the runtime side; it does not yet populate them,
-launch Generate-Propagate-Test kernels, or produce certification launch
-counters.
+allocatable and inspectable on the runtime side and that WCOJ certification is
+tied to actual counter deltas; it does not yet populate buffers, launch
+Generate-Propagate-Test kernels, or produce epistemic kernel timing evidence.
 
 ## G91 Compatibility Fixture Semantics
 

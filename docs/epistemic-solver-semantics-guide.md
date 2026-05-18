@@ -32,8 +32,10 @@ Generate-Propagate-Test kernels or validate world views.
 device-buffer allocations for candidate assumptions, world views, model
 membership, and rejection reasons. `EpistemicGpuRuntimePreflight` consumes an
 `EpistemicExecutablePlan`, computes the workspace layout, rejects nonzero CPU
-fallback counters, and records WCOJ route/helper metadata before launch. That is
-pre-kernel plumbing only; no epistemic runtime dispatch exists yet.
+fallback counters, and records WCOJ route/helper metadata before launch.
+`EpistemicGpuRuntimeWcojCertification` then requires actual production WCOJ
+counter deltas before WCOJ evidence can be certified. That is still pre-kernel
+plumbing; no epistemic runtime dispatch exists yet.
 
 ## GPU And WCOJ Scope
 
@@ -53,7 +55,8 @@ Those paths are required G090_GPU/G090_SOLVER/G090_PROB work before v0.9.0 can
 close. Existing non-epistemic programs continue to use the normal parser,
 stratifier, RIR lowering, runtime, and WCOJ infrastructure where eligible. The
 current epistemic branch proves semantic boundary, fixture contracts, GPU-plan,
-reduced-runtime-plan, workspace, and runtime-preflight contracts only.
+reduced-runtime-plan, workspace, runtime-preflight, and dispatch-counter guard
+contracts only.
 
 The reduced-runtime-plan contract reuses the Goal-038-B WCOJ surfaces. K-clique
 epistemic reductions must pass through `MultiwayPlan`, `KCliqueVariableOrder`,

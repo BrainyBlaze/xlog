@@ -8,7 +8,9 @@ use xlog_ir::{
     EpistemicWcojReductionStatus, ExecutionPlan, RirMeta, Scc,
 };
 use xlog_runtime::{
-    EpistemicGpuRuntimePreflight, EpistemicGpuWorkspaceCapacities, EpistemicGpuWorkspaceLayout,
+    EpistemicGpuRuntimeCounters, EpistemicGpuRuntimePreflight,
+    EpistemicGpuRuntimeWcojCertification, EpistemicGpuWorkspaceCapacities,
+    EpistemicGpuWorkspaceLayout,
 };
 
 #[test]
@@ -125,6 +127,65 @@ fn runtime_preflight_rejects_nonzero_cpu_fallback_counters() {
         }
         other => panic!("expected typed fallback counter error, got {other:?}"),
     }
+}
+
+#[test]
+fn runtime_wcoj_certification_rejects_preflight_only_metadata() {
+    let executable = executable_with_kclique_wcoj_plan();
+    let preflight = EpistemicGpuRuntimePreflight::for_executable_plan(
+        &executable,
+        EpistemicGpuWorkspaceCapacities {
+            max_candidates: 8,
+            max_worlds: 4,
+            max_models_per_reduction: 6,
+        },
+    )
+    .unwrap();
+
+    let before = EpistemicGpuRuntimeCounters::default();
+    let after = EpistemicGpuRuntimeCounters::default();
+    let delta = after.saturating_delta_since(before);
+
+    assert_eq!(
+        EpistemicGpuRuntimeWcojCertification::for_preflight_and_delta(&preflight, &delta),
+        EpistemicGpuRuntimeWcojCertification::MissingRequiredWcojDispatch {
+            required_kclique_plans: 1,
+            observed_wcoj_dispatches: 0,
+        }
+    );
+}
+
+#[test]
+fn runtime_wcoj_certification_accepts_actual_kclique_dispatch_delta() {
+    let executable = executable_with_kclique_wcoj_plan();
+    let preflight = EpistemicGpuRuntimePreflight::for_executable_plan(
+        &executable,
+        EpistemicGpuWorkspaceCapacities {
+            max_candidates: 8,
+            max_worlds: 4,
+            max_models_per_reduction: 6,
+        },
+    )
+    .unwrap();
+
+    let before = EpistemicGpuRuntimeCounters::default();
+    let after = EpistemicGpuRuntimeCounters {
+        wcoj_clique5_dispatch_count: 1,
+        kclique_metadata_build_count: 1,
+        wcoj_layout_sort_invocation_count: 2,
+        ..EpistemicGpuRuntimeCounters::default()
+    };
+    let delta = after.saturating_delta_since(before);
+
+    assert_eq!(
+        EpistemicGpuRuntimeWcojCertification::for_preflight_and_delta(&preflight, &delta),
+        EpistemicGpuRuntimeWcojCertification::Certified {
+            observed_wcoj_dispatches: 1,
+            observed_kclique_dispatches: 1,
+            observed_layout_sorts: 2,
+            observed_metadata_builds: 1,
+        }
+    );
 }
 
 fn epistemic_literal(predicate: &str, op: EirEpistemicOp) -> EirEpistemicLiteral {

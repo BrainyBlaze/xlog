@@ -162,7 +162,168 @@ pub struct EpistemicGpuPreparedExecution {
     pub workspace: EpistemicGpuWorkspace,
 }
 
+/// Runtime counters relevant to epistemic GPU certification.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct EpistemicGpuRuntimeCounters {
+    /// Successful triangle WCOJ dispatches installed by the executor.
+    pub wcoj_triangle_dispatch_count: u64,
+    /// Successful 4-cycle WCOJ dispatches installed by the executor.
+    pub wcoj_4cycle_dispatch_count: u64,
+    /// Successful Goal-039 chain dispatches installed by the executor.
+    pub w63_chain_dispatch_count: u64,
+    /// Successful K=5 clique WCOJ dispatches installed by the executor.
+    pub wcoj_clique5_dispatch_count: u64,
+    /// Successful K=6 clique WCOJ dispatches installed by the executor.
+    pub wcoj_clique6_dispatch_count: u64,
+    /// Successful K=7 clique WCOJ dispatches installed by the executor.
+    pub wcoj_clique7_dispatch_count: u64,
+    /// Successful K=8 clique WCOJ dispatches installed by the executor.
+    pub wcoj_clique8_dispatch_count: u64,
+    /// Provider-level HG triangle dispatch counter.
+    pub provider_wcoj_triangle_hg_dispatch_count: u64,
+    /// WCOJ layout-sort invocations observed by the provider.
+    pub wcoj_layout_sort_invocation_count: u64,
+    /// WCOJ layout fast-path hits observed by the provider.
+    pub wcoj_layout_fast_path_hit_count: u64,
+    /// K-clique metadata builds observed by the provider.
+    pub kclique_metadata_build_count: u64,
+}
+
+impl EpistemicGpuRuntimeCounters {
+    /// Saturating delta from an earlier snapshot.
+    pub fn saturating_delta_since(self, before: Self) -> Self {
+        Self {
+            wcoj_triangle_dispatch_count: self
+                .wcoj_triangle_dispatch_count
+                .saturating_sub(before.wcoj_triangle_dispatch_count),
+            wcoj_4cycle_dispatch_count: self
+                .wcoj_4cycle_dispatch_count
+                .saturating_sub(before.wcoj_4cycle_dispatch_count),
+            w63_chain_dispatch_count: self
+                .w63_chain_dispatch_count
+                .saturating_sub(before.w63_chain_dispatch_count),
+            wcoj_clique5_dispatch_count: self
+                .wcoj_clique5_dispatch_count
+                .saturating_sub(before.wcoj_clique5_dispatch_count),
+            wcoj_clique6_dispatch_count: self
+                .wcoj_clique6_dispatch_count
+                .saturating_sub(before.wcoj_clique6_dispatch_count),
+            wcoj_clique7_dispatch_count: self
+                .wcoj_clique7_dispatch_count
+                .saturating_sub(before.wcoj_clique7_dispatch_count),
+            wcoj_clique8_dispatch_count: self
+                .wcoj_clique8_dispatch_count
+                .saturating_sub(before.wcoj_clique8_dispatch_count),
+            provider_wcoj_triangle_hg_dispatch_count: self
+                .provider_wcoj_triangle_hg_dispatch_count
+                .saturating_sub(before.provider_wcoj_triangle_hg_dispatch_count),
+            wcoj_layout_sort_invocation_count: self
+                .wcoj_layout_sort_invocation_count
+                .saturating_sub(before.wcoj_layout_sort_invocation_count),
+            wcoj_layout_fast_path_hit_count: self
+                .wcoj_layout_fast_path_hit_count
+                .saturating_sub(before.wcoj_layout_fast_path_hit_count),
+            kclique_metadata_build_count: self
+                .kclique_metadata_build_count
+                .saturating_sub(before.kclique_metadata_build_count),
+        }
+    }
+
+    /// Total WCOJ dispatches installed by the executor.
+    pub fn wcoj_dispatch_count(&self) -> u64 {
+        self.wcoj_triangle_dispatch_count
+            + self.wcoj_4cycle_dispatch_count
+            + self.wcoj_clique_dispatch_count()
+    }
+
+    /// Total K-clique WCOJ dispatches installed by the executor.
+    pub fn wcoj_clique_dispatch_count(&self) -> u64 {
+        self.wcoj_clique5_dispatch_count
+            + self.wcoj_clique6_dispatch_count
+            + self.wcoj_clique7_dispatch_count
+            + self.wcoj_clique8_dispatch_count
+    }
+}
+
+/// WCOJ certification status for an epistemic runtime dispatch attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EpistemicGpuRuntimeWcojCertification {
+    /// The preflight did not require a K-clique WCOJ dispatch.
+    NotRequired {
+        /// Observed executor-installed WCOJ dispatches.
+        observed_wcoj_dispatches: u64,
+    },
+    /// Runtime counters prove the required WCOJ dispatch happened.
+    Certified {
+        /// Observed executor-installed WCOJ dispatches.
+        observed_wcoj_dispatches: u64,
+        /// Observed executor-installed K-clique dispatches.
+        observed_kclique_dispatches: u64,
+        /// Observed provider WCOJ layout-sort invocations.
+        observed_layout_sorts: u64,
+        /// Observed provider K-clique metadata builds.
+        observed_metadata_builds: u64,
+    },
+    /// The plan had K-clique WCOJ obligations, but counters did not advance.
+    MissingRequiredWcojDispatch {
+        /// K-clique WCOJ plans found during preflight.
+        required_kclique_plans: usize,
+        /// Observed executor-installed WCOJ dispatches.
+        observed_wcoj_dispatches: u64,
+    },
+}
+
+impl EpistemicGpuRuntimeWcojCertification {
+    /// Compare static preflight obligations with runtime counter deltas.
+    pub fn for_preflight_and_delta(
+        preflight: &EpistemicGpuRuntimePreflight,
+        delta: &EpistemicGpuRuntimeCounters,
+    ) -> Self {
+        let observed_wcoj_dispatches = delta.wcoj_dispatch_count();
+        let observed_kclique_dispatches = delta.wcoj_clique_dispatch_count();
+
+        if preflight.kclique_wcoj_plan_count == 0 {
+            return Self::NotRequired {
+                observed_wcoj_dispatches,
+            };
+        }
+
+        if observed_kclique_dispatches < preflight.kclique_wcoj_plan_count as u64 {
+            return Self::MissingRequiredWcojDispatch {
+                required_kclique_plans: preflight.kclique_wcoj_plan_count,
+                observed_wcoj_dispatches,
+            };
+        }
+
+        Self::Certified {
+            observed_wcoj_dispatches,
+            observed_kclique_dispatches,
+            observed_layout_sorts: delta.wcoj_layout_sort_invocation_count,
+            observed_metadata_builds: delta.kclique_metadata_build_count,
+        }
+    }
+}
+
 impl Executor {
+    /// Snapshot runtime counters used by epistemic GPU certification.
+    pub fn epistemic_gpu_runtime_counters(&self) -> EpistemicGpuRuntimeCounters {
+        EpistemicGpuRuntimeCounters {
+            wcoj_triangle_dispatch_count: self.wcoj_triangle_dispatch_count(),
+            wcoj_4cycle_dispatch_count: self.wcoj_4cycle_dispatch_count(),
+            w63_chain_dispatch_count: self.w63_chain_dispatch_count(),
+            wcoj_clique5_dispatch_count: self.wcoj_clique5_dispatch_count(),
+            wcoj_clique6_dispatch_count: self.wcoj_clique6_dispatch_count(),
+            wcoj_clique7_dispatch_count: self.wcoj_clique7_dispatch_count(),
+            wcoj_clique8_dispatch_count: self.wcoj_clique8_dispatch_count(),
+            provider_wcoj_triangle_hg_dispatch_count: self
+                .provider
+                .wcoj_triangle_hg_dispatch_count(),
+            wcoj_layout_sort_invocation_count: self.provider.wcoj_layout_sort_invocation_count(),
+            wcoj_layout_fast_path_hit_count: self.provider.wcoj_layout_fast_path_hit_count(),
+            kclique_metadata_build_count: self.provider.kclique_metadata_build_count(),
+        }
+    }
+
     /// Allocate GPU-resident buffers required by an epistemic GPU plan.
     pub fn allocate_epistemic_gpu_workspace(
         &self,
