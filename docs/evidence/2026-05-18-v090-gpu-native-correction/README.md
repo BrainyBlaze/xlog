@@ -22,7 +22,7 @@ release gate.
 | World views | `EpistemicWorldView` fixtures test `know`, `possible`, and `not know`. | ORACLE ONLY until world views are generated/validated on GPU. |
 | GPT | CPU fixture records guesses, reduced models, accepted world views, and rejection reasons. | PARTIAL: candidate generation, propagation staging, candidate-buffer validation, arity 0-3 tuple-source model-membership staging with row-scoped ground key comparison, bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, and final tuple materialization use GPU-resident buffers; bound-variable and arbitrary-arity tuple matching still do not. |
 | Splitting | CPU split/recompose fixtures pass. | PARTIAL until valid split components execute through GPU-native subplans. |
-| Solver | `SolverService` is a CPU fixture facade with SAT/UNSAT/UNKNOWN/TIMEOUT/Optimal statuses; `GpuSolverProductionAdapter` is a thin SAT/UNSAT adapter over the existing `GpuCdclSolver` production path with zero CPU search counters. | PARTIAL for SAT/UNSAT production reuse; BLOCKED until GPU-native MaxSAT, portfolio execution, and accepted candidate lifecycle traces are wired to epistemic candidates. |
+| Solver | `SolverService` is a CPU fixture facade with SAT/UNSAT/UNKNOWN/TIMEOUT/Optimal statuses; `GpuSolverProductionAdapter` is a thin SAT/UNSAT adapter over the existing `GpuCdclSolver` production path with zero CPU search counters; `production_capabilities` explicitly blocks GPU-native MaxSAT and SAT/MaxSAT portfolio execution. | PARTIAL for SAT/UNSAT production reuse; BLOCKED until GPU-native MaxSAT, portfolio execution, and accepted candidate lifecycle traces are wired to epistemic candidates. |
 | Probabilistic | `AcceptedWorldViewEvidence` guards evidence conditioning in fixtures; `EpistemicProbProductionAdapter` requires accepted evidence before routing into the existing `ExactDdnnfProgram` GPU exact/provenance path and records zero CPU recompute counters. | PARTIAL for production exact-path reuse; BLOCKED until accepted runtime world views are wired to probabilistic execution end to end. |
 | Certification | Semantic-oracle and GPU-plan contract tests can pass locally. | BLOCKED until full accepted-execution GPU timing, WCOJ evidence, and zero CPU fallback counters exist. |
 
@@ -66,8 +66,9 @@ The next production slice should start at the lowering/runtime boundary:
    machinery, including helper-splitting evidence where applicable.
 6. Replace CPU solver fixture search in accepted execution with GPU-native
    SAT/MaxSAT/portfolio services or a documented GPU-backed adapter. PARTIAL
-   for SAT/UNSAT through `GpuSolverProductionAdapter`; MaxSAT, portfolio, and
-   accepted candidate wiring remain open.
+   for SAT/UNSAT through `GpuSolverProductionAdapter`; `production_capabilities`
+   blocks MaxSAT and SAT/MaxSAT portfolio until existing GPU production paths are
+   available, and accepted candidate wiring remains open.
 7. Feed accepted world-view evidence into the existing GPU-native
    exact/provenance path and report zero CPU-only probability recomputation.
    PARTIAL through `EpistemicProbProductionAdapter`; accepted runtime wiring and
@@ -83,7 +84,7 @@ The next production slice should start at the lowering/runtime boundary:
 | `cargo test -p xlog-logic --test test_epistemic_executable_plan` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 44 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_eir --test test_epistemic_g91 --test test_epistemic_faeel --test test_epistemic_gpt --test test_epistemic_split --test test_epistemic_world_view --test test_epistemic_examples` | PASS, 23 passed, 0 failed |
-| `cargo test -p xlog-solve --test gpu_solver_production_reuse` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-solve --test gpu_solver_production_reuse` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-solve --test solver_service_semantics` | PASS, 5 passed, 0 failed |
 | `cargo test -p xlog-solve --test no_dtoh_in_gpu_cdcl` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-prob --test epistemic_prob_production_reuse` | PASS, 1 passed, 0 failed |

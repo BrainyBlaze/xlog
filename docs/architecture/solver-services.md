@@ -127,6 +127,8 @@ The adapter:
 - dispatches workspace-backed UNSAT through
   `solve_expect_unsat_with_branch_limit_ws`;
 - exposes `GpuSolverProductionTrace` counters for GPU CDCL SAT/UNSAT calls;
+- exposes `production_capabilities`, where GPU CDCL SAT/UNSAT is `Available`
+  and GPU-native MaxSAT plus SAT/MaxSAT portfolio execution are `Blocked`;
 - exposes hard-zero CPU search counters:
   `cpu_assignment_enumerations` and `cpu_maxsat_enumerations`.
 
@@ -135,6 +137,10 @@ enumerate assignments on CPU, and does not introduce an epistemic-only search
 path. It is also not full `G090_SOLVER` closure: MaxSAT, portfolio solving,
 epistemic candidate assumption lifecycle, and accepted-world-view integration
 still have to be wired through GPU-native production paths.
+
+The capability report is intentionally fail-closed. Until a real GPU-native
+MaxSAT and SAT/MaxSAT portfolio production path exists in `xlog-solve`, the CPU
+semantic-oracle service and CPU CLS solver cannot satisfy those closure metrics.
 
 ## v0.9 Semantic-Oracle Solver Service Semantics
 

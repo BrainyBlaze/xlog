@@ -21,3 +21,24 @@ fn production_solver_adapter_reuses_gpu_cdcl_not_cpu_oracle() {
     assert!(!production.contains("SolverService::new"));
     assert!(!production.contains("solve_assignments"));
 }
+
+#[test]
+fn production_solver_capabilities_block_missing_maxsat_and_portfolio_paths() {
+    let lib = include_str!("../src/lib.rs");
+    let mut production_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    production_path.push("src");
+    production_path.push("production.rs");
+    let production = fs::read_to_string(&production_path).unwrap_or_default();
+
+    assert!(lib.contains("GpuSolverProductionCapabilities"));
+    assert!(lib.contains("GpuSolverProductionCapabilityStatus"));
+    assert!(production.contains("pub fn production_capabilities()"));
+    assert!(production.contains("gpu_cdcl_sat_unsat"));
+    assert!(production.contains("gpu_maxsat"));
+    assert!(production.contains("gpu_portfolio_sat_maxsat"));
+    assert!(production.contains("GpuSolverProductionCapabilityStatus::Available"));
+    assert!(production.contains("GpuSolverProductionCapabilityStatus::Blocked"));
+    assert!(production.contains("GPU-native MaxSAT production path is not implemented"));
+    assert!(production.contains("GPU portfolio SAT/MaxSAT production path is not implemented"));
+    assert!(production.contains("cpu_oracle_solver_allowed: false"));
+}

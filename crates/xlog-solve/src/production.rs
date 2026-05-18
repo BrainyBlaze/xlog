@@ -12,6 +12,44 @@ use xlog_cuda::CudaKernelProvider;
 
 use crate::{GpuCdclConfig, GpuCdclSolver, GpuCdclWorkspace, GpuCnf};
 
+/// Production capability status for solver paths required by v0.9.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuSolverProductionCapabilityStatus {
+    /// Existing GPU-native production path is available.
+    Available,
+    /// Required GPU-native production path is not implemented.
+    Blocked,
+}
+
+/// Capability report for the solver production adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuSolverProductionCapabilities {
+    /// Complete SAT/UNSAT execution through the existing GPU CDCL verifier.
+    pub gpu_cdcl_sat_unsat: GpuSolverProductionCapabilityStatus,
+    /// GPU-native MaxSAT production execution.
+    pub gpu_maxsat: GpuSolverProductionCapabilityStatus,
+    /// GPU SAT/MaxSAT portfolio production execution.
+    pub gpu_portfolio_sat_maxsat: GpuSolverProductionCapabilityStatus,
+    /// Whether the CPU semantic-oracle solver may satisfy production metrics.
+    pub cpu_oracle_solver_allowed: bool,
+    /// Blocker reason for GPU-native MaxSAT.
+    pub gpu_maxsat_blocker: &'static str,
+    /// Blocker reason for GPU SAT/MaxSAT portfolio execution.
+    pub gpu_portfolio_blocker: &'static str,
+}
+
+/// Return the current production solver capability report.
+pub fn production_capabilities() -> GpuSolverProductionCapabilities {
+    GpuSolverProductionCapabilities {
+        gpu_cdcl_sat_unsat: GpuSolverProductionCapabilityStatus::Available,
+        gpu_maxsat: GpuSolverProductionCapabilityStatus::Blocked,
+        gpu_portfolio_sat_maxsat: GpuSolverProductionCapabilityStatus::Blocked,
+        cpu_oracle_solver_allowed: false,
+        gpu_maxsat_blocker: "GPU-native MaxSAT production path is not implemented",
+        gpu_portfolio_blocker: "GPU portfolio SAT/MaxSAT production path is not implemented",
+    }
+}
+
 /// Trace counters proving the production adapter stayed on the GPU CDCL path.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GpuSolverProductionTrace {

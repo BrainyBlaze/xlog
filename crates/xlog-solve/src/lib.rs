@@ -47,7 +47,10 @@ mod solver;
 pub use gpu_cdcl::{GpuCdclConfig, GpuCdclRawOutput, GpuCdclSolver, GpuCdclWorkspace};
 pub use gpu_cnf::GpuCnf;
 pub use instance::{Clause, Literal, Objective, SolveInstance};
-pub use production::{GpuSolverProductionAdapter, GpuSolverProductionTrace};
+pub use production::{
+    production_capabilities, GpuSolverProductionAdapter, GpuSolverProductionCapabilities,
+    GpuSolverProductionCapabilityStatus, GpuSolverProductionTrace,
+};
 pub use proof::{compute_checksum, SolveProof, SolveResult, SolveStats, SolveStatus};
 pub use service::{
     LearnedClauseTransfer, SolverPortfolioStatus, SolverService, SolverServiceBudget,
