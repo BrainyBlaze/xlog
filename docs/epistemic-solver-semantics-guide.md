@@ -104,6 +104,27 @@ current epistemic branch proves semantic boundary, fixture contracts, GPU-plan,
 reduced-runtime-plan, workspace, runtime-preflight, dispatch-counter guard, and
 reduced-plan execution-trace contracts plus bounded staging kernels only.
 
+## Prior Goal Reuse
+
+The current v0.9 branch reuses prior closure evidence only at the boundaries the
+runtime actually touches:
+
+- Goal 038: reuse the audit discipline. Historical proxy gates, superseded
+  evidence, and board/tag actions are not treated as current v0.9 closure
+  evidence.
+- Goal 038-B: reuse the production K-clique WCOJ path: `MultiwayPlan`,
+  `KCliqueVariableOrder`, sorted-layout requirements, runtime histogram
+  metadata, cost-gated hash routing, and helper-splitting specs.
+- Goal 039: reuse the existing production substrate for chain dispatch, K7/K8
+  templates, sort labels, DLPack/zero-transfer discipline, CUDA Graphs, and DTS
+  replay certification only when the epistemic runtime path actually invokes
+  those surfaces.
+
+Today the epistemic runtime consumes 38-B route metadata and fails closed when a
+WCOJ-required K-clique reduction lacks production counter deltas. It does not
+yet certify a successful epistemic WCOJ dispatch through the full planner,
+layout, skew-scheduling, and helper-splitting path.
+
 The reduced-runtime-plan contract reuses the Goal-038-B WCOJ surfaces. K-clique
 epistemic reductions must pass through `MultiwayPlan`, `KCliqueVariableOrder`,
 sorted-layout requirements, and helper-splitting specs rather than a parallel

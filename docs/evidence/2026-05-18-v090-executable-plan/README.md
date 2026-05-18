@@ -21,9 +21,9 @@ The prior closure/evidence docs were inspected before finalizing this slice:
 
 | Prior goal | Reuse decision |
 |---|---|
-| G38 | Reuse the prompt-to-artifact audit style and avoid treating stale proxy gates as closure evidence. |
-| G38-B | Reuse the production WCOJ planner surface: `StatsSnapshot`, `MultiwayPlan`, `KCliqueVariableOrder`, sorted-layout requirements, and helper-splitting specs. Do not create a parallel epistemic WCOJ route. |
-| G39 | Preserve user-gated board/tag/merge discipline and explicit PASS/PENDING/MISSING audit language. |
+| G38 | Reuse the prompt-to-artifact audit style and avoid treating stale proxy gates or superseded evidence as closure evidence. |
+| G38-B | Reuse the production WCOJ planner surface: `StatsSnapshot`, `MultiwayPlan`, `KCliqueVariableOrder`, sorted-layout requirements, runtime histogram metadata, cost-gated hash routing, and helper-splitting specs. Do not create a parallel epistemic WCOJ route. |
+| G39 | Reuse the existing production substrate for chain dispatch, K7/K8 templates, sort labels, DLPack/zero-transfer discipline, CUDA Graphs, and DTS replay certification only when the v0.9 epistemic path actually touches those surfaces. Preserve user-gated board/tag/merge discipline and explicit PASS/PENDING/MISSING audit language. |
 
 ## Implementation Summary
 
@@ -42,7 +42,7 @@ The prior closure/evidence docs were inspected before finalizing this slice:
 | `cargo fmt --check` | PASS |
 | `cargo test -p xlog-logic --test test_epistemic_executable_plan` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_gpu_plan` | PASS, 3 passed, 0 failed |
-| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 32 passed, 0 failed |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 33 passed, 0 failed |
 | `cargo test -p xlog-ir --lib` | PASS, 14 passed, 0 failed |
 | `cargo test -p xlog-logic --lib` | PASS, 238 passed, 0 failed |
 | `cargo test -p xlog-runtime --lib` | PASS, 125 passed, 0 failed |
@@ -55,7 +55,7 @@ The prior closure/evidence docs were inspected before finalizing this slice:
 |---|---|---|---|
 | M090_EIR.6 production route | accepted epistemic forms have a production lowering route | PARTIAL | Executable route exists after the semantic contract; direct `xlog run` lowering still rejects epistemic literals. |
 | M090_GPU.1 production lowering | accepted epistemic fixture runs through production runtime dispatch | PARTIAL | Reduced runtime plan is produced through the production compiler; later runtime evidence launches candidate generation/propagation/candidate validation before reduced-plan dispatch, then row-count-gated model-membership/world-view-validation/materialization and final-result flag staging, but actual stable-model tuple membership population/full final tuple materialization dispatch is not implemented. |
-| M090_GPU.2 WCOJ eligibility | at least one epistemic reduction uses the WCOJ planner/path where eligible | PARTIAL | Reduced fixtures reach `RirNode::MultiWayJoin` and K-clique `MultiwayPlan`; no runtime dispatch evidence yet. |
+| M090_GPU.2 WCOJ eligibility | at least one epistemic reduction uses the WCOJ planner/path where eligible | PARTIAL | Reduced fixtures reach `RirNode::MultiWayJoin` and K-clique `MultiwayPlan`; later runtime evidence fails closed when a required K-clique WCOJ plan lacks counter deltas, but no certified successful dispatch evidence exists yet. |
 | M090_GPU.4 kernel coverage | kernels cover GPT hot paths | PARTIAL | Later runtime evidence launches candidate-generation, propagation-staging, candidate-buffer validation, row-count-gated model-membership staging, world-view-validation staging, materialization-staging, and final-result flag kernels; full final tuple materialization kernels are missing. |
 | M090_GPU.6 launch evidence | nonzero GPU launches and timing | PARTIAL | Later runtime traces record candidate-generation, propagation, candidate-validation, model-membership, world-view-validation, accepted-candidate materialization, and final-result flag launches with CUDA-event elapsed timing; full final tuple materialization timing is missing. |
 

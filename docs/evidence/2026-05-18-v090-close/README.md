@@ -51,7 +51,7 @@ Earlier ref checks after `git fetch origin --prune` showed:
 | G090_FAEEL | PASS for semantic oracle | Foundedness fixtures pass, but GPU parity remains unproven. |
 | G090_GPT | PARTIAL | CPU trace fixtures pass; GPU-resident candidate generation, propagation staging, candidate-buffer validation, row-count-gated model-membership staging, bounded world-view validation staging, accepted-candidate materialization staging, and final-result flag staging exist, but actual reduced-runtime stable-model tuple membership population is missing. |
 | G090_SPLIT | PARTIAL | CPU split/recompose fixtures pass; GPU split execution is missing. |
-| G090_GPU | BLOCKED | GPU-plan, reduced-runtime-plan, workspace allocation/reset, bounded candidate-generation, propagation, candidate-validation, row-count-gated model-membership, world-view-validation, accepted-candidate materialization, final-result flag kernels, and hot-path transfer-budget trace with CUDA-event elapsed timing/runtime-preflight/counter-guard/reduced-plan trace contracts exist, but no production epistemic stable-model tuple membership population/full final tuple materialization dispatch or full semantic kernel buffer use exists. |
+| G090_GPU | BLOCKED | GPU-plan, reduced-runtime-plan, workspace allocation/reset, bounded candidate-generation, propagation, candidate-validation, row-count-gated model-membership, world-view-validation, accepted-candidate materialization, final-result flag kernels, and hot-path transfer-budget trace with CUDA-event elapsed timing/runtime-preflight/fail-closed WCOJ gate/reduced-plan trace contracts exist, but no production epistemic stable-model tuple membership population/full final tuple materialization dispatch or full semantic kernel buffer use exists. |
 | G090_SOLVER | BLOCKED | `SolverService` is CPU fixture enumeration; GPU-native SAT/MaxSAT/portfolio execution is not wired to epistemic candidates. |
 | G090_PROB | BLOCKED | Accepted-world-view evidence fixtures exist, but accepted probabilistic epistemic execution is not proven on the GPU-native exact path. |
 | G090_CERT | BLOCKED | Missing complete accepted-execution kernel timing, WCOJ evidence, zero CPU fallback counters, and post-v0.8 rerun. |
@@ -92,7 +92,8 @@ The branch contains useful scaffolding:
 - runtime preflight that rejects nonzero CPU fallback counters and records
   WCOJ/K-clique/helper route metadata before launch;
 - runtime counter guard that refuses to certify WCOJ evidence from preflight
-  metadata unless production WCOJ counters advance;
+  metadata unless production WCOJ counters advance, and is invoked before
+  model-membership/world-view staging;
 - hot-path transfer-budget trace that rejects tracked data-plane H2D/D2H
   deltas without resetting shared provider telemetry;
 - reduced-plan execution trace API that wraps `execute_plan` with before/after
@@ -117,8 +118,9 @@ Closure remains blocked until certification includes all of the following:
 - GPU-resident candidate, world-view, model-membership, and rejection buffers;
 - zero CPU fallback counters for candidate enumeration and world-view
   validation;
-- at least one WCOJ-eligible epistemic reduction proving WCOJ planner/runtime
-  dispatch, including layout and helper-splitting evidence where applicable;
+- at least one WCOJ-eligible epistemic reduction proving successful WCOJ
+  planner/runtime dispatch, including layout and helper-splitting evidence
+  where applicable;
 - GPU-native SAT/MaxSAT/portfolio assumption lifecycle evidence with distinct
   SAT, UNSAT, UNKNOWN, and TIMEOUT handling;
 - accepted-world-view evidence flowing into GPU-native exact/provenance

@@ -753,6 +753,24 @@ impl EpistemicGpuRuntimeTrace {
             wcoj_certification,
         }
     }
+
+    /// Fail closed when a WCOJ-required epistemic reduction lacks runtime evidence.
+    pub fn require_wcoj_certification(&self) -> Result<()> {
+        match self.wcoj_certification {
+            EpistemicGpuRuntimeWcojCertification::MissingRequiredWcojDispatch {
+                required_kclique_plans,
+                observed_wcoj_dispatches,
+            } => Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU WCOJ dispatch certification".to_string(),
+                context: format!(
+                    "required_kclique_plans={required_kclique_plans}, \
+                     observed_wcoj_dispatches={observed_wcoj_dispatches}"
+                ),
+            }),
+            EpistemicGpuRuntimeWcojCertification::NotRequired { .. }
+            | EpistemicGpuRuntimeWcojCertification::Certified { .. } => Ok(()),
+        }
+    }
 }
 
 /// Runtime counters relevant to epistemic GPU certification.
@@ -1696,6 +1714,7 @@ impl Executor {
             counters_before,
             counters_after,
         );
+        trace.require_wcoj_certification()?;
         let model_membership = self.populate_epistemic_gpu_model_membership(
             &mut prepared.workspace,
             &output,

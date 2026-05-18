@@ -116,6 +116,16 @@ reductions reuse the Goal-038-B `MultiwayPlan::WcojWithPlan` /
 `PlannedHashRoute` route, `KCliqueVariableOrder`, sorted-layout requirements,
 and helper-splitting specs.
 
+The reuse boundary follows the prior closure evidence. Goal 038 is reused as an
+audit precedent: stale or proxy performance gates are not treated as current
+closure evidence. Goal 038-B is reused as the production K-clique WCOJ
+substrate: epistemic lowering must consume its planner, sorted-layout,
+histogram, cost-gate, and helper-splitting surfaces rather than define a
+parallel WCOJ path. Goal 039 is reused only as existing production substrate for
+chain dispatch, K7/K8 templates, sort-label/DLPack discipline, CUDA Graphs, and
+DTS replay certification; v0.9 epistemic evidence may cite those surfaces only
+when the epistemic runtime path actually dispatches through them.
+
 This still does not execute epistemic semantics. Runtime kernels must populate
 and validate the candidate/world-view buffers before the reduced plan is a
 release path.
@@ -194,7 +204,11 @@ planned-hash routes, sorted-layout requirements, and helper-splitting specs.
 `EpistemicGpuRuntimeCounters` snapshots the existing production WCOJ counters
 around a future epistemic dispatch, and
 `EpistemicGpuRuntimeWcojCertification` rejects preflight-only WCOJ metadata
-when required K-clique dispatch counters do not advance.
+when required K-clique dispatch counters do not advance. The accepted runtime
+entry point calls this certification gate immediately after reduced-plan
+dispatch and before model-membership/world-view staging, so a WCOJ-required
+epistemic reduction now fails closed if the production counters do not prove a
+dispatch.
 `Executor::execute_epistemic_gpu_execution` now wraps the reduced production
 runtime plan with preflight, workspace allocation, candidate-generation,
 propagation, candidate-validation, `execute_plan` plus before/after counter

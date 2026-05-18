@@ -41,7 +41,7 @@ alone does not close `G090_GPU`.
 | Metric | Target | Status | Evidence |
 |---|---|---|---|
 | M090_GPU.1 production lowering | accepted epistemic fixture runs through production runtime dispatch | PARTIAL | Plan contract exists; later runtime evidence launches candidate generation/propagation/candidate validation before reduced-plan dispatch, then row-count-gated model-membership/world-view-validation/materialization and final-result flag staging; actual stable-model tuple membership population/full final tuple materialization dispatch is still missing. |
-| M090_GPU.2 WCOJ eligibility | at least one epistemic reduction uses the WCOJ planner/path where eligible | PARTIAL | Reduced body is marked `RequiresPlannerEligibility`; planner/runtime dispatch is not executed yet. |
+| M090_GPU.2 WCOJ eligibility | at least one epistemic reduction uses the WCOJ planner/path where eligible | PARTIAL | Reduced body is marked `RequiresPlannerEligibility`; later executable-plan evidence reaches the 38-B WCOJ planner surface and runtime evidence fails closed on missing required dispatch counters, but successful planner/runtime dispatch is not certified yet. |
 | M090_GPU.3 GPU buffers | candidate, world-view, and rejection state have GPU-resident representations | PARTIAL | Buffer categories are explicit; later runtime evidence allocates/resets them and uses bounded candidate/propagation/validation/row-count-gated model-membership/world-view-validation/materialization/final-result flag kernels. |
 | M090_GPU.4 kernel coverage | GPU kernels cover candidate generation, propagation, validation, and materialization hot paths | PARTIAL | Later runtime evidence launches candidate-generation, propagation-staging, candidate-buffer validation, row-count-gated model-membership staging, world-view-validation staging, materialization-staging, and final-result flag kernels; full final tuple materialization kernels are missing. |
 | M090_GPU.5 CPU fallback ban | accepted execution trace records zero CPU candidate enumeration/world-view validation fallbacks | PARTIAL | Plan counters initialize to zero and runtime preflight rejects nonzero counters; actual stable-model tuple membership population evidence is missing. |
@@ -52,6 +52,6 @@ alone does not close `G090_GPU`.
 ## Remaining Blocker
 
 The next slice must map actual reduced-runtime stable-model tuples into
-model-membership bytes, add full final tuple materialization, prove WCOJ
-planner dispatch evidence for eligible reductions, and produce a real accepted
+model-membership bytes, add full final tuple materialization, prove successful
+WCOJ planner/runtime dispatch evidence for eligible reductions, and produce a real accepted
 execution trace with full timing and zero CPU fallback counters.

@@ -236,6 +236,40 @@ fn runtime_trace_preserves_counter_snapshots_and_wcoj_certification() {
             observed_metadata_builds: 1,
         }
     );
+    trace
+        .require_wcoj_certification()
+        .expect("certified trace should pass runtime WCOJ gate");
+}
+
+#[test]
+fn runtime_trace_rejects_missing_required_wcoj_dispatch() {
+    let executable = executable_with_kclique_wcoj_plan();
+    let preflight = EpistemicGpuRuntimePreflight::for_executable_plan(
+        &executable,
+        EpistemicGpuWorkspaceCapacities {
+            max_candidates: 8,
+            max_worlds: 4,
+            max_models_per_reduction: 6,
+        },
+    )
+    .unwrap();
+    let trace = EpistemicGpuRuntimeTrace::from_preflight_and_counters(
+        preflight,
+        EpistemicGpuRuntimeCounters::default(),
+        EpistemicGpuRuntimeCounters::default(),
+    );
+
+    let err = trace
+        .require_wcoj_certification()
+        .expect_err("metadata-only WCOJ evidence must fail closed");
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
+            assert_eq!(construct, "epistemic GPU WCOJ dispatch certification");
+            assert!(context.contains("required_kclique_plans=1"));
+            assert!(context.contains("observed_wcoj_dispatches=0"));
+        }
+        other => panic!("expected WCOJ certification error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -505,6 +539,9 @@ fn execution_result_records_model_membership_and_world_view_validation_after_red
     let reduced_dispatch_pos = source
         .find("let output = self.execute_plan(&executable.reduced_runtime_plan)?")
         .expect("reduced production runtime dispatch");
+    let wcoj_gate_pos = source
+        .find("trace.require_wcoj_certification()?")
+        .expect("runtime WCOJ certification gate");
     let membership_pos = source
         .find("let model_membership = self.populate_epistemic_gpu_model_membership")
         .expect("model-membership launch in execution path");
@@ -516,6 +553,8 @@ fn execution_result_records_model_membership_and_world_view_validation_after_red
         .expect("materialization launch in execution path");
 
     assert!(reduced_dispatch_pos < membership_pos);
+    assert!(reduced_dispatch_pos < wcoj_gate_pos);
+    assert!(wcoj_gate_pos < membership_pos);
     assert!(membership_pos < world_validation_pos);
     assert!(world_validation_pos < materialization_pos);
 }
