@@ -118,6 +118,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(prob.contains("compile_and_evaluate_source_for_gpu_execution_results"));
     assert!(prob.contains("compile_and_evaluate_source_with_gpu_execution_result"));
     assert!(prob.contains("compile_and_evaluate_conditioned_source_with_gpu_execution_result"));
+    assert!(prob.contains("compile_and_evaluate_conditioned_program_with_gpu_execution_result"));
     assert!(prob.contains("compile_and_evaluate_program_with_gpu_execution_result"));
     assert!(prob.contains("encode_source_pir_cnf_with_gpu_execution_result"));
     assert!(prob.contains("encode_program_pir_cnf_with_gpu_execution_result"));
@@ -131,6 +132,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(prob.contains("accepted_evidence_assumptions_consumed"));
     assert!(prob.contains("gpu_conditioned_evidence_facts"));
     assert!(prob.contains("condition_source_with_accepted_evidence"));
+    assert!(prob.contains("condition_program_with_accepted_evidence"));
     assert!(prob.contains("EpistemicEvidenceTerm"));
     assert!(prob.contains("evidence_term_to_ast_term"));
     assert!(prob.contains("program.evidence.push"));

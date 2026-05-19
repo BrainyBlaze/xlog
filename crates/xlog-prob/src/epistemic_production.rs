@@ -401,6 +401,52 @@ impl EpistemicProbProductionAdapter {
         self.compile_and_evaluate_conditioned_source_with_accepted_world_view(source, &evidence)
     }
 
+    /// Compile a parsed program with accepted epistemic assumptions as exact evidence.
+    #[cfg(feature = "host-io")]
+    pub fn compile_and_evaluate_conditioned_program_with_accepted_world_view(
+        &mut self,
+        program: &Program,
+        evidence: &AcceptedWorldViewEvidence,
+    ) -> Result<ExactResult> {
+        self.consume_accepted_evidence(evidence)?;
+        let (program, evidence_facts) =
+            condition_program_with_accepted_evidence(program, evidence)?;
+        let exact = ExactDdnnfProgram::compile_from_program(&program, self.config)?;
+        self.trace.gpu_exact_program_compiles =
+            self.trace.gpu_exact_program_compiles.saturating_add(1);
+        self.trace.gpu_conditioned_evidence_facts = self
+            .trace
+            .gpu_conditioned_evidence_facts
+            .saturating_add(evidence_facts as u64);
+        let result = exact.evaluate()?;
+        self.trace.gpu_exact_query_evaluations =
+            self.trace.gpu_exact_query_evaluations.saturating_add(1);
+        self.trace.gpu_knowledge_compilation_end_to_end_runs = self
+            .trace
+            .gpu_knowledge_compilation_end_to_end_runs
+            .saturating_add(1);
+        self.trace.gpu_program_knowledge_compilation_end_to_end_runs = self
+            .trace
+            .gpu_program_knowledge_compilation_end_to_end_runs
+            .saturating_add(1);
+        self.trace.require_zero_cpu_recompute()?;
+        Ok(result)
+    }
+
+    /// Compile a parsed program with accepted GPU epistemic assumptions as exact evidence.
+    #[cfg(feature = "host-io")]
+    pub fn compile_and_evaluate_conditioned_program_with_gpu_execution_result(
+        &mut self,
+        program: &Program,
+        provider: &CudaKernelProvider,
+        result: &EpistemicGpuExecutionResult,
+        assumptions: Vec<EpistemicAssumption>,
+    ) -> Result<ExactResult> {
+        let evidence =
+            AcceptedWorldViewEvidence::from_gpu_execution_result(provider, result, assumptions)?;
+        self.compile_and_evaluate_conditioned_program_with_accepted_world_view(program, &evidence)
+    }
+
     /// Compile a parsed program and evaluate queries through the existing GPU exact path.
     #[cfg(feature = "host-io")]
     pub fn compile_and_evaluate_program_with_accepted_world_view(
@@ -601,6 +647,15 @@ fn condition_source_with_accepted_evidence(
     source: &str,
     evidence: &AcceptedWorldViewEvidence,
 ) -> Result<(Program, usize)> {
+    let program = parse_program(source)?;
+    condition_program_with_accepted_evidence(&program, evidence)
+}
+
+#[cfg(feature = "host-io")]
+fn condition_program_with_accepted_evidence(
+    program: &Program,
+    evidence: &AcceptedWorldViewEvidence,
+) -> Result<(Program, usize)> {
     if evidence.assumptions().is_empty() {
         return Err(XlogError::UnsupportedEpistemicConstruct {
             construct: "accepted probabilistic evidence conditioning".to_string(),
@@ -609,7 +664,7 @@ fn condition_source_with_accepted_evidence(
         });
     }
 
-    let mut program = parse_program(source)?;
+    let mut program = program.clone();
     for assumption in evidence.assumptions() {
         if assumption.arity == 0 {
             if !assumption.terms.is_empty() {

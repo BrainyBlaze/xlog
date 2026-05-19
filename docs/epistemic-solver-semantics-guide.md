@@ -397,10 +397,11 @@ accepted GPU runtime evidence records up front, then runs one source
 compile/evaluate through `ExactDdnnfProgram` per accepted record while
 incrementing the same accepted-evidence, source-compile, query-evaluation, and
 knowledge-compilation counters.
-`compile_and_evaluate_conditioned_source_with_gpu_execution_result` additionally
-turns accepted zero-arity and concrete nonzero-arity tuple assumptions into
-parsed exact `Evidence` AST entries before evaluating through the same GPU
-exact path, recording
+`compile_and_evaluate_conditioned_source_with_gpu_execution_result` and
+`compile_and_evaluate_conditioned_program_with_gpu_execution_result`
+additionally turn accepted zero-arity and concrete nonzero-arity tuple
+assumptions into parsed exact `Evidence` AST entries before evaluating through
+the same GPU exact path, recording
 `accepted_evidence_assumptions_consumed` and `gpu_conditioned_evidence_facts`.
 `encode_source_pir_cnf_with_gpu_execution_result` and
 `encode_program_pir_cnf_with_gpu_execution_result` apply the same accepted

@@ -24,6 +24,9 @@ fn production_prob_adapter_reuses_gpu_exact_path_not_fixture_circuit() {
     assert!(
         production.contains("compile_and_evaluate_conditioned_source_with_gpu_execution_result")
     );
+    assert!(
+        production.contains("compile_and_evaluate_conditioned_program_with_gpu_execution_result")
+    );
     assert!(production.contains("compile_and_evaluate_program_with_gpu_execution_result"));
     assert!(production.contains("encode_source_pir_cnf_with_gpu_execution_result"));
     assert!(production.contains("encode_program_pir_cnf_with_gpu_execution_result"));
@@ -43,6 +46,7 @@ fn production_prob_adapter_reuses_gpu_exact_path_not_fixture_circuit() {
     assert!(production.contains("accepted_evidence_assumptions_consumed"));
     assert!(production.contains("gpu_conditioned_evidence_facts"));
     assert!(production.contains("condition_source_with_accepted_evidence"));
+    assert!(production.contains("condition_program_with_accepted_evidence"));
     assert!(production.contains("EpistemicEvidenceTerm"));
     assert!(production.contains("evidence_term_to_ast_term"));
     assert!(production.contains("program.evidence.push"));
