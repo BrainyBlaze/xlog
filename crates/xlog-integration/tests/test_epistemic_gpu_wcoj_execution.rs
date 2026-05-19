@@ -4199,6 +4199,186 @@ fn accepted_gpu_execution_result_gates_probabilistic_program_compile_path() {
 }
 
 #[test]
+fn accepted_gpu_execution_batches_gate_probabilistic_exact_compile_paths() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X).
+        "#,
+    )
+    .expect("parse nonzero-arity epistemic fixture");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile nonzero-arity epistemic executable");
+
+    let make_result = |edge_rows: &[u32]| {
+        let mut executor =
+            Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+        for (name, rel_id) in &executable.relation_ids {
+            executor.register_relation(*rel_id, name);
+        }
+        executor.put_relation("node", upload_unary_u32(&fix.memory, &[1, 2]));
+        executor.put_relation("edge", upload_unary_u32(&fix.memory, edge_rows));
+
+        executor
+            .execute_epistemic_gpu_execution(
+                &executable,
+                EpistemicGpuWorkspaceCapacities {
+                    max_candidates: 2,
+                    max_worlds: 1,
+                    max_models_per_reduction: 2,
+                },
+            )
+            .expect("execute accepted epistemic fixture")
+    };
+    let result_a = make_result(&[1]);
+    let result_b = make_result(&[2]);
+    let assumptions_a = [EpistemicAssumption::known("edge", 1, true)];
+    let assumptions_b = [EpistemicAssumption::known("edge", 2, true)];
+    let probabilistic_source = r#"
+        0.5::rain().
+        query(rain()).
+        "#;
+    let prob_program = parse_program(probabilistic_source).expect("parse probabilistic program");
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+
+    let mut source_adapter = EpistemicProbProductionAdapter::new(config);
+    let source_exacts = source_adapter
+        .compile_source_for_gpu_execution_results(
+            probabilistic_source,
+            &fix.provider,
+            &[
+                EpistemicProbGpuExecutionEvidence {
+                    result: &result_a,
+                    assumptions: &assumptions_a,
+                },
+                EpistemicProbGpuExecutionEvidence {
+                    result: &result_b,
+                    assumptions: &assumptions_b,
+                },
+            ],
+        )
+        .expect("accepted GPU runtime evidence must gate batched source exact compile");
+    assert_eq!(source_exacts.len(), 2);
+    let source_trace = source_adapter.trace();
+    assert_eq!(source_trace.accepted_world_view_evidence_consumed, 2);
+    assert_eq!(source_trace.accepted_evidence_assumptions_consumed, 2);
+    assert_eq!(source_trace.gpu_exact_source_compiles, 2);
+    assert_eq!(source_trace.gpu_exact_program_compiles, 0);
+    assert_eq!(source_trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(source_trace.fixture_circuit_evaluations, 0);
+
+    let mut program_adapter = EpistemicProbProductionAdapter::new(config);
+    let program_exacts = program_adapter
+        .compile_program_for_gpu_execution_results(
+            &prob_program,
+            &fix.provider,
+            &[
+                EpistemicProbGpuExecutionEvidence {
+                    result: &result_a,
+                    assumptions: &assumptions_a,
+                },
+                EpistemicProbGpuExecutionEvidence {
+                    result: &result_b,
+                    assumptions: &assumptions_b,
+                },
+            ],
+        )
+        .expect("accepted GPU runtime evidence must gate batched parsed-program exact compile");
+    assert_eq!(program_exacts.len(), 2);
+    let program_trace = program_adapter.trace();
+    assert_eq!(program_trace.accepted_world_view_evidence_consumed, 2);
+    assert_eq!(program_trace.accepted_evidence_assumptions_consumed, 2);
+    assert_eq!(program_trace.gpu_exact_source_compiles, 0);
+    assert_eq!(program_trace.gpu_exact_program_compiles, 2);
+    assert_eq!(program_trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(program_trace.fixture_circuit_evaluations, 0);
+
+    let mut batch_executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &executable.relation_ids {
+        batch_executor.register_relation(*rel_id, name);
+    }
+    batch_executor.put_relation("node", upload_unary_u32(&fix.memory, &[1, 2]));
+    batch_executor.put_relation("edge", upload_unary_u32(&fix.memory, &[1]));
+    let executables = [&executable, &executable];
+    let batch = batch_executor
+        .execute_epistemic_gpu_execution_batch_with_trace(
+            &executables,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 2,
+            },
+        )
+        .expect("execute accepted epistemic batch fixture");
+    let batch_assumptions = [EpistemicAssumption::known("edge", 1, true)];
+    let assumption_groups: [&[EpistemicAssumption]; 2] = [&batch_assumptions, &batch_assumptions];
+
+    let mut source_batch_adapter = EpistemicProbProductionAdapter::new(config);
+    let source_batch_exacts = source_batch_adapter
+        .compile_source_for_gpu_batch_execution_result(
+            probabilistic_source,
+            &fix.provider,
+            EpistemicProbGpuBatchExecutionEvidence {
+                batch: &batch,
+                assumptions_by_component: &assumption_groups,
+            },
+        )
+        .expect("accepted GPU batch evidence must gate source exact compile");
+    assert_eq!(source_batch_exacts.len(), 2);
+    let source_batch_trace = source_batch_adapter.trace();
+    assert_eq!(source_batch_trace.accepted_gpu_batch_evidence_consumed, 1);
+    assert_eq!(
+        source_batch_trace.accepted_gpu_batch_component_evidence_consumed,
+        2
+    );
+    assert_eq!(source_batch_trace.accepted_world_view_evidence_consumed, 2);
+    assert_eq!(source_batch_trace.accepted_evidence_assumptions_consumed, 2);
+    assert_eq!(source_batch_trace.gpu_exact_source_compiles, 2);
+    assert_eq!(source_batch_trace.gpu_exact_program_compiles, 0);
+    assert_eq!(source_batch_trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(source_batch_trace.fixture_circuit_evaluations, 0);
+
+    let mut program_batch_adapter = EpistemicProbProductionAdapter::new(config);
+    let program_batch_exacts = program_batch_adapter
+        .compile_program_for_gpu_batch_execution_result(
+            &prob_program,
+            &fix.provider,
+            EpistemicProbGpuBatchExecutionEvidence {
+                batch: &batch,
+                assumptions_by_component: &assumption_groups,
+            },
+        )
+        .expect("accepted GPU batch evidence must gate parsed-program exact compile");
+    assert_eq!(program_batch_exacts.len(), 2);
+    let program_batch_trace = program_batch_adapter.trace();
+    assert_eq!(program_batch_trace.accepted_gpu_batch_evidence_consumed, 1);
+    assert_eq!(
+        program_batch_trace.accepted_gpu_batch_component_evidence_consumed,
+        2
+    );
+    assert_eq!(program_batch_trace.accepted_world_view_evidence_consumed, 2);
+    assert_eq!(
+        program_batch_trace.accepted_evidence_assumptions_consumed,
+        2
+    );
+    assert_eq!(program_batch_trace.gpu_exact_source_compiles, 0);
+    assert_eq!(program_batch_trace.gpu_exact_program_compiles, 2);
+    assert_eq!(program_batch_trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(program_batch_trace.fixture_circuit_evaluations, 0);
+}
+
+#[test]
 fn accepted_gpu_execution_result_gates_probabilistic_query_evaluation_path() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");

@@ -257,7 +257,11 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(prob.contains("ExactDdnnfProgram::compile_source_with_gpu"));
     assert!(prob.contains("ExactDdnnfProgram::compile_from_program"));
     assert!(prob.contains("compile_source_with_gpu_execution_result"));
+    assert!(prob.contains("compile_source_for_gpu_execution_results"));
+    assert!(prob.contains("compile_source_for_gpu_batch_execution_result"));
     assert!(prob.contains("compile_program_with_gpu_execution_result"));
+    assert!(prob.contains("compile_program_for_gpu_execution_results"));
+    assert!(prob.contains("compile_program_for_gpu_batch_execution_result"));
     assert!(prob.contains("EpistemicProbGpuExecutionEvidence"));
     assert!(prob.contains("EpistemicProbGpuBatchExecutionEvidence"));
     assert!(prob.contains("compile_and_evaluate_source_for_gpu_execution_results"));
@@ -350,6 +354,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
         .contains("accepted_split_batch_gates_probabilistic_conditioned_program_gradients"));
     assert!(integration
         .contains("accepted_split_batch_gates_probabilistic_pir_cnf_and_exact_evaluation_paths"));
+    assert!(integration
+        .contains("accepted_gpu_execution_batches_gate_probabilistic_exact_compile_paths"));
 
     for (label, source) in [
         ("runtime", runtime.as_str()),

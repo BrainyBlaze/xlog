@@ -502,6 +502,57 @@ impl EpistemicProbProductionAdapter {
         self.compile_source_with_accepted_world_view(source, &evidence)
     }
 
+    /// Compile source once per accepted GPU epistemic execution result.
+    pub fn compile_source_for_gpu_execution_results(
+        &mut self,
+        source: &str,
+        provider: &CudaKernelProvider,
+        evidence_records: &[EpistemicProbGpuExecutionEvidence<'_>],
+    ) -> Result<Vec<ExactDdnnfProgram>> {
+        if evidence_records.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic probabilistic source exact compile batch".to_string(),
+                context: "batched source exact compile requires at least one accepted GPU result"
+                    .to_string(),
+            });
+        }
+
+        let mut accepted = Vec::with_capacity(evidence_records.len());
+        for record in evidence_records {
+            accepted.push(AcceptedWorldViewEvidence::from_gpu_execution_result(
+                provider,
+                record.result,
+                record.assumptions.to_vec(),
+            )?);
+        }
+
+        let mut programs = Vec::with_capacity(accepted.len());
+        for evidence in &accepted {
+            programs.push(self.compile_source_with_accepted_world_view(source, evidence)?);
+        }
+        Ok(programs)
+    }
+
+    /// Compile source once per accepted split/batch GPU epistemic component.
+    pub fn compile_source_for_gpu_batch_execution_result(
+        &mut self,
+        source: &str,
+        provider: &CudaKernelProvider,
+        evidence: EpistemicProbGpuBatchExecutionEvidence<'_>,
+    ) -> Result<Vec<ExactDdnnfProgram>> {
+        let accepted = self.accepted_world_views_from_gpu_batch_execution_evidence(
+            provider,
+            evidence,
+            "epistemic probabilistic source exact compile batch production",
+        )?;
+
+        let mut programs = Vec::with_capacity(accepted.len());
+        for evidence in &accepted {
+            programs.push(self.compile_source_with_accepted_world_view(source, evidence)?);
+        }
+        Ok(programs)
+    }
+
     /// Compile a parsed program through the existing GPU-native exact/provenance path.
     pub fn compile_program_with_accepted_world_view(
         &mut self,
@@ -527,6 +578,58 @@ impl EpistemicProbProductionAdapter {
         let evidence =
             AcceptedWorldViewEvidence::from_gpu_execution_result(provider, result, assumptions)?;
         self.compile_program_with_accepted_world_view(program, &evidence)
+    }
+
+    /// Compile a parsed program once per accepted GPU epistemic execution result.
+    pub fn compile_program_for_gpu_execution_results(
+        &mut self,
+        program: &Program,
+        provider: &CudaKernelProvider,
+        evidence_records: &[EpistemicProbGpuExecutionEvidence<'_>],
+    ) -> Result<Vec<ExactDdnnfProgram>> {
+        if evidence_records.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic probabilistic parsed-program exact compile batch".to_string(),
+                context:
+                    "batched parsed-program exact compile requires at least one accepted GPU result"
+                        .to_string(),
+            });
+        }
+
+        let mut accepted = Vec::with_capacity(evidence_records.len());
+        for record in evidence_records {
+            accepted.push(AcceptedWorldViewEvidence::from_gpu_execution_result(
+                provider,
+                record.result,
+                record.assumptions.to_vec(),
+            )?);
+        }
+
+        let mut programs = Vec::with_capacity(accepted.len());
+        for evidence in &accepted {
+            programs.push(self.compile_program_with_accepted_world_view(program, evidence)?);
+        }
+        Ok(programs)
+    }
+
+    /// Compile a parsed program once per accepted split/batch GPU epistemic component.
+    pub fn compile_program_for_gpu_batch_execution_result(
+        &mut self,
+        program: &Program,
+        provider: &CudaKernelProvider,
+        evidence: EpistemicProbGpuBatchExecutionEvidence<'_>,
+    ) -> Result<Vec<ExactDdnnfProgram>> {
+        let accepted = self.accepted_world_views_from_gpu_batch_execution_evidence(
+            provider,
+            evidence,
+            "epistemic probabilistic parsed-program exact compile batch production",
+        )?;
+
+        let mut programs = Vec::with_capacity(accepted.len());
+        for evidence in &accepted {
+            programs.push(self.compile_program_with_accepted_world_view(program, evidence)?);
+        }
+        Ok(programs)
     }
 
     /// Compile source and evaluate queries through the existing GPU exact path after one accepted gate.
