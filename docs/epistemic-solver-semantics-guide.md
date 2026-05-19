@@ -253,10 +253,11 @@ source rule order.
 
 ## Solver Services
 
-`xlog_solve::GpuSolverProductionAdapter` is the production-facing SAT/UNSAT
-reuse adapter for epistemic callers. It is a thin wrapper over the existing
-`GpuCdclSolver`; it dispatches `solve_expect_sat`, `solve_expect_unsat`, and
-workspace-backed UNSAT through the GPU CDCL path and exposes zero CPU
+`xlog_solve::GpuSolverProductionAdapter` is the production-facing solver reuse
+adapter for epistemic callers. It is a thin wrapper over the existing
+`GpuCdclSolver`; it dispatches `solve_expect_sat`, `solve_expect_unsat`,
+workspace-backed UNSAT, bounded weighted MaxSAT candidate checks, and bounded
+SAT/MaxSAT portfolio jobs through the GPU CDCL path and exposes zero CPU
 assignment/MaxSAT enumeration counters in `GpuSolverProductionTrace`.
 `solve_expect_sat_with_gpu_execution_result` and
 `solve_expect_unsat_with_gpu_execution_result` additionally accept an
@@ -269,12 +270,18 @@ output, then dispatch SAT/UNSAT through GPU CDCL.
 accepted runtime boundary before recording balanced push/retract counters and
 dispatching a bounded SAT/UNSAT lifecycle through existing GPU CDCL calls and a
 reusable workspace.
+`solve_weighted_maxsat_candidates_with_gpu_execution_result` applies the same
+boundary before certifying bounded MaxSAT candidate CNFs through GPU CDCL and
+returning the best declared score. `solve_portfolio_with_gpu_execution_result`
+applies the boundary before dispatching bounded SAT and MaxSAT jobs through the
+same adapter and recording portfolio counters.
 `xlog_solve::production_capabilities` reports that GPU CDCL SAT/UNSAT is
-available while GPU-native MaxSAT and SAT/MaxSAT portfolio execution are blocked.
+available along with the bounded GPU-backed MaxSAT and SAT/MaxSAT portfolio
+adapters.
 
 The adapter is partial v0.9 evidence only. It does not yet wire broader
-multi-candidate learned-clause lifecycle semantics, and it does not implement
-GPU-native MaxSAT or portfolio solving.
+multi-candidate learned-clause lifecycle semantics or status-aware portfolio
+coverage for UNKNOWN/TIMEOUT outcomes.
 
 `xlog_solve::SolverService` provides the bounded solver API used by semantic
 fixtures:

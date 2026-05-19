@@ -50,7 +50,9 @@ pub use instance::{Clause, Literal, Objective, SolveInstance};
 pub use production::{
     production_capabilities, GpuSolverProductionAdapter, GpuSolverProductionCapabilities,
     GpuSolverProductionCapabilityStatus, GpuSolverProductionExpectation,
-    GpuSolverProductionLifecycleReport, GpuSolverProductionLifecycleStep, GpuSolverProductionTrace,
+    GpuSolverProductionLifecycleReport, GpuSolverProductionLifecycleStep,
+    GpuSolverProductionMaxSatCandidate, GpuSolverProductionMaxSatReport,
+    GpuSolverProductionPortfolioJob, GpuSolverProductionPortfolioReport, GpuSolverProductionTrace,
 };
 pub use proof::{compute_checksum, SolveProof, SolveResult, SolveStats, SolveStatus};
 pub use service::{

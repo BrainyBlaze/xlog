@@ -20,7 +20,8 @@ use xlog_runtime::{
 };
 use xlog_solve::{
     Clause, GpuCdclConfig, GpuCnf, GpuSolverProductionAdapter, GpuSolverProductionExpectation,
-    GpuSolverProductionLifecycleStep, Literal, SolveInstance,
+    GpuSolverProductionLifecycleStep, GpuSolverProductionMaxSatCandidate,
+    GpuSolverProductionPortfolioJob, Literal, SolveInstance,
 };
 use xlog_stats::{
     ColumnStats, JoinSelectivity, KeyHeatStats, PrefixDegreeStats, RelationStats, StatsSnapshot,
@@ -1088,6 +1089,102 @@ fn accepted_gpu_execution_result_gates_solver_assumption_lifecycle_path() {
     assert_eq!(trace.gpu_lifecycle_workspace_reuses, 1);
     assert_eq!(trace.gpu_cdcl_sat_solves, 1);
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 1);
+    assert_eq!(trace.cpu_assignment_enumerations, 0);
+    assert_eq!(trace.cpu_maxsat_enumerations, 0);
+}
+
+#[test]
+fn accepted_gpu_execution_result_gates_solver_maxsat_and_portfolio_paths() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X).
+        "#,
+    )
+    .expect("parse nonzero-arity epistemic fixture");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile nonzero-arity epistemic executable");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &executable.relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation("node", upload_unary_u32(&fix.memory, &[1, 2]));
+    executor.put_relation("edge", upload_unary_u32(&fix.memory, &[1]));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 2,
+            },
+        )
+        .expect("execute accepted epistemic fixture");
+
+    let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
+    let maxsat_candidate =
+        GpuCnf::from_host(&sat_instance, &fix.provider).expect("upload MaxSAT candidate CNF");
+    let portfolio_sat =
+        GpuCnf::from_host(&sat_instance, &fix.provider).expect("upload portfolio SAT CNF");
+    let branch_limit = upload_u32_scalar(&fix.provider, 1);
+    let mut adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+
+    let maxsat = adapter
+        .solve_weighted_maxsat_candidates_with_gpu_execution_result(
+            &fix.provider,
+            &result,
+            &[GpuSolverProductionMaxSatCandidate {
+                score: 5,
+                cnf: &maxsat_candidate,
+                branch_var_limit: &branch_limit,
+            }],
+        )
+        .expect("accepted GPU runtime evidence must gate MaxSAT through GPU CDCL");
+    assert_eq!(maxsat.optimum_score, 5);
+    assert_eq!(maxsat.gpu_cdcl_candidate_solves, 1);
+
+    let portfolio = adapter
+        .solve_portfolio_with_gpu_execution_result(
+            &fix.provider,
+            &result,
+            &[
+                GpuSolverProductionPortfolioJob::Sat {
+                    cnf: &portfolio_sat,
+                    branch_var_limit: &branch_limit,
+                },
+                GpuSolverProductionPortfolioJob::MaxSat {
+                    candidates: &[GpuSolverProductionMaxSatCandidate {
+                        score: 5,
+                        cnf: &maxsat_candidate,
+                        branch_var_limit: &branch_limit,
+                    }],
+                },
+            ],
+        )
+        .expect("accepted GPU runtime evidence must gate SAT/MaxSAT portfolio path");
+    assert_eq!(portfolio.jobs, 2);
+    assert_eq!(portfolio.sat_jobs, 1);
+    assert_eq!(portfolio.maxsat_jobs, 1);
+    assert_eq!(portfolio.maxsat_optimum_scores, 5);
+
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 2);
+    assert_eq!(trace.gpu_maxsat_candidate_solves, 2);
+    assert_eq!(trace.gpu_maxsat_optima, 2);
+    assert_eq!(trace.gpu_portfolio_jobs, 2);
+    assert_eq!(trace.gpu_portfolio_sat_jobs, 1);
+    assert_eq!(trace.gpu_portfolio_maxsat_jobs, 1);
     assert_eq!(trace.cpu_assignment_enumerations, 0);
     assert_eq!(trace.cpu_maxsat_enumerations, 0);
 }
