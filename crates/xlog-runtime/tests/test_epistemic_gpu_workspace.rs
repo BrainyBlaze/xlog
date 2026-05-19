@@ -107,6 +107,8 @@ fn runtime_preflight_records_workspace_and_wcoj_route_surfaces() {
     assert_eq!(preflight.reduced_runtime_rule_count, 1);
     assert_eq!(preflight.multiway_reduction_count, 1);
     assert_eq!(preflight.kclique_wcoj_plan_count, 1);
+    assert_eq!(preflight.kclique_wcoj_max_arity, 5);
+    assert_eq!(preflight.kclique_wcoj_edge_permutation_count, 10);
     assert_eq!(preflight.planned_hash_route_count, 0);
     assert_eq!(preflight.sorted_layout_requirement_count, 2);
     assert_eq!(preflight.helper_split_spec_count, 1);

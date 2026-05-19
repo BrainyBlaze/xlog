@@ -15,8 +15,8 @@ use xlog_prob::epistemic::EpistemicAssumption;
 use xlog_prob::epistemic_production::EpistemicProbProductionAdapter;
 use xlog_prob::exact::GpuConfig;
 use xlog_runtime::{
-    read_device_row_count, EpistemicGpuModelMembershipSource, EpistemicGpuRuntimeWcojCertification,
-    EpistemicGpuWorkspaceCapacities, Executor,
+    read_device_row_count, EpistemicGpuModelMembershipSource, EpistemicGpuRuntimePreflight,
+    EpistemicGpuRuntimeWcojCertification, EpistemicGpuWorkspaceCapacities, Executor,
 };
 use xlog_solve::{
     Clause, GpuCdclConfig, GpuCnf, GpuSolverProductionAdapter, GpuSolverProductionExpectation,
@@ -252,6 +252,43 @@ fn accepted_epistemic_k5_execution_certifies_production_wcoj_dispatch() {
         1,
         "accepted epistemic K5 final output must materialize the production WCOJ row"
     );
+}
+
+#[test]
+fn epistemic_k7_k8_reductions_reuse_g39_kclique_planner_preflight_surface() {
+    for k in [7u8, 8u8] {
+        let source = epistemic_kclique_source(k, true);
+        let program = parse_program(&source).expect("parse epistemic K-clique");
+        let rel_ids = rel_ids_for_reduced_kclique(k);
+        let stats = kclique_stats(&rel_ids, k, Some((k - 2, 5.0)));
+        let executable =
+            compile_epistemic_gpu_execution_with_stats_snapshot(&program, Some(&stats))
+                .expect("compile epistemic executable K-clique");
+
+        let preflight = EpistemicGpuRuntimePreflight::for_executable_plan(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("preflight epistemic K-clique");
+
+        let expected_edges = usize::from(k) * usize::from(k - 1) / 2;
+        assert_eq!(preflight.kclique_wcoj_plan_count, 1);
+        assert_eq!(preflight.kclique_wcoj_max_arity, k);
+        assert_eq!(
+            preflight.kclique_wcoj_edge_permutation_count,
+            expected_edges
+        );
+        assert_eq!(preflight.planned_hash_route_count, 0);
+        assert!(
+            preflight.sorted_layout_requirement_count >= 1,
+            "K{k} must carry production sorted-layout requirements"
+        );
+        assert!(preflight.cpu_fallbacks.is_zero());
+    }
 }
 
 #[test]
@@ -1414,6 +1451,19 @@ fn rel_ids_for_reduced_k5() -> BTreeMap<String, RelId> {
         .collect()
 }
 
+fn rel_ids_for_reduced_kclique(k: u8) -> BTreeMap<String, RelId> {
+    let mut compiler = Compiler::new();
+    let source = epistemic_kclique_source(k, false);
+    let _ = compiler
+        .compile(&source)
+        .expect("compile reduced K-clique source");
+    compiler
+        .rel_ids()
+        .iter()
+        .map(|(name, rel)| (name.clone(), *rel))
+        .collect()
+}
+
 fn k5_stats(rel_ids: &BTreeMap<String, RelId>) -> StatsSnapshot {
     let mut snapshot = StatsSnapshot::default();
     for (name, left, right) in K5_EDGES {
@@ -1446,4 +1496,90 @@ fn k5_stats(rel_ids: &BTreeMap<String, RelId>) -> StatsSnapshot {
     }
 
     snapshot
+}
+
+fn kclique_stats(
+    rel_ids: &BTreeMap<String, RelId>,
+    k: u8,
+    hot: Option<(u8, f64)>,
+) -> StatsSnapshot {
+    let mut snapshot = StatsSnapshot::default();
+    let mut edges = Vec::new();
+    for i in 0..k {
+        for j in (i + 1)..k {
+            let name = format!("e{i}{j}");
+            let rel = *rel_ids.get(&name).expect("edge rel id");
+            snapshot.rel_names.push((rel, name));
+            edges.push((rel, i, j));
+
+            let mut stats = RelationStats::new(rel);
+            stats.update_cardinality(10_000);
+            for (col_idx, variable) in [(0usize, i), (1usize, j)] {
+                let mut col = ColumnStats::new(col_idx, ScalarType::U32);
+                col.update_distinct(10_000);
+                stats.add_column(col);
+                stats.add_prefix_degree(PrefixDegreeStats::new(col_idx, 1.0, 1.25));
+                let heat = match hot {
+                    Some((hot_var, hot_heat)) if hot_var == variable => hot_heat,
+                    _ => 0.25,
+                };
+                stats.add_key_heat(KeyHeatStats::new(col_idx, heat, heat));
+            }
+            snapshot.relations.push(stats);
+        }
+    }
+
+    for (left_idx, (left_rel, left_i, left_j)) in edges.iter().enumerate() {
+        for (right_rel, right_i, right_j) in edges.iter().skip(left_idx + 1) {
+            if left_i == right_i || left_i == right_j || left_j == right_i || left_j == right_j {
+                let mut sel = JoinSelectivity::new(*left_rel, *right_rel);
+                sel.set_keys(vec![0], vec![0]);
+                sel.set_selectivity(0.001);
+                snapshot.join_selectivities.push(sel);
+            }
+        }
+    }
+
+    snapshot
+}
+
+fn epistemic_kclique_source(k: u8, include_epistemic: bool) -> String {
+    let mut source = String::new();
+    for i in 0..k {
+        for j in (i + 1)..k {
+            source.push_str(&format!("pred e{i}{j}(u32, u32).\n"));
+        }
+    }
+    source.push_str("pred gate().\n");
+    source.push_str(&format!("pred clique{k}("));
+    for idx in 0..k {
+        if idx > 0 {
+            source.push_str(", ");
+        }
+        source.push_str("u32");
+    }
+    source.push_str(").\n");
+    source.push_str("gate().\n");
+    source.push_str(&format!("clique{k}("));
+    for idx in 0..k {
+        if idx > 0 {
+            source.push_str(", ");
+        }
+        source.push_str(&format!("V{idx}"));
+    }
+    source.push_str(") :-\n");
+
+    let mut atoms = Vec::new();
+    for i in 0..k {
+        for j in (i + 1)..k {
+            atoms.push(format!("e{i}{j}(V{i}, V{j})"));
+        }
+    }
+    if include_epistemic {
+        atoms.push("know gate()".to_string());
+    }
+    source.push_str("    ");
+    source.push_str(&atoms.join(", "));
+    source.push_str(".\n");
+    source
 }

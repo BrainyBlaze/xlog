@@ -151,8 +151,9 @@ runtime actually touches:
 Today the epistemic runtime consumes 38-B route metadata and fails closed when a
 WCOJ-required K-clique reduction lacks production counter deltas. It now
 certifies one accepted K5 WCOJ dispatch through production runtime counters,
-but broader layout, skew-scheduling, helper-splitting, and semantic parity
-coverage remain incomplete.
+and records K7/K8 K-clique max-arity plus full edge-permutation metadata through
+runtime preflight, but broader K7/K8 dispatch, skew-scheduling,
+helper-splitting, and semantic parity coverage remain incomplete.
 
 The reduced-runtime-plan contract reuses the Goal-038-B WCOJ surfaces. K-clique
 epistemic reductions must pass through `MultiwayPlan`, `KCliqueVariableOrder`,

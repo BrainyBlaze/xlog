@@ -852,6 +852,10 @@ pub struct EpistemicGpuRuntimePreflight {
     pub multiway_reduction_count: usize,
     /// Number of K-clique WCOJ plans reused from the production planner.
     pub kclique_wcoj_plan_count: usize,
+    /// Maximum K-clique arity observed across production WCOJ plans.
+    pub kclique_wcoj_max_arity: u8,
+    /// Live edge-permutation slots carried by production K-clique plans.
+    pub kclique_wcoj_edge_permutation_count: usize,
     /// Number of structured planned-hash routes.
     pub planned_hash_route_count: usize,
     /// Sorted-layout edge-slot requirements carried by WCOJ plans.
@@ -898,6 +902,8 @@ impl EpistemicGpuRuntimePreflight {
             reduced_runtime_rule_count,
             multiway_reduction_count: routes.multiway_reduction_count,
             kclique_wcoj_plan_count: routes.kclique_wcoj_plan_count,
+            kclique_wcoj_max_arity: routes.kclique_wcoj_max_arity,
+            kclique_wcoj_edge_permutation_count: routes.kclique_wcoj_edge_permutation_count,
             planned_hash_route_count: routes.planned_hash_route_count,
             sorted_layout_requirement_count: routes.sorted_layout_requirement_count,
             helper_split_spec_count: routes.helper_split_spec_count,
@@ -3534,6 +3540,8 @@ impl Executor {
 struct RuntimeRouteSummary {
     multiway_reduction_count: usize,
     kclique_wcoj_plan_count: usize,
+    kclique_wcoj_max_arity: u8,
+    kclique_wcoj_edge_permutation_count: usize,
     planned_hash_route_count: usize,
     sorted_layout_requirement_count: usize,
     helper_split_spec_count: usize,
@@ -3551,6 +3559,12 @@ fn summarize_runtime_routes(node: &RirNode, routes: &mut RuntimeRouteSummary) {
             match plan {
                 Some(MultiwayPlan::WcojWithPlan(order)) => {
                     routes.kclique_wcoj_plan_count += 1;
+                    routes.kclique_wcoj_max_arity = routes.kclique_wcoj_max_arity.max(order.k);
+                    routes.kclique_wcoj_edge_permutation_count += order
+                        .edge_permutation
+                        .iter()
+                        .take_while(|slot| **slot != u8::MAX)
+                        .count();
                     routes.sorted_layout_requirement_count +=
                         order.sorted_layout_requirements.edge_slots.len();
                     routes.helper_split_spec_count += order.helper_split_specs.len();

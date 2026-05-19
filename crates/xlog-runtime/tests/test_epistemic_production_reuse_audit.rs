@@ -26,6 +26,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(audit.contains("G38 completion audit"));
     assert!(audit.contains("G38-B integration audit"));
     assert!(audit.contains("G39 completion audit"));
+    assert!(audit.contains("K7/K8 preflight"));
+    assert!(audit.contains("kclique_wcoj_max_arity"));
 
     let runtime = read_workspace_file("crates/xlog-runtime/src/executor/epistemic_workspace.rs");
     let logic = read_workspace_file("crates/xlog-logic/src/epistemic.rs");
@@ -39,6 +41,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(runtime.contains("self.execute_plan(&executable.reduced_runtime_plan)"));
     assert!(runtime.contains("summarize_runtime_routes"));
     assert!(runtime.contains("MultiwayPlan::WcojWithPlan"));
+    assert!(runtime.contains("kclique_wcoj_max_arity"));
+    assert!(runtime.contains("kclique_wcoj_edge_permutation_count"));
     assert!(runtime.contains("helper_split_spec_count"));
     assert!(runtime.contains("planned_hash_route_count"));
     assert!(runtime.contains("source_relation.column"));
