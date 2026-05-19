@@ -441,7 +441,7 @@ or that record CPU assignment, MaxSAT, or learned-clause transfer counters.
 The adapter is partial v0.9 evidence only. It now proves same-CNF reuse,
 distinct-CNF fail-closed rejection, a two-record accepted lifecycle, and bounded
 UNKNOWN/TIMEOUT lifecycle propagation, plus two-record same-CNF learned-clause
-reuse, a mixed `possible`/`not possible` plus binary `not know`
+reuse, a mixed unary and binary `possible`/`not possible` plus binary `not know`
 operator-result lifecycle,
 two-record/two-CNF bounded MaxSAT candidate-set execution, bounded GPU-CDCL
 pruning of UNSAT MaxSAT search candidates for one and two accepted evidence
@@ -555,7 +555,8 @@ exact/provenance/PIR/CNF counter, or record CPU/fixture recomputation.
 This adapter is partial v0.9 evidence only. It covers bounded zero-arity,
 nonzero-arity, negative nonzero-arity, parsed-program, two-record
 source-conditioned query, and two-record parsed-program-conditioned query
-cases, including true `possible`, false `not possible`, and binary false
+cases, including unary and binary true `possible`, unary and binary false
+`not possible`, and binary false
 `not know` operator-result conditioning plus query/gradient/PIR-CNF reuse, but
 not the full
 query-conditioned probabilistic matrix over accepted runtime world views.

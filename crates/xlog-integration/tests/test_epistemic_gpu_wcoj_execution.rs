@@ -3313,6 +3313,136 @@ fn accepted_binary_not_know_operator_conditions_negative_probabilistic_evidence(
 }
 
 #[test]
+fn accepted_binary_possible_operator_conditions_probabilistic_evidence() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let result = execute_binary_edge_epistemic_fixture(
+        &fix,
+        r#"
+        pred pair(u32, u32).
+        pred edge(u32, u32).
+        pred accepted(u32, u32).
+        accepted(X, Y) :- pair(X, Y), possible edge(X, Y).
+        "#,
+        &[(1, 2), (2, 3), (3, 4)],
+        &[(1, 2), (3, 4)],
+    );
+    assert_eq!(
+        download_binary_u32(&fix.provider, &result.final_output),
+        vec![(1, 2), (3, 4)]
+    );
+    assert_eq!(result.prepared.preflight.possible_operator_count, 1);
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut adapter = EpistemicProbProductionAdapter::new(config);
+    let evaluated = adapter
+        .compile_and_evaluate_conditioned_source_with_gpu_execution_result(
+            r#"
+            0.4::edge(1, 2).
+            query(edge(1, 2)).
+            "#,
+            &fix.provider,
+            &result,
+            vec![EpistemicAssumption::possible_tuple(
+                "edge",
+                vec![
+                    EpistemicEvidenceTerm::integer(1),
+                    EpistemicEvidenceTerm::integer(2),
+                ],
+                true,
+            )],
+        )
+        .expect("accepted binary possible GPU evidence must condition exact evidence");
+
+    assert_eq!(evaluated.query_probs.len(), 1);
+    assert!(
+        (evaluated.query_probs[0].prob - 1.0).abs() < 1.0e-6,
+        "accepted binary possible edge(1, 2) evidence must condition query probability to true"
+    );
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_world_view_evidence_consumed, 1);
+    assert_eq!(trace.accepted_evidence_assumptions_consumed, 1);
+    assert_eq!(trace.gpu_conditioned_evidence_facts, 1);
+    assert_eq!(trace.gpu_conditioned_negative_evidence_facts, 0);
+    assert_eq!(trace.gpu_exact_source_compiles, 1);
+    assert_eq!(trace.gpu_exact_query_evaluations, 1);
+    assert_eq!(trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(trace.fixture_circuit_evaluations, 0);
+}
+
+#[test]
+fn accepted_binary_not_possible_operator_conditions_negative_probabilistic_evidence() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let result = execute_binary_edge_epistemic_fixture(
+        &fix,
+        r#"
+        pred pair(u32, u32).
+        pred edge(u32, u32).
+        pred accepted(u32, u32).
+        accepted(X, Y) :- pair(X, Y), not possible edge(X, Y).
+        "#,
+        &[(1, 2), (2, 3), (3, 4)],
+        &[(2, 3)],
+    );
+    assert_eq!(
+        download_binary_u32(&fix.provider, &result.final_output),
+        vec![(1, 2), (3, 4)]
+    );
+    assert_eq!(result.prepared.preflight.not_possible_operator_count, 1);
+    assert_eq!(
+        result.final_tuple_materialization.negated_row_filter_count,
+        1
+    );
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut adapter = EpistemicProbProductionAdapter::new(config);
+    let evaluated = adapter
+        .compile_and_evaluate_conditioned_source_with_gpu_execution_result(
+            r#"
+            0.7::edge(1, 2).
+            query(edge(1, 2)).
+            "#,
+            &fix.provider,
+            &result,
+            vec![EpistemicAssumption::possible_tuple(
+                "edge",
+                vec![
+                    EpistemicEvidenceTerm::integer(1),
+                    EpistemicEvidenceTerm::integer(2),
+                ],
+                false,
+            )],
+        )
+        .expect("accepted binary not-possible GPU evidence must condition negative exact evidence");
+
+    assert_eq!(evaluated.query_probs.len(), 1);
+    assert!(
+        evaluated.query_probs[0].prob.abs() < 1.0e-6,
+        "accepted binary not possible edge(1, 2) evidence must condition query probability to false"
+    );
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_world_view_evidence_consumed, 1);
+    assert_eq!(trace.accepted_evidence_assumptions_consumed, 1);
+    assert_eq!(trace.gpu_conditioned_evidence_facts, 1);
+    assert_eq!(trace.gpu_conditioned_negative_evidence_facts, 1);
+    assert_eq!(trace.gpu_exact_source_compiles, 1);
+    assert_eq!(trace.gpu_exact_query_evaluations, 1);
+    assert_eq!(trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(trace.fixture_circuit_evaluations, 0);
+}
+
+#[test]
 fn accepted_gpu_execution_result_conditions_parsed_program_probabilistic_evidence() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
@@ -4953,6 +5083,28 @@ fn accepted_operator_gpu_execution_results_gate_solver_lifecycle_path() {
         &[1, 2],
         &[2],
     );
+    let binary_possible_result = execute_binary_edge_epistemic_fixture(
+        &fix,
+        r#"
+        pred pair(u32, u32).
+        pred edge(u32, u32).
+        pred accepted(u32, u32).
+        accepted(X, Y) :- pair(X, Y), possible edge(X, Y).
+        "#,
+        &[(1, 2), (2, 3), (3, 4)],
+        &[(1, 2), (3, 4)],
+    );
+    let binary_not_possible_result = execute_binary_edge_epistemic_fixture(
+        &fix,
+        r#"
+        pred pair(u32, u32).
+        pred edge(u32, u32).
+        pred accepted(u32, u32).
+        accepted(X, Y) :- pair(X, Y), not possible edge(X, Y).
+        "#,
+        &[(1, 2), (2, 3), (3, 4)],
+        &[(2, 3)],
+    );
     let not_know_result = execute_binary_edge_epistemic_fixture(
         &fix,
         r#"
@@ -4973,6 +5125,14 @@ fn accepted_operator_gpu_execution_results_gate_solver_lifecycle_path() {
         vec![1]
     );
     assert_eq!(
+        download_binary_u32(&fix.provider, &binary_possible_result.final_output),
+        vec![(1, 2), (3, 4)]
+    );
+    assert_eq!(
+        download_binary_u32(&fix.provider, &binary_not_possible_result.final_output),
+        vec![(1, 2), (3, 4)]
+    );
+    assert_eq!(
         download_binary_u32(&fix.provider, &not_know_result.final_output),
         vec![(1, 2), (3, 4)]
     );
@@ -4985,6 +5145,26 @@ fn accepted_operator_gpu_execution_results_gate_solver_lifecycle_path() {
             .prepared
             .preflight
             .not_possible_operator_count,
+        1
+    );
+    assert_eq!(
+        binary_possible_result
+            .prepared
+            .preflight
+            .possible_operator_count,
+        1
+    );
+    assert_eq!(
+        binary_not_possible_result
+            .prepared
+            .preflight
+            .not_possible_operator_count,
+        1
+    );
+    assert_eq!(
+        binary_not_possible_result
+            .final_tuple_materialization
+            .negated_row_filter_count,
         1
     );
     assert_eq!(
@@ -5019,7 +5199,13 @@ fn accepted_operator_gpu_execution_results_gate_solver_lifecycle_path() {
     let report = adapter
         .solve_multi_candidate_assumption_lifecycle_with_gpu_execution_results(
             &fix.provider,
-            &[&possible_result, &not_possible_result, &not_know_result],
+            &[
+                &possible_result,
+                &not_possible_result,
+                &binary_possible_result,
+                &binary_not_possible_result,
+                &not_know_result,
+            ],
             &mut workspace,
             &[
                 GpuSolverProductionLifecycleStep {
@@ -5037,18 +5223,18 @@ fn accepted_operator_gpu_execution_results_gate_solver_lifecycle_path() {
         .expect("accepted operator GPU evidence must gate solver lifecycle path");
 
     assert_eq!(workspace.assign_device_ptr(), assign_ptr_before);
-    assert_eq!(report.candidate_evidence_records, 3);
-    assert_eq!(report.steps, 6);
-    assert_eq!(report.assumption_pushes, 6);
-    assert_eq!(report.assumption_retractions, 6);
-    assert_eq!(report.workspace_reuses, 3);
+    assert_eq!(report.candidate_evidence_records, 5);
+    assert_eq!(report.steps, 10);
+    assert_eq!(report.assumption_pushes, 10);
+    assert_eq!(report.assumption_retractions, 10);
+    assert_eq!(report.workspace_reuses, 5);
     let trace = adapter.trace();
-    assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 3);
-    assert_eq!(trace.gpu_assumption_pushes, 6);
-    assert_eq!(trace.gpu_assumption_retractions, 6);
-    assert_eq!(trace.gpu_lifecycle_workspace_reuses, 3);
-    assert_eq!(trace.gpu_cdcl_sat_solves, 3);
-    assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 3);
+    assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 5);
+    assert_eq!(trace.gpu_assumption_pushes, 10);
+    assert_eq!(trace.gpu_assumption_retractions, 10);
+    assert_eq!(trace.gpu_lifecycle_workspace_reuses, 5);
+    assert_eq!(trace.gpu_cdcl_sat_solves, 5);
+    assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 5);
     assert_eq!(trace.cpu_assignment_enumerations, 0);
     assert_eq!(trace.cpu_maxsat_enumerations, 0);
 }
