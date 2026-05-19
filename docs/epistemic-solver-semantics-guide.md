@@ -294,7 +294,10 @@ same adapter, propagating UNKNOWN/TIMEOUT portfolio statuses without CPU search,
 and recording portfolio counters.
 `xlog_solve::production_capabilities` reports that GPU CDCL SAT/UNSAT is
 available along with the bounded GPU-backed MaxSAT and SAT/MaxSAT portfolio
-adapters.
+adapters. `GpuSolverProductionTrace::require_production_metric_eligibility`
+is the automated metric gate: it rejects traces that did not consume accepted
+GPU candidate evidence, that have no existing GPU solver production counter,
+or that record CPU assignment, MaxSAT, or learned-clause transfer counters.
 
 The adapter is partial v0.9 evidence only. It does not yet prove learned-clause
 validity across distinct candidate CNFs or full MaxSAT coverage.
@@ -362,6 +365,11 @@ runtime boundary before uploading `GpuPirGraph`/`GpuPirRoots` and calling
 before calling `ExactDdnnfProgram::evaluate`.
 `evaluate_gpu_with_grads_with_gpu_execution_result` applies the same accepted
 runtime boundary before calling `ExactDdnnfProgram::evaluate_gpu_with_grads`.
+`EpistemicProbProductionCapabilities` reports fixture circuits as disallowed
+for production metrics, and
+`EpistemicProbProductionTrace::require_production_metric_eligibility` rejects
+traces that lack accepted world-view evidence, lack an existing GPU
+exact/provenance/PIR/CNF counter, or record CPU/fixture recomputation.
 
 This adapter is partial v0.9 evidence only. It does not yet cover the broader
 probabilistic knowledge-compilation matrix over accepted runtime world views.

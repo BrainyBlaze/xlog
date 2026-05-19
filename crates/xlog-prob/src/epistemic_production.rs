@@ -20,6 +20,44 @@ use crate::exact::{ExactResult, ExactResultWithGrads};
 use crate::pir::{PirNode, PirNodeId};
 use crate::provenance::{extract_from_program, extract_from_source, Provenance};
 
+/// Production capability status for probabilistic paths required by v0.9.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EpistemicProbProductionCapabilityStatus {
+    /// Existing GPU-native production path is available.
+    Available,
+    /// Required GPU-native production path is not implemented.
+    Blocked,
+}
+
+/// Capability report for the probabilistic production adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EpistemicProbProductionCapabilities {
+    /// Exact/provenance compilation through `ExactDdnnfProgram`.
+    pub gpu_exact_provenance: EpistemicProbProductionCapabilityStatus,
+    /// GPU PIR upload and CNF encoding path.
+    pub gpu_pir_cnf: EpistemicProbProductionCapabilityStatus,
+    /// Bounded compile-plus-evaluate knowledge-compilation path.
+    pub gpu_knowledge_compilation: EpistemicProbProductionCapabilityStatus,
+    /// GPU query and gradient evaluation path.
+    pub gpu_exact_query_and_gradient: EpistemicProbProductionCapabilityStatus,
+    /// Whether the bounded fixture circuit may satisfy production metrics.
+    pub fixture_circuit_allowed: bool,
+    /// Blocker reason for knowledge-compilation production coverage, or empty when available.
+    pub gpu_knowledge_compilation_blocker: &'static str,
+}
+
+/// Return the current probabilistic production capability report.
+pub fn production_capabilities() -> EpistemicProbProductionCapabilities {
+    EpistemicProbProductionCapabilities {
+        gpu_exact_provenance: EpistemicProbProductionCapabilityStatus::Available,
+        gpu_pir_cnf: EpistemicProbProductionCapabilityStatus::Available,
+        gpu_knowledge_compilation: EpistemicProbProductionCapabilityStatus::Available,
+        gpu_exact_query_and_gradient: EpistemicProbProductionCapabilityStatus::Available,
+        fixture_circuit_allowed: false,
+        gpu_knowledge_compilation_blocker: "",
+    }
+}
+
 /// Trace counters proving the production adapter stayed on the GPU exact path.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EpistemicProbProductionTrace {
@@ -62,6 +100,73 @@ impl EpistemicProbProductionTrace {
             });
         }
         Ok(())
+    }
+
+    /// Require that this trace is eligible for v0.9 production probability metrics.
+    ///
+    /// This gate only proves fixture containment for an accepted probabilistic
+    /// path. It does not claim the broader G090 probabilistic goal is complete.
+    pub fn require_production_metric_eligibility(&self) -> Result<()> {
+        let capabilities = production_capabilities();
+        if capabilities.fixture_circuit_allowed {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic probabilistic production metric gate".to_string(),
+                context: "bounded EpistemicCircuit fixtures are not allowed for production metrics"
+                    .to_string(),
+            });
+        }
+        if capabilities.gpu_exact_provenance != EpistemicProbProductionCapabilityStatus::Available {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic probabilistic production metric gate".to_string(),
+                context: "GPU exact/provenance production capability is not available".to_string(),
+            });
+        }
+        if capabilities.gpu_pir_cnf != EpistemicProbProductionCapabilityStatus::Available {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic probabilistic production metric gate".to_string(),
+                context: "GPU PIR/CNF production capability is not available".to_string(),
+            });
+        }
+        if capabilities.gpu_knowledge_compilation
+            != EpistemicProbProductionCapabilityStatus::Available
+        {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic probabilistic production metric gate".to_string(),
+                context: capabilities.gpu_knowledge_compilation_blocker.to_string(),
+            });
+        }
+        if capabilities.gpu_exact_query_and_gradient
+            != EpistemicProbProductionCapabilityStatus::Available
+        {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic probabilistic production metric gate".to_string(),
+                context: "GPU exact query/gradient production capability is not available"
+                    .to_string(),
+            });
+        }
+        if self.accepted_world_view_evidence_consumed == 0 {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic probabilistic production metric gate".to_string(),
+                context: "production probability metrics require accepted world-view evidence"
+                    .to_string(),
+            });
+        }
+        let gpu_production_events = self
+            .gpu_exact_source_compiles
+            .saturating_add(self.gpu_exact_program_compiles)
+            .saturating_add(self.gpu_exact_query_evaluations)
+            .saturating_add(self.gpu_exact_gradient_evaluations)
+            .saturating_add(self.gpu_pir_graph_uploads)
+            .saturating_add(self.gpu_cnf_encodes)
+            .saturating_add(self.gpu_knowledge_compilation_end_to_end_runs);
+        if gpu_production_events == 0 {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic probabilistic production metric gate".to_string(),
+                context: "production probability metrics require an existing GPU exact/provenance/PIR/CNF counter"
+                    .to_string(),
+            });
+        }
+        self.require_zero_cpu_recompute()
     }
 }
 

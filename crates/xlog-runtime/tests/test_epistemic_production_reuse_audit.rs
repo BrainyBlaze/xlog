@@ -84,6 +84,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(solver.contains("gpu_portfolio_unknown_status_jobs"));
     assert!(solver.contains("gpu_portfolio_timeout_status_jobs"));
     assert!(solver.contains("accepted_gpu_candidate_evidence_consumed"));
+    assert!(solver.contains("require_production_metric_eligibility"));
+    assert!(solver.contains("production solver metrics require accepted GPU candidate evidence"));
     assert!(solver.contains("read_device_row_count"));
     assert!(solver.contains("require_stable_model_tuple_source"));
     assert!(solver.contains("cpu_assignment_enumerations: 0"));
@@ -107,6 +109,10 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(prob.contains("evaluate_gpu_with_grads_with_gpu_execution_result"));
     assert!(prob.contains("gpu_exact_query_evaluations"));
     assert!(prob.contains("gpu_exact_gradient_evaluations"));
+    assert!(prob.contains("EpistemicProbProductionCapabilities"));
+    assert!(prob.contains("fixture_circuit_allowed: false"));
+    assert!(prob.contains("require_production_metric_eligibility"));
+    assert!(prob.contains("production probability metrics require accepted world-view evidence"));
     assert!(prob.contains("cpu_only_probability_recomputations: 0"));
     assert!(prob_epistemic.contains("from_gpu_execution_result"));
     assert!(prob_epistemic.contains("read_device_row_count"));

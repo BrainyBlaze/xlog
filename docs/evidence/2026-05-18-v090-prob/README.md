@@ -49,7 +49,9 @@ coverage over accepted world views is not complete.
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_gates_probabilistic_pir_cnf_path -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_gates_probabilistic_query_evaluation_path -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_gates_probabilistic_gradient_evaluation_path -- --nocapture` | PASS, 1 passed, 0 failed |
-| `cargo test -p xlog-prob --test epistemic_prob_production_reuse` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-prob --test epistemic_prob_production_reuse` | PASS, 3 passed, 0 failed |
+| `cargo test -p xlog-prob --test epistemic_prob_production_reuse production_prob_capabilities_disallow_fixture_circuit_metrics -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-prob --test epistemic_prob_production_reuse production_prob_metric_gate_rejects_fixture_only_traces -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-prob --test epistemic_prob` | PASS, 5 passed, 0 failed |
 | `cargo test -p xlog-prob --test no_cpu_d4_in_exact` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-prob --test no_dtoh_in_gpu_exact_path` | PASS, 1 passed, 0 failed |
@@ -70,7 +72,7 @@ coverage over accepted world views is not complete.
 | M090_PROB.6 GPU exact integration | accepted world-view evidence updates the GPU-native exact/provenance path | PARTIAL | Accepted GPU runtime evidence gates `ExactDdnnfProgram::compile_source_with_gpu`, `ExactDdnnfProgram::compile_from_program`, `evaluate`, `evaluate_gpu_with_grads`, and source plus parsed-program compile-plus-query-evaluation through the same exact state; broader query-conditioning coverage is still missing. |
 | M090_PROB.7 CPU recompute ban | accepted probabilistic epistemic path records zero CPU-only probability recomputation | PARTIAL | Production trace records zero CPU-only recomputation and zero fixture-circuit counters for accepted runtime source-compile, parsed-program compile, PIR/CNF encoding, query-evaluation, gradient-evaluation, and source plus parsed-program end-to-end compile/evaluate paths; broader probabilistic execution traces are missing. |
 | M090_PROB.8 production prob reuse | accepted probabilistic fixtures execute through existing GPU exact/provenance/PIR/knowledge-compilation APIs | PARTIAL | Source guard and integration fixtures prove accepted GPU runtime evidence compiles source and parsed programs, performs source and parsed-program bounded compile/evaluate knowledge-compilation through `ExactDdnnfProgram` with distinct trace counters, encodes PIR/CNF through `GpuPirGraph` and `encode_cnf_gpu`, evaluates query probabilities, and evaluates gradients through the existing exact/provenance path; broader knowledge-compilation coverage is missing. |
-| M090_PROB.9 fixture isolation | bounded epistemic probability fixtures are marked oracle-only and cannot satisfy closure metrics | PARTIAL | Evidence docs separate `EpistemicCircuit` fixtures from `EpistemicProbProductionAdapter`; an automated closure gate is still missing. |
+| M090_PROB.9 fixture isolation | bounded epistemic probability fixtures are marked oracle-only and cannot satisfy closure metrics | PARTIAL | Evidence docs separate `EpistemicCircuit` fixtures from `EpistemicProbProductionAdapter`; `EpistemicProbProductionCapabilities` disallows fixture circuits for production metrics; `EpistemicProbProductionTrace::require_production_metric_eligibility` rejects traces without accepted world-view evidence, without existing GPU exact/provenance/PIR/CNF counters, or with CPU/fixture recomputation counters. Broader probabilistic coverage is still missing, so this is not a G090_PROB close. |
 
 ## Coordination Notes
 

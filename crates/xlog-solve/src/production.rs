@@ -254,6 +254,61 @@ impl GpuSolverProductionTrace {
         }
         Ok(())
     }
+
+    /// Require that this trace is eligible for v0.9 production solver metrics.
+    ///
+    /// This is an accepted-path containment gate, not a release-close claim:
+    /// the CPU semantic-oracle facade may still exist for fixtures, but it
+    /// cannot satisfy production metric evidence.
+    pub fn require_production_metric_eligibility(&self) -> Result<()> {
+        let capabilities = production_capabilities();
+        if capabilities.cpu_oracle_solver_allowed {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production metric gate".to_string(),
+                context: "CPU semantic-oracle solver is not allowed for production metrics"
+                    .to_string(),
+            });
+        }
+        if capabilities.gpu_cdcl_sat_unsat != GpuSolverProductionCapabilityStatus::Available {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production metric gate".to_string(),
+                context: "GPU CDCL SAT/UNSAT production capability is not available".to_string(),
+            });
+        }
+        if capabilities.gpu_maxsat != GpuSolverProductionCapabilityStatus::Available {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production metric gate".to_string(),
+                context: capabilities.gpu_maxsat_blocker.to_string(),
+            });
+        }
+        if capabilities.gpu_portfolio_sat_maxsat != GpuSolverProductionCapabilityStatus::Available {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production metric gate".to_string(),
+                context: capabilities.gpu_portfolio_blocker.to_string(),
+            });
+        }
+        if self.accepted_gpu_candidate_evidence_consumed == 0 {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production metric gate".to_string(),
+                context: "production solver metrics require accepted GPU candidate evidence"
+                    .to_string(),
+            });
+        }
+        let gpu_production_events = self
+            .gpu_cdcl_sat_solves
+            .saturating_add(self.gpu_cdcl_unsat_solves)
+            .saturating_add(self.gpu_cdcl_workspace_unsat_solves)
+            .saturating_add(self.gpu_maxsat_candidate_solves)
+            .saturating_add(self.gpu_portfolio_jobs);
+        if gpu_production_events == 0 {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production metric gate".to_string(),
+                context: "production solver metrics require an existing GPU CDCL/MaxSAT/portfolio counter"
+                    .to_string(),
+            });
+        }
+        self.require_zero_cpu_search()
+    }
 }
 
 /// Thin adapter from epistemic solver work to the existing GPU CDCL verifier.

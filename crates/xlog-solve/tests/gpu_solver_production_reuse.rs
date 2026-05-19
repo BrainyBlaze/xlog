@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::PathBuf;
 
-use xlog_solve::{production_capabilities, GpuSolverProductionCapabilityStatus};
+use xlog_solve::{
+    production_capabilities, GpuSolverProductionCapabilityStatus, GpuSolverProductionTrace,
+};
 
 #[test]
 fn production_solver_adapter_reuses_gpu_cdcl_not_cpu_oracle() {
@@ -96,4 +98,31 @@ fn production_solver_capabilities_report_gpu_backed_maxsat_and_portfolio_paths()
     assert!(!capabilities.cpu_oracle_solver_allowed);
     assert_eq!(capabilities.gpu_maxsat_blocker, "");
     assert_eq!(capabilities.gpu_portfolio_blocker, "");
+}
+
+#[test]
+fn production_solver_metric_gate_rejects_cpu_oracle_only_traces() {
+    let empty = GpuSolverProductionTrace::default();
+    let err = empty
+        .require_production_metric_eligibility()
+        .expect_err("empty solver trace must not satisfy production metrics");
+    assert!(format!("{err}").contains("accepted GPU candidate evidence"));
+
+    let eligible = GpuSolverProductionTrace {
+        accepted_gpu_candidate_evidence_consumed: 1,
+        gpu_cdcl_sat_solves: 1,
+        ..GpuSolverProductionTrace::default()
+    };
+    assert!(eligible.require_production_metric_eligibility().is_ok());
+
+    let cpu_fallback = GpuSolverProductionTrace {
+        accepted_gpu_candidate_evidence_consumed: 1,
+        gpu_cdcl_sat_solves: 1,
+        cpu_assignment_enumerations: 1,
+        ..GpuSolverProductionTrace::default()
+    };
+    let err = cpu_fallback
+        .require_production_metric_eligibility()
+        .expect_err("CPU search trace must not satisfy production metrics");
+    assert!(format!("{err}").contains("CPU solver search counters must be zero"));
 }
