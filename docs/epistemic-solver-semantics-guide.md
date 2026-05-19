@@ -441,7 +441,8 @@ or that record CPU assignment, MaxSAT, or learned-clause transfer counters.
 The adapter is partial v0.9 evidence only. It now proves same-CNF reuse,
 distinct-CNF fail-closed rejection, a two-record accepted lifecycle, and bounded
 UNKNOWN/TIMEOUT lifecycle propagation, plus two-record same-CNF learned-clause
-reuse, a mixed `possible`/`not possible` operator-result lifecycle,
+reuse, a mixed `possible`/`not possible` plus binary `not know`
+operator-result lifecycle,
 two-record/two-CNF bounded MaxSAT candidate-set execution, bounded GPU-CDCL
 pruning of UNSAT MaxSAT search candidates for one and two accepted evidence
 records, and bounded weighted soft-clause selection encoding for one and two
@@ -518,8 +519,8 @@ source counters.
 `compile_and_evaluate_conditioned_program_with_gpu_execution_result`
 additionally turn accepted zero-arity and concrete nonzero-arity tuple
 assumptions into parsed exact `Evidence` AST entries before evaluating through
-the same GPU exact path. False assumptions from `not know` are preserved as
-false parsed evidence entries and counted separately. The trace records
+the same GPU exact path. Unary and binary false assumptions from `not know` are
+preserved as false parsed evidence entries and counted separately. The trace records
 `accepted_evidence_assumptions_consumed`, `gpu_conditioned_evidence_facts`, and
 `gpu_conditioned_negative_evidence_facts`.
 `compile_and_evaluate_conditioned_source_for_gpu_execution_results` and
@@ -554,8 +555,9 @@ exact/provenance/PIR/CNF counter, or record CPU/fixture recomputation.
 This adapter is partial v0.9 evidence only. It covers bounded zero-arity,
 nonzero-arity, negative nonzero-arity, parsed-program, two-record
 source-conditioned query, and two-record parsed-program-conditioned query
-cases, including true `possible` and false `not possible` operator-result
-conditioning plus query/gradient/PIR-CNF reuse, but not the full
+cases, including true `possible`, false `not possible`, and binary false
+`not know` operator-result conditioning plus query/gradient/PIR-CNF reuse, but
+not the full
 query-conditioned probabilistic matrix over accepted runtime world views.
 
 Run the probabilistic fixture and production-adapter source guard:

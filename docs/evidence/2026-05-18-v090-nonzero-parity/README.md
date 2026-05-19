@@ -56,7 +56,7 @@ oracles. It is not a closure claim for `G090_GPU`, `G090_CERT`, or
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_multiple_memberships_filter_final_rows_by_all_bound_tuple_keys -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_not_know_nonzero_arity_membership_filters_final_rows_by_absent_bound_tuple_key -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution split_gpu_world_view_distinguishes_absent_possible_from_not_known -- --nocapture` | PASS, 1 passed, 0 failed |
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 66 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 67 passed, 0 failed |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace -- --nocapture` | PASS, 53 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_executable_plan -- --nocapture` | PASS, 6 passed, 0 failed |
 
