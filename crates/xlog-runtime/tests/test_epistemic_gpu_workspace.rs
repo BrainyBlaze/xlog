@@ -900,10 +900,23 @@ fn final_tuple_materialization_trace_records_device_tuple_buffer_without_host_wr
     assert_eq!(trace.output_row_count_device_reads, 1);
     assert_eq!(trace.model_membership_bytes_checked, 192);
     assert_eq!(trace.world_view_slots_checked, 8);
+    assert_eq!(trace.row_filter_count, 0);
+    assert_eq!(trace.negated_row_filter_count, 0);
     assert_eq!(trace.final_row_count_device_writes, 1);
     assert_eq!(trace.kernel_launches, 2);
     assert_eq!(trace.host_write_ops, 0);
     assert!(!trace.kernel_timing.is_recorded());
+}
+
+#[test]
+fn final_tuple_materialization_trace_records_row_filter_polarity_counts() {
+    let trace = EpistemicGpuFinalTupleMaterializationTrace::for_counts(2, 16, 128, 3, 8, 2, 4)
+        .unwrap()
+        .with_row_filter_counts(2, 1)
+        .unwrap();
+
+    assert_eq!(trace.row_filter_count, 2);
+    assert_eq!(trace.negated_row_filter_count, 1);
 }
 
 #[test]

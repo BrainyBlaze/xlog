@@ -24,8 +24,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(audit.contains("GpuSolverProductionAdapter"));
     assert!(audit.contains("EpistemicProbProductionAdapter"));
     assert!(audit.contains("G38 completion audit"));
-    assert!(audit.contains("G38-B integration audit"));
-    assert!(audit.contains("G39 completion audit"));
+    assert!(audit.contains("G38-B closure proposal and integration audit"));
+    assert!(audit.contains("G39 completion audit and K7/K8 evidence"));
     assert!(audit.contains("accepted K7 and K8 fixtures"));
     assert!(audit.contains("wcoj_clique8_dispatch_count"));
     assert!(audit.contains("kclique_metadata_build_nanos"));
@@ -33,12 +33,17 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(audit.contains("kclique_stream_group_count"));
     assert!(audit.contains("certified_stream_groups"));
     assert!(audit.contains("possible_operator_count"));
-    assert!(audit.contains("accepted unary, possible, binary"));
+    assert!(audit.contains("not_possible_operator_count"));
+    assert!(audit.contains("accepted unary, possible, not possible, binary"));
+    assert!(audit.contains("row_filter_count"));
+    assert!(audit.contains("negated_row_filter_count"));
     assert!(audit.contains("EpistemicGpuSemanticTrace"));
     assert!(audit.contains("kclique_wcoj_max_arity"));
 
     let runtime = read_workspace_file("crates/xlog-runtime/src/executor/epistemic_workspace.rs");
     let logic = read_workspace_file("crates/xlog-logic/src/epistemic.rs");
+    let integration =
+        read_workspace_file("crates/xlog-integration/tests/test_epistemic_gpu_wcoj_execution.rs");
     let solver = read_workspace_file("crates/xlog-solve/src/production.rs");
     let prob = read_workspace_file("crates/xlog-prob/src/epistemic_production.rs");
     let prob_epistemic = read_workspace_file("crates/xlog-prob/src/epistemic.rs");
@@ -66,6 +71,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(runtime.contains("possible_operator_count"));
     assert!(runtime.contains("not_know_operator_count"));
     assert!(runtime.contains("not_possible_operator_count"));
+    assert!(runtime.contains("row_filter_count"));
+    assert!(runtime.contains("negated_row_filter_count"));
     assert!(runtime.contains("planned_hash_route_count"));
     assert!(runtime.contains("EpistemicGpuFinalResultTransferTrace"));
     assert!(runtime.contains("from_final_output(&self.provider, &final_output)"));
@@ -76,6 +83,11 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(runtime.contains("cpu_world_view_validations: 0"));
     assert!(runtime.contains("source_relation.column"));
     assert!(runtime.contains("output.column(bound_col_index)"));
+    assert!(integration.contains(
+        "accepted_not_possible_nonzero_arity_membership_records_operator_and_polarity_metrics"
+    ));
+    assert!(integration.contains("not_possible_operator_count"));
+    assert!(integration.contains("negated_row_filter_count"));
     assert!(solver.contains("GpuCdclSolver::new"));
     assert!(solver.contains("solve_expect_sat(cnf)"));
     assert!(solver.contains("solve_expect_sat_with_gpu_execution_result"));

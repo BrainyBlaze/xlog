@@ -852,6 +852,66 @@ fn accepted_possible_nonzero_arity_membership_records_operator_metrics() {
 }
 
 #[test]
+fn accepted_not_possible_nonzero_arity_membership_records_operator_and_polarity_metrics() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), not possible edge(X).
+        "#,
+    )
+    .expect("parse not-possible nonzero-arity epistemic fixture");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile not-possible nonzero-arity epistemic executable");
+
+    assert!(executable.gpu_plan.tuple_membership_bindings[0].negated);
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &executable.relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation("node", upload_unary_u32(&fix.memory, &[1, 2, 3]));
+    executor.put_relation("edge", upload_unary_u32(&fix.memory, &[2]));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 3,
+            },
+        )
+        .expect("execute not-possible nonzero-arity epistemic fixture");
+
+    assert_eq!(result.prepared.preflight.know_operator_count, 0);
+    assert_eq!(result.prepared.preflight.possible_operator_count, 0);
+    assert_eq!(result.prepared.preflight.not_know_operator_count, 0);
+    assert_eq!(result.prepared.preflight.not_possible_operator_count, 1);
+    assert_eq!(result.final_tuple_materialization.row_filter_count, 1);
+    assert_eq!(
+        result.final_tuple_materialization.negated_row_filter_count,
+        1
+    );
+    assert_eq!(
+        result.model_membership.membership_source,
+        EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+    );
+    assert_eq!(
+        download_unary_u32(&fix.provider, &result.final_output),
+        vec![1, 3],
+        "not possible must keep only reduced rows whose bound tuple key is absent from every stable-model tuple source"
+    );
+}
+
+#[test]
 fn accepted_binary_membership_filters_final_rows_by_bound_tuple_key() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");

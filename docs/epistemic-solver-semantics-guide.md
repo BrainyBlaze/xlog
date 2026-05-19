@@ -88,9 +88,10 @@ metadata, model-membership bytes checked, world-view slots checked, kernel
 launches, zero host writes, and CUDA-event elapsed timing. The row-map kernel
 filters output rows by accepted membership, world-view state, all variable-bound
 tuple-key relation matches, and binding polarity before the final tuple kernel
-compacts reduced output columns. Accepted unary, possible, binary,
-multi-membership, and `not know` fixtures now prove final rows are filtered by
-bound tuple keys on device, and preflight records explicit
+compacts reduced output columns. The materialization trace records
+`row_filter_count` and `negated_row_filter_count`. Accepted unary, possible,
+not-possible, binary, multi-membership, and `not know` fixtures now prove final
+rows are filtered by bound tuple keys on device, and preflight records explicit
 `know`/`possible`/`not know`/`not possible` operator counts.
 `EpistemicGpuRuntimeWcojCertification` then requires actual production WCOJ
 counter deltas before WCOJ evidence can be certified, and its certified result
@@ -108,12 +109,12 @@ deltas instead of resetting shared telemetry. That is still incomplete for the
 epistemic hot path; tuple-source staging is GPU-backed over existing relation
 buffers with row-scoped ground-key comparison through specialized
 arity-one/two/three kernels and a generic arity-N kernel, plus row-scoped
-variable-bound comparison against reduced-output columns and `not know` polarity
+variable-bound comparison against reduced-output columns and negated polarity
 through the generic arity-N kernel. Final tuple output is gated by the staged
-membership and world-view buffers, with accepted unary, possible, binary,
-multi-membership, and not-know bound-key row-filter fixtures. Full world-view
-semantics, solver coupling, probabilistic production-path reuse, and broader
-accepted semantic parity do not dispatch yet.
+membership and world-view buffers, with accepted unary, possible, not-possible,
+binary, multi-membership, and `not know` bound-key row-filter fixtures. Full
+world-view semantics, solver coupling, probabilistic production-path reuse, and
+broader accepted semantic parity do not dispatch yet.
 
 ## GPU And WCOJ Scope
 
@@ -193,6 +194,7 @@ fixtures. It is a non-empty set of accepted stable models. Over a world view:
 - `know p/arity` is true when `p/arity` appears in every world;
 - `possible p/arity` is true when `p/arity` appears in at least one world;
 - `not know p/arity` is true when `know p/arity` is false.
+- `not possible p/arity` is true when `possible p/arity` is false.
 
 The current implementation constructs these world views directly in tests. It
 does not yet derive them from arbitrary EIR through GPU-native

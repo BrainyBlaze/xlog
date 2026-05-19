@@ -71,6 +71,7 @@ fixtures. It is a non-empty set of accepted stable models:
 - `know p/arity` is true when `p/arity` appears in every world;
 - `possible p/arity` is true when `p/arity` appears in at least one world;
 - `not know p/arity` is true when `know p/arity` is false.
+- `not possible p/arity` is true when `possible p/arity` is false.
 
 The current fixtures construct world views directly so operator behavior is
 testable before production execution exists. They do not yet enumerate stable

@@ -19,8 +19,9 @@ helper-split plus runtime-histogram metadata count and timing path under
 accepted epistemic execution; unary, binary, and multi-membership fixtures
 prove variable-bound nonzero-arity membership filters final rows on device; a
 `possible` fixture records accepted preflight operator metrics; the negated
-unary fixture proves `not know` filters by absent bound tuple keys on the same
-device row-map path. This is not a closure claim for `G090_GPU`,
+unary fixtures prove `not know` and `not possible` filter by absent bound tuple
+keys on the same device row-map path, with final-row polarity counts recorded
+in the materialization trace. This is not a closure claim for `G090_GPU`,
 `G090_CERT`, or `G090_CLOSE`.
 
 ## Implementation Evidence
@@ -33,14 +34,14 @@ device row-map path. This is not a closure claim for `G090_GPU`,
 | Existing K-clique path reuse | The accepted K5 fixture requires `kclique_wcoj_plan_count == 1`, `kclique_stream_group_count == 1`, `sorted_layout_requirement_count == 1`, `helper_split_spec_count == 1`, stable tuple-source model membership, and the same planner/layout/helper/scheduler metrics inside the dispatch-certified WCOJ trace. The accepted K6 fixture uses a buried-skew stats snapshot and requires the G38-B helper-split specs plus runtime K-clique histogram metadata-build counts and nanoseconds to be observed inside the accepted epistemic execution trace. The accepted K7 and K8 fixtures require `kclique_wcoj_max_arity == 7/8`, full edge-permutation counts `21/28`, `kclique_stream_group_count == 1`, nonzero sorted-layout requirements, certified runtime WCOJ counters, and final tuple materialization. All four use the existing K-clique relation layouts, stream groups, stats snapshots, WCOJ planner metadata, and runtime counter paths from the G38-B/G39 production evidence chain. |
 | K7/K8 planner-surface reuse | `test_epistemic_gpu_wcoj_execution::epistemic_k7_k8_reductions_reuse_g39_kclique_planner_preflight_surface` compiles generated epistemic K7 and K8 reductions with `know gate()`, supplies production-style stats snapshots, and requires `kclique_wcoj_max_arity == 7/8`, full `kclique_wcoj_edge_permutation_count` of 21/28, `kclique_stream_group_count == 1`, nonzero sorted-layout requirements, and zero planned-hash/CPU-fallback counters. The accepted K7 and K8 runtime fixtures now prove those generated reductions also reach production dispatch counters. |
 | Accepted final tuple materialization | The final epistemic output row count is read from device metadata and must be `1`, proving that the accepted world-view path materializes the production WCOJ row rather than only proving preflight metadata. |
-| Accepted nonzero-arity membership | Unary fixture `accepted(X) :- node(X), know edge(X)` returns `[1]`; possible fixture `accepted(X) :- node(X), possible edge(X)` returns `[2, 3]` and records `possible_operator_count == 1`; binary fixture `accepted(X, Y) :- pair(X, Y), know edge(X, Y)` returns `[(1, 2)]`; multi-membership fixture `accepted(X) :- node(X), know edge(X), know color(X)` returns `[2]`, proving bound tuple-key membership filters rows by all variable-bound tuple keys rather than accepting every reduced tuple. |
+| Accepted nonzero-arity membership | Unary fixture `accepted(X) :- node(X), know edge(X)` returns `[1]`; possible fixture `accepted(X) :- node(X), possible edge(X)` returns `[2, 3]` and records `possible_operator_count == 1`; not-possible fixture `accepted(X) :- node(X), not possible edge(X)` returns `[1, 3]`, records `not_possible_operator_count == 1`, and records `row_filter_count == 1` plus `negated_row_filter_count == 1`; binary fixture `accepted(X, Y) :- pair(X, Y), know edge(X, Y)` returns `[(1, 2)]`; multi-membership fixture `accepted(X) :- node(X), know edge(X), know color(X)` returns `[2]`, proving bound tuple-key membership filters rows by all variable-bound tuple keys rather than accepting every reduced tuple. |
 | Accepted `not know` nonzero-arity membership | Negated unary fixture `accepted(X) :- node(X), not know edge(X)` with `node = [1, 2, 3]` and `edge = [1, 3]` returns `[2]`, proving the final device row-map carries binding polarity and keeps rows whose bound tuple key is absent from the stable-model tuple source. |
 
 ## Validation
 
 | Command | Result |
 |---|---|
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 46 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 47 passed, 0 failed |
 
 ## Non-Closure Notes
 
@@ -50,8 +51,9 @@ device row-map path. This is not a closure claim for `G090_GPU`,
   histogram metadata path.
 - It retains K7/K8 planner/preflight reuse evidence for the G39 W6.4 K-clique
   template surface and now pairs K8 metadata with accepted runtime dispatch.
-- It satisfies accepted unary, possible-operator, binary, multi-membership, and
-  negated `not know` variable-bound nonzero-arity membership fixtures.
+- It satisfies accepted unary, possible-operator, not-possible-operator,
+  binary, multi-membership, and negated `not know` variable-bound nonzero-arity
+  membership fixtures.
 - It does not prove the full G91, FAEEL, GPT, and splitting semantic parity
   matrix.
 - It does not close broader solver semantic integration or broader accepted

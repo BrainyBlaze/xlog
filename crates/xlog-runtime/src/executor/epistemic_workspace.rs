@@ -221,6 +221,10 @@ pub struct EpistemicGpuFinalTupleMaterializationTrace {
     pub model_membership_bytes_checked: usize,
     /// World-view slots checked by the kernels before tuple materialization.
     pub world_view_slots_checked: usize,
+    /// Variable-bound tuple row filters applied by the final-row map kernel.
+    pub row_filter_count: usize,
+    /// Negated variable-bound tuple row filters applied by the final-row map kernel.
+    pub negated_row_filter_count: usize,
     /// Device final row-count scalars written by the kernels.
     pub final_row_count_device_writes: u32,
     /// Final tuple materialization kernel launches.
@@ -574,6 +578,8 @@ impl EpistemicGpuFinalTupleMaterializationTrace {
             output_row_count_device_reads: 1,
             model_membership_bytes_checked,
             world_view_slots_checked: candidate_count,
+            row_filter_count: 0,
+            negated_row_filter_count: 0,
             final_row_count_device_writes: 1,
             kernel_launches: output_column_count.max(1) as u32,
             host_write_ops: 0,
@@ -588,6 +594,24 @@ impl EpistemicGpuFinalTupleMaterializationTrace {
     ) -> Self {
         self.kernel_timing = kernel_timing;
         self
+    }
+
+    /// Attach final-row filter metadata captured before launching the row-map kernel.
+    pub fn with_row_filter_counts(
+        mut self,
+        row_filter_count: usize,
+        negated_row_filter_count: usize,
+    ) -> Result<Self> {
+        if negated_row_filter_count > row_filter_count {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU final-tuple negated row filters".to_string(),
+                estimated_bytes: negated_row_filter_count as u64,
+                budget_bytes: row_filter_count as u64,
+            });
+        }
+        self.row_filter_count = row_filter_count;
+        self.negated_row_filter_count = negated_row_filter_count;
+        Ok(self)
     }
 }
 
@@ -3151,6 +3175,22 @@ impl Executor {
             .provider
             .memory()
             .alloc::<u32>(output_row_capacity.max(1))?;
+        let row_filter_bindings: Vec<_> = gpu_plan
+            .tuple_membership_bindings
+            .iter()
+            .filter(|binding| binding.bound_output_columns.iter().any(Option::is_some))
+            .collect();
+        if row_filter_bindings.len() > u32::MAX as usize {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU final tuple row-filter count".to_string(),
+                estimated_bytes: row_filter_bindings.len() as u64,
+                budget_bytes: u32::MAX as u64,
+            });
+        }
+        let negated_row_filter_count = row_filter_bindings
+            .iter()
+            .filter(|binding| binding.negated)
+            .count();
         let trace = EpistemicGpuFinalTupleMaterializationTrace::for_counts(
             output.arity(),
             output.num_rows() as usize,
@@ -3159,7 +3199,8 @@ impl Executor {
             candidate_count,
             reduction_count,
             models_per_reduction,
-        )?;
+        )?
+        .with_row_filter_counts(row_filter_bindings.len(), negated_row_filter_count)?;
         if trace.model_membership_bytes_checked > workspace.layout.model_membership_bytes {
             return Err(XlogError::ResourceExhausted {
                 context: "epistemic GPU final-tuple membership workspace".to_string(),
@@ -3197,19 +3238,6 @@ impl Executor {
         let models_per_reduction = models_per_reduction as u32;
         let world_stride = world_stride as u32;
         let output_row_capacity_u32 = output_row_capacity as u32;
-        let row_filter_bindings: Vec<_> = gpu_plan
-            .tuple_membership_bindings
-            .iter()
-            .filter(|binding| binding.bound_output_columns.iter().any(Option::is_some))
-            .collect();
-        if row_filter_bindings.len() > u32::MAX as usize {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU final tuple row-filter count".to_string(),
-                estimated_bytes: row_filter_bindings.len() as u64,
-                budget_bytes: u32::MAX as u64,
-            });
-        }
-
         let mut metadata_len = 0usize;
         for binding in &row_filter_bindings {
             metadata_len = checked_sum(metadata_len, binding.key_columns.len())?;
