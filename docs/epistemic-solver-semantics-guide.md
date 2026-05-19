@@ -249,6 +249,15 @@ rejection-reason counts. These are CPU fixture counts; release certification
 still requires GPU launch counters, kernel timings, and zero CPU fallback
 counters for the same semantic phases.
 
+Accepted GPU execution also records `EpistemicGpuSemanticTrace` after the
+hot-path transfer-budget window. That trace reads bounded rejection-reason
+metadata from the device buffer and reports generated, guess, propagated,
+pruned, tested, reduced-model-slot, accepted-world-view, rejected-candidate, and
+rejection-reason counts with zero CPU candidate enumeration and zero CPU
+world-view validation counters. This is certification evidence for bounded
+runtime fixtures, not full semantic parity across every G91/FAEEL/GPT/splitting
+case.
+
 ## Epistemic Splitting
 
 `split_epistemic_program` builds deterministic components from source rules and

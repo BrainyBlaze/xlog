@@ -264,6 +264,39 @@ pub struct EpistemicGpuFinalResultTransferTrace {
     pub tracked_data_plane_dtoh_bytes: u64,
 }
 
+/// Device-derived semantic summary for Generate-Propagate-Test execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpistemicGpuSemanticTrace {
+    /// Number of candidate rows generated on device.
+    pub generated_candidates: usize,
+    /// Number of epistemic guesses represented by generated candidate rows.
+    pub guesses: usize,
+    /// Number of candidate rows propagated on device.
+    pub propagated_candidates: usize,
+    /// Number of generated candidates not propagated.
+    pub pruned_candidates: usize,
+    /// Number of candidate rows checked by world-view validation.
+    pub tested_candidates: usize,
+    /// Number of reduced model slots checked by model-membership/world-view kernels.
+    pub reduced_model_slots_checked: usize,
+    /// Number of accepted candidates observed in the device rejection buffer.
+    pub accepted_candidates: usize,
+    /// Number of accepted world views represented by accepted candidates.
+    pub accepted_world_views: usize,
+    /// Number of rejected candidates observed in the device rejection buffer.
+    pub rejected_candidates: usize,
+    /// Nonzero rejection reason codes copied from the device rejection buffer.
+    pub rejection_reasons: Vec<u32>,
+    /// Bounded metadata reads from the device rejection buffer after the hot path.
+    pub rejection_reason_device_reads: u32,
+    /// Bytes read as bounded rejection-reason metadata after the hot path.
+    pub rejection_reason_metadata_bytes: u64,
+    /// CPU candidate enumerations used by the accepted path.
+    pub cpu_candidate_enumerations: u32,
+    /// CPU world-view validations used by the accepted path.
+    pub cpu_world_view_validations: u32,
+}
+
 /// Trace proving model-membership staging was performed by a GPU kernel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EpistemicGpuModelMembershipTrace {
@@ -620,6 +653,66 @@ impl EpistemicGpuFinalResultTransferTrace {
             row_count_device_reads: u32::from(!row_count_was_cached),
             tracked_data_plane_dtoh_calls: 0,
             tracked_data_plane_dtoh_bytes: 0,
+        })
+    }
+}
+
+impl EpistemicGpuSemanticTrace {
+    /// Summarize accepted/rejected candidates from the device rejection buffer.
+    pub fn from_device_rejection_reasons(
+        provider: &xlog_cuda::CudaKernelProvider,
+        workspace: &EpistemicGpuWorkspace,
+        candidate_generation: &EpistemicGpuCandidateGenerationTrace,
+        propagation: &EpistemicGpuPropagationTrace,
+        model_membership: &EpistemicGpuModelMembershipTrace,
+        world_view_validation: &EpistemicGpuWorldViewValidationTrace,
+    ) -> Result<Self> {
+        let candidate_count = candidate_generation.generated_candidates;
+        require_positive(candidate_count, "epistemic GPU semantic-trace candidates")?;
+        if candidate_count > workspace.layout.rejection_reason_slots {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU semantic-trace rejection metadata".to_string(),
+                estimated_bytes: candidate_count as u64,
+                budget_bytes: workspace.layout.rejection_reason_slots as u64,
+            });
+        }
+
+        let raw_rejection_reasons = provider
+            .dtoh_small_metadata_untracked(&workspace.rejection_reasons, candidate_count)?;
+        let accepted_candidates = raw_rejection_reasons
+            .iter()
+            .filter(|reason| **reason == 0)
+            .count();
+        let rejection_reasons: Vec<u32> = raw_rejection_reasons
+            .into_iter()
+            .filter(|reason| *reason != 0)
+            .collect();
+        let rejected_candidates = rejection_reasons.len();
+        let reduced_model_slots_checked = checked_product(
+            checked_product(
+                world_view_validation.candidates_checked,
+                model_membership.reduction_count,
+            )?,
+            model_membership.models_per_reduction,
+        )?;
+        let rejection_reason_metadata_bytes =
+            checked_product(candidate_count, std::mem::size_of::<u32>())? as u64;
+
+        Ok(Self {
+            generated_candidates: candidate_count,
+            guesses: candidate_count,
+            propagated_candidates: propagation.propagated_candidates,
+            pruned_candidates: candidate_count.saturating_sub(propagation.propagated_candidates),
+            tested_candidates: world_view_validation.candidates_checked,
+            reduced_model_slots_checked,
+            accepted_candidates,
+            accepted_world_views: accepted_candidates,
+            rejected_candidates,
+            rejection_reasons,
+            rejection_reason_device_reads: 1,
+            rejection_reason_metadata_bytes,
+            cpu_candidate_enumerations: 0,
+            cpu_world_view_validations: 0,
         })
     }
 }
@@ -1158,6 +1251,8 @@ pub struct EpistemicGpuExecutionResult {
     pub transfer_budget: EpistemicGpuTransferBudgetTrace,
     /// Final-result transfer accounting after the GPU hot path.
     pub final_result_transfer: EpistemicGpuFinalResultTransferTrace,
+    /// Device-derived semantic summary after world-view validation.
+    pub semantic_trace: EpistemicGpuSemanticTrace,
     /// Device-resident final query output buffer.
     pub final_output: CudaBuffer,
     /// Output buffer returned by the reduced production execution plan.
@@ -3595,6 +3690,14 @@ impl Executor {
         )?;
         let final_result_transfer =
             EpistemicGpuFinalResultTransferTrace::from_final_output(&self.provider, &final_output)?;
+        let semantic_trace = EpistemicGpuSemanticTrace::from_device_rejection_reasons(
+            &self.provider,
+            &prepared.workspace,
+            &candidate_generation,
+            &propagation,
+            &model_membership,
+            &world_view_validation,
+        )?;
 
         Ok(EpistemicGpuExecutionResult {
             prepared,
@@ -3608,6 +3711,7 @@ impl Executor {
             final_tuple_materialization,
             transfer_budget,
             final_result_transfer,
+            semantic_trace,
             final_output,
             output,
             trace,

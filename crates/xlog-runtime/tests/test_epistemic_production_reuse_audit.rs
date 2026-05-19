@@ -28,6 +28,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(audit.contains("G39 completion audit"));
     assert!(audit.contains("accepted K7 and K8 fixtures"));
     assert!(audit.contains("wcoj_clique8_dispatch_count"));
+    assert!(audit.contains("EpistemicGpuSemanticTrace"));
     assert!(audit.contains("kclique_wcoj_max_arity"));
 
     let runtime = read_workspace_file("crates/xlog-runtime/src/executor/epistemic_workspace.rs");
@@ -48,6 +49,11 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(runtime.contains("planned_hash_route_count"));
     assert!(runtime.contains("EpistemicGpuFinalResultTransferTrace"));
     assert!(runtime.contains("from_final_output(&self.provider, &final_output)"));
+    assert!(runtime.contains("EpistemicGpuSemanticTrace"));
+    assert!(runtime.contains("from_device_rejection_reasons"));
+    assert!(runtime.contains("dtoh_small_metadata_untracked"));
+    assert!(runtime.contains("cpu_candidate_enumerations: 0"));
+    assert!(runtime.contains("cpu_world_view_validations: 0"));
     assert!(runtime.contains("source_relation.column"));
     assert!(runtime.contains("output.column(bound_col_index)"));
     assert!(solver.contains("GpuCdclSolver::new"));

@@ -502,6 +502,62 @@ fn accepted_nonzero_arity_membership_filters_final_rows_by_bound_tuple_key() {
 }
 
 #[test]
+fn accepted_gpu_execution_records_device_semantic_trace_counts() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X).
+        "#,
+    )
+    .expect("parse semantic-trace epistemic fixture");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile semantic-trace epistemic executable");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &executable.relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation("node", upload_unary_u32(&fix.memory, &[1, 2]));
+    executor.put_relation("edge", upload_unary_u32(&fix.memory, &[1]));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 2,
+            },
+        )
+        .expect("execute semantic-trace epistemic fixture");
+
+    assert_eq!(result.semantic_trace.generated_candidates, 2);
+    assert_eq!(result.semantic_trace.propagated_candidates, 2);
+    assert_eq!(result.semantic_trace.tested_candidates, 2);
+    assert_eq!(result.semantic_trace.reduced_model_slots_checked, 4);
+    assert_eq!(result.semantic_trace.accepted_world_views, 1);
+    assert_eq!(result.semantic_trace.accepted_candidates, 1);
+    assert_eq!(result.semantic_trace.rejected_candidates, 1);
+    assert_eq!(result.semantic_trace.rejection_reasons, vec![5]);
+    assert_eq!(result.semantic_trace.rejection_reason_device_reads, 1);
+    assert_eq!(
+        result.semantic_trace.rejection_reason_metadata_bytes,
+        2 * std::mem::size_of::<u32>() as u64
+    );
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
+}
+
+#[test]
 fn accepted_not_know_nonzero_arity_membership_filters_final_rows_by_absent_bound_tuple_key() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
