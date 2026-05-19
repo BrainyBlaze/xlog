@@ -16,8 +16,10 @@ existing production runtime paths plus preflight-only reuse checks for broader
 K-clique planner coverage. The K5 fixture proves WCOJ dispatch; the K7/K8
 fixture proves reduced epistemic programs reuse the G39 K-clique planner
 surface through runtime preflight; unary, binary, and multi-membership fixtures
-prove variable-bound nonzero-arity membership filters final rows on device. This
-is not a closure claim for `G090_GPU`, `G090_CERT`, or `G090_CLOSE`.
+prove variable-bound nonzero-arity membership filters final rows on device; the
+negated unary fixture proves `not know` filters by absent bound tuple keys on
+the same device row-map path. This is not a closure claim for `G090_GPU`,
+`G090_CERT`, or `G090_CLOSE`.
 
 ## Implementation Evidence
 
@@ -30,12 +32,13 @@ is not a closure claim for `G090_GPU`, `G090_CERT`, or `G090_CLOSE`.
 | K7/K8 planner-surface reuse | `test_epistemic_gpu_wcoj_execution::epistemic_k7_k8_reductions_reuse_g39_kclique_planner_preflight_surface` compiles generated epistemic K7 and K8 reductions with `know gate()`, supplies production-style stats snapshots, and requires `kclique_wcoj_max_arity == 7/8`, full `kclique_wcoj_edge_permutation_count` of 21/28, nonzero sorted-layout requirements, and zero planned-hash/CPU-fallback counters. This is compile/preflight evidence only, not accepted K7/K8 runtime dispatch. |
 | Accepted final tuple materialization | The final epistemic output row count is read from device metadata and must be `1`, proving that the accepted world-view path materializes the production WCOJ row rather than only proving preflight metadata. |
 | Accepted nonzero-arity membership | Unary fixture `accepted(X) :- node(X), know edge(X)` returns `[1]`; binary fixture `accepted(X, Y) :- pair(X, Y), know edge(X, Y)` returns `[(1, 2)]`; multi-membership fixture `accepted(X) :- node(X), know edge(X), know color(X)` returns `[2]`, proving bound tuple-key membership filters rows by all variable-bound tuple keys rather than accepting every reduced tuple. |
+| Accepted `not know` nonzero-arity membership | Negated unary fixture `accepted(X) :- node(X), not know edge(X)` with `node = [1, 2, 3]` and `edge = [1, 3]` returns `[2]`, proving the final device row-map carries binding polarity and keeps rows whose bound tuple key is absent from the stable-model tuple source. |
 
 ## Validation
 
 | Command | Result |
 |---|---|
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 20 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 21 passed, 0 failed |
 
 ## Non-Closure Notes
 
@@ -43,8 +46,8 @@ is not a closure claim for `G090_GPU`, `G090_CERT`, or `G090_CLOSE`.
   WCOJ-eligible epistemic reduction.
 - It adds K7/K8 planner/preflight reuse evidence for the G39 W6.4 K-clique
   template surface, without claiming K7/K8 accepted runtime dispatch.
-- It satisfies accepted unary, binary, and multi-membership variable-bound
-  nonzero-arity membership fixtures.
+- It satisfies accepted unary, binary, multi-membership, and negated `not know`
+  variable-bound nonzero-arity membership fixtures.
 - It does not prove the full G91, FAEEL, GPT, and splitting semantic parity
   matrix.
 - It does not close broader distinct-candidate learned-clause validity or

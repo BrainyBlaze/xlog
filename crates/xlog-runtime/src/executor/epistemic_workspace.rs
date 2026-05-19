@@ -1201,11 +1201,13 @@ enum TupleSourceLaunch<'a> {
     ArityZero {
         literal_index: u32,
         reduction_index: u32,
+        negated: u8,
         row_count: &'a TrackedCudaSlice<u32>,
     },
     ArityOne {
         literal_index: u32,
         reduction_index: u32,
+        negated: u8,
         row_count: &'a TrackedCudaSlice<u32>,
         key_col0: &'a CudaColumn,
         key_col0_width: u32,
@@ -1215,6 +1217,7 @@ enum TupleSourceLaunch<'a> {
     ArityTwo {
         literal_index: u32,
         reduction_index: u32,
+        negated: u8,
         row_count: &'a TrackedCudaSlice<u32>,
         key_col0: &'a CudaColumn,
         key_col0_width: u32,
@@ -1228,6 +1231,7 @@ enum TupleSourceLaunch<'a> {
     ArityThree {
         literal_index: u32,
         reduction_index: u32,
+        negated: u8,
         row_count: &'a TrackedCudaSlice<u32>,
         key_col0: &'a CudaColumn,
         key_col0_width: u32,
@@ -1245,6 +1249,7 @@ enum TupleSourceLaunch<'a> {
     ArityN {
         literal_index: u32,
         reduction_index: u32,
+        negated: u8,
         row_count: &'a TrackedCudaSlice<u32>,
         bound_value_row_count: &'a TrackedCudaSlice<u32>,
         key_col_count: u32,
@@ -1941,6 +1946,7 @@ impl Executor {
                 [] => tuple_sources.push(TupleSourceLaunch::ArityZero {
                     literal_index: binding.literal_index as u32,
                     reduction_index: binding.reduction_index as u32,
+                    negated: binding.negated as u8,
                     row_count: source_relation.num_rows_device(),
                 }),
                 &[key_col] if !has_bound_value_keys => {
@@ -1978,6 +1984,7 @@ impl Executor {
                     tuple_sources.push(TupleSourceLaunch::ArityOne {
                         literal_index: binding.literal_index as u32,
                         reduction_index: binding.reduction_index as u32,
+                        negated: binding.negated as u8,
                         row_count: source_relation.num_rows_device(),
                         key_col0,
                         key_col0_width: key_col0_width as u32,
@@ -2045,6 +2052,7 @@ impl Executor {
                     tuple_sources.push(TupleSourceLaunch::ArityTwo {
                         literal_index: binding.literal_index as u32,
                         reduction_index: binding.reduction_index as u32,
+                        negated: binding.negated as u8,
                         row_count: source_relation.num_rows_device(),
                         key_col0: key_col0_ref,
                         key_col0_width: key_col0_width as u32,
@@ -2140,6 +2148,7 @@ impl Executor {
                     tuple_sources.push(TupleSourceLaunch::ArityThree {
                         literal_index: binding.literal_index as u32,
                         reduction_index: binding.reduction_index as u32,
+                        negated: binding.negated as u8,
                         row_count: source_relation.num_rows_device(),
                         key_col0: key_col0_ref,
                         key_col0_width: key_col0_width as u32,
@@ -2362,6 +2371,7 @@ impl Executor {
                     tuple_sources.push(TupleSourceLaunch::ArityN {
                         literal_index: binding.literal_index as u32,
                         reduction_index: binding.reduction_index as u32,
+                        negated: binding.negated as u8,
                         row_count: source_relation.num_rows_device(),
                         bound_value_row_count: output.num_rows_device(),
                         key_col_count: key_columns.len() as u32,
@@ -2462,32 +2472,33 @@ impl Executor {
                         TupleSourceLaunch::ArityZero {
                             literal_index,
                             reduction_index,
+                            negated,
                             row_count,
                         } => {
                             // SAFETY: kernel arguments match the PTX signature; the capacity
                             // checks above prove candidate, world-view, membership, rejection,
                             // and tuple-source row-count buffers cover all accesses.
-                            func.clone().launch(
-                                config,
-                                (
-                                    literal_count,
-                                    candidate_count,
-                                    reduction_count,
-                                    models_per_reduction,
-                                    world_stride,
-                                    *literal_index,
-                                    *reduction_index,
-                                    *row_count,
-                                    &workspace.candidate_assumptions,
-                                    &workspace.world_views,
-                                    &mut workspace.model_membership,
-                                    &mut workspace.rejection_reasons,
-                                ),
-                            )?;
+                            let mut params: Vec<*mut c_void> = vec![
+                                (&literal_count).as_kernel_param(),
+                                (&candidate_count).as_kernel_param(),
+                                (&reduction_count).as_kernel_param(),
+                                (&models_per_reduction).as_kernel_param(),
+                                (&world_stride).as_kernel_param(),
+                                literal_index.as_kernel_param(),
+                                reduction_index.as_kernel_param(),
+                                negated.as_kernel_param(),
+                                row_count.as_kernel_param(),
+                                (&workspace.candidate_assumptions).as_kernel_param(),
+                                (&workspace.world_views).as_kernel_param(),
+                                (&mut workspace.model_membership).as_kernel_param(),
+                                (&mut workspace.rejection_reasons).as_kernel_param(),
+                            ];
+                            func.clone().launch(config, &mut params)?;
                         }
                         TupleSourceLaunch::ArityOne {
                             literal_index,
                             reduction_index,
+                            negated,
                             row_count,
                             key_col0,
                             key_col0_width,
@@ -2505,6 +2516,7 @@ impl Executor {
                                 (&world_stride).as_kernel_param(),
                                 literal_index.as_kernel_param(),
                                 reduction_index.as_kernel_param(),
+                                negated.as_kernel_param(),
                                 row_count.as_kernel_param(),
                                 key_col0.as_kernel_param(),
                                 key_col0_width.as_kernel_param(),
@@ -2520,6 +2532,7 @@ impl Executor {
                         TupleSourceLaunch::ArityTwo {
                             literal_index,
                             reduction_index,
+                            negated,
                             row_count,
                             key_col0,
                             key_col0_width,
@@ -2541,6 +2554,7 @@ impl Executor {
                                 (&world_stride).as_kernel_param(),
                                 literal_index.as_kernel_param(),
                                 reduction_index.as_kernel_param(),
+                                negated.as_kernel_param(),
                                 row_count.as_kernel_param(),
                                 key_col0.as_kernel_param(),
                                 key_col0_width.as_kernel_param(),
@@ -2560,6 +2574,7 @@ impl Executor {
                         TupleSourceLaunch::ArityThree {
                             literal_index,
                             reduction_index,
+                            negated,
                             row_count,
                             key_col0,
                             key_col0_width,
@@ -2585,6 +2600,7 @@ impl Executor {
                                 (&world_stride).as_kernel_param(),
                                 literal_index.as_kernel_param(),
                                 reduction_index.as_kernel_param(),
+                                negated.as_kernel_param(),
                                 row_count.as_kernel_param(),
                                 key_col0.as_kernel_param(),
                                 key_col0_width.as_kernel_param(),
@@ -2608,6 +2624,7 @@ impl Executor {
                         TupleSourceLaunch::ArityN {
                             literal_index,
                             reduction_index,
+                            negated,
                             row_count,
                             bound_value_row_count,
                             key_col_count,
@@ -2632,6 +2649,7 @@ impl Executor {
                                 (&world_stride).as_kernel_param(),
                                 literal_index.as_kernel_param(),
                                 reduction_index.as_kernel_param(),
+                                negated.as_kernel_param(),
                                 row_count.as_kernel_param(),
                                 key_col_ptrs.as_kernel_param(),
                                 key_col_widths.as_kernel_param(),
@@ -3054,6 +3072,7 @@ impl Executor {
         let memory = self.provider.memory();
         let device = self.provider.device().inner();
         let mut tuple_source_row_count_ptrs = memory.alloc::<u64>(row_filter_metadata_len)?;
+        let mut row_filter_negated = memory.alloc::<u8>(row_filter_metadata_len)?;
         let mut row_filter_key_offsets = memory.alloc::<u32>(row_filter_metadata_len)?;
         let mut row_filter_key_counts = memory.alloc::<u32>(row_filter_metadata_len)?;
         let mut key_col_ptrs = memory.alloc::<u64>(metadata_len)?;
@@ -3069,6 +3088,7 @@ impl Executor {
         if !row_filter_bindings.is_empty() {
             let mut tuple_source_row_count_ptrs_host =
                 Vec::with_capacity(row_filter_bindings.len());
+            let mut row_filter_negated_host = Vec::with_capacity(row_filter_bindings.len());
             let mut row_filter_key_offsets_host = Vec::with_capacity(row_filter_bindings.len());
             let mut row_filter_key_counts_host = Vec::with_capacity(row_filter_bindings.len());
             let mut key_col_ptrs_host = Vec::with_capacity(metadata_len);
@@ -3096,6 +3116,7 @@ impl Executor {
                 }
                 row_filter_key_offsets_host.push(key_col_ptrs_host.len() as u32);
                 row_filter_key_counts_host.push(binding.key_columns.len() as u32);
+                row_filter_negated_host.push(binding.negated as u8);
 
                 let source_relation =
                     self.store()
@@ -3228,6 +3249,11 @@ impl Executor {
                     )
                 })?;
             device
+                .htod_sync_copy_into(&row_filter_negated_host, &mut row_filter_negated)
+                .map_err(|e| {
+                    XlogError::execution_ctx(metadata_context, "upload row-filter polarity", &e)
+                })?;
+            device
                 .htod_sync_copy_into(&row_filter_key_offsets_host, &mut row_filter_key_offsets)
                 .map_err(|e| {
                     XlogError::execution_ctx(metadata_context, "upload row-filter key offsets", &e)
@@ -3291,6 +3317,9 @@ impl Executor {
                         &e,
                     )
                 })?;
+            device.memset_zeros(&mut row_filter_negated).map_err(|e| {
+                XlogError::execution_ctx(metadata_context, "row-filter polarity memset", &e)
+            })?;
             device
                 .memset_zeros(&mut row_filter_key_offsets)
                 .map_err(|e| {
@@ -3385,6 +3414,7 @@ impl Executor {
                     (&workspace.model_membership).as_kernel_param(),
                     (&workspace.world_views).as_kernel_param(),
                     (&tuple_source_row_count_ptrs).as_kernel_param(),
+                    (&row_filter_negated).as_kernel_param(),
                     (&row_filter_key_offsets).as_kernel_param(),
                     (&row_filter_key_counts).as_kernel_param(),
                     (&key_col_ptrs).as_kernel_param(),

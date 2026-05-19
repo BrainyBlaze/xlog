@@ -356,6 +356,57 @@ fn accepted_nonzero_arity_membership_filters_final_rows_by_bound_tuple_key() {
 }
 
 #[test]
+fn accepted_not_know_nonzero_arity_membership_filters_final_rows_by_absent_bound_tuple_key() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), not know edge(X).
+        "#,
+    )
+    .expect("parse negated nonzero-arity epistemic fixture");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile negated nonzero-arity epistemic executable");
+
+    assert!(executable.gpu_plan.tuple_membership_bindings[0].negated);
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &executable.relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation("node", upload_unary_u32(&fix.memory, &[1, 2, 3]));
+    executor.put_relation("edge", upload_unary_u32(&fix.memory, &[1, 3]));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 3,
+            },
+        )
+        .expect("execute negated nonzero-arity epistemic fixture");
+
+    assert_eq!(
+        result.model_membership.membership_source,
+        EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+    );
+    assert_eq!(
+        download_unary_u32(&fix.provider, &result.final_output),
+        vec![2],
+        "not know must keep only reduced rows whose bound tuple key is absent from the stable model"
+    );
+}
+
+#[test]
 fn accepted_binary_membership_filters_final_rows_by_bound_tuple_key() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");

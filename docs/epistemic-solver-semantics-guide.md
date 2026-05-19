@@ -86,10 +86,11 @@ CUDA-event elapsed timing for final-result flag staging.
 `CudaBuffer`, including covered tuple bytes, device row-count read/write
 metadata, model-membership bytes checked, world-view slots checked, kernel
 launches, zero host writes, and CUDA-event elapsed timing. The row-map kernel
-filters output rows by accepted membership, world-view state, and all
-variable-bound tuple-key relation matches before the final tuple kernel
-compacts reduced output columns. Accepted unary, binary, and multi-membership
-fixtures now prove final rows are filtered by bound tuple keys on device.
+filters output rows by accepted membership, world-view state, all variable-bound
+tuple-key relation matches, and binding polarity before the final tuple kernel
+compacts reduced output columns. Accepted unary, binary, multi-membership, and
+`not know` fixtures now prove final rows are filtered by bound tuple keys on
+device.
 `EpistemicGpuRuntimeWcojCertification` then requires actual production WCOJ
 counter deltas before WCOJ evidence can be certified.
 `Executor::execute_epistemic_gpu_execution` wraps the reduced production
@@ -97,17 +98,19 @@ runtime plan with preflight, workspace allocation, candidate-generation,
 propagation, candidate-validation, `execute_plan` plus before/after counter
 tracing, then model-membership staging, world-view validation staging, and
 accepted-candidate, final-result flag, and membership-gated final tuple
-materialization-staging kernel launches. It also snapshots provider host-transfer counters around the hot path
-and records `EpistemicGpuTransferBudgetTrace`, which rejects tracked data-plane
-H2D/D2H deltas instead of resetting shared telemetry. That is still incomplete
-for the epistemic hot path; tuple-source staging is GPU-backed over existing
-relation buffers with row-scoped ground-key comparison through specialized
+materialization-staging kernel launches. It also snapshots provider
+host-transfer counters around the hot path and records
+`EpistemicGpuTransferBudgetTrace`, which rejects tracked data-plane H2D/D2H
+deltas instead of resetting shared telemetry. That is still incomplete for the
+epistemic hot path; tuple-source staging is GPU-backed over existing relation
+buffers with row-scoped ground-key comparison through specialized
 arity-one/two/three kernels and a generic arity-N kernel, plus row-scoped
-variable-bound comparison against reduced-output columns through the generic
-arity-N kernel. Final tuple output is gated by the staged membership,
-world-view buffers, and accepted unary/binary/multi-membership bound-key
-row-filter fixtures. Full world-view semantics, solver coupling, probabilistic
-production-path reuse, and broader accepted semantic parity do not dispatch yet.
+variable-bound comparison against reduced-output columns and `not know` polarity
+through the generic arity-N kernel. Final tuple output is gated by the staged
+membership and world-view buffers, with accepted unary, binary,
+multi-membership, and not-know bound-key row-filter fixtures. Full world-view
+semantics, solver coupling, probabilistic production-path reuse, and broader
+accepted semantic parity do not dispatch yet.
 
 ## GPU And WCOJ Scope
 
