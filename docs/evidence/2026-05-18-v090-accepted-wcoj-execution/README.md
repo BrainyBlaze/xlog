@@ -32,7 +32,7 @@ membership filters final rows on device. This is not a closure claim for
 
 | Command | Result |
 |---|---|
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 15 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 16 passed, 0 failed |
 
 ## Non-Closure Notes
 
@@ -42,6 +42,6 @@ membership filters final rows on device. This is not a closure claim for
   nonzero-arity membership fixtures.
 - It does not prove the full G91, FAEEL, GPT, and splitting semantic parity
   matrix.
-- It does not close broader learned-clause solver lifecycle traces or broader
+- It does not close cross-candidate learned-clause import/reuse or broader
   accepted probabilistic knowledge-compilation integration.
 - No closure-board edit, merge, push, or tag is implied.

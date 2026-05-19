@@ -49,10 +49,14 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(solver.contains("solve_expect_unsat_with_gpu_execution_result"));
     assert!(solver.contains("solve_expect_unsat_with_branch_limit_ws_with_gpu_execution_result"));
     assert!(solver.contains("solve_assumption_lifecycle_with_gpu_execution_result"));
+    assert!(
+        solver.contains("solve_unsat_and_publish_learned_clause_arena_with_gpu_execution_result")
+    );
     assert!(solver.contains("solve_weighted_maxsat_candidates_with_gpu_execution_result"));
     assert!(solver.contains("solve_portfolio_with_gpu_execution_result"));
     assert!(solver.contains("GpuSolverProductionLifecycleStep"));
     assert!(solver.contains("GpuSolverProductionExpectation"));
+    assert!(solver.contains("GpuSolverProductionLearnedClauseArenaReport"));
     assert!(solver.contains("GpuSolverProductionMaxSatCandidate"));
     assert!(solver.contains("GpuSolverProductionPortfolioJob"));
     assert!(solver.contains("GpuSolverProductionPortfolioJob::Unknown"));
@@ -60,6 +64,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(solver.contains("gpu_assumption_pushes"));
     assert!(solver.contains("gpu_assumption_retractions"));
     assert!(solver.contains("gpu_lifecycle_workspace_reuses"));
+    assert!(solver.contains("gpu_learned_clause_arena_publications"));
+    assert!(solver.contains("gpu_learned_count_buffer_publications"));
     assert!(solver.contains("gpu_maxsat_candidate_solves"));
     assert!(solver.contains("gpu_maxsat_optima"));
     assert!(solver.contains("gpu_portfolio_jobs"));
@@ -71,6 +77,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(solver.contains("read_device_row_count"));
     assert!(solver.contains("require_stable_model_tuple_source"));
     assert!(solver.contains("cpu_assignment_enumerations: 0"));
+    assert!(solver.contains("cpu_learned_clause_transfers: 0"));
     assert!(prob.contains("ExactDdnnfProgram::compile_source_with_gpu"));
     assert!(prob.contains("ExactDdnnfProgram::compile_from_program"));
     assert!(prob.contains("compile_source_with_gpu_execution_result"));

@@ -277,6 +277,10 @@ output, then dispatch SAT/UNSAT through GPU CDCL.
 accepted runtime boundary before recording balanced push/retract counters and
 dispatching a bounded SAT/UNSAT lifecycle through existing GPU CDCL calls and a
 reusable workspace.
+`solve_unsat_and_publish_learned_clause_arena_with_gpu_execution_result` applies
+the same boundary before running workspace-backed GPU CDCL UNSAT and publishing
+the existing device learned-clause/proof arena plus learned-count buffer with
+zero CPU learned-clause transfers.
 `solve_weighted_maxsat_candidates_with_gpu_execution_result` applies the same
 boundary before certifying bounded MaxSAT candidate CNFs through GPU CDCL and
 returning the best declared score. `solve_portfolio_with_gpu_execution_result`
@@ -287,8 +291,8 @@ and recording portfolio counters.
 available along with the bounded GPU-backed MaxSAT and SAT/MaxSAT portfolio
 adapters.
 
-The adapter is partial v0.9 evidence only. It does not yet wire broader
-multi-candidate learned-clause lifecycle semantics or full MaxSAT coverage.
+The adapter is partial v0.9 evidence only. It does not yet wire
+cross-candidate learned-clause import/reuse or full MaxSAT coverage.
 
 `xlog_solve::SolverService` provides the bounded solver API used by semantic
 fixtures:

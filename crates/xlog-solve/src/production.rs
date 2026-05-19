@@ -72,6 +72,19 @@ pub struct GpuSolverProductionLifecycleReport {
     pub workspace_reuses: u64,
 }
 
+/// Summary of a GPU CDCL learned-clause arena publication.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GpuSolverProductionLearnedClauseArenaReport {
+    /// Number of UNSAT solves used to populate the learned-clause/proof arena.
+    pub unsat_solves: u64,
+    /// Number of learned-clause arenas published from device buffers.
+    pub gpu_learned_clause_arena_publications: u64,
+    /// Number of learned-count device buffers published with the arena.
+    pub gpu_learned_count_buffer_publications: u64,
+    /// CPU learned-clause transfers performed by this adapter.
+    pub cpu_learned_clause_transfers: u64,
+}
+
 /// One GPU-CDCL-backed candidate for bounded weighted MaxSAT production solving.
 ///
 /// The candidate CNF should encode the hard clauses plus the soft-clause subset
@@ -171,6 +184,10 @@ pub struct GpuSolverProductionTrace {
     pub gpu_assumption_retractions: u64,
     /// Number of lifecycle UNSAT steps that reused the same GPU CDCL workspace.
     pub gpu_lifecycle_workspace_reuses: u64,
+    /// Number of device learned-clause arenas published by accepted GPU CDCL solves.
+    pub gpu_learned_clause_arena_publications: u64,
+    /// Number of device learned-count buffers published with learned-clause arenas.
+    pub gpu_learned_count_buffer_publications: u64,
     /// Number of bounded MaxSAT candidate CNFs dispatched through GPU CDCL.
     pub gpu_maxsat_candidate_solves: u64,
     /// Number of bounded MaxSAT optima certified by GPU CDCL candidate solves.
@@ -189,6 +206,8 @@ pub struct GpuSolverProductionTrace {
     pub cpu_assignment_enumerations: u64,
     /// CPU MaxSAT assignment enumerations performed by this adapter.
     pub cpu_maxsat_enumerations: u64,
+    /// CPU learned-clause transfers performed by this adapter.
+    pub cpu_learned_clause_transfers: u64,
 }
 
 impl GpuSolverProductionTrace {
@@ -200,6 +219,15 @@ impl GpuSolverProductionTrace {
                 context: format!(
                     "CPU solver search counters must be zero, got assignment={} maxsat={}",
                     self.cpu_assignment_enumerations, self.cpu_maxsat_enumerations
+                ),
+            });
+        }
+        if self.cpu_learned_clause_transfers != 0 {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production adapter".to_string(),
+                context: format!(
+                    "CPU learned-clause transfers must be zero, got {}",
+                    self.cpu_learned_clause_transfers
                 ),
             });
         }
@@ -221,6 +249,7 @@ impl GpuSolverProductionAdapter {
             trace: GpuSolverProductionTrace {
                 cpu_assignment_enumerations: 0,
                 cpu_maxsat_enumerations: 0,
+                cpu_learned_clause_transfers: 0,
                 ..GpuSolverProductionTrace::default()
             },
         }
@@ -399,6 +428,76 @@ impl GpuSolverProductionAdapter {
                 .trace
                 .gpu_lifecycle_workspace_reuses
                 .saturating_sub(workspace_reuses_before),
+        })
+    }
+
+    /// Populate and publish the existing GPU CDCL learned-clause/proof arena.
+    ///
+    /// This records that an accepted epistemic candidate reached the GPU CDCL
+    /// learned-clause device buffers. It does not import those clauses into a
+    /// later candidate; cross-candidate reuse remains a separate certification gate.
+    pub fn solve_unsat_and_publish_learned_clause_arena_with_gpu_execution_result(
+        &mut self,
+        provider: &CudaKernelProvider,
+        result: &EpistemicGpuExecutionResult,
+        workspace: &mut GpuCdclWorkspace,
+        cnf: &GpuCnf,
+        branch_var_limit: &TrackedCudaSlice<u32>,
+    ) -> Result<GpuSolverProductionLearnedClauseArenaReport> {
+        require_accepted_gpu_solver_evidence(provider, result)?;
+
+        let learned_offsets_ptr = workspace.learned_offsets.device_ptr_value();
+        let learned_lits_ptr = workspace.learned_lits.device_ptr_value();
+        let proof_offsets_ptr = workspace.proof_offsets.device_ptr_value();
+        let proof_data_ptr = workspace.proof_data.device_ptr_value();
+        let learned_count_ptr = workspace.out_learned_count.device_ptr_value();
+
+        self.solve_expect_unsat_with_branch_limit_ws(workspace, cnf, branch_var_limit)?;
+
+        if learned_offsets_ptr == 0
+            || learned_lits_ptr == 0
+            || proof_offsets_ptr == 0
+            || proof_data_ptr == 0
+            || learned_count_ptr == 0
+        {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver learned-clause arena".to_string(),
+                context: "learned-clause publication requires non-null GPU arena buffers"
+                    .to_string(),
+            });
+        }
+        if workspace.learned_offsets.device_ptr_value() != learned_offsets_ptr
+            || workspace.learned_lits.device_ptr_value() != learned_lits_ptr
+            || workspace.proof_offsets.device_ptr_value() != proof_offsets_ptr
+            || workspace.proof_data.device_ptr_value() != proof_data_ptr
+            || workspace.out_learned_count.device_ptr_value() != learned_count_ptr
+        {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver learned-clause arena".to_string(),
+                context: "learned-clause publication must keep the reusable GPU workspace arena"
+                    .to_string(),
+            });
+        }
+
+        self.trace.gpu_learned_clause_arena_publications = self
+            .trace
+            .gpu_learned_clause_arena_publications
+            .saturating_add(1);
+        self.trace.gpu_learned_count_buffer_publications = self
+            .trace
+            .gpu_learned_count_buffer_publications
+            .saturating_add(1);
+        self.trace.accepted_gpu_candidate_evidence_consumed = self
+            .trace
+            .accepted_gpu_candidate_evidence_consumed
+            .saturating_add(1);
+        self.trace.require_zero_cpu_search()?;
+
+        Ok(GpuSolverProductionLearnedClauseArenaReport {
+            unsat_solves: 1,
+            gpu_learned_clause_arena_publications: 1,
+            gpu_learned_count_buffer_publications: 1,
+            cpu_learned_clause_transfers: self.trace.cpu_learned_clause_transfers,
         })
     }
 
