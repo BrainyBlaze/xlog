@@ -495,6 +495,9 @@ separately when either mode gates solver production work.
 The same trace records accepted operator-family evidence counters for `know`,
 `possible`, `not possible`, and `not know` when accepted runtime evidence gates
 solver lifecycle work.
+Accepted ternary and quaternary nonzero-arity evidence fixtures also gate the
+SAT path, requiring tuple-source membership and recording nonzero-arity
+candidate evidence plus tuple-key column reads before GPU CDCL dispatch.
 `xlog_solve::production_capabilities` reports that GPU CDCL SAT/UNSAT is
 available along with the bounded GPU-backed MaxSAT and SAT/MaxSAT portfolio
 adapters. `GpuSolverProductionTrace::require_production_metric_eligibility`
@@ -516,8 +519,9 @@ records, and bounded weighted soft-clause selection encoding for one and two
 accepted evidence records, plus two-record and split-batch heterogeneous MaxSAT schedulers
 over candidate-set, search-prune, encoded-search, UNKNOWN, and TIMEOUT jobs and
 two-record status-aware portfolio dispatch, with G91/default FAEEL mode-specific
-and operator-family accepted-evidence trace counters. Broader solver semantic integration
-remains open.
+and operator-family accepted-evidence trace counters plus ternary and quaternary
+nonzero-arity SAT evidence counters. Broader solver semantic integration remains
+open.
 
 `xlog_solve::SolverService` provides the bounded solver API used by semantic
 fixtures:
@@ -546,6 +550,7 @@ cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_maxsat_search_pruning -- --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_encoded_maxsat_and_scheduler_paths -- --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_portfolio_path -- --nocapture
+cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_gpu_execution_result_records_solver_nonzero_arity_evidence_trace -- --exact --nocapture
 cargo test -p xlog-solve --test solver_service_semantics
 ```
 

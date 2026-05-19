@@ -105,7 +105,7 @@ Post-merge compatibility validation:
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace -- --nocapture` | PASS, 54 passed |
 | `cargo test -p xlog-solve --test gpu_solver_production_reuse` | PASS, 3 passed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_epistemic_v070_4cycle_execution_certifies_production_wcoj_dispatch -- --exact --nocapture` | PASS, 1 passed |
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 101 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 102 passed, 0 failed |
 | `python scripts/validate_v086_examples.py --output /tmp/v090-v086-compat-validation.json` | PASS, consumer certification PASS, examples PASS |
 
 ## Corrected Gate Table

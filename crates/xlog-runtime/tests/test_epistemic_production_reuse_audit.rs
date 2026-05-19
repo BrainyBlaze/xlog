@@ -167,6 +167,9 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
         "accepted_ternary_gpu_execution_result_records_solver_nonzero_arity_evidence_trace"
     ));
     assert!(integration.contains(
+        "accepted_quaternary_gpu_execution_result_records_solver_nonzero_arity_evidence_trace"
+    ));
+    assert!(integration.contains(
         "accepted_split_batch_rejects_invalid_encoded_maxsat_scheduler_before_scheduler_work"
     ));
     assert!(integration.contains("not_possible_operator_count"));
