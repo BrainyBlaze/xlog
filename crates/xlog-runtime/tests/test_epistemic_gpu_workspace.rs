@@ -109,6 +109,7 @@ fn runtime_preflight_records_workspace_and_wcoj_route_surfaces() {
     assert_eq!(preflight.kclique_wcoj_plan_count, 1);
     assert_eq!(preflight.kclique_wcoj_max_arity, 5);
     assert_eq!(preflight.kclique_wcoj_edge_permutation_count, 10);
+    assert_eq!(preflight.kclique_stream_group_count, 1);
     assert_eq!(preflight.planned_hash_route_count, 0);
     assert_eq!(preflight.sorted_layout_requirement_count, 2);
     assert_eq!(preflight.helper_split_spec_count, 1);
@@ -240,6 +241,7 @@ fn runtime_wcoj_certification_accepts_actual_kclique_dispatch_delta() {
             observed_wcoj_dispatches: 1,
             observed_kclique_dispatches: 1,
             certified_edge_permutation_slots: 10,
+            certified_stream_groups: 1,
             certified_sorted_layout_requirements: 2,
             certified_helper_split_specs: 1,
             observed_layout_sorts: 2,
@@ -292,6 +294,7 @@ fn runtime_trace_preserves_counter_snapshots_and_wcoj_certification() {
             observed_wcoj_dispatches: 1,
             observed_kclique_dispatches: 1,
             certified_edge_permutation_slots: 10,
+            certified_stream_groups: 1,
             certified_sorted_layout_requirements: 2,
             certified_helper_split_specs: 1,
             observed_layout_sorts: 2,

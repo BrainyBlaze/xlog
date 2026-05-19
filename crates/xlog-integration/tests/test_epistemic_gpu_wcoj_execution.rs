@@ -236,6 +236,7 @@ fn accepted_epistemic_k5_execution_certifies_production_wcoj_dispatch() {
         .expect("execute accepted epistemic K5");
 
     assert_eq!(result.prepared.preflight.kclique_wcoj_plan_count, 1);
+    assert_eq!(result.prepared.preflight.kclique_stream_group_count, 1);
     assert_eq!(result.prepared.preflight.sorted_layout_requirement_count, 1);
     assert_eq!(result.prepared.preflight.helper_split_spec_count, 1);
     assert_eq!(
@@ -248,6 +249,7 @@ fn accepted_epistemic_k5_execution_certifies_production_wcoj_dispatch() {
             observed_wcoj_dispatches: 1..,
             observed_kclique_dispatches: 1..,
             certified_edge_permutation_slots: 10,
+            certified_stream_groups: 1,
             certified_sorted_layout_requirements: 1,
             certified_helper_split_specs: 1,
             ..
@@ -323,6 +325,7 @@ fn accepted_epistemic_k6_execution_certifies_g38b_helper_histogram_path() {
             .kclique_wcoj_edge_permutation_count,
         15
     );
+    assert_eq!(result.prepared.preflight.kclique_stream_group_count, 1);
     assert!(
         result.prepared.preflight.sorted_layout_requirement_count >= 1,
         "accepted K6 must carry production sorted-layout requirements"
@@ -337,6 +340,7 @@ fn accepted_epistemic_k6_execution_certifies_g38b_helper_histogram_path() {
             observed_wcoj_dispatches: 1..,
             observed_kclique_dispatches: 1..,
             certified_edge_permutation_slots: 15,
+            certified_stream_groups: 1..,
             certified_sorted_layout_requirements: 1..,
             certified_helper_split_specs: 1..,
             observed_metadata_builds: 1..,
@@ -397,6 +401,7 @@ fn epistemic_k7_k8_reductions_reuse_g39_kclique_planner_preflight_surface() {
             preflight.kclique_wcoj_edge_permutation_count,
             expected_edges
         );
+        assert_eq!(preflight.kclique_stream_group_count, 1);
         assert_eq!(preflight.planned_hash_route_count, 0);
         assert!(
             preflight.sorted_layout_requirement_count >= 1,
@@ -450,6 +455,7 @@ fn accepted_epistemic_k7_execution_certifies_production_wcoj_dispatch() {
             .kclique_wcoj_edge_permutation_count,
         21
     );
+    assert_eq!(result.prepared.preflight.kclique_stream_group_count, 1);
     assert!(
         result.prepared.preflight.sorted_layout_requirement_count >= 1,
         "accepted K7 must carry production sorted-layout requirements"
@@ -459,6 +465,7 @@ fn accepted_epistemic_k7_execution_certifies_production_wcoj_dispatch() {
         EpistemicGpuRuntimeWcojCertification::Certified {
             observed_wcoj_dispatches: 1..,
             observed_kclique_dispatches: 1..,
+            certified_stream_groups: 1..,
             ..
         }
     ));
@@ -523,6 +530,7 @@ fn accepted_epistemic_k8_execution_certifies_production_wcoj_dispatch() {
             .kclique_wcoj_edge_permutation_count,
         28
     );
+    assert_eq!(result.prepared.preflight.kclique_stream_group_count, 1);
     assert!(
         result.prepared.preflight.sorted_layout_requirement_count >= 1,
         "accepted K8 must carry production sorted-layout requirements"
@@ -532,6 +540,7 @@ fn accepted_epistemic_k8_execution_certifies_production_wcoj_dispatch() {
         EpistemicGpuRuntimeWcojCertification::Certified {
             observed_wcoj_dispatches: 1..,
             observed_kclique_dispatches: 1..,
+            certified_stream_groups: 1..,
             ..
         }
     ));

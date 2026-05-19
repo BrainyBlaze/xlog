@@ -30,6 +30,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(audit.contains("wcoj_clique8_dispatch_count"));
     assert!(audit.contains("kclique_metadata_build_nanos"));
     assert!(audit.contains("observed metadata-build nanoseconds"));
+    assert!(audit.contains("kclique_stream_group_count"));
+    assert!(audit.contains("certified_stream_groups"));
     assert!(audit.contains("possible_operator_count"));
     assert!(audit.contains("accepted unary, possible, binary"));
     assert!(audit.contains("EpistemicGpuSemanticTrace"));
@@ -51,8 +53,11 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(runtime.contains("MultiwayPlan::WcojWithPlan"));
     assert!(runtime.contains("kclique_wcoj_max_arity"));
     assert!(runtime.contains("kclique_wcoj_edge_permutation_count"));
+    assert!(runtime.contains("kclique_stream_group_count"));
+    assert!(runtime.contains("kclique_stream_groups"));
     assert!(runtime.contains("helper_split_spec_count"));
     assert!(runtime.contains("certified_edge_permutation_slots"));
+    assert!(runtime.contains("certified_stream_groups"));
     assert!(runtime.contains("certified_sorted_layout_requirements"));
     assert!(runtime.contains("certified_helper_split_specs"));
     assert!(runtime.contains("kclique_metadata_build_nanos"));

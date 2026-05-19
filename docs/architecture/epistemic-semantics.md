@@ -226,8 +226,9 @@ model output and solver coupling remain missing GPU phases.
 rejects nonzero forbidden CPU fallback counters, validates tuple-membership
 bindings, and records the reduced runtime rule count plus WCOJ route surfaces,
 including K-clique WCOJ plans, K-clique max arity, live edge-permutation slot
-counts, planned-hash routes, sorted-layout requirements, helper-splitting specs,
-and the certified tuple-membership binding count.
+counts, distinct stream-group scheduling ids, planned-hash routes,
+sorted-layout requirements, helper-splitting specs, and the certified
+tuple-membership binding count.
 `EpistemicGpuRuntimeCounters` snapshots the existing production WCOJ counters
 around a future epistemic dispatch, and
 `EpistemicGpuRuntimeWcojCertification` rejects preflight-only WCOJ metadata
