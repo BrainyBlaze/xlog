@@ -1100,6 +1100,122 @@ fn accepted_split_batch_gates_probabilistic_conditioned_source_path() {
 }
 
 #[test]
+fn accepted_split_batch_gates_probabilistic_conditioned_program_path() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred color(u32).
+        pred a(u32).
+        pred b(u32).
+        a(X) :- node(X), know edge(X).
+        b(X) :- node(X), know color(X).
+        "#,
+    )
+    .expect("parse split epistemic fixture");
+    let split = compile_epistemic_gpu_split_execution_with_stats_snapshot(&program, None)
+        .expect("compile split components through GPU executable path");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    let mut relation_ids = BTreeMap::new();
+    for component in &split.components {
+        for (name, rel_id) in &component.executable.relation_ids {
+            if let Some(previous) = relation_ids.insert(name.clone(), *rel_id) {
+                assert_eq!(
+                    previous, *rel_id,
+                    "split components must preserve relation ids for shared declarations"
+                );
+            }
+        }
+    }
+    for (name, rel_id) in &relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation("node", upload_unary_u32(&fix.memory, &[1, 2, 3]));
+    executor.put_relation("edge", upload_unary_u32(&fix.memory, &[1, 3]));
+    executor.put_relation("color", upload_unary_u32(&fix.memory, &[2]));
+
+    let executables: Vec<_> = split
+        .components
+        .iter()
+        .map(|component| &component.executable)
+        .collect();
+    let batch = executor
+        .execute_epistemic_gpu_execution_batch_with_trace(
+            &executables,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 2,
+            },
+        )
+        .expect("execute split GPU components through runtime batch path");
+
+    let edge_assumptions = [EpistemicAssumption::known_tuple(
+        "edge",
+        vec![EpistemicEvidenceTerm::integer(1)],
+        true,
+    )];
+    let color_assumptions = [EpistemicAssumption::known_tuple(
+        "color",
+        vec![EpistemicEvidenceTerm::integer(2)],
+        true,
+    )];
+    let assumption_groups: [&[EpistemicAssumption]; 2] = [&edge_assumptions, &color_assumptions];
+    let parsed_program = parse_program(
+        r#"
+        0.3::edge(1).
+        0.7::color(2).
+        query(edge(1)).
+        query(color(2)).
+        "#,
+    )
+    .expect("parse split-batch conditioned probabilistic program");
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut adapter = EpistemicProbProductionAdapter::new(config);
+    let evaluated = adapter
+        .compile_and_evaluate_conditioned_program_for_gpu_batch_execution_result(
+            &parsed_program,
+            &fix.provider,
+            EpistemicProbGpuBatchExecutionEvidence {
+                batch: &batch,
+                assumptions_by_component: &assumption_groups,
+            },
+        )
+        .expect("accepted split GPU batch evidence must gate conditioned parsed-program queries");
+
+    assert_eq!(evaluated.len(), 2);
+    assert_eq!(evaluated[0].query_probs.len(), 2);
+    assert!((evaluated[0].query_probs[0].prob - 1.0).abs() < 1.0e-6);
+    assert!((evaluated[0].query_probs[1].prob - 0.7).abs() < 1.0e-6);
+    assert_eq!(evaluated[1].query_probs.len(), 2);
+    assert!((evaluated[1].query_probs[0].prob - 0.3).abs() < 1.0e-6);
+    assert!((evaluated[1].query_probs[1].prob - 1.0).abs() < 1.0e-6);
+
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_gpu_batch_evidence_consumed, 1);
+    assert_eq!(trace.accepted_gpu_batch_component_evidence_consumed, 2);
+    assert_eq!(trace.accepted_world_view_evidence_consumed, 2);
+    assert_eq!(trace.accepted_evidence_assumptions_consumed, 2);
+    assert_eq!(trace.gpu_conditioned_evidence_facts, 2);
+    assert_eq!(trace.gpu_exact_program_compiles, 2);
+    assert_eq!(trace.gpu_exact_query_evaluations, 2);
+    assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 2);
+    assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 2);
+    assert_eq!(trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(trace.fixture_circuit_evaluations, 0);
+}
+
+#[test]
 fn split_gpu_world_view_distinguishes_absent_possible_from_not_known() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");

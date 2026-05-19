@@ -150,7 +150,7 @@ production GPU/WCOJ stack for specific certification fixtures:
   slices route accepted GPU evidence into existing GPU CDCL/CNF adapter paths.
 - Probabilistic source/program compile, condition, PIR/CNF encode, query, and
   gradient slices route accepted GPU evidence into existing GPU exact/provenance
-  paths with accepted split-batch conditioned source counters,
+  paths with accepted split-batch conditioned source/program counters,
   source/program-specific exact-query, PIR/CNF, and conditioned-gradient
   counters.
 
@@ -554,13 +554,14 @@ program query set without bypassing `ExactDdnnfProgram`. The source batch path
 also preserves false tuple assumptions per accepted record, so a two-record
 negative batch records two negative evidence facts and keeps probability
 recomputation on the existing exact path.
-`compile_and_evaluate_conditioned_source_for_gpu_batch_execution_result`
-consumes `EpistemicProbGpuBatchExecutionEvidence` from accepted split execution,
-validates the aggregate `EpistemicGpuBatchExecutionTrace` for one GPU runtime
+`compile_and_evaluate_conditioned_source_for_gpu_batch_execution_result` and
+`compile_and_evaluate_conditioned_program_for_gpu_batch_execution_result`
+consume `EpistemicProbGpuBatchExecutionEvidence` from accepted split execution,
+validate the aggregate `EpistemicGpuBatchExecutionTrace` for one GPU runtime
 execution per component plus zero CPU recomposition, zero CPU candidate/world-view
-fallback, and zero per-candidate host round trips, then routes each component's
-accepted assumptions through the same conditioned source exact path. The trace
-records `accepted_gpu_batch_evidence_consumed` and
+fallback, and zero per-candidate host round trips, then route each component's
+accepted assumptions through the same conditioned source or parsed-program exact
+path. The trace records `accepted_gpu_batch_evidence_consumed` and
 `accepted_gpu_batch_component_evidence_consumed` before the existing accepted
 world-view assumption and exact query counters advance.
 `encode_source_pir_cnf_with_gpu_execution_result` and
@@ -591,8 +592,8 @@ exact/provenance/PIR/CNF counter, or record CPU/fixture recomputation.
 
 This adapter is partial v0.9 evidence only. It covers bounded zero-arity,
 nonzero-arity, negative nonzero-arity, parsed-program, two-record
-source-conditioned query, split-batch conditioned source query, and two-record
-parsed-program-conditioned query
+source-conditioned query, split-batch conditioned source/program query, and
+two-record parsed-program-conditioned query
 cases, including true `know`, true `possible`, false `possible`/`not possible`,
 and false `know`/`not know` operator-result
 conditioning, accepted G91/default FAEEL mode-specific trace counters,
@@ -610,6 +611,7 @@ Run the probabilistic fixture and production-adapter source guard:
 cargo test -p xlog-prob --test epistemic_prob_production_reuse
 cargo test -p xlog-prob --test epistemic_prob
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_probabilistic_conditioned_source_path -- --nocapture
+cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_probabilistic_conditioned_program_path -- --nocapture
 ```
 
 ## Runnable Examples

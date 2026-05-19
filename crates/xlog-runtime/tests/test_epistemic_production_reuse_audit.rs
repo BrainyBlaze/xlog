@@ -238,6 +238,9 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(prob.contains("EpistemicProbGpuBatchExecutionEvidence"));
     assert!(prob.contains("compile_and_evaluate_source_for_gpu_execution_results"));
     assert!(prob.contains("compile_and_evaluate_conditioned_source_for_gpu_batch_execution_result"));
+    assert!(
+        prob.contains("compile_and_evaluate_conditioned_program_for_gpu_batch_execution_result")
+    );
     assert!(prob.contains("compile_and_evaluate_program_for_gpu_execution_results"));
     assert!(prob.contains("compile_and_evaluate_conditioned_source_for_gpu_execution_results"));
     assert!(prob.contains("compile_and_evaluate_conditioned_program_for_gpu_execution_results"));
@@ -299,6 +302,9 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(prob_epistemic.contains("require_stable_model_tuple_source"));
     assert!(
         integration.contains("accepted_split_batch_gates_probabilistic_conditioned_source_path")
+    );
+    assert!(
+        integration.contains("accepted_split_batch_gates_probabilistic_conditioned_program_path")
     );
 
     for (label, source) in [
