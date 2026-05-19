@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Added v0.8.6 persistent-session delta coalescing and opt-in relation-change
+  callbacks, with metadata-only callback payloads and evidence-backed
+  zero-data-plane-D2H hot paths.
+- Added v0.8.6 native exact-induction completion for `U32` and `Symbol`
+  pair buffers plus profile-gated chain-topology shared-memory CUDA scorers
+  with A/B controls, parity evidence, and no added data-plane transfers.
+
 ### Changed
 
 - Corrected release-facing README, changelog, and roadmap status after the

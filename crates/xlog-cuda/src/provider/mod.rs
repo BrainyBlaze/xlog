@@ -427,6 +427,8 @@ pub mod ilp_credit_kernels {
 pub mod ilp_exact_kernels {
     pub const ILP_EXACT_SCORE: &str = "ilp_exact_score";
     pub const ILP_EXACT_SCORE_U32: &str = "ilp_exact_score_u32";
+    pub const ILP_EXACT_SCORE_CHAIN_SMEM: &str = "ilp_exact_score_chain_smem";
+    pub const ILP_EXACT_SCORE_CHAIN_SMEM_U32: &str = "ilp_exact_score_chain_smem_u32";
 }
 
 /// Kernel function names in the PIR interning module.

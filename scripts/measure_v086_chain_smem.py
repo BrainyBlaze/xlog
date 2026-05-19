@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import time
 from typing import Any
@@ -37,8 +38,9 @@ def tensor(values: list[int]) -> torch.Tensor:
 def build_request(rows: int, queries: int):
     prog = pyxlog.IlpProgramFactory.compile(SOURCE, device=0, memory_mb=256)
 
-    # qx=1 appears in every left row. qy is absent from right arg1, forcing
-    # the chain predicate to scan every right row for each matching left row.
+    # qx=1 appears in every left row. qy matches only the final right row,
+    # forcing the chain predicate to scan the full right relation before
+    # finding coverage for each positive query.
     left_arg0 = [1] * rows
     left_arg1 = list(range(10_000, 10_000 + rows))
     right_arg0 = list(range(10_000, 10_000 + rows))
@@ -51,7 +53,7 @@ def build_request(rows: int, queries: int):
         head_relation="p_A",
         candidate_relations=["p_B", "p_C"],
         positive_arg0=tensor([1] * queries),
-        positive_arg1=tensor([999_999] * queries),
+        positive_arg1=tensor([20_000 + rows - 1] * queries),
         negative_arg0=tensor([2] * queries),
         negative_arg1=tensor([999_999] * queries),
         k_per_topology=2,
@@ -60,26 +62,59 @@ def build_request(rows: int, queries: int):
     return prog, kwargs
 
 
-def measure(rows: int, queries: int, iterations: int, warmup: int) -> dict[str, Any]:
-    prog, kwargs = build_request(rows, queries)
-    for _ in range(warmup):
-        induce_exact(prog, backend="native", **kwargs)
+ENV_CHAIN_SMEM = "XLOG_ILP_EXACT_CHAIN_SMEM"
 
-    torch.cuda.synchronize()
-    samples: list[float] = []
-    for _ in range(iterations):
-        prog.reset_d2h_transfer_count()
-        start = time.perf_counter()
-        result = induce_exact(prog, backend="native", **kwargs)
+
+def measure(
+    rows: int,
+    queries: int,
+    iterations: int,
+    warmup: int,
+    *,
+    chain_smem: bool,
+) -> dict[str, Any]:
+    previous = os.environ.get(ENV_CHAIN_SMEM)
+    os.environ[ENV_CHAIN_SMEM] = "1" if chain_smem else "0"
+    prog, kwargs = build_request(rows, queries)
+    try:
+        for _ in range(warmup):
+            induce_exact(prog, backend="native", **kwargs)
+
         torch.cuda.synchronize()
-        elapsed = time.perf_counter() - start
-        if prog.d2h_transfer_count() != 2:
-            raise RuntimeError(
-                f"expected dtoh_calls=2, got {prog.d2h_transfer_count()}"
-            )
-        if result.total_scored != 16:
-            raise RuntimeError(f"expected total_scored=16, got {result.total_scored}")
-        samples.append(elapsed)
+        samples: list[float] = []
+        last_signature = None
+        for _ in range(iterations):
+            prog.reset_d2h_transfer_count()
+            start = time.perf_counter()
+            result = induce_exact(prog, backend="native", **kwargs)
+            torch.cuda.synchronize()
+            elapsed = time.perf_counter() - start
+            if prog.d2h_transfer_count() != 2:
+                raise RuntimeError(
+                    f"expected dtoh_calls=2, got {prog.d2h_transfer_count()}"
+                )
+            if result.total_scored != 16:
+                raise RuntimeError(f"expected total_scored=16, got {result.total_scored}")
+            signature = [
+                (
+                    c.topology,
+                    c.left_relation,
+                    c.right_relation,
+                    c.positives_covered,
+                    c.negatives_covered,
+                    c.local_rank,
+                )
+                for c in result.candidates
+            ]
+            if last_signature is not None and signature != last_signature:
+                raise RuntimeError("exact-induction result changed across iterations")
+            last_signature = signature
+            samples.append(elapsed)
+    finally:
+        if previous is None:
+            os.environ.pop(ENV_CHAIN_SMEM, None)
+        else:
+            os.environ[ENV_CHAIN_SMEM] = previous
 
     return {
         "rows_per_candidate": rows,
@@ -91,6 +126,8 @@ def measure(rows: int, queries: int, iterations: int, warmup: int) -> dict[str, 
         "min_seconds": min(samples),
         "max_seconds": max(samples),
         "dtoh_calls": 2,
+        "chain_smem": chain_smem,
+        "result_signature": last_signature,
     }
 
 
@@ -107,14 +144,65 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    small = measure(args.small_rows, args.small_queries, args.iterations, args.warmup)
-    chain_hot = measure(args.hot_rows, args.hot_queries, args.iterations, args.warmup)
+    small_baseline = measure(
+        args.small_rows,
+        args.small_queries,
+        args.iterations,
+        args.warmup,
+        chain_smem=False,
+    )
+    small_smem = measure(
+        args.small_rows,
+        args.small_queries,
+        args.iterations,
+        args.warmup,
+        chain_smem=True,
+    )
+    chain_hot_baseline = measure(
+        args.hot_rows,
+        args.hot_queries,
+        args.iterations,
+        args.warmup,
+        chain_smem=False,
+    )
+    chain_hot_smem = measure(
+        args.hot_rows,
+        args.hot_queries,
+        args.iterations,
+        args.warmup,
+        chain_smem=True,
+    )
+    hot_speedup = (
+        chain_hot_baseline["median_seconds"] / chain_hot_smem["median_seconds"]
+    )
+    small_regression = (
+        (small_smem["median_seconds"] - small_baseline["median_seconds"])
+        / small_baseline["median_seconds"]
+        * 100.0
+    )
     payload = {
-        "small": small,
-        "chain_hot": chain_hot,
-        "hot_to_small_median_ratio": (
-            chain_hot["median_seconds"] / small["median_seconds"]
-        ),
+        "small": {
+            "baseline": small_baseline,
+            "chain_smem": small_smem,
+            "parity": small_baseline["result_signature"] == small_smem["result_signature"],
+            "regression_percent": small_regression,
+        },
+        "chain_hot": {
+            "baseline": chain_hot_baseline,
+            "chain_smem": chain_hot_smem,
+            "parity": chain_hot_baseline["result_signature"]
+            == chain_hot_smem["result_signature"],
+            "speedup_ratio": hot_speedup,
+        },
+        "transfer_budget": {
+            "baseline_dtoh_calls": chain_hot_baseline["dtoh_calls"],
+            "chain_smem_dtoh_calls": chain_hot_smem["dtoh_calls"],
+            "added_dtoh_calls": chain_hot_smem["dtoh_calls"]
+            - chain_hot_baseline["dtoh_calls"],
+        },
+        "fallback": {
+            "non_chain_uses_baseline_logic": True,
+        },
     }
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0

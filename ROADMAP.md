@@ -1542,7 +1542,7 @@ WCOJ, and CLI paths.
 
 ## v0.8.6 - DTS-DLM Runtime Completion and GPU-Native Optimizer Pack
 
-Status: planned. Governing goal document:
+Status: in progress. Governing goal document:
 `docs/plans/2026-05-19-agent-v086-dts-runtime-completion-goal.md`.
 
 v0.8.6 closes the seven v0.8.0 deferred completion items as a production
@@ -1560,22 +1560,27 @@ engines, or parallel helper paths that bypass production dispatch are blockers.
 
 ### Persistent Relation Maintenance Completion
 
-- [ ] Add device-resident batch update coalescing for repeated DTS-DLM
+- [x] Add device-resident batch update coalescing for repeated DTS-DLM
       Stage-4 `wmir_committed` updates, with row-level insert/delete
       coalescing before recompute and byte-identical output versus sequential
       deltas.
-- [ ] Add explicit opt-in change notification callbacks for
+- [x] Add explicit opt-in change notification callbacks for
       session-managed relations, delivered from committed delta summaries
       without forcing data-plane device-to-host transfers.
+      Evidence: `docs/evidence/2026-05-19-v086-delta-coalesce/` and
+      `docs/evidence/2026-05-19-v086-notify/`.
 
 ### Native Exact Induction Completion
 
-- [ ] Add native exact-induction column-type dispatch beyond `U64`,
+- [x] Add native exact-induction column-type dispatch beyond `U64`,
       including `U32` and `Symbol` pair buffers, with explicit typed kernels
       or safe physical-layout dispatch and no silent narrowing.
-- [ ] Add chain-topology shared-memory caching of L rows only after profile
+- [x] Add chain-topology shared-memory caching of L rows only after profile
       evidence identifies the chain scorer as hot, with a required speedup
       gate and parity against the existing strict per-topology semantics.
+      Evidence: `docs/evidence/2026-05-19-v086-exact-types/`,
+      `docs/evidence/2026-05-19-v086-chain-smem-profile/`, and
+      `docs/evidence/2026-05-19-v086-chain-smem/`.
 
 ### Profile-Gated Optimizer Completion
 

@@ -321,6 +321,11 @@ Returns an `ExactInductionResult` dataclass with `candidates: list[ScoredCandida
 - `U32`: supported through `ilp_exact_score_u32`.
 - `Symbol`: supported through the same physical `u32` kernel while retaining
   `Symbol` schema identity and rejecting mixed `U32`/`Symbol` requests.
+- Chain topology shared-memory caching: supported through
+  `ilp_exact_score_chain_smem` and `ilp_exact_score_chain_smem_u32` when
+  `XLOG_ILP_EXACT_CHAIN_SMEM` is enabled and the candidate-row threshold is
+  met. Non-chain topologies inside those entry points continue to call the
+  baseline matcher.
 - PTX policy: `kernels/ilp_exact.cu` is checked in; generated
   `ilp_exact.portable.ptx` and architecture-specific `.cubin` files are build
   and packaging artifacts, not source artifacts. `crates/xlog-cuda/build.rs`
@@ -330,11 +335,25 @@ Returns an `ExactInductionResult` dataclass with `candidates: list[ScoredCandida
   that lacks portable PTX. This matches the current ILP-family convention for
   `ilp.cu` and `ilp_credit.cu`.
 
-## Non-Goals / Deferred
+## Profile-Gated Chain Shared Memory
 
-- Shared-memory caching of L rows for the chain topology. This is the separate
-  G086_CHAIN_SMEM node and still requires profile evidence before kernel
-  optimization.
+The v0.8.6 G086_CHAIN_SMEM node adds an A/B-controlled chain scorer that tiles
+left-relation rows into dynamic shared memory for the strict chain topology.
+It is enabled by default only for candidate relations with at least
+`XLOG_ILP_EXACT_CHAIN_SMEM_MIN_ROWS` rows, defaulting to `256`, and can be
+disabled with `XLOG_ILP_EXACT_CHAIN_SMEM=0`.
+
+The optimization preserves the public exact-induction contract:
+
+- chain-smem and baseline dispatch produce identical coverage signatures on
+  the certified small and chain-hot fixtures;
+- median runtime improves by more than `1.2x` on the certified chain-hot
+  fixture;
+- small fixtures do not regress by more than five percent;
+- the D2H budget remains the same two count-array transfers used by the
+  baseline native exact-induction path.
+
+Evidence: `docs/evidence/2026-05-19-v086-chain-smem/`.
 
 ## See Also
 

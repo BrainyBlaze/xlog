@@ -450,7 +450,12 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
     KernelModuleSpec {
         cu_name: "ilp_exact",
         module_name: "xlog_ilp_exact",
-        kernels: &["ilp_exact_score", "ilp_exact_score_u32"],
+        kernels: &[
+            "ilp_exact_score",
+            "ilp_exact_score_u32",
+            "ilp_exact_score_chain_smem",
+            "ilp_exact_score_chain_smem_u32",
+        ],
     },
     KernelModuleSpec {
         cu_name: "wcoj",

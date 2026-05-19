@@ -15,6 +15,11 @@ use xlog_core::{Result, ScalarType, XlogError};
 use super::{ilp_exact_kernels, RawCudaView, ILP_EXACT_MODULE};
 use crate::memory::CudaBuffer;
 
+const ILP_EXACT_BLOCK_SIZE: u32 = 256;
+const ENV_ILP_EXACT_CHAIN_SMEM: &str = "XLOG_ILP_EXACT_CHAIN_SMEM";
+const ENV_ILP_EXACT_CHAIN_SMEM_MIN_ROWS: &str = "XLOG_ILP_EXACT_CHAIN_SMEM_MIN_ROWS";
+const DEFAULT_ILP_EXACT_CHAIN_SMEM_MIN_ROWS: u32 = 256;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExactPairLayout {
     U64,
@@ -29,6 +34,29 @@ impl ExactPairLayout {
             Self::U32 | Self::Symbol => std::mem::size_of::<u32>(),
         }
     }
+}
+
+fn ilp_exact_chain_smem_enabled() -> bool {
+    match std::env::var(ENV_ILP_EXACT_CHAIN_SMEM) {
+        Ok(value) => !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        ),
+        Err(_) => true,
+    }
+}
+
+fn chain_smem_shared_bytes(layout: ExactPairLayout) -> u32 {
+    let block = ILP_EXACT_BLOCK_SIZE as usize;
+    let bytes = (2usize * block * layout.elem_size()) + (block * std::mem::size_of::<u32>());
+    u32::try_from(bytes).expect("chain smem byte count fits in u32")
+}
+
+fn ilp_exact_chain_smem_min_rows() -> u32 {
+    std::env::var(ENV_ILP_EXACT_CHAIN_SMEM_MIN_ROWS)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or(DEFAULT_ILP_EXACT_CHAIN_SMEM_MIN_ROWS)
 }
 
 impl super::CudaKernelProvider {
@@ -169,6 +197,14 @@ impl super::CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("negatives: missing column 1".to_string()))?;
 
         // ── Launch ────────────────────────────────────────────────────────
+        let max_candidate_rows = cand_rows.iter().copied().max().unwrap_or(0);
+        let chain_smem_enabled =
+            ilp_exact_chain_smem_enabled() && max_candidate_rows >= ilp_exact_chain_smem_min_rows();
+        let shared_mem_bytes = if chain_smem_enabled {
+            chain_smem_shared_bytes(layout)
+        } else {
+            0
+        };
         match layout {
             ExactPairLayout::U64 => {
                 let cand_arg0_view = RawCudaView::<u64> {
@@ -189,17 +225,22 @@ impl super::CudaKernelProvider {
                 let pos_arg1_view = self.column_as_u64_view(pos_col1, pos_rows as usize)?;
                 let neg_arg0_view = self.column_as_u64_view(neg_col0, neg_rows as usize)?;
                 let neg_arg1_view = self.column_as_u64_view(neg_col1, neg_rows as usize)?;
+                let kernel_name = if chain_smem_enabled {
+                    ilp_exact_kernels::ILP_EXACT_SCORE_CHAIN_SMEM
+                } else {
+                    ilp_exact_kernels::ILP_EXACT_SCORE
+                };
                 let func = device
-                    .get_func(ILP_EXACT_MODULE, ilp_exact_kernels::ILP_EXACT_SCORE)
+                    .get_func(ILP_EXACT_MODULE, kernel_name)
                     .ok_or_else(|| {
-                        XlogError::Kernel("ilp_exact_score kernel not loaded".to_string())
+                        XlogError::Kernel(format!("{} kernel not loaded", kernel_name))
                     })?;
                 unsafe {
                     func.clone().launch(
                         LaunchConfig {
                             grid_dim: (c_u32, c_u32, 4),
-                            block_dim: (256, 1, 1),
-                            shared_mem_bytes: 0,
+                            block_dim: (ILP_EXACT_BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes,
                         },
                         (
                             &cand_arg0_view,
@@ -238,17 +279,22 @@ impl super::CudaKernelProvider {
                 let pos_arg1_view = self.column_as_u32_view(pos_col1, pos_rows as usize)?;
                 let neg_arg0_view = self.column_as_u32_view(neg_col0, neg_rows as usize)?;
                 let neg_arg1_view = self.column_as_u32_view(neg_col1, neg_rows as usize)?;
+                let kernel_name = if chain_smem_enabled {
+                    ilp_exact_kernels::ILP_EXACT_SCORE_CHAIN_SMEM_U32
+                } else {
+                    ilp_exact_kernels::ILP_EXACT_SCORE_U32
+                };
                 let func = device
-                    .get_func(ILP_EXACT_MODULE, ilp_exact_kernels::ILP_EXACT_SCORE_U32)
+                    .get_func(ILP_EXACT_MODULE, kernel_name)
                     .ok_or_else(|| {
-                        XlogError::Kernel("ilp_exact_score_u32 kernel not loaded".to_string())
+                        XlogError::Kernel(format!("{} kernel not loaded", kernel_name))
                     })?;
                 unsafe {
                     func.clone().launch(
                         LaunchConfig {
                             grid_dim: (c_u32, c_u32, 4),
-                            block_dim: (256, 1, 1),
-                            shared_mem_bytes: 0,
+                            block_dim: (ILP_EXACT_BLOCK_SIZE, 1, 1),
+                            shared_mem_bytes,
                         },
                         (
                             &cand_arg0_view,

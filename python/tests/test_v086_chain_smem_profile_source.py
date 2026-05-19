@@ -17,7 +17,9 @@ def test_chain_smem_profile_script_uses_native_exact_path() -> None:
 
     assert "induce_exact(prog, backend=\"native\"" in script
     assert "qx=1 appears in every left row" in script
-    assert "hot_to_small_median_ratio" in script
+    assert "XLOG_ILP_EXACT_CHAIN_SMEM" in script
+    assert "speedup_ratio" in script
+    assert "regression_percent" in script
     assert "prog.d2h_transfer_count() != 2" in script
 
 
