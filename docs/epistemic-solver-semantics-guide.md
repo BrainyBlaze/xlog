@@ -424,8 +424,10 @@ knowledge-compilation counters.
 `compile_and_evaluate_conditioned_program_with_gpu_execution_result`
 additionally turn accepted zero-arity and concrete nonzero-arity tuple
 assumptions into parsed exact `Evidence` AST entries before evaluating through
-the same GPU exact path, recording
-`accepted_evidence_assumptions_consumed` and `gpu_conditioned_evidence_facts`.
+the same GPU exact path. False assumptions from `not know` are preserved as
+false parsed evidence entries and counted separately. The trace records
+`accepted_evidence_assumptions_consumed`, `gpu_conditioned_evidence_facts`, and
+`gpu_conditioned_negative_evidence_facts`.
 `compile_and_evaluate_conditioned_source_for_gpu_execution_results` and
 `compile_and_evaluate_conditioned_program_for_gpu_execution_results` validate a
 batch of accepted GPU runtime records before running per-record conditioning,
@@ -446,9 +448,10 @@ traces that lack accepted world-view evidence, lack an existing GPU
 exact/provenance/PIR/CNF counter, or record CPU/fixture recomputation.
 
 This adapter is partial v0.9 evidence only. It covers bounded zero-arity,
-nonzero-arity, parsed-program, two-record source-conditioned query, and
-two-record parsed-program-conditioned query cases, but not the full
-query-conditioned probabilistic matrix over accepted runtime world views.
+nonzero-arity, negative nonzero-arity, parsed-program, two-record
+source-conditioned query, and two-record parsed-program-conditioned query
+cases, but not the full query-conditioned probabilistic matrix over accepted
+runtime world views.
 
 Run the probabilistic fixture and production-adapter source guard:
 

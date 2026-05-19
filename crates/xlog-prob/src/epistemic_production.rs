@@ -89,8 +89,10 @@ pub struct EpistemicProbProductionTrace {
     pub gpu_source_knowledge_compilation_end_to_end_runs: u64,
     /// Number of accepted parsed-program compile-and-evaluate runs through the GPU exact path.
     pub gpu_program_knowledge_compilation_end_to_end_runs: u64,
-    /// Number of zero-arity accepted assumptions compiled as exact evidence facts.
+    /// Number of accepted assumptions compiled as exact evidence facts.
     pub gpu_conditioned_evidence_facts: u64,
+    /// Number of false accepted assumptions compiled as exact evidence facts.
+    pub gpu_conditioned_negative_evidence_facts: u64,
     /// CPU-only probability recomputations performed by this adapter.
     pub cpu_only_probability_recomputations: u64,
     /// Fixture `EpistemicCircuit` evaluations performed by this adapter.
@@ -229,6 +231,21 @@ impl EpistemicProbProductionAdapter {
         self.trace
     }
 
+    #[cfg(feature = "host-io")]
+    fn record_conditioned_evidence_counts(
+        &mut self,
+        counts: EpistemicProbConditionedEvidenceCounts,
+    ) {
+        self.trace.gpu_conditioned_evidence_facts = self
+            .trace
+            .gpu_conditioned_evidence_facts
+            .saturating_add(counts.total as u64);
+        self.trace.gpu_conditioned_negative_evidence_facts = self
+            .trace
+            .gpu_conditioned_negative_evidence_facts
+            .saturating_add(counts.negative as u64);
+    }
+
     /// Compile source through the existing GPU-native exact/provenance path.
     pub fn compile_source_with_accepted_world_view(
         &mut self,
@@ -364,14 +381,11 @@ impl EpistemicProbProductionAdapter {
         evidence: &AcceptedWorldViewEvidence,
     ) -> Result<ExactResult> {
         self.consume_accepted_evidence(evidence)?;
-        let (program, evidence_facts) = condition_source_with_accepted_evidence(source, evidence)?;
+        let (program, evidence_counts) = condition_source_with_accepted_evidence(source, evidence)?;
         let exact = ExactDdnnfProgram::compile_from_program(&program, self.config)?;
         self.trace.gpu_exact_source_compiles =
             self.trace.gpu_exact_source_compiles.saturating_add(1);
-        self.trace.gpu_conditioned_evidence_facts = self
-            .trace
-            .gpu_conditioned_evidence_facts
-            .saturating_add(evidence_facts as u64);
+        self.record_conditioned_evidence_counts(evidence_counts);
         let result = exact.evaluate()?;
         self.trace.gpu_exact_query_evaluations =
             self.trace.gpu_exact_query_evaluations.saturating_add(1);
@@ -445,14 +459,11 @@ impl EpistemicProbProductionAdapter {
         evidence: &AcceptedWorldViewEvidence,
     ) -> Result<ExactResultWithGrads> {
         self.consume_accepted_evidence(evidence)?;
-        let (program, evidence_facts) = condition_source_with_accepted_evidence(source, evidence)?;
+        let (program, evidence_counts) = condition_source_with_accepted_evidence(source, evidence)?;
         let exact = ExactDdnnfProgram::compile_from_program(&program, self.config)?;
         self.trace.gpu_exact_source_compiles =
             self.trace.gpu_exact_source_compiles.saturating_add(1);
-        self.trace.gpu_conditioned_evidence_facts = self
-            .trace
-            .gpu_conditioned_evidence_facts
-            .saturating_add(evidence_facts as u64);
+        self.record_conditioned_evidence_counts(evidence_counts);
         let result = exact.evaluate_gpu_with_grads()?;
         self.trace.gpu_exact_gradient_evaluations =
             self.trace.gpu_exact_gradient_evaluations.saturating_add(1);
@@ -529,15 +540,12 @@ impl EpistemicProbProductionAdapter {
         evidence: &AcceptedWorldViewEvidence,
     ) -> Result<ExactResult> {
         self.consume_accepted_evidence(evidence)?;
-        let (program, evidence_facts) =
+        let (program, evidence_counts) =
             condition_program_with_accepted_evidence(program, evidence)?;
         let exact = ExactDdnnfProgram::compile_from_program(&program, self.config)?;
         self.trace.gpu_exact_program_compiles =
             self.trace.gpu_exact_program_compiles.saturating_add(1);
-        self.trace.gpu_conditioned_evidence_facts = self
-            .trace
-            .gpu_conditioned_evidence_facts
-            .saturating_add(evidence_facts as u64);
+        self.record_conditioned_evidence_counts(evidence_counts);
         let result = exact.evaluate()?;
         self.trace.gpu_exact_query_evaluations =
             self.trace.gpu_exact_query_evaluations.saturating_add(1);
@@ -611,15 +619,12 @@ impl EpistemicProbProductionAdapter {
         evidence: &AcceptedWorldViewEvidence,
     ) -> Result<ExactResultWithGrads> {
         self.consume_accepted_evidence(evidence)?;
-        let (program, evidence_facts) =
+        let (program, evidence_counts) =
             condition_program_with_accepted_evidence(program, evidence)?;
         let exact = ExactDdnnfProgram::compile_from_program(&program, self.config)?;
         self.trace.gpu_exact_program_compiles =
             self.trace.gpu_exact_program_compiles.saturating_add(1);
-        self.trace.gpu_conditioned_evidence_facts = self
-            .trace
-            .gpu_conditioned_evidence_facts
-            .saturating_add(evidence_facts as u64);
+        self.record_conditioned_evidence_counts(evidence_counts);
         let result = exact.evaluate_gpu_with_grads()?;
         self.trace.gpu_exact_gradient_evaluations =
             self.trace.gpu_exact_gradient_evaluations.saturating_add(1);
@@ -884,10 +889,17 @@ impl EpistemicProbProductionAdapter {
 }
 
 #[cfg(feature = "host-io")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct EpistemicProbConditionedEvidenceCounts {
+    total: usize,
+    negative: usize,
+}
+
+#[cfg(feature = "host-io")]
 fn condition_source_with_accepted_evidence(
     source: &str,
     evidence: &AcceptedWorldViewEvidence,
-) -> Result<(Program, usize)> {
+) -> Result<(Program, EpistemicProbConditionedEvidenceCounts)> {
     let program = parse_program(source)?;
     condition_program_with_accepted_evidence(&program, evidence)
 }
@@ -896,7 +908,7 @@ fn condition_source_with_accepted_evidence(
 fn condition_program_with_accepted_evidence(
     program: &Program,
     evidence: &AcceptedWorldViewEvidence,
-) -> Result<(Program, usize)> {
+) -> Result<(Program, EpistemicProbConditionedEvidenceCounts)> {
     if evidence.assumptions().is_empty() {
         return Err(XlogError::UnsupportedEpistemicConstruct {
             construct: "accepted probabilistic evidence conditioning".to_string(),
@@ -906,6 +918,7 @@ fn condition_program_with_accepted_evidence(
     }
 
     let mut program = program.clone();
+    let mut counts = EpistemicProbConditionedEvidenceCounts::default();
     for assumption in evidence.assumptions() {
         if assumption.arity == 0 {
             if !assumption.terms.is_empty() {
@@ -929,6 +942,10 @@ fn condition_program_with_accepted_evidence(
                 ),
             });
         }
+        counts.total += 1;
+        if !assumption.value {
+            counts.negative += 1;
+        }
         program.evidence.push(Evidence {
             atom: Atom {
                 predicate: assumption.predicate.clone(),
@@ -942,7 +959,7 @@ fn condition_program_with_accepted_evidence(
         });
     }
 
-    Ok((program, evidence.assumption_count()))
+    Ok((program, counts))
 }
 
 #[cfg(feature = "host-io")]

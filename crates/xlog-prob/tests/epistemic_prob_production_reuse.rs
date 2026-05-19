@@ -59,6 +59,8 @@ fn production_prob_adapter_reuses_gpu_exact_path_not_fixture_circuit() {
     assert!(production.contains("gpu_program_knowledge_compilation_end_to_end_runs"));
     assert!(production.contains("accepted_evidence_assumptions_consumed"));
     assert!(production.contains("gpu_conditioned_evidence_facts"));
+    assert!(production.contains("gpu_conditioned_negative_evidence_facts"));
+    assert!(production.contains("record_conditioned_evidence_counts"));
     assert!(production.contains("condition_source_with_accepted_evidence"));
     assert!(production.contains("condition_program_with_accepted_evidence"));
     assert!(production.contains("EpistemicEvidenceTerm"));
@@ -112,6 +114,16 @@ fn production_prob_metric_gate_rejects_fixture_only_traces() {
         ..EpistemicProbProductionTrace::default()
     };
     assert!(eligible.require_production_metric_eligibility().is_ok());
+
+    let conditioned_negative = EpistemicProbProductionTrace {
+        accepted_world_view_evidence_consumed: 1,
+        gpu_conditioned_evidence_facts: 1,
+        gpu_conditioned_negative_evidence_facts: 1,
+        ..EpistemicProbProductionTrace::default()
+    };
+    assert!(conditioned_negative
+        .require_production_metric_eligibility()
+        .is_ok());
 
     let fixture = EpistemicProbProductionTrace {
         accepted_world_view_evidence_consumed: 1,
