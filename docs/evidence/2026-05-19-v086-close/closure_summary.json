@@ -1,8 +1,9 @@
 {
   "branch": "feat/v086-runtime-completion",
-  "certification_head_before_closure": "81badf314c09",
+  "certification_head_before_closure": "df2dbc03",
   "implementation_evidence_head_before_hold_correction": "0e2a5420",
   "hold_correction_commit": "81badf314c09",
+  "persistent_index_performance_commit": "df2dbc03",
   "date": "2026-05-19",
   "governing_goal": "docs/plans/2026-05-19-agent-v086-dts-runtime-completion-goal.md",
   "proposal": "docs/plans/2026-05-19-v086-closure-proposal.md",
@@ -54,7 +55,7 @@
       "status": "PASS"
     },
     "G086_INDEX": {
-      "commit": "702e1f8f + 0e2a5420; hold correction 81badf31; performance amendment pending commit",
+      "commit": "702e1f8f + 0e2a5420; hold correction 81badf31; performance amendment df2dbc03",
       "evidence": "docs/evidence/2026-05-19-v086-persistent-hash-index/README.md",
       "status": "PASS"
     },

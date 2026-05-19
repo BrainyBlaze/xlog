@@ -2,7 +2,7 @@
 
 Date: 2026-05-19
 Branch: `feat/v086-runtime-completion`
-Validation head after hold/correction amendment: `81badf314c09`
+Validation head after persistent-index performance amendment: `df2dbc03`
 Implementation evidence head before hold/correction amendment: `0e2a5420`
 Governing goal: `docs/plans/2026-05-19-agent-v086-dts-runtime-completion-goal.md`
 
@@ -41,7 +41,7 @@ proposal.
 | G086_CHAIN_SMEM | `e1cddbb7` + `ce78e32f` | PASS | `docs/evidence/2026-05-19-v086-chain-smem-profile/README.md`, `docs/evidence/2026-05-19-v086-chain-smem/README.md` |
 | G086_CSE | `1363b05e` | PASS | `docs/evidence/2026-05-19-v086-cse/README.md` |
 | G086_ADAPT | `2d9bdc0f` | PASS | `docs/evidence/2026-05-19-v086-adaptive-reoptimization/README.md` |
-| G086_INDEX | `702e1f8f` + `0e2a5420`; hold correction `81badf31`; performance amendment pending commit | PASS | `docs/evidence/2026-05-19-v086-persistent-hash-index/README.md` |
+| G086_INDEX | `702e1f8f` + `0e2a5420`; hold correction `81badf31`; performance amendment `df2dbc03` | PASS | `docs/evidence/2026-05-19-v086-persistent-hash-index/README.md` |
 | G086_CONSUMERS | `37f16651`; hold correction `81badf31` | BLOCKED on consumer-proof gaps | `docs/evidence/2026-05-19-v086-consumers/README.md` |
 | G086_INT | `b72f61ea`; hold correction `81badf31` | BLOCKED on release-readiness metrics | `docs/evidence/2026-05-19-v086-int/README.md` |
 | G086_CLOSE | `09f5ad4b`; hold correction `81badf31` | PASS with `HOLD_FOR_FIXES` decision | `docs/evidence/2026-05-19-v086-close/README.md` |

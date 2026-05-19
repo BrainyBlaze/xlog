@@ -11,8 +11,9 @@
   validation, and git hygiene checks.
 - Scope boundary: this evidence does not authorize merge, push, tag, release
   board updates, or closure. It records integration status for the feature
-  branch after the hold/correction amendment at validation head `81badf314c09`;
-  the implementation evidence head before that correction was `0e2a5420`.
+  branch after the persistent-index performance amendment at validation head
+  `df2dbc03`; the implementation evidence head before the hold/correction
+  amendment was `0e2a5420`.
 
 ## GQM Questions
 
