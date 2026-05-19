@@ -2644,6 +2644,163 @@ fn accepted_split_batch_gates_solver_encoded_maxsat_and_scheduler_paths() {
 }
 
 #[test]
+fn accepted_split_batch_rejects_invalid_encoded_maxsat_scheduler_before_scheduler_work() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred color(u32).
+        pred a(u32).
+        pred b(u32).
+        a(X) :- node(X), know edge(X).
+        b(X) :- node(X), know color(X).
+        "#,
+    )
+    .expect("parse split epistemic fixture");
+    let split = compile_epistemic_gpu_split_execution_with_stats_snapshot(&program, None)
+        .expect("compile split components through GPU executable path");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    let mut relation_ids = BTreeMap::new();
+    for component in &split.components {
+        for (name, rel_id) in &component.executable.relation_ids {
+            if let Some(previous) = relation_ids.insert(name.clone(), *rel_id) {
+                assert_eq!(
+                    previous, *rel_id,
+                    "split components must preserve relation ids for shared declarations"
+                );
+            }
+        }
+    }
+    for (name, rel_id) in &relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation("node", upload_unary_u32(&fix.memory, &[1, 2, 3]));
+    executor.put_relation("edge", upload_unary_u32(&fix.memory, &[1, 3]));
+    executor.put_relation("color", upload_unary_u32(&fix.memory, &[2]));
+
+    let executables: Vec<_> = split
+        .components
+        .iter()
+        .map(|component| &component.executable)
+        .collect();
+    let batch = executor
+        .execute_epistemic_gpu_execution_batch_with_trace(
+            &executables,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 2,
+            },
+        )
+        .expect("execute split GPU components through runtime batch path");
+
+    let weighted = SolveInstance::with_weights(
+        1,
+        vec![
+            Clause::new(vec![Literal::positive(0)]),
+            Clause::new(vec![Literal::negative(0)]),
+        ],
+        vec![7.0, 9.0],
+    );
+    let branch_limit = upload_u32_scalar(&fix.provider, 1);
+    let both_soft_clauses = [0usize, 1usize];
+    let selections = [GpuSolverProductionWeightedMaxSatSelection {
+        soft_clause_indices: &both_soft_clauses,
+        status: GpuSolverProductionMaxSatSearchStatus::Unsatisfiable,
+    }];
+    let jobs = [GpuSolverProductionMaxSatScheduleJob::EncodedSearch {
+        weighted: &weighted,
+        branch_var_limit: &branch_limit,
+        selections: &selections,
+    }];
+
+    let mut adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let mut workspace = adapter
+        .new_workspace(1, 2)
+        .expect("new split-batch generalized MaxSAT scheduler workspace");
+    let err = adapter
+        .solve_maxsat_schedule_with_gpu_batch_execution_result(
+            &fix.provider,
+            GpuSolverProductionBatchExecutionEvidence { batch: &batch },
+            &mut workspace,
+            &jobs,
+        )
+        .expect_err("all-UNSAT encoded scheduler jobs must fail before scheduler work");
+    assert!(format!("{err}")
+        .contains("bounded MaxSAT search requires at least one satisfiable GPU candidate"));
+
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_gpu_batch_candidate_evidence_consumed, 0);
+    assert_eq!(
+        trace.accepted_gpu_batch_candidate_component_evidence_consumed,
+        0
+    );
+    assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 0);
+    assert_eq!(trace.gpu_maxsat_scheduler_jobs, 0);
+    assert_eq!(trace.gpu_maxsat_scheduler_encoded_search_jobs, 0);
+    assert_eq!(trace.gpu_maxsat_candidate_encodes, 0);
+    assert_eq!(trace.gpu_cdcl_sat_solves, 0);
+    assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 0);
+    assert_eq!(trace.gpu_maxsat_candidate_solves, 0);
+    assert_eq!(trace.gpu_maxsat_unsat_candidate_prunes, 0);
+    assert_eq!(trace.gpu_maxsat_optima, 0);
+    assert_eq!(trace.cpu_assignment_enumerations, 0);
+    assert_eq!(trace.cpu_maxsat_enumerations, 0);
+
+    let empty_soft_clauses: [usize; 0] = [];
+    let empty_selections = [GpuSolverProductionWeightedMaxSatSelection {
+        soft_clause_indices: &empty_soft_clauses,
+        status: GpuSolverProductionMaxSatSearchStatus::Satisfiable,
+    }];
+    let empty_jobs = [GpuSolverProductionMaxSatScheduleJob::EncodedSearch {
+        weighted: &weighted,
+        branch_var_limit: &branch_limit,
+        selections: &empty_selections,
+    }];
+    let mut empty_adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let mut empty_workspace = empty_adapter
+        .new_workspace(1, 2)
+        .expect("new empty-selection generalized MaxSAT scheduler workspace");
+    let err = empty_adapter
+        .solve_maxsat_schedule_with_gpu_batch_execution_result(
+            &fix.provider,
+            GpuSolverProductionBatchExecutionEvidence { batch: &batch },
+            &mut empty_workspace,
+            &empty_jobs,
+        )
+        .expect_err("empty encoded scheduler selections must fail before scheduler work");
+    assert!(format!("{err}")
+        .contains("weighted MaxSAT search selections must include at least one soft clause"));
+
+    let trace = empty_adapter.trace();
+    assert_eq!(trace.accepted_gpu_batch_candidate_evidence_consumed, 0);
+    assert_eq!(
+        trace.accepted_gpu_batch_candidate_component_evidence_consumed,
+        0
+    );
+    assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 0);
+    assert_eq!(trace.gpu_maxsat_scheduler_jobs, 0);
+    assert_eq!(trace.gpu_maxsat_scheduler_encoded_search_jobs, 0);
+    assert_eq!(trace.gpu_maxsat_candidate_encodes, 0);
+    assert_eq!(trace.gpu_cdcl_sat_solves, 0);
+    assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 0);
+    assert_eq!(trace.gpu_maxsat_candidate_solves, 0);
+    assert_eq!(trace.gpu_maxsat_unsat_candidate_prunes, 0);
+    assert_eq!(trace.gpu_maxsat_optima, 0);
+    assert_eq!(trace.cpu_assignment_enumerations, 0);
+    assert_eq!(trace.cpu_maxsat_enumerations, 0);
+}
+
+#[test]
 fn split_gpu_world_view_distinguishes_absent_possible_from_not_known() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");

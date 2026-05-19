@@ -1172,12 +1172,7 @@ impl GpuSolverProductionAdapter {
         &mut self,
         candidates: &[GpuSolverProductionMaxSatCandidate<'_>],
     ) -> Result<GpuSolverProductionMaxSatReport> {
-        if candidates.is_empty() {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "GPU solver production MaxSAT".to_string(),
-                context: "bounded MaxSAT adapter requires at least one candidate CNF".to_string(),
-            });
-        }
+        Self::require_weighted_maxsat_candidates(candidates)?;
 
         let solves_before = self.trace.gpu_maxsat_candidate_solves;
         let mut optimum_score = 0u64;
@@ -1205,6 +1200,18 @@ impl GpuSolverProductionAdapter {
                 .gpu_maxsat_candidate_solves
                 .saturating_sub(solves_before),
         })
+    }
+
+    fn require_weighted_maxsat_candidates(
+        candidates: &[GpuSolverProductionMaxSatCandidate<'_>],
+    ) -> Result<()> {
+        if candidates.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production MaxSAT".to_string(),
+                context: "bounded MaxSAT adapter requires at least one candidate CNF".to_string(),
+            });
+        }
+        Ok(())
     }
 
     /// Solve a bounded weighted MaxSAT candidate set after accepted GPU epistemic execution.
@@ -1477,23 +1484,7 @@ impl GpuSolverProductionAdapter {
         weighted: &SolveInstance,
         selections: &[GpuSolverProductionWeightedMaxSatSelection<'_>],
     ) -> Result<Vec<GpuSolverProductionEncodedMaxSatSearchCandidate>> {
-        Self::require_weighted_maxsat_search_selections(selections)?;
-
-        if weighted.objective != Objective::MaxSat {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "GPU solver production MaxSAT encoding".to_string(),
-                context: format!(
-                    "weighted MaxSAT encoding requires Objective::MaxSat, got {:?}",
-                    weighted.objective
-                ),
-            });
-        }
-        if weighted.num_vars == 0 {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "GPU solver production MaxSAT encoding".to_string(),
-                context: "weighted MaxSAT encoding requires num_vars > 0".to_string(),
-            });
-        }
+        Self::require_weighted_maxsat_encoding_inputs(weighted, selections)?;
 
         let weights =
             weighted
@@ -1504,70 +1495,14 @@ impl GpuSolverProductionAdapter {
                     context: "weighted MaxSAT encoding requires explicit soft-clause weights"
                         .to_string(),
                 })?;
-        if weights.len() != weighted.clauses.len() {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "GPU solver production MaxSAT encoding".to_string(),
-                context: format!(
-                    "soft-clause weights length {} does not match clause count {}",
-                    weights.len(),
-                    weighted.clauses.len()
-                ),
-            });
-        }
 
         let mut encoded = Vec::with_capacity(selections.len());
         for selection in selections {
-            if selection.soft_clause_indices.is_empty() {
-                return Err(XlogError::UnsupportedEpistemicConstruct {
-                    construct: "GPU solver production MaxSAT encoding".to_string(),
-                    context:
-                        "weighted MaxSAT search selections must include at least one soft clause"
-                            .to_string(),
-                });
-            }
-
             let mut score = 0u64;
             let mut clauses = Vec::with_capacity(selection.soft_clause_indices.len());
             for &idx in selection.soft_clause_indices {
-                let clause = weighted.clauses.get(idx).ok_or_else(|| {
-                    XlogError::UnsupportedEpistemicConstruct {
-                        construct: "GPU solver production MaxSAT encoding".to_string(),
-                        context: format!(
-                            "soft-clause selection index {} is out of range for {} clauses",
-                            idx,
-                            weighted.clauses.len()
-                        ),
-                    }
-                })?;
-                let weight =
-                    *weights
-                        .get(idx)
-                        .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
-                            construct: "GPU solver production MaxSAT encoding".to_string(),
-                            context: format!(
-                                "soft-clause weight index {} is out of range for {} weights",
-                                idx,
-                                weights.len()
-                            ),
-                        })?;
-                if !weight.is_finite() || weight < 0.0 || weight.fract() != 0.0 {
-                    return Err(XlogError::UnsupportedEpistemicConstruct {
-                        construct: "GPU solver production MaxSAT encoding".to_string(),
-                        context: format!(
-                            "soft-clause weight at index {} must be a finite nonnegative integer, got {}",
-                            idx, weight
-                        ),
-                    });
-                }
-                if weight > u64::MAX as f64 {
-                    return Err(XlogError::UnsupportedEpistemicConstruct {
-                        construct: "GPU solver production MaxSAT encoding".to_string(),
-                        context: format!(
-                            "soft-clause weight at index {} exceeds u64 score range",
-                            idx
-                        ),
-                    });
-                }
+                let clause = &weighted.clauses[idx];
+                let weight = weights[idx];
                 score = score.saturating_add(weight as u64);
                 clauses.push(clause.clone());
             }
@@ -1692,6 +1627,102 @@ impl GpuSolverProductionAdapter {
                 context: "bounded MaxSAT search requires at least one satisfiable GPU candidate"
                     .to_string(),
             });
+        }
+        Ok(())
+    }
+
+    fn require_weighted_maxsat_encoding_inputs(
+        weighted: &SolveInstance,
+        selections: &[GpuSolverProductionWeightedMaxSatSelection<'_>],
+    ) -> Result<()> {
+        Self::require_weighted_maxsat_search_selections(selections)?;
+
+        if weighted.objective != Objective::MaxSat {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production MaxSAT encoding".to_string(),
+                context: format!(
+                    "weighted MaxSAT encoding requires Objective::MaxSat, got {:?}",
+                    weighted.objective
+                ),
+            });
+        }
+        if weighted.num_vars == 0 {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production MaxSAT encoding".to_string(),
+                context: "weighted MaxSAT encoding requires num_vars > 0".to_string(),
+            });
+        }
+
+        let weights =
+            weighted
+                .weights
+                .as_ref()
+                .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                    construct: "GPU solver production MaxSAT encoding".to_string(),
+                    context: "weighted MaxSAT encoding requires explicit soft-clause weights"
+                        .to_string(),
+                })?;
+        if weights.len() != weighted.clauses.len() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production MaxSAT encoding".to_string(),
+                context: format!(
+                    "soft-clause weights length {} does not match clause count {}",
+                    weights.len(),
+                    weighted.clauses.len()
+                ),
+            });
+        }
+
+        for selection in selections {
+            if selection.soft_clause_indices.is_empty() {
+                return Err(XlogError::UnsupportedEpistemicConstruct {
+                    construct: "GPU solver production MaxSAT encoding".to_string(),
+                    context:
+                        "weighted MaxSAT search selections must include at least one soft clause"
+                            .to_string(),
+                });
+            }
+            for &idx in selection.soft_clause_indices {
+                let _clause = weighted.clauses.get(idx).ok_or_else(|| {
+                    XlogError::UnsupportedEpistemicConstruct {
+                        construct: "GPU solver production MaxSAT encoding".to_string(),
+                        context: format!(
+                            "soft-clause selection index {} is out of range for {} clauses",
+                            idx,
+                            weighted.clauses.len()
+                        ),
+                    }
+                })?;
+                let weight =
+                    *weights
+                        .get(idx)
+                        .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                            construct: "GPU solver production MaxSAT encoding".to_string(),
+                            context: format!(
+                                "soft-clause weight index {} is out of range for {} weights",
+                                idx,
+                                weights.len()
+                            ),
+                        })?;
+                if !weight.is_finite() || weight < 0.0 || weight.fract() != 0.0 {
+                    return Err(XlogError::UnsupportedEpistemicConstruct {
+                        construct: "GPU solver production MaxSAT encoding".to_string(),
+                        context: format!(
+                            "soft-clause weight at index {} must be a finite nonnegative integer, got {}",
+                            idx, weight
+                        ),
+                    });
+                }
+                if weight > u64::MAX as f64 {
+                    return Err(XlogError::UnsupportedEpistemicConstruct {
+                        construct: "GPU solver production MaxSAT encoding".to_string(),
+                        context: format!(
+                            "soft-clause weight at index {} exceeds u64 score range",
+                            idx
+                        ),
+                    });
+                }
+            }
         }
         Ok(())
     }
@@ -1967,12 +1998,7 @@ impl GpuSolverProductionAdapter {
         workspace: &mut GpuCdclWorkspace,
         jobs: &[GpuSolverProductionMaxSatScheduleJob<'_>],
     ) -> Result<GpuSolverProductionMaxSatScheduleReport> {
-        if jobs.is_empty() {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "GPU solver production MaxSAT scheduler".to_string(),
-                context: "accepted MaxSAT scheduler requires at least one GPU job".to_string(),
-            });
-        }
+        Self::require_maxsat_schedule_jobs(jobs)?;
 
         let mut report = GpuSolverProductionMaxSatScheduleReport::default();
         for job in jobs {
@@ -2030,28 +2056,14 @@ impl GpuSolverProductionAdapter {
                         .saturating_sub(encodes_before);
                     Self::add_maxsat_schedule_step_report(&mut report, step_report);
                 }
-                GpuSolverProductionMaxSatScheduleJob::Unknown { reason } => {
-                    if reason.trim().is_empty() {
-                        return Err(XlogError::UnsupportedEpistemicConstruct {
-                            construct: "GPU solver production MaxSAT scheduler".to_string(),
-                            context: "UNKNOWN scheduler status requires a diagnostic reason"
-                                .to_string(),
-                        });
-                    }
+                GpuSolverProductionMaxSatScheduleJob::Unknown { .. } => {
                     self.trace.gpu_maxsat_scheduler_unknown_status_jobs = self
                         .trace
                         .gpu_maxsat_scheduler_unknown_status_jobs
                         .saturating_add(1);
                     report.unknown_jobs = report.unknown_jobs.saturating_add(1);
                 }
-                GpuSolverProductionMaxSatScheduleJob::Timeout { budget_micros } => {
-                    if *budget_micros == 0 {
-                        return Err(XlogError::UnsupportedEpistemicConstruct {
-                            construct: "GPU solver production MaxSAT scheduler".to_string(),
-                            context: "TIMEOUT scheduler status requires a nonzero budget"
-                                .to_string(),
-                        });
-                    }
+                GpuSolverProductionMaxSatScheduleJob::Timeout { .. } => {
                     self.trace.gpu_maxsat_scheduler_timeout_status_jobs = self
                         .trace
                         .gpu_maxsat_scheduler_timeout_status_jobs
@@ -2063,6 +2075,54 @@ impl GpuSolverProductionAdapter {
 
         self.trace.require_zero_cpu_search()?;
         Ok(report)
+    }
+
+    fn require_maxsat_schedule_jobs(
+        jobs: &[GpuSolverProductionMaxSatScheduleJob<'_>],
+    ) -> Result<()> {
+        if jobs.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production MaxSAT scheduler".to_string(),
+                context: "accepted MaxSAT scheduler requires at least one GPU job".to_string(),
+            });
+        }
+
+        for job in jobs {
+            match job {
+                GpuSolverProductionMaxSatScheduleJob::CandidateSet { candidates } => {
+                    Self::require_weighted_maxsat_candidates(candidates)?;
+                }
+                GpuSolverProductionMaxSatScheduleJob::Search { candidates } => {
+                    Self::require_weighted_maxsat_search_candidates(candidates)?;
+                }
+                GpuSolverProductionMaxSatScheduleJob::EncodedSearch {
+                    weighted,
+                    selections,
+                    ..
+                } => {
+                    Self::require_weighted_maxsat_encoding_inputs(weighted, selections)?;
+                }
+                GpuSolverProductionMaxSatScheduleJob::Unknown { reason } => {
+                    if reason.trim().is_empty() {
+                        return Err(XlogError::UnsupportedEpistemicConstruct {
+                            construct: "GPU solver production MaxSAT scheduler".to_string(),
+                            context: "UNKNOWN scheduler status requires a diagnostic reason"
+                                .to_string(),
+                        });
+                    }
+                }
+                GpuSolverProductionMaxSatScheduleJob::Timeout { budget_micros } => {
+                    if *budget_micros == 0 {
+                        return Err(XlogError::UnsupportedEpistemicConstruct {
+                            construct: "GPU solver production MaxSAT scheduler".to_string(),
+                            context: "TIMEOUT scheduler status requires a nonzero budget"
+                                .to_string(),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Execute a heterogeneous MaxSAT schedule once per accepted GPU evidence record.
@@ -2085,12 +2145,7 @@ impl GpuSolverProductionAdapter {
                 context: "MaxSAT scheduler requires at least one accepted GPU result".to_string(),
             });
         }
-        if jobs.is_empty() {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "GPU solver production MaxSAT scheduler".to_string(),
-                context: "accepted MaxSAT scheduler requires at least one GPU job".to_string(),
-            });
-        }
+        Self::require_maxsat_schedule_jobs(jobs)?;
         for result in results {
             require_accepted_gpu_solver_evidence(provider, result)?;
         }
@@ -2140,6 +2195,7 @@ impl GpuSolverProductionAdapter {
         workspace: &mut GpuCdclWorkspace,
         jobs: &[GpuSolverProductionMaxSatScheduleJob<'_>],
     ) -> Result<GpuSolverProductionMaxSatScheduleReport> {
+        Self::require_maxsat_schedule_jobs(jobs)?;
         let results = require_accepted_gpu_solver_batch_evidence(provider, evidence.batch)?;
         self.trace.accepted_gpu_batch_candidate_evidence_consumed = self
             .trace

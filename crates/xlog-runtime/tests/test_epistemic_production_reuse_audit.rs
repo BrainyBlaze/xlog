@@ -163,6 +163,9 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(integration.contains("accepted_split_batch_gates_solver_maxsat_search_pruning"));
     assert!(integration
         .contains("accepted_split_batch_gates_solver_encoded_maxsat_and_scheduler_paths"));
+    assert!(integration.contains(
+        "accepted_split_batch_rejects_invalid_encoded_maxsat_scheduler_before_scheduler_work"
+    ));
     assert!(integration.contains("not_possible_operator_count"));
     assert!(integration.contains("negated_row_filter_count"));
     assert!(solver.contains("GpuCdclSolver::new"));
@@ -199,6 +202,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
         solver.contains("solve_multi_candidate_weighted_maxsat_search_with_gpu_execution_results")
     );
     assert!(solver.contains("require_weighted_maxsat_search_candidates"));
+    assert!(solver.contains("require_weighted_maxsat_candidates"));
     assert!(solver.contains("solve_weighted_maxsat_encoded_search_with_gpu_execution_result"));
     assert!(solver.contains(
         "solve_multi_candidate_weighted_maxsat_encoded_search_with_gpu_execution_results"
@@ -206,6 +210,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(solver.contains("solve_weighted_maxsat_encoded_search_with_gpu_batch_execution_result"));
     assert!(solver.contains("encode_weighted_maxsat_search_candidates"));
     assert!(solver.contains("require_weighted_maxsat_search_selections"));
+    assert!(solver.contains("require_weighted_maxsat_encoding_inputs"));
+    assert!(solver.contains("require_maxsat_schedule_jobs"));
     assert!(solver.contains("solve_maxsat_schedule_with_gpu_execution_results"));
     assert!(solver.contains("solve_maxsat_schedule_with_gpu_batch_execution_result"));
     assert!(solver.contains("solve_portfolio_with_gpu_execution_result"));
