@@ -135,6 +135,28 @@ pub struct GpuSolverProductionMaxSatCandidate<'a> {
     pub branch_var_limit: &'a TrackedCudaSlice<u32>,
 }
 
+/// Expected GPU-CDCL status for a bounded MaxSAT search candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuSolverProductionMaxSatSearchStatus {
+    /// The candidate should be satisfiable and eligible for optimum scoring.
+    Satisfiable,
+    /// The candidate should be unsatisfiable and pruned by GPU CDCL.
+    Unsatisfiable,
+}
+
+/// One GPU-CDCL-backed candidate in a bounded weighted MaxSAT search.
+#[derive(Clone, Copy)]
+pub struct GpuSolverProductionMaxSatSearchCandidate<'a> {
+    /// Candidate MaxSAT score represented when the CNF is satisfiable.
+    pub score: u64,
+    /// Device-resident CNF for this MaxSAT candidate.
+    pub cnf: &'a GpuCnf,
+    /// Device-resident branch limit passed to the GPU CDCL solver.
+    pub branch_var_limit: &'a TrackedCudaSlice<u32>,
+    /// Expected candidate status certified by GPU CDCL.
+    pub status: GpuSolverProductionMaxSatSearchStatus,
+}
+
 /// Summary of one bounded GPU-backed MaxSAT production adapter run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GpuSolverProductionMaxSatReport {
@@ -144,6 +166,10 @@ pub struct GpuSolverProductionMaxSatReport {
     pub optimum_score: u64,
     /// Number of candidate CNFs checked.
     pub candidates_checked: u64,
+    /// Number of GPU-certified satisfiable candidates eligible for scoring.
+    pub satisfiable_candidates: u64,
+    /// Number of GPU-certified UNSAT candidates pruned from scoring.
+    pub unsat_candidates_pruned: u64,
     /// Number of candidate solves dispatched through GPU CDCL.
     pub gpu_cdcl_candidate_solves: u64,
 }
@@ -237,6 +263,8 @@ pub struct GpuSolverProductionTrace {
     pub gpu_learned_clause_reuse_rejections: u64,
     /// Number of bounded MaxSAT candidate CNFs dispatched through GPU CDCL.
     pub gpu_maxsat_candidate_solves: u64,
+    /// Number of bounded MaxSAT search candidates pruned as UNSAT by GPU CDCL.
+    pub gpu_maxsat_unsat_candidate_prunes: u64,
     /// Number of bounded MaxSAT optima certified by GPU CDCL candidate solves.
     pub gpu_maxsat_optima: u64,
     /// Number of portfolio jobs dispatched by the production adapter.
@@ -932,6 +960,8 @@ impl GpuSolverProductionAdapter {
             candidate_evidence_records: 0,
             optimum_score,
             candidates_checked: candidates.len() as u64,
+            satisfiable_candidates: candidates.len() as u64,
+            unsat_candidates_pruned: 0,
             gpu_cdcl_candidate_solves: self
                 .trace
                 .gpu_maxsat_candidate_solves
@@ -996,6 +1026,104 @@ impl GpuSolverProductionAdapter {
                 .saturating_add(1);
         }
 
+        self.trace.require_zero_cpu_search()?;
+        Ok(report)
+    }
+
+    fn solve_weighted_maxsat_search_candidates(
+        &mut self,
+        workspace: &mut GpuCdclWorkspace,
+        candidates: &[GpuSolverProductionMaxSatSearchCandidate<'_>],
+    ) -> Result<GpuSolverProductionMaxSatReport> {
+        if candidates.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production MaxSAT search".to_string(),
+                context: "bounded MaxSAT search requires at least one candidate CNF".to_string(),
+            });
+        }
+
+        let solves_before = self.trace.gpu_maxsat_candidate_solves;
+        let unsat_prunes_before = self.trace.gpu_maxsat_unsat_candidate_prunes;
+        let mut optimum_score = 0u64;
+        let mut satisfiable_candidates = 0u64;
+
+        for candidate in candidates {
+            match candidate.status {
+                GpuSolverProductionMaxSatSearchStatus::Satisfiable => {
+                    let _assignment = self.solver.solve_expect_sat_with_branch_limit(
+                        candidate.cnf,
+                        candidate.branch_var_limit,
+                    )?;
+                    self.trace.gpu_cdcl_sat_solves =
+                        self.trace.gpu_cdcl_sat_solves.saturating_add(1);
+                    self.trace.gpu_maxsat_candidate_solves =
+                        self.trace.gpu_maxsat_candidate_solves.saturating_add(1);
+                    satisfiable_candidates = satisfiable_candidates.saturating_add(1);
+                    optimum_score = optimum_score.max(candidate.score);
+                }
+                GpuSolverProductionMaxSatSearchStatus::Unsatisfiable => {
+                    self.solve_expect_unsat_with_branch_limit_ws(
+                        workspace,
+                        candidate.cnf,
+                        candidate.branch_var_limit,
+                    )?;
+                    self.trace.gpu_maxsat_candidate_solves =
+                        self.trace.gpu_maxsat_candidate_solves.saturating_add(1);
+                    self.trace.gpu_maxsat_unsat_candidate_prunes = self
+                        .trace
+                        .gpu_maxsat_unsat_candidate_prunes
+                        .saturating_add(1);
+                }
+            }
+        }
+
+        if satisfiable_candidates == 0 {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production MaxSAT search".to_string(),
+                context: "bounded MaxSAT search requires at least one satisfiable GPU candidate"
+                    .to_string(),
+            });
+        }
+
+        self.trace.gpu_maxsat_optima = self.trace.gpu_maxsat_optima.saturating_add(1);
+        self.trace.require_zero_cpu_search()?;
+
+        Ok(GpuSolverProductionMaxSatReport {
+            candidate_evidence_records: 0,
+            optimum_score,
+            candidates_checked: candidates.len() as u64,
+            satisfiable_candidates,
+            unsat_candidates_pruned: self
+                .trace
+                .gpu_maxsat_unsat_candidate_prunes
+                .saturating_sub(unsat_prunes_before),
+            gpu_cdcl_candidate_solves: self
+                .trace
+                .gpu_maxsat_candidate_solves
+                .saturating_sub(solves_before),
+        })
+    }
+
+    /// Search a bounded weighted MaxSAT candidate set after accepted GPU epistemic execution.
+    ///
+    /// Satisfiable candidates are scored through the existing GPU CDCL SAT path.
+    /// Unsatisfiable candidates are pruned through the existing workspace-backed
+    /// GPU CDCL UNSAT path. The adapter records no CPU assignment or MaxSAT
+    /// enumeration.
+    pub fn solve_weighted_maxsat_search_with_gpu_execution_result(
+        &mut self,
+        provider: &CudaKernelProvider,
+        result: &EpistemicGpuExecutionResult,
+        workspace: &mut GpuCdclWorkspace,
+        candidates: &[GpuSolverProductionMaxSatSearchCandidate<'_>],
+    ) -> Result<GpuSolverProductionMaxSatReport> {
+        require_accepted_gpu_solver_evidence(provider, result)?;
+        let mut report = self.solve_weighted_maxsat_search_candidates(workspace, candidates)?;
+        report.candidate_evidence_records = 1;
+        self.trace.accepted_gpu_candidate_evidence_consumed = self
+            .trace
+            .accepted_gpu_candidate_evidence_consumed
+            .saturating_add(1);
         self.trace.require_zero_cpu_search()?;
         Ok(report)
     }

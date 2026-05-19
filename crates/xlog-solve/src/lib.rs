@@ -53,6 +53,7 @@ pub use production::{
     GpuSolverProductionLearnedClauseArenaReport, GpuSolverProductionLearnedClauseReuseReport,
     GpuSolverProductionLifecycleReport, GpuSolverProductionLifecycleStep,
     GpuSolverProductionMaxSatCandidate, GpuSolverProductionMaxSatReport,
+    GpuSolverProductionMaxSatSearchCandidate, GpuSolverProductionMaxSatSearchStatus,
     GpuSolverProductionPortfolioJob, GpuSolverProductionPortfolioReport, GpuSolverProductionTrace,
 };
 pub use proof::{compute_checksum, SolveProof, SolveResult, SolveStats, SolveStatus};

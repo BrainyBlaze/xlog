@@ -34,6 +34,9 @@ fn production_solver_adapter_reuses_gpu_cdcl_not_cpu_oracle() {
         .contains("solve_multi_candidate_learned_clause_reuse_with_gpu_execution_results"));
     assert!(production.contains("solve_weighted_maxsat_candidates_with_gpu_execution_result"));
     assert!(production.contains("solve_multi_candidate_weighted_maxsat_with_gpu_execution_results"));
+    assert!(production.contains("solve_weighted_maxsat_search_with_gpu_execution_result"));
+    assert!(production.contains("GpuSolverProductionMaxSatSearchCandidate"));
+    assert!(production.contains("GpuSolverProductionMaxSatSearchStatus"));
     assert!(production.contains("solve_portfolio_with_gpu_execution_result"));
     assert!(production.contains("GpuSolverProductionLearnedClauseArenaReport"));
     assert!(production.contains("GpuSolverProductionLearnedClauseReuseReport"));
@@ -57,6 +60,7 @@ fn production_solver_adapter_reuses_gpu_cdcl_not_cpu_oracle() {
     assert!(production.contains("gpu_learned_clause_reused_solves"));
     assert!(production.contains("gpu_learned_clause_reuse_rejections"));
     assert!(production.contains("gpu_maxsat_candidate_solves"));
+    assert!(production.contains("gpu_maxsat_unsat_candidate_prunes"));
     assert!(production.contains("gpu_maxsat_optima"));
     assert!(production.contains("gpu_portfolio_jobs"));
     assert!(production.contains("gpu_portfolio_sat_jobs"));
@@ -90,6 +94,7 @@ fn production_solver_capabilities_report_gpu_backed_maxsat_and_portfolio_paths()
     assert!(production.contains("gpu_portfolio_sat_maxsat"));
     assert!(production.contains("GpuSolverProductionCapabilityStatus::Available"));
     assert!(production.contains("solve_weighted_maxsat_candidates"));
+    assert!(production.contains("solve_weighted_maxsat_search_candidates"));
     assert!(production.contains("solve_portfolio_with_gpu_execution_result"));
     assert!(production.contains("cpu_oracle_solver_allowed: false"));
 
