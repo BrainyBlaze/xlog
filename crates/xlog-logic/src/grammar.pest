@@ -114,11 +114,27 @@ evidence_stmt = { "evidence" ~ "(" ~ atom ~ "," ~ bool_lit ~ ")" ~ "." }
 prob_engine_value = { "exact_ddnnf" | "mc" }
 prob_cache_value = { "on" | "off" }
 magic_sets_value = { "auto" | "on" | "off" }
+prob_method_value = { "rejection" | "evidence_clamping" }
 pragma_prob_engine = { "#pragma" ~ "prob_engine" ~ "=" ~ prob_engine_value }
 pragma_prob_cache = { "#pragma" ~ "prob_cache" ~ "=" ~ prob_cache_value }
+pragma_prob_samples = { "#pragma" ~ "prob_samples" ~ "=" ~ integer }
+pragma_prob_seed = { "#pragma" ~ "prob_seed" ~ "=" ~ integer }
+pragma_prob_confidence = { "#pragma" ~ "prob_confidence" ~ "=" ~ float_num }
+pragma_prob_method = { "#pragma" ~ "prob_method" ~ "=" ~ prob_method_value }
+pragma_prob_max_nonmonotone_iterations = { "#pragma" ~ "prob_max_nonmonotone_iterations" ~ "=" ~ integer }
 pragma_max_recursion = { "#pragma" ~ "max_recursion_depth" ~ "=" ~ integer }
 pragma_magic_sets = { "#pragma" ~ "magic_sets" ~ "=" ~ magic_sets_value }
-pragma = { pragma_prob_engine | pragma_prob_cache | pragma_max_recursion | pragma_magic_sets }
+pragma = {
+    pragma_prob_engine
+    | pragma_prob_cache
+    | pragma_prob_samples
+    | pragma_prob_seed
+    | pragma_prob_confidence
+    | pragma_prob_method
+    | pragma_prob_max_nonmonotone_iterations
+    | pragma_max_recursion
+    | pragma_magic_sets
+}
 
 // Domain declarations
 domain_decl = { "domain" ~ ident ~ ":" ~ type_spec ~ "." }

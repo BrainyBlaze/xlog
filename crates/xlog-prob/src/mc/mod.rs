@@ -30,7 +30,7 @@ use xlog_cuda::provider::{mc_eval_kernels, MC_EVAL_MODULE};
 use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager, LaunchAsync};
 #[cfg(feature = "host-io")]
 use xlog_logic::ast::{BodyLiteral, Rule};
-use xlog_logic::ast::{Evidence, ProbQuery, Program};
+use xlog_logic::ast::{Directives, Evidence, ProbMethod, ProbQuery, Program};
 use xlog_logic::compile::Compiler;
 use xlog_logic::stratify::analyze_stratification;
 use xlog_runtime::Executor;
@@ -47,6 +47,24 @@ pub enum McSamplingMethod {
     Rejection,
     /// Force evidence variables in the sampler; every sample counts.
     EvidenceClamping,
+}
+
+impl McSamplingMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            McSamplingMethod::Rejection => "rejection",
+            McSamplingMethod::EvidenceClamping => "evidence_clamping",
+        }
+    }
+}
+
+impl From<ProbMethod> for McSamplingMethod {
+    fn from(value: ProbMethod) -> Self {
+        match value {
+            ProbMethod::Rejection => Self::Rejection,
+            ProbMethod::EvidenceClamping => Self::EvidenceClamping,
+        }
+    }
 }
 
 /// Strategy for counting evidence-satisfied samples in the MC loop.
@@ -124,6 +142,47 @@ impl Default for McEvalConfig {
             max_nonmonotone_iterations: 1024,
             sampling_method: None,
         }
+    }
+}
+
+impl McEvalConfig {
+    pub fn from_directives(directives: &Directives) -> Result<Self> {
+        let mut cfg = Self::default();
+        if let Some(samples) = directives.prob_samples {
+            cfg.samples = samples;
+        }
+        if let Some(seed) = directives.prob_seed {
+            cfg.seed = seed;
+        }
+        if let Some(confidence) = directives.prob_confidence {
+            cfg.confidence = confidence;
+        }
+        if let Some(iterations) = directives.prob_max_nonmonotone_iterations {
+            cfg.max_nonmonotone_iterations = iterations;
+        }
+        cfg.sampling_method = directives.prob_method.map(McSamplingMethod::from);
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.samples == 0 {
+            return Err(XlogError::Compilation(
+                "MC inference requires samples > 0".to_string(),
+            ));
+        }
+        if !(0.0 < self.confidence && self.confidence < 1.0) || self.confidence.is_nan() {
+            return Err(XlogError::Compilation(format!(
+                "MC inference requires 0 < confidence < 1, got {}",
+                self.confidence
+            )));
+        }
+        if self.max_nonmonotone_iterations == 0 {
+            return Err(XlogError::Compilation(
+                "MC inference requires max_nonmonotone_iterations > 0".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 

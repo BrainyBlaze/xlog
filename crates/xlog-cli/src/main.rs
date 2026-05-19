@@ -8,6 +8,8 @@ use arrow::util::pretty::pretty_format_batches;
 use xlog_core::{symbol, MemoryBudget, Result, XlogError};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_gpu::logic::LogicProgram;
+#[cfg(feature = "host-io")]
+use xlog_logic::ast::ProbEngine;
 use xlog_logic::ast::Program;
 use xlog_logic::compile::load_modules;
 use xlog_logic::{parse_program, rewrite_v085_magic_sets, MagicSetReport, MagicSetStatus};
@@ -16,7 +18,7 @@ use xlog_prob::exact::ExactDdnnfProgram;
 #[cfg(feature = "host-io")]
 use xlog_prob::exact::GpuConfig;
 #[cfg(feature = "host-io")]
-use xlog_prob::mc::{McEvalConfig, McProgram};
+use xlog_prob::mc::{McEvalConfig, McProgram, McSamplingMethod};
 use xlog_prob::provenance::{AggregateLiftReport, Value};
 
 #[derive(Parser)]
@@ -71,16 +73,20 @@ struct ProbArgs {
     device: usize,
     #[arg(long, default_value = "1024")]
     memory_mb: u64,
-    #[arg(long, value_enum, default_value = "exact_ddnnf")]
-    prob_engine: ProbEngineCli,
-    #[arg(long, default_value = "10000")]
-    samples: usize,
-    #[arg(long, default_value = "0")]
-    seed: u64,
-    #[arg(long, default_value = "0.95")]
-    confidence: f64,
+    #[arg(long, value_enum)]
+    prob_engine: Option<ProbEngineCli>,
+    #[arg(long)]
+    samples: Option<usize>,
+    #[arg(long)]
+    seed: Option<u64>,
+    #[arg(long)]
+    confidence: Option<f64>,
+    #[arg(long, value_enum)]
+    prob_method: Option<ProbMethodCli>,
+    #[arg(long, alias = "max-nonmonotone-iterations")]
+    prob_max_nonmonotone_iterations: Option<usize>,
     #[arg(long, value_enum, default_value = "pretty")]
-    output: OutputFormat,
+    output: ProbOutputFormat,
     #[arg(long)]
     output_dir: Option<PathBuf>,
     /// Additional directories to search for modules (colon-separated)
@@ -110,10 +116,25 @@ enum OutputFormat {
 }
 
 #[derive(Copy, Clone, ValueEnum)]
+enum ProbOutputFormat {
+    Pretty,
+    Csv,
+    Arrow,
+    Json,
+}
+
+#[derive(Copy, Clone, ValueEnum)]
 enum ProbEngineCli {
     #[value(name = "exact_ddnnf")]
     ExactDdnnf,
     Mc,
+}
+
+#[derive(Copy, Clone, ValueEnum)]
+enum ProbMethodCli {
+    Rejection,
+    #[value(name = "evidence_clamping")]
+    EvidenceClamping,
 }
 
 fn main() -> Result<()> {
@@ -400,6 +421,7 @@ fn run_probabilistic(args: ProbArgs) -> Result<()> {
         let source = std::fs::read_to_string(&args.source).map_err(|e| {
             XlogError::Execution(format!("Failed to read {}: {}", args.source.display(), e))
         })?;
+        let parsed_program = parse_program(&source)?;
 
         // Validate module imports if any search paths are provided
         if !args.module_path.is_empty() {
@@ -411,7 +433,7 @@ fn run_probabilistic(args: ProbArgs) -> Result<()> {
         config.device_ordinal = args.device;
         config.memory_bytes = args.memory_mb * 1024 * 1024;
 
-        match args.prob_engine {
+        match resolve_prob_engine(&args, &parsed_program) {
             ProbEngineCli::ExactDdnnf => {
                 let prog = ExactDdnnfProgram::compile_source_with_gpu(&source, config)?;
                 let result = prog.evaluate()?;
@@ -419,15 +441,45 @@ fn run_probabilistic(args: ProbArgs) -> Result<()> {
             }
             ProbEngineCli::Mc => {
                 let prog = McProgram::compile_source_with_gpu(&source, config)?;
-                let mut cfg = McEvalConfig::default();
-                cfg.samples = args.samples;
-                cfg.seed = args.seed;
-                cfg.confidence = args.confidence;
+                let mut cfg = McEvalConfig::from_directives(&parsed_program.directives)?;
+                apply_mc_cli_overrides(&args, &mut cfg)?;
                 let result = prog.evaluate(cfg)?;
                 emit_prob_mc(result, args.output, args.output_dir.as_deref())
             }
         }
     }
+}
+
+#[cfg(feature = "host-io")]
+fn resolve_prob_engine(args: &ProbArgs, program: &Program) -> ProbEngineCli {
+    args.prob_engine
+        .unwrap_or_else(|| match program.directives.prob_engine_or_default() {
+            ProbEngine::ExactDdnnf => ProbEngineCli::ExactDdnnf,
+            ProbEngine::Mc => ProbEngineCli::Mc,
+        })
+}
+
+#[cfg(feature = "host-io")]
+fn apply_mc_cli_overrides(args: &ProbArgs, cfg: &mut McEvalConfig) -> Result<()> {
+    if let Some(samples) = args.samples {
+        cfg.samples = samples;
+    }
+    if let Some(seed) = args.seed {
+        cfg.seed = seed;
+    }
+    if let Some(confidence) = args.confidence {
+        cfg.confidence = confidence;
+    }
+    if let Some(iterations) = args.prob_max_nonmonotone_iterations {
+        cfg.max_nonmonotone_iterations = iterations;
+    }
+    if let Some(method) = args.prob_method {
+        cfg.sampling_method = Some(match method {
+            ProbMethodCli::Rejection => McSamplingMethod::Rejection,
+            ProbMethodCli::EvidenceClamping => McSamplingMethod::EvidenceClamping,
+        });
+    }
+    cfg.validate()
 }
 
 fn emit_logic_results(
@@ -468,9 +520,14 @@ fn emit_logic_results(
 #[cfg(feature = "host-io")]
 fn emit_prob_exact(
     result: xlog_prob::exact::ExactResult,
-    format: OutputFormat,
+    format: ProbOutputFormat,
     output_dir: Option<&Path>,
 ) -> Result<()> {
+    if matches!(format, ProbOutputFormat::Json) {
+        print_prob_exact_json(result);
+        return Ok(());
+    }
+
     let mut atoms = Vec::new();
     let mut probs = Vec::new();
     let mut log_probs = Vec::new();
@@ -496,21 +553,42 @@ fn emit_prob_exact(
     ])
     .map_err(|e| XlogError::Execution(format!("Failed to build prob batch: {}", e)))?;
 
-    emit_batch("prob", &batch, format, output_dir)
+    emit_batch(
+        "prob",
+        &batch,
+        prob_output_as_batch_format(format),
+        output_dir,
+    )
 }
 
 #[cfg(feature = "host-io")]
 fn emit_prob_mc(
     result: xlog_prob::mc::McResult,
-    format: OutputFormat,
+    format: ProbOutputFormat,
     output_dir: Option<&Path>,
 ) -> Result<()> {
+    if matches!(format, ProbOutputFormat::Json) {
+        print_prob_mc_json(result);
+        return Ok(());
+    }
+
+    let total_samples = result.total_samples as u64;
+    let evidence_samples = result.evidence_samples as u64;
+    let seed = result.seed;
+    let confidence = result.confidence;
+    let sampling_method = result.sampling_method.as_str().to_string();
+
     let mut atoms = Vec::new();
     let mut probs = Vec::new();
     let mut log_probs = Vec::new();
     let mut stderr = Vec::new();
     let mut ci_low = Vec::new();
     let mut ci_high = Vec::new();
+    let mut total_samples_col = Vec::new();
+    let mut evidence_samples_col = Vec::new();
+    let mut seed_col = Vec::new();
+    let mut confidence_col = Vec::new();
+    let mut sampling_method_col = Vec::new();
     for q in result.query_estimates {
         atoms.push(atom_to_string(&q.atom));
         probs.push(q.prob);
@@ -518,6 +596,11 @@ fn emit_prob_mc(
         stderr.push(q.stderr);
         ci_low.push(q.ci_low);
         ci_high.push(q.ci_high);
+        total_samples_col.push(total_samples);
+        evidence_samples_col.push(evidence_samples);
+        seed_col.push(seed);
+        confidence_col.push(confidence);
+        sampling_method_col.push(sampling_method.clone());
     }
 
     let batch = arrow::record_batch::RecordBatch::try_from_iter(vec![
@@ -545,10 +628,106 @@ fn emit_prob_mc(
             "ci_high",
             Arc::new(arrow::array::Float64Array::from(ci_high)) as Arc<dyn arrow::array::Array>,
         ),
+        (
+            "total_samples",
+            Arc::new(arrow::array::UInt64Array::from(total_samples_col))
+                as Arc<dyn arrow::array::Array>,
+        ),
+        (
+            "evidence_samples",
+            Arc::new(arrow::array::UInt64Array::from(evidence_samples_col))
+                as Arc<dyn arrow::array::Array>,
+        ),
+        (
+            "seed",
+            Arc::new(arrow::array::UInt64Array::from(seed_col)) as Arc<dyn arrow::array::Array>,
+        ),
+        (
+            "confidence",
+            Arc::new(arrow::array::Float64Array::from(confidence_col))
+                as Arc<dyn arrow::array::Array>,
+        ),
+        (
+            "sampling_method",
+            Arc::new(arrow::array::StringArray::from(sampling_method_col))
+                as Arc<dyn arrow::array::Array>,
+        ),
     ])
     .map_err(|e| XlogError::Execution(format!("Failed to build mc batch: {}", e)))?;
 
-    emit_batch("prob", &batch, format, output_dir)
+    emit_batch(
+        "prob",
+        &batch,
+        prob_output_as_batch_format(format),
+        output_dir,
+    )
+}
+
+#[cfg(feature = "host-io")]
+fn prob_output_as_batch_format(format: ProbOutputFormat) -> OutputFormat {
+    match format {
+        ProbOutputFormat::Pretty => OutputFormat::Pretty,
+        ProbOutputFormat::Csv => OutputFormat::Csv,
+        ProbOutputFormat::Arrow => OutputFormat::Arrow,
+        ProbOutputFormat::Json => unreachable!("json output is handled before batch emission"),
+    }
+}
+
+#[cfg(feature = "host-io")]
+fn print_prob_exact_json(result: xlog_prob::exact::ExactResult) {
+    println!("{{");
+    println!("  \"engine\": \"exact_ddnnf\",");
+    println!("  \"queries\": [");
+    let len = result.query_probs.len();
+    for (idx, q) in result.query_probs.into_iter().enumerate() {
+        let suffix = if idx + 1 == len { "" } else { "," };
+        println!("    {{");
+        println!(
+            "      \"atom\": \"{}\",",
+            json_escape(&atom_to_string(&q.atom))
+        );
+        println!("      \"prob\": {},", q.prob);
+        println!("      \"log_prob\": {}", q.log_prob);
+        println!("    }}{}", suffix);
+    }
+    println!("  ]");
+    println!("}}");
+}
+
+#[cfg(feature = "host-io")]
+fn print_prob_mc_json(result: xlog_prob::mc::McResult) {
+    let total_samples = result.total_samples;
+    let evidence_samples = result.evidence_samples;
+    let seed = result.seed;
+    let confidence = result.confidence;
+    let sampling_method = result.sampling_method.as_str();
+    println!("{{");
+    println!("  \"engine\": \"mc\",");
+    println!("  \"total_samples\": {},", total_samples);
+    println!("  \"evidence_samples\": {},", evidence_samples);
+    println!("  \"seed\": {},", seed);
+    println!("  \"confidence\": {},", confidence);
+    println!("  \"sampling_method\": \"{}\",", sampling_method);
+    println!("  \"queries\": [");
+    let len = result.query_estimates.len();
+    for (idx, q) in result.query_estimates.into_iter().enumerate() {
+        let suffix = if idx + 1 == len { "" } else { "," };
+        println!("    {{");
+        println!(
+            "      \"atom\": \"{}\",",
+            json_escape(&atom_to_string(&q.atom))
+        );
+        println!("      \"prob\": {},", q.prob);
+        println!("      \"log_prob\": {},", q.log_prob);
+        println!("      \"stderr\": {},", q.stderr);
+        println!("      \"ci_low\": {},", q.ci_low);
+        println!("      \"ci_high\": {},", q.ci_high);
+        println!("      \"total_samples\": {},", total_samples);
+        println!("      \"evidence_samples\": {}", evidence_samples);
+        println!("    }}{}", suffix);
+    }
+    println!("  ]");
+    println!("}}");
 }
 
 #[cfg(feature = "host-io")]

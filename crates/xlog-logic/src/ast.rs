@@ -419,6 +419,15 @@ pub enum ProbCache {
     Off,
 }
 
+/// Monte Carlo sampling method selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbMethod {
+    /// Rejection sampling.
+    Rejection,
+    /// Forceable evidence clamping.
+    EvidenceClamping,
+}
+
 /// Magic-set rewrite mode for bound recursive deterministic queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MagicSetsMode {
@@ -431,12 +440,22 @@ pub enum MagicSetsMode {
 }
 
 /// Compilation/evaluation directives (e.g., `#pragma ...`).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Directives {
     /// Override for the probabilistic inference engine.
     pub prob_engine: Option<ProbEngine>,
     /// Override for circuit caching.
     pub prob_cache: Option<ProbCache>,
+    /// Monte Carlo sample count.
+    pub prob_samples: Option<usize>,
+    /// Monte Carlo deterministic RNG seed.
+    pub prob_seed: Option<u64>,
+    /// Monte Carlo confidence level.
+    pub prob_confidence: Option<f64>,
+    /// Monte Carlo sampling method.
+    pub prob_method: Option<ProbMethod>,
+    /// Maximum nonmonotone MC iterations.
+    pub prob_max_nonmonotone_iterations: Option<usize>,
     /// Maximum UDF recursion depth.
     pub max_recursion_depth: Option<u32>,
     /// Magic-set rewrite mode.
@@ -452,6 +471,26 @@ impl Directives {
     /// Return the configured max recursion depth, defaulting to 1000.
     pub fn max_recursion_depth_or_default(&self) -> u32 {
         self.max_recursion_depth.unwrap_or(1000)
+    }
+
+    /// Return the configured MC sample count, defaulting to 10000.
+    pub fn prob_samples_or_default(&self) -> usize {
+        self.prob_samples.unwrap_or(10000)
+    }
+
+    /// Return the configured MC seed, defaulting to 0.
+    pub fn prob_seed_or_default(&self) -> u64 {
+        self.prob_seed.unwrap_or(0)
+    }
+
+    /// Return the configured MC confidence, defaulting to 0.95.
+    pub fn prob_confidence_or_default(&self) -> f64 {
+        self.prob_confidence.unwrap_or(0.95)
+    }
+
+    /// Return the configured nonmonotone MC iteration cap, defaulting to 1024.
+    pub fn prob_max_nonmonotone_iterations_or_default(&self) -> usize {
+        self.prob_max_nonmonotone_iterations.unwrap_or(1024)
     }
 }
 
@@ -718,6 +757,11 @@ impl Program {
             || !self.prob_queries.is_empty()
             || self.directives.prob_engine.is_some()
             || self.directives.prob_cache.is_some()
+            || self.directives.prob_samples.is_some()
+            || self.directives.prob_seed.is_some()
+            || self.directives.prob_confidence.is_some()
+            || self.directives.prob_method.is_some()
+            || self.directives.prob_max_nonmonotone_iterations.is_some()
     }
 
     /// Return the probabilistic engine (from directives, or the default).

@@ -1522,6 +1522,14 @@ report uncertainty, sample counts, evidence handling, and sampling method.
 CLI flags override source pragmas when both are provided; the effective
 configuration must be visible in CLI output and explain JSON.
 
+In the `G085_APPROX` subset, `xlog prob` uses source `#pragma prob_engine = mc`
+when `--prob-engine` is not supplied. CLI flags override source pragmas
+field-by-field: `--samples`, `--seed`, `--confidence`, `--prob-method`, and
+`--prob-max-nonmonotone-iterations` replace only their matching source values.
+`--output json` emits a machine-readable MC report with the same probability,
+standard-error, confidence-interval, sample-count, evidence-count, seed,
+confidence, and sampling-method fields as the pretty/csv batch output.
+
 ### Output Contract
 
 Approximate output formats must include:

@@ -1501,8 +1501,9 @@ WCOJ, and CLI paths.
       Evidence: `docs/evidence/2026-05-19-v085-prob-aggregates/README.md`.
 - [x] Add aggregate lifting for small domains.
       Evidence: `docs/evidence/2026-05-19-v085-aggregate-lift/README.md`.
-- [ ] Add approximate inference engine pragmas, CLI configuration, and
+- [x] Add approximate inference engine pragmas, CLI configuration, and
       confidence reporting.
+      Evidence: `docs/evidence/2026-05-19-v085-approx/README.md`.
 
 ### Incremental Parsing And CLI Developer Experience
 

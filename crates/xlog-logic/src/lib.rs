@@ -51,7 +51,7 @@ pub mod wcoj_var_ordering;
 // Re-export main types
 pub use ast::{
     AnnotatedDisjunction, Atom, BodyLiteral, Constraint, Directives, Evidence, MagicSetsMode,
-    ProbCache, ProbEngine, ProbFact, ProbQuery, Program, Query, Rule, Term, Univ,
+    ProbCache, ProbEngine, ProbFact, ProbMethod, ProbQuery, Program, Query, Rule, Term, Univ,
 };
 pub use compile::{compile, Compiler};
 pub use expand::expand_program_functions;

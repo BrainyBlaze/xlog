@@ -32,6 +32,9 @@ All notable changes to this project are documented in this file.
 - Added v0.8.5 small-domain aggregate lifting for finite probabilistic `count`
   heads using exact cardinality dynamic programming, plus explain metadata for
   fired and exact-enumeration fallback aggregate operators.
+- Added v0.8.5 approximate inference language integration: MC source pragmas,
+  CLI override precedence, JSON output, and sample/evidence confidence
+  reporting.
 
 ### Fixed
 

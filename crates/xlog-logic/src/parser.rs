@@ -13,7 +13,8 @@ use crate::ast::{
     AggExpr, AggOp, AnnotatedDisjunction, ArithExpr, Atom, BodyLiteral, CompOp, Comparison,
     CondExpr, Constraint, DomainDecl, Evidence, FuncBody, FuncDef, FuncParam, IsExpr,
     LearnableRule, MagicSetsMode, NeuralLabel, NeuralPredDecl, PredColumn, PredDecl, ProbCache,
-    ProbEngine, ProbFact, ProbQuery, Program, Query, Rule as AstRule, Term, TypeRef, Univ, UseDecl,
+    ProbEngine, ProbFact, ProbMethod, ProbQuery, Program, Query, Rule as AstRule, Term, TypeRef,
+    Univ, UseDecl,
 };
 
 /// Pest-based parser for XLOG Datalog syntax.
@@ -166,6 +167,81 @@ fn apply_pragma(pair: Pair<'_, Rule>, program: &mut Program) -> Result<()> {
                 }
             };
             program.directives.prob_cache = Some(cache);
+        }
+        Rule::pragma_prob_samples => {
+            let value = pragma
+                .into_inner()
+                .next()
+                .ok_or_else(|| XlogError::Parse("Missing prob_samples value".to_string()))?;
+            let samples: usize = value.as_str().parse().map_err(|_| {
+                XlogError::Parse(format!("Invalid prob_samples value: {}", value.as_str()))
+            })?;
+            if samples == 0 {
+                return Err(XlogError::Parse(
+                    "Invalid prob_samples value: expected > 0".to_string(),
+                ));
+            }
+            program.directives.prob_samples = Some(samples);
+        }
+        Rule::pragma_prob_seed => {
+            let value = pragma
+                .into_inner()
+                .next()
+                .ok_or_else(|| XlogError::Parse("Missing prob_seed value".to_string()))?;
+            let seed: u64 = value.as_str().parse().map_err(|_| {
+                XlogError::Parse(format!("Invalid prob_seed value: {}", value.as_str()))
+            })?;
+            program.directives.prob_seed = Some(seed);
+        }
+        Rule::pragma_prob_confidence => {
+            let value = pragma
+                .into_inner()
+                .next()
+                .ok_or_else(|| XlogError::Parse("Missing prob_confidence value".to_string()))?;
+            let confidence: f64 = value.as_str().parse().map_err(|_| {
+                XlogError::Parse(format!("Invalid prob_confidence value: {}", value.as_str()))
+            })?;
+            if !(0.0 < confidence && confidence < 1.0) || confidence.is_nan() {
+                return Err(XlogError::Parse(format!(
+                    "Invalid prob_confidence value: {}; expected 0 < confidence < 1",
+                    value.as_str()
+                )));
+            }
+            program.directives.prob_confidence = Some(confidence);
+        }
+        Rule::pragma_prob_method => {
+            let value = pragma
+                .into_inner()
+                .next()
+                .ok_or_else(|| XlogError::Parse("Missing prob_method value".to_string()))?;
+            let method = match value.as_str() {
+                "rejection" => ProbMethod::Rejection,
+                "evidence_clamping" => ProbMethod::EvidenceClamping,
+                other => {
+                    return Err(XlogError::Parse(format!(
+                        "Unknown prob_method value: {}",
+                        other
+                    )))
+                }
+            };
+            program.directives.prob_method = Some(method);
+        }
+        Rule::pragma_prob_max_nonmonotone_iterations => {
+            let value = pragma.into_inner().next().ok_or_else(|| {
+                XlogError::Parse("Missing prob_max_nonmonotone_iterations value".to_string())
+            })?;
+            let iterations: usize = value.as_str().parse().map_err(|_| {
+                XlogError::Parse(format!(
+                    "Invalid prob_max_nonmonotone_iterations value: {}",
+                    value.as_str()
+                ))
+            })?;
+            if iterations == 0 {
+                return Err(XlogError::Parse(
+                    "Invalid prob_max_nonmonotone_iterations value: expected > 0".to_string(),
+                ));
+            }
+            program.directives.prob_max_nonmonotone_iterations = Some(iterations);
         }
         Rule::pragma_max_recursion => {
             let value = pragma

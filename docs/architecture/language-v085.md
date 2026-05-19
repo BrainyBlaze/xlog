@@ -95,7 +95,7 @@ semantics.
 
 ## Source-Audit Snapshot
 
-Current implementation status through `G085_AGG_LIFT`:
+Current implementation status through `G085_APPROX`:
 
 - `docs/language-reference.md` has been updated to the v0.8.5 contract and now
   records the shipped `G085_LIST`, `G085_META`, `G085_NAF`, `G085_MAGIC`, and
@@ -141,9 +141,16 @@ Current implementation status through `G085_AGG_LIFT`:
   `explain` command for magic-set status/report rendering in text/json/dot
   formats. JSON/text explain output includes aggregate-lifting metadata for
   accepted probabilistic aggregate programs.
-- Derived-goal `findall`, non-literal `maplist` inputs, approximate inference
-  configuration, incremental parsing, REPL/watch, and full CLI explain plan
-  rendering remain gated to later `G085_*` nodes.
+- `crates/xlog-logic/src/grammar.pest` and `ast.rs` carry MC source pragmas for
+  samples, seed, confidence, sampling method, and nonmonotone iteration caps.
+  `xlog-prob::mc::McEvalConfig::from_directives` maps those directives into the
+  existing MC engine, and `xlog prob` applies CLI overrides field-by-field.
+- `xlog prob --output json` emits MC probability, stderr, CI, sample/evidence
+  counts, seed, confidence, and sampling method. Pretty/csv/arrow MC batches
+  include the same reporting columns.
+- Derived-goal `findall`, non-literal `maplist` inputs, incremental parsing,
+  REPL/watch, and full CLI explain plan rendering remain gated to later
+  `G085_*` nodes.
 
 Each later implementation node must update this snapshot or link its evidence
 when it turns contract text into accepted source behavior.
