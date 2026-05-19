@@ -317,8 +317,10 @@ pipeline is owned by `G090_GPT`.
 
 At the production executable-plan boundary, default FAEEL also rejects direct
 self-support such as `p() :- possible p().` before reduced ordinary runtime
-lowering. The same bounded fixture is allowed only with explicit
-`#pragma epistemic_mode = g91`.
+lowering. If `p/arity` has a separate ordinary rule with no epistemic body
+literals, the self-`possible` rule is treated as independently founded and may
+lower into accepted GPU runtime execution. The unsupported self-support fixture
+is allowed only with explicit `#pragma epistemic_mode = g91`.
 
 ## Generate-Propagate-Test Fixture Execution
 

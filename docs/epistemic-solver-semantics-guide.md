@@ -248,8 +248,10 @@ FAEEL is the default mode. In the bounded fixture evaluator:
 
 At the production executable-plan boundary, default FAEEL also rejects direct
 self-support such as `p() :- possible p().` before the reduced ordinary runtime
-plan is compiled. The same bounded fixture is allowed only with explicit
-`#pragma epistemic_mode = g91`.
+plan is compiled. If `p/arity` has separate ordinary support without epistemic
+body literals, the self-`possible` rule is treated as independently founded and
+may lower into accepted GPU runtime execution. The unsupported self-support
+fixture is allowed only with explicit `#pragma epistemic_mode = g91`.
 
 ## Generate-Propagate-Test
 

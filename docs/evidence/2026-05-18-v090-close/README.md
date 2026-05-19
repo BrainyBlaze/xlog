@@ -48,7 +48,7 @@ Earlier ref checks after `git fetch origin --prune` showed:
 | G090_PRE | PASS for inventory | Preflight evidence committed. |
 | G090_EIR | PARTIAL | EIR is explicit and executable-plan lowering reaches reduced production runtime plans, but accepted epistemic forms still lack production GPU runtime dispatch. |
 | G090_G91 | PASS for semantic oracle | Compatibility fixtures pass, but GPU parity remains unproven. |
-| G090_FAEEL | PASS for semantic oracle plus executable guard | Foundedness fixtures pass and default FAEEL executable-plan lowering rejects a self-supported `possible` rule before runtime dispatch, while explicit G91 compatibility remains allowed. Full GPU parity remains unproven. |
+| G090_FAEEL | PASS for semantic oracle plus executable guard | Foundedness fixtures pass, default FAEEL executable-plan lowering rejects an unsupported self-supported `possible` rule before runtime dispatch, independently founded self-`possible` reaches accepted GPU runtime execution, and explicit G91 compatibility remains allowed. Full GPU parity remains unproven. |
 | G090_GPT | PARTIAL | CPU trace fixtures pass; GPU-resident candidate generation, propagation staging, candidate-buffer validation, arity 0-3 tuple-source model-membership staging with fixed arity-one/two/three row-scoped ground key comparison, generic arity-N variable-bound tuple matching, explicit operator metrics, negated binding polarity, candidate-assumption-aware bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, final-row map construction with row-filter polarity counts, and final tuple materialization exist; unary/possible/not-possible/binary/multi-membership, missing-required multi-membership rejection, and negated final-row filtering fixtures pass, but broader semantic parity remains missing. |
 | G090_SPLIT | PARTIAL | CPU split/recompose fixtures pass, valid split components lower through GPU executable subplans, and accepted split components execute through `execute_epistemic_gpu_execution_batch` while matching simple component output oracles with zero CPU candidate/world-view fallback counters; full accepted-runtime semantic parity is still missing. |
 | G090_GPU | BLOCKED | GPU-plan, reduced-runtime-plan, workspace allocation/reset, bounded candidate-generation, propagation, candidate-validation, arity 0-3 tuple-source model-membership staging with fixed arity-one/two/three row-scoped ground key comparison over existing relation buffers, generic arity-N variable-bound tuple matching, explicit `know`/`possible`/`not know`/`not possible` preflight metrics, negated binding polarity, all-required-membership world-view-validation over GPU candidate-assumption and model-membership buffers, accepted-candidate materialization, final-result flag, final-row map/final tuple materialization kernels with `row_filter_count` and `negated_row_filter_count`, device-derived semantic trace counts, accepted K5/K6/K7/K8 WCOJ dispatch, K5 dispatch-certified edge-permutation/stream-group/sorted-layout/helper-split/helper-rule/WCOJ helper input trace metrics, helper metadata-only preflight rejection, WCOJ dispatch certification that fails closed without required layout sort or layout fast-path evidence, K6 G38-B helper/histogram metadata-build trace metrics, K7/K8 K-clique planner preflight reuse including stream-group metadata, hot-path transfer-budget trace, final-result transfer accounting, CUDA-event elapsed timing/runtime-preflight/fail-closed WCOJ gate/reduced-plan trace contracts, two-record bounded weighted MaxSAT selection encoding/search, and heterogeneous MaxSAT scheduler reuse through existing GPU CNF/CDCL paths exist, but full semantic kernel-buffer parity, probability wiring, and broader fixture coverage remain missing. |
@@ -68,8 +68,9 @@ The branch contains useful scaffolding:
 - executable lowering contract whose reduced ordinary program uses the normal
   compiler pipeline and can promote WCOJ-eligible reductions to
   `RirNode::MultiWayJoin`, including Goal-038-B K-clique planner, layout, and
-  helper-splitting metadata when statistics are supplied, and rejects default
-  FAEEL self-supported `possible` rules before reduced runtime dispatch;
+  helper-splitting metadata when statistics are supplied, rejects default
+  FAEEL unsupported self-supported `possible` rules before reduced runtime
+  dispatch, and permits independently founded self-`possible` fixtures;
 - runtime GPU workspace layout/allocation API for candidate, world-view,
   model-membership, and rejection-reason buffers;
 - device-side workspace reset trace with four `memset_zeros` operations and
@@ -138,7 +139,8 @@ The branch contains useful scaffolding:
   SAT/MaxSAT portfolio dispatch, and UNKNOWN/TIMEOUT portfolio status
   propagation on accepted GPU runtime evidence;
 - G91 and FAEEL fixture evaluators plus a default FAEEL executable-plan
-  foundedness guard;
+  foundedness guard and an independently founded self-`possible` accepted
+  GPU runtime fixture;
 - Generate-Propagate-Test phase traces;
 - world-view operator fixtures for `know`, `possible`, `not know`, and
   `not possible`;

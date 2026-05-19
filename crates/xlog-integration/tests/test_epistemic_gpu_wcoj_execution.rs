@@ -1102,6 +1102,57 @@ fn world_view_validation_rejects_candidates_missing_one_required_membership() {
 }
 
 #[test]
+fn faeel_independently_founded_self_possible_reaches_gpu_runtime_path() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred seed().
+        pred p().
+        p() :- seed().
+        p() :- possible p().
+        "#,
+    )
+    .expect("parse independently founded FAEEL fixture");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile independently founded FAEEL executable");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &executable.relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation("seed", upload_nullary(&fix.memory, 1));
+    executor.put_relation("p", upload_nullary(&fix.memory, 0));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("execute independently founded FAEEL fixture");
+
+    assert_eq!(result.prepared.preflight.possible_operator_count, 1);
+    assert_eq!(
+        result.model_membership.membership_source,
+        EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+    );
+    assert_eq!(result.semantic_trace.accepted_world_views, 1);
+    assert_eq!(
+        read_device_row_count(&fix.provider, &result.final_output).expect("final row count"),
+        1,
+        "independently founded self-possible FAEEL fixture should materialize p()"
+    );
+}
+
+#[test]
 fn accepted_gpu_execution_result_gates_probabilistic_exact_path() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");

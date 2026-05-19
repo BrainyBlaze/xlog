@@ -231,6 +231,9 @@ fn reject_faeel_self_supported_possible(eir: &EirProgram) -> Result<()> {
                 && lit.atom.predicate == rule.head.predicate
                 && lit.atom.arity == rule.head.arity
             {
+                if has_independent_founded_support(eir, &rule.head.predicate, rule.head.arity) {
+                    continue;
+                }
                 return Err(XlogError::UnsupportedEpistemicConstruct {
                     construct: "FAEEL foundedness guard".to_string(),
                     context: format!(
@@ -243,6 +246,17 @@ fn reject_faeel_self_supported_possible(eir: &EirProgram) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn has_independent_founded_support(eir: &EirProgram, predicate: &str, arity: usize) -> bool {
+    eir.rules.iter().any(|rule| {
+        rule.head.predicate == predicate
+            && rule.head.arity == arity
+            && rule
+                .body
+                .iter()
+                .all(|lit| !matches!(lit, EirBodyLiteral::Epistemic(_)))
+    })
 }
 
 /// Compile an epistemic program into its GPU contract and reduced runtime plan.

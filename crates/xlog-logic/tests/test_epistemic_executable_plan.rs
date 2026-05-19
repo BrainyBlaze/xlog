@@ -113,6 +113,26 @@ fn faeel_gpu_execution_rejects_self_supported_possible_before_runtime_dispatch()
 }
 
 #[test]
+fn faeel_gpu_execution_allows_self_possible_with_independent_founded_support() {
+    let program = parse_program(
+        r#"
+        pred seed().
+        pred p().
+        seed().
+        p() :- seed().
+        p() :- possible p().
+        "#,
+    )
+    .unwrap();
+
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("independently founded FAEEL support should permit self possible");
+
+    assert_eq!(executable.gpu_plan.mode, EirEpistemicMode::Faeel);
+    assert_eq!(executable.gpu_plan.epistemic_literals.len(), 1);
+}
+
+#[test]
 fn g91_gpu_execution_allows_self_supported_possible_compatibility_fixture() {
     let program = parse_program(
         r#"
