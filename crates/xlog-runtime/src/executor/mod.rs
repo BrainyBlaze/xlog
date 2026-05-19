@@ -31,6 +31,7 @@ mod wcoj_dispatch;
 #[cfg(feature = "wcoj-phase-timing")]
 pub mod wcoj_phase_timing;
 use join_cache::JoinIndexCache;
+pub use join_cache::JoinIndexCacheStats;
 
 /// Incremental update for a base relation.
 pub struct RelationDelta {
@@ -519,6 +520,11 @@ impl Executor {
     /// Get a reference to the runtime statistics manager
     pub fn stats(&self) -> &StatsManager {
         &self.stats
+    }
+
+    /// Return persistent join-index manager telemetry.
+    pub fn join_index_cache_stats(&self) -> JoinIndexCacheStats {
+        self.join_index_cache.stats()
     }
 
     /// Reset executor state for Monte Carlo sampling.
@@ -3456,6 +3462,105 @@ mod tests {
                 first
             );
         }
+    }
+
+    // ============== v0.8.6 Persistent Hash Index Manager Tests ==============
+
+    fn persistent_index_join_plan() -> ExecutionPlan {
+        adaptive_baseline_join_plan()
+    }
+
+    fn seed_persistent_index_fixture(executor: &mut Executor, rows: u32) {
+        executor.register_relation(RelId(1), "left");
+        executor.register_relation(RelId(2), "right");
+        let values: Vec<u32> = (0..rows).collect();
+        let left = create_test_buffer(executor, &values, "key");
+        let right = create_test_buffer(executor, &values, "key");
+        executor.put_relation("left", left);
+        executor.put_relation("right", right);
+    }
+
+    fn warm_persistent_index(executor: &mut Executor, plan: &ExecutionPlan, times: usize) {
+        for _ in 0..times {
+            executor.execute_plan(plan).expect("persistent index plan");
+        }
+    }
+
+    #[test]
+    fn test_persistent_hash_index_reuses_across_repeated_session_evaluations() {
+        let mut executor = match create_test_executor_with_config(
+            RuntimeConfig::default().with_persistent_hash_indexes(Some(true)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_persistent_index_fixture(&mut executor, 2_500);
+        let plan = persistent_index_join_plan();
+        executor.provider.reset_host_transfer_stats();
+
+        warm_persistent_index(&mut executor, &plan, 5);
+
+        let stats = executor.join_index_cache_stats();
+        let transfers = executor.provider.host_transfer_stats();
+        assert_eq!(stats.builds, 1);
+        assert!(stats.hits >= 1);
+        assert_eq!(stats.stale_rejections, 0);
+        assert_eq!(stats.entries, 1);
+        assert!(stats.total_bytes > 0);
+        assert_eq!(transfers.dtoh_calls, 0);
+        assert_eq!(transfers.htod_calls, 0);
+    }
+
+    #[test]
+    fn test_persistent_hash_index_invalidates_on_relation_generation_change() {
+        let mut executor = match create_test_executor_with_config(
+            RuntimeConfig::default().with_persistent_hash_indexes(Some(true)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_persistent_index_fixture(&mut executor, 2_500);
+        let plan = persistent_index_join_plan();
+        warm_persistent_index(&mut executor, &plan, 5);
+        assert_eq!(executor.join_index_cache_stats().entries, 1);
+
+        let changed_values: Vec<u32> = (10_000..12_500).collect();
+        let changed_right = create_test_buffer(&executor, &changed_values, "key");
+        executor.put_relation("right", changed_right);
+
+        let stats = executor.join_index_cache_stats();
+        assert_eq!(stats.entries, 0);
+        assert!(stats.invalidations >= 1);
+    }
+
+    #[test]
+    fn test_persistent_hash_index_background_build_records_requests() {
+        let mut executor = match create_test_executor_with_config(
+            RuntimeConfig::default()
+                .with_persistent_hash_indexes(Some(true))
+                .with_persistent_hash_index_background_build(Some(true)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_persistent_index_fixture(&mut executor, 2_500);
+        let plan = persistent_index_join_plan();
+
+        warm_persistent_index(&mut executor, &plan, 5);
+
+        let stats = executor.join_index_cache_stats();
+        assert_eq!(stats.background_build_requests, 1);
+        assert_eq!(stats.background_builds_completed, 1);
+        assert_eq!(stats.entries, 1);
     }
 
     // ============== MC Relation Reset Tests ==============

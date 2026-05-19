@@ -386,7 +386,7 @@ impl Executor {
         // relation scan and has become "hot" in runtime
         // statistics. Only runs if W4.2 nested-loop didn't
         // dispatch.
-        if out.is_none() {
+        if out.is_none() && self.config.resolved_persistent_hash_indexes() {
             if let Some(build_rel) = right_rel {
                 let build_heat = self
                     .stats
@@ -406,11 +406,13 @@ impl Executor {
 
                 if let Some(build_name) = self.get_rel_name(build_rel).map(|s| s.to_string()) {
                     if let Some(version) = self.store.version(&build_name) {
-                        let key = JoinIndexKey {
-                            rel: build_rel,
+                        let key = JoinIndexKey::new(
+                            build_rel,
                             version,
-                            key_cols: right_keys.to_vec(),
-                        };
+                            right_keys.to_vec(),
+                            right.schema(),
+                            self.provider.device().ordinal() as u32,
+                        );
 
                         let indexed_result = {
                             self.join_index_cache.get(&key).map(|index| {
@@ -429,13 +431,22 @@ impl Executor {
                             match indexed_result {
                                 Ok(joined) => out = Some(joined),
                                 Err(err) if is_join_index_mismatch(&err) => {
-                                    self.join_index_cache.remove(&key);
+                                    self.join_index_cache.remove_stale(&key);
                                 }
                                 Err(err) => return Err(err),
                             }
                         } else if should_index {
+                            let background_build = self
+                                .config
+                                .resolved_persistent_hash_index_background_build();
+                            if background_build {
+                                self.join_index_cache.record_background_build_request();
+                            }
                             match self.provider.build_join_index_v2(right, right_keys) {
                                 Ok(index) => {
+                                    if background_build {
+                                        self.join_index_cache.record_background_build_complete();
+                                    }
                                     match self.provider.hash_join_v2_with_index(
                                         left,
                                         right,

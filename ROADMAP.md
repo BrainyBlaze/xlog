@@ -1592,9 +1592,10 @@ engines, or parallel helper paths that bypass production dispatch are blockers.
       telemetry shows stable mis-planning on consumer fixtures, bounded by
       deterministic replay and rollback gates.
       Evidence: `docs/evidence/2026-05-19-v086-adaptive-reoptimization/`.
-- [ ] Add a persistent hash index manager with background GPU-resident
+- [x] Add a persistent hash index manager with background GPU-resident
       building, invalidation, and budget-aware reuse after profiles identify
       index rebuild cost as a release blocker.
+      Evidence: `docs/evidence/2026-05-19-v086-persistent-hash-index/`.
 
 ## v0.9.0 - Epistemic and Solver Semantics
 

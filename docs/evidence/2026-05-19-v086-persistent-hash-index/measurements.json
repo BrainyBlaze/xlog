@@ -1,0 +1,48 @@
+{
+  "node": "G086_INDEX",
+  "date": "2026-05-19",
+  "commands": [
+    "cargo test -p xlog-runtime persistent_hash_index -- --nocapture",
+    "cargo test -p xlog-runtime persistent_cache -- --nocapture",
+    "cargo test -p xlog-runtime persistent_key -- --nocapture"
+  ],
+  "repeated_session_fixture": {
+    "rows_per_side": 2500,
+    "executions": 5,
+    "builds": 1,
+    "hits": 1,
+    "entries": 1,
+    "stale_rejections": 0,
+    "tracked_dtoh_calls": 0,
+    "tracked_htod_calls": 0
+  },
+  "manager_key": {
+    "includes_relation_id": true,
+    "includes_generation": true,
+    "includes_key_columns": true,
+    "includes_schema_signature": true,
+    "includes_device_ordinal": true
+  },
+  "invalidation_fixture": {
+    "entries_before_mutation": 1,
+    "entries_after_mutation": 0,
+    "invalidations": 1
+  },
+  "budget_fixture": {
+    "max_bytes": 100,
+    "inserted_entries": 2,
+    "retained_entries": 1,
+    "retained_bytes": 60,
+    "evictions": 1
+  },
+  "background_fixture": {
+    "background_build_requests": 1,
+    "background_builds_completed": 1,
+    "stream_safety_note": "requests stay on the existing provider build/reuse path; full asynchronous recorded builds remain follow-up work"
+  },
+  "performance_or_blocker": {
+    "speedup_gate_claimed": false,
+    "reuse_observed": true,
+    "blocker": "full async background build speedup is not claimed; the completed slice makes reuse observable and stale-index/budget behavior deterministic"
+  }
+}

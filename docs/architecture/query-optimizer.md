@@ -83,16 +83,20 @@ Removes columns not needed by downstream operators:
 - Insert projections to drop unused columns early
 - Reduces memory footprint and improves cache utilization
 
-### 4. Index Selection *(design only as of v0.5.2)*
+### 4. Index Selection
 
-Heat-based index selection is specified but not yet wired into the runtime. The
-current optimizer records heat and exposes the threshold knob, but does not
-construct or evict indexes automatically. The intended decision logic is:
+Heat-based index selection is wired into the runtime through the persistent
+hash index manager. The optimizer/runtime records heat and the executor can
+reuse build-side hash indexes across repeated session evaluations when the
+memory budget allows it. The current decision logic is:
 
-- If `heat > 0.7` and no index: build HISA index
-- If `heat < 0.1` and has index: drop index (reclaim memory)
+- If relation heat crosses the size-adjusted threshold and no valid index
+  exists: build a persistent hash index.
+- If a relation generation, schema, key, or device changes: invalidate or miss
+  the stale key.
+- If retained bytes exceed budget: evict least-recently used indexes.
 
-See [`adaptive-indexing.md`](adaptive-indexing.md) for the design note.
+See [`adaptive-indexing.md`](adaptive-indexing.md) for the runtime manager.
 
 ### 5. Common Subexpression Elimination
 

@@ -20,6 +20,10 @@ All notable changes to this project are documented in this file.
   compiler-supplied candidate plans, with deterministic mis-plan telemetry,
   GPU output equivalence, rollback diagnostics, and zero added data-plane DTOH
   calls in the acceptance fixture.
+- Added v0.8.6 persistent hash-index manager telemetry and key hardening for
+  repeated session evaluations, including relation-generation/schema/device
+  keys, stale-index invalidation, deterministic LRU budget eviction, and
+  background-build mode counters.
 
 ### Changed
 
