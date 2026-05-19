@@ -37,6 +37,8 @@ pub struct EpistemicProbProductionTrace {
     pub gpu_pir_graph_uploads: u64,
     /// Number of accepted PIR root sets encoded through the existing GPU CNF encoder.
     pub gpu_cnf_encodes: u64,
+    /// Number of accepted compile-and-evaluate runs through the GPU exact path.
+    pub gpu_knowledge_compilation_end_to_end_runs: u64,
     /// CPU-only probability recomputations performed by this adapter.
     pub cpu_only_probability_recomputations: u64,
     /// Fixture `EpistemicCircuit` evaluations performed by this adapter.
@@ -150,6 +152,78 @@ impl EpistemicProbProductionAdapter {
         let evidence =
             AcceptedWorldViewEvidence::from_gpu_execution_result(provider, result, assumptions)?;
         self.compile_program_with_accepted_world_view(program, &evidence)
+    }
+
+    /// Compile source and evaluate queries through the existing GPU exact path after one accepted gate.
+    #[cfg(feature = "host-io")]
+    pub fn compile_and_evaluate_source_with_accepted_world_view(
+        &mut self,
+        source: &str,
+        evidence: &AcceptedWorldViewEvidence,
+    ) -> Result<ExactResult> {
+        self.consume_accepted_evidence(evidence)?;
+        let program = ExactDdnnfProgram::compile_source_with_gpu(source, self.config)?;
+        self.trace.gpu_exact_source_compiles =
+            self.trace.gpu_exact_source_compiles.saturating_add(1);
+        let result = program.evaluate()?;
+        self.trace.gpu_exact_query_evaluations =
+            self.trace.gpu_exact_query_evaluations.saturating_add(1);
+        self.trace.gpu_knowledge_compilation_end_to_end_runs = self
+            .trace
+            .gpu_knowledge_compilation_end_to_end_runs
+            .saturating_add(1);
+        self.trace.require_zero_cpu_recompute()?;
+        Ok(result)
+    }
+
+    /// Compile source and evaluate queries after accepted GPU epistemic execution.
+    #[cfg(feature = "host-io")]
+    pub fn compile_and_evaluate_source_with_gpu_execution_result(
+        &mut self,
+        source: &str,
+        provider: &CudaKernelProvider,
+        result: &EpistemicGpuExecutionResult,
+        assumptions: Vec<EpistemicAssumption>,
+    ) -> Result<ExactResult> {
+        let evidence =
+            AcceptedWorldViewEvidence::from_gpu_execution_result(provider, result, assumptions)?;
+        self.compile_and_evaluate_source_with_accepted_world_view(source, &evidence)
+    }
+
+    /// Compile a parsed program and evaluate queries through the existing GPU exact path.
+    #[cfg(feature = "host-io")]
+    pub fn compile_and_evaluate_program_with_accepted_world_view(
+        &mut self,
+        program: &Program,
+        evidence: &AcceptedWorldViewEvidence,
+    ) -> Result<ExactResult> {
+        self.consume_accepted_evidence(evidence)?;
+        let exact = ExactDdnnfProgram::compile_from_program(program, self.config)?;
+        self.trace.gpu_exact_program_compiles =
+            self.trace.gpu_exact_program_compiles.saturating_add(1);
+        let result = exact.evaluate()?;
+        self.trace.gpu_exact_query_evaluations =
+            self.trace.gpu_exact_query_evaluations.saturating_add(1);
+        self.trace.gpu_knowledge_compilation_end_to_end_runs = self
+            .trace
+            .gpu_knowledge_compilation_end_to_end_runs
+            .saturating_add(1);
+        self.trace.require_zero_cpu_recompute()?;
+        Ok(result)
+    }
+
+    /// Compile a parsed program and evaluate queries after accepted GPU epistemic execution.
+    #[cfg(feature = "host-io")]
+    pub fn compile_and_evaluate_program_with_gpu_execution_result(
+        &mut self,
+        program: &Program,
+        provider: &CudaKernelProvider,
+        result: &EpistemicGpuExecutionResult,
+        assumptions: Vec<EpistemicAssumption>,
+    ) -> Result<ExactResult> {
+        let evidence =
+            AcceptedWorldViewEvidence::from_gpu_execution_result(provider, result, assumptions)?;
+        self.compile_and_evaluate_program_with_accepted_world_view(program, &evidence)
     }
 
     /// Encode source through the existing GPU PIR and CNF production path.

@@ -325,6 +325,10 @@ probability recomputation counters in `EpistemicProbProductionTrace`.
 `EpistemicGpuExecutionResult` only after stable-model tuple-source membership,
 GPU model-membership/world-view/final-result/final-tuple kernel traces, zero
 hot-path transfers, and non-empty final device output are proven.
+`compile_and_evaluate_source_with_gpu_execution_result` and
+`compile_and_evaluate_program_with_gpu_execution_result` consume the same
+accepted runtime evidence once before compiling through `ExactDdnnfProgram` and
+evaluating queries from that compiled GPU exact state.
 `encode_source_pir_cnf_with_gpu_execution_result` and
 `encode_program_pir_cnf_with_gpu_execution_result` apply the same accepted
 runtime boundary before uploading `GpuPirGraph`/`GpuPirRoots` and calling
@@ -334,9 +338,8 @@ before calling `ExactDdnnfProgram::evaluate`.
 `evaluate_gpu_with_grads_with_gpu_execution_result` applies the same accepted
 runtime boundary before calling `ExactDdnnfProgram::evaluate_gpu_with_grads`.
 
-This adapter is partial v0.9 evidence only. It does not yet wire accepted
-runtime world views into the broader probabilistic knowledge-compilation matrix
-end to end.
+This adapter is partial v0.9 evidence only. It does not yet cover the broader
+probabilistic knowledge-compilation matrix over accepted runtime world views.
 
 Run the probabilistic fixture and production-adapter source guard:
 
