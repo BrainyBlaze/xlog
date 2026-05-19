@@ -58,7 +58,11 @@ fn production_prob_adapter_reuses_gpu_exact_path_not_fixture_circuit() {
     assert!(production.contains("encode_cnf_gpu"));
     assert!(production.contains("evaluate_gpu_with_grads"));
     assert!(production.contains("gpu_pir_graph_uploads"));
+    assert!(production.contains("gpu_source_pir_graph_uploads"));
+    assert!(production.contains("gpu_program_pir_graph_uploads"));
     assert!(production.contains("gpu_cnf_encodes"));
+    assert!(production.contains("gpu_source_cnf_encodes"));
+    assert!(production.contains("gpu_program_cnf_encodes"));
     assert!(production.contains("gpu_knowledge_compilation_end_to_end_runs"));
     assert!(production.contains("gpu_source_knowledge_compilation_end_to_end_runs"));
     assert!(production.contains("gpu_program_knowledge_compilation_end_to_end_runs"));

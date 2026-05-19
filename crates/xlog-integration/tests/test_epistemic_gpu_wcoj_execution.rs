@@ -4835,6 +4835,84 @@ fn accepted_gpu_execution_result_gates_probabilistic_pir_cnf_path() {
 }
 
 #[test]
+fn probabilistic_pir_cnf_records_source_and_program_trace_counters() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let source_result = execute_unary_edge_epistemic_fixture(
+        &fix,
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X).
+        "#,
+        &[1],
+        &[1],
+    );
+    let program_result = execute_unary_edge_epistemic_fixture(
+        &fix,
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), not know edge(X).
+        "#,
+        &[1],
+        &[],
+    );
+    let prob_program = parse_program(
+        r#"
+        0.5::rain().
+        query(rain()).
+        "#,
+    )
+    .expect("parse probabilistic PIR/CNF program");
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut adapter = EpistemicProbProductionAdapter::new(config);
+    let source_pir_cnf = adapter
+        .encode_source_pir_cnf_with_gpu_execution_result(
+            r#"
+            0.5::rain().
+            query(rain()).
+            "#,
+            &fix.provider,
+            &source_result,
+            vec![EpistemicAssumption::known("edge", 1, true)],
+        )
+        .expect("accepted source evidence must gate source PIR/CNF path");
+    let program_pir_cnf = adapter
+        .encode_program_pir_cnf_with_gpu_execution_result(
+            &prob_program,
+            &fix.provider,
+            &program_result,
+            vec![EpistemicAssumption::known("edge", 1, false)],
+        )
+        .expect("accepted program evidence must gate parsed-program PIR/CNF path");
+
+    assert!(source_pir_cnf.pir_nodes > 0);
+    assert!(source_pir_cnf.root_count > 0);
+    assert!(program_pir_cnf.pir_nodes > 0);
+    assert!(program_pir_cnf.root_count > 0);
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_world_view_evidence_consumed, 2);
+    assert_eq!(trace.accepted_evidence_assumptions_consumed, 2);
+    assert_eq!(trace.gpu_pir_graph_uploads, 2);
+    assert_eq!(trace.gpu_cnf_encodes, 2);
+    assert_eq!(trace.gpu_source_pir_graph_uploads, 1);
+    assert_eq!(trace.gpu_program_pir_graph_uploads, 1);
+    assert_eq!(trace.gpu_source_cnf_encodes, 1);
+    assert_eq!(trace.gpu_program_cnf_encodes, 1);
+    assert_eq!(trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(trace.fixture_circuit_evaluations, 0);
+}
+
+#[test]
 fn accepted_gpu_execution_results_gate_batched_probabilistic_source_pir_cnf_path() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");

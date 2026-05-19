@@ -92,8 +92,16 @@ pub struct EpistemicProbProductionTrace {
     pub gpu_program_conditioned_gradient_evaluations: u64,
     /// Number of accepted PIR graphs uploaded through the existing GPU PIR layout.
     pub gpu_pir_graph_uploads: u64,
+    /// Number of source accepted PIR graphs uploaded through the existing GPU PIR layout.
+    pub gpu_source_pir_graph_uploads: u64,
+    /// Number of parsed-program accepted PIR graphs uploaded through the existing GPU PIR layout.
+    pub gpu_program_pir_graph_uploads: u64,
     /// Number of accepted PIR root sets encoded through the existing GPU CNF encoder.
     pub gpu_cnf_encodes: u64,
+    /// Number of source accepted PIR root sets encoded through the existing GPU CNF encoder.
+    pub gpu_source_cnf_encodes: u64,
+    /// Number of parsed-program accepted PIR root sets encoded through the existing GPU CNF encoder.
+    pub gpu_program_cnf_encodes: u64,
     /// Number of accepted compile-and-evaluate runs through the GPU exact path.
     pub gpu_knowledge_compilation_end_to_end_runs: u64,
     /// Number of accepted source compile-and-evaluate runs through the GPU exact path.
@@ -232,6 +240,12 @@ pub struct EpistemicProbGpuExecutionEvidence<'a> {
     pub result: &'a EpistemicGpuExecutionResult,
     /// Epistemic assumptions represented by the accepted world view.
     pub assumptions: &'a [EpistemicAssumption],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EpistemicProbPirCnfPath {
+    Source,
+    Program,
 }
 
 /// Thin adapter from accepted epistemic evidence to the existing GPU exact path.
@@ -868,7 +882,12 @@ impl EpistemicProbProductionAdapter {
         evidence: &AcceptedWorldViewEvidence,
     ) -> Result<EpistemicProbPirCnfEvidence> {
         let provenance = extract_from_source(source)?;
-        self.encode_provenance_pir_cnf_with_accepted_world_view(provenance, provider, evidence)
+        self.encode_provenance_pir_cnf_with_accepted_world_view(
+            provenance,
+            provider,
+            evidence,
+            EpistemicProbPirCnfPath::Source,
+        )
     }
 
     /// Encode source PIR/CNF after accepted GPU epistemic execution.
@@ -926,7 +945,12 @@ impl EpistemicProbProductionAdapter {
         evidence: &AcceptedWorldViewEvidence,
     ) -> Result<EpistemicProbPirCnfEvidence> {
         let provenance = extract_from_program(program)?;
-        self.encode_provenance_pir_cnf_with_accepted_world_view(provenance, provider, evidence)
+        self.encode_provenance_pir_cnf_with_accepted_world_view(
+            provenance,
+            provider,
+            evidence,
+            EpistemicProbPirCnfPath::Program,
+        )
     }
 
     /// Encode parsed-program PIR/CNF after accepted GPU epistemic execution.
@@ -1139,6 +1163,7 @@ impl EpistemicProbProductionAdapter {
         provenance: Provenance,
         provider: &Arc<CudaKernelProvider>,
         evidence: &AcceptedWorldViewEvidence,
+        path: EpistemicProbPirCnfPath,
     ) -> Result<EpistemicProbPirCnfEvidence> {
         self.consume_accepted_evidence(evidence)?;
         let roots = production_pir_roots(&provenance)?;
@@ -1150,9 +1175,29 @@ impl EpistemicProbProductionAdapter {
         }
         let gpu_pir = GpuPirGraph::from_host(&provenance.pir, provider)?;
         self.trace.gpu_pir_graph_uploads = self.trace.gpu_pir_graph_uploads.saturating_add(1);
+        match path {
+            EpistemicProbPirCnfPath::Source => {
+                self.trace.gpu_source_pir_graph_uploads =
+                    self.trace.gpu_source_pir_graph_uploads.saturating_add(1);
+            }
+            EpistemicProbPirCnfPath::Program => {
+                self.trace.gpu_program_pir_graph_uploads =
+                    self.trace.gpu_program_pir_graph_uploads.saturating_add(1);
+            }
+        }
         let gpu_roots = GpuPirRoots::from_host(&roots, provider)?;
         let encoding = encode_cnf_gpu(&gpu_pir, &gpu_roots, provider)?;
         self.trace.gpu_cnf_encodes = self.trace.gpu_cnf_encodes.saturating_add(1);
+        match path {
+            EpistemicProbPirCnfPath::Source => {
+                self.trace.gpu_source_cnf_encodes =
+                    self.trace.gpu_source_cnf_encodes.saturating_add(1);
+            }
+            EpistemicProbPirCnfPath::Program => {
+                self.trace.gpu_program_cnf_encodes =
+                    self.trace.gpu_program_cnf_encodes.saturating_add(1);
+            }
+        }
         self.trace.require_zero_cpu_recompute()?;
         Ok(EpistemicProbPirCnfEvidence {
             pir_nodes: provenance.pir.len(),

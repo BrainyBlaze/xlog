@@ -150,7 +150,7 @@ production GPU/WCOJ stack for specific certification fixtures:
   slices route accepted GPU evidence into existing GPU CDCL/CNF adapter paths.
 - Probabilistic source/program compile, condition, PIR/CNF encode, query, and
   gradient slices route accepted GPU evidence into existing GPU exact/provenance
-  paths.
+  paths with source/program-specific PIR/CNF and conditioned-gradient counters.
 
 Those paths are still partial G090_GPU/G090_SOLVER/G090_PROB evidence. Before
 v0.9.0 can close, release certification must broaden arbitrary EIR semantic
@@ -544,7 +544,8 @@ recomputation on the existing exact path.
 `encode_source_pir_cnf_with_gpu_execution_result` and
 `encode_program_pir_cnf_with_gpu_execution_result` apply the same accepted
 runtime boundary before uploading `GpuPirGraph`/`GpuPirRoots` and calling
-`encode_cnf_gpu`.
+`encode_cnf_gpu`, with source/program-specific PIR graph upload and CNF encode
+counters.
 `encode_source_pir_cnf_for_gpu_execution_results` and
 `encode_program_pir_cnf_for_gpu_execution_results` validate accepted evidence
 records up front, then reuse the existing GPU PIR/CNF encoder once per record.
@@ -574,7 +575,8 @@ and false `know`/`not know` operator-result
 conditioning, accepted G91/default FAEEL mode-specific trace counters,
 source/program-specific conditioned gradient counters,
 source/program-specific and operator-specific conditioned evidence counters,
-plus query/gradient/PIR-CNF reuse, but not the full query-conditioned
+source/program-specific PIR/CNF counters, plus query/gradient/PIR-CNF reuse,
+but not the full query-conditioned
 probabilistic matrix over accepted runtime world views.
 
 Run the probabilistic fixture and production-adapter source guard:
