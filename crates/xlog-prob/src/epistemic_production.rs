@@ -132,6 +132,22 @@ pub struct EpistemicProbProductionTrace {
     pub gpu_conditioned_not_known_evidence_facts: u64,
     /// Number of false `possible` assumptions compiled as exact evidence facts.
     pub gpu_conditioned_not_possible_evidence_facts: u64,
+    /// Number of source-conditioned true `know` assumptions compiled as exact evidence facts.
+    pub gpu_source_conditioned_know_evidence_facts: u64,
+    /// Number of source-conditioned true `possible` assumptions compiled as exact evidence facts.
+    pub gpu_source_conditioned_possible_evidence_facts: u64,
+    /// Number of source-conditioned false `know` assumptions compiled as exact evidence facts.
+    pub gpu_source_conditioned_not_known_evidence_facts: u64,
+    /// Number of source-conditioned false `possible` assumptions compiled as exact evidence facts.
+    pub gpu_source_conditioned_not_possible_evidence_facts: u64,
+    /// Number of parsed-program-conditioned true `know` assumptions compiled as exact evidence facts.
+    pub gpu_program_conditioned_know_evidence_facts: u64,
+    /// Number of parsed-program-conditioned true `possible` assumptions compiled as exact evidence facts.
+    pub gpu_program_conditioned_possible_evidence_facts: u64,
+    /// Number of parsed-program-conditioned false `know` assumptions compiled as exact evidence facts.
+    pub gpu_program_conditioned_not_known_evidence_facts: u64,
+    /// Number of parsed-program-conditioned false `possible` assumptions compiled as exact evidence facts.
+    pub gpu_program_conditioned_not_possible_evidence_facts: u64,
     /// CPU-only probability recomputations performed by this adapter.
     pub cpu_only_probability_recomputations: u64,
     /// Fixture `EpistemicCircuit` evaluations performed by this adapter.
@@ -307,6 +323,23 @@ impl EpistemicProbProductionAdapter {
                     .trace
                     .gpu_source_conditioned_negative_evidence_facts
                     .saturating_add(counts.negative as u64);
+                self.trace.gpu_source_conditioned_know_evidence_facts = self
+                    .trace
+                    .gpu_source_conditioned_know_evidence_facts
+                    .saturating_add(counts.know as u64);
+                self.trace.gpu_source_conditioned_possible_evidence_facts = self
+                    .trace
+                    .gpu_source_conditioned_possible_evidence_facts
+                    .saturating_add(counts.possible as u64);
+                self.trace.gpu_source_conditioned_not_known_evidence_facts = self
+                    .trace
+                    .gpu_source_conditioned_not_known_evidence_facts
+                    .saturating_add(counts.not_known as u64);
+                self.trace
+                    .gpu_source_conditioned_not_possible_evidence_facts = self
+                    .trace
+                    .gpu_source_conditioned_not_possible_evidence_facts
+                    .saturating_add(counts.not_possible as u64);
             }
             EpistemicProbConditionedEvidencePath::Program => {
                 self.trace.gpu_program_conditioned_evidence_facts = self
@@ -317,6 +350,23 @@ impl EpistemicProbProductionAdapter {
                     .trace
                     .gpu_program_conditioned_negative_evidence_facts
                     .saturating_add(counts.negative as u64);
+                self.trace.gpu_program_conditioned_know_evidence_facts = self
+                    .trace
+                    .gpu_program_conditioned_know_evidence_facts
+                    .saturating_add(counts.know as u64);
+                self.trace.gpu_program_conditioned_possible_evidence_facts = self
+                    .trace
+                    .gpu_program_conditioned_possible_evidence_facts
+                    .saturating_add(counts.possible as u64);
+                self.trace.gpu_program_conditioned_not_known_evidence_facts = self
+                    .trace
+                    .gpu_program_conditioned_not_known_evidence_facts
+                    .saturating_add(counts.not_known as u64);
+                self.trace
+                    .gpu_program_conditioned_not_possible_evidence_facts = self
+                    .trace
+                    .gpu_program_conditioned_not_possible_evidence_facts
+                    .saturating_add(counts.not_possible as u64);
             }
         }
         self.trace.gpu_conditioned_know_evidence_facts = self

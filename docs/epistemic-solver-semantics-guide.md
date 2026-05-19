@@ -536,7 +536,10 @@ records `accepted_evidence_assumptions_consumed`,
 source/program-specific conditioned fact counters, source/program-specific
 negative conditioned fact counters, and operator-specific counts for true
 `know`, true `possible`, false `know` (`not know`), and false `possible`
-(`not possible`) evidence facts.
+(`not possible`) evidence facts. The trace also splits those operator-specific
+conditioned evidence counters by source and parsed-program paths, so a mixed
+source/program run can prove which exact input path consumed each operator
+family.
 `compile_and_evaluate_conditioned_source_for_gpu_execution_results` and
 `compile_and_evaluate_conditioned_program_for_gpu_execution_results` validate a
 batch of accepted GPU runtime records before running per-record conditioning,
@@ -579,7 +582,8 @@ and false `know`/`not know` operator-result
 conditioning, accepted G91/default FAEEL mode-specific trace counters,
 source/program-specific exact-query counters,
 source/program-specific conditioned gradient counters,
-source/program-specific and operator-specific conditioned evidence counters,
+source/program-specific conditioned evidence counters,
+source/program-specific operator-conditioned evidence counters,
 source/program-specific PIR/CNF counters, plus query/gradient/PIR-CNF reuse,
 but not the full query-conditioned
 probabilistic matrix over accepted runtime world views.

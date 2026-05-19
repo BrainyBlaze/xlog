@@ -79,6 +79,14 @@ fn production_prob_adapter_reuses_gpu_exact_path_not_fixture_circuit() {
     assert!(production.contains("gpu_conditioned_possible_evidence_facts"));
     assert!(production.contains("gpu_conditioned_not_known_evidence_facts"));
     assert!(production.contains("gpu_conditioned_not_possible_evidence_facts"));
+    assert!(production.contains("gpu_source_conditioned_know_evidence_facts"));
+    assert!(production.contains("gpu_source_conditioned_possible_evidence_facts"));
+    assert!(production.contains("gpu_source_conditioned_not_known_evidence_facts"));
+    assert!(production.contains("gpu_source_conditioned_not_possible_evidence_facts"));
+    assert!(production.contains("gpu_program_conditioned_know_evidence_facts"));
+    assert!(production.contains("gpu_program_conditioned_possible_evidence_facts"));
+    assert!(production.contains("gpu_program_conditioned_not_known_evidence_facts"));
+    assert!(production.contains("gpu_program_conditioned_not_possible_evidence_facts"));
     assert!(production.contains("record_conditioned_evidence_counts"));
     assert!(production.contains("condition_source_with_accepted_evidence"));
     assert!(production.contains("condition_program_with_accepted_evidence"));

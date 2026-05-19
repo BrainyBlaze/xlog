@@ -3941,6 +3941,14 @@ fn conditioned_probabilistic_evidence_records_source_and_program_trace_counters(
     assert_eq!(trace.gpu_program_conditioned_evidence_facts, 1);
     assert_eq!(trace.gpu_source_conditioned_negative_evidence_facts, 0);
     assert_eq!(trace.gpu_program_conditioned_negative_evidence_facts, 1);
+    assert_eq!(trace.gpu_source_conditioned_know_evidence_facts, 1);
+    assert_eq!(trace.gpu_source_conditioned_possible_evidence_facts, 0);
+    assert_eq!(trace.gpu_source_conditioned_not_known_evidence_facts, 0);
+    assert_eq!(trace.gpu_source_conditioned_not_possible_evidence_facts, 0);
+    assert_eq!(trace.gpu_program_conditioned_know_evidence_facts, 0);
+    assert_eq!(trace.gpu_program_conditioned_possible_evidence_facts, 0);
+    assert_eq!(trace.gpu_program_conditioned_not_known_evidence_facts, 1);
+    assert_eq!(trace.gpu_program_conditioned_not_possible_evidence_facts, 0);
     assert_eq!(trace.gpu_exact_source_compiles, 1);
     assert_eq!(trace.gpu_exact_program_compiles, 1);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 1);
