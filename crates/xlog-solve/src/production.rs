@@ -1477,6 +1477,8 @@ impl GpuSolverProductionAdapter {
         weighted: &SolveInstance,
         selections: &[GpuSolverProductionWeightedMaxSatSelection<'_>],
     ) -> Result<Vec<GpuSolverProductionEncodedMaxSatSearchCandidate>> {
+        Self::require_weighted_maxsat_search_selections(selections)?;
+
         if weighted.objective != Objective::MaxSat {
             return Err(XlogError::UnsupportedEpistemicConstruct {
                 construct: "GPU solver production MaxSAT encoding".to_string(),
@@ -1490,12 +1492,6 @@ impl GpuSolverProductionAdapter {
             return Err(XlogError::UnsupportedEpistemicConstruct {
                 construct: "GPU solver production MaxSAT encoding".to_string(),
                 context: "weighted MaxSAT encoding requires num_vars > 0".to_string(),
-            });
-        }
-        if selections.is_empty() {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "GPU solver production MaxSAT encoding".to_string(),
-                context: "weighted MaxSAT encoding requires at least one selection".to_string(),
             });
         }
 
@@ -1676,6 +1672,30 @@ impl GpuSolverProductionAdapter {
         Ok(())
     }
 
+    fn require_weighted_maxsat_search_selections(
+        selections: &[GpuSolverProductionWeightedMaxSatSelection<'_>],
+    ) -> Result<()> {
+        if selections.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production MaxSAT encoding".to_string(),
+                context: "weighted MaxSAT encoding requires at least one selection".to_string(),
+            });
+        }
+        if !selections.iter().any(|selection| {
+            matches!(
+                selection.status,
+                GpuSolverProductionMaxSatSearchStatus::Satisfiable
+            )
+        }) {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production MaxSAT encoding".to_string(),
+                context: "bounded MaxSAT search requires at least one satisfiable GPU candidate"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// Search a bounded weighted MaxSAT candidate set after accepted GPU epistemic execution.
     ///
     /// Satisfiable candidates are scored through the existing GPU CDCL SAT path.
@@ -1787,6 +1807,7 @@ impl GpuSolverProductionAdapter {
         branch_var_limit: &TrackedCudaSlice<u32>,
         selections: &[GpuSolverProductionWeightedMaxSatSelection<'_>],
     ) -> Result<GpuSolverProductionMaxSatReport> {
+        Self::require_weighted_maxsat_search_selections(selections)?;
         require_accepted_gpu_solver_evidence(provider, result)?;
         let encodes_before = self.trace.gpu_maxsat_candidate_encodes;
         let encoded = self.encode_weighted_maxsat_search_candidates(weighted, selections)?;
@@ -1835,6 +1856,7 @@ impl GpuSolverProductionAdapter {
                         .to_string(),
             });
         }
+        Self::require_weighted_maxsat_search_selections(selections)?;
         for result in results {
             require_accepted_gpu_solver_evidence(provider, result)?;
         }
@@ -1894,6 +1916,7 @@ impl GpuSolverProductionAdapter {
         branch_var_limit: &TrackedCudaSlice<u32>,
         selections: &[GpuSolverProductionWeightedMaxSatSelection<'_>],
     ) -> Result<GpuSolverProductionMaxSatReport> {
+        Self::require_weighted_maxsat_search_selections(selections)?;
         let results = require_accepted_gpu_solver_batch_evidence(provider, evidence.batch)?;
         self.trace.accepted_gpu_batch_candidate_evidence_consumed = self
             .trace

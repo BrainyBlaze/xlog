@@ -9345,6 +9345,69 @@ fn accepted_gpu_execution_result_encodes_weighted_maxsat_search_candidates() {
 }
 
 #[test]
+fn accepted_gpu_execution_result_rejects_all_unsat_encoded_maxsat_before_encoding_work() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let result = execute_unary_edge_epistemic_fixture(
+        &fix,
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X).
+        "#,
+        &[1, 2],
+        &[1],
+    );
+
+    let weighted = SolveInstance::with_weights(
+        1,
+        vec![
+            Clause::new(vec![Literal::positive(0)]),
+            Clause::new(vec![Literal::negative(0)]),
+        ],
+        vec![7.0, 9.0],
+    );
+    let branch_limit = upload_u32_scalar(&fix.provider, 1);
+    let mut adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let mut workspace = adapter
+        .new_workspace(1, 2)
+        .expect("new encoded MaxSAT search workspace");
+    let unsat_selection = [0usize, 1usize];
+
+    let err = adapter
+        .solve_weighted_maxsat_encoded_search_with_gpu_execution_result(
+            &fix.provider,
+            &result,
+            &mut workspace,
+            &weighted,
+            &branch_limit,
+            &[GpuSolverProductionWeightedMaxSatSelection {
+                soft_clause_indices: &unsat_selection,
+                status: GpuSolverProductionMaxSatSearchStatus::Unsatisfiable,
+            }],
+        )
+        .expect_err("all-UNSAT encoded MaxSAT selections must fail before encoding work");
+    assert!(format!("{err}")
+        .contains("bounded MaxSAT search requires at least one satisfiable GPU candidate"));
+
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 0);
+    assert_eq!(trace.gpu_maxsat_candidate_encodes, 0);
+    assert_eq!(trace.gpu_cdcl_sat_solves, 0);
+    assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 0);
+    assert_eq!(trace.gpu_maxsat_candidate_solves, 0);
+    assert_eq!(trace.gpu_maxsat_unsat_candidate_prunes, 0);
+    assert_eq!(trace.gpu_maxsat_optima, 0);
+    assert_eq!(trace.cpu_assignment_enumerations, 0);
+    assert_eq!(trace.cpu_maxsat_enumerations, 0);
+}
+
+#[test]
 fn accepted_gpu_execution_results_gate_multi_candidate_weighted_maxsat_encoded_search() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
