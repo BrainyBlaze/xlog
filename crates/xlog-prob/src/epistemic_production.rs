@@ -19,6 +19,8 @@ use xlog_runtime::EpistemicGpuExecutionResult;
 
 use crate::compilation::{encode_cnf_gpu, GpuPirGraph, GpuPirRoots};
 #[cfg(feature = "host-io")]
+use crate::epistemic::EpistemicAssumptionKind;
+#[cfg(feature = "host-io")]
 use crate::epistemic::EpistemicEvidenceTerm;
 use crate::epistemic::{AcceptedWorldViewEvidence, EpistemicAssumption};
 use crate::exact::{ExactDdnnfProgram, GpuConfig};
@@ -98,6 +100,14 @@ pub struct EpistemicProbProductionTrace {
     pub gpu_conditioned_evidence_facts: u64,
     /// Number of false accepted assumptions compiled as exact evidence facts.
     pub gpu_conditioned_negative_evidence_facts: u64,
+    /// Number of true `know` assumptions compiled as exact evidence facts.
+    pub gpu_conditioned_know_evidence_facts: u64,
+    /// Number of true `possible` assumptions compiled as exact evidence facts.
+    pub gpu_conditioned_possible_evidence_facts: u64,
+    /// Number of false `know` assumptions compiled as exact evidence facts.
+    pub gpu_conditioned_not_known_evidence_facts: u64,
+    /// Number of false `possible` assumptions compiled as exact evidence facts.
+    pub gpu_conditioned_not_possible_evidence_facts: u64,
     /// CPU-only probability recomputations performed by this adapter.
     pub cpu_only_probability_recomputations: u64,
     /// Fixture `EpistemicCircuit` evaluations performed by this adapter.
@@ -249,6 +259,22 @@ impl EpistemicProbProductionAdapter {
             .trace
             .gpu_conditioned_negative_evidence_facts
             .saturating_add(counts.negative as u64);
+        self.trace.gpu_conditioned_know_evidence_facts = self
+            .trace
+            .gpu_conditioned_know_evidence_facts
+            .saturating_add(counts.know as u64);
+        self.trace.gpu_conditioned_possible_evidence_facts = self
+            .trace
+            .gpu_conditioned_possible_evidence_facts
+            .saturating_add(counts.possible as u64);
+        self.trace.gpu_conditioned_not_known_evidence_facts = self
+            .trace
+            .gpu_conditioned_not_known_evidence_facts
+            .saturating_add(counts.not_known as u64);
+        self.trace.gpu_conditioned_not_possible_evidence_facts = self
+            .trace
+            .gpu_conditioned_not_possible_evidence_facts
+            .saturating_add(counts.not_possible as u64);
     }
 
     /// Compile source through the existing GPU-native exact/provenance path.
@@ -1081,6 +1107,10 @@ impl EpistemicProbProductionAdapter {
 struct EpistemicProbConditionedEvidenceCounts {
     total: usize,
     negative: usize,
+    know: usize,
+    possible: usize,
+    not_known: usize,
+    not_possible: usize,
 }
 
 #[cfg(feature = "host-io")]
@@ -1133,6 +1163,12 @@ fn condition_program_with_accepted_evidence(
         counts.total += 1;
         if !assumption.value {
             counts.negative += 1;
+        }
+        match (assumption.kind, assumption.value) {
+            (EpistemicAssumptionKind::Know, true) => counts.know += 1,
+            (EpistemicAssumptionKind::Possible, true) => counts.possible += 1,
+            (EpistemicAssumptionKind::Know, false) => counts.not_known += 1,
+            (EpistemicAssumptionKind::Possible, false) => counts.not_possible += 1,
         }
         program.evidence.push(Evidence {
             atom: Atom {
