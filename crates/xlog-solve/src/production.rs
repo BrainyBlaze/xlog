@@ -9,7 +9,9 @@ use std::sync::Arc;
 use xlog_core::{Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::CudaKernelProvider;
-use xlog_runtime::{read_device_row_count, EpistemicGpuExecutionResult};
+use xlog_runtime::{
+    read_device_row_count, EpistemicGpuBatchExecutionResult, EpistemicGpuExecutionResult,
+};
 
 use crate::{GpuCdclConfig, GpuCdclSolver, GpuCdclWorkspace, GpuCnf, Objective, SolveInstance};
 
@@ -86,6 +88,13 @@ pub struct GpuSolverProductionLifecycleReport {
     pub unknown_steps: u64,
     /// Number of lifecycle steps that propagated TIMEOUT without CPU search.
     pub timeout_steps: u64,
+}
+
+/// Accepted split/batch GPU epistemic evidence for solver production reuse.
+#[derive(Clone, Copy)]
+pub struct GpuSolverProductionBatchExecutionEvidence<'a> {
+    /// Results plus aggregate trace from the split/batch GPU execution adapter.
+    pub batch: &'a EpistemicGpuBatchExecutionResult,
 }
 
 /// Summary of a GPU CDCL learned-clause arena publication.
@@ -324,6 +333,10 @@ pub fn production_capabilities() -> GpuSolverProductionCapabilities {
 pub struct GpuSolverProductionTrace {
     /// Number of accepted GPU epistemic candidate evidence records consumed.
     pub accepted_gpu_candidate_evidence_consumed: u64,
+    /// Number of accepted split/batch GPU epistemic candidate evidence records consumed.
+    pub accepted_gpu_batch_candidate_evidence_consumed: u64,
+    /// Number of accepted split/batch GPU epistemic component evidence records consumed.
+    pub accepted_gpu_batch_candidate_component_evidence_consumed: u64,
     /// Number of accepted G91 GPU epistemic candidate evidence records consumed.
     pub accepted_g91_gpu_candidate_evidence_consumed: u64,
     /// Number of accepted FAEEL GPU epistemic candidate evidence records consumed.
@@ -823,6 +836,42 @@ impl GpuSolverProductionAdapter {
             self.record_accepted_gpu_candidate_evidence(result);
         }
 
+        self.trace.require_zero_cpu_search()?;
+        Ok(report)
+    }
+
+    /// Execute accepted split/batch push/solve/retract lifecycles through existing GPU CDCL calls.
+    ///
+    /// The batch evidence must prove every split component ran through the
+    /// single-plan GPU runtime path with zero aggregate CPU recomposition,
+    /// candidate/world-view fallback, tracked hot-path D2H, and per-candidate
+    /// host round trips.
+    pub fn solve_assumption_lifecycle_with_gpu_batch_execution_result(
+        &mut self,
+        provider: &CudaKernelProvider,
+        evidence: GpuSolverProductionBatchExecutionEvidence<'_>,
+        workspace: &mut GpuCdclWorkspace,
+        steps: &[GpuSolverProductionLifecycleStep<'_>],
+    ) -> Result<GpuSolverProductionLifecycleReport> {
+        if steps.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production lifecycle".to_string(),
+                context: "accepted solver lifecycle requires at least one step".to_string(),
+            });
+        }
+        let results = require_accepted_gpu_solver_batch_evidence(provider, evidence.batch)?;
+        self.trace.accepted_gpu_batch_candidate_evidence_consumed = self
+            .trace
+            .accepted_gpu_batch_candidate_evidence_consumed
+            .saturating_add(1);
+        self.trace
+            .accepted_gpu_batch_candidate_component_evidence_consumed = self
+            .trace
+            .accepted_gpu_batch_candidate_component_evidence_consumed
+            .saturating_add(results.len() as u64);
+        let report = self.solve_multi_candidate_assumption_lifecycle_with_gpu_execution_results(
+            provider, &results, workspace, steps,
+        )?;
         self.trace.require_zero_cpu_search()?;
         Ok(report)
     }
@@ -1938,6 +1987,52 @@ fn require_accepted_gpu_solver_evidence(
     }
 
     Ok(())
+}
+
+fn require_accepted_gpu_solver_batch_evidence<'a>(
+    provider: &CudaKernelProvider,
+    batch: &'a EpistemicGpuBatchExecutionResult,
+) -> Result<Vec<&'a EpistemicGpuExecutionResult>> {
+    if batch.results.is_empty() {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "accepted GPU solver batch evidence".to_string(),
+            context: "solver batch evidence requires at least one accepted GPU component"
+                .to_string(),
+        });
+    }
+
+    let trace = batch.trace;
+    if trace.component_count != batch.results.len()
+        || trace.gpu_runtime_component_executions != batch.results.len()
+        || trace.cpu_recomposition_steps != 0
+        || trace.cpu_candidate_enumerations != 0
+        || trace.cpu_world_view_validations != 0
+        || trace.tracked_dtoh_calls != 0
+        || trace.per_candidate_host_round_trips != 0
+    {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "accepted GPU solver batch evidence".to_string(),
+            context: format!(
+                "solver batch evidence requires complete GPU component execution and zero \
+                 CPU/host fallback counters, got components={}/{}, recomposition={}, \
+                 cpu_candidates={}, cpu_world_views={}, dtoh_calls={}, round_trips={}",
+                trace.gpu_runtime_component_executions,
+                trace.component_count,
+                trace.cpu_recomposition_steps,
+                trace.cpu_candidate_enumerations,
+                trace.cpu_world_view_validations,
+                trace.tracked_dtoh_calls,
+                trace.per_candidate_host_round_trips
+            ),
+        });
+    }
+
+    let mut results = Vec::with_capacity(batch.results.len());
+    for result in &batch.results {
+        require_accepted_gpu_solver_evidence(provider, result)?;
+        results.push(result);
+    }
+    Ok(results)
 }
 
 fn require_same_gpu_cnf_for_learned_clause_reuse(source: &GpuCnf, target: &GpuCnf) -> Result<()> {

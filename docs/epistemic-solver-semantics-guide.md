@@ -388,6 +388,17 @@ that boundary to multiple accepted GPU runtime results, dispatches the same
 SAT/UNSAT lifecycle per result through GPU CDCL, reports
 `candidate_evidence_records`, and records aggregate balanced push/retract and
 workspace-reuse counters without CPU search.
+`solve_assumption_lifecycle_with_gpu_batch_execution_result` consumes
+`GpuSolverProductionBatchExecutionEvidence` from
+`execute_epistemic_gpu_execution_batch_with_trace`, validates aggregate
+`EpistemicGpuBatchExecutionResult` evidence for zero CPU recomposition, zero
+CPU candidate/world-view fallback, zero tracked D2H, and zero per-candidate host
+round trips, then dispatches each accepted component through the existing
+multi-candidate GPU CDCL lifecycle path. The trace records
+`accepted_gpu_batch_candidate_evidence_consumed` and
+`accepted_gpu_batch_candidate_component_evidence_consumed` alongside the usual
+candidate evidence, balanced push/retract, workspace reuse, and GPU CDCL solve
+counters.
 `solve_unsat_and_publish_learned_clause_arena_with_gpu_execution_result` applies
 the same boundary before running workspace-backed GPU CDCL UNSAT and publishing
 the existing device learned-clause/proof arena plus learned-count buffer with
@@ -457,6 +468,7 @@ distinct-CNF fail-closed rejection, a two-record accepted lifecycle, and bounded
 UNKNOWN/TIMEOUT lifecycle propagation, plus two-record same-CNF learned-clause
 reuse, a mixed unary and binary `possible`/`not possible` plus binary `not know`
 operator-result lifecycle,
+accepted split-batch lifecycle evidence with batch/component counters,
 two-record/two-CNF bounded MaxSAT candidate-set execution, bounded GPU-CDCL
 pruning of UNSAT MaxSAT search candidates for one and two accepted evidence
 records, and bounded weighted soft-clause selection encoding for one and two
@@ -487,6 +499,7 @@ Run the solver service fixtures and production-adapter source guard:
 
 ```bash
 cargo test -p xlog-solve --test gpu_solver_production_reuse
+cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_lifecycle_path -- --nocapture
 cargo test -p xlog-solve --test solver_service_semantics
 ```
 

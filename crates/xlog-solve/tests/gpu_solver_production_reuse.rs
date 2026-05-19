@@ -27,6 +27,10 @@ fn production_solver_adapter_reuses_gpu_cdcl_not_cpu_oracle() {
     assert!(production.contains("solve_assumption_lifecycle_with_gpu_execution_result"));
     assert!(production
         .contains("solve_multi_candidate_assumption_lifecycle_with_gpu_execution_results"));
+    assert!(production.contains("GpuSolverProductionBatchExecutionEvidence"));
+    assert!(production.contains("solve_assumption_lifecycle_with_gpu_batch_execution_result"));
+    assert!(production.contains("require_accepted_gpu_solver_batch_evidence"));
+    assert!(production.contains("EpistemicGpuBatchExecutionResult"));
     assert!(production
         .contains("solve_unsat_and_publish_learned_clause_arena_with_gpu_execution_result"));
     assert!(production.contains("solve_unsat_then_reuse_learned_clauses_with_gpu_execution_result"));
@@ -86,6 +90,8 @@ fn production_solver_adapter_reuses_gpu_cdcl_not_cpu_oracle() {
     assert!(production.contains("gpu_portfolio_unknown_status_jobs"));
     assert!(production.contains("gpu_portfolio_timeout_status_jobs"));
     assert!(production.contains("accepted_gpu_candidate_evidence_consumed"));
+    assert!(production.contains("accepted_gpu_batch_candidate_evidence_consumed"));
+    assert!(production.contains("accepted_gpu_batch_candidate_component_evidence_consumed"));
     assert!(production.contains("accepted_g91_gpu_candidate_evidence_consumed"));
     assert!(production.contains("accepted_faeel_gpu_candidate_evidence_consumed"));
     assert!(production.contains("accepted_know_gpu_candidate_evidence_consumed"));
@@ -170,6 +176,17 @@ fn production_solver_metric_gate_rejects_cpu_oracle_only_traces() {
         ..GpuSolverProductionTrace::default()
     };
     assert!(encoded_maxsat
+        .require_production_metric_eligibility()
+        .is_ok());
+
+    let batch_eligible = GpuSolverProductionTrace {
+        accepted_gpu_candidate_evidence_consumed: 2,
+        accepted_gpu_batch_candidate_evidence_consumed: 1,
+        accepted_gpu_batch_candidate_component_evidence_consumed: 2,
+        gpu_cdcl_sat_solves: 2,
+        ..GpuSolverProductionTrace::default()
+    };
+    assert!(batch_eligible
         .require_production_metric_eligibility()
         .is_ok());
 

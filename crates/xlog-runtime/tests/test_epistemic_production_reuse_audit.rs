@@ -23,6 +23,9 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(audit.contains("EpistemicGpuRuntimePreflight"));
     assert!(audit.contains("EpistemicGpuBatchExecutionTrace"));
     assert!(audit.contains("GpuSolverProductionAdapter"));
+    assert!(audit.contains("GpuSolverProductionBatchExecutionEvidence"));
+    assert!(audit.contains("accepted_gpu_batch_candidate_evidence_consumed"));
+    assert!(audit.contains("accepted_gpu_batch_candidate_component_evidence_consumed"));
     assert!(audit.contains("EpistemicProbProductionAdapter"));
     assert!(audit.contains("G38 completion audit"));
     assert!(audit.contains("G38-B closure proposal and integration audit"));
@@ -143,6 +146,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(integration.contains(
         "accepted_gpu_execution_results_gate_batched_negative_conditioned_probabilistic_queries"
     ));
+    assert!(integration.contains("accepted_split_batch_gates_solver_lifecycle_path"));
     assert!(integration.contains("not_possible_operator_count"));
     assert!(integration.contains("negated_row_filter_count"));
     assert!(solver.contains("GpuCdclSolver::new"));
@@ -154,6 +158,10 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(
         solver.contains("solve_multi_candidate_assumption_lifecycle_with_gpu_execution_results")
     );
+    assert!(solver.contains("GpuSolverProductionBatchExecutionEvidence"));
+    assert!(solver.contains("solve_assumption_lifecycle_with_gpu_batch_execution_result"));
+    assert!(solver.contains("require_accepted_gpu_solver_batch_evidence"));
+    assert!(solver.contains("EpistemicGpuBatchExecutionResult"));
     assert!(
         solver.contains("solve_unsat_and_publish_learned_clause_arena_with_gpu_execution_result")
     );
@@ -217,6 +225,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(solver.contains("gpu_portfolio_unknown_status_jobs"));
     assert!(solver.contains("gpu_portfolio_timeout_status_jobs"));
     assert!(solver.contains("accepted_gpu_candidate_evidence_consumed"));
+    assert!(solver.contains("accepted_gpu_batch_candidate_evidence_consumed"));
+    assert!(solver.contains("accepted_gpu_batch_candidate_component_evidence_consumed"));
     assert!(solver.contains("accepted_g91_gpu_candidate_evidence_consumed"));
     assert!(solver.contains("accepted_faeel_gpu_candidate_evidence_consumed"));
     assert!(solver.contains("accepted_know_gpu_candidate_evidence_consumed"));
