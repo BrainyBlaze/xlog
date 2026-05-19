@@ -21,7 +21,10 @@ prove variable-bound nonzero-arity membership filters final rows on device; a
 `possible` fixture records accepted preflight operator metrics; the negated
 unary and binary fixtures prove `not know` and `not possible` filter by absent bound tuple
 keys on the same device row-map path, with final-row polarity counts recorded
-in the materialization trace. This is not a closure claim for `G090_GPU`,
+in the materialization trace; split batch execution now exposes aggregate
+zero-CPU-recomposition and zero per-candidate-host-round-trip counters while
+delegating every component to the existing single-plan GPU runtime path. This is
+not a closure claim for `G090_GPU`,
 `G090_CERT`, or `G090_CLOSE`.
 
 ## Implementation Evidence
@@ -36,6 +39,7 @@ in the materialization trace. This is not a closure claim for `G090_GPU`,
 | Accepted final tuple materialization | The final epistemic output row count is read from device metadata and must be `1`, proving that the accepted world-view path materializes the production WCOJ row rather than only proving preflight metadata. |
 | Accepted nonzero-arity membership | Unary fixture `accepted(X) :- node(X), know edge(X)` returns `[1]`; possible fixture `accepted(X) :- node(X), possible edge(X)` returns `[2, 3]` and records `possible_operator_count == 1`; not-possible fixture `accepted(X) :- node(X), not possible edge(X)` returns `[1, 3]`, records `not_possible_operator_count == 1`, and records `row_filter_count == 1` plus `negated_row_filter_count == 1`; binary fixture `accepted(X, Y) :- pair(X, Y), know edge(X, Y)` returns `[(1, 2)]`; quaternary fixture `accepted(A, B, C, D) :- tuple4(A, B, C, D), know fact4(A, B, C, D)` returns `[(2, 3, 4, 5)]`; multi-membership fixture `accepted(X) :- node(X), know edge(X), know color(X)` returns `[2]` and exactly one accepted world view, proving bound tuple-key membership filters rows by all variable-bound tuple keys rather than accepting every reduced tuple. Negative multi-membership fixture `world_view_validation_rejects_candidates_missing_one_required_membership` leaves final output empty and rejects all candidates when one required membership has no tuple-source support. |
 | Accepted `not know` nonzero-arity membership | Negated unary fixture `accepted(X) :- node(X), not know edge(X)` with `node = [1, 2, 3]` and `edge = [1, 3]` returns `[2]`; binary fixture `accepted(X, Y) :- pair(X, Y), not know edge(X, Y)` with `edge = [(2, 3)]` returns `[(1, 2), (3, 4)]`, proving the final device row-map carries binding polarity and keeps rows whose bound tuple key is absent from the stable-model tuple source. |
+| Split batch runtime trace | `test_epistemic_gpu_wcoj_execution::accepted_split_components_execute_gpu_runtime_and_match_component_oracles` uses `execute_epistemic_gpu_execution_batch_with_trace` and `EpistemicGpuBatchExecutionTrace` to prove two split components executed through the existing single-plan GPU runtime path, not CPU recomposition, while preserving per-component GPT trace/candidate-index parity, zero CPU candidate/world-view fallbacks, zero tracked hot-path D2H calls, and zero per-candidate host round trips. |
 
 ## Validation
 
@@ -57,6 +61,8 @@ in the materialization trace. This is not a closure claim for `G090_GPU`,
   binary all-operator, quaternary generic-arity, multi-membership,
   missing-required multi-membership, and negated `not know` variable-bound
   nonzero-arity membership fixtures.
+- It adds batch-level split execution trace counters, but does not close the
+  full splitting semantic parity matrix.
 - It does not prove the full G91, FAEEL, GPT, and splitting semantic parity
   matrix.
 - It does not close broader solver semantic integration or broader accepted

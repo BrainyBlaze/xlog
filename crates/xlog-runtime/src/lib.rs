@@ -11,6 +11,7 @@ pub mod relation;
 mod statistics;
 
 pub use executor::{
+    EpistemicGpuBatchExecutionResult, EpistemicGpuBatchExecutionTrace,
     EpistemicGpuCandidateGenerationTrace, EpistemicGpuCandidateValidationTrace,
     EpistemicGpuExecutionResult, EpistemicGpuFinalResultMaterializationTrace,
     EpistemicGpuFinalResultTransferTrace, EpistemicGpuFinalTupleMaterializationTrace,

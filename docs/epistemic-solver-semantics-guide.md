@@ -340,11 +340,16 @@ epistemic execution; it is bounded executable-plan evidence, not complete
 accepted-runtime parity.
 `Executor::execute_epistemic_gpu_execution_batch` executes component executable
 plans in order by delegating each item to the existing single-plan GPU runtime
-path. The accepted split integration fixture uses this adapter for two
-independent components and checks final component rows against tuple-intersection
-oracles. It also compares each component's generated, propagated, tested,
-accepted, rejected, and candidate-index trace fields against bounded GPT
-oracles while preserving zero CPU candidate/world-view fallback counters.
+path. The traced wrapper
+`Executor::execute_epistemic_gpu_execution_batch_with_trace` returns
+`EpistemicGpuBatchExecutionTrace`, which aggregates component executions,
+accepted/rejected counts, zero CPU recomposition steps, zero CPU
+candidate/world-view fallback counters, and zero per-candidate host round trips.
+The accepted split integration fixture uses this adapter for two independent
+components and checks final component rows against tuple-intersection oracles.
+It also compares each component's generated, propagated, tested, accepted,
+rejected, and candidate-index trace fields against bounded GPT oracles while
+preserving zero CPU candidate/world-view fallback counters.
 
 Split runtime coverage also includes the existing world-view distinction between
 absent `possible` and true `not know`: split `possible edge(X)` and

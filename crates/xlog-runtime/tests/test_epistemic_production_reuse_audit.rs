@@ -21,6 +21,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(audit.contains("M090_CERT.13"));
     assert!(audit.contains("zero new epistemic-only WCOJ"));
     assert!(audit.contains("EpistemicGpuRuntimePreflight"));
+    assert!(audit.contains("EpistemicGpuBatchExecutionTrace"));
     assert!(audit.contains("GpuSolverProductionAdapter"));
     assert!(audit.contains("EpistemicProbProductionAdapter"));
     assert!(audit.contains("G38 completion audit"));
@@ -65,7 +66,10 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(logic.contains("has_independent_founded_support"));
     assert!(runtime.contains("self.execute_plan(&executable.reduced_runtime_plan)"));
     assert!(runtime.contains("execute_epistemic_gpu_execution_batch"));
+    assert!(runtime.contains("execute_epistemic_gpu_execution_batch_with_trace"));
     assert!(runtime.contains("self.execute_epistemic_gpu_execution(executable, capacities)"));
+    assert!(runtime.contains("EpistemicGpuBatchExecutionTrace"));
+    assert!(runtime.contains("cpu_recomposition_steps: 0"));
     assert!(runtime.contains("summarize_runtime_routes"));
     assert!(runtime.contains("MultiwayPlan::WcojWithPlan"));
     assert!(runtime.contains("kclique_wcoj_max_arity"));
@@ -134,6 +138,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(
         integration.contains("split_gpu_world_view_distinguishes_absent_possible_from_not_known")
     );
+    assert!(integration.contains("batch.trace.cpu_recomposition_steps"));
+    assert!(integration.contains("batch.trace.per_candidate_host_round_trips"));
     assert!(integration.contains(
         "accepted_gpu_execution_results_gate_batched_negative_conditioned_probabilistic_queries"
     ));

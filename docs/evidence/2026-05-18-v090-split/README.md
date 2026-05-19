@@ -22,7 +22,7 @@ Predecessor evidence:
 | Valid split fixture | `test_epistemic_split.rs` verifies two independent epistemic rules split into two deterministic components. |
 | Invalid split rejection | A rule coupling `know p()` and `possible q()` returns `UnsupportedEpistemicConstruct { construct: "epistemic splitting" }`. |
 | Recomposition | `EpistemicSplitPlan::recomposed_rule_indices()` sorts component rule indices and equals the unsplit source order in fixtures. |
-| GPU split execution | `compile_epistemic_gpu_split_execution` compiles each epistemic split component through the existing `compile_epistemic_gpu_execution_with_stats_snapshot` path, preserving zero fallback counters and reduced production runtime subplans; accepted split integration executes component plans through `execute_epistemic_gpu_execution_batch`, which delegates each component to the existing single-plan GPU runtime path. |
+| GPU split execution | `compile_epistemic_gpu_split_execution` compiles each epistemic split component through the existing `compile_epistemic_gpu_execution_with_stats_snapshot` path, preserving zero fallback counters and reduced production runtime subplans; accepted split integration executes component plans through `execute_epistemic_gpu_execution_batch`, and the traced wrapper `execute_epistemic_gpu_execution_batch_with_trace` aggregates `EpistemicGpuBatchExecutionTrace` counters proving each component delegated to the existing single-plan GPU runtime path with zero CPU recomposition, zero CPU candidate/world-view fallbacks, and zero per-candidate host round trips. |
 | Possible-vs-not-known GPU split fixture | `test_epistemic_gpu_wcoj_execution::split_gpu_world_view_distinguishes_absent_possible_from_not_known` executes split `possible edge(X)` and `not know edge(X)` components over the same absent tuple source, returning empty `possible_edge` output and `[1, 2, 3]` `not_known_edge` output with zero CPU candidate/world-view fallback counters. |
 | Documentation | `docs/architecture/epistemic-semantics.md` documents the bounded split graph, rejection, and recomposition contract. |
 
@@ -51,12 +51,13 @@ Predecessor evidence:
 | M090_SPLIT.3 invalid split fixtures | typed rejection | PASS for oracle | `UnsupportedEpistemicConstruct` invalid coupling fixture. |
 | M090_SPLIT.4 recomposition | recomposed output equals unsplit output on fixtures | PASS for oracle | `recomposed_rule_indices() == [0, 1]` fixture. |
 | M090_SPLIT.5 modal coupling guard | fixture with cross-component epistemic dependency is not split | PASS for oracle | Invalid coupling fixture rejects split. |
-| M090_SPLIT.6 GPU split execution | valid split components execute through GPU-native subplans, not CPU-only recomposition | PARTIAL | Valid split components now compile through GPU executable subplans using the existing epistemic GPU contract and reduced runtime compiler path; accepted split integration executes two components through `execute_epistemic_gpu_execution_batch`, matches component output rows against simple tuple-intersection oracles, and also proves the world-view distinction where absent `possible edge(X)` yields no rows while `not know edge(X)` yields every node row with zero CPU candidate/world-view fallback counters. Full accepted-runtime semantic parity remains under `G090_GPU`. |
+| M090_SPLIT.6 GPU split execution | valid split components execute through GPU-native subplans, not CPU-only recomposition | PARTIAL | Valid split components now compile through GPU executable subplans using the existing epistemic GPU contract and reduced runtime compiler path; accepted split integration executes two components through `execute_epistemic_gpu_execution_batch_with_trace`, matches component output rows against simple tuple-intersection oracles, compares per-component GPT trace/candidate-index fields, and records an aggregate batch trace with two GPU runtime component executions, zero CPU recomposition steps, zero CPU candidate/world-view fallback counters, and zero per-candidate host round trips. It also proves the world-view distinction where absent `possible edge(X)` yields no rows while `not know edge(X)` yields every node row with zero CPU candidate/world-view fallback counters. Full accepted-runtime semantic parity remains under `G090_GPU`. |
 
 ## Coordination Notes
 
 - This is bounded split planning plus executable-subplan lowering and
-  accepted-runtime component execution evidence, not full GPU semantic parity
-  for arbitrary split programs.
+  accepted-runtime component execution evidence with aggregate zero CPU
+  recomposition tracing, not full GPU semantic parity for arbitrary split
+  programs.
 - No pyxlog public API signatures were changed.
 - No push, tag, release-board update, or merge was performed.

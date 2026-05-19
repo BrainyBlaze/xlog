@@ -1460,6 +1460,72 @@ pub struct EpistemicGpuExecutionResult {
     pub trace: EpistemicGpuRuntimeTrace,
 }
 
+/// Batch-level trace proving split components reused the single-plan GPU path.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EpistemicGpuBatchExecutionTrace {
+    /// Number of executable components requested by the batch.
+    pub component_count: usize,
+    /// Number of components executed through `execute_epistemic_gpu_execution`.
+    pub gpu_runtime_component_executions: usize,
+    /// CPU recomposition steps performed by this batch adapter.
+    pub cpu_recomposition_steps: u64,
+    /// CPU candidate enumerations observed across component semantic traces.
+    pub cpu_candidate_enumerations: u64,
+    /// CPU world-view validations observed across component semantic traces.
+    pub cpu_world_view_validations: u64,
+    /// Hot-path D2H calls tracked across all components.
+    pub tracked_dtoh_calls: u64,
+    /// Per-candidate host round trips tracked across all components.
+    pub per_candidate_host_round_trips: u64,
+    /// Accepted world views observed across component semantic traces.
+    pub accepted_world_views: usize,
+    /// Rejected candidates observed across component semantic traces.
+    pub rejected_candidates: usize,
+}
+
+impl EpistemicGpuBatchExecutionTrace {
+    /// Build an aggregate trace from completed component results.
+    pub fn from_component_results(results: &[EpistemicGpuExecutionResult]) -> Self {
+        Self {
+            component_count: results.len(),
+            gpu_runtime_component_executions: results.len(),
+            cpu_recomposition_steps: 0,
+            cpu_candidate_enumerations: results
+                .iter()
+                .map(|result| u64::from(result.semantic_trace.cpu_candidate_enumerations))
+                .sum(),
+            cpu_world_view_validations: results
+                .iter()
+                .map(|result| u64::from(result.semantic_trace.cpu_world_view_validations))
+                .sum(),
+            tracked_dtoh_calls: results
+                .iter()
+                .map(|result| result.transfer_budget.tracked_dtoh_calls)
+                .sum(),
+            per_candidate_host_round_trips: results
+                .iter()
+                .map(|result| result.transfer_budget.per_candidate_host_round_trips)
+                .sum(),
+            accepted_world_views: results
+                .iter()
+                .map(|result| result.semantic_trace.accepted_world_views)
+                .sum(),
+            rejected_candidates: results
+                .iter()
+                .map(|result| result.semantic_trace.rejected_candidates)
+                .sum(),
+        }
+    }
+}
+
+/// Results plus aggregate trace from a split/batch epistemic GPU execution.
+pub struct EpistemicGpuBatchExecutionResult {
+    /// Per-component execution results from the existing single-plan GPU path.
+    pub results: Vec<EpistemicGpuExecutionResult>,
+    /// Aggregate batch certification trace.
+    pub trace: EpistemicGpuBatchExecutionTrace,
+}
+
 impl EpistemicGpuRuntimeWcojCertification {
     /// Compare static preflight obligations with runtime counter deltas.
     pub fn for_preflight_and_delta(
@@ -3965,6 +4031,22 @@ impl Executor {
             results.push(self.execute_epistemic_gpu_execution(executable, capacities)?);
         }
         Ok(results)
+    }
+
+    /// Execute multiple epistemic GPU executable plans and return an aggregate trace.
+    ///
+    /// This is used by split-execution certification: every component still
+    /// routes through the existing single-plan GPU runtime path, and the batch
+    /// trace only aggregates those component traces. It does not perform CPU
+    /// recomposition.
+    pub fn execute_epistemic_gpu_execution_batch_with_trace(
+        &mut self,
+        executables: &[&EpistemicExecutablePlan],
+        capacities: EpistemicGpuWorkspaceCapacities,
+    ) -> Result<EpistemicGpuBatchExecutionResult> {
+        let results = self.execute_epistemic_gpu_execution_batch(executables, capacities)?;
+        let trace = EpistemicGpuBatchExecutionTrace::from_component_results(&results);
+        Ok(EpistemicGpuBatchExecutionResult { results, trace })
     }
 }
 

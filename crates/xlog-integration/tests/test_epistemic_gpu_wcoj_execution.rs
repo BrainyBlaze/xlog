@@ -903,8 +903,8 @@ fn accepted_split_components_execute_gpu_runtime_and_match_component_oracles() {
         .iter()
         .map(|component| &component.executable)
         .collect();
-    let results = executor
-        .execute_epistemic_gpu_execution_batch(
+    let batch = executor
+        .execute_epistemic_gpu_execution_batch_with_trace(
             &executables,
             EpistemicGpuWorkspaceCapacities {
                 max_candidates: 2,
@@ -914,6 +914,29 @@ fn accepted_split_components_execute_gpu_runtime_and_match_component_oracles() {
         )
         .expect("execute split GPU components through runtime batch path");
 
+    assert_eq!(batch.trace.component_count, 2);
+    assert_eq!(batch.trace.gpu_runtime_component_executions, 2);
+    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
+    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
+    assert_eq!(batch.trace.cpu_world_view_validations, 0);
+    assert_eq!(batch.trace.tracked_dtoh_calls, 0);
+    assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
+    assert_eq!(
+        batch.trace.accepted_world_views,
+        split_oracles
+            .iter()
+            .map(|oracle| oracle.trace.accepted_world_views)
+            .sum::<usize>()
+    );
+    assert_eq!(
+        batch.trace.rejected_candidates,
+        split_oracles
+            .iter()
+            .map(|oracle| oracle.trace.rejected)
+            .sum::<usize>()
+    );
+
+    let results = &batch.results;
     assert_eq!(results.len(), 2);
     assert_eq!(
         download_unary_u32(&fix.provider, &results[0].final_output),
