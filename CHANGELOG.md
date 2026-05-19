@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+No changes yet.
+
+## [0.8.6] — 2026-05-19
+
+DTS-DLM Runtime Completion and GPU-Native Optimizer Pack. This release closes
+the deferred v0.8.0 runtime completion items while preserving the v0.8.5
+language-completeness surface.
+
 ### Added
 
 - Added v0.8.6 persistent-session delta coalescing and opt-in relation-change
@@ -41,7 +49,14 @@ All notable changes to this project are documented in this file.
 - Corrected release-facing README, changelog, and roadmap status after the
   `v0.8.5` tag was published.
 - Bumped workspace package metadata and internal workspace dependency
-  constraints to `0.8.5` so package metadata matches release-facing docs.
+  constraints to `0.8.6` so package metadata matches release-facing docs.
+
+### Release Status
+
+- Closure proposal: `docs/plans/2026-05-19-v086-closure-proposal.md`.
+- Certification evidence: `docs/evidence/2026-05-19-v086-*`.
+- Release-board update, commit, merge, push, and annotated `v0.8.6` tag were
+  authorized on 2026-05-19 after the closure package reached `MERGE_READY`.
 
 ## [0.8.5] — 2026-05-19
 

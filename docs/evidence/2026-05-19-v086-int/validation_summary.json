@@ -1,6 +1,7 @@
 {
   "branch": "feat/v086-runtime-completion",
   "commit_under_test": "2d390318",
+  "trace_head_before_release_metadata": "c5ff5248",
   "compatibility": {
     "v080_examples": {
       "example_count": 5,
@@ -20,6 +21,7 @@
     }
   },
   "consumer_behavior_probe_commit": "2d390318",
+  "consumer_behavior_trace_commit": "c5ff5248",
   "consumer_behavior_probes": {
     "consumer_proof_gaps": [],
     "feature_coverage_source": "behavior_probes",

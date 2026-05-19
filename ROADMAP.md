@@ -1,7 +1,7 @@
 # XLOG Development Roadmap
 
 Last updated: May 19, 2026
-Current tagged release: v0.8.5. v0.6.0 shipped the stream-safe runtime
+Current tagged release: v0.8.6. v0.6.0 shipped the stream-safe runtime
 and recorded launch discipline. v0.6.1 shipped recorded CSM hash-join
 dispatch and explicit CSM cert-mode labeling. v0.6.2 shipped the first
 productized WCOJ slice: hypergraph planner / oracle foundations plus
@@ -17,16 +17,20 @@ exact-induction integration, and DTS-focused examples. v0.8.5 ships the
 language-completeness pack: finite typed lists and terms, safe meta-predicates,
 deterministic NAF, magic-set planning, probabilistic aggregate inference with
 GPU-native count-lift exact evaluation, approximate inference controls,
-incremental parsing, and explain/REPL/watch developer workflows.
+incremental parsing, and explain/REPL/watch developer workflows. v0.8.6 ships
+the DTS-DLM runtime completion and GPU-native optimizer pack: device-resident
+delta coalescing, relation-change callbacks, typed exact induction,
+profile-gated chain shared-memory scoring, runtime CSE, adaptive
+re-optimization, persistent hash-index reuse, and behavior-probe-backed
+consumer certification.
 
 This roadmap is version-oriented so planned work is not hidden inside subsystem
 sections. Historical and current-main work uses checked boxes. Future work uses
 unchecked boxes and is assigned to a concrete future version.
 After the tagged v0.8.0 feature pack, v0.8.5 completed the Language
-Completeness and Developer Experience train. It promoted the previously
-deferred language / CLI / general-product backlog because general XLOG users,
-DTS-DLM future fixtures, and the v0.9.0 epistemic/solver branch needed the
-surface. v0.9.0 is the active Epistemic/Solver Semantics train and v0.10.0 is the
+Completeness and Developer Experience train. v0.8.6 closed the deferred
+DTS-DLM runtime / GPU-native optimizer completion backlog that v0.9.0 needs as
+runtime substrate. v0.9.0 is the active Epistemic/Solver Semantics train and v0.10.0 is the
 Multi-GPU / Out-of-Core train.
 
 ## v0.0.1 - Workspace Foundation
@@ -1542,7 +1546,8 @@ WCOJ, and CLI paths.
 
 ## v0.8.6 - DTS-DLM Runtime Completion and GPU-Native Optimizer Pack
 
-Status: in progress. Governing goal document:
+Status: closed, merged, pushed, and tagged as `v0.8.6` after the 2026-05-19
+closure authorization. Governing goal document:
 `docs/plans/2026-05-19-agent-v086-dts-runtime-completion-goal.md`.
 
 v0.8.6 closes the seven v0.8.0 deferred completion items as a production

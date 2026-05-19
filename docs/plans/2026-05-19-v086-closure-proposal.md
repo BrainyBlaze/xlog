@@ -2,8 +2,11 @@
 
 Date: 2026-05-19
 Branch: `feat/v086-runtime-completion`
-Validation head after consumer behavior-probe amendment: `2d390318`
+Validation head after consumer behavior-probe trace amendment: `c5ff5248`
 Implementation evidence head before hold/correction amendment: `0e2a5420`
+Release action authorization: release-board update, commit, merge, push, and
+annotated `v0.8.6` tag authorized on 2026-05-19 after the closure package
+reached `MERGE_READY`
 Governing goal: `docs/plans/2026-05-19-agent-v086-dts-runtime-completion-goal.md`
 
 ## Recommendation
@@ -27,8 +30,8 @@ coverage from validator-owned behavior probes over committed feature evidence
 and public pyxlog compatibility gates. Public pyxlog session reuse has
 targeted behavior evidence through `test_v086_pyxlog_persistent_index_runtime.py`.
 
-No merge, push, tag, or release-board update is authorized or performed by this
-proposal.
+Release-board update, commit, merge, push, and annotated `v0.8.6` tag are now
+authorized as the release actions for this closure package.
 
 ## Sub-Goal Table
 
@@ -42,9 +45,9 @@ proposal.
 | G086_CSE | `1363b05e` | PASS | `docs/evidence/2026-05-19-v086-cse/README.md` |
 | G086_ADAPT | `2d9bdc0f` | PASS | `docs/evidence/2026-05-19-v086-adaptive-reoptimization/README.md` |
 | G086_INDEX | `702e1f8f` + `0e2a5420`; hold correction `81badf31`; performance amendment `df2dbc03` | PASS | `docs/evidence/2026-05-19-v086-persistent-hash-index/README.md` |
-| G086_CONSUMERS | `37f16651`; hold correction `81badf31`; pyxlog session amendment `611d8293`; behavior-probe amendment `2d390318` | PASS | `docs/evidence/2026-05-19-v086-consumers/README.md` |
-| G086_INT | `b72f61ea`; hold correction `81badf31`; behavior-probe amendment `2d390318` | PASS | `docs/evidence/2026-05-19-v086-int/README.md` |
-| G086_CLOSE | `09f5ad4b`; hold correction `81badf31`; behavior-probe amendment `2d390318` | PASS with `MERGE_READY` decision | `docs/evidence/2026-05-19-v086-close/README.md` |
+| G086_CONSUMERS | `37f16651`; hold correction `81badf31`; pyxlog session amendment `611d8293`; behavior-probe amendment `2d390318`; trace amendment `c5ff5248` | PASS | `docs/evidence/2026-05-19-v086-consumers/README.md` |
+| G086_INT | `b72f61ea`; hold correction `81badf31`; behavior-probe amendment `2d390318`; trace amendment `c5ff5248` | PASS | `docs/evidence/2026-05-19-v086-int/README.md` |
+| G086_CLOSE | `09f5ad4b`; hold correction `81badf31`; behavior-probe amendment `2d390318`; trace amendment `c5ff5248` | PASS with `MERGE_READY` decision | `docs/evidence/2026-05-19-v086-close/README.md` |
 
 ## GQM Metric Table
 
@@ -77,7 +80,7 @@ proposal.
 | M086_CLOSE.2 roadmap sync | PASS | `ROADMAP.md` reflects recorded background build and persistent-index timing speedup |
 | M086_CLOSE.3 unresolved issues | PASS | no unresolved consumer-proof gaps remain; out-of-scope v0.9/v0.10 work is listed separately |
 | M086_CLOSE.4 release decision | PASS | `MERGE_READY` |
-| M086_CLOSE.5 no implicit release | PASS | no board update, merge, push, or tag |
+| M086_CLOSE.5 no implicit release | PASS | release actions are authorized explicitly: board update, commit, merge, push, and annotated `v0.8.6` tag |
 | M086_CLOSE.6 methodology audit | PASS | GDSP/GQM evidence sections present across v0.8.6 evidence |
 
 ## Verification Matrix
@@ -118,7 +121,8 @@ provider build test, and the build-heavy repeated-session performance fixture.
 
 - v0.9.0 EIR, world-view semantics, solver services, MaxSAT, epistemic
   splitting, and multi-GPU/out-of-core work remain out of scope.
-- No release action has been taken.
+- Release actions are limited to the explicitly authorized release-board
+  update, commit, merge, push, and annotated `v0.8.6` tag.
 
 ## v0.9.0 Rebase Note
 
@@ -131,4 +135,5 @@ reuse.
 ## Coordinator Actions
 
 1. Review and approve the `MERGE_READY` closure package.
-2. Separately authorize any release-board update, merge, push, and tag.
+2. Execute the authorized release-board update, merge, push, and annotated
+   `v0.8.6` tag.

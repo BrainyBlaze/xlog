@@ -22,7 +22,7 @@ Scope: `G086_CLOSE` evidence rollup and closure proposal.
 | M086_CLOSE.2 roadmap sync | v0.8.6 section reflects actual PASS/BLOCKED states | PASS | `ROADMAP.md` marks the consumer certification slice complete and records behavior-probe certification |
 | M086_CLOSE.3 unresolved issues | all red/yellow metrics have explicit disposition | PASS | no unresolved consumer-proof gaps remain; `consumer_proof_gaps=[]` |
 | M086_CLOSE.4 release decision | recommendation is `MERGE_READY`, `HOLD_FOR_FIXES`, or `SCOPE_AMENDMENT_REQUIRED` | PASS | `MERGE_READY` |
-| M086_CLOSE.5 no implicit release | no push, tag, board update, or merge without authorization | PASS | no release action performed |
+| M086_CLOSE.5 no implicit release | no push, tag, board update, or merge without authorization | PASS | release actions explicitly authorized: board update, commit, merge, push, and annotated `v0.8.6` tag |
 | M086_CLOSE.6 methodology audit | every sub-goal evidence file includes GDSP/GQM evidence | PASS | methodology scan and README amendments for G086_ADAPT/G086_INDEX |
 
 ## Validation Commands
@@ -57,5 +57,5 @@ and zero tracked DTOH/H2D calls.
 
 ## Required Coordinator Decision
 
-1. Authorize any release-board update, merge, push, and tag as separate actions
-   only after the hold is cleared.
+1. Execute the authorized release-board update, merge, push, and annotated
+   `v0.8.6` tag.

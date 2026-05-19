@@ -2,18 +2,19 @@
 
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
 [![CUDA Tests](https://img.shields.io/badge/CUDA%20tests-207%2F207-brightgreen.svg)](docs/architecture/cuda-certification.md)
-[![Version](https://img.shields.io/badge/version-v0.8.5-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.8.6-blue.svg)](CHANGELOG.md)
 
-> **Release status:** `v0.8.5` - Language Completeness and Developer
-> Experience. The release refreshes the public language surface with finite
-> typed lists and terms, safe meta-predicates, deterministic NAF, magic-set
-> planning, probabilistic aggregate inference with GPU-native count-lift exact
-> evaluation, approximate inference controls, incremental parsing, and
-> developer-facing `xlog explain`, `xlog repl`, and `xlog watch` workflows. It
-> preserves the v0.8.0 DTS-DLM ML/Python productization surface. See
-> `ROADMAP.md`, `CHANGELOG.md`, `docs/language-reference.md`,
-> `docs/architecture/language-v085.md`, `docs/architecture/python-bindings.md`,
-> `examples/v085-language/`, and `examples/v080-dts/`.
+> **Release status:** `v0.8.6` - DTS-DLM Runtime Completion and GPU-Native
+> Optimizer Pack. The release closes the deferred v0.8.0 runtime completion
+> items with device-resident delta coalescing, relation-change callbacks,
+> typed exact-induction dispatch, profile-gated chain shared-memory scoring,
+> runtime CSE, adaptive re-optimization, persistent hash-index reuse, and
+> behavior-probe-backed consumer certification for DTS-DLM, Mistaber-derived
+> `.xlog` fixtures, v0.9.0 substrate prerequisites, and public pyxlog session
+> users. It preserves the v0.8.5 language-completeness surface. See
+> `ROADMAP.md`, `CHANGELOG.md`, `docs/architecture/python-bindings.md`,
+> `examples/v086-runtime/`, `examples/v085-language/`, and
+> `examples/v080-dts/`.
 
 **XLOG is a GPU-native logic programming language for unified symbolic reasoning.**
 Neural-symbolic systems today keep symbolic reasoning on the CPU while neural computation runs on
@@ -65,6 +66,7 @@ XLOG is not a DSL bolted onto a tensor framework. It is a full typed logic progr
 | **Float semantics** | IEEE 754 total ordering for `f32`/`f64` (`NaN > Inf > nums > +0 > -0 > -Inf`) |
 | **Probabilistic** | Exact inference via knowledge compilation (D4 -> XGCF), Monte Carlo sampling, WFS negation |
 | **v0.8.5 language** | Finite `list<T>` and `term` surfaces, safe `findall` / `maplist` / inspection predicates, deterministic NAF, magic sets, aggregate lifting, approximate-inference pragmas |
+| **v0.8.6 runtime** | Delta coalescing, relation callbacks, typed exact induction, chain shared-memory scoring, runtime CSE, adaptive re-optimization, persistent hash-index reuse, behavior-probe consumer certification |
 | **Neural-symbolic** | Neural predicates (`nn/k`), PyTorch autograd integration, circuit caching, term embeddings |
 | **dILP training** | Sparse GPU mask, deterministic mode, promotion pipeline, holdout validation, artifact save/load |
 | **Bounded exact induction** | `xlog-induce` plus `ilp_exact` CUDA scoring with top-K per topology and fixed-size D2H summaries |

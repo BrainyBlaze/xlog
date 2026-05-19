@@ -1,6 +1,6 @@
 {
   "branch": "feat/v086-runtime-completion",
-  "certification_head_before_closure": "2d390318",
+  "certification_head_before_closure": "c5ff5248",
   "implementation_evidence_head_before_hold_correction": "0e2a5420",
   "hold_correction_commit": "81badf314c09",
   "persistent_index_performance_commit": "df2dbc03",
@@ -8,11 +8,13 @@
   "governing_goal": "docs/plans/2026-05-19-agent-v086-dts-runtime-completion-goal.md",
   "proposal": "docs/plans/2026-05-19-v086-closure-proposal.md",
   "release_decision": "MERGE_READY",
+  "release_tag": "v0.8.6",
+  "release_authorization": "Coordinator authorized release-board update, commit, merge, push, and annotated v0.8.6 tag on 2026-05-19 after MERGE_READY blockers were cleared.",
   "release_actions_authorized": {
-    "board_update": false,
-    "merge": false,
-    "push": false,
-    "tag": false
+    "board_update": true,
+    "merge": true,
+    "push": true,
+    "tag": true
   },
   "status": "MERGE_READY",
   "subgoals": {
@@ -60,17 +62,17 @@
       "status": "PASS"
     },
     "G086_CONSUMERS": {
-      "commit": "37f16651; hold correction 81badf31; pyxlog session amendment 611d8293; behavior-probe amendment 2d390318",
+      "commit": "37f16651; hold correction 81badf31; pyxlog session amendment 611d8293; behavior-probe amendment 2d390318; behavior-probe trace c5ff5248",
       "evidence": "docs/evidence/2026-05-19-v086-consumers/README.md",
       "status": "PASS"
     },
     "G086_INT": {
-      "commit": "b72f61ea; hold correction 81badf31; behavior-probe amendment 2d390318",
+      "commit": "b72f61ea; hold correction 81badf31; behavior-probe amendment 2d390318; behavior-probe trace c5ff5248",
       "evidence": "docs/evidence/2026-05-19-v086-int/README.md",
       "status": "PASS"
     },
     "G086_CLOSE": {
-      "commit": "09f5ad4b; hold correction 81badf31; behavior-probe amendment 2d390318",
+      "commit": "09f5ad4b; hold correction 81badf31; behavior-probe amendment 2d390318; behavior-probe trace c5ff5248",
       "evidence": "docs/evidence/2026-05-19-v086-close/README.md",
       "status": "PASS"
     }
