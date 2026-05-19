@@ -1,6 +1,8 @@
 {
   "branch": "feat/v086-runtime-completion",
-  "commit_under_test": "0e2a5420",
+  "commit_under_test": "81badf314c09",
+  "implementation_evidence_head_before_hold_correction": "0e2a5420",
+  "hold_correction_commit": "81badf314c09",
   "date": "2026-05-19",
   "suite": "G086_INT",
   "status": "BLOCKED",

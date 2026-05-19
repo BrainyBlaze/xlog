@@ -1,6 +1,8 @@
 {
   "branch": "feat/v086-runtime-completion",
-  "certification_head_before_closure": "0e2a5420",
+  "certification_head_before_closure": "81badf314c09",
+  "implementation_evidence_head_before_hold_correction": "0e2a5420",
+  "hold_correction_commit": "81badf314c09",
   "date": "2026-05-19",
   "governing_goal": "docs/plans/2026-05-19-agent-v086-dts-runtime-completion-goal.md",
   "proposal": "docs/plans/2026-05-19-v086-closure-proposal.md",
@@ -52,22 +54,22 @@
       "status": "PASS"
     },
     "G086_INDEX": {
-      "commit": "702e1f8f + 0e2a5420",
+      "commit": "702e1f8f + 0e2a5420; hold correction 81badf31",
       "evidence": "docs/evidence/2026-05-19-v086-persistent-hash-index/README.md",
       "status": "BLOCKED"
     },
     "G086_CONSUMERS": {
-      "commit": "37f16651 + review amendment",
+      "commit": "37f16651; hold correction 81badf31",
       "evidence": "docs/evidence/2026-05-19-v086-consumers/README.md",
       "status": "BLOCKED"
     },
     "G086_INT": {
-      "commit": "b72f61ea + final validation refresh",
+      "commit": "b72f61ea; hold correction 81badf31",
       "evidence": "docs/evidence/2026-05-19-v086-int/README.md",
       "status": "BLOCKED"
     },
     "G086_CLOSE": {
-      "commit": "09f5ad4b + review amendment",
+      "commit": "09f5ad4b; hold correction 81badf31",
       "evidence": "docs/evidence/2026-05-19-v086-close/README.md",
       "status": "PASS_WITH_HOLD_FOR_FIXES"
     }
