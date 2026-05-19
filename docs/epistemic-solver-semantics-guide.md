@@ -378,6 +378,11 @@ accepted runtime evidence once before compiling through `ExactDdnnfProgram` and
 evaluating queries from that compiled GPU exact state. The production trace
 keeps separate source and parsed-program end-to-end counters as well as the
 aggregate knowledge-compilation counter.
+`compile_and_evaluate_source_for_gpu_execution_results` validates multiple
+accepted GPU runtime evidence records up front, then runs one source
+compile/evaluate through `ExactDdnnfProgram` per accepted record while
+incrementing the same accepted-evidence, source-compile, query-evaluation, and
+knowledge-compilation counters.
 `compile_and_evaluate_conditioned_source_with_gpu_execution_result` additionally
 turns accepted zero-arity assumptions into parsed exact `Evidence` AST entries
 before evaluating through the same GPU exact path, recording
@@ -397,7 +402,8 @@ traces that lack accepted world-view evidence, lack an existing GPU
 exact/provenance/PIR/CNF counter, or record CPU/fixture recomputation.
 
 This adapter is partial v0.9 evidence only. It does not yet cover the broader
-probabilistic knowledge-compilation matrix over accepted runtime world views.
+nonzero/query-conditioned probabilistic matrix over accepted runtime world
+views.
 
 Run the probabilistic fixture and production-adapter source guard:
 

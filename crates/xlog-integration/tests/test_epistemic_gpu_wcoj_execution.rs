@@ -12,7 +12,9 @@ use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_logic::epistemic::compile_epistemic_gpu_execution_with_stats_snapshot;
 use xlog_logic::{parse_program, Compiler};
 use xlog_prob::epistemic::EpistemicAssumption;
-use xlog_prob::epistemic_production::EpistemicProbProductionAdapter;
+use xlog_prob::epistemic_production::{
+    EpistemicProbGpuExecutionEvidence, EpistemicProbProductionAdapter,
+};
 use xlog_prob::exact::GpuConfig;
 use xlog_runtime::{
     read_device_row_count, EpistemicGpuModelMembershipSource, EpistemicGpuRuntimePreflight,
@@ -976,6 +978,91 @@ fn accepted_gpu_execution_result_gates_probabilistic_end_to_end_knowledge_compil
     assert_eq!(trace.gpu_exact_query_evaluations, 1);
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 1);
+    assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 0);
+    assert_eq!(trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(trace.fixture_circuit_evaluations, 0);
+}
+
+#[test]
+fn accepted_gpu_execution_results_gate_batched_probabilistic_knowledge_compilation_path() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X).
+        "#,
+    )
+    .expect("parse nonzero-arity epistemic fixture");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile nonzero-arity epistemic executable");
+
+    let make_result = |edge_rows: &[u32]| {
+        let mut executor =
+            Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+        for (name, rel_id) in &executable.relation_ids {
+            executor.register_relation(*rel_id, name);
+        }
+        executor.put_relation("node", upload_unary_u32(&fix.memory, &[1, 2]));
+        executor.put_relation("edge", upload_unary_u32(&fix.memory, edge_rows));
+
+        executor
+            .execute_epistemic_gpu_execution(
+                &executable,
+                EpistemicGpuWorkspaceCapacities {
+                    max_candidates: 2,
+                    max_worlds: 1,
+                    max_models_per_reduction: 2,
+                },
+            )
+            .expect("execute accepted epistemic fixture")
+    };
+    let result_a = make_result(&[1]);
+    let result_b = make_result(&[2]);
+    let assumptions_a = [EpistemicAssumption::known("edge", 1, true)];
+    let assumptions_b = [EpistemicAssumption::known("edge", 1, true)];
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut adapter = EpistemicProbProductionAdapter::new(config);
+    let evaluated = adapter
+        .compile_and_evaluate_source_for_gpu_execution_results(
+            r#"
+            0.25::rain().
+            query(rain()).
+            "#,
+            &fix.provider,
+            &[
+                EpistemicProbGpuExecutionEvidence {
+                    result: &result_a,
+                    assumptions: &assumptions_a,
+                },
+                EpistemicProbGpuExecutionEvidence {
+                    result: &result_b,
+                    assumptions: &assumptions_b,
+                },
+            ],
+        )
+        .expect("accepted GPU runtime evidence must gate batched knowledge compilation");
+
+    assert_eq!(evaluated.len(), 2);
+    for result in &evaluated {
+        assert_eq!(result.query_probs.len(), 1);
+        assert!((result.query_probs[0].prob - 0.25).abs() < 1.0e-6);
+    }
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_world_view_evidence_consumed, 2);
+    assert_eq!(trace.accepted_evidence_assumptions_consumed, 2);
+    assert_eq!(trace.gpu_exact_source_compiles, 2);
+    assert_eq!(trace.gpu_exact_query_evaluations, 2);
+    assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 2);
+    assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 2);
     assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 0);
     assert_eq!(trace.cpu_only_probability_recomputations, 0);
     assert_eq!(trace.fixture_circuit_evaluations, 0);

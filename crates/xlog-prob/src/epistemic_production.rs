@@ -194,6 +194,15 @@ pub struct EpistemicProbPirCnfEvidence {
     pub cnf_lit_cap: u32,
 }
 
+/// One accepted GPU epistemic execution record used for probabilistic production gating.
+#[derive(Clone, Copy)]
+pub struct EpistemicProbGpuExecutionEvidence<'a> {
+    /// Accepted GPU execution result whose world-view boundary must be validated.
+    pub result: &'a EpistemicGpuExecutionResult,
+    /// Epistemic assumptions represented by the accepted world view.
+    pub assumptions: &'a [EpistemicAssumption],
+}
+
 /// Thin adapter from accepted epistemic evidence to the existing GPU exact path.
 pub struct EpistemicProbProductionAdapter {
     config: GpuConfig,
@@ -310,6 +319,39 @@ impl EpistemicProbProductionAdapter {
         let evidence =
             AcceptedWorldViewEvidence::from_gpu_execution_result(provider, result, assumptions)?;
         self.compile_and_evaluate_source_with_accepted_world_view(source, &evidence)
+    }
+
+    /// Compile and evaluate source once per accepted GPU epistemic execution result.
+    #[cfg(feature = "host-io")]
+    pub fn compile_and_evaluate_source_for_gpu_execution_results(
+        &mut self,
+        source: &str,
+        provider: &CudaKernelProvider,
+        evidence_records: &[EpistemicProbGpuExecutionEvidence<'_>],
+    ) -> Result<Vec<ExactResult>> {
+        if evidence_records.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic probabilistic production batch".to_string(),
+                context: "batched knowledge compilation requires at least one accepted GPU result"
+                    .to_string(),
+            });
+        }
+
+        let mut accepted = Vec::with_capacity(evidence_records.len());
+        for record in evidence_records {
+            accepted.push(AcceptedWorldViewEvidence::from_gpu_execution_result(
+                provider,
+                record.result,
+                record.assumptions.to_vec(),
+            )?);
+        }
+
+        let mut results = Vec::with_capacity(accepted.len());
+        for evidence in &accepted {
+            results
+                .push(self.compile_and_evaluate_source_with_accepted_world_view(source, evidence)?);
+        }
+        Ok(results)
     }
 
     /// Compile source with accepted zero-arity epistemic assumptions as exact evidence.

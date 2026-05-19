@@ -37,7 +37,7 @@ the same device row-map path. This is not a closure claim for `G090_GPU`,
 
 | Command | Result |
 |---|---|
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 26 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 27 passed, 0 failed |
 
 ## Non-Closure Notes
 
@@ -50,5 +50,5 @@ the same device row-map path. This is not a closure claim for `G090_GPU`,
 - It does not prove the full G91, FAEEL, GPT, and splitting semantic parity
   matrix.
 - It does not close broader status-aware solver lifecycle or broader accepted
-  probabilistic knowledge-compilation integration.
+  nonzero/query-conditioned probabilistic integration.
 - No closure-board edit, merge, push, or tag is implied.
