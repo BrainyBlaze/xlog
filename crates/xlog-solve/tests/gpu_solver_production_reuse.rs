@@ -27,6 +27,7 @@ fn production_solver_adapter_reuses_gpu_cdcl_not_cpu_oracle() {
     assert!(production.contains("solve_assumption_lifecycle_with_gpu_execution_result"));
     assert!(production
         .contains("solve_multi_candidate_assumption_lifecycle_with_gpu_execution_results"));
+    assert!(production.contains("solve_maxsat_lifecycle_with_gpu_execution_result"));
     assert!(production.contains("GpuSolverProductionBatchExecutionEvidence"));
     assert!(production.contains("solve_assumption_lifecycle_with_gpu_batch_execution_result"));
     assert!(production.contains("require_accepted_gpu_solver_batch_evidence"));
@@ -64,6 +65,7 @@ fn production_solver_adapter_reuses_gpu_cdcl_not_cpu_oracle() {
     assert!(production.contains("GpuSolverProductionLearnedClauseArenaReport"));
     assert!(production.contains("GpuSolverProductionLearnedClauseReuseReport"));
     assert!(production.contains("GpuSolverProductionMaxSatCandidate"));
+    assert!(production.contains("GpuSolverProductionMaxSatLifecycleReport"));
     assert!(production.contains("GpuSolverProductionPortfolioJob"));
     assert!(production.contains("GpuSolverProductionPortfolioJob::Unknown"));
     assert!(production.contains("GpuSolverProductionPortfolioJob::Timeout"));

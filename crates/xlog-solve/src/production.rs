@@ -205,6 +205,17 @@ pub struct GpuSolverProductionMaxSatReport {
     pub gpu_cdcl_candidate_solves: u64,
 }
 
+/// Summary of a combined accepted solver lifecycle plus MaxSAT run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GpuSolverProductionMaxSatLifecycleReport {
+    /// Number of accepted GPU epistemic candidate evidence records consumed.
+    pub candidate_evidence_records: u64,
+    /// Push/solve/retract lifecycle report for the accepted GPU evidence.
+    pub lifecycle: GpuSolverProductionLifecycleReport,
+    /// Bounded MaxSAT candidate report for the same accepted GPU evidence.
+    pub maxsat: GpuSolverProductionMaxSatReport,
+}
+
 /// One job in an accepted GPU-backed MaxSAT scheduler batch.
 #[derive(Clone, Copy)]
 pub enum GpuSolverProductionMaxSatScheduleJob<'a> {
@@ -1213,6 +1224,33 @@ impl GpuSolverProductionAdapter {
         self.record_accepted_gpu_candidate_evidence(result);
         self.trace.require_zero_cpu_search()?;
         Ok(report)
+    }
+
+    /// Execute an accepted solver lifecycle, then a bounded MaxSAT candidate set.
+    ///
+    /// The same accepted GPU epistemic evidence gates both phases. The adapter
+    /// records that evidence once, while lifecycle and MaxSAT counters prove the
+    /// existing GPU CDCL paths handled all solver work without CPU search.
+    pub fn solve_maxsat_lifecycle_with_gpu_execution_result(
+        &mut self,
+        provider: &CudaKernelProvider,
+        result: &EpistemicGpuExecutionResult,
+        workspace: &mut GpuCdclWorkspace,
+        steps: &[GpuSolverProductionLifecycleStep<'_>],
+        candidates: &[GpuSolverProductionMaxSatCandidate<'_>],
+    ) -> Result<GpuSolverProductionMaxSatLifecycleReport> {
+        require_accepted_gpu_solver_evidence(provider, result)?;
+
+        let lifecycle = self.solve_assumption_lifecycle_steps(workspace, steps)?;
+        let maxsat = self.solve_weighted_maxsat_candidates(candidates)?;
+        self.record_accepted_gpu_candidate_evidence(result);
+        self.trace.require_zero_cpu_search()?;
+
+        Ok(GpuSolverProductionMaxSatLifecycleReport {
+            candidate_evidence_records: 1,
+            lifecycle,
+            maxsat,
+        })
     }
 
     /// Solve a bounded weighted MaxSAT candidate set once per accepted GPU epistemic candidate.

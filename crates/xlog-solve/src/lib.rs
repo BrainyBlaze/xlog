@@ -53,10 +53,10 @@ pub use production::{
     GpuSolverProductionExpectation, GpuSolverProductionLearnedClauseArenaReport,
     GpuSolverProductionLearnedClauseReuseReport, GpuSolverProductionLifecycleReport,
     GpuSolverProductionLifecycleStep, GpuSolverProductionMaxSatCandidate,
-    GpuSolverProductionMaxSatReport, GpuSolverProductionMaxSatScheduleJob,
-    GpuSolverProductionMaxSatScheduleReport, GpuSolverProductionMaxSatSearchCandidate,
-    GpuSolverProductionMaxSatSearchStatus, GpuSolverProductionPortfolioJob,
-    GpuSolverProductionPortfolioReport, GpuSolverProductionTrace,
+    GpuSolverProductionMaxSatLifecycleReport, GpuSolverProductionMaxSatReport,
+    GpuSolverProductionMaxSatScheduleJob, GpuSolverProductionMaxSatScheduleReport,
+    GpuSolverProductionMaxSatSearchCandidate, GpuSolverProductionMaxSatSearchStatus,
+    GpuSolverProductionPortfolioJob, GpuSolverProductionPortfolioReport, GpuSolverProductionTrace,
     GpuSolverProductionWeightedMaxSatSelection,
 };
 pub use proof::{compute_checksum, SolveProof, SolveResult, SolveStats, SolveStatus};
