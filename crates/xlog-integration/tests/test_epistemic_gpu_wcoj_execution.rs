@@ -26,9 +26,9 @@ use xlog_runtime::{
 use xlog_solve::{
     Clause, GpuCdclConfig, GpuCnf, GpuSolverProductionAdapter, GpuSolverProductionExpectation,
     GpuSolverProductionLifecycleStep, GpuSolverProductionMaxSatCandidate,
-    GpuSolverProductionMaxSatSearchCandidate, GpuSolverProductionMaxSatSearchStatus,
-    GpuSolverProductionPortfolioJob, GpuSolverProductionWeightedMaxSatSelection, Literal,
-    SolveInstance,
+    GpuSolverProductionMaxSatScheduleJob, GpuSolverProductionMaxSatSearchCandidate,
+    GpuSolverProductionMaxSatSearchStatus, GpuSolverProductionPortfolioJob,
+    GpuSolverProductionWeightedMaxSatSelection, Literal, SolveInstance,
 };
 use xlog_stats::{
     ColumnStats, JoinSelectivity, KeyHeatStats, PrefixDegreeStats, RelationStats, StatsSnapshot,
@@ -3633,6 +3633,165 @@ fn accepted_gpu_execution_results_gate_multi_candidate_weighted_maxsat_encoded_s
     assert_eq!(trace.gpu_maxsat_candidate_solves, 4);
     assert_eq!(trace.gpu_maxsat_unsat_candidate_prunes, 2);
     assert_eq!(trace.gpu_maxsat_optima, 2);
+    assert_eq!(trace.cpu_assignment_enumerations, 0);
+    assert_eq!(trace.cpu_maxsat_enumerations, 0);
+}
+
+#[test]
+fn accepted_gpu_execution_results_gate_generalized_maxsat_scheduler() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X).
+        "#,
+    )
+    .expect("parse nonzero-arity epistemic fixture");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile nonzero-arity epistemic executable");
+
+    let make_result = |edge_rows: &[u32]| {
+        let mut executor =
+            Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+        for (name, rel_id) in &executable.relation_ids {
+            executor.register_relation(*rel_id, name);
+        }
+        executor.put_relation("node", upload_unary_u32(&fix.memory, &[1, 2]));
+        executor.put_relation("edge", upload_unary_u32(&fix.memory, edge_rows));
+
+        executor
+            .execute_epistemic_gpu_execution(
+                &executable,
+                EpistemicGpuWorkspaceCapacities {
+                    max_candidates: 2,
+                    max_worlds: 1,
+                    max_models_per_reduction: 2,
+                },
+            )
+            .expect("execute accepted epistemic fixture")
+    };
+    let result_a = make_result(&[1]);
+    let result_b = make_result(&[2]);
+
+    let sat_low = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
+    let sat_high = SolveInstance::new(1, vec![Clause::new(vec![Literal::negative(0)])]);
+    let unsat = SolveInstance::new(
+        1,
+        vec![
+            Clause::new(vec![Literal::positive(0)]),
+            Clause::new(vec![Literal::negative(0)]),
+        ],
+    );
+    let gpu_sat_low = GpuCnf::from_host(&sat_low, &fix.provider).expect("upload SAT low");
+    let gpu_sat_high = GpuCnf::from_host(&sat_high, &fix.provider).expect("upload SAT high");
+    let gpu_unsat = GpuCnf::from_host(&unsat, &fix.provider).expect("upload UNSAT candidate");
+    let weighted = SolveInstance::with_weights(
+        1,
+        vec![
+            Clause::new(vec![Literal::positive(0)]),
+            Clause::new(vec![Literal::negative(0)]),
+        ],
+        vec![7.0, 9.0],
+    );
+    let branch_limit = upload_u32_scalar(&fix.provider, 1);
+    let mut adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let mut workspace = adapter
+        .new_workspace(1, 2)
+        .expect("new generalized MaxSAT scheduler workspace");
+    let both_soft_clauses = [0usize, 1usize];
+    let sat_soft_clause = [0usize];
+
+    let report = adapter
+        .solve_maxsat_schedule_with_gpu_execution_results(
+            &fix.provider,
+            &[&result_a, &result_b],
+            &mut workspace,
+            &[
+                GpuSolverProductionMaxSatScheduleJob::CandidateSet {
+                    candidates: &[
+                        GpuSolverProductionMaxSatCandidate {
+                            score: 3,
+                            cnf: &gpu_sat_low,
+                            branch_var_limit: &branch_limit,
+                        },
+                        GpuSolverProductionMaxSatCandidate {
+                            score: 5,
+                            cnf: &gpu_sat_high,
+                            branch_var_limit: &branch_limit,
+                        },
+                    ],
+                },
+                GpuSolverProductionMaxSatScheduleJob::Search {
+                    candidates: &[
+                        GpuSolverProductionMaxSatSearchCandidate {
+                            score: 9,
+                            cnf: &gpu_unsat,
+                            branch_var_limit: &branch_limit,
+                            status: GpuSolverProductionMaxSatSearchStatus::Unsatisfiable,
+                        },
+                        GpuSolverProductionMaxSatSearchCandidate {
+                            score: 7,
+                            cnf: &gpu_sat_low,
+                            branch_var_limit: &branch_limit,
+                            status: GpuSolverProductionMaxSatSearchStatus::Satisfiable,
+                        },
+                    ],
+                },
+                GpuSolverProductionMaxSatScheduleJob::EncodedSearch {
+                    weighted: &weighted,
+                    branch_var_limit: &branch_limit,
+                    selections: &[
+                        GpuSolverProductionWeightedMaxSatSelection {
+                            soft_clause_indices: &both_soft_clauses,
+                            status: GpuSolverProductionMaxSatSearchStatus::Unsatisfiable,
+                        },
+                        GpuSolverProductionWeightedMaxSatSelection {
+                            soft_clause_indices: &sat_soft_clause,
+                            status: GpuSolverProductionMaxSatSearchStatus::Satisfiable,
+                        },
+                    ],
+                },
+                GpuSolverProductionMaxSatScheduleJob::Unknown {
+                    reason: "bounded scheduler branch budget exhausted",
+                },
+                GpuSolverProductionMaxSatScheduleJob::Timeout { budget_micros: 25 },
+            ],
+        )
+        .expect("accepted GPU evidence must gate generalized MaxSAT scheduler");
+
+    assert_eq!(report.candidate_evidence_records, 2);
+    assert_eq!(report.jobs, 10);
+    assert_eq!(report.candidate_set_jobs, 2);
+    assert_eq!(report.search_jobs, 2);
+    assert_eq!(report.encoded_search_jobs, 2);
+    assert_eq!(report.unknown_jobs, 2);
+    assert_eq!(report.timeout_jobs, 2);
+    assert_eq!(report.optimum_score, 7);
+    assert_eq!(report.candidates_checked, 12);
+    assert_eq!(report.satisfiable_candidates, 8);
+    assert_eq!(report.unsat_candidates_pruned, 4);
+    assert_eq!(report.gpu_cdcl_candidate_encodes, 4);
+    assert_eq!(report.gpu_cdcl_candidate_solves, 12);
+
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 2);
+    assert_eq!(trace.gpu_maxsat_scheduler_jobs, 10);
+    assert_eq!(trace.gpu_maxsat_scheduler_candidate_set_jobs, 2);
+    assert_eq!(trace.gpu_maxsat_scheduler_search_jobs, 2);
+    assert_eq!(trace.gpu_maxsat_scheduler_encoded_search_jobs, 2);
+    assert_eq!(trace.gpu_maxsat_scheduler_unknown_status_jobs, 2);
+    assert_eq!(trace.gpu_maxsat_scheduler_timeout_status_jobs, 2);
+    assert_eq!(trace.gpu_maxsat_candidate_encodes, 4);
+    assert_eq!(trace.gpu_maxsat_candidate_solves, 12);
+    assert_eq!(trace.gpu_maxsat_unsat_candidate_prunes, 4);
+    assert_eq!(trace.gpu_maxsat_optima, 6);
     assert_eq!(trace.cpu_assignment_enumerations, 0);
     assert_eq!(trace.cpu_maxsat_enumerations, 0);
 }

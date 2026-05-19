@@ -53,6 +53,7 @@ pub use production::{
     GpuSolverProductionLearnedClauseArenaReport, GpuSolverProductionLearnedClauseReuseReport,
     GpuSolverProductionLifecycleReport, GpuSolverProductionLifecycleStep,
     GpuSolverProductionMaxSatCandidate, GpuSolverProductionMaxSatReport,
+    GpuSolverProductionMaxSatScheduleJob, GpuSolverProductionMaxSatScheduleReport,
     GpuSolverProductionMaxSatSearchCandidate, GpuSolverProductionMaxSatSearchStatus,
     GpuSolverProductionPortfolioJob, GpuSolverProductionPortfolioReport, GpuSolverProductionTrace,
     GpuSolverProductionWeightedMaxSatSelection,

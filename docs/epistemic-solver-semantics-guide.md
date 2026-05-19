@@ -288,7 +288,8 @@ adapter for epistemic callers. It is a thin wrapper over the existing
 `GpuCdclSolver`; it dispatches `solve_expect_sat`, `solve_expect_unsat`,
 workspace-backed UNSAT, bounded weighted MaxSAT candidate checks, single-result
 and multi-result MaxSAT search pruning, single-result and multi-result
-weighted MaxSAT selection encoding, and bounded SAT/MaxSAT portfolio jobs
+weighted MaxSAT selection encoding, heterogeneous MaxSAT scheduler jobs, and
+bounded SAT/MaxSAT portfolio jobs
 through the GPU CDCL path and exposes zero CPU assignment/MaxSAT enumeration
 counters in `GpuSolverProductionTrace`.
 `solve_expect_sat_with_gpu_execution_result` and
@@ -369,8 +370,9 @@ UNKNOWN/TIMEOUT lifecycle propagation, plus two-record same-CNF learned-clause
 reuse, two-record/two-CNF bounded MaxSAT candidate-set execution, bounded
 GPU-CDCL pruning of UNSAT MaxSAT search candidates for one and two accepted
 evidence records, and bounded weighted soft-clause selection encoding for one
-and two accepted evidence records, but not full generalized MaxSAT scheduler
-coverage.
+and two accepted evidence records, plus a two-record heterogeneous MaxSAT
+scheduler over candidate-set, search-prune, encoded-search, UNKNOWN, and
+TIMEOUT jobs. Broader solver semantic integration remains open.
 
 `xlog_solve::SolverService` provides the bounded solver API used by semantic
 fixtures:

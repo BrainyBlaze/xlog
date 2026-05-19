@@ -41,7 +41,10 @@ fn production_solver_adapter_reuses_gpu_cdcl_not_cpu_oracle() {
     assert!(production.contains(
         "solve_multi_candidate_weighted_maxsat_encoded_search_with_gpu_execution_results"
     ));
+    assert!(production.contains("solve_maxsat_schedule_with_gpu_execution_results"));
     assert!(production.contains("encode_weighted_maxsat_search_candidates"));
+    assert!(production.contains("GpuSolverProductionMaxSatScheduleJob"));
+    assert!(production.contains("GpuSolverProductionMaxSatScheduleReport"));
     assert!(production.contains("GpuSolverProductionWeightedMaxSatSelection"));
     assert!(production.contains("GpuSolverProductionMaxSatSearchCandidate"));
     assert!(production.contains("GpuSolverProductionMaxSatSearchStatus"));
@@ -69,6 +72,12 @@ fn production_solver_adapter_reuses_gpu_cdcl_not_cpu_oracle() {
     assert!(production.contains("gpu_learned_clause_reuse_rejections"));
     assert!(production.contains("gpu_maxsat_candidate_solves"));
     assert!(production.contains("gpu_maxsat_candidate_encodes"));
+    assert!(production.contains("gpu_maxsat_scheduler_jobs"));
+    assert!(production.contains("gpu_maxsat_scheduler_candidate_set_jobs"));
+    assert!(production.contains("gpu_maxsat_scheduler_search_jobs"));
+    assert!(production.contains("gpu_maxsat_scheduler_encoded_search_jobs"));
+    assert!(production.contains("gpu_maxsat_scheduler_unknown_status_jobs"));
+    assert!(production.contains("gpu_maxsat_scheduler_timeout_status_jobs"));
     assert!(production.contains("gpu_maxsat_unsat_candidate_prunes"));
     assert!(production.contains("gpu_maxsat_optima"));
     assert!(production.contains("gpu_portfolio_jobs"));
@@ -111,6 +120,7 @@ fn production_solver_capabilities_report_gpu_backed_maxsat_and_portfolio_paths()
     assert!(production.contains(
         "solve_multi_candidate_weighted_maxsat_encoded_search_with_gpu_execution_results"
     ));
+    assert!(production.contains("solve_maxsat_schedule_with_gpu_execution_results"));
     assert!(production.contains("solve_portfolio_with_gpu_execution_result"));
     assert!(production.contains("cpu_oracle_solver_allowed: false"));
 

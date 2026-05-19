@@ -88,6 +88,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
         "solve_multi_candidate_weighted_maxsat_encoded_search_with_gpu_execution_results"
     ));
     assert!(solver.contains("encode_weighted_maxsat_search_candidates"));
+    assert!(solver.contains("solve_maxsat_schedule_with_gpu_execution_results"));
     assert!(solver.contains("solve_portfolio_with_gpu_execution_result"));
     assert!(solver.contains("GpuSolverProductionLifecycleStep"));
     assert!(solver.contains("GpuSolverProductionExpectation"));
@@ -98,6 +99,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(solver.contains("GpuSolverProductionMaxSatCandidate"));
     assert!(solver.contains("GpuSolverProductionMaxSatSearchCandidate"));
     assert!(solver.contains("GpuSolverProductionMaxSatSearchStatus"));
+    assert!(solver.contains("GpuSolverProductionMaxSatScheduleJob"));
+    assert!(solver.contains("GpuSolverProductionMaxSatScheduleReport"));
     assert!(solver.contains("GpuSolverProductionWeightedMaxSatSelection"));
     assert!(solver.contains("GpuSolverProductionPortfolioJob"));
     assert!(solver.contains("GpuSolverProductionPortfolioJob::Unknown"));
@@ -115,6 +118,12 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(solver.contains("gpu_learned_clause_reuse_rejections"));
     assert!(solver.contains("gpu_maxsat_candidate_encodes"));
     assert!(solver.contains("gpu_maxsat_candidate_solves"));
+    assert!(solver.contains("gpu_maxsat_scheduler_jobs"));
+    assert!(solver.contains("gpu_maxsat_scheduler_candidate_set_jobs"));
+    assert!(solver.contains("gpu_maxsat_scheduler_search_jobs"));
+    assert!(solver.contains("gpu_maxsat_scheduler_encoded_search_jobs"));
+    assert!(solver.contains("gpu_maxsat_scheduler_unknown_status_jobs"));
+    assert!(solver.contains("gpu_maxsat_scheduler_timeout_status_jobs"));
     assert!(solver.contains("gpu_maxsat_unsat_candidate_prunes"));
     assert!(solver.contains("gpu_maxsat_optima"));
     assert!(solver.contains("gpu_portfolio_jobs"));

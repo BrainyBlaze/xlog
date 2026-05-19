@@ -196,6 +196,71 @@ pub struct GpuSolverProductionMaxSatReport {
     pub gpu_cdcl_candidate_solves: u64,
 }
 
+/// One job in an accepted GPU-backed MaxSAT scheduler batch.
+#[derive(Clone, Copy)]
+pub enum GpuSolverProductionMaxSatScheduleJob<'a> {
+    /// Certify a caller-provided weighted candidate set through GPU CDCL SAT.
+    CandidateSet {
+        /// Candidate set to certify.
+        candidates: &'a [GpuSolverProductionMaxSatCandidate<'a>],
+    },
+    /// Certify and prune a caller-provided weighted MaxSAT search frontier.
+    Search {
+        /// Search candidates to certify or prune.
+        candidates: &'a [GpuSolverProductionMaxSatSearchCandidate<'a>],
+    },
+    /// Encode weighted soft-clause selections into GPU CNF candidates before search.
+    EncodedSearch {
+        /// Weighted MaxSAT instance whose soft clauses define the schedule.
+        weighted: &'a SolveInstance,
+        /// Device-resident branch limit passed to the GPU CDCL solver.
+        branch_var_limit: &'a TrackedCudaSlice<u32>,
+        /// Soft-clause selections to encode and certify.
+        selections: &'a [GpuSolverProductionWeightedMaxSatSelection<'a>],
+    },
+    /// A scheduled MaxSAT batch whose GPU-backed budget ended inconclusively.
+    Unknown {
+        /// Diagnostic reason recorded by the accepted scheduler.
+        reason: &'static str,
+    },
+    /// A scheduled MaxSAT batch whose accepted GPU-backed budget timed out.
+    Timeout {
+        /// Timeout budget observed by the accepted scheduler.
+        budget_micros: u64,
+    },
+}
+
+/// Summary of a heterogeneous GPU-backed MaxSAT scheduler batch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GpuSolverProductionMaxSatScheduleReport {
+    /// Number of accepted GPU epistemic candidate evidence records consumed.
+    pub candidate_evidence_records: u64,
+    /// Number of scheduled jobs executed.
+    pub jobs: u64,
+    /// Number of weighted candidate-set jobs.
+    pub candidate_set_jobs: u64,
+    /// Number of search-pruning jobs.
+    pub search_jobs: u64,
+    /// Number of weighted soft-clause encoding plus search jobs.
+    pub encoded_search_jobs: u64,
+    /// Number of UNKNOWN statuses propagated without CPU search.
+    pub unknown_jobs: u64,
+    /// Number of TIMEOUT statuses propagated without CPU search.
+    pub timeout_jobs: u64,
+    /// Best optimum score observed across all GPU-certified scheduled MaxSAT jobs.
+    pub optimum_score: u64,
+    /// Number of candidate CNFs checked across scheduled MaxSAT jobs.
+    pub candidates_checked: u64,
+    /// Number of GPU-certified satisfiable candidates eligible for scoring.
+    pub satisfiable_candidates: u64,
+    /// Number of GPU-certified UNSAT candidates pruned from scoring.
+    pub unsat_candidates_pruned: u64,
+    /// Number of weighted MaxSAT selections encoded into GPU CNF candidates.
+    pub gpu_cdcl_candidate_encodes: u64,
+    /// Number of candidate solves dispatched through GPU CDCL.
+    pub gpu_cdcl_candidate_solves: u64,
+}
+
 /// One job in a bounded GPU solver portfolio.
 #[derive(Clone, Copy)]
 pub enum GpuSolverProductionPortfolioJob<'a> {
@@ -287,6 +352,18 @@ pub struct GpuSolverProductionTrace {
     pub gpu_maxsat_candidate_solves: u64,
     /// Number of weighted MaxSAT selections encoded into GPU CNF candidates.
     pub gpu_maxsat_candidate_encodes: u64,
+    /// Number of heterogeneous MaxSAT scheduler jobs dispatched.
+    pub gpu_maxsat_scheduler_jobs: u64,
+    /// Number of scheduler candidate-set jobs dispatched.
+    pub gpu_maxsat_scheduler_candidate_set_jobs: u64,
+    /// Number of scheduler search-pruning jobs dispatched.
+    pub gpu_maxsat_scheduler_search_jobs: u64,
+    /// Number of scheduler encoded-search jobs dispatched.
+    pub gpu_maxsat_scheduler_encoded_search_jobs: u64,
+    /// Number of scheduler UNKNOWN statuses propagated without CPU search.
+    pub gpu_maxsat_scheduler_unknown_status_jobs: u64,
+    /// Number of scheduler TIMEOUT statuses propagated without CPU search.
+    pub gpu_maxsat_scheduler_timeout_status_jobs: u64,
     /// Number of bounded MaxSAT search candidates pruned as UNSAT by GPU CDCL.
     pub gpu_maxsat_unsat_candidate_prunes: u64,
     /// Number of bounded MaxSAT optima certified by GPU CDCL candidate solves.
@@ -379,6 +456,7 @@ impl GpuSolverProductionTrace {
             .saturating_add(self.gpu_lifecycle_unknown_status_steps)
             .saturating_add(self.gpu_lifecycle_timeout_status_steps)
             .saturating_add(self.gpu_maxsat_candidate_solves)
+            .saturating_add(self.gpu_maxsat_scheduler_jobs)
             .saturating_add(self.gpu_portfolio_jobs);
         if gpu_production_events == 0 {
             return Err(XlogError::UnsupportedEpistemicConstruct {
@@ -1437,6 +1515,197 @@ impl GpuSolverProductionAdapter {
             report.gpu_cdcl_candidate_solves = report
                 .gpu_cdcl_candidate_solves
                 .saturating_add(step_report.gpu_cdcl_candidate_solves);
+            self.trace.accepted_gpu_candidate_evidence_consumed = self
+                .trace
+                .accepted_gpu_candidate_evidence_consumed
+                .saturating_add(1);
+        }
+
+        self.trace.require_zero_cpu_search()?;
+        Ok(report)
+    }
+
+    fn add_maxsat_schedule_step_report(
+        report: &mut GpuSolverProductionMaxSatScheduleReport,
+        step_report: GpuSolverProductionMaxSatReport,
+    ) {
+        report.optimum_score = report.optimum_score.max(step_report.optimum_score);
+        report.candidates_checked = report
+            .candidates_checked
+            .saturating_add(step_report.candidates_checked);
+        report.satisfiable_candidates = report
+            .satisfiable_candidates
+            .saturating_add(step_report.satisfiable_candidates);
+        report.unsat_candidates_pruned = report
+            .unsat_candidates_pruned
+            .saturating_add(step_report.unsat_candidates_pruned);
+        report.gpu_cdcl_candidate_encodes = report
+            .gpu_cdcl_candidate_encodes
+            .saturating_add(step_report.gpu_cdcl_candidate_encodes);
+        report.gpu_cdcl_candidate_solves = report
+            .gpu_cdcl_candidate_solves
+            .saturating_add(step_report.gpu_cdcl_candidate_solves);
+    }
+
+    fn solve_maxsat_schedule_jobs(
+        &mut self,
+        workspace: &mut GpuCdclWorkspace,
+        jobs: &[GpuSolverProductionMaxSatScheduleJob<'_>],
+    ) -> Result<GpuSolverProductionMaxSatScheduleReport> {
+        if jobs.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production MaxSAT scheduler".to_string(),
+                context: "accepted MaxSAT scheduler requires at least one GPU job".to_string(),
+            });
+        }
+
+        let mut report = GpuSolverProductionMaxSatScheduleReport::default();
+        for job in jobs {
+            self.trace.gpu_maxsat_scheduler_jobs =
+                self.trace.gpu_maxsat_scheduler_jobs.saturating_add(1);
+            report.jobs = report.jobs.saturating_add(1);
+
+            match job {
+                GpuSolverProductionMaxSatScheduleJob::CandidateSet { candidates } => {
+                    self.trace.gpu_maxsat_scheduler_candidate_set_jobs = self
+                        .trace
+                        .gpu_maxsat_scheduler_candidate_set_jobs
+                        .saturating_add(1);
+                    report.candidate_set_jobs = report.candidate_set_jobs.saturating_add(1);
+                    let step_report = self.solve_weighted_maxsat_candidates(candidates)?;
+                    Self::add_maxsat_schedule_step_report(&mut report, step_report);
+                }
+                GpuSolverProductionMaxSatScheduleJob::Search { candidates } => {
+                    self.trace.gpu_maxsat_scheduler_search_jobs = self
+                        .trace
+                        .gpu_maxsat_scheduler_search_jobs
+                        .saturating_add(1);
+                    report.search_jobs = report.search_jobs.saturating_add(1);
+                    let step_report =
+                        self.solve_weighted_maxsat_search_candidates(workspace, candidates)?;
+                    Self::add_maxsat_schedule_step_report(&mut report, step_report);
+                }
+                GpuSolverProductionMaxSatScheduleJob::EncodedSearch {
+                    weighted,
+                    branch_var_limit,
+                    selections,
+                } => {
+                    self.trace.gpu_maxsat_scheduler_encoded_search_jobs = self
+                        .trace
+                        .gpu_maxsat_scheduler_encoded_search_jobs
+                        .saturating_add(1);
+                    report.encoded_search_jobs = report.encoded_search_jobs.saturating_add(1);
+                    let encodes_before = self.trace.gpu_maxsat_candidate_encodes;
+                    let encoded =
+                        self.encode_weighted_maxsat_search_candidates(weighted, selections)?;
+                    let search_candidates: Vec<_> = encoded
+                        .iter()
+                        .map(|candidate| GpuSolverProductionMaxSatSearchCandidate {
+                            score: candidate.score,
+                            cnf: &candidate.cnf,
+                            branch_var_limit,
+                            status: candidate.status,
+                        })
+                        .collect();
+                    let mut step_report = self
+                        .solve_weighted_maxsat_search_candidates(workspace, &search_candidates)?;
+                    step_report.gpu_cdcl_candidate_encodes = self
+                        .trace
+                        .gpu_maxsat_candidate_encodes
+                        .saturating_sub(encodes_before);
+                    Self::add_maxsat_schedule_step_report(&mut report, step_report);
+                }
+                GpuSolverProductionMaxSatScheduleJob::Unknown { reason } => {
+                    if reason.trim().is_empty() {
+                        return Err(XlogError::UnsupportedEpistemicConstruct {
+                            construct: "GPU solver production MaxSAT scheduler".to_string(),
+                            context: "UNKNOWN scheduler status requires a diagnostic reason"
+                                .to_string(),
+                        });
+                    }
+                    self.trace.gpu_maxsat_scheduler_unknown_status_jobs = self
+                        .trace
+                        .gpu_maxsat_scheduler_unknown_status_jobs
+                        .saturating_add(1);
+                    report.unknown_jobs = report.unknown_jobs.saturating_add(1);
+                }
+                GpuSolverProductionMaxSatScheduleJob::Timeout { budget_micros } => {
+                    if *budget_micros == 0 {
+                        return Err(XlogError::UnsupportedEpistemicConstruct {
+                            construct: "GPU solver production MaxSAT scheduler".to_string(),
+                            context: "TIMEOUT scheduler status requires a nonzero budget"
+                                .to_string(),
+                        });
+                    }
+                    self.trace.gpu_maxsat_scheduler_timeout_status_jobs = self
+                        .trace
+                        .gpu_maxsat_scheduler_timeout_status_jobs
+                        .saturating_add(1);
+                    report.timeout_jobs = report.timeout_jobs.saturating_add(1);
+                }
+            }
+        }
+
+        self.trace.require_zero_cpu_search()?;
+        Ok(report)
+    }
+
+    /// Execute a heterogeneous MaxSAT schedule once per accepted GPU evidence record.
+    ///
+    /// The scheduler is a thin production-path adapter: it validates accepted
+    /// epistemic GPU execution up front, then dispatches candidate-set,
+    /// search-pruning, and weighted encoded-search jobs through the existing GPU
+    /// CNF/CDCL helpers. UNKNOWN and TIMEOUT jobs are status propagation records;
+    /// they never fall back to CPU assignment or MaxSAT enumeration.
+    pub fn solve_maxsat_schedule_with_gpu_execution_results(
+        &mut self,
+        provider: &CudaKernelProvider,
+        results: &[&EpistemicGpuExecutionResult],
+        workspace: &mut GpuCdclWorkspace,
+        jobs: &[GpuSolverProductionMaxSatScheduleJob<'_>],
+    ) -> Result<GpuSolverProductionMaxSatScheduleReport> {
+        if results.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production MaxSAT scheduler".to_string(),
+                context: "MaxSAT scheduler requires at least one accepted GPU result".to_string(),
+            });
+        }
+        if jobs.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production MaxSAT scheduler".to_string(),
+                context: "accepted MaxSAT scheduler requires at least one GPU job".to_string(),
+            });
+        }
+        for result in results {
+            require_accepted_gpu_solver_evidence(provider, result)?;
+        }
+
+        let mut report = GpuSolverProductionMaxSatScheduleReport::default();
+        for _ in results {
+            let step_report = self.solve_maxsat_schedule_jobs(workspace, jobs)?;
+            report.candidate_evidence_records = report.candidate_evidence_records.saturating_add(1);
+            report.jobs = report.jobs.saturating_add(step_report.jobs);
+            report.candidate_set_jobs = report
+                .candidate_set_jobs
+                .saturating_add(step_report.candidate_set_jobs);
+            report.search_jobs = report.search_jobs.saturating_add(step_report.search_jobs);
+            report.encoded_search_jobs = report
+                .encoded_search_jobs
+                .saturating_add(step_report.encoded_search_jobs);
+            report.unknown_jobs = report.unknown_jobs.saturating_add(step_report.unknown_jobs);
+            report.timeout_jobs = report.timeout_jobs.saturating_add(step_report.timeout_jobs);
+            Self::add_maxsat_schedule_step_report(
+                &mut report,
+                GpuSolverProductionMaxSatReport {
+                    optimum_score: step_report.optimum_score,
+                    candidates_checked: step_report.candidates_checked,
+                    satisfiable_candidates: step_report.satisfiable_candidates,
+                    unsat_candidates_pruned: step_report.unsat_candidates_pruned,
+                    gpu_cdcl_candidate_encodes: step_report.gpu_cdcl_candidate_encodes,
+                    gpu_cdcl_candidate_solves: step_report.gpu_cdcl_candidate_solves,
+                    ..GpuSolverProductionMaxSatReport::default()
+                },
+            );
             self.trace.accepted_gpu_candidate_evidence_consumed = self
                 .trace
                 .accepted_gpu_candidate_evidence_consumed
