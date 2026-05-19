@@ -572,6 +572,15 @@ knowledge-compilation counters.
 accepted-evidence batch gate for parsed probabilistic programs while keeping the
 parsed-program compile and program knowledge-compilation counters separate from
 source counters.
+`compile_and_evaluate_source_for_gpu_batch_execution_result` and
+`compile_and_evaluate_program_for_gpu_batch_execution_result` consume
+`EpistemicProbGpuBatchExecutionEvidence` from accepted split execution,
+validate aggregate zero CPU recomposition, zero CPU candidate/world-view
+fallback, zero tracked D2H, and zero per-candidate host round trips, then route
+each accepted component through the same source or parsed-program
+compile/evaluate exact path. The trace records batch and component evidence
+counters before source/program compile, exact-query, and end-to-end counters
+advance.
 `compile_and_evaluate_conditioned_source_with_gpu_execution_result` and
 `compile_and_evaluate_conditioned_program_with_gpu_execution_result`
 additionally turn accepted zero-arity and concrete nonzero-arity tuple
@@ -637,8 +646,8 @@ exact/provenance/PIR/CNF counter, or record CPU/fixture recomputation.
 
 This adapter is partial v0.9 evidence only. It covers bounded zero-arity,
 nonzero-arity, negative nonzero-arity, parsed-program, two-record
-source-conditioned query, split-batch conditioned source/program query and
-gradient, and two-record parsed-program-conditioned query
+source-conditioned query, split-batch source/program compile/evaluate,
+split-batch conditioned source/program query and gradient, and two-record parsed-program-conditioned query
 cases, including true `know`, true `possible`, false `possible`/`not possible`,
 and false `know`/`not know` operator-result
 conditioning, accepted G91/default FAEEL mode-specific trace counters,
@@ -655,6 +664,7 @@ Run the probabilistic fixture and production-adapter source guard:
 ```bash
 cargo test -p xlog-prob --test epistemic_prob_production_reuse
 cargo test -p xlog-prob --test epistemic_prob
+cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_probabilistic_source_and_program_end_to_end_paths -- --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_probabilistic_conditioned_source_path -- --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_probabilistic_conditioned_program_path -- --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_probabilistic_conditioned_source_gradients -- --nocapture
