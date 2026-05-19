@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 from importlib import util
 from pathlib import Path
@@ -176,6 +177,52 @@ def test_v086_validator_accepts_absolute_and_relative_output_paths(monkeypatch, 
         assert relative["output"] == "target/v086-relative-output-test.json"
     finally:
         (ROOT / relative_output).unlink(missing_ok=True)
+
+
+def test_v086_validator_stages_fresh_debug_kernels_over_package_local_stale(tmp_path) -> None:
+    module = _load_validator_module()
+
+    target_dir = tmp_path / "target" / "debug"
+    stale_out = target_dir / "build" / "xlog-cuda-stale" / "out"
+    fresh_out = target_dir / "build" / "xlog-cuda-fresh" / "out"
+    stale_out.mkdir(parents=True)
+    fresh_out.mkdir(parents=True)
+
+    (stale_out / "weights.sm_120.cubin").write_text("stale cubin", encoding="utf-8")
+    (stale_out / "weights.portable.ptx").write_text("stale ptx", encoding="utf-8")
+    (fresh_out / "weights.sm_120.cubin").write_text(
+        "fresh cubin with weights_count_lift_exact",
+        encoding="utf-8",
+    )
+    (fresh_out / "weights.portable.ptx").write_text("fresh ptx", encoding="utf-8")
+
+    deps_dir = target_dir / "deps"
+    deps_dir.mkdir()
+    (deps_dir / "xlog_cuda-current.d").write_text(
+        f"libxlog_cuda.rlib:\n# env-dep:OUT_DIR={fresh_out}\n",
+        encoding="utf-8",
+    )
+
+    os.utime(stale_out, (3, 3))
+    os.utime(fresh_out, (2, 2))
+
+    staged_pkg = target_dir / "pyxlog"
+    package_kernels = staged_pkg / "kernels"
+    package_kernels.mkdir(parents=True)
+    (package_kernels / "weights.sm_120.cubin").write_text(
+        "ignored package-local stale cubin",
+        encoding="utf-8",
+    )
+    (package_kernels / "obsolete.sm_120.cubin").write_text("obsolete", encoding="utf-8")
+
+    staged_kernels = module._stage_debug_pyxlog_kernels(target_dir, staged_pkg)
+
+    assert staged_kernels == package_kernels
+    assert (staged_kernels / "weights.sm_120.cubin").read_text(encoding="utf-8") == (
+        "fresh cubin with weights_count_lift_exact"
+    )
+    assert (staged_kernels / "weights.portable.ptx").read_text(encoding="utf-8") == "fresh ptx"
+    assert not (staged_kernels / "obsolete.sm_120.cubin").exists()
 
 
 def test_v086_validator_separates_example_execution_from_consumer_certification() -> None:

@@ -50,6 +50,7 @@ FEATURE_EVIDENCE = {
     "adaptive_reoptimization": ROOT / "docs/evidence/2026-05-19-v086-adaptive-reoptimization/measurements.json",
     "persistent_hash_index": ROOT / "docs/evidence/2026-05-19-v086-persistent-hash-index/measurements.json",
 }
+KERNEL_ARTIFACT_SUFFIXES = (".cubin", ".portable.ptx")
 
 
 def _probe(
@@ -500,6 +501,89 @@ def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _kernel_artifacts(out_dir: Path) -> list[Path]:
+    return sorted(
+        path
+        for path in out_dir.iterdir()
+        if path.is_file() and path.name.endswith(KERNEL_ARTIFACT_SUFFIXES)
+    )
+
+
+def _resolve_debug_kernel_out_dir_from_dep_info(target_dir: Path) -> Path | None:
+    deps_dir = target_dir / "deps"
+    candidates: list[tuple[int, str, Path]] = []
+    if not deps_dir.is_dir():
+        return None
+
+    marker = "# env-dep:OUT_DIR="
+    for dep_info in deps_dir.glob("xlog_cuda-*.d"):
+        for line in dep_info.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.startswith(marker):
+                continue
+            candidate = Path(line[len(marker) :])
+            if candidate.is_dir() and _kernel_artifacts(candidate):
+                candidates.append((dep_info.stat().st_mtime_ns, str(candidate), candidate))
+            break
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return candidates[0][2]
+
+
+def _resolve_debug_kernel_out_dir(target_dir: Path) -> Path:
+    dep_info_out_dir = _resolve_debug_kernel_out_dir_from_dep_info(target_dir)
+    if dep_info_out_dir is not None:
+        return dep_info_out_dir
+
+    build_dir = target_dir / "build"
+    candidates: list[tuple[int, str, Path]] = []
+    if build_dir.is_dir():
+        for out_dir in build_dir.glob("xlog-cuda-*/out"):
+            if not out_dir.is_dir():
+                continue
+            artifacts = _kernel_artifacts(out_dir)
+            if not artifacts:
+                continue
+            latest_mtime = max(
+                [out_dir.stat().st_mtime_ns, *(path.stat().st_mtime_ns for path in artifacts)]
+            )
+            candidates.append((latest_mtime, str(out_dir), out_dir))
+
+    _require(candidates, f"Unable to locate generated xlog-cuda kernel artifacts under {build_dir}")
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return candidates[0][2]
+
+
+def _stage_debug_pyxlog_kernels(target_dir: Path, staged_pkg: Path) -> Path:
+    kernel_out_dir = _resolve_debug_kernel_out_dir(target_dir)
+    artifacts = _kernel_artifacts(kernel_out_dir)
+    _require(artifacts, f"no kernel artifacts found in {kernel_out_dir}")
+
+    staged_kernels = staged_pkg / "kernels"
+    if staged_kernels.exists() or staged_kernels.is_symlink():
+        if staged_kernels.is_dir() and not staged_kernels.is_symlink():
+            shutil.rmtree(staged_kernels)
+        else:
+            staged_kernels.unlink()
+    staged_kernels.mkdir()
+
+    for artifact in artifacts:
+        shutil.copy2(artifact, staged_kernels / artifact.name)
+
+    staged_names = {
+        path.name
+        for path in staged_kernels.iterdir()
+        if path.is_file() and path.name.endswith(KERNEL_ARTIFACT_SUFFIXES)
+    }
+    expected_names = {artifact.name for artifact in artifacts}
+    _require(
+        staged_names == expected_names,
+        f"staged pyxlog kernel tree mismatch: expected={sorted(expected_names)} actual={sorted(staged_names)}",
+    )
+    return staged_kernels
+
+
 def _prepare_local_pyxlog_env(args: argparse.Namespace) -> dict[str, str]:
     env = os.environ.copy()
     build = _run_command(
@@ -528,15 +612,19 @@ def _prepare_local_pyxlog_env(args: argparse.Namespace) -> dict[str, str]:
             staged_pkg.unlink()
     staged_pkg.mkdir()
     for child in source_pkg.iterdir():
+        if child.name == "kernels":
+            continue
         if child.name.startswith("_native") and child.suffix in {".so", ".dylib", ".pyd"}:
             continue
         (staged_pkg / child.name).symlink_to(child, target_is_directory=child.is_dir())
 
     native_name = "_native.so" if native_lib.suffix == ".so" else "_native.dylib"
     (staged_pkg / native_name).symlink_to(native_lib)
+    staged_kernels = _stage_debug_pyxlog_kernels(target_dir, staged_pkg)
 
     current = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = f"{target_dir}:{current}" if current else str(target_dir)
+    env["XLOG_CUBIN_DIR"] = str(staged_kernels)
     verify = _run_command(
         [
             args.python,
