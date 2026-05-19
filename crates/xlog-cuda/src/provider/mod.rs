@@ -426,6 +426,7 @@ pub mod ilp_credit_kernels {
 /// Kernel function names in the ILP exact-induction module (M8 Phase 1).
 pub mod ilp_exact_kernels {
     pub const ILP_EXACT_SCORE: &str = "ilp_exact_score";
+    pub const ILP_EXACT_SCORE_U32: &str = "ilp_exact_score_u32";
 }
 
 /// Kernel function names in the PIR interning module.

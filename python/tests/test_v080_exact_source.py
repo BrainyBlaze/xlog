@@ -42,12 +42,15 @@ def test_v080_exact_source_contracts_are_current() -> None:
     assert "provider.ilp_exact_score" in engine
     assert "strict_per_topology=True" in py_docs
 
-    assert "t != ScalarType::U64" in engine
-    assert "`U32`: deferred" in arch
-    assert "`Symbol`: deferred" in arch
+    assert "ScalarType::U64 => ExactPairType::U64" in engine
+    assert "ScalarType::U32 => ExactPairType::U32" in engine
+    assert "ScalarType::Symbol => ExactPairType::Symbol" in engine
+    assert "`U32`: supported through `ilp_exact_score_u32`" in arch
+    assert "`Symbol`: supported through the same physical `u32` kernel" in arch
 
     assert '"ilp_exact"' in manifest
     assert '"ilp_exact_score"' in manifest
+    assert '"ilp_exact_score_u32"' in manifest
     assert "portable PTX" in installer
     assert "does not contain portable PTX kernel artifacts" in installer
 
