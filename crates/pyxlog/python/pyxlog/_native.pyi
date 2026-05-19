@@ -83,6 +83,17 @@ class LogicRelationSession:
         """Apply insert and/or delete rows to a stored relation."""
         ...
 
+    def apply_relation_delta_batch(self, updates: list[dict[str, Any]]) -> dict[str, Any]:
+        """Apply a batch of relation deltas with device-side coalescing.
+
+        Each update dictionary contains ``name`` plus optional
+        ``insert_columns`` and ``delete_columns`` DLPack column sequences. The
+        returned stats include ``input_delta_count``,
+        ``coalesced_insert_rows``, ``coalesced_delete_rows``, and
+        ``canceled_rows``.
+        """
+        ...
+
     def delta_stats(self) -> dict[str, Any]:
         """Return statistics from the most recent relation delta update."""
         ...

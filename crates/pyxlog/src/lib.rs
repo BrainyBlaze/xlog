@@ -400,6 +400,7 @@ pub struct LogicRelationSession {
 
 #[derive(Clone, Debug)]
 pub(crate) struct LogicDeltaStats {
+    pub input_delta_count: usize,
     pub changed_relations: usize,
     pub insert_rows: u64,
     pub delete_rows: u64,
@@ -407,6 +408,9 @@ pub(crate) struct LogicDeltaStats {
     pub affected_sccs: usize,
     pub recomputed_sccs: usize,
     pub incremental_sccs: usize,
+    pub coalesced_insert_rows: u64,
+    pub coalesced_delete_rows: u64,
+    pub canceled_rows: u64,
 }
 
 #[pyclass]

@@ -184,10 +184,19 @@ session.apply_relation_delta(
     insert_columns=[added_row_id, added_parent_id],
     delete_columns=[removed_row_id, removed_parent_id],
 )
+
+session.apply_relation_delta_batch([
+    {"name": "wmir_committed", "insert_columns": [row_a, parent_a]},
+    {"name": "wmir_committed", "delete_columns": [row_b, parent_b]},
+])
 ```
 
 The delta stats dictionary contains `changed_relations`, `insert_rows`,
-`delete_rows`, `affected_sccs`, `recomputed_sccs`, and `incremental_sccs`.
+`delete_rows`, `affected_sccs`, `recomputed_sccs`, `incremental_sccs`,
+`input_delta_count`, `coalesced_insert_rows`, `coalesced_delete_rows`, and
+`canceled_rows`. Batch updates coalesce repeated relation mutations before
+runtime recompute using existing device-resident set operations; callback or
+diagnostic code must not materialize relation rows on the host.
 Direct `put_relation`, `remove_relation`, or `clear_relations` calls invalidate
 the cached runtime store and make the next `evaluate()` perform a full plan
 run before later deltas can reuse it.
