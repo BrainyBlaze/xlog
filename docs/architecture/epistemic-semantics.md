@@ -367,11 +367,13 @@ fallback counters.
 ## Epistemic Splitting Fixture Contract
 
 `build_epistemic_dependency_graph` builds deterministic connected components
-from source-order rules. Connectivity includes each rule head, ordinary positive
-or negated body predicates, epistemic body predicates, and integrity-constraint
-body predicates, so an ordinary dependency or constraint between two epistemic
-rules coalesces them into one component instead of treating them as independently
-solvable:
+from source-order rules. Each component records its rule head plus ordinary,
+epistemic, and negated body predicates, but connectivity is restricted to
+predicates produced by rule heads and integrity constraints that mention those
+heads. Shared extensional inputs can therefore be reused by independent
+epistemic components without forcing them into one component, while ordinary
+derived dependencies or constraints between epistemic rules still coalesce them
+instead of treating them as independently solvable:
 
 - each component records sorted predicate names;
 - each component records source rule indices;
@@ -382,6 +384,9 @@ This prevents unsafe split certificates such as `a() :- know p().` and
 ordinary predicate `a` keeps the rules in one component. Likewise,
 `:- a(), b().` coalesces the `a` and `b` components, while an `a`-only
 constraint stays only with the `a` component during split executable lowering.
+By contrast, fixtures such as `a(X) :- node(X), know edge(X).` and
+`b(X) :- node(X), know color(X).` keep two components because `node/1` is a
+shared extensional input rather than a derived component head.
 
 Epistemic integrity constraints are not silently lowered through the reduced
 ordinary program. Until they have an explicit GPU semantic representation,

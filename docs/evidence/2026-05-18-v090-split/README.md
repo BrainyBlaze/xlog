@@ -18,8 +18,9 @@ Predecessor evidence:
 
 | Requirement | Evidence |
 |---|---|
-| Deterministic graph | `build_epistemic_dependency_graph` builds sorted connected predicate components with source rule indices. Connectivity includes rule heads, ordinary positive/negated body predicates, epistemic body predicates, and integrity-constraint body predicates. |
+| Deterministic graph | `build_epistemic_dependency_graph` builds sorted connected predicate components with source rule indices. Component predicate sets include rule heads, ordinary positive/negated body predicates, epistemic body predicates, and integrity-constraint body predicates, while connectivity is limited to rule-head dependencies and constraints that mention component heads. |
 | Valid split fixture | `test_epistemic_split.rs` verifies two independent epistemic rules split into two deterministic components. |
+| Shared extensional input reuse | `shared_extensional_inputs_do_not_coalesce_epistemic_split_components` proves independent epistemic rules that both read `node/1` stay split while each component retains its own `node` input predicate. |
 | Relational dependency guard | `relational_dependency_coalesces_epistemic_split_components` proves an ordinary dependency between epistemic rules keeps them in one component instead of producing an unsafe independent split certificate. |
 | Constraint dependency guard | `constraint_dependency_coalesces_epistemic_split_components` proves an integrity constraint that mentions two split heads coalesces those rules into one component. |
 | Constraint ownership | `split_component_constraints_stay_with_own_component` proves split executable lowering keeps an `a`-only integrity constraint with the `a/p` component and does not copy it into the independent `b/q` component. |
@@ -34,7 +35,7 @@ Predecessor evidence:
 | Command | Result |
 |---|---|
 | `cargo fmt --check` | PASS |
-| `cargo test -p xlog-logic --test test_epistemic_split` | PASS, 7 passed, 0 failed |
+| `cargo test -p xlog-logic --test test_epistemic_split` | PASS, 8 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_gpt` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_faeel` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_g91` | PASS, 3 passed, 0 failed |
@@ -49,8 +50,8 @@ Predecessor evidence:
 
 | Metric | Target | Status | Evidence |
 |---|---|---|---|
-| M090_SPLIT.1 graph construction | deterministic dependency graph | PASS for oracle | Sorted component fixture plus relational and integrity-constraint dependency coalescing fixtures. |
-| M090_SPLIT.2 valid split fixtures | 100 percent pass | PASS for oracle | `test_epistemic_split`: 7/7 passed. |
+| M090_SPLIT.1 graph construction | deterministic dependency graph | PASS for oracle | Sorted component fixture plus shared-extensional-input reuse, relational dependency coalescing, and integrity-constraint coalescing fixtures. |
+| M090_SPLIT.2 valid split fixtures | 100 percent pass | PASS for oracle | `test_epistemic_split`: 8/8 passed. |
 | M090_SPLIT.3 invalid split fixtures | typed rejection | PASS for oracle | `UnsupportedEpistemicConstruct` invalid coupling fixture. |
 | M090_SPLIT.4 recomposition | recomposed output equals unsplit output on fixtures | PASS for oracle | `recomposed_rule_indices() == [0, 1]` fixtures, including coalesced relational and constraint-dependent components. |
 | M090_SPLIT.5 modal coupling guard | fixture with cross-component epistemic dependency is not split | PASS for oracle | Invalid same-rule coupling rejects split, ordinary dependency between epistemic rules coalesces into one component, and integrity constraints that span split heads coalesce those components. |

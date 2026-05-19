@@ -662,20 +662,25 @@ pub fn build_epistemic_dependency_graph(program: &Program) -> Result<EpistemicDe
 
     let mut parents: Vec<usize> = (0..program.rules.len()).collect();
     let mut rule_predicates = Vec::with_capacity(program.rules.len());
-    let mut predicate_owner: BTreeMap<String, usize> = BTreeMap::new();
+    let mut head_owner: BTreeMap<String, usize> = BTreeMap::new();
+
+    for (idx, rule) in program.rules.iter().enumerate() {
+        if let Some(owner) = head_owner.get(&rule.head.predicate).copied() {
+            union_components(&mut parents, owner, idx);
+        } else {
+            head_owner.insert(rule.head.predicate.clone(), idx);
+        }
+    }
 
     for (idx, rule) in program.rules.iter().enumerate() {
         let mut predicates = BTreeSet::new();
         predicates.insert(rule.head.predicate.clone());
         for lit in &rule.body {
             if let Some(atom) = lit.atom() {
+                if let Some(owner) = head_owner.get(&atom.predicate).copied() {
+                    union_components(&mut parents, owner, idx);
+                }
                 predicates.insert(atom.predicate.clone());
-            }
-        }
-
-        for predicate in &predicates {
-            if let Some(owner) = predicate_owner.insert(predicate.clone(), idx) {
-                union_components(&mut parents, owner, idx);
             }
         }
 
@@ -687,7 +692,7 @@ pub fn build_epistemic_dependency_graph(program: &Program) -> Result<EpistemicDe
         let predicates = constraint_predicate_set(constraint);
         let mut owners = predicates
             .iter()
-            .filter_map(|predicate| predicate_owner.get(predicate).copied());
+            .filter_map(|predicate| head_owner.get(predicate).copied());
         if let Some(first_owner) = owners.next() {
             for owner in owners {
                 union_components(&mut parents, first_owner, owner);
@@ -708,7 +713,7 @@ pub fn build_epistemic_dependency_graph(program: &Program) -> Result<EpistemicDe
     for predicates in constraint_predicates {
         let Some(root) = predicates
             .iter()
-            .filter_map(|predicate| predicate_owner.get(predicate).copied())
+            .filter_map(|predicate| head_owner.get(predicate).copied())
             .map(|idx| find_component(&mut parents, idx))
             .next()
         else {

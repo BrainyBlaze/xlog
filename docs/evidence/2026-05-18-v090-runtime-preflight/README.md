@@ -70,7 +70,7 @@ incomplete for the full epistemic hot path and does not close `G090_GPU`.
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 54 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_epistemic_v070_4cycle_execution_certifies_production_wcoj_dispatch -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_epistemic_k5_execution_certifies_production_wcoj_dispatch -- --exact --nocapture` | PASS, 1 passed, 0 failed |
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | BLOCKED, 82 passed, 15 failed; first failure is a pre-existing split compiler assertion reproduced on clean `HEAD` `5c12b13b`. |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 97 passed, 0 failed |
 | `cargo test -p xlog-cuda --test build_script_tests -- --nocapture` | PASS, 4 passed, 0 failed |
 | `cargo test -p xlog-runtime --lib` | PASS, 128 passed, 0 failed |
 | `cargo check -p xlog-cuda -p xlog-runtime -p xlog-logic -p xlog-ir` | PASS |

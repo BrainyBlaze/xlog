@@ -149,6 +149,48 @@ fn valid_split_components_compile_through_gpu_executable_subplans() {
 }
 
 #[test]
+fn shared_extensional_inputs_do_not_coalesce_epistemic_split_components() {
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred color(u32).
+        pred a(u32).
+        pred b(u32).
+        a(X) :- node(X), know edge(X).
+        b(X) :- node(X), know color(X).
+        "#,
+    )
+    .unwrap();
+
+    let split = compile_epistemic_gpu_split_execution(&program).unwrap();
+    let component_predicates: Vec<Vec<String>> = split
+        .components
+        .iter()
+        .map(|component| component.component.predicates.clone())
+        .collect();
+    let component_rule_indices: Vec<Vec<usize>> = split
+        .components
+        .iter()
+        .map(|component| component.component.rule_indices.clone())
+        .collect();
+
+    assert_eq!(split.components.len(), 2);
+    assert_eq!(split.recomposed_rule_indices(), vec![0, 1]);
+    assert_eq!(component_rule_indices, vec![vec![0], vec![1]]);
+    assert_eq!(
+        component_predicates,
+        vec![
+            vec!["a".to_string(), "edge".to_string(), "node".to_string()],
+            vec!["b".to_string(), "color".to_string(), "node".to_string()],
+        ]
+    );
+    for component in &split.components {
+        assert_eq!(component.executable.gpu_plan.epistemic_literals.len(), 1);
+    }
+}
+
+#[test]
 fn invalid_cross_component_split_returns_typed_rejection() {
     let program = parse_program("a() :- know p(), possible q().").unwrap();
     let err = split_epistemic_program(&program).unwrap_err();

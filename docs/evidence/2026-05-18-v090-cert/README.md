@@ -36,7 +36,7 @@ certification evidence for `M090_CERT.8` or the final release decision.
 | `cargo test -p xlog-runtime --test test_epistemic_production_reuse_audit -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_epistemic_v070_4cycle_execution_certifies_production_wcoj_dispatch -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_epistemic_k5_execution_certifies_production_wcoj_dispatch -- --exact --nocapture` | PASS, 1 passed, 0 failed |
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | BLOCKED, 82 passed, 15 failed; first failure is a pre-existing split compiler assertion reproduced on clean `HEAD` `5c12b13b`. |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 97 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_semantic_trace_matches_gpt_oracle_rejection_reason -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_ternary_membership_matches_gpt_oracle_parity -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_membership_matches_gpt_oracle_parity -- --nocapture` | PASS, 1 passed, 0 failed |
@@ -103,7 +103,7 @@ certification evidence for `M090_CERT.8` or the final release decision.
 | `cargo test -p xlog-prob --tests` after merging `main`/`v0.8.6` | PASS |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace -- --nocapture` after merging `main`/`v0.8.6` | PASS, 53 passed, 0 failed |
 | `cargo test -p xlog-solve --test gpu_solver_production_reuse` after merging `main`/`v0.8.6` | PASS, 3 passed, 0 failed |
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` after merging `main`/`v0.8.6` | BLOCKED in the current checkout by the pre-existing split compiler assertion reproduced on clean `HEAD` `5c12b13b`. |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` after merging `main`/`v0.8.6` | PASS, 97 passed, 0 failed |
 | `cargo run -q -p xlog-cli --features host-io -- prob examples/v085-language/showcase/06_prob_aggregate_mc/program.xlog --output json` after merging `main`/`v0.8.6` | PASS, MC output emitted `out_degree(1, 2)` |
 | `python scripts/validate_v086_examples.py --output /tmp/v090-v086-compat-validation.json` after merging `main`/`v0.8.6` | PASS, consumer certification PASS, example execution PASS |
 

@@ -51,7 +51,7 @@ not a closure claim for `G090_GPU`,
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_epistemic_v070_4cycle_execution_certifies_production_wcoj_dispatch -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_epistemic_k5_execution_certifies_production_wcoj_dispatch -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_binary_not_know_membership_matches_gpt_oracle_parity -- --nocapture` | PASS, 1 passed, 0 failed |
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | BLOCKED, 82 passed, 15 failed; the first failure is the pre-existing split compiler assertion `accepted_split_components_execute_gpu_runtime_and_match_component_oracles` (`split.components.len()` observed 1, expected 2), reproduced on clean `HEAD` `5c12b13b`. |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 97 passed, 0 failed |
 
 ## Non-Closure Notes
 

@@ -49,7 +49,7 @@ The prior closure/evidence docs were inspected before finalizing this slice:
 | `cargo fmt --check` | PASS |
 | `cargo test -p xlog-logic --test test_epistemic_executable_plan` | PASS, 7 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_epistemic_v070_4cycle_execution_certifies_production_wcoj_dispatch -- --exact --nocapture` | PASS, 1 passed, 0 failed |
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | BLOCKED, 82 passed, 15 failed on a pre-existing split compiler assertion reproduced on clean `HEAD` `5c12b13b`. |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 97 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_gpu_plan` | PASS, 8 passed, 0 failed |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 54 passed, 0 failed |
 | `cargo test -p xlog-ir --lib` | PASS, 14 passed, 0 failed |
