@@ -229,6 +229,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(prob.contains("compile_and_evaluate_program_with_gpu_execution_result"));
     assert!(prob.contains("encode_source_pir_cnf_with_gpu_execution_result"));
     assert!(prob.contains("encode_program_pir_cnf_with_gpu_execution_result"));
+    assert!(prob.contains("evaluate_for_gpu_execution_results"));
+    assert!(prob.contains("evaluate_gpu_with_grads_for_gpu_execution_results"));
     assert!(prob.contains("GpuPirGraph::from_host"));
     assert!(prob.contains("encode_cnf_gpu"));
     assert!(prob.contains("gpu_pir_graph_uploads"));

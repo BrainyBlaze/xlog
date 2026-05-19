@@ -496,6 +496,10 @@ runtime boundary before uploading `GpuPirGraph`/`GpuPirRoots` and calling
 before calling `ExactDdnnfProgram::evaluate`.
 `evaluate_gpu_with_grads_with_gpu_execution_result` applies the same accepted
 runtime boundary before calling `ExactDdnnfProgram::evaluate_gpu_with_grads`.
+`evaluate_for_gpu_execution_results` and
+`evaluate_gpu_with_grads_for_gpu_execution_results` validate all accepted GPU
+runtime evidence records before reusing the already-compiled exact program for
+per-record query or gradient evaluation.
 `EpistemicProbProductionCapabilities` reports fixture circuits as disallowed
 for production metrics, and
 `EpistemicProbProductionTrace::require_production_metric_eligibility` rejects

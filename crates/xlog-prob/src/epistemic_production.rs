@@ -844,6 +844,38 @@ impl EpistemicProbProductionAdapter {
         self.evaluate(program, &evidence)
     }
 
+    /// Evaluate GPU exact query probabilities once per accepted GPU epistemic execution result.
+    #[cfg(feature = "host-io")]
+    pub fn evaluate_for_gpu_execution_results(
+        &mut self,
+        program: &ExactDdnnfProgram,
+        provider: &CudaKernelProvider,
+        evidence_records: &[EpistemicProbGpuExecutionEvidence<'_>],
+    ) -> Result<Vec<ExactResult>> {
+        if evidence_records.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic probabilistic query evaluation production batch".to_string(),
+                context: "batched query evaluation requires at least one accepted GPU result"
+                    .to_string(),
+            });
+        }
+
+        let mut accepted = Vec::with_capacity(evidence_records.len());
+        for record in evidence_records {
+            accepted.push(AcceptedWorldViewEvidence::from_gpu_execution_result(
+                provider,
+                record.result,
+                record.assumptions.to_vec(),
+            )?);
+        }
+
+        let mut results = Vec::with_capacity(accepted.len());
+        for evidence in &accepted {
+            results.push(self.evaluate(program, evidence)?);
+        }
+        Ok(results)
+    }
+
     /// Evaluate GPU exact gradients after accepted world-view evidence was consumed.
     #[cfg(feature = "host-io")]
     pub fn evaluate_gpu_with_grads(
@@ -871,6 +903,39 @@ impl EpistemicProbProductionAdapter {
         let evidence =
             AcceptedWorldViewEvidence::from_gpu_execution_result(provider, result, assumptions)?;
         self.evaluate_gpu_with_grads(program, &evidence)
+    }
+
+    /// Evaluate GPU exact gradients once per accepted GPU epistemic execution result.
+    #[cfg(feature = "host-io")]
+    pub fn evaluate_gpu_with_grads_for_gpu_execution_results(
+        &mut self,
+        program: &ExactDdnnfProgram,
+        provider: &CudaKernelProvider,
+        evidence_records: &[EpistemicProbGpuExecutionEvidence<'_>],
+    ) -> Result<Vec<ExactResultWithGrads>> {
+        if evidence_records.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic probabilistic gradient evaluation production batch"
+                    .to_string(),
+                context: "batched gradient evaluation requires at least one accepted GPU result"
+                    .to_string(),
+            });
+        }
+
+        let mut accepted = Vec::with_capacity(evidence_records.len());
+        for record in evidence_records {
+            accepted.push(AcceptedWorldViewEvidence::from_gpu_execution_result(
+                provider,
+                record.result,
+                record.assumptions.to_vec(),
+            )?);
+        }
+
+        let mut results = Vec::with_capacity(accepted.len());
+        for evidence in &accepted {
+            results.push(self.evaluate_gpu_with_grads(program, evidence)?);
+        }
+        Ok(results)
     }
 
     fn consume_accepted_evidence(&mut self, evidence: &AcceptedWorldViewEvidence) -> Result<()> {
