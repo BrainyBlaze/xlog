@@ -1,0 +1,116 @@
+{
+  "branch": "feat/v086-runtime-completion",
+  "commit_under_test": "37f16651",
+  "date": "2026-05-19",
+  "suite": "G086_INT",
+  "status": "PASS",
+  "metrics": {
+    "M086_INT.1 formatting": {
+      "command": "cargo fmt --check",
+      "status": "PASS"
+    },
+    "M086_INT.2 workspace": {
+      "command": "cargo check --workspace",
+      "status": "PASS",
+      "observed": "Finished dev profile in 3.19s"
+    },
+    "M086_INT.3 targeted Rust": {
+      "commands": [
+        "cargo test -p xlog-runtime",
+        "cargo test -p xlog-cuda kernel_modules",
+        "cargo test -p xlog-induce",
+        "cargo test -p xlog-prob",
+        "cargo test -p xlog-logic",
+        "cargo test -p xlog-integration"
+      ],
+      "status": "PASS"
+    },
+    "M086_INT.4 Python": {
+      "command": "PYTHONPATH=target/debug pytest -q python/tests/test_v080_examples_source.py python/tests/test_v085_examples_source.py python/tests/test_v086_delta_coalescing.py python/tests/test_v086_relation_callbacks.py python/tests/test_v086_relation_callbacks_runtime.py python/tests/test_v086_exact_types_source.py python/tests/test_v086_exact_types_runtime.py python/tests/test_v086_chain_smem_profile_source.py python/tests/test_v086_chain_smem_source.py python/tests/test_v086_cse_source.py python/tests/test_v086_adaptive_reoptimization_source.py python/tests/test_v086_persistent_hash_index_source.py python/tests/test_v086_consumers_source.py",
+      "status": "PASS",
+      "observed": "38 passed in 26.04s"
+    },
+    "M086_INT.5 examples": {
+      "command": "python scripts/validate_v086_examples.py",
+      "status": "PASS",
+      "observed": {
+        "v080_examples": 5,
+        "v085_examples": 10,
+        "v086_examples": 5
+      }
+    },
+    "M086_INT.6 transfer guards": {
+      "status": "PASS",
+      "covered_by": [
+        "cargo test -p xlog-prob no_dtoh",
+        "cargo test -p xlog-integration strict_deterministic_d2h",
+        "python/tests/test_v086_delta_coalescing.py",
+        "python/tests/test_v086_relation_callbacks_runtime.py",
+        "python/tests/test_v086_exact_types_runtime.py",
+        "python/tests/test_v086_chain_smem_source.py",
+        "python/tests/test_v086_cse_source.py",
+        "python/tests/test_v086_adaptive_reoptimization_source.py",
+        "python/tests/test_v086_persistent_hash_index_source.py"
+      ]
+    },
+    "M086_INT.7 performance": {
+      "status": "PASS",
+      "evidence": {
+        "delta": "recompute_call_reduction_ratio=3.0; hot_path_dtoh_calls=0",
+        "chain_shared_memory": "speedup_ratio=5.58300273358745 on chain_hot fixture",
+        "cse": "duplicate_subplan_reduction_percent=50.0; added_dtoh_calls=0",
+        "adaptive_reoptimization": "correctness/rollback gate passed; no speedup gate claimed",
+        "persistent_hash_index": "reuse observed; full async background build speedup not claimed"
+      }
+    },
+    "M086_INT.8 docs": {
+      "commands": [
+        "python -m json.tool over docs/evidence/2026-05-19-v086-*/*.json and examples/v086-runtime/*/expected.json",
+        "python -m py_compile scripts/validate_v086_examples.py python/tests/test_v086_consumers_source.py",
+        "python scripts/validate_package_metadata.py"
+      ],
+      "status": "PASS"
+    },
+    "M086_INT.9 git hygiene": {
+      "command": "git diff --check",
+      "status": "PASS",
+      "generated_artifacts_documented": [
+        "docs/evidence/2026-05-19-v086-consumers/*.json refreshed by the fresh validator run",
+        "docs/evidence/2026-05-19-v086-int/README.md",
+        "docs/evidence/2026-05-19-v086-int/validation_summary.json"
+      ]
+    }
+  },
+  "rust_counts": {
+    "xlog-runtime": "140 lib tests, 15 integration tests, 2 doc tests passed; 2 doc tests ignored",
+    "xlog-cuda": "kernel_modules filter: 2 passed",
+    "xlog-induce": "23 lib tests passed",
+    "xlog-prob": "package test suite passed, including no_cpu_d4_in_exact and no_dtoh_* guards",
+    "xlog-logic": "package test suite passed, including v0.8.5 language and optimizer suites",
+    "xlog-integration": "package test suite passed, including strict deterministic D2H, cross-mode determinism, WCOJ, and widened-frontier suites"
+  },
+  "compatibility": {
+    "v080_examples": {
+      "status": "PASS",
+      "example_count": 5,
+      "summary": "docs/evidence/2026-05-19-v086-consumers/compat_v080_validation_summary.json"
+    },
+    "v085_examples": {
+      "status": "PASS",
+      "example_count": 10,
+      "summary": "docs/evidence/2026-05-19-v086-consumers/compat_v085_validation_summary.json"
+    },
+    "v086_examples": {
+      "status": "PASS",
+      "example_count": 5,
+      "summary": "docs/evidence/2026-05-19-v086-consumers/validation_summary.json"
+    }
+  },
+  "unresolved": [
+    {
+      "status": "BLOCKED",
+      "scope": "G086_INDEX performance claim only",
+      "reason": "Full asynchronous recorded persistent-index background builds remain follow-up work; v0.8.6 evidence claims deterministic reuse, invalidation, budget, and background request/completion telemetry, not async speedup."
+    }
+  ]
+}
