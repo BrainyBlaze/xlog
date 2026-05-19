@@ -8,6 +8,8 @@ All notable changes to this project are documented in this file.
 
 - Corrected release-facing README, changelog, and roadmap status after the
   `v0.8.5` tag was published.
+- Bumped workspace package metadata and internal workspace dependency
+  constraints to `0.8.5` so package metadata matches release-facing docs.
 
 ## [0.8.5] — 2026-05-19
 
