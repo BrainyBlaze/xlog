@@ -92,7 +92,9 @@ compacts reduced output columns. Accepted unary, binary, multi-membership, and
 `not know` fixtures now prove final rows are filtered by bound tuple keys on
 device.
 `EpistemicGpuRuntimeWcojCertification` then requires actual production WCOJ
-counter deltas before WCOJ evidence can be certified.
+counter deltas before WCOJ evidence can be certified, and its certified result
+carries the dispatched plan's edge-permutation, sorted-layout, and helper-split
+counts.
 `Executor::execute_epistemic_gpu_execution` wraps the reduced production
 runtime plan with preflight, workspace allocation, candidate-generation,
 propagation, candidate-validation, `execute_plan` plus before/after counter
@@ -154,9 +156,11 @@ runtime actually touches:
 Today the epistemic runtime consumes 38-B route metadata and fails closed when a
 WCOJ-required K-clique reduction lacks production counter deltas. It now
 certifies accepted K5, K7, and K8 WCOJ dispatch through production runtime
-counters and records K7/K8 K-clique max-arity plus full edge-permutation
-metadata through runtime preflight, but broader skew-scheduling,
-helper-splitting, and semantic parity coverage remain incomplete.
+counters. The K5 certified dispatch trace now includes edge-permutation,
+sorted-layout, and helper-split counts; K7/K8 still record K-clique max-arity
+plus full edge-permutation metadata through runtime preflight. Broader
+skew-scheduling, helper-splitting, and semantic parity coverage remain
+incomplete.
 
 The reduced-runtime-plan contract reuses the Goal-038-B WCOJ surfaces. K-clique
 epistemic reductions must pass through `MultiwayPlan`, `KCliqueVariableOrder`,

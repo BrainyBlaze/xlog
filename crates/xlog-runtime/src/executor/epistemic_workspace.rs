@@ -1213,6 +1213,12 @@ pub enum EpistemicGpuRuntimeWcojCertification {
         observed_wcoj_dispatches: u64,
         /// Observed executor-installed K-clique dispatches.
         observed_kclique_dispatches: u64,
+        /// Edge-permutation slots certified by the dispatched K-clique plans.
+        certified_edge_permutation_slots: usize,
+        /// Sorted-layout requirements certified by the dispatched K-clique plans.
+        certified_sorted_layout_requirements: usize,
+        /// Helper-split specs certified by the dispatched K-clique plans.
+        certified_helper_split_specs: usize,
         /// Observed provider WCOJ layout-sort invocations.
         observed_layout_sorts: u64,
         /// Observed provider K-clique metadata builds.
@@ -1286,6 +1292,9 @@ impl EpistemicGpuRuntimeWcojCertification {
         Self::Certified {
             observed_wcoj_dispatches,
             observed_kclique_dispatches,
+            certified_edge_permutation_slots: preflight.kclique_wcoj_edge_permutation_count,
+            certified_sorted_layout_requirements: preflight.sorted_layout_requirement_count,
+            certified_helper_split_specs: preflight.helper_split_spec_count,
             observed_layout_sorts: delta.wcoj_layout_sort_invocation_count,
             observed_metadata_builds: delta.kclique_metadata_build_count,
         }

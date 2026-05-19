@@ -218,6 +218,9 @@ fn runtime_wcoj_certification_accepts_actual_kclique_dispatch_delta() {
         EpistemicGpuRuntimeWcojCertification::Certified {
             observed_wcoj_dispatches: 1,
             observed_kclique_dispatches: 1,
+            certified_edge_permutation_slots: 10,
+            certified_sorted_layout_requirements: 2,
+            certified_helper_split_specs: 1,
             observed_layout_sorts: 2,
             observed_metadata_builds: 1,
         }
@@ -263,6 +266,9 @@ fn runtime_trace_preserves_counter_snapshots_and_wcoj_certification() {
         EpistemicGpuRuntimeWcojCertification::Certified {
             observed_wcoj_dispatches: 1,
             observed_kclique_dispatches: 1,
+            certified_edge_permutation_slots: 10,
+            certified_sorted_layout_requirements: 2,
+            certified_helper_split_specs: 1,
             observed_layout_sorts: 2,
             observed_metadata_builds: 1,
         }

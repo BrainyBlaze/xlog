@@ -242,6 +242,9 @@ fn accepted_epistemic_k5_execution_certifies_production_wcoj_dispatch() {
         EpistemicGpuRuntimeWcojCertification::Certified {
             observed_wcoj_dispatches: 1..,
             observed_kclique_dispatches: 1..,
+            certified_edge_permutation_slots: 10,
+            certified_sorted_layout_requirements: 1,
+            certified_helper_split_specs: 1,
             ..
         }
     ));

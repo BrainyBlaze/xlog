@@ -46,6 +46,9 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(runtime.contains("kclique_wcoj_max_arity"));
     assert!(runtime.contains("kclique_wcoj_edge_permutation_count"));
     assert!(runtime.contains("helper_split_spec_count"));
+    assert!(runtime.contains("certified_edge_permutation_slots"));
+    assert!(runtime.contains("certified_sorted_layout_requirements"));
+    assert!(runtime.contains("certified_helper_split_specs"));
     assert!(runtime.contains("planned_hash_route_count"));
     assert!(runtime.contains("EpistemicGpuFinalResultTransferTrace"));
     assert!(runtime.contains("from_final_output(&self.provider, &final_output)"));
