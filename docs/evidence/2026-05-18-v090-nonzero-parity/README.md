@@ -13,10 +13,11 @@ Branch: `feat/v090-epistemic-solver-semantics`
 This artifact records accepted runtime fixtures proving `know`, `possible`,
 `not possible`, multi-membership, missing-required multi-membership, and
 negated `not know` variable-bound nonzero-arity tuple membership can filter or
-reject final output rows on device. The current slice broadens binary
-operator-level parity by comparing `possible edge(X, Y)` and
-`not possible edge(X, Y)` accepted GPU traces against bounded GPT oracles. It
-is not a closure claim for `G090_GPU`, `G090_CERT`, or `G090_CLOSE`.
+reject final output rows on device. The current slice broadens accepted
+generic arity-N tuple-key parity with a quaternary `know fact4(A, B, C, D)`
+fixture whose accepted GPU trace and candidate-index fields match the bounded
+GPT oracle. It is not a closure claim for `G090_GPU`, `G090_CERT`, or
+`G090_CLOSE`.
 
 ## Implementation Evidence
 
@@ -30,6 +31,7 @@ is not a closure claim for `G090_GPU`, `G090_CERT`, or `G090_CLOSE`.
 | Accepted possible fixture | `test_epistemic_gpu_wcoj_execution::accepted_possible_nonzero_arity_membership_records_operator_metrics` runs `accepted(X) :- node(X), possible edge(X)` with `node = [1, 2, 3]` and `edge = [2, 3]`; the final device output downloads as `[2, 3]`, preflight records `possible_operator_count == 1`, and the GPU trace/candidate-index fields match a bounded GPT oracle. |
 | Accepted not-possible fixture | `test_epistemic_gpu_wcoj_execution::accepted_not_possible_nonzero_arity_membership_records_operator_and_polarity_metrics` runs `accepted(X) :- node(X), not possible edge(X)` with `node = [1, 2, 3]` and `edge = [2]`; the final device output downloads as `[1, 3]`, preflight records `not_possible_operator_count == 1`, final tuple materialization records one negated row filter, and the GPU trace/candidate-index fields match a bounded GPT oracle. |
 | Accepted binary fixture | `test_epistemic_gpu_wcoj_execution::accepted_binary_membership_filters_final_rows_by_bound_tuple_key` runs `accepted(X, Y) :- pair(X, Y), know edge(X, Y)` with `pair = [(1, 2), (2, 3)]` and `edge = [(1, 2)]`; the final device output downloads as `[(1, 2)]`, preflight records `know_operator_count == 1`, and the GPU trace/candidate-index fields match a bounded GPT oracle for `edge/2`. |
+| Accepted quaternary fixture | `test_epistemic_gpu_wcoj_execution::accepted_quaternary_membership_matches_gpt_oracle_parity` runs `accepted(A, B, C, D) :- tuple4(A, B, C, D), know fact4(A, B, C, D)` with `tuple4 = [(1, 2, 3, 4), (2, 3, 4, 5), (9, 9, 9, 9)]` and `fact4 = [(2, 3, 4, 5)]`; the final device output downloads as `[(2, 3, 4, 5)]`, the tuple-membership binding records arity 4 with all four bound output columns, preflight records `know_operator_count == 1`, and the GPU trace/candidate-index fields match a bounded GPT oracle for `fact4/4` with zero CPU candidate/world-view fallback counters and zero tracked hot-path D2H calls. |
 | Accepted binary possible fixture | `test_epistemic_gpu_wcoj_execution::accepted_binary_possible_membership_matches_gpt_oracle_parity` runs `accepted(X, Y) :- pair(X, Y), possible edge(X, Y)` with `pair = [(1, 2), (2, 3), (3, 4)]` and `edge = [(1, 2), (3, 4)]`; the final device output downloads as `[(1, 2), (3, 4)]`, preflight records `possible_operator_count == 1`, and the GPU trace/candidate-index fields match a bounded GPT oracle for `edge/2`. |
 | Accepted binary not-possible fixture | `test_epistemic_gpu_wcoj_execution::accepted_binary_not_possible_membership_matches_gpt_oracle_parity` runs `accepted(X, Y) :- pair(X, Y), not possible edge(X, Y)` with `pair = [(1, 2), (2, 3), (3, 4)]` and `edge = [(2, 3)]`; the final device output downloads as `[(1, 2), (3, 4)]`, preflight records `not_possible_operator_count == 1`, final tuple materialization records one negated row filter, and the GPU trace/candidate-index fields match a bounded GPT oracle for `edge/2`. |
 | Accepted multi-membership fixture | `test_epistemic_gpu_wcoj_execution::accepted_multiple_memberships_filter_final_rows_by_all_bound_tuple_keys` runs `accepted(X) :- node(X), know edge(X), know color(X)`, returns `[2]`, and compares generated/propagated/tested/accepted/rejected counts plus accepted/rejected candidate indices against the bounded GPT oracle for the four-candidate two-literal matrix. |
@@ -46,20 +48,23 @@ is not a closure claim for `G090_GPU`, `G090_CERT`, or `G090_CLOSE`.
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_possible_nonzero_arity_membership_records_operator_metrics -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_not_possible_nonzero_arity_membership_records_operator_and_polarity_metrics -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_binary_membership_filters_final_rows_by_bound_tuple_key -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_membership_matches_gpt_oracle_parity -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_binary_possible_membership_matches_gpt_oracle_parity -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_binary_not_possible_membership_matches_gpt_oracle_parity -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_multiple_memberships_filter_final_rows_by_all_bound_tuple_keys -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_not_know_nonzero_arity_membership_filters_final_rows_by_absent_bound_tuple_key -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution split_gpu_world_view_distinguishes_absent_possible_from_not_known -- --nocapture` | PASS, 1 passed, 0 failed |
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 64 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 65 passed, 0 failed |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace -- --nocapture` | PASS, 53 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_executable_plan -- --nocapture` | PASS, 6 passed, 0 failed |
 
 ## Non-Closure Notes
 
-- This covers unary and binary variable-bound `know` membership fixtures,
+- This covers unary, binary, and quaternary variable-bound `know` membership fixtures,
   unary and binary variable-bound `possible` and `not possible` membership
-  metrics with operator-level GPT trace/candidate-index oracle parity, multi-membership
+  metrics with operator-level GPT trace/candidate-index oracle parity, generic
+  arity-N bound-output tuple-key comparison through an accepted `fact4/4`
+  fixture, multi-membership
   acceptance with two-literal GPT trace/candidate-index oracle parity,
   missing-required rejection, and unary variable-bound `not know` absent-key
   filtering with operator-level GPT trace/candidate-index oracle parity plus

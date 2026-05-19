@@ -95,10 +95,10 @@ filters output rows by accepted membership, world-view state, all variable-bound
 tuple-key relation matches, and binding polarity before the final tuple kernel
 compacts reduced output columns. The materialization trace records
 `row_filter_count` and `negated_row_filter_count`. Accepted unary, possible,
-not-possible, binary, multi-membership, missing-required multi-membership, and
-`not know` fixtures now prove final rows are filtered or rejected by bound tuple
-keys on device, and preflight records explicit `know`/`possible`/`not know`/
-`not possible` operator counts.
+not-possible, binary, quaternary generic-arity, multi-membership,
+missing-required multi-membership, and `not know` fixtures now prove final rows
+are filtered or rejected by bound tuple keys on device, and preflight records
+explicit `know`/`possible`/`not know`/`not possible` operator counts.
 `EpistemicGpuRuntimeWcojCertification` then requires actual production WCOJ
 counter deltas before WCOJ evidence can be certified, and its certified result
 carries the dispatched plan's edge-permutation, stream-group scheduling,
@@ -119,8 +119,9 @@ arity-one/two/three kernels and a generic arity-N kernel, plus row-scoped
 variable-bound comparison against reduced-output columns and negated polarity
 through the generic arity-N kernel. Final tuple output is gated by the staged
 membership and world-view buffers, with accepted unary, possible, not-possible,
-binary `know`, binary `possible`, binary `not possible`, multi-membership,
-missing-required multi-membership, and `not know` bound-key row-filter
+binary `know`, binary `possible`, binary `not possible`, quaternary generic
+arity-N `know`, multi-membership, missing-required multi-membership, and
+`not know` bound-key row-filter
 fixtures. Full arbitrary-world enumeration, complete semantic parity, and
 release-wide solver/probabilistic coverage do not dispatch yet, but bounded
 accepted runtime fixtures now feed the solver and probabilistic production
@@ -140,8 +141,9 @@ production GPU/WCOJ stack for specific certification fixtures:
   accepted-candidate materialization, final-result flag staging, final-row map
   construction, and membership-gated final tuple materialization use GPU
   workspace/output buffers with zero CPU candidate/world-view fallback counters.
-- Unary and binary nonzero-arity `know`/`possible`/`not possible` slices, unary
-  `not know`, multi-membership, missing-required rejection, split
+- Unary and binary nonzero-arity `know`/`possible`/`not possible` slices,
+  quaternary generic arity-N `know`, unary `not know`, multi-membership,
+  missing-required rejection, split
   possible-vs-not-known, G91 self-support, and independently founded FAEEL
   fixtures compare bounded GPU traces against semantic or GPT oracles.
 - Solver SAT/UNSAT, lifecycle, learned-clause, MaxSAT, scheduler, and portfolio
@@ -314,6 +316,9 @@ The unary nonzero-arity `possible edge(X)`, `not possible edge(X)`, and
 `not know edge(X)` fixtures compare the same trace and candidate-index fields
 against bounded GPT oracles; for the negated operators, candidate index 1 is
 the oracle slot where the negated literal is true.
+The quaternary `know fact4(A, B, C, D)` fixture exercises the generic arity-N
+bound-output tuple-key path and compares the same trace and candidate-index
+fields against a bounded GPT oracle.
 This is certification evidence for
 bounded runtime fixtures, not full semantic parity across every
 G91/FAEEL/GPT/splitting case.

@@ -109,6 +109,64 @@ fn upload_binary_u32(memory: &Arc<GpuMemoryManager>, rows: &[(u32, u32)]) -> Cud
     )
 }
 
+fn upload_quaternary_u32(
+    memory: &Arc<GpuMemoryManager>,
+    rows: &[(u32, u32, u32, u32)],
+) -> CudaBuffer {
+    let n = rows.len() as u32;
+    let bytes_per_column = (n as usize).max(1) * std::mem::size_of::<u32>();
+    let mut col0 = memory
+        .alloc::<u8>(bytes_per_column)
+        .expect("alloc quaternary col0");
+    let mut col1 = memory
+        .alloc::<u8>(bytes_per_column)
+        .expect("alloc quaternary col1");
+    let mut col2 = memory
+        .alloc::<u8>(bytes_per_column)
+        .expect("alloc quaternary col2");
+    let mut col3 = memory
+        .alloc::<u8>(bytes_per_column)
+        .expect("alloc quaternary col3");
+    let mut device_row_count = memory.alloc::<u32>(1).expect("alloc quaternary row count");
+    let dev = memory.device().inner();
+    if n > 0 {
+        let c0: Vec<u8> = rows
+            .iter()
+            .flat_map(|(a, _, _, _)| a.to_le_bytes())
+            .collect();
+        let c1: Vec<u8> = rows
+            .iter()
+            .flat_map(|(_, b, _, _)| b.to_le_bytes())
+            .collect();
+        let c2: Vec<u8> = rows
+            .iter()
+            .flat_map(|(_, _, c, _)| c.to_le_bytes())
+            .collect();
+        let c3: Vec<u8> = rows
+            .iter()
+            .flat_map(|(_, _, _, d)| d.to_le_bytes())
+            .collect();
+        dev.htod_sync_copy_into(&c0, &mut col0).unwrap();
+        dev.htod_sync_copy_into(&c1, &mut col1).unwrap();
+        dev.htod_sync_copy_into(&c2, &mut col2).unwrap();
+        dev.htod_sync_copy_into(&c3, &mut col3).unwrap();
+    }
+    dev.htod_sync_copy_into(&[n], &mut device_row_count)
+        .unwrap();
+    CudaBuffer::from_columns_with_host_count(
+        vec![col0.into(), col1.into(), col2.into(), col3.into()],
+        n as u64,
+        device_row_count,
+        Schema::new(vec![
+            ("c0".to_string(), ScalarType::U32),
+            ("c1".to_string(), ScalarType::U32),
+            ("c2".to_string(), ScalarType::U32),
+            ("c3".to_string(), ScalarType::U32),
+        ]),
+        n,
+    )
+}
+
 fn upload_unary_u32(memory: &Arc<GpuMemoryManager>, rows: &[u32]) -> CudaBuffer {
     let n = rows.len() as u32;
     let bytes = (n as usize).max(1) * std::mem::size_of::<u32>();
@@ -200,6 +258,55 @@ fn download_binary_u32(provider: &CudaKernelProvider, buffer: &CudaBuffer) -> Ve
             (
                 u32::from_le_bytes(a.try_into().unwrap()),
                 u32::from_le_bytes(b.try_into().unwrap()),
+            )
+        })
+        .collect()
+}
+
+fn download_quaternary_u32(
+    provider: &CudaKernelProvider,
+    buffer: &CudaBuffer,
+) -> Vec<(u32, u32, u32, u32)> {
+    let rows = read_device_row_count(provider, buffer).expect("device row count");
+    if rows == 0 {
+        return Vec::new();
+    }
+    let mut col0 = vec![0u8; rows * std::mem::size_of::<u32>()];
+    let mut col1 = vec![0u8; rows * std::mem::size_of::<u32>()];
+    let mut col2 = vec![0u8; rows * std::mem::size_of::<u32>()];
+    let mut col3 = vec![0u8; rows * std::mem::size_of::<u32>()];
+    unsafe {
+        sys::cuMemcpyDtoH_v2(
+            col0.as_mut_ptr() as *mut _,
+            *buffer.column(0).expect("quaternary column 0").device_ptr(),
+            col0.len(),
+        );
+        sys::cuMemcpyDtoH_v2(
+            col1.as_mut_ptr() as *mut _,
+            *buffer.column(1).expect("quaternary column 1").device_ptr(),
+            col1.len(),
+        );
+        sys::cuMemcpyDtoH_v2(
+            col2.as_mut_ptr() as *mut _,
+            *buffer.column(2).expect("quaternary column 2").device_ptr(),
+            col2.len(),
+        );
+        sys::cuMemcpyDtoH_v2(
+            col3.as_mut_ptr() as *mut _,
+            *buffer.column(3).expect("quaternary column 3").device_ptr(),
+            col3.len(),
+        );
+    }
+    col0.chunks_exact(std::mem::size_of::<u32>())
+        .zip(col1.chunks_exact(std::mem::size_of::<u32>()))
+        .zip(col2.chunks_exact(std::mem::size_of::<u32>()))
+        .zip(col3.chunks_exact(std::mem::size_of::<u32>()))
+        .map(|(((a, b), c), d)| {
+            (
+                u32::from_le_bytes(a.try_into().unwrap()),
+                u32::from_le_bytes(b.try_into().unwrap()),
+                u32::from_le_bytes(c.try_into().unwrap()),
+                u32::from_le_bytes(d.try_into().unwrap()),
             )
         })
         .collect()
@@ -1457,6 +1564,111 @@ fn accepted_binary_membership_filters_final_rows_by_bound_tuple_key() {
         download_binary_u32(&fix.provider, &result.final_output),
         vec![(1, 2)],
         "final output must keep only reduced rows whose binary tuple key appears in the stable model"
+    );
+}
+
+#[test]
+fn accepted_quaternary_membership_matches_gpt_oracle_parity() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred tuple4(u32, u32, u32, u32).
+        pred fact4(u32, u32, u32, u32).
+        pred accepted(u32, u32, u32, u32).
+        accepted(A, B, C, D) :- tuple4(A, B, C, D), know fact4(A, B, C, D).
+        "#,
+    )
+    .expect("parse quaternary epistemic fixture");
+    let oracle = run_generate_propagate_test(
+        &program,
+        vec![
+            EpistemicInterpretation::new(),
+            EpistemicInterpretation::new().with_known("fact4", 4),
+        ],
+        GeneratePropagateTestConfig { max_candidates: 2 },
+    )
+    .expect("run quaternary GPT oracle");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile quaternary epistemic executable");
+    assert_eq!(executable.gpu_plan.tuple_membership_bindings.len(), 1);
+    assert_eq!(executable.gpu_plan.tuple_membership_bindings[0].arity, 4);
+    assert_eq!(
+        executable.gpu_plan.tuple_membership_bindings[0].bound_output_columns,
+        vec![Some(0), Some(1), Some(2), Some(3)]
+    );
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &executable.relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation(
+        "tuple4",
+        upload_quaternary_u32(&fix.memory, &[(1, 2, 3, 4), (2, 3, 4, 5), (9, 9, 9, 9)]),
+    );
+    executor.put_relation("fact4", upload_quaternary_u32(&fix.memory, &[(2, 3, 4, 5)]));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 3,
+            },
+        )
+        .expect("execute quaternary epistemic fixture");
+
+    assert_eq!(result.prepared.preflight.know_operator_count, 1);
+    assert_eq!(result.prepared.preflight.possible_operator_count, 0);
+    assert_eq!(result.prepared.preflight.not_know_operator_count, 0);
+    assert_eq!(result.prepared.preflight.not_possible_operator_count, 0);
+    assert_eq!(
+        result.semantic_trace.generated_candidates,
+        oracle.trace.generated
+    );
+    assert_eq!(result.semantic_trace.guesses, oracle.trace.guesses);
+    assert_eq!(
+        result.semantic_trace.propagated_candidates,
+        oracle.trace.propagated
+    );
+    assert_eq!(result.semantic_trace.pruned_candidates, oracle.trace.pruned);
+    assert_eq!(result.semantic_trace.tested_candidates, oracle.trace.tested);
+    assert_eq!(
+        result.semantic_trace.accepted_candidates,
+        oracle.trace.accepted
+    );
+    assert_eq!(
+        result.semantic_trace.accepted_world_views,
+        oracle.trace.accepted_world_views
+    );
+    assert_eq!(
+        result.semantic_trace.rejected_candidates,
+        oracle.trace.rejected
+    );
+    assert_eq!(
+        result.semantic_trace.accepted_candidate_indices,
+        oracle.accepted_candidate_indices
+    );
+    assert_eq!(
+        result.semantic_trace.rejected_candidate_indices,
+        oracle.rejected_candidate_indices
+    );
+    assert_eq!(
+        result.model_membership.membership_source,
+        EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+    );
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
+    assert_eq!(
+        download_quaternary_u32(&fix.provider, &result.final_output),
+        vec![(2, 3, 4, 5)],
+        "final output must keep only rows whose arity-4 tuple key appears in the stable model"
     );
 }
 
