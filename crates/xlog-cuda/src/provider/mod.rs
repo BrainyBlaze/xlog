@@ -2574,6 +2574,10 @@ impl CudaKernelProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device_runtime::{
+        AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LoggingResource, NullSink,
+        StreamPool, XlogDeviceRuntime,
+    };
     use xlog_core::{AggOp, MemoryBudget, ScalarType};
 
     fn has_cuda_device() -> bool {
@@ -2862,6 +2866,75 @@ mod tests {
         let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
         let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
         CudaKernelProvider::new(device, memory).ok()
+    }
+
+    fn create_test_provider_with_runtime() -> Option<(CudaKernelProvider, Arc<XlogDeviceRuntime>)> {
+        if !has_cuda_device() {
+            return None;
+        }
+        let device = Arc::new(CudaDevice::new(0).ok()?);
+        let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+        let sink = Arc::new(NullSink::new());
+        let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(
+            AsyncCudaResource::new(Arc::clone(&device), 0, Arc::clone(&pool)),
+        );
+        let logging: Box<dyn DeviceMemoryResource + Send + Sync> =
+            Box::new(LoggingResource::new(async_resource, sink));
+        let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
+            Box::new(GlobalDeviceBudget::new(logging, 1024 * 1024 * 1024));
+        let runtime = Arc::new(XlogDeviceRuntime::with_resource(
+            Arc::clone(&device),
+            0,
+            pool,
+            budget,
+        ));
+        let memory = Arc::new(GpuMemoryManager::with_runtime(
+            Arc::clone(&device),
+            MemoryBudget::with_limit(1024 * 1024 * 1024),
+            Arc::clone(&runtime),
+        ));
+        let provider = CudaKernelProvider::with_runtime(device, memory).ok()?;
+        Some((provider, runtime))
+    }
+
+    #[test]
+    fn test_recorded_join_index_build_runs_on_runtime_stream() {
+        let (provider, runtime) = match create_test_provider_with_runtime() {
+            Some(fixture) => fixture,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        let stream = runtime.stream_pool().acquire().expect("recorded stream");
+        let left = create_test_buffer(&provider, &[1, 2, 3, 4], "key");
+        let right = create_test_buffer(&provider, &[1, 2, 3, 4], "key");
+
+        let index = provider
+            .build_join_index_v2_recorded(&right, &[0], stream)
+            .expect("recorded join-index build");
+        let joined = provider
+            .hash_join_v2_with_index_recorded(
+                &left,
+                &right,
+                &[0],
+                &[0],
+                JoinType::Inner,
+                &index,
+                None,
+                stream,
+            )
+            .expect("recorded indexed join consumes recorded build");
+        runtime
+            .stream_pool()
+            .resolve(stream)
+            .expect("stream resolves")
+            .synchronize()
+            .expect("recorded stream synchronized");
+
+        assert_eq!(index.right_num_rows(), 4);
+        assert_eq!(index.right_keys(), &[0]);
+        assert_eq!(provider.device_row_count(&joined).expect("joined rows"), 4);
     }
 
     // Helper function to create a CudaBuffer with U32 data

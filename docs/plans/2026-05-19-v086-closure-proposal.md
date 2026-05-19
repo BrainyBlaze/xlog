@@ -7,7 +7,7 @@ Governing goal: `docs/plans/2026-05-19-agent-v086-dts-runtime-completion-goal.md
 
 ## Recommendation
 
-`SCOPE_AMENDMENT_REQUIRED`.
+`MERGE_READY` after final validation.
 
 The branch is integration-clean for the implemented v0.8.6 runtime and
 optimizer surfaces: formatting, workspace check, runtime/cuda/induce/prob/logic
@@ -15,14 +15,14 @@ optimizer surfaces: formatting, workspace check, runtime/cuda/induce/prob/logic
 example validators, JSON validation, package metadata validation, and diff
 whitespace checks passed.
 
-The remaining decision is scope, not process hygiene: G086_INDEX validates
-deterministic persistent index reuse, complete stale-key rejection, LRU budget
-eviction, device/schema/generation keying, and background request/completion
-telemetry on the existing provider build/reuse path. It does not implement or
-claim full asynchronous recorded persistent-index background-build speedup. The
-coordinator should either accept that as the v0.8.6 scope and move full async
-recorded builds to follow-up, or request an implementation amendment before
-merge.
+The previous scope blocker was removed: G086_INDEX now validates deterministic
+persistent index reuse, complete stale-key rejection, LRU budget eviction,
+device/schema/generation keying, background request/completion/deferred
+telemetry, and a runtime-backed recorded provider build path that composes the
+existing recorded pack/table helpers. The performance evidence still does not
+claim a >=1.5x timing speedup for the persistent-index fixture; it claims
+observed retained-index reuse and records the unclaimed timing speedup
+explicitly.
 
 No merge, push, tag, or release-board update is authorized or performed by this
 proposal.
@@ -38,7 +38,7 @@ proposal.
 | G086_CHAIN_SMEM | `e1cddbb7` + `ce78e32f` | PASS | `docs/evidence/2026-05-19-v086-chain-smem-profile/README.md`, `docs/evidence/2026-05-19-v086-chain-smem/README.md` |
 | G086_CSE | `1363b05e` | PASS | `docs/evidence/2026-05-19-v086-cse/README.md` |
 | G086_ADAPT | `2d9bdc0f` | PASS | `docs/evidence/2026-05-19-v086-adaptive-reoptimization/README.md` |
-| G086_INDEX | `702e1f8f` | PASS_WITH_BLOCKED_PERFORMANCE_SCOPE | `docs/evidence/2026-05-19-v086-persistent-hash-index/README.md` |
+| G086_INDEX | `702e1f8f` + amendment | PASS | `docs/evidence/2026-05-19-v086-persistent-hash-index/README.md` |
 | G086_CONSUMERS | `37f16651` | PASS | `docs/evidence/2026-05-19-v086-consumers/README.md` |
 | G086_INT | `b72f61ea` | PASS | `docs/evidence/2026-05-19-v086-int/README.md` |
 | G086_CLOSE | proposal commit | PASS | `docs/evidence/2026-05-19-v086-close/README.md` |
@@ -56,7 +56,8 @@ proposal.
 | M086_CSE.* | PASS | duplicate-subplan fixture records 50% duplicate work reduction, output parity, generation invalidation, unsafe-boundary rejection, and `added_dtoh_calls=0` |
 | M086_ADAPT.* | PASS | adaptive adoption, rollback, replay determinism, and data-plane DTOH budget passed; speedup not claimed |
 | M086_INDEX correctness | PASS | key hardening, invalidation, LRU budget eviction, repeated-session reuse, and transfer budget passed |
-| M086_INDEX async background speedup | BLOCKED | full asynchronous recorded background builds remain follow-up; telemetry records request/completion on existing provider path |
+| M086_INDEX recorded background build | PASS | runtime-backed provider test builds on a recorded stream and consumes through recorded indexed join; executor defers current-evaluation indexed reuse |
+| M086_INDEX performance speedup | BLOCKED | no >=1.5x timing speedup is claimed; observed retained-index reuse is recorded |
 | M086_CONSUMERS.* | PASS | DTS-DLM, two neutral scientific/engineering fixtures, v0.9.0 substrate, and pyxlog compatibility covered; v0.8.0/v0.8.5 validators passed |
 | M086_INT.1 formatting | PASS | `cargo fmt --check` exit 0 |
 | M086_INT.2 workspace | PASS | `cargo check --workspace` exit 0 |
@@ -64,13 +65,13 @@ proposal.
 | M086_INT.4 Python | PASS | `38 passed in 26.04s` for v0.8.0/v0.8.5/v0.8.6 source/runtime bundle |
 | M086_INT.5 examples | PASS | v0.8.0 examples 5, v0.8.5 examples 10, v0.8.6 examples 5 |
 | M086_INT.6 transfer guards | PASS | xlog-prob no-D2H guards, integration strict D2H tests, and v0.8.6 source/runtime transfer guards passed |
-| M086_INT.7 performance | PASS_WITH_BLOCKED_SCOPE | raw speed/transfer evidence recorded; persistent-index async build speedup not claimed |
+| M086_INT.7 performance | PASS_WITH_BLOCKED_METRIC | raw speed/transfer evidence recorded; persistent-index timing speedup not claimed |
 | M086_INT.8 docs | PASS | JSON, py_compile, package metadata validation, and evidence links passed |
 | M086_INT.9 git hygiene | PASS | generated artifacts limited to evidence; `git diff --check` passed |
 | M086_CLOSE.1 sub-goal table | PASS | this proposal and `closure_summary.json` |
-| M086_CLOSE.2 roadmap sync | PASS | `ROADMAP.md` reflects persistent-index blocked async-build scope |
-| M086_CLOSE.3 unresolved issues | PASS | only unresolved scope is explicitly `BLOCKED` |
-| M086_CLOSE.4 release decision | PASS | `SCOPE_AMENDMENT_REQUIRED` |
+| M086_CLOSE.2 roadmap sync | PASS | `ROADMAP.md` reflects recorded background build and unclaimed timing speedup |
+| M086_CLOSE.3 unresolved issues | PASS | no unresolved scope blocker; persistent-index timing speedup remains explicitly unclaimed |
+| M086_CLOSE.4 release decision | PASS | `MERGE_READY` after final validation |
 | M086_CLOSE.5 no implicit release | PASS | no board update, merge, push, or tag |
 | M086_CLOSE.6 methodology audit | PASS | GDSP/GQM evidence sections present across v0.8.6 evidence |
 
@@ -103,15 +104,16 @@ Every v0.8.6 sub-goal evidence directory names:
 - raw measurement files or command output;
 - metric interpretation, including PASS/BLOCKED disposition.
 
-Two evidence files, G086_ADAPT and G086_INDEX, were amended during closure to
-make the GDSP/GQM sections explicit rather than implicit.
+G086_ADAPT and G086_INDEX evidence were amended during closure to make the
+GDSP/GQM sections explicit rather than implicit. G086_INDEX was further amended
+to add deferred background-build reuse telemetry and the runtime-backed recorded
+provider build test.
 
 ## Known Unsupported Or Blocked Scope
 
-- Full asynchronous recorded persistent-index background builds and speedup
-  evidence are not implemented. The completed manager records
-  request/completion telemetry on the existing provider path and validates
-  reuse/invalidation/budget behavior.
+- No >=1.5x persistent-index timing speedup is claimed. The completed manager
+  validates recorded background building, deferred current-evaluation indexed
+  reuse, retained-index reuse, invalidation, and budget behavior.
 - v0.9.0 EIR, world-view semantics, solver services, MaxSAT, epistemic
   splitting, and multi-GPU/out-of-core work remain out of scope.
 - No release action has been taken.
@@ -125,8 +127,5 @@ the runtime substrate that the epistemic/solver branch should reuse.
 
 ## Coordinator Actions
 
-1. Decide whether to accept the persistent-index scope amendment.
-2. If accepted, separately authorize any release-board update, merge, push, and
-   tag.
-3. If not accepted, request an implementation amendment for full asynchronous
-   recorded persistent-index background builds before merge.
+1. Review the amendment evidence and final validation output.
+2. Separately authorize any release-board update, merge, push, and tag.

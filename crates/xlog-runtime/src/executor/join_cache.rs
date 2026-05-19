@@ -79,6 +79,8 @@ pub struct JoinIndexCacheStats {
     pub background_build_requests: u64,
     /// Background-build mode completions.
     pub background_builds_completed: u64,
+    /// Background builds whose indexed reuse was deferred until a later evaluation.
+    pub background_builds_deferred: u64,
     /// Current retained index count.
     pub entries: usize,
     /// Current retained index bytes.
@@ -272,6 +274,11 @@ impl JoinIndexCache {
     pub(crate) fn record_background_build_complete(&mut self) {
         self.stats.background_builds_completed =
             self.stats.background_builds_completed.saturating_add(1);
+    }
+
+    pub(crate) fn record_background_build_deferred(&mut self) {
+        self.stats.background_builds_deferred =
+            self.stats.background_builds_deferred.saturating_add(1);
     }
 
     pub(crate) fn stats(&self) -> JoinIndexCacheStats {

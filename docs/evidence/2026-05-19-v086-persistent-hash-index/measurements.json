@@ -3,6 +3,7 @@
   "date": "2026-05-19",
   "commands": [
     "cargo test -p xlog-runtime persistent_hash_index -- --nocapture",
+    "cargo test -p xlog-cuda test_recorded_join_index_build_runs_on_runtime_stream -- --nocapture",
     "cargo test -p xlog-runtime persistent_cache -- --nocapture",
     "cargo test -p xlog-runtime persistent_key -- --nocapture"
   ],
@@ -38,11 +39,15 @@
   "background_fixture": {
     "background_build_requests": 1,
     "background_builds_completed": 1,
-    "stream_safety_note": "requests stay on the existing provider build/reuse path; full asynchronous recorded builds remain follow-up work"
+    "background_builds_deferred": 1,
+    "same_evaluation_index_hits": 0,
+    "next_evaluation_reuses_completed_index": true,
+    "recorded_provider_test": "test_recorded_join_index_build_runs_on_runtime_stream",
+    "stream_safety_note": "runtime-backed recorded providers build with build_join_index_v2_recorded on the recorded operation stream; non-runtime fallback preserves deferred current-evaluation reuse"
   },
   "performance_or_blocker": {
     "speedup_gate_claimed": false,
     "reuse_observed": true,
-    "blocker": "full async background build speedup is not claimed; the completed slice makes reuse observable and stale-index/budget behavior deterministic"
+    "blocker": "no >=1.5x timing speedup is claimed; the completed slice makes recorded background building, deferred reuse, stale-index rejection, and budget behavior deterministic"
   }
 }

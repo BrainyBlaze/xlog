@@ -23,7 +23,8 @@ All notable changes to this project are documented in this file.
 - Added v0.8.6 persistent hash-index manager telemetry and key hardening for
   repeated session evaluations, including relation-generation/schema/device
   keys, stale-index invalidation, deterministic LRU budget eviction, and
-  background-build mode counters.
+  background-build request/completion/deferred counters plus a runtime-backed
+  recorded provider build path.
 - Added v0.8.6 runtime consumer certification examples and validator for
   DTS-DLM-shaped delta/optimizer workloads, neutral Mistaber-derived `.xlog`
   fixtures, v0.9.0 substrate primitives, and public pyxlog compatibility,

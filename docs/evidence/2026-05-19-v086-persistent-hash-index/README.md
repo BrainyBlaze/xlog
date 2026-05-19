@@ -16,11 +16,16 @@ mode.
   repeated evaluations and do not reuse stale device buffers.
 - Existing subsystem reused: the existing `xlog-runtime` executor join-index
   cache, relation generation tracking, schema metadata, CUDA device ordinal,
-  provider hash-index build/reuse path, and runtime configuration controls.
+  provider hash-index build/reuse path, recorded CUDA launch machinery, and
+  runtime configuration controls.
 - Scope boundary: this slice does not introduce a second index manager or a
-  private host-side mirror of relation data. Background-build mode records
-  request/completion telemetry on the existing provider path; full asynchronous
-  recorded builds remain follow-up work.
+  private host-side mirror of relation data. Background-build mode inserts the
+  built index into the existing cache and defers indexed reuse until a later
+  evaluation. When recorded hash joins and a runtime-backed provider are
+  available, `build_join_index_v2_background` routes through
+  `build_join_index_v2_recorded`, `pack_keys_gpu_on_stream`, and
+  `build_hash_table_v2_on_stream`; otherwise it falls back to the legacy
+  synchronous builder while preserving deferred current-evaluation reuse.
 
 ## GQM Questions
 
@@ -28,12 +33,12 @@ mode.
   key-column, or device reuse?
 - Does relation mutation invalidate retained entries before reuse?
 - Does the cache enforce deterministic budget eviction?
-- Does background-build mode expose telemetry without changing the provider
-  dispatch path?
+- Does background-build mode record request/completion/deferred telemetry and
+  use the recorded provider path where stream-backed execution is applicable?
 - Does repeated session evaluation observe reuse without tracked data-plane
   DTOH/H2D calls after fixture upload?
-- Are performance claims bounded to measured reuse and explicitly avoid
-  claiming full async build speedup?
+- Are performance claims bounded to measured reuse and explicit about the
+  absence of a >=1.5x timing claim?
 
 ## Metrics
 
@@ -43,18 +48,22 @@ mode.
   before a stale version can be reused.
 - `M086_INDEX.3 budget`: LRU eviction bounds retained bytes under the cache
   budget and records deterministic eviction telemetry.
-- `M086_INDEX.4 background build`: background-build mode records request and
-  completion telemetry while staying on the existing provider build/reuse path.
+- `M086_INDEX.4 background build`: background-build mode records request,
+  completion, and deferred-current-use telemetry; the CUDA provider has a
+  runtime-backed recorded-stream build test that consumes the built index
+  through the recorded indexed join path.
 - `M086_INDEX.5 performance/blocker`: repeated session evaluation reuses one
-  retained build-side index; full async background build speedup remains a
-  follow-up because the provider build is still synchronous.
+  retained build-side index. No >=1.5x timing speedup is claimed in this
+  fixture; the performance metric remains explicitly bounded to observed reuse.
 - `M086_INDEX.6 transfer budget`: the repeated-session fixture records zero
   tracked data-plane DTOH/H2D calls after fixture upload.
 
 ## Fresh Checks
 
 - `cargo test -p xlog-runtime persistent_hash_index -- --nocapture`
-  - 3 executor reuse/invalidation/background tests passed.
+  - 4 executor reuse/invalidation/background tests passed.
+- `cargo test -p xlog-cuda test_recorded_join_index_build_runs_on_runtime_stream -- --nocapture`
+  - 1 runtime-backed recorded provider test passed.
 - `cargo test -p xlog-runtime persistent_cache -- --nocapture`
   - 2 cache budget/invalidation tests passed.
 - `cargo test -p xlog-runtime persistent_key -- --nocapture`
@@ -64,8 +73,8 @@ Machine-readable evidence: `measurements.json`.
 
 ## Metric Interpretation
 
-All G086_INDEX correctness, invalidation, budget, keying, telemetry, and
-transfer-budget metrics are PASS. The speedup claim for full asynchronous
-background index builds is BLOCKED as follow-up scope; the accepted v0.8.6
-claim is deterministic reuse plus safe invalidation/budget behavior on the
-existing provider build/reuse path.
+G086_INDEX correctness, invalidation, budget, keying, recorded background-build
+path, deferred current-evaluation reuse, and transfer-budget metrics are PASS.
+M086_INDEX.5 does not claim a >=1.5x timing speedup; the accepted v0.8.6
+performance claim is deterministic retained-index reuse with the speedup gate
+left unclaimed rather than inferred from correctness tests.

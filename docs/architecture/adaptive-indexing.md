@@ -30,7 +30,8 @@ budget allows it.
 - Scan heat + cardinality/bytes during `Scan`
 - Join selectivity observations for base/base joins (both sides are `Scan`)
 - Persistent hash-index cache hits, misses, builds, evictions, invalidations,
-  stale rejections, and background-build mode requests/completions
+  stale rejections, and background-build mode request/completion/deferred
+  counters
 
 See: `crates/xlog-runtime/src/executor.rs`
 
@@ -45,8 +46,12 @@ index lifetime or fixture-only cache. Runtime controls:
   field is `None`; unset defaults to enabled to preserve adaptive-indexing
   behavior.
 - `RuntimeConfig::with_persistent_hash_index_background_build(Some(true))`
-  records background-build request/completion telemetry while staying on the
-  existing provider build/reuse path.
+  builds the index through `build_join_index_v2_background`, records
+  request/completion/deferred telemetry, and defers indexed reuse until a later
+  evaluation. Runtime-backed providers with recorded hash joins enabled build
+  through `build_join_index_v2_recorded` on the recorded operation stream;
+  non-runtime providers fall back to the legacy builder while preserving the
+  same cache lifetime semantics.
 
 Cache keys include:
 
@@ -72,7 +77,11 @@ fn maybe_build_index(&mut self, relation: RelId, right: &CudaBuffer, keys: &[usi
     let heat = self.stats.get_relation_stats(relation).map(|s| s.heat);
     let bytes = estimate_join_index_bytes(right, keys);
     if self.join_index_cache.should_build(bytes, heat.unwrap_or(0.0), remaining, budget) {
-        let index = self.provider.build_join_index_v2(right, keys)?;
+        let index = if self.config.resolved_persistent_hash_index_background_build() {
+            self.provider.build_join_index_v2_background(right, keys)?
+        } else {
+            self.provider.build_join_index_v2(right, keys)?
+        };
         self.join_index_cache.insert(key, index);
     }
 }
@@ -81,7 +90,6 @@ fn maybe_build_index(&mut self, relation: RelId, right: &CudaBuffer, keys: &[usi
 ## Future Work
 
 1. Implement NestedLoop and SortMerge joins
-2. Move background-build mode from telemetry to fully asynchronous recorded
-   builds once provider stream dependencies are promoted for join-index build
-   kernels.
+2. Add a dedicated timing fixture if v0.8.6 needs a >=1.5x persistent-index
+   speedup claim rather than the current observed-reuse claim.
 3. Integrate statistics into fixpoint loop (recursive SCCs)

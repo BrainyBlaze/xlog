@@ -4,14 +4,14 @@
   "date": "2026-05-19",
   "governing_goal": "docs/plans/2026-05-19-agent-v086-dts-runtime-completion-goal.md",
   "proposal": "docs/plans/2026-05-19-v086-closure-proposal.md",
-  "release_decision": "SCOPE_AMENDMENT_REQUIRED",
+  "release_decision": "MERGE_READY",
   "release_actions_authorized": {
     "board_update": false,
     "merge": false,
     "push": false,
     "tag": false
   },
-  "status": "PASS_WITH_BLOCKED_SCOPE",
+  "status": "PASS",
   "subgoals": {
     "G086_PRE": {
       "commit": "e6edb49c",
@@ -52,9 +52,9 @@
       "status": "PASS"
     },
     "G086_INDEX": {
-      "commit": "702e1f8f",
+      "commit": "702e1f8f + amendment",
       "evidence": "docs/evidence/2026-05-19-v086-persistent-hash-index/README.md",
-      "status": "PASS_WITH_BLOCKED_PERFORMANCE_SCOPE"
+      "status": "PASS"
     },
     "G086_CONSUMERS": {
       "commit": "37f16651",
@@ -72,12 +72,13 @@
       "status": "PASS"
     }
   },
-  "blocked_or_scope_amendment_items": [
+  "blocked_or_scope_amendment_items": [],
+  "unclaimed_performance_metrics": [
     {
       "goal": "G086_INDEX",
       "metric": "M086_INDEX.5 performance/blocker",
-      "status": "BLOCKED",
-      "description": "Full asynchronous recorded persistent-index background-build speedup is not implemented or claimed. Completed scope covers deterministic persistent reuse, key hardening, invalidation, budget eviction, and background request/completion telemetry on the existing provider build/reuse path."
+      "status": "UNCLAIMED_SPEEDUP",
+      "description": "No >=1.5x persistent-index timing speedup is claimed. Completed scope covers recorded background building, deferred current-evaluation reuse, deterministic persistent reuse, key hardening, invalidation, budget eviction, and background request/completion telemetry."
     }
   ],
   "verification": {

@@ -1594,10 +1594,10 @@ engines, or parallel helper paths that bypass production dispatch are blockers.
       Evidence: `docs/evidence/2026-05-19-v086-adaptive-reoptimization/`.
 - [x] Add a persistent hash index manager with generation/schema/device keying,
       stale-index invalidation, deterministic LRU budget eviction, repeated
-      session reuse, and background-build request/completion telemetry after
-      profiles identify index rebuild cost as a release blocker. Full
-      asynchronous recorded background-build speedup remains a named v0.8.6
-      closure blocker/follow-up rather than a claimed PASS metric.
+      session reuse, background-build request/completion/deferred telemetry,
+      and a runtime-backed recorded provider build path after profiles identify
+      index rebuild cost as a release blocker. The branch claims observed reuse
+      rather than a >=1.5x persistent-index timing speedup.
       Evidence: `docs/evidence/2026-05-19-v086-persistent-hash-index/`.
 
 ### Consumer Certification

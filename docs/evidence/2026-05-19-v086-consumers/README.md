@@ -57,7 +57,7 @@ pytest -q python/tests/test_v086_consumers_source.py
 
 ## Open Gaps
 
-- The persistent-index evidence still records background-build request and
-  completion telemetry on the existing provider build/reuse path; full
-  asynchronous recorded builds remain a later implementation detail and are not
-  claimed as a speedup in this consumer certification.
+- The persistent-index evidence records background-build request, completion,
+  and deferred-current-use telemetry plus a runtime-backed recorded provider
+  build path. It does not claim a >=1.5x timing speedup in this consumer
+  certification.

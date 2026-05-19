@@ -52,17 +52,17 @@
 | M086_INT.4 Python | PASS | v0.8.0/v0.8.5/v0.8.6 source and runtime guards: 38 passed |
 | M086_INT.5 examples | PASS | v0.8.6 validator invoked v0.8.0, v0.8.5, and v0.8.6 validators; all PASS |
 | M086_INT.6 transfer guards | PASS | xlog-prob no-D2H guards, integration strict deterministic D2H tests, and v0.8.6 source/runtime guards passed |
-| M086_INT.7 performance | PASS | raw feature-node evidence records delta/CSE/chain performance; adaptive and persistent-index speedups are not overclaimed |
+| M086_INT.7 performance | PASS | raw feature-node evidence records delta/CSE/chain performance; adaptive speedup and persistent-index >=1.5x timing speedup are not overclaimed |
 | M086_INT.8 docs | PASS | JSON, py_compile, metadata validation, roadmap/changelog/architecture evidence links checked |
 | M086_INT.9 git hygiene | PASS | `git diff --check` clean; generated artifacts are limited to refreshed consumer summaries plus this INT evidence |
 
 ## Open Issues
 
-- G086_INDEX still does not claim full asynchronous recorded persistent-index
-  background-build speedup. The implemented and validated scope is deterministic
-  reuse, stale-key invalidation, LRU budget eviction, device/schema/generation
-  keying, and background request/completion telemetry on the existing provider
-  build/reuse path.
+- G086_INDEX does not claim a >=1.5x persistent-index timing speedup. The
+  implemented and validated scope is deterministic reuse, stale-key
+  invalidation, LRU budget eviction, device/schema/generation keying,
+  background request/completion/deferred telemetry, and the runtime-backed
+  recorded provider build path.
 
 ## Next Gate
 

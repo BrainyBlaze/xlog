@@ -1,7 +1,7 @@
 {
   "compatibility_gates": {
     "v080_examples": {
-      "duration_sec": 19.405006,
+      "duration_sec": 23.249319,
       "example_count": 5,
       "output": "docs/evidence/2026-05-19-v086-consumers/compat_v080_validation_summary.json",
       "returncode": 0,
@@ -17,13 +17,13 @@
         "python/tests/test_v080_examples_source.py",
         "python/tests/test_v085_examples_source.py"
       ],
-      "duration_sec": 2.696843,
+      "duration_sec": 2.742649,
       "returncode": 0,
       "status": "PASS",
       "stdout_preview": "......                                                                   [100%]\n6 passed in 0.03s\n"
     },
     "v085_examples": {
-      "duration_sec": 38.666001,
+      "duration_sec": 44.015022,
       "example_count": 10,
       "output": "docs/evidence/2026-05-19-v086-consumers/compat_v085_validation_summary.json",
       "returncode": 0,
@@ -107,8 +107,8 @@
       ],
       "name": "01_dts_delta_optimizer",
       "raw_measurements": {
-        "explain_duration_sec": 0.095062,
-        "run_duration_sec": 1.778322
+        "explain_duration_sec": 0.098018,
+        "run_duration_sec": 9.320845
       },
       "status": "PASS"
     },
@@ -125,8 +125,8 @@
       ],
       "name": "02_neutral_material_flow",
       "raw_measurements": {
-        "explain_duration_sec": 0.09619,
-        "run_duration_sec": 1.359515
+        "explain_duration_sec": 0.110979,
+        "run_duration_sec": 1.504891
       },
       "status": "PASS"
     },
@@ -143,8 +143,8 @@
       ],
       "name": "03_neutral_signal_diagnostics",
       "raw_measurements": {
-        "explain_duration_sec": 0.090461,
-        "run_duration_sec": 1.113328
+        "explain_duration_sec": 0.093199,
+        "run_duration_sec": 1.381469
       },
       "status": "PASS"
     },
@@ -166,8 +166,8 @@
       ],
       "name": "04_v090_substrate_primitives",
       "raw_measurements": {
-        "explain_duration_sec": 0.09745,
-        "run_duration_sec": 1.116895
+        "explain_duration_sec": 0.099018,
+        "run_duration_sec": 1.367355
       },
       "status": "PASS"
     },
@@ -184,8 +184,8 @@
       ],
       "name": "05_pyxlog_session_compatibility",
       "raw_measurements": {
-        "explain_duration_sec": 0.090962,
-        "run_duration_sec": 0.623534
+        "explain_duration_sec": 0.092526,
+        "run_duration_sec": 0.703731
       },
       "status": "PASS"
     }
@@ -213,24 +213,24 @@
   "raw_measurements": {
     "example_timings": {
       "01_dts_delta_optimizer": {
-        "explain_duration_sec": 0.095062,
-        "run_duration_sec": 1.778322
+        "explain_duration_sec": 0.098018,
+        "run_duration_sec": 9.320845
       },
       "02_neutral_material_flow": {
-        "explain_duration_sec": 0.09619,
-        "run_duration_sec": 1.359515
+        "explain_duration_sec": 0.110979,
+        "run_duration_sec": 1.504891
       },
       "03_neutral_signal_diagnostics": {
-        "explain_duration_sec": 0.090461,
-        "run_duration_sec": 1.113328
+        "explain_duration_sec": 0.093199,
+        "run_duration_sec": 1.381469
       },
       "04_v090_substrate_primitives": {
-        "explain_duration_sec": 0.09745,
-        "run_duration_sec": 1.116895
+        "explain_duration_sec": 0.099018,
+        "run_duration_sec": 1.367355
       },
       "05_pyxlog_session_compatibility": {
-        "explain_duration_sec": 0.090962,
-        "run_duration_sec": 0.623534
+        "explain_duration_sec": 0.092526,
+        "run_duration_sec": 0.703731
       }
     },
     "feature_evidence": {
@@ -534,7 +534,11 @@
           "background_fixture": {
             "background_build_requests": 1,
             "background_builds_completed": 1,
-            "stream_safety_note": "requests stay on the existing provider build/reuse path; full asynchronous recorded builds remain follow-up work"
+            "background_builds_deferred": 1,
+            "next_evaluation_reuses_completed_index": true,
+            "recorded_provider_test": "test_recorded_join_index_build_runs_on_runtime_stream",
+            "same_evaluation_index_hits": 0,
+            "stream_safety_note": "runtime-backed recorded providers build with build_join_index_v2_recorded on the recorded operation stream; non-runtime fallback preserves deferred current-evaluation reuse"
           },
           "budget_fixture": {
             "evictions": 1,
@@ -545,6 +549,7 @@
           },
           "commands": [
             "cargo test -p xlog-runtime persistent_hash_index -- --nocapture",
+            "cargo test -p xlog-cuda test_recorded_join_index_build_runs_on_runtime_stream -- --nocapture",
             "cargo test -p xlog-runtime persistent_cache -- --nocapture",
             "cargo test -p xlog-runtime persistent_key -- --nocapture"
           ],
@@ -563,7 +568,7 @@
           },
           "node": "G086_INDEX",
           "performance_or_blocker": {
-            "blocker": "full async background build speedup is not claimed; the completed slice makes reuse observable and stale-index/budget behavior deterministic",
+            "blocker": "no >=1.5x timing speedup is claimed; the completed slice makes recorded background building, deferred reuse, stale-index rejection, and budget behavior deterministic",
             "reuse_observed": true,
             "speedup_gate_claimed": false
           },
@@ -596,7 +601,7 @@
           "json",
           "examples/v086-runtime/01_dts_delta_optimizer/program.xlog"
         ],
-        "duration_sec": 0.095062,
+        "duration_sec": 0.098018,
         "returncode": 0,
         "stderr_preview": "",
         "stdout_preview": "{\n  \"parse\": {\n    \"statements\": 28,\n    \"cache_hits\": 0,\n    \"cache_misses\": 28\n  },\n  \"ast\": {\n    \"rules\": 16,\n    \"queries\": 3,\n    \"prob_queries\": 0\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 3\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 12\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"magic_sets\": {\n    \"status\": \"disabled\",\n    \"adorned_predicates\": [],\n    \"generated_predicates\": [],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"exact_ddnnf\",\n    \"aggregate_lifting_count\": 0\n  },\n  \"aggregate_lifting\": [\n  ]\n}\n"
@@ -612,7 +617,7 @@
           "run",
           "examples/v086-runtime/01_dts_delta_optimizer/program.xlog"
         ],
-        "duration_sec": 1.778322,
+        "duration_sec": 9.320845,
         "returncode": 0,
         "stderr_preview": "",
         "stdout_preview": "__xlog_query_0\n+------+-----+\n| item | dst |\n+------+-----+\n| 101  | 201 |\n| 104  | 204 |\n| 105  | 205 |\n+------+-----+\n__xlog_query_1\n+------+-----+\n| item | dst |\n+------+-----+\n| 101  | 201 |\n| 104  | 204 |\n+------+-----+\n__xlog_query_2\n+------------+---------+\n| computed_0 | count_0 |\n+------------+---------+\n| 4          | 4       |\n+------------+---------+\n"
@@ -632,7 +637,7 @@
           "json",
           "examples/v086-runtime/02_neutral_material_flow/program.xlog"
         ],
-        "duration_sec": 0.09619,
+        "duration_sec": 0.110979,
         "returncode": 0,
         "stderr_preview": "",
         "stdout_preview": "{\n  \"parse\": {\n    \"statements\": 24,\n    \"cache_hits\": 0,\n    \"cache_misses\": 24\n  },\n  \"ast\": {\n    \"rules\": 14,\n    \"queries\": 3,\n    \"prob_queries\": 0\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 3\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 10\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"magic_sets\": {\n    \"status\": \"disabled\",\n    \"adorned_predicates\": [],\n    \"generated_predicates\": [],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"exact_ddnnf\",\n    \"aggregate_lifting_count\": 0\n  },\n  \"aggregate_lifting\": [\n  ]\n}\n"
@@ -648,7 +653,7 @@
           "run",
           "examples/v086-runtime/02_neutral_material_flow/program.xlog"
         ],
-        "duration_sec": 1.359515,
+        "duration_sec": 1.504891,
         "returncode": 0,
         "stderr_preview": "",
         "stdout_preview": "__xlog_query_0\n+-----+-----+\n| src | dst |\n+-----+-----+\n| 1   | 4   |\n| 2   | 6   |\n| 3   | 6   |\n+-----+-----+\n__xlog_query_1\n+-----+-----+\n| src | dst |\n+-----+-----+\n| 1   | 4   |\n+-----+-----+\n__xlog_query_2\n+-----+---------+\n| src | count_0 |\n+-----+---------+\n| 1   | 1       |\n| 2   | 1       |\n| 3   | 1       |\n+-----+---------+\n"
@@ -668,7 +673,7 @@
           "json",
           "examples/v086-runtime/03_neutral_signal_diagnostics/program.xlog"
         ],
-        "duration_sec": 0.090461,
+        "duration_sec": 0.093199,
         "returncode": 0,
         "stderr_preview": "",
         "stdout_preview": "{\n  \"parse\": {\n    \"statements\": 27,\n    \"cache_hits\": 0,\n    \"cache_misses\": 27\n  },\n  \"ast\": {\n    \"rules\": 16,\n    \"queries\": 3,\n    \"prob_queries\": 0\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 3\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 11\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"magic_sets\": {\n    \"status\": \"disabled\",\n    \"adorned_predicates\": [],\n    \"generated_predicates\": [],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"exact_ddnnf\",\n    \"aggregate_lifting_count\": 0\n  },\n  \"aggregate_lifting\": [\n  ]\n}\n"
@@ -684,7 +689,7 @@
           "run",
           "examples/v086-runtime/03_neutral_signal_diagnostics/program.xlog"
         ],
-        "duration_sec": 1.113328,
+        "duration_sec": 1.381469,
         "returncode": 0,
         "stderr_preview": "",
         "stdout_preview": "__xlog_query_0\n+----+-----+\n| id | dst |\n+----+-----+\n| 10 | 11  |\n| 10 | 12  |\n| 11 | 12  |\n+----+-----+\n__xlog_query_1\n+----+-----+\n| id | dst |\n+----+-----+\n| 10 | 12  |\n+----+-----+\n__xlog_query_2\n+----+---------+\n| id | count_0 |\n+----+---------+\n| 10 | 2       |\n| 11 | 1       |\n+----+---------+\n"
@@ -704,7 +709,7 @@
           "json",
           "examples/v086-runtime/04_v090_substrate_primitives/program.xlog"
         ],
-        "duration_sec": 0.09745,
+        "duration_sec": 0.099018,
         "returncode": 0,
         "stderr_preview": "",
         "stdout_preview": "{\n  \"parse\": {\n    \"statements\": 28,\n    \"cache_hits\": 0,\n    \"cache_misses\": 28\n  },\n  \"ast\": {\n    \"rules\": 16,\n    \"queries\": 3,\n    \"prob_queries\": 0\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 2\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 12\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"magic_sets\": {\n    \"status\": \"disabled\",\n    \"adorned_predicates\": [],\n    \"generated_predicates\": [],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"exact_ddnnf\",\n    \"aggregate_lifting_count\": 0\n  },\n  \"aggregate_lifting\": [\n  ]\n}\n"
@@ -720,7 +725,7 @@
           "run",
           "examples/v086-runtime/04_v090_substrate_primitives/program.xlog"
         ],
-        "duration_sec": 1.116895,
+        "duration_sec": 1.367355,
         "returncode": 0,
         "stderr_preview": "",
         "stdout_preview": "__xlog_query_0\n+-----+-----+\n| src | dst |\n+-----+-----+\n| 1   | 3   |\n+-----+-----+\n__xlog_query_1\n+----+-----+\n| id | dst |\n+----+-----+\n| 1  | 3   |\n+----+-----+\n__xlog_query_2\n+-----+---------+\n| src | count_0 |\n+-----+---------+\n| 1   | 1       |\n+-----+---------+\n"
@@ -740,7 +745,7 @@
           "json",
           "examples/v086-runtime/05_pyxlog_session_compatibility/program.xlog"
         ],
-        "duration_sec": 0.090962,
+        "duration_sec": 0.092526,
         "returncode": 0,
         "stderr_preview": "",
         "stdout_preview": "{\n  \"parse\": {\n    \"statements\": 15,\n    \"cache_hits\": 0,\n    \"cache_misses\": 15\n  },\n  \"ast\": {\n    \"rules\": 8,\n    \"queries\": 2,\n    \"prob_queries\": 0\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 3\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 7\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"magic_sets\": {\n    \"status\": \"disabled\",\n    \"adorned_predicates\": [],\n    \"generated_predicates\": [],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"exact_ddnnf\",\n    \"aggregate_lifting_count\": 0\n  },\n  \"aggregate_lifting\": [\n  ]\n}\n"
@@ -756,7 +761,7 @@
           "run",
           "examples/v086-runtime/05_pyxlog_session_compatibility/program.xlog"
         ],
-        "duration_sec": 0.623534,
+        "duration_sec": 0.703731,
         "returncode": 0,
         "stderr_preview": "",
         "stdout_preview": "__xlog_query_0\n+----+\n| id |\n+----+\n| 1  |\n| 2  |\n| 3  |\n+----+\n__xlog_query_1\n+------------+---------+\n| computed_0 | count_0 |\n+------------+---------+\n| 0          | 3       |\n+------------+---------+\n"

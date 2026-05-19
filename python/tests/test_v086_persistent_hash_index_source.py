@@ -31,7 +31,22 @@ def test_v086_persistent_hash_index_extends_existing_cache_path() -> None:
     assert "JoinIndexKey::new" in dispatch
     assert "resolved_persistent_hash_indexes" in dispatch
     assert "record_background_build_request" in dispatch
+    assert "record_background_build_deferred" in dispatch
     assert "Persistent Hash Index Manager" in docs
+
+
+def test_v086_persistent_hash_index_background_builds_use_recorded_provider_path() -> None:
+    cache = read("crates/xlog-runtime/src/executor/join_cache.rs")
+    dispatch = read("crates/xlog-runtime/src/executor/node_dispatch.rs")
+    provider = read("crates/xlog-cuda/src/provider/relational.rs")
+
+    assert "background_builds_deferred" in cache
+    assert "build_join_index_v2_background" in dispatch
+    assert "build_join_index_v2_background" in provider
+    assert "build_join_index_v2_recorded" in provider
+    assert "recorded_op_stream_or_init" in provider
+    assert "pack_keys_gpu_on_stream" in provider
+    assert "build_hash_table_v2_on_stream" in provider
 
 
 def test_v086_persistent_hash_index_evidence_is_present() -> None:
@@ -48,3 +63,4 @@ def test_v086_persistent_hash_index_evidence_is_present() -> None:
     assert measurements["invalidation_fixture"]["entries_after_mutation"] == 0
     assert measurements["budget_fixture"]["evictions"] == 1
     assert measurements["background_fixture"]["background_build_requests"] == 1
+    assert measurements["background_fixture"]["background_builds_deferred"] == 1

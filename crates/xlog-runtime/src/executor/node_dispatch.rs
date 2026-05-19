@@ -442,31 +442,45 @@ impl Executor {
                             if background_build {
                                 self.join_index_cache.record_background_build_request();
                             }
-                            match self.provider.build_join_index_v2(right, right_keys) {
+                            let build_result = if background_build {
+                                self.provider
+                                    .build_join_index_v2_background(right, right_keys)
+                            } else {
+                                self.provider.build_join_index_v2(right, right_keys)
+                            };
+                            match build_result {
                                 Ok(index) => {
                                     if background_build {
                                         self.join_index_cache.record_background_build_complete();
-                                    }
-                                    match self.provider.hash_join_v2_with_index(
-                                        left,
-                                        right,
-                                        left_keys,
-                                        right_keys,
-                                        cuda_join_type,
-                                        &index,
-                                        None,
-                                    ) {
-                                        Ok(joined) => {
-                                            self.join_index_cache.insert(key, index);
-                                            if let Some(stats) =
-                                                self.stats.get_relation_stats_mut(build_rel)
-                                            {
-                                                stats.has_index = true;
-                                            }
-                                            out = Some(joined);
+                                        self.join_index_cache.insert(key, index);
+                                        self.join_index_cache.record_background_build_deferred();
+                                        if let Some(stats) =
+                                            self.stats.get_relation_stats_mut(build_rel)
+                                        {
+                                            stats.has_index = true;
                                         }
-                                        Err(err) if is_join_index_mismatch(&err) => {}
-                                        Err(err) => return Err(err),
+                                    } else {
+                                        match self.provider.hash_join_v2_with_index(
+                                            left,
+                                            right,
+                                            left_keys,
+                                            right_keys,
+                                            cuda_join_type,
+                                            &index,
+                                            None,
+                                        ) {
+                                            Ok(joined) => {
+                                                self.join_index_cache.insert(key, index);
+                                                if let Some(stats) =
+                                                    self.stats.get_relation_stats_mut(build_rel)
+                                                {
+                                                    stats.has_index = true;
+                                                }
+                                                out = Some(joined);
+                                            }
+                                            Err(err) if is_join_index_mismatch(&err) => {}
+                                            Err(err) => return Err(err),
+                                        }
                                     }
                                 }
                                 Err(_) => {

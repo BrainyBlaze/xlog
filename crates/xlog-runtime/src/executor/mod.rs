@@ -3563,6 +3563,55 @@ mod tests {
         assert_eq!(stats.entries, 1);
     }
 
+    #[test]
+    fn test_persistent_hash_index_background_build_defers_current_join_reuse() {
+        let mut executor = match create_test_executor_with_config(
+            RuntimeConfig::default()
+                .with_persistent_hash_indexes(Some(true))
+                .with_persistent_hash_index_background_build(Some(true)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_persistent_index_fixture(&mut executor, 2_500);
+        let plan = persistent_index_join_plan();
+
+        let mut before_build = executor.join_index_cache_stats();
+        let mut after_build = None;
+        for _ in 0..5 {
+            executor
+                .execute_plan(&plan)
+                .expect("background-build warm evaluation");
+            let stats = executor.join_index_cache_stats();
+            if stats.background_build_requests > before_build.background_build_requests {
+                after_build = Some(stats);
+                break;
+            }
+            before_build = stats;
+        }
+
+        let after_first = after_build.expect("background build request observed");
+        assert_eq!(after_first.background_build_requests, 1);
+        assert_eq!(after_first.background_builds_completed, 1);
+        assert_eq!(after_first.background_builds_deferred, 1);
+        assert_eq!(
+            after_first.hits, before_build.hits,
+            "background build must not be consumed by the same evaluation that requested it"
+        );
+        assert_eq!(after_first.entries, 1);
+
+        executor
+            .execute_plan(&plan)
+            .expect("second evaluation reuses completed background index");
+        let after_second = executor.join_index_cache_stats();
+        assert_eq!(after_second.background_build_requests, 1);
+        assert_eq!(after_second.background_builds_deferred, 1);
+        assert!(after_second.hits >= 1);
+    }
+
     // ============== MC Relation Reset Tests ==============
 
     #[test]

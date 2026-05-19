@@ -60,7 +60,7 @@
         "chain_shared_memory": "speedup_ratio=5.58300273358745 on chain_hot fixture",
         "cse": "duplicate_subplan_reduction_percent=50.0; added_dtoh_calls=0",
         "adaptive_reoptimization": "correctness/rollback gate passed; no speedup gate claimed",
-        "persistent_hash_index": "reuse observed; full async background build speedup not claimed"
+        "persistent_hash_index": "recorded background build and deferred reuse observed; >=1.5x timing speedup not claimed"
       }
     },
     "M086_INT.8 docs": {
@@ -108,9 +108,9 @@
   },
   "unresolved": [
     {
-      "status": "BLOCKED",
+      "status": "UNCLAIMED_SPEEDUP",
       "scope": "G086_INDEX performance claim only",
-      "reason": "Full asynchronous recorded persistent-index background builds remain follow-up work; v0.8.6 evidence claims deterministic reuse, invalidation, budget, and background request/completion telemetry, not async speedup."
+      "reason": "The persistent-index evidence claims deterministic reuse, recorded background building, deferred current-evaluation reuse, invalidation, budget, and background request/completion/deferred telemetry; it does not claim a >=1.5x timing speedup."
     }
   ]
 }
