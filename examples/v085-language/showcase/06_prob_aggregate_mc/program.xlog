@@ -1,0 +1,12 @@
+#pragma prob_engine = mc
+#pragma prob_samples = 96
+#pragma prob_seed = 19
+
+0.50::edge(1, 2).
+0.50::edge(1, 3).
+0.25::edge(1, 4).
+
+out_degree(X, count(Y)) :- edge(X, Y).
+
+query(out_degree(1, 2)).
+

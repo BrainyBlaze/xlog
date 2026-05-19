@@ -1,0 +1,19 @@
+// Safe finite findall plus a deterministic aggregate query.
+
+pred edge(src: u32, dst: u32).
+
+edge(1, 2).
+edge(1, 3).
+edge(2, 4).
+edge(2, 5).
+
+neighbors(S, L) :- source(S), findall(D, edge(S, D), L).
+neighbor_len(S, N) :- source(S), findall(D, edge(S, D), L), length(L, N).
+neighbor_count(S, count(D)) :- edge(S, D).
+
+source(1).
+source(2).
+
+?- neighbors(1, L).
+?- neighbor_len(1, N).
+?- neighbor_count(1, N).

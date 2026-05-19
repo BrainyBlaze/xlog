@@ -1,0 +1,12 @@
+{
+  "features": ["maplist", "lists", "types"],
+  "source_required_substrings": ["maplist(good, [1, 2, 3])", "maplist(next, [1, 2, 3], L)", "pred next(input: u32, output: u32)"],
+  "checks": {
+    "explain_json": {
+      "min_statements": 16,
+      "stratification_status": "ok",
+      "rir_status": "ok"
+    }
+  }
+}
+

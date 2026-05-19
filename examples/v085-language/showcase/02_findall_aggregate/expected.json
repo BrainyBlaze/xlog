@@ -1,0 +1,12 @@
+{
+  "features": ["findall", "aggregate_query", "lists"],
+  "source_required_substrings": ["findall(D, edge(S, D), L)", "neighbor_count(S, count(D))", "length(L, N)"],
+  "checks": {
+    "explain_json": {
+      "min_statements": 11,
+      "stratification_status": "ok",
+      "rir_status": "ok"
+    }
+  }
+}
+

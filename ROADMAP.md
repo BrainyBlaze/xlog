@@ -1516,10 +1516,12 @@ WCOJ, and CLI paths.
 
 ### Examples And Certification
 
-- [ ] Add at least 10 advanced v0.8.5 `.xlog` examples covering every feature
+- [x] Add at least 10 advanced v0.8.5 `.xlog` examples covering every feature
       node and at least 5 feature interactions.
-- [ ] Add `scripts/validate_v085_examples.py` or equivalent validation with
+      Evidence: `docs/evidence/2026-05-19-v085-examples/README.md`.
+- [x] Add `scripts/validate_v085_examples.py` or equivalent validation with
       committed evidence JSON.
+      Evidence: `docs/evidence/2026-05-19-v085-examples/validation_summary.json`.
 
 ## v0.9.0 - Epistemic and Solver Semantics
 

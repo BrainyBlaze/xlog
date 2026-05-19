@@ -1,0 +1,19 @@
+{
+  "features": ["cli_repl", "cli_watch", "cli_explain", "incremental_parse", "magic_sets"],
+  "source_required_substrings": ["#pragma magic_sets = on", "?- reach(1, Y)"],
+  "checks": {
+    "explain_json": {
+      "min_statements": 6,
+      "stratification_status": "ok",
+      "rir_status": "ok",
+      "magic_status": "applied"
+    },
+    "repl": {
+      "required_substrings": ["repl:", "statements=6", "queries=1"]
+    },
+    "watch": {
+      "required_substrings": ["watch:", "magic_sets:", "status: applied"]
+    }
+  }
+}
+

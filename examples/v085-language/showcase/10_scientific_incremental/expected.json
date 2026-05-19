@@ -1,0 +1,12 @@
+{
+  "features": ["types", "lists", "findall", "maplist", "naf", "aggregate_query", "incremental_parse"],
+  "source_required_substrings": ["pred sensor(id: u32)", "not blocked_sensor(S)", "findall(V, reading(S, V), Values)", "maplist(valid_sample, [10, 11, 12])"],
+  "checks": {
+    "explain_json": {
+      "min_statements": 24,
+      "stratification_status": "ok",
+      "rir_status": "ok"
+    }
+  }
+}
+
