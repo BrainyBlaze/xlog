@@ -1595,12 +1595,7 @@ impl GpuSolverProductionAdapter {
         workspace: &mut GpuCdclWorkspace,
         candidates: &[GpuSolverProductionMaxSatSearchCandidate<'_>],
     ) -> Result<GpuSolverProductionMaxSatReport> {
-        if candidates.is_empty() {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "GPU solver production MaxSAT search".to_string(),
-                context: "bounded MaxSAT search requires at least one candidate CNF".to_string(),
-            });
-        }
+        Self::require_weighted_maxsat_search_candidates(candidates)?;
 
         let solves_before = self.trace.gpu_maxsat_candidate_solves;
         let unsat_prunes_before = self.trace.gpu_maxsat_unsat_candidate_prunes;
@@ -1637,14 +1632,6 @@ impl GpuSolverProductionAdapter {
             }
         }
 
-        if satisfiable_candidates == 0 {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "GPU solver production MaxSAT search".to_string(),
-                context: "bounded MaxSAT search requires at least one satisfiable GPU candidate"
-                    .to_string(),
-            });
-        }
-
         self.trace.gpu_maxsat_optima = self.trace.gpu_maxsat_optima.saturating_add(1);
         self.trace.require_zero_cpu_search()?;
 
@@ -1665,6 +1652,30 @@ impl GpuSolverProductionAdapter {
         })
     }
 
+    fn require_weighted_maxsat_search_candidates(
+        candidates: &[GpuSolverProductionMaxSatSearchCandidate<'_>],
+    ) -> Result<()> {
+        if candidates.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production MaxSAT search".to_string(),
+                context: "bounded MaxSAT search requires at least one candidate CNF".to_string(),
+            });
+        }
+        if !candidates.iter().any(|candidate| {
+            matches!(
+                candidate.status,
+                GpuSolverProductionMaxSatSearchStatus::Satisfiable
+            )
+        }) {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production MaxSAT search".to_string(),
+                context: "bounded MaxSAT search requires at least one satisfiable GPU candidate"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// Search a bounded weighted MaxSAT candidate set after accepted GPU epistemic execution.
     ///
     /// Satisfiable candidates are scored through the existing GPU CDCL SAT path.
@@ -1678,6 +1689,7 @@ impl GpuSolverProductionAdapter {
         workspace: &mut GpuCdclWorkspace,
         candidates: &[GpuSolverProductionMaxSatSearchCandidate<'_>],
     ) -> Result<GpuSolverProductionMaxSatReport> {
+        Self::require_weighted_maxsat_search_candidates(candidates)?;
         require_accepted_gpu_solver_evidence(provider, result)?;
         let mut report = self.solve_weighted_maxsat_search_candidates(workspace, candidates)?;
         report.candidate_evidence_records = 1;
@@ -1694,6 +1706,7 @@ impl GpuSolverProductionAdapter {
         workspace: &mut GpuCdclWorkspace,
         candidates: &[GpuSolverProductionMaxSatSearchCandidate<'_>],
     ) -> Result<GpuSolverProductionMaxSatReport> {
+        Self::require_weighted_maxsat_search_candidates(candidates)?;
         let results = require_accepted_gpu_solver_batch_evidence(provider, evidence.batch)?;
         self.trace.accepted_gpu_batch_candidate_evidence_consumed = self
             .trace
@@ -1726,6 +1739,7 @@ impl GpuSolverProductionAdapter {
                     .to_string(),
             });
         }
+        Self::require_weighted_maxsat_search_candidates(candidates)?;
         for result in results {
             require_accepted_gpu_solver_evidence(provider, result)?;
         }

@@ -9089,6 +9089,70 @@ fn accepted_gpu_execution_result_prunes_unsat_maxsat_search_candidates() {
 }
 
 #[test]
+fn accepted_gpu_execution_result_rejects_all_unsat_maxsat_search_before_solver_work() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let result = execute_unary_edge_epistemic_fixture(
+        &fix,
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X).
+        "#,
+        &[1, 2],
+        &[1],
+    );
+
+    let unsat_candidate = SolveInstance::new(
+        1,
+        vec![
+            Clause::new(vec![Literal::positive(0)]),
+            Clause::new(vec![Literal::negative(0)]),
+        ],
+    );
+    let gpu_unsat_candidate =
+        GpuCnf::from_host(&unsat_candidate, &fix.provider).expect("upload UNSAT candidate");
+    let branch_limit = upload_u32_scalar(&fix.provider, 1);
+    let mut adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let mut workspace = adapter
+        .new_workspace(gpu_unsat_candidate.var_cap, gpu_unsat_candidate.clause_cap)
+        .expect("new MaxSAT search workspace");
+    let assign_ptr_before = workspace.assign_device_ptr();
+
+    let err = adapter
+        .solve_weighted_maxsat_search_with_gpu_execution_result(
+            &fix.provider,
+            &result,
+            &mut workspace,
+            &[GpuSolverProductionMaxSatSearchCandidate {
+                score: 9,
+                cnf: &gpu_unsat_candidate,
+                branch_var_limit: &branch_limit,
+                status: GpuSolverProductionMaxSatSearchStatus::Unsatisfiable,
+            }],
+        )
+        .expect_err("all-UNSAT MaxSAT search candidates must fail before solver work");
+    assert!(format!("{err}")
+        .contains("bounded MaxSAT search requires at least one satisfiable GPU candidate"));
+
+    assert_eq!(workspace.assign_device_ptr(), assign_ptr_before);
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 0);
+    assert_eq!(trace.gpu_cdcl_sat_solves, 0);
+    assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 0);
+    assert_eq!(trace.gpu_maxsat_candidate_solves, 0);
+    assert_eq!(trace.gpu_maxsat_unsat_candidate_prunes, 0);
+    assert_eq!(trace.gpu_maxsat_optima, 0);
+    assert_eq!(trace.cpu_assignment_enumerations, 0);
+    assert_eq!(trace.cpu_maxsat_enumerations, 0);
+}
+
+#[test]
 fn accepted_gpu_execution_results_gate_multi_candidate_maxsat_search_pruning() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
