@@ -4,7 +4,10 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
-No user-facing changes are staged after the v0.8.5 closure proposal.
+### Changed
+
+- Corrected release-facing README, changelog, and roadmap status after the
+  `v0.8.5` tag was published.
 
 ## [0.8.5] — 2026-05-19
 
@@ -42,6 +45,9 @@ the v0.8.0 DTS-DLM runtime compatibility surface.
 - Added v0.8.5 small-domain aggregate lifting for finite probabilistic `count`
   heads using exact cardinality dynamic programming, plus explain metadata for
   fired and exact-enumeration fallback aggregate operators.
+- Added the GPU-native exact count-lift evaluator for accepted fired
+  probabilistic `count` aggregate queries; the production exact path launches
+  `weights_count_lift_exact` instead of using a CPU finite-world shortcut.
 - Added v0.8.5 approximate inference language integration: MC source pragmas,
   CLI override precedence, JSON output, and sample/evidence confidence
   reporting.
@@ -83,8 +89,9 @@ the v0.8.0 DTS-DLM runtime compatibility surface.
 - Closure proposal: `docs/plans/2026-05-19-v085-closure-proposal.md`.
 - Certification evidence: `docs/evidence/2026-05-18-v085-*` and
   `docs/evidence/2026-05-19-v085-*`.
-- Release-board update, commit, merge, push, and `v0.8.5` tag were authorized
-  on 2026-05-19.
+- Release-board update, commit, merge, push, and annotated `v0.8.5` tag were
+  completed on 2026-05-19. The tag peels to
+  `5679b686a579d581595c3d095b95a9b8899083a7`.
 
 ## [0.8.0] — 2026-05-18
 

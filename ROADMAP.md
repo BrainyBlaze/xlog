@@ -13,7 +13,11 @@ Graph hot-loop support, and DTS-DLM end-to-end validation. v0.8.0 ships
 the DTS-DLM ML/Python productization pack: stable `pyxlog` runtime/session
 contracts, async and streaming evaluation, relation deltas, diagnostics,
 registered neural top-k/deterministic modes, Belnap bridge helpers, native
-exact-induction integration, and DTS-focused examples.
+exact-induction integration, and DTS-focused examples. v0.8.5 ships the
+language-completeness pack: finite typed lists and terms, safe meta-predicates,
+deterministic NAF, magic-set planning, probabilistic aggregate inference with
+GPU-native count-lift exact evaluation, approximate inference controls,
+incremental parsing, and explain/REPL/watch developer workflows.
 
 This roadmap is version-oriented so planned work is not hidden inside subsystem
 sections. Historical and current-main work uses checked boxes. Future work uses
@@ -1451,9 +1455,9 @@ release-certification consumer depends on them.
 ### Deferred Product Backlog
 
 These items were intentionally not v0.8.0 gates after the DTS-DLM scope
-review. They are now promoted into v0.8.5 because they have named consumers:
+review. They were promoted into v0.8.5 because they had named consumers:
 general XLOG users, DTS-DLM future fixtures, and the v0.9.0
-epistemic/solver branch. Their active tracking lives in the v0.8.5 section
+epistemic/solver branch. Their completed tracking lives in the v0.8.5 section
 below.
 
 ## v0.8.5 - Language Completeness and Developer Experience
