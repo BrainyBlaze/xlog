@@ -235,7 +235,9 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(prob.contains("compile_source_with_gpu_execution_result"));
     assert!(prob.contains("compile_program_with_gpu_execution_result"));
     assert!(prob.contains("EpistemicProbGpuExecutionEvidence"));
+    assert!(prob.contains("EpistemicProbGpuBatchExecutionEvidence"));
     assert!(prob.contains("compile_and_evaluate_source_for_gpu_execution_results"));
+    assert!(prob.contains("compile_and_evaluate_conditioned_source_for_gpu_batch_execution_result"));
     assert!(prob.contains("compile_and_evaluate_program_for_gpu_execution_results"));
     assert!(prob.contains("compile_and_evaluate_conditioned_source_for_gpu_execution_results"));
     assert!(prob.contains("compile_and_evaluate_conditioned_program_for_gpu_execution_results"));
@@ -265,6 +267,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(prob.contains("gpu_source_knowledge_compilation_end_to_end_runs"));
     assert!(prob.contains("gpu_program_knowledge_compilation_end_to_end_runs"));
     assert!(prob.contains("accepted_evidence_assumptions_consumed"));
+    assert!(prob.contains("accepted_gpu_batch_evidence_consumed"));
+    assert!(prob.contains("accepted_gpu_batch_component_evidence_consumed"));
     assert!(prob.contains("gpu_conditioned_evidence_facts"));
     assert!(prob.contains("gpu_conditioned_negative_evidence_facts"));
     assert!(prob.contains("gpu_source_conditioned_know_evidence_facts"));
@@ -293,6 +297,9 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(prob_epistemic.contains("from_gpu_execution_result"));
     assert!(prob_epistemic.contains("read_device_row_count"));
     assert!(prob_epistemic.contains("require_stable_model_tuple_source"));
+    assert!(
+        integration.contains("accepted_split_batch_gates_probabilistic_conditioned_source_path")
+    );
 
     for (label, source) in [
         ("runtime", runtime.as_str()),
