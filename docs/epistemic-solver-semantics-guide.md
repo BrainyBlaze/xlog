@@ -315,7 +315,12 @@ CDCL workspace once per accepted evidence record while keeping learned-clause
 transfer counters at zero.
 `solve_weighted_maxsat_candidates_with_gpu_execution_result` applies the same
 boundary before certifying bounded MaxSAT candidate CNFs through GPU CDCL and
-returning the best declared score. `solve_portfolio_with_gpu_execution_result`
+returning the best declared score.
+`solve_multi_candidate_weighted_maxsat_with_gpu_execution_results` validates
+multiple accepted GPU runtime results up front, then repeats the same bounded
+MaxSAT candidate-set certification through existing GPU CDCL calls once per
+accepted evidence record.
+`solve_portfolio_with_gpu_execution_result`
 applies the boundary before dispatching bounded SAT and MaxSAT jobs through the
 same adapter, propagating UNKNOWN/TIMEOUT portfolio statuses without CPU search,
 and recording portfolio counters.
@@ -329,7 +334,8 @@ or that record CPU assignment, MaxSAT, or learned-clause transfer counters.
 The adapter is partial v0.9 evidence only. It now proves same-CNF reuse,
 distinct-CNF fail-closed rejection, a two-record accepted lifecycle, and bounded
 UNKNOWN/TIMEOUT lifecycle propagation, plus two-record same-CNF learned-clause
-reuse, but not full MaxSAT coverage.
+reuse and two-record/two-CNF bounded MaxSAT candidate-set execution, but not
+full MaxSAT encoding/search coverage.
 
 `xlog_solve::SolverService` provides the bounded solver API used by semantic
 fixtures:

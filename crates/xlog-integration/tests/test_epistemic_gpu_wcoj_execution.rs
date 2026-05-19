@@ -2237,6 +2237,7 @@ fn accepted_gpu_execution_result_gates_solver_maxsat_and_portfolio_paths() {
             }],
         )
         .expect("accepted GPU runtime evidence must gate MaxSAT through GPU CDCL");
+    assert_eq!(maxsat.candidate_evidence_records, 1);
     assert_eq!(maxsat.optimum_score, 5);
     assert_eq!(maxsat.gpu_cdcl_candidate_solves, 1);
 
@@ -2279,6 +2280,90 @@ fn accepted_gpu_execution_result_gates_solver_maxsat_and_portfolio_paths() {
     assert_eq!(trace.gpu_portfolio_maxsat_jobs, 1);
     assert_eq!(trace.gpu_portfolio_unknown_status_jobs, 1);
     assert_eq!(trace.gpu_portfolio_timeout_status_jobs, 1);
+    assert_eq!(trace.cpu_assignment_enumerations, 0);
+    assert_eq!(trace.cpu_maxsat_enumerations, 0);
+}
+
+#[test]
+fn accepted_gpu_execution_results_gate_multi_candidate_maxsat_path() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X).
+        "#,
+    )
+    .expect("parse nonzero-arity epistemic fixture");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile nonzero-arity epistemic executable");
+
+    let make_result = |edge_rows: &[u32]| {
+        let mut executor =
+            Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+        for (name, rel_id) in &executable.relation_ids {
+            executor.register_relation(*rel_id, name);
+        }
+        executor.put_relation("node", upload_unary_u32(&fix.memory, &[1, 2]));
+        executor.put_relation("edge", upload_unary_u32(&fix.memory, edge_rows));
+
+        executor
+            .execute_epistemic_gpu_execution(
+                &executable,
+                EpistemicGpuWorkspaceCapacities {
+                    max_candidates: 2,
+                    max_worlds: 1,
+                    max_models_per_reduction: 2,
+                },
+            )
+            .expect("execute accepted epistemic fixture")
+    };
+    let result_a = make_result(&[1]);
+    let result_b = make_result(&[2]);
+
+    let candidate_low = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
+    let candidate_high = SolveInstance::new(1, vec![Clause::new(vec![Literal::negative(0)])]);
+    let gpu_candidate_low =
+        GpuCnf::from_host(&candidate_low, &fix.provider).expect("upload low-score MaxSAT CNF");
+    let gpu_candidate_high =
+        GpuCnf::from_host(&candidate_high, &fix.provider).expect("upload high-score MaxSAT CNF");
+    let branch_limit = upload_u32_scalar(&fix.provider, 1);
+    let mut adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+
+    let report = adapter
+        .solve_multi_candidate_weighted_maxsat_with_gpu_execution_results(
+            &fix.provider,
+            &[&result_a, &result_b],
+            &[
+                GpuSolverProductionMaxSatCandidate {
+                    score: 3,
+                    cnf: &gpu_candidate_low,
+                    branch_var_limit: &branch_limit,
+                },
+                GpuSolverProductionMaxSatCandidate {
+                    score: 7,
+                    cnf: &gpu_candidate_high,
+                    branch_var_limit: &branch_limit,
+                },
+            ],
+        )
+        .expect("accepted GPU runtime evidence must gate multi-candidate MaxSAT through GPU CDCL");
+
+    assert_eq!(report.candidate_evidence_records, 2);
+    assert_eq!(report.optimum_score, 7);
+    assert_eq!(report.candidates_checked, 4);
+    assert_eq!(report.gpu_cdcl_candidate_solves, 4);
+
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 2);
+    assert_eq!(trace.gpu_maxsat_candidate_solves, 4);
+    assert_eq!(trace.gpu_maxsat_optima, 2);
     assert_eq!(trace.cpu_assignment_enumerations, 0);
     assert_eq!(trace.cpu_maxsat_enumerations, 0);
 }

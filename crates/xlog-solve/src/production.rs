@@ -138,6 +138,8 @@ pub struct GpuSolverProductionMaxSatCandidate<'a> {
 /// Summary of one bounded GPU-backed MaxSAT production adapter run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GpuSolverProductionMaxSatReport {
+    /// Number of accepted GPU epistemic candidate evidence records consumed.
+    pub candidate_evidence_records: u64,
     /// Best score among GPU-certified satisfiable candidates.
     pub optimum_score: u64,
     /// Number of candidate CNFs checked.
@@ -927,6 +929,7 @@ impl GpuSolverProductionAdapter {
         self.trace.require_zero_cpu_search()?;
 
         Ok(GpuSolverProductionMaxSatReport {
+            candidate_evidence_records: 0,
             optimum_score,
             candidates_checked: candidates.len() as u64,
             gpu_cdcl_candidate_solves: self
@@ -948,11 +951,51 @@ impl GpuSolverProductionAdapter {
         candidates: &[GpuSolverProductionMaxSatCandidate<'_>],
     ) -> Result<GpuSolverProductionMaxSatReport> {
         require_accepted_gpu_solver_evidence(provider, result)?;
-        let report = self.solve_weighted_maxsat_candidates(candidates)?;
+        let mut report = self.solve_weighted_maxsat_candidates(candidates)?;
+        report.candidate_evidence_records = 1;
         self.trace.accepted_gpu_candidate_evidence_consumed = self
             .trace
             .accepted_gpu_candidate_evidence_consumed
             .saturating_add(1);
+        self.trace.require_zero_cpu_search()?;
+        Ok(report)
+    }
+
+    /// Solve a bounded weighted MaxSAT candidate set once per accepted GPU epistemic candidate.
+    pub fn solve_multi_candidate_weighted_maxsat_with_gpu_execution_results(
+        &mut self,
+        provider: &CudaKernelProvider,
+        results: &[&EpistemicGpuExecutionResult],
+        candidates: &[GpuSolverProductionMaxSatCandidate<'_>],
+    ) -> Result<GpuSolverProductionMaxSatReport> {
+        if results.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production MaxSAT".to_string(),
+                context: "multi-candidate MaxSAT requires at least one accepted GPU result"
+                    .to_string(),
+            });
+        }
+        for result in results {
+            require_accepted_gpu_solver_evidence(provider, result)?;
+        }
+
+        let mut report = GpuSolverProductionMaxSatReport::default();
+        for _ in results {
+            let step_report = self.solve_weighted_maxsat_candidates(candidates)?;
+            report.candidate_evidence_records = report.candidate_evidence_records.saturating_add(1);
+            report.optimum_score = report.optimum_score.max(step_report.optimum_score);
+            report.candidates_checked = report
+                .candidates_checked
+                .saturating_add(step_report.candidates_checked);
+            report.gpu_cdcl_candidate_solves = report
+                .gpu_cdcl_candidate_solves
+                .saturating_add(step_report.gpu_cdcl_candidate_solves);
+            self.trace.accepted_gpu_candidate_evidence_consumed = self
+                .trace
+                .accepted_gpu_candidate_evidence_consumed
+                .saturating_add(1);
+        }
+
         self.trace.require_zero_cpu_search()?;
         Ok(report)
     }
