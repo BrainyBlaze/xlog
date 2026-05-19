@@ -271,6 +271,45 @@ pub struct EpistemicGpuFinalResultTransferTrace {
     pub tracked_data_plane_dtoh_bytes: u64,
 }
 
+/// Typed interpretation of nonzero GPU epistemic rejection codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EpistemicGpuRejectionReason {
+    /// Candidate was rejected because its world-view row was inactive.
+    InactiveWorld,
+    /// Candidate buffer contained a value outside the valid boolean bit range.
+    InvalidCandidateBit,
+    /// Candidate did not have a reduced-model tuple source to validate against.
+    MissingReducedModel,
+    /// Candidate assumptions were not supported by model-membership evidence.
+    UnsatisfiedMembership,
+}
+
+impl EpistemicGpuRejectionReason {
+    /// Return the raw device rejection code used by the CUDA kernels.
+    pub const fn code(self) -> u32 {
+        match self {
+            Self::InactiveWorld => 2,
+            Self::InvalidCandidateBit => 3,
+            Self::MissingReducedModel => 4,
+            Self::UnsatisfiedMembership => 5,
+        }
+    }
+
+    /// Decode a nonzero device rejection code into a typed reason.
+    pub fn from_code(code: u32) -> Result<Self> {
+        match code {
+            2 => Ok(Self::InactiveWorld),
+            3 => Ok(Self::InvalidCandidateBit),
+            4 => Ok(Self::MissingReducedModel),
+            5 => Ok(Self::UnsatisfiedMembership),
+            other => Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU rejection reason".to_string(),
+                context: format!("unknown device rejection code {other}"),
+            }),
+        }
+    }
+}
+
 /// Device-derived semantic summary for Generate-Propagate-Test execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EpistemicGpuSemanticTrace {
@@ -685,6 +724,15 @@ impl EpistemicGpuFinalResultTransferTrace {
 }
 
 impl EpistemicGpuSemanticTrace {
+    /// Decode nonzero device rejection codes into typed GPU semantic reasons.
+    pub fn typed_rejection_reasons(&self) -> Result<Vec<EpistemicGpuRejectionReason>> {
+        self.rejection_reasons
+            .iter()
+            .copied()
+            .map(EpistemicGpuRejectionReason::from_code)
+            .collect()
+    }
+
     /// Summarize accepted/rejected candidates from the device rejection buffer.
     pub fn from_device_rejection_reasons(
         provider: &xlog_cuda::CudaKernelProvider,

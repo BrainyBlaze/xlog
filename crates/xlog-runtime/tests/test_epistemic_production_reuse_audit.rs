@@ -102,6 +102,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(runtime.contains("from_final_output(&self.provider, &final_output)"));
     assert!(runtime.contains("EpistemicGpuSemanticTrace"));
     assert!(runtime.contains("from_device_rejection_reasons"));
+    assert!(runtime.contains("EpistemicGpuRejectionReason"));
+    assert!(runtime.contains("typed_rejection_reasons"));
     assert!(runtime.contains("dtoh_small_metadata_untracked"));
     assert!(runtime.contains("&workspace.candidate_assumptions"));
     assert!(cuda.contains("complete_membership"));
@@ -119,6 +121,9 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
         integration.contains("faeel_independently_founded_self_possible_reaches_gpu_runtime_path")
     );
     assert!(integration.contains("g91_self_supported_possible_reaches_gpu_runtime_path"));
+    assert!(integration
+        .contains("accepted_gpu_execution_semantic_trace_matches_gpt_oracle_rejection_reason"));
+    assert!(integration.contains("run_generate_propagate_test"));
     assert!(
         integration.contains("split_gpu_world_view_distinguishes_absent_possible_from_not_known")
     );

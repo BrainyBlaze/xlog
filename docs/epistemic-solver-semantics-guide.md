@@ -282,9 +282,11 @@ hot-path transfer-budget window. That trace reads bounded rejection-reason
 metadata from the device buffer and reports generated, guess, propagated,
 pruned, tested, reduced-model-slot, accepted-world-view, rejected-candidate, and
 rejection-reason counts with zero CPU candidate enumeration and zero CPU
-world-view validation counters. This is certification evidence for bounded
-runtime fixtures, not full semantic parity across every G91/FAEEL/GPT/splitting
-case.
+world-view validation counters. `EpistemicGpuRejectionReason` decodes nonzero
+device rejection codes so bounded GPU traces can be compared with the GPT
+oracle's typed rejection expectations. This is certification evidence for
+bounded runtime fixtures, not full semantic parity across every
+G91/FAEEL/GPT/splitting case.
 
 ## Epistemic Splitting
 

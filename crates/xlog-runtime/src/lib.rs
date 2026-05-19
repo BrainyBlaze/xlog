@@ -16,10 +16,10 @@ pub use executor::{
     EpistemicGpuFinalResultTransferTrace, EpistemicGpuFinalTupleMaterializationTrace,
     EpistemicGpuKernelTimingTrace, EpistemicGpuMaterializationTrace,
     EpistemicGpuModelMembershipSource, EpistemicGpuModelMembershipTrace,
-    EpistemicGpuPreparedExecution, EpistemicGpuPropagationTrace, EpistemicGpuRuntimeCounters,
-    EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace, EpistemicGpuRuntimeWcojCertification,
-    EpistemicGpuTransferBudgetTrace, EpistemicGpuWorkspace, EpistemicGpuWorkspaceCapacities,
-    EpistemicGpuWorkspaceLayout, EpistemicGpuWorkspaceResetTrace,
+    EpistemicGpuPreparedExecution, EpistemicGpuPropagationTrace, EpistemicGpuRejectionReason,
+    EpistemicGpuRuntimeCounters, EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace,
+    EpistemicGpuRuntimeWcojCertification, EpistemicGpuTransferBudgetTrace, EpistemicGpuWorkspace,
+    EpistemicGpuWorkspaceCapacities, EpistemicGpuWorkspaceLayout, EpistemicGpuWorkspaceResetTrace,
     EpistemicGpuWorldViewValidationTrace, Executor,
 };
 pub use ilp_registry::{read_device_row_count, IlpRegistry, IlpTagEntry, IlpTaggedResult};

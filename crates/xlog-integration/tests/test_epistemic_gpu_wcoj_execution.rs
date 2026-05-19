@@ -12,7 +12,8 @@ use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_ir::EirEpistemicMode;
 use xlog_logic::epistemic::{
     compile_epistemic_gpu_execution_with_stats_snapshot,
-    compile_epistemic_gpu_split_execution_with_stats_snapshot,
+    compile_epistemic_gpu_split_execution_with_stats_snapshot, run_generate_propagate_test,
+    EpistemicInterpretation, FaeelNoModelReason, GeneratePropagateTestConfig,
 };
 use xlog_logic::{parse_program, Compiler};
 use xlog_prob::epistemic::{EpistemicAssumption, EpistemicEvidenceTerm};
@@ -21,8 +22,9 @@ use xlog_prob::epistemic_production::{
 };
 use xlog_prob::exact::GpuConfig;
 use xlog_runtime::{
-    read_device_row_count, EpistemicGpuModelMembershipSource, EpistemicGpuRuntimePreflight,
-    EpistemicGpuRuntimeWcojCertification, EpistemicGpuWorkspaceCapacities, Executor,
+    read_device_row_count, EpistemicGpuModelMembershipSource, EpistemicGpuRejectionReason,
+    EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeWcojCertification,
+    EpistemicGpuWorkspaceCapacities, Executor,
 };
 use xlog_solve::{
     Clause, GpuCdclConfig, GpuCnf, GpuSolverProductionAdapter, GpuSolverProductionExpectation,
@@ -871,6 +873,96 @@ fn accepted_gpu_execution_records_device_semantic_trace_counts() {
     assert_eq!(
         result.semantic_trace.rejection_reason_metadata_bytes,
         2 * std::mem::size_of::<u32>() as u64
+    );
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
+}
+
+#[test]
+fn accepted_gpu_execution_semantic_trace_matches_gpt_oracle_rejection_reason() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X).
+        "#,
+    )
+    .expect("parse GPT oracle parity fixture");
+    let oracle = run_generate_propagate_test(
+        &program,
+        vec![
+            EpistemicInterpretation::new(),
+            EpistemicInterpretation::new().with_known("edge", 1),
+        ],
+        GeneratePropagateTestConfig { max_candidates: 2 },
+    )
+    .expect("run bounded GPT oracle");
+    assert_eq!(
+        oracle.trace.rejection_reasons,
+        vec![FaeelNoModelReason::UnsatisfiedLiteral {
+            predicate: "edge".to_string(),
+            arity: 1,
+        }]
+    );
+
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile GPT oracle parity executable");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &executable.relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation("node", upload_unary_u32(&fix.memory, &[1, 2]));
+    executor.put_relation("edge", upload_unary_u32(&fix.memory, &[1]));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 2,
+            },
+        )
+        .expect("execute GPT oracle parity fixture");
+
+    assert_eq!(
+        result.semantic_trace.generated_candidates,
+        oracle.trace.generated
+    );
+    assert_eq!(result.semantic_trace.guesses, oracle.trace.guesses);
+    assert_eq!(
+        result.semantic_trace.propagated_candidates,
+        oracle.trace.propagated
+    );
+    assert_eq!(result.semantic_trace.pruned_candidates, oracle.trace.pruned);
+    assert_eq!(result.semantic_trace.tested_candidates, oracle.trace.tested);
+    assert_eq!(
+        result.semantic_trace.accepted_candidates,
+        oracle.trace.accepted
+    );
+    assert_eq!(
+        result.semantic_trace.accepted_world_views,
+        oracle.trace.accepted_world_views
+    );
+    assert_eq!(
+        result.semantic_trace.rejected_candidates,
+        oracle.trace.rejected
+    );
+    assert_eq!(
+        result
+            .semantic_trace
+            .typed_rejection_reasons()
+            .expect("decode GPU rejection reasons"),
+        vec![EpistemicGpuRejectionReason::UnsatisfiedMembership]
     );
     assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
     assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
