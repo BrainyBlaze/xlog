@@ -340,6 +340,7 @@ fn accepted_epistemic_k6_execution_certifies_g38b_helper_histogram_path() {
             certified_sorted_layout_requirements: 1..,
             certified_helper_split_specs: 1..,
             observed_metadata_builds: 1..,
+            observed_metadata_build_nanos: 1..,
             ..
         }
     ));
@@ -350,6 +351,10 @@ fn accepted_epistemic_k6_execution_certifies_g38b_helper_histogram_path() {
     assert!(
         result.trace.counter_delta.kclique_metadata_build_count >= 1,
         "accepted epistemic K6 must build production K-clique histogram metadata"
+    );
+    assert!(
+        result.trace.counter_delta.kclique_metadata_build_nanos >= 1,
+        "accepted epistemic K6 must time production K-clique histogram metadata builds"
     );
     assert_eq!(result.final_result_transfer.final_output_rows, 1);
     assert_eq!(result.final_result_transfer.final_output_column_count, 6);

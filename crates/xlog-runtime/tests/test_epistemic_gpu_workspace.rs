@@ -208,6 +208,7 @@ fn runtime_wcoj_certification_accepts_actual_kclique_dispatch_delta() {
     let after = EpistemicGpuRuntimeCounters {
         wcoj_clique5_dispatch_count: 1,
         kclique_metadata_build_count: 1,
+        kclique_metadata_build_nanos: 42,
         wcoj_layout_sort_invocation_count: 2,
         ..EpistemicGpuRuntimeCounters::default()
     };
@@ -223,6 +224,7 @@ fn runtime_wcoj_certification_accepts_actual_kclique_dispatch_delta() {
             certified_helper_split_specs: 1,
             observed_layout_sorts: 2,
             observed_metadata_builds: 1,
+            observed_metadata_build_nanos: 42,
         }
     );
 }
@@ -243,12 +245,14 @@ fn runtime_trace_preserves_counter_snapshots_and_wcoj_certification() {
     let before = EpistemicGpuRuntimeCounters {
         wcoj_clique5_dispatch_count: 2,
         kclique_metadata_build_count: 4,
+        kclique_metadata_build_nanos: 10,
         wcoj_layout_sort_invocation_count: 8,
         ..EpistemicGpuRuntimeCounters::default()
     };
     let after = EpistemicGpuRuntimeCounters {
         wcoj_clique5_dispatch_count: 3,
         kclique_metadata_build_count: 5,
+        kclique_metadata_build_nanos: 52,
         wcoj_layout_sort_invocation_count: 10,
         ..EpistemicGpuRuntimeCounters::default()
     };
@@ -260,6 +264,7 @@ fn runtime_trace_preserves_counter_snapshots_and_wcoj_certification() {
     assert_eq!(trace.counters_after.wcoj_clique5_dispatch_count, 3);
     assert_eq!(trace.counter_delta.wcoj_clique5_dispatch_count, 1);
     assert_eq!(trace.counter_delta.kclique_metadata_build_count, 1);
+    assert_eq!(trace.counter_delta.kclique_metadata_build_nanos, 42);
     assert_eq!(trace.counter_delta.wcoj_layout_sort_invocation_count, 2);
     assert_eq!(
         trace.wcoj_certification,
@@ -271,6 +276,7 @@ fn runtime_trace_preserves_counter_snapshots_and_wcoj_certification() {
             certified_helper_split_specs: 1,
             observed_layout_sorts: 2,
             observed_metadata_builds: 1,
+            observed_metadata_build_nanos: 42,
         }
     );
     trace

@@ -28,6 +28,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(audit.contains("G39 completion audit"));
     assert!(audit.contains("accepted K7 and K8 fixtures"));
     assert!(audit.contains("wcoj_clique8_dispatch_count"));
+    assert!(audit.contains("kclique_metadata_build_nanos"));
+    assert!(audit.contains("observed metadata-build nanoseconds"));
     assert!(audit.contains("EpistemicGpuSemanticTrace"));
     assert!(audit.contains("kclique_wcoj_max_arity"));
 
@@ -51,6 +53,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(runtime.contains("certified_edge_permutation_slots"));
     assert!(runtime.contains("certified_sorted_layout_requirements"));
     assert!(runtime.contains("certified_helper_split_specs"));
+    assert!(runtime.contains("kclique_metadata_build_nanos"));
+    assert!(runtime.contains("observed_metadata_build_nanos"));
     assert!(runtime.contains("planned_hash_route_count"));
     assert!(runtime.contains("EpistemicGpuFinalResultTransferTrace"));
     assert!(runtime.contains("from_final_output(&self.provider, &final_output)"));

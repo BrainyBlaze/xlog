@@ -1141,6 +1141,8 @@ pub struct EpistemicGpuRuntimeCounters {
     pub wcoj_layout_fast_path_hit_count: u64,
     /// K-clique metadata builds observed by the provider.
     pub kclique_metadata_build_count: u64,
+    /// Provider-observed nanoseconds spent building K-clique metadata.
+    pub kclique_metadata_build_nanos: u64,
 }
 
 impl EpistemicGpuRuntimeCounters {
@@ -1180,6 +1182,9 @@ impl EpistemicGpuRuntimeCounters {
             kclique_metadata_build_count: self
                 .kclique_metadata_build_count
                 .saturating_sub(before.kclique_metadata_build_count),
+            kclique_metadata_build_nanos: self
+                .kclique_metadata_build_nanos
+                .saturating_sub(before.kclique_metadata_build_nanos),
         }
     }
 
@@ -1223,6 +1228,8 @@ pub enum EpistemicGpuRuntimeWcojCertification {
         observed_layout_sorts: u64,
         /// Observed provider K-clique metadata builds.
         observed_metadata_builds: u64,
+        /// Observed provider time spent building K-clique metadata.
+        observed_metadata_build_nanos: u64,
     },
     /// The plan had K-clique WCOJ obligations, but counters did not advance.
     MissingRequiredWcojDispatch {
@@ -1297,6 +1304,7 @@ impl EpistemicGpuRuntimeWcojCertification {
             certified_helper_split_specs: preflight.helper_split_spec_count,
             observed_layout_sorts: delta.wcoj_layout_sort_invocation_count,
             observed_metadata_builds: delta.kclique_metadata_build_count,
+            observed_metadata_build_nanos: delta.kclique_metadata_build_nanos,
         }
     }
 }
@@ -1465,6 +1473,7 @@ impl Executor {
             wcoj_layout_sort_invocation_count: self.provider.wcoj_layout_sort_invocation_count(),
             wcoj_layout_fast_path_hit_count: self.provider.wcoj_layout_fast_path_hit_count(),
             kclique_metadata_build_count: self.provider.kclique_metadata_build_count(),
+            kclique_metadata_build_nanos: self.provider.kclique_metadata_build_nanos(),
         }
     }
 

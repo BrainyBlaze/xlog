@@ -147,7 +147,7 @@ runtime actually touches:
   evidence.
 - Goal 038-B: reuse the production K-clique WCOJ path: `MultiwayPlan`,
   `KCliqueVariableOrder`, sorted-layout requirements, runtime histogram
-  metadata, cost-gated hash routing, and helper-splitting specs.
+  metadata count/timing, cost-gated hash routing, and helper-splitting specs.
 - Goal 039: reuse the existing production substrate for chain dispatch, K7/K8
   templates, sort labels, DLPack/zero-transfer discipline, CUDA Graphs, and DTS
   replay certification only when the epistemic runtime path actually invokes
