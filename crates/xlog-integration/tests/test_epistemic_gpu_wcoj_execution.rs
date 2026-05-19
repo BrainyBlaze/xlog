@@ -8100,6 +8100,79 @@ fn accepted_gpu_execution_result_gates_solver_maxsat_lifecycle_path() {
 }
 
 #[test]
+fn accepted_gpu_execution_result_rejects_empty_maxsat_lifecycle_before_lifecycle_work() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let result = execute_unary_edge_epistemic_fixture(
+        &fix,
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X).
+        "#,
+        &[1, 2],
+        &[1],
+    );
+
+    let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
+    let unsat_instance = SolveInstance::new(
+        1,
+        vec![
+            Clause::new(vec![Literal::positive(0)]),
+            Clause::new(vec![Literal::negative(0)]),
+        ],
+    );
+    let sat_cnf = GpuCnf::from_host(&sat_instance, &fix.provider).expect("upload SAT CNF");
+    let unsat_cnf = GpuCnf::from_host(&unsat_instance, &fix.provider).expect("upload UNSAT CNF");
+    let branch_limit = upload_u32_scalar(&fix.provider, 1);
+    let mut adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let mut workspace = adapter
+        .new_workspace(unsat_cnf.var_cap, unsat_cnf.clause_cap)
+        .expect("new MaxSAT lifecycle workspace");
+    let assign_ptr_before = workspace.assign_device_ptr();
+
+    let err = adapter
+        .solve_maxsat_lifecycle_with_gpu_execution_result(
+            &fix.provider,
+            &result,
+            &mut workspace,
+            &[
+                GpuSolverProductionLifecycleStep {
+                    cnf: &sat_cnf,
+                    branch_var_limit: &branch_limit,
+                    expectation: GpuSolverProductionExpectation::Sat,
+                },
+                GpuSolverProductionLifecycleStep {
+                    cnf: &unsat_cnf,
+                    branch_var_limit: &branch_limit,
+                    expectation: GpuSolverProductionExpectation::Unsat,
+                },
+            ],
+            &[],
+        )
+        .expect_err("empty MaxSAT lifecycle candidates must fail before lifecycle work");
+    assert!(format!("{err}").contains("bounded MaxSAT adapter requires at least one candidate CNF"));
+
+    assert_eq!(workspace.assign_device_ptr(), assign_ptr_before);
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 0);
+    assert_eq!(trace.gpu_assumption_pushes, 0);
+    assert_eq!(trace.gpu_assumption_retractions, 0);
+    assert_eq!(trace.gpu_lifecycle_workspace_reuses, 0);
+    assert_eq!(trace.gpu_cdcl_sat_solves, 0);
+    assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 0);
+    assert_eq!(trace.gpu_maxsat_candidate_solves, 0);
+    assert_eq!(trace.gpu_maxsat_optima, 0);
+    assert_eq!(trace.cpu_assignment_enumerations, 0);
+    assert_eq!(trace.cpu_maxsat_enumerations, 0);
+}
+
+#[test]
 fn accepted_operator_gpu_execution_results_gate_solver_lifecycle_path() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");

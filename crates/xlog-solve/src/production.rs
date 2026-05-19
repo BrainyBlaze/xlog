@@ -1226,6 +1226,26 @@ impl GpuSolverProductionAdapter {
         Ok(report)
     }
 
+    fn require_maxsat_lifecycle_inputs(
+        steps: &[GpuSolverProductionLifecycleStep<'_>],
+        candidates: &[GpuSolverProductionMaxSatCandidate<'_>],
+    ) -> Result<()> {
+        if steps.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production MaxSAT lifecycle".to_string(),
+                context: "accepted MaxSAT lifecycle requires at least one lifecycle step"
+                    .to_string(),
+            });
+        }
+        if candidates.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production MaxSAT lifecycle".to_string(),
+                context: "bounded MaxSAT adapter requires at least one candidate CNF".to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// Execute an accepted solver lifecycle, then a bounded MaxSAT candidate set.
     ///
     /// The same accepted GPU epistemic evidence gates both phases. The adapter
@@ -1239,6 +1259,7 @@ impl GpuSolverProductionAdapter {
         steps: &[GpuSolverProductionLifecycleStep<'_>],
         candidates: &[GpuSolverProductionMaxSatCandidate<'_>],
     ) -> Result<GpuSolverProductionMaxSatLifecycleReport> {
+        Self::require_maxsat_lifecycle_inputs(steps, candidates)?;
         require_accepted_gpu_solver_evidence(provider, result)?;
 
         let lifecycle = self.solve_assumption_lifecycle_steps(workspace, steps)?;
@@ -1327,6 +1348,7 @@ impl GpuSolverProductionAdapter {
                         .to_string(),
             });
         }
+        Self::require_maxsat_lifecycle_inputs(steps, candidates)?;
         for result in results {
             require_accepted_gpu_solver_evidence(provider, result)?;
         }
@@ -1359,6 +1381,7 @@ impl GpuSolverProductionAdapter {
         steps: &[GpuSolverProductionLifecycleStep<'_>],
         candidates: &[GpuSolverProductionMaxSatCandidate<'_>],
     ) -> Result<GpuSolverProductionMaxSatLifecycleReport> {
+        Self::require_maxsat_lifecycle_inputs(steps, candidates)?;
         let results = require_accepted_gpu_solver_batch_evidence(provider, evidence.batch)?;
         self.trace.accepted_gpu_batch_candidate_evidence_consumed = self
             .trace
