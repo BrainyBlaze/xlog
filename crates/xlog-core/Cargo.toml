@@ -12,7 +12,7 @@ readme = "../../README.md"
 
 [dependencies]
 thiserror.workspace = true
-arrow = { version = "53", default-features = false, features = ["ffi"] }
+arrow = { version = "58", default-features = false, features = ["ffi"] }
 
 [dev-dependencies]
 serial_test = "3"

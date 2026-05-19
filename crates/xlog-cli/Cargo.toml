@@ -16,7 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
-arrow = { version = "53", default-features = false, features = ["ffi", "ipc", "csv", "prettyprint"] }
+arrow = { version = "58", default-features = false, features = ["ffi", "ipc", "csv", "prettyprint"] }
 thiserror.workspace = true
 xlog-core.workspace = true
 xlog-cuda.workspace = true
