@@ -25,10 +25,12 @@ All notable changes to this project are documented in this file.
   keys, stale-index invalidation, deterministic LRU budget eviction, and
   background-build request/completion/deferred counters plus a runtime-backed
   recorded provider build path.
-- Added v0.8.6 runtime consumer certification examples and validator for
+- Added v0.8.6 runtime consumer example-execution fixtures and validator for
   DTS-DLM-shaped delta/optimizer workloads, neutral Mistaber-derived `.xlog`
   fixtures, v0.9.0 substrate primitives, and public pyxlog compatibility,
   reusing the v0.8.0/v0.8.5 validators and recording production-path evidence.
+  Full consumer certification remains held until label-derived feature coverage
+  is replaced with behavior-proven probes or explicitly scope-amended.
 
 ### Changed
 

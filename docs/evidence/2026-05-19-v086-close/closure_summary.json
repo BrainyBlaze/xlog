@@ -4,14 +4,14 @@
   "date": "2026-05-19",
   "governing_goal": "docs/plans/2026-05-19-agent-v086-dts-runtime-completion-goal.md",
   "proposal": "docs/plans/2026-05-19-v086-closure-proposal.md",
-  "release_decision": "MERGE_READY",
+  "release_decision": "HOLD_FOR_FIXES",
   "release_actions_authorized": {
     "board_update": false,
     "merge": false,
     "push": false,
     "tag": false
   },
-  "status": "PASS",
+  "status": "HOLD_FOR_FIXES",
   "subgoals": {
     "G086_PRE": {
       "commit": "e6edb49c",
@@ -54,25 +54,44 @@
     "G086_INDEX": {
       "commit": "702e1f8f + 0e2a5420",
       "evidence": "docs/evidence/2026-05-19-v086-persistent-hash-index/README.md",
-      "status": "PASS"
+      "status": "BLOCKED"
     },
     "G086_CONSUMERS": {
-      "commit": "37f16651",
+      "commit": "37f16651 + review amendment",
       "evidence": "docs/evidence/2026-05-19-v086-consumers/README.md",
-      "status": "PASS"
+      "status": "BLOCKED"
     },
     "G086_INT": {
       "commit": "b72f61ea + final validation refresh",
       "evidence": "docs/evidence/2026-05-19-v086-int/README.md",
-      "status": "PASS"
+      "status": "BLOCKED"
     },
     "G086_CLOSE": {
-      "commit": "09f5ad4b + final evidence refresh",
+      "commit": "09f5ad4b + review amendment",
       "evidence": "docs/evidence/2026-05-19-v086-close/README.md",
-      "status": "PASS"
+      "status": "PASS_WITH_HOLD_FOR_FIXES"
     }
   },
-  "blocked_or_scope_amendment_items": [],
+  "blocked_or_scope_amendment_items": [
+    {
+      "goal": "G086_INDEX",
+      "metric": "M086_INDEX.5 performance",
+      "status": "BLOCKED",
+      "description": "No >=1.5x persistent-index timing speedup is claimed, and no coordinator waiver or amended target is recorded."
+    },
+    {
+      "goal": "G086_CONSUMERS",
+      "metric": "M086_CONSUMERS.1/M086_CONSUMERS.3 consumer feature proof",
+      "status": "BLOCKED",
+      "description": "Feature coverage is label-derived from expected.json declarations; examples prove xlog-cli run/explain and link feature-node evidence, but do not directly prove native exact/adaptive/index behavior inside each consumer fixture."
+    },
+    {
+      "goal": "G086_CONSUMERS",
+      "metric": "pyxlog persistent-index session reuse",
+      "status": "BLOCKED",
+      "description": "Public pyxlog session compatibility is green, but persistent hash-index reuse across session mutation and reevaluation is not directly proven."
+    }
+  ],
   "unclaimed_performance_metrics": [
     {
       "goal": "G086_INDEX",
@@ -84,6 +103,7 @@
   "verification": {
     "integration_evidence": "docs/evidence/2026-05-19-v086-int/README.md",
     "consumer_evidence": "docs/evidence/2026-05-19-v086-consumers/validation_summary.json",
+    "consumer_certification_status": "BLOCKED",
     "latest_consumer_examples": {
       "v080": 5,
       "v085": 10,
@@ -92,5 +112,5 @@
     "python_bundle": "39 passed in 52.33s",
     "workspace_check": "cargo check --workspace exit 0"
   },
-  "v090_rebase_note": "v0.9.0 should rebase or merge after any accepted v0.8.6 landing because exact type dispatch, chain shared-memory scoring, runtime CSE, adaptive candidate adoption, and persistent-index telemetry affect the substrate expected by epistemic/solver work."
+  "v090_rebase_note": "v0.9.0 should rebase or merge after any accepted v0.8.6 landing because exact type dispatch, chain shared-memory scoring, runtime CSE, adaptive candidate adoption, and persistent-index telemetry affect the substrate expected by epistemic/solver work. The v0.8.6 branch remains held until the listed blockers are fixed, waived, or scope-amended."
 }

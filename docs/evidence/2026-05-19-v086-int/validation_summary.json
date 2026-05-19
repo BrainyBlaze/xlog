@@ -3,7 +3,7 @@
   "commit_under_test": "0e2a5420",
   "date": "2026-05-19",
   "suite": "G086_INT",
-  "status": "PASS",
+  "status": "BLOCKED",
   "metrics": {
     "M086_INT.1 formatting": {
       "command": "cargo fmt --check",
@@ -32,11 +32,12 @@
     },
     "M086_INT.5 examples": {
       "command": "python scripts/validate_v086_examples.py",
-      "status": "PASS",
+      "status": "PASS_WITH_CONSUMER_PROOF_GAP",
       "observed": {
         "v080_examples": 5,
         "v085_examples": 10,
-        "v086_examples": 5
+        "v086_examples": 5,
+        "consumer_certification_status": "BLOCKED"
       }
     },
     "M086_INT.6 transfer guards": {
@@ -54,7 +55,7 @@
       ]
     },
     "M086_INT.7 performance": {
-      "status": "PASS",
+      "status": "BLOCKED",
       "evidence": {
         "delta": "recompute_call_reduction_ratio=3.0; hot_path_dtoh_calls=0",
         "chain_shared_memory": "speedup_ratio=5.58300273358745 on chain_hot fixture",
@@ -101,9 +102,10 @@
       "summary": "docs/evidence/2026-05-19-v086-consumers/compat_v085_validation_summary.json"
     },
     "v086_examples": {
-      "status": "PASS",
+      "status": "PASS_WITH_CONSUMER_PROOF_GAP",
       "example_count": 5,
-      "summary": "docs/evidence/2026-05-19-v086-consumers/validation_summary.json"
+      "summary": "docs/evidence/2026-05-19-v086-consumers/validation_summary.json",
+      "consumer_certification_status": "BLOCKED"
     }
   },
   "unresolved": [
@@ -111,6 +113,16 @@
       "status": "UNCLAIMED_SPEEDUP",
       "scope": "G086_INDEX performance claim only",
       "reason": "The persistent-index evidence claims deterministic reuse, recorded background building, deferred current-evaluation reuse, invalidation, budget, and background request/completion/deferred telemetry; it does not claim a >=1.5x timing speedup."
+    },
+    {
+      "status": "CONSUMER_PROOF_GAP",
+      "scope": "G086_CONSUMERS feature coverage",
+      "reason": "The v0.8.6 examples execute through xlog-cli, but feature coverage is label-derived from expected.json declarations and is not direct behavior proof for every declared native/runtime feature."
+    },
+    {
+      "status": "PYXLOG_REUSE_UNPROVEN",
+      "scope": "pyxlog persistent-index session reuse",
+      "reason": "Public pyxlog compatibility is green, but persistent hash-index reuse across session mutation and reevaluation is not directly proven."
     }
   ]
 }

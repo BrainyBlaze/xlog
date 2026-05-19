@@ -50,11 +50,49 @@ FEATURE_EVIDENCE = {
     "adaptive_reoptimization": ROOT / "docs/evidence/2026-05-19-v086-adaptive-reoptimization/measurements.json",
     "persistent_hash_index": ROOT / "docs/evidence/2026-05-19-v086-persistent-hash-index/measurements.json",
 }
+CONSUMER_PROOF_GAPS = [
+    {
+        "id": "label-derived-feature-coverage",
+        "status": "BLOCKED",
+        "reason": (
+            "feature_coverage is label-derived from expected.json declarations; "
+            "the .xlog examples prove parser/RIR/run/explain execution and "
+            "link to feature-node evidence, but they do not by themselves "
+            "prove native exact-induction, adaptive reoptimization, or "
+            "persistent-index behavior inside each labeled example"
+        ),
+    },
+    {
+        "id": "pyxlog-persistent-index-session-reuse",
+        "status": "BLOCKED",
+        "reason": (
+            "persistent hash-index reuse is proven on reused runtime Executors; "
+            "public pyxlog LogicRelationSession evaluation does not yet expose "
+            "targeted persistent-index reuse telemetry across session mutation "
+            "and reevaluation"
+        ),
+    },
+]
 
 
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise SystemExit(message)
+
+
+def _resolve_output_path(path: Path) -> Path:
+    expanded = path.expanduser()
+    if expanded.is_absolute():
+        return expanded.resolve()
+    return (ROOT / expanded).resolve()
+
+
+def _display_path(path: Path) -> str:
+    resolved = _resolve_output_path(path)
+    try:
+        return str(resolved.relative_to(ROOT))
+    except ValueError:
+        return str(resolved)
 
 
 def _base_xlog_command(args: argparse.Namespace) -> list[str]:
@@ -292,8 +330,9 @@ def _run_existing_validator(
     output: Path,
     env: dict[str, str],
 ) -> dict[str, Any]:
+    output_path = _resolve_output_path(output)
     raw = _run_command(
-        [args.python, script, "--output", str(output), "--timeout", str(args.compat_timeout)],
+        [args.python, script, "--output", str(output_path), "--timeout", str(args.compat_timeout)],
         timeout=args.compat_timeout * 20,
         env=env,
     )
@@ -301,11 +340,11 @@ def _run_existing_validator(
         raise SystemExit(
             f"{script} failed with exit {raw['returncode']}\nSTDOUT:\n{raw['stdout']}\nSTDERR:\n{raw['stderr']}"
         )
-    payload = _read_json(output)
+    payload = _read_json(output_path)
     return {
         "status": payload.get("status", "UNKNOWN"),
         "script": script,
-        "output": str(output.relative_to(ROOT)),
+        "output": _display_path(output_path),
         "duration_sec": raw["duration_sec"],
         "returncode": raw["returncode"],
         "example_count": payload.get("example_count"),
@@ -427,6 +466,10 @@ def _aggregate(
     return {
         "suite": "G086_CONSUMERS",
         "status": "PASS",
+        "example_execution_status": "PASS",
+        "consumer_certification_status": "BLOCKED",
+        "feature_coverage_source": "expected_json_declarations",
+        "consumer_proof_gaps": CONSUMER_PROOF_GAPS,
         "example_count": len(results),
         "required_example_count": len(EXAMPLES),
         "consumer_coverage": {
@@ -434,6 +477,15 @@ def _aggregate(
             for consumer in sorted(REQUIRED_CONSUMERS)
         },
         "feature_coverage": feature_coverage,
+        "feature_proof_model": {
+            "example_execution": "xlog-cli run/explain over committed .xlog programs",
+            "feature_coverage": "expected.json declarations cross-linked to committed feature-node evidence",
+            "certification_limit": (
+                "declarations plus linked evidence are not equivalent to per-consumer "
+                "runtime probes for native exact induction, adaptive reoptimization, "
+                "or persistent-index pyxlog session reuse"
+            ),
+        },
         "per_example": [
             {
                 "name": result["name"],
@@ -469,6 +521,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     _require(EXAMPLE_ROOT.exists(), f"Missing example root: {EXAMPLE_ROOT}")
+    args.output = _resolve_output_path(args.output)
     evidence_dir = args.output.parent
     evidence_dir.mkdir(parents=True, exist_ok=True)
 

@@ -20,8 +20,8 @@ Scope: `G086_CLOSE` evidence rollup and closure proposal.
 |---|---|---|---|
 | M086_CLOSE.1 sub-goal table | every G086 node listed with commit SHA and metric status | PASS | closure proposal and `closure_summary.json` |
 | M086_CLOSE.2 roadmap sync | v0.8.6 section reflects actual PASS/BLOCKED states | PASS | `ROADMAP.md` persistent-index bullet names recorded background build and unclaimed timing speedup |
-| M086_CLOSE.3 unresolved issues | all red/yellow metrics have explicit disposition | PASS | no unresolved scope blocker; persistent-index >=1.5x timing speedup is not claimed |
-| M086_CLOSE.4 release decision | recommendation is `MERGE_READY`, `HOLD_FOR_FIXES`, or `SCOPE_AMENDMENT_REQUIRED` | PASS | `MERGE_READY` after final validation |
+| M086_CLOSE.3 unresolved issues | all red/yellow metrics have explicit disposition | PASS | persistent-index timing speedup, label-derived consumer feature coverage, and pyxlog persistent-index reuse proof are explicitly blocked |
+| M086_CLOSE.4 release decision | recommendation is `MERGE_READY`, `HOLD_FOR_FIXES`, or `SCOPE_AMENDMENT_REQUIRED` | PASS | `HOLD_FOR_FIXES` |
 | M086_CLOSE.5 no implicit release | no push, tag, board update, or merge without authorization | PASS | no release action performed |
 | M086_CLOSE.6 methodology audit | every sub-goal evidence file includes GDSP/GQM evidence | PASS | methodology scan and README amendments for G086_ADAPT/G086_INDEX |
 
@@ -39,17 +39,22 @@ Scope: `G086_CLOSE` evidence rollup and closure proposal.
 
 ## Release Decision
 
-`MERGE_READY` after final validation.
+`HOLD_FOR_FIXES`.
 
-The previous persistent-index scope blocker has been amended. The branch now
-implements and validates generation/schema/device keying, invalidation, budget
-eviction, repeated-session reuse, background request/completion/deferred
-telemetry, and a runtime-backed recorded provider build path. It still does not
-claim a >=1.5x persistent-index timing speedup; the performance evidence is
-bounded to observed retained-index reuse.
+The branch now implements and validates generation/schema/device keying,
+invalidation, budget eviction, repeated-session reuse, background
+request/completion/deferred telemetry, and a runtime-backed recorded provider
+build path. It still does not claim a >=1.5x persistent-index timing speedup,
+and no waiver or amended target is recorded. Consumer example execution passes,
+but the validator now records that feature coverage is label-derived and that
+pyxlog persistent-index session reuse remains unproven.
 
 ## Required Coordinator Decision
 
-1. Review final validation output.
-2. Authorize any release-board update, merge, push, and tag as separate actions.
-3. v0.9.0 should rebase or merge after any accepted v0.8.6 landing.
+1. Fix, waive, or scope-amend M086_INDEX.5.
+2. Replace label-derived consumer feature coverage with behavior-proven probes
+   or record an explicit coordinator amendment.
+3. Add targeted pyxlog persistent-index reuse evidence or document an
+   authorized scope limitation.
+4. Authorize any release-board update, merge, push, and tag as separate actions
+   only after the hold is cleared.
