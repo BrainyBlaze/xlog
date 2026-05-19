@@ -51,7 +51,7 @@ Earlier ref checks after `git fetch origin --prune` showed:
 | G090_FAEEL | PASS for semantic oracle | Foundedness fixtures pass, but GPU parity remains unproven. |
 | G090_GPT | PARTIAL | CPU trace fixtures pass; GPU-resident candidate generation, propagation staging, candidate-buffer validation, arity 0-3 tuple-source model-membership staging with fixed arity-one/two/three row-scoped ground key comparison, generic arity-N variable-bound tuple matching, `not know` binding polarity, bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, final-row map construction, and final tuple materialization exist; unary/binary/multi-membership and negated final-row filtering fixtures pass, but broader semantic parity remains missing. |
 | G090_SPLIT | PARTIAL | CPU split/recompose fixtures pass and valid split components now lower through GPU executable subplans; full accepted-runtime semantic parity is still missing. |
-| G090_GPU | BLOCKED | GPU-plan, reduced-runtime-plan, workspace allocation/reset, bounded candidate-generation, propagation, candidate-validation, arity 0-3 tuple-source model-membership staging with fixed arity-one/two/three row-scoped ground key comparison over existing relation buffers, generic arity-N variable-bound tuple matching, `not know` binding polarity, world-view-validation, accepted-candidate materialization, final-result flag, final-row map/final tuple materialization kernels, device-derived semantic trace counts, accepted K5/K7/K8 WCOJ dispatch, K5 dispatch-certified edge-permutation/sorted-layout/helper-split trace metrics, K7/K8 K-clique planner preflight reuse, hot-path transfer-budget trace, final-result transfer accounting, CUDA-event elapsed timing/runtime-preflight/fail-closed WCOJ gate/reduced-plan trace contracts exist, but full semantic kernel-buffer parity, full MaxSAT encoding/search coverage, probability wiring, and broader fixture coverage remain missing. |
+| G090_GPU | BLOCKED | GPU-plan, reduced-runtime-plan, workspace allocation/reset, bounded candidate-generation, propagation, candidate-validation, arity 0-3 tuple-source model-membership staging with fixed arity-one/two/three row-scoped ground key comparison over existing relation buffers, generic arity-N variable-bound tuple matching, `not know` binding polarity, world-view-validation, accepted-candidate materialization, final-result flag, final-row map/final tuple materialization kernels, device-derived semantic trace counts, accepted K5/K6/K7/K8 WCOJ dispatch, K5 dispatch-certified edge-permutation/sorted-layout/helper-split trace metrics, K6 G38-B helper/histogram metadata-build trace metrics, K7/K8 K-clique planner preflight reuse, hot-path transfer-budget trace, final-result transfer accounting, CUDA-event elapsed timing/runtime-preflight/fail-closed WCOJ gate/reduced-plan trace contracts exist, but full semantic kernel-buffer parity, full MaxSAT encoding/search coverage, probability wiring, and broader fixture coverage remain missing. |
 | G090_SOLVER | BLOCKED | Accepted GPU runtime evidence can gate GPU CDCL SAT/UNSAT, reusable workspace-backed UNSAT, one-record and two-record bounded push/solve/retract lifecycles, lifecycle UNKNOWN/TIMEOUT propagation, learned-clause arena publication, same-device-CNF learned-clause import/reuse, two-record learned-clause reuse, distinct-CNF learned-clause import rejection, bounded single- and multi-candidate MaxSAT solving, bounded MaxSAT search pruning, and bounded SAT/MaxSAT portfolio dispatch with UNKNOWN/TIMEOUT status propagation, but full MaxSAT encoding/search coverage remains incomplete. |
 | G090_PROB | BLOCKED | Accepted GPU runtime evidence can gate source/program exact compilation, source/program bounded compile/evaluate, two-record accepted source batch compile/evaluate, source/program zero-arity and concrete nonzero-arity evidence conditioning, two-record conditioned source/program query batches, conditioned source/program gradient evaluation, PIR/CNF encoding, and query/gradient evaluation through the existing GPU-native path, but broader probabilistic coverage on accepted world views is incomplete. |
 | G090_CERT | BLOCKED | Missing complete accepted-execution kernel timing, broader WCOJ runtime evidence, zero CPU fallback counters, and post-v0.8 rerun. |
@@ -102,10 +102,11 @@ The branch contains useful scaffolding:
   WCOJ/K-clique/helper route metadata before launch, including max K-clique
   arity and live edge-permutation counts;
 - runtime counter guard that refuses to certify WCOJ evidence from preflight
-  metadata unless production WCOJ counters advance, while accepted K5/K7/K8
+  metadata unless production WCOJ counters advance, while accepted K5/K6/K7/K8
   evidence observes production dispatch counters before model-membership and
-  world-view staging; K5 also certifies edge-permutation, sorted-layout, and
-  helper-split counts inside the dispatch-certified trace;
+  world-view staging; K5 certifies edge-permutation, sorted-layout, and
+  helper-split counts inside the dispatch-certified trace, and K6 certifies
+  G38-B helper-split plus runtime histogram metadata-build counters;
 - K7/K8 preflight evidence, plus K7/K8 runtime evidence, that generated
   epistemic reductions reuse the G39 K-clique template planner metadata, with
   complete 21/28 edge-permutation counts and zero planned-hash/CPU-fallback
@@ -150,7 +151,7 @@ Closure remains blocked until certification includes all of the following:
 - zero CPU fallback counters for candidate enumeration and world-view
   validation;
 - broader WCOJ-eligible epistemic reductions proving successful runtime
-  dispatch beyond the current accepted K5/K7/K8 fixtures, including layout,
+  dispatch beyond the current accepted K5/K6/K7/K8 fixtures, including layout,
   skew-scheduling, and helper-splitting evidence where applicable;
 - full accepted MaxSAT encoding/search coverage across candidate lifecycle
   paths;
