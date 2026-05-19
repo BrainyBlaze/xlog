@@ -2,7 +2,7 @@
 
 Date: 2026-05-19
 Branch: `feat/v086-runtime-completion`
-Validation head after pyxlog persistent-index session amendment: pending commit
+Validation head after pyxlog persistent-index session amendment: `611d8293`
 Implementation evidence head before hold/correction amendment: `0e2a5420`
 Governing goal: `docs/plans/2026-05-19-agent-v086-dts-runtime-completion-goal.md`
 
@@ -44,7 +44,7 @@ proposal.
 | G086_CSE | `1363b05e` | PASS | `docs/evidence/2026-05-19-v086-cse/README.md` |
 | G086_ADAPT | `2d9bdc0f` | PASS | `docs/evidence/2026-05-19-v086-adaptive-reoptimization/README.md` |
 | G086_INDEX | `702e1f8f` + `0e2a5420`; hold correction `81badf31`; performance amendment `df2dbc03` | PASS | `docs/evidence/2026-05-19-v086-persistent-hash-index/README.md` |
-| G086_CONSUMERS | `37f16651`; hold correction `81badf31`; pyxlog session amendment pending | BLOCKED on label-derived consumer feature proof | `docs/evidence/2026-05-19-v086-consumers/README.md` |
+| G086_CONSUMERS | `37f16651`; hold correction `81badf31`; pyxlog session amendment `611d8293` | BLOCKED on label-derived consumer feature proof | `docs/evidence/2026-05-19-v086-consumers/README.md` |
 | G086_INT | `b72f61ea`; hold correction `81badf31` | BLOCKED on release-readiness metrics | `docs/evidence/2026-05-19-v086-int/README.md` |
 | G086_CLOSE | `09f5ad4b`; hold correction `81badf31` | PASS with `HOLD_FOR_FIXES` decision | `docs/evidence/2026-05-19-v086-close/README.md` |
 

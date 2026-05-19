@@ -102,5 +102,5 @@
     }
   },
   "v090_rebase_note": "v0.9.0 should rebase or merge after any accepted v0.8.6 landing because exact type dispatch, chain shared-memory scoring, runtime CSE, adaptive candidate adoption, and persistent-index telemetry affect the substrate expected by epistemic/solver work. The v0.8.6 branch remains held until the listed blockers are fixed, waived, or scope-amended.",
-  "pyxlog_persistent_index_session_reuse_commit": "pending"
+  "pyxlog_persistent_index_session_reuse_commit": "611d8293"
 }
