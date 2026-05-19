@@ -5,15 +5,19 @@ use std::collections::{HashMap, HashSet};
 use std::os::raw::{c_char, c_void};
 use std::sync::Arc;
 
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyMemoryError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 use xlog_core::{MemoryBudget, Schema};
-#[cfg(feature = "arrow-device-import")]
-use xlog_cuda::{ArrowDeviceArray, ArrowDeviceArrayOwned};
 use xlog_cuda::{
+    device_runtime::{
+        AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, StreamPool, XlogDeviceRuntime,
+    },
     CudaBuffer, CudaDevice, CudaKernelProvider, DlpackManagedTensor, GpuMemoryManager,
 };
+#[cfg(feature = "arrow-device-import")]
+use xlog_cuda::{ArrowDeviceArray, ArrowDeviceArrayOwned};
 use xlog_gpu::logic as gpu_logic;
 use xlog_logic::ast::ProbEngine;
 use xlog_neural::{NetworkRegistry, TensorSourceRegistry};
@@ -200,11 +204,62 @@ pub(crate) fn arrow_device_from_py(obj: &Bound<'_, PyAny>) -> PyResult<ArrowDevi
 
 pub(crate) fn provider_from_config(config: GpuConfig) -> xlog_core::Result<CudaKernelProvider> {
     let device = Arc::new(CudaDevice::new(config.device_ordinal)?);
-    let memory = Arc::new(GpuMemoryManager::new(
+    let stream_pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
+    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> =
+        Box::new(AsyncCudaResource::new(
+            Arc::clone(&device),
+            config.device_ordinal as u32,
+            Arc::clone(&stream_pool),
+        ));
+    let budget_limit = usize::try_from(config.memory_bytes).unwrap_or(usize::MAX);
+    let budgeted: Box<dyn DeviceMemoryResource + Send + Sync> =
+        Box::new(GlobalDeviceBudget::new(async_resource, budget_limit));
+    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
+        Arc::clone(&device),
+        config.device_ordinal as u32,
+        stream_pool,
+        budgeted,
+    ));
+    let memory = Arc::new(GpuMemoryManager::with_runtime(
         device.clone(),
         MemoryBudget::with_limit(config.memory_bytes),
+        runtime,
     ));
-    CudaKernelProvider::new(device, memory)
+    CudaKernelProvider::with_runtime(device, memory)
+}
+
+pub(crate) fn enforce_call_memory_limit(
+    provider: &Arc<CudaKernelProvider>,
+    memory_mb: Option<u64>,
+) -> PyResult<()> {
+    let Some(memory_mb) = memory_mb else {
+        return Ok(());
+    };
+    if memory_mb == 0 {
+        return Err(PyValueError::new_err("memory_mb must be > 0"));
+    }
+    let memory_limit_bytes = memory_mb.saturating_mul(1024 * 1024);
+    let allocated_bytes = provider.memory().allocated_bytes();
+    if allocated_bytes > memory_limit_bytes {
+        return Err(PyMemoryError::new_err(format!(
+            "per-call memory limit exceeded before evaluation: allocated_bytes={} memory_limit_bytes={}",
+            allocated_bytes, memory_limit_bytes
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn provider_memory_stats(
+    py: Python<'_>,
+    provider: &Arc<CudaKernelProvider>,
+) -> PyResult<PyObject> {
+    let dict = PyDict::new(py);
+    let memory = provider.memory();
+    dict.set_item("allocated_bytes", memory.allocated_bytes())?;
+    dict.set_item("memory_limit_bytes", memory.budget().device_bytes)?;
+    dict.set_item("peak_memory_bytes", memory.allocated_bytes())?;
+    dict.set_item("status", "available")?;
+    Ok(dict.into())
 }
 
 pub(crate) fn parse_prob_engine_override(s: &str) -> PyResult<ProbEngine> {
@@ -313,6 +368,10 @@ pub struct CompiledProgram {
     pub(crate) query_signature_cache: HashMap<String, QuerySignature>,
     /// Cache of compiled circuits by template signature
     pub(crate) circuit_cache: HashMap<String, CachedCircuit>,
+    /// Number of circuit-template cache hits observed by neural training paths.
+    pub(crate) circuit_cache_hits: usize,
+    /// Number of circuit-template cache misses observed by neural training paths.
+    pub(crate) circuit_cache_misses: usize,
     /// Number of times the template compilation path executed.
     pub(crate) template_compile_count: usize,
     /// When true, batch queries sharing the same circuit template in training.
@@ -335,6 +394,19 @@ pub struct LogicRelationSession {
     pub(crate) program: gpu_logic::LogicProgram,
     pub(crate) provider: Arc<CudaKernelProvider>,
     pub(crate) relation_store: RelationStore,
+    pub(crate) evaluation_store: Option<RelationStore>,
+    pub(crate) last_delta_stats: Option<LogicDeltaStats>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LogicDeltaStats {
+    pub changed_relations: usize,
+    pub insert_rows: u64,
+    pub delete_rows: u64,
+    pub has_deletes: bool,
+    pub affected_sccs: usize,
+    pub recomputed_sccs: usize,
+    pub incremental_sccs: usize,
 }
 
 #[pyclass]
@@ -343,6 +415,8 @@ pub struct LogicQueryResult {
     pub relation_name: String,
     #[pyo3(get)]
     pub columns: Vec<String>,
+    #[pyo3(get)]
+    pub sort_labels: Vec<String>,
     #[pyo3(get)]
     pub tensors: Vec<PyObject>,
     #[pyo3(get)]

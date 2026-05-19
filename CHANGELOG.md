@@ -2,10 +2,525 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased] — targeting v0.6.0
+## [Unreleased]
 
-> **Note:** All items below are post-v0.5.0 work (42 commits since the `v0.5.0` tag). They are
-> not part of the v0.5.0 release.
+### Fixed
+
+- Hardened the release example validator so every `.xlog`, probabilistic,
+  Python, and neural example runs in release validation without depending on
+  an installed `pyxlog` wheel or optional external neural datasets.
+- Fixed recorded CUDA sort/groupby row-count handling so compacted buffers do
+  not cache row capacity as logical cardinality.
+- Hardened adaptive join-index reuse so stale index metadata is evicted and
+  falls back to the regular hash join instead of aborting valid queries.
+- Updated the public CUDA certification count to 207/207 after the current
+  full-suite and recorded-launch certification reruns.
+
+## [0.8.0] — 2026-05-18
+
+DTS-DLM ML/Python Productization. This release pulls the consumer-critical
+Python, neural-symbolic, incremental-session, and native exact-induction work
+forward so DTS-DLM can execute the queued M37-A+B path against production xlog
+surfaces.
+
+### Added
+
+- `pyxlog` runtime/session controls for async evaluation, chunked streaming
+  results, per-call memory limits, progress counters, memory diagnostics,
+  CUDA Graph counters, and host-transfer counters.
+- Persistent relation delta APIs on `LogicRelationSession`, including insert,
+  delete, mixed `apply_relation_delta`, and `delta_stats` reporting backed by
+  runtime `RelationDelta` recomputation paths.
+- DTS-DLM neural bridge helpers: registered-network top-k and deterministic
+  output modes, stable top-k tie-breaking, neural cache telemetry, Belnap
+  pro/contra/quarantine loss helpers, semantic loss, MSE, and infoloss
+  surfaces.
+- Native exact-induction consumer integration through
+  `pyxlog.ilp.exact_induce.induce_exact(..., backend="native")` for the DTS
+  tensorized ILP `U64` path, with strict-per-topology compatibility policy and
+  packaging of `ilp_exact` CUDA artifacts through the normal `pyxlog/kernels`
+  wheel path.
+- A DTS-focused example suite under `examples/v080-dts/` plus
+  `scripts/validate_v080_examples.py`, covering async/streaming runtime
+  controls, relation deltas, neural bridge helpers, native exact induction, and
+  probabilistic async diagnostics.
+- A machine-readable v0.8.0 certification pack under
+  `docs/evidence/2026-05-18-v080-cert/` with `17/17` DTS-required pyxlog symbol
+  coverage and `signature_drift=0`.
+
+### Changed
+
+- Workspace package version and internal xlog crate dependency constraints now
+  target `0.8.0`.
+- README and roadmap release status now identify `v0.8.0` as the current
+  tagged release and route DTS-DLM users to the Python bindings and
+  `examples/v080-dts/` suite.
+- v0.9.0 is the next Epistemic/Solver Semantics train; v0.10.0 is the
+  Multi-GPU / Out-of-Core train.
+
+### Release Status
+
+- Closure proposal: `docs/plans/2026-05-18-v080-closure-proposal.md`.
+- Certification evidence: `docs/evidence/2026-05-18-v080-*/`.
+- DTS-DLM full 449-doc native-liveness replay is accepted by historical
+  evidence waiver; it was not freshly rerun inside the xlog release worktree.
+
+## [0.7.0] — 2026-05-18
+
+General WCOJ Architecture and Runtime Expansion. This release
+retargets the completed feature pack originally planned as v0.6.5
+to v0.7.0 because the delivered surface is a full WCOJ subsystem
+expansion: cost-aware planning, recursive integration, K-clique
+coverage, paper-aligned helper/runtime mechanisms, DTS-DLM hot-loop
+integration, and release-board closure.
+
+### Added
+
+- First-class `MultiWayJoin` / WCOJ RIR and promoter surface for
+  eligible multiway rules, with deterministic fallback preservation.
+- WCOJ variable-ordering and cardinality/selectivity-aware cost-model
+  integration, including per-iteration recursive SCC statistics.
+- General WCOJ CUDA/runtime coverage beyond triangle: 4-cycle,
+  K=5/K=6 hypergraph planner production path, K=7/K=8 template
+  coverage, runtime histogram refresh, and helper-splitting invocation.
+- Adaptive join closure: nested-loop dispatch for small eligible joins
+  and preserved provider-level sort-merge operator certification.
+- Certification and benchmark surfaces for GPU Same Generation,
+  skewed multiway, deep-recursive WCOJ, deterministic mixed execution,
+  widened-frontier replay, and paper-class production-scale fixtures.
+- DTS-DLM Phase-2 integration evidence for chain-shaped joins,
+  sort-label propagation, CUDA Graph capture/replay, M37-A surface
+  preservation, and m37c-prime end-to-end validation.
+- Dedicated WCOJ architecture and user guides.
+
+### Changed
+
+- Workspace package version and internal xlog crate dependency
+  constraints now target `0.7.0`.
+- Closure-board and tag-handoff release surfaces now use `v0.7.0`;
+  historical evidence may still say the work was originally targeted
+  as `v0.6.5`.
+- Roadmap release trains move forward: the completed WCOJ expansion is
+  v0.7.0, v0.8.0 is narrowed to DTS-DLM ML/Python
+  productization, Epistemic/Solver Semantics moves to v0.9.0,
+  and Multi-GPU / Out-of-Core moves to v0.10.0. The broader
+  language / CLI product backlog is deferred until it has a named
+  consumer.
+
+### Release Status
+
+- Closure board: 31 DONE, 0 IN-PROGRESS, 0 BLOCKED, 0 OPEN.
+- W7.1 is complete: the annotated `v0.7.0` tag has been created and pushed.
+
+## [0.6.0] — 2026-04-29
+
+Stream-Safe GPU Runtime And Execution Discipline. Infrastructure
+hardening release: a stream-safe GPU runtime and recorded launch
+discipline so subsequent join / WCOJ work can be trusted under
+parallel execution. Default behaviour for legacy callers is
+unchanged; the new path is opt-in via
+`CudaKernelProvider::with_runtime` /
+`GpuMemoryManager::with_runtime` plus the
+`XLOG_USE_DEVICE_RUNTIME` / `XLOG_USE_RECORDED_OPS` env flags.
+
+### Added
+
+- **Access-aware stream dependency manager** (PR #72,
+  `26c2e429` + follow-ups). Replaces post-launch-only
+  `record_block_use` with `prepare_block_use(BlockId, stream,
+  Access)` / `finish_block_use(...)` and an `Access {Read,
+  Write, ReadWrite}` enum. `AsyncCudaResource::LiveEntry`
+  tracks `last_write: Option<(StreamId, CudaEvent)>` (seeded
+  with an allocation-ready event captured immediately after
+  `cuMemAllocAsync`) and `outstanding_reads:
+  Vec<(StreamId, CudaEvent)>`. Reads wait on `last_write`;
+  writes wait on `last_write` plus every cross-stream
+  outstanding read. Same-stream events are skipped. Closes
+  both the use-after-prior-write hazard and the
+  use-after-allocation hazard across streams.
+- **Lifetime-free `LaunchRecorder`**. Snapshots `BlockId` from
+  each registered slice at record time and drops the source
+  borrow immediately, so kernel `&mut` borrows after preflight
+  are unrestricted. `preflight(&runtime)` queues
+  `cuStreamWaitEvent` for every recorded use's cross-stream
+  dependency BEFORE the launch; `commit(self, &runtime)`
+  records new events via `finish_block_use` AFTER. Repeated
+  registrations of the same block dedup on
+  `(ptr, generation, device_ordinal)` to a single
+  prepare/finish call with the strongest access.
+- **`XlogDeviceRuntime::prepare_first_use(slice, stream, access)`
+  / `finish_first_use(...)`** for helper-internal scratch
+  whose first cross-stream consumer is a raw `cuMemsetD8Async`
+  / `cuMemcpyDtoDAsync_v2` / `kernel.launch_on_stream` call
+  ahead of any `LaunchRecorder::preflight`.
+- **Formal certification harness** (`3361785b`). The cert
+  `TestContext` builds the production decorator stack
+  (`AsyncCudaResource → LoggingResource → GlobalDeviceBudget
+  → XlogDeviceRuntime`) when `XLOG_USE_DEVICE_RUNTIME=1` is
+  set and uses `with_runtime` constructors; the env-gated
+  dispatchers in `provider::sort` / `filter_by_mask` /
+  `hash_join_v2` / etc. then route through the recorded path
+  when `XLOG_USE_RECORDED_*` is set. The harness reaps
+  pending async frees between categories, and
+  `GlobalDeviceBudget::allocate` retries once after a reap on
+  transient over-budget conditions.
+  Result: `XLOG_USE_DEVICE_RUNTIME=1 XLOG_USE_RECORDED_OPS=1
+  cargo test -p xlog-cuda-tests --test certification_suite
+  --release` passes **206/206**; legacy default still passes
+  206/206.
+- **A3/A4 cross-stream lifetime stress harness**
+  (`crates/xlog-integration/tests/test_a3_a4_stress.rs`,
+  `27ec3bd9` + `a01b51fa`). Two workloads (`friends`
+  sort+hash-join sensitive, `reach` recursive fixed-point +
+  joins). Stable FNV-1a checksums, fixed schedule + seeded
+  random tail. **A4 fork-isolated stress passes 16/16** in
+  every fixture mode and every env combination. A 5-mode
+  diagnostic matrix (`XLOG_A3_FIXTURE_MODE=per_iter |
+  per_thread | shared` × runtime-on/off × recorded-on/off
+  via `XLOG_A3_DIAGNOSTIC=1`) classifies the A3 thread-of-N
+  drift as pre-existing and not introduced by v0.6.0 — see
+  Known Issues below.
+- **Multi-threaded sort+hash-join regression**
+  (`crates/xlog-cuda/tests/test_mt_sort_hj_alloc_ordering.rs`,
+  PR #72). 8 threads × 128 iters × 3 rounds friend-of-friend
+  self-join. Was RED at baseline `8cc0882c` (~6/1024 failures
+  per run); 1024/1024 + 1024/1024 across 10 consecutive runs
+  on `b1560674`.
+- **Documentation**: `docs/architecture/device-runtime.md`
+  (runtime stack + access matrix + env-gated dispatch + cert
+  modes) and `docs/architecture/recorded-launch-migration.md`
+  (operator-author checklist + anti-patterns + four-gate
+  validation command sequence). Linked from
+  `docs/ARCHITECTURE.md` Memory Management section.
+
+### Changed
+
+- `record_block_use` retained as a backward-compat shim that
+  calls `finish_block_use(Read)` for the dealloc-wait surface;
+  production callers go through the recorder.
+- `write_post_preflight_fresh` removed. All 78 callers across
+  `provider/{relational,filter,groupby,mod}.rs` migrated to
+  pre-preflight `write` (the recorder snapshot drops the
+  borrow, so kernel `&mut` borrows after preflight are
+  unaffected).
+- 6 direct `runtime.record_block_use(b, launch_stream)` call
+  sites in provider code migrated to
+  `runtime.finish_block_use(BlockId::from_block(b),
+  launch_stream, Access::Write)` with semantically correct
+  Access kinds.
+- `prepare_first_use(Access::Write)` added at every
+  helper-internal scratch alloc site that subsequently writes
+  via raw CUDA work BEFORE its parent recorder's preflight:
+  `build_hash_table_v2_on_stream` (5 buffers),
+  `gather_buffer_by_indices_on_stream` (per-column
+  `dst_col`s), `multiblock_scan_u32_inplace_on_stream` /
+  `_view_inplace_on_stream` (`block_sums`), and every join
+  variant's `d_count_only` / `d_output_count` / `out_col`
+  zero-fills (Inner / LeftOuter / count-scan-materialize /
+  indexed Inner / indexed LeftOuter).
+- `gather_buffer_by_indices_on_stream`: local
+  `d_output_rows` scalar created via
+  `upload_device_row_count` + read on `launch_stream` is now
+  fenced via `Access::Write` at upload + `Access::Read`
+  prepare on `launch_stream` + `Access::Read` finish before
+  drop. Closed a review-finding from the PR.
+
+### Deferred to post-v0.6.0
+
+- **Host-mask `compact_buffer_by_mask` recorded migration**.
+  Re-opens when a runtime-backed recorded release path
+  consumes host-provided masks. Until then the legacy entry
+  is the supported path; the recorded
+  `compact_buffer_by_device_mask_counted_recorded` covers the
+  device-mask case for runtime-backed callers.
+- **ILP / ILP-exact view helpers + operators recorded
+  migration**. Re-opens when tensorized ILP /
+  exact-induction downstream consumer work resumes (v0.8.0
+  native exact-induction consumer gate) and requires
+  runtime-backed stream safety.
+- **Sub-slice 3 LeftOuter CSM** (commit `b90ae77f`, never
+  pushed; recovered into `.recovery/sub-slice-3-edits.md`).
+  Apply on a fresh post-v0.6.0 branch after auditing every
+  scratch alloc against the access-aware contract documented
+  in `docs/architecture/recorded-launch-migration.md`.
+
+### Known Issues (not release blockers)
+
+- **A3 in-process thread-of-N drift on
+  `test_a3_a4_stress`**: 8 threads × 32 iters produce ~3%
+  checksum drift on recursive Datalog workloads. The 5-mode
+  diagnostic matrix demonstrates this is **NOT v0.6.0
+  stream-safety regression** — drift fires identically on the
+  legacy default path (no `XLOG_USE_DEVICE_RUNTIME`, no
+  `XLOG_USE_RECORDED_OPS`, one runtime per thread, no v0.6
+  code in the call chain). Bug class: pre-existing
+  same-process multi-executor concurrency against one CUDA
+  primary context. Tracked under v0.9.0 "Concurrency
+  Hardening" in `ROADMAP.md`. The v0.6.0 release gate is
+  **A4 fork-isolated stress + cert suite + umbrella ×50**,
+  not "A3 zero drift".
+- **`test_provider_launch_recorder --test-threads=8`** shows
+  9/42 `*_survives_drop_and_reuse` failures (was 23/42 at
+  baseline `8cc0882c`). Pre-existing pattern from
+  cross-runtime mempool aliasing under intra-binary test
+  parallelism. Production gate spec is `--test-threads=1`,
+  which is clean.
+
+### Release Validation (gates green on `b1560674`)
+
+- `cargo fmt --check`: clean.
+- `git diff --check`: clean.
+- Legacy cert suite: 206/206 in 20.22s.
+- Runtime+recorded cert suite
+  (`XLOG_USE_DEVICE_RUNTIME=1 XLOG_USE_RECORDED_OPS=1`):
+  206/206 in 16.56s.
+- Umbrella ×50 (`real_world_tests --test-threads=8` under
+  recorded runtime): **50/50**.
+- Workspace `--tests --exclude pyxlog --release
+  --test-threads=1`: 142 result lines, no failures.
+
+> **Note:** All items below are post-v0.5.0 work. Items in
+> `[Unreleased]` between the v0.5.0 tag and the v0.6.0 tag are
+> reflected in the v0.6.0 release entry above.
+
+## [0.6.1] — 2026-04-29
+
+CSM Env Dispatch and Certification Mode Labeling. Small,
+focused release on top of v0.6.0: enables count-scan-materialize
+(CSM) hash-join methods for `Inner` / `LeftOuter` (indexed and
+non-indexed) under an env gate, closes a stream-safety gap in
+three earlier CSM siblings, and names the CSM cert mode
+explicitly so reports are unambiguous. No kernel changes, no
+algorithm changes, no eligibility relaxation. Default behaviour
+for legacy callers is unchanged; the new path is opt-in via
+`XLOG_USE_RECORDED_CSM=1` (or umbrella `XLOG_USE_RECORDED_OPS=1`).
+
+### Added
+
+- **Recorded CSM (count-scan-materialize) hash-join env
+  dispatch** (PR #91). The recorded hash-join dispatcher
+  routes `JoinType::Inner` and `JoinType::LeftOuter` through
+  CSM (count → exclusive scan → materialize) for both the
+  non-indexed and indexed entry points when
+  `XLOG_USE_RECORDED_CSM=1` (or umbrella
+  `XLOG_USE_RECORDED_OPS=1`) is set. `Semi` / `Anti` always
+  route through the existing legacy recorded methods — no
+  CSM implementation exists for them. Eligibility checks
+  preserved exactly: runtime-backed manager, ≤4 keys
+  (`pack_keys` constraint), key-type match, row-count caps,
+  indexed-path key-byte and shape checks. New env-dispatch
+  routing test suite
+  (`crates/xlog-cuda/tests/test_csm_env_dispatch.rs`)
+  proves selection across the Inner / LeftOuter × indexed /
+  non-indexed × env-on / env-off matrix plus Semi / Anti
+  and the >4-keys upstream short-circuit.
+- **Indexed LeftOuter CSM operator** (PR #87,
+  `hash_join_left_outer_v2_with_index_count_scan_materialize_recorded`).
+  Probe-only pack on `launch_stream` plus a cached
+  `JoinIndexV2` for the build side, sharing the
+  count → scan → materialize phase shape with the
+  non-indexed LeftOuter CSM (PR #84) and the indexed
+  Inner CSM. No new kernels; reuses the four already-
+  migrated CSM kernels plus `hash_join_csm_unmatched_mask`
+  from PR #84.
+- **Cert-mode labeling** (commit `bca1e373`). The
+  `certification_suite` header now prints
+  `Recorded-op dispatch (explicit):` (extended to include
+  `XLOG_USE_RECORDED_CSM`) and a synthesized `Cert mode:`
+  line keyed off the explicit env flags. The three intended
+  values match the v0.6.1 cert gate commands —
+  `legacy/default`, `runtime+recorded`,
+  `runtime+recorded+CSM` — so CSM-mode runs are
+  self-documenting in the cert evidence.
+
+### Fixed
+
+- **`d_overflow` lifetime in three CSM materialize
+  recorders** (PR #89). The Phase B materialize kernel
+  takes `d_overflow` as a kernel param (writes the
+  overflow flag). Three previously-shipped CSM siblings
+  (`hash_join_inner_v2_count_scan_materialize_recorded`,
+  `hash_join_left_outer_v2_count_scan_materialize_recorded`,
+  `hash_join_inner_v2_with_index_count_scan_materialize_recorded`)
+  did not register `d_overflow` on their materialize-phase
+  `LaunchRecorder`, so the runtime was free to release the
+  block once `rec_count.commit` resolved — a potential
+  use-after-free if pool reuse beat kernel completion. Each
+  site now registers
+  `rec_mat.write(&d_overflow);` before `rec_mat.preflight`,
+  matching the indexed-LeftOuter CSM site (PR #87) so all
+  four CSM materialize recorders are identical.
+
+### Deferred to post-v0.6.1
+
+- **Semi / Anti CSM**. No `count_scan_materialize_recorded`
+  variants exist for `JoinType::Semi` / `JoinType::Anti`;
+  the env dispatch leaves them on the legacy recorded
+  paths. **Trigger to re-open**: a benchmark or
+  correctness scenario forces it. The legacy paths are
+  correct today and adding CSM variants would be code
+  without a consumer.
+- **CSM default-on**. CSM remains opt-in via
+  `XLOG_USE_RECORDED_CSM` / umbrella
+  `XLOG_USE_RECORDED_OPS`. Re-evaluate flipping the
+  default once cert history accumulates a stable run of
+  CSM-mode passes; until then the env gate is the
+  migration boundary.
+
+### Release Validation (gates green at tag)
+
+- `cargo fmt --check`: clean.
+- `git diff --check`: clean.
+- Legacy cert
+  (`cargo test -p xlog-cuda-tests --test certification_suite --release`):
+  `Cert mode: legacy/default`, 1 outer test passing — 33
+  cert categories internal.
+- Runtime+recorded cert
+  (`XLOG_USE_DEVICE_RUNTIME=1 XLOG_USE_RECORDED_OPS=1 cargo test ...`):
+  `Cert mode: runtime+recorded`, 1 outer test passing —
+  same 33 categories.
+- Runtime+recorded+CSM cert
+  (`XLOG_USE_DEVICE_RUNTIME=1 XLOG_USE_RECORDED_OPS=1 XLOG_USE_RECORDED_CSM=1 cargo test ...`):
+  `Cert mode: runtime+recorded+CSM`, 1 outer test passing —
+  same 33 categories.
+- Umbrella ×20 (`real_world_tests --test-threads=8` under
+  `XLOG_USE_DEVICE_RUNTIME=1 XLOG_USE_RECORDED_OPS=1`):
+  20/20 (recorded across PR #87, #89, #91 prep).
+
+## [0.6.2] — 2026-05-01
+
+Default-On Adaptive WCOJ Triangle Dispatch. Productizes the
+first GPU Worst-Case Optimal Join slice: a certified 3-way
+triangle path for `u32`, `u64`, and `Symbol` keys, wired into
+the runtime behind a default-on adaptive skew classifier and a
+hard kill switch. The release also ships the pure-Rust
+hypergraph planner / oracle stack that future WCOJ kernels are
+certified against. Scope remains deliberately narrow: no
+general-arity WCOJ, no recursive/SCC WCOJ execution, no cost
+model, and no `MultiWayJoin` / `WcojJoin` RIR node yet.
+
+### Added
+
+- **Hypergraph planner and oracle foundation.** Added
+  `xlog-logic::hypergraph` with a hypergraph IR, eligibility
+  analyzer, deterministic variable-order interface, canonical
+  explain output, typed gate, mixed plan contract, single-rule
+  reference evaluator, single-target fixpoint evaluator, SCC
+  fixpoint evaluator, and transitive SCC type inference. The
+  certification workloads cover triangle, Same Generation,
+  skewed multiway, deep recursive frontier, and mutually
+  recursive parity SCC shapes.
+- **GPU WCOJ triangle provider path.** Added recorded
+  `wcoj_triangle_u32_recorded` / `wcoj_triangle_u64_recorded`
+  provider entries plus `wcoj_layout_u32_recorded` /
+  `wcoj_layout_u64_recorded` sorted-layout construction. The
+  triangle pipeline uses count → device-side prefix scan →
+  materialize with a 4-byte metadata D2H total; no count-vector
+  D2H remains. `Symbol` uses the u32 physical path.
+- **Planner-to-provider certification.** Added test-only
+  `xlog-logic` dev dependency in `xlog-cuda` so planner verdicts
+  and GPU provider outputs are certified against the same CPU
+  oracle fixtures before executor wiring.
+- **Runtime WCOJ dispatch.** Added the executor hook for the
+  canonical non-recursive triangle RIR shape
+  `tri(X,Y,Z) :- e1(X,Y), e2(Y,Z), e3(X,Z)`. The hook supports
+  4-byte (`U32` / `Symbol`) and 8-byte (`U64`) uniform-width
+  triangles, silently falls back for unsupported shapes, and
+  exposes `Executor::wcoj_triangle_dispatch_count()` for tests.
+- **Adaptive skew classifier and default-on policy.** Added
+  `wcoj_triangle_skew_score_{u32,u64}` and a 64-bucket
+  hash-mixed L-infinity/L1 classifier. `RuntimeConfig::default()`
+  now runs adaptive WCOJ on matching non-recursive triangle
+  rules: high-skew inputs dispatch WCOJ, uniform / empty inputs
+  fall back to the binary-join chain. Ops can disable the path
+  globally with `XLOG_DISABLE_WCOJ_TRIANGLE=1`.
+- **Diagnostic phase timing.** Added feature-gated
+  `wcoj-phase-timing` support and the `wcoj_phase_report`
+  binary to measure classifier, layout, triangle count / scan /
+  total / materialize, wall, and residual overhead.
+- **WCOJ benchmark baseline.** Added
+  `crates/xlog-integration/benches/wcoj_triangle_bench.rs` and
+  evidence under
+  `docs/evidence/2026-05-01-wcoj-bench-baseline/` for baseline,
+  adaptive acceptance, default-on acceptance, pre-fast-path phase
+  timing, and post-fast-path phase timing.
+
+### Changed
+
+- **WCOJ layout fast-path.** `wcoj_layout_u32_recorded` and
+  `wcoj_layout_u64_recorded` now prove already sorted+unique
+  inputs with a recorded checker kernel and return a recorded
+  device-side clone instead of always running sort + dedup. The
+  slow path is unchanged and remains the correctness fallback.
+- **Recorded sort / dedup U64 support.** `sort_recorded` now
+  supports U64 via the same hi/lo radix strategy as the legacy
+  sort path, and `dedup_full_row_recorded` admits U64 rows.
+- **Executor WCOJ stream reuse.** The executor caches one WCOJ
+  launch stream per instance, preventing long-lived runtimes from
+  exhausting the grow-only `StreamPool` and silently falling back
+  after 16 dispatches.
+- **WCOJ adaptive default.** `RuntimeConfig::wcoj_triangle_dispatch`
+  remains the explicit force/off knob. New
+  `wcoj_triangle_dispatch_adaptive` controls adaptive opt-out /
+  opt-in, and `wcoj_triangle_dispatch_disabled` is the hard kill
+  switch. Precedence is: disable > force > explicit force-off >
+  adaptive.
+
+### Fixed
+
+- **Skew-classifier failure paths.** Failure paths after queued
+  classifier work now drain the launch stream before dropping
+  temporary buffers.
+- **Layout fast-path failure paths.** Failure paths after queued
+  checker / recorded-clone work now drain the launch stream before
+  dropping temporary buffers.
+- **SCC-aware planner precedence.** The hypergraph planner now
+  preserves structural-error precedence when typed gating and SCC
+  inference both apply.
+
+### Bench Evidence
+
+- Initial force-on WCOJ was strong on super-hub fixtures but
+  regressed uniform / empty fixtures. The adaptive classifier
+  cleared the locked median gates: uniform / empty adaptive cells
+  stayed ≤2× binary-join, while super-hub speedups remained above
+  the locked minimums.
+- Phase timing showed layout construction was 91-97% of super-hub
+  WCOJ wall time before the fast-path. The layout fast-path reduced
+  layout time by ~97-98% and wall time by ~90-96% on the measured
+  super-hub cells.
+
+### Deferred to post-v0.6.2
+
+- General `MultiWayJoin` / `WcojJoin` RIR node and optimizer
+  integration.
+- Cost-aware variable ordering and selectivity / heat feedback.
+- Recursive / SCC WCOJ execution and mixed recursive WCOJ +
+  binary-join semantics.
+- 4-way and general-arity WCOJ kernels.
+- Histogram-guided block scheduling / B1 heavy-row offload. Phase
+  timing after the layout fast-path shows materialize is now a
+  plausible future optimization target, but no longer the obvious
+  next slice.
+- Dedicated WCOJ architecture and performance-tuning guide.
+
+### Release Validation Targets
+
+Run before tagging `v0.6.2`:
+
+- `cargo fmt --check`
+- `git diff --check`
+- WCOJ provider / integration test matrix
+- `cargo test -p xlog-logic`
+- `cargo test -p xlog-runtime --lib`
+- `cargo build --workspace --exclude pyxlog`
+- `XLOG_USE_DEVICE_RUNTIME=1 cargo test -p xlog-integration --test real_world_tests --release`
+- Existing certification modes from v0.6.1 remain the recorded-launch
+  baseline for runtime safety.
+
+## [Unreleased] — targeting v0.6.3
+
+> Empty.
 
 ## [0.5.2](https://github.com/BrainyBlaze/xlog/compare/xlog-cli-v0.5.0...xlog-cli-v0.5.2) — 2026-04-20
 

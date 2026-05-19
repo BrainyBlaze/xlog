@@ -128,9 +128,15 @@ three topologies — microseconds per block in practice.
 | `pos_covered`, `neg_covered` | `u32` × (4·C·C) | Output count arrays; kernel writes each slot exactly once. |
 
 Column type is fixed to `U64` in this milestone (matches DTS's `pred
-p_X(u64, u64)` declarations). Type dispatch for other scalar types
-would follow the existing `ilp_mark_selected_ids_{u32,i32,i64,u64}`
-precedent in `xlog_ilp`.
+p_X(u64, u64)` declarations). The pyxlog DLPack layer already accepts
+signedness-compatible tensors for general relation import/export, but the
+exact-induction engine intentionally validates every positive, negative, and
+candidate pair buffer as `U64` before launching `ilp_exact_score`.
+
+`U32` and `Symbol` exact-induction callers are deferred until a downstream
+consumer names them. That extension should add an explicit width/type dispatch
+at the `xlog-induce` / `xlog-cuda` boundary rather than silently narrowing
+inside the existing `U64` kernel.
 
 ## Semantics
 
@@ -289,21 +295,29 @@ Returns an `ExactInductionResult` dataclass with `candidates: list[ScoredCandida
   Uses `strict_per_topology=True` against the Python reference so both
   backends compute clean per-topology coverage.
 
+## Type Dispatch And Packaging Policy
+
+- `U64`: supported and covered by the runtime parity/D2H tests.
+- `U32`: deferred. General pyxlog DLPack signedness compatibility accepts
+  `torch.int32` for `u32` schemas elsewhere, but this exact-induction kernel
+  does not yet have a `u32` scoring launcher.
+- `Symbol`: deferred. Symbols are represented as `u32` ids elsewhere in xlog,
+  so this should share the eventual `u32` dispatch instead of adding a
+  symbol-specialized kernel.
+- PTX policy: `kernels/ilp_exact.cu` is checked in; generated
+  `ilp_exact.portable.ptx` and architecture-specific `.cubin` files are build
+  and packaging artifacts, not source artifacts. `crates/xlog-cuda/build.rs`
+  generates portable PTX for every manifest module, including `ilp_exact`;
+  `scripts/stage_pyxlog_kernels.sh` stages those artifacts into
+  `pyxlog/kernels/`; `scripts/install_pyxlog_for_python.py` rejects a wheel
+  that lacks portable PTX. This matches the current ILP-family convention for
+  `ilp.cu` and `ilp_credit.cu`.
+
 ## Non-Goals / Deferred
 
-- Column types other than `u64`. The Prolog-declared schema for DTS's
-  head predicates is `pred p_X(u64, u64)`, so a single-type kernel
-  suffices today. Extending to `u32` / `i32` / `i64` / `Symbol` would
-  follow the existing `ilp_mark_selected_ids_{u32,i32,i64,u64}` fanout
-  in `kernels/ilp.cu`.
 - Shared-memory caching of L rows for the chain topology. At current
   DTS data sizes the per-block work is microseconds and does not
   warrant the added kernel complexity. Profile first if this changes.
-- Committed `kernels/ilp_exact.ptx` artifact. `ilp.cu` and
-  `ilp_credit.cu` are also compiled at build time without a checked-in
-  PTX (the C01 `test_kernel_function_resolution` certification scans
-  only committed PTX files, so these kernels are not automatically
-  validated by that test). `ilp_exact.cu` follows the same convention.
 
 ## See Also
 

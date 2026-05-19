@@ -11,7 +11,9 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scripts.neural_datasets import DatasetManifest
 from scripts.neural_training import (
+    class_pattern_tensor,
     classification_accuracy,
+    neural_fixture_smoke_enabled,
     report_and_enforce_metric,
     resolve_epochs,
     resolve_min_accuracy,
@@ -110,8 +112,25 @@ def build_training_queries(train_labels, picked_indices, rank_weight: int):
     return queries
 
 
+def _fixture_cards(mode: str):
+    manifest = DatasetManifest.load(MANIFEST)
+    labels = []
+    class_ids = []
+    repeats = 2 if mode == "release" else 1
+    for _ in range(repeats):
+        for rank_i, rank in enumerate(RANKS):
+            for suit_i, suit in enumerate(SUITS):
+                labels.append((RANK_ATOMS[rank], SUIT_ATOMS[suit]))
+                class_ids.append(rank_i * len(SUITS) + suit_i)
+    tensor = class_pattern_tensor(class_ids, len(RANKS) * len(SUITS), 3, 64, 64)
+    return manifest, tensor, labels
+
+
 def load_cards(mode: str):
     if not DATA.exists():
+        if neural_fixture_smoke_enabled():
+            print("INFO: using synthetic playing-card fixture; dataset is unavailable")
+            return _fixture_cards(mode)
         raise SystemExit(
             "Card dataset missing. Place under examples/neural/05_poker/data/cards"
         )
@@ -120,6 +139,9 @@ def load_cards(mode: str):
         from PIL import Image
         from torchvision import transforms
     except ImportError as exc:
+        if neural_fixture_smoke_enabled():
+            print("INFO: using synthetic playing-card fixture; dependency is unavailable")
+            return _fixture_cards(mode)
         raise SystemExit(f"Missing dependency: {exc}")
     import torch
 

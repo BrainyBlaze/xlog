@@ -252,6 +252,195 @@ extern "C" __global__ void hash_join_probe_v2(
 }
 
 /**
+ * Inner-join probe — count-only pass for the deterministic
+ * count→prefix-scan→materialize flow. Each thread writes its own slot
+ * in `out_per_probe_count[num_probe]`, so there are no global atomics.
+ *
+ * The follow-up pipeline scans the per-probe array exclusively to
+ * produce per-probe write offsets, then `hash_join_probe_v2_materialize`
+ * writes to the deterministic offsets without atomic-append.
+ */
+extern "C" __global__ void hash_join_probe_v2_count_per_row(
+    const uint64_t* __restrict__ probe_hashes,
+    const uint32_t* __restrict__ num_probe_device,
+    uint32_t probe_cap,
+    const uint32_t* __restrict__ bucket_offsets,
+    const uint32_t* __restrict__ bucket_counts,
+    const uint32_t* __restrict__ bucket_entries,
+    const uint64_t* __restrict__ bucket_entry_hashes,
+    uint32_t bucket_mask,
+    const uint8_t* __restrict__ probe_keys,
+    const uint8_t* __restrict__ build_keys,
+    uint32_t key_bytes,
+    uint32_t* __restrict__ out_per_probe_count
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= probe_cap) return;
+
+    uint32_t num_probe = *num_probe_device;
+    if (num_probe > probe_cap) num_probe = probe_cap;
+    if (tid >= num_probe) {
+        out_per_probe_count[tid] = 0;
+        return;
+    }
+
+    uint64_t hash = probe_hashes[tid];
+    uint32_t h32 = (uint32_t)(hash ^ (hash >> 32));
+    uint32_t bucket = h32 & bucket_mask;
+
+    uint32_t start = bucket_offsets[bucket];
+    uint32_t count = bucket_counts[bucket];
+
+    uint32_t matches = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t pos = start + i;
+        if (bucket_entry_hashes[pos] == hash) {
+            uint32_t build_idx = bucket_entries[pos];
+            if (keys_equal(probe_keys, build_keys, tid, build_idx, key_bytes)) {
+                matches++;
+            }
+        }
+    }
+    out_per_probe_count[tid] = matches;
+}
+
+/**
+ * Inner-join probe — materialize pass with deterministic per-probe
+ * offsets supplied by the caller (typically the output of an exclusive
+ * prefix scan over the per-probe count array).
+ *
+ * Each probe row writes its `local`-th match to
+ * `output[per_probe_offsets[tid] + local]` directly. Output order is a
+ * deterministic function of probe-row index and per-row match-discovery
+ * order; no global atomic determines positions.
+ *
+ * If a probe row's offset + match would exceed `output_capacity`, the
+ * write is suppressed and `d_overflow` is raised. The caller treats
+ * the overflow flag as a deferred status — a non-zero flag means the
+ * result is truncated to the first `output_capacity` rows in
+ * deterministic order.
+ */
+extern "C" __global__ void hash_join_probe_v2_materialize(
+    const uint64_t* __restrict__ probe_hashes,
+    const uint32_t* __restrict__ num_probe_device,
+    uint32_t probe_cap,
+    const uint32_t* __restrict__ bucket_offsets,
+    const uint32_t* __restrict__ bucket_counts,
+    const uint32_t* __restrict__ bucket_entries,
+    const uint64_t* __restrict__ bucket_entry_hashes,
+    uint32_t bucket_mask,
+    const uint8_t* __restrict__ probe_keys,
+    const uint8_t* __restrict__ build_keys,
+    uint32_t key_bytes,
+    const uint32_t* __restrict__ per_probe_offsets,
+    uint32_t output_capacity,
+    uint32_t* __restrict__ output_left,
+    uint32_t* __restrict__ output_right,
+    uint8_t* __restrict__ d_overflow
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= probe_cap) return;
+
+    uint32_t num_probe = *num_probe_device;
+    if (num_probe > probe_cap) num_probe = probe_cap;
+    if (tid >= num_probe) return;
+
+    uint64_t hash = probe_hashes[tid];
+    uint32_t h32 = (uint32_t)(hash ^ (hash >> 32));
+    uint32_t bucket = h32 & bucket_mask;
+
+    uint32_t start = bucket_offsets[bucket];
+    uint32_t count = bucket_counts[bucket];
+
+    uint32_t base = per_probe_offsets[tid];
+    uint32_t local = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t pos = start + i;
+        if (bucket_entry_hashes[pos] == hash) {
+            uint32_t build_idx = bucket_entries[pos];
+            if (keys_equal(probe_keys, build_keys, tid, build_idx, key_bytes)) {
+                uint32_t out_idx = base + local;
+                local++;
+                if (out_idx < output_capacity) {
+                    output_left[out_idx] = tid;
+                    output_right[out_idx] = build_idx;
+                } else {
+                    *d_overflow = 1;
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Compute the device-resident logical join output row count
+ * from the post-scan tail of the per-probe arrays:
+ *
+ *     total = per_probe_offsets[N-1] + per_probe_count[N-1]
+ *
+ * where N = min(*num_probe_device, probe_cap). Single-thread
+ * single-block kernel — runs after the exclusive scan + count
+ * pass, before the materialize pass that consumes
+ * `d_logical_count` indirectly via `output_capacity`. Sets
+ * `d_overflow` if `total > capacity` and clamps the recorded
+ * logical count to `capacity`. Avoids a host-side D2H of the
+ * post-scan total — the recorded path consumes the value via
+ * the output buffer's `num_rows_device` scalar without
+ * touching the host data plane.
+ */
+extern "C" __global__ void hash_join_total_from_scan(
+    const uint32_t* __restrict__ per_probe_offsets,
+    const uint32_t* __restrict__ per_probe_count,
+    const uint32_t* __restrict__ num_probe_device,
+    uint32_t probe_cap,
+    uint32_t capacity,
+    uint32_t* __restrict__ d_logical_count,
+    uint8_t* __restrict__ d_overflow
+) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    uint32_t num_probe = *num_probe_device;
+    if (num_probe > probe_cap) num_probe = probe_cap;
+    if (num_probe == 0) {
+        *d_logical_count = 0;
+        return;
+    }
+    uint32_t tail_off = per_probe_offsets[num_probe - 1];
+    uint32_t tail_cnt = per_probe_count[num_probe - 1];
+    uint32_t total = tail_off + tail_cnt;
+    if (total > capacity) {
+        *d_overflow = 1;
+        *d_logical_count = capacity;
+    } else {
+        *d_logical_count = total;
+    }
+}
+
+/**
+ * Derive a u8 unmatched-probe-row mask from the CSM
+ * `per_probe_count` array. Used by the LeftOuter CSM path
+ * (`hash_join_left_outer_v2_count_scan_materialize_recorded`)
+ * to feed the recorded compact tail and produce
+ * `unmatched_left` deterministically.
+ *
+ * `mask[tid] = 1` if `tid < num_probe AND per_probe_count[tid] == 0`,
+ * else `0`. Slots in `[num_probe, probe_cap)` are zeroed
+ * (they don't correspond to logical probe rows).
+ */
+extern "C" __global__ void hash_join_csm_unmatched_mask(
+    const uint32_t* __restrict__ per_probe_count,
+    const uint32_t* __restrict__ num_probe_device,
+    uint32_t probe_cap,
+    uint8_t* __restrict__ out_unmatched_mask
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= probe_cap) return;
+    uint32_t num_probe = *num_probe_device;
+    if (num_probe > probe_cap) num_probe = probe_cap;
+    out_unmatched_mask[tid] =
+        (tid < num_probe && per_probe_count[tid] == 0u) ? (uint8_t)1u : (uint8_t)0u;
+}
+
+/**
  * Semi-join: mark probe rows that have any match.
  * @param probe_hashes Hash values for probe side
  * @param num_probe Number of probe rows
@@ -357,5 +546,165 @@ extern "C" __global__ void init_hash_table(
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
     if (gid < size) {
         hash_table[gid] = 0xFFFFFFFF;
+    }
+}
+
+// ===============================================================
+// W4.2 — Nested-loop inner join (emit-pairs design).
+// Multi-col-compatible via columnar `CudaBuffer`: kernel reads
+// ONLY the key columns (one `*const uint32_t` pointer per side)
+// and emits matched (left_idx, right_idx) pairs as two parallel
+// `uint32_t` arrays. Payload columns are materialized AFTER the
+// kernel via `gather_buffer_by_indices` in the provider fn —
+// outside this kernel's scope.
+//
+// Spike-vs-production note: the bench-spike branch
+// `bench-spike/w42-nested-loop` carries a 1-col emit-keys spike
+// kernel (`nested_loop_join_inner_u32_1key_1col`) used for
+// crossover measurement; that kernel does NOT graduate to
+// production. This kernel is the production-shape design.
+//
+// Restrictions (per W4.2 plan iteration-4 canonical, D1+D2):
+//   * Inner join only (Semi/Anti/LeftOuter not supported).
+//   * U32 / Symbol keys (Symbol IS u32 at the byte level).
+//   * Single key column (multi-key not supported).
+//
+// Memory contract:
+//   * `left_keys`, `right_keys`: pointers to the single key
+//     column from each side. Caller (provider fn) validates
+//     `num_bytes() == num_rows * 4` BEFORE launching this
+//     kernel (per plan F-W42-14 byte-length validation).
+//   * `output_left_idx`, `output_right_idx`: pre-allocated to
+//     `output_capacity = num_left * num_right` rows. Caller
+//     (provider fn) enforces `num_left * num_right <=
+//     NESTED_LOOP_TOTAL_THRESHOLD = 4_000_000` via `checked_mul`
+//     before allocation (per plan F-W42-15).
+//   * `output_count`: pre-zeroed `uint32_t[1]`.
+//
+// Defense-in-depth: the kernel guards `out_idx <
+// output_capacity` even though, by the provider's contract,
+// the guard is unreachable on a well-formed call. The branch
+// is well-predicted (all threads in a warp evaluate together)
+// and protects against future callers violating the contract.
+// ===============================================================
+extern "C" __global__ void nested_loop_join_inner_u32_1key_pairs(
+    const uint32_t* __restrict__ left_keys,
+    const uint32_t* __restrict__ right_keys,
+    uint32_t num_left,
+    uint32_t num_right,
+    uint32_t* __restrict__ output_left_idx,
+    uint32_t* __restrict__ output_right_idx,
+    uint32_t* __restrict__ output_count,
+    uint32_t output_capacity
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_left) return;
+    uint32_t lk = left_keys[tid];
+    for (uint32_t r = 0; r < num_right; r++) {
+        if (right_keys[r] == lk) {
+            uint32_t out_idx = atomicAdd(output_count, 1);
+            if (out_idx < output_capacity) {
+                output_left_idx[out_idx] = tid;
+                output_right_idx[out_idx] = r;
+            }
+        }
+    }
+}
+
+// ===============================================================
+// W4.3 — Sort-merge inner join (emit-pairs design,
+// multi-col-compatible via columnar `CudaBuffer`).
+//
+// Caller asserts both inputs are pre-sorted ascending by the
+// single key column. Callers may pre-check via the runtime
+// detection kernel `check_ascending_sorted_u32` (provider fn
+// `is_sorted_ascending_u32`); on caller-contract violation the
+// row-set output is undefined. Per W4.3 plan iter-6 F-W43-14
+// (operator-only scope after Step 12 bench rejected D2
+// precedence), there is no executor dispatch-site pre-check
+// — sortedness is purely a caller-supplied invariant. Each
+// thread takes one LEFT-row
+// and uses binary search on the RIGHT side to find the matched-
+// key run (`lower_bound` + `upper_bound`), then emits
+// `(left_idx, right_idx)` pairs for each `right_idx` in
+// `[lb, ub)`. Total work O(L · log R) — between hash's
+// O(L+R) and nested-loop's O(L·R). Binary search exploits
+// sortedness; pair emission handles run-length matching for
+// duplicate-key inputs.
+//
+// Spike-vs-production note: the bench-spike branch
+// `bench-spike/w43-sort-merge` carries
+// `sort_merge_join_inner_u32_1key_pairs_spike` used for the
+// crossover measurement; that kernel does NOT graduate to
+// production. This kernel is the production-shape design,
+// written fresh per W4.3 plan iter-4 D8.
+//
+// Restrictions (per W4.3 plan iter-4 D4):
+//   * Inner join only.
+//   * U32 / Symbol keys (Symbol IS u32 at the byte level).
+//   * Single key column.
+//
+// Memory contract:
+//   * `left_keys` / `right_keys`: pointers to the single key
+//     column from each side, sorted ascending. Caller
+//     (provider fn) validates `num_bytes() >= num_rows * 4`
+//     BEFORE launching (W4.2 F-W42-14 idiom).
+//   * Index arrays: pre-allocated to
+//     `output_capacity = num_left * num_right`. Caller
+//     enforces `num_left * num_right <= 4_000_000` via
+//     `checked_mul` (shared `NESTED_LOOP_TOTAL_THRESHOLD`
+//     per W4.3 D3).
+//   * `output_count`: pre-zeroed.
+//
+// Defense-in-depth: kernel guards `out_idx < output_capacity`
+// even though, by the provider's contract, the guard is
+// unreachable on a well-formed call.
+// ===============================================================
+extern "C" __global__ void sort_merge_join_inner_u32_1key_pairs(
+    const uint32_t* __restrict__ left_keys,    // sorted ascending
+    const uint32_t* __restrict__ right_keys,   // sorted ascending
+    uint32_t num_left,
+    uint32_t num_right,
+    uint32_t* __restrict__ output_left_idx,
+    uint32_t* __restrict__ output_right_idx,
+    uint32_t* __restrict__ output_count,
+    uint32_t output_capacity
+) {
+    uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= num_left) return;
+    uint32_t key = left_keys[tid];
+
+    // lower_bound: first index in right where right_keys[idx] >= key
+    uint32_t lo = 0, hi = num_right;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        if (right_keys[mid] < key) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    uint32_t lb = lo;
+
+    // upper_bound: first index in right where right_keys[idx] > key
+    lo = lb;
+    hi = num_right;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        if (right_keys[mid] <= key) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    uint32_t ub = lo;
+
+    // Emit (tid, r) pairs for each r in [lb, ub).
+    for (uint32_t r = lb; r < ub; r++) {
+        uint32_t out_idx = atomicAdd(output_count, 1);
+        if (out_idx < output_capacity) {
+            output_left_idx[out_idx] = tid;
+            output_right_idx[out_idx] = r;
+        }
     }
 }

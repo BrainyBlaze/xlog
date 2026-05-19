@@ -1,0 +1,72 @@
+{
+  "run_id": "g39-pre-50doc-20260517-r1",
+  "milestone": "M37-C-prime",
+  "m22_run_id": "2026-04-25-run1",
+  "m25_baseline_run_id": "2026-04-27-xlog-fix-m25-rerun",
+  "eval_path": "/tmp/g39-pre-corpus-50.jsonl",
+  "v3_dir": "/home/dev/projects/dts-dlm/.worktrees/g39-pre-profiler-trace/data/serving/v3",
+  "backbone_vocab_size": 248320,
+  "backbone_hidden_dim": 1024,
+  "arms": [
+    {
+      "name": "C",
+      "r_cfg_weight": 0.9,
+      "use_zero_bridge": false,
+      "use_learned_bridge": true,
+      "widening": true,
+      "m37c_constraint_active": false,
+      "description": "M22 learned widened (M22 bridge.pt + widening, no constraint; arm-C M36-shadow diagnostics provide the widened-only denominator)"
+    }
+  ],
+  "arm_results": [
+    {
+      "arm": "C",
+      "doc_count": 50,
+      "fail_count": 0,
+      "total_wall_seconds": 1759.5450429916382,
+      "frontier_include_token_id_changes": true,
+      "m37c_constraint_active": false,
+      "out_path": "/tmp/g39-pre-m37c-prime/g39-pre-50doc-20260517-r1/eval/arm_C.jsonl"
+    }
+  ],
+  "training_metadata": {
+    "run_id": "2026-04-25-run1",
+    "training_path": "/home/dev/projects/dts-dlm/data/m15-phase-c-train/training_slice.jsonl",
+    "v3_dir": "/home/dev/projects/dts-dlm/data/serving/v3",
+    "v3_codebook_0_sha256": "644c3151a5aac3e8822e3893101cfa735c05c18b6de023f74c9413a15e45ad4b",
+    "backbone_vocab_size": 248320,
+    "backbone_hidden_dim": 1024,
+    "bridge": {
+      "d_summary": 7,
+      "vocab_size": 248320,
+      "hidden_dim": null
+    },
+    "optimizer": {
+      "class": "torch.optim.Adam",
+      "lr": 0.01
+    },
+    "loss_scalars": {
+      "margin": 1.0,
+      "alpha_contra": 0.5,
+      "alpha_delta": 2.0
+    },
+    "m22_locks": {
+      "r_cfg_weight_during_data_collection": 1.0,
+      "use_zero_bridge": false,
+      "use_learned_bridge": false
+    },
+    "seeds": {
+      "bridge_init": 42,
+      "optimizer": 42,
+      "data_collection": 42
+    },
+    "doc_count": 100,
+    "covered_positions_total": 17779,
+    "loss_first": 1.2065008878707886,
+    "loss_last": 0.07070653885602951,
+    "total_wall_seconds": 725.5336601734161,
+    "bridge_path": "/home/dev/projects/dts-dlm/out/m22/2026-04-25-run1/bridge.pt",
+    "log_path": "/home/dev/projects/dts-dlm/out/m22/2026-04-25-run1/training_log.jsonl"
+  },
+  "verdict_label": null
+}

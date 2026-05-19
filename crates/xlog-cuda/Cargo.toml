@@ -27,7 +27,16 @@ arrow = { version = "53", default-features = false, features = ["ffi", "ipc"] }
 
 [dev-dependencies]
 bytemuck = "1.14"
+# v0.6.2 plan→provider cert: tests that the pure-Rust hypergraph
+# planner and the GPU WCOJ provider agree on the same fixture.
+# Dev-only — no runtime coupling between xlog-cuda and xlog-logic.
+xlog-logic.workspace = true
 
 [features]
 default = []
 arrow-device-import = []
+# Diagnostic-only: enable per-phase CUDA-event timing inside
+# the WCOJ triangle dispatch. Production builds leave this off
+# to keep the hot path zero-overhead. The phase-report binary
+# in xlog-integration enables it for measurement runs only.
+wcoj-phase-timing = []

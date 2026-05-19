@@ -7,7 +7,7 @@
 // include!() in build.rs would interpret //! as documenting the wrong item.
 
 /// Module names matching the .cu filenames (without extension).
-/// Order matches provider/mod.rs load order. All 22 modules listed.
+/// Order matches provider/mod.rs load order. All 23 modules listed.
 pub const KERNEL_CU_NAMES: &[&str] = &[
     "join",
     "dedup",
@@ -31,6 +31,7 @@ pub const KERNEL_CU_NAMES: &[&str] = &[
     "ilp",
     "ilp_credit",
     "ilp_exact",
+    "wcoj",
 ];
 
 /// Describes a single CUDA module: the .cu file name, the runtime module name
@@ -54,9 +55,18 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "hash_join_bucket_count_v2",
             "hash_join_scatter_v2",
             "hash_join_probe_v2",
+            "hash_join_probe_v2_count_per_row",
+            "hash_join_probe_v2_materialize",
+            "hash_join_total_from_scan",
+            "hash_join_csm_unmatched_mask",
             "hash_join_semi",
             "hash_join_anti",
             "init_hash_table",
+            // W4.2 nested-loop inner join (emit-pairs design).
+            "nested_loop_join_inner_u32_1key_pairs",
+            // W4.3 sort-merge inner join (emit-pairs design,
+            // caller-asserted pre-sorted inputs).
+            "sort_merge_join_inner_u32_1key_pairs",
         ],
     },
     KernelModuleSpec {
@@ -67,6 +77,9 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "mark_unique_columnar",
             "mark_unique_and_scan_columnar",
             "compact_rows",
+            "mark_unique_full_row_bytewise",
+            "mark_diff_full_row_typed_sorted",
+            "small_sort_full_row_indices_typed",
         ],
     },
     KernelModuleSpec {
@@ -123,6 +136,10 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "gather_keys_i64_hi_u32",
             "gather_keys_f64_lo_u32",
             "gather_keys_f64_hi_u32",
+            // W4.3 sortedness-detection kernel (used by the
+            // dispatch-site eligibility check before invoking
+            // the sort-merge join).
+            "check_ascending_sorted_u32",
         ],
     },
     KernelModuleSpec {
@@ -434,6 +451,55 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
         module_name: "xlog_ilp_exact",
         kernels: &["ilp_exact_score"],
     },
+    KernelModuleSpec {
+        cu_name: "wcoj",
+        module_name: "xlog_wcoj",
+        kernels: &[
+            "wcoj_build_metadata_mark_boundaries_u32",
+            "wcoj_build_metadata_mark_boundaries_u64",
+            "wcoj_build_metadata_scatter_u32",
+            "wcoj_build_metadata_scatter_u64",
+            "wcoj_triangle_build_hg_work_plan_u32",
+            "wcoj_triangle_count_hg_u32",
+            "wcoj_triangle_materialize_hg_u32",
+            "wcoj_triangle_build_hg_work_plan_u64",
+            "wcoj_triangle_count_hg_u64",
+            "wcoj_triangle_materialize_hg_u64",
+            "wcoj_triangle_count_hg_cached_u32",
+            "wcoj_triangle_materialize_hg_cached_u32",
+            "wcoj_scan_hg_block_counts_u32",
+            "wcoj_compute_total",
+            "wcoj_layout_check_sorted_unique_u32",
+            "wcoj_layout_check_sorted_unique_u64",
+            "wcoj_4cycle_build_e2_work_prefix_u32",
+            "wcoj_4cycle_build_hg_work_plan_u32",
+            "wcoj_4cycle_count_hg_u32",
+            "wcoj_4cycle_materialize_hg_u32",
+            "wcoj_4cycle_build_e2_work_prefix_u64",
+            "wcoj_4cycle_build_hg_work_plan_u64",
+            "wcoj_4cycle_count_hg_u64",
+            "wcoj_4cycle_materialize_hg_u64",
+            // W3.2/W6.4 — General-arity clique kernel (k=5..8 from
+            // single C++ template; ABI wrappers below are
+            // template-call-only per Tier-1 source-audit).
+            "wcoj_clique5_count_hg_u32",
+            "wcoj_clique5_materialize_hg_u32",
+            "wcoj_clique5_count_hg_u64",
+            "wcoj_clique5_materialize_hg_u64",
+            "wcoj_clique6_count_hg_u32",
+            "wcoj_clique6_materialize_hg_u32",
+            "wcoj_clique6_count_hg_u64",
+            "wcoj_clique6_materialize_hg_u64",
+            "wcoj_clique7_count_hg_u32",
+            "wcoj_clique7_materialize_hg_u32",
+            "wcoj_clique7_count_hg_u64",
+            "wcoj_clique7_materialize_hg_u64",
+            "wcoj_clique8_count_hg_u32",
+            "wcoj_clique8_materialize_hg_u32",
+            "wcoj_clique8_count_hg_u64",
+            "wcoj_clique8_materialize_hg_u64",
+        ],
+    },
 ];
 
 #[cfg(test)]
@@ -459,8 +525,8 @@ mod tests {
     }
 
     #[test]
-    fn kernel_modules_count_is_22() {
-        assert_eq!(KERNEL_MODULES.len(), 22);
+    fn kernel_modules_count_is_23() {
+        assert_eq!(KERNEL_MODULES.len(), 23);
     }
 
     #[test]

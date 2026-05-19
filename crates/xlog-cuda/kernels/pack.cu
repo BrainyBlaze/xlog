@@ -130,7 +130,8 @@ extern "C" __global__ void hash_packed_keys(
  * @param col1 Second column data buffer (or nullptr if num_cols < 2)
  * @param col2 Third column data buffer (or nullptr if num_cols < 3)
  * @param col3 Fourth column data buffer (or nullptr if num_cols < 4)
- * @param col_sizes Size in bytes of each column element
+ * @param packed_col_sizes Four 16-bit element sizes packed little-endian
+ *        into one 64-bit scalar. This avoids a hot-path H2D metadata upload.
  * @param num_cols Number of columns to pack (1-4)
  * @param num_rows Number of rows to process
  * @param row_size Total size of packed row in bytes
@@ -145,7 +146,7 @@ extern "C" __global__ void pack_and_hash_keys(
     const uint8_t* __restrict__ col1,
     const uint8_t* __restrict__ col2,
     const uint8_t* __restrict__ col3,
-    const uint32_t* __restrict__ col_sizes,
+    uint64_t packed_col_sizes,
     uint32_t num_cols,
     uint32_t num_rows,
     uint32_t row_size,
@@ -158,10 +159,14 @@ extern "C" __global__ void pack_and_hash_keys(
     uint8_t* out_row = packed_output + (uint64_t)row * row_size;
     uint64_t hash = FNV_OFFSET;
     uint32_t offset = 0;
+    uint32_t col0_size = (uint32_t)(packed_col_sizes & 0xffffULL);
+    uint32_t col1_size = (uint32_t)((packed_col_sizes >> 16) & 0xffffULL);
+    uint32_t col2_size = (uint32_t)((packed_col_sizes >> 32) & 0xffffULL);
+    uint32_t col3_size = (uint32_t)((packed_col_sizes >> 48) & 0xffffULL);
 
     // Pack and hash simultaneously - each byte is processed exactly once
     if (num_cols >= 1 && col0 != nullptr) {
-        uint32_t sz = col_sizes[0];
+        uint32_t sz = col0_size;
         const uint8_t* col_data = col0 + (uint64_t)row * sz;
         for (uint32_t i = 0; i < sz; i++) {
             uint8_t b = col_data[i];
@@ -172,7 +177,7 @@ extern "C" __global__ void pack_and_hash_keys(
         offset += sz;
     }
     if (num_cols >= 2 && col1 != nullptr) {
-        uint32_t sz = col_sizes[1];
+        uint32_t sz = col1_size;
         const uint8_t* col_data = col1 + (uint64_t)row * sz;
         for (uint32_t i = 0; i < sz; i++) {
             uint8_t b = col_data[i];
@@ -183,7 +188,7 @@ extern "C" __global__ void pack_and_hash_keys(
         offset += sz;
     }
     if (num_cols >= 3 && col2 != nullptr) {
-        uint32_t sz = col_sizes[2];
+        uint32_t sz = col2_size;
         const uint8_t* col_data = col2 + (uint64_t)row * sz;
         for (uint32_t i = 0; i < sz; i++) {
             uint8_t b = col_data[i];
@@ -194,7 +199,7 @@ extern "C" __global__ void pack_and_hash_keys(
         offset += sz;
     }
     if (num_cols >= 4 && col3 != nullptr) {
-        uint32_t sz = col_sizes[3];
+        uint32_t sz = col3_size;
         const uint8_t* col_data = col3 + (uint64_t)row * sz;
         for (uint32_t i = 0; i < sz; i++) {
             uint8_t b = col_data[i];

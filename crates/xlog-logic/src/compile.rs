@@ -16,6 +16,7 @@ use xlog_core::Result;
 use xlog_ir::ExecutionPlan;
 use xlog_stats::{StatsManager, StatsSnapshot};
 
+use crate::compiler_config::CompilerConfig;
 use crate::lower::Lowerer;
 use crate::module::ModuleError;
 use crate::optimizer::Optimizer;
@@ -106,14 +107,36 @@ impl Compiler {
 
     /// Compile XLOG source code into an execution plan, optionally seeding the optimizer
     /// with a runtime statistics snapshot.
+    ///
+    /// W2.1: this entry point delegates through the new composable API
+    /// with `CompilerConfig::default()`, which preserves slice
+    /// 1/2/4/W2.2 behavior bit-identically.
     pub fn compile_with_stats_snapshot(
         &mut self,
         source: &str,
         stats_snapshot: Option<&StatsSnapshot>,
     ) -> Result<ExecutionPlan> {
-        // Phase 1: Parse source into AST
+        self.compile_with_config_and_stats_snapshot(
+            source,
+            &CompilerConfig::default(),
+            stats_snapshot,
+        )
+    }
+
+    /// W2.1: composable entry point that accepts a `CompilerConfig`.
+    ///
+    /// Default-config callers should keep using `compile()` /
+    /// `compile_with_stats_snapshot()`. This entry point exists so
+    /// W2.1 can flip the variable-ordering cost model on per-call
+    /// without an env override.
+    pub fn compile_with_config_and_stats_snapshot(
+        &mut self,
+        source: &str,
+        config: &CompilerConfig,
+        stats_snapshot: Option<&StatsSnapshot>,
+    ) -> Result<ExecutionPlan> {
         let program = parse_program(source)?;
-        self.compile_program_with_stats_snapshot(&program, stats_snapshot)
+        self.compile_program_with_config_and_stats_snapshot(&program, config, stats_snapshot)
     }
 
     /// Compile a parsed XLOG program into an execution plan.
@@ -125,9 +148,32 @@ impl Compiler {
     }
 
     /// Compile a parsed XLOG program into an execution plan, optionally seeding the optimizer.
+    ///
+    /// W2.1: delegates to
+    /// [`Self::compile_program_with_config_and_stats_snapshot`] with
+    /// `CompilerConfig::default()`.
     pub fn compile_program_with_stats_snapshot(
         &mut self,
         program: &Program,
+        stats_snapshot: Option<&StatsSnapshot>,
+    ) -> Result<ExecutionPlan> {
+        self.compile_program_with_config_and_stats_snapshot(
+            program,
+            &CompilerConfig::default(),
+            stats_snapshot,
+        )
+    }
+
+    /// W2.1: composable program-level entry point.
+    ///
+    /// `config` is currently consumed only by the promoter
+    /// (W2.1 step 5) when it wires the variable-ordering cost
+    /// model. With `CompilerConfig::default()`, the promoter
+    /// behaves identically to pre-W2.1.
+    pub fn compile_program_with_config_and_stats_snapshot(
+        &mut self,
+        program: &Program,
+        config: &CompilerConfig,
         stats_snapshot: Option<&StatsSnapshot>,
     ) -> Result<ExecutionPlan> {
         let program = desugar_queries_and_constraints(program);
@@ -273,13 +319,78 @@ impl Compiler {
             })
             .collect();
 
-        let mut optimizer = Optimizer::new(Arc::new(mgr));
+        let stats_arc = Arc::new(mgr);
+
+        crate::optimizer::helper_split_pass::run(
+            &mut plan,
+            &schemas_by_rel_id,
+            &stats_arc,
+            |schema| self.lowerer.create_helper_relation(schema),
+        );
+
+        let schemas_by_rel_id: HashMap<RelId, Schema> = self
+            .lowerer
+            .rel_ids()
+            .iter()
+            .filter_map(|(pred, rel_id)| {
+                self.lowerer
+                    .schemas()
+                    .get(pred)
+                    .map(|schema| (*rel_id, schema.clone()))
+            })
+            .collect();
+
+        let mut optimizer = Optimizer::new(Arc::clone(&stats_arc));
         optimizer.set_schemas(schemas_by_rel_id);
         for rules in &mut plan.rules_by_scc {
             for rule in rules {
                 rule.body = optimizer.optimize(rule.body.clone());
             }
         }
+
+        // v0.6.5 slice 3: selectivity-aware reordering pass. Runs
+        // BETWEEN the optimizer loop and promote_multiway.
+        // Locked compile-pipeline ordering:
+        //   lower → helper_split_pass → optimizer → selectivity_pass → promote_multiway
+        //
+        // v0.6.5 W2.2: takes `rel_ids` so per-body Scans can be
+        // resolved against `StatsManager`. Behavior on empty
+        // stats / unseeded relations is no-op (safety floor).
+        crate::optimizer::selectivity_pass::run(&mut plan, &stats_arc, self.lowerer.rel_ids());
+
+        // v0.6.5 slice 1: promote eligible triangle subtrees to
+        // RirNode::MultiWayJoin. Runs *after* the optimizer so the
+        // optimizer never has to learn the new variant. Fallback
+        // identity preserves v0.6.2 binary-join semantics on
+        // dispatch decline.
+        //
+        // v0.6.5 slice 4: pass the lowerer's predicate→RelId map
+        // so the promoter can gate recursive-SCC bodies on the
+        // count of in-SCC Scans (≤ 1 = promote, ≥ 2 = skip).
+        //
+        // W2.1: also pass `&stats_arc` and the caller-provided
+        // `&CompilerConfig`. With `CompilerConfig::default()`
+        // (`Disabled`), the promoter never sets `var_order` and
+        // slice 1/2/4/W2.2 dispatch is bit-identical.
+        crate::promote::promote_multiway(&mut plan, self.lowerer.rel_ids(), &stats_arc, config);
+
+        let schemas_by_rel_id: HashMap<RelId, Schema> = self
+            .lowerer
+            .rel_ids()
+            .iter()
+            .filter_map(|(pred, rel_id)| {
+                self.lowerer
+                    .schemas()
+                    .get(pred)
+                    .map(|schema| (*rel_id, schema.clone()))
+            })
+            .collect();
+
+        crate::optimizer::helper_split_pass::run_kclique_specs(
+            &mut plan,
+            &schemas_by_rel_id,
+            |schema| self.lowerer.create_helper_relation(schema),
+        );
 
         Ok(plan)
     }
@@ -356,7 +467,7 @@ fn desugar_queries_and_constraints(program: &Program) -> Program {
 
 /// Convenience function to compile source in one call.
 ///
-/// This creates a temporary compiler and compiles the source.
+/// This creates a short-lived compiler and compiles the source.
 /// For multiple compilations, prefer creating a `Compiler` instance directly.
 ///
 /// # Example
@@ -411,6 +522,7 @@ mod tests {
     use super::*;
     use xlog_core::ScalarType;
     use xlog_ir::RirNode;
+    use xlog_stats::ColumnStats;
     use xlog_stats::RelationStats;
     use xlog_stats::StatsManager;
 
@@ -737,12 +849,162 @@ mod tests {
         }
 
         match node {
+            RirNode::ChainJoin {
+                left,
+                right,
+                fallback,
+                ..
+            } => {
+                // W63 wraps eligible two-atom joins after stats-aware
+                // ordering. The chain node and its captured fallback must
+                // agree on the build-side choice.
+                assert!(matches!(**left, RirNode::Scan { rel } if rel == foo_id));
+                assert!(matches!(**right, RirNode::Scan { rel } if rel == edge_id));
+
+                let mut fallback_node = fallback.as_ref();
+                while let RirNode::Project { input, .. } = fallback_node {
+                    fallback_node = input;
+                }
+                match fallback_node {
+                    RirNode::Join { left, right, .. } => {
+                        assert!(matches!(**left, RirNode::Scan { rel } if rel == foo_id));
+                        assert!(matches!(**right, RirNode::Scan { rel } if rel == edge_id));
+                    }
+                    other => panic!("Expected ChainJoin fallback Join node, got {:?}", other),
+                }
+            }
             RirNode::Join { left, right, .. } => {
                 // Prefer building on the smaller relation (right/build side).
                 assert!(matches!(**left, RirNode::Scan { rel } if rel == foo_id));
                 assert!(matches!(**right, RirNode::Scan { rel } if rel == edge_id));
             }
             other => panic!("Expected Join node, got {:?}", other),
+        }
+    }
+
+    fn helper_split_source() -> &'static str {
+        r#"
+            ab(0, 0). bc(0, 0). cd(0, 0). de(0, 0). ef(0, 0). af(0, 0).
+            out(A, B, C, D, F) :-
+                ab(A, B),
+                bc(B, C),
+                cd(C, D),
+                de(D, E),
+                ef(E, F),
+                af(A, F).
+        "#
+    }
+
+    fn helper_split_snapshot(distinct_d: u64) -> StatsSnapshot {
+        let mut snapshot_relations = Vec::new();
+        for (idx, name) in ["ab", "bc", "cd", "de", "ef", "af"].iter().enumerate() {
+            let mut rel_stats = RelationStats::new(RelId(idx as u32));
+            rel_stats.update_cardinality(8192);
+            if *name == "de" {
+                let mut d_col = ColumnStats::new(0, ScalarType::U32);
+                d_col.update_distinct(distinct_d);
+                rel_stats.add_column(d_col);
+            }
+            snapshot_relations.push(rel_stats);
+        }
+        StatsSnapshot {
+            relations: snapshot_relations,
+            join_selectivities: Vec::new(),
+            rel_names: ["ab", "bc", "cd", "de", "ef", "af"]
+                .iter()
+                .enumerate()
+                .map(|(idx, name)| (RelId(idx as u32), (*name).to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn test_compile_with_named_stats_snapshot_creates_helper_relation() {
+        let mut compiler = Compiler::new();
+        let snapshot = helper_split_snapshot(1);
+        let plan = compiler
+            .compile_with_stats_snapshot(helper_split_source(), Some(&snapshot))
+            .expect("compile with helper stats");
+        let helper = compiler
+            .rel_ids()
+            .iter()
+            .find_map(|(name, rel)| {
+                name.starts_with("__w37_helper_")
+                    .then_some((name.clone(), *rel))
+            })
+            .expect("helper relation allocated");
+
+        let helper_rule_count = plan
+            .rules_by_scc
+            .iter()
+            .flatten()
+            .filter(|rule| rule.head == helper.0)
+            .count();
+        assert_eq!(helper_rule_count, 1);
+
+        let helper_rule = plan
+            .rules_by_scc
+            .iter()
+            .flatten()
+            .find(|rule| rule.head == helper.0)
+            .expect("helper rule");
+        assert!(
+            matches!(helper_rule.body, RirNode::ChainJoin { .. }),
+            "helper split output should be eligible for W63 ChainJoin promotion"
+        );
+
+        let out_rule = plan
+            .rules_by_scc
+            .iter()
+            .flatten()
+            .find(|rule| rule.head == "out")
+            .expect("out rule");
+        assert!(contains_scan(&out_rule.body, helper.1));
+    }
+
+    #[test]
+    fn test_compile_with_flat_named_stats_keeps_original_rule() {
+        let mut compiler = Compiler::new();
+        let snapshot = helper_split_snapshot(8192);
+        let plan = compiler
+            .compile_with_stats_snapshot(helper_split_source(), Some(&snapshot))
+            .expect("compile with flat stats");
+
+        assert!(!compiler
+            .rel_ids()
+            .keys()
+            .any(|name| name.starts_with("__w37_helper_")));
+        let out_rules = plan
+            .rules_by_scc
+            .iter()
+            .flatten()
+            .filter(|rule| rule.head == "out")
+            .count();
+        assert_eq!(out_rules, 1);
+    }
+
+    fn contains_scan(node: &RirNode, rel: RelId) -> bool {
+        match node {
+            RirNode::Scan { rel: scan_rel } => *scan_rel == rel,
+            RirNode::Join { left, right, .. } | RirNode::ChainJoin { left, right, .. } => {
+                contains_scan(left, rel) || contains_scan(right, rel)
+            }
+            RirNode::Project { input, .. }
+            | RirNode::Filter { input, .. }
+            | RirNode::Distinct { input, .. }
+            | RirNode::GroupBy { input, .. } => contains_scan(input, rel),
+            RirNode::Union { inputs } => inputs.iter().any(|input| contains_scan(input, rel)),
+            RirNode::Diff { left, right } => contains_scan(left, rel) || contains_scan(right, rel),
+            RirNode::Fixpoint {
+                base, recursive, ..
+            } => contains_scan(base, rel) || contains_scan(recursive, rel),
+            RirNode::MultiWayJoin { inputs, .. } => {
+                inputs.iter().any(|input| contains_scan(input, rel))
+            }
+            RirNode::TensorMaskedJoin { rel_index, .. } => {
+                rel_index.iter().any(|(input_rel, _)| *input_rel == rel)
+            }
+            RirNode::Unit => false,
         }
     }
 }

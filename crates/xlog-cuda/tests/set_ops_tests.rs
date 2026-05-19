@@ -2,9 +2,42 @@
 //! Tests for GPU-native set operations (union, diff)
 
 mod common;
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
 use common::setup_provider;
 use xlog_core::{ScalarType, Schema};
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
+
+fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+struct EnvGuard {
+    _lock: MutexGuard<'static, ()>,
+    old_graph: Option<String>,
+}
+
+impl EnvGuard {
+    fn graph_mode() -> Self {
+        let lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let old_graph = std::env::var("XLOG_USE_CSM_CUDA_GRAPH").ok();
+        std::env::set_var("XLOG_USE_CSM_CUDA_GRAPH", "1");
+        Self {
+            _lock: lock,
+            old_graph,
+        }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match &self.old_graph {
+            Some(value) => std::env::set_var("XLOG_USE_CSM_CUDA_GRAPH", value),
+            None => std::env::remove_var("XLOG_USE_CSM_CUDA_GRAPH"),
+        }
+    }
+}
 
 fn device_row_count(
     provider: &CudaKernelProvider,
@@ -67,6 +100,34 @@ fn buffer_with_row_cap(
     CudaBuffer::from_columns(vec![col.into()], row_cap, d_num_rows, schema)
 }
 
+fn buffer_i64_triples(provider: &CudaKernelProvider, rows: &[(i64, i64, i64)]) -> CudaBuffer {
+    let c0: Vec<i64> = rows.iter().map(|r| r.0).collect();
+    let c1: Vec<i64> = rows.iter().map(|r| r.1).collect();
+    let c2: Vec<i64> = rows.iter().map(|r| r.2).collect();
+    let schema = Schema::new(vec![
+        ("c0".to_string(), ScalarType::I64),
+        ("c1".to_string(), ScalarType::I64),
+        ("c2".to_string(), ScalarType::I64),
+    ]);
+    let bytes0: Vec<u8> = c0.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let bytes1: Vec<u8> = c1.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let bytes2: Vec<u8> = c2.iter().flat_map(|v| v.to_le_bytes()).collect();
+    provider
+        .create_buffer_from_slices(&[&bytes0, &bytes1, &bytes2], schema)
+        .expect("create i64 triple buffer")
+}
+
+fn read_i64_triples(provider: &CudaKernelProvider, buffer: &CudaBuffer) -> Vec<(i64, i64, i64)> {
+    let c0 = provider.download_column::<i64>(buffer, 0).expect("c0");
+    let c1 = provider.download_column::<i64>(buffer, 1).expect("c1");
+    let c2 = provider.download_column::<i64>(buffer, 2).expect("c2");
+    c0.into_iter()
+        .zip(c1)
+        .zip(c2)
+        .map(|((a, b), c)| (a, b, c))
+        .collect()
+}
+
 // ============== Union Tests ==============
 
 #[test]
@@ -117,6 +178,44 @@ fn test_union_gpu_basic() {
     let result_data = provider.download_column::<u32>(&result, 0).unwrap();
 
     assert_eq!(result_data, vec![1, 2, 3, 4, 5]);
+}
+
+#[test]
+fn w66_graph_mode_small_i64_full_row_set_ops_match_baseline_and_use_small_sort() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let a = buffer_i64_triples(
+        &provider,
+        &[(3, 30, -1), (-5, 7, 8), (3, 30, -1), (1, 2, 3)],
+    );
+    let b = buffer_i64_triples(&provider, &[(1, 2, 3), (9, 0, -4), (-5, 7, 8), (4, 4, 4)]);
+
+    let baseline_union = provider.union_gpu(&a, &b).expect("baseline union");
+    let baseline_diff = provider
+        .diff_gpu(&baseline_union, &b)
+        .expect("baseline diff");
+    let baseline_union_rows = read_i64_triples(&provider, &baseline_union);
+    let baseline_diff_rows = read_i64_triples(&provider, &baseline_diff);
+
+    let _guard = EnvGuard::graph_mode();
+    let before = provider.small_full_row_sort_invocations();
+    let graph_union = provider.union_gpu(&a, &b).expect("graph union");
+    let graph_diff = provider.diff_gpu(&graph_union, &b).expect("graph diff");
+    let after = provider.small_full_row_sort_invocations();
+
+    assert_eq!(
+        read_i64_triples(&provider, &graph_union),
+        baseline_union_rows
+    );
+    assert_eq!(read_i64_triples(&provider, &graph_diff), baseline_diff_rows);
+    assert!(
+        after >= before + 3,
+        "graph-mode union+diff should route small full-row set maintenance \
+         through the W66 small-sort path; before={before} after={after}"
+    );
 }
 
 #[test]
@@ -395,7 +494,7 @@ fn test_diff_gpu_complete_overlap() {
     };
 
     // a = [1, 2, 3], b = [1, 2, 3]
-    // Diff: a - b = [] (all removed)
+    // Diff: a - b = [] (complete overlap)
     let a: Vec<u32> = vec![1, 2, 3];
     let b: Vec<u32> = vec![1, 2, 3];
     let schema = Schema::new(vec![("val".to_string(), ScalarType::U32)]);
@@ -684,7 +783,7 @@ fn test_diff_u64_complete_overlap() {
 
     let result = provider.diff_gpu(&a_buf, &b_buf).unwrap();
     let result_data = provider.download_column::<u64>(&result, 0).unwrap();
-    assert!(result_data.is_empty()); // All removed
+    assert!(result_data.is_empty()); // Complete overlap
 }
 
 #[test]

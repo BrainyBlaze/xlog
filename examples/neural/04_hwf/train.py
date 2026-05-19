@@ -9,7 +9,9 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scripts.neural_datasets import DatasetManifest
 from scripts.neural_training import (
+    class_pattern_tensor,
     classification_accuracy,
+    neural_fixture_smoke_enabled,
     report_and_enforce_metric,
     resolve_epochs,
     resolve_min_accuracy,
@@ -62,8 +64,22 @@ def label_from_latex(latex: str) -> str:
     return "mul"
 
 
+def _fixture_crohme(mode: str):
+    manifest = DatasetManifest.load(MANIFEST)
+    if mode == "ci":
+        n = manifest.ci_subset.get("train", 64)
+    else:
+        n = 64
+    label_idx = [i % len(LABEL_ORDER) for i in range(n)]
+    labels = [LABEL_ORDER[i] for i in label_idx]
+    return manifest, class_pattern_tensor(label_idx, len(LABEL_ORDER), 1, 128, 128), labels
+
+
 def load_crohme(mode: str):
     if not DATA.exists():
+        if neural_fixture_smoke_enabled():
+            print("INFO: using synthetic CROHME fixture; dataset is unavailable")
+            return _fixture_crohme(mode)
         raise SystemExit(
             "CROHME dataset missing. Place under examples/neural/04_hwf/data/crohme"
         )
@@ -71,6 +87,9 @@ def load_crohme(mode: str):
     try:
         from torchvision import transforms
     except ImportError as exc:
+        if neural_fixture_smoke_enabled():
+            print("INFO: using synthetic CROHME fixture; torchvision is unavailable")
+            return _fixture_crohme(mode)
         raise SystemExit(f"Missing dependency: {exc}")
     import torch
 

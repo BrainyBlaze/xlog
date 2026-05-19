@@ -1,0 +1,9 @@
+pred p_A(u64, u64).
+pred p_B(u64, u64).
+pred p_C(u64, u64).
+pred p_D(u64, u64).
+
+learnable(W_chain_p_A)  :: p_A(X, Y) :- p_B(X, Z), p_C(Z, Y).
+learnable(W_star_p_A)   :: p_A(X, Y) :- p_B(X, Y), p_C(X, Y).
+learnable(W_fanout_p_A) :: p_A(X, Y) :- p_B(X, Z), p_D(X, Y).
+learnable(W_fanin_p_A)  :: p_A(X, Y) :- p_D(X, Y), p_C(Z, Y).

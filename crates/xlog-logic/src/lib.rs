@@ -30,16 +30,20 @@
 
 pub mod ast;
 pub mod compile;
+pub mod compiler_config;
 pub mod expand;
 pub mod function;
+pub mod hypergraph;
 pub mod lower;
 pub mod module;
 pub mod optimizer;
 pub mod parser;
+pub mod promote;
 pub mod resolver;
 pub mod stratify;
 #[allow(dead_code)] // reserved API: type inference not yet wired to main pipeline
 pub mod typeinfer;
+pub mod wcoj_var_ordering;
 
 // Re-export main types
 pub use ast::{

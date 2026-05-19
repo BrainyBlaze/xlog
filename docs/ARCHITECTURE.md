@@ -898,6 +898,28 @@ impl GpuMemoryManager {
 }
 ```
 
+### v0.6 Device Runtime + Recorded Launch Discipline
+
+The v0.6 runtime adds an opt-in stack atop the
+`GpuMemoryManager` shown above:
+`AsyncCudaResource → LoggingResource → GlobalDeviceBudget →
+XlogDeviceRuntime + StreamPool`. It tracks per-allocation
+events for cross-stream lifetime safety and exposes an
+access-aware `prepare_block_use` / `finish_block_use` /
+`prepare_first_use` / `finish_first_use` API that the
+`LaunchRecorder` uses to fence kernels safely on
+non-default streams. Activated via
+`CudaKernelProvider::with_runtime` /
+`GpuMemoryManager::with_runtime`; `XLOG_USE_DEVICE_RUNTIME=1`
+flips integration-test fixtures onto the runtime stack and
+`XLOG_USE_RECORDED_OPS=1` (or per-operator
+`XLOG_USE_RECORDED_*`) routes operator dispatch through the
+recorded variants. Default `new` constructors are unchanged.
+
+  * Architecture: [`architecture/device-runtime.md`](architecture/device-runtime.md).
+  * Operator-author migration checklist:
+    [`architecture/recorded-launch-migration.md`](architecture/recorded-launch-migration.md).
+
 ### Memory Budget Configuration
 
 ```rust

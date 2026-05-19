@@ -2,6 +2,8 @@
 // Sort-based deduplication with prefix sum compaction
 
 #include <cstdint>
+#include <cstring>
+#include "totalorder.cuh"
 
 #define BLOCK_SIZE 256
 
@@ -286,4 +288,278 @@ extern "C" __global__ void compact_rows(
             output[out_idx * row_stride + c] = input[tid * row_stride + c];
         }
     }
+}
+
+// Mark unique rows on a sorted multi-column buffer using BYTEWISE per-column
+// equality. This matches the deterministic Datalog set semantics enforced by
+// the host fallback `BTreeSet<Vec<u8>>`: two rows collapse iff their raw
+// column bytes are identical. For floats, this matches IEEE-754 totalOrder
+// equality under the project's f32_to_ordered_u32 / f64_to_ordered_u64
+// normalization (see kernels/sort.cu) — distinct bit patterns map to
+// distinct ordered keys, so bytewise equality on the post-sort buffer is
+// equivalent to total-order equality. +0.0 vs -0.0 stay distinct under this
+// rule; two NaNs collapse iff bit-identical.
+//
+// Caller is responsible for sorting the buffer with the multi-column sort
+// (which uses total-order normalization for floats) BEFORE invoking this
+// kernel. Row 0 is always unique. unique_mask[i] is u8 0/1.
+extern "C" __global__ void mark_unique_full_row_bytewise(
+    const uint64_t* __restrict__ col_ptrs,
+    const uint32_t* __restrict__ col_sizes,
+    uint32_t num_cols,
+    const uint32_t* __restrict__ num_rows_device,
+    uint32_t row_cap,
+    uint8_t* __restrict__ unique_mask
+) {
+    uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= row_cap) return;
+
+    uint32_t num_rows = *num_rows_device;
+    if (num_rows > row_cap) {
+        num_rows = row_cap;
+    }
+    if (row >= num_rows) {
+        unique_mask[row] = 0;
+        return;
+    }
+    if (row == 0) {
+        unique_mask[0] = 1;
+        return;
+    }
+
+    bool is_dup = true;
+    for (uint32_t c = 0; c < num_cols && is_dup; c++) {
+        const uint8_t* col = (const uint8_t*)(uintptr_t)col_ptrs[c];
+        uint32_t sz = col_sizes[c];
+        const uint8_t* prev = col + (uint64_t)(row - 1) * sz;
+        const uint8_t* curr = col + (uint64_t)row * sz;
+        for (uint32_t i = 0; i < sz; i++) {
+            if (prev[i] != curr[i]) {
+                is_dup = false;
+                break;
+            }
+        }
+    }
+
+    unique_mask[row] = is_dup ? 0 : 1;
+}
+
+// Per-column typed compare matching the order convention of the project's
+// multi-column sort (kernels/sort.cu). For each column, returns -1 / 0 / 1
+// based on TYPED order:
+//
+//   * U32, U64, BOOL, SYMBOL: unsigned compare on raw bits.
+//   * I32, I64: sign-flipped unsigned compare (matches `^ 0x80...`).
+//   * F32, F64: totalOrder key compare via the shared
+//     `xlog_f{32,64}_to_ordered_u{32,64}` helpers in `totalorder.cuh`,
+//     so the binary search converges with the sort's ordering.
+//
+// Equality is the same as bytewise equality across all the typed branches,
+// so the dedup mask kernel above and this comparator agree on equality.
+__device__ __forceinline__ int32_t xlog_typed_cmp_cell(
+    const uint8_t* a_cell,
+    const uint8_t* b_cell,
+    uint8_t ty
+) {
+    if (ty == XLOG_TY_F64) {
+        uint64_t a, b;
+        memcpy(&a, a_cell, 8);
+        memcpy(&b, b_cell, 8);
+        uint64_t ka = xlog_f64_to_ordered_u64(a);
+        uint64_t kb = xlog_f64_to_ordered_u64(b);
+        if (ka < kb) return -1;
+        if (ka > kb) return 1;
+        return 0;
+    } else if (ty == XLOG_TY_F32) {
+        uint32_t a, b;
+        memcpy(&a, a_cell, 4);
+        memcpy(&b, b_cell, 4);
+        uint32_t ka = xlog_f32_to_ordered_u32(a);
+        uint32_t kb = xlog_f32_to_ordered_u32(b);
+        if (ka < kb) return -1;
+        if (ka > kb) return 1;
+        return 0;
+    } else if (ty == XLOG_TY_U64) {
+        uint64_t a, b;
+        memcpy(&a, a_cell, 8);
+        memcpy(&b, b_cell, 8);
+        if (a < b) return -1;
+        if (a > b) return 1;
+        return 0;
+    } else if (ty == XLOG_TY_I64) {
+        uint64_t a, b;
+        memcpy(&a, a_cell, 8);
+        memcpy(&b, b_cell, 8);
+        a ^= 0x8000000000000000ull;
+        b ^= 0x8000000000000000ull;
+        if (a < b) return -1;
+        if (a > b) return 1;
+        return 0;
+    } else if (ty == XLOG_TY_U32 || ty == XLOG_TY_SYMBOL) {
+        uint32_t a, b;
+        memcpy(&a, a_cell, 4);
+        memcpy(&b, b_cell, 4);
+        if (a < b) return -1;
+        if (a > b) return 1;
+        return 0;
+    } else if (ty == XLOG_TY_I32) {
+        uint32_t a, b;
+        memcpy(&a, a_cell, 4);
+        memcpy(&b, b_cell, 4);
+        a ^= 0x80000000u;
+        b ^= 0x80000000u;
+        if (a < b) return -1;
+        if (a > b) return 1;
+        return 0;
+    } else if (ty == XLOG_TY_BOOL) {
+        if (a_cell[0] < b_cell[0]) return -1;
+        if (a_cell[0] > b_cell[0]) return 1;
+        return 0;
+    }
+    return 0;
+}
+
+__device__ __forceinline__ int32_t xlog_typed_cmp_row(
+    const uint64_t* __restrict__ col_ptrs,
+    const uint32_t* __restrict__ col_sizes,
+    const uint8_t* __restrict__ col_types,
+    uint32_t num_cols,
+    uint32_t lhs_row,
+    uint32_t rhs_row
+) {
+    for (uint32_t c = 0; c < num_cols; c++) {
+        const uint8_t* col = (const uint8_t*)(uintptr_t)col_ptrs[c];
+        uint32_t sz = col_sizes[c];
+        const uint8_t* lhs = col + (uint64_t)lhs_row * sz;
+        const uint8_t* rhs = col + (uint64_t)rhs_row * sz;
+        int32_t cmp = xlog_typed_cmp_cell(lhs, rhs, col_types[c]);
+        if (cmp != 0) return cmp;
+    }
+    if (lhs_row < rhs_row) return -1;
+    if (lhs_row > rhs_row) return 1;
+    return 0;
+}
+
+__device__ __forceinline__ int32_t xlog_small_sort_cmp_index(
+    uint32_t lhs,
+    uint32_t rhs,
+    const uint64_t* __restrict__ col_ptrs,
+    const uint32_t* __restrict__ col_sizes,
+    const uint8_t* __restrict__ col_types,
+    uint32_t num_cols
+) {
+    const uint32_t sentinel = 0xffffffffu;
+    if (lhs == sentinel && rhs == sentinel) return 0;
+    if (lhs == sentinel) return 1;
+    if (rhs == sentinel) return -1;
+    return xlog_typed_cmp_row(col_ptrs, col_sizes, col_types, num_cols, lhs, rhs);
+}
+
+// Sort a small full-row relation by typed lexicographic order and return the
+// row permutation. This is intentionally capped at 1024 rows: it replaces the
+// many-launch radix multi-column path for W66's small recursive set-maintenance
+// buffers without changing large-relation behavior.
+extern "C" __global__ void small_sort_full_row_indices_typed(
+    const uint64_t* __restrict__ col_ptrs,
+    const uint32_t* __restrict__ col_sizes,
+    const uint8_t* __restrict__ col_types,
+    uint32_t num_cols,
+    const uint32_t* __restrict__ num_rows_device,
+    uint32_t row_cap,
+    uint32_t* __restrict__ out_indices
+) {
+    __shared__ uint32_t indices[1024];
+    const uint32_t sentinel = 0xffffffffu;
+    uint32_t tid = threadIdx.x;
+    uint32_t n = *num_rows_device;
+    if (n > row_cap) n = row_cap;
+    if (n > 1024u) n = 1024u;
+
+    indices[tid] = (tid < n) ? tid : sentinel;
+    __syncthreads();
+
+    for (uint32_t k = 2; k <= 1024u; k <<= 1) {
+        for (uint32_t j = k >> 1; j > 0; j >>= 1) {
+            uint32_t partner = tid ^ j;
+            if (partner > tid) {
+                bool ascending = ((tid & k) == 0);
+                uint32_t lhs = indices[tid];
+                uint32_t rhs = indices[partner];
+                int32_t cmp = xlog_small_sort_cmp_index(
+                    lhs, rhs, col_ptrs, col_sizes, col_types, num_cols);
+                bool swap = ascending ? (cmp > 0) : (cmp < 0);
+                if (swap) {
+                    indices[tid] = rhs;
+                    indices[partner] = lhs;
+                }
+            }
+            __syncthreads();
+        }
+    }
+
+    if (tid < n) {
+        out_indices[tid] = indices[tid];
+    }
+}
+
+// Mark rows of sorted, deduped buffer `a` that do NOT appear in sorted,
+// deduped buffer `b`. Each thread handles one a-row and performs a binary
+// search over b's row space using the typed per-column comparator above,
+// which agrees with the multi-column sort's order convention. The probe
+// converges because the buffers were sorted with the same convention; the
+// equality result is the same as bytewise equality (totalOrder
+// normalization is bijective, so distinct bit patterns map to distinct
+// ordered keys).
+//
+// keep_mask[t] = 1 iff a[t] is NOT found in b.
+extern "C" __global__ void mark_diff_full_row_typed_sorted(
+    const uint64_t* __restrict__ a_col_ptrs,
+    const uint64_t* __restrict__ b_col_ptrs,
+    const uint32_t* __restrict__ col_sizes,
+    const uint8_t* __restrict__ col_types,
+    uint32_t num_cols,
+    const uint32_t* __restrict__ num_a_device,
+    uint32_t num_b,
+    uint32_t a_cap,
+    uint8_t* __restrict__ keep_mask
+) {
+    uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= a_cap) return;
+
+    uint32_t num_a = *num_a_device;
+    if (num_a > a_cap) num_a = a_cap;
+    if (row >= num_a) {
+        keep_mask[row] = 0;
+        return;
+    }
+
+    if (num_b == 0) {
+        keep_mask[row] = 1;
+        return;
+    }
+
+    int32_t lo = 0;
+    int32_t hi = (int32_t)num_b;
+    while (lo < hi) {
+        int32_t mid = lo + ((hi - lo) >> 1);
+        int32_t cmp = 0;
+        for (uint32_t c = 0; c < num_cols; c++) {
+            const uint8_t* a_col = (const uint8_t*)(uintptr_t)a_col_ptrs[c];
+            const uint8_t* b_col = (const uint8_t*)(uintptr_t)b_col_ptrs[c];
+            uint32_t sz = col_sizes[c];
+            const uint8_t* a_cell = a_col + (uint64_t)row * sz;
+            const uint8_t* b_cell = b_col + (uint64_t)mid * sz;
+            cmp = xlog_typed_cmp_cell(a_cell, b_cell, col_types[c]);
+            if (cmp != 0) break;
+        }
+        if (cmp < 0) {
+            hi = mid;
+        } else if (cmp > 0) {
+            lo = mid + 1;
+        } else {
+            keep_mask[row] = 0;
+            return;
+        }
+    }
+    keep_mask[row] = 1;
 }

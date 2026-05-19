@@ -1,7 +1,7 @@
 //! Run a `.xlog` program end-to-end on a CUDA device.
 //!
 //! Usage:
-//! `cargo run -p xlog-logic --release --example xlog_run -- <file.xlog> [--device N] [--memory-mb MB] [--limit N]`
+//! `cargo run -p xlog-integration --release --bin xlog_run -- <file.xlog> [--device N] [--memory-mb MB] [--limit N]`
 
 use std::collections::HashMap;
 use std::env;
@@ -23,8 +23,8 @@ fn usage() -> String {
         "  xlog_run <file.xlog> [--device N] [--memory-mb MB] [--limit N]",
         "",
         "Examples:",
-        "  cargo run -p xlog-logic --release --example xlog_run -- examples/xlog/00-basics/01_tc_reachability.xlog",
-        "  cargo run -p xlog-logic --release --example xlog_run -- examples/xlog/70-aggregates/01_out_degree_count.xlog --limit 20",
+        "  cargo run -p xlog-integration --release --bin xlog_run -- examples/xlog/00-basics/01_tc_reachability.xlog",
+        "  cargo run -p xlog-integration --release --bin xlog_run -- examples/xlog/70-aggregates/01_out_degree_count.xlog --limit 20",
     ]
     .join("\n")
 }

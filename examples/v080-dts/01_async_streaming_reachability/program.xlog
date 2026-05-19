@@ -1,0 +1,7 @@
+pred edge(i32, i32).
+pred reach(i32, i32).
+
+reach(X, Y) :- edge(X, Y).
+reach(X, Z) :- reach(X, Y), edge(Y, Z).
+
+?- reach(X, Y).

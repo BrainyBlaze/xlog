@@ -4,7 +4,7 @@
 //! to execute GPU-accelerated relational operations.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 #[cfg(test)]
 use xlog_core::ScalarType;
@@ -26,6 +26,10 @@ mod join_cache;
 mod node_dispatch;
 mod recursive;
 mod rewrite;
+mod wcoj_cost_model;
+mod wcoj_dispatch;
+#[cfg(feature = "wcoj-phase-timing")]
+pub mod wcoj_phase_timing;
 use join_cache::JoinIndexCache;
 
 /// Incremental update for a base relation.
@@ -41,6 +45,21 @@ impl RelationDelta {
     pub fn new(insert: Option<CudaBuffer>, delete: Option<CudaBuffer>) -> Self {
         Self { insert, delete }
     }
+}
+
+/// Runtime summary for a delta recomputation pass.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DeltaRecomputeStats {
+    /// Number of base relations changed by the delta map.
+    pub changed_relations: usize,
+    /// True when at least one relation supplied delete rows.
+    pub has_deletes: bool,
+    /// Number of SCCs whose dependency closure was affected.
+    pub affected_sccs: usize,
+    /// Number of affected SCCs that were cleared and fully recomputed.
+    pub recomputed_sccs: usize,
+    /// Number of affected SCCs updated without clearing prior output.
+    pub incremental_sccs: usize,
 }
 
 /// Query executor that interprets RIR nodes using GPU kernels
@@ -83,6 +102,143 @@ pub struct Executor {
     ilp_registry: IlpRegistry,
     /// Last ILP tagged result metadata
     ilp_last_result: Option<IlpTaggedResult>,
+    /// Number of times the env-gated WCOJ triangle dispatch
+    /// (`XLOG_USE_WCOJ_TRIANGLE_U32` / `RuntimeConfig::wcoj_triangle_dispatch`)
+    /// produced a result and the executor installed it. Tests use this
+    /// counter to assert that the WCOJ path actually fired vs. silently
+    /// falling back to the binary-join chain with the same answer.
+    wcoj_triangle_dispatch_count: u64,
+    /// v0.6.5 slice 2 — count of times `try_dispatch_wcoj_4cycle`
+    /// produced a result and the executor installed it. Tracks
+    /// 4-cycle dispatches separately from triangle.
+    pub(super) wcoj_4cycle_dispatch_count: u64,
+    /// Goal-039 G_W63_CHAIN — count of times the chain
+    /// dispatcher produced a result and the executor installed it.
+    pub(super) w63_chain_dispatch_count: u64,
+    /// W3.2 — count of times `try_dispatch_wcoj_clique5` produced
+    /// a result and the executor installed it. Public accessor:
+    /// `Executor::wcoj_clique5_dispatch_count(&self) -> u64`.
+    pub(super) wcoj_clique5_dispatch_count: u64,
+    /// W3.2 — count of times `try_dispatch_wcoj_clique6` produced
+    /// a result and the executor installed it.
+    pub(super) wcoj_clique6_dispatch_count: u64,
+    /// W6.4 — count of times `try_dispatch_wcoj_clique7` produced
+    /// a result and the executor installed it.
+    pub(super) wcoj_clique7_dispatch_count: u64,
+    /// W6.4 — count of times `try_dispatch_wcoj_clique8` produced
+    /// a result and the executor installed it.
+    pub(super) wcoj_clique8_dispatch_count: u64,
+    /// Authorization 5 G_HIST_KC — number of recursive Merge-phase
+    /// K-clique histogram refresh boundaries observed.
+    pub(super) kclique_histogram_refresh_count: u64,
+    /// Authorization 5 G_HIST_KC — cumulative nanoseconds spent in
+    /// recursive Merge-phase K-clique histogram refresh accounting.
+    pub(super) kclique_histogram_refresh_nanos: u128,
+    /// W4.2 — count of times `execute_join` routed an inner-join
+    /// to the nested-loop provider entry point
+    /// (`CudaKernelProvider::nested_loop_join_v2_inner_u32_1key`)
+    /// because the eligibility predicate + Cartesian-product
+    /// threshold both held. Tests use this counter to assert that
+    /// the W4.2 path actually fired vs. silently falling back to
+    /// hash. Public accessor:
+    /// `Executor::nested_loop_dispatch_count(&self) -> u64`.
+    pub(super) nested_loop_dispatch_count: u64,
+    /// Cached non-default stream for the WCOJ triangle dispatch hook.
+    /// Acquired lazily on first dispatch and reused thereafter — mirrors
+    /// [`xlog_cuda::CudaKernelProvider::recorded_op_stream`] for the
+    /// same reason: the device-runtime
+    /// [`xlog_cuda::device_runtime::StreamPool`] is grow-only with a
+    /// hard cap (default 16). Acquiring per-invocation would silently
+    /// drain the pool on long-lived runtimes (benchmarks, soak tests,
+    /// any program with >16 matching WCOJ-eligible rules) and route
+    /// subsequent dispatches through the binary-join fallback,
+    /// invalidating the dispatch counter and the gate-on path.
+    ///
+    /// **Shared across WCOJ shapes** (v0.6.5 slice 2): triangle and
+    /// 4-cycle dispatch both acquire and reuse this single stream.
+    /// Renamed from `wcoj_triangle_stream` when 4-cycle dispatch
+    /// landed.
+    wcoj_dispatch_stream: OnceLock<xlog_cuda::device_runtime::StreamId>,
+    /// Diagnostic-only: per-dispatch WCOJ triangle phase
+    /// timings, populated by `try_dispatch_wcoj_triangle` when
+    /// the `wcoj-phase-timing` Cargo feature is on. Read by the
+    /// `wcoj_phase_report` binary in xlog-integration. Field is
+    /// absent under feature-off so production builds have zero
+    /// overhead.
+    #[cfg(feature = "wcoj-phase-timing")]
+    pub(super) last_wcoj_phase_timing:
+        std::sync::Mutex<Option<wcoj_phase_timing::WcojDispatchPhaseTiming>>,
+    /// W2.3: per-iteration recursive-SCC stats trace, populated
+    /// by `execute_recursive_scc` after each Phase 2 (delta) and
+    /// Phase 4 (full) cardinality update site. Field + types +
+    /// accessor + populating call sites are gated on the
+    /// `recursive-stats-trace` Cargo feature (default OFF) so
+    /// production builds carry zero trace overhead — no field,
+    /// no populating call site, no symbol. The W2.3 acceptance
+    /// test target declares this feature in its
+    /// `required-features`, so it is only built when the
+    /// feature is enabled.
+    #[cfg(feature = "recursive-stats-trace")]
+    pub(super) last_recursive_stats_trace: RecursiveStatsTrace,
+}
+
+/// W2.3 step 7 acceptance gate — recursive-SCC stats trace.
+///
+/// Captures one entry per `(iteration, predicate)` boundary
+/// at which `execute_recursive_scc` updates `StatsManager` for
+/// a recursive predicate's `(full_rel, delta_rel)` RelIds.
+/// Used by Part A + Part B tests to assert per-iteration
+/// cardinality evolution + binary-join estimate evolution
+/// without intrusive instrumentation.
+#[cfg(feature = "recursive-stats-trace")]
+#[derive(Debug, Default, Clone)]
+#[allow(missing_docs)]
+pub struct RecursiveStatsTrace {
+    pub entries: Vec<RecursiveStatsTraceEntry>,
+}
+
+/// One entry per `(iteration, pred)` boundary.
+///
+/// `iteration == 0` is the seed pass; `iteration >= 1` is the
+/// fixpoint loop. `phase` distinguishes the Phase 2 delta-
+/// recording site from the Phase 4 full-recording site so Part
+/// A's strict `>` assertions on `full_rows` only see Phase 4
+/// snapshots (full_rel actually advanced) and Part A's
+/// delta-evolves assertions only see Phase 2 snapshots.
+#[cfg(feature = "recursive-stats-trace")]
+#[derive(Debug, Clone)]
+#[allow(missing_docs)]
+pub struct RecursiveStatsTraceEntry {
+    pub iteration: usize,
+    pub pred: String,
+    pub full_rel: RelId,
+    pub delta_rel: RelId,
+    pub full_rows: u64,
+    pub delta_rows: u64,
+    pub phase: RecursiveStatsPhase,
+    /// Optional binary-join estimate the cost model would use
+    /// for the variant body's first binary hop. Triangle:
+    /// `(delta_e1_rel, e2_rel, &[1], &[0])`. 4-cycle: same
+    /// `(delta_e1_rel, e2_rel, &[1], &[0])` (slot 0 → slot 1
+    /// adjacency on the X variable).
+    pub binary_est_for_variant: Option<u64>,
+}
+
+#[cfg(feature = "recursive-stats-trace")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(missing_docs)]
+pub enum RecursiveStatsPhase {
+    /// Seed pass — full_rel + delta_rel both updated; trace
+    /// entry contains both row counts. iteration == 0.
+    Seed,
+    /// Fixpoint loop Phase 2 — delta_rel updated; full_rel
+    /// holds the previous iteration's value. Trace entry
+    /// reports `full_rows` as the previous-iter card it sees.
+    Phase2Delta,
+    /// Fixpoint loop Phase 4 — full_rel updated post-merge.
+    /// Trace entry reports the new full row count + the
+    /// delta_rel value Phase 2 just recorded.
+    Phase4Full,
 }
 
 impl Executor {
@@ -110,7 +266,47 @@ impl Executor {
             profiler: Profiler::default(),
             ilp_registry: IlpRegistry::new(),
             ilp_last_result: None,
+            wcoj_triangle_dispatch_count: 0,
+            wcoj_4cycle_dispatch_count: 0,
+            w63_chain_dispatch_count: 0,
+            wcoj_clique5_dispatch_count: 0,
+            wcoj_clique6_dispatch_count: 0,
+            wcoj_clique7_dispatch_count: 0,
+            wcoj_clique8_dispatch_count: 0,
+            kclique_histogram_refresh_count: 0,
+            kclique_histogram_refresh_nanos: 0,
+            nested_loop_dispatch_count: 0,
+            wcoj_dispatch_stream: OnceLock::new(),
+            #[cfg(feature = "wcoj-phase-timing")]
+            last_wcoj_phase_timing: std::sync::Mutex::new(None),
+            #[cfg(feature = "recursive-stats-trace")]
+            last_recursive_stats_trace: RecursiveStatsTrace::default(),
         }
+    }
+
+    /// W2.3 Part A + Part B test seam — return the most recent
+    /// recursive-SCC stats trace populated by
+    /// `execute_recursive_scc`. Gated on the
+    /// `recursive-stats-trace` Cargo feature; default OFF.
+    #[cfg(feature = "recursive-stats-trace")]
+    pub fn last_recursive_stats_trace(&self) -> &RecursiveStatsTrace {
+        &self.last_recursive_stats_trace
+    }
+
+    /// Take the most recent WCOJ triangle dispatch's per-phase
+    /// timing breakdown. Reading clears the slot — designed for
+    /// one-shot consumption by the `wcoj_phase_report` binary.
+    /// Returns `None` if no triangle has dispatched since the
+    /// last read (or since construction).
+    ///
+    /// Compiled in only with the `wcoj-phase-timing` Cargo
+    /// feature; production builds have no such method.
+    #[cfg(feature = "wcoj-phase-timing")]
+    pub fn take_wcoj_phase_timing(&self) -> Option<wcoj_phase_timing::WcojDispatchPhaseTiming> {
+        self.last_wcoj_phase_timing
+            .lock()
+            .ok()
+            .and_then(|mut g| g.take())
     }
 
     /// Enable or disable the performance profiler
@@ -181,7 +377,7 @@ impl Executor {
 
     /// Targeted MC reset: preserve base/static relations and clear dynamic ones.
     ///
-    /// Unlike [`reset_for_mc`] which drops all relations, this method keeps the
+    /// Unlike [`Self::reset_for_mc`] which drops all relations, this method keeps the
     /// relations listed in `preserve` untouched, removes every other relation,
     /// then re-creates the relations specified in `clear_to_empty` as empty
     /// GPU buffers with the given schemas.  The join-index cache is fully
@@ -275,6 +471,17 @@ impl Executor {
         self.stats.register_relation(rel_id);
     }
 
+    /// W2.3: reverse-lookup a RelId by predicate name. Used by
+    /// `execute_recursive_scc` to resolve a recursive predicate's
+    /// full-rel RelId for `StatsManager::update_cardinality`
+    /// calls at iteration boundaries. Returns `None` for
+    /// unregistered names (defensive — production callers
+    /// register IDB heads before `execute_plan`; tests that
+    /// omit registration get a no-op stats update).
+    fn name_to_rel_id(&self, name: &str) -> Option<RelId> {
+        self.name_to_rel.get(name).copied()
+    }
+
     /// Get the relation name for a RelId
     fn get_rel_name(&self, rel_id: RelId) -> Option<&str> {
         self.rel_names.get(&rel_id).map(|s| s.as_str())
@@ -294,6 +501,30 @@ impl Executor {
     /// # Errors
     /// Returns an error if any stratum or query execution fails
     pub fn execute_plan(&mut self, plan: &ExecutionPlan) -> Result<CudaBuffer> {
+        // Opt-in deterministic-Datalog D2H gate. Enabled only for the
+        // duration of this call; the provider is shared so we restore the
+        // prior state on every exit path (including errors). This PR ships
+        // the gate as opt-in only — known violating relational paths
+        // (set difference, binary-join count/materialize) are scheduled for
+        // replacement before the default flips.
+        let gate = self.config.strict_deterministic_d2h;
+        let prev_gate = self.provider.strict_deterministic_d2h_enabled();
+        if gate && !prev_gate {
+            // Only reset the violation counter when *this* call is what
+            // engages the gate. If a caller has manually enabled the
+            // gate to accumulate violations across a broader strict
+            // section, we must not clobber their telemetry.
+            self.provider.reset_deterministic_d2h_violations();
+            self.provider.enable_strict_deterministic_d2h();
+        }
+        // Cloning the Arc keeps the guard independent of `self`, so the
+        // guard can coexist with `&mut self` calls inside the strata loop.
+        let _gate_guard = D2hGateGuard {
+            provider: Arc::clone(&self.provider),
+            engaged: gate,
+            previous: prev_gate,
+        };
+
         // Execute strata in order
         for (idx, stratum) in plan.strata.iter().enumerate() {
             // Count rules and check if recursive
@@ -772,14 +1003,41 @@ impl Executor {
         if let Some(n) = buffer.cached_row_count() {
             return Ok(n);
         }
-        let mut host_rows = [0u32];
-        self.provider
-            .device()
-            .inner()
-            .dtoh_sync_copy_into(buffer.num_rows_device(), &mut host_rows)
+        // Metadata-only read: row counts are control-plane state, not
+        // tuple data. Route through `dtoh_scalar_untracked` so the
+        // metadata-vs-data-plane contract stays grepable and the
+        // deterministic-D2H gate continues to allow it. Re-map the
+        // provider-level `XlogError::Kernel` into `XlogError::Execution`
+        // with the executor's historical "Failed to read row count"
+        // context so callers see a consistent error category.
+        let n = self
+            .provider
+            .dtoh_scalar_untracked::<u32>(buffer.num_rows_device(), 0)
             .map_err(|e| XlogError::Execution(format!("Failed to read row count: {}", e)))?;
-        buffer.set_cached_row_count_if_unset(host_rows[0]);
-        Ok(host_rows[0])
+        buffer.set_cached_row_count_if_unset(n);
+        Ok(n)
+    }
+}
+
+/// RAII guard that restores the provider's deterministic-D2H gate state on
+/// drop. Engaged only when `Executor::execute_plan` opted in via
+/// `RuntimeConfig::strict_deterministic_d2h`.
+struct D2hGateGuard {
+    provider: Arc<CudaKernelProvider>,
+    engaged: bool,
+    previous: bool,
+}
+
+impl Drop for D2hGateGuard {
+    fn drop(&mut self) {
+        if !self.engaged {
+            return;
+        }
+        if self.previous {
+            self.provider.enable_strict_deterministic_d2h();
+        } else {
+            self.provider.disable_strict_deterministic_d2h();
+        }
     }
 }
 

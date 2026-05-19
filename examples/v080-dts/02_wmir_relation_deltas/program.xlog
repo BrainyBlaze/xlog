@@ -1,0 +1,7 @@
+pred wmir_committed(i32, i32).
+pred wmir_reachable(i32, i32).
+
+wmir_reachable(X, Y) :- wmir_committed(X, Y).
+wmir_reachable(X, Z) :- wmir_reachable(X, Y), wmir_committed(Y, Z).
+
+?- wmir_reachable(X, Y).

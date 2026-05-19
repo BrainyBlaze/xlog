@@ -84,6 +84,206 @@ pub enum ProjectExpr {
     Computed(Expr, ScalarType),
 }
 
+/// Per-lookup-input permutation for W2.1 variable-ordering.
+///
+/// When a non-default leader is chosen, the dispatcher rotates kernel
+/// inputs and may swap the two columns of selected lookup atoms (triangle
+/// only — the 4-cycle has rotational symmetry and never needs col-swap).
+/// `swap_cols == true` means the dispatcher must materialize an owned
+/// 2-col view with cols swapped before calling the layout helper.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LookupPerm {
+    /// Index into the **promoter's canonical input order**:
+    /// triangle = `[e_xy, e_yz, e_xz]`, 4-cycle =
+    /// `[e_wx, e_xy, e_yz, e_zw]`. `lookup_perms[i]` describes
+    /// kernel slot `i + 1` (slots 1, 2, 3 — the non-leader slots).
+    /// The leader slot 0 is identified by `VariableOrder::leader_idx`
+    /// and is never repeated here.
+    pub input_idx: u8,
+    /// Whether to swap col0 ↔ col1 on this input before the layout
+    /// helper sees it.
+    pub swap_cols: bool,
+}
+
+/// Maximum K supported by the 38-B K-clique variable-order plan.
+pub const K_CLIQUE_MAX_K: usize = 8;
+
+/// Maximum edge count for K=8 complete binary-edge clique, C(8, 2).
+pub const K_CLIQUE_MAX_EDGES: usize = 28;
+
+/// Column-order rewrite for one K-clique input edge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnSwap {
+    /// Edge slot to rewrite after edge permutation.
+    pub edge_slot: u8,
+    /// Whether the two source columns should be swapped.
+    pub swap_cols: bool,
+}
+
+/// Sorted-layout requirements carried by a K-clique plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SortedLayoutSpec {
+    /// Edge slots whose sorted layouts are required by the plan.
+    pub edge_slots: Vec<u8>,
+    /// Per-edge key-column order required by the sorted layout.
+    pub key_columns: Vec<Vec<u8>>,
+}
+
+/// Helper relation split requested by the K-clique plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelperSplitSpec {
+    /// Stable helper identifier within the plan.
+    pub helper_id: u8,
+    /// Variable whose prefix/fanout is split into the helper.
+    pub variable: u8,
+    /// Edge slots materialized into the helper relation.
+    pub edge_slots: Vec<u8>,
+}
+
+/// Stream group assigned to a K-clique plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StreamGroupId(pub u8);
+
+/// Full variable-order plan for K=5..K=8 clique-family WCOJ dispatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KCliqueVariableOrder {
+    /// Clique arity K.
+    pub k: u8,
+    /// Position for each variable id; unused entries are `u8::MAX`.
+    pub variable_positions: [u8; K_CLIQUE_MAX_K],
+    /// Edge-slot permutation; unused entries are `u8::MAX`.
+    pub edge_permutation: [u8; K_CLIQUE_MAX_EDGES],
+    /// Optional column swaps after edge permutation.
+    pub column_swaps: Vec<ColumnSwap>,
+    /// Sorted-layout requirements for runtime layout construction.
+    pub sorted_layout_requirements: SortedLayoutSpec,
+    /// Helper-split requests attached to this plan.
+    pub helper_split_specs: Vec<HelperSplitSpec>,
+    /// Stream group consumed by stream-mux scheduling.
+    pub stream_group: StreamGroupId,
+}
+
+impl KCliqueVariableOrder {
+    /// Creates a K-clique variable-order plan with all seven required fields.
+    pub fn new(
+        k: u8,
+        variable_positions: [u8; K_CLIQUE_MAX_K],
+        edge_permutation: [u8; K_CLIQUE_MAX_EDGES],
+        column_swaps: Vec<ColumnSwap>,
+        sorted_layout_requirements: SortedLayoutSpec,
+        helper_split_specs: Vec<HelperSplitSpec>,
+        stream_group: StreamGroupId,
+    ) -> Self {
+        Self {
+            k,
+            variable_positions,
+            edge_permutation,
+            column_swaps,
+            sorted_layout_requirements,
+            helper_split_specs,
+            stream_group,
+        }
+    }
+}
+
+/// Cost evidence carried with a planned WCOJ-vs-hash route.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CostPredictionRecord {
+    /// Estimated WCOJ work under the selected plan.
+    pub wcoj_cost: f64,
+    /// Estimated hash-chain work under the captured fallback plan.
+    pub hash_cost: f64,
+}
+
+impl CostPredictionRecord {
+    /// Stable evidence for incomplete stats: hash is the safe default route.
+    pub fn empty() -> Self {
+        Self {
+            wcoj_cost: f64::INFINITY,
+            hash_cost: 0.0,
+        }
+    }
+}
+
+/// Auditable reason for a structured hash route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlannedHashReason {
+    /// Planner had complete stats and predicted hash lower-cost.
+    PlannerPredictsHashWins,
+    /// Planner could not build a complete stats-backed plan.
+    IncompleteStatsSafeDefault,
+}
+
+/// Route chosen for a recognized multiway shape.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MultiwayPlan {
+    /// Execute the WCOJ path with the attached K-clique plan.
+    WcojWithPlan(KCliqueVariableOrder),
+    /// Execute the captured fallback as a planned hash route.
+    PlannedHashRoute {
+        /// Why the recognized shape routes to hash.
+        reason: PlannedHashReason,
+        /// Cost evidence that made the route auditable.
+        planner_evidence: CostPredictionRecord,
+    },
+}
+
+/// Variable-ordering decision attached to a `MultiWayJoin`.
+///
+/// `None` on the parent variant preserves slice 1/2/4/W2.2 dispatch
+/// behavior bit-identically (default leader, no col-swap, no kernel
+/// projection — `output_columns` carries the binary-fallback projection
+/// as before).
+///
+/// When `Some`, the dispatcher consumes `leader_idx` to rotate the
+/// kernel `inputs`, applies any `lookup_perms` col-swaps, and
+/// post-projects the kernel-direct output buffer through
+/// `kernel_output_cols`. `MultiWayJoin::output_columns` stays untouched
+/// so binary-fallback consumers continue reading it directly.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VariableOrder {
+    /// Selected leader's index in the canonical promoter input order
+    /// (e.g., for triangle: 0=e_xy, 1=e_yz, 2=e_xz). `0` reproduces
+    /// the default leader.
+    pub leader_idx: u8,
+    /// One entry per non-leader lookup input, in dispatcher slot order.
+    pub lookup_perms: Vec<LookupPerm>,
+    /// Permutation applied to the kernel-direct output buffer to
+    /// produce head-ordered columns. For default leader this would be
+    /// identity but the field is omitted (`var_order = None`) — slice
+    /// 1/2 keeps using `MultiWayJoin::output_columns` directly.
+    pub kernel_output_cols: Vec<ProjectExpr>,
+    /// Full K-clique variable-order plan for K=5..K=8. `None`
+    /// preserves the legacy triangle/4-cycle leader-permutation path.
+    pub kclique: Option<KCliqueVariableOrder>,
+}
+
+impl VariableOrder {
+    /// Creates the legacy triangle/4-cycle leader-permutation form.
+    pub fn legacy(
+        leader_idx: u8,
+        lookup_perms: Vec<LookupPerm>,
+        kernel_output_cols: Vec<ProjectExpr>,
+    ) -> Self {
+        Self {
+            leader_idx,
+            lookup_perms,
+            kernel_output_cols,
+            kclique: None,
+        }
+    }
+
+    /// Creates the full K-clique variable-order form.
+    pub fn kclique(kclique: KCliqueVariableOrder) -> Self {
+        Self {
+            leader_idx: 0,
+            lookup_perms: Vec::new(),
+            kernel_output_cols: Vec::new(),
+            kclique: Some(kclique),
+        }
+    }
+}
+
 /// Comparison operators
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompareOp {
@@ -168,6 +368,27 @@ pub enum RirNode {
         join_type: JoinType,
     },
 
+    /// Production W6.3 two-atom chain join:
+    /// `head(...) :- left(..., Z, ...), right(..., Z, ...)`.
+    ///
+    /// The executor MAY dispatch this node through a specialized
+    /// physical route. On dispatch decline, it must execute `fallback`,
+    /// the IR-equivalent binary join captured at promotion time.
+    ChainJoin {
+        /// Left relation input. The W6.3 promoter emits a Scan.
+        left: Box<RirNode>,
+        /// Right relation input. The W6.3 promoter emits a Scan.
+        right: Box<RirNode>,
+        /// Join key column in `left`.
+        left_key: usize,
+        /// Join key column in `right`.
+        right_key: usize,
+        /// Output projection in head-tuple order.
+        output_columns: Vec<ProjectExpr>,
+        /// IR-equivalent binary-join plan for fallback execution.
+        fallback: Box<RirNode>,
+    },
+
     /// Group by with aggregation
     GroupBy {
         /// Input relation subtree to aggregate.
@@ -196,7 +417,7 @@ pub enum RirNode {
     Diff {
         /// Left-hand input relation.
         left: Box<RirNode>,
-        /// Right-hand input relation whose rows are removed from the left input.
+        /// Right-hand input relation whose rows are excluded from the left input.
         right: Box<RirNode>,
     },
 
@@ -212,6 +433,67 @@ pub enum RirNode {
         delta_rel: RelId,
         /// Relation for full result
         full_rel: RelId,
+    },
+
+    /// A multi-way conjunctive join that the executor MAY dispatch to a
+    /// specialized physical operator (e.g. GPU WCOJ). When the dispatch
+    /// declines, the executor falls through to `fallback`, which is the
+    /// IR-equivalent binary-join plan captured at promotion time.
+    ///
+    /// **Invariant** (upheld by `xlog-logic::promote::promote_multiway`):
+    /// executing `fallback` produces the same row set as a successful
+    /// specialized dispatch.
+    ///
+    /// v0.6.5 slice 1 only emits this for the certified triangle shape;
+    /// 4-way and general-arity admission land in later slices.
+    ///
+    /// # Walker contract
+    ///
+    /// Generic walkers and visitors that handle `MultiWayJoin` MUST be
+    /// shape-agnostic over `inputs`, `slot_vars`, and `output_columns`
+    /// — no walker may assume a fixed arity or a specific
+    /// variable-class layout. Only matchers/promoters whose name
+    /// carries an explicit shape qualifier (e.g.
+    /// `match_multiway_triangle`, `try_promote_triangle`) may lock to
+    /// a specific shape.
+    MultiWayJoin {
+        /// Input scans, in physical-plan slot order. For the v0.6.5
+        /// initial promoter, this is exactly `[Scan(rel_xy), Scan(rel_yz),
+        /// Scan(rel_xz)]` for a recognized triangle. Each input MUST be
+        /// `RirNode::Scan { rel }` in v1.
+        inputs: Vec<RirNode>,
+        /// Per-slot, per-column variable-class id. Same id across slots →
+        /// join on that variable. For the canonical triangle this is
+        /// `[[Some(0), Some(1)], [Some(1), Some(2)], [Some(0), Some(2)]]`.
+        /// `None` is reserved for constant-bound or don't-care columns;
+        /// the v1 promoter never emits `None`.
+        slot_vars: Vec<Vec<Option<u32>>>,
+        /// Output projection in head-tuple order, identical to what the
+        /// equivalent `Project { input: Join { ... } }` carries. For the
+        /// triangle: `[Column(0), Column(1), Column(3)]`. The executor
+        /// re-validates this; a malformed or rotated projection is
+        /// treated as ineligible (no dispatch).
+        output_columns: Vec<ProjectExpr>,
+        /// IR-equivalent binary-join plan. Executed verbatim on dispatch
+        /// decline. Captured from the post-optimizer tree by the
+        /// promoter; never synthesized.
+        fallback: Box<RirNode>,
+        /// Structured route for recognized multiway shapes. K-clique
+        /// cost-gated hash routes are positive plans, not promoter
+        /// inability to handle the shape.
+        plan: Option<MultiwayPlan>,
+        /// Optional W2.1 variable-ordering decision.
+        ///
+        /// `None` preserves slice 1/2/4/W2.2 behavior bit-identically:
+        /// dispatcher uses default leader, no col-swap, post-kernel
+        /// projection is the existing `output_columns`.
+        ///
+        /// `Some(VariableOrder)` instructs the dispatcher to rotate
+        /// kernel inputs to put `leader_idx` at slot 0, apply
+        /// `lookup_perms` col-swaps, and post-project via
+        /// `kernel_output_cols`. `output_columns` is NOT consulted on
+        /// the W2.1 path; binary-fallback consumers still read it.
+        var_order: Option<VariableOrder>,
     },
 
     /// Tensorized ILP super-graph join. A DLPack mask tensor selects which
@@ -261,7 +543,9 @@ impl RirNode {
             RirNode::Filter { input, .. } | RirNode::Project { input, .. } => {
                 input.collect_relations(rels);
             }
-            RirNode::Join { left, right, .. } | RirNode::Diff { left, right } => {
+            RirNode::Join { left, right, .. }
+            | RirNode::ChainJoin { left, right, .. }
+            | RirNode::Diff { left, right } => {
                 left.collect_relations(rels);
                 right.collect_relations(rels);
             }
@@ -288,6 +572,14 @@ impl RirNode {
             RirNode::TensorMaskedJoin { rel_index, .. } => {
                 for (rel_id, _) in rel_index {
                     rels.push(*rel_id);
+                }
+            }
+            RirNode::MultiWayJoin { inputs, .. } => {
+                // Recurse into `inputs` only. The `fallback` references
+                // the same set by promoter invariant; walking both would
+                // double-count.
+                for input in inputs {
+                    input.collect_relations(rels);
                 }
             }
         }

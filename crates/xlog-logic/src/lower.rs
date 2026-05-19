@@ -102,6 +102,13 @@ impl Lowerer {
         &self.schemas
     }
 
+    pub(crate) fn create_helper_relation(&mut self, schema: Schema) -> (String, RelId) {
+        let name = format!("__w37_helper_{}", self.next_rel_id);
+        let rel_id = self.get_or_create_rel_id(&name);
+        self.schemas.insert(name.clone(), schema);
+        (name, rel_id)
+    }
+
     /// Get or allocate a relation ID for a predicate
     fn get_or_create_rel_id(&mut self, name: &str) -> RelId {
         if let Some(&id) = self.rel_ids.get(name) {
@@ -166,7 +173,10 @@ impl Lowerer {
                         (format!("c{}", i), ty)
                     })
                     .collect();
-                self.schemas.insert(pred.clone(), Schema::new(columns));
+                let schema = Schema::new(columns)
+                    .with_sort_labels(sort_labels_from_terms(&rule.head.terms))
+                    .expect("rule head sort labels match inferred schema arity");
+                self.schemas.insert(pred.clone(), schema);
             }
         }
 
@@ -187,7 +197,10 @@ impl Lowerer {
                     .enumerate()
                     .map(|(i, term)| (format!("c{}", i), infer_term_type(term)))
                     .collect();
-                self.schemas.insert(pred.clone(), Schema::new(columns));
+                let schema = Schema::new(columns)
+                    .with_sort_labels(sort_labels_from_terms(&atom.terms))
+                    .expect("body sort labels match inferred schema arity");
+                self.schemas.insert(pred.clone(), schema);
             }
         }
 
@@ -2056,6 +2069,18 @@ fn infer_term_type(term: &Term) -> ScalarType {
             AggOp::LogSumExp => ScalarType::F64,
         },
     }
+}
+
+fn sort_labels_from_terms(terms: &[Term]) -> Vec<String> {
+    terms
+        .iter()
+        .enumerate()
+        .map(|(idx, term)| match term {
+            Term::Variable(name) if !name.trim().is_empty() => name.clone(),
+            Term::Aggregate(agg) => format!("{:?}_{}", agg.op, agg.variable),
+            _ => format!("c{}", idx),
+        })
+        .collect()
 }
 
 /// Convert a term to a constant value (if it is a constant)

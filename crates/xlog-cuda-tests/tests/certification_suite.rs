@@ -23,6 +23,89 @@ fn run_full_certification() {
                 Ok((major, minor)) => println!("Compute capability: {}.{}", major, minor),
                 Err(e) => println!("Compute capability: <unavailable> ({})", e),
             }
+            // Surface which allocator backend the context is
+            // running on so a cert report makes the runtime
+            // path unambiguous. The selection is driven by
+            // `XLOG_USE_DEVICE_RUNTIME` at process start.
+            let backend = if ctx.uses_device_runtime() {
+                "device-runtime (AsyncCudaResource → LoggingResource → GlobalDeviceBudget)"
+            } else {
+                "legacy (cudarc-backed GpuMemoryManager::new)"
+            };
+            println!("Allocator backend: {}", backend);
+            // List explicitly-set recorded-op env flags so the
+            // report shows the dispatch surface the categories
+            // will actually exercise. `XLOG_USE_RECORDED_CSM` is
+            // included so the cert evidence is unambiguous about
+            // CSM selection — even though `XLOG_USE_RECORDED_OPS`
+            // implies CSM, the explicit flag's presence shows up
+            // separately so a "runtime+recorded+CSM" run is
+            // visibly distinct from a "runtime+recorded" run.
+            let env_flag = |var: &str| {
+                std::env::var(var)
+                    .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
+                    .unwrap_or(false)
+            };
+            let explicit_flags: Vec<&str> = [
+                ("XLOG_USE_RECORDED_OPS", "all"),
+                ("XLOG_USE_RECORDED_FILTERS", "filters"),
+                ("XLOG_USE_RECORDED_SORT", "sort"),
+                ("XLOG_USE_RECORDED_DEDUP", "dedup"),
+                ("XLOG_USE_RECORDED_GROUPBY", "groupby"),
+                ("XLOG_USE_RECORDED_HASH_JOIN", "hash_join"),
+                ("XLOG_USE_RECORDED_CSM", "csm"),
+            ]
+            .iter()
+            .filter_map(|(var, label)| if env_flag(var) { Some(*label) } else { None })
+            .collect();
+            if explicit_flags.is_empty() {
+                println!("Recorded-op dispatch (explicit): <none>");
+            } else {
+                println!(
+                    "Recorded-op dispatch (explicit): {}",
+                    explicit_flags.join(", ")
+                );
+            }
+            // Synthesize a single cert-mode label keyed off the
+            // EXPLICIT recorded-op env flags (not the implied
+            // umbrella unlock). The three intended modes are:
+            //
+            //   * legacy/default          — no XLOG_USE_DEVICE_RUNTIME
+            //   * runtime+recorded        — XLOG_USE_DEVICE_RUNTIME=1
+            //                               + at least one recorded-op
+            //                               flag (umbrella or specific)
+            //                               but no explicit
+            //                               XLOG_USE_RECORDED_CSM=1
+            //   * runtime+recorded+CSM    — same as above PLUS the
+            //                               explicit
+            //                               XLOG_USE_RECORDED_CSM=1
+            //
+            // CSM is also implicitly active in the dispatch when
+            // only the umbrella `XLOG_USE_RECORDED_OPS=1` is set
+            // (see `CudaKernelProvider::use_recorded_csm_env`), but
+            // the cert label keys off the EXPLICIT flag so the
+            // evidence trail is unambiguous: a "runtime+recorded+CSM"
+            // run is the one where the operator deliberately set
+            // `XLOG_USE_RECORDED_CSM=1`. Set the explicit flag to
+            // emit unambiguous CSM-mode evidence.
+            let any_recorded = env_flag("XLOG_USE_RECORDED_OPS")
+                || env_flag("XLOG_USE_RECORDED_FILTERS")
+                || env_flag("XLOG_USE_RECORDED_SORT")
+                || env_flag("XLOG_USE_RECORDED_DEDUP")
+                || env_flag("XLOG_USE_RECORDED_GROUPBY")
+                || env_flag("XLOG_USE_RECORDED_HASH_JOIN");
+            let csm_explicit = env_flag("XLOG_USE_RECORDED_CSM");
+            let cert_mode = match (ctx.uses_device_runtime(), any_recorded, csm_explicit) {
+                (false, false, false) => "legacy/default",
+                (true, true, true) => "runtime+recorded+CSM",
+                (true, true, false) => "runtime+recorded",
+                (true, false, false) => "runtime (no recorded-ops)",
+                (true, false, true) => "runtime+CSM (no other recorded-ops)",
+                (false, true, true) => "recorded+CSM (no device-runtime)",
+                (false, true, false) => "recorded (no device-runtime)",
+                (false, false, true) => "CSM-only (no device-runtime, no other recorded-ops)",
+            };
+            println!("Cert mode: {}", cert_mode);
             println!();
             ctx
         }
@@ -35,105 +118,146 @@ fn run_full_certification() {
 
     let mut results = CertificationResults::new();
 
+    // Reap pending async frees between categories when running
+    // against the device-runtime backend. Each category
+    // allocates many short-lived buffers; without periodic
+    // reap, the `GlobalDeviceBudget` reservation accumulates
+    // because `cuMemFreeAsync` only releases real GPU memory
+    // after stream completion. No-op on the legacy backend.
+    let reap = || ctx.reap_pending();
+
     // Run all 33 categories sequentially (C01-C25 + G01-G08)
     println!("Running C01: Toolchain...");
     results.add_category(categories::c01_toolchain::run_all(&ctx));
+    reap();
 
     println!("Running C02: Launch Config...");
     results.add_category(categories::c02_launch_config::run_all(&ctx));
+    reap();
 
     println!("Running C03: Pointer Bounds...");
     results.add_category(categories::c03_pointer_bounds::run_all(&ctx));
+    reap();
 
     println!("Running C04: Address Space...");
     results.add_category(categories::c04_address_space::run_all(&ctx));
+    reap();
 
     println!("Running C05: Global Memory...");
     results.add_category(categories::c05_global_memory::run_all(&ctx));
+    reap();
 
     println!("Running C06: Shared Memory...");
     results.add_category(categories::c06_shared_memory::run_all(&ctx));
+    reap();
 
     println!("Running C07: Local Memory...");
     results.add_category(categories::c07_local_memory::run_all(&ctx));
+    reap();
 
     println!("Running C08: Synchronization...");
     results.add_category(categories::c08_synchronization::run_all(&ctx));
+    reap();
 
     println!("Running C09: Warp Level...");
     results.add_category(categories::c09_warp_level::run_all(&ctx));
+    reap();
 
     println!("Running C10: Block Grid...");
     results.add_category(categories::c10_block_grid::run_all(&ctx));
+    reap();
 
     println!("Running C11: Control Flow...");
     results.add_category(categories::c11_control_flow::run_all(&ctx));
+    reap();
 
     println!("Running C12: Atomics...");
     results.add_category(categories::c12_atomics::run_all(&ctx));
+    reap();
 
     println!("Running C13: Floating Point...");
     results.add_category(categories::c13_floating_point::run_all(&ctx));
+    reap();
 
     println!("Running C14: Integer...");
     results.add_category(categories::c14_integer::run_all(&ctx));
+    reap();
 
     println!("Running C15: Determinism...");
     results.add_category(categories::c15_determinism::run_all(&ctx));
+    reap();
 
     println!("Running C16: Async Pipeline...");
     results.add_category(categories::c16_async_pipeline::run_all(&ctx));
+    reap();
 
     println!("Running C17: Caching...");
     results.add_category(categories::c17_caching::run_all(&ctx));
+    reap();
 
     println!("Running C18: Host Device...");
     results.add_category(categories::c18_host_device::run_all(&ctx));
+    reap();
 
     println!("Running C19: Multi Stream...");
     results.add_category(categories::c19_multi_stream::run_all(&ctx));
+    reap();
 
     println!("Running C20: Multi GPU...");
     results.add_category(categories::c20_multi_gpu::run_all(&ctx));
+    reap();
 
     println!("Running C21: Hardware...");
     results.add_category(categories::c21_hardware::run_all(&ctx));
+    reap();
 
     println!("Running C22: Algorithms...");
     results.add_category(categories::c22_algorithms::run_all(&ctx));
+    reap();
 
     println!("Running C23: Blind Spots...");
     results.add_category(categories::c23_blind_spots::run_all(&ctx));
+    reap();
 
     println!("Running C24: Edge Matrix...");
     results.add_category(categories::c24_edge_matrix::run_all(&ctx));
+    reap();
 
     println!("Running C25: Float Filter...");
     results.add_category(categories::c25_float_filter::run_all(&ctx));
+    reap();
 
     println!("Running G01: Circuit Forward...");
     results.add_category(categories::g01_circuit_forward::run_all(&ctx));
+    reap();
 
     println!("Running G02: Circuit Backward...");
     results.add_category(categories::g02_circuit_backward::run_all(&ctx));
+    reap();
 
     println!("Running G03: Weight Injection...");
     results.add_category(categories::g03_weight_injection::run_all(&ctx));
+    reap();
 
     println!("Running G04: Transfer Efficiency...");
     results.add_category(categories::g04_transfer_efficiency::run_all(&ctx));
+    reap();
 
     println!("Running G05: Circuit Cache...");
     results.add_category(categories::g05_circuit_cache::run_all(&ctx));
+    reap();
 
     println!("Running G06: PTX Robustness...");
     results.add_category(categories::g06_ptx_robustness::run_all(&ctx));
+    reap();
 
     println!("Running G07: SAT/CDCL...");
     results.add_category(categories::g07_sat_cdcl::run_all(&ctx));
+    reap();
 
     println!("Running G08: Device Counts...");
     results.add_category(categories::g08_device_counts::run_all(&ctx));
+    reap();
 
     // Finalize and print results
     results.finalize();

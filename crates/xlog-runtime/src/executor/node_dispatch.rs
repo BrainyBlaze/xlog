@@ -2,7 +2,8 @@
 
 use std::collections::HashMap;
 
-use xlog_core::{AggOp, RelId, Result, Schema, XlogError};
+use xlog_core::{AggOp, RelId, Result, ScalarType, Schema, XlogError};
+use xlog_cuda::provider::NESTED_LOOP_TOTAL_THRESHOLD;
 use xlog_cuda::{CudaBuffer, JoinType as CudaJoinType};
 use xlog_ir::{JoinType, ProjectExpr, RirNode};
 
@@ -10,6 +11,58 @@ use crate::ilp_registry::{read_device_row_count, IlpMask, IlpTagEntry, IlpTagged
 
 use super::join_cache::{estimate_join_index_bytes, JoinIndexKey};
 use super::Executor;
+
+/// W4.2 eligibility predicate for nested-loop join dispatch.
+///
+/// Returns `true` iff the join shape is admissible for the
+/// `nested_loop_join_v2_inner_u32_1key` provider entry point.
+/// The predicate is intentionally narrow per the W4.2
+/// iteration-4 plan D1:
+///   * `JoinType::Inner` only (Semi / Anti / LeftOuter fall back
+///     to hash).
+///   * Exactly one key column on each side.
+///   * Both key columns share the same `ScalarType` AND that
+///     shared type is `U32` or `Symbol` (Symbol is `u32` at the
+///     byte level — same kernel applies). U32-on-Symbol or
+///     other type mismatches return `false`, mirroring
+///     `hash_join_v2`'s own type-mismatch rejection at
+///     `crates/xlog-cuda/src/provider/relational.rs:3567-3576`.
+///
+/// Out-of-bounds key indices yield `Schema::column_type(_) = None`,
+/// which fails the `matches!(...)` guard — falling back to hash
+/// without a separate bounds check.
+///
+/// Cheap O(1) — no kernel launches, no row-count reads, no D2H.
+/// The threshold check (`num_left * num_right <=
+/// NESTED_LOOP_TOTAL_THRESHOLD`) is performed at the dispatch
+/// site (W4.2 Step 5), not in this predicate.
+//
+fn eligible_for_nested_loop(
+    left: &CudaBuffer,
+    right: &CudaBuffer,
+    left_keys: &[usize],
+    right_keys: &[usize],
+    join_type: JoinType,
+) -> bool {
+    if join_type != JoinType::Inner {
+        return false;
+    }
+    if left_keys.len() != 1 || right_keys.len() != 1 {
+        return false;
+    }
+    let lt = left.schema().column_type(left_keys[0]);
+    let rt = right.schema().column_type(right_keys[0]);
+    lt == rt && matches!(lt, Some(ScalarType::U32) | Some(ScalarType::Symbol))
+}
+
+fn is_join_index_mismatch(err: &XlogError) -> bool {
+    matches!(
+        err,
+        XlogError::Kernel(msg)
+            if msg.contains("Join index row count does not match right relation")
+                || msg.contains("Join index key columns do not match requested right_keys")
+    )
+}
 
 impl Executor {
     /// Execute a Scan node — looks up the relation by RelId and returns a clone.
@@ -230,6 +283,15 @@ impl Executor {
                 *max_active_rules,
                 head_projection,
             ),
+            // v0.6.5 slice 1: defensive fallback descent for any
+            // `execute_node` caller that bypasses the WCOJ dispatch
+            // hook (probabilistic eval, neural store walks, etc.).
+            // The non-recursive arm in `recursive.rs` short-circuits
+            // dispatch-eligible bodies before reaching here; this
+            // arm is the safety net for everyone else.
+            RirNode::MultiWayJoin { fallback, .. } | RirNode::ChainJoin { fallback, .. } => {
+                self.execute_node(fallback)
+            }
         }
     }
 
@@ -246,7 +308,8 @@ impl Executor {
         left_rel: Option<RelId>,
         right_rel: Option<RelId>,
     ) -> Result<CudaBuffer> {
-        // Convert IR JoinType to CUDA JoinType
+        // Convert IR JoinType to CUDA JoinType (used by adaptive
+        // indexing and the hash fallback below).
         let cuda_join_type = match join_type {
             JoinType::Inner => CudaJoinType::Inner,
             JoinType::Semi => CudaJoinType::Semi,
@@ -254,49 +317,97 @@ impl Executor {
             JoinType::LeftOuter => CudaJoinType::LeftOuter,
         };
 
-        // Adaptive indexing: opportunistically reuse cached build-side hash tables when the right side
-        // is a base relation scan and has become "hot" in runtime statistics.
+        // Output buffer — set by W4.2 nested-loop dispatch,
+        // adaptive indexing, or the hash fallback. All three
+        // paths flow through the shared `record_join_result`
+        // feedback block at the end of this fn.
         let mut out: Option<CudaBuffer> = None;
-        if let Some(build_rel) = right_rel {
-            let build_heat = self
-                .stats
-                .get_relation_stats(build_rel)
-                .map(|s| s.heat)
-                .unwrap_or(0.0);
-            let est_index_bytes = estimate_join_index_bytes(right, right_keys);
-            let budget_bytes = self.provider.memory().budget().device_bytes;
-            let remaining_bytes = self.provider.memory().remaining_bytes();
 
-            let should_index = self.join_index_cache.should_build(
-                est_index_bytes,
-                build_heat,
-                remaining_bytes,
-                budget_bytes,
-            );
+        // W4.2 nested-loop dispatch (precedes adaptive indexing
+        // and hash fallback). On predicate + threshold pass,
+        // route to `nested_loop_join_v2_inner_u32_1key` and
+        // bump the dispatch counter; do NOT early-return —
+        // leave the result in `out` so the shared feedback
+        // block observes it. Otherwise leave `out` unchanged.
+        //
+        // Threshold check uses logical row counts via
+        // `provider.device_row_count(...)` (NOT `row_cap`), with
+        // `checked_mul` fail-closed on overflow per W4.2
+        // iteration-4 F-W42-15.
+        if eligible_for_nested_loop(left, right, left_keys, right_keys, join_type) {
+            let num_left = self.provider.device_row_count(left)? as u64;
+            let num_right = self.provider.device_row_count(right)? as u64;
+            let in_threshold = num_left
+                .checked_mul(num_right)
+                .map(|p| p <= NESTED_LOOP_TOTAL_THRESHOLD)
+                .unwrap_or(false);
+            if in_threshold {
+                out = Some(self.provider.nested_loop_join_v2_inner_u32_1key(
+                    left,
+                    right,
+                    left_keys[0],
+                    right_keys[0],
+                )?);
+                self.nested_loop_dispatch_count += 1;
+            }
+        }
 
-            if let Some(build_name) = self.get_rel_name(build_rel).map(|s| s.to_string()) {
-                if let Some(version) = self.store.version(&build_name) {
-                    let key = JoinIndexKey {
-                        rel: build_rel,
-                        version,
-                        key_cols: right_keys.to_vec(),
-                    };
+        // Adaptive indexing: opportunistically reuse cached
+        // build-side hash tables when the right side is a base
+        // relation scan and has become "hot" in runtime
+        // statistics. Only runs if W4.2 nested-loop didn't
+        // dispatch.
+        if out.is_none() {
+            if let Some(build_rel) = right_rel {
+                let build_heat = self
+                    .stats
+                    .get_relation_stats(build_rel)
+                    .map(|s| s.heat)
+                    .unwrap_or(0.0);
+                let est_index_bytes = estimate_join_index_bytes(right, right_keys);
+                let budget_bytes = self.provider.memory().budget().device_bytes;
+                let remaining_bytes = self.provider.memory().remaining_bytes();
 
-                    if let Some(index) = self.join_index_cache.get(&key) {
-                        out = Some(self.provider.hash_join_v2_with_index(
-                            left,
-                            right,
-                            left_keys,
-                            right_keys,
-                            cuda_join_type,
-                            index,
-                            None,
-                        )?);
-                    } else if should_index {
-                        if let Some(build_buf) = self.store.get(&build_name) {
-                            match self.provider.build_join_index_v2(build_buf, right_keys) {
+                let should_index = self.join_index_cache.should_build(
+                    est_index_bytes,
+                    build_heat,
+                    remaining_bytes,
+                    budget_bytes,
+                );
+
+                if let Some(build_name) = self.get_rel_name(build_rel).map(|s| s.to_string()) {
+                    if let Some(version) = self.store.version(&build_name) {
+                        let key = JoinIndexKey {
+                            rel: build_rel,
+                            version,
+                            key_cols: right_keys.to_vec(),
+                        };
+
+                        let indexed_result = {
+                            self.join_index_cache.get(&key).map(|index| {
+                                self.provider.hash_join_v2_with_index(
+                                    left,
+                                    right,
+                                    left_keys,
+                                    right_keys,
+                                    cuda_join_type,
+                                    index,
+                                    None,
+                                )
+                            })
+                        };
+                        if let Some(indexed_result) = indexed_result {
+                            match indexed_result {
+                                Ok(joined) => out = Some(joined),
+                                Err(err) if is_join_index_mismatch(&err) => {
+                                    self.join_index_cache.remove(&key);
+                                }
+                                Err(err) => return Err(err),
+                            }
+                        } else if should_index {
+                            match self.provider.build_join_index_v2(right, right_keys) {
                                 Ok(index) => {
-                                    let joined = self.provider.hash_join_v2_with_index(
+                                    match self.provider.hash_join_v2_with_index(
                                         left,
                                         right,
                                         left_keys,
@@ -304,14 +415,19 @@ impl Executor {
                                         cuda_join_type,
                                         &index,
                                         None,
-                                    )?;
-                                    self.join_index_cache.insert(key, index);
-                                    if let Some(stats) =
-                                        self.stats.get_relation_stats_mut(build_rel)
-                                    {
-                                        stats.has_index = true;
+                                    ) {
+                                        Ok(joined) => {
+                                            self.join_index_cache.insert(key, index);
+                                            if let Some(stats) =
+                                                self.stats.get_relation_stats_mut(build_rel)
+                                            {
+                                                stats.has_index = true;
+                                            }
+                                            out = Some(joined);
+                                        }
+                                        Err(err) if is_join_index_mismatch(&err) => {}
+                                        Err(err) => return Err(err),
                                     }
-                                    out = Some(joined);
                                 }
                                 Err(_) => {
                                     // If indexing fails (e.g., memory pressure), fall back to normal join.
@@ -321,7 +437,7 @@ impl Executor {
                     }
                 }
             }
-        }
+        } // end `if out.is_none()` (adaptive-indexing gate added by W4.2 Step 5 patch)
 
         let out = match out {
             Some(buf) => buf,

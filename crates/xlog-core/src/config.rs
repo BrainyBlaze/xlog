@@ -65,6 +65,65 @@ pub struct RuntimeConfig {
     pub profile: bool,
     /// Maximum fixpoint iterations before abort
     pub max_iterations: u32,
+    /// Opt-in: enforce the strict deterministic-Datalog D2H gate during
+    /// `Executor::execute_plan`. When `true`, any data-plane device-to-host
+    /// transfer (column downloads, internal `dtoh_sync_copy_into_tracked`
+    /// calls) returns `XlogError::Execution` and increments the provider's
+    /// `deterministic_d2h_violation_count`. Metadata reads via
+    /// `dtoh_scalar_untracked` remain allowed.
+    ///
+    /// Default `false`: v0.5.5 still has known data-plane D2H paths in
+    /// relational set difference and binary-join count/materialize that are
+    /// scheduled for replacement before the default flips.
+    pub strict_deterministic_d2h: bool,
+    /// Override the env-driven WCOJ triangle dispatch gate
+    /// (`XLOG_USE_WCOJ_TRIANGLE_U32`). `None` (default) consults
+    /// the env var; `Some(true)` / `Some(false)` force the
+    /// runtime to ignore the env and use the explicit value.
+    /// Test-only knob — production callers should leave this
+    /// `None` and configure via the env var.
+    pub wcoj_triangle_dispatch: Option<bool>,
+    /// Override the stats-backed WCOJ triangle dispatch gate.
+    /// `None` uses the production default. `Some(true)` enables
+    /// the cardinality model; `Some(false)` disables this runtime's
+    /// default stats-backed decision.
+    pub wcoj_triangle_dispatch_adaptive: Option<bool>,
+    /// Runtime-local hard stop for WCOJ triangle dispatch.
+    /// `Some(true)` pins dispatch off across force and stats mode.
+    /// `Some(false)` leaves dispatch available for this runtime.
+    /// `None` uses the production default.
+    pub wcoj_triangle_dispatch_disabled: Option<bool>,
+
+    /// v0.6.5 slice 2 — force gate for the 4-cycle WCOJ dispatch.
+    /// `Some(true)` / env `XLOG_USE_WCOJ_4CYCLE=1` forces every
+    /// recognized 4-cycle to dispatch the GPU kernel. `Some(false)` is explicit force-off. `None`
+    /// (default) consults the env.
+    pub wcoj_4cycle_dispatch: Option<bool>,
+    /// v0.6.5 slice 2 — adaptive opt-in for 4-cycle WCOJ. **Unlike
+    /// triangle, 4-cycle adaptive is opt-in by default**, not
+    /// default-on: `None` resolves to `false`. Default-on for
+    /// 4-cycle is a separate follow-up slice gated by bench evidence.
+    pub wcoj_4cycle_dispatch_adaptive: Option<bool>,
+    /// v0.6.5 slice 2 — kill switch for 4-cycle WCOJ. Same shape
+    /// as triangle's kill switch: beats force + adaptive.
+    pub wcoj_4cycle_dispatch_disabled: Option<bool>,
+    /// v0.6.5 W2.5 — selects the runtime WCOJ cost model.
+    /// `None` resolves by env/default precedence; see
+    /// [`RuntimeConfig::with_wcoj_cost_model`].
+    pub wcoj_cost_model: Option<CostModelKind>,
+}
+
+/// v0.6.5 W2.5 cost-model selector for WCOJ dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CostModelKind {
+    /// Legacy skew-classifier opt-out selector.
+    ///
+    /// On current G38 integration code the GPU classifier surface is absent,
+    /// so this selector is implemented as a conservative opt-out from
+    /// stats/cardinality dispatch.
+    SkewClassifier,
+    /// Stats/cardinality-backed dispatch selector.
+    Cardinality,
 }
 
 impl Default for RuntimeConfig {
@@ -74,6 +133,14 @@ impl Default for RuntimeConfig {
             deterministic: true,
             profile: false,
             max_iterations: 1_000_000,
+            strict_deterministic_d2h: false,
+            wcoj_triangle_dispatch: None,
+            wcoj_triangle_dispatch_adaptive: None,
+            wcoj_triangle_dispatch_disabled: None,
+            wcoj_4cycle_dispatch: None,
+            wcoj_4cycle_dispatch_adaptive: None,
+            wcoj_4cycle_dispatch_disabled: None,
+            wcoj_cost_model: None,
         }
     }
 }
@@ -89,6 +156,85 @@ impl RuntimeConfig {
     pub fn with_memory(mut self, memory: MemoryBudget) -> Self {
         self.memory = memory;
         self
+    }
+
+    /// Enable the strict deterministic-Datalog D2H gate for this runtime.
+    pub fn with_strict_deterministic_d2h(mut self) -> Self {
+        self.strict_deterministic_d2h = true;
+        self
+    }
+
+    /// Override the env-driven WCOJ triangle dispatch gate. Pass
+    /// `Some(true)` / `Some(false)` to force the runtime to ignore
+    /// `XLOG_USE_WCOJ_TRIANGLE_U32`; `None` to consult the env var
+    /// (the production default). Test-only knob.
+    pub fn with_wcoj_triangle_dispatch(mut self, override_value: Option<bool>) -> Self {
+        self.wcoj_triangle_dispatch = override_value;
+        self
+    }
+
+    /// Override the stats-backed WCOJ triangle dispatch gate.
+    /// Force-WCOJ (`with_wcoj_triangle_dispatch(Some(true))`)
+    /// takes precedence.
+    pub fn with_wcoj_triangle_dispatch_adaptive(mut self, override_value: Option<bool>) -> Self {
+        self.wcoj_triangle_dispatch_adaptive = override_value;
+        self
+    }
+
+    /// Engage / disengage the runtime-local WCOJ triangle
+    /// dispatch hard stop.
+    pub fn with_wcoj_triangle_dispatch_disabled(mut self, override_value: Option<bool>) -> Self {
+        self.wcoj_triangle_dispatch_disabled = override_value;
+        self
+    }
+
+    /// v0.6.5 slice 2 — override the 4-cycle force-gate.
+    /// `Some(true)` forces the GPU kernel; `Some(false)` is
+    /// explicit force-off; `None` consults `XLOG_USE_WCOJ_4CYCLE`.
+    pub fn with_wcoj_4cycle_dispatch(mut self, override_value: Option<bool>) -> Self {
+        self.wcoj_4cycle_dispatch = override_value;
+        self
+    }
+
+    /// v0.6.5 slice 2 — override the 4-cycle stats opt-in.
+    /// `Some(true)` engages the cardinality model; `Some(false)` skips it.
+    /// `None` resolves to `false` (opt-in by default — 4-cycle
+    /// does NOT inherit triangle's default-on behavior).
+    pub fn with_wcoj_4cycle_dispatch_adaptive(mut self, override_value: Option<bool>) -> Self {
+        self.wcoj_4cycle_dispatch_adaptive = override_value;
+        self
+    }
+
+    /// v0.6.5 slice 2 — engage / disengage the 4-cycle kill switch.
+    /// Same shape as the triangle kill switch.
+    pub fn with_wcoj_4cycle_dispatch_disabled(mut self, override_value: Option<bool>) -> Self {
+        self.wcoj_4cycle_dispatch_disabled = override_value;
+        self
+    }
+
+    /// Select which WCOJ cost-model implementation the runtime consults.
+    ///
+    /// Precedence:
+    /// 1. Explicit config field set here.
+    /// 2. `XLOG_WCOJ_COST_MODEL=cardinality` or `skew`.
+    /// 3. Default `Cardinality`.
+    pub fn with_wcoj_cost_model(mut self, kind: Option<CostModelKind>) -> Self {
+        self.wcoj_cost_model = kind;
+        self
+    }
+
+    /// Resolve the effective WCOJ cost-model selector.
+    pub fn resolved_wcoj_cost_model(&self) -> CostModelKind {
+        if let Some(kind) = self.wcoj_cost_model {
+            return kind;
+        }
+        let raw = std::env::var("XLOG_WCOJ_COST_MODEL").ok();
+        let normalized = raw.as_deref().map(|s| s.trim().to_ascii_lowercase());
+        match normalized.as_deref() {
+            Some("cardinality") => CostModelKind::Cardinality,
+            Some("skew") | Some("skewclassifier") | Some(_) => CostModelKind::SkewClassifier,
+            None => CostModelKind::Cardinality,
+        }
     }
 }
 

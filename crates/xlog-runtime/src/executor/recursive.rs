@@ -1,6 +1,7 @@
 //! Recursive SCC execution using semi-naive fixpoint iteration.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::time::Instant;
 
 use xlog_core::{RelId, Result, Schema, XlogError};
 use xlog_cuda::CudaBuffer;
@@ -12,6 +13,111 @@ use super::Executor;
 impl Executor {
     /// Maximum iterations for fixpoint computation to prevent infinite loops
     const MAX_FIXPOINT_ITERATIONS: usize = 1000;
+
+    /// v0.6.5 slice 4 / W4.1 helper. For a `MultiWayJoin` body
+    /// (produced by the slice 1–2 promoter), try WCOJ dispatch
+    /// via the triangle/4-cycle entry points; on decline, fall
+    /// back to the embedded fallback subtree via `execute_node`.
+    /// For any other RIR variant, defer to `execute_node`
+    /// directly.
+    ///
+    /// Used at TWO sites in the recursive engine — the seeding
+    /// pass (where stable rules with zero recursive Scans AND
+    /// linear/multi-recursive rules with non-zero in-SCC Scans
+    /// get their initial dispatch on the full body) and the
+    /// per-variant loop (where each recursive Scan with a
+    /// non-empty delta is rewritten to its delta RelId for one
+    /// dispatch). Multi-recursive bodies — both distinct-
+    /// recursive-predicate and same-predicate self-recursive
+    /// (paper P1, arXiv:2604.20073) — DO reach a `MultiWayJoin`
+    /// here after W4.1 eliminated the `recursive_scan_count > 1`
+    /// promoter cutoff at `crates/xlog-logic/src/promote.rs:114`;
+    /// the per-variant rewrite loop builds N variants (one per
+    /// recursive occurrence with a non-empty delta) and
+    /// dispatches each via this helper.
+    ///
+    /// Counter semantics: `wcoj_*_dispatch_count` increments per
+    /// successful WCOJ kernel result — once per (rule, iteration,
+    /// variant). Slice 1–3 non-recursive sites still increment
+    /// once per rule per call.
+    fn execute_wcoj_or_fallback_node(&mut self, node: &RirNode) -> Result<CudaBuffer> {
+        if let RirNode::ChainJoin { .. } = node {
+            if let Some(buf) = self.try_dispatch_w63_chain_on_body(node)? {
+                return Ok(buf);
+            }
+            return self.execute_node(node);
+        }
+        if let RirNode::MultiWayJoin { .. } = node {
+            // Triangle, 4-cycle, then K-clique. A body cannot
+            // match more than one paper-derived shape (different
+            // atom counts). The dispatcher's own gate handles
+            // env-var / config / adaptive decisions; this site is
+            // purely structural.
+            if let Some(buf) = self.try_dispatch_wcoj_triangle_on_body(node)? {
+                return Ok(buf);
+            }
+            if let Some(buf) = self.try_dispatch_wcoj_4cycle_on_body(node)? {
+                return Ok(buf);
+            }
+            // Authorization 5 G_HIST_KC: recursive clique bodies
+            // must use the same launch-local metadata builders as
+            // non-recursive K-clique dispatch, so rewritten
+            // semi-naive variants are eligible here too.
+            if let Some(buf) = self.try_dispatch_wcoj_clique5_on_body(node)? {
+                return Ok(buf);
+            }
+            if let Some(buf) = self.try_dispatch_wcoj_clique6_on_body(node)? {
+                return Ok(buf);
+            }
+        }
+        self.execute_node(node)
+    }
+
+    fn refresh_kclique_edge_metadata_after_merge(
+        &mut self,
+        rules: &[xlog_ir::CompiledRule],
+        pred: &str,
+    ) {
+        let start = Instant::now();
+        let affected_rules = rules
+            .iter()
+            .filter(|rule| self.kclique_body_mentions_pred(&rule.body, pred))
+            .count() as u64;
+        self.record_kclique_histogram_refresh_time(start, affected_rules);
+    }
+
+    fn record_kclique_histogram_refresh_time(&mut self, start: Instant, affected_rules: u64) {
+        if affected_rules == 0 {
+            return;
+        }
+        self.kclique_histogram_refresh_count = self
+            .kclique_histogram_refresh_count
+            .saturating_add(affected_rules);
+        self.kclique_histogram_refresh_nanos = self
+            .kclique_histogram_refresh_nanos
+            .saturating_add(start.elapsed().as_nanos());
+    }
+
+    fn kclique_body_mentions_pred(&self, node: &RirNode, pred: &str) -> bool {
+        let RirNode::MultiWayJoin {
+            inputs, var_order, ..
+        } = node
+        else {
+            return false;
+        };
+        let Some(order) = var_order.as_ref().and_then(|order| order.kclique.as_ref()) else {
+            return false;
+        };
+        if !matches!(order.k, 5 | 6) {
+            return false;
+        }
+        inputs.iter().any(|input| {
+            let RirNode::Scan { rel } = input else {
+                return false;
+            };
+            self.rel_names.get(rel).is_some_and(|name| name == pred)
+        })
+    }
 
     /// Stub: always returns an error directing callers to use `execute_plan` instead.
     pub fn execute_stratum(&mut self, _stratum: &Stratum) -> Result<()> {
@@ -64,12 +170,153 @@ impl Executor {
                 let is_recursive = scc.map(|s| s.is_recursive).unwrap_or(false);
 
                 if is_recursive {
-                    // Recursive SCC: use semi-naive fixpoint iteration
+                    // Recursive SCC: use semi-naive fixpoint iteration.
+                    // v0.6.5 slice 4: the recursive engine now invokes
+                    // WCOJ dispatch via `execute_wcoj_or_fallback_node`
+                    // on both the seeding pass and per-variant
+                    // evaluation, gated by the slice 4 promoter
+                    // (recursive-Scan count ≤ 1).
                     self.execute_recursive_scc(rules)?;
                 } else {
-                    // Non-recursive SCC: execute rules once, union results for same predicate
+                    // Non-recursive SCC: execute rules once, union results for same predicate.
                     for rule in rules {
-                        let result = self.execute_node(&rule.body)?;
+                        // Goal-039 G_W63_CHAIN — route two-atom
+                        // ChainJoin bodies before the
+                        // triangle/4-cycle/KC attempts. The
+                        // dispatcher silently declines on non-chain
+                        // bodies or when the env gate disables the
+                        // route.
+                        if let Some(chain_result) =
+                            self.try_dispatch_w63_chain_on_body(&rule.body)?
+                        {
+                            if let Some(existing) = self.store.get(&rule.head) {
+                                let merged = self.provider.union_gpu(existing, &chain_result)?;
+                                self.store_put(&rule.head, merged);
+                            } else {
+                                let key_cols: Vec<usize> = (0..chain_result.arity()).collect();
+                                let deduped = if chain_result.is_empty() {
+                                    chain_result
+                                } else {
+                                    let dedup_input_rows = chain_result.num_rows();
+                                    let start = self.profiler.start_op();
+                                    let deduped = self.provider.dedup(&chain_result, &key_cols)?;
+                                    if let Some(start) = start {
+                                        let mem = self.provider.memory().allocated_bytes();
+                                        self.profiler.record_op(
+                                            "dedup",
+                                            dedup_input_rows,
+                                            deduped.num_rows(),
+                                            start,
+                                            mem,
+                                        );
+                                        self.profiler.record_peak_memory(mem);
+                                    }
+                                    deduped
+                                };
+                                self.store_put(&rule.head, deduped);
+                            }
+                            continue;
+                        }
+
+                        // v0.6.2 WCOJ triangle dispatch — env-gated.
+                        // Try to short-circuit the rule via the GPU
+                        // 3-way kernel. On Some(_), install the
+                        // result and skip the binary-join path for
+                        // this rule. On None (gate off, shape
+                        // mismatch, missing input, kernel error),
+                        // fall through silently. See
+                        // `wcoj_dispatch::try_dispatch_wcoj_triangle`
+                        // for the full match contract.
+                        if let Some(wcoj_result) = self.try_dispatch_wcoj_triangle(rule)? {
+                            // Mirrors the binary-join arm below:
+                            // union with existing result if predicate
+                            // already has data; otherwise install
+                            // directly. WCOJ output is already
+                            // sorted+deduped, so the dedup pass on
+                            // the else branch is unnecessary here.
+                            if let Some(existing) = self.store.get(&rule.head) {
+                                let merged = self.provider.union_gpu(existing, &wcoj_result)?;
+                                self.store_put(&rule.head, merged);
+                            } else {
+                                self.store_put(&rule.head, wcoj_result);
+                            }
+                            continue;
+                        }
+
+                        // v0.6.5 slice 2: WCOJ 4-cycle dispatch.
+                        // Same pattern as triangle. Order is a doc
+                        // anchor — a body cannot match both shapes
+                        // (different atom counts), so triangle's
+                        // earlier attempt always returns None on a
+                        // 4-cycle body and vice versa.
+                        if let Some(wcoj_result) = self.try_dispatch_wcoj_4cycle(rule)? {
+                            if let Some(existing) = self.store.get(&rule.head) {
+                                let merged = self.provider.union_gpu(existing, &wcoj_result)?;
+                                self.store_put(&rule.head, merged);
+                            } else {
+                                self.store_put(&rule.head, wcoj_result);
+                            }
+                            continue;
+                        }
+
+                        // W3.2/W6.4 — k=5..k=8 clique dispatch.
+                        // Same shape-gated default-dispatch
+                        // pattern as triangle / 4-cycle; silent
+                        // fallback to MultiWayJoin.fallback on
+                        // dispatcher decline or kernel error.
+                        if let Some(wcoj_result) = self.try_dispatch_wcoj_clique5(rule)? {
+                            if let Some(existing) = self.store.get(&rule.head) {
+                                let merged = self.provider.union_gpu(existing, &wcoj_result)?;
+                                self.store_put(&rule.head, merged);
+                            } else {
+                                self.store_put(&rule.head, wcoj_result);
+                            }
+                            continue;
+                        }
+                        if let Some(wcoj_result) = self.try_dispatch_wcoj_clique6(rule)? {
+                            if let Some(existing) = self.store.get(&rule.head) {
+                                let merged = self.provider.union_gpu(existing, &wcoj_result)?;
+                                self.store_put(&rule.head, merged);
+                            } else {
+                                self.store_put(&rule.head, wcoj_result);
+                            }
+                            continue;
+                        }
+                        if let Some(wcoj_result) = self.try_dispatch_wcoj_clique7(rule)? {
+                            if let Some(existing) = self.store.get(&rule.head) {
+                                let merged = self.provider.union_gpu(existing, &wcoj_result)?;
+                                self.store_put(&rule.head, merged);
+                            } else {
+                                self.store_put(&rule.head, wcoj_result);
+                            }
+                            continue;
+                        }
+                        if let Some(wcoj_result) = self.try_dispatch_wcoj_clique8(rule)? {
+                            if let Some(existing) = self.store.get(&rule.head) {
+                                let merged = self.provider.union_gpu(existing, &wcoj_result)?;
+                                self.store_put(&rule.head, merged);
+                            } else {
+                                self.store_put(&rule.head, wcoj_result);
+                            }
+                            continue;
+                        }
+
+                        // v0.6.5 slice 1: when WCOJ dispatch declines on
+                        // a `MultiWayJoin` body (gate off, kernel error,
+                        // adaptive score below threshold, …), execute
+                        // the embedded `fallback` — the post-optimizer
+                        // binary-join tree the promoter captured. This
+                        // preserves byte-identical behavior with v0.6.2.
+                        // `execute_node`'s `MultiWayJoin` arm is the
+                        // defensive safety net; explicit destructuring
+                        // here keeps the intent visible at the dispatch
+                        // site.
+                        let body_to_execute = match &rule.body {
+                            xlog_ir::RirNode::MultiWayJoin { fallback, .. }
+                            | xlog_ir::RirNode::ChainJoin { fallback, .. } => fallback.as_ref(),
+                            other => other,
+                        };
+                        let result = self.execute_node(body_to_execute)?;
 
                         // Union with existing result if predicate already has data
                         if let Some(existing) = self.store.get(&rule.head) {
@@ -127,6 +374,13 @@ impl Executor {
     /// 3. Re-execute rules, using delta from previous iteration
     /// 4. Repeat until no changes (fixpoint reached)
     pub fn execute_recursive_scc(&mut self, rules: &[xlog_ir::CompiledRule]) -> Result<()> {
+        // W2.3: reset the per-iteration stats trace at SCC entry so
+        // tests see a fresh trace per invocation. Gated on the
+        // `recursive-stats-trace` feature; default OFF.
+        #[cfg(feature = "recursive-stats-trace")]
+        {
+            self.last_recursive_stats_trace.entries.clear();
+        }
         // Identify SCC predicates from rule heads (these are the recursive IDBs).
         let mut recursive_pred_names: BTreeSet<String> = BTreeSet::new();
         let mut schema_by_pred: HashMap<String, Schema> = HashMap::new();
@@ -182,9 +436,16 @@ impl Executor {
 
         // Step 1: Execute all rules once against the current store to seed initial results.
         // Accumulate per-head before mutating the store to avoid order dependence.
+        //
+        // v0.6.5 slice 4: route through `execute_wcoj_or_fallback_node`
+        // so MultiWayJoin bodies (slice 4 promoter output for stable
+        // and linear-recursive triangles / 4-cycles) get a chance at
+        // WCOJ dispatch on the seeding pass. Stable rules — bodies
+        // with zero recursive Scans — only run here, so without this
+        // hook they'd never see a kernel.
         let mut derived_initial: HashMap<String, CudaBuffer> = HashMap::new();
         for rule in rules {
-            let result = self.execute_node(&rule.body)?;
+            let result = self.execute_wcoj_or_fallback_node(&rule.body)?;
             if let Some(acc) = derived_initial.get_mut(&rule.head) {
                 let union_input = acc.num_rows() + result.num_rows();
                 let start = self.profiler.start_op();
@@ -227,21 +488,7 @@ impl Executor {
                 self.profiler.record_peak_memory(mem);
             }
 
-            let key_cols: Vec<usize> = (0..merged.arity()).collect();
-            let full_new = if self.buffer_row_count(&merged)? == 0 {
-                merged
-            } else {
-                let dedup_input = merged.num_rows();
-                let start = self.profiler.start_op();
-                let deduped = self.provider.dedup_sorted(&merged, &key_cols)?;
-                if let Some(start) = start {
-                    let mem = self.provider.memory().allocated_bytes();
-                    self.profiler
-                        .record_op("dedup", dedup_input, deduped.num_rows(), start, mem);
-                    self.profiler.record_peak_memory(mem);
-                }
-                deduped
-            };
+            let full_new = merged;
 
             let delta_name = delta_tracker.delta_name(pred)?;
 
@@ -264,8 +511,43 @@ impl Executor {
                 diffed
             };
 
+            // W2.3 step 4 — seed-iteration cardinality refresh.
+            // Capture the actual delta_initial row count BEFORE the
+            // `store_put` move (after the move, the buffer is gone).
+            // `full_new_rows` was captured at line 356 above.
+            let delta_initial_rows = self.buffer_row_count(&delta_initial)? as u64;
+            let seed_full_rows = full_new_rows as u64;
+            // Pre-resolve rel_id lookups before the &mut self stats
+            // borrow below.
+            let full_rel_opt = self.name_to_rel_id(pred);
+            let delta_rel = delta_tracker.delta_rel_id(pred)?;
+
             self.store_put(pred, full_new);
             self.store_put(delta_name, delta_initial);
+
+            // Stats updates fire whether or not WCOJ ran on the seed
+            // pass. update_cardinality is a no-op for unregistered
+            // rel_ids (defensive: tests that don't register an IDB
+            // head get a no-op for the full_rel write).
+            if let Some(full_rel) = full_rel_opt {
+                self.stats.update_cardinality(full_rel, seed_full_rows);
+            }
+            self.stats.update_cardinality(delta_rel, delta_initial_rows);
+
+            // W2.3 trace seam — gated on `recursive-stats-trace`.
+            #[cfg(feature = "recursive-stats-trace")]
+            self.last_recursive_stats_trace
+                .entries
+                .push(super::RecursiveStatsTraceEntry {
+                    iteration: 0,
+                    pred: pred.clone(),
+                    full_rel: full_rel_opt.unwrap_or(RelId(u32::MAX)),
+                    delta_rel,
+                    full_rows: seed_full_rows,
+                    delta_rows: delta_initial_rows,
+                    phase: super::RecursiveStatsPhase::Seed,
+                    binary_est_for_variant: None,
+                });
         }
 
         // Step 2: Iterate until no new tuples are produced.
@@ -330,7 +612,14 @@ impl Executor {
                             },
                         )?;
 
-                    let out = self.execute_node(&variant_node)?;
+                    // v0.6.5 slice 4: try WCOJ on the rewritten variant
+                    // body before falling back to the binary-join walker.
+                    // For a linear-recursive triangle/4-cycle, the
+                    // variant has one Scan's RelId swapped to its
+                    // delta — the kernel reads from the delta store
+                    // entry transparently, no special-case dispatch
+                    // logic needed.
+                    let out = self.execute_wcoj_or_fallback_node(&variant_node)?;
                     rule_delta_raw = Some(if let Some(acc) = rule_delta_raw {
                         let union_input = acc.num_rows() + out.num_rows();
                         let start = self.profiler.start_op();
@@ -383,6 +672,12 @@ impl Executor {
                     .store
                     .get(pred)
                     .ok_or_else(|| XlogError::Execution(format!("Missing relation: {}", pred)))?;
+                // W2.3 step 5: capture the pre-Phase-4 full row count
+                // for the trace's full_rows field at this Phase 2 site.
+                // Gated on `recursive-stats-trace` so production builds
+                // don't compute it.
+                #[cfg(feature = "recursive-stats-trace")]
+                let pre_phase4_full_rows = self.buffer_row_count(full)? as u64;
 
                 let delta_raw = delta_new_raw_by_head.remove(pred);
                 let delta_new = if let Some(delta_raw) = delta_raw {
@@ -410,10 +705,54 @@ impl Executor {
                 };
 
                 let delta_name = delta_tracker.delta_name(pred)?.to_string();
-                if self.buffer_row_count(&delta_new)? != 0 {
+                let delta_new_rows = self.buffer_row_count(&delta_new)? as u64;
+                if delta_new_rows != 0 {
                     delta_tracker.mark_changed();
                 }
+                // Pre-resolve rel_id lookups before the &mut self
+                // store_put + stats update below. `full_rel_opt` is
+                // only used by the trace under the
+                // `recursive-stats-trace` feature.
+                #[cfg(feature = "recursive-stats-trace")]
+                let full_rel_opt = self.name_to_rel_id(pred);
+                let delta_rel = delta_tracker.delta_rel_id(pred)?;
                 self.store_put(&delta_name, delta_new);
+
+                // W2.3 step 5 — Phase 2: refresh delta_rel card.
+                // full_rel card is NOT updated here (full hasn't
+                // changed yet this iteration; Phase 4 owns that).
+                self.stats.update_cardinality(delta_rel, delta_new_rows);
+
+                // W2.3 trace seam — gated on `recursive-stats-trace`.
+                // binary_est_for_variant captures the cost model's
+                // first-binary-hop estimate for the slice-4
+                // linear-recursive fixtures (`pred == "e1"` rewrites
+                // Scan(e1) → Scan(delta_e1); first hop is
+                // `delta_e1.col1 ⋈ e2.col0`). Populated inline because
+                // delta_rel is unregistered at fixpoint exit, so the
+                // test cannot recompute after `execute_plan` returns.
+                #[cfg(feature = "recursive-stats-trace")]
+                let binary_est_for_variant: Option<u64> = if pred == "e1" {
+                    self.name_to_rel_id("e2").map(|e2_rel| {
+                        self.stats
+                            .estimate_join_cardinality(delta_rel, e2_rel, &[1], &[0])
+                    })
+                } else {
+                    None
+                };
+                #[cfg(feature = "recursive-stats-trace")]
+                self.last_recursive_stats_trace
+                    .entries
+                    .push(super::RecursiveStatsTraceEntry {
+                        iteration: iteration_count,
+                        pred: pred.clone(),
+                        full_rel: full_rel_opt.unwrap_or(RelId(u32::MAX)),
+                        delta_rel,
+                        full_rows: pre_phase4_full_rows,
+                        delta_rows: delta_new_rows,
+                        phase: super::RecursiveStatsPhase::Phase2Delta,
+                        binary_est_for_variant,
+                    });
             }
 
             // Fixpoint reached if no deltas produced.
@@ -429,14 +768,19 @@ impl Executor {
                     .store
                     .remove(pred)
                     .ok_or_else(|| XlogError::Execution(format!("Missing relation: {}", pred)))?;
-                let dn = delta_tracker.delta_name(pred)?;
+                let dn = delta_tracker.delta_name(pred)?.to_string();
                 let delta = self
-                    .store_remove(dn)
+                    .store_remove(&dn)
                     .ok_or_else(|| XlogError::Execution(format!("Missing relation: {}", dn)))?;
 
                 if self.buffer_row_count(&delta)? == 0 {
+                    // W2.3: zero-delta short-circuit — full and delta
+                    // unchanged this iteration. Phase 2's delta_rel
+                    // record (with rows == 0) stands; full_rel record
+                    // from a prior iteration's Phase 4 stands. No
+                    // additional update.
                     self.store_put(pred, full_old);
-                    self.store_put(dn, delta);
+                    self.store_put(&dn, delta);
                     continue;
                 }
 
@@ -450,28 +794,43 @@ impl Executor {
                     self.profiler.record_peak_memory(mem);
                 }
 
-                let key_cols: Vec<usize> = (0..merged.arity()).collect();
-                let full_new = if self.buffer_row_count(&merged)? == 0 {
-                    merged
-                } else {
-                    let dedup_input = merged.num_rows();
-                    let start = self.profiler.start_op();
-                    let deduped = self.provider.dedup_sorted(&merged, &key_cols)?;
-                    if let Some(start) = start {
-                        let mem = self.provider.memory().allocated_bytes();
-                        self.profiler.record_op(
-                            "dedup",
-                            dedup_input,
-                            deduped.num_rows(),
-                            start,
-                            mem,
-                        );
-                        self.profiler.record_peak_memory(mem);
-                    }
-                    deduped
-                };
+                let full_new = merged;
+                // W2.3 step 6 — Phase 4: capture full_new's row count
+                // BEFORE the store_put move; pre-resolve full_rel_opt
+                // before the &mut self stats borrow. delta_rows_phase4
+                // and delta_rel are only used by the trace under the
+                // `recursive-stats-trace` feature.
+                let full_new_rows_phase4 = self.buffer_row_count(&full_new)? as u64;
+                #[cfg(feature = "recursive-stats-trace")]
+                let delta_rows_phase4 = self.buffer_row_count(&delta)? as u64;
+                let full_rel_opt = self.name_to_rel_id(pred);
+                #[cfg(feature = "recursive-stats-trace")]
+                let delta_rel = delta_tracker.delta_rel_id(pred)?;
                 self.store_put(pred, full_new);
-                self.store_put(dn, delta);
+                self.store_put(&dn, delta);
+
+                // Record full_rel's new card. (Phase 2 already
+                // recorded delta_rel for this iteration.)
+                if let Some(full_rel) = full_rel_opt {
+                    self.stats
+                        .update_cardinality(full_rel, full_new_rows_phase4);
+                }
+                self.refresh_kclique_edge_metadata_after_merge(rules, pred);
+
+                // W2.3 trace seam — gated on `recursive-stats-trace`.
+                #[cfg(feature = "recursive-stats-trace")]
+                self.last_recursive_stats_trace
+                    .entries
+                    .push(super::RecursiveStatsTraceEntry {
+                        iteration: iteration_count,
+                        pred: pred.clone(),
+                        full_rel: full_rel_opt.unwrap_or(RelId(u32::MAX)),
+                        delta_rel,
+                        full_rows: full_new_rows_phase4,
+                        delta_rows: delta_rows_phase4,
+                        phase: super::RecursiveStatsPhase::Phase4Full,
+                        binary_est_for_variant: None,
+                    });
             }
         }
 

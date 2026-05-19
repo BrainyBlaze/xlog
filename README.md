@@ -1,13 +1,16 @@
 # XLOG
 
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
-[![CUDA Tests](https://img.shields.io/badge/CUDA%20tests-206%2F206-brightgreen.svg)](docs/architecture/cuda-certification.md)
-[![Version](https://img.shields.io/badge/version-v0.5.2-blue.svg)](CHANGELOG.md)
+[![CUDA Tests](https://img.shields.io/badge/CUDA%20tests-207%2F207-brightgreen.svg)](docs/architecture/cuda-certification.md)
+[![Version](https://img.shields.io/badge/version-v0.8.0-blue.svg)](CHANGELOG.md)
 
-> **Release status:** `v0.5.2` - GPU-resident ILP credit/loss path (zero D2H), P2a term embeddings
-> (`register_embedding` / `forward_embedding` with device-aware autograd), P2b extended training
-> controls (gradient clipping, early stopping, lr management), P3 incremental verifier
-> (`GpuCdclWorkspace` arena reuse). See `ROADMAP.md` and `CHANGELOG.md`.
+> **Release status:** `v0.8.0` - DTS-DLM ML/Python Productization.
+> The release productizes the DTS-DLM M37-A+B support surface: stable
+> `pyxlog` runtime/session APIs, async and streaming evaluation, relation
+> deltas, diagnostics, registered neural top-k/deterministic modes, Belnap
+> bridge helpers, native exact-induction integration, and certification-friendly
+> DTS examples. See `ROADMAP.md`, `CHANGELOG.md`,
+> `docs/architecture/python-bindings.md`, and `examples/v080-dts/`.
 
 **XLOG is a GPU-native logic programming language for unified symbolic reasoning.**
 Neural-symbolic systems today keep symbolic reasoning on the CPU while neural computation runs on
@@ -281,6 +284,8 @@ flag reference.
 | [Architecture](docs/ARCHITECTURE.md) | System design, crate structure, IR layers, GPU execution model |
 | [Roadmap](ROADMAP.md) | Feature status, shipped milestones, and planned work |
 | [Benchmarks](docs/BENCHMARKS.md) | Performance methodology and benchmark artifacts |
+| [WCOJ architecture guide](docs/wcoj-architecture-guide.md) | RIR, promoter, dispatch, cost model, recursive integration, and Phase-2 WCOJ mechanisms |
+| [WCOJ user guide](docs/wcoj-user-guide.md) | Eligibility, fallback behavior, performance tuning, env vars, troubleshooting, and DTS-DLM guidance |
 | [Probabilistic tier](docs/architecture/xlog-prob.md) | Exact knowledge compilation and Monte Carlo inference |
 | [Solver services](docs/architecture/solver-services.md) | GPU CDCL verifier, SAT/MaxSAT services, workspace arena reuse |
 | [dILP training](docs/architecture/dilp-training.md) | Differentiable ILP trainer architecture and GPU hot-loop contract |

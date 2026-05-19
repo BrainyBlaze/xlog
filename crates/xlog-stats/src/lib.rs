@@ -15,6 +15,8 @@
 //!   and value ranges for selectivity estimation.
 //! - [`JoinSelectivity`]: Models join behavior between relations for cardinality
 //!   estimation.
+//! - [`PrefixDegreeStats`] and [`KeyHeatStats`]: WCOJ planner inputs for prefix
+//!   fan-out and per-key skew.
 //!
 //! # Usage
 //!
@@ -53,4 +55,4 @@ mod stats;
 
 pub use manager::StatsManager;
 pub use manager::StatsSnapshot;
-pub use stats::{ColumnStats, JoinSelectivity, RelationStats};
+pub use stats::{ColumnStats, JoinSelectivity, KeyHeatStats, PrefixDegreeStats, RelationStats};

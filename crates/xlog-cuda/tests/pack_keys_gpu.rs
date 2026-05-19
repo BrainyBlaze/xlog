@@ -41,3 +41,39 @@ fn test_pack_keys_gpu_generic_no_dtoh() {
         stats.dtoh_bytes
     );
 }
+
+#[test]
+fn test_pack_keys_gpu_common_path_no_host_transfers() {
+    let Some(provider) = setup_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return;
+    };
+
+    let schema = Schema::new(vec![
+        ("a".to_string(), ScalarType::U32),
+        ("b".to_string(), ScalarType::U32),
+    ]);
+
+    let a = vec![1u32, 2, 3, 4];
+    let b = vec![10u32, 20, 30, 40];
+    let buffer = provider
+        .create_buffer_from_u32_columns(&[&a, &b], schema)
+        .unwrap();
+
+    provider.reset_host_transfer_stats();
+
+    let index = provider.build_join_index_v2(&buffer, &[0, 1]).unwrap();
+    assert!(index.estimated_bytes() > 0);
+
+    let stats = provider.host_transfer_stats();
+    assert_eq!(
+        stats.dtoh_bytes, 0,
+        "unexpected device-to-host transfer during common GPU key packing: {:?}",
+        stats
+    );
+    assert_eq!(
+        stats.htod_bytes, 0,
+        "unexpected host-to-device transfer during common GPU key packing: {:?}",
+        stats
+    );
+}

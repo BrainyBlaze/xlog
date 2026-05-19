@@ -50,6 +50,10 @@ cargo bench -- --baseline baseline_name
 |----------|-------------|---------|
 | `CUDA_VISIBLE_DEVICES` | GPU device ordinal | `0` |
 | `XLOG_BENCH_MEMORY_MB` | GPU memory budget | `4096` |
+| `WCOJ_BENCH_FULL` | Run the full WCOJ triangle matrix (adds 100K + 250K row sizes) | `0` |
+| `XLOG_USE_WCOJ_TRIANGLE_U32` | Force-on the WCOJ triangle dispatch (bypasses adaptive classifier) | unset |
+| `XLOG_USE_WCOJ_TRIANGLE_ADAPTIVE` | Adaptive (skew-classifier-gated) WCOJ dispatch — set to `0`/`false` to opt out of default-on | unset (default-on) |
+| `XLOG_DISABLE_WCOJ_TRIANGLE` | Hard kill switch — pins all WCOJ triangle dispatch off, beats every other flag | unset |
 
 ---
 
@@ -104,6 +108,34 @@ Tests GROUP BY with COUNT aggregate.
 - 1M rows with 100K groups
 
 Aggregation throughput is tracked in groups/sec, but the repository does not currently publish a single public pass/fail threshold for this case.
+
+### WCOJ Triangle (default-on adaptive, `xlog-integration`)
+
+**Location:** `crates/xlog-integration/benches/wcoj_triangle_bench.rs`
+
+Compares the GPU 3-way Worst-Case Optimal Join dispatch against the existing binary-join chain on identical fixtures, across `u32`, `u64`, and a Symbol sanity case. Three modes per cell — `Off` (binary), `Force` (WCOJ pipeline always), `Adaptive` (default-on: classifier runs and dispatches WCOJ on high-skew triangles only). The bench overrides each mode explicitly via `RuntimeConfig::with_wcoj_triangle_dispatch[_adaptive]` to keep the measured path process-global-free. Production callers can pin behavior via the env vars in the table at the top of this file.
+
+**Run:**
+```bash
+# Default matrix (~25 cells; few minutes)
+cargo bench -p xlog-integration --bench wcoj_triangle_bench
+
+# Full matrix adds 100K + 250K rows per relation (slow)
+WCOJ_BENCH_FULL=1 cargo bench -p xlog-integration --bench wcoj_triangle_bench
+```
+
+| Bench Group | Fixture | Targets |
+|-------------|---------|--------|
+| `wcoj_triangle/uniform` | Uniform Erdős-Rényi (key range = rows/10) | Average-case baseline |
+| `wcoj_triangle/superhub` | Deterministic super-hub (~50% of edges concentrated on one Y / one X) | Histogram-targetable per-thread workload imbalance |
+| `wcoj_triangle/empty` | Three relations over disjoint key ranges | Count→scan→empty fast path |
+| `wcoj_triangle/symbol_sanity` | One uniform 10K case for `Symbol` | Symbol shares u32's physical layout — sanity only |
+
+**Methodology:**
+- Timed region = `Executor::execute_plan` only. Driven via `b.iter_custom(...)` so the per-iteration loop is owned by the harness. Each cell builds ONE long-lived `Executor`; `put_relation` uploads + `store.remove("tri")` cleanup live OUTSIDE the timed region. The long-lived Executor is required so the executor's cached `wcoj_triangle_stream` (`OnceLock<StreamId>`) is acquired exactly once per cell and reused — a fresh Executor per iteration would drain the runtime's `StreamPool` (cap 16, grow-only) past iteration 16.
+- Each `(width, fixture, size)` cell pre-runs an untimed correctness check: `gate=Some(false)` (binary-join) and `gate=Some(true)` (WCOJ) must produce identical row sets (host-side dedup of fixtures aligns the two paths to set semantics). Counter delta is also asserted *inside* `iter_custom`: gate=true must increment by `iters` over the loop, gate=false must increment by 0 — a silent fallback anywhere in the hot loop fails the bench.
+- Bench-only: the `StreamPool` cap is bumped to 1024 in `make_provider` (production default 16). The bench has many short-lived correctness-check executors that each acquire one stream; production runs at 16 because each long-lived process has one provider with one cached stream.
+- Baseline numbers, adaptive default-on acceptance, phase-timing evidence, and the post-layout-fast-path results are indexed in `docs/evidence/2026-05-01-wcoj-bench-baseline/`. The current v0.6.2 state is default-on adaptive WCOJ for eligible non-recursive triangle rules, with `XLOG_DISABLE_WCOJ_TRIANGLE=1` as the hard kill switch.
 
 ### Probabilistic Benchmarks (`xlog-prob`)
 

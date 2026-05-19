@@ -12,11 +12,77 @@ xlog-gpu.workspace = true
 xlog-ir.workspace = true
 xlog-logic.workspace = true
 xlog-runtime.workspace = true
+xlog-stats.workspace = true
 bytemuck = "1.14"
+
+[dev-dependencies]
+rand = "0.8"
+rand_chacha = "0.3"
+serde_json = "1"
+# cudarc::driver::sys is needed for raw column D2H in the
+# WCOJ dispatch test. Production code uses
+# `dtoh_scalar_untracked` and recorded column primitives;
+# the test downloads result columns for assertion.
+cudarc = { workspace = true }
+# Criterion drives the WCOJ triangle bench. Dev-dep only —
+# `cargo test --workspace` does not pull this in for tests.
+criterion = "0.5"
+
+[[bench]]
+name = "wcoj_triangle_bench"
+harness = false
+
+[[bench]]
+name = "wcoj_4cycle_bench"
+harness = false
+
+[[bench]]
+name = "w42_production_nested_loop_bench"
+harness = false
+
+[[bench]]
+name = "w43_production_sort_merge_bench"
+harness = false
+
+[[bench]]
+name = "w52_skewed_multiway_bench"
+harness = false
+
+[[bench]]
+name = "wcoj_w33_superhub"
+harness = false
+
+[[bench]]
+name = "wcoj_paper_class"
+harness = false
+
+[[bench]]
+name = "wcoj_w37_helper_split"
+harness = false
+
+[[bench]]
+name = "wcoj_w38_stream_mux"
+harness = false
 
 [[bin]]
 name = "xlog_run"
 path = "src/bin/xlog_run.rs"
+
+[[bin]]
+name = "wcoj_phase_report"
+path = "src/bin/wcoj_phase_report.rs"
+required-features = ["wcoj-phase-timing"]
+
+[features]
+default = []
+# Diagnostic-only: forwards to xlog-runtime + xlog-cuda's
+# `wcoj-phase-timing` so the report binary can read per-phase
+# CUDA-event timings out of the executor. Off in regular
+# `cargo test --workspace` and bench runs.
+wcoj-phase-timing = [
+    "xlog-runtime/wcoj-phase-timing",
+    "xlog-cuda/wcoj-phase-timing",
+]
 
 [[test]]
 name = "executor_config_tests"
@@ -36,4 +102,9 @@ harness = true
 [[test]]
 name = "real_world_tests"
 path = "tests/real_world_tests.rs"
+harness = true
+
+[[test]]
+name = "test_a3_a4_stress"
+path = "tests/test_a3_a4_stress.rs"
 harness = true

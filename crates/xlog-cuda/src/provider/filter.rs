@@ -9,6 +9,8 @@ use crate::{DeviceRepr, DeviceSlice, KernelScalar, LaunchAsync, LaunchConfig};
 use xlog_core::{Result, ScalarType, XlogError};
 
 use super::{filter_kernels, scan_kernels, RawCudaView, FILTER_MODULE, SCAN_MODULE};
+use crate::device_runtime::StreamId;
+use crate::launch::LaunchRecorder;
 use crate::memory::{CudaColumn, TrackedCudaSlice};
 use crate::type_seam::GpuScalar;
 use crate::{CompareOp, CudaBuffer};
@@ -54,6 +56,16 @@ impl super::CudaKernelProvider {
         value: T,
         op: CompareOp,
     ) -> Result<CudaBuffer> {
+        // Opt-in dispatch: route through the recorded filter path
+        // when the env var is set AND the manager is runtime-backed
+        // AND a launch stream can be acquired from the pool.
+        // Default behavior is unchanged (legacy fused / mask+compact).
+        if Self::use_recorded_filters_env() {
+            if let Some(launch_stream) = self.recorded_op_stream_or_init() {
+                return self.filter_recorded::<T>(input, col, value, op, launch_stream);
+            }
+        }
+
         if input.is_empty() {
             return self.create_empty_buffer(input.schema.clone());
         }
@@ -73,6 +85,411 @@ impl super::CudaKernelProvider {
             )?;
             self.filter_by_device_mask(input, &mask)
         }
+    }
+
+    /// Strict-recorder, end-to-end variant of [`Self::filter`] —
+    /// the first composed migrated DATA path.
+    ///
+    /// Composes [`Self::compare_const_mask_recorded`] and
+    /// [`Self::compact_buffer_by_device_mask_counted_recorded`]
+    /// on a single `launch_stream`. Each primitive builds its
+    /// own [`crate::launch::LaunchRecorder`], records its uses,
+    /// preflights, runs its kernels, and commits independently.
+    ///
+    /// Composition correctness rests on the runtime's
+    /// "record-all, wait-all" semantics: every
+    /// `record_block_use` call APPENDS a fresh event to the
+    /// live entry's `last_use_events: Vec<CudaEvent>`, and
+    /// `deallocate` waits on EVERY event in that vector before
+    /// queueing `cuMemFreeAsync`. So the compare's commit and
+    /// the compact's later commit each push their own event
+    /// for `input.column[i]` (and other shared buffers), and
+    /// the deallocate gates the free behind both — closing
+    /// the cross-stream lifetime gap end-to-end. (Latest-event
+    /// coalescing per `(block, launch_stream)` is a possible
+    /// future optimization; today every recorded use is
+    /// retained and waited on.)
+    ///
+    /// # Dispatch
+    /// For types with a fused `filter_compare_*_scan_phase1`
+    /// kernel (`u32`, `f64`), routes to
+    /// [`Self::filter_fused_scan_recorded`] — single-pass
+    /// compare+scan+compact mirror of the legacy fast path.
+    /// For all other types, composes
+    /// [`Self::compare_const_mask_recorded`] +
+    /// [`Self::compact_buffer_by_device_mask_counted_recorded`].
+    ///
+    /// # Errors
+    /// Propagates the structured `XlogError::Kernel` errors
+    /// produced by either underlying recorded primitive
+    /// (legacy manager, unresolved launch_stream, external
+    /// column, preflight / commit failures, kernel launch
+    /// failures, `cu_stream.synchronize()` before host scalar
+    /// read).
+    pub fn filter_recorded<T: GpuScalar>(
+        &self,
+        input: &CudaBuffer,
+        col: usize,
+        value: T,
+        op: CompareOp,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        if input.is_empty() {
+            return self.create_empty_buffer(input.schema.clone());
+        }
+        if T::filter_scan_phase1_kernel().is_some() {
+            return self.filter_fused_scan_recorded::<T>(input, col, value, op, launch_stream);
+        }
+        let d_mask = self.compare_const_mask_recorded::<T>(input, col, value, op, launch_stream)?;
+        self.compact_buffer_by_device_mask_counted_recorded(input, &d_mask, launch_stream)
+    }
+
+    /// Strict-recorder variant of [`Self::filter_fused_scan`] —
+    /// the migrated fused compare+scan+compact fast path for
+    /// `u32` and `f64`.
+    ///
+    /// Mirrors the legacy chain on a single explicit
+    /// `launch_stream`:
+    ///   1. `filter_compare_T_scan_phase1` — fused compare +
+    ///      block-local scan that produces `d_mask`,
+    ///      `d_prefix_sum`, `d_block_sums` in one launch.
+    ///   2. When `num_blocks > 1`,
+    ///      `multiblock_scan_u32_inplace_on_stream` on
+    ///      `d_block_sums` followed by
+    ///      `multiblock_scan_phase3` to propagate block offsets
+    ///      into `d_prefix_sum`.
+    ///   3. `capture_compact_count` — writes `d_out_count` for
+    ///      the masked total.
+    ///   4. `cu_stream.synchronize()` — explicitly orders the
+    ///      host scalar read of `d_out_count` against the
+    ///      pending capture kernel.
+    ///   5. `dtoh_scalar_untracked(&d_out_count, 0)` →
+    ///      `output_rows`.
+    ///   6. Per-input-column `compact_bytes_by_mask` on the
+    ///      same `launch_stream`.
+    ///
+    /// # Strict-mode contract
+    /// Identical to
+    /// [`Self::compact_buffer_by_device_mask_counted_recorded`]:
+    /// `input.num_rows_device()` and every `input.column(i)`
+    /// recorded as reads BEFORE preflight; every fresh
+    /// runtime-backed allocation (`d_mask`, `d_prefix_sum`,
+    /// `d_block_sums`, `d_out_count`, each `dst_col`) recorded
+    /// via `write` BEFORE preflight; the recorder snapshots
+    /// block identity at record time and drops the source
+    /// borrow, so kernel `&mut` borrows after preflight remain
+    /// valid before the kernels enqueue.
+    ///
+    /// # Panics
+    /// `T::filter_scan_phase1_kernel()` must be `Some` —
+    /// callers should only reach this method for `u32` / `f64`.
+    pub fn filter_fused_scan_recorded<T: GpuScalar>(
+        &self,
+        input: &CudaBuffer,
+        col: usize,
+        value: T,
+        op: CompareOp,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        let runtime = self.memory.runtime().ok_or_else(|| {
+            XlogError::Kernel(
+                "filter_fused_scan_recorded requires a runtime-backed GpuMemoryManager \
+                 (constructed via with_runtime)"
+                    .to_string(),
+            )
+        })?;
+        let pool = runtime.stream_pool();
+        let cu_stream = pool.resolve(launch_stream).ok_or_else(|| {
+            XlogError::Kernel(format!(
+                "filter_fused_scan_recorded: launch_stream StreamId({}) does not resolve",
+                launch_stream.0
+            ))
+        })?;
+
+        if input.num_rows() > u32::MAX as u64 {
+            return Err(XlogError::Kernel(format!(
+                "filter supports at most {} rows, got {}",
+                u32::MAX,
+                input.num_rows()
+            )));
+        }
+        if col >= input.arity() {
+            return Err(XlogError::Kernel(format!(
+                "Column index {} out of bounds (arity {})",
+                col,
+                input.arity()
+            )));
+        }
+        let col_type = input
+            .schema()
+            .column_type(col)
+            .ok_or_else(|| XlogError::Kernel("Missing column type".into()))?;
+        if !T::allowed_scalar_types().contains(&col_type) {
+            return Err(XlogError::Kernel(format!(
+                "Column {} is {:?} (expected one of {:?})",
+                col,
+                col_type,
+                T::allowed_scalar_types()
+            )));
+        }
+        if input.is_empty() {
+            return self.create_empty_buffer(input.schema.clone());
+        }
+
+        let n = input.num_rows() as usize;
+        let num_rows = input.num_rows() as u32;
+        let block_size = 256u32;
+        let num_blocks = num_rows.div_ceil(block_size);
+        let row_cap = u64::from(num_rows);
+        let device = self.device.inner();
+
+        let col_data = input
+            .column(col)
+            .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col)))?;
+        let col_view = Self::column_as_typed_view::<T>(col_data, n)?;
+
+        // Allocate ALL fresh runtime-backed buffers BEFORE the
+        // recorder (Rust drop order — these are recorded as
+        // pre-launch writes via the standard `write` API; the
+        // recorder snapshots block identity at record time so
+        // the kernel `&mut` borrow after preflight is unaffected).
+        let d_mask = self.memory.alloc::<u8>(n)?;
+        let d_prefix_sum = self.memory.alloc::<u32>(n)?;
+        let mut d_block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
+        let mut d_out_count = self.memory.alloc::<u32>(1)?;
+
+        let mut dst_cols: Vec<TrackedCudaSlice<u8>> = Vec::with_capacity(input.columns.len());
+        for col_idx in 0..input.columns.len() {
+            let elem_size = input
+                .schema
+                .column_type(col_idx)
+                .map(|t| t.size_bytes())
+                .unwrap_or(4);
+            let output_bytes = (row_cap as usize) * elem_size;
+            dst_cols.push(self.memory.alloc::<u8>(output_bytes)?);
+        }
+
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read(input.num_rows_device());
+        for col_idx in 0..input.columns.len() {
+            let src_col = input
+                .column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
+            rec.read_column(src_col);
+        }
+        rec.write(&d_mask);
+        rec.write(&d_prefix_sum);
+        rec.write(&d_block_sums);
+        rec.write(&d_out_count);
+        for dst_col in &dst_cols {
+            rec.write(dst_col);
+        }
+        rec.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "filter_fused_scan_recorded: launch recorder preflight failed: {}",
+                e
+            ))
+        })?;
+
+        // Step 1: fused compare + block-local scan.
+        let scan_kernel_name = T::filter_scan_phase1_kernel()
+            .expect("filter_fused_scan_recorded called without scan phase1 kernel");
+        let filter_scan_fn = device
+            .get_func(FILTER_MODULE, scan_kernel_name)
+            .ok_or_else(|| XlogError::Kernel(format!("{} kernel not found", scan_kernel_name)))?;
+        // SAFETY: filter_compare_*_scan_phase1(column, constant, num_rows,
+        // num_rows_device, op, mask, prefix_sum, block_sums)
+        unsafe {
+            filter_scan_fn.clone().launch_on_stream(
+                &cu_stream,
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (
+                    &col_view,
+                    value,
+                    num_rows,
+                    input.num_rows_device(),
+                    op as u8,
+                    &d_mask,
+                    &d_prefix_sum,
+                    &d_block_sums,
+                ),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!("{} (on_stream) failed: {}", scan_kernel_name, e))
+        })?;
+
+        // Step 2: multi-block scan propagation (only when there
+        // is more than one block).
+        if num_blocks > 1 {
+            self.multiblock_scan_u32_inplace_on_stream(
+                &mut d_block_sums,
+                num_blocks,
+                &cu_stream,
+                launch_stream,
+                runtime,
+            )?;
+
+            let phase3_fn = device
+                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE3)
+                .ok_or_else(|| {
+                    XlogError::Kernel("Failed to get multiblock_scan_phase3 kernel".to_string())
+                })?;
+            // SAFETY: multiblock_scan_phase3(prefix_sum, block_offsets, n)
+            unsafe {
+                phase3_fn.clone().launch_on_stream(
+                    &cu_stream,
+                    LaunchConfig {
+                        grid_dim: (num_blocks, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (&d_prefix_sum, &d_block_sums, num_rows),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("multiblock_scan_phase3 (on_stream) failed: {}", e))
+            })?;
+        }
+
+        // Step 3: capture compact count on launch_stream.
+        let capture_fn = device
+            .get_func(FILTER_MODULE, filter_kernels::CAPTURE_COMPACT_COUNT)
+            .ok_or_else(|| {
+                XlogError::Kernel("capture_compact_count kernel not found".to_string())
+            })?;
+        // SAFETY: capture_compact_count(prefix_sum, mask, n, out_count)
+        unsafe {
+            capture_fn.clone().launch_on_stream(
+                &cu_stream,
+                LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (1, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&d_prefix_sum, &d_mask, num_rows, &mut d_out_count),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!("capture_compact_count (on_stream) failed: {}", e))
+        })?;
+
+        // Step 4: explicit barrier before host scalar read.
+        // Non-blocking streams do NOT get default-stream
+        // implicit synchronization, so the dtoh_scalar_untracked
+        // call below would otherwise race the still-pending
+        // capture kernel.
+        cu_stream.synchronize().map_err(|e| {
+            XlogError::Kernel(format!(
+                "filter_fused_scan_recorded: launch_stream synchronize before host scalar \
+                 read failed: {}",
+                e
+            ))
+        })?;
+        let output_rows = self.dtoh_scalar_untracked(&d_out_count, 0)? as u64;
+
+        // Step 5: per-column compact_bytes_by_mask on
+        // launch_stream. Same shape as
+        // compact_buffer_by_device_mask_counted_recorded; only
+        // run when there are rows to keep.
+        if output_rows > 0 {
+            let compact_fn = device
+                .get_func(FILTER_MODULE, filter_kernels::COMPACT_BYTES_BY_MASK)
+                .ok_or_else(|| {
+                    XlogError::Kernel("compact_bytes_by_mask kernel not found".to_string())
+                })?;
+            let cfg = LaunchConfig {
+                grid_dim: (num_blocks, 1, 1),
+                block_dim: (block_size, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            for (col_idx, dst_col) in dst_cols.iter().enumerate() {
+                let src_col = input
+                    .column(col_idx)
+                    .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
+                let elem_size = input
+                    .schema
+                    .column_type(col_idx)
+                    .map(|t| t.size_bytes())
+                    .unwrap_or(4) as u32;
+                // SAFETY: compact_bytes_by_mask(input, mask, prefix_sum, n, elem_size, output)
+                unsafe {
+                    compact_fn.clone().launch_on_stream(
+                        &cu_stream,
+                        cfg,
+                        (
+                            src_col,
+                            &d_mask,
+                            &d_prefix_sum,
+                            num_rows,
+                            elem_size,
+                            dst_col,
+                        ),
+                    )
+                }
+                .map_err(|e| {
+                    XlogError::Kernel(format!("compact_bytes_by_mask (on_stream) failed: {}", e))
+                })?;
+            }
+        }
+
+        // Record fresh writes via the post-preflight escape
+        // hatch and commit.
+        rec.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "filter_fused_scan_recorded: launch recorder commit failed: {}",
+                e
+            ))
+        })?;
+
+        let new_columns: Vec<CudaColumn> = dst_cols.into_iter().map(|s| s.into()).collect();
+        Ok(CudaBuffer::from_columns_with_host_count(
+            new_columns,
+            row_cap,
+            d_out_count,
+            input.schema.clone(),
+            output_rows as u32,
+        ))
+    }
+
+    /// Strict-recorder, end-to-end variant of column-column
+    /// filter: keep rows where `column[left] <op> column[right]`.
+    ///
+    /// Composes [`Self::compare_columns_mask_recorded`] and
+    /// [`Self::compact_buffer_by_device_mask_counted_recorded`]
+    /// on a single `launch_stream`. Same composition contract
+    /// as [`Self::filter_recorded`]: each primitive builds its
+    /// own recorder and commits independently; the runtime
+    /// appends every recorded event to `last_use_events`, and
+    /// `deallocate` waits on every event, so input columns
+    /// referenced by BOTH the compare AND the per-column
+    /// compacts are correctly gated end-to-end.
+    ///
+    /// # Errors
+    /// Propagates the structured `XlogError::Kernel` errors
+    /// produced by either underlying recorded primitive
+    /// (legacy manager, unresolved launch_stream, external
+    /// column on either input side, preflight / commit
+    /// failures, kernel launch failures,
+    /// `cu_stream.synchronize()` before host scalar read).
+    pub fn filter_columns_recorded<T: GpuScalar>(
+        &self,
+        input: &CudaBuffer,
+        left: usize,
+        right: usize,
+        op: CompareOp,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        if input.is_empty() {
+            return self.create_empty_buffer(input.schema.clone());
+        }
+        let d_mask =
+            self.compare_columns_mask_recorded::<T>(input, left, right, op, launch_stream)?;
+        self.compact_buffer_by_device_mask_counted_recorded(input, &d_mask, launch_stream)
     }
 
     // ------------------------------------------------------------------
@@ -159,6 +576,177 @@ impl super::CudaKernelProvider {
                 .launch(config, (col_data, value, num_rows, op as u8, &mut d_mask))
         }
         .map_err(|e| XlogError::Kernel(format!("filter compare failed: {}", e)))?;
+
+        Ok(d_mask)
+    }
+
+    /// Strict-recorder variant of [`Self::compare_const_mask`].
+    ///
+    /// Runs the filter compare kernel on the caller-supplied
+    /// `launch_stream` and threads the column read through the
+    /// runtime via [`LaunchRecorder`]. This is the second
+    /// migrated launch path (after `memset_recorded`) and the
+    /// first kernel-driven one — it is intentionally a sibling
+    /// of the legacy [`Self::compare_const_mask`] rather than a
+    /// replacement. Existing callers stay on the legacy path
+    /// until the broader filter migration lands.
+    ///
+    /// # Strict-mode contract
+    /// * Requires the provider's manager to be built via
+    ///   [`crate::GpuMemoryManager::with_runtime`]; otherwise
+    ///   returns `XlogError::Kernel` before any allocation.
+    /// * `input.column(col)` is recorded as a read; external
+    ///   (`CudaColumn::Dlpack` / `CudaColumn::ArrowDevice`)
+    ///   columns are rejected at preflight, before the kernel
+    ///   is enqueued.
+    /// * `d_mask` is freshly allocated through the same
+    ///   runtime-backed manager. By construction its
+    ///   `runtime_block()` is `Some`, so its write recording
+    ///   cannot strict-reject. The write is therefore noted
+    ///   AFTER the kernel is enqueued — this sidesteps the
+    ///   borrow conflict between `&mut d_mask` (cudarc kernel
+    ///   param) and `&d_mask` (recorder). A future migration
+    ///   that may write to a buffer of unknown provenance must
+    ///   instead capture identity pre-launch (e.g. via a raw
+    ///   view) so strict rejection happens at preflight.
+    ///
+    /// # Errors
+    ///   * `XlogError::Kernel` if the manager has no runtime,
+    ///     or if `launch_stream` does not resolve.
+    ///   * `XlogError::Kernel` from preflight (external column,
+    ///     unsupported active resource).
+    ///   * `XlogError::Kernel` from the underlying CUDA launch.
+    ///   * `XlogError::Kernel` from commit on transient
+    ///     `record_block_use` failure.
+    pub fn compare_const_mask_recorded<T: GpuScalar>(
+        &self,
+        input: &CudaBuffer,
+        col: usize,
+        value: T,
+        op: CompareOp,
+        launch_stream: StreamId,
+    ) -> Result<TrackedCudaSlice<u8>> {
+        let allowed_types = T::allowed_scalar_types();
+        let kernel = T::filter_compare_kernel();
+        let runtime = self.memory.runtime().ok_or_else(|| {
+            XlogError::Kernel(
+                "compare_const_mask_recorded requires a runtime-backed GpuMemoryManager \
+                 (constructed via with_runtime)"
+                    .to_string(),
+            )
+        })?;
+        let pool = runtime.stream_pool();
+        let cu_stream = pool.resolve(launch_stream).ok_or_else(|| {
+            XlogError::Kernel(format!(
+                "compare_const_mask_recorded: launch_stream StreamId({}) does not resolve",
+                launch_stream.0
+            ))
+        })?;
+
+        if input.num_rows() > u32::MAX as u64 {
+            return Err(XlogError::Kernel(format!(
+                "Filter supports at most {} rows, got {}",
+                u32::MAX,
+                input.num_rows()
+            )));
+        }
+        if col >= input.arity() {
+            return Err(XlogError::Kernel(format!(
+                "Column index {} out of bounds (arity {})",
+                col,
+                input.arity()
+            )));
+        }
+
+        if input.is_empty() {
+            return self.memory.alloc::<u8>(0);
+        }
+
+        let col_type = input
+            .schema()
+            .column_type(col)
+            .ok_or_else(|| XlogError::Kernel("Missing column type".into()))?;
+        if !allowed_types.contains(&col_type) {
+            return Err(XlogError::Kernel(format!(
+                "Column {} is {:?} (expected {:?})",
+                col, col_type, allowed_types
+            )));
+        }
+
+        let num_rows = input.num_rows() as u32;
+        let expected_bytes = (num_rows as usize)
+            .checked_mul(std::mem::size_of::<T>())
+            .ok_or_else(|| XlogError::Kernel("filter compare size overflow".into()))?;
+        let col_data = input
+            .column(col)
+            .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col)))?;
+        if col_data.num_bytes() != expected_bytes {
+            return Err(XlogError::Kernel(format!(
+                "Column {} has {} bytes but expected {} for {} rows",
+                col,
+                col_data.num_bytes(),
+                expected_bytes,
+                input.num_rows()
+            )));
+        }
+
+        let block_size = 256u32;
+        let num_blocks = num_rows.div_ceil(block_size);
+        let config = LaunchConfig {
+            grid_dim: (num_blocks, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let mut d_mask = self.memory.alloc::<u8>(num_rows as usize)?;
+        let func = self
+            .device
+            .inner()
+            .get_func(FILTER_MODULE, kernel)
+            .ok_or_else(|| XlogError::Kernel("filter compare kernel not found".into()))?;
+
+        // Strict recorder + PREFLIGHT before the kernel queues.
+        // External columns (DLPack / Arrow) and unsupported
+        // active resources are caught here without any CUDA
+        // work in flight.
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read_column(col_data);
+        rec.write(&d_mask);
+        rec.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "compare_const_mask_recorded: launch recorder preflight failed: {}",
+                e
+            ))
+        })?;
+
+        // SAFETY: PTX kernel signature matches the params tuple;
+        // col_data is validated above and lives through the
+        // launch (held by `input`); d_mask was allocated by the
+        // same runtime-backed manager and matches `num_rows`.
+        // launch_on_stream queues on `cu_stream` and returns
+        // immediately.
+        unsafe {
+            func.clone().launch_on_stream(
+                &cu_stream,
+                config,
+                (col_data, value, num_rows, op as u8, &mut d_mask),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!("compare_const_mask_recorded launch failed: {}", e))
+        })?;
+
+        // Record the write AFTER the launch enqueues, using the
+        // explicit escape hatch. d_mask is the freshly-allocated
+        // runtime-backed output of THIS call; the kernel-param
+        // borrow rules force this ordering. See the
+        // "Strict-mode contract" on this method.
+        rec.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "compare_const_mask_recorded: launch recorder commit failed: {}",
+                e
+            ))
+        })?;
 
         Ok(d_mask)
     }
@@ -257,6 +845,182 @@ impl super::CudaKernelProvider {
             )
         }
         .map_err(|e| XlogError::Kernel(format!("filter compare failed: {}", e)))?;
+
+        Ok(d_mask)
+    }
+
+    /// Strict-recorder variant of [`Self::compare_columns_mask`].
+    ///
+    /// Runs the column-column compare kernel on the
+    /// caller-supplied `launch_stream` and threads BOTH column
+    /// reads through the runtime via [`LaunchRecorder`]. Sibling
+    /// of the legacy [`Self::compare_columns_mask`]; existing
+    /// callers stay on the legacy path.
+    ///
+    /// # Strict-mode contract
+    /// * Requires the provider's manager to be built via
+    ///   [`crate::GpuMemoryManager::with_runtime`]; otherwise
+    ///   returns `XlogError::Kernel` before any allocation.
+    /// * `input.column(left)` and `input.column(right)` are both
+    ///   recorded as reads BEFORE preflight. External (DLPack /
+    ///   Arrow) columns on either side are rejected at preflight,
+    ///   before the kernel is enqueued.
+    /// * `d_mask` is freshly allocated by the same runtime-backed
+    ///   manager; its write is recorded via the standard `write`
+    ///   API BEFORE preflight (the recorder snapshots block
+    ///   identity, so the kernel `&mut d_mask` borrow after
+    ///   preflight is unaffected).
+    ///
+    /// # Errors
+    ///   * `XlogError::Kernel` if the manager has no runtime,
+    ///     or if `launch_stream` does not resolve.
+    ///   * `XlogError::Kernel` from preflight (external column
+    ///     on either side, unsupported active resource).
+    ///   * `XlogError::Kernel` from the underlying CUDA launch.
+    ///   * `XlogError::Kernel` from commit on transient
+    ///     `record_block_use` failure.
+    pub fn compare_columns_mask_recorded<T: GpuScalar>(
+        &self,
+        input: &CudaBuffer,
+        left: usize,
+        right: usize,
+        op: CompareOp,
+        launch_stream: StreamId,
+    ) -> Result<TrackedCudaSlice<u8>> {
+        let allowed_types = T::allowed_scalar_types();
+        let kernel = T::compare_col_kernel();
+
+        let runtime = self.memory.runtime().ok_or_else(|| {
+            XlogError::Kernel(
+                "compare_columns_mask_recorded requires a runtime-backed GpuMemoryManager \
+                 (constructed via with_runtime)"
+                    .to_string(),
+            )
+        })?;
+        let pool = runtime.stream_pool();
+        let cu_stream = pool.resolve(launch_stream).ok_or_else(|| {
+            XlogError::Kernel(format!(
+                "compare_columns_mask_recorded: launch_stream StreamId({}) does not resolve",
+                launch_stream.0
+            ))
+        })?;
+
+        if input.num_rows() > u32::MAX as u64 {
+            return Err(XlogError::Kernel(format!(
+                "Filter supports at most {} rows, got {}",
+                u32::MAX,
+                input.num_rows()
+            )));
+        }
+        if left >= input.arity() || right >= input.arity() {
+            return Err(XlogError::Kernel(format!(
+                "Column indices {} or {} out of bounds (arity {})",
+                left,
+                right,
+                input.arity()
+            )));
+        }
+
+        if input.is_empty() {
+            return self.memory.alloc::<u8>(0);
+        }
+
+        let left_type = input
+            .schema()
+            .column_type(left)
+            .ok_or_else(|| XlogError::Kernel("Missing left column type".into()))?;
+        let right_type = input
+            .schema()
+            .column_type(right)
+            .ok_or_else(|| XlogError::Kernel("Missing right column type".into()))?;
+        if left_type != right_type {
+            return Err(XlogError::Kernel(
+                "Column-column compare requires matching types".into(),
+            ));
+        }
+        if !allowed_types.contains(&left_type) {
+            return Err(XlogError::Kernel(format!(
+                "Column type {:?} not supported for compare",
+                left_type
+            )));
+        }
+
+        let num_rows = input.num_rows() as u32;
+        let expected_bytes = (num_rows as usize)
+            .checked_mul(std::mem::size_of::<T>())
+            .ok_or_else(|| XlogError::Kernel("compare columns size overflow".into()))?;
+        let left_col = input
+            .column(left)
+            .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", left)))?;
+        let right_col = input
+            .column(right)
+            .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", right)))?;
+        if left_col.num_bytes() != expected_bytes || right_col.num_bytes() != expected_bytes {
+            return Err(XlogError::Kernel(format!(
+                "Compare columns expect {} bytes per column for {} rows",
+                expected_bytes,
+                input.num_rows()
+            )));
+        }
+
+        let block_size = 256u32;
+        let num_blocks = num_rows.div_ceil(block_size);
+        let config = LaunchConfig {
+            grid_dim: (num_blocks, 1, 1),
+            block_dim: (block_size, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let mut d_mask = self.memory.alloc::<u8>(num_rows as usize)?;
+        let func = self
+            .device
+            .inner()
+            .get_func(FILTER_MODULE, kernel)
+            .ok_or_else(|| XlogError::Kernel("filter compare kernel not found".into()))?;
+
+        // Record BOTH column reads BEFORE preflight. Strict mode
+        // catches external columns on either side here, before
+        // any CUDA work is queued.
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read_column(left_col);
+        rec.read_column(right_col);
+        rec.write(&d_mask);
+        rec.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "compare_columns_mask_recorded: launch recorder preflight failed: {}",
+                e
+            ))
+        })?;
+
+        // SAFETY: PTX kernel signature matches the params tuple;
+        // both columns are validated above and live through the
+        // launch (held by `input`); d_mask was allocated by the
+        // same runtime-backed manager and matches `num_rows`.
+        // launch_on_stream queues on `cu_stream` and returns
+        // immediately.
+        unsafe {
+            func.clone().launch_on_stream(
+                &cu_stream,
+                config,
+                (left_col, right_col, num_rows, op as u8, &mut d_mask),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!(
+                "compare_columns_mask_recorded launch failed: {}",
+                e
+            ))
+        })?;
+
+        // Record d_mask write AFTER the launch enqueues, via the
+        // explicit escape hatch — d_mask is the freshly-allocated
+        // runtime-backed output of THIS call.
+        rec.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "compare_columns_mask_recorded: launch recorder commit failed: {}",
+                e
+            ))
+        })?;
 
         Ok(d_mask)
     }
@@ -413,6 +1177,7 @@ impl super::CudaKernelProvider {
             ptr,
             len: num_elements,
             stream: col.stream().clone(),
+            source_block: col.runtime_block(),
             _marker: PhantomData,
         })
     }
@@ -600,6 +1365,345 @@ impl super::CudaKernelProvider {
     /// Compact a buffer using a device-resident mask.
     ///
     /// Computes prefix sum and output count fully on-device.
+    /// Strict-recorder variant of
+    /// [`Self::compact_buffer_by_device_mask_counted`] — the
+    /// first migrated COMPACT path.
+    ///
+    /// The compact pipeline is a multi-kernel chain:
+    /// `mask_clamp_rows` → `multiblock_scan_phase1` →
+    /// `multiblock_scan_u32_inplace_on_stream` (recursive,
+    /// only when `num_blocks > 1`) → `multiblock_scan_phase3` →
+    /// `capture_compact_count` → host scalar read of
+    /// `d_out_count` → per-column `compact_bytes_by_mask`.
+    /// **Every kernel runs on the same explicit `launch_stream`
+    /// via `launch_on_stream`**, and the host scalar read at
+    /// the chain's middle is explicitly ordered by
+    /// `cu_stream.synchronize()` — non-blocking streams do
+    /// NOT get default-stream implicit ordering.
+    ///
+    /// # Strict-mode contract
+    /// * Requires the provider's manager to be built via
+    ///   [`crate::GpuMemoryManager::with_runtime`]; otherwise
+    ///   returns `XlogError::Kernel` before any allocation.
+    /// * `d_mask` is recorded as a read.
+    /// * `input.num_rows_device()` is recorded as a read.
+    /// * Each `input.column(i)` is recorded as a read; external
+    ///   columns on any side are rejected at preflight, before
+    ///   any CUDA work is enqueued.
+    /// * Every fresh runtime-backed allocation that this
+    ///   function makes (`d_mask_clamped`, `d_prefix_sum`,
+    ///   `d_block_sums`, `d_out_count`, each `dst_col`) is
+    ///   recorded via `write` BEFORE the
+    ///   kernel chain enqueues. Locals that drop at end-of-scope
+    ///   (`d_mask_clamped`, `d_prefix_sum`, `d_block_sums`)
+    ///   stay safe because the runtime's deallocate queues
+    ///   `cuStreamWaitEvent(alloc_stream, recorded_event)`
+    ///   BEFORE `cuMemFreeAsync`, gating the free on the
+    ///   launch_stream chain.
+    /// * Intermediate `block_sums` allocations created by the
+    ///   recursive scan helper are recorded directly inside the
+    ///   helper (they don't outlive the helper call).
+    ///
+    /// # Errors
+    ///   * `XlogError::Kernel` if the manager has no runtime,
+    ///     or if `launch_stream` does not resolve.
+    ///   * `XlogError::Kernel` from preflight (external column
+    ///     on any side, unsupported active resource).
+    ///   * `XlogError::Kernel` from any underlying CUDA launch
+    ///     or from the launch_stream synchronize before the
+    ///     host scalar read.
+    ///   * `XlogError::Kernel` from commit on transient
+    ///     `record_block_use` failure.
+    pub fn compact_buffer_by_device_mask_counted_recorded(
+        &self,
+        input: &CudaBuffer,
+        d_mask: &TrackedCudaSlice<u8>,
+        launch_stream: StreamId,
+    ) -> Result<CudaBuffer> {
+        let runtime = self.memory.runtime().ok_or_else(|| {
+            XlogError::Kernel(
+                "compact_buffer_by_device_mask_counted_recorded requires a \
+                 runtime-backed GpuMemoryManager (constructed via with_runtime)"
+                    .to_string(),
+            )
+        })?;
+        let pool = runtime.stream_pool();
+        let cu_stream = pool.resolve(launch_stream).ok_or_else(|| {
+            XlogError::Kernel(format!(
+                "compact_buffer_by_device_mask_counted_recorded: launch_stream \
+                 StreamId({}) does not resolve",
+                launch_stream.0
+            ))
+        })?;
+
+        let n = input.num_rows() as u32;
+        if n == 0 {
+            return self.create_empty_buffer(input.schema.clone());
+        }
+        // The bound `d_mask.len() >= n (row_cap)` is too
+        // strict — `mask_clamp_rows` only reads `d_mask[i]`
+        // for `i < num_rows_device` (logical count). Real
+        // callers (hash_join_semi/anti recorded) pass masks
+        // sized to logical count which can be < row_cap. We
+        // require only that the mask is non-empty; OOB reads
+        // are bounded by the kernel's own check against the
+        // device-resident logical row count.
+        if d_mask.is_empty() {
+            return Err(XlogError::Kernel(
+                "compact_buffer_by_device_mask_counted_recorded: empty d_mask".to_string(),
+            ));
+        }
+
+        let device = self.device.inner();
+        let block_size = 256u32;
+        let num_blocks = n.div_ceil(block_size);
+        let row_cap = u64::from(n);
+
+        // Allocate ALL fresh runtime-backed buffers up front,
+        // BEFORE the recorder is constructed. The recorder
+        // snapshots each block's identity at record time and
+        // drops the slice borrow, so the buffers can be
+        // mutably borrowed by kernel launches after preflight.
+        // Output column sizes are known up front from
+        // `row_cap = n`, so this
+        // is sound — the host scalar read of `d_out_count` only
+        // tells us `output_rows`, which we use as metadata, not
+        // for sizing.
+        let mut d_mask_clamped = self.memory.alloc::<u8>(n as usize)?;
+        let d_prefix_sum = self.memory.alloc::<u32>(n as usize)?;
+        let mut d_block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
+        let mut d_out_count = self.memory.alloc::<u32>(1)?;
+
+        let mut dst_cols: Vec<TrackedCudaSlice<u8>> = Vec::with_capacity(input.columns.len());
+        for col_idx in 0..input.columns.len() {
+            let elem_size = input
+                .schema
+                .column_type(col_idx)
+                .map(|t| t.size_bytes())
+                .unwrap_or(4);
+            let output_bytes = (row_cap as usize) * elem_size;
+            dst_cols.push(self.memory.alloc::<u8>(output_bytes)?);
+        }
+
+        // Build recorder, record reads BEFORE preflight.
+        let mut rec = LaunchRecorder::new_strict(launch_stream);
+        rec.read(d_mask);
+        rec.read(input.num_rows_device());
+        for col_idx in 0..input.columns.len() {
+            let src_col = input
+                .column(col_idx)
+                .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
+            rec.read_column(src_col);
+        }
+        rec.write(&d_mask_clamped);
+        rec.write(&d_prefix_sum);
+        rec.write(&d_block_sums);
+        rec.write(&d_out_count);
+        for dst_col in &dst_cols {
+            rec.write(dst_col);
+        }
+        rec.preflight(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "compact_buffer_by_device_mask_counted_recorded: launch recorder \
+                 preflight failed: {}",
+                e
+            ))
+        })?;
+
+        // Step 1: mask_clamp_rows on launch_stream.
+        let clamp_fn = device
+            .get_func(FILTER_MODULE, filter_kernels::MASK_CLAMP_ROWS)
+            .ok_or_else(|| XlogError::Kernel("mask_clamp_rows kernel not found".to_string()))?;
+        // SAFETY: mask_clamp_rows(in_mask, num_rows_device, row_cap, out_mask)
+        unsafe {
+            clamp_fn.clone().launch_on_stream(
+                &cu_stream,
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (d_mask, input.num_rows_device(), n, &mut d_mask_clamped),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("mask_clamp_rows (on_stream) failed: {}", e)))?;
+
+        // Step 2: multiblock_scan_phase1 on launch_stream.
+        let phase1_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE1)
+            .ok_or_else(|| {
+                XlogError::Kernel("Failed to get multiblock_scan_phase1 kernel".to_string())
+            })?;
+        // SAFETY: multiblock_scan_phase1(const u8 mask, u32 prefix_sum, u32 block_sums, u32 n)
+        unsafe {
+            phase1_fn.clone().launch_on_stream(
+                &cu_stream,
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&d_mask_clamped, &d_prefix_sum, &d_block_sums, n),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!("multiblock_scan_phase1 (on_stream) failed: {}", e))
+        })?;
+
+        // Step 3: scan inplace on block_sums + phase3 propagate
+        // (only when there is more than one block).
+        if num_blocks > 1 {
+            self.multiblock_scan_u32_inplace_on_stream(
+                &mut d_block_sums,
+                num_blocks,
+                &cu_stream,
+                launch_stream,
+                runtime,
+            )?;
+
+            let phase3_fn = device
+                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE3)
+                .ok_or_else(|| {
+                    XlogError::Kernel("Failed to get multiblock_scan_phase3 kernel".to_string())
+                })?;
+            // SAFETY: multiblock_scan_phase3(prefix_sum, block_offsets, n)
+            unsafe {
+                phase3_fn.clone().launch_on_stream(
+                    &cu_stream,
+                    LaunchConfig {
+                        grid_dim: (num_blocks, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (&d_prefix_sum, &d_block_sums, n),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("multiblock_scan_phase3 (on_stream) failed: {}", e))
+            })?;
+        }
+
+        // Step 4: capture_compact_count on launch_stream.
+        // (`d_out_count` was pre-allocated up front; see header.)
+        let capture_fn = device
+            .get_func(FILTER_MODULE, filter_kernels::CAPTURE_COMPACT_COUNT)
+            .ok_or_else(|| {
+                XlogError::Kernel("capture_compact_count kernel not found".to_string())
+            })?;
+        // SAFETY: capture_compact_count(prefix_sum, mask, n, out_count)
+        //
+        // Use the clamped mask, not the caller's original mask.
+        // Some recorded callers provide a mask sized to the
+        // device-resident logical row count while `n` is the
+        // buffer row capacity. `mask_clamp_rows` expanded that
+        // shorter domain into a row-capacity-sized mask with
+        // slack rows forced to zero; every downstream consumer
+        // in this compaction chain must use that expanded mask.
+        unsafe {
+            capture_fn.clone().launch_on_stream(
+                &cu_stream,
+                LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (1, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&d_prefix_sum, &d_mask_clamped, n, &mut d_out_count),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!("capture_compact_count (on_stream) failed: {}", e))
+        })?;
+
+        // Explicit ordering for the host scalar read of
+        // `d_out_count`. `dtoh_scalar_untracked` routes its
+        // copy through the device's default cudarc stream,
+        // which does NOT get implicit synchronization with the
+        // non-blocking `launch_stream`. Without this barrier
+        // we would race the still-pending capture kernel.
+        cu_stream.synchronize().map_err(|e| {
+            XlogError::Kernel(format!(
+                "compact_buffer_by_device_mask_counted_recorded: launch_stream \
+                 synchronize before host scalar read failed: {}",
+                e
+            ))
+        })?;
+
+        let output_rows = self.dtoh_scalar_untracked(&d_out_count, 0)? as u64;
+
+        // Step 5: per-column compact_bytes_by_mask on
+        // launch_stream. Only run when output_rows > 0; an
+        // empty mask still allocates row_cap-sized columns
+        // (matching legacy) but skips the kernel.
+        if output_rows > 0 {
+            let compact_fn = device
+                .get_func(FILTER_MODULE, filter_kernels::COMPACT_BYTES_BY_MASK)
+                .ok_or_else(|| {
+                    XlogError::Kernel("compact_bytes_by_mask kernel not found".to_string())
+                })?;
+            let grid_size = n.div_ceil(block_size);
+            let cfg = LaunchConfig {
+                grid_dim: (grid_size, 1, 1),
+                block_dim: (block_size, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            for (col_idx, dst_col) in dst_cols.iter().enumerate() {
+                let src_col = input
+                    .column(col_idx)
+                    .ok_or_else(|| XlogError::Kernel(format!("Column {} not found", col_idx)))?;
+                let elem_size = input
+                    .schema
+                    .column_type(col_idx)
+                    .map(|t| t.size_bytes())
+                    .unwrap_or(4) as u32;
+                // SAFETY: compact_bytes_by_mask(input, mask, prefix_sum, n, elem_size, output)
+                //
+                // Same domain rule as capture_compact_count:
+                // compact over the row-capacity-sized clamped
+                // mask so rows >= logical_count are never
+                // materialized from valid-looking slack.
+                unsafe {
+                    compact_fn.clone().launch_on_stream(
+                        &cu_stream,
+                        cfg,
+                        (
+                            src_col,
+                            &d_mask_clamped,
+                            &d_prefix_sum,
+                            n,
+                            elem_size,
+                            dst_col,
+                        ),
+                    )
+                }
+                .map_err(|e| {
+                    XlogError::Kernel(format!("compact_bytes_by_mask (on_stream) failed: {}", e))
+                })?;
+            }
+        }
+
+        // Record fresh writes via the post-preflight escape
+        // hatch. ALL fresh runtime-backed allocations made by
+        // this function are recorded so that drops at
+        // end-of-scope (or on the returned buffer's drop) are
+        // correctly serialized with the launch_stream chain.
+        rec.commit(runtime).map_err(|e| {
+            XlogError::Kernel(format!(
+                "compact_buffer_by_device_mask_counted_recorded: launch recorder \
+                 commit failed: {}",
+                e
+            ))
+        })?;
+
+        let new_columns: Vec<CudaColumn> = dst_cols.into_iter().map(|s| s.into()).collect();
+        Ok(CudaBuffer::from_columns_with_host_count(
+            new_columns,
+            row_cap,
+            d_out_count,
+            input.schema.clone(),
+            output_rows as u32,
+        ))
+    }
+
     pub fn compact_buffer_by_device_mask_counted(
         &self,
         input: &CudaBuffer,

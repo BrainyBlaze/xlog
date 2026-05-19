@@ -7,6 +7,7 @@ from pyxlog import Program
 
 def main() -> None:
     samples = int(os.environ.get("XLOG_PY_EXAMPLE_MC_SAMPLES", "100000"))
+    memory_mb = int(os.environ.get("XLOG_PY_EXAMPLE_MEMORY_MB", "4096"))
 
     source = r"""
     #pragma prob_engine = mc
@@ -21,7 +22,7 @@ def main() -> None:
     query(flip()).
     """.strip()
 
-    prog = Program.compile(source, device=0, memory_mb=32768)
+    prog = Program.compile(source, device=0, memory_mb=memory_mb)
     result = prog.evaluate(
         return_grads=False,
         samples=samples,

@@ -3,10 +3,11 @@
 //! This module provides the `CudaKernelProvider` which manages pre-compiled
 //! PTX kernels for GPU execution of relational operations (join, dedup, groupby).
 
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use std::ffi::c_void;
 use xlog_core::{Result, Schema, XlogError};
@@ -16,6 +17,7 @@ use crate::{
         AsKernelParam, DeviceParamStorage, DevicePtr, DeviceRepr, DeviceSlice,
         IntoKernelParamStorage, LaunchAsync, LaunchConfig,
     },
+    cuda_graph::{CapturedCudaGraph, CsmCudaGraphKey, CudaGraphNode},
     memory::{validate_logical_row_count, CudaColumn, TrackedCudaSlice},
     CudaBuffer, CudaDevice, CudaStream, CudaViewMut, GpuMemoryManager,
 };
@@ -28,9 +30,13 @@ mod ilp_exact;
 mod io;
 mod kernel_loading;
 pub mod kernel_paths;
+mod launch_safe;
 mod probabilistic;
 mod relational;
 mod transfer;
+mod wcoj;
+mod wcoj_metadata;
+mod wcoj_project;
 
 /// Per-module PTX load timing (populated only when XLOG_WARMUP_PROFILE=1).
 #[derive(Debug, Clone, Default)]
@@ -114,7 +120,58 @@ pub(crate) struct RawCudaView<'a, T> {
     ptr: cudarc::driver::sys::CUdeviceptr,
     len: usize,
     stream: Arc<CudaStream>,
+    /// Optional back-reference to the source [`DeviceBlock`]
+    /// when this view borrows a region of a runtime-backed
+    /// allocation. The launch recorder uses this to attach
+    /// cross-stream uses without losing identity through view
+    /// construction. `None` for views built from external
+    /// memory or legacy paths; strict-mode launch recorders
+    /// reject `None` views.
+    ///
+    /// Read by [`RawCudaView::runtime_block`]; the field
+    /// itself is intentionally not directly exposed because
+    /// the lifetime of the back-reference is bound to the
+    /// view's `'a`.
+    #[allow(dead_code)]
+    source_block: Option<&'a crate::device_runtime::DeviceBlock>,
     _marker: PhantomData<&'a [T]>,
+}
+
+/// Preallocated scratch layout for graph-capturable u32 multi-block scans.
+///
+/// The legacy stream-aware scan helper allocates recursive `block_sums`
+/// buffers inside the helper. CUDA Graph capture records concrete allocation
+/// addresses, so W66 needs the scan topology and scratch buffers to be fixed
+/// before capture begins.
+pub(crate) struct MultiblockScanScratchU32 {
+    levels: Vec<TrackedCudaSlice<u32>>,
+}
+
+impl MultiblockScanScratchU32 {
+    pub(crate) fn levels(&self) -> &[TrackedCudaSlice<u32>] {
+        &self.levels
+    }
+}
+
+pub(crate) struct CsmCudaGraphNodes {
+    pub(crate) count: CudaGraphNode,
+    pub(crate) total: CudaGraphNode,
+    pub(crate) materialize: CudaGraphNode,
+    pub(crate) node_count: usize,
+}
+
+pub(crate) struct CsmCudaGraphEntry {
+    pub(crate) graph: CapturedCudaGraph,
+    pub(crate) nodes: CsmCudaGraphNodes,
+    pub(crate) per_probe_count: TrackedCudaSlice<u32>,
+    pub(crate) per_probe_offsets: TrackedCudaSlice<u32>,
+    pub(crate) d_logical_count: TrackedCudaSlice<u32>,
+    pub(crate) d_overflow: TrackedCudaSlice<u8>,
+    pub(crate) d_output_left: TrackedCudaSlice<u32>,
+    pub(crate) d_output_right: TrackedCudaSlice<u32>,
+    pub(crate) scan_scratch: MultiblockScanScratchU32,
+    pub(crate) probe_capacity: u32,
+    pub(crate) output_capacity: u32,
 }
 
 impl<'a, T> DeviceSlice<T> for RawCudaView<'a, T> {
@@ -142,6 +199,19 @@ impl<'a, T> DevicePtr<T> for RawCudaView<'a, T> {
 impl<'a, T> RawCudaView<'a, T> {
     pub fn device_ptr(&self) -> &cudarc::driver::sys::CUdeviceptr {
         &self.ptr
+    }
+
+    /// Borrow the back-reference to the source
+    /// [`crate::device_runtime::DeviceBlock`], if this view was
+    /// constructed from a runtime-backed allocation. Returns
+    /// `None` for views built from external memory or legacy
+    /// paths.
+    ///
+    /// Public API reserved for the filter-class migration; no
+    /// production caller exists yet.
+    #[allow(dead_code)]
+    pub fn runtime_block(&self) -> Option<&'a crate::device_runtime::DeviceBlock> {
+        self.source_block
     }
 }
 
@@ -224,9 +294,58 @@ pub const WEIGHTS_MODULE: &str = "xlog_weights";
 pub const ILP_MODULE: &str = "xlog_ilp";
 pub const ILP_CREDIT_MODULE: &str = "xlog_ilp_credit";
 pub const ILP_EXACT_MODULE: &str = "xlog_ilp_exact";
+pub const WCOJ_MODULE: &str = "xlog_wcoj";
 
-// Compile-time check: kernel manifest lists exactly 22 modules.
-const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 22);
+// Compile-time check: kernel manifest lists exactly 23 modules.
+const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 23);
+
+/// Kernel function names in the GPU WCOJ module.
+pub mod wcoj_kernels {
+    pub const WCOJ_BUILD_METADATA_MARK_BOUNDARIES_U32: &str =
+        "wcoj_build_metadata_mark_boundaries_u32";
+    pub const WCOJ_BUILD_METADATA_MARK_BOUNDARIES_U64: &str =
+        "wcoj_build_metadata_mark_boundaries_u64";
+    pub const WCOJ_BUILD_METADATA_SCATTER_U32: &str = "wcoj_build_metadata_scatter_u32";
+    pub const WCOJ_BUILD_METADATA_SCATTER_U64: &str = "wcoj_build_metadata_scatter_u64";
+    pub const WCOJ_TRIANGLE_BUILD_HG_WORK_PLAN_U32: &str = "wcoj_triangle_build_hg_work_plan_u32";
+    pub const WCOJ_TRIANGLE_COUNT_HG_U32: &str = "wcoj_triangle_count_hg_u32";
+    pub const WCOJ_TRIANGLE_MATERIALIZE_HG_U32: &str = "wcoj_triangle_materialize_hg_u32";
+    pub const WCOJ_TRIANGLE_BUILD_HG_WORK_PLAN_U64: &str = "wcoj_triangle_build_hg_work_plan_u64";
+    pub const WCOJ_TRIANGLE_COUNT_HG_U64: &str = "wcoj_triangle_count_hg_u64";
+    pub const WCOJ_TRIANGLE_MATERIALIZE_HG_U64: &str = "wcoj_triangle_materialize_hg_u64";
+    pub const WCOJ_TRIANGLE_COUNT_HG_CACHED_U32: &str = "wcoj_triangle_count_hg_cached_u32";
+    pub const WCOJ_TRIANGLE_MATERIALIZE_HG_CACHED_U32: &str =
+        "wcoj_triangle_materialize_hg_cached_u32";
+    pub const WCOJ_SCAN_HG_BLOCK_COUNTS_U32: &str = "wcoj_scan_hg_block_counts_u32";
+    pub const WCOJ_COMPUTE_TOTAL: &str = "wcoj_compute_total";
+    pub const WCOJ_LAYOUT_CHECK_SORTED_UNIQUE_U32: &str = "wcoj_layout_check_sorted_unique_u32";
+    pub const WCOJ_LAYOUT_CHECK_SORTED_UNIQUE_U64: &str = "wcoj_layout_check_sorted_unique_u64";
+    pub const WCOJ_4CYCLE_BUILD_E2_WORK_PREFIX_U32: &str = "wcoj_4cycle_build_e2_work_prefix_u32";
+    pub const WCOJ_4CYCLE_BUILD_HG_WORK_PLAN_U32: &str = "wcoj_4cycle_build_hg_work_plan_u32";
+    pub const WCOJ_4CYCLE_COUNT_HG_U32: &str = "wcoj_4cycle_count_hg_u32";
+    pub const WCOJ_4CYCLE_MATERIALIZE_HG_U32: &str = "wcoj_4cycle_materialize_hg_u32";
+    pub const WCOJ_4CYCLE_BUILD_E2_WORK_PREFIX_U64: &str = "wcoj_4cycle_build_e2_work_prefix_u64";
+    pub const WCOJ_4CYCLE_BUILD_HG_WORK_PLAN_U64: &str = "wcoj_4cycle_build_hg_work_plan_u64";
+    pub const WCOJ_4CYCLE_COUNT_HG_U64: &str = "wcoj_4cycle_count_hg_u64";
+    pub const WCOJ_4CYCLE_MATERIALIZE_HG_U64: &str = "wcoj_4cycle_materialize_hg_u64";
+    // W3.2/W6.4 — General-arity clique kernels (k=5..8 from single template).
+    pub const WCOJ_CLIQUE5_COUNT_HG_U32: &str = "wcoj_clique5_count_hg_u32";
+    pub const WCOJ_CLIQUE5_MATERIALIZE_HG_U32: &str = "wcoj_clique5_materialize_hg_u32";
+    pub const WCOJ_CLIQUE5_COUNT_HG_U64: &str = "wcoj_clique5_count_hg_u64";
+    pub const WCOJ_CLIQUE5_MATERIALIZE_HG_U64: &str = "wcoj_clique5_materialize_hg_u64";
+    pub const WCOJ_CLIQUE6_COUNT_HG_U32: &str = "wcoj_clique6_count_hg_u32";
+    pub const WCOJ_CLIQUE6_MATERIALIZE_HG_U32: &str = "wcoj_clique6_materialize_hg_u32";
+    pub const WCOJ_CLIQUE6_COUNT_HG_U64: &str = "wcoj_clique6_count_hg_u64";
+    pub const WCOJ_CLIQUE6_MATERIALIZE_HG_U64: &str = "wcoj_clique6_materialize_hg_u64";
+    pub const WCOJ_CLIQUE7_COUNT_HG_U32: &str = "wcoj_clique7_count_hg_u32";
+    pub const WCOJ_CLIQUE7_MATERIALIZE_HG_U32: &str = "wcoj_clique7_materialize_hg_u32";
+    pub const WCOJ_CLIQUE7_COUNT_HG_U64: &str = "wcoj_clique7_count_hg_u64";
+    pub const WCOJ_CLIQUE7_MATERIALIZE_HG_U64: &str = "wcoj_clique7_materialize_hg_u64";
+    pub const WCOJ_CLIQUE8_COUNT_HG_U32: &str = "wcoj_clique8_count_hg_u32";
+    pub const WCOJ_CLIQUE8_MATERIALIZE_HG_U32: &str = "wcoj_clique8_materialize_hg_u32";
+    pub const WCOJ_CLIQUE8_COUNT_HG_U64: &str = "wcoj_clique8_count_hg_u64";
+    pub const WCOJ_CLIQUE8_MATERIALIZE_HG_U64: &str = "wcoj_clique8_materialize_hg_u64";
+}
 
 /// Kernel function names in the Monte Carlo sampling module
 pub mod mc_sample_kernels {
@@ -413,9 +532,27 @@ pub mod join_kernels {
     pub const HASH_JOIN_BUCKET_COUNT_V2: &str = "hash_join_bucket_count_v2";
     pub const HASH_JOIN_SCATTER_V2: &str = "hash_join_scatter_v2";
     pub const HASH_JOIN_PROBE_V2: &str = "hash_join_probe_v2";
+    pub const HASH_JOIN_PROBE_V2_COUNT_PER_ROW: &str = "hash_join_probe_v2_count_per_row";
+    pub const HASH_JOIN_PROBE_V2_MATERIALIZE: &str = "hash_join_probe_v2_materialize";
+    pub const HASH_JOIN_TOTAL_FROM_SCAN: &str = "hash_join_total_from_scan";
+    pub const HASH_JOIN_CSM_UNMATCHED_MASK: &str = "hash_join_csm_unmatched_mask";
     pub const HASH_JOIN_SEMI: &str = "hash_join_semi";
     pub const HASH_JOIN_ANTI: &str = "hash_join_anti";
     pub const INIT_HASH_TABLE: &str = "init_hash_table";
+    /// W4.2 nested-loop inner join (emit-pairs design). Reads
+    /// the single key column from each side; emits matched
+    /// `(left_idx, right_idx)` pairs as two parallel u32 arrays.
+    /// Payload columns are materialized after the kernel via
+    /// `gather_buffer_by_indices` in the provider fn.
+    pub const NESTED_LOOP_JOIN_INNER_U32_1KEY_PAIRS: &str = "nested_loop_join_inner_u32_1key_pairs";
+    /// W4.3 sort-merge inner join (emit-pairs design,
+    /// caller-asserted pre-sorted inputs). Reads the single
+    /// key column from each side, performs per-thread binary
+    /// search on the right side to find matched-key runs,
+    /// emits `(left_idx, right_idx)` pairs as two parallel
+    /// u32 arrays. Payload columns materialize after the
+    /// kernel via `gather_buffer_by_indices`.
+    pub const SORT_MERGE_JOIN_INNER_U32_1KEY_PAIRS: &str = "sort_merge_join_inner_u32_1key_pairs";
 }
 
 /// Kernel function names in the dedup module
@@ -424,6 +561,9 @@ pub mod dedup_kernels {
     pub const MARK_UNIQUE_COLUMNAR: &str = "mark_unique_columnar";
     pub const MARK_UNIQUE_AND_SCAN_COLUMNAR: &str = "mark_unique_and_scan_columnar";
     pub const COMPACT_ROWS: &str = "compact_rows";
+    pub const MARK_UNIQUE_FULL_ROW_BYTEWISE: &str = "mark_unique_full_row_bytewise";
+    pub const MARK_DIFF_FULL_ROW_TYPED_SORTED: &str = "mark_diff_full_row_typed_sorted";
+    pub const SMALL_SORT_FULL_ROW_INDICES_TYPED: &str = "small_sort_full_row_indices_typed";
 }
 
 /// Kernel function names in the groupby module
@@ -479,6 +619,14 @@ pub mod sort_kernels {
 
     pub const GATHER_KEYS_F64_LO_U32: &str = "gather_keys_f64_lo_u32";
     pub const GATHER_KEYS_F64_HI_U32: &str = "gather_keys_f64_hi_u32";
+    /// W4.3 sortedness-detection kernel — single-pass adjacent-
+    /// pair check; atomically writes 0 to a u32 flag on
+    /// `keys[i] > keys[i+1]`. Caller initializes flag to 1
+    /// before launch, reads result post-launch. Used by the
+    /// dispatch-site eligibility check at `execute_join` to
+    /// validate caller-asserted sortedness before invoking
+    /// `sort_merge_join_v2_inner_u32_1key`.
+    pub const CHECK_ASCENDING_SORTED_U32: &str = "check_ascending_sorted_u32";
 }
 
 /// Kernel function names in the filter module
@@ -615,6 +763,28 @@ pub mod sat_kernels {
 /// This prevents memory overflow when joining large tables with high cardinality matches.
 pub const DEFAULT_JOIN_MAX_OUTPUT: usize = 1_000_000;
 
+/// W4.2 nested-loop join eligibility threshold (Cartesian product
+/// upper bound). The dispatcher routes to nested-loop iff
+/// `num_left * num_right <= NESTED_LOOP_TOTAL_THRESHOLD`; the
+/// provider validates the same invariant fail-closed before any
+/// allocation.
+///
+/// This is the **single source of truth** for the threshold.
+/// `xlog-runtime`'s dispatch site imports this constant; do NOT
+/// redeclare in xlog-runtime (would create either drift risk or
+/// a reverse `xlog-cuda → xlog-runtime` dep cycle).
+///
+/// Value (`4_000_000`) is grounded in the bench-spike at
+/// `bench-spike/w42-nested-loop` HEAD `9c0cefc6` (see
+/// `docs/evidence/2026-05-07-w42-bench-spike/README.md`):
+/// largest symmetric tested cell `L=R=2000` → 4M total wins by
+/// 5.41× over hash; the algorithmic crossover is extrapolated to
+/// ~10000×10000 = 100M; 4M leaves 6× margin to absorb
+/// production-kernel cost asymmetry. The threshold also caps the
+/// index-array allocation at 32 MB total (4M × 4 bytes × 2
+/// arrays).
+pub const NESTED_LOOP_TOTAL_THRESHOLD: u64 = 4_000_000;
+
 /// Comparison operators for filtering
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -733,6 +903,78 @@ pub struct CudaKernelProvider {
     ptx_load_profile: Option<PtxLoadProfile>,
     /// Column-level D2H transfer counter (incremented by each download_column_* call)
     d2h_transfer_count: AtomicU64,
+    /// Strict deterministic-Datalog D2H gate. When `true`, any data-plane D2H
+    /// transfer (column downloads or `dtoh_sync_copy_into_tracked`) increments
+    /// the violation counter and returns `XlogError::Execution` from the
+    /// originating call. Metadata reads via `dtoh_scalar_untracked` are NOT
+    /// gated. See [`CudaKernelProvider::enable_strict_deterministic_d2h`].
+    strict_deterministic_d2h: AtomicBool,
+    /// Cumulative count of deterministic-D2H gate violations observed since
+    /// the last reset. Increments even on the failing path (the originating
+    /// call still returns `Err`); kept for telemetry and tests.
+    deterministic_d2h_violations: AtomicU64,
+    /// Lazy-initialized non-default launch stream used by
+    /// env-gated recorded-operator dispatch (filter, sort,
+    /// dedup, GroupBy, hash-join). Cached for the provider's
+    /// lifetime — the [`crate::device_runtime::StreamPool`]
+    /// never returns streams to a free-list, so per-call
+    /// acquire would saturate it. One stream per provider is
+    /// sufficient because the recorder serializes work on it;
+    /// multiple operations chain through commit-order events.
+    recorded_op_stream: OnceLock<crate::device_runtime::StreamId>,
+    /// Test/diagnostic-only counter for CSM (count-scan-materialize)
+    /// invocations selected by the recorded hash-join dispatch.
+    /// **Not part of any public stability guarantee** — its existence,
+    /// shape, exposure, and increment semantics may change in any
+    /// release. Used by the env-dispatch test suite to prove that CSM
+    /// was actually selected for eligible Inner / LeftOuter cases (and
+    /// not selected for Semi / Anti or when the env gate is off).
+    csm_invocations: AtomicU64,
+    /// Diagnostic counter for W66 bounded CSM CUDA Graph captures.
+    csm_cuda_graph_captures: AtomicU64,
+    /// Diagnostic counter for W66 bounded CSM CUDA Graph launches.
+    csm_cuda_graph_launches: AtomicU64,
+    /// Diagnostic counter for W66 CSM CUDA Graph ineligibility fallbacks.
+    csm_cuda_graph_fallbacks: AtomicU64,
+    /// Diagnostic counter for W66 bounded CSM CUDA Graph cache replays.
+    csm_cuda_graph_cache_hits: AtomicU64,
+    /// Diagnostic counter for W66 graph-mode small full-row set-maintenance
+    /// sorts. This is test telemetry only; production correctness must not
+    /// depend on the value.
+    small_full_row_sort_invocations: AtomicU64,
+    /// W66 bounded CSM CUDA Graph replay cache.
+    csm_cuda_graph_cache: Mutex<HashMap<CsmCudaGraphKey, CsmCudaGraphEntry>>,
+    /// Per-process counter of WCOJ layout fast-path hits. The
+    /// fast-path skips `dedup_full_row_recorded` when the input
+    /// is already strictly lex-sorted and full-row unique.
+    /// Tests + the phase report binary read this counter to
+    /// confirm the fast-path actually fired vs. silently fell
+    /// through to the existing dedup pipeline.
+    wcoj_layout_fast_path_hit_count: AtomicU64,
+    /// Diagnostic counter for generic WCOJ layout-sort helper
+    /// invocations. Used by goal-038-B dispatch-plan certs to
+    /// prove K-clique runtime dispatch no longer routes every edge
+    /// through the old all-edge `wcoj_layout_sort_*_recorded` path.
+    wcoj_layout_sort_invocation_count: AtomicU64,
+    /// Authorization 5 G_HIST_KC diagnostic counter: number of
+    /// K-clique leader-edge metadata builds.
+    kclique_metadata_build_count: AtomicU64,
+    /// Authorization 5 G_HIST_KC diagnostic counter: cumulative
+    /// nanoseconds spent building K-clique leader-edge metadata.
+    kclique_metadata_build_nanos: AtomicU64,
+    /// W3.3 routing counter: successful triangle dispatches
+    /// accepted through the histogram-guided block-slice provider
+    /// entry.
+    wcoj_triangle_hg_dispatch_count: AtomicU64,
+    /// Diagnostic-only: last WCOJ triangle dispatch's per-phase
+    /// CUDA-event timings, populated by `wcoj_triangle_*_recorded`
+    /// when the `wcoj-phase-timing` Cargo feature is on. Read by
+    /// the `wcoj_phase_report` binary in xlog-integration. Field
+    /// is absent when the feature is off, so production builds
+    /// have zero overhead.
+    #[cfg(feature = "wcoj-phase-timing")]
+    last_triangle_phase_timing:
+        std::sync::Mutex<Option<crate::wcoj_phase_timing::WcojTrianglePhaseTiming>>,
 }
 
 #[derive(Default)]
@@ -808,7 +1050,357 @@ impl CudaKernelProvider {
             transfer_tracker: HostTransferTracker::default(),
             ptx_load_profile,
             d2h_transfer_count: AtomicU64::new(0),
+            strict_deterministic_d2h: AtomicBool::new(false),
+            deterministic_d2h_violations: AtomicU64::new(0),
+            recorded_op_stream: OnceLock::new(),
+            csm_invocations: AtomicU64::new(0),
+            csm_cuda_graph_captures: AtomicU64::new(0),
+            csm_cuda_graph_launches: AtomicU64::new(0),
+            csm_cuda_graph_fallbacks: AtomicU64::new(0),
+            csm_cuda_graph_cache_hits: AtomicU64::new(0),
+            small_full_row_sort_invocations: AtomicU64::new(0),
+            csm_cuda_graph_cache: Mutex::new(HashMap::new()),
+            wcoj_layout_fast_path_hit_count: AtomicU64::new(0),
+            wcoj_layout_sort_invocation_count: AtomicU64::new(0),
+            kclique_metadata_build_count: AtomicU64::new(0),
+            kclique_metadata_build_nanos: AtomicU64::new(0),
+            wcoj_triangle_hg_dispatch_count: AtomicU64::new(0),
+            #[cfg(feature = "wcoj-phase-timing")]
+            last_triangle_phase_timing: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Construct a provider whose `GpuMemoryManager` must already
+    /// have a v0.6 [`crate::device_runtime::XlogDeviceRuntime`]
+    /// attached via [`GpuMemoryManager::with_runtime`].
+    ///
+    /// Equivalent to [`Self::new`] in every respect — same kernel
+    /// loading, same field initialization — but **rejects** managers
+    /// that lack a runtime. This guards against the misconfiguration
+    /// in which a caller asks for runtime-routed provider semantics
+    /// (by calling `with_runtime`) but supplies a legacy manager
+    /// built via [`GpuMemoryManager::new`]; without the check, the
+    /// resulting provider would silently keep using the cudarc
+    /// default allocator and the runtime budget/logging stack would
+    /// never observe the allocations the caller expected to be
+    /// routed through it.
+    ///
+    /// Note: a runtime-routed manager passed to [`Self::new`] still
+    /// routes correctly — `alloc::<T>` and `alloc_raw` consult
+    /// `memory.runtime()` regardless of which provider constructor
+    /// was used. `with_runtime` exists for callers that want the
+    /// requirement enforced at construction time, not for
+    /// correctness of the routing itself.
+    ///
+    /// This is the **opt-in** runtime entry point for providers.
+    /// `Self::new` continues to accept managers without a runtime
+    /// (the legacy default) and remains the production constructor
+    /// until the runtime stack is certified end-to-end.
+    ///
+    /// # Errors
+    /// Returns `XlogError::Kernel` if `memory.runtime()` is `None`,
+    /// or anything `Self::new` would return.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let device = Arc::new(CudaDevice::new(0)?);
+    /// let runtime = Arc::new(XlogDeviceRuntime::with_resource(
+    ///     Arc::clone(&device),
+    ///     0,
+    ///     Arc::new(StreamPool::with_defaults(Arc::clone(&device))),
+    ///     Box::new(AsyncCudaResource::new(/* ... */)),
+    /// ));
+    /// let memory = Arc::new(GpuMemoryManager::with_runtime(
+    ///     Arc::clone(&device),
+    ///     MemoryBudget::default(),
+    ///     runtime,
+    /// ));
+    /// let provider = CudaKernelProvider::with_runtime(device, memory)?;
+    /// ```
+    pub fn with_runtime(device: Arc<CudaDevice>, memory: Arc<GpuMemoryManager>) -> Result<Self> {
+        if memory.runtime().is_none() {
+            return Err(XlogError::Kernel(
+                "CudaKernelProvider::with_runtime requires a GpuMemoryManager built via \
+                 GpuMemoryManager::with_runtime; got a manager with no runtime attached"
+                    .to_string(),
+            ));
+        }
+        Self::new(device, memory)
+    }
+
+    /// Internal: parse a "boolean" env var. Empty / unset / `"0"`
+    /// → false; any other value → true.
+    fn env_flag(name: &str) -> bool {
+        std::env::var(name)
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false)
+    }
+
+    /// Whether the recorded filter dispatch is enabled via env.
+    ///
+    /// Returns `true` when either `XLOG_USE_RECORDED_FILTERS` or
+    /// the umbrella `XLOG_USE_RECORDED_OPS` env var is set.
+    /// Combined with a runtime-backed manager, this routes
+    /// `filter::<T>` through the recorded launch path.
+    ///
+    /// Env-gated rather than default-on so the migration is
+    /// opt-in for real callers; the existing legacy paths remain
+    /// the production default until the runtime stack is
+    /// certified end-to-end.
+    pub(crate) fn use_recorded_filters_env() -> bool {
+        Self::env_flag("XLOG_USE_RECORDED_FILTERS") || Self::env_flag("XLOG_USE_RECORDED_OPS")
+    }
+
+    /// Whether the recorded sort dispatch is enabled via env.
+    /// Reads `XLOG_USE_RECORDED_SORT` or the umbrella
+    /// `XLOG_USE_RECORDED_OPS`. Slice #5 narrowed
+    /// `sort_recorded` to U32 / Symbol keys only — the public
+    /// `sort()` dispatcher checks both this env flag AND key
+    /// type compatibility before routing.
+    pub(crate) fn use_recorded_sort_env() -> bool {
+        Self::env_flag("XLOG_USE_RECORDED_SORT") || Self::env_flag("XLOG_USE_RECORDED_OPS")
+    }
+
+    /// Whether the recorded full-row dedup dispatch is enabled
+    /// via env. Reads `XLOG_USE_RECORDED_DEDUP` or the umbrella
+    /// `XLOG_USE_RECORDED_OPS`. `dedup_full_row_recorded` is
+    /// narrow to all-U32 / Symbol columns.
+    pub(crate) fn use_recorded_dedup_env() -> bool {
+        Self::env_flag("XLOG_USE_RECORDED_DEDUP") || Self::env_flag("XLOG_USE_RECORDED_OPS")
+    }
+
+    /// Whether the recorded GroupBy dispatch is enabled via
+    /// env. Reads `XLOG_USE_RECORDED_GROUPBY` or
+    /// `XLOG_USE_RECORDED_OPS`. `groupby_multi_agg_recorded`
+    /// supports U32 / Symbol keys + Count / Sum / Min / Max
+    /// aggs only.
+    pub(crate) fn use_recorded_groupby_env() -> bool {
+        Self::env_flag("XLOG_USE_RECORDED_GROUPBY") || Self::env_flag("XLOG_USE_RECORDED_OPS")
+    }
+
+    /// Whether the recorded hash-join dispatch is enabled via
+    /// env. Reads `XLOG_USE_RECORDED_HASH_JOIN` or
+    /// `XLOG_USE_RECORDED_OPS`. `hash_join_v2_recorded` and
+    /// `hash_join_v2_with_index_recorded` cover all four join
+    /// types (Inner / Semi / Anti / LeftOuter); the only
+    /// hard constraint inherited from `pack_keys` is `≤4`
+    /// key columns.
+    pub(crate) fn use_recorded_hash_join_env() -> bool {
+        Self::env_flag("XLOG_USE_RECORDED_HASH_JOIN") || Self::env_flag("XLOG_USE_RECORDED_OPS")
+    }
+
+    /// Whether the recorded CSM (count-scan-materialize)
+    /// dispatch is enabled via env. Reads `XLOG_USE_RECORDED_CSM`
+    /// or `XLOG_USE_RECORDED_OPS`. CSM is a sub-strategy of the
+    /// recorded hash-join: it is consulted only after the
+    /// recorded path has already been selected, and only for
+    /// `JoinType::Inner` / `JoinType::LeftOuter` where a CSM
+    /// implementation exists. `Semi` / `Anti` are not affected.
+    pub(crate) fn use_recorded_csm_env() -> bool {
+        Self::env_flag("XLOG_USE_RECORDED_CSM") || Self::env_flag("XLOG_USE_RECORDED_OPS")
+    }
+
+    /// Whether W66's bounded CSM CUDA Graph path is enabled.
+    ///
+    /// This is narrower than `XLOG_USE_RECORDED_CSM`: callers must first select
+    /// the recorded CSM hash-join path, then opt into graph capture/replay with
+    /// `XLOG_USE_CSM_CUDA_GRAPH=1` (or the broader `XLOG_USE_CUDA_GRAPHS=1`).
+    pub(crate) fn use_csm_cuda_graph_env() -> bool {
+        Self::env_flag("XLOG_USE_CSM_CUDA_GRAPH") || Self::env_flag("XLOG_USE_CUDA_GRAPHS")
+    }
+
+    /// Test/diagnostic-only telemetry: number of times the recorded
+    /// hash-join dispatch routed through a CSM (count-scan-materialize)
+    /// method since this provider was created. Increments once per
+    /// dispatched call across all four CSM methods (Inner / LeftOuter,
+    /// non-indexed / indexed). Used by `test_csm_env_dispatch` to
+    /// prove dispatch selection.
+    ///
+    /// **Not part of any public stability guarantee.** Hidden from
+    /// rustdoc with `#[doc(hidden)]` so it does not appear in
+    /// generated API docs; the symbol remains callable from
+    /// integration tests within this crate but production callers
+    /// must not depend on it. May be renamed, gated behind a cargo
+    /// feature, or withdrawn in any release without notice.
+    #[doc(hidden)]
+    pub fn csm_invocations(&self) -> u64 {
+        self.csm_invocations.load(Ordering::Relaxed)
+    }
+
+    #[doc(hidden)]
+    pub fn csm_cuda_graph_captures(&self) -> u64 {
+        self.csm_cuda_graph_captures.load(Ordering::Relaxed)
+    }
+
+    #[doc(hidden)]
+    pub fn csm_cuda_graph_launches(&self) -> u64 {
+        self.csm_cuda_graph_launches.load(Ordering::Relaxed)
+    }
+
+    #[doc(hidden)]
+    pub fn csm_cuda_graph_fallbacks(&self) -> u64 {
+        self.csm_cuda_graph_fallbacks.load(Ordering::Relaxed)
+    }
+
+    #[doc(hidden)]
+    pub fn csm_cuda_graph_cache_hits(&self) -> u64 {
+        self.csm_cuda_graph_cache_hits.load(Ordering::Relaxed)
+    }
+
+    #[doc(hidden)]
+    pub fn small_full_row_sort_invocations(&self) -> u64 {
+        self.small_full_row_sort_invocations.load(Ordering::Relaxed)
+    }
+
+    /// Lazily acquire one non-default launch stream from the
+    /// runtime's [`crate::device_runtime::StreamPool`] for
+    /// recorded-operator dispatch, and cache it for this
+    /// provider's lifetime. Shared across all env-gated
+    /// recorded paths (filter, sort, dedup, GroupBy,
+    /// hash-join) — a single stream is sufficient because the
+    /// recorder serializes work on it; multiple operations
+    /// chain naturally through commit-order events.
+    ///
+    /// Returns `None` when:
+    ///   * the manager has no runtime attached
+    ///     (`memory.runtime() == None`), or
+    ///   * the stream pool is at capacity and `acquire` fails.
+    ///
+    /// On a lost race during first init the loser leaks one
+    /// stream (the pool keeps it alive); both winners cache
+    /// the same `StreamId`. Acceptable cost — practical pool
+    /// sizes are large compared to the number of providers
+    /// per process.
+    pub(crate) fn recorded_op_stream_or_init(&self) -> Option<crate::device_runtime::StreamId> {
+        if let Some(s) = self.recorded_op_stream.get() {
+            return Some(*s);
+        }
+        let runtime = self.memory.runtime()?;
+        let stream = runtime.stream_pool().acquire().ok()?;
+        let _ = self.recorded_op_stream.set(stream);
+        self.recorded_op_stream.get().copied()
+    }
+
+    /// Take the per-phase WCOJ triangle dispatch timings recorded
+    /// by the most recent `wcoj_triangle_*_recorded` call. Reading
+    /// clears the slot — designed for one-shot consumption by the
+    /// `wcoj_phase_report` binary in xlog-integration. Returns
+    /// `None` if no triangle dispatch has fired since the last
+    /// read (or since construction).
+    ///
+    /// Compiled in only with the `wcoj-phase-timing` Cargo
+    /// feature; production builds have no such method.
+    #[cfg(feature = "wcoj-phase-timing")]
+    pub fn take_wcoj_triangle_phase_timing(
+        &self,
+    ) -> Option<crate::wcoj_phase_timing::WcojTrianglePhaseTiming> {
+        self.last_triangle_phase_timing
+            .lock()
+            .ok()
+            .and_then(|mut g| g.take())
+    }
+
+    /// Internal: store the phase timings produced by a triangle
+    /// dispatch. Overwrites any prior unread slot — the report
+    /// binary is expected to read after every `execute_plan`.
+    #[cfg(feature = "wcoj-phase-timing")]
+    #[allow(dead_code)]
+    pub(crate) fn put_wcoj_triangle_phase_timing(
+        &self,
+        timing: crate::wcoj_phase_timing::WcojTrianglePhaseTiming,
+    ) {
+        if let Ok(mut g) = self.last_triangle_phase_timing.lock() {
+            *g = Some(timing);
+        }
+    }
+
+    /// Number of times `wcoj_layout_*_recorded` short-circuited
+    /// to the fast-path (recorded clone) instead of running
+    /// `dedup_full_row_recorded`. Increments by 1 per
+    /// fast-path hit (3 hits per dispatch when all inputs are
+    /// already sorted+unique). Used by tests + the phase
+    /// report to confirm the fast-path fired.
+    pub fn wcoj_layout_fast_path_hit_count(&self) -> u64 {
+        self.wcoj_layout_fast_path_hit_count.load(Ordering::Relaxed)
+    }
+
+    /// W3.3 test/diagnostic counter: successful triangle WCOJ
+    /// dispatches that routed through the HG block-slice provider
+    /// entry.
+    pub fn wcoj_triangle_hg_dispatch_count(&self) -> u64 {
+        self.wcoj_triangle_hg_dispatch_count.load(Ordering::Relaxed)
+    }
+
+    /// Reset the fast-path hit counter to 0. Tests use this to
+    /// scope counter assertions to a single dispatch.
+    pub fn reset_wcoj_layout_fast_path_hit_count(&self) {
+        self.wcoj_layout_fast_path_hit_count
+            .store(0, Ordering::Relaxed);
+    }
+
+    /// Number of calls to `wcoj_layout_sort_*_recorded` since the
+    /// last reset. Diagnostic-only; used by Step 4 dispatch-plan
+    /// certification.
+    pub fn wcoj_layout_sort_invocation_count(&self) -> u64 {
+        self.wcoj_layout_sort_invocation_count
+            .load(Ordering::Relaxed)
+    }
+
+    /// Reset the WCOJ layout-sort invocation counter to 0.
+    pub fn reset_wcoj_layout_sort_invocation_count(&self) {
+        self.wcoj_layout_sort_invocation_count
+            .store(0, Ordering::Relaxed);
+    }
+
+    /// Number of K-clique leader-edge metadata builds since the
+    /// last reset.
+    pub fn kclique_metadata_build_count(&self) -> u64 {
+        self.kclique_metadata_build_count.load(Ordering::Relaxed)
+    }
+
+    /// Cumulative nanoseconds spent building K-clique leader-edge
+    /// metadata since the last reset.
+    pub fn kclique_metadata_build_nanos(&self) -> u64 {
+        self.kclique_metadata_build_nanos.load(Ordering::Relaxed)
+    }
+
+    /// Reset K-clique metadata build diagnostics.
+    pub fn reset_kclique_metadata_build_metrics(&self) {
+        self.kclique_metadata_build_count
+            .store(0, Ordering::Relaxed);
+        self.kclique_metadata_build_nanos
+            .store(0, Ordering::Relaxed);
+    }
+
+    /// Internal: increment the fast-path counter. Called by
+    /// `wcoj_layout_*_recorded` after a successful fast-path
+    /// branch. Not part of any public stability guarantee.
+    pub(crate) fn record_wcoj_layout_fast_path_hit(&self) {
+        self.wcoj_layout_fast_path_hit_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Internal: increment the generic WCOJ layout-sort counter.
+    pub(crate) fn record_wcoj_layout_sort_invocation(&self) {
+        self.wcoj_layout_sort_invocation_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Internal: record a K-clique leader-edge metadata build.
+    pub(crate) fn record_kclique_metadata_build_nanos(&self, nanos: u128) {
+        self.kclique_metadata_build_count
+            .fetch_add(1, Ordering::Relaxed);
+        let nanos = u64::try_from(nanos).unwrap_or(u64::MAX);
+        self.kclique_metadata_build_nanos
+            .fetch_add(nanos, Ordering::Relaxed);
+    }
+
+    /// W3.3 runtime hook: record a successful HG block-slice
+    /// triangle dispatch.
+    #[doc(hidden)]
+    pub fn record_wcoj_triangle_hg_dispatch(&self) {
+        self.wcoj_triangle_hg_dispatch_count
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Get the CUDA device
@@ -850,6 +1442,65 @@ impl CudaKernelProvider {
         self.d2h_transfer_count.store(0, Ordering::Relaxed);
     }
 
+    /// Enable the strict deterministic-Datalog D2H gate.
+    ///
+    /// While enabled, any data-plane device-to-host transfer (column downloads
+    /// via `download_column` / `download_column_untracked`, and any internal
+    /// transfer routed through `dtoh_sync_copy_into_tracked`) increments
+    /// [`CudaKernelProvider::deterministic_d2h_violation_count`] and returns
+    /// `XlogError::Execution` from the originating call.
+    ///
+    /// Metadata reads via [`CudaKernelProvider::dtoh_scalar_untracked`] are
+    /// allowed and never trip the gate.
+    ///
+    /// Default is `false`; the runtime opts in via
+    /// `RuntimeConfig::strict_deterministic_d2h`. v0.5.5 ships the gate
+    /// opt-in only — known-violating relational paths (set difference,
+    /// join count/materialize) are scheduled for replacement before the
+    /// default flips.
+    pub fn enable_strict_deterministic_d2h(&self) {
+        self.strict_deterministic_d2h.store(true, Ordering::Relaxed);
+    }
+
+    /// Disable the strict deterministic-Datalog D2H gate.
+    pub fn disable_strict_deterministic_d2h(&self) {
+        self.strict_deterministic_d2h
+            .store(false, Ordering::Relaxed);
+    }
+
+    /// Returns whether the strict deterministic-Datalog D2H gate is enabled.
+    pub fn strict_deterministic_d2h_enabled(&self) -> bool {
+        self.strict_deterministic_d2h.load(Ordering::Relaxed)
+    }
+
+    /// Cumulative deterministic-D2H gate violations since the last reset.
+    pub fn deterministic_d2h_violation_count(&self) -> u64 {
+        self.deterministic_d2h_violations.load(Ordering::Relaxed)
+    }
+
+    /// Reset the deterministic-D2H violation counter to zero.
+    pub fn reset_deterministic_d2h_violations(&self) {
+        self.deterministic_d2h_violations
+            .store(0, Ordering::Relaxed);
+    }
+
+    /// Chokepoint for the deterministic-D2H gate.
+    ///
+    /// If the gate is enabled, increments the violation counter and returns
+    /// `XlogError::Execution` naming the offending operation and byte count.
+    /// If the gate is disabled, returns `Ok(())` cheaply.
+    pub(crate) fn check_deterministic_d2h(&self, op: &'static str, bytes: u64) -> Result<()> {
+        if self.strict_deterministic_d2h.load(Ordering::Relaxed) {
+            self.deterministic_d2h_violations
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(XlogError::Execution(format!(
+                "deterministic D2H gate: {} attempted to copy {} bytes from device to host",
+                op, bytes
+            )));
+        }
+        Ok(())
+    }
+
     fn dtoh_sync_copy_into_tracked<T: DeviceRepr, Src: DevicePtr<T>>(
         &self,
         src: &Src,
@@ -858,11 +1509,82 @@ impl CudaKernelProvider {
         let bytes = std::mem::size_of::<T>()
             .checked_mul(dst.len())
             .ok_or_else(|| XlogError::Kernel("dtoh size overflow".to_string()))?;
+        self.check_deterministic_d2h("dtoh_sync_copy_into_tracked", bytes as u64)?;
         self.transfer_tracker.record_dtoh(bytes as u64);
         self.device
             .inner()
             .dtoh_sync_copy_into(src, dst)
             .map_err(|e| XlogError::Kernel(format!("Failed to copy from device: {}", e)))
+    }
+
+    /// Hard cap (in bytes) for [`Self::dtoh_small_metadata_untracked`].
+    /// Set deliberately small (4 KB) so the helper cannot become a
+    /// general-purpose vector D2H escape hatch — it's strictly for
+    /// classifier histograms and similar small metadata round-trips.
+    pub const DTOH_SMALL_METADATA_MAX_BYTES: usize = 4096;
+
+    /// Read a small metadata vector (≤ [`Self::DTOH_SMALL_METADATA_MAX_BYTES`])
+    /// from device to host WITHOUT updating the D2H transfer tracker.
+    ///
+    /// Sibling of [`Self::dtoh_scalar_untracked`] for callers that need
+    /// a few bucket counts (the WCOJ skew classifier reads a 3 × 64 ×
+    /// `u32` = 768-byte histogram in one go) instead of `count` separate
+    /// scalar reads. Like `dtoh_scalar_untracked`, this method is
+    /// whitelisted by the strict deterministic-D2H gate
+    /// ([`Self::enable_strict_deterministic_d2h`]) — it does NOT trip
+    /// the gate, on purpose, because metadata reads are part of the
+    /// determinism contract (just like a scalar `total` after a scan).
+    ///
+    /// # Hard contract — DO NOT WIDEN THE CAP
+    /// The 4 KB cap is the contract. If a caller wants a larger D2H,
+    /// it's a data-plane transfer and must go through the tracked
+    /// `download_column*` path. Widening this cap turns the helper
+    /// into a backdoor for tracked-bypass column reads, which would
+    /// silently invalidate the strict deterministic-D2H gate.
+    ///
+    /// # Errors
+    ///   * `XlogError::Kernel` if `count * size_of::<T>()` exceeds
+    ///     `DTOH_SMALL_METADATA_MAX_BYTES`.
+    ///   * `XlogError::Kernel` if `count` exceeds the device slice's
+    ///     length, or if the inner sync copy fails.
+    pub fn dtoh_small_metadata_untracked<T: DeviceRepr + Default + Copy>(
+        &self,
+        src: &crate::memory::TrackedCudaSlice<T>,
+        count: usize,
+    ) -> Result<Vec<T>> {
+        let bytes = count.checked_mul(std::mem::size_of::<T>()).ok_or_else(|| {
+            XlogError::Kernel("dtoh_small_metadata_untracked: byte size overflow".to_string())
+        })?;
+        if bytes > Self::DTOH_SMALL_METADATA_MAX_BYTES {
+            return Err(XlogError::Kernel(format!(
+                "dtoh_small_metadata_untracked: requested {} bytes exceeds metadata cap of {} bytes \
+                 (this is metadata-only; use download_column* for data-plane transfers)",
+                bytes,
+                Self::DTOH_SMALL_METADATA_MAX_BYTES
+            )));
+        }
+        if count > src.len() {
+            return Err(XlogError::Kernel(format!(
+                "dtoh_small_metadata_untracked: count={count} > src.len={}",
+                src.len()
+            )));
+        }
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let slice = src.try_slice(0..count).ok_or_else(|| {
+            XlogError::Kernel(format!(
+                "dtoh_small_metadata_untracked: try_slice(0..{count}) failed"
+            ))
+        })?;
+        let mut buf: Vec<T> = vec![T::default(); count];
+        self.device
+            .inner()
+            .dtoh_sync_copy_into(&slice, &mut buf)
+            .map_err(|e| {
+                XlogError::Kernel(format!("dtoh_small_metadata_untracked: copy failed: {}", e))
+            })?;
+        Ok(buf)
     }
 
     /// Read a single scalar from device to host WITHOUT updating the
@@ -1042,6 +1764,461 @@ impl CudaKernelProvider {
         Ok(())
     }
 
+    /// Stream-aware variant of [`Self::multiblock_scan_u32_inplace`].
+    ///
+    /// Runs every kernel of the recursive scan on `cu_stream`
+    /// (no `device.synchronize()`), and records each intermediate
+    /// `block_sums` allocation against the runtime so that when
+    /// the helper returns and the local drops, the runtime's
+    /// deallocate can queue `cuStreamWaitEvent(alloc_stream,
+    /// recorded_event)` BEFORE `cuMemFreeAsync` — the same
+    /// cross-stream lifetime safety the LaunchRecorder gives
+    /// caller-provided buffers.
+    ///
+    /// `data` is not recorded here: the caller already records
+    /// its own write of `data` against the same launch_stream
+    /// (typically via `LaunchRecorder::write` BEFORE preflight).
+    pub(crate) fn multiblock_scan_u32_inplace_on_stream(
+        &self,
+        data: &mut crate::memory::TrackedCudaSlice<u32>,
+        n: u32,
+        cu_stream: &cudarc::driver::CudaStream,
+        launch_stream: crate::device_runtime::StreamId,
+        runtime: &crate::device_runtime::XlogDeviceRuntime,
+    ) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        let device = self.device.inner();
+        let block_size = 256u32;
+
+        if n <= block_size {
+            let phase2_fn = device
+                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE2)
+                .ok_or_else(|| {
+                    XlogError::Kernel("Failed to get multiblock_scan_phase2 kernel".to_string())
+                })?;
+            // SAFETY: kernel signature matches; data is mutated in place.
+            unsafe {
+                phase2_fn.clone().launch_on_stream(
+                    cu_stream,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (&mut *data, n),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!("multiblock_scan_phase2 (on_stream) failed: {}", e))
+            })?;
+            return Ok(());
+        }
+
+        let num_blocks = (n + block_size - 1) / block_size;
+        let mut block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
+        // Fence alloc-ready → launch_stream for block_sums
+        // before phase1 kernel writes it. The alloc was queued
+        // on the manager's default stream; without this wait,
+        // a launch_stream-queued kernel can begin before
+        // cuMemAllocAsync completes and read pool-recycled
+        // bytes when the streams differ.
+        runtime
+            .prepare_first_use(
+                &block_sums,
+                launch_stream,
+                crate::device_runtime::Access::Write,
+            )
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "multiblock_scan_u32_inplace_on_stream: prepare block_sums failed: {}",
+                    e
+                ))
+            })?;
+
+        let phase1_u32_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_U32_PHASE1)
+            .ok_or_else(|| {
+                XlogError::Kernel("Failed to get multiblock_scan_u32_phase1 kernel".to_string())
+            })?;
+        // SAFETY: kernel signature matches.
+        unsafe {
+            phase1_u32_fn.clone().launch_on_stream(
+                cu_stream,
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&mut *data, &mut block_sums, n),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!(
+                "multiblock_scan_u32_phase1 (on_stream) failed: {}",
+                e
+            ))
+        })?;
+
+        if num_blocks > 1 {
+            self.multiblock_scan_u32_inplace_on_stream(
+                &mut block_sums,
+                num_blocks,
+                cu_stream,
+                launch_stream,
+                runtime,
+            )?;
+        }
+
+        let phase3_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE3)
+            .ok_or_else(|| {
+                XlogError::Kernel("Failed to get multiblock_scan_phase3 kernel".to_string())
+            })?;
+        // SAFETY: kernel signature matches.
+        unsafe {
+            phase3_fn.clone().launch_on_stream(
+                cu_stream,
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&mut *data, &block_sums, n),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!("multiblock_scan_phase3 (on_stream) failed: {}", e))
+        })?;
+
+        // Record `block_sums` use on `launch_stream` BEFORE it
+        // drops at end-of-scope. Without this, the runtime's
+        // deallocate would queue `cuMemFreeAsync` on alloc_stream
+        // without waiting for the launch_stream chain that's
+        // still reading/writing block_sums to complete.
+        if let Some(b) = block_sums.runtime_block() {
+            runtime
+                .finish_block_use(
+                    crate::device_runtime::BlockId::from_block(b),
+                    launch_stream,
+                    crate::device_runtime::Access::Write,
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "multiblock_scan_u32_inplace_on_stream: finish_block_use \
+                         for intermediate block_sums failed: {}",
+                        e
+                    ))
+                })?;
+        } else {
+            return Err(XlogError::Kernel(
+                "multiblock_scan_u32_inplace_on_stream: intermediate block_sums has no \
+                 runtime block — caller must use a runtime-backed manager"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Allocate every recursive `block_sums` buffer needed by
+    /// [`Self::multiblock_scan_u32_inplace_on_stream_with_scratch`].
+    pub(crate) fn multiblock_scan_u32_scratch_for_len(
+        &self,
+        mut n: u32,
+    ) -> Result<MultiblockScanScratchU32> {
+        let block_size = 256u32;
+        let mut levels = Vec::new();
+        while n > block_size {
+            let num_blocks = (n + block_size - 1) / block_size;
+            levels.push(self.memory.alloc::<u32>(num_blocks as usize)?);
+            n = num_blocks;
+        }
+        Ok(MultiblockScanScratchU32 { levels })
+    }
+
+    /// Stream-aware u32 scan with caller-owned scratch.
+    ///
+    /// This is the CUDA Graph compatible counterpart to
+    /// [`Self::multiblock_scan_u32_inplace_on_stream`]: all scratch buffers are
+    /// supplied by the caller, so graph capture sees a stable scan topology and
+    /// stable intermediate addresses.
+    pub(crate) fn multiblock_scan_u32_inplace_on_stream_with_scratch(
+        &self,
+        data: &mut crate::memory::TrackedCudaSlice<u32>,
+        n: u32,
+        cu_stream: &cudarc::driver::CudaStream,
+        scratch: &mut MultiblockScanScratchU32,
+    ) -> Result<()> {
+        self.multiblock_scan_u32_inplace_on_stream_with_scratch_levels(
+            data,
+            n,
+            cu_stream,
+            &mut scratch.levels,
+        )
+    }
+
+    fn multiblock_scan_u32_inplace_on_stream_with_scratch_levels(
+        &self,
+        data: &mut crate::memory::TrackedCudaSlice<u32>,
+        n: u32,
+        cu_stream: &cudarc::driver::CudaStream,
+        scratch_levels: &mut [TrackedCudaSlice<u32>],
+    ) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        let device = self.device.inner();
+        let block_size = 256u32;
+
+        if n <= block_size {
+            let phase2_fn = device
+                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE2)
+                .ok_or_else(|| {
+                    XlogError::Kernel("Failed to get multiblock_scan_phase2 kernel".to_string())
+                })?;
+            // SAFETY: kernel signature matches; data is mutated in place.
+            unsafe {
+                phase2_fn.clone().launch_on_stream(
+                    cu_stream,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (&mut *data, n),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "multiblock_scan_phase2 (graph scratch) failed: {}",
+                    e
+                ))
+            })?;
+            return Ok(());
+        }
+
+        let num_blocks = (n + block_size - 1) / block_size;
+        let (block_sums, rest) = scratch_levels.split_first_mut().ok_or_else(|| {
+            XlogError::Kernel(format!(
+                "multiblock_scan_u32_inplace_on_stream_with_scratch: missing scratch level \
+                 for n={n}, num_blocks={num_blocks}"
+            ))
+        })?;
+        if block_sums.len() < num_blocks as usize {
+            return Err(XlogError::Kernel(format!(
+                "multiblock_scan_u32_inplace_on_stream_with_scratch: scratch level too small \
+                 (have {}, need {})",
+                block_sums.len(),
+                num_blocks
+            )));
+        }
+
+        let phase1_u32_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_U32_PHASE1)
+            .ok_or_else(|| {
+                XlogError::Kernel("Failed to get multiblock_scan_u32_phase1 kernel".to_string())
+            })?;
+        // SAFETY: kernel signature matches.
+        unsafe {
+            phase1_u32_fn.clone().launch_on_stream(
+                cu_stream,
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&mut *data, &mut *block_sums, n),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!(
+                "multiblock_scan_u32_phase1 (graph scratch) failed: {}",
+                e
+            ))
+        })?;
+
+        if num_blocks > 1 {
+            self.multiblock_scan_u32_inplace_on_stream_with_scratch_levels(
+                block_sums, num_blocks, cu_stream, rest,
+            )?;
+        }
+
+        let phase3_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE3)
+            .ok_or_else(|| {
+                XlogError::Kernel("Failed to get multiblock_scan_phase3 kernel".to_string())
+            })?;
+        // SAFETY: kernel signature matches.
+        unsafe {
+            phase3_fn.clone().launch_on_stream(
+                cu_stream,
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&mut *data, &*block_sums, n),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!(
+                "multiblock_scan_phase3 (graph scratch) failed: {}",
+                e
+            ))
+        })?;
+        Ok(())
+    }
+
+    /// Stream-aware view-inplace variant of
+    /// [`Self::multiblock_scan_u32_view_inplace`]. Same shape
+    /// as [`Self::multiblock_scan_u32_inplace_on_stream`] but
+    /// over a `CudaViewMut` (used by recorded radix sort
+    /// digit loops that scan per-digit slices of the histogram
+    /// in place). Records intermediate `block_sums` against
+    /// the runtime before they drop at end-of-scope.
+    pub(crate) fn multiblock_scan_u32_view_inplace_on_stream(
+        &self,
+        data: &mut CudaViewMut<'_, u32>,
+        n: u32,
+        cu_stream: &cudarc::driver::CudaStream,
+        launch_stream: crate::device_runtime::StreamId,
+        runtime: &crate::device_runtime::XlogDeviceRuntime,
+    ) -> Result<()> {
+        if n == 0 {
+            return Ok(());
+        }
+        let device = self.device.inner();
+        let block_size = 256u32;
+
+        if n <= block_size {
+            let phase2_fn = device
+                .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE2)
+                .ok_or_else(|| {
+                    XlogError::Kernel("Failed to get multiblock_scan_phase2 kernel".to_string())
+                })?;
+            // SAFETY: phase2 kernel signature.
+            unsafe {
+                phase2_fn.clone().launch_on_stream(
+                    cu_stream,
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (block_size, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (data, n),
+                )
+            }
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "multiblock_scan_phase2 (view on_stream) failed: {}",
+                    e
+                ))
+            })?;
+            return Ok(());
+        }
+
+        let num_blocks = (n + block_size - 1) / block_size;
+        let mut block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
+        // Fence alloc-ready → launch_stream for block_sums
+        // before phase1 kernel writes it. See the inplace
+        // variant for the full rationale.
+        runtime
+            .prepare_first_use(
+                &block_sums,
+                launch_stream,
+                crate::device_runtime::Access::Write,
+            )
+            .map_err(|e| {
+                XlogError::Kernel(format!(
+                    "multiblock_scan_u32_view_inplace_on_stream: prepare block_sums failed: {}",
+                    e
+                ))
+            })?;
+
+        let phase1_u32_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_U32_PHASE1)
+            .ok_or_else(|| {
+                XlogError::Kernel("Failed to get multiblock_scan_u32_phase1 kernel".to_string())
+            })?;
+        // SAFETY: phase1 kernel signature.
+        unsafe {
+            phase1_u32_fn.clone().launch_on_stream(
+                cu_stream,
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&mut *data, &mut block_sums, n),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!(
+                "multiblock_scan_u32_phase1 (view on_stream) failed: {}",
+                e
+            ))
+        })?;
+
+        if num_blocks > 1 {
+            self.multiblock_scan_u32_inplace_on_stream(
+                &mut block_sums,
+                num_blocks,
+                cu_stream,
+                launch_stream,
+                runtime,
+            )?;
+        }
+
+        let phase3_fn = device
+            .get_func(SCAN_MODULE, scan_kernels::MULTIBLOCK_SCAN_PHASE3)
+            .ok_or_else(|| {
+                XlogError::Kernel("Failed to get multiblock_scan_phase3 kernel".to_string())
+            })?;
+        // SAFETY: phase3 kernel signature.
+        unsafe {
+            phase3_fn.clone().launch_on_stream(
+                cu_stream,
+                LaunchConfig {
+                    grid_dim: (num_blocks, 1, 1),
+                    block_dim: (block_size, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (&mut *data, &block_sums, n),
+            )
+        }
+        .map_err(|e| {
+            XlogError::Kernel(format!(
+                "multiblock_scan_phase3 (view on_stream) failed: {}",
+                e
+            ))
+        })?;
+
+        // Record block_sums use before end-of-scope drop.
+        if let Some(b) = block_sums.runtime_block() {
+            runtime
+                .finish_block_use(
+                    crate::device_runtime::BlockId::from_block(b),
+                    launch_stream,
+                    crate::device_runtime::Access::Write,
+                )
+                .map_err(|e| {
+                    XlogError::Kernel(format!(
+                        "multiblock_scan_u32_view_inplace_on_stream: finish_block_use \
+                     for intermediate block_sums failed: {}",
+                        e
+                    ))
+                })?;
+        } else {
+            return Err(XlogError::Kernel(
+                "multiblock_scan_u32_view_inplace_on_stream: intermediate block_sums has no \
+                 runtime block — caller must use a runtime-backed manager"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     fn multiblock_scan_u32_view_inplace(
         &self,
         data: &mut CudaViewMut<'_, u32>,
@@ -1128,9 +2305,6 @@ impl CudaKernelProvider {
         Ok(())
     }
 
-    /// (GPU-asserted). If they diverge, the GPU asserts and the export fails.
-    /// - Download fails
-
     // ============== Internal Helper Methods ==============
 
     /// Read a buffer's logical row count, using the host cache when available
@@ -1205,6 +2379,7 @@ impl CudaKernelProvider {
             ptr,
             len: num_bytes,
             stream: col.stream().clone(),
+            source_block: col.runtime_block(),
             _marker: PhantomData,
         })
     }
@@ -1233,6 +2408,7 @@ impl CudaKernelProvider {
             ptr,
             len: num_elements,
             stream: bytes.stream().clone(),
+            source_block: bytes.runtime_block(),
             _marker: PhantomData,
         })
     }
@@ -1262,6 +2438,7 @@ impl CudaKernelProvider {
             ptr,
             len: num_elements,
             stream: col.stream().clone(),
+            source_block: col.runtime_block(),
             _marker: PhantomData,
         })
     }
@@ -1290,6 +2467,7 @@ impl CudaKernelProvider {
             ptr,
             len: num_elements,
             stream: col.stream().clone(),
+            source_block: col.runtime_block(),
             _marker: PhantomData,
         })
     }
@@ -1319,6 +2497,7 @@ impl CudaKernelProvider {
             ptr,
             len: num_elements,
             stream: col.stream().clone(),
+            source_block: col.runtime_block(),
             _marker: PhantomData,
         })
     }
@@ -1364,7 +2543,11 @@ impl CudaKernelProvider {
     fn combine_schemas(&self, left: &Schema, right: &Schema) -> Schema {
         let mut columns = left.columns.clone();
         columns.extend(right.columns.iter().cloned());
+        let mut sort_labels = left.sort_labels().to_vec();
+        sort_labels.extend(right.sort_labels().iter().cloned());
         Schema::new(columns)
+            .with_sort_labels(sort_labels)
+            .expect("combined schema sort labels match column arity")
     }
 
     /// Check if two schemas have compatible types (same arity and column types)
@@ -2105,7 +3288,7 @@ mod tests {
     }
 
     #[test]
-    fn test_diff_all_removed() {
+    fn test_diff_all_filtered_out() {
         let provider = match create_test_provider() {
             Some(p) => p,
             None => {
