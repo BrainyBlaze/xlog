@@ -391,6 +391,9 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(
         integration.contains("accepted_ternary_probabilistic_evidence_records_nonzero_arity_trace")
     );
+    assert!(integration.contains(
+        "accepted_quaternary_parsed_program_probabilistic_evidence_records_nonzero_arity_trace"
+    ));
 
     for (label, source) in [
         ("runtime", runtime.as_str()),

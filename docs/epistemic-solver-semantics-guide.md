@@ -608,6 +608,8 @@ the same GPU exact path. Unary and binary false assumptions from `not know` are
 preserved as false parsed evidence entries and counted separately. The trace
 records `accepted_evidence_assumptions_consumed`,
 `gpu_conditioned_evidence_facts`, `gpu_conditioned_negative_evidence_facts`,
+`gpu_conditioned_nonzero_arity_evidence_facts`,
+`gpu_conditioned_max_evidence_arity`,
 source/program-specific conditioned fact counters, source/program-specific
 negative conditioned fact counters, and operator-specific counts for true
 `know`, true `possible`, false `know` (`not know`), and false `possible`
@@ -664,8 +666,9 @@ traces that lack accepted world-view evidence, lack an existing GPU
 exact/provenance/PIR/CNF counter, or record CPU/fixture recomputation.
 
 This adapter is partial v0.9 evidence only. It covers bounded zero-arity,
-nonzero-arity, negative nonzero-arity, parsed-program, two-record
-source-conditioned query, split-batch source/program compile/evaluate,
+nonzero-arity, negative nonzero-arity, parsed-program, ternary source
+nonzero-arity evidence, quaternary parsed-program nonzero-arity evidence,
+two-record source-conditioned query, split-batch source/program compile/evaluate,
 split-batch conditioned source/program query and gradient, and two-record parsed-program-conditioned query
 cases, including true `know`, true `possible`, false `possible`/`not possible`,
 and false `know`/`not know` operator-result
@@ -686,6 +689,7 @@ cargo test -p xlog-prob --test epistemic_prob
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_probabilistic_source_and_program_end_to_end_paths -- --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_probabilistic_conditioned_source_path -- --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_probabilistic_conditioned_program_path -- --nocapture
+cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_parsed_program_probabilistic_evidence_records_nonzero_arity_trace -- --exact --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_probabilistic_conditioned_source_gradients -- --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_probabilistic_conditioned_program_gradients -- --nocapture
 ```
