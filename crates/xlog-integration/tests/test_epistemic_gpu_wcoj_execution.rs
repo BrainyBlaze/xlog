@@ -13,9 +13,10 @@ use xlog_ir::EirEpistemicMode;
 use xlog_logic::epistemic::{
     compile_epistemic_gpu_execution_with_stats_snapshot,
     compile_epistemic_gpu_split_execution_with_stats_snapshot, run_generate_propagate_test,
-    EpistemicInterpretation, FaeelNoModelReason, GeneratePropagateTestConfig,
+    run_generate_propagate_test_with_mode, EpistemicInterpretation, FaeelNoModelReason,
+    GeneratePropagateTestConfig,
 };
-use xlog_logic::{parse_program, Compiler};
+use xlog_logic::{parse_program, Compiler, EpistemicMode};
 use xlog_prob::epistemic::{EpistemicAssumption, EpistemicEvidenceTerm};
 use xlog_prob::epistemic_production::{
     EpistemicProbGpuExecutionEvidence, EpistemicProbProductionAdapter,
@@ -1322,6 +1323,16 @@ fn g91_self_supported_possible_reaches_gpu_runtime_path() {
         "#,
     )
     .expect("parse G91 self-supported possible fixture");
+    let oracle = run_generate_propagate_test_with_mode(
+        &program,
+        vec![
+            EpistemicInterpretation::new(),
+            EpistemicInterpretation::new().with_possible("p", 0),
+        ],
+        GeneratePropagateTestConfig { max_candidates: 2 },
+        EpistemicMode::G91,
+    )
+    .expect("run G91 compatibility oracle");
     let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
         .expect("compile G91 self-supported possible executable");
 
@@ -1353,6 +1364,35 @@ fn g91_self_supported_possible_reaches_gpu_runtime_path() {
         EpistemicGpuModelMembershipSource::StableModelTupleBuffer
     );
     assert_eq!(result.semantic_trace.accepted_world_views, 1);
+    assert_eq!(
+        result.semantic_trace.generated_candidates,
+        oracle.trace.generated
+    );
+    assert_eq!(
+        result.semantic_trace.propagated_candidates,
+        oracle.trace.propagated
+    );
+    assert_eq!(result.semantic_trace.tested_candidates, oracle.trace.tested);
+    assert_eq!(
+        result.semantic_trace.accepted_candidates,
+        oracle.trace.accepted
+    );
+    assert_eq!(
+        result.semantic_trace.accepted_world_views,
+        oracle.trace.accepted_world_views
+    );
+    assert_eq!(
+        result.semantic_trace.rejected_candidates,
+        oracle.trace.rejected
+    );
+    assert_eq!(
+        result.semantic_trace.accepted_candidate_indices,
+        oracle.accepted_candidate_indices
+    );
+    assert_eq!(
+        result.semantic_trace.rejected_candidate_indices,
+        oracle.rejected_candidate_indices
+    );
     assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
     assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
     assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);

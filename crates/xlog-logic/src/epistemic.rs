@@ -504,6 +504,15 @@ pub fn evaluate_faeel_candidate(
     program: &Program,
     interpretation: &EpistemicInterpretation,
 ) -> Result<FaeelCandidateResult> {
+    evaluate_epistemic_candidate(program, interpretation, EpistemicMode::Faeel)
+}
+
+/// Evaluate all epistemic literals in a program under a bounded fixture semantics mode.
+pub fn evaluate_epistemic_candidate(
+    program: &Program,
+    interpretation: &EpistemicInterpretation,
+    mode: EpistemicMode,
+) -> Result<FaeelCandidateResult> {
     for rule in &program.rules {
         for body_lit in &rule.body {
             let BodyLiteral::Epistemic(lit) = body_lit else {
@@ -518,7 +527,8 @@ pub fn evaluate_faeel_candidate(
                     },
                 ));
             }
-            if lit.op == EpistemicOp::Possible
+            if mode == EpistemicMode::Faeel
+                && lit.op == EpistemicOp::Possible
                 && interpretation.possible.contains(&key)
                 && !interpretation.known.contains(&key)
             {
@@ -529,9 +539,7 @@ pub fn evaluate_faeel_candidate(
                     },
                 ));
             }
-            if evaluate_epistemic_literal(EpistemicMode::Faeel, lit, interpretation)
-                == TruthValue::False
-            {
+            if evaluate_epistemic_literal(mode, lit, interpretation) == TruthValue::False {
                 return Ok(FaeelCandidateResult::NoModel(
                     FaeelNoModelReason::UnsatisfiedLiteral {
                         predicate: key.0,
@@ -550,6 +558,16 @@ pub fn run_generate_propagate_test(
     program: &Program,
     candidates: Vec<EpistemicInterpretation>,
     config: GeneratePropagateTestConfig,
+) -> Result<GeneratePropagateTestOutcome> {
+    run_generate_propagate_test_with_mode(program, candidates, config, EpistemicMode::Faeel)
+}
+
+/// Run bounded Generate-Propagate-Test execution over explicit candidates and semantics mode.
+pub fn run_generate_propagate_test_with_mode(
+    program: &Program,
+    candidates: Vec<EpistemicInterpretation>,
+    config: GeneratePropagateTestConfig,
+    mode: EpistemicMode,
 ) -> Result<GeneratePropagateTestOutcome> {
     if candidates.len() > config.max_candidates {
         return Err(xlog_core::XlogError::ResourceExhausted {
@@ -585,7 +603,7 @@ pub fn run_generate_propagate_test(
 
     for (idx, candidate) in &propagated_candidates {
         trace.tested += 1;
-        match evaluate_faeel_candidate(program, candidate)? {
+        match evaluate_epistemic_candidate(program, candidate, mode)? {
             FaeelCandidateResult::Model => {
                 trace.accepted += 1;
                 trace.accepted_world_views += 1;

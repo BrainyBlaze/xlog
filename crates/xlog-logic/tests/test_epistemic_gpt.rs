@@ -1,9 +1,9 @@
 use xlog_core::XlogError;
 use xlog_logic::epistemic::{
-    run_generate_propagate_test, EpistemicInterpretation, FaeelNoModelReason,
-    GeneratePropagateTestConfig,
+    run_generate_propagate_test, run_generate_propagate_test_with_mode, EpistemicInterpretation,
+    FaeelNoModelReason, GeneratePropagateTestConfig,
 };
-use xlog_logic::parse_program;
+use xlog_logic::{parse_program, EpistemicMode};
 
 #[test]
 fn gpt_reports_phase_counts_and_candidate_outcomes() {
@@ -77,4 +77,35 @@ fn gpt_candidate_guard_is_typed_and_bounded() {
         }
         other => panic!("expected typed GPT guard error, got {other:?}"),
     }
+}
+
+#[test]
+fn gpt_can_run_g91_compatibility_mode() {
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = g91
+        p() :- possible p().
+        "#,
+    )
+    .unwrap();
+
+    let outcome = run_generate_propagate_test_with_mode(
+        &program,
+        vec![
+            EpistemicInterpretation::new(),
+            EpistemicInterpretation::new().with_possible("p", 0),
+        ],
+        GeneratePropagateTestConfig { max_candidates: 2 },
+        EpistemicMode::G91,
+    )
+    .unwrap();
+
+    assert_eq!(outcome.trace.generated, 2);
+    assert_eq!(outcome.trace.propagated, 2);
+    assert_eq!(outcome.trace.tested, 2);
+    assert_eq!(outcome.trace.accepted, 1);
+    assert_eq!(outcome.trace.accepted_world_views, 1);
+    assert_eq!(outcome.trace.rejected, 1);
+    assert_eq!(outcome.accepted_candidate_indices, vec![1]);
+    assert_eq!(outcome.rejected_candidate_indices, vec![0]);
 }

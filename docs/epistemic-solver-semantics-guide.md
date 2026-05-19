@@ -265,11 +265,13 @@ fixture is allowed only with explicit `#pragma epistemic_mode = g91`.
 
 ## Generate-Propagate-Test
 
-`run_generate_propagate_test` executes a bounded three-phase fixture:
+`run_generate_propagate_test` executes a bounded three-phase fixture under the
+default FAEEL semantics. `run_generate_propagate_test_with_mode` uses the same
+pipeline with an explicit semantics mode, including G91 compatibility checks:
 
 - generate: accept an explicit candidate list and enforce `max_candidates`;
 - propagate: prune immediate known/rejected contradictions;
-- test: evaluate remaining candidates under bounded FAEEL.
+- test: evaluate remaining candidates under the selected bounded semantics.
 
 The returned trace records generated, guess, propagated, pruned,
 reduced-program-model, tested, accepted, accepted-world-view, rejected, and
@@ -285,9 +287,11 @@ pruned, tested, reduced-model-slot, accepted-world-view, rejected-candidate,
 accepted/rejected candidate indices, and rejection-reason counts with zero CPU
 candidate enumeration and zero CPU world-view validation counters.
 `EpistemicGpuRejectionReason` decodes nonzero device rejection codes so bounded
-GPU traces can be compared with the GPT oracle's accepted candidate indices and
-rejected candidate indices plus typed rejection expectations. This is
-certification evidence for
+GPU traces can be compared with the GPT oracle's phase counts,
+accepted/rejected candidate indices, and typed rejection expectations. The G91
+self-supported `possible p()` runtime fixture uses the mode-aware oracle for
+generated, propagated, tested, accepted, rejected, and candidate-index parity.
+This is certification evidence for
 bounded runtime fixtures, not full semantic parity across every
 G91/FAEEL/GPT/splitting case.
 
