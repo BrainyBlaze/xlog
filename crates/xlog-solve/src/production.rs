@@ -11,7 +11,7 @@ use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::CudaKernelProvider;
 use xlog_runtime::{read_device_row_count, EpistemicGpuExecutionResult};
 
-use crate::{GpuCdclConfig, GpuCdclSolver, GpuCdclWorkspace, GpuCnf};
+use crate::{GpuCdclConfig, GpuCdclSolver, GpuCdclWorkspace, GpuCnf, Objective, SolveInstance};
 
 /// Production capability status for solver paths required by v0.9.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +157,26 @@ pub struct GpuSolverProductionMaxSatSearchCandidate<'a> {
     pub status: GpuSolverProductionMaxSatSearchStatus,
 }
 
+/// One caller-declared weighted soft-clause selection for GPU MaxSAT search encoding.
+///
+/// The adapter treats `soft_clause_indices` as the soft clauses selected for
+/// a bounded search candidate, builds a satisfaction CNF from those clauses,
+/// uploads it with the existing GPU CNF layout, and certifies `status` through
+/// GPU CDCL. It does not enumerate assignments or candidate subsets on CPU.
+#[derive(Clone, Copy)]
+pub struct GpuSolverProductionWeightedMaxSatSelection<'a> {
+    /// Indices of weighted soft clauses selected for this bounded candidate.
+    pub soft_clause_indices: &'a [usize],
+    /// Expected GPU-CDCL status for the encoded selected-clause CNF.
+    pub status: GpuSolverProductionMaxSatSearchStatus,
+}
+
+struct GpuSolverProductionEncodedMaxSatSearchCandidate {
+    score: u64,
+    cnf: GpuCnf,
+    status: GpuSolverProductionMaxSatSearchStatus,
+}
+
 /// Summary of one bounded GPU-backed MaxSAT production adapter run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GpuSolverProductionMaxSatReport {
@@ -170,6 +190,8 @@ pub struct GpuSolverProductionMaxSatReport {
     pub satisfiable_candidates: u64,
     /// Number of GPU-certified UNSAT candidates pruned from scoring.
     pub unsat_candidates_pruned: u64,
+    /// Number of weighted MaxSAT selections encoded into GPU CNF candidates.
+    pub gpu_cdcl_candidate_encodes: u64,
     /// Number of candidate solves dispatched through GPU CDCL.
     pub gpu_cdcl_candidate_solves: u64,
 }
@@ -263,6 +285,8 @@ pub struct GpuSolverProductionTrace {
     pub gpu_learned_clause_reuse_rejections: u64,
     /// Number of bounded MaxSAT candidate CNFs dispatched through GPU CDCL.
     pub gpu_maxsat_candidate_solves: u64,
+    /// Number of weighted MaxSAT selections encoded into GPU CNF candidates.
+    pub gpu_maxsat_candidate_encodes: u64,
     /// Number of bounded MaxSAT search candidates pruned as UNSAT by GPU CDCL.
     pub gpu_maxsat_unsat_candidate_prunes: u64,
     /// Number of bounded MaxSAT optima certified by GPU CDCL candidate solves.
@@ -369,6 +393,7 @@ impl GpuSolverProductionTrace {
 
 /// Thin adapter from epistemic solver work to the existing GPU CDCL verifier.
 pub struct GpuSolverProductionAdapter {
+    provider: Arc<CudaKernelProvider>,
     solver: GpuCdclSolver,
     trace: GpuSolverProductionTrace,
 }
@@ -377,7 +402,8 @@ impl GpuSolverProductionAdapter {
     /// Create an adapter over the existing GPU CDCL solver implementation.
     pub fn new(provider: Arc<CudaKernelProvider>, config: GpuCdclConfig) -> Self {
         Self {
-            solver: GpuCdclSolver::new(provider, config),
+            solver: GpuCdclSolver::new(Arc::clone(&provider), config),
+            provider,
             trace: GpuSolverProductionTrace {
                 cpu_assignment_enumerations: 0,
                 cpu_maxsat_enumerations: 0,
@@ -962,6 +988,7 @@ impl GpuSolverProductionAdapter {
             candidates_checked: candidates.len() as u64,
             satisfiable_candidates: candidates.len() as u64,
             unsat_candidates_pruned: 0,
+            gpu_cdcl_candidate_encodes: 0,
             gpu_cdcl_candidate_solves: self
                 .trace
                 .gpu_maxsat_candidate_solves
@@ -1017,6 +1044,15 @@ impl GpuSolverProductionAdapter {
             report.candidates_checked = report
                 .candidates_checked
                 .saturating_add(step_report.candidates_checked);
+            report.satisfiable_candidates = report
+                .satisfiable_candidates
+                .saturating_add(step_report.satisfiable_candidates);
+            report.unsat_candidates_pruned = report
+                .unsat_candidates_pruned
+                .saturating_add(step_report.unsat_candidates_pruned);
+            report.gpu_cdcl_candidate_encodes = report
+                .gpu_cdcl_candidate_encodes
+                .saturating_add(step_report.gpu_cdcl_candidate_encodes);
             report.gpu_cdcl_candidate_solves = report
                 .gpu_cdcl_candidate_solves
                 .saturating_add(step_report.gpu_cdcl_candidate_solves);
@@ -1028,6 +1064,124 @@ impl GpuSolverProductionAdapter {
 
         self.trace.require_zero_cpu_search()?;
         Ok(report)
+    }
+
+    fn encode_weighted_maxsat_search_candidates(
+        &mut self,
+        weighted: &SolveInstance,
+        selections: &[GpuSolverProductionWeightedMaxSatSelection<'_>],
+    ) -> Result<Vec<GpuSolverProductionEncodedMaxSatSearchCandidate>> {
+        if weighted.objective != Objective::MaxSat {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production MaxSAT encoding".to_string(),
+                context: format!(
+                    "weighted MaxSAT encoding requires Objective::MaxSat, got {:?}",
+                    weighted.objective
+                ),
+            });
+        }
+        if weighted.num_vars == 0 {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production MaxSAT encoding".to_string(),
+                context: "weighted MaxSAT encoding requires num_vars > 0".to_string(),
+            });
+        }
+        if selections.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production MaxSAT encoding".to_string(),
+                context: "weighted MaxSAT encoding requires at least one selection".to_string(),
+            });
+        }
+
+        let weights =
+            weighted
+                .weights
+                .as_ref()
+                .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                    construct: "GPU solver production MaxSAT encoding".to_string(),
+                    context: "weighted MaxSAT encoding requires explicit soft-clause weights"
+                        .to_string(),
+                })?;
+        if weights.len() != weighted.clauses.len() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production MaxSAT encoding".to_string(),
+                context: format!(
+                    "soft-clause weights length {} does not match clause count {}",
+                    weights.len(),
+                    weighted.clauses.len()
+                ),
+            });
+        }
+
+        let mut encoded = Vec::with_capacity(selections.len());
+        for selection in selections {
+            if selection.soft_clause_indices.is_empty() {
+                return Err(XlogError::UnsupportedEpistemicConstruct {
+                    construct: "GPU solver production MaxSAT encoding".to_string(),
+                    context:
+                        "weighted MaxSAT search selections must include at least one soft clause"
+                            .to_string(),
+                });
+            }
+
+            let mut score = 0u64;
+            let mut clauses = Vec::with_capacity(selection.soft_clause_indices.len());
+            for &idx in selection.soft_clause_indices {
+                let clause = weighted.clauses.get(idx).ok_or_else(|| {
+                    XlogError::UnsupportedEpistemicConstruct {
+                        construct: "GPU solver production MaxSAT encoding".to_string(),
+                        context: format!(
+                            "soft-clause selection index {} is out of range for {} clauses",
+                            idx,
+                            weighted.clauses.len()
+                        ),
+                    }
+                })?;
+                let weight =
+                    *weights
+                        .get(idx)
+                        .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                            construct: "GPU solver production MaxSAT encoding".to_string(),
+                            context: format!(
+                                "soft-clause weight index {} is out of range for {} weights",
+                                idx,
+                                weights.len()
+                            ),
+                        })?;
+                if !weight.is_finite() || weight < 0.0 || weight.fract() != 0.0 {
+                    return Err(XlogError::UnsupportedEpistemicConstruct {
+                        construct: "GPU solver production MaxSAT encoding".to_string(),
+                        context: format!(
+                            "soft-clause weight at index {} must be a finite nonnegative integer, got {}",
+                            idx, weight
+                        ),
+                    });
+                }
+                if weight > u64::MAX as f64 {
+                    return Err(XlogError::UnsupportedEpistemicConstruct {
+                        construct: "GPU solver production MaxSAT encoding".to_string(),
+                        context: format!(
+                            "soft-clause weight at index {} exceeds u64 score range",
+                            idx
+                        ),
+                    });
+                }
+                score = score.saturating_add(weight as u64);
+                clauses.push(clause.clone());
+            }
+
+            let candidate_instance = SolveInstance::new(weighted.num_vars, clauses);
+            let cnf = GpuCnf::from_host(&candidate_instance, &self.provider)?;
+            self.trace.gpu_maxsat_candidate_encodes =
+                self.trace.gpu_maxsat_candidate_encodes.saturating_add(1);
+            encoded.push(GpuSolverProductionEncodedMaxSatSearchCandidate {
+                score,
+                cnf,
+                status: selection.status,
+            });
+        }
+
+        Ok(encoded)
     }
 
     fn solve_weighted_maxsat_search_candidates(
@@ -1097,6 +1251,7 @@ impl GpuSolverProductionAdapter {
                 .trace
                 .gpu_maxsat_unsat_candidate_prunes
                 .saturating_sub(unsat_prunes_before),
+            gpu_cdcl_candidate_encodes: 0,
             gpu_cdcl_candidate_solves: self
                 .trace
                 .gpu_maxsat_candidate_solves
@@ -1120,6 +1275,48 @@ impl GpuSolverProductionAdapter {
         require_accepted_gpu_solver_evidence(provider, result)?;
         let mut report = self.solve_weighted_maxsat_search_candidates(workspace, candidates)?;
         report.candidate_evidence_records = 1;
+        self.trace.accepted_gpu_candidate_evidence_consumed = self
+            .trace
+            .accepted_gpu_candidate_evidence_consumed
+            .saturating_add(1);
+        self.trace.require_zero_cpu_search()?;
+        Ok(report)
+    }
+
+    /// Encode weighted soft-clause selections, then search them after accepted GPU evidence.
+    ///
+    /// Candidate construction is bounded by caller-declared selections. The adapter
+    /// builds satisfaction CNFs for those selections, uploads them through the existing
+    /// GPU CNF layout, and dispatches SAT/UNSAT certification through GPU CDCL. It
+    /// performs no CPU assignment or MaxSAT subset enumeration.
+    pub fn solve_weighted_maxsat_encoded_search_with_gpu_execution_result(
+        &mut self,
+        provider: &CudaKernelProvider,
+        result: &EpistemicGpuExecutionResult,
+        workspace: &mut GpuCdclWorkspace,
+        weighted: &SolveInstance,
+        branch_var_limit: &TrackedCudaSlice<u32>,
+        selections: &[GpuSolverProductionWeightedMaxSatSelection<'_>],
+    ) -> Result<GpuSolverProductionMaxSatReport> {
+        require_accepted_gpu_solver_evidence(provider, result)?;
+        let encodes_before = self.trace.gpu_maxsat_candidate_encodes;
+        let encoded = self.encode_weighted_maxsat_search_candidates(weighted, selections)?;
+        let search_candidates: Vec<_> = encoded
+            .iter()
+            .map(|candidate| GpuSolverProductionMaxSatSearchCandidate {
+                score: candidate.score,
+                cnf: &candidate.cnf,
+                branch_var_limit,
+                status: candidate.status,
+            })
+            .collect();
+        let mut report =
+            self.solve_weighted_maxsat_search_candidates(workspace, &search_candidates)?;
+        report.candidate_evidence_records = 1;
+        report.gpu_cdcl_candidate_encodes = self
+            .trace
+            .gpu_maxsat_candidate_encodes
+            .saturating_sub(encodes_before);
         self.trace.accepted_gpu_candidate_evidence_consumed = self
             .trace
             .accepted_gpu_candidate_evidence_consumed

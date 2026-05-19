@@ -39,7 +39,7 @@ the same device row-map path. This is not a closure claim for `G090_GPU`,
 
 | Command | Result |
 |---|---|
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 38 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 39 passed, 0 failed |
 
 ## Non-Closure Notes
 
@@ -53,6 +53,6 @@ the same device row-map path. This is not a closure claim for `G090_GPU`,
   variable-bound nonzero-arity membership fixtures.
 - It does not prove the full G91, FAEEL, GPT, and splitting semantic parity
   matrix.
-- It does not close full MaxSAT encoding/search coverage or broader accepted
+- It does not close generalized MaxSAT scheduler coverage or broader accepted
   probabilistic integration.
 - No closure-board edit, merge, push, or tag is implied.
