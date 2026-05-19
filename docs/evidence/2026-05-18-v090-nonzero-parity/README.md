@@ -39,7 +39,7 @@ membership can filter final output rows on device. It is not a closure claim for
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_not_possible_nonzero_arity_membership_records_operator_and_polarity_metrics -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_binary_membership_filters_final_rows_by_bound_tuple_key -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_not_know_nonzero_arity_membership_filters_final_rows_by_absent_bound_tuple_key -- --nocapture` | PASS, 1 passed, 0 failed |
-| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace -- --nocapture` | PASS, 49 passed, 0 failed |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace -- --nocapture` | PASS, 51 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_executable_plan -- --nocapture` | PASS, 3 passed, 0 failed |
 
 ## Non-Closure Notes

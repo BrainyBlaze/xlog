@@ -233,11 +233,13 @@ tuple-membership binding count.
 `EpistemicGpuRuntimeCounters` snapshots the existing production WCOJ counters
 around a future epistemic dispatch, and
 `EpistemicGpuRuntimeWcojCertification` rejects preflight-only WCOJ metadata
-when required K-clique dispatch counters do not advance. The accepted runtime
-entry point calls this certification gate immediately after reduced-plan
-dispatch and before model-membership/world-view staging, so a WCOJ-required
-epistemic reduction now fails closed if the production counters do not prove a
-dispatch.
+when required K-clique dispatch counters do not advance, and rejects dispatched
+K-clique evidence when the plan has sorted-layout obligations but no layout sort
+or layout fast-path counter advanced. The accepted runtime entry point calls
+this certification gate immediately after reduced-plan dispatch and before
+model-membership/world-view staging, so a WCOJ-required epistemic reduction now
+fails closed if the production counters do not prove both dispatch and layout
+reuse.
 `Executor::execute_epistemic_gpu_execution` now wraps the reduced production
 runtime plan with preflight, workspace allocation, candidate-generation,
 propagation, candidate-validation, `execute_plan` plus before/after counter

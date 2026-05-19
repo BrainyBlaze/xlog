@@ -1165,6 +1165,16 @@ impl EpistemicGpuRuntimeTrace {
                      observed_wcoj_dispatches={observed_wcoj_dispatches}"
                 ),
             }),
+            EpistemicGpuRuntimeWcojCertification::MissingRequiredWcojLayout {
+                required_sorted_layouts,
+                observed_layout_events,
+            } => Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU WCOJ layout certification".to_string(),
+                context: format!(
+                    "required_sorted_layouts={required_sorted_layouts}, \
+                     observed_layout_events={observed_layout_events}"
+                ),
+            }),
             EpistemicGpuRuntimeWcojCertification::NotRequired { .. }
             | EpistemicGpuRuntimeWcojCertification::Certified { .. } => Ok(()),
         }
@@ -1283,10 +1293,19 @@ pub enum EpistemicGpuRuntimeWcojCertification {
         certified_helper_split_specs: usize,
         /// Observed provider WCOJ layout-sort invocations.
         observed_layout_sorts: u64,
+        /// Observed provider WCOJ layout fast-path hits.
+        observed_layout_fast_path_hits: u64,
         /// Observed provider K-clique metadata builds.
         observed_metadata_builds: u64,
         /// Observed provider time spent building K-clique metadata.
         observed_metadata_build_nanos: u64,
+    },
+    /// The plan required sorted layouts, but no layout path executed.
+    MissingRequiredWcojLayout {
+        /// Sorted-layout requirements found during preflight.
+        required_sorted_layouts: usize,
+        /// Observed layout sort or fast-path events.
+        observed_layout_events: u64,
     },
     /// The plan had K-clique WCOJ obligations, but counters did not advance.
     MissingRequiredWcojDispatch {
@@ -1353,6 +1372,15 @@ impl EpistemicGpuRuntimeWcojCertification {
             };
         }
 
+        let observed_layout_events =
+            delta.wcoj_layout_sort_invocation_count + delta.wcoj_layout_fast_path_hit_count;
+        if preflight.sorted_layout_requirement_count > 0 && observed_layout_events == 0 {
+            return Self::MissingRequiredWcojLayout {
+                required_sorted_layouts: preflight.sorted_layout_requirement_count,
+                observed_layout_events,
+            };
+        }
+
         Self::Certified {
             observed_wcoj_dispatches,
             observed_kclique_dispatches,
@@ -1361,6 +1389,7 @@ impl EpistemicGpuRuntimeWcojCertification {
             certified_sorted_layout_requirements: preflight.sorted_layout_requirement_count,
             certified_helper_split_specs: preflight.helper_split_spec_count,
             observed_layout_sorts: delta.wcoj_layout_sort_invocation_count,
+            observed_layout_fast_path_hits: delta.wcoj_layout_fast_path_hit_count,
             observed_metadata_builds: delta.kclique_metadata_build_count,
             observed_metadata_build_nanos: delta.kclique_metadata_build_nanos,
         }

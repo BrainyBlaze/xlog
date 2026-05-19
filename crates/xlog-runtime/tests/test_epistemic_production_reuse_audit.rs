@@ -30,6 +30,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(audit.contains("wcoj_clique8_dispatch_count"));
     assert!(audit.contains("kclique_metadata_build_nanos"));
     assert!(audit.contains("observed metadata-build nanoseconds"));
+    assert!(audit.contains("layout sort or fast-path"));
+    assert!(audit.contains("MissingRequiredWcojLayout"));
     assert!(audit.contains("kclique_stream_group_count"));
     assert!(audit.contains("certified_stream_groups"));
     assert!(audit.contains("possible_operator_count"));
@@ -67,6 +69,10 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(runtime.contains("certified_stream_groups"));
     assert!(runtime.contains("certified_sorted_layout_requirements"));
     assert!(runtime.contains("certified_helper_split_specs"));
+    assert!(runtime.contains("observed_layout_fast_path_hits"));
+    assert!(runtime.contains("MissingRequiredWcojLayout"));
+    assert!(runtime.contains("required_sorted_layouts"));
+    assert!(runtime.contains("wcoj_layout_fast_path_hit_count"));
     assert!(runtime.contains("kclique_metadata_build_nanos"));
     assert!(runtime.contains("observed_metadata_build_nanos"));
     assert!(runtime.contains("know_operator_count"));

@@ -245,6 +245,47 @@ fn runtime_wcoj_certification_accepts_actual_kclique_dispatch_delta() {
             certified_sorted_layout_requirements: 2,
             certified_helper_split_specs: 1,
             observed_layout_sorts: 2,
+            observed_layout_fast_path_hits: 0,
+            observed_metadata_builds: 1,
+            observed_metadata_build_nanos: 42,
+        }
+    );
+}
+
+#[test]
+fn runtime_wcoj_certification_accepts_layout_fast_path_evidence() {
+    let executable = executable_with_kclique_wcoj_plan();
+    let preflight = EpistemicGpuRuntimePreflight::for_executable_plan(
+        &executable,
+        EpistemicGpuWorkspaceCapacities {
+            max_candidates: 8,
+            max_worlds: 4,
+            max_models_per_reduction: 6,
+        },
+    )
+    .unwrap();
+
+    let before = EpistemicGpuRuntimeCounters::default();
+    let after = EpistemicGpuRuntimeCounters {
+        wcoj_clique5_dispatch_count: 1,
+        wcoj_layout_fast_path_hit_count: 2,
+        kclique_metadata_build_count: 1,
+        kclique_metadata_build_nanos: 42,
+        ..EpistemicGpuRuntimeCounters::default()
+    };
+    let delta = after.saturating_delta_since(before);
+
+    assert_eq!(
+        EpistemicGpuRuntimeWcojCertification::for_preflight_and_delta(&preflight, &delta),
+        EpistemicGpuRuntimeWcojCertification::Certified {
+            observed_wcoj_dispatches: 1,
+            observed_kclique_dispatches: 1,
+            certified_edge_permutation_slots: 10,
+            certified_stream_groups: 1,
+            certified_sorted_layout_requirements: 2,
+            certified_helper_split_specs: 1,
+            observed_layout_sorts: 0,
+            observed_layout_fast_path_hits: 2,
             observed_metadata_builds: 1,
             observed_metadata_build_nanos: 42,
         }
@@ -298,6 +339,7 @@ fn runtime_trace_preserves_counter_snapshots_and_wcoj_certification() {
             certified_sorted_layout_requirements: 2,
             certified_helper_split_specs: 1,
             observed_layout_sorts: 2,
+            observed_layout_fast_path_hits: 0,
             observed_metadata_builds: 1,
             observed_metadata_build_nanos: 42,
         }
@@ -335,6 +377,44 @@ fn runtime_trace_rejects_missing_required_wcoj_dispatch() {
             assert!(context.contains("observed_wcoj_dispatches=0"));
         }
         other => panic!("expected WCOJ certification error, got {other:?}"),
+    }
+}
+
+#[test]
+fn runtime_trace_rejects_kclique_dispatch_without_required_layout_evidence() {
+    let executable = executable_with_kclique_wcoj_plan();
+    let preflight = EpistemicGpuRuntimePreflight::for_executable_plan(
+        &executable,
+        EpistemicGpuWorkspaceCapacities {
+            max_candidates: 8,
+            max_worlds: 4,
+            max_models_per_reduction: 6,
+        },
+    )
+    .unwrap();
+    assert_eq!(preflight.sorted_layout_requirement_count, 2);
+
+    let trace = EpistemicGpuRuntimeTrace::from_preflight_and_counters(
+        preflight,
+        EpistemicGpuRuntimeCounters::default(),
+        EpistemicGpuRuntimeCounters {
+            wcoj_clique5_dispatch_count: 1,
+            kclique_metadata_build_count: 1,
+            kclique_metadata_build_nanos: 42,
+            ..EpistemicGpuRuntimeCounters::default()
+        },
+    );
+
+    let err = trace
+        .require_wcoj_certification()
+        .expect_err("layout-required WCOJ evidence must fail closed without layout counters");
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
+            assert_eq!(construct, "epistemic GPU WCOJ layout certification");
+            assert!(context.contains("required_sorted_layouts=2"));
+            assert!(context.contains("observed_layout_events=0"));
+        }
+        other => panic!("expected WCOJ layout certification error, got {other:?}"),
     }
 }
 
