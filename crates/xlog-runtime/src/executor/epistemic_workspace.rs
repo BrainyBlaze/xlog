@@ -11,8 +11,8 @@ use xlog_cuda::{
 };
 use xlog_ir::rir::{MultiwayPlan, RirNode, StreamGroupId};
 use xlog_ir::{
-    EirEpistemicOp, EirTerm, EpistemicCpuFallbackCounters, EpistemicExecutablePlan,
-    EpistemicGpuPlan,
+    EirEpistemicMode, EirEpistemicOp, EirTerm, EpistemicCpuFallbackCounters,
+    EpistemicExecutablePlan, EpistemicGpuPlan,
 };
 
 use super::Executor;
@@ -1066,6 +1066,8 @@ impl EpistemicGpuWorkspaceResetTrace {
 /// Runtime preflight summary for an epistemic executable plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EpistemicGpuRuntimePreflight {
+    /// Selected epistemic semantics mode for the accepted GPU execution.
+    pub epistemic_mode: EirEpistemicMode,
     /// GPU workspace layout required by the executable plan.
     pub workspace_layout: EpistemicGpuWorkspaceLayout,
     /// Compiled reduced-runtime rule count.
@@ -1173,6 +1175,7 @@ impl EpistemicGpuRuntimePreflight {
         }
 
         Ok(Self {
+            epistemic_mode: executable.gpu_plan.mode,
             workspace_layout,
             reduced_runtime_rule_count,
             multiway_reduction_count: routes.multiway_reduction_count,

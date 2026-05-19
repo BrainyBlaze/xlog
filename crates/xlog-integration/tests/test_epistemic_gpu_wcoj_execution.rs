@@ -2220,6 +2220,10 @@ fn g91_self_supported_possible_reaches_gpu_runtime_path() {
         )
         .expect("execute G91 self-supported possible fixture");
 
+    assert_eq!(
+        result.prepared.preflight.epistemic_mode,
+        EirEpistemicMode::G91
+    );
     assert_eq!(result.prepared.preflight.possible_operator_count, 1);
     assert_eq!(
         result.model_membership.membership_source,
@@ -2312,6 +2316,10 @@ fn faeel_independently_founded_self_possible_reaches_gpu_runtime_path() {
         )
         .expect("execute independently founded FAEEL fixture");
 
+    assert_eq!(
+        result.prepared.preflight.epistemic_mode,
+        EirEpistemicMode::Faeel
+    );
     assert_eq!(result.prepared.preflight.possible_operator_count, 1);
     assert_eq!(
         result.model_membership.membership_source,
@@ -2352,6 +2360,124 @@ fn faeel_independently_founded_self_possible_reaches_gpu_runtime_path() {
         1,
         "independently founded self-possible FAEEL fixture should materialize p()"
     );
+}
+
+#[test]
+fn accepted_g91_and_faeel_modes_gate_probabilistic_production_trace() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let g91_program = parse_program(
+        r#"
+        #pragma epistemic_mode = g91
+        pred p().
+        p() :- possible p().
+        "#,
+    )
+    .expect("parse G91 self-supported possible fixture");
+    let g91_executable = compile_epistemic_gpu_execution_with_stats_snapshot(&g91_program, None)
+        .expect("compile G91 self-supported possible executable");
+    let mut g91_executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &g91_executable.relation_ids {
+        g91_executor.register_relation(*rel_id, name);
+    }
+    g91_executor.put_relation("p", upload_nullary(&fix.memory, 1));
+    let g91_result = g91_executor
+        .execute_epistemic_gpu_execution(
+            &g91_executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("execute G91 self-supported possible fixture");
+    assert_eq!(
+        g91_result.prepared.preflight.epistemic_mode,
+        EirEpistemicMode::G91
+    );
+
+    let faeel_program = parse_program(
+        r#"
+        pred seed().
+        pred p().
+        p() :- seed().
+        p() :- possible p().
+        "#,
+    )
+    .expect("parse independently founded FAEEL fixture");
+    let faeel_executable =
+        compile_epistemic_gpu_execution_with_stats_snapshot(&faeel_program, None)
+            .expect("compile independently founded FAEEL executable");
+    let mut faeel_executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &faeel_executable.relation_ids {
+        faeel_executor.register_relation(*rel_id, name);
+    }
+    faeel_executor.put_relation("seed", upload_nullary(&fix.memory, 1));
+    faeel_executor.put_relation("p", upload_nullary(&fix.memory, 0));
+    let faeel_result = faeel_executor
+        .execute_epistemic_gpu_execution(
+            &faeel_executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("execute independently founded FAEEL fixture");
+    assert_eq!(
+        faeel_result.prepared.preflight.epistemic_mode,
+        EirEpistemicMode::Faeel
+    );
+
+    let g91_assumptions = [EpistemicAssumption::possible("p", 0, true)];
+    let faeel_assumptions = [EpistemicAssumption::known("p", 0, true)];
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut adapter = EpistemicProbProductionAdapter::new(config);
+    let evaluated = adapter
+        .compile_and_evaluate_conditioned_source_for_gpu_execution_results(
+            r#"
+            0.5::p().
+            query(p()).
+            "#,
+            &fix.provider,
+            &[
+                EpistemicProbGpuExecutionEvidence {
+                    result: &g91_result,
+                    assumptions: &g91_assumptions,
+                },
+                EpistemicProbGpuExecutionEvidence {
+                    result: &faeel_result,
+                    assumptions: &faeel_assumptions,
+                },
+            ],
+        )
+        .expect("accepted G91 and FAEEL GPU evidence must gate conditioned exact path");
+
+    assert_eq!(evaluated.len(), 2);
+    assert_eq!(evaluated[0].query_probs.len(), 1);
+    assert!((evaluated[0].query_probs[0].prob - 1.0).abs() < 1.0e-6);
+    assert_eq!(evaluated[1].query_probs.len(), 1);
+    assert!((evaluated[1].query_probs[0].prob - 1.0).abs() < 1.0e-6);
+
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_world_view_evidence_consumed, 2);
+    assert_eq!(trace.accepted_g91_world_view_evidence_consumed, 1);
+    assert_eq!(trace.accepted_faeel_world_view_evidence_consumed, 1);
+    assert_eq!(trace.accepted_evidence_assumptions_consumed, 2);
+    assert_eq!(trace.gpu_conditioned_evidence_facts, 2);
+    assert_eq!(trace.gpu_conditioned_negative_evidence_facts, 0);
+    assert_eq!(trace.gpu_exact_source_compiles, 2);
+    assert_eq!(trace.gpu_exact_query_evaluations, 2);
+    assert_eq!(trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(trace.fixture_circuit_evaluations, 0);
 }
 
 #[test]

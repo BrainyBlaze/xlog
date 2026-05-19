@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use xlog_core::{Result, XlogError};
 use xlog_cuda::CudaKernelProvider;
+use xlog_ir::EirEpistemicMode;
 use xlog_logic::ast::Program;
 #[cfg(feature = "host-io")]
 use xlog_logic::ast::{Atom, Evidence, Term};
@@ -73,6 +74,10 @@ pub struct EpistemicProbProductionTrace {
     pub gpu_exact_program_compiles: u64,
     /// Number of accepted world-view evidence objects consumed as a gate.
     pub accepted_world_view_evidence_consumed: u64,
+    /// Number of accepted G91 GPU world-view evidence objects consumed as a gate.
+    pub accepted_g91_world_view_evidence_consumed: u64,
+    /// Number of accepted FAEEL GPU world-view evidence objects consumed as a gate.
+    pub accepted_faeel_world_view_evidence_consumed: u64,
     /// Number of accepted epistemic assumptions consumed from world-view evidence.
     pub accepted_evidence_assumptions_consumed: u64,
     /// Number of GPU exact query evaluations routed through `ExactDdnnfProgram`.
@@ -1019,6 +1024,21 @@ impl EpistemicProbProductionAdapter {
             .trace
             .accepted_world_view_evidence_consumed
             .saturating_add(1);
+        match evidence.gpu_epistemic_mode() {
+            Some(EirEpistemicMode::G91) => {
+                self.trace.accepted_g91_world_view_evidence_consumed = self
+                    .trace
+                    .accepted_g91_world_view_evidence_consumed
+                    .saturating_add(1);
+            }
+            Some(EirEpistemicMode::Faeel) => {
+                self.trace.accepted_faeel_world_view_evidence_consumed = self
+                    .trace
+                    .accepted_faeel_world_view_evidence_consumed
+                    .saturating_add(1);
+            }
+            None => {}
+        }
         self.trace.accepted_evidence_assumptions_consumed = self
             .trace
             .accepted_evidence_assumptions_consumed

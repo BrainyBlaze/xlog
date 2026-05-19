@@ -499,7 +499,9 @@ probability recomputation counters in `EpistemicProbProductionTrace`.
 `compile_program_with_gpu_execution_result` build that evidence from an accepted
 `EpistemicGpuExecutionResult` only after stable-model tuple-source membership,
 GPU model-membership/world-view/final-result/final-tuple kernel traces, zero
-hot-path transfers, and non-empty final device output are proven.
+hot-path transfers, and non-empty final device output are proven. That accepted
+evidence preserves the runtime epistemic mode so the production trace can count
+G91 and default FAEEL evidence consumptions separately.
 `compile_and_evaluate_source_with_gpu_execution_result` and
 `compile_and_evaluate_program_with_gpu_execution_result` consume the same
 accepted runtime evidence once before compiling through `ExactDdnnfProgram` and
@@ -557,8 +559,8 @@ nonzero-arity, negative nonzero-arity, parsed-program, two-record
 source-conditioned query, and two-record parsed-program-conditioned query
 cases, including unary and binary true `possible`, unary and binary false
 `not possible`, and binary false
-`not know` operator-result conditioning plus query/gradient/PIR-CNF reuse, but
-not the full
+`not know` operator-result conditioning, accepted G91/default FAEEL
+mode-specific trace counters, plus query/gradient/PIR-CNF reuse, but not the full
 query-conditioned probabilistic matrix over accepted runtime world views.
 
 Run the probabilistic fixture and production-adapter source guard:

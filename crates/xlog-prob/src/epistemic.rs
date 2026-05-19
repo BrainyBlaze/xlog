@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use xlog_core::{Result, XlogError};
 use xlog_cuda::CudaKernelProvider;
+use xlog_ir::EirEpistemicMode;
 use xlog_logic::epistemic::EpistemicWorldView;
 use xlog_runtime::{read_device_row_count, EpistemicGpuExecutionResult};
 
@@ -293,6 +294,7 @@ pub struct CircuitUpdate {
 pub struct AcceptedWorldViewEvidence {
     assumptions: Vec<EpistemicAssumption>,
     world_count: usize,
+    gpu_epistemic_mode: Option<EirEpistemicMode>,
 }
 
 impl AcceptedWorldViewEvidence {
@@ -304,6 +306,7 @@ impl AcceptedWorldViewEvidence {
         Ok(Self {
             assumptions,
             world_count: world_view.world_count(),
+            gpu_epistemic_mode: None,
         })
     }
 
@@ -376,6 +379,7 @@ impl AcceptedWorldViewEvidence {
         Ok(Self {
             assumptions,
             world_count: accepted_rows,
+            gpu_epistemic_mode: Some(result.prepared.preflight.epistemic_mode),
         })
     }
 
@@ -387,6 +391,11 @@ impl AcceptedWorldViewEvidence {
     /// Accepted epistemic assumptions represented by this evidence.
     pub fn assumptions(&self) -> &[EpistemicAssumption] {
         &self.assumptions
+    }
+
+    /// Epistemic mode reported by the accepted GPU runtime evidence, when present.
+    pub fn gpu_epistemic_mode(&self) -> Option<EirEpistemicMode> {
+        self.gpu_epistemic_mode
     }
 
     /// Number of accepted epistemic assumptions represented by this evidence.
