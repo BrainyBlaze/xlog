@@ -19,7 +19,7 @@ The current branch contains two solver layers:
   portfolio work can route through existing GPU CDCL APIs without using the CPU
   fixture service. Its accepted-runtime SAT/UNSAT and workspace-backed UNSAT
   gates, bounded push/solve/retract lifecycle gate, bounded MaxSAT candidate
-  gate, and bounded portfolio gate consume an accepted
+  gate, and bounded status-aware portfolio gate consume an accepted
   `EpistemicGpuExecutionResult` before dispatching to GPU CDCL.
 - `production_capabilities`, a source-level capability report that marks GPU
   CDCL SAT/UNSAT plus bounded GPU-backed MaxSAT and SAT/MaxSAT portfolio
@@ -28,17 +28,17 @@ The current branch contains two solver layers:
 
 This remains partial evidence. The branch still lacks broader multi-candidate
 assumption lifecycle traces with learned-clause reuse semantics, complete
-status-aware SAT/UNSAT/UNKNOWN/TIMEOUT lifecycle coverage, and full solver
-release closure.
+status-aware SAT/UNSAT/UNKNOWN/TIMEOUT lifecycle coverage beyond the bounded
+portfolio adapter, and full solver release closure.
 
 | Requirement | Evidence |
 |---|---|
 | Solver service interface | `SolverService` exposes bounded SAT/MaxSAT solves, assumptions, retraction, learned-clause transfer, trace, and GPU portfolio status. |
-| GPU production adapter | `GpuSolverProductionAdapter` exports SAT/UNSAT calls over `GpuCdclSolver`, including workspace-backed UNSAT reuse, bounded MaxSAT candidate solving, and bounded SAT/MaxSAT portfolio dispatch. |
+| GPU production adapter | `GpuSolverProductionAdapter` exports SAT/UNSAT calls over `GpuCdclSolver`, including workspace-backed UNSAT reuse, bounded MaxSAT candidate solving, bounded SAT/MaxSAT portfolio dispatch, and UNKNOWN/TIMEOUT portfolio status propagation. |
 | Accepted runtime SAT/UNSAT gates | `solve_expect_sat_with_gpu_execution_result`, `solve_expect_unsat_with_gpu_execution_result`, and `solve_expect_unsat_with_branch_limit_ws_with_gpu_execution_result` validate stable tuple-source membership, GPU kernel traces, zero hot-path transfers, and non-empty final device output before calling `GpuCdclSolver` SAT/UNSAT paths, including reusable workspace-backed UNSAT. |
 | Accepted runtime lifecycle gate | `solve_assumption_lifecycle_with_gpu_execution_result` validates accepted GPU runtime evidence, then records GPU assumption pushes/retractions while dispatching SAT and UNSAT lifecycle steps through existing GPU CDCL calls and the provided reusable workspace. |
 | Accepted runtime MaxSAT gate | `solve_weighted_maxsat_candidates_with_gpu_execution_result` validates accepted GPU runtime evidence, then certifies bounded weighted MaxSAT candidate CNFs through `GpuCdclSolver::solve_expect_sat_with_branch_limit` and records `gpu_maxsat_candidate_solves`/`gpu_maxsat_optima` with zero CPU MaxSAT enumerations. |
-| Accepted runtime portfolio gate | `solve_portfolio_with_gpu_execution_result` validates accepted GPU runtime evidence, then dispatches SAT jobs and bounded MaxSAT candidate jobs through the same GPU CDCL adapter while recording `gpu_portfolio_*` counters. |
+| Accepted runtime portfolio gate | `solve_portfolio_with_gpu_execution_result` validates accepted GPU runtime evidence, then dispatches SAT jobs and bounded MaxSAT candidate jobs through the same GPU CDCL adapter while propagating UNKNOWN/TIMEOUT portfolio statuses without CPU search and recording `gpu_portfolio_*` counters. |
 | Production capability report | `production_capabilities` reports GPU CDCL SAT/UNSAT, bounded MaxSAT, and bounded portfolio adapters available, with CPU oracle disallowed. |
 | CPU solver-search isolation | `GpuSolverProductionTrace` records zero CPU assignment and MaxSAT enumerations plus GPU MaxSAT/portfolio counters; the production adapter source test rejects `SolverService` use. |
 | Incremental SAT assumptions | `solver_service_semantics.rs` verifies assumption add/retract changes SAT status without stale learned contradictions. |
@@ -68,15 +68,15 @@ release closure.
 
 | Metric | Target | Status | Evidence |
 |---|---|---|---|
-| M090_SOLVER.1 interface | trait/API documented and tested | PARTIAL | CPU facade API exists, and `GpuSolverProductionAdapter` exposes GPU CDCL SAT/UNSAT, accepted-runtime SAT/UNSAT and workspace-backed UNSAT gates, bounded accepted lifecycle API, bounded MaxSAT candidate API, and bounded SAT/MaxSAT portfolio API; broader candidate lifecycle APIs are still missing. |
+| M090_SOLVER.1 interface | trait/API documented and tested | PARTIAL | CPU facade API exists, and `GpuSolverProductionAdapter` exposes GPU CDCL SAT/UNSAT, accepted-runtime SAT/UNSAT and workspace-backed UNSAT gates, bounded accepted lifecycle API, bounded MaxSAT candidate API, and bounded SAT/MaxSAT/UNKNOWN/TIMEOUT portfolio API; broader candidate lifecycle APIs are still missing. |
 | M090_SOLVER.2 incremental SAT | add/retract assumption fixtures pass on GPU-native path | PARTIAL | CPU oracle fixture exists, and accepted GPU runtime evidence can gate a SAT/UNSAT push/solve/retract sequence through `GpuCdclSolver`; broader incremental epistemic candidate assumptions are not fully wired. |
 | M090_SOLVER.3 learned clauses | transfer observable in GPU trace or test double | PARTIAL | CPU test double observes transfer, and the accepted production adapter can reuse GPU CDCL workspaces after accepted runtime evidence; learned-clause transfer semantics across epistemic candidates are missing. |
 | M090_SOLVER.4 MaxSAT | soft-constraint fixture returns expected optimum on GPU-native path | PARTIAL | CPU oracle fixture exists; accepted GPU runtime evidence now gates a bounded weighted MaxSAT candidate fixture through `GpuCdclSolver::solve_expect_sat_with_branch_limit`, returns optimum score `5`, and records zero CPU MaxSAT enumerations. Broader MaxSAT encoding/search coverage is still missing. |
-| M090_SOLVER.5 GPU portfolio | portfolio dispatch executes on GPU or GPU-backed adapter with measured launch evidence | PARTIAL | Accepted GPU runtime evidence now gates a bounded SAT/MaxSAT portfolio through `GpuCdclSolver`, records SAT and MaxSAT portfolio counters, and keeps CPU search counters at zero. Broader portfolio scheduling/status coverage is still missing. |
+| M090_SOLVER.5 GPU portfolio | portfolio dispatch executes on GPU or GPU-backed adapter with measured launch evidence | PARTIAL | Accepted GPU runtime evidence now gates a bounded SAT/MaxSAT/UNKNOWN/TIMEOUT portfolio through `GpuCdclSolver` plus status propagation, records SAT, MaxSAT, UNKNOWN, and TIMEOUT portfolio counters, and keeps CPU search counters at zero. Broader portfolio scheduling coverage is still missing. |
 | M090_SOLVER.6 failure modes | UNSAT/UNKNOWN/TIMEOUT represented distinctly | PASS for oracle | CPU oracle fixtures distinguish the states. |
 | M090_SOLVER.7 assumption lifecycle | push, solve, retract, and reuse trace proves no assumption leak between candidates | PARTIAL | CPU lifecycle fixture exists; accepted GPU candidate evidence now gates one SAT/UNSAT push/solve/retract sequence and records balanced pushes/retractions plus workspace reuse. Broader multi-candidate and learned-clause lifecycle traces are missing. |
 | M090_SOLVER.8 CPU search ban | accepted solver path records zero CPU exhaustive assignment enumeration | PARTIAL | Accepted runtime SAT/UNSAT, workspace-backed UNSAT, bounded lifecycle, bounded MaxSAT, and bounded portfolio gates route GPU evidence into GPU CDCL and record zero CPU assignment/MaxSAT enumeration counters; broader lifecycle traces are missing. |
-| M090_SOLVER.9 production solver reuse | accepted SAT/MaxSAT fixtures execute through existing GPU CNF/CDCL/solver production APIs or thin adapters over them | PARTIAL | Accepted SAT/UNSAT/lifecycle/MaxSAT/portfolio fixtures call `GpuCdclSolver::new`, `solve_expect_sat`, `solve_expect_sat_with_branch_limit`, `solve_expect_unsat`, and `solve_expect_unsat_with_branch_limit_ws`; broader learned-clause and status-aware portfolio coverage remains missing. |
+| M090_SOLVER.9 production solver reuse | accepted SAT/MaxSAT fixtures execute through existing GPU CNF/CDCL/solver production APIs or thin adapters over them | PARTIAL | Accepted SAT/UNSAT/lifecycle/MaxSAT/portfolio fixtures call `GpuCdclSolver::new`, `solve_expect_sat`, `solve_expect_sat_with_branch_limit`, `solve_expect_unsat`, and `solve_expect_unsat_with_branch_limit_ws`; the accepted portfolio fixture also propagates UNKNOWN/TIMEOUT without CPU search. Broader learned-clause lifecycle coverage remains missing. |
 | M090_SOLVER.10 fixture isolation | CPU semantic-oracle solver facade is gated so it cannot satisfy closure metrics | PARTIAL | Evidence docs mark `SolverService` as oracle-only, the production adapter source test rejects `SolverService`, and `production_capabilities` disallows the CPU oracle for production metrics; accepted-path closure automation is still missing. |
 
 ## Coordination Notes
@@ -84,8 +84,8 @@ release closure.
 - This file is not release-close evidence for `G090_SOLVER`.
 - The production adapter is partial accepted-runtime SAT, UNSAT,
   workspace-backed UNSAT, bounded lifecycle, bounded MaxSAT, and bounded
-  portfolio reuse evidence only.
-- Broader multi-candidate learned-clause lifecycle traces and status-aware
-  portfolio/MaxSAT coverage remain required before v0.9.0 can close.
+  status-aware portfolio reuse evidence only.
+- Broader multi-candidate learned-clause lifecycle traces and MaxSAT coverage
+  remain required before v0.9.0 can close.
 - No pyxlog public API signatures were changed.
 - No push, tag, release-board update, or merge was performed.

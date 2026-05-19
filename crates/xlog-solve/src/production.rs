@@ -29,13 +29,13 @@ pub struct GpuSolverProductionCapabilities {
     pub gpu_cdcl_sat_unsat: GpuSolverProductionCapabilityStatus,
     /// GPU-native MaxSAT production execution.
     pub gpu_maxsat: GpuSolverProductionCapabilityStatus,
-    /// GPU SAT/MaxSAT portfolio production execution.
+    /// GPU SAT/MaxSAT/status-aware portfolio production execution.
     pub gpu_portfolio_sat_maxsat: GpuSolverProductionCapabilityStatus,
     /// Whether the CPU semantic-oracle solver may satisfy production metrics.
     pub cpu_oracle_solver_allowed: bool,
     /// Blocker reason for GPU-native MaxSAT, or empty when available.
     pub gpu_maxsat_blocker: &'static str,
-    /// Blocker reason for GPU SAT/MaxSAT portfolio execution, or empty when available.
+    /// Blocker reason for GPU SAT/MaxSAT/status-aware portfolio execution.
     pub gpu_portfolio_blocker: &'static str,
 }
 
@@ -113,9 +113,19 @@ pub enum GpuSolverProductionPortfolioJob<'a> {
         /// Candidate set to certify.
         candidates: &'a [GpuSolverProductionMaxSatCandidate<'a>],
     },
+    /// A status-aware job whose GPU-backed portfolio budget ended inconclusively.
+    Unknown {
+        /// Diagnostic reason recorded by the accepted portfolio scheduler.
+        reason: &'static str,
+    },
+    /// A status-aware job whose accepted portfolio budget timed out.
+    Timeout {
+        /// Timeout budget observed by the accepted portfolio scheduler.
+        budget_micros: u64,
+    },
 }
 
-/// Summary of one bounded GPU SAT/MaxSAT portfolio run.
+/// Summary of one bounded GPU SAT/MaxSAT/status-aware portfolio run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GpuSolverProductionPortfolioReport {
     /// Number of portfolio jobs executed.
@@ -124,6 +134,10 @@ pub struct GpuSolverProductionPortfolioReport {
     pub sat_jobs: u64,
     /// Number of MaxSAT jobs executed.
     pub maxsat_jobs: u64,
+    /// Number of portfolio jobs that propagated UNKNOWN without CPU search.
+    pub unknown_jobs: u64,
+    /// Number of portfolio jobs that propagated TIMEOUT without CPU search.
+    pub timeout_jobs: u64,
     /// Sum of best MaxSAT scores returned by MaxSAT jobs.
     pub maxsat_optimum_scores: u64,
 }
@@ -167,6 +181,10 @@ pub struct GpuSolverProductionTrace {
     pub gpu_portfolio_sat_jobs: u64,
     /// Number of MaxSAT jobs dispatched through the portfolio adapter.
     pub gpu_portfolio_maxsat_jobs: u64,
+    /// Number of accepted portfolio UNKNOWN statuses propagated without CPU search.
+    pub gpu_portfolio_unknown_status_jobs: u64,
+    /// Number of accepted portfolio TIMEOUT statuses propagated without CPU search.
+    pub gpu_portfolio_timeout_status_jobs: u64,
     /// CPU exhaustive assignment enumerations performed by this adapter.
     pub cpu_assignment_enumerations: u64,
     /// CPU MaxSAT assignment enumerations performed by this adapter.
@@ -440,7 +458,7 @@ impl GpuSolverProductionAdapter {
         Ok(report)
     }
 
-    /// Execute a bounded SAT/MaxSAT portfolio after accepted GPU epistemic execution.
+    /// Execute a bounded SAT/MaxSAT/status-aware portfolio after accepted GPU epistemic execution.
     ///
     /// The portfolio is a production adapter over existing GPU CDCL calls. It records
     /// per-job counters and rejects empty portfolios without falling back to the CPU
@@ -488,6 +506,34 @@ impl GpuSolverProductionAdapter {
                     report.maxsat_optimum_scores = report
                         .maxsat_optimum_scores
                         .saturating_add(maxsat.optimum_score);
+                }
+                GpuSolverProductionPortfolioJob::Unknown { reason } => {
+                    if reason.trim().is_empty() {
+                        return Err(XlogError::UnsupportedEpistemicConstruct {
+                            construct: "GPU solver production portfolio".to_string(),
+                            context: "UNKNOWN portfolio status requires a diagnostic reason"
+                                .to_string(),
+                        });
+                    }
+                    self.trace.gpu_portfolio_unknown_status_jobs = self
+                        .trace
+                        .gpu_portfolio_unknown_status_jobs
+                        .saturating_add(1);
+                    report.unknown_jobs = report.unknown_jobs.saturating_add(1);
+                }
+                GpuSolverProductionPortfolioJob::Timeout { budget_micros } => {
+                    if *budget_micros == 0 {
+                        return Err(XlogError::UnsupportedEpistemicConstruct {
+                            construct: "GPU solver production portfolio".to_string(),
+                            context: "TIMEOUT portfolio status requires a nonzero budget"
+                                .to_string(),
+                        });
+                    }
+                    self.trace.gpu_portfolio_timeout_status_jobs = self
+                        .trace
+                        .gpu_portfolio_timeout_status_jobs
+                        .saturating_add(1);
+                    report.timeout_jobs = report.timeout_jobs.saturating_add(1);
                 }
             }
         }

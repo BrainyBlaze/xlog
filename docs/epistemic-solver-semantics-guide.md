@@ -281,14 +281,14 @@ reusable workspace.
 boundary before certifying bounded MaxSAT candidate CNFs through GPU CDCL and
 returning the best declared score. `solve_portfolio_with_gpu_execution_result`
 applies the boundary before dispatching bounded SAT and MaxSAT jobs through the
-same adapter and recording portfolio counters.
+same adapter, propagating UNKNOWN/TIMEOUT portfolio statuses without CPU search,
+and recording portfolio counters.
 `xlog_solve::production_capabilities` reports that GPU CDCL SAT/UNSAT is
 available along with the bounded GPU-backed MaxSAT and SAT/MaxSAT portfolio
 adapters.
 
 The adapter is partial v0.9 evidence only. It does not yet wire broader
-multi-candidate learned-clause lifecycle semantics or status-aware portfolio
-coverage for UNKNOWN/TIMEOUT outcomes.
+multi-candidate learned-clause lifecycle semantics or full MaxSAT coverage.
 
 `xlog_solve::SolverService` provides the bounded solver API used by semantic
 fixtures:

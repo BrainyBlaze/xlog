@@ -22,7 +22,7 @@ release gate.
 | World views | `EpistemicWorldView` fixtures test `know`, `possible`, and `not know`. | ORACLE ONLY until world views are generated/validated on GPU. |
 | GPT | CPU fixture records guesses, reduced models, accepted world views, and rejection reasons. | PARTIAL: candidate generation, propagation staging, candidate-buffer validation, tuple-source model-membership staging with specialized arity-one/two/three and generic arity-N row-scoped ground-key comparison plus generic arity-N variable-bound comparison, bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, final-row map construction, and membership-gated final tuple materialization use GPU-resident buffers; broader accepted semantic parity remains missing. |
 | Splitting | CPU split/recompose fixtures pass, and valid split components now lower through GPU executable subplans that reuse the existing epistemic executable path. | PARTIAL until full accepted-runtime semantic parity is covered for split programs. |
-| Solver | `SolverService` is a CPU fixture facade with SAT/UNSAT/UNKNOWN/TIMEOUT/Optimal statuses; `GpuSolverProductionAdapter` is a thin adapter over the existing `GpuCdclSolver` production path with accepted-runtime SAT/UNSAT, reusable workspace-backed UNSAT, bounded lifecycle, bounded MaxSAT candidate, and bounded SAT/MaxSAT portfolio gates plus zero CPU search counters; `production_capabilities` reports those GPU-backed adapters available while disallowing the CPU oracle for production metrics. | PARTIAL for accepted-runtime SAT, UNSAT, workspace-backed UNSAT, bounded lifecycle, bounded MaxSAT, and bounded portfolio production reuse; BLOCKED until broader accepted candidate learned-clause lifecycle traces and status-aware portfolio coverage are wired to epistemic candidates. |
+| Solver | `SolverService` is a CPU fixture facade with SAT/UNSAT/UNKNOWN/TIMEOUT/Optimal statuses; `GpuSolverProductionAdapter` is a thin adapter over the existing `GpuCdclSolver` production path with accepted-runtime SAT/UNSAT, reusable workspace-backed UNSAT, bounded lifecycle, bounded MaxSAT candidate, bounded SAT/MaxSAT portfolio gates, UNKNOWN/TIMEOUT portfolio status propagation, and zero CPU search counters; `production_capabilities` reports those GPU-backed adapters available while disallowing the CPU oracle for production metrics. | PARTIAL for accepted-runtime SAT, UNSAT, workspace-backed UNSAT, bounded lifecycle, bounded MaxSAT, and bounded status-aware portfolio production reuse; BLOCKED until broader accepted candidate learned-clause lifecycle traces are wired to epistemic candidates. |
 | Probabilistic | `AcceptedWorldViewEvidence` guards evidence conditioning in fixtures; `EpistemicProbProductionAdapter` can construct evidence from an accepted `EpistemicGpuExecutionResult`, route source and parsed programs into the existing `ExactDdnnfProgram` GPU exact/provenance compile path, bounded compile/evaluate path, `GpuPirGraph`/`GpuPirRoots` upload plus `encode_cnf_gpu`, and query/gradient-evaluation paths, and record zero CPU recompute counters. | PARTIAL for production exact compile/PIR-CNF/evaluation reuse; BLOCKED until broader probabilistic knowledge-compilation coverage over accepted runtime world views exists. |
 | Certification | Semantic-oracle, GPU-plan contract, and accepted K5 WCOJ execution tests can pass locally. | BLOCKED until full accepted-execution GPU timing, solver/probability traces, semantic parity, and zero CPU fallback counters exist. |
 
@@ -70,15 +70,14 @@ The next production slice should start at the lowering/runtime boundary:
 6. Replace CPU solver fixture search in accepted execution with GPU-native
    SAT/MaxSAT/portfolio services or a documented GPU-backed adapter. PARTIAL
    for accepted-runtime SAT, UNSAT, reusable workspace-backed UNSAT,
-   bounded lifecycle, bounded MaxSAT, and bounded portfolio reuse through
+   bounded lifecycle, bounded MaxSAT, and bounded status-aware portfolio reuse through
    `GpuSolverProductionAdapter`, `solve_expect_sat_with_gpu_execution_result`,
    `solve_expect_unsat_with_gpu_execution_result`, and
    `solve_expect_unsat_with_branch_limit_ws_with_gpu_execution_result` plus
    `solve_assumption_lifecycle_with_gpu_execution_result`,
    `solve_weighted_maxsat_candidates_with_gpu_execution_result`, and
    `solve_portfolio_with_gpu_execution_result`; broader accepted candidate
-   learned-clause lifecycle traces and status-aware portfolio coverage remain
-   open.
+   learned-clause lifecycle traces remain open.
 7. Feed accepted world-view evidence into the existing GPU-native
    exact/provenance/PIR/CNF paths and report zero CPU-only probability
    recomputation.

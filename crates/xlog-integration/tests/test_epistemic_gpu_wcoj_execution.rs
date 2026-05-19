@@ -1170,21 +1170,29 @@ fn accepted_gpu_execution_result_gates_solver_maxsat_and_portfolio_paths() {
                         branch_var_limit: &branch_limit,
                     }],
                 },
+                GpuSolverProductionPortfolioJob::Unknown {
+                    reason: "bounded branch budget exhausted before a determined status",
+                },
+                GpuSolverProductionPortfolioJob::Timeout { budget_micros: 10 },
             ],
         )
-        .expect("accepted GPU runtime evidence must gate SAT/MaxSAT portfolio path");
-    assert_eq!(portfolio.jobs, 2);
+        .expect("accepted GPU runtime evidence must gate status-aware portfolio path");
+    assert_eq!(portfolio.jobs, 4);
     assert_eq!(portfolio.sat_jobs, 1);
     assert_eq!(portfolio.maxsat_jobs, 1);
+    assert_eq!(portfolio.unknown_jobs, 1);
+    assert_eq!(portfolio.timeout_jobs, 1);
     assert_eq!(portfolio.maxsat_optimum_scores, 5);
 
     let trace = adapter.trace();
     assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 2);
     assert_eq!(trace.gpu_maxsat_candidate_solves, 2);
     assert_eq!(trace.gpu_maxsat_optima, 2);
-    assert_eq!(trace.gpu_portfolio_jobs, 2);
+    assert_eq!(trace.gpu_portfolio_jobs, 4);
     assert_eq!(trace.gpu_portfolio_sat_jobs, 1);
     assert_eq!(trace.gpu_portfolio_maxsat_jobs, 1);
+    assert_eq!(trace.gpu_portfolio_unknown_status_jobs, 1);
+    assert_eq!(trace.gpu_portfolio_timeout_status_jobs, 1);
     assert_eq!(trace.cpu_assignment_enumerations, 0);
     assert_eq!(trace.cpu_maxsat_enumerations, 0);
 }

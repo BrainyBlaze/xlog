@@ -42,7 +42,6 @@ membership filters final rows on device. This is not a closure claim for
   nonzero-arity membership fixtures.
 - It does not prove the full G91, FAEEL, GPT, and splitting semantic parity
   matrix.
-- It does not close broader learned-clause solver lifecycle traces,
-  status-aware portfolio coverage, or broader accepted probabilistic
-  knowledge-compilation integration.
+- It does not close broader learned-clause solver lifecycle traces or broader
+  accepted probabilistic knowledge-compilation integration.
 - No closure-board edit, merge, push, or tag is implied.
