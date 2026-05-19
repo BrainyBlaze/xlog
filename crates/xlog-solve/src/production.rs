@@ -1682,6 +1682,43 @@ impl GpuSolverProductionAdapter {
         Ok(report)
     }
 
+    /// Encode weighted soft-clause selections, then search once per accepted split-batch component.
+    ///
+    /// The batch evidence must prove every split component reused the existing
+    /// single-plan GPU runtime path before each component is delegated to the
+    /// existing multi-candidate weighted MaxSAT encoding adapter.
+    pub fn solve_weighted_maxsat_encoded_search_with_gpu_batch_execution_result(
+        &mut self,
+        provider: &CudaKernelProvider,
+        evidence: GpuSolverProductionBatchExecutionEvidence<'_>,
+        workspace: &mut GpuCdclWorkspace,
+        weighted: &SolveInstance,
+        branch_var_limit: &TrackedCudaSlice<u32>,
+        selections: &[GpuSolverProductionWeightedMaxSatSelection<'_>],
+    ) -> Result<GpuSolverProductionMaxSatReport> {
+        let results = require_accepted_gpu_solver_batch_evidence(provider, evidence.batch)?;
+        self.trace.accepted_gpu_batch_candidate_evidence_consumed = self
+            .trace
+            .accepted_gpu_batch_candidate_evidence_consumed
+            .saturating_add(1);
+        self.trace
+            .accepted_gpu_batch_candidate_component_evidence_consumed = self
+            .trace
+            .accepted_gpu_batch_candidate_component_evidence_consumed
+            .saturating_add(results.len() as u64);
+        let report = self
+            .solve_multi_candidate_weighted_maxsat_encoded_search_with_gpu_execution_results(
+                provider,
+                &results,
+                workspace,
+                weighted,
+                branch_var_limit,
+                selections,
+            )?;
+        self.trace.require_zero_cpu_search()?;
+        Ok(report)
+    }
+
     fn add_maxsat_schedule_step_report(
         report: &mut GpuSolverProductionMaxSatScheduleReport,
         step_report: GpuSolverProductionMaxSatReport,
@@ -1866,6 +1903,35 @@ impl GpuSolverProductionAdapter {
             self.record_accepted_gpu_candidate_evidence(result);
         }
 
+        self.trace.require_zero_cpu_search()?;
+        Ok(report)
+    }
+
+    /// Execute a heterogeneous MaxSAT schedule once per accepted split-batch component.
+    ///
+    /// This preserves the scheduler's existing GPU CNF/CDCL dispatch behavior while
+    /// requiring aggregate split-batch evidence with zero CPU recomposition,
+    /// fallback, and per-candidate host round trips before any scheduled job runs.
+    pub fn solve_maxsat_schedule_with_gpu_batch_execution_result(
+        &mut self,
+        provider: &CudaKernelProvider,
+        evidence: GpuSolverProductionBatchExecutionEvidence<'_>,
+        workspace: &mut GpuCdclWorkspace,
+        jobs: &[GpuSolverProductionMaxSatScheduleJob<'_>],
+    ) -> Result<GpuSolverProductionMaxSatScheduleReport> {
+        let results = require_accepted_gpu_solver_batch_evidence(provider, evidence.batch)?;
+        self.trace.accepted_gpu_batch_candidate_evidence_consumed = self
+            .trace
+            .accepted_gpu_batch_candidate_evidence_consumed
+            .saturating_add(1);
+        self.trace
+            .accepted_gpu_batch_candidate_component_evidence_consumed = self
+            .trace
+            .accepted_gpu_batch_candidate_component_evidence_consumed
+            .saturating_add(results.len() as u64);
+        let report = self.solve_maxsat_schedule_with_gpu_execution_results(
+            provider, &results, workspace, jobs,
+        )?;
         self.trace.require_zero_cpu_search()?;
         Ok(report)
     }

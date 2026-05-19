@@ -26,6 +26,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(audit.contains("GpuSolverProductionBatchExecutionEvidence"));
     assert!(audit.contains("accepted_gpu_batch_candidate_evidence_consumed"));
     assert!(audit.contains("accepted_gpu_batch_candidate_component_evidence_consumed"));
+    assert!(audit.contains("solve_weighted_maxsat_encoded_search_with_gpu_batch_execution_result"));
+    assert!(audit.contains("solve_maxsat_schedule_with_gpu_batch_execution_result"));
     assert!(audit.contains("EpistemicProbProductionAdapter"));
     assert!(audit.contains("G38 completion audit"));
     assert!(audit.contains("G38-B closure proposal and integration audit"));
@@ -151,6 +153,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(integration.contains("accepted_split_batch_gates_solver_learned_clause_reuse_path"));
     assert!(integration.contains("accepted_split_batch_gates_solver_maxsat_path"));
     assert!(integration.contains("accepted_split_batch_gates_solver_maxsat_search_pruning"));
+    assert!(integration
+        .contains("accepted_split_batch_gates_solver_encoded_maxsat_and_scheduler_paths"));
     assert!(integration.contains("not_possible_operator_count"));
     assert!(integration.contains("negated_row_filter_count"));
     assert!(solver.contains("GpuCdclSolver::new"));
@@ -186,8 +190,10 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(solver.contains(
         "solve_multi_candidate_weighted_maxsat_encoded_search_with_gpu_execution_results"
     ));
+    assert!(solver.contains("solve_weighted_maxsat_encoded_search_with_gpu_batch_execution_result"));
     assert!(solver.contains("encode_weighted_maxsat_search_candidates"));
     assert!(solver.contains("solve_maxsat_schedule_with_gpu_execution_results"));
+    assert!(solver.contains("solve_maxsat_schedule_with_gpu_batch_execution_result"));
     assert!(solver.contains("solve_portfolio_with_gpu_execution_result"));
     assert!(solver.contains("solve_portfolio_with_gpu_batch_execution_result"));
     assert!(solver.contains("solve_multi_candidate_portfolio_with_gpu_execution_results"));

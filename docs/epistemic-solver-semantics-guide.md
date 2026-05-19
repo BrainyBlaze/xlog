@@ -146,8 +146,8 @@ production GPU/WCOJ stack for specific certification fixtures:
   multi-membership, missing-required rejection, split
   possible-vs-not-known, G91 self-support, and independently founded FAEEL
   fixtures compare bounded GPU traces against semantic or GPT oracles.
-- Solver SAT/UNSAT, lifecycle, split-batch learned-clause and MaxSAT,
-  scheduler, and portfolio slices route accepted GPU evidence into existing
+- Solver SAT/UNSAT, lifecycle, split-batch learned-clause, MaxSAT,
+  weighted MaxSAT encoding, scheduler, and portfolio slices route accepted GPU evidence into existing
   GPU CDCL/CNF adapter paths.
 - Probabilistic source/program compile, condition, PIR/CNF encode, query, and
   gradient slices route accepted GPU evidence into existing GPU exact/provenance
@@ -366,8 +366,9 @@ zero CPU candidate/world-view fallback counters.
 adapter for epistemic callers. It is a thin wrapper over the existing
 `GpuCdclSolver`; it dispatches `solve_expect_sat`, `solve_expect_unsat`,
 workspace-backed UNSAT, bounded weighted MaxSAT candidate checks, single-result,
-multi-result, and accepted split-batch MaxSAT search pruning, single-result and multi-result
-weighted MaxSAT selection encoding, heterogeneous MaxSAT scheduler jobs, and
+multi-result, and accepted split-batch MaxSAT search pruning, single-result,
+multi-result, and accepted split-batch weighted MaxSAT selection encoding,
+heterogeneous and accepted split-batch MaxSAT scheduler jobs, and
 single-result plus multi-result bounded SAT/MaxSAT portfolio jobs
 through the GPU CDCL path and exposes zero CPU assignment/MaxSAT enumeration
 counters in `GpuSolverProductionTrace`.
@@ -459,6 +460,14 @@ validates multiple accepted GPU runtime results up front, then repeats that
 weighted-selection encoding and GPU CDCL search path once per accepted evidence
 record while aggregating candidate-evidence, encode, solve, prune, and optimum
 counters.
+`solve_weighted_maxsat_encoded_search_with_gpu_batch_execution_result` consumes
+the same accepted split-batch evidence as the lifecycle adapter, then delegates
+each component to the existing multi-candidate weighted-selection encoding and
+GPU CDCL search path while recording split-batch candidate/component counters.
+`solve_maxsat_schedule_with_gpu_batch_execution_result` consumes accepted
+split-batch evidence before delegating each component to the heterogeneous
+MaxSAT scheduler, including candidate-set, search-pruning, weighted encoded
+search, UNKNOWN, and TIMEOUT jobs without CPU MaxSAT enumeration.
 `solve_portfolio_with_gpu_execution_result`
 applies the boundary before dispatching bounded SAT and MaxSAT jobs through the
 same adapter, propagating UNKNOWN/TIMEOUT portfolio statuses without CPU search,
@@ -490,12 +499,13 @@ distinct-CNF fail-closed rejection, a two-record accepted lifecycle, and bounded
 UNKNOWN/TIMEOUT lifecycle propagation, plus two-record same-CNF learned-clause
 reuse, a mixed unary and binary `possible`/`not possible` plus binary `not know`
 operator-result lifecycle,
-accepted split-batch lifecycle, learned-clause reuse, MaxSAT, MaxSAT search pruning, and portfolio evidence
+accepted split-batch lifecycle, learned-clause reuse, MaxSAT, MaxSAT search pruning,
+weighted MaxSAT encoding/search, generalized MaxSAT scheduling, and portfolio evidence
 with batch/component counters,
 two-record/two-CNF bounded MaxSAT candidate-set execution, bounded GPU-CDCL
 pruning of UNSAT MaxSAT search candidates for one, two, and split-batch accepted evidence
 records, and bounded weighted soft-clause selection encoding for one and two
-accepted evidence records, plus a two-record heterogeneous MaxSAT scheduler
+accepted evidence records, plus two-record and split-batch heterogeneous MaxSAT schedulers
 over candidate-set, search-prune, encoded-search, UNKNOWN, and TIMEOUT jobs and
 two-record status-aware portfolio dispatch, with G91/default FAEEL mode-specific
 and operator-family accepted-evidence trace counters. Broader solver semantic integration
@@ -526,6 +536,7 @@ cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_learned_clause_reuse_path -- --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_maxsat_path -- --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_maxsat_search_pruning -- --nocapture
+cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_encoded_maxsat_and_scheduler_paths -- --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_portfolio_path -- --nocapture
 cargo test -p xlog-solve --test solver_service_semantics
 ```
