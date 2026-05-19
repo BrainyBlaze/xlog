@@ -334,7 +334,13 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(prob.contains("accepted_gpu_batch_evidence_consumed"));
     assert!(prob.contains("accepted_gpu_batch_component_evidence_consumed"));
     assert!(prob.contains("gpu_conditioned_evidence_facts"));
+    assert!(prob.contains("gpu_conditioned_nonzero_arity_evidence_facts"));
+    assert!(prob.contains("gpu_conditioned_max_evidence_arity"));
     assert!(prob.contains("gpu_conditioned_negative_evidence_facts"));
+    assert!(prob.contains("gpu_source_conditioned_nonzero_arity_evidence_facts"));
+    assert!(prob.contains("gpu_source_conditioned_max_evidence_arity"));
+    assert!(prob.contains("gpu_program_conditioned_nonzero_arity_evidence_facts"));
+    assert!(prob.contains("gpu_program_conditioned_max_evidence_arity"));
     assert!(prob.contains("gpu_source_conditioned_know_evidence_facts"));
     assert!(prob.contains("gpu_source_conditioned_possible_evidence_facts"));
     assert!(prob.contains("gpu_source_conditioned_not_known_evidence_facts"));
@@ -377,6 +383,9 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
         .contains("accepted_split_batch_gates_probabilistic_pir_cnf_and_exact_evaluation_paths"));
     assert!(integration
         .contains("accepted_gpu_execution_batches_gate_probabilistic_exact_compile_paths"));
+    assert!(
+        integration.contains("accepted_ternary_probabilistic_evidence_records_nonzero_arity_trace")
+    );
 
     for (label, source) in [
         ("runtime", runtime.as_str()),

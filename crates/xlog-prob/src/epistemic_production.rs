@@ -118,12 +118,24 @@ pub struct EpistemicProbProductionTrace {
     pub gpu_program_knowledge_compilation_end_to_end_runs: u64,
     /// Number of accepted assumptions compiled as exact evidence facts.
     pub gpu_conditioned_evidence_facts: u64,
+    /// Number of accepted nonzero-arity assumptions compiled as exact evidence facts.
+    pub gpu_conditioned_nonzero_arity_evidence_facts: u64,
+    /// Maximum accepted exact evidence tuple arity observed across conditioned paths.
+    pub gpu_conditioned_max_evidence_arity: u32,
     /// Number of false accepted assumptions compiled as exact evidence facts.
     pub gpu_conditioned_negative_evidence_facts: u64,
     /// Number of source-conditioned accepted assumptions compiled as exact evidence facts.
     pub gpu_source_conditioned_evidence_facts: u64,
+    /// Number of source-conditioned nonzero-arity assumptions compiled as exact evidence facts.
+    pub gpu_source_conditioned_nonzero_arity_evidence_facts: u64,
+    /// Maximum source-conditioned accepted exact evidence tuple arity observed.
+    pub gpu_source_conditioned_max_evidence_arity: u32,
     /// Number of parsed-program-conditioned accepted assumptions compiled as exact evidence facts.
     pub gpu_program_conditioned_evidence_facts: u64,
+    /// Number of parsed-program-conditioned nonzero-arity assumptions compiled as exact evidence facts.
+    pub gpu_program_conditioned_nonzero_arity_evidence_facts: u64,
+    /// Maximum parsed-program-conditioned accepted exact evidence tuple arity observed.
+    pub gpu_program_conditioned_max_evidence_arity: u32,
     /// Number of false source-conditioned assumptions compiled as exact evidence facts.
     pub gpu_source_conditioned_negative_evidence_facts: u64,
     /// Number of false parsed-program-conditioned assumptions compiled as exact evidence facts.
@@ -397,6 +409,14 @@ impl EpistemicProbProductionAdapter {
             .trace
             .gpu_conditioned_evidence_facts
             .saturating_add(counts.total as u64);
+        self.trace.gpu_conditioned_nonzero_arity_evidence_facts = self
+            .trace
+            .gpu_conditioned_nonzero_arity_evidence_facts
+            .saturating_add(counts.nonzero_arity as u64);
+        self.trace.gpu_conditioned_max_evidence_arity = self
+            .trace
+            .gpu_conditioned_max_evidence_arity
+            .max(counts.max_arity);
         self.trace.gpu_conditioned_negative_evidence_facts = self
             .trace
             .gpu_conditioned_negative_evidence_facts
@@ -407,6 +427,15 @@ impl EpistemicProbProductionAdapter {
                     .trace
                     .gpu_source_conditioned_evidence_facts
                     .saturating_add(counts.total as u64);
+                self.trace
+                    .gpu_source_conditioned_nonzero_arity_evidence_facts = self
+                    .trace
+                    .gpu_source_conditioned_nonzero_arity_evidence_facts
+                    .saturating_add(counts.nonzero_arity as u64);
+                self.trace.gpu_source_conditioned_max_evidence_arity = self
+                    .trace
+                    .gpu_source_conditioned_max_evidence_arity
+                    .max(counts.max_arity);
                 self.trace.gpu_source_conditioned_negative_evidence_facts = self
                     .trace
                     .gpu_source_conditioned_negative_evidence_facts
@@ -434,6 +463,15 @@ impl EpistemicProbProductionAdapter {
                     .trace
                     .gpu_program_conditioned_evidence_facts
                     .saturating_add(counts.total as u64);
+                self.trace
+                    .gpu_program_conditioned_nonzero_arity_evidence_facts = self
+                    .trace
+                    .gpu_program_conditioned_nonzero_arity_evidence_facts
+                    .saturating_add(counts.nonzero_arity as u64);
+                self.trace.gpu_program_conditioned_max_evidence_arity = self
+                    .trace
+                    .gpu_program_conditioned_max_evidence_arity
+                    .max(counts.max_arity);
                 self.trace.gpu_program_conditioned_negative_evidence_facts = self
                     .trace
                     .gpu_program_conditioned_negative_evidence_facts
@@ -2071,6 +2109,8 @@ impl EpistemicProbProductionAdapter {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct EpistemicProbConditionedEvidenceCounts {
     total: usize,
+    nonzero_arity: usize,
+    max_arity: u32,
     negative: usize,
     know: usize,
     possible: usize,
@@ -2126,6 +2166,10 @@ fn condition_program_with_accepted_evidence(
             });
         }
         counts.total += 1;
+        if assumption.arity > 0 {
+            counts.nonzero_arity += 1;
+            counts.max_arity = counts.max_arity.max(assumption.arity as u32);
+        }
         if !assumption.value {
             counts.negative += 1;
         }

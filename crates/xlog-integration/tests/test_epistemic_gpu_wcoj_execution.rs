@@ -5493,6 +5493,99 @@ fn accepted_gpu_execution_result_conditions_nonzero_arity_probabilistic_evidence
 }
 
 #[test]
+fn accepted_ternary_probabilistic_evidence_records_nonzero_arity_trace() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred triple(u32, u32, u32).
+        pred fact3(u32, u32, u32).
+        pred accepted(u32, u32, u32).
+        accepted(A, B, C) :- triple(A, B, C), know fact3(A, B, C).
+        "#,
+    )
+    .expect("parse ternary probabilistic evidence fixture");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile ternary probabilistic evidence executable");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &executable.relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation(
+        "triple",
+        upload_ternary_u32(&fix.memory, &[(1, 2, 3), (2, 3, 5), (8, 13, 21)]),
+    );
+    executor.put_relation("fact3", upload_ternary_u32(&fix.memory, &[(2, 3, 5)]));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 3,
+            },
+        )
+        .expect("execute ternary probabilistic evidence fixture");
+    assert_eq!(
+        download_ternary_u32(&fix.provider, &result.final_output),
+        vec![(2, 3, 5)]
+    );
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut adapter = EpistemicProbProductionAdapter::new(config);
+    let evaluated = adapter
+        .compile_and_evaluate_conditioned_source_with_gpu_execution_result(
+            r#"
+            0.8::fact3(2, 3, 5).
+            query(fact3(2, 3, 5)).
+            "#,
+            &fix.provider,
+            &result,
+            vec![EpistemicAssumption::known_tuple(
+                "fact3",
+                vec![
+                    EpistemicEvidenceTerm::integer(2),
+                    EpistemicEvidenceTerm::integer(3),
+                    EpistemicEvidenceTerm::integer(5),
+                ],
+                true,
+            )],
+        )
+        .expect("accepted ternary GPU evidence must condition exact evidence");
+
+    assert_eq!(evaluated.query_probs.len(), 1);
+    assert!(
+        (evaluated.query_probs[0].prob - 1.0).abs() < 1.0e-6,
+        "accepted ternary know fact3(2, 3, 5) evidence must condition query probability to true"
+    );
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_world_view_evidence_consumed, 1);
+    assert_eq!(trace.accepted_evidence_assumptions_consumed, 1);
+    assert_eq!(trace.gpu_conditioned_evidence_facts, 1);
+    assert_eq!(trace.gpu_conditioned_nonzero_arity_evidence_facts, 1);
+    assert_eq!(trace.gpu_source_conditioned_nonzero_arity_evidence_facts, 1);
+    assert_eq!(
+        trace.gpu_program_conditioned_nonzero_arity_evidence_facts,
+        0
+    );
+    assert_eq!(trace.gpu_conditioned_max_evidence_arity, 3);
+    assert_eq!(trace.gpu_source_conditioned_max_evidence_arity, 3);
+    assert_eq!(trace.gpu_program_conditioned_max_evidence_arity, 0);
+    assert_eq!(trace.gpu_exact_source_compiles, 1);
+    assert_eq!(trace.gpu_exact_query_evaluations, 1);
+    assert_eq!(trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(trace.fixture_circuit_evaluations, 0);
+}
+
+#[test]
 fn accepted_gpu_execution_result_conditions_negative_nonzero_arity_probabilistic_evidence() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
