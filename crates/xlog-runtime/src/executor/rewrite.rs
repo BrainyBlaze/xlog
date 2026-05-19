@@ -6,8 +6,8 @@ use xlog_core::{RelId, Result, XlogError};
 use xlog_ir::rir::{LookupPerm, ProjectExpr, VariableOrder};
 use xlog_ir::{ExecutionPlan, JoinType, RirNode};
 
-use super::Executor;
 use super::RelationDelta;
+use super::{DeltaRecomputeStats, Executor};
 
 fn triangle_delta_var_order(leader_idx: u8) -> VariableOrder {
     let lookup_perms = match leader_idx {
@@ -131,9 +131,9 @@ impl Executor {
         &mut self,
         plan: &ExecutionPlan,
         deltas: &HashMap<String, RelationDelta>,
-    ) -> Result<()> {
+    ) -> Result<DeltaRecomputeStats> {
         if deltas.is_empty() {
-            return Ok(());
+            return Ok(DeltaRecomputeStats::default());
         }
 
         let has_deletes = deltas
@@ -222,7 +222,13 @@ impl Executor {
         }
 
         if affected.is_empty() {
-            return Ok(());
+            return Ok(DeltaRecomputeStats {
+                changed_relations: deltas.len(),
+                has_deletes,
+                affected_sccs: 0,
+                recomputed_sccs: 0,
+                incremental_sccs: 0,
+            });
         }
 
         fn contains_non_monotonic_ops(node: &RirNode) -> bool {
@@ -353,7 +359,13 @@ impl Executor {
             }
         }
 
-        Ok(())
+        Ok(DeltaRecomputeStats {
+            changed_relations: deltas.len(),
+            has_deletes,
+            affected_sccs: affected.len(),
+            recomputed_sccs: recompute_sccs.len(),
+            incremental_sccs: affected.len().saturating_sub(recompute_sccs.len()),
+        })
     }
 
     pub(crate) fn collect_scan_rels(node: &RirNode, out: &mut Vec<RelId>) {

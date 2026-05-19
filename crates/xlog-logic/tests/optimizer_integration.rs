@@ -92,7 +92,7 @@ fn test_optimizer_with_stratified_program() {
         node(4).
         edge(1, 2).
         edge(2, 3).
-        isolated(X) :- node(X), not edge(X, Y).
+        isolated(X) :- node(X), not edge(X, _).
     "#;
 
     let plan = compiler

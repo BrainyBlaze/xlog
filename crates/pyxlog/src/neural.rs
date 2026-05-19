@@ -9,7 +9,7 @@ use xlog_core::{symbol, ScalarType, Schema};
 use xlog_logic::ast::ArithExpr;
 use xlog_logic::ast::{Atom, BodyLiteral, Rule, Term};
 use xlog_logic::parse_program;
-use xlog_neural::{EmbeddingHandle, NetworkConfig, TensorMetadata};
+use xlog_neural::{EmbeddingHandle, NetworkConfig, NetworkHandle, TensorMetadata};
 use xlog_prob::exact::ExactDdnnfProgram;
 use xlog_prob::neural_fast_path::{GpuWeightSlots, NeuralFastPathConfig};
 
@@ -24,6 +24,65 @@ use super::{
 /// Build the standard 1-column schema for probability values.
 fn prob_schema(scalar_type: ScalarType) -> Schema {
     Schema::new(vec![("col0".to_string(), scalar_type)])
+}
+
+fn apply_network_output_mode(
+    py: Python<'_>,
+    values: &Bound<'_, PyAny>,
+    handle: &NetworkHandle,
+) -> PyResult<PyObject> {
+    let take = if handle.det { Some(1) } else { handle.k };
+    let Some(k) = take else {
+        return Ok(values.clone().unbind());
+    };
+    if k == 0 {
+        return Err(PyValueError::new_err("k must be > 0"));
+    }
+
+    let ndim: usize = values.getattr("ndim")?.extract()?;
+    if ndim != 1 {
+        return Err(PyValueError::new_err(format!(
+            "registered network output mode expects a 1-D tensor, got {}D",
+            ndim
+        )));
+    }
+    let numel: usize = values
+        .call_method0("numel")?
+        .extract::<i64>()?
+        .try_into()
+        .map_err(|_| PyValueError::new_err("tensor numel is negative"))?;
+    let take = k.min(numel);
+    let take_i64 = i64::try_from(take).map_err(|_| PyValueError::new_err("k exceeds i64::MAX"))?;
+
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("descending", true)?;
+    kwargs.set_item("stable", true)?;
+    let order = values.call_method("argsort", (), Some(&kwargs))?;
+    let indices = order.call_method1("narrow", (0i32, 0i64, take_i64))?;
+
+    let torch = py.import("torch")?;
+    let mask = torch.call_method1("zeros_like", (values,))?;
+    let ones = torch.call_method1("ones_like", (values,))?;
+    let selected_ones = ones.call_method1("index_select", (0i32, &indices))?;
+    mask.call_method1("scatter_", (0i32, &indices, &selected_ones))?;
+
+    let selected = values.call_method1("__mul__", (&mask,))?;
+    let clamp_kwargs = PyDict::new(py);
+    clamp_kwargs.set_item("min", types::NLL_EPSILON)?;
+    let denom = selected
+        .call_method0("sum")?
+        .call_method("clamp", (), Some(&clamp_kwargs))?;
+    let soft = selected.call_method1("__truediv__", (&denom,))?;
+    if handle.det {
+        let detached_soft = soft.call_method0("detach")?;
+        let straight_through = mask.call_method1(
+            "__add__",
+            (&soft.call_method1("__sub__", (&detached_soft,))?,),
+        )?;
+        Ok(straight_through.unbind())
+    } else {
+        Ok(soft.unbind())
+    }
 }
 
 // =============================================================================
@@ -59,6 +118,10 @@ impl CompiledProgram {
         cache: bool,
         cache_size: usize,
     ) -> PyResult<()> {
+        if k == Some(0) {
+            return Err(PyValueError::new_err("k must be > 0"));
+        }
+
         // Validate network name exists in neural predicates
         if !self.declared_networks.contains(&name) {
             return Err(PyValueError::new_err(format!(
@@ -290,6 +353,72 @@ impl CompiledProgram {
         self.template_compile_count
     }
 
+    /// Return neural bridge cache and deterministic-mode telemetry.
+    fn neural_cache_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let stats = PyDict::new(py);
+        stats.set_item("circuit_cache_size", self.circuit_cache.len())?;
+        stats.set_item("circuit_cache_hits", self.circuit_cache_hits)?;
+        stats.set_item("circuit_cache_misses", self.circuit_cache_misses)?;
+        stats.set_item("template_compile_count", self.template_compile_count)?;
+        stats.set_item(
+            "query_signature_cache_size",
+            self.query_signature_cache.len(),
+        )?;
+
+        let networks = PyDict::new(py);
+        for (name, handle) in self.network_registry.iter() {
+            let entry = PyDict::new(py);
+            entry.set_item("cache_enabled", handle.cache_enabled)?;
+            entry.set_item("cache_size", handle.cache_size)?;
+            entry.set_item("top_k", handle.k)?;
+            entry.set_item("deterministic", handle.det)?;
+            networks.set_item(name, entry)?;
+        }
+        stats.set_item("networks", networks)?;
+        Ok(stats.into())
+    }
+
+    /// Deterministic stable top-k over a 1-D tensor.
+    ///
+    /// Ties are resolved by lower input index via stable descending argsort.
+    fn deterministic_topk(
+        &self,
+        py: Python<'_>,
+        values: &Bound<'_, PyAny>,
+        k: usize,
+    ) -> PyResult<PyObject> {
+        if k == 0 {
+            return Err(PyValueError::new_err("k must be > 0"));
+        }
+        let ndim: usize = values.getattr("ndim")?.extract()?;
+        if ndim != 1 {
+            return Err(PyValueError::new_err(format!(
+                "deterministic_topk expects a 1-D tensor, got {}D",
+                ndim
+            )));
+        }
+        let numel: usize = values
+            .call_method0("numel")?
+            .extract::<i64>()?
+            .try_into()
+            .map_err(|_| PyValueError::new_err("tensor numel is negative"))?;
+        let take = k.min(numel);
+        let take_i64 =
+            i64::try_from(take).map_err(|_| PyValueError::new_err("k exceeds i64::MAX"))?;
+
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("descending", true)?;
+        kwargs.set_item("stable", true)?;
+        let order = values.call_method("argsort", (), Some(&kwargs))?;
+        let indices = order.call_method1("narrow", (0i32, 0i64, take_i64))?;
+        let top_values = values.call_method1("index_select", (0i32, &indices))?;
+
+        let dict = PyDict::new(py);
+        dict.set_item("indices", indices)?;
+        dict.set_item("values", top_values)?;
+        Ok(dict.into())
+    }
+
     /// Get names of all declared neural networks (from nn() declarations).
     fn declared_network_names(&self) -> Vec<String> {
         self.declared_networks.iter().cloned().collect()
@@ -485,6 +614,112 @@ impl CompiledProgram {
         expected: bool,
     ) -> PyResult<PyObject> {
         self.forward_backward_tensor_internal(py, query, expected)
+    }
+
+    /// Belnap-aware dual-channel loss terms for bridge training.
+    #[pyo3(signature = (pro, contra, quarantine, pro_reward=1.0, contra_penalty=1.0, quarantine_penalty=1.0, reduction="mean"))]
+    fn belnap_loss(
+        &self,
+        py: Python<'_>,
+        pro: &Bound<'_, PyAny>,
+        contra: &Bound<'_, PyAny>,
+        quarantine: &Bound<'_, PyAny>,
+        pro_reward: f64,
+        contra_penalty: f64,
+        quarantine_penalty: f64,
+        reduction: &str,
+    ) -> PyResult<PyObject> {
+        let pro_term = pro.call_method1("__mul__", (pro_reward,))?.unbind();
+        let contra_term = contra.call_method1("__mul__", (contra_penalty,))?.unbind();
+        let quarantine_term = quarantine
+            .call_method1("__mul__", (quarantine_penalty,))?
+            .unbind();
+        let penalty = contra_term
+            .bind(py)
+            .call_method1("__add__", (quarantine_term.bind(py),))?
+            .unbind();
+        let unreduced = penalty
+            .bind(py)
+            .call_method1("__sub__", (pro_term.bind(py),))?
+            .unbind();
+
+        let dict = PyDict::new(py);
+        dict.set_item(
+            "loss",
+            reduce_tensor_obj(py, unreduced.clone_ref(py), reduction)?,
+        )?;
+        dict.set_item(
+            "pro_reward",
+            reduce_tensor_obj(py, pro_term.clone_ref(py), reduction)?,
+        )?;
+        dict.set_item(
+            "contra_penalty",
+            reduce_tensor_obj(py, contra_term.clone_ref(py), reduction)?,
+        )?;
+        dict.set_item(
+            "quarantine_penalty",
+            reduce_tensor_obj(py, quarantine_term.clone_ref(py), reduction)?,
+        )?;
+        dict.set_item(
+            "cfr_regret_proxy",
+            reduce_tensor_obj(py, penalty.clone_ref(py), reduction)?,
+        )?;
+        dict.set_item(
+            "formula",
+            "contra_penalty + quarantine_penalty - pro_reward",
+        )?;
+        Ok(dict.into())
+    }
+
+    /// Non-negative semantic violation loss.
+    #[pyo3(signature = (violations, weight=1.0, reduction="mean"))]
+    fn semantic_loss_tensor(
+        &self,
+        py: Python<'_>,
+        violations: &Bound<'_, PyAny>,
+        weight: f64,
+        reduction: &str,
+    ) -> PyResult<PyObject> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("min", 0.0)?;
+        let clipped = violations.call_method("clamp", (), Some(&kwargs))?;
+        let weighted = clipped.call_method1("__mul__", (weight,))?.unbind();
+        reduce_tensor_obj(py, weighted, reduction)
+    }
+
+    /// Mean-squared-error tensor helper.
+    #[pyo3(signature = (pred, target, weight=1.0, reduction="mean"))]
+    fn mse_loss_tensor(
+        &self,
+        py: Python<'_>,
+        pred: &Bound<'_, PyAny>,
+        target: &Bound<'_, PyAny>,
+        weight: f64,
+        reduction: &str,
+    ) -> PyResult<PyObject> {
+        let diff = pred.call_method1("__sub__", (target,))?;
+        let sq = diff.call_method1("pow", (2.0f64,))?;
+        let weighted = sq.call_method1("__mul__", (weight,))?.unbind();
+        reduce_tensor_obj(py, weighted, reduction)
+    }
+
+    /// Information loss `-log(prob)` with clamping.
+    #[pyo3(signature = (prob, weight=1.0, eps=types::NLL_EPSILON, reduction="mean"))]
+    fn infoloss_tensor(
+        &self,
+        py: Python<'_>,
+        prob: &Bound<'_, PyAny>,
+        weight: f64,
+        eps: f64,
+        reduction: &str,
+    ) -> PyResult<PyObject> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("min", eps)?;
+        let clamped = prob.call_method("clamp", (), Some(&kwargs))?;
+        let log_p = clamped.call_method0("log")?;
+        let neg = log_p.call_method0("__neg__")?;
+        let weighted = neg.call_method1("__mul__", (weight,))?.unbind();
+        reduce_tensor_obj(py, weighted, reduction)
     }
 }
 
@@ -827,6 +1062,8 @@ impl CompiledProgram {
 
         // Output shape is [batch=1, num_classes], squeeze to [num_classes]
         let output_squeezed = output_bound.call_method1("squeeze", (0i32,))?;
+        let output_mode = apply_network_output_mode(py, &output_squeezed, handle)?;
+        let output_squeezed = output_mode.bind(py);
 
         // Select the target probability tensor and compute loss on GPU:
         // loss = -log(clamp(prob, min=epsilon)).
@@ -973,6 +1210,8 @@ impl CompiledProgram {
 
             for (batch_idx, call) in calls.iter().enumerate() {
                 let output_row = output_bound.get_item(batch_idx)?;
+                let output_row_mode = apply_network_output_mode(py, &output_row, handle)?;
+                let output_row = output_row_mode.bind(py);
                 let output_row = output_row.call_method0("contiguous")?;
 
                 let output_detached = output_row.call_method0("detach")?;
@@ -1017,7 +1256,10 @@ impl CompiledProgram {
         // Ensure template circuit is available (compile-once per shape).
         let cache_key =
             self.generate_cache_key_for_signature(&signature, &pred_name, atom.terms.len());
-        if !self.circuit_cache.contains_key(&cache_key) {
+        if self.circuit_cache.contains_key(&cache_key) {
+            self.circuit_cache_hits = self.circuit_cache_hits.saturating_add(1);
+        } else {
+            self.circuit_cache_misses = self.circuit_cache_misses.saturating_add(1);
             let (cached, profile) =
                 self.compile_circuit_for_template(&signature, &pred_name, atom.terms.len())?;
             self.circuit_cache.insert(cache_key.clone(), cached);
@@ -1164,7 +1406,10 @@ impl CompiledProgram {
         // Ensure circuit is compiled/cached.
         let cache_key =
             self.generate_cache_key_for_signature(&signature, &pred_name, atoms[0].terms.len());
-        if !self.circuit_cache.contains_key(&cache_key) {
+        if self.circuit_cache.contains_key(&cache_key) {
+            self.circuit_cache_hits = self.circuit_cache_hits.saturating_add(1);
+        } else {
+            self.circuit_cache_misses = self.circuit_cache_misses.saturating_add(1);
             let (cached, profile) =
                 self.compile_circuit_for_template(&signature, &pred_name, atoms[0].terms.len())?;
             self.circuit_cache.insert(cache_key.clone(), cached);
@@ -1281,6 +1526,8 @@ impl CompiledProgram {
             // Slice each row, validate label count, create DLPack buffers.
             for (i, call) in calls.iter().enumerate() {
                 let row = batch_output_bound.get_item(i)?;
+                let row_mode = apply_network_output_mode(py, &row, handle)?;
+                let row = row_mode.bind(py);
                 let row = row.call_method0("contiguous")?;
 
                 // Validate network output width matches declared labels.
@@ -2073,5 +2320,17 @@ impl CompiledProgram {
         let tensor_bound = tensor.bind(py);
         let indexed = tensor_bound.get_item(index)?;
         Ok(indexed.into())
+    }
+}
+
+fn reduce_tensor_obj(py: Python<'_>, tensor: PyObject, reduction: &str) -> PyResult<PyObject> {
+    match reduction {
+        "none" => Ok(tensor),
+        "sum" => Ok(tensor.bind(py).call_method0("sum")?.unbind()),
+        "mean" => Ok(tensor.bind(py).call_method0("mean")?.unbind()),
+        other => Err(PyValueError::new_err(format!(
+            "Unsupported reduction '{}'; expected 'none', 'sum', or 'mean'",
+            other
+        ))),
     }
 }

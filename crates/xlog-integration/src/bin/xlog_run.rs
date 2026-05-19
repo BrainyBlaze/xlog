@@ -213,6 +213,17 @@ fn format_term(term: &Term) -> String {
         Term::Float(f) => f.to_string(),
         Term::String(s) => format!("{:?}", s),
         Term::Symbol(id) => symbol::resolve(*id),
+        Term::List(items) => format!(
+            "[{}]",
+            items.iter().map(format_term).collect::<Vec<_>>().join(", ")
+        ),
+        Term::Cons { head, tail } => format!("[{} | {}]", format_term(head), format_term(tail)),
+        Term::Compound { functor, args } => format!(
+            "{}({})",
+            functor,
+            args.iter().map(format_term).collect::<Vec<_>>().join(", ")
+        ),
+        Term::PredRef(name) => format!("predref({})", name),
         Term::Aggregate(a) => format!("{:?}({})", a.op, a.variable),
     }
 }
@@ -266,6 +277,13 @@ fn format_constraint(body: &[BodyLiteral]) -> String {
                 };
                 let prefix = if e.negated { "not " } else { "" };
                 format!("{prefix}{op} {}({})", e.atom.predicate, args)
+            }
+            BodyLiteral::Univ(univ) => {
+                format!(
+                    "{} =.. {}",
+                    format_term(&univ.term),
+                    format_term(&univ.parts)
+                )
             }
         })
         .collect::<Vec<_>>()

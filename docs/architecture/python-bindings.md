@@ -162,6 +162,139 @@ The persistent session path is additive:
 - `evaluate(dlpack_inputs=...)` remains the stateless one-shot API
 - `session()` exposes a mutable named relation store with schema-checked DLPack import/export
 
+#### Persistent Relation Deltas
+
+Persistent sessions also support DLPack-backed relation deltas for DTS-DLM
+Stage-4 update loops. `insert_relation(...)`, `delete_relation(...)`, and
+`apply_relation_delta(...)` update the session relation store through the
+runtime `RelationDelta` / `apply_deltas_and_recompute` path. Insert-only
+monotone SCCs keep prior materialized output where the execution plan permits
+it; delete-containing deltas clear and recompute affected SCCs for correctness.
+
+```python
+session.put_relation("wmir_committed", [row_id, parent_id])
+session.evaluate()
+
+delta = session.insert_relation("wmir_committed", [new_row_id, new_parent_id])
+result = session.evaluate()          # returns the delta-updated cached store
+print(session.delta_stats(), delta)
+
+session.apply_relation_delta(
+    "wmir_committed",
+    insert_columns=[added_row_id, added_parent_id],
+    delete_columns=[removed_row_id, removed_parent_id],
+)
+
+session.apply_relation_delta_batch([
+    {"name": "wmir_committed", "insert_columns": [row_a, parent_a]},
+    {"name": "wmir_committed", "delete_columns": [row_b, parent_b]},
+])
+```
+
+The delta stats dictionary contains `changed_relations`, `insert_rows`,
+`delete_rows`, `affected_sccs`, `recomputed_sccs`, `incremental_sccs`,
+`input_delta_count`, `coalesced_insert_rows`, `coalesced_delete_rows`, and
+`canceled_rows`. Batch updates coalesce repeated relation mutations before
+runtime recompute using existing device-resident set operations; callback or
+diagnostic code must not materialize relation rows on the host.
+Direct `put_relation`, `remove_relation`, or `clear_relations` calls invalidate
+the cached runtime store and make the next `evaluate()` perform a full plan
+run before later deltas can reuse it.
+
+Persistent sessions retain their runtime executor across `evaluate()` and
+delta recompute calls, so persistent hash indexes can be reused through public
+pyxlog mutation loops. `session.join_index_cache_stats()` returns the retained
+executor's `lookups`, `hits`, `misses`, `builds`, invalidation counters,
+background-build counters, `entries`, and `total_bytes`.
+
+#### Relation Change Callbacks
+
+Persistent sessions expose opt-in metadata callbacks for relation delta
+commits:
+
+```python
+def register_relation_callback(callback) -> int: ...
+def unregister_relation_callback(callback_id: int) -> bool: ...
+
+events = []
+callback_id = session.register_relation_callback(events.append)
+session.apply_relation_delta_batch([
+    {"name": "wmir_committed", "insert_columns": [row_a, parent_a]},
+])
+session.unregister_relation_callback(callback_id)
+```
+
+Callbacks fire only after a delta commit succeeds. A failed or rolled-back
+delta does not invoke registered callbacks. The callback payload is a
+metadata-only dictionary with `relation`, `generation`, `input_delta_count`,
+`insert_rows`, `delete_rows`, `has_deletes`, `coalesced_insert_rows`,
+`coalesced_delete_rows`, `canceled_rows`, `affected_sccs`,
+`recomputed_sccs`, `incremental_sccs`, and nested `telemetry`.
+
+Callbacks are invoked synchronously while the pyxlog method holds the Python
+GIL. Registration order is callback order, and relation events are emitted in
+the caller's update order after duplicate relation names are coalesced. The
+G086_NOTIFY ordering fixture records 100 replays with identical callback
+sequences. Callback payload construction does not export DLPack tensors or
+download relation data-plane rows; use explicit `evaluate()` or
+`export_relation()` when row materialization is actually requested.
+
+#### v0.8.0 Runtime Controls And Diagnostics
+
+Long-running DTS-DLM callers can submit logic or probabilistic evaluations to a
+background Python worker with `evaluate_async(...)`. The returned
+`AsyncEvaluation` is awaitable and also exposes `done()`, `cancel()`,
+`exception()`, and `result(timeout=None)` for synchronous orchestration.
+
+```python
+handle = session.evaluate_async(memory_mb=512)
+result = handle.result(timeout=30)
+```
+
+Large logic outputs can be consumed as DLPack-compatible CUDA tensor chunks:
+
+```python
+for chunk in session.evaluate_stream(memory_mb=512, chunk_rows=1024):
+    cols = chunk.tensors  # torch CUDA tensor views, DLPack-compatible
+    print(chunk.relation_name, chunk.offset, chunk.num_rows, cols)
+```
+
+The same chunking is available from an already materialized result:
+
+```python
+result = session.evaluate()
+for chunk in result.iter_query_chunks(chunk_rows=1024):
+    ...
+```
+
+Per-call `memory_mb` is accepted by `CompiledLogicProgram.evaluate`,
+`LogicRelationSession.evaluate`, `CompiledProgram.evaluate`, and
+`CompiledProgram.evaluate_device`. A zero limit raises `ValueError`; a limit
+below the provider's current tracked allocation raises `MemoryError` before the
+evaluation starts. The provider-level compile-time budget remains the hard GPU
+allocator budget.
+
+Runtime progress and diagnostics are exposed as stable dictionaries:
+
+```python
+session.progress_stats()
+session.memory_stats()
+session.host_transfer_stats()
+session.cuda_graph_stats()
+
+program.progress_stats()
+program.memory_stats()
+program.host_transfer_stats()
+program.cuda_graph_stats()
+```
+
+`memory_stats()` reports `allocated_bytes`, `memory_limit_bytes`,
+`peak_memory_bytes`, and `status`. CUDA Graph stats report
+`csm_cuda_graph_captures`, `csm_cuda_graph_launches`,
+`csm_cuda_graph_fallbacks`, and `csm_cuda_graph_cache_hits`. Environments that
+cannot provide a future diagnostic must report an explicit unavailable status or
+error rather than fabricating a zero-valued probe.
+
 ### Program (Probabilistic)
 
 ```python
@@ -322,6 +455,45 @@ batch_t = program.nll_loss_batch_tensor(queries)
 avg_loss = program.evaluate_loss(queries)
 ```
 
+### v0.8.0 DTS-DLM Bridge Helpers
+
+M37-A+B bridge training keeps Belnap pro/contra/quarantine semantics in the
+Python/ML layer. Stage-4 structural kernels remain oblivious to those channels.
+The helper surfaces operate on PyTorch tensors and preserve autograd unless the
+caller explicitly detaches inputs.
+
+```python
+top = program.deterministic_topk(scores, k=4)
+stats = program.neural_cache_stats()
+
+terms = program.belnap_loss(
+    pro=pro_scores,
+    contra=contra_scores,
+    quarantine=quarantine_scores,
+    pro_reward=1.0,
+    contra_penalty=2.0,
+    quarantine_penalty=0.5,
+)
+
+semantic = program.semantic_loss_tensor(violations, weight=1.5)
+mse = program.mse_loss_tensor(pred, target)
+info = program.infoloss_tensor(prob)
+```
+
+`deterministic_topk(...)` resolves ties by lower input index. `neural_cache_stats()`
+reports circuit-cache size, hit/miss counters, template compile count,
+query-signature cache size, and registered-network cache/top-k/deterministic
+configuration. `belnap_loss(...)` returns a dictionary containing `loss`,
+`pro_reward`, `contra_penalty`, `quarantine_penalty`, `cfr_regret_proxy`, and
+the formula string.
+
+Registered-network output modes reuse the existing `register_network(..., k=N,
+det=True)` configuration. `forward_backward_tensor(...)`,
+`forward_backward(...)`, and batched neural-query training apply the configured
+stable top-k or deterministic top-1 mode before NLL loss and cached circuit
+probability import. Deterministic mode uses a hard top-1 forward value with a
+straight-through gradient path through the selected probability.
+
 ### Optimizer and scheduler control
 
 ```python
@@ -473,6 +645,42 @@ Contract notes:
 - The device query path avoids semantic-loop DTOH transfers; inspect
   `host_transfer_stats()` / `reset_host_transfer_stats()` when enforcing that contract in tests
 - Unsigned metadata/count tensors are exported as DLPack `int32` for broad framework compatibility
+
+### Bounded Exact Induction API
+
+`pyxlog.ilp.induce_exact(..., backend="native")` exposes the GPU-native
+bounded exact-induction scorer used by DTS-DLM tensorized ILP consumers. The
+public entry point returns an `ExactInductionResult` containing
+`ScoredCandidate` rows grouped by topology order: `chain`, `star`, `fanout`,
+then `fanin`.
+
+```python
+from pyxlog.ilp import induce_exact
+
+result = induce_exact(
+    prog,
+    head_relation="p_A",
+    candidate_relations=["p_B", "p_C", "p_D"],
+    positive_arg0=pos_a0,
+    positive_arg1=pos_a1,
+    negative_arg0=neg_a0,
+    negative_arg1=neg_a1,
+    k_per_topology=2,
+    deterministic=True,
+    backend="native",
+)
+```
+
+The native backend scores each topology independently in one batched CUDA
+pass. The Python reference can be used for parity checks with
+`backend="python", strict_per_topology=True`; leaving `strict_per_topology`
+at its default preserves legacy prototype behavior and is not semantically
+equivalent to native scoring.
+
+Current type policy is intentionally narrow: exact induction supports
+`u64` pair relations. `U32` and `Symbol` exact-induction dispatch are deferred
+until a downstream consumer requires them. Generated `ilp_exact.portable.ptx`
+and `.cubin` files are packaged build artifacts, not checked-in source files.
 
 ### Sparse Mask APIs
 
@@ -713,8 +921,8 @@ for batch in data_loader:
 Current limitations:
 - Linux x86_64 + CUDA only
 - Published PyPI wheels follow tagged releases and may lag the current `main` branch workspace version
-- No async evaluation API
-- No per-call memory limit configuration
+- v0.8.0 async evaluation and per-call memory APIs require this branch's
+  workspace build until the next tagged wheel is published
 
 ## See Also
 

@@ -1,0 +1,17 @@
+{
+  "features": ["magic_sets", "cli_explain"],
+  "source_required_substrings": ["#pragma magic_sets = on", "reach(X, Z) :- reach(X, Y), edge(Y, Z)"],
+  "checks": {
+    "run": {
+      "returncode": 0,
+      "stdout_contains": ["__xlog_query_0"]
+    },
+    "explain_json": {
+      "min_statements": 10,
+      "stratification_status": "ok",
+      "rir_status": "ok",
+      "magic_status": "applied",
+      "generated_predicates": ["__xlog_magic_reach_bf"]
+    }
+  }
+}

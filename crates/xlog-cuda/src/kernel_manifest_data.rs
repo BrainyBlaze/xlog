@@ -264,6 +264,7 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
         kernels: &[
             "weights_fill_leaf",
             "weights_fill_choice",
+            "weights_count_lift_exact",
             "weights_set_evidence_from_nodes",
             "weights_apply_evidence",
             "weights_map_nodes_to_vars",
@@ -450,7 +451,12 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
     KernelModuleSpec {
         cu_name: "ilp_exact",
         module_name: "xlog_ilp_exact",
-        kernels: &["ilp_exact_score"],
+        kernels: &[
+            "ilp_exact_score",
+            "ilp_exact_score_u32",
+            "ilp_exact_score_chain_smem",
+            "ilp_exact_score_chain_smem_u32",
+        ],
     },
     KernelModuleSpec {
         cu_name: "epistemic",

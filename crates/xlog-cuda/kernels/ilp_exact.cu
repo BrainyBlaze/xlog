@@ -27,16 +27,17 @@
 //   star:   H(X,Y) :- L(X,Y), R(X,Y)   (qx, qy) ∈ L ∧ (qx, qy) ∈ R
 //   fanout: H(X,Y) :- L(X,Z), R(X,Y)   ∃ _ . (qx, _) ∈ L ∧ (qx, qy) ∈ R
 //   fanin:  H(X,Y) :- L(X,Y), R(Z,Y)   (qx, qy) ∈ L ∧ ∃ _ . (_, qy) ∈ R
-__device__ inline uint32_t ilp_exact_matches(
+template <typename PairT>
+__device__ inline uint32_t ilp_exact_matches_t(
     uint32_t topology,
-    const uint64_t* L_arg0, const uint64_t* L_arg1, uint32_t L_rows,
-    const uint64_t* R_arg0, const uint64_t* R_arg1, uint32_t R_rows,
-    uint64_t qx, uint64_t qy
+    const PairT* L_arg0, const PairT* L_arg1, uint32_t L_rows,
+    const PairT* R_arg0, const PairT* R_arg1, uint32_t R_rows,
+    PairT qx, PairT qy
 ) {
     if (topology == ILP_EXACT_TOPO_CHAIN) {
         for (uint32_t i = 0; i < L_rows; i++) {
             if (L_arg0[i] != qx) continue;
-            uint64_t z = L_arg1[i];
+            PairT z = L_arg1[i];
             for (uint32_t j = 0; j < R_rows; j++) {
                 if (R_arg0[j] == z && R_arg1[j] == qy) return 1u;
             }
@@ -75,6 +76,64 @@ __device__ inline uint32_t ilp_exact_matches(
         if (R_arg1[j] == qy) return 1u;
     }
     return 0u;
+}
+
+template <typename PairT>
+__device__ inline uint32_t ilp_exact_count_chain_smem(
+    const PairT* L_arg0, const PairT* L_arg1, uint32_t L_rows,
+    const PairT* R_arg0, const PairT* R_arg1, uint32_t R_rows,
+    const PairT* query_arg0, const PairT* query_arg1, uint32_t num_queries,
+    PairT* shared_L_arg0, PairT* shared_L_arg1, uint32_t* shared_match
+) {
+    uint32_t tid = threadIdx.x;
+    uint32_t local_count = 0u;
+    uint32_t tile_capacity = blockDim.x;
+
+    for (uint32_t q = 0; q < num_queries; q++) {
+        PairT qx = query_arg0[q];
+        PairT qy = query_arg1[q];
+        uint32_t matched = 0u;
+
+        for (uint32_t tile = 0; tile < L_rows; tile += tile_capacity) {
+            uint32_t tile_rows = L_rows - tile;
+            if (tile_rows > tile_capacity) tile_rows = tile_capacity;
+
+            for (uint32_t i = tid; i < tile_rows; i += blockDim.x) {
+                shared_L_arg0[i] = L_arg0[tile + i];
+                shared_L_arg1[i] = L_arg1[tile + i];
+            }
+            __syncthreads();
+
+            uint32_t thread_match = 0u;
+            if (!matched) {
+                for (uint32_t i = tid; i < tile_rows && !thread_match; i += blockDim.x) {
+                    if (shared_L_arg0[i] != qx) continue;
+                    PairT z = shared_L_arg1[i];
+                    for (uint32_t j = 0; j < R_rows; j++) {
+                        if (R_arg0[j] == z && R_arg1[j] == qy) {
+                            thread_match = 1u;
+                            break;
+                        }
+                    }
+                }
+            }
+            shared_match[tid] = thread_match;
+            __syncthreads();
+
+            for (uint32_t s = blockDim.x / 2u; s > 0u; s >>= 1u) {
+                if (tid < s) {
+                    shared_match[tid] |= shared_match[tid + s];
+                }
+                __syncthreads();
+            }
+            if (shared_match[0]) matched = 1u;
+            __syncthreads();
+        }
+
+        if (tid == 0u) local_count += matched;
+    }
+
+    return local_count;
 }
 
 // Batched scoring kernel.
@@ -126,19 +185,236 @@ extern "C" __global__ void ilp_exact_score(
     // Per-thread stripe over queries (positives then negatives).
     uint32_t local_pos = 0u;
     for (uint32_t q = tid; q < num_pos; q += blockDim.x) {
-        local_pos += ilp_exact_matches(
+        local_pos += ilp_exact_matches_t<uint64_t>(
             topology, L_a0, L_a1, L_rows, R_a0, R_a1, R_rows,
             pos_arg0[q], pos_arg1[q]);
     }
     uint32_t local_neg = 0u;
     for (uint32_t q = tid; q < num_neg; q += blockDim.x) {
-        local_neg += ilp_exact_matches(
+        local_neg += ilp_exact_matches_t<uint64_t>(
             topology, L_a0, L_a1, L_rows, R_a0, R_a1, R_rows,
             neg_arg0[q], neg_arg1[q]);
     }
 
     // Block reduction (pair-halving, sequential — deterministic by
     // construction).
+    __shared__ uint32_t pos_scratch[ILP_EXACT_BLOCK_SIZE];
+    __shared__ uint32_t neg_scratch[ILP_EXACT_BLOCK_SIZE];
+    pos_scratch[tid] = local_pos;
+    neg_scratch[tid] = local_neg;
+    __syncthreads();
+
+    for (uint32_t s = blockDim.x / 2u; s > 0u; s >>= 1u) {
+        if (tid < s) {
+            pos_scratch[tid] += pos_scratch[tid + s];
+            neg_scratch[tid] += neg_scratch[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0u) {
+        uint32_t slot = topology * (C * C) + L * C + R;
+        pos_covered[slot] = pos_scratch[0];
+        neg_covered[slot] = neg_scratch[0];
+    }
+}
+
+extern "C" __global__ void ilp_exact_score_u32(
+    const uint32_t* cand_arg0,
+    const uint32_t* cand_arg1,
+    const uint32_t* cand_offsets,
+    uint32_t C,
+    const uint32_t* pos_arg0,
+    const uint32_t* pos_arg1,
+    uint32_t num_pos,
+    const uint32_t* neg_arg0,
+    const uint32_t* neg_arg1,
+    uint32_t num_neg,
+    uint32_t* pos_covered,
+    uint32_t* neg_covered
+) {
+    uint32_t L = blockIdx.x;
+    uint32_t R = blockIdx.y;
+    uint32_t topology = blockIdx.z;
+    uint32_t tid = threadIdx.x;
+
+    uint32_t L_off = cand_offsets[L];
+    uint32_t L_rows = cand_offsets[L + 1] - L_off;
+    uint32_t R_off = cand_offsets[R];
+    uint32_t R_rows = cand_offsets[R + 1] - R_off;
+
+    const uint32_t* L_a0 = cand_arg0 + L_off;
+    const uint32_t* L_a1 = cand_arg1 + L_off;
+    const uint32_t* R_a0 = cand_arg0 + R_off;
+    const uint32_t* R_a1 = cand_arg1 + R_off;
+
+    uint32_t local_pos = 0u;
+    for (uint32_t q = tid; q < num_pos; q += blockDim.x) {
+        local_pos += ilp_exact_matches_t<uint32_t>(
+            topology, L_a0, L_a1, L_rows, R_a0, R_a1, R_rows,
+            pos_arg0[q], pos_arg1[q]);
+    }
+    uint32_t local_neg = 0u;
+    for (uint32_t q = tid; q < num_neg; q += blockDim.x) {
+        local_neg += ilp_exact_matches_t<uint32_t>(
+            topology, L_a0, L_a1, L_rows, R_a0, R_a1, R_rows,
+            neg_arg0[q], neg_arg1[q]);
+    }
+
+    __shared__ uint32_t pos_scratch[ILP_EXACT_BLOCK_SIZE];
+    __shared__ uint32_t neg_scratch[ILP_EXACT_BLOCK_SIZE];
+    pos_scratch[tid] = local_pos;
+    neg_scratch[tid] = local_neg;
+    __syncthreads();
+
+    for (uint32_t s = blockDim.x / 2u; s > 0u; s >>= 1u) {
+        if (tid < s) {
+            pos_scratch[tid] += pos_scratch[tid + s];
+            neg_scratch[tid] += neg_scratch[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0u) {
+        uint32_t slot = topology * (C * C) + L * C + R;
+        pos_covered[slot] = pos_scratch[0];
+        neg_covered[slot] = neg_scratch[0];
+    }
+}
+
+extern "C" __global__ void ilp_exact_score_chain_smem(
+    const uint64_t* cand_arg0,
+    const uint64_t* cand_arg1,
+    const uint32_t* cand_offsets,
+    uint32_t C,
+    const uint64_t* pos_arg0,
+    const uint64_t* pos_arg1,
+    uint32_t num_pos,
+    const uint64_t* neg_arg0,
+    const uint64_t* neg_arg1,
+    uint32_t num_neg,
+    uint32_t* pos_covered,
+    uint32_t* neg_covered
+) {
+    uint32_t L = blockIdx.x;
+    uint32_t R = blockIdx.y;
+    uint32_t topology = blockIdx.z;
+    uint32_t tid = threadIdx.x;
+
+    uint32_t L_off = cand_offsets[L];
+    uint32_t L_rows = cand_offsets[L + 1] - L_off;
+    uint32_t R_off = cand_offsets[R];
+    uint32_t R_rows = cand_offsets[R + 1] - R_off;
+
+    const uint64_t* L_a0 = cand_arg0 + L_off;
+    const uint64_t* L_a1 = cand_arg1 + L_off;
+    const uint64_t* R_a0 = cand_arg0 + R_off;
+    const uint64_t* R_a1 = cand_arg1 + R_off;
+
+    extern __shared__ unsigned char ilp_exact_chain_smem_bytes[];
+    uint64_t* shared_L_arg0 = reinterpret_cast<uint64_t*>(ilp_exact_chain_smem_bytes);
+    uint64_t* shared_L_arg1 = shared_L_arg0 + blockDim.x;
+    uint32_t* shared_match = reinterpret_cast<uint32_t*>(shared_L_arg1 + blockDim.x);
+
+    uint32_t local_pos = 0u;
+    uint32_t local_neg = 0u;
+    if (topology == ILP_EXACT_TOPO_CHAIN) {
+        local_pos = ilp_exact_count_chain_smem<uint64_t>(
+            L_a0, L_a1, L_rows, R_a0, R_a1, R_rows,
+            pos_arg0, pos_arg1, num_pos, shared_L_arg0, shared_L_arg1, shared_match);
+        local_neg = ilp_exact_count_chain_smem<uint64_t>(
+            L_a0, L_a1, L_rows, R_a0, R_a1, R_rows,
+            neg_arg0, neg_arg1, num_neg, shared_L_arg0, shared_L_arg1, shared_match);
+    } else {
+        for (uint32_t q = tid; q < num_pos; q += blockDim.x) {
+            local_pos += ilp_exact_matches_t<uint64_t>(
+                topology, L_a0, L_a1, L_rows, R_a0, R_a1, R_rows,
+                pos_arg0[q], pos_arg1[q]);
+        }
+        for (uint32_t q = tid; q < num_neg; q += blockDim.x) {
+            local_neg += ilp_exact_matches_t<uint64_t>(
+                topology, L_a0, L_a1, L_rows, R_a0, R_a1, R_rows,
+                neg_arg0[q], neg_arg1[q]);
+        }
+    }
+
+    __shared__ uint32_t pos_scratch[ILP_EXACT_BLOCK_SIZE];
+    __shared__ uint32_t neg_scratch[ILP_EXACT_BLOCK_SIZE];
+    pos_scratch[tid] = local_pos;
+    neg_scratch[tid] = local_neg;
+    __syncthreads();
+
+    for (uint32_t s = blockDim.x / 2u; s > 0u; s >>= 1u) {
+        if (tid < s) {
+            pos_scratch[tid] += pos_scratch[tid + s];
+            neg_scratch[tid] += neg_scratch[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0u) {
+        uint32_t slot = topology * (C * C) + L * C + R;
+        pos_covered[slot] = pos_scratch[0];
+        neg_covered[slot] = neg_scratch[0];
+    }
+}
+
+extern "C" __global__ void ilp_exact_score_chain_smem_u32(
+    const uint32_t* cand_arg0,
+    const uint32_t* cand_arg1,
+    const uint32_t* cand_offsets,
+    uint32_t C,
+    const uint32_t* pos_arg0,
+    const uint32_t* pos_arg1,
+    uint32_t num_pos,
+    const uint32_t* neg_arg0,
+    const uint32_t* neg_arg1,
+    uint32_t num_neg,
+    uint32_t* pos_covered,
+    uint32_t* neg_covered
+) {
+    uint32_t L = blockIdx.x;
+    uint32_t R = blockIdx.y;
+    uint32_t topology = blockIdx.z;
+    uint32_t tid = threadIdx.x;
+
+    uint32_t L_off = cand_offsets[L];
+    uint32_t L_rows = cand_offsets[L + 1] - L_off;
+    uint32_t R_off = cand_offsets[R];
+    uint32_t R_rows = cand_offsets[R + 1] - R_off;
+
+    const uint32_t* L_a0 = cand_arg0 + L_off;
+    const uint32_t* L_a1 = cand_arg1 + L_off;
+    const uint32_t* R_a0 = cand_arg0 + R_off;
+    const uint32_t* R_a1 = cand_arg1 + R_off;
+
+    extern __shared__ unsigned char ilp_exact_chain_smem_bytes[];
+    uint32_t* shared_L_arg0 = reinterpret_cast<uint32_t*>(ilp_exact_chain_smem_bytes);
+    uint32_t* shared_L_arg1 = shared_L_arg0 + blockDim.x;
+    uint32_t* shared_match = shared_L_arg1 + blockDim.x;
+
+    uint32_t local_pos = 0u;
+    uint32_t local_neg = 0u;
+    if (topology == ILP_EXACT_TOPO_CHAIN) {
+        local_pos = ilp_exact_count_chain_smem<uint32_t>(
+            L_a0, L_a1, L_rows, R_a0, R_a1, R_rows,
+            pos_arg0, pos_arg1, num_pos, shared_L_arg0, shared_L_arg1, shared_match);
+        local_neg = ilp_exact_count_chain_smem<uint32_t>(
+            L_a0, L_a1, L_rows, R_a0, R_a1, R_rows,
+            neg_arg0, neg_arg1, num_neg, shared_L_arg0, shared_L_arg1, shared_match);
+    } else {
+        for (uint32_t q = tid; q < num_pos; q += blockDim.x) {
+            local_pos += ilp_exact_matches_t<uint32_t>(
+                topology, L_a0, L_a1, L_rows, R_a0, R_a1, R_rows,
+                pos_arg0[q], pos_arg1[q]);
+        }
+        for (uint32_t q = tid; q < num_neg; q += blockDim.x) {
+            local_neg += ilp_exact_matches_t<uint32_t>(
+                topology, L_a0, L_a1, L_rows, R_a0, R_a1, R_rows,
+                neg_arg0[q], neg_arg1[q]);
+        }
+    }
+
     __shared__ uint32_t pos_scratch[ILP_EXACT_BLOCK_SIZE];
     __shared__ uint32_t neg_scratch[ILP_EXACT_BLOCK_SIZE];
     pos_scratch[tid] = local_pos;

@@ -4,6 +4,116 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+No changes yet.
+
+## [0.8.6] — 2026-05-19
+
+DTS-DLM Runtime Completion and GPU-Native Optimizer Pack. This release closes
+the deferred v0.8.0 runtime completion items while preserving the v0.8.5
+language-completeness surface.
+
+### Added
+
+- Added v0.8.6 persistent-session delta coalescing and opt-in relation-change
+  callbacks, with metadata-only callback payloads and evidence-backed
+  zero-data-plane-D2H hot paths.
+- Added v0.8.6 native exact-induction completion for `U32` and `Symbol`
+  pair buffers plus profile-gated chain-topology shared-memory CUDA scorers
+  with A/B controls, parity evidence, and no added data-plane transfers.
+- Added v0.8.6 runtime common subexpression elimination for safe
+  deterministic subplans, with explicit off/on controls, relation-generation
+  invalidation, unsafe-boundary diagnostics, and evidence-backed duplicate
+  work reduction.
+- Added v0.8.6 adaptive runtime re-optimization adoption for
+  compiler-supplied candidate plans, with deterministic mis-plan telemetry,
+  GPU output equivalence, rollback diagnostics, and zero added data-plane DTOH
+  calls in the acceptance fixture.
+- Added v0.8.6 persistent hash-index manager telemetry and key hardening for
+  repeated session evaluations, including relation-generation/schema/device
+  keys, stale-index invalidation, deterministic LRU budget eviction, and
+  background-build request/completion/deferred counters plus a runtime-backed
+  recorded provider build path. The build-heavy repeated-session fixture
+  records `speedup_ratio=3.206` against the >=1.5x persistent-index target
+  with zero tracked DTOH/H2D calls.
+- Added v0.8.6 runtime consumer example-execution fixtures and validator for
+  DTS-DLM-shaped delta/optimizer workloads, neutral Mistaber-derived `.xlog`
+  fixtures, v0.9.0 substrate primitives, and public pyxlog compatibility,
+  reusing the v0.8.0/v0.8.5 validators and recording production-path evidence.
+  The validator now includes a public `LogicRelationSession` persistent-index
+  reuse probe that records a cache build/hit with zero tracked host transfers.
+  Full consumer certification now derives feature coverage from behavior
+  probes rather than `expected.json` declarations.
+
+### Changed
+
+- Corrected release-facing README, changelog, and roadmap status after the
+  `v0.8.5` tag was published.
+- Bumped workspace package metadata and internal workspace dependency
+  constraints to `0.8.6` so package metadata matches release-facing docs.
+
+### Fixed
+
+- Hardened the v0.8.6 release validator so local pyxlog staging copies fresh
+  Cargo `xlog-cuda` kernel artifacts into the staged package and sets
+  `XLOG_CUBIN_DIR` there. This prevents ignored package-local kernels from
+  shadowing the current build during v0.8.0/v0.8.5 compatibility validation.
+
+### Release Status
+
+- Closure proposal: `docs/plans/2026-05-19-v086-closure-proposal.md`.
+- Certification evidence: `docs/evidence/2026-05-19-v086-*`.
+- Release-board update, commit, merge, push, and annotated `v0.8.6` tag were
+  authorized on 2026-05-19 after the closure package reached `MERGE_READY`.
+
+## [0.8.5] — 2026-05-19
+
+Language Completeness and Developer Experience. This release refreshes the
+public language surface for finite terms/lists/meta constructs, explicit NAF,
+magic-set planning, probabilistic aggregate inference, approximate inference
+configuration, incremental parsing, and CLI inspectability while preserving
+the v0.8.0 DTS-DLM runtime compatibility surface.
+
+### Added
+
+- Added the v0.8.5 language-completeness documentation contract, including
+  finite lists, safe meta-predicates, deterministic NAF, magic-set planning,
+  probabilistic aggregate semantics, aggregate lifting, approximate inference
+  configuration, incremental parsing, and `xlog explain` / `xlog repl` /
+  `xlog watch` boundaries. The implementation remains tracked by the
+  corresponding `G085_*` evidence gates.
+- Added `docs/architecture/language-v085.md` as the parser, term, probability,
+  CLI, and v0.9.0 handoff contract for the v0.8.5 branch.
+- Added finite list normalization for `list<T>` columns, list literals, safe
+  cons patterns, and core list built-ins via `__xlog_list_*` helper relations
+  that lower through the existing relational runtime path.
+- Added safe v0.8.5 meta-predicate normalization for finite `ground`, `var`,
+  `nonvar`, `functor`, `=..`, source-fact `findall`, and unary/binary
+  `maplist` through `__xlog_meta_*` helper relations.
+- Added v0.8.5 deterministic NAF safety diagnostics for source-order bound
+  `not atom` use while preserving probabilistic WFS as a separate exact
+  inference profile.
+- Added v0.8.5 magic-set rewriting for safe bound deterministic recursive
+  queries, including `#pragma magic_sets = auto|on|off`, generated magic
+  predicates, row-reduction evidence, and typed decline diagnostics.
+- Added v0.8.5 probabilistic aggregate support for finite `count`, `sum`,
+  `min`, `max`, and `logsumexp` outcomes in exact provenance/PIR and MC
+  deterministic aggregate execution, with typed exact-domain cap diagnostics.
+- Added v0.8.5 small-domain aggregate lifting for finite probabilistic `count`
+  heads using exact cardinality dynamic programming, plus explain metadata for
+  fired and exact-enumeration fallback aggregate operators.
+- Added the GPU-native exact count-lift evaluator for accepted fired
+  probabilistic `count` aggregate queries; the production exact path launches
+  `weights_count_lift_exact` instead of using a CPU finite-world shortcut.
+- Added v0.8.5 approximate inference language integration: MC source pragmas,
+  CLI override precedence, JSON output, and sample/evidence confidence
+  reporting.
+- Added v0.8.5 incremental parsing support with statement-level parser cache,
+  stable spans, invalidation stats, module invalidation, and explain-path cache
+  integration.
+- Added v0.8.5 CLI developer surfaces for deterministic explain sections,
+  parse-only REPL smoke sessions, and watch `--once --explain` smoke runs
+  without introducing new dependencies.
+
 ### Fixed
 
 - Hardened the release example validator so every `.xlog`, probabilistic,
@@ -15,6 +125,78 @@ All notable changes to this project are documented in this file.
   falls back to the regular hash join instead of aborting valid queries.
 - Updated the public CUDA certification count to 207/207 after the current
   full-suite and recorded-launch certification reruns.
+- Fixed v0.8.5 list-helper reservation so ordinary `pair/2` relations remain
+  compatible while reserved pair-helper arities still fail closed.
+
+### Migration Notes
+
+- Existing v0.8.0 programs remain compatible. The G085_INT gate revalidated
+  the v0.8.0 DTS example/source guards and strict deterministic D2H runtime
+  paths.
+- New finite list/meta features intentionally reject non-finite, dynamic, or
+  CPU-only term forms. Unsupported forms emit typed `v0.8.5 ... error`
+  diagnostics with remediation guidance.
+- `xlog explain`, `xlog repl`, and `xlog watch --once --explain` are safe
+  inspectability paths for v0.8.5 programs and do not authorize release
+  publishing by themselves.
+
+### Release Status
+
+- Closure proposal: `docs/plans/2026-05-19-v085-closure-proposal.md`.
+- Certification evidence: `docs/evidence/2026-05-18-v085-*` and
+  `docs/evidence/2026-05-19-v085-*`.
+- Release-board update, commit, merge, push, and annotated `v0.8.5` tag were
+  completed on 2026-05-19. The tag peels to
+  `5679b686a579d581595c3d095b95a9b8899083a7`.
+
+## [0.8.0] — 2026-05-18
+
+DTS-DLM ML/Python Productization. This release pulls the consumer-critical
+Python, neural-symbolic, incremental-session, and native exact-induction work
+forward so DTS-DLM can execute the queued M37-A+B path against production xlog
+surfaces.
+
+### Added
+
+- `pyxlog` runtime/session controls for async evaluation, chunked streaming
+  results, per-call memory limits, progress counters, memory diagnostics,
+  CUDA Graph counters, and host-transfer counters.
+- Persistent relation delta APIs on `LogicRelationSession`, including insert,
+  delete, mixed `apply_relation_delta`, and `delta_stats` reporting backed by
+  runtime `RelationDelta` recomputation paths.
+- DTS-DLM neural bridge helpers: registered-network top-k and deterministic
+  output modes, stable top-k tie-breaking, neural cache telemetry, Belnap
+  pro/contra/quarantine loss helpers, semantic loss, MSE, and infoloss
+  surfaces.
+- Native exact-induction consumer integration through
+  `pyxlog.ilp.exact_induce.induce_exact(..., backend="native")` for the DTS
+  tensorized ILP `U64` path, with strict-per-topology compatibility policy and
+  packaging of `ilp_exact` CUDA artifacts through the normal `pyxlog/kernels`
+  wheel path.
+- A DTS-focused example suite under `examples/v080-dts/` plus
+  `scripts/validate_v080_examples.py`, covering async/streaming runtime
+  controls, relation deltas, neural bridge helpers, native exact induction, and
+  probabilistic async diagnostics.
+- A machine-readable v0.8.0 certification pack under
+  `docs/evidence/2026-05-18-v080-cert/` with `17/17` DTS-required pyxlog symbol
+  coverage and `signature_drift=0`.
+
+### Changed
+
+- Workspace package version and internal xlog crate dependency constraints now
+  target `0.8.0`.
+- README and roadmap release status now identify `v0.8.0` as the current
+  tagged release and route DTS-DLM users to the Python bindings and
+  `examples/v080-dts/` suite.
+- v0.9.0 is the next Epistemic/Solver Semantics train; v0.10.0 is the
+  Multi-GPU / Out-of-Core train.
+
+### Release Status
+
+- Closure proposal: `docs/plans/2026-05-18-v080-closure-proposal.md`.
+- Certification evidence: `docs/evidence/2026-05-18-v080-*/`.
+- DTS-DLM full 449-doc native-liveness replay is accepted by historical
+  evidence waiver; it was not freshly rerun inside the xlog release worktree.
 
 ## [0.7.0] — 2026-05-18
 

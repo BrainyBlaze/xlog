@@ -1,0 +1,48 @@
+{
+  "node": "G086_ADAPT",
+  "date": "2026-05-19",
+  "command": "cargo test -p xlog-runtime adaptive_reoptimization -- --nocapture",
+  "deterministic_fixture": {
+    "baseline_plan": "Project(Join(Scan(left), Scan(right)), Column(0))",
+    "candidate_plan": "Scan(left)",
+    "adapted_output_matches_baseline": true,
+    "adopted": 1,
+    "rolled_back": 0,
+    "decision_replays": 100,
+    "telemetry_fields": [
+      "estimated_output_rows",
+      "actual_output_rows",
+      "cardinality_delta_abs",
+      "estimated_selectivity",
+      "actual_selectivity",
+      "selectivity_delta_abs",
+      "left_heat",
+      "right_heat",
+      "heat_delta_abs",
+      "misplan_ratio"
+    ],
+    "data_plane_dtoh_calls": 0
+  },
+  "disabled_fixture": {
+    "disabled": 1,
+    "adopted": 0,
+    "rolled_back": 0,
+    "decision": "Disabled"
+  },
+  "rollback_fixture": {
+    "rolled_back": 1,
+    "candidate_output_mismatch_diagnostic": true,
+    "rollback_restored_baseline_diagnostic": true,
+    "baseline_output_restored": true
+  },
+  "performance_or_blocker": {
+    "speedup_gate_claimed": false,
+    "correctness_blocker_removed": true,
+    "blocker": "candidate adoption cannot replace baseline output unless GPU full-row equivalence succeeds; adverse candidates roll back with typed diagnostics"
+  },
+  "transfer_budget": {
+    "uses_gpu_full_row_set_difference": true,
+    "uses_metadata_control_plane_counters": true,
+    "tracked_data_plane_dtoh_calls": 0
+  }
+}

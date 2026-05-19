@@ -1,0 +1,21 @@
+// maplist over static predicate references.
+
+pred good(value: u32).
+pred next(input: u32, output: u32).
+pred todo(id: u32, values: list<u32>).
+
+good(1).
+good(2).
+good(3).
+next(1, 10).
+next(2, 20).
+next(3, 30).
+todo(1, [1, 2, 3]).
+
+all_good(1) :- maplist(good, [1, 2, 3]).
+mapped_len(N) :- maplist(next, [1, 2, 3], L), length(L, N).
+todo_size(Id, N) :- todo(Id, Values), length(Values, N).
+
+?- all_good(1).
+?- mapped_len(N).
+?- todo_size(Id, N).

@@ -5,8 +5,9 @@ use std::collections::{HashMap, HashSet};
 use std::os::raw::{c_char, c_void};
 use std::sync::Arc;
 
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyMemoryError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 use xlog_core::{MemoryBudget, Schema};
 use xlog_cuda::{
@@ -227,6 +228,40 @@ pub(crate) fn provider_from_config(config: GpuConfig) -> xlog_core::Result<CudaK
     CudaKernelProvider::with_runtime(device, memory)
 }
 
+pub(crate) fn enforce_call_memory_limit(
+    provider: &Arc<CudaKernelProvider>,
+    memory_mb: Option<u64>,
+) -> PyResult<()> {
+    let Some(memory_mb) = memory_mb else {
+        return Ok(());
+    };
+    if memory_mb == 0 {
+        return Err(PyValueError::new_err("memory_mb must be > 0"));
+    }
+    let memory_limit_bytes = memory_mb.saturating_mul(1024 * 1024);
+    let allocated_bytes = provider.memory().allocated_bytes();
+    if allocated_bytes > memory_limit_bytes {
+        return Err(PyMemoryError::new_err(format!(
+            "per-call memory limit exceeded before evaluation: allocated_bytes={} memory_limit_bytes={}",
+            allocated_bytes, memory_limit_bytes
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn provider_memory_stats(
+    py: Python<'_>,
+    provider: &Arc<CudaKernelProvider>,
+) -> PyResult<PyObject> {
+    let dict = PyDict::new(py);
+    let memory = provider.memory();
+    dict.set_item("allocated_bytes", memory.allocated_bytes())?;
+    dict.set_item("memory_limit_bytes", memory.budget().device_bytes)?;
+    dict.set_item("peak_memory_bytes", memory.allocated_bytes())?;
+    dict.set_item("status", "available")?;
+    Ok(dict.into())
+}
+
 pub(crate) fn parse_prob_engine_override(s: &str) -> PyResult<ProbEngine> {
     let v = s.trim().to_ascii_lowercase();
     match v.as_str() {
@@ -333,6 +368,10 @@ pub struct CompiledProgram {
     pub(crate) query_signature_cache: HashMap<String, QuerySignature>,
     /// Cache of compiled circuits by template signature
     pub(crate) circuit_cache: HashMap<String, CachedCircuit>,
+    /// Number of circuit-template cache hits observed by neural training paths.
+    pub(crate) circuit_cache_hits: usize,
+    /// Number of circuit-template cache misses observed by neural training paths.
+    pub(crate) circuit_cache_misses: usize,
     /// Number of times the template compilation path executed.
     pub(crate) template_compile_count: usize,
     /// When true, batch queries sharing the same circuit template in training.
@@ -355,6 +394,32 @@ pub struct LogicRelationSession {
     pub(crate) program: gpu_logic::LogicProgram,
     pub(crate) provider: Arc<CudaKernelProvider>,
     pub(crate) relation_store: RelationStore,
+    pub(crate) evaluation_store: Option<RelationStore>,
+    pub(crate) session_runtime: Option<gpu_logic::LogicSessionRuntime>,
+    pub(crate) last_delta_stats: Option<LogicDeltaStats>,
+    pub(crate) relation_callbacks: Vec<RelationChangeCallback>,
+    pub(crate) next_relation_callback_id: u64,
+    pub(crate) relation_generations: HashMap<String, u64>,
+}
+
+pub(crate) struct RelationChangeCallback {
+    pub id: u64,
+    pub callback: PyObject,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LogicDeltaStats {
+    pub input_delta_count: usize,
+    pub changed_relations: usize,
+    pub insert_rows: u64,
+    pub delete_rows: u64,
+    pub has_deletes: bool,
+    pub affected_sccs: usize,
+    pub recomputed_sccs: usize,
+    pub incremental_sccs: usize,
+    pub coalesced_insert_rows: u64,
+    pub coalesced_delete_rows: u64,
+    pub canceled_rows: u64,
 }
 
 #[pyclass]

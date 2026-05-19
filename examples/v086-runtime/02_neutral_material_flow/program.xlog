@@ -1,0 +1,31 @@
+// Neutral material-flow workload for shared subplan and index reuse coverage.
+
+pred material_link(src: u32, dst: u32).
+pred quality_gate(node: u32).
+pred blocked_step(node: u32).
+pred two_hop_flow(src: u32, dst: u32).
+pred certified_flow(src: u32, dst: u32).
+pred alternate_flow(src: u32, dst: u32).
+pred flow_count(src: u32, count: u64).
+
+material_link(1, 2).
+material_link(2, 4).
+material_link(1, 3).
+material_link(3, 4).
+material_link(4, 6).
+material_link(3, 5).
+
+quality_gate(2).
+quality_gate(3).
+quality_gate(4).
+
+blocked_step(5).
+
+two_hop_flow(A, C) :- material_link(A, B), material_link(B, C).
+certified_flow(A, C) :- material_link(A, B), material_link(B, C), quality_gate(B), not blocked_step(C).
+alternate_flow(A, C) :- material_link(A, B), material_link(B, C), quality_gate(C).
+flow_count(A, count(C)) :- certified_flow(A, C).
+
+?- certified_flow(A, C).
+?- alternate_flow(A, C).
+?- flow_count(A, N).

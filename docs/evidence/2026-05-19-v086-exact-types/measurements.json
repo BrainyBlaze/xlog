@@ -1,0 +1,62 @@
+{
+  "date": "2026-05-19",
+  "goal_node": "G086_EXACT_TYPES",
+  "runtime_venv": "/tmp/xlog-v086-exact-types-venv",
+  "u32": {
+    "3": {
+      "candidate_count": 3,
+      "total_scored": 36,
+      "positive_count": 2,
+      "negative_count": 1,
+      "dtoh_calls": 2,
+      "parity": true,
+      "schema": [
+        "u32",
+        "u32"
+      ]
+    },
+    "5": {
+      "candidate_count": 5,
+      "total_scored": 100,
+      "positive_count": 2,
+      "negative_count": 1,
+      "dtoh_calls": 2,
+      "parity": true,
+      "schema": [
+        "u32",
+        "u32"
+      ]
+    }
+  },
+  "symbol": {
+    "3": {
+      "candidate_count": 3,
+      "total_scored": 36,
+      "positive_count": 2,
+      "negative_count": 1,
+      "dtoh_calls": 2,
+      "parity": true,
+      "schema": [
+        "symbol",
+        "symbol"
+      ]
+    },
+    "5": {
+      "candidate_count": 5,
+      "total_scored": 100,
+      "positive_count": 2,
+      "negative_count": 1,
+      "dtoh_calls": 2,
+      "parity": true,
+      "schema": [
+        "symbol",
+        "symbol"
+      ]
+    }
+  },
+  "mixed_type_error": "Type error: induce_exact: candidate[0] buffer type mismatch: expected U32, got Symbol",
+  "unsupported_provider_error": "ilp_exact_score: positives buffer column 0 type = I32, expected U64, U32, or Symbol",
+  "provider_typed_tests_passed": 7,
+  "engine_unit_tests_passed": 23,
+  "core_dlpack_compatibility_tests_passed": 1
+}

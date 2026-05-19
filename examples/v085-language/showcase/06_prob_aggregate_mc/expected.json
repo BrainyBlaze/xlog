@@ -1,0 +1,23 @@
+{
+  "features": ["prob_aggregate_mc", "aggregate_query"],
+  "source_required_substrings": ["#pragma prob_engine = mc", "#pragma prob_samples = 96", "out_degree(X, count(Y))"],
+  "checks": {
+    "prob_json": {
+      "engine": "mc",
+      "total_samples": 96,
+      "seed": 19,
+      "query_atoms": ["out_degree(1, 2)"],
+      "probability_ranges": {
+        "out_degree(1, 2)": [0.0, 1.0]
+      }
+    },
+    "explain_json": {
+      "min_statements": 8,
+      "stratification_status": "ok",
+      "rir_status": "ok",
+      "prob_engine": "mc",
+      "aggregate_lifting_count_min": 1,
+      "aggregate_lifting_statuses": ["fired"]
+    }
+  }
+}

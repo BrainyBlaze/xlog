@@ -111,6 +111,37 @@ pub struct RuntimeConfig {
     /// `None` resolves by env/default precedence; see
     /// [`RuntimeConfig::with_wcoj_cost_model`].
     pub wcoj_cost_model: Option<CostModelKind>,
+    /// v0.8.6 G086_CSE — runtime common subexpression elimination.
+    ///
+    /// `Some(true)` enables structural CSE for safe deterministic subplans.
+    /// `Some(false)` disables it. `None` consults `XLOG_CSE`; unset defaults
+    /// to disabled so existing runtime behavior is preserved unless the caller
+    /// opts in.
+    pub common_subexpression_elimination: Option<bool>,
+    /// v0.8.6 G086_ADAPT — runtime adaptive re-optimization adoption gate.
+    ///
+    /// `Some(true)` allows an executor to compare a baseline plan against a
+    /// compiler-supplied candidate plan using runtime telemetry, adopt the
+    /// candidate only when deterministic mis-plan thresholds trigger, and roll
+    /// back on adverse candidates. `Some(false)` disables the adoption path.
+    /// `None` consults `XLOG_ADAPTIVE_REOPT`; unset defaults to disabled.
+    pub adaptive_reoptimization: Option<bool>,
+    /// Minimum mis-plan ratio required before the executor attempts to adopt a
+    /// candidate re-optimized plan. `None` consults
+    /// `XLOG_ADAPTIVE_REOPT_MIN_RATIO`; unset or invalid values default to 1.2.
+    pub adaptive_reoptimization_min_misplan_ratio: Option<f64>,
+    /// v0.8.6 G086_INDEX — persistent hash index manager gate.
+    ///
+    /// `Some(true)` enables persistent build-side hash index reuse in the
+    /// existing executor join-index cache. `Some(false)` disables the manager.
+    /// `None` consults `XLOG_PERSISTENT_HASH_INDEXES`; unset defaults to
+    /// enabled to preserve the existing adaptive-indexing behavior.
+    pub persistent_hash_indexes: Option<bool>,
+    /// v0.8.6 G086_INDEX — record background-build mode for the persistent
+    /// hash index manager. The current runtime keeps builds on the existing
+    /// provider path but records background build requests/completions so the
+    /// transition to recorded asynchronous builds has stable telemetry.
+    pub persistent_hash_index_background_build: Option<bool>,
 }
 
 /// v0.6.5 W2.5 cost-model selector for WCOJ dispatch.
@@ -141,6 +172,11 @@ impl Default for RuntimeConfig {
             wcoj_4cycle_dispatch_adaptive: None,
             wcoj_4cycle_dispatch_disabled: None,
             wcoj_cost_model: None,
+            common_subexpression_elimination: None,
+            adaptive_reoptimization: None,
+            adaptive_reoptimization_min_misplan_ratio: None,
+            persistent_hash_indexes: None,
+            persistent_hash_index_background_build: None,
         }
     }
 }
@@ -223,6 +259,120 @@ impl RuntimeConfig {
         self
     }
 
+    /// Enable or disable runtime common subexpression elimination.
+    pub fn with_common_subexpression_elimination(mut self, override_value: Option<bool>) -> Self {
+        self.common_subexpression_elimination = override_value;
+        self
+    }
+
+    /// Enable or disable adaptive runtime re-optimization adoption.
+    pub fn with_adaptive_reoptimization(mut self, override_value: Option<bool>) -> Self {
+        self.adaptive_reoptimization = override_value;
+        self
+    }
+
+    /// Set the minimum mis-plan ratio for adaptive runtime re-optimization.
+    pub fn with_adaptive_reoptimization_min_misplan_ratio(
+        mut self,
+        override_value: Option<f64>,
+    ) -> Self {
+        self.adaptive_reoptimization_min_misplan_ratio = override_value;
+        self
+    }
+
+    /// Enable or disable persistent build-side hash index reuse.
+    pub fn with_persistent_hash_indexes(mut self, override_value: Option<bool>) -> Self {
+        self.persistent_hash_indexes = override_value;
+        self
+    }
+
+    /// Enable or disable persistent hash-index background-build telemetry.
+    pub fn with_persistent_hash_index_background_build(
+        mut self,
+        override_value: Option<bool>,
+    ) -> Self {
+        self.persistent_hash_index_background_build = override_value;
+        self
+    }
+
+    /// Resolve runtime common subexpression elimination by config/env/default.
+    pub fn resolved_common_subexpression_elimination(&self) -> bool {
+        if let Some(enabled) = self.common_subexpression_elimination {
+            return enabled;
+        }
+
+        std::env::var("XLOG_CSE")
+            .map(|raw| {
+                matches!(
+                    raw.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "on" | "yes"
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    /// Resolve adaptive runtime re-optimization by config/env/default.
+    pub fn resolved_adaptive_reoptimization(&self) -> bool {
+        if let Some(enabled) = self.adaptive_reoptimization {
+            return enabled;
+        }
+
+        std::env::var("XLOG_ADAPTIVE_REOPT")
+            .map(|raw| {
+                matches!(
+                    raw.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "on" | "yes"
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    /// Resolve the deterministic mis-plan threshold for adaptive re-optimization.
+    pub fn resolved_adaptive_reoptimization_min_misplan_ratio(&self) -> f64 {
+        const DEFAULT_MIN_RATIO: f64 = 1.2;
+        if let Some(value) = self.adaptive_reoptimization_min_misplan_ratio {
+            return sanitize_adaptive_reoptimization_ratio(value, DEFAULT_MIN_RATIO);
+        }
+
+        std::env::var("XLOG_ADAPTIVE_REOPT_MIN_RATIO")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<f64>().ok())
+            .map(|value| sanitize_adaptive_reoptimization_ratio(value, DEFAULT_MIN_RATIO))
+            .unwrap_or(DEFAULT_MIN_RATIO)
+    }
+
+    /// Resolve persistent hash-index reuse by config/env/default.
+    pub fn resolved_persistent_hash_indexes(&self) -> bool {
+        if let Some(enabled) = self.persistent_hash_indexes {
+            return enabled;
+        }
+
+        std::env::var("XLOG_PERSISTENT_HASH_INDEXES")
+            .map(|raw| {
+                !matches!(
+                    raw.trim().to_ascii_lowercase().as_str(),
+                    "0" | "false" | "off" | "no"
+                )
+            })
+            .unwrap_or(true)
+    }
+
+    /// Resolve background-build telemetry for persistent hash indexes.
+    pub fn resolved_persistent_hash_index_background_build(&self) -> bool {
+        if let Some(enabled) = self.persistent_hash_index_background_build {
+            return enabled;
+        }
+
+        std::env::var("XLOG_PERSISTENT_HASH_INDEX_BACKGROUND_BUILD")
+            .map(|raw| {
+                matches!(
+                    raw.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "on" | "yes"
+                )
+            })
+            .unwrap_or(false)
+    }
+
     /// Resolve the effective WCOJ cost-model selector.
     pub fn resolved_wcoj_cost_model(&self) -> CostModelKind {
         if let Some(kind) = self.wcoj_cost_model {
@@ -235,6 +385,14 @@ impl RuntimeConfig {
             Some("skew") | Some("skewclassifier") | Some(_) => CostModelKind::SkewClassifier,
             None => CostModelKind::Cardinality,
         }
+    }
+}
+
+fn sanitize_adaptive_reoptimization_ratio(value: f64, fallback: f64) -> f64 {
+    if value.is_finite() && value >= 1.0 {
+        value
+    } else {
+        fallback
     }
 }
 

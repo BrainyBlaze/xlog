@@ -1720,7 +1720,15 @@ impl TupleKeyExpectation {
                     "term {term:?} cannot be encoded as a ground tuple-key expectation"
                 )))
             }
-            (EirTerm::Anonymous | EirTerm::Aggregate { .. }, _) => {
+            (
+                EirTerm::Anonymous
+                | EirTerm::List(_)
+                | EirTerm::Cons { .. }
+                | EirTerm::Compound { .. }
+                | EirTerm::PredRef(_)
+                | EirTerm::Aggregate { .. },
+                _,
+            ) => {
                 return Err(tuple_key_expectation_error(format!(
                     "term {term:?} cannot be used for GPU tuple-key matching"
                 )))

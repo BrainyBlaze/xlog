@@ -42,6 +42,7 @@ fn convert_body_literal(lit: &BodyLiteral) -> EirBodyLiteral {
         }),
         BodyLiteral::Comparison(_) => EirBodyLiteral::Constraint,
         BodyLiteral::IsExpr(_) => EirBodyLiteral::Binding,
+        BodyLiteral::Univ(_) => EirBodyLiteral::Binding,
     }
 }
 
@@ -61,6 +62,16 @@ fn convert_term(term: &Term) -> EirTerm {
         Term::Float(value) => EirTerm::FloatBits(value.to_bits()),
         Term::String(value) => EirTerm::String(value.clone()),
         Term::Symbol(id) => EirTerm::Symbol(*id),
+        Term::List(items) => EirTerm::List(items.iter().map(convert_term).collect()),
+        Term::Cons { head, tail } => EirTerm::Cons {
+            head: Box::new(convert_term(head)),
+            tail: Box::new(convert_term(tail)),
+        },
+        Term::Compound { functor, args } => EirTerm::Compound {
+            functor: functor.clone(),
+            args: args.iter().map(convert_term).collect(),
+        },
+        Term::PredRef(name) => EirTerm::PredRef(name.clone()),
         Term::Aggregate(agg) => EirTerm::Aggregate {
             op: convert_agg_op(agg.op).to_string(),
             variable: agg.variable.clone(),

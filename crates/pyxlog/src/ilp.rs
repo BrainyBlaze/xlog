@@ -13,7 +13,7 @@ use pyo3::types::{PyDict, PySequence};
 use xlog_core::{symbol, RelId, ScalarType, Schema};
 use xlog_cuda::{CudaKernelProvider, JoinType};
 use xlog_ir::{ExecutionPlan, RirNode};
-use xlog_logic::ast::{Program as AstProgram, Term};
+use xlog_logic::ast::{Program as AstProgram, Term, TypeRef};
 use xlog_prob::exact::GpuConfig;
 use xlog_runtime::ilp_registry::IlpMask;
 use xlog_runtime::{read_device_row_count, Executor};
@@ -33,6 +33,17 @@ struct RelationExampleGroup {
     relation: String,
     query_buf: xlog_cuda::CudaBuffer,
     num_rows: u32,
+}
+
+fn type_ref_name(typ: &TypeRef) -> String {
+    match typ {
+        TypeRef::Scalar(scalar) => types::scalar_type_name(scalar),
+        TypeRef::Domain(name) => name.clone(),
+        TypeRef::List(inner) => format!("list<{}>", type_ref_name(inner)),
+        TypeRef::Term => "term".to_string(),
+        TypeRef::Compound => "compound".to_string(),
+        TypeRef::PredRef => "predref".to_string(),
+    }
 }
 
 fn collect_dlpack_columns(
@@ -1818,7 +1829,7 @@ use train_only(..., strict_gpu_native=True) or export an explicit compatibility 
             .predicates
             .iter()
             .map(|pred| {
-                let types = pred.types.iter().map(types::scalar_type_name).collect();
+                let types = pred.types.iter().map(type_ref_name).collect();
                 (pred.name.clone(), types)
             })
             .collect()

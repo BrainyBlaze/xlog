@@ -11,8 +11,9 @@ Introduced for DTS's M8 Phase 1 as the production replacement for
 throwaway prototype.
 
 - **Crate:** `crates/xlog-induce/`
-- **CUDA kernel:** `kernels/ilp_exact.cu` (module `xlog_ilp_exact`, entry
-  `ilp_exact_score`)
+- **CUDA kernels:** `kernels/ilp_exact.cu` (module `xlog_ilp_exact`, entries
+  `ilp_exact_score` for `U64` and `ilp_exact_score_u32` for `U32` /
+  `Symbol`)
 - **Provider launcher:** `crates/xlog-cuda/src/provider/ilp_exact.rs`
 - **pyxlog bridge:** `crates/pyxlog/src/ilp_exact.rs` +
   `crates/pyxlog/python/pyxlog/ilp/exact_induce.py`
@@ -80,7 +81,10 @@ CudaKernelProvider::ilp_exact_score(...)  (crates/xlog-cuda/src/provider/ilp_exa
     │     - H2D upload cand_offsets (small prefix-sum array)
     │     - Alloc output pos_covered/neg_covered arrays
     │
-    ├── Launch kernel `ilp_exact_score`  (kernels/ilp_exact.cu)
+    ├── Launch typed kernel  (kernels/ilp_exact.cu)
+    │     U64    → `ilp_exact_score`
+    │     U32    → `ilp_exact_score_u32`
+    │     Symbol → `ilp_exact_score_u32` with logical schema preserved
     │     grid  = (C, C, 4)       — one block per (L, R, topology)
     │     block = (256, 1, 1)
     │     Each block writes exactly one slot in pos_covered and neg_covered.
@@ -121,16 +125,29 @@ three topologies — microseconds per block in practice.
 
 | Buffer | Type / length | Contents |
 |---|---|---|
-| `cand_arg0`, `cand_arg1` | `u64` × total_rows | Concatenated (D2D-copied) arg0 / arg1 columns of all candidate relations |
+| `cand_arg0`, `cand_arg1` | `u64` or `u32` × total_rows | Concatenated (D2D-copied) arg0 / arg1 columns of all candidate relations |
 | `cand_offsets` | `u32` × (C+1) | Exclusive prefix-sum of candidate row counts; H2D uploaded once per call |
-| `pos_arg0`, `pos_arg1` | `u64` × num_pos | Device-resident positive query pairs (DLPack-imported from the caller's torch tensors) |
-| `neg_arg0`, `neg_arg1` | `u64` × num_neg | Same for negatives. When the caller passes no negatives, the engine materializes a zero-row `(u64, u64)` pair buffer via `create_empty_buffer` so the kernel signature stays uniform. |
+| `pos_arg0`, `pos_arg1` | `u64` or `u32` × num_pos | Device-resident positive query pairs (DLPack-imported from the caller's torch tensors) |
+| `neg_arg0`, `neg_arg1` | `u64` or `u32` × num_neg | Same for negatives. When the caller passes no negatives, the engine materializes a zero-row pair buffer with the positive pair type so the kernel signature stays uniform. |
 | `pos_covered`, `neg_covered` | `u32` × (4·C·C) | Output count arrays; kernel writes each slot exactly once. |
 
-Column type is fixed to `U64` in this milestone (matches DTS's `pred
-p_X(u64, u64)` declarations). Type dispatch for other scalar types
-would follow the existing `ilp_mark_selected_ids_{u32,i32,i64,u64}`
-precedent in `xlog_ilp`.
+Column type dispatch is explicit at both native boundaries:
+
+- `xlog_induce::induce_exact` validates that positives, negatives, and every
+  candidate buffer are arity-2 pairs with one uniform logical type: `U64`,
+  `U32`, or `Symbol`.
+- `CudaKernelProvider::ilp_exact_score` repeats that validation at the provider
+  seam before choosing the physical kernel.
+- `U64` buffers launch `ilp_exact_score` over `uint64_t` columns.
+- `U32` buffers launch `ilp_exact_score_u32` over `uint32_t` columns.
+- `Symbol` buffers also launch `ilp_exact_score_u32`, but the `CudaBuffer`
+  schema remains `Symbol` and mixed `U32`/`Symbol` requests fail with typed
+  diagnostics rather than silently narrowing.
+
+The pyxlog DLPack layer accepts physical 32-bit tensor IDs for `symbol`
+schemas only through schema-checked import. This preserves public logical
+types while allowing CUDA-resident symbol-id tensors to reach the native scorer
+without host widening.
 
 ## Semantics
 
@@ -195,7 +212,8 @@ Buffer-level invariants enforced by `xlog_induce::induce_exact`:
 |---|---|---|
 | `candidates.is_empty()` | Engine top of `induce_exact` | Returns default `ExactInductionResult` (all zeros) — matches Python reference's `if not body_indices: return …` |
 | Buffer arity == 2 | `validate_pair_buffer` | `XlogError::Execution` |
-| Column type == `U64` for all columns | `validate_pair_buffer` | `XlogError::Type` |
+| Column type is exactly one of `U64`, `U32`, `Symbol` | `validate_pair_buffer` | `XlogError::Type` |
+| Positive, negative, and candidate pair types match exactly | `require_pair_type` / provider layout check | `XlogError::Type` / `XlogError::Kernel` |
 | `cached_row_count()` populated | `cached_rows` helper | `XlogError::Execution` — caller fed a buffer that skipped the DLPack ingest path |
 | `positive_count == 0` | `classify_request` (pure) | Returns result with zero candidates but retained neg/candidate counts |
 
@@ -281,29 +299,61 @@ Returns an `ExactInductionResult` dataclass with `candidates: list[ScoredCandida
 - **CUDA-gated launcher tests** (`cargo test -p xlog-cuda --lib ilp_exact`):
   `ilp_exact_score_matches_hand_computed_fixture` (hand-derived coverage
   against C=2 candidates), `ilp_exact_score_is_deterministic_across_runs`,
-  `ilp_exact_score_handles_empty_negatives`. Skip with `eprintln!` when
-  no CUDA device is present.
+  `ilp_exact_score_handles_empty_negatives`,
+  `ilp_exact_score_accepts_u32_pair_buffers`,
+  `ilp_exact_score_accepts_symbol_pair_buffers`, and
+  `ilp_exact_score_rejects_mixed_pair_types`. Skip with `eprintln!` when no
+  CUDA device is present.
 - **Python parity test** (`python -m pytest python/tests/test_ilp_exact_induce.py`):
   `test_induce_exact_native_matches_python_reference` and
   `test_induce_exact_native_does_not_scale_d2h_with_candidate_pairs`.
   Uses `strict_per_topology=True` against the Python reference so both
   backends compute clean per-topology coverage.
+- **v0.8.6 typed parity tests**
+  (`python -m pytest python/tests/test_v086_exact_types_runtime.py`):
+  `U32` and `Symbol` fixtures match the Python reference, preserve relation
+  type annotations, keep D2H at exactly two count-array transfers, and reject
+  mixed logical pair types.
 
-## Non-Goals / Deferred
+## Type Dispatch And Packaging Policy
 
-- Column types other than `u64`. The Prolog-declared schema for DTS's
-  head predicates is `pred p_X(u64, u64)`, so a single-type kernel
-  suffices today. Extending to `u32` / `i32` / `i64` / `Symbol` would
-  follow the existing `ilp_mark_selected_ids_{u32,i32,i64,u64}` fanout
-  in `kernels/ilp.cu`.
-- Shared-memory caching of L rows for the chain topology. At current
-  DTS data sizes the per-block work is microseconds and does not
-  warrant the added kernel complexity. Profile first if this changes.
-- Committed `kernels/ilp_exact.ptx` artifact. `ilp.cu` and
-  `ilp_credit.cu` are also compiled at build time without a checked-in
-  PTX (the C01 `test_kernel_function_resolution` certification scans
-  only committed PTX files, so these kernels are not automatically
-  validated by that test). `ilp_exact.cu` follows the same convention.
+- `U64`: supported through `ilp_exact_score`.
+- `U32`: supported through `ilp_exact_score_u32`.
+- `Symbol`: supported through the same physical `u32` kernel while retaining
+  `Symbol` schema identity and rejecting mixed `U32`/`Symbol` requests.
+- Chain topology shared-memory caching: supported through
+  `ilp_exact_score_chain_smem` and `ilp_exact_score_chain_smem_u32` when
+  `XLOG_ILP_EXACT_CHAIN_SMEM` is enabled and the candidate-row threshold is
+  met. Non-chain topologies inside those entry points continue to call the
+  baseline matcher.
+- PTX policy: `kernels/ilp_exact.cu` is checked in; generated
+  `ilp_exact.portable.ptx` and architecture-specific `.cubin` files are build
+  and packaging artifacts, not source artifacts. `crates/xlog-cuda/build.rs`
+  generates portable PTX for every manifest module, including `ilp_exact`;
+  `scripts/stage_pyxlog_kernels.sh` stages those artifacts into
+  `pyxlog/kernels/`; `scripts/install_pyxlog_for_python.py` rejects a wheel
+  that lacks portable PTX. This matches the current ILP-family convention for
+  `ilp.cu` and `ilp_credit.cu`.
+
+## Profile-Gated Chain Shared Memory
+
+The v0.8.6 G086_CHAIN_SMEM node adds an A/B-controlled chain scorer that tiles
+left-relation rows into dynamic shared memory for the strict chain topology.
+It is enabled by default only for candidate relations with at least
+`XLOG_ILP_EXACT_CHAIN_SMEM_MIN_ROWS` rows, defaulting to `256`, and can be
+disabled with `XLOG_ILP_EXACT_CHAIN_SMEM=0`.
+
+The optimization preserves the public exact-induction contract:
+
+- chain-smem and baseline dispatch produce identical coverage signatures on
+  the certified small and chain-hot fixtures;
+- median runtime improves by more than `1.2x` on the certified chain-hot
+  fixture;
+- small fixtures do not regress by more than five percent;
+- the D2H budget remains the same two count-array transfers used by the
+  baseline native exact-induction path.
+
+Evidence: `docs/evidence/2026-05-19-v086-chain-smem/`.
 
 ## See Also
 

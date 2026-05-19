@@ -15,14 +15,16 @@ execution is fully GPU-native after parsing/planning. CPU-only or fixture-only
 execution is allowed as semantic-oracle scaffolding, but it is not an acceptable
 release path.
 
-The current branch therefore cannot produce a closure proposal. It is blocked on
-two independent requirements:
+The current branch still cannot produce a closure proposal. The
+v0.8.0/v0.8.5/v0.8.6 bundle has now been merged into this feature branch and
+the v0.8.6 compatibility validator has passed, but closure remains blocked on
+the incomplete v0.9 GPU-native certification scope:
 
 - `G090_GPU`: production GPU-native epistemic execution, WCOJ-backed reductions
   where eligible, GPU-resident world-view/candidate/rejection buffers, and zero
   CPU fallback counters.
-- `G090_CLOSE`: rebase or merge after v0.8.0 lands, followed by v0.8
-  compatibility and v0.9 certification reruns.
+- `G090_CLOSE`: final closure still requires the remaining v0.9 certification
+  reruns and an approved closure proposal after the GPU-native blockers clear.
 
 ## Ref Evidence
 
@@ -40,10 +42,10 @@ Current ref checks on 2026-05-19 showed:
 | `git merge-base --is-ancestor v0.8.0 main` | exit `0` | v0.8.0 is merged into `main`. |
 | `git merge-base --is-ancestor v0.8.5 main` | exit `0` | v0.8.5 is merged into `main`. |
 | `git merge-base --is-ancestor v0.8.6 main` | exit `0` | v0.8.6 is merged into `main`. |
-| `git merge-base --is-ancestor main HEAD` | exit `1` | v0.9 branch is not yet rebased/merged on top of the v0.8.6 bundle. |
-| `git merge-base --is-ancestor origin/main HEAD` | exit `1` | v0.9 branch is not yet rebased/merged on top of `origin/main`. |
+| `git merge-base --is-ancestor main HEAD` | exit `0` after the integration merge | v0.9 branch now contains the v0.8.6 bundle. |
+| `git merge-base --is-ancestor origin/main HEAD` | exit `0` after the integration merge | v0.9 branch now contains `origin/main` at `bd45229d`. |
 
-## v0.8.6 Bundle Integration Preflight
+## v0.8.6 Bundle Integration
 
 A non-destructive preflight on 2026-05-19 used a throwaway detached worktree at
 `HEAD` and ran:
@@ -71,10 +73,35 @@ The preflight did not move this branch. It exited `1` with 11 content conflicts:
 The conflicted surface is the expected reuse seam between the v0.8.0/v0.8.5/v0.8.6
 bundle and v0.9.0: CLI execution, logic AST/parser/grammar/lowering/stratifier,
 probabilistic Monte Carlo/provenance APIs, and runtime exports. Any real
-integration must resolve these conflicts by preserving the v0.8.6 language,
+integration needed to resolve these conflicts by preserving the v0.8.6 language,
 runtime, pyxlog, and packaging changes while reapplying the v0.9.0 epistemic
-EIR/GPU/probability/solver hooks. This evidence is a preflight only; it is not
-the required rebase/merge or compatibility rerun.
+EIR/GPU/probability/solver hooks.
+
+The real feature-branch integration then merged `main`/`v0.8.6` into
+`feat/v090-epistemic-solver-semantics` and resolved the same 11 files by:
+
+- preserving v0.8.5/v0.8.6 `univ`, list/meta, magic-set, approximate
+  probabilistic, runtime-delta, pyxlog, example, and validation surfaces;
+- preserving v0.9.0 epistemic AST/parser/grammar, typed RIR boundary,
+  stratification, runtime trace/export, probabilistic provenance, and MC
+  schema hooks;
+- extending EIR conversion and GPU tuple-key matching diagnostics for the new
+  v0.8.5 term forms;
+- removing the stale upfront MC predicate-declaration inference loop that
+  regressed `06_prob_aggregate_mc` with
+  `Compilation("Inconsistent predicate types for edge")`.
+
+Post-merge compatibility validation:
+
+| Command | Result |
+|---|---|
+| `cargo check -p xlog-logic -p xlog-prob -p xlog-runtime -p xlog-integration` | PASS |
+| `cargo test -p xlog-logic --tests` | PASS |
+| `cargo test -p xlog-prob --tests` | PASS |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace -- --nocapture` | PASS, 53 passed |
+| `cargo test -p xlog-solve --test gpu_solver_production_reuse` | PASS, 3 passed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 96 passed |
+| `python scripts/validate_v086_examples.py --output /tmp/v090-v086-compat-validation.json` | PASS, consumer certification PASS, examples PASS |
 
 ## Corrected Gate Table
 
@@ -89,9 +116,9 @@ the required rebase/merge or compatibility rerun.
 | G090_GPU | BLOCKED | GPU-plan, reduced-runtime-plan, workspace allocation/reset, bounded candidate-generation, propagation, candidate-validation, arity 0-3 tuple-source model-membership staging with fixed arity-one/two/three row-scoped ground key comparison over existing relation buffers, generic arity-N variable-bound tuple matching, explicit `know`/`possible`/`not know`/`not possible` preflight metrics, negated binding polarity, all-required-membership world-view-validation over GPU candidate-assumption and model-membership buffers, accepted-candidate materialization, final-result flag, final-row map/final tuple materialization kernels with `row_filter_count` and `negated_row_filter_count`, device-derived semantic trace counts with accepted/rejected candidate indices and typed rejection reasons, bounded FAEEL, G91, unary operator, binary all-operator, ternary specialized-arity, quaternary generic-arity, multi-membership, and split-component GPU-vs-GPT oracle trace parity fixtures, split batch zero CPU recomposition/per-candidate-host-round-trip counters, split possible-vs-not-known world-view parity, accepted K5/K6/K7/K8 WCOJ dispatch, K5 dispatch-certified edge-permutation/stream-group/skew-scheduled-helper/sorted-layout/helper-split/helper-rule/WCOJ helper input trace metrics, helper metadata-only preflight rejection, WCOJ dispatch certification that fails closed without required layout sort or layout fast-path evidence, K6 G38-B skew-scheduled helper/histogram metadata-build trace metrics, K7/K8 K-clique planner preflight reuse including stream-group metadata, hot-path transfer-budget trace, final-result transfer accounting, CUDA-event elapsed timing/runtime-preflight/fail-closed WCOJ gate/reduced-plan trace contracts, two-record and accepted split-batch bounded weighted MaxSAT selection encoding/search, and heterogeneous plus accepted split-batch MaxSAT scheduler reuse through existing GPU CNF/CDCL paths exist, but full semantic kernel-buffer parity, probability wiring, and broader fixture coverage remain missing. |
 | G090_SOLVER | BLOCKED | Accepted GPU runtime evidence can gate GPU CDCL SAT/UNSAT, reusable workspace-backed UNSAT, one-record, two-record, accepted split-batch, and mixed five-record bounded push/solve/retract lifecycles, single-result, two-record, and accepted split-batch combined lifecycle-plus-MaxSAT, fail-closed empty MaxSAT lifecycle rejection before lifecycle trace mutation, fail-closed all-UNSAT MaxSAT search rejection before solver trace mutation, fail-closed all-UNSAT encoded MaxSAT rejection before accepted-evidence or encode trace mutation, fail-closed invalid encoded MaxSAT scheduler rejection before accepted-batch evidence, scheduler, encode, or solver trace mutation, accepted G91/default FAEEL mode-specific solver trace counters, accepted operator-family solver trace counters, accepted split-batch/component counters, mixed unary and binary `possible`/`not possible` plus binary `not know` operator-result lifecycles, lifecycle UNKNOWN/TIMEOUT propagation, learned-clause arena publication, same-device-CNF learned-clause import/reuse, two-record and accepted split-batch learned-clause reuse, distinct-CNF learned-clause import rejection, bounded single-, multi-candidate, and accepted split-batch MaxSAT solving, single-result, two-record, and accepted split-batch MaxSAT search pruning, single-result, two-record, and accepted split-batch weighted soft-clause selection encoding through existing GPU CNF/CDCL paths, heterogeneous and accepted split-batch MaxSAT scheduling, and single-result, two-record, plus split-batch bounded SAT/MaxSAT portfolio dispatch with UNKNOWN/TIMEOUT status propagation, but broader solver semantic integration and post-v0.8 certification remain incomplete. |
 | G090_PROB | BLOCKED | Accepted GPU runtime evidence can gate source/program exact compilation, two-record and accepted split-batch direct source/program exact compilation, source/program bounded compile/evaluate with source/program-specific exact-query counters, two-record accepted source/program batch compile/evaluate, accepted split-batch source/program compile/evaluate plus conditioned source/program query and gradient evaluation with accepted batch/component counters, source/program zero-arity and concrete nonzero-arity true/false evidence conditioning with negative-evidence, source/program-specific, aggregate operator-specific, and source/program-specific operator-conditioned trace counters including true `know`, true `possible`, false `possible`/`not possible`, and false `know`/`not know` operator evidence, mode-specific accepted G91/FAEEL production trace counters, two-record positive and negative conditioned source query batches, two-record conditioned program query batches, conditioned source/program gradient evaluation with source/program-specific gradient counters, single-record, two-record, and accepted split-batch PIR/CNF encoding with source/program-specific PIR/CNF counters, and single-record, two-record, and accepted split-batch query/gradient evaluation through the existing GPU-native path, but broader probabilistic coverage on accepted world views is incomplete. |
-| G090_CERT | BLOCKED | Missing complete accepted-execution kernel timing, broader WCOJ runtime evidence, zero CPU fallback counters, and post-v0.8 rerun. |
+| G090_CERT | BLOCKED | v0.8.6 compatibility rerun passed after the integration merge, but complete accepted-execution kernel timing, broader semantic/probabilistic coverage, and final GPU-native certification remain missing. |
 | G090_DOC | PARTIAL | Guide documents the semantic oracle, partial accepted GPU/WCOJ runtime path, solver/probability production adapters, and remaining blockers; full release documentation is still blocked by broader semantic parity and post-v0.8 certification. |
-| G090_CLOSE | BLOCKED | Requires G090_GPU/G090_SOLVER/G090_PROB/G090_CERT plus v0.8 integration/rebase. A 2026-05-19 throwaway-worktree merge preflight against `main`/`v0.8.6` found 11 content conflicts before any compatibility rerun could be attempted. |
+| G090_CLOSE | BLOCKED | The v0.8.6 bundle has been merged into the feature branch and compatibility validation passed, but closure still requires G090_GPU/G090_SOLVER/G090_PROB/G090_CERT completion plus an approved closure proposal. |
 
 ## Current Semantic-Oracle Evidence
 
@@ -243,7 +270,8 @@ Closure remains blocked until certification includes all of the following:
   split-batch conditioned source/program query/gradient, split-batch PIR/CNF,
   exact query/gradient, and PIR/CNF GPU-native knowledge-compilation fixtures,
   with zero CPU-only probability recomputation;
-- post-v0.8.6 conflict resolution, rebase/merge, and compatibility evidence.
+- broader final v0.9 certification evidence beyond the post-v0.8.6 merge and
+  compatibility validator.
 
 ## Release Hygiene
 
@@ -252,9 +280,8 @@ change was performed.
 
 ## Decision
 
-Release decision: `HOLD_FOR_GPU_NATIVE_AND_V086_BUNDLE_REBASE`.
+Release decision: `HOLD_FOR_GPU_NATIVE_CERTIFICATION`.
 
 The current branch is still incomplete. The next closing work must complete the
-corrected `G090_GPU` production runtime/WCOJ/GPU path, explicitly resolve the
-v0.8.6 bundle conflicts, rebase or merge the branch on top of the merged
-v0.8.0/v0.8.5/v0.8.6 bundle, and then rerun the full certification set.
+corrected `G090_GPU` production runtime/WCOJ/GPU path and then rerun the full
+v0.9 certification set before any closure proposal.

@@ -1,0 +1,9 @@
+0.6::rain().
+0.2::sprinkler().
+
+wet_grass() :- rain().
+wet_grass() :- sprinkler().
+alert() :- wet_grass().
+
+query(wet_grass()).
+query(alert()).

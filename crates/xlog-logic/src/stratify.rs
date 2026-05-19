@@ -69,7 +69,7 @@ pub fn build_dependency_graph(program: &Program) -> DependencyGraph {
                 BodyLiteral::Epistemic(lit) => {
                     graph.add_edge(head.clone(), lit.atom.predicate.clone(), DepType::Negative);
                 }
-                BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) => {}
+                BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {}
             }
         }
 

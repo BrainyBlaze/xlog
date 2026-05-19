@@ -1,0 +1,20 @@
+// Public pyxlog compatibility fixture over session-style relation updates.
+
+pred session_fact(id: u32).
+pred session_delta(id: u32).
+pred rejected_delta(id: u32).
+pred live_session(id: u32).
+pred session_count(bucket: u32, count: u64).
+
+session_fact(1).
+session_fact(2).
+session_delta(3).
+session_delta(4).
+rejected_delta(4).
+
+live_session(I) :- session_fact(I).
+live_session(I) :- session_delta(I), not rejected_delta(I).
+session_count(0, count(I)) :- live_session(I).
+
+?- live_session(I).
+?- session_count(Bucket, N).

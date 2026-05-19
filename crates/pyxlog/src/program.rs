@@ -21,8 +21,8 @@ use xlog_prob::neural_fast_path::GpuWeightSlots;
 
 use super::neural_registry::NeuralPredicateInfo;
 use super::{
-    dlpack_capsule_from_tensor, types, CompiledProgram, EpochStats, EvalResult, McDeviceEvalResult,
-    TrainingHistory,
+    dlpack_capsule_from_tensor, enforce_call_memory_limit, provider_memory_stats, types,
+    CompiledProgram, EpochStats, EvalResult, McDeviceEvalResult, TrainingHistory,
 };
 
 // =========================================================================
@@ -465,7 +465,7 @@ impl CompiledProgram {
 
 #[pymethods]
 impl CompiledProgram {
-    #[pyo3(signature = (return_grads=false, samples=None, seed=None, confidence=0.95, max_nonmonotone_iterations=1024, sampling_method=None))]
+    #[pyo3(signature = (return_grads=false, samples=None, seed=None, confidence=0.95, max_nonmonotone_iterations=1024, sampling_method=None, memory_mb=None))]
     pub fn evaluate(
         &self,
         _py: Python<'_>,
@@ -475,7 +475,9 @@ impl CompiledProgram {
         confidence: f64,
         max_nonmonotone_iterations: usize,
         sampling_method: Option<String>,
+        memory_mb: Option<u64>,
     ) -> PyResult<EvalResult> {
+        enforce_call_memory_limit(&self.output_provider, memory_mb)?;
         match &self.program {
             CompiledProbProgram::Exact(_program) => {
                 if samples.is_some() || seed.is_some() {
@@ -532,7 +534,7 @@ impl CompiledProgram {
     ///
     /// This is the primary GPU-native API surface for MC inference. It never performs
     /// device->host reads for result data (only returns device buffers).
-    #[pyo3(signature = (samples=None, seed=None, confidence=0.95, max_nonmonotone_iterations=1024, sampling_method=None))]
+    #[pyo3(signature = (samples=None, seed=None, confidence=0.95, max_nonmonotone_iterations=1024, sampling_method=None, memory_mb=None))]
     pub fn evaluate_device(
         &self,
         py: Python<'_>,
@@ -541,7 +543,9 @@ impl CompiledProgram {
         confidence: f64,
         max_nonmonotone_iterations: usize,
         sampling_method: Option<String>,
+        memory_mb: Option<u64>,
     ) -> PyResult<McDeviceEvalResult> {
+        enforce_call_memory_limit(&self.output_provider, memory_mb)?;
         let (
             query_counts,
             evidence_count,
@@ -995,5 +999,45 @@ impl CompiledProgram {
     /// Used for cache ablation benchmarks.
     fn clear_circuit_cache(&mut self) {
         self.circuit_cache.clear();
+    }
+
+    /// Return memory diagnostics including allocated_bytes and memory_limit_bytes.
+    pub fn memory_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+        provider_memory_stats(py, &self.output_provider)
+    }
+
+    pub fn host_transfer_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let stats = self.output_provider.host_transfer_stats();
+        let dict = PyDict::new(py);
+        dict.set_item("dtoh_bytes", stats.dtoh_bytes)?;
+        dict.set_item("htod_bytes", stats.htod_bytes)?;
+        dict.set_item("dtoh_calls", stats.dtoh_calls)?;
+        dict.set_item("htod_calls", stats.htod_calls)?;
+        Ok(dict.into())
+    }
+
+    pub fn reset_host_transfer_stats(&self) {
+        self.output_provider.reset_host_transfer_stats()
+    }
+
+    pub fn cuda_graph_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let dict = PyDict::new(py);
+        dict.set_item(
+            "csm_cuda_graph_captures",
+            self.output_provider.csm_cuda_graph_captures(),
+        )?;
+        dict.set_item(
+            "csm_cuda_graph_launches",
+            self.output_provider.csm_cuda_graph_launches(),
+        )?;
+        dict.set_item(
+            "csm_cuda_graph_fallbacks",
+            self.output_provider.csm_cuda_graph_fallbacks(),
+        )?;
+        dict.set_item(
+            "csm_cuda_graph_cache_hits",
+            self.output_provider.csm_cuda_graph_cache_hits(),
+        )?;
+        Ok(dict.into())
     }
 }

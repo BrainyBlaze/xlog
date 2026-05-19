@@ -37,6 +37,7 @@ class CompiledLogicProgram:
     def evaluate(
         self,
         dlpack_inputs: Optional[dict[str, Any]] = None,
+        memory_mb: Optional[int] = None,
     ) -> LogicEvalResult:
         """Evaluate the program, optionally supplying DLPack input relations.
 
@@ -44,6 +45,10 @@ class CompiledLogicProgram:
         Returns a :class:`LogicEvalResult` containing one :class:`LogicQueryResult`
         per query atom in the program.
         """
+        ...
+
+    def memory_stats(self) -> dict[str, Any]:
+        """Return memory-limit, current-allocation, and peak-memory diagnostics."""
         ...
 
     def session(self) -> LogicRelationSession:
@@ -57,8 +62,73 @@ class LogicRelationSession:
         """Upload a relation as a sequence of DLPack column capsules."""
         ...
 
-    def evaluate(self) -> LogicEvalResult:
+    def evaluate(self, memory_mb: Optional[int] = None) -> LogicEvalResult:
         """Evaluate the program against all currently stored relations."""
+        ...
+
+    def insert_relation(self, name: str, dlpack_columns: Any) -> dict[str, Any]:
+        """Insert DLPack rows into a stored relation through the delta path."""
+        ...
+
+    def delete_relation(self, name: str, dlpack_columns: Any) -> dict[str, Any]:
+        """Delete DLPack rows from a stored relation through the delta path."""
+        ...
+
+    def apply_relation_delta(
+        self,
+        name: str,
+        insert_columns: Optional[Any] = None,
+        delete_columns: Optional[Any] = None,
+    ) -> dict[str, Any]:
+        """Apply insert and/or delete rows to a stored relation."""
+        ...
+
+    def apply_relation_delta_batch(self, updates: list[dict[str, Any]]) -> dict[str, Any]:
+        """Apply a batch of relation deltas with device-side coalescing.
+
+        Each update dictionary contains ``name`` plus optional
+        ``insert_columns`` and ``delete_columns`` DLPack column sequences. The
+        returned stats include ``input_delta_count``,
+        ``coalesced_insert_rows``, ``coalesced_delete_rows``, and
+        ``canceled_rows``.
+        """
+        ...
+
+    def delta_stats(self) -> dict[str, Any]:
+        """Return statistics from the most recent relation delta update."""
+        ...
+
+    def register_relation_callback(self, callback: Any) -> int:
+        """Register a session-level relation mutation callback.
+
+        The callable receives one metadata-only payload dictionary after each
+        successful relation delta commit. Returns a callback id for
+        ``unregister_relation_callback``.
+        """
+        ...
+
+    def unregister_relation_callback(self, callback_id: int) -> bool:
+        """Unregister a relation callback by id. Returns True when removed."""
+        ...
+
+    def host_transfer_stats(self) -> dict[str, int]:
+        """Return ``{dtoh_bytes: int, ...}`` transfer statistics."""
+        ...
+
+    def join_index_cache_stats(self) -> dict[str, int]:
+        """Return persistent hash-index cache telemetry for this session."""
+        ...
+
+    def reset_host_transfer_stats(self) -> None:
+        """Reset all host-transfer statistics."""
+        ...
+
+    def cuda_graph_stats(self) -> dict[str, int]:
+        """Return CUDA Graph capture, launch, fallback, and cache-hit counters."""
+        ...
+
+    def memory_stats(self) -> dict[str, Any]:
+        """Return memory-limit, current-allocation, and peak-memory diagnostics."""
         ...
 
     def export_relation(self, name: str) -> list[Any]:
@@ -145,6 +215,7 @@ class CompiledProgram:
         confidence: float = 0.95,
         max_nonmonotone_iterations: int = 1024,
         sampling_method: Optional[str] = None,
+        memory_mb: Optional[int] = None,
     ) -> EvalResult:
         """Evaluate the program and return probabilities (host-side).
 
@@ -163,11 +234,28 @@ class CompiledProgram:
         confidence: float = 0.95,
         max_nonmonotone_iterations: int = 1024,
         sampling_method: Optional[str] = None,
+        memory_mb: Optional[int] = None,
     ) -> McDeviceEvalResult:
         """GPU-native MC evaluation — result counts stay on the device.
 
         Only valid for programs compiled with ``prob_engine="mc"``.
         """
+        ...
+
+    def host_transfer_stats(self) -> dict[str, int]:
+        """Return ``{dtoh_bytes: int, ...}`` transfer statistics."""
+        ...
+
+    def reset_host_transfer_stats(self) -> None:
+        """Reset all host-transfer statistics."""
+        ...
+
+    def cuda_graph_stats(self) -> dict[str, int]:
+        """Return CUDA Graph capture, launch, fallback, and cache-hit counters."""
+        ...
+
+    def memory_stats(self) -> dict[str, Any]:
+        """Return memory-limit, current-allocation, and peak-memory diagnostics."""
         ...
 
     # ------------------------------------------------------------------
@@ -291,6 +379,14 @@ class CompiledProgram:
         """Number of times template compilation has been executed."""
         ...
 
+    def neural_cache_stats(self) -> dict[str, Any]:
+        """Return circuit-cache and registered-network cache telemetry."""
+        ...
+
+    def deterministic_topk(self, values: Any, k: int) -> dict[str, Any]:
+        """Stable top-k over a 1-D tensor, resolving ties by lower index."""
+        ...
+
     def set_batch_queries(self, enabled: bool = True) -> None:
         """Enable or disable multi-query batching for training."""
         ...
@@ -376,6 +472,48 @@ class CompiledProgram:
 
     def forward_backward_tensor(self, query: str, expected: bool = True) -> Any:
         """Forward + backward pass; returns the NLL loss as a CUDA tensor."""
+        ...
+
+    def belnap_loss(
+        self,
+        pro: Any,
+        contra: Any,
+        quarantine: Any,
+        pro_reward: float = 1.0,
+        contra_penalty: float = 1.0,
+        quarantine_penalty: float = 1.0,
+        reduction: str = "mean",
+    ) -> dict[str, Any]:
+        """Belnap/CFR-oriented loss terms for pro, contra, and quarantine channels."""
+        ...
+
+    def semantic_loss_tensor(
+        self,
+        violations: Any,
+        weight: float = 1.0,
+        reduction: str = "mean",
+    ) -> Any:
+        """Non-negative semantic violation loss."""
+        ...
+
+    def mse_loss_tensor(
+        self,
+        pred: Any,
+        target: Any,
+        weight: float = 1.0,
+        reduction: str = "mean",
+    ) -> Any:
+        """Weighted MSE tensor loss."""
+        ...
+
+    def infoloss_tensor(
+        self,
+        prob: Any,
+        weight: float = 1.0,
+        eps: float = ...,
+        reduction: str = "mean",
+    ) -> Any:
+        """Weighted information loss ``-log(prob)`` with clamping."""
         ...
 
     # ------------------------------------------------------------------

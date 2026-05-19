@@ -10,12 +10,12 @@
 //!
 //! Task progression:
 //!   * Task 2:  raised `PyNotImplementedError`.
-//!   * Task 3B.2 (this change): real name→`RelId` resolution, DLPack-backed
+//!   * Task 3B.2: real name-to-`RelId` resolution, DLPack-backed
 //!                 positive/negative buffer construction, engine call, and
-//!                 dict-shaped return. The scoring kernel isn't wired yet
-//!                 (3B.4), so the engine returns an empty candidate list with
-//!                 populated counts — the parity test now fails on length
-//!                 mismatch rather than on a Rust exception.
+//!                 dict-shaped return.
+//!   * Task 3B.4: the batched scoring kernel is wired through
+//!                 `CudaKernelProvider::ilp_exact_score`; native parity is
+//!                 locked by `python/tests/test_ilp_exact_induce.py`.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;

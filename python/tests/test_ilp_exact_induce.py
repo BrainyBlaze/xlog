@@ -8,8 +8,9 @@ is implemented by the ``xlog-induce`` engine. This file locks the contract:
 2. The ``native`` hot loop must not scale host/device transfers with the number
    of candidate pairs — a small constant-size D2H is the only allowed export.
 
-Both tests start RED (the native backend raises ``NotImplementedError`` until
-the engine lands in Task 2/3).
+Both tests are the release contract for the wired native backend: they catch
+semantic drift against the strict Python reference and host-transfer scaling
+regressions in the native scoring path.
 """
 from __future__ import annotations
 
@@ -102,7 +103,7 @@ def _run_and_collect_transfer_stats(prog, kwargs):
     return {"dtoh_calls": prog.d2h_transfer_count()}
 
 
-# ── Parity contract (red until native lands) ───────────────────────────
+# ── Parity contract ────────────────────────────────────────────────────
 
 def test_induce_exact_native_matches_python_reference():
     """Native backend returns the same ordered ExactInductionResult as python reference.
@@ -140,7 +141,7 @@ def test_induce_exact_native_matches_python_reference():
         assert n.local_rank == p.local_rank
 
 
-# ── D2H hot-loop gate (red until native lands) ─────────────────────────
+# ── D2H hot-loop gate ──────────────────────────────────────────────────
 
 def test_induce_exact_native_does_not_scale_d2h_with_candidate_pairs():
     """Native backend: transfers must be constant-size, not per-candidate-pair.

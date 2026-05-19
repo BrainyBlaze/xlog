@@ -33,6 +33,24 @@ pub enum EirTerm {
     String(String),
     /// Interned symbol identifier.
     Symbol(u32),
+    /// Finite list literal.
+    List(Vec<EirTerm>),
+    /// Finite cons pattern.
+    Cons {
+        /// Head term.
+        head: Box<EirTerm>,
+        /// Tail term.
+        tail: Box<EirTerm>,
+    },
+    /// Finite compound term.
+    Compound {
+        /// Functor name.
+        functor: String,
+        /// Compound arguments.
+        args: Vec<EirTerm>,
+    },
+    /// Static predicate reference.
+    PredRef(String),
     /// Aggregate term preserved from a rule head.
     Aggregate {
         /// Aggregate operator name.

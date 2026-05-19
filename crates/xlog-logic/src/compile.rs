@@ -12,12 +12,15 @@
 
 use std::path::{Path, PathBuf};
 
-use xlog_core::Result;
+use xlog_core::{Result, XlogError};
 use xlog_ir::ExecutionPlan;
 use xlog_stats::{StatsManager, StatsSnapshot};
 
 use crate::compiler_config::CompilerConfig;
+use crate::list_normalize::normalize_v085_lists;
 use crate::lower::Lowerer;
+use crate::magic_sets::rewrite_v085_magic_sets;
+use crate::meta_normalize::normalize_v085_meta;
 use crate::module::ModuleError;
 use crate::optimizer::Optimizer;
 use crate::parser::parse_program;
@@ -44,7 +47,7 @@ pub struct Compiler {
     lowerer: Lowerer,
 }
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use xlog_core::{RelId, Schema};
 
@@ -177,9 +180,13 @@ impl Compiler {
         stats_snapshot: Option<&StatsSnapshot>,
     ) -> Result<ExecutionPlan> {
         let program = desugar_queries_and_constraints(program);
+        let program = normalize_v085_meta(&program)?;
+        let program = normalize_v085_lists(&program)?;
+        let program = rewrite_v085_magic_sets(&program)?.program;
+        validate_v085_naf_safety(&program)?;
 
         // Phase 2: Stratify (analyze dependencies, detect cycles)
-        let strata = stratify(&program)?;
+        let strata = stratify(&program).map_err(map_stratification_to_naf_error)?;
 
         // Convert strata to the format expected by the lowerer
         let strata_preds: Vec<Vec<String>> = strata.into_iter().map(|s| s.predicates).collect();
@@ -442,9 +449,9 @@ fn desugar_queries_and_constraints(program: &Program) -> Program {
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
         for term in &atom.terms {
-            if let Term::Variable(name) = term {
-                if seen.insert(name.as_str()) {
-                    head_terms.push(Term::Variable(name.clone()));
+            for name in term.variables() {
+                if seen.insert(name) {
+                    head_terms.push(Term::Variable(name.to_string()));
                 }
             }
         }
@@ -463,6 +470,65 @@ fn desugar_queries_and_constraints(program: &Program) -> Program {
     }
 
     out
+}
+
+fn validate_v085_naf_safety(program: &Program) -> Result<()> {
+    for rule in &program.rules {
+        validate_body_naf_safety(&rule.body, &format!("rule {}", rule.head.predicate))?;
+    }
+    for (idx, constraint) in program.constraints.iter().enumerate() {
+        validate_body_naf_safety(&constraint.body, &format!("constraint {}", idx))?;
+    }
+    for (idx, learnable) in program.learnable_rules.iter().enumerate() {
+        validate_body_naf_safety(&learnable.body, &format!("learnable rule {}", idx))?;
+    }
+    Ok(())
+}
+
+fn validate_body_naf_safety(body: &[BodyLiteral], context: &str) -> Result<()> {
+    let mut bound: HashSet<String> = HashSet::new();
+    for lit in body {
+        match lit {
+            BodyLiteral::Positive(atom) => {
+                for name in atom.variables() {
+                    bound.insert(name.to_string());
+                }
+            }
+            BodyLiteral::Negated(atom) => {
+                for name in atom.variables() {
+                    if !bound.contains(name) {
+                        return Err(naf_error(format!(
+                            "unbound variable {} in negated atom {}/{} in {}; bind it before not with a positive atom or deterministic is expression, or use '_' for existential positions",
+                            name,
+                            atom.predicate,
+                            atom.arity(),
+                            context
+                        )));
+                    }
+                }
+            }
+            BodyLiteral::IsExpr(is_expr) => {
+                bound.insert(is_expr.target.clone());
+            }
+            BodyLiteral::Epistemic(_) => {}
+            BodyLiteral::Comparison(_) | BodyLiteral::Univ(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn map_stratification_to_naf_error(err: XlogError) -> XlogError {
+    match err {
+        XlogError::StratificationCycle(cycle) => naf_error(format!(
+            "deterministic not atom must be stratified; cycle through negation or aggregation: {}",
+            cycle.join(" -> ")
+        )),
+        other => other,
+    }
+}
+
+fn naf_error(message: impl Into<String>) -> XlogError {
+    XlogError::Compilation(format!("v0.8.5 naf error: {}", message.into()))
 }
 
 /// Convenience function to compile source in one call.
@@ -587,7 +653,7 @@ mod tests {
             node(2).
             node(3).
             edge(1, 2).
-            isolated(X) :- node(X), not edge(X, Y).
+            isolated(X) :- node(X), not edge(X, _).
         "#,
         );
         assert!(

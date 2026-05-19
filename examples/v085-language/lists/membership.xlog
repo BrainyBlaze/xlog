@@ -1,0 +1,14 @@
+pred bag(id: u32, xs: list<u32>).
+
+bag(1, [10, 20, 10]).
+bag(2, [30]).
+
+member_value(Id, X) :- bag(Id, L), member(X, L).
+checked_member(Id, X) :- bag(Id, L), memberchk(X, L).
+bag_len(Id, N) :- bag(Id, L), length(L, N).
+second_value(Id, X) :- bag(Id, L), nth(1, L, X).
+
+?- member_value(Id, X).
+?- checked_member(Id, X).
+?- bag_len(Id, N).
+?- second_value(Id, X).

@@ -1,6 +1,6 @@
 //! Inline expansion of user-defined functions.
 
-use crate::ast::{ArithExpr, Atom, BodyLiteral, Comparison, FuncBody, FuncDef, IsExpr, Term};
+use crate::ast::{ArithExpr, Atom, BodyLiteral, Comparison, FuncBody, FuncDef, IsExpr, Term, Univ};
 use crate::function::{FunctionError, FunctionRegistry};
 use std::collections::HashMap;
 
@@ -255,6 +255,10 @@ impl<'a> ExpansionContext<'a> {
                 let expr = self.substitute_arith_expr(&is_expr.expr, subst);
                 BodyLiteral::IsExpr(IsExpr { target, expr })
             }
+            BodyLiteral::Univ(univ) => BodyLiteral::Univ(Univ {
+                term: self.substitute_term(&univ.term, subst),
+                parts: self.substitute_term(&univ.parts, subst),
+            }),
         }
     }
 
@@ -533,6 +537,7 @@ fn expand_literal_functions(
                 expr: expanded_expr,
             }))
         }
+        BodyLiteral::Univ(univ) => Ok(BodyLiteral::Univ(univ.clone())),
     }
 }
 

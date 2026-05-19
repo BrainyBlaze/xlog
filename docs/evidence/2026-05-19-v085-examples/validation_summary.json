@@ -1,0 +1,625 @@
+{
+  "example_count": 10,
+  "feature_coverage": {
+    "aggregate_lifting": [
+      "07_aggregate_lifting"
+    ],
+    "aggregate_query": [
+      "02_findall_aggregate",
+      "05_prob_aggregate_exact",
+      "06_prob_aggregate_mc",
+      "10_scientific_incremental"
+    ],
+    "approx_inference": [
+      "08_approx_confidence"
+    ],
+    "cli_explain": [
+      "04_magic_reach_explain",
+      "09_repl_watch_explain"
+    ],
+    "cli_repl": [
+      "09_repl_watch_explain"
+    ],
+    "cli_watch": [
+      "09_repl_watch_explain"
+    ],
+    "findall": [
+      "02_findall_aggregate",
+      "10_scientific_incremental"
+    ],
+    "incremental_parse": [
+      "09_repl_watch_explain",
+      "10_scientific_incremental"
+    ],
+    "lists": [
+      "01_list_typed_relation",
+      "02_findall_aggregate",
+      "03_maplist_static_predref",
+      "10_scientific_incremental"
+    ],
+    "magic_sets": [
+      "04_magic_reach_explain",
+      "09_repl_watch_explain"
+    ],
+    "maplist": [
+      "03_maplist_static_predref",
+      "10_scientific_incremental"
+    ],
+    "naf": [
+      "10_scientific_incremental"
+    ],
+    "prob_aggregate_exact": [
+      "05_prob_aggregate_exact",
+      "07_aggregate_lifting"
+    ],
+    "prob_aggregate_mc": [
+      "06_prob_aggregate_mc",
+      "08_approx_confidence"
+    ],
+    "types": [
+      "01_list_typed_relation",
+      "03_maplist_static_predref",
+      "10_scientific_incremental"
+    ]
+  },
+  "interaction_count": 10,
+  "per_example": [
+    {
+      "checks": [
+        "explain_json",
+        "run"
+      ],
+      "features": [
+        "types",
+        "lists"
+      ],
+      "interaction": true,
+      "name": "01_list_typed_relation",
+      "status": "PASS"
+    },
+    {
+      "checks": [
+        "explain_json",
+        "run"
+      ],
+      "features": [
+        "findall",
+        "aggregate_query",
+        "lists"
+      ],
+      "interaction": true,
+      "name": "02_findall_aggregate",
+      "status": "PASS"
+    },
+    {
+      "checks": [
+        "explain_json",
+        "run"
+      ],
+      "features": [
+        "maplist",
+        "lists",
+        "types"
+      ],
+      "interaction": true,
+      "name": "03_maplist_static_predref",
+      "status": "PASS"
+    },
+    {
+      "checks": [
+        "explain_json",
+        "run"
+      ],
+      "features": [
+        "magic_sets",
+        "cli_explain"
+      ],
+      "interaction": true,
+      "name": "04_magic_reach_explain",
+      "status": "PASS"
+    },
+    {
+      "checks": [
+        "explain_json",
+        "prob_json"
+      ],
+      "features": [
+        "prob_aggregate_exact",
+        "aggregate_query"
+      ],
+      "interaction": true,
+      "name": "05_prob_aggregate_exact",
+      "status": "PASS"
+    },
+    {
+      "checks": [
+        "explain_json",
+        "prob_json"
+      ],
+      "features": [
+        "prob_aggregate_mc",
+        "aggregate_query"
+      ],
+      "interaction": true,
+      "name": "06_prob_aggregate_mc",
+      "status": "PASS"
+    },
+    {
+      "checks": [
+        "explain_json",
+        "prob_json"
+      ],
+      "features": [
+        "aggregate_lifting",
+        "prob_aggregate_exact"
+      ],
+      "interaction": true,
+      "name": "07_aggregate_lifting",
+      "status": "PASS"
+    },
+    {
+      "checks": [
+        "explain_json",
+        "prob_json"
+      ],
+      "features": [
+        "approx_inference",
+        "prob_aggregate_mc"
+      ],
+      "interaction": true,
+      "name": "08_approx_confidence",
+      "status": "PASS"
+    },
+    {
+      "checks": [
+        "explain_json",
+        "repl",
+        "run",
+        "watch"
+      ],
+      "features": [
+        "cli_repl",
+        "cli_watch",
+        "cli_explain",
+        "incremental_parse",
+        "magic_sets"
+      ],
+      "interaction": true,
+      "name": "09_repl_watch_explain",
+      "status": "PASS"
+    },
+    {
+      "checks": [
+        "explain_json",
+        "run"
+      ],
+      "features": [
+        "types",
+        "lists",
+        "findall",
+        "maplist",
+        "naf",
+        "aggregate_query",
+        "incremental_parse"
+      ],
+      "interaction": true,
+      "name": "10_scientific_incremental",
+      "status": "PASS"
+    }
+  ],
+  "raw_outputs": {
+    "01_list_typed_relation": {
+      "explain_json": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "explain",
+          "--format",
+          "json",
+          "examples/v085-language/showcase/01_list_typed_relation/program.xlog"
+        ],
+        "duration_sec": 0.093688,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\n  \"parse\": {\n    \"statements\": 15,\n    \"cache_hits\": 0,\n    \"cache_misses\": 15\n  },\n  \"ast\": {\n    \"rules\": 8,\n    \"queries\": 5,\n    \"prob_queries\": 0\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 1\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 15\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"magic_sets\": {\n    \"status\": \"disabled\",\n    \"adorned_predicates\": [],\n    \"generated_predicates\": [],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"exact_ddnnf\",\n    \"aggregate_lifting_count\": 0\n  },\n  \"aggregate_lifting\": [\n  ]\n}\n"
+      },
+      "run": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "run",
+          "examples/v085-language/showcase/01_list_typed_relation/program.xlog"
+        ],
+        "duration_sec": 2.471347,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "__xlog_query_0\n+----+-------+\n| id | value |\n+----+-------+\n| 1  | 10    |\n| 1  | 20    |\n| 2  | 30    |\n+----+-------+\n__xlog_query_1\n+----+-------+\n| id | value |\n+----+-------+\n| 1  | 10    |\n| 1  | 20    |\n| 2  | 30    |\n+----+-------+\n__xlog_query_2\n+----+-----+\n| id | len |\n+----+-----+\n| 1  | 3   |\n| 2  | 1   |\n+----+-----+\n__xlog_query_3\n+----+-------+\n| id | value |\n+----+-------+\n| 1  | 20    |\n+----+-------+\n__xlog_query_4\n+----+-----+\n| id | len |\n+----+-----+\n| 1  | 2   |\n| 2  | 0   |\n+----+-----+\n"
+      }
+    },
+    "02_findall_aggregate": {
+      "explain_json": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "explain",
+          "--format",
+          "json",
+          "examples/v085-language/showcase/02_findall_aggregate/program.xlog"
+        ],
+        "duration_sec": 0.095682,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\n  \"parse\": {\n    \"statements\": 14,\n    \"cache_hits\": 0,\n    \"cache_misses\": 14\n  },\n  \"ast\": {\n    \"rules\": 9,\n    \"queries\": 3,\n    \"prob_queries\": 0\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 2\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 13\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"magic_sets\": {\n    \"status\": \"disabled\",\n    \"adorned_predicates\": [],\n    \"generated_predicates\": [],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"exact_ddnnf\",\n    \"aggregate_lifting_count\": 0\n  },\n  \"aggregate_lifting\": [\n  ]\n}\n"
+      },
+      "run": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "run",
+          "examples/v085-language/showcase/02_findall_aggregate/program.xlog"
+        ],
+        "duration_sec": 3.738327,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "__xlog_query_0\n+---------+\n| results |\n+---------+\n| 1       |\n+---------+\n__xlog_query_1\n+-----+\n| len |\n+-----+\n| 2   |\n+-----+\n__xlog_query_2\n+---------+\n| count_0 |\n+---------+\n| 2       |\n+---------+\n"
+      }
+    },
+    "03_maplist_static_predref": {
+      "explain_json": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "explain",
+          "--format",
+          "json",
+          "examples/v085-language/showcase/03_maplist_static_predref/program.xlog"
+        ],
+        "duration_sec": 0.088232,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\n  \"parse\": {\n    \"statements\": 16,\n    \"cache_hits\": 0,\n    \"cache_misses\": 16\n  },\n  \"ast\": {\n    \"rules\": 10,\n    \"queries\": 3,\n    \"prob_queries\": 0\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 1\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 14\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"magic_sets\": {\n    \"status\": \"disabled\",\n    \"adorned_predicates\": [],\n    \"generated_predicates\": [],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"exact_ddnnf\",\n    \"aggregate_lifting_count\": 0\n  },\n  \"aggregate_lifting\": [\n  ]\n}\n"
+      },
+      "run": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "run",
+          "examples/v085-language/showcase/03_maplist_static_predref/program.xlog"
+        ],
+        "duration_sec": 4.737511,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "__xlog_query_0\n+------------+\n| computed_0 |\n+------------+\n| 1          |\n+------------+\n__xlog_query_1\n+-----+\n| len |\n+-----+\n| 3   |\n+-----+\n__xlog_query_2\n+----+-----+\n| id | len |\n+----+-----+\n| 1  | 3   |\n+----+-----+\n"
+      }
+    },
+    "04_magic_reach_explain": {
+      "explain_json": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "explain",
+          "--format",
+          "json",
+          "examples/v085-language/showcase/04_magic_reach_explain/program.xlog"
+        ],
+        "duration_sec": 0.091737,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\n  \"parse\": {\n    \"statements\": 10,\n    \"cache_hits\": 0,\n    \"cache_misses\": 10\n  },\n  \"ast\": {\n    \"rules\": 6,\n    \"queries\": 1,\n    \"prob_queries\": 0\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 1\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 4\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"magic_sets\": {\n    \"status\": \"applied\",\n    \"adorned_predicates\": [\"reach/bf\"],\n    \"generated_predicates\": [\"__xlog_magic_reach_bf\"],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"exact_ddnnf\",\n    \"aggregate_lifting_count\": 0\n  },\n  \"aggregate_lifting\": [\n  ]\n}\n"
+      },
+      "run": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "run",
+          "examples/v085-language/showcase/04_magic_reach_explain/program.xlog"
+        ],
+        "duration_sec": 0.644315,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "__xlog_query_0\n+----+\n| c0 |\n+----+\n+----+\n"
+      }
+    },
+    "05_prob_aggregate_exact": {
+      "explain_json": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "explain",
+          "--format",
+          "json",
+          "examples/v085-language/showcase/05_prob_aggregate_exact/program.xlog"
+        ],
+        "duration_sec": 0.092007,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\n  \"parse\": {\n    \"statements\": 10,\n    \"cache_hits\": 0,\n    \"cache_misses\": 10\n  },\n  \"ast\": {\n    \"rules\": 5,\n    \"queries\": 0,\n    \"prob_queries\": 1\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 2\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 7\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"magic_sets\": {\n    \"status\": \"disabled\",\n    \"adorned_predicates\": [],\n    \"generated_predicates\": [],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"exact_ddnnf\",\n    \"aggregate_lifting_count\": 5\n  },\n  \"aggregate_lifting\": [\n    {\n      \"predicate\": \"score_lse\",\n      \"group_key\": [1],\n      \"operator\": \"logsumexp\",\n      \"finite_domain_source\": \"grounded body rows\",\n      \"deterministic_rows\": 0,\n      \"uncertain_rows\": 2,\n      \"domain_size\": 2,\n      \"cap\": 16,\n      \"status\": \"fallback_exact_enumeration\",\n      \"reason\": \"operator uses exact finite outcome enumeration; lifted implementation is not selected for this aggregate head\",\n      \"naive_outcomes\": 4,\n      \"dynamic_programming_states\": 0\n    },\n    {\n      \"predicate\": \"score_sum\",\n      \"group_key\": [1],\n      \"operator\": \"sum\",\n      \"finite_domain_source\": \"grounded body rows\",\n      \"deterministic_rows\": 0,\n      \"uncertain_rows\": 2,\n      \"domain_size\": 2,\n      \"cap\": 16,\n      \"status\": \"fallback_exact_enumeration\",\n      \"reason\": \"operator uses exact finite outcome enumeration; lifted implementation is not selected for this aggregate head\",\n      \"naive_outcomes\": 4,\n      \"dynamic_programming_states\": 0\n    },\n    {\n      \"predicate\": \"out_degree\",\n      \"group_key\": [1],\n      \"operator\": \"count\",\n      \"finite_domain_source\": \"grounded body rows\",\n      \"deterministic_rows\": 0,\n      \"uncertain_rows\": 2,\n      \"domain_size\": 2,\n      \"cap\": 64,\n      \"status\": \"fired\",\n      \"reason\": \"finite count domain lifted with exact cardinality dynamic programming\",\n      \"naive_outcomes\": 4,\n      \"dynamic_programming_states\": 6\n    },\n    {\n      \"predicate\": \"score_max\",\n      \"group_key\": [1],\n      \"operator\": \"max\",\n      \"finite_domain_source\": \"grounded body rows\",\n      \"deterministic_rows\": 0,\n      \"uncertain_rows\": 2,\n      \"domain_size\": 2,\n      \"cap\": 16,\n      \"status\": \"fallback_exact_enumeration\",\n      \"reason\": \"operator uses exact finite outcome enumeration; lifted implementation is not selected for this aggregate head\",\n      \"naive_outcomes\": 4,\n      \"dynamic_programming_states\": 0\n    },\n    {\n      \"predicate\": \"score_min\",\n      \"group_key\": [1],\n      \"operator\": \"min\",\n      \"finite_domain_source\": \"grounded body rows\",\n      \"deterministic_rows\": 0,\n      \"uncertain_rows\": 2,\n      \"domain_size\": 2,\n      \"cap\": 16,\n      \"status\": \"fallback_exact_enumeration\",\n      \"reason\": \"operator uses exact finite outcome enumeration; lifted implementation is not selected for this aggregate head\",\n      \"naive_outcomes\": 4,\n      \"dynamic_programming_states\": 0\n    }\n  ]\n}\n"
+      },
+      "prob_json": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--features",
+          "host-io",
+          "--",
+          "prob",
+          "examples/v085-language/showcase/05_prob_aggregate_exact/program.xlog",
+          "--output",
+          "json"
+        ],
+        "duration_sec": 0.363384,
+        "returncode": 0,
+        "stderr": "[xlog-prob] compile_gpu_d4_and_verify_cached: hash_cnf_gpu\n[xlog-prob] compile_gpu_d4_and_verify_cached: lookup_or_insert_device\n[xlog-prob] compile_gpu_d4_and_verify_cached: checking disk cache\n[xlog-prob] compile_gpu_d4_and_verify_cached: disk cache hit\n",
+        "stdout": "{\n  \"engine\": \"exact_ddnnf\",\n  \"queries\": [\n    {\n      \"atom\": \"out_degree(1, 2)\",\n      \"prob\": 0.12500000000000008,\n      \"log_prob\": -2.0794415416798353\n    }\n  ]\n}\n"
+      }
+    },
+    "06_prob_aggregate_mc": {
+      "explain_json": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "explain",
+          "--format",
+          "json",
+          "examples/v085-language/showcase/06_prob_aggregate_mc/program.xlog"
+        ],
+        "duration_sec": 0.097098,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\n  \"parse\": {\n    \"statements\": 8,\n    \"cache_hits\": 0,\n    \"cache_misses\": 8\n  },\n  \"ast\": {\n    \"rules\": 1,\n    \"queries\": 0,\n    \"prob_queries\": 1\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 2\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 2\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"magic_sets\": {\n    \"status\": \"disabled\",\n    \"adorned_predicates\": [],\n    \"generated_predicates\": [],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"mc\",\n    \"aggregate_lifting_count\": 1\n  },\n  \"aggregate_lifting\": [\n    {\n      \"predicate\": \"out_degree\",\n      \"group_key\": [1],\n      \"operator\": \"count\",\n      \"finite_domain_source\": \"grounded body rows\",\n      \"deterministic_rows\": 0,\n      \"uncertain_rows\": 3,\n      \"domain_size\": 3,\n      \"cap\": 64,\n      \"status\": \"fired\",\n      \"reason\": \"finite count domain lifted with exact cardinality dynamic programming\",\n      \"naive_outcomes\": 8,\n      \"dynamic_programming_states\": 10\n    }\n  ]\n}\n"
+      },
+      "prob_json": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--features",
+          "host-io",
+          "--",
+          "prob",
+          "examples/v085-language/showcase/06_prob_aggregate_mc/program.xlog",
+          "--output",
+          "json"
+        ],
+        "duration_sec": 4.467914,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\n  \"engine\": \"mc\",\n  \"total_samples\": 96,\n  \"evidence_samples\": 96,\n  \"seed\": 19,\n  \"confidence\": 0.95,\n  \"sampling_method\": \"rejection\",\n  \"queries\": [\n    {\n      \"atom\": \"out_degree(1, 2)\",\n      \"prob\": 0.20833333333333334,\n      \"log_prob\": -1.5686159179138452,\n      \"stderr\": 0.04144908467469904,\n      \"ci_low\": 0.13910828901260805,\n      \"ci_high\": 0.30000247060583296,\n      \"total_samples\": 96,\n      \"evidence_samples\": 96\n    }\n  ]\n}\n"
+      }
+    },
+    "07_aggregate_lifting": {
+      "explain_json": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "explain",
+          "--format",
+          "json",
+          "examples/v085-language/showcase/07_aggregate_lifting/program.xlog"
+        ],
+        "duration_sec": 0.097667,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\n  \"parse\": {\n    \"statements\": 10,\n    \"cache_hits\": 0,\n    \"cache_misses\": 10\n  },\n  \"ast\": {\n    \"rules\": 1,\n    \"queries\": 0,\n    \"prob_queries\": 1\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 2\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 2\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"magic_sets\": {\n    \"status\": \"disabled\",\n    \"adorned_predicates\": [],\n    \"generated_predicates\": [],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"exact_ddnnf\",\n    \"aggregate_lifting_count\": 1\n  },\n  \"aggregate_lifting\": [\n    {\n      \"predicate\": \"out_degree\",\n      \"group_key\": [1],\n      \"operator\": \"count\",\n      \"finite_domain_source\": \"grounded body rows\",\n      \"deterministic_rows\": 0,\n      \"uncertain_rows\": 8,\n      \"domain_size\": 8,\n      \"cap\": 64,\n      \"status\": \"fired\",\n      \"reason\": \"finite count domain lifted with exact cardinality dynamic programming\",\n      \"naive_outcomes\": 256,\n      \"dynamic_programming_states\": 45\n    }\n  ]\n}\n"
+      },
+      "prob_json": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--features",
+          "host-io",
+          "--",
+          "prob",
+          "examples/v085-language/showcase/07_aggregate_lifting/program.xlog",
+          "--output",
+          "json"
+        ],
+        "duration_sec": 0.335891,
+        "returncode": 0,
+        "stderr": "[xlog-prob] compile_gpu_d4_and_verify_cached: hash_cnf_gpu\n[xlog-prob] compile_gpu_d4_and_verify_cached: lookup_or_insert_device\n[xlog-prob] compile_gpu_d4_and_verify_cached: checking disk cache\n[xlog-prob] compile_gpu_d4_and_verify_cached: disk cache hit\n",
+        "stdout": "{\n  \"engine\": \"exact_ddnnf\",\n  \"queries\": [\n    {\n      \"atom\": \"out_degree(1, 4)\",\n      \"prob\": 0.27343750000000006,\n      \"log_prob\": -1.2966822024302034\n    }\n  ]\n}\n"
+      }
+    },
+    "08_approx_confidence": {
+      "explain_json": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "explain",
+          "--format",
+          "json",
+          "examples/v085-language/showcase/08_approx_confidence/program.xlog"
+        ],
+        "duration_sec": 0.091706,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\n  \"parse\": {\n    \"statements\": 9,\n    \"cache_hits\": 0,\n    \"cache_misses\": 9\n  },\n  \"ast\": {\n    \"rules\": 1,\n    \"queries\": 0,\n    \"prob_queries\": 1\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 2\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 2\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"magic_sets\": {\n    \"status\": \"disabled\",\n    \"adorned_predicates\": [],\n    \"generated_predicates\": [],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"mc\",\n    \"aggregate_lifting_count\": 1\n  },\n  \"aggregate_lifting\": [\n    {\n      \"predicate\": \"out_degree\",\n      \"group_key\": [1],\n      \"operator\": \"count\",\n      \"finite_domain_source\": \"grounded body rows\",\n      \"deterministic_rows\": 0,\n      \"uncertain_rows\": 2,\n      \"domain_size\": 2,\n      \"cap\": 64,\n      \"status\": \"fired\",\n      \"reason\": \"finite count domain lifted with exact cardinality dynamic programming\",\n      \"naive_outcomes\": 4,\n      \"dynamic_programming_states\": 6\n    }\n  ]\n}\n"
+      },
+      "prob_json": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--features",
+          "host-io",
+          "--",
+          "prob",
+          "examples/v085-language/showcase/08_approx_confidence/program.xlog",
+          "--output",
+          "json"
+        ],
+        "duration_sec": 14.04022,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\n  \"engine\": \"mc\",\n  \"total_samples\": 128,\n  \"evidence_samples\": 128,\n  \"seed\": 7,\n  \"confidence\": 0.9,\n  \"sampling_method\": \"rejection\",\n  \"queries\": [\n    {\n      \"atom\": \"out_degree(1, 2)\",\n      \"prob\": 1,\n      \"log_prob\": 0,\n      \"stderr\": 0,\n      \"ci_low\": 0.9793004690027592,\n      \"ci_high\": 1,\n      \"total_samples\": 128,\n      \"evidence_samples\": 128\n    }\n  ]\n}\n"
+      }
+    },
+    "09_repl_watch_explain": {
+      "explain_json": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "explain",
+          "--format",
+          "json",
+          "examples/v085-language/showcase/09_repl_watch_explain/program.xlog"
+        ],
+        "duration_sec": 0.087351,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\n  \"parse\": {\n    \"statements\": 8,\n    \"cache_hits\": 0,\n    \"cache_misses\": 8\n  },\n  \"ast\": {\n    \"rules\": 4,\n    \"queries\": 1,\n    \"prob_queries\": 0\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 1\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 4\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"magic_sets\": {\n    \"status\": \"applied\",\n    \"adorned_predicates\": [\"reach/bf\"],\n    \"generated_predicates\": [\"__xlog_magic_reach_bf\"],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"exact_ddnnf\",\n    \"aggregate_lifting_count\": 0\n  },\n  \"aggregate_lifting\": [\n  ]\n}\n"
+      },
+      "repl": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "repl"
+        ],
+        "duration_sec": 0.088489,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "repl: statements=8 cache_hits=0 cache_misses=8\nstate: rules=4 queries=1 prob_queries=0\n"
+      },
+      "run": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "run",
+          "examples/v085-language/showcase/09_repl_watch_explain/program.xlog"
+        ],
+        "duration_sec": 0.508197,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "__xlog_query_0\n+----+\n| c0 |\n+----+\n+----+\n"
+      },
+      "watch": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "watch",
+          "--once",
+          "--explain",
+          "examples/v085-language/showcase/09_repl_watch_explain/program.xlog"
+        ],
+        "duration_sec": 0.086094,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "watch: statements=8 cache_hits=0 cache_misses=8\nparse:\n  statements: 8\nast:\n  rules: 4\n  queries: 1\nstratification:\n  status: ok\n  strata: 1\nrir:\n  status: ok\n  sccs: 4\noptimizer:\n  status: ok\n  est_memory_peak: 0\nwcoj:\n  status: reported\nmagic_sets:\n  status: applied\n  adorned_predicates:\n    - reach/bf\n  generated_predicates:\n    - __xlog_magic_reach_bf\n"
+      }
+    },
+    "10_scientific_incremental": {
+      "explain_json": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "explain",
+          "--format",
+          "json",
+          "examples/v085-language/showcase/10_scientific_incremental/program.xlog"
+        ],
+        "duration_sec": 0.09333,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "{\n  \"parse\": {\n    \"statements\": 26,\n    \"cache_hits\": 0,\n    \"cache_misses\": 26\n  },\n  \"ast\": {\n    \"rules\": 18,\n    \"queries\": 3,\n    \"prob_queries\": 0\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 2\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 19\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"magic_sets\": {\n    \"status\": \"disabled\",\n    \"adorned_predicates\": [],\n    \"generated_predicates\": [],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"exact_ddnnf\",\n    \"aggregate_lifting_count\": 0\n  },\n  \"aggregate_lifting\": [\n  ]\n}\n"
+      },
+      "run": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "run",
+          "examples/v085-language/showcase/10_scientific_incremental/program.xlog"
+        ],
+        "duration_sec": 4.963731,
+        "returncode": 0,
+        "stderr": "",
+        "stdout": "__xlog_query_0\n+----+\n| id |\n+----+\n| 1  |\n+----+\n__xlog_query_1\n+----+-----+\n| id | len |\n+----+-----+\n| 1  | 3   |\n| 2  | 2   |\n+----+-----+\n__xlog_query_2\n+--------+---------+\n| sensor | count_0 |\n+--------+---------+\n| 1      | 3       |\n| 2      | 2       |\n+--------+---------+\n"
+      }
+    }
+  },
+  "required_example_count": 10,
+  "required_interaction_count": 5,
+  "status": "PASS",
+  "suite": "G085_EXAMPLES"
+}

@@ -1,0 +1,140 @@
+{
+  "branch": "feat/v086-runtime-completion",
+  "commit_under_test": "2d390318",
+  "trace_head_before_release_metadata": "c5ff5248",
+  "post_release_validator_hardening_commit": "b4fdcd79",
+  "compatibility": {
+    "v080_examples": {
+      "example_count": 5,
+      "status": "PASS",
+      "summary": "docs/evidence/2026-05-19-v086-consumers/compat_v080_validation_summary.json"
+    },
+    "v085_examples": {
+      "example_count": 10,
+      "status": "PASS",
+      "summary": "docs/evidence/2026-05-19-v086-consumers/compat_v085_validation_summary.json"
+    },
+    "v086_examples": {
+      "consumer_certification_status": "PASS",
+      "example_count": 5,
+      "status": "PASS",
+      "summary": "docs/evidence/2026-05-19-v086-consumers/validation_summary.json"
+    }
+  },
+  "consumer_behavior_probe_commit": "2d390318",
+  "consumer_behavior_trace_commit": "c5ff5248",
+  "consumer_behavior_probes": {
+    "consumer_proof_gaps": [],
+    "feature_coverage_source": "behavior_probes",
+    "probe_count": 9,
+    "status": "PASS"
+  },
+  "release_validator_revalidation": {
+    "command": "python scripts/validate_v086_examples.py --output /tmp/v086-release-revalidate.json --timeout 120",
+    "kernel_staging": "fresh Cargo xlog-cuda artifacts staged into target/debug/pyxlog/kernels; no manual XLOG_CUBIN_DIR override",
+    "output": "/tmp/v086-release-revalidate.json",
+    "status": "PASS"
+  },
+  "date": "2026-05-19",
+  "hold_correction_commit": "81badf314c09",
+  "implementation_evidence_head_before_hold_correction": "0e2a5420",
+  "metrics": {
+    "M086_INT.1 formatting": {
+      "command": "cargo fmt --check",
+      "status": "PASS"
+    },
+    "M086_INT.2 workspace": {
+      "command": "cargo check --workspace",
+      "observed": "Finished dev profile in 0.17s",
+      "status": "PASS"
+    },
+    "M086_INT.3 targeted Rust": {
+      "commands": [
+        "cargo test -p xlog-runtime",
+        "cargo test -p xlog-cuda kernel_modules",
+        "cargo test -p xlog-induce",
+        "cargo test -p xlog-prob",
+        "cargo test -p xlog-logic",
+        "cargo test -p xlog-integration"
+      ],
+      "status": "PASS"
+    },
+    "M086_INT.4 Python": {
+      "command": "PYTHONPATH=target/debug pytest -q python/tests/test_v080_examples_source.py python/tests/test_v085_examples_source.py python/tests/test_v086_delta_coalescing.py python/tests/test_v086_relation_callbacks.py python/tests/test_v086_relation_callbacks_runtime.py python/tests/test_v086_exact_types_source.py python/tests/test_v086_exact_types_runtime.py python/tests/test_v086_chain_smem_profile_source.py python/tests/test_v086_chain_smem_source.py python/tests/test_v086_cse_source.py python/tests/test_v086_adaptive_reoptimization_source.py python/tests/test_v086_persistent_hash_index_source.py python/tests/test_v086_consumers_source.py python/tests/test_v086_pyxlog_persistent_index_runtime.py",
+      "observed": "44 passed in 86.31s",
+      "status": "PASS"
+    },
+    "M086_INT.5 examples": {
+      "command": "python scripts/validate_v086_examples.py",
+      "observed": {
+        "behavior_probe_count": 9,
+        "consumer_certification_status": "PASS",
+        "feature_coverage_source": "behavior_probes",
+        "v080_examples": 5,
+        "v085_examples": 10,
+        "v086_examples": 5
+      },
+      "status": "PASS"
+    },
+    "M086_INT.6 transfer guards": {
+      "covered_by": [
+        "cargo test -p xlog-prob no_dtoh",
+        "cargo test -p xlog-integration strict_deterministic_d2h",
+        "python/tests/test_v086_delta_coalescing.py",
+        "python/tests/test_v086_relation_callbacks_runtime.py",
+        "python/tests/test_v086_exact_types_runtime.py",
+        "python/tests/test_v086_chain_smem_source.py",
+        "python/tests/test_v086_cse_source.py",
+        "python/tests/test_v086_adaptive_reoptimization_source.py",
+        "python/tests/test_v086_persistent_hash_index_source.py"
+      ],
+      "status": "PASS"
+    },
+    "M086_INT.7 performance": {
+      "evidence": {
+        "adaptive_reoptimization": "correctness/rollback gate passed; no speedup gate claimed",
+        "chain_shared_memory": "speedup_ratio=5.58300273358745 on chain_hot fixture",
+        "cse": "duplicate_subplan_reduction_percent=50.0; added_dtoh_calls=0",
+        "delta": "recompute_call_reduction_ratio=3.0; hot_path_dtoh_calls=0",
+        "persistent_hash_index": "build-heavy repeated-session fixture records speedup_ratio=3.206; cached median 0.079429262s, uncached median 0.254631847s; tracked DTOH/H2D calls remain 0"
+      },
+      "status": "PASS"
+    },
+    "M086_INT.8 docs": {
+      "commands": [
+        "python -m json.tool over docs/evidence/2026-05-19-v086-*/*.json and examples/v086-runtime/*/expected.json",
+        "python -m py_compile scripts/validate_v086_examples.py python/tests/test_v086_relation_callbacks.py python/tests/test_v086_persistent_hash_index_source.py python/tests/test_v086_consumers_source.py python/tests/test_v086_pyxlog_persistent_index_runtime.py",
+        "python scripts/validate_package_metadata.py"
+      ],
+      "status": "PASS"
+    },
+    "M086_INT.9 git hygiene": {
+      "command": "git diff --check",
+      "generated_artifacts_documented": [
+        "docs/evidence/2026-05-19-v086-consumers/*.json refreshed by the fresh validator run",
+        "docs/evidence/2026-05-19-v086-int/README.md",
+        "docs/evidence/2026-05-19-v086-int/validation_summary.json"
+      ],
+      "status": "PASS"
+    }
+  },
+  "persistent_index_performance_commit": "df2dbc03",
+  "python": {
+    "pyxlog_persistent_index_session_reuse": {
+      "status": "PASS",
+      "summary": "public LogicRelationSession mutation loop records persistent-index build/hit and zero tracked host transfers",
+      "test": "python/tests/test_v086_pyxlog_persistent_index_runtime.py"
+    }
+  },
+  "rust_counts": {
+    "xlog-cuda": "kernel_modules filter: 2 passed",
+    "xlog-induce": "23 lib tests passed",
+    "xlog-integration": "package test suite passed, including strict deterministic D2H, cross-mode determinism, WCOJ, and widened-frontier suites",
+    "xlog-logic": "package test suite passed, including v0.8.5 language and optimizer suites",
+    "xlog-prob": "package test suite passed, including no_cpu_d4_in_exact and no_dtoh_* guards",
+    "xlog-runtime": "142 lib tests, 15 integration tests, 2 doc tests passed; 2 doc tests ignored"
+  },
+  "status": "PASS",
+  "suite": "G086_INT",
+  "unresolved": []
+}

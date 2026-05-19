@@ -1,0 +1,11 @@
+pred bag(id: u32, xs: list<u32>).
+pred head_tail(id: u32, head: u32, tail: list<u32>).
+
+bag(1, [10, 20, 30]).
+bag(2, [40]).
+
+head_tail(Id, Head, Tail) :- bag(Id, [Head | Tail]).
+tail_len(Id, N) :- head_tail(Id, _, Tail), length(Tail, N).
+
+?- head_tail(Id, Head, Tail).
+?- tail_len(Id, N).

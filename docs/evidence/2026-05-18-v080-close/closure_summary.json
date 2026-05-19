@@ -1,0 +1,39 @@
+{
+  "branch": "feat/v080-dts-ml-python-productization",
+  "date": "2026-05-18",
+  "release_decision": "MERGE_READY",
+  "release_decision_condition": "requires coordinator acceptance of historical DTS-DLM 449-doc native-liveness evidence for M080_EXACT.2",
+  "no_push_tag_merge_or_board_update": true,
+  "post_review_remediation": {
+    "implementation_reuse_commit": "30995c1e",
+    "implementation_reuse_scope": "registered neural NetworkHandle.k and NetworkHandle.det modes are applied in direct, complex, and batched forward/backward probability paths",
+    "no_push_tag_merge_or_board_update": true
+  },
+  "subgoals": {
+    "G080_PRE": {"commit": "6c9a08c7", "status": "PASS"},
+    "G080_CERT": {"commit": "1cde68b5", "status": "PASS"},
+    "G080_PYAPI": {"commit": "f318ce5d", "status": "PASS"},
+    "G080_DELTA": {"commit": "9d659d41", "status": "PASS"},
+    "G080_BRIDGE": {"commit": "63ef0298", "status": "PASS", "post_review_remediation_commit": "30995c1e"},
+    "G080_EXACT": {"commit": "3c63cdb2", "status": "PASS"},
+    "G080_PROFILE": {"commit": "bfa20ef5", "status": "PASS"},
+    "G080_INT": {"commit": "861f6a02", "status": "PASS"},
+    "G080_CLOSE": {"commit": "8cd6e095", "status": "PASS"}
+  },
+  "accepted_evidence_waivers": [
+    {
+      "metric": "M080_EXACT.2",
+      "status": "PASS by accepted-evidence waiver",
+      "accepted_evidence": "/home/dev/projects/dts-dlm/docs/evidence/2026-04-17-m8-phase1-engine-integration.md",
+      "fresh_replay_in_v080_worktree": false,
+      "fallback_decision_if_not_accepted": "HOLD_FOR_FIXES"
+    }
+  ],
+  "deferred_non_blocking": [
+    "U32 and Symbol native exact-induction dispatch deferred until named consumer",
+    "batch coalescing and relation-change callbacks not implemented in this branch",
+    "profile-gated optimizer/index work not implemented because no current DTS profile names a new blocker",
+    "full DTS 449-doc native exact job not relaunched in this xlog worktree"
+  ],
+  "proposal": "docs/plans/2026-05-18-v080-closure-proposal.md"
+}

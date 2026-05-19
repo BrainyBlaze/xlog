@@ -346,7 +346,7 @@ fn test_stratified_negation() {
         node(2).
         node(3).
         edge(1, 2).
-        isolated(X) :- node(X), not edge(X, Y), not edge(Y, X).
+        isolated(X) :- node(X), not edge(X, _), not edge(_, X).
     "#;
 
     // Compile the program
@@ -724,7 +724,7 @@ fn test_negation_compiles() {
         node(2).
         node(3).
         edge(1, 2).
-        isolated(X) :- node(X), not edge(X, Y), not edge(Y, X).
+        isolated(X) :- node(X), not edge(X, _), not edge(_, X).
     "#;
 
     let mut compiler = Compiler::new();
