@@ -437,6 +437,90 @@ impl EpistemicProbProductionAdapter {
         Ok(results)
     }
 
+    /// Compile source with accepted epistemic assumptions as exact evidence and evaluate gradients.
+    #[cfg(feature = "host-io")]
+    pub fn compile_and_evaluate_conditioned_source_with_grads_with_accepted_world_view(
+        &mut self,
+        source: &str,
+        evidence: &AcceptedWorldViewEvidence,
+    ) -> Result<ExactResultWithGrads> {
+        self.consume_accepted_evidence(evidence)?;
+        let (program, evidence_facts) = condition_source_with_accepted_evidence(source, evidence)?;
+        let exact = ExactDdnnfProgram::compile_from_program(&program, self.config)?;
+        self.trace.gpu_exact_source_compiles =
+            self.trace.gpu_exact_source_compiles.saturating_add(1);
+        self.trace.gpu_conditioned_evidence_facts = self
+            .trace
+            .gpu_conditioned_evidence_facts
+            .saturating_add(evidence_facts as u64);
+        let result = exact.evaluate_gpu_with_grads()?;
+        self.trace.gpu_exact_gradient_evaluations =
+            self.trace.gpu_exact_gradient_evaluations.saturating_add(1);
+        self.trace.gpu_knowledge_compilation_end_to_end_runs = self
+            .trace
+            .gpu_knowledge_compilation_end_to_end_runs
+            .saturating_add(1);
+        self.trace.gpu_source_knowledge_compilation_end_to_end_runs = self
+            .trace
+            .gpu_source_knowledge_compilation_end_to_end_runs
+            .saturating_add(1);
+        self.trace.require_zero_cpu_recompute()?;
+        Ok(result)
+    }
+
+    /// Compile source with accepted GPU epistemic assumptions as exact evidence and evaluate gradients.
+    #[cfg(feature = "host-io")]
+    pub fn compile_and_evaluate_conditioned_source_with_grads_with_gpu_execution_result(
+        &mut self,
+        source: &str,
+        provider: &CudaKernelProvider,
+        result: &EpistemicGpuExecutionResult,
+        assumptions: Vec<EpistemicAssumption>,
+    ) -> Result<ExactResultWithGrads> {
+        let evidence =
+            AcceptedWorldViewEvidence::from_gpu_execution_result(provider, result, assumptions)?;
+        self.compile_and_evaluate_conditioned_source_with_grads_with_accepted_world_view(
+            source, &evidence,
+        )
+    }
+
+    /// Compile conditioned source gradients once per accepted GPU epistemic execution result.
+    #[cfg(feature = "host-io")]
+    pub fn compile_and_evaluate_conditioned_source_with_grads_for_gpu_execution_results(
+        &mut self,
+        source: &str,
+        provider: &CudaKernelProvider,
+        evidence_records: &[EpistemicProbGpuExecutionEvidence<'_>],
+    ) -> Result<Vec<ExactResultWithGrads>> {
+        if evidence_records.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic probabilistic conditioned gradient production batch"
+                    .to_string(),
+                context: "batched conditioned gradient compilation requires at least one accepted GPU result"
+                    .to_string(),
+            });
+        }
+
+        let mut accepted = Vec::with_capacity(evidence_records.len());
+        for record in evidence_records {
+            accepted.push(AcceptedWorldViewEvidence::from_gpu_execution_result(
+                provider,
+                record.result,
+                record.assumptions.to_vec(),
+            )?);
+        }
+
+        let mut results = Vec::with_capacity(accepted.len());
+        for evidence in &accepted {
+            results.push(
+                self.compile_and_evaluate_conditioned_source_with_grads_with_accepted_world_view(
+                    source, evidence,
+                )?,
+            );
+        }
+        Ok(results)
+    }
+
     /// Compile a parsed program with accepted epistemic assumptions as exact evidence.
     #[cfg(feature = "host-io")]
     pub fn compile_and_evaluate_conditioned_program_with_accepted_world_view(
@@ -512,6 +596,91 @@ impl EpistemicProbProductionAdapter {
         for evidence in &accepted {
             results.push(
                 self.compile_and_evaluate_conditioned_program_with_accepted_world_view(
+                    program, evidence,
+                )?,
+            );
+        }
+        Ok(results)
+    }
+
+    /// Compile a parsed program with accepted epistemic assumptions as exact evidence and evaluate gradients.
+    #[cfg(feature = "host-io")]
+    pub fn compile_and_evaluate_conditioned_program_with_grads_with_accepted_world_view(
+        &mut self,
+        program: &Program,
+        evidence: &AcceptedWorldViewEvidence,
+    ) -> Result<ExactResultWithGrads> {
+        self.consume_accepted_evidence(evidence)?;
+        let (program, evidence_facts) =
+            condition_program_with_accepted_evidence(program, evidence)?;
+        let exact = ExactDdnnfProgram::compile_from_program(&program, self.config)?;
+        self.trace.gpu_exact_program_compiles =
+            self.trace.gpu_exact_program_compiles.saturating_add(1);
+        self.trace.gpu_conditioned_evidence_facts = self
+            .trace
+            .gpu_conditioned_evidence_facts
+            .saturating_add(evidence_facts as u64);
+        let result = exact.evaluate_gpu_with_grads()?;
+        self.trace.gpu_exact_gradient_evaluations =
+            self.trace.gpu_exact_gradient_evaluations.saturating_add(1);
+        self.trace.gpu_knowledge_compilation_end_to_end_runs = self
+            .trace
+            .gpu_knowledge_compilation_end_to_end_runs
+            .saturating_add(1);
+        self.trace.gpu_program_knowledge_compilation_end_to_end_runs = self
+            .trace
+            .gpu_program_knowledge_compilation_end_to_end_runs
+            .saturating_add(1);
+        self.trace.require_zero_cpu_recompute()?;
+        Ok(result)
+    }
+
+    /// Compile a parsed program with accepted GPU epistemic assumptions as exact evidence and evaluate gradients.
+    #[cfg(feature = "host-io")]
+    pub fn compile_and_evaluate_conditioned_program_with_grads_with_gpu_execution_result(
+        &mut self,
+        program: &Program,
+        provider: &CudaKernelProvider,
+        result: &EpistemicGpuExecutionResult,
+        assumptions: Vec<EpistemicAssumption>,
+    ) -> Result<ExactResultWithGrads> {
+        let evidence =
+            AcceptedWorldViewEvidence::from_gpu_execution_result(provider, result, assumptions)?;
+        self.compile_and_evaluate_conditioned_program_with_grads_with_accepted_world_view(
+            program, &evidence,
+        )
+    }
+
+    /// Compile conditioned parsed-program gradients once per accepted GPU epistemic execution result.
+    #[cfg(feature = "host-io")]
+    pub fn compile_and_evaluate_conditioned_program_with_grads_for_gpu_execution_results(
+        &mut self,
+        program: &Program,
+        provider: &CudaKernelProvider,
+        evidence_records: &[EpistemicProbGpuExecutionEvidence<'_>],
+    ) -> Result<Vec<ExactResultWithGrads>> {
+        if evidence_records.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic probabilistic conditioned gradient production batch"
+                    .to_string(),
+                context: "batched conditioned program gradient compilation requires at least one accepted GPU result"
+                    .to_string(),
+            });
+        }
+
+        let mut accepted = Vec::with_capacity(evidence_records.len());
+        for record in evidence_records {
+            accepted.push(AcceptedWorldViewEvidence::from_gpu_execution_result(
+                provider,
+                record.result,
+                record.assumptions.to_vec(),
+            )?);
+        }
+
+        let mut results = Vec::with_capacity(accepted.len());
+        for evidence in &accepted {
+            results.push(
+                self.compile_and_evaluate_conditioned_program_with_grads_with_accepted_world_view(
                     program, evidence,
                 )?,
             );

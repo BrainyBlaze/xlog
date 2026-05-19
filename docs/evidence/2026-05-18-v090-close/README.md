@@ -53,7 +53,7 @@ Earlier ref checks after `git fetch origin --prune` showed:
 | G090_SPLIT | PARTIAL | CPU split/recompose fixtures pass and valid split components now lower through GPU executable subplans; full accepted-runtime semantic parity is still missing. |
 | G090_GPU | BLOCKED | GPU-plan, reduced-runtime-plan, workspace allocation/reset, bounded candidate-generation, propagation, candidate-validation, arity 0-3 tuple-source model-membership staging with fixed arity-one/two/three row-scoped ground key comparison over existing relation buffers, generic arity-N variable-bound tuple matching, `not know` binding polarity, world-view-validation, accepted-candidate materialization, final-result flag, final-row map/final tuple materialization kernels, device-derived semantic trace counts, accepted K5/K7/K8 WCOJ dispatch, K5 dispatch-certified edge-permutation/sorted-layout/helper-split trace metrics, K7/K8 K-clique planner preflight reuse, hot-path transfer-budget trace, final-result transfer accounting, CUDA-event elapsed timing/runtime-preflight/fail-closed WCOJ gate/reduced-plan trace contracts exist, but full semantic kernel-buffer parity, full MaxSAT encoding/search coverage, probability wiring, and broader fixture coverage remain missing. |
 | G090_SOLVER | BLOCKED | Accepted GPU runtime evidence can gate GPU CDCL SAT/UNSAT, reusable workspace-backed UNSAT, one-record and two-record bounded push/solve/retract lifecycles, lifecycle UNKNOWN/TIMEOUT propagation, learned-clause arena publication, same-device-CNF learned-clause import/reuse, two-record learned-clause reuse, distinct-CNF learned-clause import rejection, bounded single- and multi-candidate MaxSAT solving, bounded MaxSAT search pruning, and bounded SAT/MaxSAT portfolio dispatch with UNKNOWN/TIMEOUT status propagation, but full MaxSAT encoding/search coverage remains incomplete. |
-| G090_PROB | BLOCKED | Accepted GPU runtime evidence can gate source/program exact compilation, source/program bounded compile/evaluate, two-record accepted source batch compile/evaluate, source/program zero-arity and concrete nonzero-arity evidence conditioning, two-record conditioned source/program query batches, PIR/CNF encoding, and query/gradient evaluation through the existing GPU-native path, but full query-conditioned probabilistic execution on accepted world views is incomplete. |
+| G090_PROB | BLOCKED | Accepted GPU runtime evidence can gate source/program exact compilation, source/program bounded compile/evaluate, two-record accepted source batch compile/evaluate, source/program zero-arity and concrete nonzero-arity evidence conditioning, two-record conditioned source/program query batches, conditioned source/program gradient evaluation, PIR/CNF encoding, and query/gradient evaluation through the existing GPU-native path, but broader probabilistic coverage on accepted world views is incomplete. |
 | G090_CERT | BLOCKED | Missing complete accepted-execution kernel timing, broader WCOJ runtime evidence, zero CPU fallback counters, and post-v0.8 rerun. |
 | G090_DOC | PARTIAL | Guide documents semantic oracle and blockers; production GPU/WCOJ path is not implemented. |
 | G090_CLOSE | BLOCKED | Requires G090_GPU/G090_SOLVER/G090_PROB/G090_CERT plus v0.8 integration/rebase. |
@@ -154,9 +154,9 @@ Closure remains blocked until certification includes all of the following:
   skew-scheduling, and helper-splitting evidence where applicable;
 - full accepted MaxSAT encoding/search coverage across candidate lifecycle
   paths;
-- accepted-world-view evidence flowing through full query-conditioned
-  GPU-native knowledge-compilation evaluation with zero CPU-only probability
-  recomputation;
+- broader accepted-world-view probabilistic coverage beyond the bounded
+  conditioned query/gradient GPU-native knowledge-compilation fixtures, with
+  zero CPU-only probability recomputation;
 - post-v0.8 rebase compatibility evidence.
 
 ## Release Hygiene

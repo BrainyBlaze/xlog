@@ -1508,6 +1508,189 @@ fn accepted_gpu_execution_results_gate_batched_conditioned_parsed_program_querie
 }
 
 #[test]
+fn accepted_gpu_execution_result_conditions_probabilistic_gradient_evidence() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X).
+        "#,
+    )
+    .expect("parse nonzero-arity epistemic fixture");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile nonzero-arity epistemic executable");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &executable.relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation("node", upload_unary_u32(&fix.memory, &[1, 2]));
+    executor.put_relation("edge", upload_unary_u32(&fix.memory, &[1]));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 2,
+            },
+        )
+        .expect("execute nonzero-arity accepted epistemic fixture");
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut adapter = EpistemicProbProductionAdapter::new(config);
+    let grads = adapter
+        .compile_and_evaluate_conditioned_source_with_grads_with_gpu_execution_result(
+            r#"
+            0.2::edge(1).
+            0.8::edge(2).
+            query(edge(1)).
+            query(edge(2)).
+            "#,
+            &fix.provider,
+            &result,
+            vec![EpistemicAssumption::known_tuple(
+                "edge",
+                vec![EpistemicEvidenceTerm::integer(1)],
+                true,
+            )],
+        )
+        .expect("accepted GPU runtime evidence must condition probabilistic gradient evaluation");
+
+    assert_eq!(grads.query_grads.len(), 2);
+    assert!((grads.query_grads[0].prob - 1.0).abs() < 1.0e-6);
+    assert!((grads.query_grads[1].prob - 0.8).abs() < 1.0e-6);
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_world_view_evidence_consumed, 1);
+    assert_eq!(trace.accepted_evidence_assumptions_consumed, 1);
+    assert_eq!(trace.gpu_conditioned_evidence_facts, 1);
+    assert_eq!(trace.gpu_exact_source_compiles, 1);
+    assert_eq!(trace.gpu_exact_program_compiles, 0);
+    assert_eq!(trace.gpu_exact_query_evaluations, 0);
+    assert_eq!(trace.gpu_exact_gradient_evaluations, 1);
+    assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
+    assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 1);
+    assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 0);
+    assert_eq!(trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(trace.fixture_circuit_evaluations, 0);
+}
+
+#[test]
+fn accepted_gpu_execution_results_gate_batched_conditioned_parsed_program_gradients() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X).
+        "#,
+    )
+    .expect("parse nonzero-arity epistemic fixture");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile nonzero-arity epistemic executable");
+
+    let make_result = |edge_rows: &[u32]| {
+        let mut executor =
+            Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+        for (name, rel_id) in &executable.relation_ids {
+            executor.register_relation(*rel_id, name);
+        }
+        executor.put_relation("node", upload_unary_u32(&fix.memory, &[1, 2]));
+        executor.put_relation("edge", upload_unary_u32(&fix.memory, edge_rows));
+
+        executor
+            .execute_epistemic_gpu_execution(
+                &executable,
+                EpistemicGpuWorkspaceCapacities {
+                    max_candidates: 2,
+                    max_worlds: 1,
+                    max_models_per_reduction: 2,
+                },
+            )
+            .expect("execute accepted epistemic fixture")
+    };
+    let result_a = make_result(&[1]);
+    let result_b = make_result(&[2]);
+    let assumptions_a = [EpistemicAssumption::known_tuple(
+        "edge",
+        vec![EpistemicEvidenceTerm::integer(1)],
+        true,
+    )];
+    let assumptions_b = [EpistemicAssumption::known_tuple(
+        "edge",
+        vec![EpistemicEvidenceTerm::integer(2)],
+        true,
+    )];
+    let prob_program = parse_program(
+        r#"
+        0.2::edge(1).
+        0.8::edge(2).
+        query(edge(1)).
+        query(edge(2)).
+        "#,
+    )
+    .expect("parse probabilistic program");
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut adapter = EpistemicProbProductionAdapter::new(config);
+    let evaluated = adapter
+        .compile_and_evaluate_conditioned_program_with_grads_for_gpu_execution_results(
+            &prob_program,
+            &fix.provider,
+            &[
+                EpistemicProbGpuExecutionEvidence {
+                    result: &result_a,
+                    assumptions: &assumptions_a,
+                },
+                EpistemicProbGpuExecutionEvidence {
+                    result: &result_b,
+                    assumptions: &assumptions_b,
+                },
+            ],
+        )
+        .expect("accepted GPU runtime evidence must gate batched conditioned gradients");
+
+    assert_eq!(evaluated.len(), 2);
+    assert_eq!(evaluated[0].query_grads.len(), 2);
+    assert!((evaluated[0].query_grads[0].prob - 1.0).abs() < 1.0e-6);
+    assert!((evaluated[0].query_grads[1].prob - 0.8).abs() < 1.0e-6);
+    assert_eq!(evaluated[1].query_grads.len(), 2);
+    assert!((evaluated[1].query_grads[0].prob - 0.2).abs() < 1.0e-6);
+    assert!((evaluated[1].query_grads[1].prob - 1.0).abs() < 1.0e-6);
+
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_world_view_evidence_consumed, 2);
+    assert_eq!(trace.accepted_evidence_assumptions_consumed, 2);
+    assert_eq!(trace.gpu_conditioned_evidence_facts, 2);
+    assert_eq!(trace.gpu_exact_source_compiles, 0);
+    assert_eq!(trace.gpu_exact_program_compiles, 2);
+    assert_eq!(trace.gpu_exact_query_evaluations, 0);
+    assert_eq!(trace.gpu_exact_gradient_evaluations, 2);
+    assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 2);
+    assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 0);
+    assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 2);
+    assert_eq!(trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(trace.fixture_circuit_evaluations, 0);
+}
+
+#[test]
 fn accepted_gpu_execution_result_gates_probabilistic_program_end_to_end_path() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
