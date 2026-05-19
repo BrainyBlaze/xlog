@@ -76,3 +76,18 @@ def test_v086_persistent_hash_index_records_required_speedup_fixture() -> None:
     assert performance["cached"]["output_rows"] == performance["uncached"]["output_rows"]
     assert performance["transfer_budget"]["cached_tracked_dtoh_calls"] == 0
     assert performance["transfer_budget"]["cached_tracked_htod_calls"] == 0
+
+
+def test_v086_persistent_hash_index_pyxlog_session_reuse_is_exposed() -> None:
+    pyxlog_logic = read("crates/pyxlog/src/logic.rs")
+    pyxlog_lib = read("crates/pyxlog/src/lib.rs")
+    gpu_logic = read("crates/xlog-gpu/src/logic.rs")
+    stub = read("crates/pyxlog/python/pyxlog/_native.pyi")
+    docs = read("docs/architecture/python-bindings.md")
+
+    assert "LogicSessionRuntime" in gpu_logic
+    assert "apply_relation_deltas_with_session_runtime" in gpu_logic
+    assert "join_index_cache_stats" in pyxlog_logic
+    assert "session_runtime" in pyxlog_lib
+    assert "def join_index_cache_stats(self) -> dict[str, int]:" in stub
+    assert "join_index_cache_stats()" in docs

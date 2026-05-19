@@ -37,7 +37,7 @@
 | `cargo test -p xlog-prob` | PASS; package suite passed, including GPU/native no-D2H guards |
 | `cargo test -p xlog-logic` | PASS; package suite passed, including v0.8.5 language and optimizer suites |
 | `cargo test -p xlog-integration` | PASS; package suite passed, including strict D2H, cross-mode determinism, WCOJ, and DTS widened-frontier suites |
-| `PYTHONPATH=target/debug pytest -q python/tests/test_v080_examples_source.py python/tests/test_v085_examples_source.py python/tests/test_v086_delta_coalescing.py python/tests/test_v086_relation_callbacks.py python/tests/test_v086_relation_callbacks_runtime.py python/tests/test_v086_exact_types_source.py python/tests/test_v086_exact_types_runtime.py python/tests/test_v086_chain_smem_profile_source.py python/tests/test_v086_chain_smem_source.py python/tests/test_v086_cse_source.py python/tests/test_v086_adaptive_reoptimization_source.py python/tests/test_v086_persistent_hash_index_source.py python/tests/test_v086_consumers_source.py` | PASS; 42 passed in 56.08s |
+| `PYTHONPATH=target/debug pytest -q python/tests/test_v080_examples_source.py python/tests/test_v085_examples_source.py python/tests/test_v086_delta_coalescing.py python/tests/test_v086_relation_callbacks.py python/tests/test_v086_relation_callbacks_runtime.py python/tests/test_v086_exact_types_source.py python/tests/test_v086_exact_types_runtime.py python/tests/test_v086_chain_smem_profile_source.py python/tests/test_v086_chain_smem_source.py python/tests/test_v086_cse_source.py python/tests/test_v086_adaptive_reoptimization_source.py python/tests/test_v086_persistent_hash_index_source.py python/tests/test_v086_consumers_source.py python/tests/test_v086_pyxlog_persistent_index_runtime.py` | PASS; 44 passed in 86.31s |
 | `python scripts/validate_v086_examples.py` | PASS_WITH_CONSUMER_PROOF_GAP; v0.8.0 examples 5, v0.8.5 examples 10, v0.8.6 examples 5; `consumer_certification_status=BLOCKED` |
 | `python -m json.tool` over v0.8.6 evidence and expected JSON files | PASS |
 | `python -m py_compile scripts/validate_v086_examples.py python/tests/test_v086_persistent_hash_index_source.py python/tests/test_v086_consumers_source.py` | PASS |
@@ -51,7 +51,7 @@
 | M086_INT.1 formatting | PASS | `cargo fmt --check` exit 0 |
 | M086_INT.2 workspace | PASS | `cargo check --workspace` exit 0 |
 | M086_INT.3 targeted Rust | PASS | runtime, cuda, induce, prob, logic, and integration crates exited 0 |
-| M086_INT.4 Python | PASS | v0.8.0/v0.8.5/v0.8.6 source and runtime guards: 42 passed |
+| M086_INT.4 Python | PASS | v0.8.0/v0.8.5/v0.8.6 source and runtime guards: 44 passed |
 | M086_INT.5 examples | PASS_WITH_CONSUMER_PROOF_GAP | v0.8.6 validator invoked v0.8.0, v0.8.5, and v0.8.6 validators; example execution passed but consumer certification remains blocked |
 | M086_INT.6 transfer guards | PASS | xlog-prob no-D2H guards, integration strict deterministic D2H tests, and v0.8.6 source/runtime guards passed |
 | M086_INT.7 performance | PASS | raw feature-node evidence records delta/CSE/chain/persistent-index performance; persistent-index `speedup_ratio=3.206` with zero tracked DTOH/H2D calls |
@@ -64,8 +64,6 @@
   fixture behavior. The examples execute through `xlog-cli run/explain` and
   link to feature-node evidence, but feature coverage is label-derived from
   `expected.json`.
-- Public pyxlog compatibility remains green, but persistent hash-index reuse
-  across pyxlog session mutation and reevaluation is not directly proven.
 
 ## Next Gate
 

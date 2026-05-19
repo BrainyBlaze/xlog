@@ -62,16 +62,6 @@ CONSUMER_PROOF_GAPS = [
             "persistent-index behavior inside each labeled example"
         ),
     },
-    {
-        "id": "pyxlog-persistent-index-session-reuse",
-        "status": "BLOCKED",
-        "reason": (
-            "persistent hash-index reuse is proven on reused runtime Executors; "
-            "public pyxlog LogicRelationSession evaluation does not yet expose "
-            "targeted persistent-index reuse telemetry across session mutation "
-            "and reevaluation"
-        ),
-    },
 ]
 
 
@@ -303,6 +293,8 @@ def _prepare_local_pyxlog_env(args: argparse.Namespace) -> dict[str, str]:
             staged_pkg.unlink()
     staged_pkg.mkdir()
     for child in source_pkg.iterdir():
+        if child.name.startswith("_native") and child.suffix in {".so", ".dylib", ".pyd"}:
+            continue
         (staged_pkg / child.name).symlink_to(child, target_is_directory=child.is_dir())
 
     native_name = "_native.so" if native_lib.suffix == ".so" else "_native.dylib"
@@ -400,6 +392,35 @@ def _run_source_guard(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _run_pyxlog_persistent_index_probe(
+    args: argparse.Namespace,
+    env: dict[str, str],
+) -> dict[str, Any]:
+    raw = _run_command(
+        [
+            args.python,
+            "-m",
+            "pytest",
+            "-q",
+            "python/tests/test_v086_pyxlog_persistent_index_runtime.py",
+        ],
+        timeout=args.compat_timeout,
+        env=env,
+    )
+    if raw["returncode"] != 0:
+        raise SystemExit(
+            "pyxlog persistent-index session probe failed with exit "
+            f"{raw['returncode']}\nSTDOUT:\n{raw['stdout']}\nSTDERR:\n{raw['stderr']}"
+        )
+    return {
+        "status": "PASS",
+        "cmd": raw["cmd"],
+        "duration_sec": raw["duration_sec"],
+        "returncode": raw["returncode"],
+        "stdout_preview": raw["stdout"][-1000:],
+    }
+
+
 def _compatibility_gates(args: argparse.Namespace, evidence_dir: Path) -> dict[str, Any]:
     pyxlog_env = _prepare_local_pyxlog_env(args)
     v080 = _run_existing_validator(
@@ -415,12 +436,14 @@ def _compatibility_gates(args: argparse.Namespace, evidence_dir: Path) -> dict[s
         pyxlog_env,
     )
     guards = _run_source_guard(args)
+    pyxlog_persistent = _run_pyxlog_persistent_index_probe(args, pyxlog_env)
     _require(v080["status"] == "PASS", f"v0.8.0 validator did not pass: {v080}")
     _require(v085["status"] == "PASS", f"v0.8.5 validator did not pass: {v085}")
     return {
         "v080_examples": v080,
         "v085_examples": v085,
         "v080_v085_source_guards": guards,
+        "pyxlog_persistent_index_session_reuse": pyxlog_persistent,
     }
 
 
@@ -507,7 +530,7 @@ def _aggregate(
             "certification_limit": (
                 "declarations plus linked evidence are not equivalent to per-consumer "
                 "runtime probes for native exact induction, adaptive reoptimization, "
-                "or persistent-index pyxlog session reuse"
+                "or persistent-index fixture dispatch"
             ),
         },
         "per_example": [

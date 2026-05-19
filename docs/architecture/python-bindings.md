@@ -201,6 +201,12 @@ Direct `put_relation`, `remove_relation`, or `clear_relations` calls invalidate
 the cached runtime store and make the next `evaluate()` perform a full plan
 run before later deltas can reuse it.
 
+Persistent sessions retain their runtime executor across `evaluate()` and
+delta recompute calls, so persistent hash indexes can be reused through public
+pyxlog mutation loops. `session.join_index_cache_stats()` returns the retained
+executor's `lookups`, `hits`, `misses`, `builds`, invalidation counters,
+background-build counters, `entries`, and `total_bytes`.
+
 #### Relation Change Callbacks
 
 Persistent sessions expose opt-in metadata callbacks for relation delta

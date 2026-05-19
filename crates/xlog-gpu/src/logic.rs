@@ -6,6 +6,7 @@ use std::sync::Arc;
 use xlog_core::{symbol, Result, Schema, XlogError};
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 use xlog_logic::{BodyLiteral, Compiler, Program, Query, Term};
+use xlog_runtime::executor::JoinIndexCacheStats;
 use xlog_runtime::{DeltaRecomputeStats, ExecutionStats, Executor, RelationDelta, RelationStore};
 
 /// Result of evaluating a single query in a Datalog program.
@@ -26,6 +27,19 @@ pub struct LogicEvalResult {
     pub queries: Vec<LogicQueryResult>,
     /// Execution statistics (populated when profiling is enabled).
     pub stats: Option<ExecutionStats>,
+}
+
+/// Runtime state retained by a persistent logic session.
+pub struct LogicSessionRuntime {
+    executor: Executor,
+    profiling: bool,
+}
+
+impl LogicSessionRuntime {
+    /// Return persistent hash-index cache telemetry for the retained executor.
+    pub fn join_index_cache_stats(&self) -> JoinIndexCacheStats {
+        self.executor.join_index_cache_stats()
+    }
 }
 
 /// Summary for a persistent-session relation delta update.
@@ -204,6 +218,41 @@ impl LogicProgram {
         Ok((result, cached_store))
     }
 
+    /// Create retained runtime state for a persistent relation session.
+    pub fn create_session_runtime(
+        &self,
+        provider: Arc<CudaKernelProvider>,
+        relation_store: &RelationStore,
+        profiling: bool,
+    ) -> Result<LogicSessionRuntime> {
+        Ok(LogicSessionRuntime {
+            executor: self.executor_from_relation_store(provider, relation_store, profiling)?,
+            profiling,
+        })
+    }
+
+    /// Evaluate with retained session runtime state and return a materialized store snapshot.
+    pub fn evaluate_with_session_runtime(
+        &self,
+        provider: Arc<CudaKernelProvider>,
+        runtime: &mut LogicSessionRuntime,
+    ) -> Result<(LogicEvalResult, RelationStore)> {
+        runtime.executor.set_profiling(runtime.profiling);
+        runtime.executor.execute_plan(&self.plan)?;
+        self.enforce_constraints(&provider, &runtime.executor)?;
+
+        let total_output_rows = self.total_query_rows(runtime.executor.store())?;
+        let stats = if runtime.profiling {
+            Some(runtime.executor.execution_stats(total_output_rows))
+        } else {
+            None
+        };
+
+        let cached_store = self.clone_relation_store(&provider, runtime.executor.store())?;
+        let result = self.logic_result_from_store(provider.as_ref(), &cached_store, stats)?;
+        Ok((result, cached_store))
+    }
+
     /// Build query results from an already materialized runtime store.
     pub fn evaluate_cached_relation_store(
         &self,
@@ -264,6 +313,66 @@ impl LogicProgram {
         Ok(logic_delta_report(delta_stats, insert_rows, delete_rows))
     }
 
+    /// Apply relation deltas while preserving retained session runtime state.
+    pub fn apply_relation_deltas_with_session_runtime(
+        &self,
+        provider: Arc<CudaKernelProvider>,
+        relation_store: &mut RelationStore,
+        cached_store: &mut Option<RelationStore>,
+        session_runtime: &mut Option<LogicSessionRuntime>,
+        deltas: HashMap<String, RelationDelta>,
+    ) -> Result<LogicDeltaReport> {
+        let insert_rows = deltas
+            .values()
+            .filter_map(|d| d.insert.as_ref())
+            .map(|b| b.num_rows())
+            .sum();
+        let delete_rows = deltas
+            .values()
+            .filter_map(|d| d.delete.as_ref())
+            .map(|b| b.num_rows())
+            .sum();
+
+        if session_runtime.is_none() {
+            let seed_store: &RelationStore = match cached_store.as_ref() {
+                Some(store) => store,
+                None => &*relation_store,
+            };
+            *session_runtime =
+                Some(self.create_session_runtime(provider.clone(), seed_store, false)?);
+        }
+
+        if cached_store.is_none() {
+            let runtime = session_runtime.as_mut().ok_or_else(|| {
+                XlogError::Execution("Missing session runtime for cached evaluation".to_string())
+            })?;
+            let (_, store) = self.evaluate_with_session_runtime(provider.clone(), runtime)?;
+            *cached_store = Some(store);
+        }
+
+        let runtime = session_runtime.as_mut().ok_or_else(|| {
+            XlogError::Execution("Missing session runtime for delta update".to_string())
+        })?;
+        let delta_stats = runtime
+            .executor
+            .apply_deltas_and_recompute(&self.plan, &deltas)?;
+        self.enforce_constraints(&provider, &runtime.executor)?;
+
+        for name in deltas.keys() {
+            let updated = runtime.executor.store().get(name).ok_or_else(|| {
+                XlogError::Execution(format!(
+                    "Delta relation {} missing after runtime recompute",
+                    name
+                ))
+            })?;
+            relation_store.put(name, provider.clone_buffer(updated)?);
+        }
+
+        *cached_store = Some(self.clone_relation_store(&provider, runtime.executor.store())?);
+
+        Ok(logic_delta_report(delta_stats, insert_rows, delete_rows))
+    }
+
     /// Apply an ordered batch of relation deltas after device-side coalescing.
     pub fn apply_relation_delta_batch(
         &self,
@@ -291,6 +400,47 @@ impl LogicProgram {
 
         let mut report =
             self.apply_relation_deltas(provider, relation_store, cached_store, coalesced.deltas)?;
+        report.input_delta_count = coalesced.input_delta_count;
+        report.changed_relations = coalesced.changed_relations;
+        report.coalesced_insert_rows = coalesced.coalesced_insert_rows;
+        report.coalesced_delete_rows = coalesced.coalesced_delete_rows;
+        report.canceled_rows = coalesced.canceled_rows;
+        Ok(report)
+    }
+
+    /// Apply an ordered batch of relation deltas while preserving session runtime state.
+    pub fn apply_relation_delta_batch_with_session_runtime(
+        &self,
+        provider: Arc<CudaKernelProvider>,
+        relation_store: &mut RelationStore,
+        cached_store: &mut Option<RelationStore>,
+        session_runtime: &mut Option<LogicSessionRuntime>,
+        delta_batch: Vec<(String, RelationDelta)>,
+    ) -> Result<LogicDeltaReport> {
+        let coalesced = coalesce_relation_delta_batch(provider.as_ref(), delta_batch)?;
+        if coalesced.deltas.is_empty() {
+            return Ok(LogicDeltaReport {
+                input_delta_count: coalesced.input_delta_count,
+                changed_relations: 0,
+                insert_rows: 0,
+                delete_rows: 0,
+                has_deletes: false,
+                affected_sccs: 0,
+                recomputed_sccs: 0,
+                incremental_sccs: 0,
+                coalesced_insert_rows: 0,
+                coalesced_delete_rows: 0,
+                canceled_rows: coalesced.canceled_rows,
+            });
+        }
+
+        let mut report = self.apply_relation_deltas_with_session_runtime(
+            provider,
+            relation_store,
+            cached_store,
+            session_runtime,
+            coalesced.deltas,
+        )?;
         report.input_delta_count = coalesced.input_delta_count;
         report.changed_relations = coalesced.changed_relations;
         report.coalesced_insert_rows = coalesced.coalesced_insert_rows;

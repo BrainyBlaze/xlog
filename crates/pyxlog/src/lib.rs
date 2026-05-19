@@ -395,6 +395,7 @@ pub struct LogicRelationSession {
     pub(crate) provider: Arc<CudaKernelProvider>,
     pub(crate) relation_store: RelationStore,
     pub(crate) evaluation_store: Option<RelationStore>,
+    pub(crate) session_runtime: Option<gpu_logic::LogicSessionRuntime>,
     pub(crate) last_delta_stats: Option<LogicDeltaStats>,
     pub(crate) relation_callbacks: Vec<RelationChangeCallback>,
     pub(crate) next_relation_callback_id: u64,

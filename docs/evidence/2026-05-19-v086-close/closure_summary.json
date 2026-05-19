@@ -81,12 +81,6 @@
       "metric": "M086_CONSUMERS.1/M086_CONSUMERS.3 consumer feature proof",
       "status": "BLOCKED",
       "description": "Feature coverage is label-derived from expected.json declarations; examples prove xlog-cli run/explain and link feature-node evidence, but do not directly prove native exact/adaptive/index behavior inside each consumer fixture."
-    },
-    {
-      "goal": "G086_CONSUMERS",
-      "metric": "pyxlog persistent-index session reuse",
-      "status": "BLOCKED",
-      "description": "Public pyxlog session compatibility is green, but persistent hash-index reuse across session mutation and reevaluation is not directly proven."
     }
   ],
   "unclaimed_performance_metrics": [],
@@ -99,8 +93,14 @@
       "v085": 10,
       "v086": 5
     },
-    "python_bundle": "42 passed in 56.08s",
-    "workspace_check": "cargo check --workspace exit 0"
+    "python_bundle": "44 passed in 86.31s (0:01:26)",
+    "workspace_check": "cargo check --workspace exit 0",
+    "pyxlog_persistent_index_session_reuse": {
+      "status": "PASS",
+      "evidence": "python/tests/test_v086_pyxlog_persistent_index_runtime.py",
+      "summary": "public LogicRelationSession delta loop records persistent index build/hit and zero tracked host transfers"
+    }
   },
-  "v090_rebase_note": "v0.9.0 should rebase or merge after any accepted v0.8.6 landing because exact type dispatch, chain shared-memory scoring, runtime CSE, adaptive candidate adoption, and persistent-index telemetry affect the substrate expected by epistemic/solver work. The v0.8.6 branch remains held until the listed blockers are fixed, waived, or scope-amended."
+  "v090_rebase_note": "v0.9.0 should rebase or merge after any accepted v0.8.6 landing because exact type dispatch, chain shared-memory scoring, runtime CSE, adaptive candidate adoption, and persistent-index telemetry affect the substrate expected by epistemic/solver work. The v0.8.6 branch remains held until the listed blockers are fixed, waived, or scope-amended.",
+  "pyxlog_persistent_index_session_reuse_commit": "pending"
 }

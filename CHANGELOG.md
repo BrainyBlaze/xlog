@@ -31,6 +31,8 @@ All notable changes to this project are documented in this file.
   DTS-DLM-shaped delta/optimizer workloads, neutral Mistaber-derived `.xlog`
   fixtures, v0.9.0 substrate primitives, and public pyxlog compatibility,
   reusing the v0.8.0/v0.8.5 validators and recording production-path evidence.
+  The validator now includes a public `LogicRelationSession` persistent-index
+  reuse probe that records a cache build/hit with zero tracked host transfers.
   Full consumer certification remains held until label-derived feature coverage
   is replaced with behavior-proven probes or explicitly scope-amended.
 

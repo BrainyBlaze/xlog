@@ -20,7 +20,7 @@ Scope: `G086_CLOSE` evidence rollup and closure proposal.
 |---|---|---|---|
 | M086_CLOSE.1 sub-goal table | every G086 node listed with commit SHA and metric status | PASS | closure proposal and `closure_summary.json` |
 | M086_CLOSE.2 roadmap sync | v0.8.6 section reflects actual PASS/BLOCKED states | PASS | `ROADMAP.md` persistent-index bullet names recorded background build and measured timing speedup |
-| M086_CLOSE.3 unresolved issues | all red/yellow metrics have explicit disposition | PASS | label-derived consumer feature coverage and pyxlog persistent-index reuse proof are explicitly blocked |
+| M086_CLOSE.3 unresolved issues | all red/yellow metrics have explicit disposition | PASS | label-derived consumer feature coverage is explicitly blocked; pyxlog persistent-index session reuse now has a passing public-session probe |
 | M086_CLOSE.4 release decision | recommendation is `MERGE_READY`, `HOLD_FOR_FIXES`, or `SCOPE_AMENDMENT_REQUIRED` | PASS | `HOLD_FOR_FIXES` |
 | M086_CLOSE.5 no implicit release | no push, tag, board update, or merge without authorization | PASS | no release action performed |
 | M086_CLOSE.6 methodology audit | every sub-goal evidence file includes GDSP/GQM evidence | PASS | methodology scan and README amendments for G086_ADAPT/G086_INDEX |
@@ -34,6 +34,7 @@ Scope: `G086_CLOSE` evidence rollup and closure proposal.
 | `cargo test -p xlog-runtime persistent_hash_index -- --nocapture` | PASS; 5 tests |
 | `cargo test -p xlog-runtime test_persistent_hash_index_performance_fixture_meets_speedup_target -- --nocapture` | PASS; `speedup_ratio=3.206`, zero tracked DTOH/H2D |
 | `cargo test -p xlog-cuda test_recorded_join_index_build_runs_on_runtime_stream -- --nocapture` | PASS; 1 provider test |
+| `PYTHONPATH=target/debug pytest -q python/tests/test_v086_pyxlog_persistent_index_runtime.py` | PASS; public `LogicRelationSession` persistent-index build/hit, zero tracked host transfers |
 | methodology heading scan over `docs/evidence/2026-05-19-v086-*` | PASS; 12 evidence files |
 | `python scripts/validate_package_metadata.py` | PASS |
 | `git diff --check` | PASS |
@@ -49,13 +50,13 @@ build path. It now also records a build-heavy repeated-session persistent-index
 fixture with cached median 0.079429262s, uncached median 0.254631847s,
 `speedup_ratio=3.206`, and zero tracked DTOH/H2D calls. Consumer example
 execution passes, but the validator now records that feature coverage is
-label-derived and that pyxlog persistent-index session reuse remains unproven.
+label-derived. Public pyxlog persistent-index session reuse is now proven by
+a `LogicRelationSession` delta loop that records one build, at least one hit,
+and zero tracked DTOH/H2D calls.
 
 ## Required Coordinator Decision
 
 1. Replace label-derived consumer feature coverage with behavior-proven probes
    or record an explicit coordinator amendment.
-2. Add targeted pyxlog persistent-index reuse evidence or document an
-   authorized scope limitation.
-3. Authorize any release-board update, merge, push, and tag as separate actions
+2. Authorize any release-board update, merge, push, and tag as separate actions
    only after the hold is cleared.

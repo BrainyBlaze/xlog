@@ -2,7 +2,7 @@
 
 Date: 2026-05-19
 Branch: `feat/v086-runtime-completion`
-Validation head after persistent-index performance amendment: `df2dbc03`
+Validation head after pyxlog persistent-index session amendment: pending commit
 Implementation evidence head before hold/correction amendment: `0e2a5420`
 Governing goal: `docs/plans/2026-05-19-agent-v086-dts-runtime-completion-goal.md`
 
@@ -24,8 +24,10 @@ background request/completion/deferred telemetry, a runtime-backed recorded
 provider build path, and a build-heavy repeated-session performance fixture
 with a 3.206x cached-vs-uncached speedup against the >=1.5x target.
 G086_CONSUMERS now separates example execution from consumer certification and
-records the remaining proof gaps instead of treating `expected.json` feature
-declarations as behavior proof.
+records the remaining label-derived feature-coverage gap instead of treating
+`expected.json` feature declarations as behavior proof. Public pyxlog
+session reuse now has targeted behavior evidence through
+`test_v086_pyxlog_persistent_index_runtime.py`.
 
 No merge, push, tag, or release-board update is authorized or performed by this
 proposal.
@@ -42,7 +44,7 @@ proposal.
 | G086_CSE | `1363b05e` | PASS | `docs/evidence/2026-05-19-v086-cse/README.md` |
 | G086_ADAPT | `2d9bdc0f` | PASS | `docs/evidence/2026-05-19-v086-adaptive-reoptimization/README.md` |
 | G086_INDEX | `702e1f8f` + `0e2a5420`; hold correction `81badf31`; performance amendment `df2dbc03` | PASS | `docs/evidence/2026-05-19-v086-persistent-hash-index/README.md` |
-| G086_CONSUMERS | `37f16651`; hold correction `81badf31` | BLOCKED on consumer-proof gaps | `docs/evidence/2026-05-19-v086-consumers/README.md` |
+| G086_CONSUMERS | `37f16651`; hold correction `81badf31`; pyxlog session amendment pending | BLOCKED on label-derived consumer feature proof | `docs/evidence/2026-05-19-v086-consumers/README.md` |
 | G086_INT | `b72f61ea`; hold correction `81badf31` | BLOCKED on release-readiness metrics | `docs/evidence/2026-05-19-v086-int/README.md` |
 | G086_CLOSE | `09f5ad4b`; hold correction `81badf31` | PASS with `HOLD_FOR_FIXES` decision | `docs/evidence/2026-05-19-v086-close/README.md` |
 
@@ -63,10 +65,11 @@ proposal.
 | M086_INDEX performance speedup | PASS | build-heavy repeated-session semi-join fixture records cached median 0.079429262s, uncached median 0.254631847s, and `speedup_ratio=3.206` against the >=1.5x target |
 | M086_CONSUMERS example execution | PASS | DTS-DLM, two neutral scientific/engineering fixtures, v0.9.0 substrate, and pyxlog compatibility examples execute through `xlog-cli`; v0.8.0/v0.8.5 validators passed |
 | M086_CONSUMERS certification proof | BLOCKED | feature coverage is label-derived from `expected.json`; native exact/adaptive/index behavior is linked through feature evidence, not directly proven per consumer fixture |
+| M086_CONSUMERS pyxlog persistent-index reuse | PASS | public `LogicRelationSession` delta loop records persistent-index build/hit and zero tracked host transfers |
 | M086_INT.1 formatting | PASS | `cargo fmt --check` exit 0 |
 | M086_INT.2 workspace | PASS | `cargo check --workspace` exit 0 |
 | M086_INT.3 targeted Rust | PASS | runtime, cuda, induce, prob, logic, and integration crates exited 0 |
-| M086_INT.4 Python | PASS | `42 passed in 56.08s` for v0.8.0/v0.8.5/v0.8.6 source/runtime bundle |
+| M086_INT.4 Python | PASS | `44 passed in 86.31s` for v0.8.0/v0.8.5/v0.8.6 source/runtime bundle |
 | M086_INT.5 examples | PASS_WITH_CONSUMER_PROOF_GAP | v0.8.0 examples 5, v0.8.5 examples 10, v0.8.6 examples 5; validator records `consumer_certification_status=BLOCKED` |
 | M086_INT.6 transfer guards | PASS | xlog-prob no-D2H guards, integration strict D2H tests, and v0.8.6 source/runtime transfer guards passed |
 | M086_INT.7 performance | PASS | raw speed/transfer evidence recorded, including persistent-index `speedup_ratio=3.206` with zero tracked DTOH/H2D calls |
@@ -74,7 +77,7 @@ proposal.
 | M086_INT.9 git hygiene | PASS | generated artifacts limited to evidence; `git diff --check` passed |
 | M086_CLOSE.1 sub-goal table | PASS | this proposal and `closure_summary.json` |
 | M086_CLOSE.2 roadmap sync | PASS | `ROADMAP.md` reflects recorded background build and persistent-index timing speedup |
-| M086_CLOSE.3 unresolved issues | PASS | label-derived consumer feature coverage and pyxlog persistent-index reuse proof are explicitly blocked |
+| M086_CLOSE.3 unresolved issues | PASS | label-derived consumer feature coverage is explicitly blocked; pyxlog persistent-index session reuse is behavior-proven |
 | M086_CLOSE.4 release decision | PASS | `HOLD_FOR_FIXES` |
 | M086_CLOSE.5 no implicit release | PASS | no board update, merge, push, or tag |
 | M086_CLOSE.6 methodology audit | PASS | GDSP/GQM evidence sections present across v0.8.6 evidence |
@@ -91,7 +94,7 @@ proposal.
 | `cargo test -p xlog-prob` | exit 0; includes no-D2H/native GPU guards |
 | `cargo test -p xlog-logic` | exit 0 |
 | `cargo test -p xlog-integration` | exit 0; includes strict deterministic D2H, cross-mode determinism, WCOJ, and widened-frontier suites |
-| `PYTHONPATH=target/debug pytest -q python/tests/test_v080_examples_source.py python/tests/test_v085_examples_source.py python/tests/test_v086_delta_coalescing.py python/tests/test_v086_relation_callbacks.py python/tests/test_v086_relation_callbacks_runtime.py python/tests/test_v086_exact_types_source.py python/tests/test_v086_exact_types_runtime.py python/tests/test_v086_chain_smem_profile_source.py python/tests/test_v086_chain_smem_source.py python/tests/test_v086_cse_source.py python/tests/test_v086_adaptive_reoptimization_source.py python/tests/test_v086_persistent_hash_index_source.py python/tests/test_v086_consumers_source.py` | exit 0; 42 passed in 56.08s |
+| `PYTHONPATH=target/debug pytest -q python/tests/test_v080_examples_source.py python/tests/test_v085_examples_source.py python/tests/test_v086_delta_coalescing.py python/tests/test_v086_relation_callbacks.py python/tests/test_v086_relation_callbacks_runtime.py python/tests/test_v086_exact_types_source.py python/tests/test_v086_exact_types_runtime.py python/tests/test_v086_chain_smem_profile_source.py python/tests/test_v086_chain_smem_source.py python/tests/test_v086_cse_source.py python/tests/test_v086_adaptive_reoptimization_source.py python/tests/test_v086_persistent_hash_index_source.py python/tests/test_v086_consumers_source.py python/tests/test_v086_pyxlog_persistent_index_runtime.py` | exit 0; 44 passed in 86.31s |
 | `python scripts/validate_v086_examples.py` | exit 0; v0.8.0 examples 5, v0.8.5 examples 10, v0.8.6 examples 5 |
 | `python -m json.tool` over v0.8.6 evidence and expected JSON files | exit 0 |
 | `python -m py_compile scripts/validate_v086_examples.py python/tests/test_v086_persistent_hash_index_source.py python/tests/test_v086_consumers_source.py` | exit 0 |
@@ -120,11 +123,9 @@ provider build test, and the build-heavy repeated-session performance fixture.
   feature-node evidence, but they do not directly prove native exact-induction,
   adaptive reoptimization, or persistent-index behavior inside each labeled
   consumer fixture. The persistent-index feature node now has direct
-  performance evidence, but the consumer examples still do not trigger that
-  behavior directly.
-- Public pyxlog session coverage does not yet prove persistent hash-index reuse
-  across session mutation and reevaluation; the current persistent-index reuse
-  evidence is runtime-Executor based.
+  performance evidence, and public pyxlog session mutation now has targeted
+  persistent-index reuse evidence, but the consumer examples still do not
+  trigger every declared feature directly.
 - v0.9.0 EIR, world-view semantics, solver services, MaxSAT, epistemic
   splitting, and multi-GPU/out-of-core work remain out of scope.
 - No release action has been taken.

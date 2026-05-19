@@ -64,9 +64,9 @@ def test_v086_relation_callback_payload_is_metadata_only_and_post_commit() -> No
             "fn fire_relation_callbacks"
         )
     ]
-    assert ".apply_relation_deltas(" in apply_delta
+    assert ".apply_relation_deltas_with_session_runtime(" in apply_delta
     assert "self.fire_relation_callbacks(" in apply_delta
-    assert apply_delta.index(".apply_relation_deltas(") < apply_delta.index(
+    assert apply_delta.index(".apply_relation_deltas_with_session_runtime(") < apply_delta.index(
         "self.fire_relation_callbacks("
     )
 

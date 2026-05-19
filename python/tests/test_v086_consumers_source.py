@@ -108,6 +108,8 @@ def test_v086_consumer_validator_reuses_existing_compatibility_gates() -> None:
         "compatibility_gates",
         "production_path_reuse",
         "reuse_audit",
+        "child.name.startswith(\"_native\")",
+        "pyxlog_persistent_index_session_reuse",
     ]:
         assert needle in source
 
@@ -131,8 +133,16 @@ def test_v086_consumer_evidence_records_feature_coverage_and_reuse_audit() -> No
 
     assert summary["compatibility_gates"]["v080_examples"]["status"] == "PASS"
     assert summary["compatibility_gates"]["v085_examples"]["status"] == "PASS"
+    assert (
+        summary["compatibility_gates"]["pyxlog_persistent_index_session_reuse"]["status"]
+        == "PASS"
+    )
     assert summary["production_path_reuse"]["status"] == "PASS"
     assert summary["reuse_audit"]["status"] == "PASS"
+    assert all(
+        gap["id"] != "pyxlog-persistent-index-session-reuse"
+        for gap in summary["consumer_proof_gaps"]
+    )
 
 
 def test_v086_validator_accepts_absolute_and_relative_output_paths(monkeypatch, tmp_path) -> None:

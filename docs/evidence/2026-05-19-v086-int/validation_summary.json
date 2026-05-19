@@ -1,12 +1,27 @@
 {
   "branch": "feat/v086-runtime-completion",
   "commit_under_test": "df2dbc03",
-  "implementation_evidence_head_before_hold_correction": "0e2a5420",
-  "hold_correction_commit": "81badf314c09",
-  "persistent_index_performance_commit": "df2dbc03",
+  "compatibility": {
+    "v080_examples": {
+      "example_count": 5,
+      "status": "PASS",
+      "summary": "docs/evidence/2026-05-19-v086-consumers/compat_v080_validation_summary.json"
+    },
+    "v085_examples": {
+      "example_count": 10,
+      "status": "PASS",
+      "summary": "docs/evidence/2026-05-19-v086-consumers/compat_v085_validation_summary.json"
+    },
+    "v086_examples": {
+      "consumer_certification_status": "BLOCKED",
+      "example_count": 5,
+      "status": "PASS_WITH_CONSUMER_PROOF_GAP",
+      "summary": "docs/evidence/2026-05-19-v086-consumers/validation_summary.json"
+    }
+  },
   "date": "2026-05-19",
-  "suite": "G086_INT",
-  "status": "BLOCKED",
+  "hold_correction_commit": "81badf314c09",
+  "implementation_evidence_head_before_hold_correction": "0e2a5420",
   "metrics": {
     "M086_INT.1 formatting": {
       "command": "cargo fmt --check",
@@ -14,8 +29,8 @@
     },
     "M086_INT.2 workspace": {
       "command": "cargo check --workspace",
-      "status": "PASS",
-      "observed": "Finished dev profile in 0.17s"
+      "observed": "Finished dev profile in 0.17s",
+      "status": "PASS"
     },
     "M086_INT.3 targeted Rust": {
       "commands": [
@@ -30,21 +45,20 @@
     },
     "M086_INT.4 Python": {
       "command": "PYTHONPATH=target/debug pytest -q python/tests/test_v080_examples_source.py python/tests/test_v085_examples_source.py python/tests/test_v086_delta_coalescing.py python/tests/test_v086_relation_callbacks.py python/tests/test_v086_relation_callbacks_runtime.py python/tests/test_v086_exact_types_source.py python/tests/test_v086_exact_types_runtime.py python/tests/test_v086_chain_smem_profile_source.py python/tests/test_v086_chain_smem_source.py python/tests/test_v086_cse_source.py python/tests/test_v086_adaptive_reoptimization_source.py python/tests/test_v086_persistent_hash_index_source.py python/tests/test_v086_consumers_source.py",
-      "status": "PASS",
-      "observed": "42 passed in 56.08s"
+      "observed": "42 passed in 56.08s",
+      "status": "PASS"
     },
     "M086_INT.5 examples": {
       "command": "python scripts/validate_v086_examples.py",
-      "status": "PASS_WITH_CONSUMER_PROOF_GAP",
       "observed": {
+        "consumer_certification_status": "BLOCKED",
         "v080_examples": 5,
         "v085_examples": 10,
-        "v086_examples": 5,
-        "consumer_certification_status": "BLOCKED"
-      }
+        "v086_examples": 5
+      },
+      "status": "PASS_WITH_CONSUMER_PROOF_GAP"
     },
     "M086_INT.6 transfer guards": {
-      "status": "PASS",
       "covered_by": [
         "cargo test -p xlog-prob no_dtoh",
         "cargo test -p xlog-integration strict_deterministic_d2h",
@@ -55,17 +69,18 @@
         "python/tests/test_v086_cse_source.py",
         "python/tests/test_v086_adaptive_reoptimization_source.py",
         "python/tests/test_v086_persistent_hash_index_source.py"
-      ]
+      ],
+      "status": "PASS"
     },
     "M086_INT.7 performance": {
-      "status": "PASS",
       "evidence": {
-        "delta": "recompute_call_reduction_ratio=3.0; hot_path_dtoh_calls=0",
+        "adaptive_reoptimization": "correctness/rollback gate passed; no speedup gate claimed",
         "chain_shared_memory": "speedup_ratio=5.58300273358745 on chain_hot fixture",
         "cse": "duplicate_subplan_reduction_percent=50.0; added_dtoh_calls=0",
-        "adaptive_reoptimization": "correctness/rollback gate passed; no speedup gate claimed",
+        "delta": "recompute_call_reduction_ratio=3.0; hot_path_dtoh_calls=0",
         "persistent_hash_index": "build-heavy repeated-session fixture records speedup_ratio=3.206; cached median 0.079429262s, uncached median 0.254631847s; tracked DTOH/H2D calls remain 0"
-      }
+      },
+      "status": "PASS"
     },
     "M086_INT.8 docs": {
       "commands": [
@@ -77,50 +92,37 @@
     },
     "M086_INT.9 git hygiene": {
       "command": "git diff --check",
-      "status": "PASS",
       "generated_artifacts_documented": [
         "docs/evidence/2026-05-19-v086-consumers/*.json refreshed by the fresh validator run",
         "docs/evidence/2026-05-19-v086-int/README.md",
         "docs/evidence/2026-05-19-v086-int/validation_summary.json"
-      ]
+      ],
+      "status": "PASS"
+    }
+  },
+  "persistent_index_performance_commit": "df2dbc03",
+  "python": {
+    "pyxlog_persistent_index_session_reuse": {
+      "status": "PASS",
+      "summary": "public LogicRelationSession mutation loop records persistent-index build/hit and zero tracked host transfers",
+      "test": "python/tests/test_v086_pyxlog_persistent_index_runtime.py"
     }
   },
   "rust_counts": {
-    "xlog-runtime": "142 lib tests, 15 integration tests, 2 doc tests passed; 2 doc tests ignored",
     "xlog-cuda": "kernel_modules filter: 2 passed",
     "xlog-induce": "23 lib tests passed",
-    "xlog-prob": "package test suite passed, including no_cpu_d4_in_exact and no_dtoh_* guards",
+    "xlog-integration": "package test suite passed, including strict deterministic D2H, cross-mode determinism, WCOJ, and widened-frontier suites",
     "xlog-logic": "package test suite passed, including v0.8.5 language and optimizer suites",
-    "xlog-integration": "package test suite passed, including strict deterministic D2H, cross-mode determinism, WCOJ, and widened-frontier suites"
+    "xlog-prob": "package test suite passed, including no_cpu_d4_in_exact and no_dtoh_* guards",
+    "xlog-runtime": "142 lib tests, 15 integration tests, 2 doc tests passed; 2 doc tests ignored"
   },
-  "compatibility": {
-    "v080_examples": {
-      "status": "PASS",
-      "example_count": 5,
-      "summary": "docs/evidence/2026-05-19-v086-consumers/compat_v080_validation_summary.json"
-    },
-    "v085_examples": {
-      "status": "PASS",
-      "example_count": 10,
-      "summary": "docs/evidence/2026-05-19-v086-consumers/compat_v085_validation_summary.json"
-    },
-    "v086_examples": {
-      "status": "PASS_WITH_CONSUMER_PROOF_GAP",
-      "example_count": 5,
-      "summary": "docs/evidence/2026-05-19-v086-consumers/validation_summary.json",
-      "consumer_certification_status": "BLOCKED"
-    }
-  },
+  "status": "BLOCKED",
+  "suite": "G086_INT",
   "unresolved": [
     {
-      "status": "CONSUMER_PROOF_GAP",
+      "reason": "The v0.8.6 examples execute through xlog-cli, but feature coverage is label-derived from expected.json declarations and is not direct behavior proof for every declared native/runtime feature.",
       "scope": "G086_CONSUMERS feature coverage",
-      "reason": "The v0.8.6 examples execute through xlog-cli, but feature coverage is label-derived from expected.json declarations and is not direct behavior proof for every declared native/runtime feature."
-    },
-    {
-      "status": "PYXLOG_REUSE_UNPROVEN",
-      "scope": "pyxlog persistent-index session reuse",
-      "reason": "Public pyxlog compatibility is green, but persistent hash-index reuse across session mutation and reevaluation is not directly proven."
+      "status": "CONSUMER_PROOF_GAP"
     }
   ]
 }

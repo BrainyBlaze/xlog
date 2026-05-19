@@ -115,6 +115,10 @@ class LogicRelationSession:
         """Return ``{dtoh_bytes: int, ...}`` transfer statistics."""
         ...
 
+    def join_index_cache_stats(self) -> dict[str, int]:
+        """Return persistent hash-index cache telemetry for this session."""
+        ...
+
     def reset_host_transfer_stats(self) -> None:
         """Reset all host-transfer statistics."""
         ...

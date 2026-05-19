@@ -188,6 +188,7 @@ impl CompiledLogicProgram {
             provider: self.provider.clone(),
             relation_store,
             evaluation_store: None,
+            session_runtime: None,
             last_delta_stats: None,
             relation_callbacks: Vec::new(),
             next_relation_callback_id: 1,
@@ -232,6 +233,7 @@ impl LogicRelationSession {
             .map_err(types::xlog_err)?;
         self.relation_store.put(&name, buffer);
         self.evaluation_store = None;
+        self.session_runtime = None;
         self.last_delta_stats = None;
         Ok(())
     }
@@ -248,13 +250,19 @@ impl LogicRelationSession {
                 .evaluate_cached_relation_store(self.provider.clone(), store)
                 .map_err(types::xlog_err)?
         } else {
+            if self.session_runtime.is_none() {
+                self.session_runtime = Some(
+                    self.program
+                        .create_session_runtime(self.provider.clone(), &self.relation_store, false)
+                        .map_err(types::xlog_err)?,
+                );
+            }
+            let runtime = self.session_runtime.as_mut().ok_or_else(|| {
+                PyRuntimeError::new_err("session runtime unavailable during evaluation")
+            })?;
             let (result, store) = self
                 .program
-                .evaluate_with_relation_store_and_cache(
-                    self.provider.clone(),
-                    &self.relation_store,
-                    false,
-                )
+                .evaluate_with_session_runtime(self.provider.clone(), runtime)
                 .map_err(types::xlog_err)?;
             self.evaluation_store = Some(store);
             result
@@ -342,10 +350,11 @@ impl LogicRelationSession {
 
         let report = self
             .program
-            .apply_relation_delta_batch(
+            .apply_relation_delta_batch_with_session_runtime(
                 self.provider.clone(),
                 &mut self.relation_store,
                 &mut self.evaluation_store,
+                &mut self.session_runtime,
                 batch,
             )
             .map_err(types::xlog_err)?;
@@ -422,6 +431,34 @@ impl LogicRelationSession {
         Ok(dict.into())
     }
 
+    pub fn join_index_cache_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let dict = PyDict::new(py);
+        let stats = self
+            .session_runtime
+            .as_ref()
+            .map(|runtime| runtime.join_index_cache_stats())
+            .unwrap_or_default();
+        dict.set_item("lookups", stats.lookups)?;
+        dict.set_item("hits", stats.hits)?;
+        dict.set_item("misses", stats.misses)?;
+        dict.set_item("builds", stats.builds)?;
+        dict.set_item("evictions", stats.evictions)?;
+        dict.set_item("invalidations", stats.invalidations)?;
+        dict.set_item("stale_rejections", stats.stale_rejections)?;
+        dict.set_item("background_build_requests", stats.background_build_requests)?;
+        dict.set_item(
+            "background_builds_completed",
+            stats.background_builds_completed,
+        )?;
+        dict.set_item(
+            "background_builds_deferred",
+            stats.background_builds_deferred,
+        )?;
+        dict.set_item("entries", stats.entries)?;
+        dict.set_item("total_bytes", stats.total_bytes)?;
+        Ok(dict.into())
+    }
+
     pub fn reset_host_transfer_stats(&self) {
         self.provider.reset_host_transfer_stats()
     }
@@ -453,6 +490,7 @@ impl LogicRelationSession {
         let removed = self.relation_store.remove(name).is_some();
         if removed {
             self.evaluation_store = None;
+            self.session_runtime = None;
             self.last_delta_stats = None;
         }
         removed
@@ -461,6 +499,7 @@ impl LogicRelationSession {
     pub fn clear_relations(&mut self) {
         self.relation_store.clear();
         self.evaluation_store = None;
+        self.session_runtime = None;
         self.last_delta_stats = None;
     }
 }
@@ -507,10 +546,11 @@ impl LogicRelationSession {
         deltas.insert(name, RelationDelta::new(insert, delete));
         let report = self
             .program
-            .apply_relation_deltas(
+            .apply_relation_deltas_with_session_runtime(
                 self.provider.clone(),
                 &mut self.relation_store,
                 &mut self.evaluation_store,
+                &mut self.session_runtime,
                 deltas,
             )
             .map_err(types::xlog_err)?;

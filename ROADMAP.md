@@ -1610,8 +1610,8 @@ engines, or parallel helper paths that bypass production dispatch are blockers.
       v0.8.0 and v0.8.5 validators, records raw timings/transfer evidence, and
       audits production-path reuse instead of introducing a fixture-only engine.
       Example execution passes, but certification remains HOLD_FOR_FIXES because
-      feature coverage is label-derived and pyxlog persistent-index session
-      reuse is not directly proven.
+      feature coverage is label-derived. Public pyxlog persistent-index session
+      reuse now has a passing behavior probe.
       Evidence: `docs/evidence/2026-05-19-v086-consumers/`.
 
 ## v0.9.0 - Epistemic and Solver Semantics
