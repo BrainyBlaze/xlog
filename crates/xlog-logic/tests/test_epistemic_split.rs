@@ -48,6 +48,31 @@ fn valid_split_recomposes_to_unsplit_rule_order() {
 }
 
 #[test]
+fn relational_dependency_coalesces_epistemic_split_components() {
+    let program = parse_program(
+        r#"
+        a() :- know p().
+        b() :- a(), know q().
+        "#,
+    )
+    .unwrap();
+
+    let split = split_epistemic_program(&program).unwrap();
+
+    assert_eq!(split.components.len(), 1);
+    assert_eq!(
+        split.components[0].predicates,
+        vec![
+            "a".to_string(),
+            "b".to_string(),
+            "p".to_string(),
+            "q".to_string()
+        ]
+    );
+    assert_eq!(split.recomposed_rule_indices(), vec![0, 1]);
+}
+
+#[test]
 fn valid_split_components_compile_through_gpu_executable_subplans() {
     let program = parse_program(
         r#"

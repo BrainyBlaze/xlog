@@ -1,6 +1,6 @@
 //! Epistemic mode helpers for compatibility fixtures.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use xlog_core::{Result, XlogError};
 use xlog_ir::{
@@ -626,25 +626,70 @@ pub fn run_generate_propagate_test_with_mode(
 
 /// Build a deterministic dependency graph for bounded epistemic splitting.
 pub fn build_epistemic_dependency_graph(program: &Program) -> Result<EpistemicDependencyGraph> {
-    let mut components: Vec<EpistemicDependencyComponent> = Vec::new();
+    if program.rules.is_empty() {
+        return Ok(EpistemicDependencyGraph { components: vec![] });
+    }
+
+    let mut parents: Vec<usize> = (0..program.rules.len()).collect();
+    let mut rule_predicates = Vec::with_capacity(program.rules.len());
+    let mut predicate_owner: BTreeMap<String, usize> = BTreeMap::new();
 
     for (idx, rule) in program.rules.iter().enumerate() {
         let mut predicates = BTreeSet::new();
         predicates.insert(rule.head.predicate.clone());
         for lit in &rule.body {
-            if let BodyLiteral::Epistemic(lit) = lit {
-                predicates.insert(lit.atom.predicate.clone());
+            if let Some(atom) = lit.atom() {
+                predicates.insert(atom.predicate.clone());
             }
         }
 
-        components.push(EpistemicDependencyComponent {
-            predicates: predicates.into_iter().collect(),
-            rule_indices: vec![idx],
-        });
+        for predicate in &predicates {
+            if let Some(owner) = predicate_owner.insert(predicate.clone(), idx) {
+                union_components(&mut parents, owner, idx);
+            }
+        }
+
+        rule_predicates.push(predicates);
     }
 
+    let mut grouped: BTreeMap<usize, (BTreeSet<String>, Vec<usize>)> = BTreeMap::new();
+    for (idx, predicates) in rule_predicates.into_iter().enumerate() {
+        let root = find_component(&mut parents, idx);
+        let entry = grouped
+            .entry(root)
+            .or_insert_with(|| (BTreeSet::new(), vec![]));
+        entry.0.extend(predicates);
+        entry.1.push(idx);
+    }
+
+    let mut components: Vec<EpistemicDependencyComponent> = grouped
+        .into_values()
+        .map(|(predicates, mut rule_indices)| {
+            rule_indices.sort_unstable();
+            EpistemicDependencyComponent {
+                predicates: predicates.into_iter().collect(),
+                rule_indices,
+            }
+        })
+        .collect();
     components.sort_by(|a, b| a.predicates.cmp(&b.predicates));
     Ok(EpistemicDependencyGraph { components })
+}
+
+fn find_component(parents: &mut [usize], idx: usize) -> usize {
+    if parents[idx] != idx {
+        let root = find_component(parents, parents[idx]);
+        parents[idx] = root;
+    }
+    parents[idx]
+}
+
+fn union_components(parents: &mut [usize], left: usize, right: usize) {
+    let left_root = find_component(parents, left);
+    let right_root = find_component(parents, right);
+    if left_root != right_root {
+        parents[right_root] = left_root;
+    }
 }
 
 /// Split an epistemic program into independently solvable bounded components.

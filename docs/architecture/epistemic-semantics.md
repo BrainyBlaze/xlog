@@ -359,12 +359,19 @@ fallback counters.
 
 ## Epistemic Splitting Fixture Contract
 
-`build_epistemic_dependency_graph` builds deterministic split components from
-source-order rules:
+`build_epistemic_dependency_graph` builds deterministic connected components
+from source-order rules. Connectivity includes each rule head, ordinary positive
+or negated body predicates, and epistemic body predicates, so an ordinary
+dependency between two epistemic rules coalesces them into one component instead
+of treating them as independently solvable:
 
 - each component records sorted predicate names;
 - each component records source rule indices;
 - components are sorted lexicographically by predicate list.
+
+This prevents unsafe split certificates such as `a() :- know p().` and
+`b() :- a(), know q().` from becoming two independent components. The shared
+ordinary predicate `a` keeps the rules in one component.
 
 `split_epistemic_program` rejects a rule that couples more than one distinct
 epistemic body predicate. In this bounded split layer, such a rule would require
