@@ -7,14 +7,17 @@ Post-review amendments: imported the governing goal document, closed the
 completed DOCREF/TYPES ROADMAP checkboxes, strengthened the examples validator
 so every showcase has semantic checks, and converted the remaining
 deterministic showcases from raw kernel schema errors to successful `xlog run`
-outputs.
+outputs. The aggregate-lift exact-path amendment also validates the certified
+17-row fixture through the production exact CLI path and routes accepted fired
+count-lift queries through the GPU-native count-lift evaluator.
 
 ## Recommendation
 
-`MERGE_READY`, pending coordinator authorization for the actual merge.
+`MERGE_READY` after committing this exact-path amendment and checking clean
+status. The coordinator authorized the release-board update, commit, merge,
+push, and `v0.8.5` tag on 2026-05-19.
 
-This proposal does not authorize or perform a push, tag, release-board update,
-or merge. v0.9.0 work should rebase or merge after v0.8.5 lands because this
+v0.9.0 work should rebase or merge after v0.8.5 lands because this
 branch changes parser, AST, finite-term, probability, and CLI surfaces that the
 epistemic/solver branch is expected to build on.
 
@@ -30,7 +33,7 @@ epistemic/solver branch is expected to build on.
 | G085_NAF | `5acc3a60` | PASS | `docs/evidence/2026-05-19-v085-naf/README.md` |
 | G085_MAGIC | `e61961b1` | PASS | `docs/evidence/2026-05-19-v085-magic-sets/README.md` |
 | G085_PROB_AGG | `23e57dcb` | PASS | `docs/evidence/2026-05-19-v085-prob-aggregates/README.md` |
-| G085_AGG_LIFT | `b3087a88` | PASS | `docs/evidence/2026-05-19-v085-aggregate-lift/README.md` |
+| G085_AGG_LIFT | `b3087a88` plus exact-path amendment | PASS | `docs/evidence/2026-05-19-v085-aggregate-lift/README.md` |
 | G085_APPROX | `470564c5` | PASS | `docs/evidence/2026-05-19-v085-approx/README.md` |
 | G085_INC_PARSE | `03f87db1` | PASS | `docs/evidence/2026-05-19-v085-incremental-parse/README.md` |
 | G085_CLI | `72d8c9de` | PASS | `docs/evidence/2026-05-19-v085-cli/README.md` |
@@ -51,7 +54,7 @@ epistemic/solver branch is expected to build on.
 | M085_NAF.* | PASS | deterministic source-order-bound NAF tests pass; probabilistic WFS remains separate |
 | M085_MAGIC.* | PASS | bound recursive magic-set rewrite tests pass; explain reports generated predicates |
 | M085_PROB_AGG.* | PASS | exact finite probabilistic aggregate tests pass; cap diagnostics tested |
-| M085_AGG_LIFT.* | PASS | count lift reports `131072` naive outcomes versus `171` DP states on the certified fixture |
+| M085_AGG_LIFT.* | PASS | count lift reports `131072` naive outcomes versus `171` DP states; exact CLI returns `out_degree(1, 8)=0.1854705810546875` on the certified fixture through the GPU-native count-lift path |
 | M085_APPROX.* | PASS | approximate inference pragmas and MC metadata tests pass |
 | M085_INC_PARSE.* | PASS | parser-session cache, invalidation, and span diagnostics tests pass |
 | M085_CLI.* | PASS | explain, REPL, and watch tests pass |
@@ -69,12 +72,12 @@ epistemic/solver branch is expected to build on.
 | M085_INT.7 source audit | PASS | `no_cpu_d4_in_exact`, `no_dtoh_gpu_native`, and `no_dtoh_*` tests passed inside `cargo test -p xlog-prob` |
 | M085_INT.8 v0.8.0 compatibility | PASS | `pytest -q python/tests/test_v080_examples_source.py python/tests/test_v085_examples_source.py` -> `6 passed` |
 | M085_INT.9 docs/hygiene | PASS | JSON validation, stale-marker scan, and `git diff --check` passed |
-| M085_CLOSE.1 metric table | PASS | this table marks every metric PASS |
+| M085_CLOSE.1 metric table | PASS | product metrics pass; release-board update authorized on 2026-05-19 |
 | M085_CLOSE.2 roadmap | PASS | `ROADMAP.md` has explicit v0.8.5 section with completed DOCREF/TYPES/examples/certification items and v0.9.0 ordering preserved |
 | M085_CLOSE.3 changelog | PASS | `CHANGELOG.md` has explicit `0.8.5` entry, migration notes, and release-status note |
 | M085_CLOSE.4 closure proposal | PASS | this document |
-| M085_CLOSE.5 worktree | PASS | clean before close edits; final status checked after commit |
-| M085_CLOSE.6 no unauthorized actions | PASS | no push, tag, merge, or board update performed |
+| M085_CLOSE.5 worktree | PASS | exact-path amendment is validated; clean status is checked after the commit |
+| M085_CLOSE.6 release authorization | PASS | release-board update, commit, merge, push, and `v0.8.5` tag authorized on 2026-05-19 |
 
 ## Verification Matrix
 
@@ -86,6 +89,9 @@ epistemic/solver branch is expected to build on.
 | `cargo check -p xlog-cli` | exit 0 |
 | `cargo test -p xlog-logic` | exit 0 |
 | `cargo test -p xlog-prob` | exit 0 |
+| `cargo test -p xlog-prob --features host-io --test test_v085_aggregate_lifting` | exit 0; `5 passed`; committed exact fixture asserts GPU-native count-lift routing |
+| `cargo test -p xlog-cuda kernel_modules` | exit 0; `2 passed` |
+| `CUDA_LAUNCH_BLOCKING=1 cargo run -q -p xlog-cli --features host-io -- prob examples/v085-language/aggregate_lifting/count_lift.xlog --output json` | exit 0; `out_degree(1, 8)=0.1854705810546875` |
 | `cargo test -p xlog-cli` | exit 0 |
 | `cargo test -p xlog-runtime` | exit 0 |
 | `cargo test -p xlog-integration` | exit 0 after fixing the `pair/2` compatibility regression |
@@ -134,5 +140,6 @@ parallel.
 ## Required Coordinator Actions
 
 1. Review this closure proposal and the linked evidence directories.
-2. Decide whether to authorize merge.
-3. If merge is authorized, perform or explicitly delegate merge/push/tag steps.
+2. Commit the exact-path amendment and verify clean status.
+3. Merge the branch to `main`.
+4. Push `main` and the `v0.8.5` tag.

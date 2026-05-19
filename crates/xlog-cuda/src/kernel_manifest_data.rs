@@ -263,6 +263,7 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
         kernels: &[
             "weights_fill_leaf",
             "weights_fill_choice",
+            "weights_count_lift_exact",
             "weights_set_evidence_from_nodes",
             "weights_apply_evidence",
             "weights_map_nodes_to_vars",

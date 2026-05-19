@@ -469,6 +469,7 @@ pub mod cnf_kernels {
 pub mod weights_kernels {
     pub const WEIGHTS_FILL_LEAF: &str = "weights_fill_leaf";
     pub const WEIGHTS_FILL_CHOICE: &str = "weights_fill_choice";
+    pub const WEIGHTS_COUNT_LIFT_EXACT: &str = "weights_count_lift_exact";
     pub const WEIGHTS_SET_EVIDENCE_FROM_NODES: &str = "weights_set_evidence_from_nodes";
     pub const WEIGHTS_APPLY_EVIDENCE: &str = "weights_apply_evidence";
     pub const WEIGHTS_MAP_NODES_TO_VARS: &str = "weights_map_nodes_to_vars";

@@ -20,7 +20,9 @@ use crate::compilation::{
     GpuCompileConfig, GpuPirGraph, GpuPirRoots,
 };
 use crate::neural_fast_path::{GpuWeightSlots, NeuralFastPathConfig};
-use crate::provenance::{extract_from_program, extract_from_source, GroundAtom, Provenance};
+use crate::provenance::{
+    extract_from_program, extract_from_source, AggregateLiftStatus, GroundAtom, Provenance, Value,
+};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::provider::{
     arith_kernels, filter_kernels, neural_kernels, weights_kernels, ARITH_MODULE, FILTER_MODULE,
@@ -112,9 +114,101 @@ impl GpuExactState {
     }
 }
 
+#[cfg_attr(not(feature = "host-io"), allow(dead_code))]
+struct GpuCountLiftQuery {
+    atom: GroundAtom,
+    target_count: u32,
+    leaf_count: u32,
+    leaf_probs: TrackedCudaSlice<f64>,
+}
+
+#[cfg_attr(not(feature = "host-io"), allow(dead_code))]
+struct GpuCountLiftState {
+    provider: Arc<CudaKernelProvider>,
+    queries: Vec<GpuCountLiftQuery>,
+}
+
+impl GpuCountLiftState {
+    fn new(provider: Arc<CudaKernelProvider>, queries: Vec<GpuCountLiftQuery>) -> Self {
+        Self { provider, queries }
+    }
+
+    #[cfg(feature = "host-io")]
+    fn evaluate(&self) -> Result<ExactResult> {
+        let func = self
+            .provider
+            .device()
+            .inner()
+            .get_func(WEIGHTS_MODULE, weights_kernels::WEIGHTS_COUNT_LIFT_EXACT)
+            .ok_or_else(|| {
+                XlogError::Kernel("weights_count_lift_exact kernel not found".to_string())
+            })?;
+        let mut query_probs = Vec::with_capacity(self.queries.len());
+        for query in &self.queries {
+            let scratch_len = query
+                .target_count
+                .checked_add(1)
+                .ok_or_else(|| XlogError::Compilation("count-lift target overflow".to_string()))?;
+            let mut scratch = self.provider.memory().alloc::<f64>(scratch_len as usize)?;
+            let mut out = self.provider.memory().alloc::<f64>(1)?;
+            unsafe {
+                func.clone().launch(
+                    LaunchConfig {
+                        grid_dim: (1, 1, 1),
+                        block_dim: (1, 1, 1),
+                        shared_mem_bytes: 0,
+                    },
+                    (
+                        &query.leaf_probs,
+                        query.leaf_count,
+                        query.target_count,
+                        &mut scratch,
+                        &mut out,
+                    ),
+                )
+            }
+            .map_err(|e| XlogError::Kernel(format!("weights_count_lift_exact failed: {}", e)))?;
+            let mut host = vec![0.0f64; 1];
+            self.provider
+                .device()
+                .inner()
+                .dtoh_sync_copy_into(&out, &mut host)
+                .map_err(|e| XlogError::Kernel(format!("count-lift result dtoh failed: {}", e)))?;
+            let mut prob = host[0];
+            if prob < 0.0 && prob >= -1e-12 {
+                prob = 0.0;
+            } else if prob > 1.0 && prob <= 1.0 + 1e-12 {
+                prob = 1.0;
+            }
+            if !prob.is_finite() || !(0.0..=1.0).contains(&prob) {
+                return Err(XlogError::Kernel(format!(
+                    "count-lift GPU evaluator returned invalid probability {}",
+                    prob
+                )));
+            }
+            let log_prob = if prob == 0.0 {
+                f64::NEG_INFINITY
+            } else {
+                prob.ln()
+            };
+            query_probs.push(QueryProbability {
+                atom: query.atom.clone(),
+                log_prob,
+                prob,
+            });
+        }
+        Ok(ExactResult {
+            log_z_e: 0.0,
+            query_probs,
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct ExactDdnnfProgram {
     gpu: Option<Arc<GpuExactState>>,
+    #[cfg_attr(not(feature = "host-io"), allow(dead_code))]
+    count_lift_gpu: Option<Arc<GpuCountLiftState>>,
     queries: Vec<QuerySpec>,
     #[cfg_attr(not(feature = "host-io"), allow(dead_code))]
     random_vars: Option<Arc<DeviceRandomVarList>>,
@@ -151,8 +245,18 @@ impl ExactDdnnfProgram {
         self.last_compile_profile.as_ref()
     }
 
+    #[doc(hidden)]
+    #[cfg(feature = "host-io")]
+    pub fn uses_gpu_native_count_lift(&self) -> bool {
+        self.count_lift_gpu.is_some()
+    }
+
     #[cfg(feature = "host-io")]
     pub fn evaluate(&self) -> Result<ExactResult> {
+        if let Some(count_lift_gpu) = &self.count_lift_gpu {
+            return count_lift_gpu.evaluate();
+        }
+
         if self.gpu.is_none() {
             let mut query_probs: Vec<QueryProbability> = Vec::with_capacity(self.queries.len());
             for query in &self.queries {
@@ -1267,6 +1371,20 @@ impl ExactDdnnfProgram {
         if roots.is_empty() {
             return Ok(Self {
                 gpu: None,
+                count_lift_gpu: None,
+                queries,
+                random_vars: None,
+                max_var: 0,
+                gpu_config: config,
+                last_compile_profile: None,
+            });
+        }
+
+        let count_lift_gpu = try_build_count_lift_gpu_state(&provenance, &queries, config)?;
+        if let Some(count_lift_gpu) = count_lift_gpu {
+            return Ok(Self {
+                gpu: None,
+                count_lift_gpu: Some(count_lift_gpu),
                 queries,
                 random_vars: None,
                 max_var: 0,
@@ -1402,6 +1520,7 @@ impl ExactDdnnfProgram {
 
         Ok(Self {
             gpu: Some(Arc::new(state)),
+            count_lift_gpu: None,
             queries,
             random_vars: Some(Arc::new(random_vars)),
             max_var: encoding.vars.max_var,
@@ -1549,6 +1668,126 @@ impl ExactDdnnfProgram {
             .map_err(|e| XlogError::Kernel(format!("Failed to download grad_false: {}", e)))?;
 
         Ok((log_z[0], host_grad_true, host_grad_false))
+    }
+}
+
+fn try_build_count_lift_gpu_state(
+    provenance: &Provenance,
+    queries: &[QuerySpec],
+    config: GpuConfig,
+) -> Result<Option<Arc<GpuCountLiftState>>> {
+    if queries.is_empty() || !provenance.evidence.is_empty() || !provenance.choice_probs.is_empty()
+    {
+        return Ok(None);
+    }
+
+    let fired_count_predicates: HashSet<&str> = provenance
+        .aggregate_lifting
+        .iter()
+        .filter(|entry| {
+            entry.status == AggregateLiftStatus::Fired
+                && entry.operator.as_str() == "count"
+                && entry.deterministic_rows == 0
+        })
+        .map(|entry| entry.predicate.as_str())
+        .collect();
+    if fired_count_predicates.is_empty() {
+        return Ok(None);
+    }
+    if queries
+        .iter()
+        .any(|query| !fired_count_predicates.contains(query.atom.predicate.as_str()))
+    {
+        return Ok(None);
+    }
+
+    let device = Arc::new(CudaDevice::new(config.device_ordinal)?);
+    let memory = Arc::new(GpuMemoryManager::new(
+        device.clone(),
+        MemoryBudget::with_limit(config.memory_bytes),
+    ));
+    let provider = Arc::new(CudaKernelProvider::new(device, memory)?);
+    let mut gpu_queries = Vec::with_capacity(queries.len());
+    for query in queries {
+        let target_count = match count_lift_query_target(query)? {
+            Some(target) => target,
+            None => return Ok(None),
+        };
+        let root = match provenance.query_formula(&query.atom.predicate, &query.atom.args) {
+            Some(root) => root,
+            None => return Ok(None),
+        };
+        let mut leaves = HashSet::new();
+        collect_count_lift_leaves(provenance, root, &mut leaves)?;
+        if leaves.is_empty() || leaves.len() > 64 {
+            return Ok(None);
+        }
+        if target_count > leaves.len() as u32 {
+            return Ok(None);
+        }
+        let mut leaves: Vec<_> = leaves.into_iter().collect();
+        leaves.sort_by_key(|leaf| leaf.as_u32());
+        let mut leaf_probs_host = Vec::with_capacity(leaves.len());
+        for leaf in leaves {
+            let p = *provenance.leaf_probs.get(&leaf).ok_or_else(|| {
+                XlogError::Compilation(format!(
+                    "Count-lift GPU evaluator missing probability for leaf {}",
+                    leaf.as_u32()
+                ))
+            })?;
+            leaf_probs_host.push(p);
+        }
+        let leaf_count = u32::try_from(leaf_probs_host.len())
+            .map_err(|_| XlogError::Compilation("count-lift leaf count exceeds u32".to_string()))?;
+        let leaf_probs = upload_f64(&provider, &leaf_probs_host)?;
+        gpu_queries.push(GpuCountLiftQuery {
+            atom: query.atom.clone(),
+            target_count,
+            leaf_count,
+            leaf_probs,
+        });
+    }
+    Ok(Some(Arc::new(GpuCountLiftState::new(
+        provider,
+        gpu_queries,
+    ))))
+}
+
+fn count_lift_query_target(query: &QuerySpec) -> Result<Option<u32>> {
+    match query.atom.args.last() {
+        Some(Value::I64(value)) if *value >= 0 => u32::try_from(*value)
+            .map(Some)
+            .map_err(|_| XlogError::Compilation("count-lift target exceeds u32".to_string())),
+        _ => Ok(None),
+    }
+}
+
+fn collect_count_lift_leaves(
+    provenance: &Provenance,
+    node: crate::pir::PirNodeId,
+    leaves: &mut HashSet<crate::pir::LeafId>,
+) -> Result<()> {
+    let pir_node = provenance.pir.node(node).ok_or_else(|| {
+        XlogError::Compilation(format!(
+            "Count-lift GPU evaluator saw invalid PIR node {}",
+            node.as_u32()
+        ))
+    })?;
+    match pir_node {
+        crate::pir::PirNode::Const(_) => Ok(()),
+        crate::pir::PirNode::Lit { leaf } | crate::pir::PirNode::NegLit { leaf } => {
+            leaves.insert(*leaf);
+            Ok(())
+        }
+        crate::pir::PirNode::And { children } | crate::pir::PirNode::Or { children } => {
+            for child in children {
+                collect_count_lift_leaves(provenance, *child, leaves)?;
+            }
+            Ok(())
+        }
+        crate::pir::PirNode::Decision { .. } => Err(XlogError::Compilation(
+            "Count-lift GPU evaluator does not support annotated-disjunction choices".to_string(),
+        )),
     }
 }
 

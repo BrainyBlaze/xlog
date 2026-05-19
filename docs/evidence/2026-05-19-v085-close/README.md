@@ -30,7 +30,7 @@ schema errors to successful `xlog run` outputs.
 | M085_CLOSE.3 changelog | v0.8.5 entry | PASS | `CHANGELOG.md` |
 | M085_CLOSE.4 closure proposal | proposal document created | PASS | `docs/plans/2026-05-19-v085-closure-proposal.md` |
 | M085_CLOSE.5 worktree | clean final status | PASS | checked after G085_INT commit; final status checked after G085_CLOSE commit |
-| M085_CLOSE.6 no unauthorized actions | no push, tag, merge, or board update | PASS | no such action performed |
+| M085_CLOSE.6 release authorization | release-board update, commit, merge, push, and tag require explicit authorization | PASS | authorization received on 2026-05-19 |
 
 ## Validation Commands
 
@@ -44,4 +44,5 @@ schema errors to successful `xlog run` outputs.
 | `git diff --check` | exit 0 |
 | targeted stale-marker scan across the closure proposal and close evidence | no matches |
 
-No push, tag, release-board update, or merge was performed.
+Release-board update, commit, merge, push, and `v0.8.5` tag were authorized on
+2026-05-19.

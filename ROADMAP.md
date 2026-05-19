@@ -1,7 +1,7 @@
 # XLOG Development Roadmap
 
-Last updated: May 18, 2026
-Current tagged release: v0.8.0. v0.6.0 shipped the stream-safe runtime
+Last updated: May 19, 2026
+Current tagged release: v0.8.5. v0.6.0 shipped the stream-safe runtime
 and recorded launch discipline. v0.6.1 shipped recorded CSM hash-join
 dispatch and explicit CSM cert-mode labeling. v0.6.2 shipped the first
 productized WCOJ slice: hypergraph planner / oracle foundations plus
@@ -18,11 +18,11 @@ exact-induction integration, and DTS-focused examples.
 This roadmap is version-oriented so planned work is not hidden inside subsystem
 sections. Historical and current-main work uses checked boxes. Future work uses
 unchecked boxes and is assigned to a concrete future version.
-After the tagged v0.8.0 feature pack, v0.8.5 is the active Language
-Completeness and Developer Experience train. It promotes the previously
+After the tagged v0.8.0 feature pack, v0.8.5 completed the Language
+Completeness and Developer Experience train. It promoted the previously
 deferred language / CLI / general-product backlog because general XLOG users,
-DTS-DLM future fixtures, and the v0.9.0 epistemic/solver branch now need the
-surface. v0.9.0 remains the Epistemic/Solver Semantics train and v0.10.0 is the
+DTS-DLM future fixtures, and the v0.9.0 epistemic/solver branch needed the
+surface. v0.9.0 is the active Epistemic/Solver Semantics train and v0.10.0 is the
 Multi-GPU / Out-of-Core train.
 
 ## v0.0.1 - Workspace Foundation
@@ -1457,6 +1457,9 @@ epistemic/solver branch. Their active tracking lives in the v0.8.5 section
 below.
 
 ## v0.8.5 - Language Completeness and Developer Experience
+
+Status: closed, merged, pushed, and tagged as `v0.8.5` after the
+2026-05-19 closure authorization.
 
 v0.8.5 is a language-surface release. It refreshes the public language
 reference, adds finite term/list/meta constructs, makes negation contracts

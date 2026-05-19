@@ -166,3 +166,34 @@ fn committed_aggregate_lift_example_extracts_report() {
     assert_eq!(report.status, AggregateLiftStatus::Fired);
     assert_eq!(report.uncertain_rows, 17);
 }
+
+#[cfg(feature = "host-io")]
+#[test]
+fn committed_aggregate_lift_example_runs_exact_path() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/v085-language/aggregate_lifting/count_lift.xlog");
+    let source = std::fs::read_to_string(path).expect("read committed aggregate lift example");
+    let mut config = xlog_prob::exact::GpuConfig::default();
+    config.memory_bytes = 1024 * 1024 * 1024;
+    let compiled = xlog_prob::exact::ExactDdnnfProgram::compile_source_with_gpu(&source, config)
+        .expect("compile committed aggregate lift exact GPU example");
+    assert!(
+        compiled.uses_gpu_native_count_lift(),
+        "accepted exact aggregate fixture must route through the GPU-native count-lift path"
+    );
+    let result = compiled
+        .evaluate()
+        .expect("evaluate committed aggregate lift exact GPU example");
+    let got = result
+        .query_probs
+        .iter()
+        .find(|query| query.atom.predicate == "out_degree")
+        .expect("query result")
+        .prob;
+
+    assert!(
+        (got - binomial_probability(17, 8, 0.5)).abs() < 1e-9,
+        "got={}",
+        got
+    );
+}

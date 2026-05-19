@@ -72,6 +72,45 @@ extern "C" __global__ void weights_fill_choice(
     }
 }
 
+extern "C" __global__ void weights_count_lift_exact(
+    const double* __restrict__ leaf_prob,
+    uint32_t leaf_count,
+    uint32_t target_count,
+    double* __restrict__ scratch,
+    double* __restrict__ out
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) {
+        return;
+    }
+    if (target_count > leaf_count) {
+        out[0] = 0.0;
+        return;
+    }
+
+    for (uint32_t k = 0; k <= target_count; k++) {
+        scratch[k] = 0.0;
+    }
+    scratch[0] = 1.0;
+
+    for (uint32_t i = 0; i < leaf_count; i++) {
+        double p = leaf_prob[i];
+        if (!(p >= 0.0 && p <= 1.0)) {
+            weights_trap();
+        }
+        uint32_t upper = i + 1u;
+        if (upper > target_count) {
+            upper = target_count;
+        }
+        for (uint32_t rev = 0; rev < upper; rev++) {
+            uint32_t k = upper - rev;
+            scratch[k] = scratch[k] * (1.0 - p) + scratch[k - 1u] * p;
+        }
+        scratch[0] = scratch[0] * (1.0 - p);
+    }
+
+    out[0] = scratch[target_count];
+}
+
 extern "C" __global__ void weights_set_evidence_from_nodes(
     const uint32_t* __restrict__ node_var,
     const uint32_t* __restrict__ evidence_nodes,

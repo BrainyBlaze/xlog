@@ -83,8 +83,8 @@ the v0.8.0 DTS-DLM runtime compatibility surface.
 - Closure proposal: `docs/plans/2026-05-19-v085-closure-proposal.md`.
 - Certification evidence: `docs/evidence/2026-05-18-v085-*` and
   `docs/evidence/2026-05-19-v085-*`.
-- No push, tag, merge, or release-board update is authorized by the local
-  closure proposal.
+- Release-board update, commit, merge, push, and `v0.8.5` tag were authorized
+  on 2026-05-19.
 
 ## [0.8.0] — 2026-05-18
 
