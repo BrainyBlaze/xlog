@@ -26,8 +26,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(audit.contains("G38 completion audit"));
     assert!(audit.contains("G38-B integration audit"));
     assert!(audit.contains("G39 completion audit"));
-    assert!(audit.contains("accepted K7 fixture"));
-    assert!(audit.contains("K8 epistemic reductions carry"));
+    assert!(audit.contains("accepted K7 and K8 fixtures"));
+    assert!(audit.contains("wcoj_clique8_dispatch_count"));
     assert!(audit.contains("kclique_wcoj_max_arity"));
 
     let runtime = read_workspace_file("crates/xlog-runtime/src/executor/epistemic_workspace.rs");
