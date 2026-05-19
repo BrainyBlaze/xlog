@@ -3,7 +3,7 @@
 use std::{collections::BTreeSet, ffi::c_void};
 
 use cudarc::driver::LaunchConfig;
-use xlog_core::{Result, ScalarType, XlogError};
+use xlog_core::{RelId, Result, ScalarType, XlogError};
 use xlog_cuda::provider::{epistemic_kernels, HostTransferStats, EPISTEMIC_MODULE};
 use xlog_cuda::{
     memory::TrackedCudaSlice, sys, AsKernelParam, CudaBuffer, CudaColumn, DeviceSlice, DriverError,
@@ -1028,6 +1028,10 @@ pub struct EpistemicGpuRuntimePreflight {
     pub sorted_layout_requirement_count: usize,
     /// Helper-splitting specs carried by WCOJ plans.
     pub helper_split_spec_count: usize,
+    /// Compiler-created helper-split relation rules in the reduced runtime plan.
+    pub helper_relation_rule_count: usize,
+    /// Scans of compiler-created helper-split relations in reduced WCOJ plans.
+    pub helper_relation_scan_count: usize,
     /// Tuple-membership bindings certified for stable-model membership checks.
     pub tuple_membership_binding_count: usize,
     /// Non-negated `know` operators represented by the executable GPU plan.
@@ -1060,6 +1064,9 @@ impl EpistemicGpuRuntimePreflight {
             EpistemicGpuWorkspaceLayout::for_plan(&executable.gpu_plan, capacities)?;
         let mut routes = RuntimeRouteSummary::default();
         let mut reduced_runtime_rule_count = 0usize;
+        let helper_relation_ids = helper_relation_ids(executable);
+        let mut helper_relation_rule_count = 0usize;
+        let mut helper_relation_scan_count = 0usize;
 
         for rule in executable
             .reduced_runtime_plan
@@ -1068,7 +1075,28 @@ impl EpistemicGpuRuntimePreflight {
             .flatten()
         {
             reduced_runtime_rule_count += 1;
+            if rule.head.starts_with("__w37_helper_") {
+                helper_relation_rule_count += 1;
+            }
+            helper_relation_scan_count +=
+                count_helper_relation_scans(&rule.body, &helper_relation_ids);
             summarize_runtime_routes(&rule.body, &mut routes);
+        }
+
+        if routes.helper_split_spec_count > 0
+            && (helper_relation_rule_count < routes.helper_split_spec_count
+                || helper_relation_scan_count < routes.helper_split_spec_count)
+        {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU helper-split certification".to_string(),
+                context: format!(
+                    "helper_split_specs={}, helper_relation_rules={}, \
+                     helper_relation_scans={}",
+                    routes.helper_split_spec_count,
+                    helper_relation_rule_count,
+                    helper_relation_scan_count
+                ),
+            });
         }
 
         let mut know_operator_count = 0usize;
@@ -1095,6 +1123,8 @@ impl EpistemicGpuRuntimePreflight {
             planned_hash_route_count: routes.planned_hash_route_count,
             sorted_layout_requirement_count: routes.sorted_layout_requirement_count,
             helper_split_spec_count: routes.helper_split_spec_count,
+            helper_relation_rule_count,
+            helper_relation_scan_count,
             tuple_membership_binding_count: executable.gpu_plan.tuple_membership_bindings.len(),
             know_operator_count,
             possible_operator_count,
@@ -1291,6 +1321,10 @@ pub enum EpistemicGpuRuntimeWcojCertification {
         certified_sorted_layout_requirements: usize,
         /// Helper-split specs certified by the dispatched K-clique plans.
         certified_helper_split_specs: usize,
+        /// Helper relation rules proving production helper-split rewrite happened.
+        certified_helper_relation_rules: usize,
+        /// Helper relation scans proving WCOJ consumed production helper output.
+        certified_helper_relation_scans: usize,
         /// Observed provider WCOJ layout-sort invocations.
         observed_layout_sorts: u64,
         /// Observed provider WCOJ layout fast-path hits.
@@ -1388,6 +1422,8 @@ impl EpistemicGpuRuntimeWcojCertification {
             certified_stream_groups: preflight.kclique_stream_group_count,
             certified_sorted_layout_requirements: preflight.sorted_layout_requirement_count,
             certified_helper_split_specs: preflight.helper_split_spec_count,
+            certified_helper_relation_rules: preflight.helper_relation_rule_count,
+            certified_helper_relation_scans: preflight.helper_relation_scan_count,
             observed_layout_sorts: delta.wcoj_layout_sort_invocation_count,
             observed_layout_fast_path_hits: delta.wcoj_layout_fast_path_hit_count,
             observed_metadata_builds: delta.kclique_metadata_build_count,
@@ -3930,6 +3966,58 @@ fn summarize_runtime_routes(node: &RirNode, routes: &mut RuntimeRouteSummary) {
             summarize_runtime_routes(fallback, routes);
         }
         RirNode::TensorMaskedJoin { .. } | RirNode::Scan { .. } | RirNode::Unit => {}
+    }
+}
+
+fn helper_relation_ids(executable: &EpistemicExecutablePlan) -> BTreeSet<RelId> {
+    executable
+        .relation_ids
+        .iter()
+        .filter_map(|(name, rel)| name.starts_with("__w37_helper_").then_some(*rel))
+        .collect()
+}
+
+fn count_helper_relation_scans(node: &RirNode, helper_relations: &BTreeSet<RelId>) -> usize {
+    match node {
+        RirNode::Scan { rel } => usize::from(helper_relations.contains(rel)),
+        RirNode::MultiWayJoin {
+            inputs, fallback, ..
+        } => {
+            inputs
+                .iter()
+                .map(|input| count_helper_relation_scans(input, helper_relations))
+                .sum::<usize>()
+                + count_helper_relation_scans(fallback, helper_relations)
+        }
+        RirNode::Filter { input, .. }
+        | RirNode::Project { input, .. }
+        | RirNode::Distinct { input, .. }
+        | RirNode::GroupBy { input, .. } => count_helper_relation_scans(input, helper_relations),
+        RirNode::Join { left, right, .. } | RirNode::Diff { left, right } => {
+            count_helper_relation_scans(left, helper_relations)
+                + count_helper_relation_scans(right, helper_relations)
+        }
+        RirNode::Union { inputs } => inputs
+            .iter()
+            .map(|input| count_helper_relation_scans(input, helper_relations))
+            .sum(),
+        RirNode::Fixpoint {
+            base, recursive, ..
+        } => {
+            count_helper_relation_scans(base, helper_relations)
+                + count_helper_relation_scans(recursive, helper_relations)
+        }
+        RirNode::ChainJoin {
+            left,
+            right,
+            fallback,
+            ..
+        } => {
+            count_helper_relation_scans(left, helper_relations)
+                + count_helper_relation_scans(right, helper_relations)
+                + count_helper_relation_scans(fallback, helper_relations)
+        }
+        RirNode::TensorMaskedJoin { .. } | RirNode::Unit => 0,
     }
 }
 

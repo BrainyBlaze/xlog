@@ -104,7 +104,7 @@ fn runtime_preflight_records_workspace_and_wcoj_route_surfaces() {
     .unwrap();
 
     assert_eq!(preflight.workspace_layout.total_bytes(), 120);
-    assert_eq!(preflight.reduced_runtime_rule_count, 1);
+    assert_eq!(preflight.reduced_runtime_rule_count, 2);
     assert_eq!(preflight.multiway_reduction_count, 1);
     assert_eq!(preflight.kclique_wcoj_plan_count, 1);
     assert_eq!(preflight.kclique_wcoj_max_arity, 5);
@@ -113,8 +113,35 @@ fn runtime_preflight_records_workspace_and_wcoj_route_surfaces() {
     assert_eq!(preflight.planned_hash_route_count, 0);
     assert_eq!(preflight.sorted_layout_requirement_count, 2);
     assert_eq!(preflight.helper_split_spec_count, 1);
+    assert_eq!(preflight.helper_relation_rule_count, 1);
+    assert_eq!(preflight.helper_relation_scan_count, 1);
     assert_eq!(preflight.tuple_membership_binding_count, 1);
     assert!(preflight.cpu_fallbacks.is_zero());
+}
+
+#[test]
+fn runtime_preflight_rejects_helper_split_specs_without_production_helper_rewrite() {
+    let executable = executable_with_kclique_helper_metadata_only_plan();
+
+    let err = EpistemicGpuRuntimePreflight::for_executable_plan(
+        &executable,
+        EpistemicGpuWorkspaceCapacities {
+            max_candidates: 8,
+            max_worlds: 4,
+            max_models_per_reduction: 6,
+        },
+    )
+    .expect_err("helper-split metadata alone must not certify production helper reuse");
+
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
+            assert_eq!(construct, "epistemic GPU helper-split certification");
+            assert!(context.contains("helper_split_specs=1"));
+            assert!(context.contains("helper_relation_rules=0"));
+            assert!(context.contains("helper_relation_scans=0"));
+        }
+        other => panic!("expected helper-split certification error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -244,6 +271,8 @@ fn runtime_wcoj_certification_accepts_actual_kclique_dispatch_delta() {
             certified_stream_groups: 1,
             certified_sorted_layout_requirements: 2,
             certified_helper_split_specs: 1,
+            certified_helper_relation_rules: 1,
+            certified_helper_relation_scans: 1,
             observed_layout_sorts: 2,
             observed_layout_fast_path_hits: 0,
             observed_metadata_builds: 1,
@@ -284,6 +313,8 @@ fn runtime_wcoj_certification_accepts_layout_fast_path_evidence() {
             certified_stream_groups: 1,
             certified_sorted_layout_requirements: 2,
             certified_helper_split_specs: 1,
+            certified_helper_relation_rules: 1,
+            certified_helper_relation_scans: 1,
             observed_layout_sorts: 0,
             observed_layout_fast_path_hits: 2,
             observed_metadata_builds: 1,
@@ -338,6 +369,8 @@ fn runtime_trace_preserves_counter_snapshots_and_wcoj_certification() {
             certified_stream_groups: 1,
             certified_sorted_layout_requirements: 2,
             certified_helper_split_specs: 1,
+            certified_helper_relation_rules: 1,
+            certified_helper_relation_scans: 1,
             observed_layout_sorts: 2,
             observed_layout_fast_path_hits: 0,
             observed_metadata_builds: 1,
@@ -1348,7 +1381,7 @@ fn executable_with_operator_mix() -> EpistemicExecutablePlan {
     EpistemicExecutablePlan {
         gpu_plan,
         relation_ids: std::collections::BTreeMap::new(),
-        reduced_runtime_plan: runtime_plan_with_kclique_wcoj(),
+        reduced_runtime_plan: runtime_plan_with_scan_rule(),
     }
 }
 
@@ -1366,12 +1399,88 @@ fn executable_with_kclique_wcoj_plan() -> EpistemicExecutablePlan {
 
     EpistemicExecutablePlan {
         gpu_plan,
-        relation_ids: std::collections::BTreeMap::new(),
+        relation_ids: std::collections::BTreeMap::from([(
+            "__w37_helper_99".to_string(),
+            xlog_core::RelId(99),
+        )]),
         reduced_runtime_plan: runtime_plan_with_kclique_wcoj(),
     }
 }
 
+fn executable_with_kclique_helper_metadata_only_plan() -> EpistemicExecutablePlan {
+    let gpu_plan = EpistemicGpuPlan::new(
+        EirEpistemicMode::Faeel,
+        vec![epistemic_literal("gate", EirEpistemicOp::Know)],
+        vec![EpistemicReductionPlan {
+            rule_index: 0,
+            head_predicate: "clique5".to_string(),
+            relational_body_atoms: 10,
+            wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
+        }],
+    );
+
+    EpistemicExecutablePlan {
+        gpu_plan,
+        relation_ids: std::collections::BTreeMap::new(),
+        reduced_runtime_plan: runtime_plan_with_kclique_helper_metadata_only(),
+    }
+}
+
 fn runtime_plan_with_kclique_wcoj() -> ExecutionPlan {
+    let mut plan = ExecutionPlan::new(vec![Scc {
+        id: 0,
+        predicates: vec!["__w37_helper_99".to_string(), "clique5".to_string()],
+        is_recursive: false,
+    }]);
+    let mut inputs: Vec<_> = (1..=10)
+        .map(|rel| RirNode::Scan {
+            rel: xlog_core::RelId(rel),
+        })
+        .collect();
+    inputs[5] = RirNode::Scan {
+        rel: xlog_core::RelId(99),
+    };
+    plan.rules_by_scc = vec![vec![
+        CompiledRule {
+            head: "__w37_helper_99".to_string(),
+            body: RirNode::Scan {
+                rel: xlog_core::RelId(2),
+            },
+            meta: RirMeta::default(),
+        },
+        CompiledRule {
+            head: "clique5".to_string(),
+            body: RirNode::MultiWayJoin {
+                inputs,
+                slot_vars: vec![vec![Some(0), Some(1)]; 10],
+                output_columns: vec![ProjectExpr::Column(0)],
+                fallback: Box::new(RirNode::Unit),
+                plan: Some(MultiwayPlan::WcojWithPlan(kclique_order())),
+                var_order: Some(xlog_ir::rir::VariableOrder::kclique(kclique_order())),
+            },
+            meta: RirMeta::default(),
+        },
+    ]];
+    plan
+}
+
+fn runtime_plan_with_scan_rule() -> ExecutionPlan {
+    let mut plan = ExecutionPlan::new(vec![Scc {
+        id: 0,
+        predicates: vec!["out".to_string()],
+        is_recursive: false,
+    }]);
+    plan.rules_by_scc = vec![vec![CompiledRule {
+        head: "out".to_string(),
+        body: RirNode::Scan {
+            rel: xlog_core::RelId(1),
+        },
+        meta: RirMeta::default(),
+    }]];
+    plan
+}
+
+fn runtime_plan_with_kclique_helper_metadata_only() -> ExecutionPlan {
     let mut plan = ExecutionPlan::new(vec![Scc {
         id: 0,
         predicates: vec!["clique5".to_string()],

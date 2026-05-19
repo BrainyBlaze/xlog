@@ -239,6 +239,8 @@ fn accepted_epistemic_k5_execution_certifies_production_wcoj_dispatch() {
     assert_eq!(result.prepared.preflight.kclique_stream_group_count, 1);
     assert_eq!(result.prepared.preflight.sorted_layout_requirement_count, 1);
     assert_eq!(result.prepared.preflight.helper_split_spec_count, 1);
+    assert_eq!(result.prepared.preflight.helper_relation_rule_count, 1);
+    assert_eq!(result.prepared.preflight.helper_relation_scan_count, 1);
     assert_eq!(
         result.model_membership.membership_source,
         EpistemicGpuModelMembershipSource::StableModelTupleBuffer
@@ -252,6 +254,8 @@ fn accepted_epistemic_k5_execution_certifies_production_wcoj_dispatch() {
             certified_stream_groups: 1,
             certified_sorted_layout_requirements: 1,
             certified_helper_split_specs: 1,
+            certified_helper_relation_rules: 1,
+            certified_helper_relation_scans: 1,
             ..
         }
     ));
@@ -334,6 +338,14 @@ fn accepted_epistemic_k6_execution_certifies_g38b_helper_histogram_path() {
         result.prepared.preflight.helper_split_spec_count >= 1,
         "accepted K6 must carry G38-B helper-split specs for buried skew"
     );
+    assert!(
+        result.prepared.preflight.helper_relation_rule_count >= 1,
+        "accepted K6 must include production helper relation rules"
+    );
+    assert!(
+        result.prepared.preflight.helper_relation_scan_count >= 1,
+        "accepted K6 WCOJ plan must scan production helper relation output"
+    );
     assert!(matches!(
         result.trace.wcoj_certification,
         EpistemicGpuRuntimeWcojCertification::Certified {
@@ -343,6 +355,8 @@ fn accepted_epistemic_k6_execution_certifies_g38b_helper_histogram_path() {
             certified_stream_groups: 1..,
             certified_sorted_layout_requirements: 1..,
             certified_helper_split_specs: 1..,
+            certified_helper_relation_rules: 1..,
+            certified_helper_relation_scans: 1..,
             observed_metadata_builds: 1..,
             observed_metadata_build_nanos: 1..,
             ..
@@ -407,6 +421,16 @@ fn epistemic_k7_k8_reductions_reuse_g39_kclique_planner_preflight_surface() {
             preflight.sorted_layout_requirement_count >= 1,
             "K{k} must carry production sorted-layout requirements"
         );
+        if preflight.helper_split_spec_count > 0 {
+            assert!(
+                preflight.helper_relation_rule_count >= preflight.helper_split_spec_count,
+                "K{k} helper-split specs must be backed by production helper relation rules"
+            );
+            assert!(
+                preflight.helper_relation_scan_count >= preflight.helper_split_spec_count,
+                "K{k} helper-split specs must be consumed by production helper relation scans"
+            );
+        }
         assert!(preflight.cpu_fallbacks.is_zero());
     }
 }
