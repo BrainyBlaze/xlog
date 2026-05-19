@@ -287,9 +287,10 @@ oracles while preserving zero CPU candidate/world-view fallback counters.
 adapter for epistemic callers. It is a thin wrapper over the existing
 `GpuCdclSolver`; it dispatches `solve_expect_sat`, `solve_expect_unsat`,
 workspace-backed UNSAT, bounded weighted MaxSAT candidate checks, bounded
-MaxSAT search pruning, bounded weighted MaxSAT selection encoding, and bounded
-SAT/MaxSAT portfolio jobs through the GPU CDCL path and exposes zero CPU
-assignment/MaxSAT enumeration counters in `GpuSolverProductionTrace`.
+MaxSAT search pruning, single-result and multi-result weighted MaxSAT
+selection encoding, and bounded SAT/MaxSAT portfolio jobs through the GPU CDCL
+path and exposes zero CPU assignment/MaxSAT enumeration counters in
+`GpuSolverProductionTrace`.
 `solve_expect_sat_with_gpu_execution_result` and
 `solve_expect_unsat_with_gpu_execution_result` additionally accept an
 `EpistemicGpuExecutionResult`; the reusable-workspace variant is
@@ -342,6 +343,11 @@ layout, and reusing the bounded MaxSAT search path. It records
 `gpu_maxsat_candidate_encodes` and `gpu_cdcl_candidate_encodes` alongside GPU
 candidate solves and UNSAT prunes, without CPU assignment or subset
 enumeration.
+`solve_multi_candidate_weighted_maxsat_encoded_search_with_gpu_execution_results`
+validates multiple accepted GPU runtime results up front, then repeats that
+weighted-selection encoding and GPU CDCL search path once per accepted evidence
+record while aggregating candidate-evidence, encode, solve, prune, and optimum
+counters.
 `solve_portfolio_with_gpu_execution_result`
 applies the boundary before dispatching bounded SAT and MaxSAT jobs through the
 same adapter, propagating UNKNOWN/TIMEOUT portfolio statuses without CPU search,
@@ -358,7 +364,8 @@ distinct-CNF fail-closed rejection, a two-record accepted lifecycle, and bounded
 UNKNOWN/TIMEOUT lifecycle propagation, plus two-record same-CNF learned-clause
 reuse, two-record/two-CNF bounded MaxSAT candidate-set execution, and bounded
 GPU-CDCL pruning of UNSAT MaxSAT search candidates plus bounded weighted
-soft-clause selection encoding, but not generalized MaxSAT scheduler coverage.
+soft-clause selection encoding for one and two accepted evidence records, but
+not full generalized MaxSAT scheduler coverage.
 
 `xlog_solve::SolverService` provides the bounded solver API used by semantic
 fixtures:

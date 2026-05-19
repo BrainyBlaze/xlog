@@ -1325,6 +1325,78 @@ impl GpuSolverProductionAdapter {
         Ok(report)
     }
 
+    /// Encode weighted soft-clause selections, then search once per accepted GPU evidence record.
+    ///
+    /// This is the multi-candidate scheduler-facing variant of the bounded encoded
+    /// MaxSAT search adapter. It validates all accepted GPU epistemic evidence up
+    /// front, encodes the caller-declared selections through the existing GPU CNF
+    /// layout for each accepted record, and dispatches each candidate through GPU
+    /// CDCL SAT/UNSAT certification without CPU assignment or MaxSAT enumeration.
+    pub fn solve_multi_candidate_weighted_maxsat_encoded_search_with_gpu_execution_results(
+        &mut self,
+        provider: &CudaKernelProvider,
+        results: &[&EpistemicGpuExecutionResult],
+        workspace: &mut GpuCdclWorkspace,
+        weighted: &SolveInstance,
+        branch_var_limit: &TrackedCudaSlice<u32>,
+        selections: &[GpuSolverProductionWeightedMaxSatSelection<'_>],
+    ) -> Result<GpuSolverProductionMaxSatReport> {
+        if results.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production MaxSAT encoding".to_string(),
+                context:
+                    "multi-candidate weighted MaxSAT encoded search requires at least one accepted GPU result"
+                        .to_string(),
+            });
+        }
+        for result in results {
+            require_accepted_gpu_solver_evidence(provider, result)?;
+        }
+
+        let mut report = GpuSolverProductionMaxSatReport::default();
+        for _ in results {
+            let encodes_before = self.trace.gpu_maxsat_candidate_encodes;
+            let encoded = self.encode_weighted_maxsat_search_candidates(weighted, selections)?;
+            let search_candidates: Vec<_> = encoded
+                .iter()
+                .map(|candidate| GpuSolverProductionMaxSatSearchCandidate {
+                    score: candidate.score,
+                    cnf: &candidate.cnf,
+                    branch_var_limit,
+                    status: candidate.status,
+                })
+                .collect();
+            let step_report =
+                self.solve_weighted_maxsat_search_candidates(workspace, &search_candidates)?;
+            report.candidate_evidence_records = report.candidate_evidence_records.saturating_add(1);
+            report.optimum_score = report.optimum_score.max(step_report.optimum_score);
+            report.candidates_checked = report
+                .candidates_checked
+                .saturating_add(step_report.candidates_checked);
+            report.satisfiable_candidates = report
+                .satisfiable_candidates
+                .saturating_add(step_report.satisfiable_candidates);
+            report.unsat_candidates_pruned = report
+                .unsat_candidates_pruned
+                .saturating_add(step_report.unsat_candidates_pruned);
+            report.gpu_cdcl_candidate_encodes = report.gpu_cdcl_candidate_encodes.saturating_add(
+                self.trace
+                    .gpu_maxsat_candidate_encodes
+                    .saturating_sub(encodes_before),
+            );
+            report.gpu_cdcl_candidate_solves = report
+                .gpu_cdcl_candidate_solves
+                .saturating_add(step_report.gpu_cdcl_candidate_solves);
+            self.trace.accepted_gpu_candidate_evidence_consumed = self
+                .trace
+                .accepted_gpu_candidate_evidence_consumed
+                .saturating_add(1);
+        }
+
+        self.trace.require_zero_cpu_search()?;
+        Ok(report)
+    }
+
     /// Execute a bounded SAT/MaxSAT/status-aware portfolio after accepted GPU epistemic execution.
     ///
     /// The portfolio is a production adapter over existing GPU CDCL calls. It records
