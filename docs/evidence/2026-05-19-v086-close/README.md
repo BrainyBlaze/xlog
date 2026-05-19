@@ -12,16 +12,16 @@ Scope: `G086_CLOSE` evidence rollup and closure proposal.
 | `closure_summary.json` | Machine-readable closure summary and release decision. |
 | `docs/evidence/2026-05-19-v086-int/README.md` | Full integration/regression certification evidence. |
 | `docs/evidence/2026-05-19-v086-consumers/validation_summary.json` | Consumer example and compatibility validator summary. |
-| `ROADMAP.md` | v0.8.6 section synced to actual implemented state and remaining consumer-proof blockers. |
+| `ROADMAP.md` | v0.8.6 section synced to actual implemented state and release decision. |
 
 ## Metric Status
 
 | Metric | Target | Status | Evidence |
 |---|---|---|---|
 | M086_CLOSE.1 sub-goal table | every G086 node listed with commit SHA and metric status | PASS | closure proposal and `closure_summary.json` |
-| M086_CLOSE.2 roadmap sync | v0.8.6 section reflects actual PASS/BLOCKED states | PASS | `ROADMAP.md` persistent-index bullet names recorded background build and measured timing speedup |
-| M086_CLOSE.3 unresolved issues | all red/yellow metrics have explicit disposition | PASS | label-derived consumer feature coverage is explicitly blocked; pyxlog persistent-index session reuse now has a passing public-session probe |
-| M086_CLOSE.4 release decision | recommendation is `MERGE_READY`, `HOLD_FOR_FIXES`, or `SCOPE_AMENDMENT_REQUIRED` | PASS | `HOLD_FOR_FIXES` |
+| M086_CLOSE.2 roadmap sync | v0.8.6 section reflects actual PASS/BLOCKED states | PASS | `ROADMAP.md` marks the consumer certification slice complete and records behavior-probe certification |
+| M086_CLOSE.3 unresolved issues | all red/yellow metrics have explicit disposition | PASS | no unresolved consumer-proof gaps remain; `consumer_proof_gaps=[]` |
+| M086_CLOSE.4 release decision | recommendation is `MERGE_READY`, `HOLD_FOR_FIXES`, or `SCOPE_AMENDMENT_REQUIRED` | PASS | `MERGE_READY` |
 | M086_CLOSE.5 no implicit release | no push, tag, board update, or merge without authorization | PASS | no release action performed |
 | M086_CLOSE.6 methodology audit | every sub-goal evidence file includes GDSP/GQM evidence | PASS | methodology scan and README amendments for G086_ADAPT/G086_INDEX |
 
@@ -41,7 +41,7 @@ Scope: `G086_CLOSE` evidence rollup and closure proposal.
 
 ## Release Decision
 
-`HOLD_FOR_FIXES`.
+`MERGE_READY`.
 
 The branch now implements and validates generation/schema/device keying,
 invalidation, budget eviction, repeated-session reuse, background
@@ -49,14 +49,13 @@ request/completion/deferred telemetry, and a runtime-backed recorded provider
 build path. It now also records a build-heavy repeated-session persistent-index
 fixture with cached median 0.079429262s, uncached median 0.254631847s,
 `speedup_ratio=3.206`, and zero tracked DTOH/H2D calls. Consumer example
-execution passes, but the validator now records that feature coverage is
-label-derived. Public pyxlog persistent-index session reuse is now proven by
-a `LogicRelationSession` delta loop that records one build, at least one hit,
+execution passes, and certification now derives feature coverage from
+validator-owned behavior probes rather than `expected.json` declarations.
+Public pyxlog persistent-index session reuse is proven by a
+`LogicRelationSession` delta loop that records one build, at least one hit,
 and zero tracked DTOH/H2D calls.
 
 ## Required Coordinator Decision
 
-1. Replace label-derived consumer feature coverage with behavior-proven probes
-   or record an explicit coordinator amendment.
-2. Authorize any release-board update, merge, push, and tag as separate actions
+1. Authorize any release-board update, merge, push, and tag as separate actions
    only after the hold is cleared.

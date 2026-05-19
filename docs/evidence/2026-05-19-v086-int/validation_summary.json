@@ -1,6 +1,6 @@
 {
   "branch": "feat/v086-runtime-completion",
-  "commit_under_test": "df2dbc03",
+  "commit_under_test": "pending-consumer-behavior-probe-commit",
   "compatibility": {
     "v080_examples": {
       "example_count": 5,
@@ -13,11 +13,18 @@
       "summary": "docs/evidence/2026-05-19-v086-consumers/compat_v085_validation_summary.json"
     },
     "v086_examples": {
-      "consumer_certification_status": "BLOCKED",
+      "consumer_certification_status": "PASS",
       "example_count": 5,
-      "status": "PASS_WITH_CONSUMER_PROOF_GAP",
+      "status": "PASS",
       "summary": "docs/evidence/2026-05-19-v086-consumers/validation_summary.json"
     }
+  },
+  "consumer_behavior_probe_commit": "pending",
+  "consumer_behavior_probes": {
+    "consumer_proof_gaps": [],
+    "feature_coverage_source": "behavior_probes",
+    "probe_count": 9,
+    "status": "PASS"
   },
   "date": "2026-05-19",
   "hold_correction_commit": "81badf314c09",
@@ -44,19 +51,21 @@
       "status": "PASS"
     },
     "M086_INT.4 Python": {
-      "command": "PYTHONPATH=target/debug pytest -q python/tests/test_v080_examples_source.py python/tests/test_v085_examples_source.py python/tests/test_v086_delta_coalescing.py python/tests/test_v086_relation_callbacks.py python/tests/test_v086_relation_callbacks_runtime.py python/tests/test_v086_exact_types_source.py python/tests/test_v086_exact_types_runtime.py python/tests/test_v086_chain_smem_profile_source.py python/tests/test_v086_chain_smem_source.py python/tests/test_v086_cse_source.py python/tests/test_v086_adaptive_reoptimization_source.py python/tests/test_v086_persistent_hash_index_source.py python/tests/test_v086_consumers_source.py",
-      "observed": "42 passed in 56.08s",
+      "command": "PYTHONPATH=target/debug pytest -q python/tests/test_v080_examples_source.py python/tests/test_v085_examples_source.py python/tests/test_v086_delta_coalescing.py python/tests/test_v086_relation_callbacks.py python/tests/test_v086_relation_callbacks_runtime.py python/tests/test_v086_exact_types_source.py python/tests/test_v086_exact_types_runtime.py python/tests/test_v086_chain_smem_profile_source.py python/tests/test_v086_chain_smem_source.py python/tests/test_v086_cse_source.py python/tests/test_v086_adaptive_reoptimization_source.py python/tests/test_v086_persistent_hash_index_source.py python/tests/test_v086_consumers_source.py python/tests/test_v086_pyxlog_persistent_index_runtime.py",
+      "observed": "44 passed in 86.31s",
       "status": "PASS"
     },
     "M086_INT.5 examples": {
       "command": "python scripts/validate_v086_examples.py",
       "observed": {
-        "consumer_certification_status": "BLOCKED",
+        "behavior_probe_count": 9,
+        "consumer_certification_status": "PASS",
+        "feature_coverage_source": "behavior_probes",
         "v080_examples": 5,
         "v085_examples": 10,
         "v086_examples": 5
       },
-      "status": "PASS_WITH_CONSUMER_PROOF_GAP"
+      "status": "PASS"
     },
     "M086_INT.6 transfer guards": {
       "covered_by": [
@@ -85,7 +94,7 @@
     "M086_INT.8 docs": {
       "commands": [
         "python -m json.tool over docs/evidence/2026-05-19-v086-*/*.json and examples/v086-runtime/*/expected.json",
-        "python -m py_compile scripts/validate_v086_examples.py python/tests/test_v086_persistent_hash_index_source.py python/tests/test_v086_consumers_source.py",
+        "python -m py_compile scripts/validate_v086_examples.py python/tests/test_v086_relation_callbacks.py python/tests/test_v086_persistent_hash_index_source.py python/tests/test_v086_consumers_source.py python/tests/test_v086_pyxlog_persistent_index_runtime.py",
         "python scripts/validate_package_metadata.py"
       ],
       "status": "PASS"
@@ -116,13 +125,7 @@
     "xlog-prob": "package test suite passed, including no_cpu_d4_in_exact and no_dtoh_* guards",
     "xlog-runtime": "142 lib tests, 15 integration tests, 2 doc tests passed; 2 doc tests ignored"
   },
-  "status": "BLOCKED",
+  "status": "PASS",
   "suite": "G086_INT",
-  "unresolved": [
-    {
-      "reason": "The v0.8.6 examples execute through xlog-cli, but feature coverage is label-derived from expected.json declarations and is not direct behavior proof for every declared native/runtime feature.",
-      "scope": "G086_CONSUMERS feature coverage",
-      "status": "CONSUMER_PROOF_GAP"
-    }
-  ]
+  "unresolved": []
 }

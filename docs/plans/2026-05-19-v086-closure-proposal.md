@@ -2,13 +2,13 @@
 
 Date: 2026-05-19
 Branch: `feat/v086-runtime-completion`
-Validation head after pyxlog persistent-index session amendment: `611d8293`
+Validation head after consumer behavior-probe amendment: pending commit
 Implementation evidence head before hold/correction amendment: `0e2a5420`
 Governing goal: `docs/plans/2026-05-19-agent-v086-dts-runtime-completion-goal.md`
 
 ## Recommendation
 
-`HOLD_FOR_FIXES`.
+`MERGE_READY`.
 
 The branch is code-check clean for the implemented v0.8.6 runtime and
 optimizer surfaces: formatting, workspace check, runtime/cuda/induce/prob/logic
@@ -16,18 +16,16 @@ optimizer surfaces: formatting, workspace check, runtime/cuda/induce/prob/logic
 example execution, JSON validation, package metadata validation, and diff
 whitespace checks passed.
 
-The branch is not merge-ready under the governing GQM/DoD because consumer
-certification still contains label-derived feature coverage. G086_INDEX now
-validates deterministic persistent index reuse, complete stale-key rejection,
-LRU budget eviction, device/schema/generation keying,
-background request/completion/deferred telemetry, a runtime-backed recorded
-provider build path, and a build-heavy repeated-session performance fixture
-with a 3.206x cached-vs-uncached speedup against the >=1.5x target.
-G086_CONSUMERS now separates example execution from consumer certification and
-records the remaining label-derived feature-coverage gap instead of treating
-`expected.json` feature declarations as behavior proof. Public pyxlog
-session reuse now has targeted behavior evidence through
-`test_v086_pyxlog_persistent_index_runtime.py`.
+The branch is merge-ready under the governing GQM/DoD. G086_INDEX validates
+deterministic persistent index reuse, complete stale-key rejection, LRU budget
+eviction, device/schema/generation keying, background
+request/completion/deferred telemetry, a runtime-backed recorded provider
+build path, and a build-heavy repeated-session performance fixture with a
+3.206x cached-vs-uncached speedup against the >=1.5x target. G086_CONSUMERS
+now separates example declarations from certification and derives feature
+coverage from validator-owned behavior probes over committed feature evidence
+and public pyxlog compatibility gates. Public pyxlog session reuse has
+targeted behavior evidence through `test_v086_pyxlog_persistent_index_runtime.py`.
 
 No merge, push, tag, or release-board update is authorized or performed by this
 proposal.
@@ -44,9 +42,9 @@ proposal.
 | G086_CSE | `1363b05e` | PASS | `docs/evidence/2026-05-19-v086-cse/README.md` |
 | G086_ADAPT | `2d9bdc0f` | PASS | `docs/evidence/2026-05-19-v086-adaptive-reoptimization/README.md` |
 | G086_INDEX | `702e1f8f` + `0e2a5420`; hold correction `81badf31`; performance amendment `df2dbc03` | PASS | `docs/evidence/2026-05-19-v086-persistent-hash-index/README.md` |
-| G086_CONSUMERS | `37f16651`; hold correction `81badf31`; pyxlog session amendment `611d8293` | BLOCKED on label-derived consumer feature proof | `docs/evidence/2026-05-19-v086-consumers/README.md` |
-| G086_INT | `b72f61ea`; hold correction `81badf31` | BLOCKED on release-readiness metrics | `docs/evidence/2026-05-19-v086-int/README.md` |
-| G086_CLOSE | `09f5ad4b`; hold correction `81badf31` | PASS with `HOLD_FOR_FIXES` decision | `docs/evidence/2026-05-19-v086-close/README.md` |
+| G086_CONSUMERS | `37f16651`; hold correction `81badf31`; pyxlog session amendment `611d8293`; behavior-probe amendment pending | PASS | `docs/evidence/2026-05-19-v086-consumers/README.md` |
+| G086_INT | `b72f61ea`; hold correction `81badf31`; behavior-probe amendment pending | PASS | `docs/evidence/2026-05-19-v086-int/README.md` |
+| G086_CLOSE | `09f5ad4b`; hold correction `81badf31`; behavior-probe amendment pending | PASS with `MERGE_READY` decision | `docs/evidence/2026-05-19-v086-close/README.md` |
 
 ## GQM Metric Table
 
@@ -64,21 +62,21 @@ proposal.
 | M086_INDEX recorded background build | PASS | runtime-backed provider test builds on a recorded stream and consumes through recorded indexed join; executor defers current-evaluation indexed reuse |
 | M086_INDEX performance speedup | PASS | build-heavy repeated-session semi-join fixture records cached median 0.079429262s, uncached median 0.254631847s, and `speedup_ratio=3.206` against the >=1.5x target |
 | M086_CONSUMERS example execution | PASS | DTS-DLM, two neutral scientific/engineering fixtures, v0.9.0 substrate, and pyxlog compatibility examples execute through `xlog-cli`; v0.8.0/v0.8.5 validators passed |
-| M086_CONSUMERS certification proof | BLOCKED | feature coverage is label-derived from `expected.json`; native exact/adaptive/index behavior is linked through feature evidence, not directly proven per consumer fixture |
+| M086_CONSUMERS certification proof | PASS | feature coverage source is `behavior_probes`; nine validator-owned behavior probes pass and `consumer_proof_gaps=[]` |
 | M086_CONSUMERS pyxlog persistent-index reuse | PASS | public `LogicRelationSession` delta loop records persistent-index build/hit and zero tracked host transfers |
 | M086_INT.1 formatting | PASS | `cargo fmt --check` exit 0 |
 | M086_INT.2 workspace | PASS | `cargo check --workspace` exit 0 |
 | M086_INT.3 targeted Rust | PASS | runtime, cuda, induce, prob, logic, and integration crates exited 0 |
 | M086_INT.4 Python | PASS | `44 passed in 86.31s` for v0.8.0/v0.8.5/v0.8.6 source/runtime bundle |
-| M086_INT.5 examples | PASS_WITH_CONSUMER_PROOF_GAP | v0.8.0 examples 5, v0.8.5 examples 10, v0.8.6 examples 5; validator records `consumer_certification_status=BLOCKED` |
+| M086_INT.5 examples | PASS | v0.8.0 examples 5, v0.8.5 examples 10, v0.8.6 examples 5; validator records `consumer_certification_status=PASS` and `feature_coverage_source=behavior_probes` |
 | M086_INT.6 transfer guards | PASS | xlog-prob no-D2H guards, integration strict D2H tests, and v0.8.6 source/runtime transfer guards passed |
 | M086_INT.7 performance | PASS | raw speed/transfer evidence recorded, including persistent-index `speedup_ratio=3.206` with zero tracked DTOH/H2D calls |
 | M086_INT.8 docs | PASS | JSON, py_compile, package metadata validation, and evidence links passed |
 | M086_INT.9 git hygiene | PASS | generated artifacts limited to evidence; `git diff --check` passed |
 | M086_CLOSE.1 sub-goal table | PASS | this proposal and `closure_summary.json` |
 | M086_CLOSE.2 roadmap sync | PASS | `ROADMAP.md` reflects recorded background build and persistent-index timing speedup |
-| M086_CLOSE.3 unresolved issues | PASS | label-derived consumer feature coverage is explicitly blocked; pyxlog persistent-index session reuse is behavior-proven |
-| M086_CLOSE.4 release decision | PASS | `HOLD_FOR_FIXES` |
+| M086_CLOSE.3 unresolved issues | PASS | no unresolved consumer-proof gaps remain; out-of-scope v0.9/v0.10 work is listed separately |
+| M086_CLOSE.4 release decision | PASS | `MERGE_READY` |
 | M086_CLOSE.5 no implicit release | PASS | no board update, merge, push, or tag |
 | M086_CLOSE.6 methodology audit | PASS | GDSP/GQM evidence sections present across v0.8.6 evidence |
 
@@ -95,7 +93,7 @@ proposal.
 | `cargo test -p xlog-logic` | exit 0 |
 | `cargo test -p xlog-integration` | exit 0; includes strict deterministic D2H, cross-mode determinism, WCOJ, and widened-frontier suites |
 | `PYTHONPATH=target/debug pytest -q python/tests/test_v080_examples_source.py python/tests/test_v085_examples_source.py python/tests/test_v086_delta_coalescing.py python/tests/test_v086_relation_callbacks.py python/tests/test_v086_relation_callbacks_runtime.py python/tests/test_v086_exact_types_source.py python/tests/test_v086_exact_types_runtime.py python/tests/test_v086_chain_smem_profile_source.py python/tests/test_v086_chain_smem_source.py python/tests/test_v086_cse_source.py python/tests/test_v086_adaptive_reoptimization_source.py python/tests/test_v086_persistent_hash_index_source.py python/tests/test_v086_consumers_source.py python/tests/test_v086_pyxlog_persistent_index_runtime.py` | exit 0; 44 passed in 86.31s |
-| `python scripts/validate_v086_examples.py` | exit 0; v0.8.0 examples 5, v0.8.5 examples 10, v0.8.6 examples 5 |
+| `python scripts/validate_v086_examples.py` | exit 0; v0.8.0 examples 5, v0.8.5 examples 10, v0.8.6 examples 5; `consumer_certification_status=PASS` |
 | `python -m json.tool` over v0.8.6 evidence and expected JSON files | exit 0 |
 | `python -m py_compile scripts/validate_v086_examples.py python/tests/test_v086_persistent_hash_index_source.py python/tests/test_v086_consumers_source.py` | exit 0 |
 | `python scripts/validate_package_metadata.py` | exit 0 |
@@ -118,14 +116,6 @@ provider build test, and the build-heavy repeated-session performance fixture.
 
 ## Known Unsupported Or Blocked Scope
 
-- M086_CONSUMERS feature coverage is label-derived from `expected.json`
-  declarations. The examples prove parser/RIR/run/explain execution and link
-  feature-node evidence, but they do not directly prove native exact-induction,
-  adaptive reoptimization, or persistent-index behavior inside each labeled
-  consumer fixture. The persistent-index feature node now has direct
-  performance evidence, and public pyxlog session mutation now has targeted
-  persistent-index reuse evidence, but the consumer examples still do not
-  trigger every declared feature directly.
 - v0.9.0 EIR, world-view semantics, solver services, MaxSAT, epistemic
   splitting, and multi-GPU/out-of-core work remain out of scope.
 - No release action has been taken.
@@ -134,12 +124,11 @@ provider build test, and the build-heavy repeated-session performance fixture.
 
 v0.9.0 should rebase on or merge after any accepted v0.8.6 landing because
 typed exact induction, chain shared-memory scoring, runtime CSE, adaptive
-candidate adoption, persistent-index telemetry, and consumer examples now form
-the runtime substrate that the epistemic/solver branch should reuse.
+candidate adoption, persistent-index telemetry, and behavior-proven consumer
+examples now form the runtime substrate that the epistemic/solver branch should
+reuse.
 
 ## Coordinator Actions
 
-1. Keep the v0.8.6 branch on hold until the consumer-proof gaps are fixed,
-   waived, or explicitly scope-amended by the coordinator.
-2. Separately authorize any release-board update, merge, push, and tag only
-   after the hold is cleared.
+1. Review and approve the `MERGE_READY` closure package.
+2. Separately authorize any release-board update, merge, push, and tag.

@@ -93,27 +93,27 @@
   },
   "per_example": [
     {
-      "duration_sec": 2.111587,
+      "duration_sec": 2.115788,
       "name": "01_async_streaming_reachability",
       "status": "PASS"
     },
     {
-      "duration_sec": 3.870608,
+      "duration_sec": 3.108078,
       "name": "02_wmir_relation_deltas",
       "status": "PASS"
     },
     {
-      "duration_sec": 3.176284,
+      "duration_sec": 2.743026,
       "name": "03_neural_bridge_topk_belnap",
       "status": "PASS"
     },
     {
-      "duration_sec": 8.94966,
+      "duration_sec": 7.327239,
       "name": "04_native_exact_induction",
       "status": "PASS"
     },
     {
-      "duration_sec": 6.011329,
+      "duration_sec": 5.017971,
       "name": "05_probabilistic_async_diagnostics",
       "status": "PASS"
     }
@@ -129,7 +129,7 @@
         "all_stream_tensors_cuda": true,
         "checked_tensor_count": 14
       },
-      "duration_sec": 2.111587,
+      "duration_sec": 2.115788,
       "example": "01_async_streaming_reachability",
       "graph_diagnostics": {
         "csm_cuda_graph_cache_hits": 0,
@@ -227,7 +227,7 @@
           "status": "ok"
         }
       },
-      "duration_sec": 3.870608,
+      "duration_sec": 3.108078,
       "example": "02_wmir_relation_deltas",
       "relation_delta_equivalence": {
         "delete": true,
@@ -277,7 +277,7 @@
         "reject",
         "accept"
       ],
-      "duration_sec": 3.176284,
+      "duration_sec": 2.743026,
       "example": "03_neural_bridge_topk_belnap",
       "forward_backward_loss": 1.0000000496614982e-07,
       "gradient_finite": true,
@@ -296,7 +296,7 @@
         "negative_examples_cuda": true,
         "positive_examples_cuda": true
       },
-      "duration_sec": 8.94966,
+      "duration_sec": 7.327239,
       "exact_induction_parity": {
         "ordered_candidates": true,
         "summary": true
@@ -332,7 +332,7 @@
       "cuda_tensor_checks": {
         "exact_probability_tensor_cuda": true
       },
-      "duration_sec": 6.011329,
+      "duration_sec": 5.017971,
       "example": "05_probabilistic_async_diagnostics",
       "graph_diagnostics": {
         "exact": {

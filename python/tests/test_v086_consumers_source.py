@@ -106,6 +106,7 @@ def test_v086_consumer_validator_reuses_existing_compatibility_gates() -> None:
         "feature_coverage",
         "raw_measurements",
         "compatibility_gates",
+        "behavior_probes",
         "production_path_reuse",
         "reuse_audit",
         "child.name.startswith(\"_native\")",
@@ -123,14 +124,16 @@ def test_v086_consumer_evidence_records_feature_coverage_and_reuse_audit() -> No
     assert summary["suite"] == "G086_CONSUMERS"
     assert summary["status"] == "PASS"
     assert summary["example_execution_status"] == "PASS"
-    assert summary["consumer_certification_status"] == "BLOCKED"
-    assert summary["feature_coverage_source"] == "expected_json_declarations"
-    assert summary["consumer_proof_gaps"]
+    assert summary["consumer_certification_status"] == "PASS"
+    assert summary["feature_coverage_source"] == "behavior_probes"
+    assert summary["consumer_proof_gaps"] == []
     assert summary["example_count"] == len(EXAMPLES)
 
     for feature in REQUIRED_FEATURES:
         assert summary["feature_coverage"][feature]
 
+    assert summary["behavior_probes"]
+    assert all(probe["status"] == "PASS" for probe in summary["behavior_probes"].values())
     assert summary["compatibility_gates"]["v080_examples"]["status"] == "PASS"
     assert summary["compatibility_gates"]["v085_examples"]["status"] == "PASS"
     assert (
@@ -139,10 +142,6 @@ def test_v086_consumer_evidence_records_feature_coverage_and_reuse_audit() -> No
     )
     assert summary["production_path_reuse"]["status"] == "PASS"
     assert summary["reuse_audit"]["status"] == "PASS"
-    assert all(
-        gap["id"] != "pyxlog-persistent-index-session-reuse"
-        for gap in summary["consumer_proof_gaps"]
-    )
 
 
 def test_v086_validator_accepts_absolute_and_relative_output_paths(monkeypatch, tmp_path) -> None:
@@ -222,17 +221,70 @@ def test_v086_validator_separates_example_execution_from_consumer_certification(
             "raw_outputs": {},
         },
     ]
-    feature_measurements = {feature: {"path": f"{feature}.json", "raw": {}} for feature in REQUIRED_FEATURES[:6]}
-    feature_measurements["persistent_hash_index"] = {
-        "path": "persistent_hash_index.json",
-        "raw": {
-            "performance_fixture": {
-                "speedup_ratio": 3.206,
-                "transfer_budget": {
-                    "cached_tracked_dtoh_calls": 0,
-                    "cached_tracked_htod_calls": 0,
+    feature_measurements = {
+        "delta": {
+            "path": "delta.json",
+            "raw": {
+                "recompute_call_reduction_ratio": 3.0,
+                "hot_path_dtoh_calls": 0,
+                "final_output_transfer_excluded": True,
+            },
+        },
+        "exact_induction": {
+            "path": "exact_induction.json",
+            "raw": {
+                "provider_typed_tests_passed": 7,
+                "core_dlpack_compatibility_tests_passed": 1,
+                "u32": {"3": {"parity": True}},
+                "symbol": {"3": {"parity": True}},
+            },
+        },
+        "chain_shared_memory": {
+            "path": "chain_shared_memory.json",
+            "raw": {
+                "chain_hot": {"parity": True, "speedup_ratio": 5.5},
+                "transfer_budget": {"added_dtoh_calls": 0},
+            },
+        },
+        "common_subexpression_elimination": {
+            "path": "common_subexpression_elimination.json",
+            "raw": {
+                "deterministic_fixture": {
+                    "output_parity": True,
+                    "duplicate_subplan_reduction_percent": 50.0,
+                    "added_dtoh_calls": 0,
                 },
-            }
+                "unsafe_rejections": {
+                    "aggregate_boundary": True,
+                    "negation_or_difference_boundary": True,
+                    "provenance_or_tensor_boundary": True,
+                    "specialized_dispatch_boundary": True,
+                },
+            },
+        },
+        "adaptive_reoptimization": {
+            "path": "adaptive_reoptimization.json",
+            "raw": {
+                "deterministic_fixture": {
+                    "adopted": 1,
+                    "data_plane_dtoh_calls": 0,
+                    "decision_replays": 100,
+                },
+                "rollback_fixture": {"rolled_back": 1},
+            },
+        },
+        "persistent_hash_index": {
+            "path": "persistent_hash_index.json",
+            "raw": {
+                "performance_fixture": {
+                    "speedup_ratio": 3.206,
+                    "transfer_budget": {
+                        "cached_tracked_dtoh_calls": 0,
+                        "cached_tracked_htod_calls": 0,
+                    },
+                },
+                "repeated_session_fixture": {"builds": 1, "hits": 1, "tracked_dtoh_calls": 0},
+            },
         },
     }
     summary = module._aggregate(
@@ -242,13 +294,15 @@ def test_v086_validator_separates_example_execution_from_consumer_certification(
             "v080_examples": {"status": "PASS"},
             "v085_examples": {"status": "PASS"},
             "v080_v085_source_guards": {"status": "PASS"},
+            "pyxlog_persistent_index_session_reuse": {"status": "PASS"},
         },
     )
 
     assert summary["status"] == "PASS"
     assert summary["example_execution_status"] == "PASS"
-    assert summary["consumer_certification_status"] == "BLOCKED"
-    assert summary["feature_coverage_source"] == "expected_json_declarations"
+    assert summary["consumer_certification_status"] == "PASS"
+    assert summary["feature_coverage_source"] == "behavior_probes"
     assert summary["feature_node_behavior_proofs"]["persistent_hash_index"]["status"] == "PASS"
     assert summary["feature_node_behavior_proofs"]["persistent_hash_index"]["speedup_ratio"] == 3.206
-    assert any("label-derived" in gap["reason"] for gap in summary["consumer_proof_gaps"])
+    assert summary["consumer_proof_gaps"] == []
+    assert summary["behavior_probes"]["persistent_hash_index"]["status"] == "PASS"

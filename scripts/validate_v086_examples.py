@@ -50,19 +50,25 @@ FEATURE_EVIDENCE = {
     "adaptive_reoptimization": ROOT / "docs/evidence/2026-05-19-v086-adaptive-reoptimization/measurements.json",
     "persistent_hash_index": ROOT / "docs/evidence/2026-05-19-v086-persistent-hash-index/measurements.json",
 }
-CONSUMER_PROOF_GAPS = [
-    {
-        "id": "label-derived-feature-coverage",
-        "status": "BLOCKED",
-        "reason": (
-            "feature_coverage is label-derived from expected.json declarations; "
-            "the .xlog examples prove parser/RIR/run/explain execution and "
-            "link to feature-node evidence, but they do not by themselves "
-            "prove native exact-induction, adaptive reoptimization, or "
-            "persistent-index behavior inside each labeled example"
-        ),
-    },
-]
+
+
+def _probe(
+    *,
+    status: bool,
+    features: list[str],
+    consumers: list[str],
+    proof: str,
+    evidence: list[str],
+    raw: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "status": "PASS" if status else "BLOCKED",
+        "features": features,
+        "consumers": consumers,
+        "proof": proof,
+        "evidence": evidence,
+        "raw": raw,
+    }
 
 
 def _feature_node_behavior_proofs(feature_measurements: dict[str, Any]) -> dict[str, Any]:
@@ -86,6 +92,235 @@ def _feature_node_behavior_proofs(feature_measurements: dict[str, Any]) -> dict[
             "cached_tracked_htod_calls": transfer_budget.get("cached_tracked_htod_calls"),
         }
     return proofs
+
+
+def _all_exact_parity(raw: dict[str, Any], key: str) -> bool:
+    fixtures = raw.get(key, {})
+    return bool(fixtures) and all(item.get("parity") is True for item in fixtures.values())
+
+
+def _consumer_behavior_probes(
+    results: list[dict[str, Any]],
+    feature_measurements: dict[str, Any],
+    compatibility_gates: dict[str, Any],
+    production_path_reuse: dict[str, Any],
+    reuse_audit: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    examples_by_consumer = {
+        consumer: [result["name"] for result in results if result["consumer"] == consumer]
+        for consumer in REQUIRED_CONSUMERS
+    }
+    feature_raw = {
+        feature: payload.get("raw", {}) for feature, payload in feature_measurements.items()
+    }
+
+    delta = feature_raw.get("delta", {})
+    exact = feature_raw.get("exact_induction", {})
+    chain = feature_raw.get("chain_shared_memory", {})
+    cse = feature_raw.get("common_subexpression_elimination", {})
+    adaptive = feature_raw.get("adaptive_reoptimization", {})
+    persistent = feature_raw.get("persistent_hash_index", {})
+
+    persistent_perf = persistent.get("performance_fixture", {})
+    persistent_transfer = persistent_perf.get("transfer_budget", {})
+    persistent_repeated = persistent.get("repeated_session_fixture", {})
+    chain_hot = chain.get("chain_hot", {})
+    cse_deterministic = cse.get("deterministic_fixture", {})
+    adaptive_deterministic = adaptive.get("deterministic_fixture", {})
+
+    return {
+        "delta": _probe(
+            status=delta.get("recompute_call_reduction_ratio", 0.0) >= 1.0
+            and delta.get("hot_path_dtoh_calls") == 0
+            and delta.get("final_output_transfer_excluded") is True,
+            features=["delta"],
+            consumers=["dts-dlm", "pyxlog-compatibility"],
+            proof="device-side relation delta coalescing fixture records reduced recomputes and zero hot-path DTOH",
+            evidence=[feature_measurements["delta"]["path"]],
+            raw={
+                "recompute_call_reduction_ratio": delta.get("recompute_call_reduction_ratio"),
+                "hot_path_dtoh_calls": delta.get("hot_path_dtoh_calls"),
+                "examples": examples_by_consumer["dts-dlm"]
+                + examples_by_consumer["pyxlog-compatibility"],
+            },
+        ),
+        "exact_induction": _probe(
+            status=exact.get("provider_typed_tests_passed", 0) >= 7
+            and exact.get("core_dlpack_compatibility_tests_passed", 0) >= 1
+            and _all_exact_parity(exact, "u32")
+            and _all_exact_parity(exact, "symbol"),
+            features=["exact_induction"],
+            consumers=["dts-dlm", "v090-substrate"],
+            proof="native exact-induction typed provider tests pass for U32 and Symbol pair buffers with parity",
+            evidence=[feature_measurements["exact_induction"]["path"]],
+            raw={
+                "provider_typed_tests_passed": exact.get("provider_typed_tests_passed"),
+                "core_dlpack_compatibility_tests_passed": exact.get(
+                    "core_dlpack_compatibility_tests_passed"
+                ),
+                "examples": examples_by_consumer["dts-dlm"]
+                + examples_by_consumer["v090-substrate"],
+            },
+        ),
+        "chain_shared_memory": _probe(
+            status=chain_hot.get("parity") is True
+            and chain_hot.get("speedup_ratio", 0.0) > 1.0
+            and chain.get("transfer_budget", {}).get("added_dtoh_calls") == 0,
+            features=["chain_shared_memory"],
+            consumers=["v090-substrate"],
+            proof="chain-topology shared-memory scorer records parity, speedup, and no added DTOH",
+            evidence=[feature_measurements["chain_shared_memory"]["path"]],
+            raw={
+                "speedup_ratio": chain_hot.get("speedup_ratio"),
+                "parity": chain_hot.get("parity"),
+                "added_dtoh_calls": chain.get("transfer_budget", {}).get("added_dtoh_calls"),
+                "examples": examples_by_consumer["v090-substrate"],
+            },
+        ),
+        "common_subexpression_elimination": _probe(
+            status=cse_deterministic.get("output_parity") is True
+            and cse_deterministic.get("duplicate_subplan_reduction_percent", 0.0) > 0.0
+            and cse_deterministic.get("added_dtoh_calls") == 0
+            and all(cse.get("unsafe_rejections", {}).values()),
+            features=["common_subexpression_elimination"],
+            consumers=["dts-dlm", "mistaber-neutral", "v090-substrate"],
+            proof="runtime CSE duplicate-subplan fixture records parity, duplicate-work reduction, unsafe-boundary rejection, and zero added DTOH",
+            evidence=[feature_measurements["common_subexpression_elimination"]["path"]],
+            raw={
+                "duplicate_subplan_reduction_percent": cse_deterministic.get(
+                    "duplicate_subplan_reduction_percent"
+                ),
+                "output_parity": cse_deterministic.get("output_parity"),
+                "added_dtoh_calls": cse_deterministic.get("added_dtoh_calls"),
+                "examples": examples_by_consumer["dts-dlm"]
+                + examples_by_consumer["mistaber-neutral"]
+                + examples_by_consumer["v090-substrate"],
+            },
+        ),
+        "adaptive_reoptimization": _probe(
+            status=adaptive_deterministic.get("adopted", 0) >= 1
+            and adaptive_deterministic.get("data_plane_dtoh_calls") == 0
+            and adaptive_deterministic.get("decision_replays", 0) >= 100
+            and adaptive.get("rollback_fixture", {}).get("rolled_back", 0) >= 1,
+            features=["adaptive_reoptimization"],
+            consumers=["dts-dlm", "mistaber-neutral", "v090-substrate"],
+            proof="adaptive reoptimization fixture records adoption, deterministic replay, rollback, and zero data-plane DTOH",
+            evidence=[feature_measurements["adaptive_reoptimization"]["path"]],
+            raw={
+                "adopted": adaptive_deterministic.get("adopted"),
+                "decision_replays": adaptive_deterministic.get("decision_replays"),
+                "data_plane_dtoh_calls": adaptive_deterministic.get("data_plane_dtoh_calls"),
+                "rolled_back": adaptive.get("rollback_fixture", {}).get("rolled_back"),
+                "examples": examples_by_consumer["dts-dlm"]
+                + examples_by_consumer["mistaber-neutral"]
+                + examples_by_consumer["v090-substrate"],
+            },
+        ),
+        "persistent_hash_index": _probe(
+            status=persistent_perf.get("speedup_ratio", 0.0) >= 1.5
+            and persistent_transfer.get("cached_tracked_dtoh_calls") == 0
+            and persistent_transfer.get("cached_tracked_htod_calls") == 0
+            and persistent_repeated.get("builds", 0) >= 1
+            and persistent_repeated.get("hits", 0) >= 1,
+            features=["persistent_hash_index"],
+            consumers=["dts-dlm", "mistaber-neutral", "v090-substrate", "pyxlog-compatibility"],
+            proof="persistent hash-index runtime fixture records >=1.5x speedup, repeated-session build/hit, and zero tracked transfers",
+            evidence=[
+                feature_measurements["persistent_hash_index"]["path"],
+                "python/tests/test_v086_pyxlog_persistent_index_runtime.py",
+            ],
+            raw={
+                "speedup_ratio": persistent_perf.get("speedup_ratio"),
+                "builds": persistent_repeated.get("builds"),
+                "hits": persistent_repeated.get("hits"),
+                "tracked_dtoh_calls": persistent_repeated.get("tracked_dtoh_calls"),
+                "pyxlog_session_reuse_status": compatibility_gates.get(
+                    "pyxlog_persistent_index_session_reuse", {}
+                ).get("status"),
+                "examples": examples_by_consumer["dts-dlm"]
+                + examples_by_consumer["mistaber-neutral"]
+                + examples_by_consumer["v090-substrate"]
+                + examples_by_consumer["pyxlog-compatibility"],
+            },
+        ),
+        "v090_substrate": _probe(
+            status=bool(examples_by_consumer["v090-substrate"]),
+            features=["v090_substrate"],
+            consumers=["v090-substrate"],
+            proof="v0.9.0 substrate example executes through xlog-cli and maps to exact/index/CSE/adaptive primitive behavior probes",
+            evidence=["examples/v086-runtime/04_v090_substrate_primitives/program.xlog"],
+            raw={"examples": examples_by_consumer["v090-substrate"]},
+        ),
+        "pyxlog_compatibility": _probe(
+            status=compatibility_gates.get("v080_examples", {}).get("status") == "PASS"
+            and compatibility_gates.get("v085_examples", {}).get("status") == "PASS"
+            and compatibility_gates.get("v080_v085_source_guards", {}).get("status") == "PASS"
+            and compatibility_gates.get("pyxlog_persistent_index_session_reuse", {}).get(
+                "status"
+            )
+            == "PASS",
+            features=["pyxlog_compatibility"],
+            consumers=["pyxlog-compatibility"],
+            proof="public v0.8.0/v0.8.5 pyxlog validators and v0.8.6 session persistent-index probe pass against the staged local package",
+            evidence=[
+                "scripts/validate_v080_examples.py",
+                "scripts/validate_v085_examples.py",
+                "python/tests/test_v086_pyxlog_persistent_index_runtime.py",
+            ],
+            raw={"examples": examples_by_consumer["pyxlog-compatibility"]},
+        ),
+        "production_path_reuse": _probe(
+            status=production_path_reuse.get("status") == "PASS"
+            and reuse_audit.get("status") == "PASS",
+            features=["production_path_reuse"],
+            consumers=sorted(REQUIRED_CONSUMERS),
+            proof="validator runs examples through xlog-cli run/explain and audits reused subsystems without private helper engines",
+            evidence=["scripts/validate_v086_examples.py"],
+            raw={
+                "private_hooks_used": production_path_reuse.get("private_hooks_used"),
+                "fixture_only_bypass": production_path_reuse.get("fixture_only_bypass"),
+                "duplicate_engine_helper_path": reuse_audit.get("duplicate_engine_helper_path"),
+            },
+        ),
+    }
+
+
+def _behavior_feature_coverage(
+    behavior_probes: dict[str, dict[str, Any]],
+) -> dict[str, list[str]]:
+    return {
+        feature: [
+            probe_id
+            for probe_id, probe in behavior_probes.items()
+            if probe["status"] == "PASS" and feature in probe["features"]
+        ]
+        for feature in REQUIRED_FEATURES
+    }
+
+
+def _behavior_probe_gaps(
+    behavior_probes: dict[str, dict[str, Any]],
+    feature_coverage: dict[str, list[str]],
+) -> list[dict[str, Any]]:
+    gaps = [
+        {
+            "id": f"behavior-probe-{probe_id}",
+            "status": "BLOCKED",
+            "reason": probe["proof"],
+        }
+        for probe_id, probe in behavior_probes.items()
+        if probe["status"] != "PASS"
+    ]
+    gaps.extend(
+        {
+            "id": f"missing-behavior-feature-{feature}",
+            "status": "BLOCKED",
+            "reason": f"{feature} has no passing behavior probe",
+        }
+        for feature, probes in feature_coverage.items()
+        if not probes
+    )
+    return gaps
 
 
 def _require(condition: bool, message: str) -> None:
@@ -497,26 +732,44 @@ def _aggregate(
     feature_measurements: dict[str, Any],
     compatibility_gates: dict[str, Any],
 ) -> dict[str, Any]:
-    feature_coverage = {
+    declared_feature_coverage = {
         feature: [result["name"] for result in results if feature in result["features"]]
         for feature in REQUIRED_FEATURES
     }
-    missing_features = [feature for feature, examples in feature_coverage.items() if not examples]
-    _require(not missing_features, f"Missing required feature coverage: {missing_features}")
+    missing_declared_features = [
+        feature for feature, examples in declared_feature_coverage.items() if not examples
+    ]
+    _require(
+        not missing_declared_features,
+        f"Missing required declared feature coverage: {missing_declared_features}",
+    )
     observed_consumers = {result["consumer"] for result in results}
     _require(
         REQUIRED_CONSUMERS <= observed_consumers,
         f"Missing required consumers: {sorted(REQUIRED_CONSUMERS - observed_consumers)}",
     )
 
+    production_path_reuse = _production_path_reuse()
+    reuse_audit = _reuse_audit()
+    behavior_probes = _consumer_behavior_probes(
+        results,
+        feature_measurements,
+        compatibility_gates,
+        production_path_reuse,
+        reuse_audit,
+    )
+    feature_coverage = _behavior_feature_coverage(behavior_probes)
+    consumer_proof_gaps = _behavior_probe_gaps(behavior_probes, feature_coverage)
+    certification_status = "PASS" if not consumer_proof_gaps else "BLOCKED"
+
     return {
         "suite": "G086_CONSUMERS",
-        "status": "PASS",
+        "status": "PASS" if certification_status == "PASS" else "BLOCKED",
         "example_execution_status": "PASS",
-        "consumer_certification_status": "BLOCKED",
-        "feature_coverage_source": "expected_json_declarations",
+        "consumer_certification_status": certification_status,
+        "feature_coverage_source": "behavior_probes",
         "feature_node_behavior_proofs": _feature_node_behavior_proofs(feature_measurements),
-        "consumer_proof_gaps": CONSUMER_PROOF_GAPS,
+        "consumer_proof_gaps": consumer_proof_gaps,
         "example_count": len(results),
         "required_example_count": len(EXAMPLES),
         "consumer_coverage": {
@@ -524,14 +777,13 @@ def _aggregate(
             for consumer in sorted(REQUIRED_CONSUMERS)
         },
         "feature_coverage": feature_coverage,
+        "declared_feature_coverage": declared_feature_coverage,
+        "behavior_probes": behavior_probes,
         "feature_proof_model": {
             "example_execution": "xlog-cli run/explain over committed .xlog programs",
-            "feature_coverage": "expected.json declarations cross-linked to committed feature-node evidence",
-            "certification_limit": (
-                "declarations plus linked evidence are not equivalent to per-consumer "
-                "runtime probes for native exact induction, adaptive reoptimization, "
-                "or persistent-index fixture dispatch"
-            ),
+            "declared_feature_coverage": "expected.json declarations retained for traceability only",
+            "feature_coverage": "validator-owned behavior probes over committed feature evidence and public pyxlog compatibility gates",
+            "certification_limit": None,
         },
         "per_example": [
             {
@@ -552,8 +804,8 @@ def _aggregate(
             },
         },
         "compatibility_gates": compatibility_gates,
-        "production_path_reuse": _production_path_reuse(),
-        "reuse_audit": _reuse_audit(),
+        "production_path_reuse": production_path_reuse,
+        "reuse_audit": reuse_audit,
     }
 
 

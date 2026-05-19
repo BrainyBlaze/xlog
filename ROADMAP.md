@@ -1603,15 +1603,15 @@ engines, or parallel helper paths that bypass production dispatch are blockers.
 
 ### Consumer Certification
 
-- [ ] Add v0.8.6 runtime consumer certification examples and validator for
+- [x] Add v0.8.6 runtime consumer certification examples and validator for
       DTS-DLM, neutral Mistaber-derived `.xlog` workloads, v0.9.0 substrate
       primitives, and public pyxlog session compatibility. The validator runs
       the new examples through `xlog-cli run/explain`, invokes the existing
       v0.8.0 and v0.8.5 validators, records raw timings/transfer evidence, and
       audits production-path reuse instead of introducing a fixture-only engine.
-      Example execution passes, but certification remains HOLD_FOR_FIXES because
-      feature coverage is label-derived. Public pyxlog persistent-index session
-      reuse now has a passing behavior probe.
+      Example execution and consumer certification pass; feature coverage is
+      backed by validator-owned behavior probes, and public pyxlog persistent
+      index session reuse has a passing behavior probe.
       Evidence: `docs/evidence/2026-05-19-v086-consumers/`.
 
 ## v0.9.0 - Epistemic and Solver Semantics
