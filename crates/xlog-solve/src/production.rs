@@ -62,6 +62,8 @@ pub struct GpuSolverProductionLifecycleStep<'a> {
 /// Summary of an accepted solver lifecycle run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GpuSolverProductionLifecycleReport {
+    /// Number of accepted GPU epistemic candidate evidence records consumed.
+    pub candidate_evidence_records: u64,
     /// Number of lifecycle steps executed.
     pub steps: u64,
     /// Number of assumption pushes recorded before GPU solves.
@@ -423,11 +425,8 @@ impl GpuSolverProductionAdapter {
         self.trace.require_zero_cpu_search()
     }
 
-    /// Execute an accepted push/solve/retract lifecycle through existing GPU CDCL calls.
-    pub fn solve_assumption_lifecycle_with_gpu_execution_result(
+    fn solve_assumption_lifecycle_steps(
         &mut self,
-        provider: &CudaKernelProvider,
-        result: &EpistemicGpuExecutionResult,
         workspace: &mut GpuCdclWorkspace,
         steps: &[GpuSolverProductionLifecycleStep<'_>],
     ) -> Result<GpuSolverProductionLifecycleReport> {
@@ -437,8 +436,6 @@ impl GpuSolverProductionAdapter {
                 context: "accepted solver lifecycle requires at least one step".to_string(),
             });
         }
-
-        require_accepted_gpu_solver_evidence(provider, result)?;
 
         let pushes_before = self.trace.gpu_assumption_pushes;
         let retractions_before = self.trace.gpu_assumption_retractions;
@@ -492,13 +489,8 @@ impl GpuSolverProductionAdapter {
             });
         }
 
-        self.trace.accepted_gpu_candidate_evidence_consumed = self
-            .trace
-            .accepted_gpu_candidate_evidence_consumed
-            .saturating_add(1);
-        self.trace.require_zero_cpu_search()?;
-
         Ok(GpuSolverProductionLifecycleReport {
+            candidate_evidence_records: 0,
             steps: steps.len() as u64,
             assumption_pushes,
             assumption_retractions,
@@ -507,6 +499,86 @@ impl GpuSolverProductionAdapter {
                 .gpu_lifecycle_workspace_reuses
                 .saturating_sub(workspace_reuses_before),
         })
+    }
+
+    /// Execute an accepted push/solve/retract lifecycle through existing GPU CDCL calls.
+    pub fn solve_assumption_lifecycle_with_gpu_execution_result(
+        &mut self,
+        provider: &CudaKernelProvider,
+        result: &EpistemicGpuExecutionResult,
+        workspace: &mut GpuCdclWorkspace,
+        steps: &[GpuSolverProductionLifecycleStep<'_>],
+    ) -> Result<GpuSolverProductionLifecycleReport> {
+        if steps.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production lifecycle".to_string(),
+                context: "accepted solver lifecycle requires at least one step".to_string(),
+            });
+        }
+
+        require_accepted_gpu_solver_evidence(provider, result)?;
+        let mut report = self.solve_assumption_lifecycle_steps(workspace, steps)?;
+        report.candidate_evidence_records = 1;
+        self.trace.accepted_gpu_candidate_evidence_consumed = self
+            .trace
+            .accepted_gpu_candidate_evidence_consumed
+            .saturating_add(1);
+        self.trace.require_zero_cpu_search()?;
+        Ok(report)
+    }
+
+    /// Execute accepted push/solve/retract lifecycles for multiple GPU epistemic candidates.
+    ///
+    /// Each candidate result is validated against the accepted GPU execution boundary, then
+    /// the same lifecycle steps are dispatched through the existing GPU CDCL SAT/UNSAT paths.
+    pub fn solve_multi_candidate_assumption_lifecycle_with_gpu_execution_results(
+        &mut self,
+        provider: &CudaKernelProvider,
+        results: &[&EpistemicGpuExecutionResult],
+        workspace: &mut GpuCdclWorkspace,
+        steps: &[GpuSolverProductionLifecycleStep<'_>],
+    ) -> Result<GpuSolverProductionLifecycleReport> {
+        if results.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production lifecycle".to_string(),
+                context:
+                    "multi-candidate solver lifecycle requires at least one accepted GPU result"
+                        .to_string(),
+            });
+        }
+        if steps.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production lifecycle".to_string(),
+                context: "accepted solver lifecycle requires at least one step".to_string(),
+            });
+        }
+
+        for result in results {
+            require_accepted_gpu_solver_evidence(provider, result)?;
+        }
+
+        let mut report = GpuSolverProductionLifecycleReport::default();
+        for _ in results {
+            let step_report = self.solve_assumption_lifecycle_steps(workspace, steps)?;
+            report.candidate_evidence_records = report.candidate_evidence_records.saturating_add(1);
+            report.steps = report.steps.saturating_add(step_report.steps);
+            report.assumption_pushes = report
+                .assumption_pushes
+                .saturating_add(step_report.assumption_pushes);
+            report.assumption_retractions = report
+                .assumption_retractions
+                .saturating_add(step_report.assumption_retractions);
+            report.workspace_reuses = report
+                .workspace_reuses
+                .saturating_add(step_report.workspace_reuses);
+            self.trace.accepted_gpu_candidate_evidence_consumed = self
+                .trace
+                .accepted_gpu_candidate_evidence_consumed
+                .saturating_add(1);
+        }
+
+        self.trace.require_zero_cpu_search()?;
+        Ok(report)
     }
 
     /// Populate and publish the existing GPU CDCL learned-clause/proof arena.

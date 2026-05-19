@@ -63,6 +63,9 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(solver.contains("solve_expect_unsat_with_branch_limit_ws_with_gpu_execution_result"));
     assert!(solver.contains("solve_assumption_lifecycle_with_gpu_execution_result"));
     assert!(
+        solver.contains("solve_multi_candidate_assumption_lifecycle_with_gpu_execution_results")
+    );
+    assert!(
         solver.contains("solve_unsat_and_publish_learned_clause_arena_with_gpu_execution_result")
     );
     assert!(solver.contains("solve_unsat_then_reuse_learned_clauses_with_gpu_execution_result"));
@@ -76,6 +79,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(solver.contains("GpuSolverProductionPortfolioJob"));
     assert!(solver.contains("GpuSolverProductionPortfolioJob::Unknown"));
     assert!(solver.contains("GpuSolverProductionPortfolioJob::Timeout"));
+    assert!(solver.contains("candidate_evidence_records"));
     assert!(solver.contains("gpu_assumption_pushes"));
     assert!(solver.contains("gpu_assumption_retractions"));
     assert!(solver.contains("gpu_lifecycle_workspace_reuses"));
