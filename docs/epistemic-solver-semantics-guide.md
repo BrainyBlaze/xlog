@@ -251,6 +251,13 @@ rejects a rule that couples more than one distinct epistemic body predicate. For
 accepted split fixtures, `recomposed_rule_indices()` must recover the original
 source rule order.
 
+`compile_epistemic_gpu_split_execution` lowers valid epistemic split components
+through `compile_epistemic_gpu_execution_with_stats_snapshot`, producing one
+GPU executable subplan per epistemic component. This reuses the same reduced
+runtime compiler, WCOJ promotion, and helper-splitting surfaces as unsplit
+epistemic execution; it is bounded executable-plan evidence, not complete
+accepted-runtime parity.
+
 ## Solver Services
 
 `xlog_solve::GpuSolverProductionAdapter` is the production-facing solver reuse

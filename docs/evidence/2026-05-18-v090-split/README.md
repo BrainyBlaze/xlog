@@ -22,7 +22,7 @@ Predecessor evidence:
 | Valid split fixture | `test_epistemic_split.rs` verifies two independent epistemic rules split into two deterministic components. |
 | Invalid split rejection | A rule coupling `know p()` and `possible q()` returns `UnsupportedEpistemicConstruct { construct: "epistemic splitting" }`. |
 | Recomposition | `EpistemicSplitPlan::recomposed_rule_indices()` sorts component rule indices and equals the unsplit source order in fixtures. |
-| GPU split execution | Not implemented in this CPU semantic-oracle fixture. |
+| GPU split execution | `compile_epistemic_gpu_split_execution` compiles each epistemic split component through the existing `compile_epistemic_gpu_execution_with_stats_snapshot` path, preserving zero fallback counters and reduced production runtime subplans. |
 | Documentation | `docs/architecture/epistemic-semantics.md` documents the bounded split graph, rejection, and recomposition contract. |
 
 ## Validation
@@ -30,7 +30,7 @@ Predecessor evidence:
 | Command | Result |
 |---|---|
 | `cargo fmt --check` | PASS |
-| `cargo test -p xlog-logic --test test_epistemic_split` | PASS, 3 passed, 0 failed |
+| `cargo test -p xlog-logic --test test_epistemic_split` | PASS, 4 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_gpt` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_faeel` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_g91` | PASS, 3 passed, 0 failed |
@@ -44,14 +44,15 @@ Predecessor evidence:
 | Metric | Target | Status | Evidence |
 |---|---|---|---|
 | M090_SPLIT.1 graph construction | deterministic dependency graph | PASS for oracle | Sorted component fixture. |
-| M090_SPLIT.2 valid split fixtures | 100 percent pass | PASS for oracle | `test_epistemic_split`: 3/3 passed. |
+| M090_SPLIT.2 valid split fixtures | 100 percent pass | PASS for oracle | `test_epistemic_split`: 4/4 passed. |
 | M090_SPLIT.3 invalid split fixtures | typed rejection | PASS for oracle | `UnsupportedEpistemicConstruct` invalid coupling fixture. |
 | M090_SPLIT.4 recomposition | recomposed output equals unsplit output on fixtures | PASS for oracle | `recomposed_rule_indices() == [0, 1]` fixture. |
 | M090_SPLIT.5 modal coupling guard | fixture with cross-component epistemic dependency is not split | PASS for oracle | Invalid coupling fixture rejects split. |
-| M090_SPLIT.6 GPU split execution | valid split components execute through GPU-native subplans, not CPU-only recomposition | BLOCKED | Current split fixture does not execute GPU subplans. |
+| M090_SPLIT.6 GPU split execution | valid split components execute through GPU-native subplans, not CPU-only recomposition | PARTIAL | Valid split components now compile through GPU executable subplans using the existing epistemic GPU contract and reduced runtime compiler path; full accepted-runtime semantic parity remains under `G090_GPU`. |
 
 ## Coordination Notes
 
-- This is bounded split planning, not GPU-native component execution.
+- This is bounded split planning plus executable-subplan lowering, not full GPU
+  semantic parity for arbitrary split programs.
 - No pyxlog public API signatures were changed.
 - No push, tag, release-board update, or merge was performed.

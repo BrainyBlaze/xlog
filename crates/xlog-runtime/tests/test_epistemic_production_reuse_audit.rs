@@ -34,6 +34,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     let prob_epistemic = read_workspace_file("crates/xlog-prob/src/epistemic.rs");
 
     assert!(logic.contains("compile_epistemic_gpu_execution"));
+    assert!(logic.contains("compile_epistemic_gpu_split_execution"));
     assert!(logic.contains("compile_program_with_stats_snapshot"));
     assert!(runtime.contains("self.execute_plan(&executable.reduced_runtime_plan)"));
     assert!(runtime.contains("summarize_runtime_routes"));

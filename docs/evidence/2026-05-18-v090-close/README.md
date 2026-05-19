@@ -50,7 +50,7 @@ Earlier ref checks after `git fetch origin --prune` showed:
 | G090_G91 | PASS for semantic oracle | Compatibility fixtures pass, but GPU parity remains unproven. |
 | G090_FAEEL | PASS for semantic oracle | Foundedness fixtures pass, but GPU parity remains unproven. |
 | G090_GPT | PARTIAL | CPU trace fixtures pass; GPU-resident candidate generation, propagation staging, candidate-buffer validation, arity 0-3 tuple-source model-membership staging with fixed arity-one/two/three row-scoped ground key comparison, generic arity-N variable-bound tuple matching, bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, final-row map construction, and final tuple materialization exist; unary/binary/multi-membership final-row filtering fixtures pass, but broader semantic parity remains missing. |
-| G090_SPLIT | PARTIAL | CPU split/recompose fixtures pass; GPU split execution is missing. |
+| G090_SPLIT | PARTIAL | CPU split/recompose fixtures pass and valid split components now lower through GPU executable subplans; full accepted-runtime semantic parity is still missing. |
 | G090_GPU | BLOCKED | GPU-plan, reduced-runtime-plan, workspace allocation/reset, bounded candidate-generation, propagation, candidate-validation, arity 0-3 tuple-source model-membership staging with fixed arity-one/two/three row-scoped ground key comparison over existing relation buffers, generic arity-N variable-bound tuple matching, world-view-validation, accepted-candidate materialization, final-result flag, final-row map/final tuple materialization kernels, accepted K5 WCOJ dispatch, and hot-path transfer-budget trace with CUDA-event elapsed timing/runtime-preflight/fail-closed WCOJ gate/reduced-plan trace contracts exist, but full semantic kernel-buffer parity, broader solver learned-clause/status lifecycle wiring, probability wiring, and broader fixture coverage remain missing. |
 | G090_SOLVER | BLOCKED | Accepted GPU runtime evidence can gate GPU CDCL SAT/UNSAT, reusable workspace-backed UNSAT, one bounded push/solve/retract lifecycle, bounded MaxSAT candidate solving, and bounded SAT/MaxSAT portfolio dispatch, but broader learned-clause lifecycle traces and status-aware UNKNOWN/TIMEOUT portfolio handling are not wired to epistemic candidates. |
 | G090_PROB | BLOCKED | Accepted GPU runtime evidence can gate source/program exact compilation, bounded compile/evaluate, PIR/CNF encoding, and query/gradient evaluation through the existing GPU-native path, but broader probabilistic knowledge-compilation execution on accepted world views is incomplete. |
@@ -116,6 +116,8 @@ The branch contains useful scaffolding:
   gates for accepted source/program exact compilation, bounded
   compile/evaluate, PIR/CNF encoding, query evaluation, and gradient
   evaluation.
+- bounded executable split components that reuse the existing epistemic GPU
+  executable-plan path rather than a split-only WCOJ or tuple-store engine.
 
 This evidence should be retained as oracle coverage for the required GPU-native
 implementation, but it cannot be used as release-close evidence.

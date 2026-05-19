@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use xlog_core::Result;
+use xlog_core::{Result, XlogError};
 use xlog_ir::{
     EirBodyLiteral, EirTerm, EpistemicExecutablePlan, EpistemicGpuPlan, EpistemicReductionPlan,
     EpistemicTupleMembershipBinding, EpistemicWcojReductionStatus,
@@ -407,6 +407,31 @@ impl EpistemicSplitPlan {
     }
 }
 
+/// One split component lowered through the production epistemic GPU plan path.
+#[derive(Debug, Clone)]
+pub struct EpistemicSplitExecutableComponent {
+    /// Source dependency component covered by this executable subplan.
+    pub component: EpistemicDependencyComponent,
+    /// GPU contract plus reduced runtime plan for this component.
+    pub executable: EpistemicExecutablePlan,
+}
+
+/// Executable split plan whose components reuse the normal epistemic GPU lowering.
+#[derive(Debug, Clone)]
+pub struct EpistemicSplitExecutablePlan {
+    /// Original bounded split certificate.
+    pub split_plan: EpistemicSplitPlan,
+    /// Epistemic components compiled into GPU executable subplans.
+    pub components: Vec<EpistemicSplitExecutableComponent>,
+}
+
+impl EpistemicSplitExecutablePlan {
+    /// Return the original rule order recovered from the split certificate.
+    pub fn recomposed_rule_indices(&self) -> Vec<usize> {
+        self.split_plan.recomposed_rule_indices()
+    }
+}
+
 /// Evaluate a single parsed epistemic literal against a bounded interpretation.
 pub fn evaluate_epistemic_literal(
     mode: EpistemicMode,
@@ -578,4 +603,87 @@ pub fn split_epistemic_program(program: &Program) -> Result<EpistemicSplitPlan> 
     Ok(EpistemicSplitPlan {
         components: build_epistemic_dependency_graph(program)?.components,
     })
+}
+
+/// Compile valid epistemic split components through the production GPU executable path.
+pub fn compile_epistemic_gpu_split_execution(
+    program: &Program,
+) -> Result<EpistemicSplitExecutablePlan> {
+    compile_epistemic_gpu_split_execution_with_stats_snapshot(program, None)
+}
+
+/// Compile valid epistemic split components with an optional production stats snapshot.
+///
+/// Each component subprogram is lowered through
+/// [`compile_epistemic_gpu_execution_with_stats_snapshot`], so split execution
+/// reuses the same GPU contract, reduced compiler pipeline, WCOJ promotion, and
+/// helper-splitting surfaces as unsplit epistemic execution.
+pub fn compile_epistemic_gpu_split_execution_with_stats_snapshot(
+    program: &Program,
+    stats_snapshot: Option<&StatsSnapshot>,
+) -> Result<EpistemicSplitExecutablePlan> {
+    let split_plan = split_epistemic_program(program)?;
+    let mut components = Vec::new();
+
+    for component in &split_plan.components {
+        if !component_has_epistemic_rule(program, component) {
+            continue;
+        }
+
+        let component_program = split_component_program(program, component)?;
+        let executable = compile_epistemic_gpu_execution_with_stats_snapshot(
+            &component_program,
+            stats_snapshot,
+        )?;
+        components.push(EpistemicSplitExecutableComponent {
+            component: component.clone(),
+            executable,
+        });
+    }
+
+    if components.is_empty() {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "epistemic GPU split execution".to_string(),
+            context: "requires at least one epistemic split component".to_string(),
+        });
+    }
+
+    Ok(EpistemicSplitExecutablePlan {
+        split_plan,
+        components,
+    })
+}
+
+fn component_has_epistemic_rule(
+    program: &Program,
+    component: &EpistemicDependencyComponent,
+) -> bool {
+    component
+        .rule_indices
+        .iter()
+        .filter_map(|idx| program.rules.get(*idx))
+        .any(|rule| {
+            rule.body
+                .iter()
+                .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
+        })
+}
+
+fn split_component_program(
+    program: &Program,
+    component: &EpistemicDependencyComponent,
+) -> Result<Program> {
+    let mut component_program = program.clone();
+    component_program.rules = component
+        .rule_indices
+        .iter()
+        .map(|idx| {
+            program.rules.get(*idx).cloned().ok_or_else(|| {
+                XlogError::Compilation(format!(
+                    "epistemic split component references missing rule[{idx}]"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(component_program)
 }

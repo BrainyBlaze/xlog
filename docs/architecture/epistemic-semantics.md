@@ -346,3 +346,11 @@ For valid split fixtures, `EpistemicSplitPlan::recomposed_rule_indices` sorts th
 component rule indices and must equal the unsplit source rule order. This gives a
 stable recomposition certificate before later execution layers attach actual
 candidate solving to each component.
+
+`compile_epistemic_gpu_split_execution` attaches bounded executable subplans to
+valid epistemic split components. Each subprogram is lowered through
+`compile_epistemic_gpu_execution_with_stats_snapshot`, so split execution reuses
+the same GPU contract, reduced production compiler pipeline, WCOJ promotion, and
+helper-splitting surfaces as the unsplit epistemic executable path. This is not a
+separate split-only WCOJ or tuple-store engine, and it remains bounded evidence
+until full accepted-runtime semantic parity is covered.
