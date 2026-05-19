@@ -60,4 +60,11 @@ query(out_degree(1, 2)).
     assert!(stdout.contains("\"predicate\": \"out_degree\""), "{stdout}");
     assert!(stdout.contains("\"operator\": \"count\""), "{stdout}");
     assert!(stdout.contains("\"status\": \"fired\""), "{stdout}");
+    assert!(stdout.contains("\"parse\""), "{stdout}");
+    assert!(stdout.contains("\"ast\""), "{stdout}");
+    assert!(stdout.contains("\"stratification\""), "{stdout}");
+    assert!(stdout.contains("\"rir\""), "{stdout}");
+    assert!(stdout.contains("\"optimizer\""), "{stdout}");
+    assert!(stdout.contains("\"wcoj\""), "{stdout}");
+    assert!(stdout.contains("\"probability\""), "{stdout}");
 }

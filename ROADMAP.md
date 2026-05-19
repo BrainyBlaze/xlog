@@ -1509,9 +1509,10 @@ WCOJ, and CLI paths.
 
 - [x] Add incremental parsing for interactive use.
       Evidence: `docs/evidence/2026-05-19-v085-incremental-parse/README.md`.
-- [ ] Add interactive REPL.
-- [ ] Add watch mode.
-- [ ] Add CLI explain/plan visualization.
+- [x] Add interactive REPL.
+- [x] Add watch mode.
+- [x] Add CLI explain/plan visualization.
+      Evidence: `docs/evidence/2026-05-19-v085-cli/README.md`.
 
 ### Examples And Certification
 

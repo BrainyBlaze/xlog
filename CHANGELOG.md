@@ -38,6 +38,9 @@ All notable changes to this project are documented in this file.
 - Added v0.8.5 incremental parsing support with statement-level parser cache,
   stable spans, invalidation stats, module invalidation, and explain-path cache
   integration.
+- Added v0.8.5 CLI developer surfaces for deterministic explain sections,
+  parse-only REPL smoke sessions, and watch `--once --explain` smoke runs
+  without introducing new dependencies.
 
 ### Fixed
 

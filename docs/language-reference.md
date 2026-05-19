@@ -1786,10 +1786,9 @@ and interactive without changing the runtime execution contract.
 xlog explain [--format text|json|dot] <FILE>
 ```
 
-The `G085_MAGIC` subset of explain reports magic-set status, adorned
-predicates, generated predicates, and declined reasons without requiring GPU
-access. Later `G085_CLI` work expands explain to the full deterministic and
-probabilistic plan surface.
+The `G085_CLI` subset of explain reports deterministic parse, AST,
+stratification, RIR, optimizer, WCOJ, magic-set, and probability sections
+without requiring GPU execution. JSON output is deterministic for fixed input.
 
 Full explain output must include deterministic sections when applicable:
 
@@ -1826,6 +1825,8 @@ xlog repl [--module-path DIR[:DIR...]]
 The REPL accepts multiline facts, rules, declarations, pragmas, and queries.
 It shares the incremental parser/session cache and does not require GPU access
 until the user submits a command that needs execution.
+The `G085_CLI` smoke implementation reads a multiline stdin session, preserves
+the accumulated parser state, and reports statement/rule/query counts.
 
 ### `xlog watch`
 
@@ -1837,6 +1838,8 @@ Watch mode reruns compilation, execution, or explanation after file changes.
 It must debounce rapid writes, invalidate changed statements and dependent
 module state, and display typed diagnostics without reusing stale parse
 results.
+The `G085_CLI` smoke implementation supports `--once`, `--explain`, and
+`--debounce-ms`, using the shared parser session before any execution path.
 
 Unsupported REPL/watch mutation semantics, such as dynamic `assert` or
 `retract`, remain outside the language.

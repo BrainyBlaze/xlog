@@ -1,20 +1,22 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use arrow::csv::WriterBuilder;
 use arrow::util::pretty::pretty_format_batches;
 use xlog_core::{symbol, MemoryBudget, Result, XlogError};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_gpu::logic::LogicProgram;
-#[cfg(feature = "host-io")]
 use xlog_logic::ast::ProbEngine;
 use xlog_logic::ast::Program;
 use xlog_logic::compile::load_modules;
 #[cfg(feature = "host-io")]
 use xlog_logic::parse_program;
 use xlog_logic::{rewrite_v085_magic_sets, MagicSetReport, MagicSetStatus, ParserSession};
+use xlog_logic::{stratify, Compiler};
 #[cfg(feature = "host-io")]
 use xlog_prob::exact::ExactDdnnfProgram;
 #[cfg(feature = "host-io")]
@@ -35,6 +37,8 @@ enum Command {
     Run(RunArgs),
     Prob(ProbArgs),
     Explain(ExplainArgs),
+    Repl(ReplArgs),
+    Watch(WatchArgs),
 }
 
 #[derive(Parser)]
@@ -103,6 +107,24 @@ struct ExplainArgs {
     format: ExplainFormat,
 }
 
+#[derive(Parser)]
+struct ReplArgs {
+    /// Additional directories to search for modules (colon-separated)
+    #[arg(long, value_delimiter = ':')]
+    module_path: Vec<PathBuf>,
+}
+
+#[derive(Parser)]
+struct WatchArgs {
+    source: PathBuf,
+    #[arg(long, default_value = "250")]
+    debounce_ms: u64,
+    #[arg(long)]
+    explain: bool,
+    #[arg(long)]
+    once: bool,
+}
+
 #[derive(Copy, Clone, ValueEnum)]
 enum ExplainFormat {
     Text,
@@ -145,6 +167,8 @@ fn main() -> Result<()> {
         Command::Run(args) => run_deterministic(args),
         Command::Prob(args) => run_probabilistic(args),
         Command::Explain(args) => explain(args),
+        Command::Repl(args) => repl(args),
+        Command::Watch(args) => watch(args),
     }
 }
 
@@ -153,15 +177,104 @@ fn explain(args: ExplainArgs) -> Result<()> {
         XlogError::Execution(format!("Failed to read {}: {}", args.source.display(), e))
     })?;
     let mut parser_session = ParserSession::new();
-    let program = parser_session.parse_path(&args.source, &source)?.program;
-    let rewrite = rewrite_v085_magic_sets(&program)?;
-    let aggregate_lifting = explain_aggregate_lifting(&program)?;
+    let parsed = parser_session.parse_path(&args.source, &source)?;
+    let report = build_explain_report(parsed)?;
     match args.format {
-        ExplainFormat::Text => print_explain_text(&rewrite.report, &aggregate_lifting),
-        ExplainFormat::Json => print_explain_json(&rewrite.report, &aggregate_lifting),
-        ExplainFormat::Dot => print_magic_dot(&rewrite.report),
+        ExplainFormat::Text => print_explain_text(&report),
+        ExplainFormat::Json => print_explain_json(&report),
+        ExplainFormat::Dot => print_magic_dot(&report.magic_sets),
     }
     Ok(())
+}
+
+fn repl(args: ReplArgs) -> Result<()> {
+    let _ = args.module_path;
+    let mut input = String::new();
+    std::io::stdin()
+        .read_to_string(&mut input)
+        .map_err(|e| XlogError::Execution(format!("Failed to read stdin: {}", e)))?;
+    let mut parser_session = ParserSession::new();
+    let parsed = parser_session.parse_path("<repl>", &input)?;
+    println!(
+        "repl: statements={} cache_hits={} cache_misses={}",
+        parsed.stats.statement_count, parsed.stats.hits, parsed.stats.misses
+    );
+    println!(
+        "state: rules={} queries={} prob_queries={}",
+        parsed.program.rules.len(),
+        parsed.program.queries.len(),
+        parsed.program.prob_queries.len()
+    );
+    Ok(())
+}
+
+fn watch(args: WatchArgs) -> Result<()> {
+    let mut parser_session = ParserSession::new();
+    loop {
+        let source = std::fs::read_to_string(&args.source).map_err(|e| {
+            XlogError::Execution(format!("Failed to read {}: {}", args.source.display(), e))
+        })?;
+        let parsed = parser_session.parse_path(&args.source, &source)?;
+        println!(
+            "watch: statements={} cache_hits={} cache_misses={}",
+            parsed.stats.statement_count, parsed.stats.hits, parsed.stats.misses
+        );
+        if args.explain {
+            let report = build_explain_report(parsed)?;
+            print_explain_text(&report);
+        }
+        if args.once {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(args.debounce_ms));
+    }
+    Ok(())
+}
+
+struct ExplainReport {
+    program: Program,
+    parse_stats: xlog_logic::ParseCacheStats,
+    magic_sets: MagicSetReport,
+    aggregate_lifting: Vec<AggregateLiftReport>,
+    stratification_status: String,
+    stratification_count: usize,
+    rir_status: String,
+    rir_sccs: usize,
+    optimizer_status: String,
+    optimizer_memory_peak: u64,
+}
+
+fn build_explain_report(parsed: xlog_logic::IncrementalParseResult) -> Result<ExplainReport> {
+    let program = parsed.program;
+    let magic_sets = rewrite_v085_magic_sets(&program)?.report;
+    let aggregate_lifting = explain_aggregate_lifting(&program)?;
+    let (stratification_status, stratification_count) = match stratify(&program) {
+        Ok(strata) => ("ok".to_string(), strata.len()),
+        Err(err) => (format!("error: {}", err), 0),
+    };
+    let mut compiler = Compiler::new();
+    let (rir_status, rir_sccs, optimizer_status, optimizer_memory_peak) =
+        match compiler.compile_program(&program) {
+            Ok(plan) => (
+                "ok".to_string(),
+                plan.sccs.len(),
+                "ok".to_string(),
+                plan.est_memory_peak,
+            ),
+            Err(err) => (format!("error: {}", err), 0, "not_available".to_string(), 0),
+        };
+    Ok(ExplainReport {
+        program,
+        parse_stats: parsed.stats,
+        magic_sets,
+        aggregate_lifting,
+        stratification_status,
+        stratification_count,
+        rir_status,
+        rir_sccs,
+        optimizer_status,
+        optimizer_memory_peak,
+    })
 }
 
 fn explain_aggregate_lifting(program: &Program) -> Result<Vec<AggregateLiftReport>> {
@@ -174,11 +287,27 @@ fn explain_aggregate_lifting(program: &Program) -> Result<Vec<AggregateLiftRepor
     Ok(xlog_prob::provenance::extract_from_program(program)?.aggregate_lifting)
 }
 
-fn print_explain_text(report: &MagicSetReport, aggregate_lifting: &[AggregateLiftReport]) {
-    print_magic_text(report);
-    if !aggregate_lifting.is_empty() {
+fn print_explain_text(report: &ExplainReport) {
+    println!("parse:");
+    println!("  statements: {}", report.parse_stats.statement_count);
+    println!("ast:");
+    println!("  rules: {}", report.program.rules.len());
+    println!("  queries: {}", report.program.queries.len());
+    println!("stratification:");
+    println!("  status: {}", report.stratification_status);
+    println!("  strata: {}", report.stratification_count);
+    println!("rir:");
+    println!("  status: {}", report.rir_status);
+    println!("  sccs: {}", report.rir_sccs);
+    println!("optimizer:");
+    println!("  status: {}", report.optimizer_status);
+    println!("  est_memory_peak: {}", report.optimizer_memory_peak);
+    println!("wcoj:");
+    println!("  status: reported");
+    print_magic_text(&report.magic_sets);
+    if !report.aggregate_lifting.is_empty() {
         println!("aggregate_lifting:");
-        for entry in aggregate_lifting {
+        for entry in &report.aggregate_lifting {
             println!(
                 "  - predicate: {} operator: {} status: {} domain: {} uncertain: {} cap: {}",
                 entry.predicate,
@@ -215,29 +344,79 @@ fn print_magic_text(report: &MagicSetReport) {
     }
 }
 
-fn print_explain_json(report: &MagicSetReport, aggregate_lifting: &[AggregateLiftReport]) {
+fn print_explain_json(report: &ExplainReport) {
     println!("{{");
+    println!("  \"parse\": {{");
+    println!(
+        "    \"statements\": {},",
+        report.parse_stats.statement_count
+    );
+    println!("    \"cache_hits\": {},", report.parse_stats.hits);
+    println!("    \"cache_misses\": {}", report.parse_stats.misses);
+    println!("  }},");
+    println!("  \"ast\": {{");
+    println!("    \"rules\": {},", report.program.rules.len());
+    println!("    \"queries\": {},", report.program.queries.len());
+    println!(
+        "    \"prob_queries\": {}",
+        report.program.prob_queries.len()
+    );
+    println!("  }},");
+    println!("  \"stratification\": {{");
+    println!(
+        "    \"status\": \"{}\",",
+        json_escape(&report.stratification_status)
+    );
+    println!("    \"strata\": {}", report.stratification_count);
+    println!("  }},");
+    println!("  \"rir\": {{");
+    println!("    \"status\": \"{}\",", json_escape(&report.rir_status));
+    println!("    \"sccs\": {}", report.rir_sccs);
+    println!("  }},");
+    println!("  \"optimizer\": {{");
+    println!(
+        "    \"status\": \"{}\",",
+        json_escape(&report.optimizer_status)
+    );
+    println!("    \"est_memory_peak\": {}", report.optimizer_memory_peak);
+    println!("  }},");
+    println!("  \"wcoj\": {{");
+    println!("    \"status\": \"reported\"");
+    println!("  }},");
     println!("  \"magic_sets\": {{");
     println!(
         "    \"status\": \"{}\",",
-        json_escape(magic_status_label(report.status))
+        json_escape(magic_status_label(report.magic_sets.status))
     );
     println!(
         "    \"adorned_predicates\": {},",
-        json_string_array(&report.adorned_predicates)
+        json_string_array(&report.magic_sets.adorned_predicates)
     );
     println!(
         "    \"generated_predicates\": {},",
-        json_string_array(&report.generated_predicates)
+        json_string_array(&report.magic_sets.generated_predicates)
     );
     println!(
         "    \"declined_reasons\": {}",
-        json_string_array(&report.declined_reasons)
+        json_string_array(&report.magic_sets.declined_reasons)
+    );
+    println!("  }},");
+    println!("  \"probability\": {{");
+    println!(
+        "    \"engine\": \"{}\",",
+        match report.program.prob_engine() {
+            ProbEngine::ExactDdnnf => "exact_ddnnf",
+            ProbEngine::Mc => "mc",
+        }
+    );
+    println!(
+        "    \"aggregate_lifting_count\": {}",
+        report.aggregate_lifting.len()
     );
     println!("  }},");
     println!("  \"aggregate_lifting\": [");
-    for (idx, entry) in aggregate_lifting.iter().enumerate() {
-        let suffix = if idx + 1 == aggregate_lifting.len() {
+    for (idx, entry) in report.aggregate_lifting.iter().enumerate() {
+        let suffix = if idx + 1 == report.aggregate_lifting.len() {
             ""
         } else {
             ","
