@@ -1798,6 +1798,115 @@ fn accepted_split_batch_gates_solver_learned_clause_reuse_path() {
 }
 
 #[test]
+fn accepted_split_batch_gates_solver_maxsat_path() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred color(u32).
+        pred a(u32).
+        pred b(u32).
+        a(X) :- node(X), know edge(X).
+        b(X) :- node(X), know color(X).
+        "#,
+    )
+    .expect("parse split epistemic fixture");
+    let split = compile_epistemic_gpu_split_execution_with_stats_snapshot(&program, None)
+        .expect("compile split components through GPU executable path");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    let mut relation_ids = BTreeMap::new();
+    for component in &split.components {
+        for (name, rel_id) in &component.executable.relation_ids {
+            if let Some(previous) = relation_ids.insert(name.clone(), *rel_id) {
+                assert_eq!(
+                    previous, *rel_id,
+                    "split components must preserve relation ids for shared declarations"
+                );
+            }
+        }
+    }
+    for (name, rel_id) in &relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation("node", upload_unary_u32(&fix.memory, &[1, 2, 3]));
+    executor.put_relation("edge", upload_unary_u32(&fix.memory, &[1, 3]));
+    executor.put_relation("color", upload_unary_u32(&fix.memory, &[2]));
+
+    let executables: Vec<_> = split
+        .components
+        .iter()
+        .map(|component| &component.executable)
+        .collect();
+    let batch = executor
+        .execute_epistemic_gpu_execution_batch_with_trace(
+            &executables,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 2,
+            },
+        )
+        .expect("execute split GPU components through runtime batch path");
+
+    let candidate_low = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
+    let candidate_high = SolveInstance::new(1, vec![Clause::new(vec![Literal::negative(0)])]);
+    let gpu_candidate_low =
+        GpuCnf::from_host(&candidate_low, &fix.provider).expect("upload low-score MaxSAT CNF");
+    let gpu_candidate_high =
+        GpuCnf::from_host(&candidate_high, &fix.provider).expect("upload high-score MaxSAT CNF");
+    let branch_limit = upload_u32_scalar(&fix.provider, 1);
+    let mut adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+
+    let report = adapter
+        .solve_weighted_maxsat_candidates_with_gpu_batch_execution_result(
+            &fix.provider,
+            GpuSolverProductionBatchExecutionEvidence { batch: &batch },
+            &[
+                GpuSolverProductionMaxSatCandidate {
+                    score: 3,
+                    cnf: &gpu_candidate_low,
+                    branch_var_limit: &branch_limit,
+                },
+                GpuSolverProductionMaxSatCandidate {
+                    score: 7,
+                    cnf: &gpu_candidate_high,
+                    branch_var_limit: &branch_limit,
+                },
+            ],
+        )
+        .expect("accepted split GPU batch evidence must gate MaxSAT through GPU CDCL");
+
+    assert_eq!(report.candidate_evidence_records, 2);
+    assert_eq!(report.optimum_score, 7);
+    assert_eq!(report.candidates_checked, 4);
+    assert_eq!(report.satisfiable_candidates, 4);
+    assert_eq!(report.unsat_candidates_pruned, 0);
+    assert_eq!(report.gpu_cdcl_candidate_encodes, 0);
+    assert_eq!(report.gpu_cdcl_candidate_solves, 4);
+
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_gpu_batch_candidate_evidence_consumed, 1);
+    assert_eq!(
+        trace.accepted_gpu_batch_candidate_component_evidence_consumed,
+        2
+    );
+    assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 2);
+    assert_eq!(trace.gpu_cdcl_sat_solves, 4);
+    assert_eq!(trace.gpu_maxsat_candidate_solves, 4);
+    assert_eq!(trace.gpu_maxsat_optima, 2);
+    assert_eq!(trace.cpu_assignment_enumerations, 0);
+    assert_eq!(trace.cpu_maxsat_enumerations, 0);
+}
+
+#[test]
 fn split_gpu_world_view_distinguishes_absent_possible_from_not_known() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");

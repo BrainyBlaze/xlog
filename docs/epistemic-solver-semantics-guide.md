@@ -146,9 +146,9 @@ production GPU/WCOJ stack for specific certification fixtures:
   multi-membership, missing-required rejection, split
   possible-vs-not-known, G91 self-support, and independently founded FAEEL
   fixtures compare bounded GPU traces against semantic or GPT oracles.
-- Solver SAT/UNSAT, lifecycle, split-batch learned-clause, MaxSAT, scheduler,
-  and portfolio slices route accepted GPU evidence into existing GPU CDCL/CNF
-  adapter paths.
+- Solver SAT/UNSAT, lifecycle, split-batch learned-clause and MaxSAT,
+  scheduler, and portfolio slices route accepted GPU evidence into existing
+  GPU CDCL/CNF adapter paths.
 - Probabilistic source/program compile, condition, PIR/CNF encode, query, and
   gradient slices route accepted GPU evidence into existing GPU exact/provenance
   paths with accepted split-batch conditioned source/program query and gradient
@@ -428,6 +428,11 @@ returning the best declared score.
 multiple accepted GPU runtime results up front, then repeats the same bounded
 MaxSAT candidate-set certification through existing GPU CDCL calls once per
 accepted evidence record.
+`solve_weighted_maxsat_candidates_with_gpu_batch_execution_result` consumes the
+same accepted split-batch evidence as the lifecycle adapter, then delegates
+each component to the existing multi-candidate weighted MaxSAT path. It records
+the split-batch candidate/component counters together with accepted candidate
+records, GPU CDCL candidate solves, optima, and zero CPU MaxSAT enumeration.
 `solve_weighted_maxsat_search_with_gpu_execution_result` applies the accepted
 runtime boundary before scoring satisfiable MaxSAT candidates through GPU CDCL
 SAT and pruning UNSAT candidates through the workspace-backed GPU CDCL UNSAT
@@ -480,7 +485,7 @@ distinct-CNF fail-closed rejection, a two-record accepted lifecycle, and bounded
 UNKNOWN/TIMEOUT lifecycle propagation, plus two-record same-CNF learned-clause
 reuse, a mixed unary and binary `possible`/`not possible` plus binary `not know`
 operator-result lifecycle,
-accepted split-batch lifecycle, learned-clause reuse, and portfolio evidence
+accepted split-batch lifecycle, learned-clause reuse, MaxSAT, and portfolio evidence
 with batch/component counters,
 two-record/two-CNF bounded MaxSAT candidate-set execution, bounded GPU-CDCL
 pruning of UNSAT MaxSAT search candidates for one and two accepted evidence
@@ -514,6 +519,7 @@ Run the solver service fixtures and production-adapter source guard:
 cargo test -p xlog-solve --test gpu_solver_production_reuse
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_lifecycle_path -- --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_learned_clause_reuse_path -- --nocapture
+cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_maxsat_path -- --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_portfolio_path -- --nocapture
 cargo test -p xlog-solve --test solver_service_semantics
 ```
