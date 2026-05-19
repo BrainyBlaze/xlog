@@ -1061,6 +1061,17 @@ fn accepted_not_know_nonzero_arity_membership_filters_final_rows_by_absent_bound
         "#,
     )
     .expect("parse negated nonzero-arity epistemic fixture");
+    let oracle = run_generate_propagate_test(
+        &program,
+        vec![
+            // Candidate index 0 represents the negated literal as false.
+            EpistemicInterpretation::new().with_known("edge", 1),
+            // Candidate index 1 represents the negated literal as true.
+            EpistemicInterpretation::new(),
+        ],
+        GeneratePropagateTestConfig { max_candidates: 2 },
+    )
+    .expect("run not-know GPT oracle");
     let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
         .expect("compile negated nonzero-arity epistemic executable");
 
@@ -1085,6 +1096,41 @@ fn accepted_not_know_nonzero_arity_membership_filters_final_rows_by_absent_bound
         )
         .expect("execute negated nonzero-arity epistemic fixture");
 
+    assert_eq!(result.prepared.preflight.know_operator_count, 0);
+    assert_eq!(result.prepared.preflight.possible_operator_count, 0);
+    assert_eq!(result.prepared.preflight.not_know_operator_count, 1);
+    assert_eq!(result.prepared.preflight.not_possible_operator_count, 0);
+    assert_eq!(
+        result.semantic_trace.generated_candidates,
+        oracle.trace.generated
+    );
+    assert_eq!(result.semantic_trace.guesses, oracle.trace.guesses);
+    assert_eq!(
+        result.semantic_trace.propagated_candidates,
+        oracle.trace.propagated
+    );
+    assert_eq!(result.semantic_trace.pruned_candidates, oracle.trace.pruned);
+    assert_eq!(result.semantic_trace.tested_candidates, oracle.trace.tested);
+    assert_eq!(
+        result.semantic_trace.accepted_candidates,
+        oracle.trace.accepted
+    );
+    assert_eq!(
+        result.semantic_trace.accepted_world_views,
+        oracle.trace.accepted_world_views
+    );
+    assert_eq!(
+        result.semantic_trace.rejected_candidates,
+        oracle.trace.rejected
+    );
+    assert_eq!(
+        result.semantic_trace.accepted_candidate_indices,
+        oracle.accepted_candidate_indices
+    );
+    assert_eq!(
+        result.semantic_trace.rejected_candidate_indices,
+        oracle.rejected_candidate_indices
+    );
     assert_eq!(
         result.model_membership.membership_source,
         EpistemicGpuModelMembershipSource::StableModelTupleBuffer
@@ -1112,6 +1158,15 @@ fn accepted_possible_nonzero_arity_membership_records_operator_metrics() {
         "#,
     )
     .expect("parse possible nonzero-arity epistemic fixture");
+    let oracle = run_generate_propagate_test(
+        &program,
+        vec![
+            EpistemicInterpretation::new(),
+            EpistemicInterpretation::new().with_known("edge", 1),
+        ],
+        GeneratePropagateTestConfig { max_candidates: 2 },
+    )
+    .expect("run possible GPT oracle");
     let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
         .expect("compile possible nonzero-arity epistemic executable");
 
@@ -1139,6 +1194,37 @@ fn accepted_possible_nonzero_arity_membership_records_operator_metrics() {
     assert_eq!(result.prepared.preflight.not_know_operator_count, 0);
     assert_eq!(result.prepared.preflight.not_possible_operator_count, 0);
     assert_eq!(
+        result.semantic_trace.generated_candidates,
+        oracle.trace.generated
+    );
+    assert_eq!(result.semantic_trace.guesses, oracle.trace.guesses);
+    assert_eq!(
+        result.semantic_trace.propagated_candidates,
+        oracle.trace.propagated
+    );
+    assert_eq!(result.semantic_trace.pruned_candidates, oracle.trace.pruned);
+    assert_eq!(result.semantic_trace.tested_candidates, oracle.trace.tested);
+    assert_eq!(
+        result.semantic_trace.accepted_candidates,
+        oracle.trace.accepted
+    );
+    assert_eq!(
+        result.semantic_trace.accepted_world_views,
+        oracle.trace.accepted_world_views
+    );
+    assert_eq!(
+        result.semantic_trace.rejected_candidates,
+        oracle.trace.rejected
+    );
+    assert_eq!(
+        result.semantic_trace.accepted_candidate_indices,
+        oracle.accepted_candidate_indices
+    );
+    assert_eq!(
+        result.semantic_trace.rejected_candidate_indices,
+        oracle.rejected_candidate_indices
+    );
+    assert_eq!(
         result.model_membership.membership_source,
         EpistemicGpuModelMembershipSource::StableModelTupleBuffer
     );
@@ -1165,6 +1251,17 @@ fn accepted_not_possible_nonzero_arity_membership_records_operator_and_polarity_
         "#,
     )
     .expect("parse not-possible nonzero-arity epistemic fixture");
+    let oracle = run_generate_propagate_test(
+        &program,
+        vec![
+            // Candidate index 0 represents the negated literal as false.
+            EpistemicInterpretation::new().with_known("edge", 1),
+            // Candidate index 1 represents the negated literal as true.
+            EpistemicInterpretation::new(),
+        ],
+        GeneratePropagateTestConfig { max_candidates: 2 },
+    )
+    .expect("run not-possible GPT oracle");
     let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
         .expect("compile not-possible nonzero-arity epistemic executable");
 
@@ -1193,6 +1290,37 @@ fn accepted_not_possible_nonzero_arity_membership_records_operator_and_polarity_
     assert_eq!(result.prepared.preflight.possible_operator_count, 0);
     assert_eq!(result.prepared.preflight.not_know_operator_count, 0);
     assert_eq!(result.prepared.preflight.not_possible_operator_count, 1);
+    assert_eq!(
+        result.semantic_trace.generated_candidates,
+        oracle.trace.generated
+    );
+    assert_eq!(result.semantic_trace.guesses, oracle.trace.guesses);
+    assert_eq!(
+        result.semantic_trace.propagated_candidates,
+        oracle.trace.propagated
+    );
+    assert_eq!(result.semantic_trace.pruned_candidates, oracle.trace.pruned);
+    assert_eq!(result.semantic_trace.tested_candidates, oracle.trace.tested);
+    assert_eq!(
+        result.semantic_trace.accepted_candidates,
+        oracle.trace.accepted
+    );
+    assert_eq!(
+        result.semantic_trace.accepted_world_views,
+        oracle.trace.accepted_world_views
+    );
+    assert_eq!(
+        result.semantic_trace.rejected_candidates,
+        oracle.trace.rejected
+    );
+    assert_eq!(
+        result.semantic_trace.accepted_candidate_indices,
+        oracle.accepted_candidate_indices
+    );
+    assert_eq!(
+        result.semantic_trace.rejected_candidate_indices,
+        oracle.rejected_candidate_indices
+    );
     assert_eq!(result.final_tuple_materialization.row_filter_count, 1);
     assert_eq!(
         result.final_tuple_materialization.negated_row_filter_count,

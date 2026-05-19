@@ -25,12 +25,12 @@ reject final output rows on device. It is not a closure claim for `G090_GPU`,
 | Operator metrics | `EpistemicGpuRuntimePreflight` reports `know_operator_count`, `possible_operator_count`, `not_know_operator_count`, and `not_possible_operator_count` from the accepted executable GPU plan. |
 | Device final-row filtering | `epistemic_build_final_tuple_row_map_u8` builds a device row map from accepted model-membership/world-view buffers, tuple-source key comparison, and row-filter polarity before `epistemic_materialize_final_tuple_column_u8` compacts final output columns. `EpistemicGpuFinalTupleMaterializationTrace` records `row_filter_count` and `negated_row_filter_count`. |
 | Accepted unary fixture | `test_epistemic_gpu_wcoj_execution::accepted_nonzero_arity_membership_filters_final_rows_by_bound_tuple_key` runs `accepted(X) :- node(X), know edge(X)` with `node = [1, 2]` and `edge = [1]`; the final device output downloads as `[1]`. |
-| Accepted possible fixture | `test_epistemic_gpu_wcoj_execution::accepted_possible_nonzero_arity_membership_records_operator_metrics` runs `accepted(X) :- node(X), possible edge(X)` with `node = [1, 2, 3]` and `edge = [2, 3]`; the final device output downloads as `[2, 3]` and preflight records `possible_operator_count == 1`. |
-| Accepted not-possible fixture | `test_epistemic_gpu_wcoj_execution::accepted_not_possible_nonzero_arity_membership_records_operator_and_polarity_metrics` runs `accepted(X) :- node(X), not possible edge(X)` with `node = [1, 2, 3]` and `edge = [2]`; the final device output downloads as `[1, 3]`, preflight records `not_possible_operator_count == 1`, and final tuple materialization records one negated row filter. |
+| Accepted possible fixture | `test_epistemic_gpu_wcoj_execution::accepted_possible_nonzero_arity_membership_records_operator_metrics` runs `accepted(X) :- node(X), possible edge(X)` with `node = [1, 2, 3]` and `edge = [2, 3]`; the final device output downloads as `[2, 3]`, preflight records `possible_operator_count == 1`, and the GPU trace/candidate-index fields match a bounded GPT oracle. |
+| Accepted not-possible fixture | `test_epistemic_gpu_wcoj_execution::accepted_not_possible_nonzero_arity_membership_records_operator_and_polarity_metrics` runs `accepted(X) :- node(X), not possible edge(X)` with `node = [1, 2, 3]` and `edge = [2]`; the final device output downloads as `[1, 3]`, preflight records `not_possible_operator_count == 1`, final tuple materialization records one negated row filter, and the GPU trace/candidate-index fields match a bounded GPT oracle. |
 | Accepted binary fixture | `test_epistemic_gpu_wcoj_execution::accepted_binary_membership_filters_final_rows_by_bound_tuple_key` runs `accepted(X, Y) :- pair(X, Y), know edge(X, Y)` with `pair = [(1, 2), (2, 3)]` and `edge = [(1, 2)]`; the final device output downloads as `[(1, 2)]`. |
 | Accepted multi-membership fixture | `test_epistemic_gpu_wcoj_execution::accepted_multiple_memberships_filter_final_rows_by_all_bound_tuple_keys` runs `accepted(X) :- node(X), know edge(X), know color(X)`, returns `[2]`, and compares generated/propagated/tested/accepted/rejected counts plus accepted/rejected candidate indices against the bounded GPT oracle for the four-candidate two-literal matrix. |
 | Missing-required multi-membership fixture | `test_epistemic_gpu_wcoj_execution::world_view_validation_rejects_candidates_missing_one_required_membership` runs `accepted(X) :- node(X), know edge(X), know color(X)` with no `color` tuple support, rejects all four candidates at the world-view boundary, and leaves final output empty. |
-| Accepted negated unary fixture | `test_epistemic_gpu_wcoj_execution::accepted_not_know_nonzero_arity_membership_filters_final_rows_by_absent_bound_tuple_key` runs `accepted(X) :- node(X), not know edge(X)` with `node = [1, 2, 3]` and `edge = [1, 3]`; the final device output downloads as `[2]`. |
+| Accepted negated unary fixture | `test_epistemic_gpu_wcoj_execution::accepted_not_know_nonzero_arity_membership_filters_final_rows_by_absent_bound_tuple_key` runs `accepted(X) :- node(X), not know edge(X)` with `node = [1, 2, 3]` and `edge = [1, 3]`; the final device output downloads as `[2]`, and the GPU trace/candidate-index fields match a bounded GPT oracle. |
 | Split possible-vs-not-known fixture | `test_epistemic_gpu_wcoj_execution::split_gpu_world_view_distinguishes_absent_possible_from_not_known` executes split components over `node = [1, 2, 3]` and an empty `edge` tuple source; `possible edge(X)` returns `[]` while `not know edge(X)` returns `[1, 2, 3]` through the accepted GPU runtime path. |
 | Existing relation reuse | The fixture registers `EpistemicExecutablePlan::relation_ids`, seeds ordinary runtime relations, executes the reduced production runtime plan, and reads final output from the runtime-owned device buffer. |
 
@@ -52,11 +52,12 @@ reject final output rows on device. It is not a closure claim for `G090_GPU`,
 ## Non-Closure Notes
 
 - This covers unary and binary variable-bound `know` membership fixtures,
-  unary variable-bound `possible` and `not possible` membership metrics,
-  multi-membership acceptance with two-literal GPT trace/candidate-index oracle
-  parity, missing-required rejection, and unary variable-bound `not know`
-  absent-key filtering plus split possible-vs-not-known output parity over the
-  same absent tuple source.
+  unary variable-bound `possible` and `not possible` membership metrics with
+  operator-level GPT trace/candidate-index oracle parity, multi-membership
+  acceptance with two-literal GPT trace/candidate-index oracle parity,
+  missing-required rejection, and unary variable-bound `not know` absent-key
+  filtering with operator-level GPT trace/candidate-index oracle parity plus
+  split possible-vs-not-known output parity over the same absent tuple source.
 - It does not prove the full G91, FAEEL, GPT, splitting, solver, or
   probabilistic parity matrix.
 - Multiple-epistemic-literal final-row filters now have focused positive and

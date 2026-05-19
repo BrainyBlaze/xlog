@@ -297,6 +297,10 @@ The accepted multi-membership fixture also compares the two-literal
 `know edge(X), know color(X)` candidate matrix against the bounded GPT oracle,
 including generated, propagated, tested, accepted, rejected, and
 accepted/rejected candidate-index fields.
+The unary nonzero-arity `possible edge(X)`, `not possible edge(X)`, and
+`not know edge(X)` fixtures compare the same trace and candidate-index fields
+against bounded GPT oracles; for the negated operators, candidate index 1 is
+the oracle slot where the negated literal is true.
 This is certification evidence for
 bounded runtime fixtures, not full semantic parity across every
 G91/FAEEL/GPT/splitting case.
