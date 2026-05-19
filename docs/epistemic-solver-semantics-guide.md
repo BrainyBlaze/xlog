@@ -275,6 +275,11 @@ GPU executable subplan per epistemic component. This reuses the same reduced
 runtime compiler, WCOJ promotion, and helper-splitting surfaces as unsplit
 epistemic execution; it is bounded executable-plan evidence, not complete
 accepted-runtime parity.
+`Executor::execute_epistemic_gpu_execution_batch` executes component executable
+plans in order by delegating each item to the existing single-plan GPU runtime
+path. The accepted split integration fixture uses this adapter for two
+independent components and checks final component rows against tuple-intersection
+oracles while preserving zero CPU candidate/world-view fallback counters.
 
 ## Solver Services
 

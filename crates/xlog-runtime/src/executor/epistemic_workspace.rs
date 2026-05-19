@@ -3726,6 +3726,32 @@ impl Executor {
             trace,
         })
     }
+
+    /// Execute multiple accepted epistemic GPU executable plans in order.
+    ///
+    /// This is the runtime adapter used by split execution evidence: each
+    /// component is still dispatched through [`Self::execute_epistemic_gpu_execution`],
+    /// so candidate generation, model-membership, world-view validation,
+    /// materialization, transfer-budget, and production runtime counters are
+    /// recorded by the existing single-plan path.
+    pub fn execute_epistemic_gpu_execution_batch(
+        &mut self,
+        executables: &[&EpistemicExecutablePlan],
+        capacities: EpistemicGpuWorkspaceCapacities,
+    ) -> Result<Vec<EpistemicGpuExecutionResult>> {
+        if executables.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU batch execution".to_string(),
+                context: "batch execution requires at least one executable component".to_string(),
+            });
+        }
+
+        let mut results = Vec::with_capacity(executables.len());
+        for executable in executables {
+            results.push(self.execute_epistemic_gpu_execution(executable, capacities)?);
+        }
+        Ok(results)
+    }
 }
 
 #[derive(Default)]

@@ -41,6 +41,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(logic.contains("compile_epistemic_gpu_split_execution"));
     assert!(logic.contains("compile_program_with_stats_snapshot"));
     assert!(runtime.contains("self.execute_plan(&executable.reduced_runtime_plan)"));
+    assert!(runtime.contains("execute_epistemic_gpu_execution_batch"));
+    assert!(runtime.contains("self.execute_epistemic_gpu_execution(executable, capacities)"));
     assert!(runtime.contains("summarize_runtime_routes"));
     assert!(runtime.contains("MultiwayPlan::WcojWithPlan"));
     assert!(runtime.contains("kclique_wcoj_max_arity"));

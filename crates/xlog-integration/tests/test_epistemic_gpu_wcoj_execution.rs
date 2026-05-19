@@ -9,7 +9,10 @@ use xlog_cuda::device_runtime::{
 };
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
-use xlog_logic::epistemic::compile_epistemic_gpu_execution_with_stats_snapshot;
+use xlog_logic::epistemic::{
+    compile_epistemic_gpu_execution_with_stats_snapshot,
+    compile_epistemic_gpu_split_execution_with_stats_snapshot,
+};
 use xlog_logic::{parse_program, Compiler};
 use xlog_prob::epistemic::{EpistemicAssumption, EpistemicEvidenceTerm};
 use xlog_prob::epistemic_production::{
@@ -591,6 +594,87 @@ fn accepted_nonzero_arity_membership_filters_final_rows_by_bound_tuple_key() {
         vec![1],
         "final output must keep only reduced rows whose bound tuple key appears in the stable model"
     );
+}
+
+#[test]
+fn accepted_split_components_execute_gpu_runtime_and_match_component_oracles() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred color(u32).
+        pred a(u32).
+        pred b(u32).
+        a(X) :- node(X), know edge(X).
+        b(X) :- node(X), know color(X).
+        "#,
+    )
+    .expect("parse split epistemic fixture");
+    let split = compile_epistemic_gpu_split_execution_with_stats_snapshot(&program, None)
+        .expect("compile split components through GPU executable path");
+
+    assert_eq!(split.components.len(), 2);
+    assert_eq!(split.recomposed_rule_indices(), vec![0, 1]);
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    let mut relation_ids = BTreeMap::new();
+    for component in &split.components {
+        for (name, rel_id) in &component.executable.relation_ids {
+            if let Some(previous) = relation_ids.insert(name.clone(), *rel_id) {
+                assert_eq!(
+                    previous, *rel_id,
+                    "split components must preserve relation ids for shared declarations"
+                );
+            }
+        }
+    }
+    for (name, rel_id) in &relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation("node", upload_unary_u32(&fix.memory, &[1, 2, 3]));
+    executor.put_relation("edge", upload_unary_u32(&fix.memory, &[1, 3]));
+    executor.put_relation("color", upload_unary_u32(&fix.memory, &[2]));
+
+    let executables: Vec<_> = split
+        .components
+        .iter()
+        .map(|component| &component.executable)
+        .collect();
+    let results = executor
+        .execute_epistemic_gpu_execution_batch(
+            &executables,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 2,
+            },
+        )
+        .expect("execute split GPU components through runtime batch path");
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(
+        download_unary_u32(&fix.provider, &results[0].final_output),
+        vec![1, 3]
+    );
+    assert_eq!(
+        download_unary_u32(&fix.provider, &results[1].final_output),
+        vec![2]
+    );
+    for result in &results {
+        assert_eq!(
+            result.model_membership.membership_source,
+            EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+        );
+        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+        assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
+    }
 }
 
 #[test]
