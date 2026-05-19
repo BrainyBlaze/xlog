@@ -286,11 +286,11 @@ oracles while preserving zero CPU candidate/world-view fallback counters.
 `xlog_solve::GpuSolverProductionAdapter` is the production-facing solver reuse
 adapter for epistemic callers. It is a thin wrapper over the existing
 `GpuCdclSolver`; it dispatches `solve_expect_sat`, `solve_expect_unsat`,
-workspace-backed UNSAT, bounded weighted MaxSAT candidate checks, bounded
-MaxSAT search pruning, single-result and multi-result weighted MaxSAT
-selection encoding, and bounded SAT/MaxSAT portfolio jobs through the GPU CDCL
-path and exposes zero CPU assignment/MaxSAT enumeration counters in
-`GpuSolverProductionTrace`.
+workspace-backed UNSAT, bounded weighted MaxSAT candidate checks, single-result
+and multi-result MaxSAT search pruning, single-result and multi-result
+weighted MaxSAT selection encoding, and bounded SAT/MaxSAT portfolio jobs
+through the GPU CDCL path and exposes zero CPU assignment/MaxSAT enumeration
+counters in `GpuSolverProductionTrace`.
 `solve_expect_sat_with_gpu_execution_result` and
 `solve_expect_unsat_with_gpu_execution_result` additionally accept an
 `EpistemicGpuExecutionResult`; the reusable-workspace variant is
@@ -336,6 +336,10 @@ runtime boundary before scoring satisfiable MaxSAT candidates through GPU CDCL
 SAT and pruning UNSAT candidates through the workspace-backed GPU CDCL UNSAT
 path, recording `gpu_maxsat_unsat_candidate_prunes` with zero CPU MaxSAT
 enumeration.
+`solve_multi_candidate_weighted_maxsat_search_with_gpu_execution_results`
+validates multiple accepted GPU runtime results up front, then repeats that
+bounded SAT/UNSAT MaxSAT search-pruning path once per accepted evidence record
+through the same GPU CDCL workspace.
 `solve_weighted_maxsat_encoded_search_with_gpu_execution_result` applies the
 same boundary before converting caller-declared weighted soft-clause selections
 into satisfaction CNFs, uploading those candidates through the existing GPU CNF
@@ -362,10 +366,11 @@ or that record CPU assignment, MaxSAT, or learned-clause transfer counters.
 The adapter is partial v0.9 evidence only. It now proves same-CNF reuse,
 distinct-CNF fail-closed rejection, a two-record accepted lifecycle, and bounded
 UNKNOWN/TIMEOUT lifecycle propagation, plus two-record same-CNF learned-clause
-reuse, two-record/two-CNF bounded MaxSAT candidate-set execution, and bounded
-GPU-CDCL pruning of UNSAT MaxSAT search candidates plus bounded weighted
-soft-clause selection encoding for one and two accepted evidence records, but
-not full generalized MaxSAT scheduler coverage.
+reuse, two-record/two-CNF bounded MaxSAT candidate-set execution, bounded
+GPU-CDCL pruning of UNSAT MaxSAT search candidates for one and two accepted
+evidence records, and bounded weighted soft-clause selection encoding for one
+and two accepted evidence records, but not full generalized MaxSAT scheduler
+coverage.
 
 `xlog_solve::SolverService` provides the bounded solver API used by semantic
 fixtures:

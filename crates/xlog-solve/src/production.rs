@@ -1283,6 +1283,56 @@ impl GpuSolverProductionAdapter {
         Ok(report)
     }
 
+    /// Search a bounded weighted MaxSAT candidate set once per accepted GPU evidence record.
+    pub fn solve_multi_candidate_weighted_maxsat_search_with_gpu_execution_results(
+        &mut self,
+        provider: &CudaKernelProvider,
+        results: &[&EpistemicGpuExecutionResult],
+        workspace: &mut GpuCdclWorkspace,
+        candidates: &[GpuSolverProductionMaxSatSearchCandidate<'_>],
+    ) -> Result<GpuSolverProductionMaxSatReport> {
+        if results.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production MaxSAT search".to_string(),
+                context: "multi-candidate MaxSAT search requires at least one accepted GPU result"
+                    .to_string(),
+            });
+        }
+        for result in results {
+            require_accepted_gpu_solver_evidence(provider, result)?;
+        }
+
+        let mut report = GpuSolverProductionMaxSatReport::default();
+        for _ in results {
+            let step_report =
+                self.solve_weighted_maxsat_search_candidates(workspace, candidates)?;
+            report.candidate_evidence_records = report.candidate_evidence_records.saturating_add(1);
+            report.optimum_score = report.optimum_score.max(step_report.optimum_score);
+            report.candidates_checked = report
+                .candidates_checked
+                .saturating_add(step_report.candidates_checked);
+            report.satisfiable_candidates = report
+                .satisfiable_candidates
+                .saturating_add(step_report.satisfiable_candidates);
+            report.unsat_candidates_pruned = report
+                .unsat_candidates_pruned
+                .saturating_add(step_report.unsat_candidates_pruned);
+            report.gpu_cdcl_candidate_encodes = report
+                .gpu_cdcl_candidate_encodes
+                .saturating_add(step_report.gpu_cdcl_candidate_encodes);
+            report.gpu_cdcl_candidate_solves = report
+                .gpu_cdcl_candidate_solves
+                .saturating_add(step_report.gpu_cdcl_candidate_solves);
+            self.trace.accepted_gpu_candidate_evidence_consumed = self
+                .trace
+                .accepted_gpu_candidate_evidence_consumed
+                .saturating_add(1);
+        }
+
+        self.trace.require_zero_cpu_search()?;
+        Ok(report)
+    }
+
     /// Encode weighted soft-clause selections, then search them after accepted GPU evidence.
     ///
     /// Candidate construction is bounded by caller-declared selections. The adapter
