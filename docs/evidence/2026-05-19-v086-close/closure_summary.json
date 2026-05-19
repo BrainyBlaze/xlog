@@ -54,9 +54,9 @@
       "status": "PASS"
     },
     "G086_INDEX": {
-      "commit": "702e1f8f + 0e2a5420; hold correction 81badf31",
+      "commit": "702e1f8f + 0e2a5420; hold correction 81badf31; performance amendment pending commit",
       "evidence": "docs/evidence/2026-05-19-v086-persistent-hash-index/README.md",
-      "status": "BLOCKED"
+      "status": "PASS"
     },
     "G086_CONSUMERS": {
       "commit": "37f16651; hold correction 81badf31",
@@ -76,12 +76,6 @@
   },
   "blocked_or_scope_amendment_items": [
     {
-      "goal": "G086_INDEX",
-      "metric": "M086_INDEX.5 performance",
-      "status": "BLOCKED",
-      "description": "No >=1.5x persistent-index timing speedup is claimed, and no coordinator waiver or amended target is recorded."
-    },
-    {
       "goal": "G086_CONSUMERS",
       "metric": "M086_CONSUMERS.1/M086_CONSUMERS.3 consumer feature proof",
       "status": "BLOCKED",
@@ -94,14 +88,7 @@
       "description": "Public pyxlog session compatibility is green, but persistent hash-index reuse across session mutation and reevaluation is not directly proven."
     }
   ],
-  "unclaimed_performance_metrics": [
-    {
-      "goal": "G086_INDEX",
-      "metric": "M086_INDEX.5 performance/blocker",
-      "status": "UNCLAIMED_SPEEDUP",
-      "description": "No >=1.5x persistent-index timing speedup is claimed. Completed scope covers recorded background building, deferred current-evaluation reuse, deterministic persistent reuse, key hardening, invalidation, budget eviction, and background request/completion telemetry."
-    }
-  ],
+  "unclaimed_performance_metrics": [],
   "verification": {
     "integration_evidence": "docs/evidence/2026-05-19-v086-int/README.md",
     "consumer_evidence": "docs/evidence/2026-05-19-v086-consumers/validation_summary.json",
@@ -111,7 +98,7 @@
       "v085": 10,
       "v086": 5
     },
-    "python_bundle": "39 passed in 52.33s",
+    "python_bundle": "42 passed in 56.08s",
     "workspace_check": "cargo check --workspace exit 0"
   },
   "v090_rebase_note": "v0.9.0 should rebase or merge after any accepted v0.8.6 landing because exact type dispatch, chain shared-memory scoring, runtime CSE, adaptive candidate adoption, and persistent-index telemetry affect the substrate expected by epistemic/solver work. The v0.8.6 branch remains held until the listed blockers are fixed, waived, or scope-amended."

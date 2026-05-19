@@ -37,8 +37,8 @@ mode.
   use the recorded provider path where stream-backed execution is applicable?
 - Does repeated session evaluation observe reuse without tracked data-plane
   DTOH/H2D calls after fixture upload?
-- Are performance claims bounded to measured reuse and explicit about the
-  absence of a >=1.5x timing claim?
+- Does a build-heavy repeated-session fixture meet the >=1.5x timing target
+  with raw cached/uncached measurements?
 
 ## Metrics
 
@@ -52,16 +52,20 @@ mode.
   completion, and deferred-current-use telemetry; the CUDA provider has a
   runtime-backed recorded-stream build test that consumes the built index
   through the recorded indexed join path.
-- `M086_INDEX.5 performance/blocker`: repeated session evaluation reuses one
-  retained build-side index. No >=1.5x timing speedup is claimed in this
-  fixture; the performance metric remains explicitly bounded to observed reuse.
+- `M086_INDEX.5 performance`: build-heavy repeated-session semi-join fixture
+  records cached median 0.079429262s, uncached median 0.254631847s, and
+  speedup ratio 3.206x against the >=1.5x target.
 - `M086_INDEX.6 transfer budget`: the repeated-session fixture records zero
   tracked data-plane DTOH/H2D calls after fixture upload.
 
 ## Fresh Checks
 
 - `cargo test -p xlog-runtime persistent_hash_index -- --nocapture`
-  - 4 executor reuse/invalidation/background tests passed.
+  - 5 executor reuse/invalidation/background/performance tests passed.
+- `cargo test -p xlog-runtime test_persistent_hash_index_performance_fixture_meets_speedup_target -- --nocapture`
+  - recorded `left_rows=8`, `right_rows=8000000`, `warmup=12`,
+    `iterations=9`, cached median 0.079429262s, uncached median
+    0.254631847s, `speedup_ratio=3.206`, and zero tracked DTOH/H2D calls.
 - `cargo test -p xlog-cuda test_recorded_join_index_build_runs_on_runtime_stream -- --nocapture`
   - 1 runtime-backed recorded provider test passed.
 - `cargo test -p xlog-runtime persistent_cache -- --nocapture`
@@ -74,7 +78,6 @@ Machine-readable evidence: `measurements.json`.
 ## Metric Interpretation
 
 G086_INDEX correctness, invalidation, budget, keying, recorded background-build
-path, deferred current-evaluation reuse, and transfer-budget metrics are PASS.
-M086_INDEX.5 does not claim a >=1.5x timing speedup; the accepted v0.8.6
-performance claim is deterministic retained-index reuse with the speedup gate
-left unclaimed rather than inferred from correctness tests.
+path, deferred current-evaluation reuse, performance, and transfer-budget
+metrics are PASS. M086_INDEX.5 is backed by the recorded build-heavy
+repeated-session fixture rather than inferred from correctness tests.

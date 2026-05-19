@@ -24,7 +24,9 @@ All notable changes to this project are documented in this file.
   repeated session evaluations, including relation-generation/schema/device
   keys, stale-index invalidation, deterministic LRU budget eviction, and
   background-build request/completion/deferred counters plus a runtime-backed
-  recorded provider build path.
+  recorded provider build path. The build-heavy repeated-session fixture
+  records `speedup_ratio=3.206` against the >=1.5x persistent-index target
+  with zero tracked DTOH/H2D calls.
 - Added v0.8.6 runtime consumer example-execution fixtures and validator for
   DTS-DLM-shaped delta/optimizer workloads, neutral Mistaber-derived `.xlog`
   fixtures, v0.9.0 substrate primitives, and public pyxlog compatibility,

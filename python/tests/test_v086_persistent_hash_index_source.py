@@ -64,3 +64,15 @@ def test_v086_persistent_hash_index_evidence_is_present() -> None:
     assert measurements["budget_fixture"]["evictions"] == 1
     assert measurements["background_fixture"]["background_build_requests"] == 1
     assert measurements["background_fixture"]["background_builds_deferred"] == 1
+
+
+def test_v086_persistent_hash_index_records_required_speedup_fixture() -> None:
+    measurements = json.loads((EVIDENCE_DIR / "measurements.json").read_text(encoding="utf-8"))
+
+    performance = measurements["performance_fixture"]
+    assert performance["speedup_ratio"] >= 1.5
+    assert measurements["performance_or_blocker"]["speedup_gate_claimed"] is True
+    assert performance["cached"]["median_seconds"] < performance["uncached"]["median_seconds"]
+    assert performance["cached"]["output_rows"] == performance["uncached"]["output_rows"]
+    assert performance["transfer_budget"]["cached_tracked_dtoh_calls"] == 0
+    assert performance["transfer_budget"]["cached_tracked_htod_calls"] == 0

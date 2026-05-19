@@ -1596,10 +1596,9 @@ engines, or parallel helper paths that bypass production dispatch are blockers.
       stale-index invalidation, deterministic LRU budget eviction, repeated
       session reuse, background-build request/completion/deferred telemetry,
       and a runtime-backed recorded provider build path after profiles identify
-      index rebuild cost as a release blocker. The branch claims observed reuse
-      rather than a >=1.5x persistent-index timing speedup; M086_INDEX.5 remains
-      HOLD_FOR_FIXES until a timing fixture passes or the target is explicitly
-      waived/amended.
+      index rebuild cost as a release blocker. The build-heavy repeated-session
+      semi-join fixture records cached median 0.079429262s, uncached median
+      0.254631847s, `speedup_ratio=3.206`, and zero tracked DTOH/H2D calls.
       Evidence: `docs/evidence/2026-05-19-v086-persistent-hash-index/`.
 
 ### Consumer Certification

@@ -213,6 +213,18 @@ def test_v086_validator_separates_example_execution_from_consumer_certification(
         },
     ]
     feature_measurements = {feature: {"path": f"{feature}.json", "raw": {}} for feature in REQUIRED_FEATURES[:6]}
+    feature_measurements["persistent_hash_index"] = {
+        "path": "persistent_hash_index.json",
+        "raw": {
+            "performance_fixture": {
+                "speedup_ratio": 3.206,
+                "transfer_budget": {
+                    "cached_tracked_dtoh_calls": 0,
+                    "cached_tracked_htod_calls": 0,
+                },
+            }
+        },
+    }
     summary = module._aggregate(
         fake_results,
         feature_measurements,
@@ -227,4 +239,6 @@ def test_v086_validator_separates_example_execution_from_consumer_certification(
     assert summary["example_execution_status"] == "PASS"
     assert summary["consumer_certification_status"] == "BLOCKED"
     assert summary["feature_coverage_source"] == "expected_json_declarations"
+    assert summary["feature_node_behavior_proofs"]["persistent_hash_index"]["status"] == "PASS"
+    assert summary["feature_node_behavior_proofs"]["persistent_hash_index"]["speedup_ratio"] == 3.206
     assert any("label-derived" in gap["reason"] for gap in summary["consumer_proof_gaps"])

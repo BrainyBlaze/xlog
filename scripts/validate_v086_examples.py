@@ -75,6 +75,29 @@ CONSUMER_PROOF_GAPS = [
 ]
 
 
+def _feature_node_behavior_proofs(feature_measurements: dict[str, Any]) -> dict[str, Any]:
+    proofs: dict[str, Any] = {}
+    persistent = feature_measurements.get("persistent_hash_index", {}).get("raw", {})
+    performance = persistent.get("performance_fixture")
+    if performance:
+        transfer_budget = performance.get("transfer_budget", {})
+        proofs["persistent_hash_index"] = {
+            "status": "PASS"
+            if performance.get("speedup_ratio", 0.0) >= 1.5
+            and transfer_budget.get("cached_tracked_dtoh_calls") == 0
+            and transfer_budget.get("cached_tracked_htod_calls") == 0
+            else "BLOCKED",
+            "proof": "feature-node runtime performance fixture",
+            "speedup_ratio": performance.get("speedup_ratio"),
+            "target_speedup_ratio": performance.get("target_speedup_ratio", 1.5),
+            "cached_median_seconds": performance.get("cached", {}).get("median_seconds"),
+            "uncached_median_seconds": performance.get("uncached", {}).get("median_seconds"),
+            "cached_tracked_dtoh_calls": transfer_budget.get("cached_tracked_dtoh_calls"),
+            "cached_tracked_htod_calls": transfer_budget.get("cached_tracked_htod_calls"),
+        }
+    return proofs
+
+
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise SystemExit(message)
@@ -469,6 +492,7 @@ def _aggregate(
         "example_execution_status": "PASS",
         "consumer_certification_status": "BLOCKED",
         "feature_coverage_source": "expected_json_declarations",
+        "feature_node_behavior_proofs": _feature_node_behavior_proofs(feature_measurements),
         "consumer_proof_gaps": CONSUMER_PROOF_GAPS,
         "example_count": len(results),
         "required_example_count": len(EXAMPLES),

@@ -16,17 +16,16 @@ optimizer surfaces: formatting, workspace check, runtime/cuda/induce/prob/logic
 example execution, JSON validation, package metadata validation, and diff
 whitespace checks passed.
 
-The branch is not merge-ready under the governing GQM/DoD because the
-persistent-index timing target remains unresolved and consumer certification
-still contains label-derived feature coverage. G086_INDEX validates
-deterministic persistent index reuse, complete stale-key rejection, LRU budget
-eviction, device/schema/generation keying, background
-request/completion/deferred telemetry, and a runtime-backed recorded provider
-build path. It still does not claim a >=1.5x persistent-index timing speedup
-and does not carry a coordinator waiver or amended target. G086_CONSUMERS now
-separates example execution from consumer certification and records the
-remaining proof gaps instead of treating `expected.json` feature declarations
-as behavior proof.
+The branch is not merge-ready under the governing GQM/DoD because consumer
+certification still contains label-derived feature coverage. G086_INDEX now
+validates deterministic persistent index reuse, complete stale-key rejection,
+LRU budget eviction, device/schema/generation keying,
+background request/completion/deferred telemetry, a runtime-backed recorded
+provider build path, and a build-heavy repeated-session performance fixture
+with a 3.206x cached-vs-uncached speedup against the >=1.5x target.
+G086_CONSUMERS now separates example execution from consumer certification and
+records the remaining proof gaps instead of treating `expected.json` feature
+declarations as behavior proof.
 
 No merge, push, tag, or release-board update is authorized or performed by this
 proposal.
@@ -42,7 +41,7 @@ proposal.
 | G086_CHAIN_SMEM | `e1cddbb7` + `ce78e32f` | PASS | `docs/evidence/2026-05-19-v086-chain-smem-profile/README.md`, `docs/evidence/2026-05-19-v086-chain-smem/README.md` |
 | G086_CSE | `1363b05e` | PASS | `docs/evidence/2026-05-19-v086-cse/README.md` |
 | G086_ADAPT | `2d9bdc0f` | PASS | `docs/evidence/2026-05-19-v086-adaptive-reoptimization/README.md` |
-| G086_INDEX | `702e1f8f` + `0e2a5420`; hold correction `81badf31` | BLOCKED on M086_INDEX.5 | `docs/evidence/2026-05-19-v086-persistent-hash-index/README.md` |
+| G086_INDEX | `702e1f8f` + `0e2a5420`; hold correction `81badf31`; performance amendment pending commit | PASS | `docs/evidence/2026-05-19-v086-persistent-hash-index/README.md` |
 | G086_CONSUMERS | `37f16651`; hold correction `81badf31` | BLOCKED on consumer-proof gaps | `docs/evidence/2026-05-19-v086-consumers/README.md` |
 | G086_INT | `b72f61ea`; hold correction `81badf31` | BLOCKED on release-readiness metrics | `docs/evidence/2026-05-19-v086-int/README.md` |
 | G086_CLOSE | `09f5ad4b`; hold correction `81badf31` | PASS with `HOLD_FOR_FIXES` decision | `docs/evidence/2026-05-19-v086-close/README.md` |
@@ -61,21 +60,21 @@ proposal.
 | M086_ADAPT.* | PASS | adaptive adoption, rollback, replay determinism, and data-plane DTOH budget passed; speedup not claimed |
 | M086_INDEX correctness | PASS | key hardening, invalidation, LRU budget eviction, repeated-session reuse, and transfer budget passed |
 | M086_INDEX recorded background build | PASS | runtime-backed provider test builds on a recorded stream and consumes through recorded indexed join; executor defers current-evaluation indexed reuse |
-| M086_INDEX performance speedup | BLOCKED | no >=1.5x timing speedup is claimed; no waiver or amended target is recorded |
+| M086_INDEX performance speedup | PASS | build-heavy repeated-session semi-join fixture records cached median 0.079429262s, uncached median 0.254631847s, and `speedup_ratio=3.206` against the >=1.5x target |
 | M086_CONSUMERS example execution | PASS | DTS-DLM, two neutral scientific/engineering fixtures, v0.9.0 substrate, and pyxlog compatibility examples execute through `xlog-cli`; v0.8.0/v0.8.5 validators passed |
 | M086_CONSUMERS certification proof | BLOCKED | feature coverage is label-derived from `expected.json`; native exact/adaptive/index behavior is linked through feature evidence, not directly proven per consumer fixture |
 | M086_INT.1 formatting | PASS | `cargo fmt --check` exit 0 |
 | M086_INT.2 workspace | PASS | `cargo check --workspace` exit 0 |
 | M086_INT.3 targeted Rust | PASS | runtime, cuda, induce, prob, logic, and integration crates exited 0 |
-| M086_INT.4 Python | PASS | `39 passed in 52.33s` for v0.8.0/v0.8.5/v0.8.6 source/runtime bundle |
+| M086_INT.4 Python | PASS | `42 passed in 56.08s` for v0.8.0/v0.8.5/v0.8.6 source/runtime bundle |
 | M086_INT.5 examples | PASS_WITH_CONSUMER_PROOF_GAP | v0.8.0 examples 5, v0.8.5 examples 10, v0.8.6 examples 5; validator records `consumer_certification_status=BLOCKED` |
 | M086_INT.6 transfer guards | PASS | xlog-prob no-D2H guards, integration strict D2H tests, and v0.8.6 source/runtime transfer guards passed |
-| M086_INT.7 performance | BLOCKED | raw speed/transfer evidence recorded; persistent-index timing speedup not claimed and not waived |
+| M086_INT.7 performance | PASS | raw speed/transfer evidence recorded, including persistent-index `speedup_ratio=3.206` with zero tracked DTOH/H2D calls |
 | M086_INT.8 docs | PASS | JSON, py_compile, package metadata validation, and evidence links passed |
 | M086_INT.9 git hygiene | PASS | generated artifacts limited to evidence; `git diff --check` passed |
 | M086_CLOSE.1 sub-goal table | PASS | this proposal and `closure_summary.json` |
-| M086_CLOSE.2 roadmap sync | PASS | `ROADMAP.md` reflects recorded background build and unclaimed timing speedup |
-| M086_CLOSE.3 unresolved issues | PASS | persistent-index timing speedup, label-derived consumer feature coverage, and pyxlog persistent-index reuse proof are explicitly blocked |
+| M086_CLOSE.2 roadmap sync | PASS | `ROADMAP.md` reflects recorded background build and persistent-index timing speedup |
+| M086_CLOSE.3 unresolved issues | PASS | label-derived consumer feature coverage and pyxlog persistent-index reuse proof are explicitly blocked |
 | M086_CLOSE.4 release decision | PASS | `HOLD_FOR_FIXES` |
 | M086_CLOSE.5 no implicit release | PASS | no board update, merge, push, or tag |
 | M086_CLOSE.6 methodology audit | PASS | GDSP/GQM evidence sections present across v0.8.6 evidence |
@@ -86,13 +85,13 @@ proposal.
 |---|---|
 | `cargo fmt --check` | exit 0 |
 | `cargo check --workspace` | exit 0 |
-| `cargo test -p xlog-runtime` | exit 0; 141 lib tests, 15 integration tests, 2 doc tests passed, 2 doc tests ignored |
+| `cargo test -p xlog-runtime` | exit 0; 142 lib tests, 15 integration tests, 2 doc tests passed, 2 doc tests ignored |
 | `cargo test -p xlog-cuda kernel_modules` | exit 0; 2 passed |
 | `cargo test -p xlog-induce` | exit 0; 23 passed |
 | `cargo test -p xlog-prob` | exit 0; includes no-D2H/native GPU guards |
 | `cargo test -p xlog-logic` | exit 0 |
 | `cargo test -p xlog-integration` | exit 0; includes strict deterministic D2H, cross-mode determinism, WCOJ, and widened-frontier suites |
-| `PYTHONPATH=target/debug pytest -q python/tests/test_v080_examples_source.py python/tests/test_v085_examples_source.py python/tests/test_v086_delta_coalescing.py python/tests/test_v086_relation_callbacks.py python/tests/test_v086_relation_callbacks_runtime.py python/tests/test_v086_exact_types_source.py python/tests/test_v086_exact_types_runtime.py python/tests/test_v086_chain_smem_profile_source.py python/tests/test_v086_chain_smem_source.py python/tests/test_v086_cse_source.py python/tests/test_v086_adaptive_reoptimization_source.py python/tests/test_v086_persistent_hash_index_source.py python/tests/test_v086_consumers_source.py` | exit 0; 39 passed in 52.33s |
+| `PYTHONPATH=target/debug pytest -q python/tests/test_v080_examples_source.py python/tests/test_v085_examples_source.py python/tests/test_v086_delta_coalescing.py python/tests/test_v086_relation_callbacks.py python/tests/test_v086_relation_callbacks_runtime.py python/tests/test_v086_exact_types_source.py python/tests/test_v086_exact_types_runtime.py python/tests/test_v086_chain_smem_profile_source.py python/tests/test_v086_chain_smem_source.py python/tests/test_v086_cse_source.py python/tests/test_v086_adaptive_reoptimization_source.py python/tests/test_v086_persistent_hash_index_source.py python/tests/test_v086_consumers_source.py` | exit 0; 42 passed in 56.08s |
 | `python scripts/validate_v086_examples.py` | exit 0; v0.8.0 examples 5, v0.8.5 examples 10, v0.8.6 examples 5 |
 | `python -m json.tool` over v0.8.6 evidence and expected JSON files | exit 0 |
 | `python -m py_compile scripts/validate_v086_examples.py python/tests/test_v086_persistent_hash_index_source.py python/tests/test_v086_consumers_source.py` | exit 0 |
@@ -111,20 +110,18 @@ Every v0.8.6 sub-goal evidence directory names:
 
 G086_ADAPT and G086_INDEX evidence were amended during closure to make the
 GDSP/GQM sections explicit rather than implicit. G086_INDEX was further amended
-to add deferred background-build reuse telemetry and the runtime-backed recorded
-provider build test.
+to add deferred background-build reuse telemetry, the runtime-backed recorded
+provider build test, and the build-heavy repeated-session performance fixture.
 
 ## Known Unsupported Or Blocked Scope
 
-- M086_INDEX.5 has no >=1.5x persistent-index timing speedup and no recorded
-  coordinator waiver or amended target. The completed manager validates
-  recorded background building, deferred current-evaluation indexed reuse,
-  retained-index reuse, invalidation, and budget behavior.
 - M086_CONSUMERS feature coverage is label-derived from `expected.json`
   declarations. The examples prove parser/RIR/run/explain execution and link
   feature-node evidence, but they do not directly prove native exact-induction,
   adaptive reoptimization, or persistent-index behavior inside each labeled
-  consumer fixture.
+  consumer fixture. The persistent-index feature node now has direct
+  performance evidence, but the consumer examples still do not trigger that
+  behavior directly.
 - Public pyxlog session coverage does not yet prove persistent hash-index reuse
   across session mutation and reevaluation; the current persistent-index reuse
   evidence is runtime-Executor based.
@@ -141,7 +138,7 @@ the runtime substrate that the epistemic/solver branch should reuse.
 
 ## Coordinator Actions
 
-1. Keep the v0.8.6 branch on hold until M086_INDEX.5 and consumer-proof gaps
-   are fixed, waived, or explicitly scope-amended by the coordinator.
+1. Keep the v0.8.6 branch on hold until the consumer-proof gaps are fixed,
+   waived, or explicitly scope-amended by the coordinator.
 2. Separately authorize any release-board update, merge, push, and tag only
    after the hold is cleared.

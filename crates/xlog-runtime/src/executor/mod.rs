@@ -1827,6 +1827,7 @@ impl Drop for D2hGateGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
     use xlog_core::MemoryBudget;
     use xlog_cuda::{CudaDevice, GpuMemoryManager};
     use xlog_ir::{CompiledRule, RirMeta, Scc};
@@ -3470,6 +3471,23 @@ mod tests {
         adaptive_baseline_join_plan()
     }
 
+    fn persistent_index_heavy_join_plan(repetitions: usize) -> ExecutionPlan {
+        let mut inputs = Vec::with_capacity(repetitions);
+        for _ in 0..repetitions {
+            inputs.push(RirNode::Project {
+                input: Box::new(RirNode::Join {
+                    left: Box::new(RirNode::Scan { rel: RelId(1) }),
+                    right: Box::new(RirNode::Scan { rel: RelId(2) }),
+                    left_keys: vec![0],
+                    right_keys: vec![0],
+                    join_type: JoinType::Semi,
+                }),
+                columns: vec![ProjectExpr::Column(0)],
+            });
+        }
+        adaptive_plan(RirNode::Union { inputs })
+    }
+
     fn seed_persistent_index_fixture(executor: &mut Executor, rows: u32) {
         executor.register_relation(RelId(1), "left");
         executor.register_relation(RelId(2), "right");
@@ -3480,10 +3498,73 @@ mod tests {
         executor.put_relation("right", right);
     }
 
+    fn seed_persistent_index_performance_fixture(
+        executor: &mut Executor,
+        left_rows: u32,
+        right_rows: u32,
+    ) {
+        executor.register_relation(RelId(1), "left");
+        executor.register_relation(RelId(2), "right");
+        let left_values: Vec<u32> = (0..left_rows).collect();
+        let right_values: Vec<u32> = (0..right_rows).collect();
+        let left = create_test_buffer(executor, &left_values, "key");
+        let right = create_test_buffer(executor, &right_values, "key");
+        executor.put_relation("left", left);
+        executor.put_relation("right", right);
+    }
+
     fn warm_persistent_index(executor: &mut Executor, plan: &ExecutionPlan, times: usize) {
         for _ in 0..times {
             executor.execute_plan(plan).expect("persistent index plan");
         }
+    }
+
+    fn median_duration(samples: &mut [Duration]) -> Duration {
+        samples.sort_unstable();
+        samples[samples.len() / 2]
+    }
+
+    fn measure_persistent_index_fixture(
+        mut executor: Executor,
+        plan: &ExecutionPlan,
+        warmup: usize,
+        iterations: usize,
+    ) -> (
+        Duration,
+        u64,
+        JoinIndexCacheStats,
+        xlog_cuda::provider::HostTransferStats,
+    ) {
+        let mut output_rows = None;
+        warm_persistent_index(&mut executor, plan, warmup);
+        executor.provider.reset_host_transfer_stats();
+
+        let mut samples = Vec::with_capacity(iterations);
+        for _ in 0..iterations {
+            let start = Instant::now();
+            let output = executor.execute_plan(plan).expect("persistent index plan");
+            executor
+                .provider
+                .device()
+                .synchronize()
+                .expect("sync device");
+            samples.push(start.elapsed());
+            output_rows = Some(if let Some(buffer) = executor.store().get("out") {
+                executor
+                    .buffer_row_count(buffer)
+                    .expect("read output row count")
+                    .into()
+            } else {
+                output.num_rows()
+            });
+        }
+
+        (
+            median_duration(&mut samples),
+            output_rows.expect("at least one measured execution"),
+            executor.join_index_cache_stats(),
+            executor.provider.host_transfer_stats(),
+        )
     }
 
     #[test]
@@ -3610,6 +3691,81 @@ mod tests {
         assert_eq!(after_second.background_build_requests, 1);
         assert_eq!(after_second.background_builds_deferred, 1);
         assert!(after_second.hits >= 1);
+    }
+
+    #[test]
+    fn test_persistent_hash_index_performance_fixture_meets_speedup_target() {
+        const LEFT_ROWS: u32 = 8;
+        const RIGHT_ROWS: u32 = 8_000_000;
+        const JOIN_REPETITIONS: usize = 1;
+        const WARMUP: usize = 12;
+        const ITERATIONS: usize = 9;
+
+        let mut cached = match create_test_executor_with_config(
+            RuntimeConfig::default().with_persistent_hash_indexes(Some(true)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_persistent_index_performance_fixture(&mut cached, LEFT_ROWS, RIGHT_ROWS);
+
+        let mut uncached = match create_test_executor_with_config(
+            RuntimeConfig::default().with_persistent_hash_indexes(Some(false)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_persistent_index_performance_fixture(&mut uncached, LEFT_ROWS, RIGHT_ROWS);
+
+        let plan = persistent_index_heavy_join_plan(JOIN_REPETITIONS);
+        let (cached_median, cached_rows, cached_stats, cached_transfers) =
+            measure_persistent_index_fixture(cached, &plan, WARMUP, ITERATIONS);
+        let (uncached_median, uncached_rows, uncached_stats, uncached_transfers) =
+            measure_persistent_index_fixture(uncached, &plan, WARMUP, ITERATIONS);
+
+        let speedup_ratio = uncached_median.as_secs_f64() / cached_median.as_secs_f64();
+        eprintln!(
+            "persistent_hash_index_perf left_rows={} right_rows={} join_repetitions={} warmup={} iterations={} \
+             cached_median_sec={:.9} uncached_median_sec={:.9} speedup_ratio={:.3} \
+             cached_output_rows={} uncached_output_rows={} cached_builds={} cached_hits={} \
+             uncached_builds={} cached_dtoh_calls={} cached_htod_calls={}",
+            LEFT_ROWS,
+            RIGHT_ROWS,
+            JOIN_REPETITIONS,
+            WARMUP,
+            ITERATIONS,
+            cached_median.as_secs_f64(),
+            uncached_median.as_secs_f64(),
+            speedup_ratio,
+            cached_rows,
+            uncached_rows,
+            cached_stats.builds,
+            cached_stats.hits,
+            uncached_stats.builds,
+            cached_transfers.dtoh_calls,
+            cached_transfers.htod_calls
+        );
+
+        assert_eq!(cached_rows, uncached_rows);
+        assert_eq!(cached_rows, LEFT_ROWS as u64);
+        assert_eq!(cached_stats.builds, 1);
+        assert!(cached_stats.hits >= ITERATIONS as u64);
+        assert_eq!(uncached_stats.builds, 0);
+        assert_eq!(cached_transfers.dtoh_calls, 0);
+        assert_eq!(cached_transfers.htod_calls, 0);
+        assert_eq!(uncached_transfers.dtoh_calls, 0);
+        assert_eq!(uncached_transfers.htod_calls, 0);
+        assert!(
+            speedup_ratio >= 1.5,
+            "persistent index speedup {:.3} below 1.5 target",
+            speedup_ratio
+        );
     }
 
     // ============== MC Relation Reset Tests ==============

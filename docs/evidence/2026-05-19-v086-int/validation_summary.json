@@ -30,7 +30,7 @@
     "M086_INT.4 Python": {
       "command": "PYTHONPATH=target/debug pytest -q python/tests/test_v080_examples_source.py python/tests/test_v085_examples_source.py python/tests/test_v086_delta_coalescing.py python/tests/test_v086_relation_callbacks.py python/tests/test_v086_relation_callbacks_runtime.py python/tests/test_v086_exact_types_source.py python/tests/test_v086_exact_types_runtime.py python/tests/test_v086_chain_smem_profile_source.py python/tests/test_v086_chain_smem_source.py python/tests/test_v086_cse_source.py python/tests/test_v086_adaptive_reoptimization_source.py python/tests/test_v086_persistent_hash_index_source.py python/tests/test_v086_consumers_source.py",
       "status": "PASS",
-      "observed": "39 passed in 52.33s"
+      "observed": "42 passed in 56.08s"
     },
     "M086_INT.5 examples": {
       "command": "python scripts/validate_v086_examples.py",
@@ -57,13 +57,13 @@
       ]
     },
     "M086_INT.7 performance": {
-      "status": "BLOCKED",
+      "status": "PASS",
       "evidence": {
         "delta": "recompute_call_reduction_ratio=3.0; hot_path_dtoh_calls=0",
         "chain_shared_memory": "speedup_ratio=5.58300273358745 on chain_hot fixture",
         "cse": "duplicate_subplan_reduction_percent=50.0; added_dtoh_calls=0",
         "adaptive_reoptimization": "correctness/rollback gate passed; no speedup gate claimed",
-        "persistent_hash_index": "recorded background build and deferred reuse observed; >=1.5x timing speedup not claimed"
+        "persistent_hash_index": "build-heavy repeated-session fixture records speedup_ratio=3.206; cached median 0.079429262s, uncached median 0.254631847s; tracked DTOH/H2D calls remain 0"
       }
     },
     "M086_INT.8 docs": {
@@ -85,7 +85,7 @@
     }
   },
   "rust_counts": {
-    "xlog-runtime": "141 lib tests, 15 integration tests, 2 doc tests passed; 2 doc tests ignored",
+    "xlog-runtime": "142 lib tests, 15 integration tests, 2 doc tests passed; 2 doc tests ignored",
     "xlog-cuda": "kernel_modules filter: 2 passed",
     "xlog-induce": "23 lib tests passed",
     "xlog-prob": "package test suite passed, including no_cpu_d4_in_exact and no_dtoh_* guards",
@@ -111,11 +111,6 @@
     }
   },
   "unresolved": [
-    {
-      "status": "UNCLAIMED_SPEEDUP",
-      "scope": "G086_INDEX performance claim only",
-      "reason": "The persistent-index evidence claims deterministic reuse, recorded background building, deferred current-evaluation reuse, invalidation, budget, and background request/completion/deferred telemetry; it does not claim a >=1.5x timing speedup."
-    },
     {
       "status": "CONSUMER_PROOF_GAP",
       "scope": "G086_CONSUMERS feature coverage",

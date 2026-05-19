@@ -40,6 +40,8 @@ pytest -q python/tests/test_v086_consumers_source.py
 - `example_execution_status=PASS` and
   `consumer_certification_status=BLOCKED`;
 - feature coverage source as `expected_json_declarations`;
+- `feature_node_behavior_proofs.persistent_hash_index=PASS` with
+  `speedup_ratio=3.206` from the runtime performance fixture;
 - v0.8.0 compatibility validator output in
   `compat_v080_validation_summary.json`;
 - v0.8.5 compatibility validator output in
@@ -53,19 +55,15 @@ pytest -q python/tests/test_v086_consumers_source.py
 
 | Metric | Status | Evidence |
 |---|---|---|
-| M086_CONSUMERS.1 DTS-DLM | BLOCKED | `01_dts_delta_optimizer` passed run/explain, but exact-induction, adaptive, and persistent-index coverage remains declaration-plus-linked-evidence rather than direct consumer fixture behavior. |
+| M086_CONSUMERS.1 DTS-DLM | BLOCKED | `01_dts_delta_optimizer` passed run/explain, but exact-induction, adaptive, and persistent-index coverage remains declaration-plus-linked-evidence rather than direct consumer fixture behavior. Persistent-index now has direct feature-node performance proof, but not per-consumer fixture dispatch proof. |
 | M086_CONSUMERS.2 Mistaber | PASS | `02_neutral_material_flow` and `03_neutral_signal_diagnostics` passed and contain no `mistaber` term in program source. |
-| M086_CONSUMERS.3 v0.9.0 substrate | BLOCKED | `04_v090_substrate_primitives` passed run/explain, but exact, chain shared-memory, adaptive, and persistent-index coverage is label-derived and linked to feature evidence rather than directly executed by the `.xlog` fixture. |
+| M086_CONSUMERS.3 v0.9.0 substrate | BLOCKED | `04_v090_substrate_primitives` passed run/explain, but exact, chain shared-memory, adaptive, and persistent-index coverage is label-derived and linked to feature evidence rather than directly executed by the `.xlog` fixture. Persistent-index now has direct feature-node performance proof, but not v0.9.0 fixture dispatch proof. |
 | M086_CONSUMERS.4 pyxlog compatibility | PASS | v0.8.0 and v0.8.5 validators plus their source guards passed. |
 | M086_CONSUMERS.5 production path | PASS | Validator runs examples through `xlog-cli run/explain`; no private hooks or fixture-only bypass are used. |
 | M086_CONSUMERS.6 reuse audit | PASS | Summary names reused subsystems and committed feature evidence paths; no duplicate engine/helper path is introduced. |
 
 ## Open Gaps
 
-- The persistent-index evidence records background-build request, completion,
-  and deferred-current-use telemetry plus a runtime-backed recorded provider
-  build path. It does not claim a >=1.5x timing speedup in this consumer
-  certification.
 - Feature coverage is label-derived from `expected.json`. The examples prove
   CLI parser/RIR/run/explain behavior and link to feature-node evidence, but
   they do not directly prove each declared runtime feature inside each consumer
