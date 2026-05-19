@@ -53,7 +53,7 @@ Earlier ref checks after `git fetch origin --prune` showed:
 | G090_SPLIT | PARTIAL | CPU split/recompose fixtures pass, valid split components lower through GPU executable subplans, and accepted split components execute through `execute_epistemic_gpu_execution_batch` while matching simple component output oracles and the absent `possible` vs true `not know` world-view oracle with zero CPU candidate/world-view fallback counters; full accepted-runtime semantic parity is still missing. |
 | G090_GPU | BLOCKED | GPU-plan, reduced-runtime-plan, workspace allocation/reset, bounded candidate-generation, propagation, candidate-validation, arity 0-3 tuple-source model-membership staging with fixed arity-one/two/three row-scoped ground key comparison over existing relation buffers, generic arity-N variable-bound tuple matching, explicit `know`/`possible`/`not know`/`not possible` preflight metrics, negated binding polarity, all-required-membership world-view-validation over GPU candidate-assumption and model-membership buffers, accepted-candidate materialization, final-result flag, final-row map/final tuple materialization kernels with `row_filter_count` and `negated_row_filter_count`, device-derived semantic trace counts, split possible-vs-not-known world-view parity, accepted K5/K6/K7/K8 WCOJ dispatch, K5 dispatch-certified edge-permutation/stream-group/skew-scheduled-helper/sorted-layout/helper-split/helper-rule/WCOJ helper input trace metrics, helper metadata-only preflight rejection, WCOJ dispatch certification that fails closed without required layout sort or layout fast-path evidence, K6 G38-B skew-scheduled helper/histogram metadata-build trace metrics, K7/K8 K-clique planner preflight reuse including stream-group metadata, hot-path transfer-budget trace, final-result transfer accounting, CUDA-event elapsed timing/runtime-preflight/fail-closed WCOJ gate/reduced-plan trace contracts, two-record bounded weighted MaxSAT selection encoding/search, and heterogeneous MaxSAT scheduler reuse through existing GPU CNF/CDCL paths exist, but full semantic kernel-buffer parity, probability wiring, and broader fixture coverage remain missing. |
 | G090_SOLVER | BLOCKED | Accepted GPU runtime evidence can gate GPU CDCL SAT/UNSAT, reusable workspace-backed UNSAT, one-record and two-record bounded push/solve/retract lifecycles, lifecycle UNKNOWN/TIMEOUT propagation, learned-clause arena publication, same-device-CNF learned-clause import/reuse, two-record learned-clause reuse, distinct-CNF learned-clause import rejection, bounded single- and multi-candidate MaxSAT solving, single-result and two-record MaxSAT search pruning, single-result and two-record weighted soft-clause selection encoding through existing GPU CNF/CDCL paths, heterogeneous MaxSAT scheduling, and single-result plus two-record bounded SAT/MaxSAT portfolio dispatch with UNKNOWN/TIMEOUT status propagation, but broader solver semantic integration and post-v0.8 certification remain incomplete. |
-| G090_PROB | BLOCKED | Accepted GPU runtime evidence can gate source/program exact compilation, source/program bounded compile/evaluate, two-record accepted source/program batch compile/evaluate, source/program zero-arity and concrete nonzero-arity true/false evidence conditioning with negative-evidence trace counters, two-record positive and negative conditioned source query batches, two-record conditioned program query batches, conditioned source/program gradient evaluation, PIR/CNF encoding, and single-record plus two-record query/gradient evaluation through the existing GPU-native path, but broader probabilistic coverage on accepted world views is incomplete. |
+| G090_PROB | BLOCKED | Accepted GPU runtime evidence can gate source/program exact compilation, source/program bounded compile/evaluate, two-record accepted source/program batch compile/evaluate, source/program zero-arity and concrete nonzero-arity true/false evidence conditioning with negative-evidence trace counters, two-record positive and negative conditioned source query batches, two-record conditioned program query batches, conditioned source/program gradient evaluation, single-record plus two-record PIR/CNF encoding, and single-record plus two-record query/gradient evaluation through the existing GPU-native path, but broader probabilistic coverage on accepted world views is incomplete. |
 | G090_CERT | BLOCKED | Missing complete accepted-execution kernel timing, broader WCOJ runtime evidence, zero CPU fallback counters, and post-v0.8 rerun. |
 | G090_DOC | PARTIAL | Guide documents semantic oracle and blockers; production GPU/WCOJ path is not implemented. |
 | G090_CLOSE | BLOCKED | Requires G090_GPU/G090_SOLVER/G090_PROB/G090_CERT plus v0.8 integration/rebase. |
@@ -153,8 +153,8 @@ The branch contains useful scaffolding:
   compile/evaluate, source/program zero-arity and concrete nonzero-arity
   true/false evidence conditioning with negative-evidence trace counters,
   two-record positive and negative conditioned source query batches,
-  two-record conditioned program query batches, PIR/CNF encoding, query
-  evaluation, and gradient evaluation.
+  two-record conditioned program query batches, single-record plus two-record
+  PIR/CNF encoding, query evaluation, and gradient evaluation.
 - bounded executable split components that reuse the existing epistemic GPU
   executable-plan path and a batch adapter over the existing single-plan GPU
   runtime execution path rather than a split-only WCOJ or tuple-store engine.
@@ -178,8 +178,8 @@ Closure remains blocked until certification includes all of the following:
 - broader accepted solver semantic integration beyond the current bounded
   scheduler and portfolio fixtures;
 - broader accepted-world-view probabilistic coverage beyond the bounded
-  conditioned query/gradient GPU-native knowledge-compilation fixtures, with
-  zero CPU-only probability recomputation;
+  conditioned query/gradient and PIR/CNF GPU-native knowledge-compilation
+  fixtures, with zero CPU-only probability recomputation;
 - post-v0.8 rebase compatibility evidence.
 
 ## Release Hygiene

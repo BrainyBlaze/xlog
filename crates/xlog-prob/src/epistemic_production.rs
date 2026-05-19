@@ -791,6 +791,40 @@ impl EpistemicProbProductionAdapter {
         self.encode_source_pir_cnf_with_accepted_world_view(source, provider, &evidence)
     }
 
+    /// Encode source PIR/CNF once per accepted GPU epistemic execution result.
+    pub fn encode_source_pir_cnf_for_gpu_execution_results(
+        &mut self,
+        source: &str,
+        provider: &Arc<CudaKernelProvider>,
+        evidence_records: &[EpistemicProbGpuExecutionEvidence<'_>],
+    ) -> Result<Vec<EpistemicProbPirCnfEvidence>> {
+        if evidence_records.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic probabilistic source PIR/CNF production batch".to_string(),
+                context:
+                    "batched source PIR/CNF encoding requires at least one accepted GPU result"
+                        .to_string(),
+            });
+        }
+
+        let mut accepted = Vec::with_capacity(evidence_records.len());
+        for record in evidence_records {
+            accepted.push(AcceptedWorldViewEvidence::from_gpu_execution_result(
+                provider,
+                record.result,
+                record.assumptions.to_vec(),
+            )?);
+        }
+
+        let mut results = Vec::with_capacity(accepted.len());
+        for evidence in &accepted {
+            results.push(
+                self.encode_source_pir_cnf_with_accepted_world_view(source, provider, evidence)?,
+            );
+        }
+        Ok(results)
+    }
+
     /// Encode a parsed program through the existing GPU PIR and CNF production path.
     pub fn encode_program_pir_cnf_with_accepted_world_view(
         &mut self,
@@ -813,6 +847,41 @@ impl EpistemicProbProductionAdapter {
         let evidence =
             AcceptedWorldViewEvidence::from_gpu_execution_result(provider, result, assumptions)?;
         self.encode_program_pir_cnf_with_accepted_world_view(program, provider, &evidence)
+    }
+
+    /// Encode parsed-program PIR/CNF once per accepted GPU epistemic execution result.
+    pub fn encode_program_pir_cnf_for_gpu_execution_results(
+        &mut self,
+        program: &Program,
+        provider: &Arc<CudaKernelProvider>,
+        evidence_records: &[EpistemicProbGpuExecutionEvidence<'_>],
+    ) -> Result<Vec<EpistemicProbPirCnfEvidence>> {
+        if evidence_records.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic probabilistic parsed-program PIR/CNF production batch"
+                    .to_string(),
+                context:
+                    "batched parsed-program PIR/CNF encoding requires at least one accepted GPU result"
+                        .to_string(),
+            });
+        }
+
+        let mut accepted = Vec::with_capacity(evidence_records.len());
+        for record in evidence_records {
+            accepted.push(AcceptedWorldViewEvidence::from_gpu_execution_result(
+                provider,
+                record.result,
+                record.assumptions.to_vec(),
+            )?);
+        }
+
+        let mut results = Vec::with_capacity(accepted.len());
+        for evidence in &accepted {
+            results.push(
+                self.encode_program_pir_cnf_with_accepted_world_view(program, provider, evidence)?,
+            );
+        }
+        Ok(results)
     }
 
     /// Evaluate GPU exact query probabilities after accepted world-view evidence was consumed.

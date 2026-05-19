@@ -492,6 +492,9 @@ recomputation on the existing exact path.
 `encode_program_pir_cnf_with_gpu_execution_result` apply the same accepted
 runtime boundary before uploading `GpuPirGraph`/`GpuPirRoots` and calling
 `encode_cnf_gpu`.
+`encode_source_pir_cnf_for_gpu_execution_results` and
+`encode_program_pir_cnf_for_gpu_execution_results` validate accepted evidence
+records up front, then reuse the existing GPU PIR/CNF encoder once per record.
 `evaluate_with_gpu_execution_result` applies the same accepted runtime boundary
 before calling `ExactDdnnfProgram::evaluate`.
 `evaluate_gpu_with_grads_with_gpu_execution_result` applies the same accepted
