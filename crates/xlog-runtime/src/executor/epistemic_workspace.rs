@@ -1481,6 +1481,14 @@ pub struct EpistemicGpuBatchExecutionTrace {
     pub accepted_world_views: usize,
     /// Rejected candidates observed across component semantic traces.
     pub rejected_candidates: usize,
+    /// Non-negated `know` operators observed across component preflight traces.
+    pub know_operator_count: usize,
+    /// Non-negated `possible` operators observed across component preflight traces.
+    pub possible_operator_count: usize,
+    /// Negated `know` operators observed as `not know` across component preflight traces.
+    pub not_know_operator_count: usize,
+    /// Negated `possible` operators observed as `not possible` across component preflight traces.
+    pub not_possible_operator_count: usize,
 }
 
 impl EpistemicGpuBatchExecutionTrace {
@@ -1513,6 +1521,22 @@ impl EpistemicGpuBatchExecutionTrace {
             rejected_candidates: results
                 .iter()
                 .map(|result| result.semantic_trace.rejected_candidates)
+                .sum(),
+            know_operator_count: results
+                .iter()
+                .map(|result| result.prepared.preflight.know_operator_count)
+                .sum(),
+            possible_operator_count: results
+                .iter()
+                .map(|result| result.prepared.preflight.possible_operator_count)
+                .sum(),
+            not_know_operator_count: results
+                .iter()
+                .map(|result| result.prepared.preflight.not_know_operator_count)
+                .sum(),
+            not_possible_operator_count: results
+                .iter()
+                .map(|result| result.prepared.preflight.not_possible_operator_count)
                 .sum(),
         }
     }

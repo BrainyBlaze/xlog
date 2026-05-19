@@ -2848,8 +2848,8 @@ fn split_gpu_world_view_distinguishes_absent_possible_from_not_known() {
         .iter()
         .map(|component| &component.executable)
         .collect();
-    let results = executor
-        .execute_epistemic_gpu_execution_batch(
+    let batch = executor
+        .execute_epistemic_gpu_execution_batch_with_trace(
             &executables,
             EpistemicGpuWorkspaceCapacities {
                 max_candidates: 2,
@@ -2858,9 +2858,13 @@ fn split_gpu_world_view_distinguishes_absent_possible_from_not_known() {
             },
         )
         .expect("execute possible-vs-not-known split components");
+    assert_eq!(batch.trace.know_operator_count, 0);
+    assert_eq!(batch.trace.possible_operator_count, 1);
+    assert_eq!(batch.trace.not_know_operator_count, 1);
+    assert_eq!(batch.trace.not_possible_operator_count, 0);
 
     let mut outputs_by_head = BTreeMap::new();
-    for (component, result) in split.components.iter().zip(results.iter()) {
+    for (component, result) in split.components.iter().zip(batch.results.iter()) {
         let head = component.executable.gpu_plan.reductions[0]
             .head_predicate
             .clone();
