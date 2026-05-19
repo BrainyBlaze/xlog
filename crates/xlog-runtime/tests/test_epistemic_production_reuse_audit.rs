@@ -36,6 +36,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(audit.contains("WCOJ helper input scans"));
     assert!(audit.contains("kclique_stream_group_count"));
     assert!(audit.contains("certified_stream_groups"));
+    assert!(audit.contains("kclique_skew_scheduled_plan_count"));
+    assert!(audit.contains("certified_skew_scheduled_plans"));
     assert!(audit.contains("possible_operator_count"));
     assert!(audit.contains("not_possible_operator_count"));
     assert!(audit.contains("accepted unary, possible, not possible, binary"));
@@ -68,6 +70,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(runtime.contains("kclique_wcoj_edge_permutation_count"));
     assert!(runtime.contains("kclique_stream_group_count"));
     assert!(runtime.contains("kclique_stream_groups"));
+    assert!(runtime.contains("kclique_skew_scheduled_plan_count"));
     assert!(runtime.contains("helper_split_spec_count"));
     assert!(runtime.contains("helper_relation_rule_count"));
     assert!(runtime.contains("helper_relation_scan_count"));
@@ -77,6 +80,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(runtime.contains("epistemic GPU helper-split certification"));
     assert!(runtime.contains("certified_edge_permutation_slots"));
     assert!(runtime.contains("certified_stream_groups"));
+    assert!(runtime.contains("certified_skew_scheduled_plans"));
     assert!(runtime.contains("certified_sorted_layout_requirements"));
     assert!(runtime.contains("certified_helper_split_specs"));
     assert!(runtime.contains("certified_helper_relation_rules"));

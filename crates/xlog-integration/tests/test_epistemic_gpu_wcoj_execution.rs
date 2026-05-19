@@ -237,6 +237,10 @@ fn accepted_epistemic_k5_execution_certifies_production_wcoj_dispatch() {
 
     assert_eq!(result.prepared.preflight.kclique_wcoj_plan_count, 1);
     assert_eq!(result.prepared.preflight.kclique_stream_group_count, 1);
+    assert_eq!(
+        result.prepared.preflight.kclique_skew_scheduled_plan_count, 1,
+        "accepted K5 must carry G38-B buried-skew helper scheduling"
+    );
     assert_eq!(result.prepared.preflight.sorted_layout_requirement_count, 1);
     assert_eq!(result.prepared.preflight.helper_split_spec_count, 1);
     assert_eq!(result.prepared.preflight.helper_relation_rule_count, 1);
@@ -252,6 +256,7 @@ fn accepted_epistemic_k5_execution_certifies_production_wcoj_dispatch() {
             observed_kclique_dispatches: 1..,
             certified_edge_permutation_slots: 10,
             certified_stream_groups: 1,
+            certified_skew_scheduled_plans: 1,
             certified_sorted_layout_requirements: 1,
             certified_helper_split_specs: 1,
             certified_helper_relation_rules: 1,
@@ -330,6 +335,10 @@ fn accepted_epistemic_k6_execution_certifies_g38b_helper_histogram_path() {
         15
     );
     assert_eq!(result.prepared.preflight.kclique_stream_group_count, 1);
+    assert_eq!(
+        result.prepared.preflight.kclique_skew_scheduled_plan_count, 1,
+        "accepted K6 must carry G38-B buried-skew helper scheduling"
+    );
     assert!(
         result.prepared.preflight.sorted_layout_requirement_count >= 1,
         "accepted K6 must carry production sorted-layout requirements"
@@ -353,6 +362,7 @@ fn accepted_epistemic_k6_execution_certifies_g38b_helper_histogram_path() {
             observed_kclique_dispatches: 1..,
             certified_edge_permutation_slots: 15,
             certified_stream_groups: 1..,
+            certified_skew_scheduled_plans: 1..,
             certified_sorted_layout_requirements: 1..,
             certified_helper_split_specs: 1..,
             certified_helper_relation_rules: 1..,

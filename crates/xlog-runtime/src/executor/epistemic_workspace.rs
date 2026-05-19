@@ -1022,6 +1022,8 @@ pub struct EpistemicGpuRuntimePreflight {
     pub kclique_wcoj_edge_permutation_count: usize,
     /// Distinct K-clique stream groups carried by production WCOJ plans.
     pub kclique_stream_group_count: usize,
+    /// K-clique WCOJ plans carrying helper-split skew scheduling metadata.
+    pub kclique_skew_scheduled_plan_count: usize,
     /// Number of structured planned-hash routes.
     pub planned_hash_route_count: usize,
     /// Sorted-layout edge-slot requirements carried by WCOJ plans.
@@ -1120,6 +1122,7 @@ impl EpistemicGpuRuntimePreflight {
             kclique_wcoj_max_arity: routes.kclique_wcoj_max_arity,
             kclique_wcoj_edge_permutation_count: routes.kclique_wcoj_edge_permutation_count,
             kclique_stream_group_count: routes.kclique_stream_groups.len(),
+            kclique_skew_scheduled_plan_count: routes.kclique_skew_scheduled_plan_count,
             planned_hash_route_count: routes.planned_hash_route_count,
             sorted_layout_requirement_count: routes.sorted_layout_requirement_count,
             helper_split_spec_count: routes.helper_split_spec_count,
@@ -1317,6 +1320,8 @@ pub enum EpistemicGpuRuntimeWcojCertification {
         certified_edge_permutation_slots: usize,
         /// Distinct stream groups certified by the dispatched K-clique plans.
         certified_stream_groups: usize,
+        /// Helper-split skew-scheduled K-clique plans certified by dispatch.
+        certified_skew_scheduled_plans: usize,
         /// Sorted-layout requirements certified by the dispatched K-clique plans.
         certified_sorted_layout_requirements: usize,
         /// Helper-split specs certified by the dispatched K-clique plans.
@@ -1420,6 +1425,7 @@ impl EpistemicGpuRuntimeWcojCertification {
             observed_kclique_dispatches,
             certified_edge_permutation_slots: preflight.kclique_wcoj_edge_permutation_count,
             certified_stream_groups: preflight.kclique_stream_group_count,
+            certified_skew_scheduled_plans: preflight.kclique_skew_scheduled_plan_count,
             certified_sorted_layout_requirements: preflight.sorted_layout_requirement_count,
             certified_helper_split_specs: preflight.helper_split_spec_count,
             certified_helper_relation_rules: preflight.helper_relation_rule_count,
@@ -3898,6 +3904,7 @@ struct RuntimeRouteSummary {
     kclique_wcoj_max_arity: u8,
     kclique_wcoj_edge_permutation_count: usize,
     kclique_stream_groups: BTreeSet<StreamGroupId>,
+    kclique_skew_scheduled_plan_count: usize,
     planned_hash_route_count: usize,
     sorted_layout_requirement_count: usize,
     helper_split_spec_count: usize,
@@ -3922,6 +3929,9 @@ fn summarize_runtime_routes(node: &RirNode, routes: &mut RuntimeRouteSummary) {
                         .take_while(|slot| **slot != u8::MAX)
                         .count();
                     routes.kclique_stream_groups.insert(order.stream_group);
+                    if !order.helper_split_specs.is_empty() {
+                        routes.kclique_skew_scheduled_plan_count += 1;
+                    }
                     routes.sorted_layout_requirement_count +=
                         order.sorted_layout_requirements.edge_slots.len();
                     routes.helper_split_spec_count += order.helper_split_specs.len();

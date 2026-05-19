@@ -99,7 +99,7 @@ keys on device, and preflight records explicit `know`/`possible`/`not know`/
 `EpistemicGpuRuntimeWcojCertification` then requires actual production WCOJ
 counter deltas before WCOJ evidence can be certified, and its certified result
 carries the dispatched plan's edge-permutation, stream-group scheduling,
-sorted-layout, and helper-split counts.
+skew-scheduled helper count, sorted-layout, and helper-split counts.
 `Executor::execute_epistemic_gpu_execution` wraps the reduced production
 runtime plan with preflight, workspace allocation, candidate-generation,
 propagation, candidate-validation, `execute_plan` plus before/after counter
@@ -154,7 +154,8 @@ runtime actually touches:
   evidence.
 - Goal 038-B: reuse the production K-clique WCOJ path: `MultiwayPlan`,
   `KCliqueVariableOrder`, sorted-layout requirements, runtime histogram
-  metadata count/timing, cost-gated hash routing, and helper-splitting specs.
+  metadata count/timing, cost-gated hash routing, skew scheduling, and
+  helper-splitting specs.
 - Goal 039: reuse the existing production substrate for chain dispatch, K7/K8
   templates, sort labels, DLPack/zero-transfer discipline, CUDA Graphs, and DTS
   replay certification only when the epistemic runtime path actually invokes
@@ -162,9 +163,10 @@ runtime actually touches:
 
 Today the epistemic runtime consumes 38-B route metadata and fails closed when a
 WCOJ-required K-clique reduction lacks production counter deltas. It now
-certifies accepted K5, K7, and K8 WCOJ dispatch through production runtime
-counters. The K5 certified dispatch trace now includes edge-permutation,
-stream-group scheduling, sorted-layout, and helper-split counts; K7/K8 now
+certifies accepted K5, K6, K7, and K8 WCOJ dispatch through production runtime
+counters. The K5/K6 certified dispatch traces now include edge-permutation,
+stream-group scheduling, skew-scheduled helper, sorted-layout, and helper-split
+counts; K6 also carries runtime histogram metadata-build timing, while K7/K8
 record K-clique max-arity plus full edge-permutation and stream-group metadata
 through runtime preflight. Broader semantic parity coverage remains incomplete.
 

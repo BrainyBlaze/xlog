@@ -228,9 +228,10 @@ model output and solver coupling remain missing GPU phases.
 rejects nonzero forbidden CPU fallback counters, validates tuple-membership
 bindings, and records the reduced runtime rule count plus WCOJ route surfaces,
 including K-clique WCOJ plans, K-clique max arity, live edge-permutation slot
-counts, distinct stream-group scheduling ids, planned-hash routes,
-sorted-layout requirements, helper-splitting specs, and the certified
-helper relation rule/scan counts plus tuple-membership binding count. If a
+counts, distinct stream-group scheduling ids, skew-scheduled helper-plan counts,
+planned-hash routes, sorted-layout requirements, helper-splitting specs, and
+the certified helper relation rule/scan counts plus tuple-membership binding
+count. If a
 K-clique route carries helper-split specs but the reduced plan lacks matching
 compiler-created helper relation rules and WCOJ input scans of those helpers,
 preflight fails closed with `epistemic GPU helper-split certification`.
@@ -239,13 +240,13 @@ around a future epistemic dispatch, and
 `EpistemicGpuRuntimeWcojCertification` rejects preflight-only WCOJ metadata
 when required K-clique dispatch counters do not advance, and rejects dispatched
 K-clique evidence when the plan has sorted-layout obligations but no layout sort
-or layout fast-path counter advanced. Certified traces carry helper-split specs,
-helper relation rules, and WCOJ helper input scans only after the reduced
-production plan has passed the helper rewrite gate. The accepted runtime entry
-point calls this certification gate immediately after reduced-plan dispatch and
-before model-membership/world-view staging, so a WCOJ-required epistemic
-reduction now fails closed if the production counters do not prove both dispatch
-and layout reuse.
+or layout fast-path counter advanced. Certified traces carry skew-scheduled
+helper-plan counts, helper-split specs, helper relation rules, and WCOJ helper
+input scans only after the reduced production plan has passed the helper rewrite
+gate. The accepted runtime entry point calls this certification gate immediately
+after reduced-plan dispatch and before model-membership/world-view staging, so a
+WCOJ-required epistemic reduction now fails closed if the production counters do
+not prove dispatch, layout reuse, and the helper rewrite surface.
 `Executor::execute_epistemic_gpu_execution` now wraps the reduced production
 runtime plan with preflight, workspace allocation, candidate-generation,
 propagation, candidate-validation, `execute_plan` plus before/after counter
