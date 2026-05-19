@@ -1,10 +1,10 @@
 {
   "features": ["cli_repl", "cli_watch", "cli_explain", "incremental_parse", "magic_sets"],
-  "source_required_substrings": ["#pragma magic_sets = on", "?- reach(1, Y)"],
+  "source_required_substrings": ["#pragma magic_sets = on", "pred reach(src: u32, dst: u32)", "?- reach(1, Y)"],
   "checks": {
     "run": {
-      "returncode": 1,
-      "combined_contains": ["Union requires compatible schemas"]
+      "returncode": 0,
+      "stdout_contains": ["__xlog_query_0"]
     },
     "explain_json": {
       "min_statements": 6,
@@ -13,7 +13,7 @@
       "magic_status": "applied"
     },
     "repl": {
-      "required_substrings": ["repl:", "statements=6", "queries=1"]
+      "required_substrings": ["repl:", "statements=8", "queries=1"]
     },
     "watch": {
       "required_substrings": ["watch:", "magic_sets:", "status: applied"]

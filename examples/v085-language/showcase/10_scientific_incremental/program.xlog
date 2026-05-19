@@ -4,6 +4,7 @@ pred sensor(id: u32).
 pred reading(sensor: u32, value: u32).
 pred blocked_sensor(id: u32).
 pred valid_sample(value: u32).
+pred reading_count(sensor: u32, count: u64).
 
 sensor(1).
 sensor(2).

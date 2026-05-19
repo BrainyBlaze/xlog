@@ -56,6 +56,20 @@ def test_v085_examples_expected_contracts_include_semantic_execution() -> None:
         assert any(key in checks for key in ["run", "prob_json"]), name
 
 
+def test_v085_showcase_run_checks_do_not_accept_raw_kernel_schema_errors() -> None:
+    suite = ROOT / "examples/v085-language/showcase"
+    raw_schema_error = " ".join(["Union requires compatible", "schemas"])
+
+    for name in EXAMPLES:
+        expected = json.loads((suite / name / "expected.json").read_text())
+        run_check = expected["checks"].get("run")
+        if not run_check:
+            continue
+
+        combined_needles = run_check.get("combined_contains", [])
+        assert raw_schema_error not in combined_needles, name
+
+
 def test_v085_examples_validator_and_evidence_contract_is_committed() -> None:
     validator = ROOT / "scripts/validate_v085_examples.py"
     evidence = ROOT / "docs/evidence/2026-05-19-v085-examples"

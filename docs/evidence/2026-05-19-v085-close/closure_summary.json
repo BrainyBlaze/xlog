@@ -3,10 +3,11 @@
   "date": "2026-05-19",
   "release_decision": "MERGE_READY",
   "certification_head_before_closure": "25cf0f1e45c646abbd68b681d84632c6feb965ea",
-  "post_review_amendment": {
+  "post_review_amendments": {
     "goal_doc_imported": "docs/plans/2026-05-18-agent-v085-language-completeness-goal.md",
     "roadmap_items_closed": ["G085_DOCREF", "G085_TYPES"],
-    "examples_validator": "every showcase example has explain_json plus semantic run or prob_json checks"
+    "examples_validator": "every showcase example has explain_json plus semantic run or prob_json checks",
+    "showcase_quality": "deterministic run checks exit 0; source tests reject raw kernel schema mismatch as accepted output"
   },
   "no_push_tag_merge_or_board_update": true,
   "proposal": "docs/plans/2026-05-19-v085-closure-proposal.md",
@@ -24,7 +25,7 @@
     "G085_APPROX": {"commit": "470564c5", "status": "PASS"},
     "G085_INC_PARSE": {"commit": "03f87db1", "status": "PASS"},
     "G085_CLI": {"commit": "72d8c9de", "status": "PASS"},
-    "G085_EXAMPLES": {"commit": "19a1f6c5 + post-review amendment", "status": "PASS"},
+    "G085_EXAMPLES": {"commit": "19a1f6c5 + post-review amendments", "status": "PASS"},
     "G085_INT": {"commit": "25cf0f1e", "status": "PASS"},
     "G085_CLOSE": {"commit": "proposal commit", "status": "PASS"}
   },

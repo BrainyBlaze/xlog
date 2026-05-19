@@ -1,10 +1,10 @@
 {
   "features": ["types", "lists", "findall", "maplist", "naf", "aggregate_query", "incremental_parse"],
-  "source_required_substrings": ["pred sensor(id: u32)", "not blocked_sensor(S)", "findall(V, reading(S, V), Values)", "maplist(valid_sample, [10, 11, 12])"],
+  "source_required_substrings": ["pred sensor(id: u32)", "pred reading_count(sensor: u32, count: u64)", "not blocked_sensor(S)", "findall(V, reading(S, V), Values)", "maplist(valid_sample, [10, 11, 12])"],
   "checks": {
     "run": {
-      "returncode": 1,
-      "combined_contains": ["Union requires compatible schemas", "aggregate_0"]
+      "returncode": 0,
+      "stdout_contains": ["__xlog_query_0", "| 1", "__xlog_query_1", "| 1  | 3", "| 2  | 2", "__xlog_query_2", "| 1      | 3", "| 2      | 2"]
     },
     "explain_json": {
       "min_statements": 24,

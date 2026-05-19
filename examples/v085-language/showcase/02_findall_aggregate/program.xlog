@@ -1,6 +1,7 @@
 // Safe finite findall plus a deterministic aggregate query.
 
 pred edge(src: u32, dst: u32).
+pred neighbor_count(src: u32, count: u64).
 
 edge(1, 2).
 edge(1, 3).

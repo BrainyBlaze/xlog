@@ -4,10 +4,11 @@ Date: 2026-05-19
 Branch: `feat/v085-language-completeness`
 Scope: `G085_CLOSE` evidence rollup and closure proposal.
 
-Post-review amendment: closure blockers were addressed by importing the missing
-governing goal document, marking completed DOCREF/TYPES ROADMAP items, and
+Post-review amendments: closure blockers were addressed by importing the
+missing governing goal document, marking completed DOCREF/TYPES ROADMAP items,
 strengthening the example validator so every showcase has semantic execution
-output or diagnostic checks.
+checks, and converting the remaining deterministic showcases from raw kernel
+schema errors to successful `xlog run` outputs.
 
 ## Artifacts
 
