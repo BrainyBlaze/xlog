@@ -305,6 +305,11 @@ The bounded FAEEL evaluator is a certification fixture for foundedness and
 no-model behavior. It is not yet the full Generate-Propagate-Test executor; that
 pipeline is owned by `G090_GPT`.
 
+At the production executable-plan boundary, default FAEEL also rejects direct
+self-support such as `p() :- possible p().` before reduced ordinary runtime
+lowering. The same bounded fixture is allowed only with explicit
+`#pragma epistemic_mode = g91`.
+
 ## Generate-Propagate-Test Fixture Execution
 
 `run_generate_propagate_test` in `crates/xlog-logic/src/epistemic.rs` provides a

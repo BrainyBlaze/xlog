@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use xlog_core::{RelId, ScalarType};
 use xlog_ir::rir::MultiwayPlan;
-use xlog_ir::{ExecutionPlan, RirNode};
+use xlog_ir::{EirEpistemicMode, ExecutionPlan, RirNode};
 use xlog_logic::epistemic::{
     compile_epistemic_gpu_execution, compile_epistemic_gpu_execution_with_stats_snapshot,
 };
@@ -86,6 +86,49 @@ fn epistemic_kclique_reduction_reuses_38b_planner_layout_and_helper_split_surfac
         1,
         "buried-skew epistemic reduction must reuse helper-splitting specs"
     );
+}
+
+#[test]
+fn faeel_gpu_execution_rejects_self_supported_possible_before_runtime_dispatch() {
+    let program = parse_program(
+        r#"
+        pred p().
+        p() :- possible p().
+        "#,
+    )
+    .unwrap();
+
+    let err = compile_epistemic_gpu_execution(&program)
+        .expect_err("default FAEEL lowering must reject self-supported possible");
+
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
+            assert_eq!(construct, "FAEEL foundedness guard");
+            assert!(context.contains("rule[0]"));
+            assert!(context.contains("possible p/0"));
+            assert!(context.contains("self-supported"));
+        }
+        other => panic!("expected FAEEL foundedness rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn g91_gpu_execution_allows_self_supported_possible_compatibility_fixture() {
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = g91
+        pred p().
+        p() :- possible p().
+        "#,
+    )
+    .unwrap();
+
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("G91 compatibility mode permits self-supported possible fixtures");
+
+    assert_eq!(executable.gpu_plan.mode, EirEpistemicMode::G91);
+    assert_eq!(executable.gpu_plan.epistemic_literals.len(), 1);
+    assert_eq!(compiled_rule_count(&executable.reduced_runtime_plan), 1);
 }
 
 const EPISTEMIC_K5_SRC: &str = r#"

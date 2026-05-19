@@ -21,6 +21,7 @@ Predecessor evidence:
 | Foundedness fixture | `test_epistemic_faeel.rs` accepts a candidate where `know fact()` is backed by `known fact/0`. |
 | No-model behavior | `test_epistemic_faeel.rs` returns typed `NoModel` values for unfounded possible-only support and contradictions. |
 | G91 distinction | `test_epistemic_g91.rs` preserves the intentional G91/FAEEL difference for `possible fact()`. |
+| Production executable guard | `compile_epistemic_gpu_execution` calls the FAEEL foundedness guard before reduced runtime compilation, rejecting `p() :- possible p().` under the default mode while preserving the explicit G91 compatibility fixture. |
 | Documentation | `docs/architecture/epistemic-semantics.md` documents bounded FAEEL semantics and no-model reasons. |
 
 ## Validation
@@ -30,6 +31,7 @@ Predecessor evidence:
 | `cargo fmt --check` | PASS |
 | `cargo test -p xlog-logic --test test_epistemic_faeel` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_g91` | PASS, 3 passed, 0 failed |
+| `cargo test -p xlog-logic --test test_epistemic_executable_plan` | PASS, 5 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_eir` | PASS, 4 passed, 0 failed |
 | `cargo test -p xlog-logic --lib` | PASS, 238 passed, 0 failed |
 | `cargo check -p xlog-logic -p xlog-ir -p xlog-solve -p xlog-prob` | PASS |
@@ -43,10 +45,12 @@ Predecessor evidence:
 | M090_FAEEL.2 golden fixtures | 100 percent pass | PASS | `cargo test -p xlog-logic --test test_epistemic_faeel`: 3/3 passed. |
 | M090_FAEEL.3 no-model behavior | typed result or diagnostic, not panic | PASS | `FaeelCandidateResult::NoModel(FaeelNoModelReason::...)` fixtures. |
 | M090_FAEEL.4 G91 distinction | fixtures show at least one intentional G91/FAEEL difference | PASS | `test_epistemic_g91::g91_possible_fixture_differs_from_faeel_default`. |
+| M090_FAEEL.5 foundedness guard | self-supported epistemic fixture rejected with documented reason | PASS | `test_epistemic_executable_plan::faeel_gpu_execution_rejects_self_supported_possible_before_runtime_dispatch` rejects default `p() :- possible p().` as `FAEEL foundedness guard`; `g91_gpu_execution_allows_self_supported_possible_compatibility_fixture` preserves explicit G91 compatibility. |
 
 ## Coordination Notes
 
-- This is bounded fixture semantics, not full production epistemic execution.
+- This is bounded fixture semantics plus a production executable-plan guard; it
+  is not full production epistemic execution.
 - Generate-Propagate-Test execution remains `G090_GPT` scope.
 - No pyxlog public API signatures were changed.
 - No push, tag, release-board update, or merge was performed.

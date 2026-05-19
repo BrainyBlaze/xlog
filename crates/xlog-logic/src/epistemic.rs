@@ -4,8 +4,9 @@ use std::collections::BTreeSet;
 
 use xlog_core::{Result, XlogError};
 use xlog_ir::{
-    EirBodyLiteral, EirTerm, EpistemicExecutablePlan, EpistemicGpuPlan, EpistemicReductionPlan,
-    EpistemicTupleMembershipBinding, EpistemicWcojReductionStatus,
+    EirBodyLiteral, EirEpistemicMode, EirEpistemicOp, EirProgram, EirTerm, EpistemicExecutablePlan,
+    EpistemicGpuPlan, EpistemicReductionPlan, EpistemicTupleMembershipBinding,
+    EpistemicWcojReductionStatus,
 };
 use xlog_stats::StatsSnapshot;
 
@@ -145,6 +146,7 @@ impl EpistemicWorldView {
 /// counters.
 pub fn plan_epistemic_gpu_execution(program: &Program) -> Result<EpistemicGpuPlan> {
     let eir = build_eir(program)?;
+    reject_faeel_self_supported_possible(&eir)?;
     let mut epistemic_literals = Vec::new();
     let mut reductions = Vec::new();
     let mut tuple_membership_bindings = Vec::new();
@@ -212,6 +214,35 @@ pub fn plan_epistemic_gpu_execution(program: &Program) -> Result<EpistemicGpuPla
         EpistemicGpuPlan::new(eir.mode, epistemic_literals, reductions)
             .with_tuple_membership_bindings(tuple_membership_bindings),
     )
+}
+
+fn reject_faeel_self_supported_possible(eir: &EirProgram) -> Result<()> {
+    if eir.mode != EirEpistemicMode::Faeel {
+        return Ok(());
+    }
+
+    for (rule_index, rule) in eir.rules.iter().enumerate() {
+        for lit in &rule.body {
+            let EirBodyLiteral::Epistemic(lit) = lit else {
+                continue;
+            };
+            if lit.op == EirEpistemicOp::Possible
+                && !lit.negated
+                && lit.atom.predicate == rule.head.predicate
+                && lit.atom.arity == rule.head.arity
+            {
+                return Err(XlogError::UnsupportedEpistemicConstruct {
+                    construct: "FAEEL foundedness guard".to_string(),
+                    context: format!(
+                        "rule[{rule_index}] has self-supported possible {}/{} in default FAEEL mode; use explicit g91 compatibility mode or provide independent founded support",
+                        lit.atom.predicate, lit.atom.arity
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Compile an epistemic program into its GPU contract and reduced runtime plan.

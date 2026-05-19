@@ -241,6 +241,11 @@ FAEEL is the default mode. In the bounded fixture evaluator:
 - known plus rejected support is rejected as `Contradiction`;
 - otherwise unsatisfied epistemic literals are reported as `UnsatisfiedLiteral`.
 
+At the production executable-plan boundary, default FAEEL also rejects direct
+self-support such as `p() :- possible p().` before the reduced ordinary runtime
+plan is compiled. The same bounded fixture is allowed only with explicit
+`#pragma epistemic_mode = g91`.
+
 ## Generate-Propagate-Test
 
 `run_generate_propagate_test` executes a bounded three-phase fixture:
