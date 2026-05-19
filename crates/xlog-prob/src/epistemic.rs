@@ -50,6 +50,42 @@ impl EpistemicAssumptionKind {
     }
 }
 
+/// Concrete tuple key term for nonzero-arity epistemic evidence conditioning.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EpistemicEvidenceTerm {
+    /// Integer tuple key term.
+    Integer(i64),
+    /// String tuple key term.
+    String(String),
+    /// Interned symbol tuple key term.
+    Symbol(u32),
+}
+
+impl EpistemicEvidenceTerm {
+    /// Construct an integer tuple key term.
+    pub fn integer(value: i64) -> Self {
+        Self::Integer(value)
+    }
+
+    /// Construct a string tuple key term.
+    pub fn string(value: impl Into<String>) -> Self {
+        Self::String(value.into())
+    }
+
+    /// Construct an interned symbol tuple key term.
+    pub fn symbol(value: u32) -> Self {
+        Self::Symbol(value)
+    }
+
+    fn evidence_literal(&self) -> String {
+        match self {
+            Self::Integer(value) => value.to_string(),
+            Self::String(value) => format!("{value:?}"),
+            Self::Symbol(value) => format!("#{value}"),
+        }
+    }
+}
+
 /// One bounded epistemic assumption compiled as evidence.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct EpistemicAssumption {
@@ -59,6 +95,8 @@ pub struct EpistemicAssumption {
     pub predicate: String,
     /// Predicate arity.
     pub arity: usize,
+    /// Concrete tuple terms for nonzero-arity evidence conditioning.
+    pub terms: Vec<EpistemicEvidenceTerm>,
     /// Assumed evidence truth value.
     pub value: bool,
 }
@@ -70,6 +108,22 @@ impl EpistemicAssumption {
             kind: EpistemicAssumptionKind::Know,
             predicate: predicate.into(),
             arity,
+            terms: Vec::new(),
+            value,
+        }
+    }
+
+    /// Construct a `know predicate(terms...) = value` assumption.
+    pub fn known_tuple(
+        predicate: impl Into<String>,
+        terms: Vec<EpistemicEvidenceTerm>,
+        value: bool,
+    ) -> Self {
+        Self {
+            kind: EpistemicAssumptionKind::Know,
+            predicate: predicate.into(),
+            arity: terms.len(),
+            terms,
             value,
         }
     }
@@ -80,19 +134,52 @@ impl EpistemicAssumption {
             kind: EpistemicAssumptionKind::Possible,
             predicate: predicate.into(),
             arity,
+            terms: Vec::new(),
+            value,
+        }
+    }
+
+    /// Construct a `possible predicate(terms...) = value` assumption.
+    pub fn possible_tuple(
+        predicate: impl Into<String>,
+        terms: Vec<EpistemicEvidenceTerm>,
+        value: bool,
+    ) -> Self {
+        Self {
+            kind: EpistemicAssumptionKind::Possible,
+            predicate: predicate.into(),
+            arity: terms.len(),
+            terms,
             value,
         }
     }
 
     /// Return the compiler-facing evidence literal for this assumption.
     pub fn evidence_literal(&self) -> String {
-        format!(
-            "{}:{}/{}={}",
-            self.kind.evidence_prefix(),
-            self.predicate,
-            self.arity,
-            self.value
-        )
+        if self.terms.is_empty() {
+            format!(
+                "{}:{}/{}={}",
+                self.kind.evidence_prefix(),
+                self.predicate,
+                self.arity,
+                self.value
+            )
+        } else {
+            let terms = self
+                .terms
+                .iter()
+                .map(EpistemicEvidenceTerm::evidence_literal)
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "{}:{}/{}({})={}",
+                self.kind.evidence_prefix(),
+                self.predicate,
+                self.arity,
+                terms,
+                self.value
+            )
+        }
     }
 }
 

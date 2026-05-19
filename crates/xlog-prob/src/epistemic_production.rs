@@ -11,12 +11,14 @@ use xlog_core::{Result, XlogError};
 use xlog_cuda::CudaKernelProvider;
 use xlog_logic::ast::Program;
 #[cfg(feature = "host-io")]
-use xlog_logic::ast::{Atom, Evidence};
+use xlog_logic::ast::{Atom, Evidence, Term};
 #[cfg(feature = "host-io")]
 use xlog_logic::parse_program;
 use xlog_runtime::EpistemicGpuExecutionResult;
 
 use crate::compilation::{encode_cnf_gpu, GpuPirGraph, GpuPirRoots};
+#[cfg(feature = "host-io")]
+use crate::epistemic::EpistemicEvidenceTerm;
 use crate::epistemic::{AcceptedWorldViewEvidence, EpistemicAssumption};
 use crate::exact::{ExactDdnnfProgram, GpuConfig};
 #[cfg(feature = "host-io")]
@@ -362,8 +364,7 @@ impl EpistemicProbProductionAdapter {
         evidence: &AcceptedWorldViewEvidence,
     ) -> Result<ExactResult> {
         self.consume_accepted_evidence(evidence)?;
-        let (program, evidence_facts) =
-            condition_source_with_zero_arity_evidence(source, evidence)?;
+        let (program, evidence_facts) = condition_source_with_accepted_evidence(source, evidence)?;
         let exact = ExactDdnnfProgram::compile_from_program(&program, self.config)?;
         self.trace.gpu_exact_source_compiles =
             self.trace.gpu_exact_source_compiles.saturating_add(1);
@@ -596,7 +597,7 @@ impl EpistemicProbProductionAdapter {
 }
 
 #[cfg(feature = "host-io")]
-fn condition_source_with_zero_arity_evidence(
+fn condition_source_with_accepted_evidence(
     source: &str,
     evidence: &AcceptedWorldViewEvidence,
 ) -> Result<(Program, usize)> {
@@ -610,25 +611,51 @@ fn condition_source_with_zero_arity_evidence(
 
     let mut program = parse_program(source)?;
     for assumption in evidence.assumptions() {
-        if assumption.arity != 0 {
+        if assumption.arity == 0 {
+            if !assumption.terms.is_empty() {
+                return Err(XlogError::UnsupportedEpistemicConstruct {
+                    construct: "accepted probabilistic evidence conditioning".to_string(),
+                    context: format!(
+                        "zero-arity exact evidence must not carry tuple terms, got {}/{}",
+                        assumption.predicate, assumption.arity
+                    ),
+                });
+            }
+        } else if assumption.terms.len() != assumption.arity {
             return Err(XlogError::UnsupportedEpistemicConstruct {
                 construct: "accepted probabilistic evidence conditioning".to_string(),
                 context: format!(
-                    "exact evidence conditioning currently supports zero-arity assumptions, got {}/{}",
-                    assumption.predicate, assumption.arity
+                    "nonzero exact evidence conditioning requires {} concrete tuple terms, got {} for {}/{}",
+                    assumption.arity,
+                    assumption.terms.len(),
+                    assumption.predicate,
+                    assumption.arity
                 ),
             });
         }
         program.evidence.push(Evidence {
             atom: Atom {
                 predicate: assumption.predicate.clone(),
-                terms: Vec::new(),
+                terms: assumption
+                    .terms
+                    .iter()
+                    .map(evidence_term_to_ast_term)
+                    .collect(),
             },
             value: assumption.value,
         });
     }
 
     Ok((program, evidence.assumption_count()))
+}
+
+#[cfg(feature = "host-io")]
+fn evidence_term_to_ast_term(term: &EpistemicEvidenceTerm) -> Term {
+    match term {
+        EpistemicEvidenceTerm::Integer(value) => Term::Integer(*value),
+        EpistemicEvidenceTerm::String(value) => Term::String(value.clone()),
+        EpistemicEvidenceTerm::Symbol(value) => Term::Symbol(*value),
+    }
 }
 
 fn production_pir_roots(provenance: &Provenance) -> Result<Vec<PirNodeId>> {

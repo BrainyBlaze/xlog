@@ -398,8 +398,9 @@ compile/evaluate through `ExactDdnnfProgram` per accepted record while
 incrementing the same accepted-evidence, source-compile, query-evaluation, and
 knowledge-compilation counters.
 `compile_and_evaluate_conditioned_source_with_gpu_execution_result` additionally
-turns accepted zero-arity assumptions into parsed exact `Evidence` AST entries
-before evaluating through the same GPU exact path, recording
+turns accepted zero-arity and concrete nonzero-arity tuple assumptions into
+parsed exact `Evidence` AST entries before evaluating through the same GPU
+exact path, recording
 `accepted_evidence_assumptions_consumed` and `gpu_conditioned_evidence_facts`.
 `encode_source_pir_cnf_with_gpu_execution_result` and
 `encode_program_pir_cnf_with_gpu_execution_result` apply the same accepted
@@ -416,8 +417,7 @@ traces that lack accepted world-view evidence, lack an existing GPU
 exact/provenance/PIR/CNF counter, or record CPU/fixture recomputation.
 
 This adapter is partial v0.9 evidence only. It does not yet cover the broader
-nonzero/query-conditioned probabilistic matrix over accepted runtime world
-views.
+query-conditioned probabilistic matrix over accepted runtime world views.
 
 Run the probabilistic fixture and production-adapter source guard:
 

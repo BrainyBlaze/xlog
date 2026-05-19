@@ -42,7 +42,9 @@ fn production_prob_adapter_reuses_gpu_exact_path_not_fixture_circuit() {
     assert!(production.contains("gpu_program_knowledge_compilation_end_to_end_runs"));
     assert!(production.contains("accepted_evidence_assumptions_consumed"));
     assert!(production.contains("gpu_conditioned_evidence_facts"));
-    assert!(production.contains("condition_source_with_zero_arity_evidence"));
+    assert!(production.contains("condition_source_with_accepted_evidence"));
+    assert!(production.contains("EpistemicEvidenceTerm"));
+    assert!(production.contains("evidence_term_to_ast_term"));
     assert!(production.contains("program.evidence.push"));
     assert!(production.contains("gpu_exact_query_evaluations"));
     assert!(production.contains("gpu_exact_gradient_evaluations"));

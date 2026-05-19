@@ -130,7 +130,9 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(prob.contains("gpu_program_knowledge_compilation_end_to_end_runs"));
     assert!(prob.contains("accepted_evidence_assumptions_consumed"));
     assert!(prob.contains("gpu_conditioned_evidence_facts"));
-    assert!(prob.contains("condition_source_with_zero_arity_evidence"));
+    assert!(prob.contains("condition_source_with_accepted_evidence"));
+    assert!(prob.contains("EpistemicEvidenceTerm"));
+    assert!(prob.contains("evidence_term_to_ast_term"));
     assert!(prob.contains("program.evidence.push"));
     assert!(prob.contains("evaluate_with_gpu_execution_result"));
     assert!(prob.contains("evaluate_gpu_with_grads_with_gpu_execution_result"));

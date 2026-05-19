@@ -21,11 +21,11 @@ production exact compilation, GPU PIR upload/CNF encoding, and GPU exact query
 and gradient evaluation. It also gates bounded source and parsed-program
 compile-plus-query-evaluation paths end to end through the same
 exact/provenance machinery, including a two-record accepted-runtime batch over
-the source compile/evaluate path. A bounded zero-arity conditioning path now
-compiles accepted epistemic assumptions into exact `evidence(atom(), value)`
-statements before evaluating through the GPU exact path, but broader
-nonzero/query-conditioned probabilistic coverage over accepted world views is
-not complete.
+the source compile/evaluate path. A bounded conditioning path now compiles
+accepted zero-arity and concrete nonzero-arity epistemic assumptions into exact
+`evidence(atom(...), value)` statements before evaluating through the GPU exact
+path, but broader query-conditioned probabilistic coverage over accepted world
+views is not complete.
 
 | Requirement | Evidence |
 |---|---|
@@ -35,7 +35,7 @@ not complete.
 | Accepted runtime exact gates | `compile_source_with_gpu_execution_result` and `compile_program_with_gpu_execution_result` construct `AcceptedWorldViewEvidence` from an accepted `EpistemicGpuExecutionResult`, require stable-model tuple membership, GPU kernel traces, zero hot-path transfers, and non-empty final device output before exact compilation. |
 | Accepted runtime end-to-end gate | `compile_and_evaluate_source_with_gpu_execution_result` and `compile_and_evaluate_program_with_gpu_execution_result` consume accepted runtime evidence once before compiling through `ExactDdnnfProgram` and evaluating queries from that compiled GPU exact state, with separate source and parsed-program trace counters. |
 | Accepted runtime batch gate | `compile_and_evaluate_source_for_gpu_execution_results` validates two accepted GPU runtime evidence records before running each source compile/evaluate through `ExactDdnnfProgram`, recording two accepted evidence consumptions, two source compiles, two query evaluations, and zero CPU recomputations. |
-| Accepted runtime conditioning gate | `compile_and_evaluate_conditioned_source_with_gpu_execution_result` constructs accepted GPU evidence, appends zero-arity assumptions as parsed `Evidence` AST entries, and evaluates through `ExactDdnnfProgram` with `accepted_evidence_assumptions_consumed` and `gpu_conditioned_evidence_facts` counters. |
+| Accepted runtime conditioning gate | `compile_and_evaluate_conditioned_source_with_gpu_execution_result` constructs accepted GPU evidence, appends zero-arity and concrete nonzero-arity tuple assumptions as parsed `Evidence` AST entries, and evaluates through `ExactDdnnfProgram` with `accepted_evidence_assumptions_consumed` and `gpu_conditioned_evidence_facts` counters. |
 | Accepted runtime PIR/CNF gate | `encode_source_pir_cnf_with_gpu_execution_result` and `encode_program_pir_cnf_with_gpu_execution_result` reconstruct accepted evidence before calling `GpuPirGraph::from_host`, `GpuPirRoots::from_host`, and `encode_cnf_gpu`. |
 | Accepted runtime evaluation gates | `evaluate_with_gpu_execution_result` and `evaluate_gpu_with_grads_with_gpu_execution_result` reconstruct accepted evidence from the GPU runtime result before calling the existing `ExactDdnnfProgram::evaluate` and `ExactDdnnfProgram::evaluate_gpu_with_grads` paths. |
 | CPU probability isolation | `EpistemicProbProductionTrace` records zero CPU-only probability recomputation and zero fixture-circuit evaluations; the source guard rejects `EpistemicCircuit::compile` in the production adapter. |
@@ -53,6 +53,7 @@ not complete.
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_gates_probabilistic_end_to_end_knowledge_compilation_path -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_results_gate_batched_probabilistic_knowledge_compilation_path -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_conditions_zero_arity_probabilistic_evidence -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_conditions_nonzero_arity_probabilistic_evidence -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_gates_probabilistic_program_end_to_end_path -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_gates_probabilistic_pir_cnf_path -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_gates_probabilistic_query_evaluation_path -- --nocapture` | PASS, 1 passed, 0 failed |
@@ -76,10 +77,10 @@ not complete.
 | M090_PROB.2 incremental circuit fixture | changed assumption updates circuit without full rebuild where supported | PASS for oracle | `evidence_conditioning_consumes_accepted_world_view`. |
 | M090_PROB.3 compiler adapter | at least one alternative compiler adapter design or implementation | PASS for oracle | `external_ddnnf_text_compiler_adapter_is_explicitly_represented`. |
 | M090_PROB.4 numerical stability | deterministic fixture within documented tolerance | PASS for oracle | `log_space_conditional_probability_is_tolerance_bounded`. |
-| M090_PROB.5 evidence conditioning | probabilistic integration consumes accepted world views, not raw unvalidated guesses | PARTIAL | `AcceptedWorldViewEvidence` requires an `EpistemicWorldView` for oracle fixtures and can be constructed from one or more accepted GPU runtime results after stable tuple-source, kernel-trace, transfer-budget, and non-empty final-output checks. The conditioned exact path consumes accepted zero-arity assumptions as parsed exact evidence and records accepted-assumption/evidence-fact counters. |
-| M090_PROB.6 GPU exact integration | accepted world-view evidence updates the GPU-native exact/provenance path | PARTIAL | Accepted GPU runtime evidence gates `ExactDdnnfProgram::compile_source_with_gpu`, `ExactDdnnfProgram::compile_from_program`, `evaluate`, `evaluate_gpu_with_grads`, source plus parsed-program compile-plus-query-evaluation through the same exact state, two-record source batch compile/evaluate, and zero-arity exact evidence conditioning; broader nonzero/query-conditioning coverage is still missing. |
-| M090_PROB.7 CPU recompute ban | accepted probabilistic epistemic path records zero CPU-only probability recomputation | PARTIAL | Production trace records zero CPU-only recomputation and zero fixture-circuit counters for accepted runtime source-compile, parsed-program compile, PIR/CNF encoding, query-evaluation, gradient-evaluation, source plus parsed-program end-to-end compile/evaluate paths, two-record source batch compile/evaluate, and zero-arity conditioned source evaluation; broader probabilistic execution traces are missing. |
-| M090_PROB.8 production prob reuse | accepted probabilistic fixtures execute through existing GPU exact/provenance/PIR/knowledge-compilation APIs | PARTIAL | Source guard and integration fixtures prove accepted GPU runtime evidence compiles source and parsed programs, performs source and parsed-program bounded compile/evaluate knowledge-compilation through `ExactDdnnfProgram` with distinct trace counters, performs two-record accepted source batch compile/evaluate, conditions zero-arity evidence via parsed `Evidence` AST entries, encodes PIR/CNF through `GpuPirGraph` and `encode_cnf_gpu`, evaluates query probabilities, and evaluates gradients through the existing exact/provenance path; broader nonzero/query-conditioned coverage is missing. |
+| M090_PROB.5 evidence conditioning | probabilistic integration consumes accepted world views, not raw unvalidated guesses | PARTIAL | `AcceptedWorldViewEvidence` requires an `EpistemicWorldView` for oracle fixtures and can be constructed from one or more accepted GPU runtime results after stable tuple-source, kernel-trace, transfer-budget, and non-empty final-output checks. The conditioned exact path consumes accepted zero-arity and concrete nonzero-arity tuple assumptions as parsed exact evidence and records accepted-assumption/evidence-fact counters. |
+| M090_PROB.6 GPU exact integration | accepted world-view evidence updates the GPU-native exact/provenance path | PARTIAL | Accepted GPU runtime evidence gates `ExactDdnnfProgram::compile_source_with_gpu`, `ExactDdnnfProgram::compile_from_program`, `evaluate`, `evaluate_gpu_with_grads`, source plus parsed-program compile-plus-query-evaluation through the same exact state, two-record source batch compile/evaluate, and zero-arity plus concrete nonzero-arity exact evidence conditioning; broader query-conditioned coverage is still missing. |
+| M090_PROB.7 CPU recompute ban | accepted probabilistic epistemic path records zero CPU-only probability recomputation | PARTIAL | Production trace records zero CPU-only recomputation and zero fixture-circuit counters for accepted runtime source-compile, parsed-program compile, PIR/CNF encoding, query-evaluation, gradient-evaluation, source plus parsed-program end-to-end compile/evaluate paths, two-record source batch compile/evaluate, and zero-arity plus concrete nonzero-arity conditioned source evaluation; broader probabilistic execution traces are missing. |
+| M090_PROB.8 production prob reuse | accepted probabilistic fixtures execute through existing GPU exact/provenance/PIR/knowledge-compilation APIs | PARTIAL | Source guard and integration fixtures prove accepted GPU runtime evidence compiles source and parsed programs, performs source and parsed-program bounded compile/evaluate knowledge-compilation through `ExactDdnnfProgram` with distinct trace counters, performs two-record accepted source batch compile/evaluate, conditions zero-arity and concrete nonzero-arity evidence via parsed `Evidence` AST entries, encodes PIR/CNF through `GpuPirGraph` and `encode_cnf_gpu`, evaluates query probabilities, and evaluates gradients through the existing exact/provenance path; broader query-conditioned coverage is missing. |
 | M090_PROB.9 fixture isolation | bounded epistemic probability fixtures are marked oracle-only and cannot satisfy closure metrics | PARTIAL | Evidence docs separate `EpistemicCircuit` fixtures from `EpistemicProbProductionAdapter`; `EpistemicProbProductionCapabilities` disallows fixture circuits for production metrics; `EpistemicProbProductionTrace::require_production_metric_eligibility` rejects traces without accepted world-view evidence, without existing GPU exact/provenance/PIR/CNF counters, or with CPU/fixture recomputation counters. Broader probabilistic coverage is still missing, so this is not a G090_PROB close. |
 
 ## Coordination Notes
@@ -87,9 +88,10 @@ not complete.
 - This file is not release-close evidence for `G090_PROB`.
 - Production WFS/provenance still rejects direct epistemic literals.
 - The production adapter is partial source/program exact-compile,
-  PIR/CNF, query-evaluation, gradient-evaluation, zero-arity conditioned
-  source evaluation, source/program bounded compile/evaluate reuse, and
-  two-record accepted source batch reuse evidence only.
+  PIR/CNF, query-evaluation, gradient-evaluation, zero-arity and concrete
+  nonzero-arity conditioned source evaluation, source/program bounded
+  compile/evaluate reuse, and two-record accepted source batch reuse evidence
+  only.
 - The external Decision-DNNF adapter is a design contract, not a dispatch path.
 - No pyxlog public API signatures were changed.
 - No push, tag, release-board update, or merge was performed.
