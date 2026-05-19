@@ -12,6 +12,10 @@ All notable changes to this project are documented in this file.
 - Added v0.8.6 native exact-induction completion for `U32` and `Symbol`
   pair buffers plus profile-gated chain-topology shared-memory CUDA scorers
   with A/B controls, parity evidence, and no added data-plane transfers.
+- Added v0.8.6 runtime common subexpression elimination for safe
+  deterministic subplans, with explicit off/on controls, relation-generation
+  invalidation, unsafe-boundary diagnostics, and evidence-backed duplicate
+  work reduction.
 
 ### Changed
 

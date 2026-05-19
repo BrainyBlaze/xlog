@@ -111,6 +111,13 @@ pub struct RuntimeConfig {
     /// `None` resolves by env/default precedence; see
     /// [`RuntimeConfig::with_wcoj_cost_model`].
     pub wcoj_cost_model: Option<CostModelKind>,
+    /// v0.8.6 G086_CSE — runtime common subexpression elimination.
+    ///
+    /// `Some(true)` enables structural CSE for safe deterministic subplans.
+    /// `Some(false)` disables it. `None` consults `XLOG_CSE`; unset defaults
+    /// to disabled so existing runtime behavior is preserved unless the caller
+    /// opts in.
+    pub common_subexpression_elimination: Option<bool>,
 }
 
 /// v0.6.5 W2.5 cost-model selector for WCOJ dispatch.
@@ -141,6 +148,7 @@ impl Default for RuntimeConfig {
             wcoj_4cycle_dispatch_adaptive: None,
             wcoj_4cycle_dispatch_disabled: None,
             wcoj_cost_model: None,
+            common_subexpression_elimination: None,
         }
     }
 }
@@ -221,6 +229,28 @@ impl RuntimeConfig {
     pub fn with_wcoj_cost_model(mut self, kind: Option<CostModelKind>) -> Self {
         self.wcoj_cost_model = kind;
         self
+    }
+
+    /// Enable or disable runtime common subexpression elimination.
+    pub fn with_common_subexpression_elimination(mut self, override_value: Option<bool>) -> Self {
+        self.common_subexpression_elimination = override_value;
+        self
+    }
+
+    /// Resolve runtime common subexpression elimination by config/env/default.
+    pub fn resolved_common_subexpression_elimination(&self) -> bool {
+        if let Some(enabled) = self.common_subexpression_elimination {
+            return enabled;
+        }
+
+        std::env::var("XLOG_CSE")
+            .map(|raw| {
+                matches!(
+                    raw.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "on" | "yes"
+                )
+            })
+            .unwrap_or(false)
     }
 
     /// Resolve the effective WCOJ cost-model selector.

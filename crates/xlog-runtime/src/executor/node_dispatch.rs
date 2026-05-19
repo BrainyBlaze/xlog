@@ -97,6 +97,35 @@ impl Executor {
     /// # Errors
     /// Returns an error if the node execution fails
     pub fn execute_node(&mut self, node: &RirNode) -> Result<CudaBuffer> {
+        if !self.common_subexpression_enabled() || !Self::is_common_subexpression_cacheable(node) {
+            return self.execute_node_uncached(node);
+        }
+
+        let Some(key) = self.common_subexpression_key(node) else {
+            return self.execute_node_uncached(node);
+        };
+
+        if self.common_subexpression_cache.contains_key(&key) {
+            let cached = self
+                .common_subexpression_cache
+                .remove(&key)
+                .expect("cache key checked above");
+            let result = self.clone_buffer(&cached)?;
+            self.common_subexpression_cache.insert(key, cached);
+            self.common_subexpression_stats.hits =
+                self.common_subexpression_stats.hits.saturating_add(1);
+            return Ok(result);
+        }
+
+        self.common_subexpression_stats.misses =
+            self.common_subexpression_stats.misses.saturating_add(1);
+        let result = self.execute_node_uncached(node)?;
+        let cached = self.clone_buffer(&result)?;
+        self.common_subexpression_cache.insert(key, cached);
+        Ok(result)
+    }
+
+    fn execute_node_uncached(&mut self, node: &RirNode) -> Result<CudaBuffer> {
         match node {
             RirNode::Unit => {
                 // Materialize the relational "unit" ({()}) as a 0-arity buffer with one row.

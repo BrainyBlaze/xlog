@@ -11,9 +11,9 @@ use xlog_core::ScalarType;
 use xlog_core::{RelId, Result, RuntimeConfig, Schema, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
-use xlog_ir::ExecutionPlan;
 #[cfg(test)]
-use xlog_ir::{CompareOp, ConstValue, Expr, JoinType, ProjectExpr, RirNode, Stratum};
+use xlog_ir::{CompareOp, ConstValue, Stratum};
+use xlog_ir::{ExecutionPlan, Expr, JoinType, ProjectExpr, RirNode};
 use xlog_stats::{StatsManager, StatsSnapshot};
 
 use crate::ilp_registry::{IlpRegistry, IlpTaggedResult};
@@ -62,6 +62,48 @@ pub struct DeltaRecomputeStats {
     pub incremental_sccs: usize,
 }
 
+/// Runtime common subexpression elimination telemetry.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CommonSubexpressionStats {
+    /// Number of safe subplan cache hits.
+    pub hits: u64,
+    /// Number of safe subplans evaluated and inserted into the cache.
+    pub misses: u64,
+    /// Number of subplans rejected because they cross an unsafe boundary.
+    pub unsafe_rejections: u64,
+    /// Rejection reason labels observed during the current executor lifetime.
+    pub rejection_reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum CommonSubexpressionKey {
+    Scan {
+        rel: RelId,
+        generation: u64,
+    },
+    Filter {
+        input: Box<CommonSubexpressionKey>,
+        predicate: String,
+    },
+    Project {
+        input: Box<CommonSubexpressionKey>,
+        columns: Vec<String>,
+    },
+    Join {
+        left: Box<CommonSubexpressionKey>,
+        right: Box<CommonSubexpressionKey>,
+        left_keys: Vec<usize>,
+        right_keys: Vec<usize>,
+    },
+    Union {
+        inputs: Vec<CommonSubexpressionKey>,
+    },
+    Distinct {
+        input: Box<CommonSubexpressionKey>,
+        key_cols: Vec<usize>,
+    },
+}
+
 /// Query executor that interprets RIR nodes using GPU kernels
 ///
 /// The executor processes execution plans by iterating through strata and
@@ -94,6 +136,10 @@ pub struct Executor {
     stats: StatsManager,
     /// Cached build-side join indexes (adaptive indexing)
     join_index_cache: JoinIndexCache,
+    /// Per-execution CSE cache for safe deterministic subplans.
+    common_subexpression_cache: HashMap<CommonSubexpressionKey, CudaBuffer>,
+    /// Runtime CSE telemetry for evidence and diagnostics.
+    common_subexpression_stats: CommonSubexpressionStats,
     /// Runtime configuration
     config: RuntimeConfig,
     /// Performance profiler for --stats output
@@ -262,6 +308,8 @@ impl Executor {
             name_to_rel: HashMap::new(),
             stats: StatsManager::new(),
             join_index_cache: JoinIndexCache::new(max_index_cache_bytes),
+            common_subexpression_cache: HashMap::new(),
+            common_subexpression_stats: CommonSubexpressionStats::default(),
             config,
             profiler: Profiler::default(),
             ilp_registry: IlpRegistry::new(),
@@ -373,6 +421,7 @@ impl Executor {
     pub fn reset_for_mc(&mut self) {
         self.store.clear();
         self.join_index_cache.clear();
+        self.common_subexpression_cache.clear();
     }
 
     /// Targeted MC reset: preserve base/static relations and clear dynamic ones.
@@ -407,6 +456,7 @@ impl Executor {
         }
 
         self.join_index_cache.clear();
+        self.common_subexpression_cache.clear();
         Ok(())
     }
 
@@ -421,6 +471,7 @@ impl Executor {
         self.ilp_last_result = None;
         self.store.clear();
         self.join_index_cache.clear();
+        self.common_subexpression_cache.clear();
         self.stats = StatsManager::new();
         self.profiler = Profiler::default();
     }
@@ -443,7 +494,253 @@ impl Executor {
         snapshot
     }
 
+    /// Return runtime CSE telemetry for evidence and diagnostics.
+    pub fn common_subexpression_stats(&self) -> &CommonSubexpressionStats {
+        &self.common_subexpression_stats
+    }
+
+    fn common_subexpression_enabled(&self) -> bool {
+        self.config.resolved_common_subexpression_elimination()
+    }
+
+    fn is_common_subexpression_cacheable(node: &RirNode) -> bool {
+        !matches!(node, RirNode::Unit | RirNode::Scan { .. })
+    }
+
+    fn record_common_subexpression_rejection(&mut self, reason: &'static str) {
+        self.common_subexpression_stats.unsafe_rejections = self
+            .common_subexpression_stats
+            .unsafe_rejections
+            .saturating_add(1);
+        if !self
+            .common_subexpression_stats
+            .rejection_reasons
+            .iter()
+            .any(|seen| seen == reason)
+        {
+            self.common_subexpression_stats
+                .rejection_reasons
+                .push(reason.to_string());
+        }
+    }
+
+    fn common_subexpression_key(&mut self, node: &RirNode) -> Option<CommonSubexpressionKey> {
+        match node {
+            RirNode::Unit => None,
+            RirNode::Scan { rel } => {
+                let generation = self
+                    .get_rel_name(*rel)
+                    .and_then(|name| self.store.version(name))
+                    .unwrap_or(0);
+                Some(CommonSubexpressionKey::Scan {
+                    rel: *rel,
+                    generation,
+                })
+            }
+            RirNode::Filter { input, predicate } => {
+                let input = self.common_subexpression_key(input)?;
+                Some(CommonSubexpressionKey::Filter {
+                    input: Box::new(input),
+                    predicate: Self::expr_cse_key(predicate),
+                })
+            }
+            RirNode::Project { input, columns } => {
+                let input = self.common_subexpression_key(input)?;
+                Some(CommonSubexpressionKey::Project {
+                    input: Box::new(input),
+                    columns: columns.iter().map(Self::project_expr_cse_key).collect(),
+                })
+            }
+            RirNode::Join {
+                left,
+                right,
+                left_keys,
+                right_keys,
+                join_type,
+            } => {
+                if *join_type != JoinType::Inner {
+                    self.record_common_subexpression_rejection("negation_or_outer_join_boundary");
+                    return None;
+                }
+                let left = self.common_subexpression_key(left)?;
+                let right = self.common_subexpression_key(right)?;
+                Some(CommonSubexpressionKey::Join {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    left_keys: left_keys.clone(),
+                    right_keys: right_keys.clone(),
+                })
+            }
+            RirNode::Union { inputs } => {
+                let mut input_keys = Vec::with_capacity(inputs.len());
+                for input in inputs {
+                    input_keys.push(self.common_subexpression_key(input)?);
+                }
+                Some(CommonSubexpressionKey::Union { inputs: input_keys })
+            }
+            RirNode::Distinct { input, key_cols } => {
+                let input = self.common_subexpression_key(input)?;
+                Some(CommonSubexpressionKey::Distinct {
+                    input: Box::new(input),
+                    key_cols: key_cols.clone(),
+                })
+            }
+            RirNode::Diff { .. } => {
+                self.record_common_subexpression_rejection("negation_or_difference_boundary");
+                None
+            }
+            RirNode::GroupBy { .. } => {
+                self.record_common_subexpression_rejection("aggregate_boundary");
+                None
+            }
+            RirNode::Fixpoint { .. } => {
+                self.record_common_subexpression_rejection("recursive_or_mutable_boundary");
+                None
+            }
+            RirNode::TensorMaskedJoin { .. } => {
+                self.record_common_subexpression_rejection("provenance_or_tensor_boundary");
+                None
+            }
+            RirNode::MultiWayJoin { .. } | RirNode::ChainJoin { .. } => {
+                self.record_common_subexpression_rejection("specialized_dispatch_boundary");
+                None
+            }
+        }
+    }
+
+    fn expr_cse_key(expr: &Expr) -> String {
+        match expr {
+            Expr::Column(idx) => format!("col:{idx}"),
+            Expr::Const(value) => format!("const:{}", Self::const_cse_key(value)),
+            Expr::Compare { left, op, right } => format!(
+                "cmp:{}:{}:{}",
+                Self::expr_cse_key(left),
+                Self::compare_op_cse_key(*op),
+                Self::expr_cse_key(right)
+            ),
+            Expr::And(items) => format!(
+                "and:[{}]",
+                items
+                    .iter()
+                    .map(Self::expr_cse_key)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            Expr::Or(items) => format!(
+                "or:[{}]",
+                items
+                    .iter()
+                    .map(Self::expr_cse_key)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            Expr::Not(inner) => format!("not:{}", Self::expr_cse_key(inner)),
+            Expr::Add(left, right) => {
+                format!(
+                    "add:{}:{}",
+                    Self::expr_cse_key(left),
+                    Self::expr_cse_key(right)
+                )
+            }
+            Expr::Sub(left, right) => {
+                format!(
+                    "sub:{}:{}",
+                    Self::expr_cse_key(left),
+                    Self::expr_cse_key(right)
+                )
+            }
+            Expr::Mul(left, right) => {
+                format!(
+                    "mul:{}:{}",
+                    Self::expr_cse_key(left),
+                    Self::expr_cse_key(right)
+                )
+            }
+            Expr::Div(left, right) => {
+                format!(
+                    "div:{}:{}",
+                    Self::expr_cse_key(left),
+                    Self::expr_cse_key(right)
+                )
+            }
+            Expr::Mod(left, right) => {
+                format!(
+                    "mod:{}:{}",
+                    Self::expr_cse_key(left),
+                    Self::expr_cse_key(right)
+                )
+            }
+            Expr::Abs(inner) => format!("abs:{}", Self::expr_cse_key(inner)),
+            Expr::Min(left, right) => {
+                format!(
+                    "min:{}:{}",
+                    Self::expr_cse_key(left),
+                    Self::expr_cse_key(right)
+                )
+            }
+            Expr::Max(left, right) => {
+                format!(
+                    "max:{}:{}",
+                    Self::expr_cse_key(left),
+                    Self::expr_cse_key(right)
+                )
+            }
+            Expr::Pow(left, right) => {
+                format!(
+                    "pow:{}:{}",
+                    Self::expr_cse_key(left),
+                    Self::expr_cse_key(right)
+                )
+            }
+            Expr::Cast(inner, ty) => format!("cast:{:?}:{}", ty, Self::expr_cse_key(inner)),
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+            } => format!(
+                "if:{}:{}:{}",
+                Self::expr_cse_key(condition),
+                Self::expr_cse_key(then_expr),
+                Self::expr_cse_key(else_expr)
+            ),
+        }
+    }
+
+    fn project_expr_cse_key(expr: &ProjectExpr) -> String {
+        match expr {
+            ProjectExpr::Column(idx) => format!("col:{idx}"),
+            ProjectExpr::Computed(expr, ty) => {
+                format!("computed:{:?}:{}", ty, Self::expr_cse_key(expr))
+            }
+        }
+    }
+
+    fn const_cse_key(value: &xlog_ir::ConstValue) -> String {
+        match value {
+            xlog_ir::ConstValue::U32(value) => format!("u32:{value}"),
+            xlog_ir::ConstValue::U64(value) => format!("u64:{value}"),
+            xlog_ir::ConstValue::I32(value) => format!("i32:{value}"),
+            xlog_ir::ConstValue::I64(value) => format!("i64:{value}"),
+            xlog_ir::ConstValue::F32(value) => format!("f32:{:08x}", value.to_bits()),
+            xlog_ir::ConstValue::F64(value) => format!("f64:{:016x}", value.to_bits()),
+            xlog_ir::ConstValue::Bool(value) => format!("bool:{value}"),
+            xlog_ir::ConstValue::Symbol(value) => format!("symbol:{value:?}"),
+        }
+    }
+
+    fn compare_op_cse_key(op: xlog_ir::CompareOp) -> &'static str {
+        match op {
+            xlog_ir::CompareOp::Eq => "eq",
+            xlog_ir::CompareOp::Ne => "ne",
+            xlog_ir::CompareOp::Lt => "lt",
+            xlog_ir::CompareOp::Le => "le",
+            xlog_ir::CompareOp::Gt => "gt",
+            xlog_ir::CompareOp::Ge => "ge",
+        }
+    }
+
     fn store_put(&mut self, name: &str, buffer: CudaBuffer) {
+        self.common_subexpression_cache.clear();
         self.store.put(name, buffer);
         if let Some(&rel_id) = self.name_to_rel.get(name) {
             self.join_index_cache.invalidate_rel(rel_id);
@@ -451,6 +748,7 @@ impl Executor {
     }
 
     fn store_remove(&mut self, name: &str) -> Option<CudaBuffer> {
+        self.common_subexpression_cache.clear();
         if let Some(&rel_id) = self.name_to_rel.get(name) {
             self.join_index_cache.invalidate_rel(rel_id);
         }
@@ -501,6 +799,7 @@ impl Executor {
     /// # Errors
     /// Returns an error if any stratum or query execution fails
     pub fn execute_plan(&mut self, plan: &ExecutionPlan) -> Result<CudaBuffer> {
+        self.common_subexpression_cache.clear();
         // Opt-in deterministic-Datalog D2H gate. Enabled only for the
         // duration of this call; the provider is shared so we restore the
         // prior state on every exit path (including errors). This PR ships
@@ -1062,6 +1361,17 @@ mod tests {
         let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
         let provider = Arc::new(CudaKernelProvider::new(device, memory).ok()?);
         Some(Executor::new(provider))
+    }
+
+    fn create_test_executor_with_config(config: RuntimeConfig) -> Option<Executor> {
+        if !has_cuda_device() {
+            return None;
+        }
+        let device = Arc::new(CudaDevice::new(0).ok()?);
+        let budget = MemoryBudget::with_limit(1024 * 1024 * 1024); // 1 GB
+        let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
+        let provider = Arc::new(CudaKernelProvider::new(device, memory).ok()?);
+        Some(Executor::new_with_config(provider, config))
     }
 
     fn device_row_count(executor: &Executor, rows: u64) -> TrackedCudaSlice<u32> {
@@ -2277,6 +2587,210 @@ mod tests {
 
         let values = read_buffer_u32(&executor, &result, 0);
         assert_eq!(values, vec![3, 4, 5]);
+    }
+
+    // ============== v0.8.6 Common Subexpression Elimination Tests ==============
+
+    fn duplicate_join_union_plan() -> RirNode {
+        let join = RirNode::Join {
+            left: Box::new(RirNode::Scan { rel: RelId(1) }),
+            right: Box::new(RirNode::Scan { rel: RelId(2) }),
+            left_keys: vec![0],
+            right_keys: vec![0],
+            join_type: JoinType::Inner,
+        };
+        RirNode::Union {
+            inputs: vec![join.clone(), join],
+        }
+    }
+
+    fn seed_cse_join_fixture(executor: &mut Executor, right: &[u32]) {
+        executor.register_relation(RelId(1), "left");
+        executor.register_relation(RelId(2), "right");
+        let left = create_test_buffer(executor, &[1, 2, 3, 4], "key");
+        let right = create_test_buffer(executor, right, "key");
+        executor.put_relation("left", left);
+        executor.put_relation("right", right);
+    }
+
+    #[test]
+    fn test_common_subexpression_cache_reuses_duplicate_inner_join_when_enabled() {
+        let mut executor = match create_test_executor_with_config(
+            RuntimeConfig::default().with_common_subexpression_elimination(Some(true)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_cse_join_fixture(&mut executor, &[2, 3, 5]);
+
+        let result = executor
+            .execute_node(&duplicate_join_union_plan())
+            .expect("duplicate join union executes");
+
+        assert_eq!(buffer_row_count(&executor, &result), 2);
+        let stats = executor.common_subexpression_stats();
+        assert_eq!(stats.hits, 1);
+        assert!(stats.misses >= 1);
+        assert_eq!(stats.unsafe_rejections, 0);
+    }
+
+    #[test]
+    fn test_common_subexpression_off_on_preserves_output_and_records_reuse_only_when_enabled() {
+        let mut disabled = match create_test_executor_with_config(
+            RuntimeConfig::default().with_common_subexpression_elimination(Some(false)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        let mut enabled = match create_test_executor_with_config(
+            RuntimeConfig::default().with_common_subexpression_elimination(Some(true)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_cse_join_fixture(&mut disabled, &[2, 3, 5]);
+        seed_cse_join_fixture(&mut enabled, &[2, 3, 5]);
+        let plan = duplicate_join_union_plan();
+
+        disabled.provider.reset_d2h_transfer_count();
+        enabled.provider.reset_d2h_transfer_count();
+        let disabled_result = disabled.execute_node(&plan).expect("disabled CSE output");
+        let enabled_result = enabled.execute_node(&plan).expect("enabled CSE output");
+        let disabled_d2h = disabled.provider.d2h_transfer_count();
+        let enabled_d2h = enabled.provider.d2h_transfer_count();
+
+        assert_eq!(
+            read_buffer_u32(&disabled, &disabled_result, 0),
+            read_buffer_u32(&enabled, &enabled_result, 0)
+        );
+        assert_eq!(enabled_d2h, disabled_d2h);
+        assert_eq!(disabled.common_subexpression_stats().hits, 0);
+        assert_eq!(disabled.common_subexpression_stats().misses, 0);
+        assert_eq!(enabled.common_subexpression_stats().hits, 1);
+    }
+
+    #[test]
+    fn test_common_subexpression_cache_invalidates_on_relation_generation_change() {
+        let mut executor = match create_test_executor_with_config(
+            RuntimeConfig::default().with_common_subexpression_elimination(Some(true)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_cse_join_fixture(&mut executor, &[2, 3, 5]);
+        let plan = duplicate_join_union_plan();
+
+        executor.execute_node(&plan).expect("first execution");
+        assert_eq!(executor.common_subexpression_stats().hits, 1);
+
+        let changed_right = create_test_buffer(&executor, &[4], "key");
+        executor.put_relation("right", changed_right);
+        let result = executor.execute_node(&plan).expect("second execution");
+
+        assert_eq!(buffer_row_count(&executor, &result), 1);
+        let stats = executor.common_subexpression_stats();
+        assert_eq!(stats.hits, 2);
+        assert!(stats.misses >= 2);
+    }
+
+    #[test]
+    fn test_common_subexpression_cache_rejects_unsafe_difference_boundary() {
+        let mut executor = match create_test_executor_with_config(
+            RuntimeConfig::default().with_common_subexpression_elimination(Some(true)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_cse_join_fixture(&mut executor, &[2, 3, 5]);
+        let diff = RirNode::Diff {
+            left: Box::new(RirNode::Scan { rel: RelId(1) }),
+            right: Box::new(RirNode::Scan { rel: RelId(2) }),
+        };
+
+        executor
+            .execute_node(&RirNode::Union {
+                inputs: vec![diff.clone(), diff],
+            })
+            .expect("unsafe duplicate diff still executes without CSE sharing");
+
+        let stats = executor.common_subexpression_stats();
+        assert_eq!(stats.hits, 0);
+        assert!(stats.unsafe_rejections >= 1);
+        assert!(stats
+            .rejection_reasons
+            .iter()
+            .any(|reason| reason == "negation_or_difference_boundary"));
+    }
+
+    #[test]
+    fn test_common_subexpression_key_rejects_aggregate_and_tensor_boundaries() {
+        let mut executor = match create_test_executor_with_config(
+            RuntimeConfig::default().with_common_subexpression_elimination(Some(true)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        let aggregate = RirNode::GroupBy {
+            input: Box::new(RirNode::Scan { rel: RelId(1) }),
+            key_cols: vec![0],
+            aggs: vec![(0, xlog_core::AggOp::Count)],
+        };
+        let tensor = RirNode::TensorMaskedJoin {
+            mask_name: "W".to_string(),
+            schema_size: 1,
+            left_keys: vec![0],
+            right_keys: vec![0],
+            rel_index: vec![(RelId(1), "left".to_string())],
+            head_rel_name: "head".to_string(),
+            head_rel_id: RelId(3),
+            max_active_rules: 1,
+            head_projection: vec![0],
+        };
+        let chain = RirNode::ChainJoin {
+            left: Box::new(RirNode::Scan { rel: RelId(1) }),
+            right: Box::new(RirNode::Scan { rel: RelId(2) }),
+            left_key: 0,
+            right_key: 0,
+            output_columns: vec![ProjectExpr::Column(0)],
+            fallback: Box::new(RirNode::Join {
+                left: Box::new(RirNode::Scan { rel: RelId(1) }),
+                right: Box::new(RirNode::Scan { rel: RelId(2) }),
+                left_keys: vec![0],
+                right_keys: vec![0],
+                join_type: JoinType::Inner,
+            }),
+        };
+
+        assert!(executor.common_subexpression_key(&aggregate).is_none());
+        assert!(executor.common_subexpression_key(&tensor).is_none());
+        assert!(executor.common_subexpression_key(&chain).is_none());
+
+        let reasons = &executor.common_subexpression_stats().rejection_reasons;
+        assert!(reasons.iter().any(|reason| reason == "aggregate_boundary"));
+        assert!(reasons
+            .iter()
+            .any(|reason| reason == "provenance_or_tensor_boundary"));
+        assert!(reasons
+            .iter()
+            .any(|reason| reason == "specialized_dispatch_boundary"));
     }
 
     // ============== MC Relation Reset Tests ==============

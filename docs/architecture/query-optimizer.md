@@ -94,6 +94,45 @@ construct or evict indexes automatically. The intended decision logic is:
 
 See [`adaptive-indexing.md`](adaptive-indexing.md) for the design note.
 
+### 5. Common Subexpression Elimination
+
+v0.8.6 adds runtime common subexpression elimination for safe deterministic
+RIR subplans. The control is explicit:
+
+- `RuntimeConfig::with_common_subexpression_elimination(Some(true))`
+  enables CSE for one runtime.
+- `RuntimeConfig::with_common_subexpression_elimination(Some(false))`
+  disables it for A/B comparison.
+- `XLOG_CSE=1` enables it when the config field is `None`.
+
+The cache lives in `xlog-runtime::Executor`, not in a separate evaluator.
+`execute_node` builds a structural key for cacheable subplans, executes the
+existing runtime/provider path on a miss, and returns a device-to-device clone
+of the cached `CudaBuffer` on a hit. Relation scans in the key include the
+current `RelationStore` generation, and the cache is cleared on relation
+mutation and plan execution boundaries.
+
+Cacheable deterministic nodes:
+
+- `Filter`, keyed by input key plus predicate structure.
+- `Project`, keyed by input key plus projection expressions.
+- inner `Join`, keyed by input keys and join columns.
+- `Union` and `Distinct`, keyed by child keys and identity columns.
+
+Unsafe boundaries are rejected with diagnostics rather than shared:
+
+- non-inner joins and `Diff` use the `negation_or_difference_boundary` /
+  `negation_or_outer_join_boundary` classes;
+- `GroupBy` uses `aggregate_boundary`;
+- `TensorMaskedJoin` uses `provenance_or_tensor_boundary`;
+- `Fixpoint` uses `recursive_or_mutable_boundary`;
+- specialized `MultiWayJoin` and `ChainJoin` use
+  `specialized_dispatch_boundary`.
+
+The G086_CSE evidence records output parity, generation invalidation,
+unsafe-boundary rejection, CSE hit/miss telemetry, and zero added data-plane
+D2H calls for the duplicated-subplan fixture.
+
 ## Unified Statistics Layer
 
 The optimizer integrates with `xlog-stats` for runtime feedback.
@@ -200,7 +239,6 @@ pub struct OptimizerConfig {
 Planned optimizer improvements (not yet implemented):
 
 - Join reordering based on selectivity estimates
-- Common subexpression elimination across rules
 - Magic sets transformation for top-down evaluation
 - Adaptive query re-optimization during execution
 
