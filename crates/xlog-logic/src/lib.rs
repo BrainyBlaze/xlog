@@ -34,6 +34,7 @@ pub mod compiler_config;
 pub mod expand;
 pub mod function;
 pub mod hypergraph;
+pub mod incremental_parse;
 pub mod list_normalize;
 pub mod lower;
 pub mod magic_sets;
@@ -55,6 +56,9 @@ pub use ast::{
 };
 pub use compile::{compile, Compiler};
 pub use expand::expand_program_functions;
+pub use incremental_parse::{
+    IncrementalParseResult, ParseCacheStats, ParserSession, StatementSpan, StatementUnit,
+};
 pub use list_normalize::normalize_v085_lists;
 pub use lower::Lowerer;
 pub use magic_sets::{rewrite_v085_magic_sets, MagicSetReport, MagicSetRewrite, MagicSetStatus};

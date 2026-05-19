@@ -1805,6 +1805,18 @@ Full explain output must include deterministic sections when applicable:
 JSON output must be deterministic for fixed input. Unknown formats are rejected
 before compilation.
 
+### Incremental Parsing
+
+`xlog_logic::ParserSession` is the shared parser cache for explain, REPL, and
+watch workflows. It splits `.xlog` source into statement units, records stable
+text hashes and byte/line spans, and reparses only changed statements through
+the production parser. Cache statistics report hits, misses, invalidations,
+module invalidations, statement count, and an estimated statement-unit speedup.
+
+Module invalidation removes the changed module and cached sources that import
+that module name. Incremental parse diagnostics include the original
+line/column and byte span before forwarding the underlying parser error.
+
 ### `xlog repl`
 
 ```bash

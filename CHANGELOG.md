@@ -35,6 +35,9 @@ All notable changes to this project are documented in this file.
 - Added v0.8.5 approximate inference language integration: MC source pragmas,
   CLI override precedence, JSON output, and sample/evidence confidence
   reporting.
+- Added v0.8.5 incremental parsing support with statement-level parser cache,
+  stable spans, invalidation stats, module invalidation, and explain-path cache
+  integration.
 
 ### Fixed
 

@@ -12,7 +12,9 @@ use xlog_gpu::logic::LogicProgram;
 use xlog_logic::ast::ProbEngine;
 use xlog_logic::ast::Program;
 use xlog_logic::compile::load_modules;
-use xlog_logic::{parse_program, rewrite_v085_magic_sets, MagicSetReport, MagicSetStatus};
+#[cfg(feature = "host-io")]
+use xlog_logic::parse_program;
+use xlog_logic::{rewrite_v085_magic_sets, MagicSetReport, MagicSetStatus, ParserSession};
 #[cfg(feature = "host-io")]
 use xlog_prob::exact::ExactDdnnfProgram;
 #[cfg(feature = "host-io")]
@@ -150,7 +152,8 @@ fn explain(args: ExplainArgs) -> Result<()> {
     let source = std::fs::read_to_string(&args.source).map_err(|e| {
         XlogError::Execution(format!("Failed to read {}: {}", args.source.display(), e))
     })?;
-    let program = parse_program(&source)?;
+    let mut parser_session = ParserSession::new();
+    let program = parser_session.parse_path(&args.source, &source)?.program;
     let rewrite = rewrite_v085_magic_sets(&program)?;
     let aggregate_lifting = explain_aggregate_lifting(&program)?;
     match args.format {

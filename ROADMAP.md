@@ -1507,7 +1507,8 @@ WCOJ, and CLI paths.
 
 ### Incremental Parsing And CLI Developer Experience
 
-- [ ] Add incremental parsing for interactive use.
+- [x] Add incremental parsing for interactive use.
+      Evidence: `docs/evidence/2026-05-19-v085-incremental-parse/README.md`.
 - [ ] Add interactive REPL.
 - [ ] Add watch mode.
 - [ ] Add CLI explain/plan visualization.

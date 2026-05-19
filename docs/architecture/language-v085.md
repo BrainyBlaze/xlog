@@ -95,7 +95,7 @@ semantics.
 
 ## Source-Audit Snapshot
 
-Current implementation status through `G085_APPROX`:
+Current implementation status through `G085_INC_PARSE`:
 
 - `docs/language-reference.md` has been updated to the v0.8.5 contract and now
   records the shipped `G085_LIST`, `G085_META`, `G085_NAF`, `G085_MAGIC`, and
@@ -148,9 +148,12 @@ Current implementation status through `G085_APPROX`:
 - `xlog prob --output json` emits MC probability, stderr, CI, sample/evidence
   counts, seed, confidence, and sampling method. Pretty/csv/arrow MC batches
   include the same reporting columns.
-- Derived-goal `findall`, non-literal `maplist` inputs, incremental parsing,
-  REPL/watch, and full CLI explain plan rendering remain gated to later
-  `G085_*` nodes.
+- `crates/xlog-logic/src/incremental_parse.rs` provides `ParserSession` for
+  statement-level parse reuse with spans, cache hit/miss/invalidation stats,
+  module invalidation, and original-span parse diagnostics. `xlog explain`
+  parses through this session API so REPL/watch can share it in `G085_CLI`.
+- Derived-goal `findall`, non-literal `maplist` inputs, REPL/watch, and full
+  CLI explain plan rendering remain gated to later `G085_*` nodes.
 
 Each later implementation node must update this snapshot or link its evidence
 when it turns contract text into accepted source behavior.
