@@ -19,6 +19,9 @@ fn production_prob_adapter_reuses_gpu_exact_path_not_fixture_circuit() {
     assert!(production.contains("compile_source_with_gpu_execution_result"));
     assert!(production.contains("compile_program_with_gpu_execution_result"));
     assert!(production.contains("compile_and_evaluate_source_with_gpu_execution_result"));
+    assert!(
+        production.contains("compile_and_evaluate_conditioned_source_with_gpu_execution_result")
+    );
     assert!(production.contains("compile_and_evaluate_program_with_gpu_execution_result"));
     assert!(production.contains("encode_source_pir_cnf_with_gpu_execution_result"));
     assert!(production.contains("encode_program_pir_cnf_with_gpu_execution_result"));
@@ -35,6 +38,10 @@ fn production_prob_adapter_reuses_gpu_exact_path_not_fixture_circuit() {
     assert!(production.contains("gpu_knowledge_compilation_end_to_end_runs"));
     assert!(production.contains("gpu_source_knowledge_compilation_end_to_end_runs"));
     assert!(production.contains("gpu_program_knowledge_compilation_end_to_end_runs"));
+    assert!(production.contains("accepted_evidence_assumptions_consumed"));
+    assert!(production.contains("gpu_conditioned_evidence_facts"));
+    assert!(production.contains("condition_source_with_zero_arity_evidence"));
+    assert!(production.contains("program.evidence.push"));
     assert!(production.contains("gpu_exact_query_evaluations"));
     assert!(production.contains("gpu_exact_gradient_evaluations"));
     assert!(production.contains("cpu_only_probability_recomputations: 0"));

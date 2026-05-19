@@ -10,6 +10,10 @@ use std::sync::Arc;
 use xlog_core::{Result, XlogError};
 use xlog_cuda::CudaKernelProvider;
 use xlog_logic::ast::Program;
+#[cfg(feature = "host-io")]
+use xlog_logic::ast::{Atom, Evidence};
+#[cfg(feature = "host-io")]
+use xlog_logic::parse_program;
 use xlog_runtime::EpistemicGpuExecutionResult;
 
 use crate::compilation::{encode_cnf_gpu, GpuPirGraph, GpuPirRoots};
@@ -67,6 +71,8 @@ pub struct EpistemicProbProductionTrace {
     pub gpu_exact_program_compiles: u64,
     /// Number of accepted world-view evidence objects consumed as a gate.
     pub accepted_world_view_evidence_consumed: u64,
+    /// Number of accepted epistemic assumptions consumed from world-view evidence.
+    pub accepted_evidence_assumptions_consumed: u64,
     /// Number of GPU exact query evaluations routed through `ExactDdnnfProgram`.
     pub gpu_exact_query_evaluations: u64,
     /// Number of GPU gradient evaluations routed through `ExactDdnnfProgram`.
@@ -81,6 +87,8 @@ pub struct EpistemicProbProductionTrace {
     pub gpu_source_knowledge_compilation_end_to_end_runs: u64,
     /// Number of accepted parsed-program compile-and-evaluate runs through the GPU exact path.
     pub gpu_program_knowledge_compilation_end_to_end_runs: u64,
+    /// Number of zero-arity accepted assumptions compiled as exact evidence facts.
+    pub gpu_conditioned_evidence_facts: u64,
     /// CPU-only probability recomputations performed by this adapter.
     pub cpu_only_probability_recomputations: u64,
     /// Fixture `EpistemicCircuit` evaluations performed by this adapter.
@@ -158,7 +166,8 @@ impl EpistemicProbProductionTrace {
             .saturating_add(self.gpu_exact_gradient_evaluations)
             .saturating_add(self.gpu_pir_graph_uploads)
             .saturating_add(self.gpu_cnf_encodes)
-            .saturating_add(self.gpu_knowledge_compilation_end_to_end_runs);
+            .saturating_add(self.gpu_knowledge_compilation_end_to_end_runs)
+            .saturating_add(self.gpu_conditioned_evidence_facts);
         if gpu_production_events == 0 {
             return Err(XlogError::UnsupportedEpistemicConstruct {
                 construct: "epistemic probabilistic production metric gate".to_string(),
@@ -301,6 +310,52 @@ impl EpistemicProbProductionAdapter {
         let evidence =
             AcceptedWorldViewEvidence::from_gpu_execution_result(provider, result, assumptions)?;
         self.compile_and_evaluate_source_with_accepted_world_view(source, &evidence)
+    }
+
+    /// Compile source with accepted zero-arity epistemic assumptions as exact evidence.
+    #[cfg(feature = "host-io")]
+    pub fn compile_and_evaluate_conditioned_source_with_accepted_world_view(
+        &mut self,
+        source: &str,
+        evidence: &AcceptedWorldViewEvidence,
+    ) -> Result<ExactResult> {
+        self.consume_accepted_evidence(evidence)?;
+        let (program, evidence_facts) =
+            condition_source_with_zero_arity_evidence(source, evidence)?;
+        let exact = ExactDdnnfProgram::compile_from_program(&program, self.config)?;
+        self.trace.gpu_exact_source_compiles =
+            self.trace.gpu_exact_source_compiles.saturating_add(1);
+        self.trace.gpu_conditioned_evidence_facts = self
+            .trace
+            .gpu_conditioned_evidence_facts
+            .saturating_add(evidence_facts as u64);
+        let result = exact.evaluate()?;
+        self.trace.gpu_exact_query_evaluations =
+            self.trace.gpu_exact_query_evaluations.saturating_add(1);
+        self.trace.gpu_knowledge_compilation_end_to_end_runs = self
+            .trace
+            .gpu_knowledge_compilation_end_to_end_runs
+            .saturating_add(1);
+        self.trace.gpu_source_knowledge_compilation_end_to_end_runs = self
+            .trace
+            .gpu_source_knowledge_compilation_end_to_end_runs
+            .saturating_add(1);
+        self.trace.require_zero_cpu_recompute()?;
+        Ok(result)
+    }
+
+    /// Compile source with accepted GPU epistemic assumptions as exact evidence.
+    #[cfg(feature = "host-io")]
+    pub fn compile_and_evaluate_conditioned_source_with_gpu_execution_result(
+        &mut self,
+        source: &str,
+        provider: &CudaKernelProvider,
+        result: &EpistemicGpuExecutionResult,
+        assumptions: Vec<EpistemicAssumption>,
+    ) -> Result<ExactResult> {
+        let evidence =
+            AcceptedWorldViewEvidence::from_gpu_execution_result(provider, result, assumptions)?;
+        self.compile_and_evaluate_conditioned_source_with_accepted_world_view(source, &evidence)
     }
 
     /// Compile a parsed program and evaluate queries through the existing GPU exact path.
@@ -461,6 +516,10 @@ impl EpistemicProbProductionAdapter {
             .trace
             .accepted_world_view_evidence_consumed
             .saturating_add(1);
+        self.trace.accepted_evidence_assumptions_consumed = self
+            .trace
+            .accepted_evidence_assumptions_consumed
+            .saturating_add(evidence.assumption_count() as u64);
         self.trace.require_zero_cpu_recompute()
     }
 
@@ -492,6 +551,42 @@ impl EpistemicProbProductionAdapter {
             cnf_lit_cap: encoding.cnf.lit_cap,
         })
     }
+}
+
+#[cfg(feature = "host-io")]
+fn condition_source_with_zero_arity_evidence(
+    source: &str,
+    evidence: &AcceptedWorldViewEvidence,
+) -> Result<(Program, usize)> {
+    if evidence.assumptions().is_empty() {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "accepted probabilistic evidence conditioning".to_string(),
+            context: "conditioned exact path requires at least one accepted epistemic assumption"
+                .to_string(),
+        });
+    }
+
+    let mut program = parse_program(source)?;
+    for assumption in evidence.assumptions() {
+        if assumption.arity != 0 {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "accepted probabilistic evidence conditioning".to_string(),
+                context: format!(
+                    "exact evidence conditioning currently supports zero-arity assumptions, got {}/{}",
+                    assumption.predicate, assumption.arity
+                ),
+            });
+        }
+        program.evidence.push(Evidence {
+            atom: Atom {
+                predicate: assumption.predicate.clone(),
+                terms: Vec::new(),
+            },
+            value: assumption.value,
+        });
+    }
+
+    Ok((program, evidence.assumption_count()))
 }
 
 fn production_pir_roots(provenance: &Provenance) -> Result<Vec<PirNodeId>> {

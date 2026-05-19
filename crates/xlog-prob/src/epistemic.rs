@@ -296,6 +296,16 @@ impl AcceptedWorldViewEvidence {
     pub fn world_count(&self) -> usize {
         self.world_count
     }
+
+    /// Accepted epistemic assumptions represented by this evidence.
+    pub fn assumptions(&self) -> &[EpistemicAssumption] {
+        &self.assumptions
+    }
+
+    /// Number of accepted epistemic assumptions represented by this evidence.
+    pub fn assumption_count(&self) -> usize {
+        self.assumptions.len()
+    }
 }
 
 fn require_gpu_kernel_trace(

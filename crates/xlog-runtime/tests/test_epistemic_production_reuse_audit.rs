@@ -95,6 +95,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(prob.contains("compile_source_with_gpu_execution_result"));
     assert!(prob.contains("compile_program_with_gpu_execution_result"));
     assert!(prob.contains("compile_and_evaluate_source_with_gpu_execution_result"));
+    assert!(prob.contains("compile_and_evaluate_conditioned_source_with_gpu_execution_result"));
     assert!(prob.contains("compile_and_evaluate_program_with_gpu_execution_result"));
     assert!(prob.contains("encode_source_pir_cnf_with_gpu_execution_result"));
     assert!(prob.contains("encode_program_pir_cnf_with_gpu_execution_result"));
@@ -105,6 +106,10 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(prob.contains("gpu_knowledge_compilation_end_to_end_runs"));
     assert!(prob.contains("gpu_source_knowledge_compilation_end_to_end_runs"));
     assert!(prob.contains("gpu_program_knowledge_compilation_end_to_end_runs"));
+    assert!(prob.contains("accepted_evidence_assumptions_consumed"));
+    assert!(prob.contains("gpu_conditioned_evidence_facts"));
+    assert!(prob.contains("condition_source_with_zero_arity_evidence"));
+    assert!(prob.contains("program.evidence.push"));
     assert!(prob.contains("evaluate_with_gpu_execution_result"));
     assert!(prob.contains("evaluate_gpu_with_grads_with_gpu_execution_result"));
     assert!(prob.contains("gpu_exact_query_evaluations"));
