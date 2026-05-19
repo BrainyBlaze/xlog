@@ -1502,6 +1502,31 @@ impl GpuSolverProductionAdapter {
         Ok(report)
     }
 
+    /// Search a bounded weighted MaxSAT candidate set once per accepted split-batch component.
+    pub fn solve_weighted_maxsat_search_with_gpu_batch_execution_result(
+        &mut self,
+        provider: &CudaKernelProvider,
+        evidence: GpuSolverProductionBatchExecutionEvidence<'_>,
+        workspace: &mut GpuCdclWorkspace,
+        candidates: &[GpuSolverProductionMaxSatSearchCandidate<'_>],
+    ) -> Result<GpuSolverProductionMaxSatReport> {
+        let results = require_accepted_gpu_solver_batch_evidence(provider, evidence.batch)?;
+        self.trace.accepted_gpu_batch_candidate_evidence_consumed = self
+            .trace
+            .accepted_gpu_batch_candidate_evidence_consumed
+            .saturating_add(1);
+        self.trace
+            .accepted_gpu_batch_candidate_component_evidence_consumed = self
+            .trace
+            .accepted_gpu_batch_candidate_component_evidence_consumed
+            .saturating_add(results.len() as u64);
+        let report = self.solve_multi_candidate_weighted_maxsat_search_with_gpu_execution_results(
+            provider, &results, workspace, candidates,
+        )?;
+        self.trace.require_zero_cpu_search()?;
+        Ok(report)
+    }
+
     /// Search a bounded weighted MaxSAT candidate set once per accepted GPU evidence record.
     pub fn solve_multi_candidate_weighted_maxsat_search_with_gpu_execution_results(
         &mut self,

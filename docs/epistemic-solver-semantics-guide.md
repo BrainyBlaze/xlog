@@ -365,8 +365,8 @@ zero CPU candidate/world-view fallback counters.
 `xlog_solve::GpuSolverProductionAdapter` is the production-facing solver reuse
 adapter for epistemic callers. It is a thin wrapper over the existing
 `GpuCdclSolver`; it dispatches `solve_expect_sat`, `solve_expect_unsat`,
-workspace-backed UNSAT, bounded weighted MaxSAT candidate checks, single-result
-and multi-result MaxSAT search pruning, single-result and multi-result
+workspace-backed UNSAT, bounded weighted MaxSAT candidate checks, single-result,
+multi-result, and accepted split-batch MaxSAT search pruning, single-result and multi-result
 weighted MaxSAT selection encoding, heterogeneous MaxSAT scheduler jobs, and
 single-result plus multi-result bounded SAT/MaxSAT portfolio jobs
 through the GPU CDCL path and exposes zero CPU assignment/MaxSAT enumeration
@@ -442,6 +442,11 @@ enumeration.
 validates multiple accepted GPU runtime results up front, then repeats that
 bounded SAT/UNSAT MaxSAT search-pruning path once per accepted evidence record
 through the same GPU CDCL workspace.
+`solve_weighted_maxsat_search_with_gpu_batch_execution_result` consumes the
+same accepted split-batch evidence as the lifecycle adapter, then delegates
+each component to the existing multi-candidate MaxSAT search-pruning path. It
+records split-batch candidate/component counters, satisfiable candidates, UNSAT
+prunes, GPU CDCL candidate solves, optima, and zero CPU MaxSAT enumeration.
 `solve_weighted_maxsat_encoded_search_with_gpu_execution_result` applies the
 same boundary before converting caller-declared weighted soft-clause selections
 into satisfaction CNFs, uploading those candidates through the existing GPU CNF
@@ -485,10 +490,10 @@ distinct-CNF fail-closed rejection, a two-record accepted lifecycle, and bounded
 UNKNOWN/TIMEOUT lifecycle propagation, plus two-record same-CNF learned-clause
 reuse, a mixed unary and binary `possible`/`not possible` plus binary `not know`
 operator-result lifecycle,
-accepted split-batch lifecycle, learned-clause reuse, MaxSAT, and portfolio evidence
+accepted split-batch lifecycle, learned-clause reuse, MaxSAT, MaxSAT search pruning, and portfolio evidence
 with batch/component counters,
 two-record/two-CNF bounded MaxSAT candidate-set execution, bounded GPU-CDCL
-pruning of UNSAT MaxSAT search candidates for one and two accepted evidence
+pruning of UNSAT MaxSAT search candidates for one, two, and split-batch accepted evidence
 records, and bounded weighted soft-clause selection encoding for one and two
 accepted evidence records, plus a two-record heterogeneous MaxSAT scheduler
 over candidate-set, search-prune, encoded-search, UNKNOWN, and TIMEOUT jobs and
@@ -520,6 +525,7 @@ cargo test -p xlog-solve --test gpu_solver_production_reuse
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_lifecycle_path -- --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_learned_clause_reuse_path -- --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_maxsat_path -- --nocapture
+cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_maxsat_search_pruning -- --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_portfolio_path -- --nocapture
 cargo test -p xlog-solve --test solver_service_semantics
 ```
