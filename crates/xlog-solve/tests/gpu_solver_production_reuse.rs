@@ -86,6 +86,8 @@ fn production_solver_adapter_reuses_gpu_cdcl_not_cpu_oracle() {
     assert!(production.contains("gpu_portfolio_unknown_status_jobs"));
     assert!(production.contains("gpu_portfolio_timeout_status_jobs"));
     assert!(production.contains("accepted_gpu_candidate_evidence_consumed"));
+    assert!(production.contains("accepted_g91_gpu_candidate_evidence_consumed"));
+    assert!(production.contains("accepted_faeel_gpu_candidate_evidence_consumed"));
     assert!(production.contains("read_device_row_count"));
     assert!(production.contains("require_stable_model_tuple_source"));
     assert!(production.contains("GpuCnf::from_host(&candidate_instance, &self.provider)"));

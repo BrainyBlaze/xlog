@@ -2481,6 +2481,133 @@ fn accepted_g91_and_faeel_modes_gate_probabilistic_production_trace() {
 }
 
 #[test]
+fn accepted_g91_and_faeel_modes_gate_solver_production_trace() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let g91_program = parse_program(
+        r#"
+        #pragma epistemic_mode = g91
+        pred p().
+        p() :- possible p().
+        "#,
+    )
+    .expect("parse G91 self-supported possible fixture");
+    let g91_executable = compile_epistemic_gpu_execution_with_stats_snapshot(&g91_program, None)
+        .expect("compile G91 self-supported possible executable");
+    let mut g91_executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &g91_executable.relation_ids {
+        g91_executor.register_relation(*rel_id, name);
+    }
+    g91_executor.put_relation("p", upload_nullary(&fix.memory, 1));
+    let g91_result = g91_executor
+        .execute_epistemic_gpu_execution(
+            &g91_executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("execute G91 self-supported possible fixture");
+    assert_eq!(
+        g91_result.prepared.preflight.epistemic_mode,
+        EirEpistemicMode::G91
+    );
+
+    let faeel_program = parse_program(
+        r#"
+        pred seed().
+        pred p().
+        p() :- seed().
+        p() :- possible p().
+        "#,
+    )
+    .expect("parse independently founded FAEEL fixture");
+    let faeel_executable =
+        compile_epistemic_gpu_execution_with_stats_snapshot(&faeel_program, None)
+            .expect("compile independently founded FAEEL executable");
+    let mut faeel_executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &faeel_executable.relation_ids {
+        faeel_executor.register_relation(*rel_id, name);
+    }
+    faeel_executor.put_relation("seed", upload_nullary(&fix.memory, 1));
+    faeel_executor.put_relation("p", upload_nullary(&fix.memory, 0));
+    let faeel_result = faeel_executor
+        .execute_epistemic_gpu_execution(
+            &faeel_executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("execute independently founded FAEEL fixture");
+    assert_eq!(
+        faeel_result.prepared.preflight.epistemic_mode,
+        EirEpistemicMode::Faeel
+    );
+
+    let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
+    let unsat_instance = SolveInstance::new(
+        1,
+        vec![
+            Clause::new(vec![Literal::positive(0)]),
+            Clause::new(vec![Literal::negative(0)]),
+        ],
+    );
+    let sat_cnf = GpuCnf::from_host(&sat_instance, &fix.provider).expect("upload SAT CNF");
+    let unsat_cnf = GpuCnf::from_host(&unsat_instance, &fix.provider).expect("upload UNSAT CNF");
+    let branch_limit = upload_u32_scalar(&fix.provider, 1);
+    let mut adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let mut workspace = adapter
+        .new_workspace(unsat_cnf.var_cap, unsat_cnf.clause_cap)
+        .expect("new workspace");
+
+    let report = adapter
+        .solve_multi_candidate_assumption_lifecycle_with_gpu_execution_results(
+            &fix.provider,
+            &[&g91_result, &faeel_result],
+            &mut workspace,
+            &[
+                GpuSolverProductionLifecycleStep {
+                    cnf: &sat_cnf,
+                    branch_var_limit: &branch_limit,
+                    expectation: GpuSolverProductionExpectation::Sat,
+                },
+                GpuSolverProductionLifecycleStep {
+                    cnf: &unsat_cnf,
+                    branch_var_limit: &branch_limit,
+                    expectation: GpuSolverProductionExpectation::Unsat,
+                },
+            ],
+        )
+        .expect("accepted G91 and FAEEL GPU evidence must gate solver lifecycle path");
+
+    assert_eq!(report.candidate_evidence_records, 2);
+    assert_eq!(report.steps, 4);
+    assert_eq!(report.assumption_pushes, 4);
+    assert_eq!(report.assumption_retractions, 4);
+    assert_eq!(report.workspace_reuses, 2);
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 2);
+    assert_eq!(trace.accepted_g91_gpu_candidate_evidence_consumed, 1);
+    assert_eq!(trace.accepted_faeel_gpu_candidate_evidence_consumed, 1);
+    assert_eq!(trace.gpu_assumption_pushes, 4);
+    assert_eq!(trace.gpu_assumption_retractions, 4);
+    assert_eq!(trace.gpu_lifecycle_workspace_reuses, 2);
+    assert_eq!(trace.gpu_cdcl_sat_solves, 2);
+    assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 2);
+    assert_eq!(trace.cpu_assignment_enumerations, 0);
+    assert_eq!(trace.cpu_maxsat_enumerations, 0);
+}
+
+#[test]
 fn accepted_gpu_execution_result_gates_probabilistic_exact_path() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");

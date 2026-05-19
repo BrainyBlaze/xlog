@@ -431,6 +431,9 @@ and recording portfolio counters.
 accepted GPU runtime results up front, then repeats the same SAT/MaxSAT/status
 portfolio jobs once per accepted evidence record while aggregating
 candidate-evidence and `gpu_portfolio_*` counters.
+Accepted GPU candidate evidence also preserves the runtime epistemic mode;
+`GpuSolverProductionTrace` counts G91 and default FAEEL candidate evidence
+separately when either mode gates solver production work.
 `xlog_solve::production_capabilities` reports that GPU CDCL SAT/UNSAT is
 available along with the bounded GPU-backed MaxSAT and SAT/MaxSAT portfolio
 adapters. `GpuSolverProductionTrace::require_production_metric_eligibility`
@@ -448,7 +451,8 @@ pruning of UNSAT MaxSAT search candidates for one and two accepted evidence
 records, and bounded weighted soft-clause selection encoding for one and two
 accepted evidence records, plus a two-record heterogeneous MaxSAT scheduler
 over candidate-set, search-prune, encoded-search, UNKNOWN, and TIMEOUT jobs and
-two-record status-aware portfolio dispatch. Broader solver semantic integration
+two-record status-aware portfolio dispatch, with G91/default FAEEL mode-specific
+accepted-evidence trace counters. Broader solver semantic integration
 remains open.
 
 `xlog_solve::SolverService` provides the bounded solver API used by semantic

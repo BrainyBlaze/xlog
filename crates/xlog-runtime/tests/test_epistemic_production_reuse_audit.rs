@@ -211,6 +211,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(solver.contains("gpu_portfolio_unknown_status_jobs"));
     assert!(solver.contains("gpu_portfolio_timeout_status_jobs"));
     assert!(solver.contains("accepted_gpu_candidate_evidence_consumed"));
+    assert!(solver.contains("accepted_g91_gpu_candidate_evidence_consumed"));
+    assert!(solver.contains("accepted_faeel_gpu_candidate_evidence_consumed"));
     assert!(solver.contains("require_production_metric_eligibility"));
     assert!(solver.contains("production solver metrics require accepted GPU candidate evidence"));
     assert!(solver.contains("read_device_row_count"));

@@ -1109,6 +1109,16 @@ pub struct EpistemicGpuRuntimePreflight {
 }
 
 impl EpistemicGpuRuntimePreflight {
+    /// Whether this accepted execution used G91 compatibility semantics.
+    pub fn is_g91_mode(&self) -> bool {
+        matches!(self.epistemic_mode, EirEpistemicMode::G91)
+    }
+
+    /// Whether this accepted execution used default FAEEL semantics.
+    pub fn is_faeel_mode(&self) -> bool {
+        matches!(self.epistemic_mode, EirEpistemicMode::Faeel)
+    }
+
     /// Inspect an executable epistemic plan before GPU kernel dispatch.
     pub fn for_executable_plan(
         executable: &EpistemicExecutablePlan,

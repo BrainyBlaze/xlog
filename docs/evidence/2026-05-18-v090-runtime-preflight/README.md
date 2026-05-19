@@ -68,7 +68,7 @@ incomplete for the full epistemic hot path and does not close `G090_GPU`.
 | `cargo fmt --check` | PASS |
 | `git diff --check` | PASS |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 53 passed, 0 failed |
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 70 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 71 passed, 0 failed |
 | `cargo test -p xlog-cuda --test build_script_tests -- --nocapture` | PASS, 4 passed, 0 failed |
 | `cargo test -p xlog-runtime --lib` | PASS, 128 passed, 0 failed |
 | `cargo check -p xlog-cuda -p xlog-runtime -p xlog-logic -p xlog-ir` | PASS |

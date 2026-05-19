@@ -324,6 +324,10 @@ pub fn production_capabilities() -> GpuSolverProductionCapabilities {
 pub struct GpuSolverProductionTrace {
     /// Number of accepted GPU epistemic candidate evidence records consumed.
     pub accepted_gpu_candidate_evidence_consumed: u64,
+    /// Number of accepted G91 GPU epistemic candidate evidence records consumed.
+    pub accepted_g91_gpu_candidate_evidence_consumed: u64,
+    /// Number of accepted FAEEL GPU epistemic candidate evidence records consumed.
+    pub accepted_faeel_gpu_candidate_evidence_consumed: u64,
     /// Number of SAT expectations dispatched through `GpuCdclSolver`.
     pub gpu_cdcl_sat_solves: u64,
     /// Number of UNSAT expectations dispatched through `GpuCdclSolver`.
@@ -503,6 +507,25 @@ impl GpuSolverProductionAdapter {
         self.solver.new_workspace(max_var_cap, max_clause_cap)
     }
 
+    fn record_accepted_gpu_candidate_evidence(&mut self, result: &EpistemicGpuExecutionResult) {
+        self.trace.accepted_gpu_candidate_evidence_consumed = self
+            .trace
+            .accepted_gpu_candidate_evidence_consumed
+            .saturating_add(1);
+        if result.prepared.preflight.is_g91_mode() {
+            self.trace.accepted_g91_gpu_candidate_evidence_consumed = self
+                .trace
+                .accepted_g91_gpu_candidate_evidence_consumed
+                .saturating_add(1);
+        }
+        if result.prepared.preflight.is_faeel_mode() {
+            self.trace.accepted_faeel_gpu_candidate_evidence_consumed = self
+                .trace
+                .accepted_faeel_gpu_candidate_evidence_consumed
+                .saturating_add(1);
+        }
+    }
+
     /// Solve and enforce SAT entirely on GPU.
     pub fn solve_expect_sat(&mut self, cnf: &GpuCnf) -> Result<TrackedCudaSlice<i8>> {
         let assignment = self.solver.solve_expect_sat(cnf)?;
@@ -520,10 +543,7 @@ impl GpuSolverProductionAdapter {
     ) -> Result<TrackedCudaSlice<i8>> {
         require_accepted_gpu_solver_evidence(provider, result)?;
         let assignment = self.solve_expect_sat(cnf)?;
-        self.trace.accepted_gpu_candidate_evidence_consumed = self
-            .trace
-            .accepted_gpu_candidate_evidence_consumed
-            .saturating_add(1);
+        self.record_accepted_gpu_candidate_evidence(result);
         self.trace.require_zero_cpu_search()?;
         Ok(assignment)
     }
@@ -537,10 +557,7 @@ impl GpuSolverProductionAdapter {
     ) -> Result<()> {
         require_accepted_gpu_solver_evidence(provider, result)?;
         self.solve_expect_unsat(cnf)?;
-        self.trace.accepted_gpu_candidate_evidence_consumed = self
-            .trace
-            .accepted_gpu_candidate_evidence_consumed
-            .saturating_add(1);
+        self.record_accepted_gpu_candidate_evidence(result);
         self.trace.require_zero_cpu_search()
     }
 
@@ -576,10 +593,7 @@ impl GpuSolverProductionAdapter {
     ) -> Result<()> {
         require_accepted_gpu_solver_evidence(provider, result)?;
         self.solve_expect_unsat_with_branch_limit_ws(workspace, cnf, branch_var_limit)?;
-        self.trace.accepted_gpu_candidate_evidence_consumed = self
-            .trace
-            .accepted_gpu_candidate_evidence_consumed
-            .saturating_add(1);
+        self.record_accepted_gpu_candidate_evidence(result);
         self.trace.require_zero_cpu_search()
     }
 
@@ -717,10 +731,7 @@ impl GpuSolverProductionAdapter {
         require_accepted_gpu_solver_evidence(provider, result)?;
         let mut report = self.solve_assumption_lifecycle_steps(workspace, steps)?;
         report.candidate_evidence_records = 1;
-        self.trace.accepted_gpu_candidate_evidence_consumed = self
-            .trace
-            .accepted_gpu_candidate_evidence_consumed
-            .saturating_add(1);
+        self.record_accepted_gpu_candidate_evidence(result);
         self.trace.require_zero_cpu_search()?;
         Ok(report)
     }
@@ -756,7 +767,7 @@ impl GpuSolverProductionAdapter {
         }
 
         let mut report = GpuSolverProductionLifecycleReport::default();
-        for _ in results {
+        for result in results {
             let step_report = self.solve_assumption_lifecycle_steps(workspace, steps)?;
             report.candidate_evidence_records = report.candidate_evidence_records.saturating_add(1);
             report.steps = report.steps.saturating_add(step_report.steps);
@@ -775,10 +786,7 @@ impl GpuSolverProductionAdapter {
             report.timeout_steps = report
                 .timeout_steps
                 .saturating_add(step_report.timeout_steps);
-            self.trace.accepted_gpu_candidate_evidence_consumed = self
-                .trace
-                .accepted_gpu_candidate_evidence_consumed
-                .saturating_add(1);
+            self.record_accepted_gpu_candidate_evidence(result);
         }
 
         self.trace.require_zero_cpu_search()?;
@@ -841,10 +849,7 @@ impl GpuSolverProductionAdapter {
             .trace
             .gpu_learned_count_buffer_publications
             .saturating_add(1);
-        self.trace.accepted_gpu_candidate_evidence_consumed = self
-            .trace
-            .accepted_gpu_candidate_evidence_consumed
-            .saturating_add(1);
+        self.record_accepted_gpu_candidate_evidence(result);
         self.trace.require_zero_cpu_search()?;
 
         Ok(GpuSolverProductionLearnedClauseArenaReport {
@@ -973,10 +978,7 @@ impl GpuSolverProductionAdapter {
             target_branch_var_limit,
         )?;
         report.candidate_evidence_records = 1;
-        self.trace.accepted_gpu_candidate_evidence_consumed = self
-            .trace
-            .accepted_gpu_candidate_evidence_consumed
-            .saturating_add(1);
+        self.record_accepted_gpu_candidate_evidence(result);
         self.trace.require_zero_cpu_search()?;
         Ok(report)
     }
@@ -1006,7 +1008,7 @@ impl GpuSolverProductionAdapter {
         }
 
         let mut report = GpuSolverProductionLearnedClauseReuseReport::default();
-        for _ in results {
+        for result in results {
             let step_report = self.solve_unsat_then_reuse_learned_clauses(
                 workspace,
                 source_cnf,
@@ -1027,10 +1029,7 @@ impl GpuSolverProductionAdapter {
                 .gpu_learned_clause_reused_solves
                 .saturating_add(step_report.gpu_learned_clause_reused_solves);
             report.cpu_learned_clause_transfers = self.trace.cpu_learned_clause_transfers;
-            self.trace.accepted_gpu_candidate_evidence_consumed = self
-                .trace
-                .accepted_gpu_candidate_evidence_consumed
-                .saturating_add(1);
+            self.record_accepted_gpu_candidate_evidence(result);
         }
 
         self.trace.require_zero_cpu_search()?;
@@ -1090,10 +1089,7 @@ impl GpuSolverProductionAdapter {
         require_accepted_gpu_solver_evidence(provider, result)?;
         let mut report = self.solve_weighted_maxsat_candidates(candidates)?;
         report.candidate_evidence_records = 1;
-        self.trace.accepted_gpu_candidate_evidence_consumed = self
-            .trace
-            .accepted_gpu_candidate_evidence_consumed
-            .saturating_add(1);
+        self.record_accepted_gpu_candidate_evidence(result);
         self.trace.require_zero_cpu_search()?;
         Ok(report)
     }
@@ -1117,7 +1113,7 @@ impl GpuSolverProductionAdapter {
         }
 
         let mut report = GpuSolverProductionMaxSatReport::default();
-        for _ in results {
+        for result in results {
             let step_report = self.solve_weighted_maxsat_candidates(candidates)?;
             report.candidate_evidence_records = report.candidate_evidence_records.saturating_add(1);
             report.optimum_score = report.optimum_score.max(step_report.optimum_score);
@@ -1136,10 +1132,7 @@ impl GpuSolverProductionAdapter {
             report.gpu_cdcl_candidate_solves = report
                 .gpu_cdcl_candidate_solves
                 .saturating_add(step_report.gpu_cdcl_candidate_solves);
-            self.trace.accepted_gpu_candidate_evidence_consumed = self
-                .trace
-                .accepted_gpu_candidate_evidence_consumed
-                .saturating_add(1);
+            self.record_accepted_gpu_candidate_evidence(result);
         }
 
         self.trace.require_zero_cpu_search()?;
@@ -1355,10 +1348,7 @@ impl GpuSolverProductionAdapter {
         require_accepted_gpu_solver_evidence(provider, result)?;
         let mut report = self.solve_weighted_maxsat_search_candidates(workspace, candidates)?;
         report.candidate_evidence_records = 1;
-        self.trace.accepted_gpu_candidate_evidence_consumed = self
-            .trace
-            .accepted_gpu_candidate_evidence_consumed
-            .saturating_add(1);
+        self.record_accepted_gpu_candidate_evidence(result);
         self.trace.require_zero_cpu_search()?;
         Ok(report)
     }
@@ -1383,7 +1373,7 @@ impl GpuSolverProductionAdapter {
         }
 
         let mut report = GpuSolverProductionMaxSatReport::default();
-        for _ in results {
+        for result in results {
             let step_report =
                 self.solve_weighted_maxsat_search_candidates(workspace, candidates)?;
             report.candidate_evidence_records = report.candidate_evidence_records.saturating_add(1);
@@ -1403,10 +1393,7 @@ impl GpuSolverProductionAdapter {
             report.gpu_cdcl_candidate_solves = report
                 .gpu_cdcl_candidate_solves
                 .saturating_add(step_report.gpu_cdcl_candidate_solves);
-            self.trace.accepted_gpu_candidate_evidence_consumed = self
-                .trace
-                .accepted_gpu_candidate_evidence_consumed
-                .saturating_add(1);
+            self.record_accepted_gpu_candidate_evidence(result);
         }
 
         self.trace.require_zero_cpu_search()?;
@@ -1447,10 +1434,7 @@ impl GpuSolverProductionAdapter {
             .trace
             .gpu_maxsat_candidate_encodes
             .saturating_sub(encodes_before);
-        self.trace.accepted_gpu_candidate_evidence_consumed = self
-            .trace
-            .accepted_gpu_candidate_evidence_consumed
-            .saturating_add(1);
+        self.record_accepted_gpu_candidate_evidence(result);
         self.trace.require_zero_cpu_search()?;
         Ok(report)
     }
@@ -1484,7 +1468,7 @@ impl GpuSolverProductionAdapter {
         }
 
         let mut report = GpuSolverProductionMaxSatReport::default();
-        for _ in results {
+        for result in results {
             let encodes_before = self.trace.gpu_maxsat_candidate_encodes;
             let encoded = self.encode_weighted_maxsat_search_candidates(weighted, selections)?;
             let search_candidates: Vec<_> = encoded
@@ -1517,10 +1501,7 @@ impl GpuSolverProductionAdapter {
             report.gpu_cdcl_candidate_solves = report
                 .gpu_cdcl_candidate_solves
                 .saturating_add(step_report.gpu_cdcl_candidate_solves);
-            self.trace.accepted_gpu_candidate_evidence_consumed = self
-                .trace
-                .accepted_gpu_candidate_evidence_consumed
-                .saturating_add(1);
+            self.record_accepted_gpu_candidate_evidence(result);
         }
 
         self.trace.require_zero_cpu_search()?;
@@ -1683,7 +1664,7 @@ impl GpuSolverProductionAdapter {
         }
 
         let mut report = GpuSolverProductionMaxSatScheduleReport::default();
-        for _ in results {
+        for result in results {
             let step_report = self.solve_maxsat_schedule_jobs(workspace, jobs)?;
             report.candidate_evidence_records = report.candidate_evidence_records.saturating_add(1);
             report.jobs = report.jobs.saturating_add(step_report.jobs);
@@ -1708,10 +1689,7 @@ impl GpuSolverProductionAdapter {
                     ..GpuSolverProductionMaxSatReport::default()
                 },
             );
-            self.trace.accepted_gpu_candidate_evidence_consumed = self
-                .trace
-                .accepted_gpu_candidate_evidence_consumed
-                .saturating_add(1);
+            self.record_accepted_gpu_candidate_evidence(result);
         }
 
         self.trace.require_zero_cpu_search()?;
@@ -1821,10 +1799,7 @@ impl GpuSolverProductionAdapter {
         let mut report = self.solve_portfolio_jobs(jobs)?;
         report.candidate_evidence_records = 1;
 
-        self.trace.accepted_gpu_candidate_evidence_consumed = self
-            .trace
-            .accepted_gpu_candidate_evidence_consumed
-            .saturating_add(1);
+        self.record_accepted_gpu_candidate_evidence(result);
         self.trace.require_zero_cpu_search()?;
         Ok(report)
     }
@@ -1854,14 +1829,11 @@ impl GpuSolverProductionAdapter {
         }
 
         let mut report = GpuSolverProductionPortfolioReport::default();
-        for _ in results {
+        for result in results {
             let step_report = self.solve_portfolio_jobs(jobs)?;
             report.candidate_evidence_records = report.candidate_evidence_records.saturating_add(1);
             Self::add_portfolio_report(&mut report, step_report);
-            self.trace.accepted_gpu_candidate_evidence_consumed = self
-                .trace
-                .accepted_gpu_candidate_evidence_consumed
-                .saturating_add(1);
+            self.record_accepted_gpu_candidate_evidence(result);
         }
 
         self.trace.require_zero_cpu_search()?;
