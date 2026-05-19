@@ -4,6 +4,7 @@ Date: 2026-05-19
 Branch: `feat/v086-runtime-completion`
 Validation head after consumer behavior-probe trace amendment: `c5ff5248`
 Implementation evidence head before hold/correction amendment: `0e2a5420`
+Post-release validator hardening commit: `b4fdcd79`
 Release action authorization: release-board update, commit, merge, push, and
 annotated `v0.8.6` tag authorized on 2026-05-19 after the closure package
 reached `MERGE_READY`
@@ -97,6 +98,7 @@ authorized as the release actions for this closure package.
 | `cargo test -p xlog-integration` | exit 0; includes strict deterministic D2H, cross-mode determinism, WCOJ, and widened-frontier suites |
 | `PYTHONPATH=target/debug pytest -q python/tests/test_v080_examples_source.py python/tests/test_v085_examples_source.py python/tests/test_v086_delta_coalescing.py python/tests/test_v086_relation_callbacks.py python/tests/test_v086_relation_callbacks_runtime.py python/tests/test_v086_exact_types_source.py python/tests/test_v086_exact_types_runtime.py python/tests/test_v086_chain_smem_profile_source.py python/tests/test_v086_chain_smem_source.py python/tests/test_v086_cse_source.py python/tests/test_v086_adaptive_reoptimization_source.py python/tests/test_v086_persistent_hash_index_source.py python/tests/test_v086_consumers_source.py python/tests/test_v086_pyxlog_persistent_index_runtime.py` | exit 0; 44 passed in 86.31s |
 | `python scripts/validate_v086_examples.py` | exit 0; v0.8.0 examples 5, v0.8.5 examples 10, v0.8.6 examples 5; `consumer_certification_status=PASS` |
+| `python scripts/validate_v086_examples.py --output /tmp/v086-release-revalidate.json --timeout 120` | exit 0 after `b4fdcd79`; default pyxlog staging now uses fresh Cargo kernel artifacts instead of ignored package-local kernels |
 | `python -m json.tool` over v0.8.6 evidence and expected JSON files | exit 0 |
 | `python -m py_compile scripts/validate_v086_examples.py python/tests/test_v086_persistent_hash_index_source.py python/tests/test_v086_consumers_source.py` | exit 0 |
 | `python scripts/validate_package_metadata.py` | exit 0 |

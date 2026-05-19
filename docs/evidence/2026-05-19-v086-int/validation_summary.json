@@ -2,6 +2,7 @@
   "branch": "feat/v086-runtime-completion",
   "commit_under_test": "2d390318",
   "trace_head_before_release_metadata": "c5ff5248",
+  "post_release_validator_hardening_commit": "b4fdcd79",
   "compatibility": {
     "v080_examples": {
       "example_count": 5,
@@ -26,6 +27,12 @@
     "consumer_proof_gaps": [],
     "feature_coverage_source": "behavior_probes",
     "probe_count": 9,
+    "status": "PASS"
+  },
+  "release_validator_revalidation": {
+    "command": "python scripts/validate_v086_examples.py --output /tmp/v086-release-revalidate.json --timeout 120",
+    "kernel_staging": "fresh Cargo xlog-cuda artifacts staged into target/debug/pyxlog/kernels; no manual XLOG_CUBIN_DIR override",
+    "output": "/tmp/v086-release-revalidate.json",
     "status": "PASS"
   },
   "date": "2026-05-19",

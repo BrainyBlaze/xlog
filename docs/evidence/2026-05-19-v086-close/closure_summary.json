@@ -4,6 +4,7 @@
   "implementation_evidence_head_before_hold_correction": "0e2a5420",
   "hold_correction_commit": "81badf314c09",
   "persistent_index_performance_commit": "df2dbc03",
+  "post_release_validator_hardening_commit": "b4fdcd79",
   "date": "2026-05-19",
   "governing_goal": "docs/plans/2026-05-19-agent-v086-dts-runtime-completion-goal.md",
   "proposal": "docs/plans/2026-05-19-v086-closure-proposal.md",
@@ -100,6 +101,12 @@
       "feature_coverage_source": "behavior_probes",
       "probe_count": 9,
       "consumer_proof_gaps": []
+    },
+    "release_validator_revalidation": {
+      "status": "PASS",
+      "command": "python scripts/validate_v086_examples.py --output /tmp/v086-release-revalidate.json --timeout 120",
+      "output": "/tmp/v086-release-revalidate.json",
+      "kernel_staging": "fresh Cargo xlog-cuda artifacts staged into target/debug/pyxlog/kernels; no manual XLOG_CUBIN_DIR override"
     }
   },
   "v090_rebase_note": "v0.9.0 should rebase on or merge after any accepted v0.8.6 landing because exact type dispatch, chain shared-memory scoring, runtime CSE, adaptive candidate adoption, persistent-index telemetry, and behavior-proven consumer certification affect the substrate expected by epistemic/solver work.",

@@ -35,6 +35,8 @@ Scope: `G086_CLOSE` evidence rollup and closure proposal.
 | `cargo test -p xlog-runtime test_persistent_hash_index_performance_fixture_meets_speedup_target -- --nocapture` | PASS; `speedup_ratio=3.206`, zero tracked DTOH/H2D |
 | `cargo test -p xlog-cuda test_recorded_join_index_build_runs_on_runtime_stream -- --nocapture` | PASS; 1 provider test |
 | `PYTHONPATH=target/debug pytest -q python/tests/test_v086_pyxlog_persistent_index_runtime.py` | PASS; public `LogicRelationSession` persistent-index build/hit, zero tracked host transfers |
+| `PYTHONPATH=target/debug pytest -q python/tests/test_v086_consumers_source.py` | PASS; 8 tests, including stale package-local kernel staging regression |
+| `python scripts/validate_v086_examples.py --output /tmp/v086-release-revalidate.json --timeout 120` | PASS; default environment, no manual `XLOG_CUBIN_DIR` override, v0.8.0/v0.8.5/v0.8.6 examples and pyxlog probe passed |
 | methodology heading scan over `docs/evidence/2026-05-19-v086-*` | PASS; 12 evidence files |
 | `python scripts/validate_package_metadata.py` | PASS |
 | `git diff --check` | PASS |
@@ -54,6 +56,14 @@ validator-owned behavior probes rather than `expected.json` declarations.
 Public pyxlog persistent-index session reuse is proven by a
 `LogicRelationSession` delta loop that records one build, at least one hit,
 and zero tracked DTOH/H2D calls.
+
+Post-release revalidation found that ignored package-local pyxlog kernel
+artifacts could shadow freshly generated Cargo build artifacts. Commit
+`b4fdcd79` fixes the validator staging path by copying fresh debug
+`xlog-cuda` artifacts into the staged pyxlog package and pinning
+`XLOG_CUBIN_DIR` to that directory before compatibility probes run. The default
+release validator command passed after that fix without a manual kernel-dir
+override.
 
 ## Required Coordinator Decision
 

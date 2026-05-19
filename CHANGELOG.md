@@ -51,6 +51,13 @@ language-completeness surface.
 - Bumped workspace package metadata and internal workspace dependency
   constraints to `0.8.6` so package metadata matches release-facing docs.
 
+### Fixed
+
+- Hardened the v0.8.6 release validator so local pyxlog staging copies fresh
+  Cargo `xlog-cuda` kernel artifacts into the staged package and sets
+  `XLOG_CUBIN_DIR` there. This prevents ignored package-local kernels from
+  shadowing the current build during v0.8.0/v0.8.5 compatibility validation.
+
 ### Release Status
 
 - Closure proposal: `docs/plans/2026-05-19-v086-closure-proposal.md`.
