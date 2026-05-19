@@ -384,3 +384,10 @@ the same GPU contract, reduced production compiler pipeline, WCOJ promotion, and
 helper-splitting surfaces as the unsplit epistemic executable path. This is not a
 separate split-only WCOJ or tuple-store engine, and it remains bounded evidence
 until full accepted-runtime semantic parity is covered.
+
+Accepted split runtime evidence now also includes a world-view parity fixture:
+split `possible edge(X)` and `not know edge(X)` components execute through
+`Executor::execute_epistemic_gpu_execution_batch` over the same absent stable
+tuple source. The GPU path returns no `possible_edge` rows and all
+`not_known_edge` node rows, preserving the oracle distinction without CPU
+candidate or world-view fallback.

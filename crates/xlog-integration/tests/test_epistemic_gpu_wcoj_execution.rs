@@ -727,6 +727,101 @@ fn accepted_split_components_execute_gpu_runtime_and_match_component_oracles() {
 }
 
 #[test]
+fn split_gpu_world_view_distinguishes_absent_possible_from_not_known() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred possible_edge(u32).
+        pred not_known_edge(u32).
+        possible_edge(X) :- node(X), possible edge(X).
+        not_known_edge(X) :- node(X), not know edge(X).
+        "#,
+    )
+    .expect("parse possible-vs-not-known split fixture");
+    let split = compile_epistemic_gpu_split_execution_with_stats_snapshot(&program, None)
+        .expect("compile possible-vs-not-known split fixture");
+
+    assert_eq!(split.components.len(), 2);
+    assert_eq!(split.recomposed_rule_indices(), vec![0, 1]);
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    let mut relation_ids = BTreeMap::new();
+    for component in &split.components {
+        for (name, rel_id) in &component.executable.relation_ids {
+            if let Some(previous) = relation_ids.insert(name.clone(), *rel_id) {
+                assert_eq!(
+                    previous, *rel_id,
+                    "split components must preserve relation ids for shared declarations"
+                );
+            }
+        }
+    }
+    for (name, rel_id) in &relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation("node", upload_unary_u32(&fix.memory, &[1, 2, 3]));
+    executor.put_relation("edge", upload_unary_u32(&fix.memory, &[]));
+
+    let executables: Vec<_> = split
+        .components
+        .iter()
+        .map(|component| &component.executable)
+        .collect();
+    let results = executor
+        .execute_epistemic_gpu_execution_batch(
+            &executables,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 3,
+            },
+        )
+        .expect("execute possible-vs-not-known split components");
+
+    let mut outputs_by_head = BTreeMap::new();
+    for (component, result) in split.components.iter().zip(results.iter()) {
+        let head = component.executable.gpu_plan.reductions[0]
+            .head_predicate
+            .clone();
+        outputs_by_head.insert(
+            head,
+            download_unary_u32(&fix.provider, &result.final_output),
+        );
+        assert_eq!(
+            result.model_membership.membership_source,
+            EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+        );
+        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+        assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
+    }
+
+    assert_eq!(
+        outputs_by_head
+            .get("possible_edge")
+            .cloned()
+            .unwrap_or_default(),
+        Vec::<u32>::new(),
+        "possible edge(X) must reject rows when the stable-model tuple source is absent"
+    );
+    assert_eq!(
+        outputs_by_head
+            .get("not_known_edge")
+            .cloned()
+            .unwrap_or_default(),
+        vec![1, 2, 3],
+        "not know edge(X) must accept rows when the stable-model tuple source is absent"
+    );
+}
+
+#[test]
 fn accepted_gpu_execution_records_device_semantic_trace_counts() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");

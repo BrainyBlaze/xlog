@@ -305,6 +305,12 @@ path. The accepted split integration fixture uses this adapter for two
 independent components and checks final component rows against tuple-intersection
 oracles while preserving zero CPU candidate/world-view fallback counters.
 
+Split runtime coverage also includes the existing world-view distinction between
+absent `possible` and true `not know`: split `possible edge(X)` and
+`not know edge(X)` components execute over the same absent `edge` tuple source,
+returning `[]` for `possible_edge` and `[1, 2, 3]` for `not_known_edge` with
+zero CPU candidate/world-view fallback counters.
+
 ## Solver Services
 
 `xlog_solve::GpuSolverProductionAdapter` is the production-facing solver reuse
