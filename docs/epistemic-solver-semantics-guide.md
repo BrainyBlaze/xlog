@@ -403,6 +403,10 @@ additionally turn accepted zero-arity and concrete nonzero-arity tuple
 assumptions into parsed exact `Evidence` AST entries before evaluating through
 the same GPU exact path, recording
 `accepted_evidence_assumptions_consumed` and `gpu_conditioned_evidence_facts`.
+`compile_and_evaluate_conditioned_source_for_gpu_execution_results` validates a
+batch of accepted GPU runtime records before running per-record source
+conditioning, so different accepted world views can condition a shared query
+set without bypassing `ExactDdnnfProgram`.
 `encode_source_pir_cnf_with_gpu_execution_result` and
 `encode_program_pir_cnf_with_gpu_execution_result` apply the same accepted
 runtime boundary before uploading `GpuPirGraph`/`GpuPirRoots` and calling
@@ -417,8 +421,10 @@ for production metrics, and
 traces that lack accepted world-view evidence, lack an existing GPU
 exact/provenance/PIR/CNF counter, or record CPU/fixture recomputation.
 
-This adapter is partial v0.9 evidence only. It does not yet cover the broader
-query-conditioned probabilistic matrix over accepted runtime world views.
+This adapter is partial v0.9 evidence only. It covers bounded zero-arity,
+nonzero-arity, parsed-program, and two-record source-conditioned query cases,
+but not the full query-conditioned probabilistic matrix over accepted runtime
+world views.
 
 Run the probabilistic fixture and production-adapter source guard:
 

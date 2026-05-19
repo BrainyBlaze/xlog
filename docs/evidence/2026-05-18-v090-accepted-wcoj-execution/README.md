@@ -37,7 +37,7 @@ the same device row-map path. This is not a closure claim for `G090_GPU`,
 
 | Command | Result |
 |---|---|
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 32 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 33 passed, 0 failed |
 
 ## Non-Closure Notes
 
