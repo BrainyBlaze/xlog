@@ -288,7 +288,10 @@ the existing device learned-clause/proof arena plus learned-count buffer with
 zero CPU learned-clause transfers.
 `solve_unsat_then_reuse_learned_clauses_with_gpu_execution_result` applies the
 same boundary before importing that existing device arena into a second
-workspace-backed UNSAT solve over the same GPU CNF.
+workspace-backed UNSAT solve over the same GPU CNF. Distinct candidate CNFs
+are rejected before import, incrementing
+`gpu_learned_clause_reuse_rejections` while keeping CPU learned-clause transfer
+counters at zero.
 `solve_weighted_maxsat_candidates_with_gpu_execution_result` applies the same
 boundary before certifying bounded MaxSAT candidate CNFs through GPU CDCL and
 returning the best declared score. `solve_portfolio_with_gpu_execution_result`
@@ -302,8 +305,9 @@ is the automated metric gate: it rejects traces that did not consume accepted
 GPU candidate evidence, that have no existing GPU solver production counter,
 or that record CPU assignment, MaxSAT, or learned-clause transfer counters.
 
-The adapter is partial v0.9 evidence only. It does not yet prove learned-clause
-validity across distinct candidate CNFs or full MaxSAT coverage.
+The adapter is partial v0.9 evidence only. It now proves same-CNF reuse and
+distinct-CNF fail-closed rejection, but not broader multi-candidate lifecycle or
+full MaxSAT coverage.
 
 `xlog_solve::SolverService` provides the bounded solver API used by semantic
 fixtures:

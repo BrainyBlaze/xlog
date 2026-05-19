@@ -209,6 +209,8 @@ pub struct GpuSolverProductionTrace {
     pub gpu_learned_clause_imports: u64,
     /// Number of GPU CDCL solves that reused imported learned clauses.
     pub gpu_learned_clause_reused_solves: u64,
+    /// Number of learned-clause imports rejected because candidate CNFs differ.
+    pub gpu_learned_clause_reuse_rejections: u64,
     /// Number of bounded MaxSAT candidate CNFs dispatched through GPU CDCL.
     pub gpu_maxsat_candidate_solves: u64,
     /// Number of bounded MaxSAT optima certified by GPU CDCL candidate solves.
@@ -592,7 +594,14 @@ impl GpuSolverProductionAdapter {
         target_branch_var_limit: &TrackedCudaSlice<u32>,
     ) -> Result<GpuSolverProductionLearnedClauseReuseReport> {
         require_accepted_gpu_solver_evidence(provider, result)?;
-        require_same_gpu_cnf_for_learned_clause_reuse(source_cnf, target_cnf)?;
+        if let Err(err) = require_same_gpu_cnf_for_learned_clause_reuse(source_cnf, target_cnf) {
+            self.trace.gpu_learned_clause_reuse_rejections = self
+                .trace
+                .gpu_learned_clause_reuse_rejections
+                .saturating_add(1);
+            self.trace.require_zero_cpu_search()?;
+            return Err(err);
+        }
 
         let learned_offsets_ptr = workspace.learned_offsets.device_ptr_value();
         let learned_lits_ptr = workspace.learned_lits.device_ptr_value();
@@ -897,9 +906,9 @@ fn require_same_gpu_cnf_for_learned_clause_reuse(source: &GpuCnf, target: &GpuCn
     if !same_shape || !same_buffers {
         return Err(XlogError::UnsupportedEpistemicConstruct {
             construct: "GPU solver learned-clause reuse".to_string(),
-            context:
-                "learned-clause import is currently certified only for the same device-resident CNF"
-                    .to_string(),
+            context: "learned-clause import is currently certified only for the same \
+                 device-resident CNF; distinct candidate CNFs must not reuse imported clauses"
+                .to_string(),
         });
     }
     Ok(())

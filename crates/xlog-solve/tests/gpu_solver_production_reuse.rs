@@ -45,6 +45,7 @@ fn production_solver_adapter_reuses_gpu_cdcl_not_cpu_oracle() {
     assert!(production.contains("gpu_learned_count_buffer_publications"));
     assert!(production.contains("gpu_learned_clause_imports"));
     assert!(production.contains("gpu_learned_clause_reused_solves"));
+    assert!(production.contains("gpu_learned_clause_reuse_rejections"));
     assert!(production.contains("gpu_maxsat_candidate_solves"));
     assert!(production.contains("gpu_maxsat_optima"));
     assert!(production.contains("gpu_portfolio_jobs"));

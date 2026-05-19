@@ -22,7 +22,7 @@ release gate.
 | World views | `EpistemicWorldView` fixtures test `know`, `possible`, and `not know`. | ORACLE ONLY until world views are generated/validated on GPU. |
 | GPT | CPU fixture records guesses, reduced models, accepted world views, and rejection reasons. | PARTIAL: candidate generation, propagation staging, candidate-buffer validation, tuple-source model-membership staging with specialized arity-one/two/three and generic arity-N row-scoped ground-key comparison plus generic arity-N variable-bound comparison, bounded world-view validation staging, accepted-candidate materialization staging, final-result flag staging, final-row map construction, and membership-gated final tuple materialization use GPU-resident buffers; broader accepted semantic parity remains missing. |
 | Splitting | CPU split/recompose fixtures pass, and valid split components now lower through GPU executable subplans that reuse the existing epistemic executable path. | PARTIAL until full accepted-runtime semantic parity is covered for split programs. |
-| Solver | `SolverService` is a CPU fixture facade with SAT/UNSAT/UNKNOWN/TIMEOUT/Optimal statuses; `GpuSolverProductionAdapter` is a thin adapter over the existing `GpuCdclSolver` production path with accepted-runtime SAT/UNSAT, reusable workspace-backed UNSAT, bounded lifecycle, learned-clause arena publication, same-device-CNF learned-clause import/reuse, bounded MaxSAT candidate, bounded SAT/MaxSAT portfolio gates, UNKNOWN/TIMEOUT portfolio status propagation, and zero CPU search counters; `production_capabilities` reports those GPU-backed adapters available while disallowing the CPU oracle for production metrics; `GpuSolverProductionTrace::require_production_metric_eligibility` rejects CPU-oracle-only traces. | PARTIAL for accepted-runtime SAT, UNSAT, workspace-backed UNSAT, bounded lifecycle, learned-clause arena publication, same-device-CNF learned-clause import/reuse, bounded MaxSAT, and bounded status-aware portfolio production reuse; BLOCKED until broader distinct-candidate learned-clause validity is wired to epistemic candidates. |
+| Solver | `SolverService` is a CPU fixture facade with SAT/UNSAT/UNKNOWN/TIMEOUT/Optimal statuses; `GpuSolverProductionAdapter` is a thin adapter over the existing `GpuCdclSolver` production path with accepted-runtime SAT/UNSAT, reusable workspace-backed UNSAT, bounded lifecycle, learned-clause arena publication, same-device-CNF learned-clause import/reuse, distinct-CNF learned-clause import rejection, bounded MaxSAT candidate, bounded SAT/MaxSAT portfolio gates, UNKNOWN/TIMEOUT portfolio status propagation, and zero CPU search counters; `production_capabilities` reports those GPU-backed adapters available while disallowing the CPU oracle for production metrics; `GpuSolverProductionTrace::require_production_metric_eligibility` rejects CPU-oracle-only traces. | PARTIAL for accepted-runtime SAT, UNSAT, workspace-backed UNSAT, bounded lifecycle, learned-clause arena publication, same-device-CNF learned-clause import/reuse, distinct-CNF learned-clause import rejection, bounded MaxSAT, and bounded status-aware portfolio production reuse; BLOCKED until broader multi-candidate solver lifecycle is wired to epistemic candidates. |
 | Probabilistic | `AcceptedWorldViewEvidence` guards evidence conditioning in fixtures; `EpistemicProbProductionAdapter` can construct evidence from an accepted `EpistemicGpuExecutionResult`, route source and parsed programs into the existing `ExactDdnnfProgram` GPU exact/provenance compile path, source/program bounded compile/evaluate paths, zero-arity conditioned source evaluation through parsed `Evidence` AST entries, `GpuPirGraph`/`GpuPirRoots` upload plus `encode_cnf_gpu`, and query/gradient-evaluation paths, and record zero CPU recompute counters; `EpistemicProbProductionTrace::require_production_metric_eligibility` rejects fixture-only metric traces. | PARTIAL for production exact compile/PIR-CNF/evaluation reuse; BLOCKED until broader probabilistic knowledge-compilation coverage over accepted runtime world views exists. |
 | Certification | Semantic-oracle, GPU-plan contract, accepted K5 WCOJ execution, and K7/K8 K-clique preflight reuse tests can pass locally. | BLOCKED until full accepted-execution GPU timing, solver/probability traces, semantic parity, and zero CPU fallback counters exist. |
 
@@ -76,8 +76,8 @@ The next production slice should start at the lowering/runtime boundary:
    SAT/MaxSAT/portfolio services or a documented GPU-backed adapter. PARTIAL
    for accepted-runtime SAT, UNSAT, reusable workspace-backed UNSAT,
    bounded lifecycle, learned-clause arena publication, same-device-CNF
-   learned-clause import/reuse, bounded MaxSAT, and bounded status-aware
-   portfolio reuse through
+   learned-clause import/reuse, distinct-CNF learned-clause import rejection,
+   bounded MaxSAT, and bounded status-aware portfolio reuse through
    `GpuSolverProductionAdapter`, `solve_expect_sat_with_gpu_execution_result`,
    `solve_expect_unsat_with_gpu_execution_result`, and
    `solve_expect_unsat_with_branch_limit_ws_with_gpu_execution_result` plus
@@ -85,8 +85,8 @@ The next production slice should start at the lowering/runtime boundary:
    `solve_unsat_and_publish_learned_clause_arena_with_gpu_execution_result`,
    `solve_unsat_then_reuse_learned_clauses_with_gpu_execution_result`,
    `solve_weighted_maxsat_candidates_with_gpu_execution_result`, and
-   `solve_portfolio_with_gpu_execution_result`; broader accepted candidate
-   distinct-candidate learned-clause validity remains open.
+   `solve_portfolio_with_gpu_execution_result`; broader accepted
+   multi-candidate solver lifecycle coverage remains open.
 7. Feed accepted world-view evidence into the existing GPU-native
    exact/provenance/PIR/CNF paths and report zero CPU-only probability
    recomputation.
@@ -110,7 +110,7 @@ The next production slice should start at the lowering/runtime boundary:
 | `cargo test -p xlog-logic --test test_epistemic_gpu_plan` | PASS, 8 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_executable_plan` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 47 passed, 0 failed |
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 21 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 22 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_eir --test test_epistemic_g91 --test test_epistemic_faeel --test test_epistemic_gpt --test test_epistemic_split --test test_epistemic_world_view --test test_epistemic_examples` | PASS, 24 passed, 0 failed |
 | `cargo test -p xlog-solve --test gpu_solver_production_reuse` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-solve --test solver_service_semantics` | PASS, 5 passed, 0 failed |
