@@ -1,6 +1,6 @@
 {
   "branch": "feat/v086-runtime-completion",
-  "certification_head_before_closure": "b72f61ea",
+  "certification_head_before_closure": "0e2a5420",
   "date": "2026-05-19",
   "governing_goal": "docs/plans/2026-05-19-agent-v086-dts-runtime-completion-goal.md",
   "proposal": "docs/plans/2026-05-19-v086-closure-proposal.md",
@@ -52,7 +52,7 @@
       "status": "PASS"
     },
     "G086_INDEX": {
-      "commit": "702e1f8f + amendment",
+      "commit": "702e1f8f + 0e2a5420",
       "evidence": "docs/evidence/2026-05-19-v086-persistent-hash-index/README.md",
       "status": "PASS"
     },
@@ -62,12 +62,12 @@
       "status": "PASS"
     },
     "G086_INT": {
-      "commit": "b72f61ea",
+      "commit": "b72f61ea + final validation refresh",
       "evidence": "docs/evidence/2026-05-19-v086-int/README.md",
       "status": "PASS"
     },
     "G086_CLOSE": {
-      "commit": "proposal commit",
+      "commit": "09f5ad4b + final evidence refresh",
       "evidence": "docs/evidence/2026-05-19-v086-close/README.md",
       "status": "PASS"
     }
@@ -89,7 +89,7 @@
       "v085": 10,
       "v086": 5
     },
-    "python_bundle": "38 passed in 26.04s",
+    "python_bundle": "39 passed in 52.33s",
     "workspace_check": "cargo check --workspace exit 0"
   },
   "v090_rebase_note": "v0.9.0 should rebase or merge after any accepted v0.8.6 landing because exact type dispatch, chain shared-memory scoring, runtime CSE, adaptive candidate adoption, and persistent-index telemetry affect the substrate expected by epistemic/solver work."

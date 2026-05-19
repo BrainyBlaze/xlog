@@ -2,7 +2,7 @@
 
 Date: 2026-05-19
 Branch: `feat/v086-runtime-completion`
-Certification head before closure proposal: `b72f61ea`
+Validation head after persistent-index amendment: `0e2a5420`
 Governing goal: `docs/plans/2026-05-19-agent-v086-dts-runtime-completion-goal.md`
 
 ## Recommendation
@@ -38,10 +38,10 @@ proposal.
 | G086_CHAIN_SMEM | `e1cddbb7` + `ce78e32f` | PASS | `docs/evidence/2026-05-19-v086-chain-smem-profile/README.md`, `docs/evidence/2026-05-19-v086-chain-smem/README.md` |
 | G086_CSE | `1363b05e` | PASS | `docs/evidence/2026-05-19-v086-cse/README.md` |
 | G086_ADAPT | `2d9bdc0f` | PASS | `docs/evidence/2026-05-19-v086-adaptive-reoptimization/README.md` |
-| G086_INDEX | `702e1f8f` + amendment | PASS | `docs/evidence/2026-05-19-v086-persistent-hash-index/README.md` |
+| G086_INDEX | `702e1f8f` + `0e2a5420` | PASS | `docs/evidence/2026-05-19-v086-persistent-hash-index/README.md` |
 | G086_CONSUMERS | `37f16651` | PASS | `docs/evidence/2026-05-19-v086-consumers/README.md` |
-| G086_INT | `b72f61ea` | PASS | `docs/evidence/2026-05-19-v086-int/README.md` |
-| G086_CLOSE | proposal commit | PASS | `docs/evidence/2026-05-19-v086-close/README.md` |
+| G086_INT | `b72f61ea` + final validation refresh | PASS | `docs/evidence/2026-05-19-v086-int/README.md` |
+| G086_CLOSE | `09f5ad4b` + final evidence refresh | PASS | `docs/evidence/2026-05-19-v086-close/README.md` |
 
 ## GQM Metric Table
 
@@ -62,7 +62,7 @@ proposal.
 | M086_INT.1 formatting | PASS | `cargo fmt --check` exit 0 |
 | M086_INT.2 workspace | PASS | `cargo check --workspace` exit 0 |
 | M086_INT.3 targeted Rust | PASS | runtime, cuda, induce, prob, logic, and integration crates exited 0 |
-| M086_INT.4 Python | PASS | `38 passed in 26.04s` for v0.8.0/v0.8.5/v0.8.6 source/runtime bundle |
+| M086_INT.4 Python | PASS | `39 passed in 52.33s` for v0.8.0/v0.8.5/v0.8.6 source/runtime bundle |
 | M086_INT.5 examples | PASS | v0.8.0 examples 5, v0.8.5 examples 10, v0.8.6 examples 5 |
 | M086_INT.6 transfer guards | PASS | xlog-prob no-D2H guards, integration strict D2H tests, and v0.8.6 source/runtime transfer guards passed |
 | M086_INT.7 performance | PASS_WITH_BLOCKED_METRIC | raw speed/transfer evidence recorded; persistent-index timing speedup not claimed |
@@ -81,16 +81,16 @@ proposal.
 |---|---|
 | `cargo fmt --check` | exit 0 |
 | `cargo check --workspace` | exit 0 |
-| `cargo test -p xlog-runtime` | exit 0; 140 lib tests, 15 integration tests, 2 doc tests passed, 2 doc tests ignored |
+| `cargo test -p xlog-runtime` | exit 0; 141 lib tests, 15 integration tests, 2 doc tests passed, 2 doc tests ignored |
 | `cargo test -p xlog-cuda kernel_modules` | exit 0; 2 passed |
 | `cargo test -p xlog-induce` | exit 0; 23 passed |
 | `cargo test -p xlog-prob` | exit 0; includes no-D2H/native GPU guards |
 | `cargo test -p xlog-logic` | exit 0 |
 | `cargo test -p xlog-integration` | exit 0; includes strict deterministic D2H, cross-mode determinism, WCOJ, and widened-frontier suites |
-| `PYTHONPATH=target/debug pytest -q python/tests/test_v080_examples_source.py python/tests/test_v085_examples_source.py python/tests/test_v086_delta_coalescing.py python/tests/test_v086_relation_callbacks.py python/tests/test_v086_relation_callbacks_runtime.py python/tests/test_v086_exact_types_source.py python/tests/test_v086_exact_types_runtime.py python/tests/test_v086_chain_smem_profile_source.py python/tests/test_v086_chain_smem_source.py python/tests/test_v086_cse_source.py python/tests/test_v086_adaptive_reoptimization_source.py python/tests/test_v086_persistent_hash_index_source.py python/tests/test_v086_consumers_source.py` | exit 0; 38 passed |
+| `PYTHONPATH=target/debug pytest -q python/tests/test_v080_examples_source.py python/tests/test_v085_examples_source.py python/tests/test_v086_delta_coalescing.py python/tests/test_v086_relation_callbacks.py python/tests/test_v086_relation_callbacks_runtime.py python/tests/test_v086_exact_types_source.py python/tests/test_v086_exact_types_runtime.py python/tests/test_v086_chain_smem_profile_source.py python/tests/test_v086_chain_smem_source.py python/tests/test_v086_cse_source.py python/tests/test_v086_adaptive_reoptimization_source.py python/tests/test_v086_persistent_hash_index_source.py python/tests/test_v086_consumers_source.py` | exit 0; 39 passed in 52.33s |
 | `python scripts/validate_v086_examples.py` | exit 0; v0.8.0 examples 5, v0.8.5 examples 10, v0.8.6 examples 5 |
 | `python -m json.tool` over v0.8.6 evidence and expected JSON files | exit 0 |
-| `python -m py_compile scripts/validate_v086_examples.py python/tests/test_v086_consumers_source.py` | exit 0 |
+| `python -m py_compile scripts/validate_v086_examples.py python/tests/test_v086_persistent_hash_index_source.py python/tests/test_v086_consumers_source.py` | exit 0 |
 | `python scripts/validate_package_metadata.py` | exit 0 |
 | `git diff --check` | exit 0 |
 

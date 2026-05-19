@@ -1,6 +1,6 @@
 {
   "branch": "feat/v086-runtime-completion",
-  "commit_under_test": "37f16651",
+  "commit_under_test": "0e2a5420",
   "date": "2026-05-19",
   "suite": "G086_INT",
   "status": "PASS",
@@ -12,7 +12,7 @@
     "M086_INT.2 workspace": {
       "command": "cargo check --workspace",
       "status": "PASS",
-      "observed": "Finished dev profile in 3.19s"
+      "observed": "Finished dev profile in 0.17s"
     },
     "M086_INT.3 targeted Rust": {
       "commands": [
@@ -28,7 +28,7 @@
     "M086_INT.4 Python": {
       "command": "PYTHONPATH=target/debug pytest -q python/tests/test_v080_examples_source.py python/tests/test_v085_examples_source.py python/tests/test_v086_delta_coalescing.py python/tests/test_v086_relation_callbacks.py python/tests/test_v086_relation_callbacks_runtime.py python/tests/test_v086_exact_types_source.py python/tests/test_v086_exact_types_runtime.py python/tests/test_v086_chain_smem_profile_source.py python/tests/test_v086_chain_smem_source.py python/tests/test_v086_cse_source.py python/tests/test_v086_adaptive_reoptimization_source.py python/tests/test_v086_persistent_hash_index_source.py python/tests/test_v086_consumers_source.py",
       "status": "PASS",
-      "observed": "38 passed in 26.04s"
+      "observed": "39 passed in 52.33s"
     },
     "M086_INT.5 examples": {
       "command": "python scripts/validate_v086_examples.py",
@@ -66,7 +66,7 @@
     "M086_INT.8 docs": {
       "commands": [
         "python -m json.tool over docs/evidence/2026-05-19-v086-*/*.json and examples/v086-runtime/*/expected.json",
-        "python -m py_compile scripts/validate_v086_examples.py python/tests/test_v086_consumers_source.py",
+        "python -m py_compile scripts/validate_v086_examples.py python/tests/test_v086_persistent_hash_index_source.py python/tests/test_v086_consumers_source.py",
         "python scripts/validate_package_metadata.py"
       ],
       "status": "PASS"
@@ -82,7 +82,7 @@
     }
   },
   "rust_counts": {
-    "xlog-runtime": "140 lib tests, 15 integration tests, 2 doc tests passed; 2 doc tests ignored",
+    "xlog-runtime": "141 lib tests, 15 integration tests, 2 doc tests passed; 2 doc tests ignored",
     "xlog-cuda": "kernel_modules filter: 2 passed",
     "xlog-induce": "23 lib tests passed",
     "xlog-prob": "package test suite passed, including no_cpu_d4_in_exact and no_dtoh_* guards",
