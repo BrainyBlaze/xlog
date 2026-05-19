@@ -113,6 +113,29 @@ fn faeel_gpu_execution_rejects_self_supported_possible_before_runtime_dispatch()
 }
 
 #[test]
+fn epistemic_constraint_reaches_typed_gpu_boundary() {
+    let program = parse_program(
+        r#"
+        accepted() :- know fact().
+        :- possible blocked().
+        "#,
+    )
+    .unwrap();
+
+    let err = compile_epistemic_gpu_execution(&program)
+        .expect_err("epistemic constraints must not be silently erased during GPU lowering");
+
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
+            assert_eq!(construct, "epistemic GPU constraint");
+            assert!(context.contains("constraint[0]"));
+            assert!(context.contains("possible blocked/0"));
+        }
+        other => panic!("expected epistemic GPU constraint boundary, got {other:?}"),
+    }
+}
+
+#[test]
 fn faeel_gpu_execution_allows_self_possible_with_independent_founded_support() {
     let program = parse_program(
         r#"

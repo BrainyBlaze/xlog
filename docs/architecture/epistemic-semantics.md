@@ -361,9 +361,10 @@ fallback counters.
 
 `build_epistemic_dependency_graph` builds deterministic connected components
 from source-order rules. Connectivity includes each rule head, ordinary positive
-or negated body predicates, and epistemic body predicates, so an ordinary
-dependency between two epistemic rules coalesces them into one component instead
-of treating them as independently solvable:
+or negated body predicates, epistemic body predicates, and integrity-constraint
+body predicates, so an ordinary dependency or constraint between two epistemic
+rules coalesces them into one component instead of treating them as independently
+solvable:
 
 - each component records sorted predicate names;
 - each component records source rule indices;
@@ -371,7 +372,15 @@ of treating them as independently solvable:
 
 This prevents unsafe split certificates such as `a() :- know p().` and
 `b() :- a(), know q().` from becoming two independent components. The shared
-ordinary predicate `a` keeps the rules in one component.
+ordinary predicate `a` keeps the rules in one component. Likewise,
+`:- a(), b().` coalesces the `a` and `b` components, while an `a`-only
+constraint stays only with the `a` component during split executable lowering.
+
+Epistemic integrity constraints are not silently lowered through the reduced
+ordinary program. Until they have an explicit GPU semantic representation,
+`compile_epistemic_gpu_execution` and split executable lowering fail closed with
+`XlogError::UnsupportedEpistemicConstruct { construct: "epistemic GPU constraint",
+... }`.
 
 `split_epistemic_program` rejects a rule that couples more than one distinct
 epistemic body predicate. In this bounded split layer, such a rule would require

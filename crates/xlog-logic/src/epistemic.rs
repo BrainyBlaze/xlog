@@ -10,7 +10,7 @@ use xlog_ir::{
 };
 use xlog_stats::StatsSnapshot;
 
-use crate::ast::{BodyLiteral, EpistemicLiteral, EpistemicMode, EpistemicOp, Program};
+use crate::ast::{BodyLiteral, Constraint, EpistemicLiteral, EpistemicMode, EpistemicOp, Program};
 use crate::build_eir;
 use crate::compile::Compiler;
 
@@ -145,6 +145,7 @@ impl EpistemicWorldView {
 /// required device buffers, WCOJ planning obligations, and zero CPU fallback
 /// counters.
 pub fn plan_epistemic_gpu_execution(program: &Program) -> Result<EpistemicGpuPlan> {
+    reject_epistemic_constraints(program)?;
     let eir = build_eir(program)?;
     reject_faeel_self_supported_possible(&eir)?;
     let mut epistemic_literals = Vec::new();
@@ -296,6 +297,35 @@ pub fn compile_epistemic_gpu_execution_with_stats_snapshot(
         relation_ids,
         reduced_runtime_plan,
     })
+}
+
+fn reject_epistemic_constraints(program: &Program) -> Result<()> {
+    for (constraint_index, constraint) in program.constraints.iter().enumerate() {
+        for lit in &constraint.body {
+            let BodyLiteral::Epistemic(lit) = lit else {
+                continue;
+            };
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU constraint".to_string(),
+                context: format!(
+                    "constraint[{constraint_index}] contains unsupported {} {}/{}; epistemic integrity constraints must be represented explicitly before GPU lowering",
+                    epistemic_literal_label(lit),
+                    lit.atom.predicate,
+                    lit.atom.arity()
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn epistemic_literal_label(lit: &EpistemicLiteral) -> &'static str {
+    match (lit.negated, lit.op) {
+        (false, EpistemicOp::Know) => "know",
+        (false, EpistemicOp::Possible) => "possible",
+        (true, EpistemicOp::Know) => "not know",
+        (true, EpistemicOp::Possible) => "not possible",
+    }
 }
 
 fn bound_output_columns_for_literal(
@@ -652,6 +682,20 @@ pub fn build_epistemic_dependency_graph(program: &Program) -> Result<EpistemicDe
         rule_predicates.push(predicates);
     }
 
+    let mut constraint_predicates = Vec::with_capacity(program.constraints.len());
+    for constraint in &program.constraints {
+        let predicates = constraint_predicate_set(constraint);
+        let mut owners = predicates
+            .iter()
+            .filter_map(|predicate| predicate_owner.get(predicate).copied());
+        if let Some(first_owner) = owners.next() {
+            for owner in owners {
+                union_components(&mut parents, first_owner, owner);
+            }
+        }
+        constraint_predicates.push(predicates);
+    }
+
     let mut grouped: BTreeMap<usize, (BTreeSet<String>, Vec<usize>)> = BTreeMap::new();
     for (idx, predicates) in rule_predicates.into_iter().enumerate() {
         let root = find_component(&mut parents, idx);
@@ -660,6 +704,21 @@ pub fn build_epistemic_dependency_graph(program: &Program) -> Result<EpistemicDe
             .or_insert_with(|| (BTreeSet::new(), vec![]));
         entry.0.extend(predicates);
         entry.1.push(idx);
+    }
+    for predicates in constraint_predicates {
+        let Some(root) = predicates
+            .iter()
+            .filter_map(|predicate| predicate_owner.get(predicate).copied())
+            .map(|idx| find_component(&mut parents, idx))
+            .next()
+        else {
+            continue;
+        };
+        grouped
+            .entry(root)
+            .or_insert_with(|| (BTreeSet::new(), vec![]))
+            .0
+            .extend(predicates);
     }
 
     let mut components: Vec<EpistemicDependencyComponent> = grouped
@@ -674,6 +733,14 @@ pub fn build_epistemic_dependency_graph(program: &Program) -> Result<EpistemicDe
         .collect();
     components.sort_by(|a, b| a.predicates.cmp(&b.predicates));
     Ok(EpistemicDependencyGraph { components })
+}
+
+fn constraint_predicate_set(constraint: &Constraint) -> BTreeSet<String> {
+    constraint
+        .body
+        .iter()
+        .filter_map(|lit| lit.atom().map(|atom| atom.predicate.clone()))
+        .collect()
 }
 
 fn find_component(parents: &mut [usize], idx: usize) -> usize {
@@ -736,6 +803,7 @@ pub fn compile_epistemic_gpu_split_execution_with_stats_snapshot(
     program: &Program,
     stats_snapshot: Option<&StatsSnapshot>,
 ) -> Result<EpistemicSplitExecutablePlan> {
+    reject_epistemic_constraints(program)?;
     let split_plan = split_epistemic_program(program)?;
     let mut components = Vec::new();
 
@@ -788,6 +856,8 @@ fn split_component_program(
     component: &EpistemicDependencyComponent,
 ) -> Result<Program> {
     let mut component_program = program.clone();
+    let component_predicates: BTreeSet<&str> =
+        component.predicates.iter().map(String::as_str).collect();
     component_program.rules = component
         .rule_indices
         .iter()
@@ -799,5 +869,17 @@ fn split_component_program(
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    component_program.constraints = program
+        .constraints
+        .iter()
+        .filter(|constraint| {
+            let predicates = constraint_predicate_set(constraint);
+            !predicates.is_empty()
+                && predicates
+                    .iter()
+                    .all(|predicate| component_predicates.contains(predicate.as_str()))
+        })
+        .cloned()
+        .collect();
     Ok(component_program)
 }

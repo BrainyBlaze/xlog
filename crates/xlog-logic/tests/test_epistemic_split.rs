@@ -73,6 +73,58 @@ fn relational_dependency_coalesces_epistemic_split_components() {
 }
 
 #[test]
+fn constraint_dependency_coalesces_epistemic_split_components() {
+    let program = parse_program(
+        r#"
+        a() :- know p().
+        b() :- know q().
+        :- a(), b().
+        "#,
+    )
+    .unwrap();
+
+    let split = split_epistemic_program(&program).unwrap();
+
+    assert_eq!(split.components.len(), 1);
+    assert_eq!(
+        split.components[0].predicates,
+        vec![
+            "a".to_string(),
+            "b".to_string(),
+            "p".to_string(),
+            "q".to_string()
+        ]
+    );
+    assert_eq!(split.recomposed_rule_indices(), vec![0, 1]);
+}
+
+#[test]
+fn split_component_constraints_stay_with_own_component() {
+    let program = parse_program(
+        r#"
+        a() :- know p().
+        b() :- know q().
+        :- a().
+        "#,
+    )
+    .unwrap();
+
+    let split = compile_epistemic_gpu_split_execution(&program).unwrap();
+
+    assert_eq!(split.components.len(), 2);
+    assert_eq!(
+        compiled_rule_count(&split.components[0].executable.reduced_runtime_plan),
+        2,
+        "the a/p component owns its integrity constraint"
+    );
+    assert_eq!(
+        compiled_rule_count(&split.components[1].executable.reduced_runtime_plan),
+        1,
+        "the b/q component must not inherit the a-only constraint"
+    );
+}
+
+#[test]
 fn valid_split_components_compile_through_gpu_executable_subplans() {
     let program = parse_program(
         r#"

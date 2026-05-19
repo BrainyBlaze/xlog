@@ -18,12 +18,14 @@ Predecessor evidence:
 
 | Requirement | Evidence |
 |---|---|
-| Deterministic graph | `build_epistemic_dependency_graph` builds sorted connected predicate components with source rule indices. Connectivity includes rule heads, ordinary positive/negated body predicates, and epistemic body predicates. |
+| Deterministic graph | `build_epistemic_dependency_graph` builds sorted connected predicate components with source rule indices. Connectivity includes rule heads, ordinary positive/negated body predicates, epistemic body predicates, and integrity-constraint body predicates. |
 | Valid split fixture | `test_epistemic_split.rs` verifies two independent epistemic rules split into two deterministic components. |
 | Relational dependency guard | `relational_dependency_coalesces_epistemic_split_components` proves an ordinary dependency between epistemic rules keeps them in one component instead of producing an unsafe independent split certificate. |
+| Constraint dependency guard | `constraint_dependency_coalesces_epistemic_split_components` proves an integrity constraint that mentions two split heads coalesces those rules into one component. |
+| Constraint ownership | `split_component_constraints_stay_with_own_component` proves split executable lowering keeps an `a`-only integrity constraint with the `a/p` component and does not copy it into the independent `b/q` component. |
 | Invalid split rejection | A rule coupling `know p()` and `possible q()` returns `UnsupportedEpistemicConstruct { construct: "epistemic splitting" }`. |
 | Recomposition | `EpistemicSplitPlan::recomposed_rule_indices()` sorts component rule indices and equals the unsplit source order in fixtures. |
-| GPU split execution | `compile_epistemic_gpu_split_execution` compiles each epistemic split component through the existing `compile_epistemic_gpu_execution_with_stats_snapshot` path, preserving zero fallback counters and reduced production runtime subplans; accepted split integration executes component plans through `execute_epistemic_gpu_execution_batch`, and the traced wrapper `execute_epistemic_gpu_execution_batch_with_trace` aggregates `EpistemicGpuBatchExecutionTrace` counters proving each component delegated to the existing single-plan GPU runtime path with zero CPU recomposition, zero CPU candidate/world-view fallbacks, zero per-candidate host round trips, and aggregate `know`/`possible`/`not know`/`not possible` operator counts. |
+| GPU split execution | `compile_epistemic_gpu_split_execution` compiles each epistemic split component through the existing `compile_epistemic_gpu_execution_with_stats_snapshot` path, preserving zero fallback counters, component-owned integrity constraints, and reduced production runtime subplans; accepted split integration executes component plans through `execute_epistemic_gpu_execution_batch`, and the traced wrapper `execute_epistemic_gpu_execution_batch_with_trace` aggregates `EpistemicGpuBatchExecutionTrace` counters proving each component delegated to the existing single-plan GPU runtime path with zero CPU recomposition, zero CPU candidate/world-view fallbacks, zero per-candidate host round trips, and aggregate `know`/`possible`/`not know`/`not possible` operator counts. |
 | Possible-vs-not-known GPU split fixture | `test_epistemic_gpu_wcoj_execution::split_gpu_world_view_distinguishes_absent_possible_from_not_known` executes split `possible edge(X)` and `not know edge(X)` components over the same absent tuple source, returning empty `possible_edge` output and `[1, 2, 3]` `not_known_edge` output with zero CPU candidate/world-view fallback counters and aggregate batch operator counts of `possible == 1` and `not know == 1`. |
 | Documentation | `docs/architecture/epistemic-semantics.md` documents the bounded split graph, rejection, and recomposition contract. |
 
@@ -32,7 +34,7 @@ Predecessor evidence:
 | Command | Result |
 |---|---|
 | `cargo fmt --check` | PASS |
-| `cargo test -p xlog-logic --test test_epistemic_split` | PASS, 5 passed, 0 failed |
+| `cargo test -p xlog-logic --test test_epistemic_split` | PASS, 7 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_gpt` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_faeel` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_g91` | PASS, 3 passed, 0 failed |
@@ -47,12 +49,12 @@ Predecessor evidence:
 
 | Metric | Target | Status | Evidence |
 |---|---|---|---|
-| M090_SPLIT.1 graph construction | deterministic dependency graph | PASS for oracle | Sorted component fixture plus relational dependency coalescing fixture. |
-| M090_SPLIT.2 valid split fixtures | 100 percent pass | PASS for oracle | `test_epistemic_split`: 5/5 passed. |
+| M090_SPLIT.1 graph construction | deterministic dependency graph | PASS for oracle | Sorted component fixture plus relational and integrity-constraint dependency coalescing fixtures. |
+| M090_SPLIT.2 valid split fixtures | 100 percent pass | PASS for oracle | `test_epistemic_split`: 7/7 passed. |
 | M090_SPLIT.3 invalid split fixtures | typed rejection | PASS for oracle | `UnsupportedEpistemicConstruct` invalid coupling fixture. |
-| M090_SPLIT.4 recomposition | recomposed output equals unsplit output on fixtures | PASS for oracle | `recomposed_rule_indices() == [0, 1]` fixture. |
-| M090_SPLIT.5 modal coupling guard | fixture with cross-component epistemic dependency is not split | PASS for oracle | Invalid same-rule coupling rejects split, and ordinary dependency between epistemic rules coalesces into one component. |
-| M090_SPLIT.6 GPU split execution | valid split components execute through GPU-native subplans, not CPU-only recomposition | PARTIAL | Valid split components now compile through GPU executable subplans using the existing epistemic GPU contract and reduced runtime compiler path; accepted split integration executes two components through `execute_epistemic_gpu_execution_batch_with_trace`, matches component output rows against simple tuple-intersection oracles, compares per-component GPT trace/candidate-index fields, and records an aggregate batch trace with two GPU runtime component executions, zero CPU recomposition steps, zero CPU candidate/world-view fallback counters, zero per-candidate host round trips, and aggregate operator counts. It also proves the world-view distinction where absent `possible edge(X)` yields no rows while `not know edge(X)` yields every node row, and the batch trace records `possible_operator_count == 1` plus `not_know_operator_count == 1`. Full accepted-runtime semantic parity remains under `G090_GPU`. |
+| M090_SPLIT.4 recomposition | recomposed output equals unsplit output on fixtures | PASS for oracle | `recomposed_rule_indices() == [0, 1]` fixtures, including coalesced relational and constraint-dependent components. |
+| M090_SPLIT.5 modal coupling guard | fixture with cross-component epistemic dependency is not split | PASS for oracle | Invalid same-rule coupling rejects split, ordinary dependency between epistemic rules coalesces into one component, and integrity constraints that span split heads coalesce those components. |
+| M090_SPLIT.6 GPU split execution | valid split components execute through GPU-native subplans, not CPU-only recomposition | PARTIAL | Valid split components now compile through GPU executable subplans using the existing epistemic GPU contract and reduced runtime compiler path while retaining only component-owned integrity constraints; accepted split integration executes two components through `execute_epistemic_gpu_execution_batch_with_trace`, matches component output rows against simple tuple-intersection oracles, compares per-component GPT trace/candidate-index fields, and records an aggregate batch trace with two GPU runtime component executions, zero CPU recomposition steps, zero CPU candidate/world-view fallback counters, zero per-candidate host round trips, and aggregate operator counts. It also proves the world-view distinction where absent `possible edge(X)` yields no rows while `not know edge(X)` yields every node row, and the batch trace records `possible_operator_count == 1` plus `not_know_operator_count == 1`. Full accepted-runtime semantic parity remains under `G090_GPU`. |
 
 ## Coordination Notes
 
