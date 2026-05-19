@@ -46,6 +46,7 @@ fn gpt_reports_phase_counts_and_candidate_outcomes() {
         ]
     );
     assert_eq!(outcome.accepted_candidate_indices, vec![0]);
+    assert_eq!(outcome.rejected_candidate_indices, vec![2, 1]);
 }
 
 #[test]

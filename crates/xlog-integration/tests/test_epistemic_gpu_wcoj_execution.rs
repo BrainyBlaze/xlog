@@ -961,7 +961,10 @@ fn accepted_gpu_execution_semantic_trace_matches_gpt_oracle_rejection_reason() {
         result.semantic_trace.accepted_candidate_indices,
         oracle.accepted_candidate_indices
     );
-    assert_eq!(result.semantic_trace.rejected_candidate_indices, vec![0]);
+    assert_eq!(
+        result.semantic_trace.rejected_candidate_indices,
+        oracle.rejected_candidate_indices
+    );
     assert_eq!(
         result
             .semantic_trace

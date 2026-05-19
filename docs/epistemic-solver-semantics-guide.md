@@ -273,9 +273,10 @@ fixture is allowed only with explicit `#pragma epistemic_mode = g91`.
 
 The returned trace records generated, guess, propagated, pruned,
 reduced-program-model, tested, accepted, accepted-world-view, rejected, and
-rejection-reason counts. These are CPU fixture counts; release certification
-still requires GPU launch counters, kernel timings, and zero CPU fallback
-counters for the same semantic phases.
+rejection-reason counts. The outcome also records accepted and rejected
+candidate indices in oracle order. These are CPU fixture counts; release
+certification still requires GPU launch counters, kernel timings, and zero CPU
+fallback counters for the same semantic phases.
 
 Accepted GPU execution also records `EpistemicGpuSemanticTrace` after the
 hot-path transfer-budget window. That trace reads bounded rejection-reason
@@ -285,7 +286,8 @@ accepted/rejected candidate indices, and rejection-reason counts with zero CPU
 candidate enumeration and zero CPU world-view validation counters.
 `EpistemicGpuRejectionReason` decodes nonzero device rejection codes so bounded
 GPU traces can be compared with the GPT oracle's accepted candidate indices and
-typed rejection expectations. This is certification evidence for
+rejected candidate indices plus typed rejection expectations. This is
+certification evidence for
 bounded runtime fixtures, not full semantic parity across every
 G91/FAEEL/GPT/splitting case.
 

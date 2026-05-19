@@ -414,6 +414,8 @@ pub struct GeneratePropagateTestOutcome {
     pub trace: GeneratePropagateTestTrace,
     /// Original indices of accepted candidates.
     pub accepted_candidate_indices: Vec<usize>,
+    /// Original indices of rejected candidates in rejection-reason order.
+    pub rejected_candidate_indices: Vec<usize>,
 }
 
 /// One deterministic dependency component for epistemic splitting.
@@ -560,9 +562,11 @@ pub fn run_generate_propagate_test(
     let generated = candidates.len();
     let mut propagated_candidates = Vec::new();
     let mut rejection_reasons = Vec::new();
+    let mut rejected_candidate_indices = Vec::new();
     for (idx, candidate) in candidates.into_iter().enumerate() {
         if let Some((predicate, arity)) = candidate.first_contradiction() {
             rejection_reasons.push(FaeelNoModelReason::Contradiction { predicate, arity });
+            rejected_candidate_indices.push(idx);
         } else {
             propagated_candidates.push((idx, candidate));
         }
@@ -590,6 +594,7 @@ pub fn run_generate_propagate_test(
             FaeelCandidateResult::NoModel(reason) => {
                 trace.rejected += 1;
                 trace.rejection_reasons.push(reason);
+                rejected_candidate_indices.push(*idx);
             }
         }
     }
@@ -597,6 +602,7 @@ pub fn run_generate_propagate_test(
     Ok(GeneratePropagateTestOutcome {
         trace,
         accepted_candidate_indices,
+        rejected_candidate_indices,
     })
 }
 
