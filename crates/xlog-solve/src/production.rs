@@ -1119,6 +1119,44 @@ impl GpuSolverProductionAdapter {
         Ok(report)
     }
 
+    /// Publish and reuse learned clauses once per accepted split/batch GPU component.
+    ///
+    /// The batch evidence must prove every split component reused the existing
+    /// single-plan GPU runtime path before each component is delegated to the
+    /// existing multi-candidate learned-clause reuse adapter.
+    pub fn solve_learned_clause_reuse_with_gpu_batch_execution_result(
+        &mut self,
+        provider: &CudaKernelProvider,
+        evidence: GpuSolverProductionBatchExecutionEvidence<'_>,
+        workspace: &mut GpuCdclWorkspace,
+        source_cnf: &GpuCnf,
+        source_branch_var_limit: &TrackedCudaSlice<u32>,
+        target_cnf: &GpuCnf,
+        target_branch_var_limit: &TrackedCudaSlice<u32>,
+    ) -> Result<GpuSolverProductionLearnedClauseReuseReport> {
+        let results = require_accepted_gpu_solver_batch_evidence(provider, evidence.batch)?;
+        self.trace.accepted_gpu_batch_candidate_evidence_consumed = self
+            .trace
+            .accepted_gpu_batch_candidate_evidence_consumed
+            .saturating_add(1);
+        self.trace
+            .accepted_gpu_batch_candidate_component_evidence_consumed = self
+            .trace
+            .accepted_gpu_batch_candidate_component_evidence_consumed
+            .saturating_add(results.len() as u64);
+        let report = self.solve_multi_candidate_learned_clause_reuse_with_gpu_execution_results(
+            provider,
+            &results,
+            workspace,
+            source_cnf,
+            source_branch_var_limit,
+            target_cnf,
+            target_branch_var_limit,
+        )?;
+        self.trace.require_zero_cpu_search()?;
+        Ok(report)
+    }
+
     fn solve_weighted_maxsat_candidates(
         &mut self,
         candidates: &[GpuSolverProductionMaxSatCandidate<'_>],

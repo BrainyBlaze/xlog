@@ -148,6 +148,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     ));
     assert!(integration.contains("accepted_split_batch_gates_solver_lifecycle_path"));
     assert!(integration.contains("accepted_split_batch_gates_solver_portfolio_path"));
+    assert!(integration.contains("accepted_split_batch_gates_solver_learned_clause_reuse_path"));
     assert!(integration.contains("not_possible_operator_count"));
     assert!(integration.contains("negated_row_filter_count"));
     assert!(solver.contains("GpuCdclSolver::new"));
@@ -170,6 +171,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(
         solver.contains("solve_multi_candidate_learned_clause_reuse_with_gpu_execution_results")
     );
+    assert!(solver.contains("solve_learned_clause_reuse_with_gpu_batch_execution_result"));
     assert!(solver.contains("solve_weighted_maxsat_candidates_with_gpu_execution_result"));
     assert!(solver.contains("solve_multi_candidate_weighted_maxsat_with_gpu_execution_results"));
     assert!(solver.contains("solve_weighted_maxsat_search_with_gpu_execution_result"));
