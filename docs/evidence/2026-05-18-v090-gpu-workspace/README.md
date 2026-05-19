@@ -61,7 +61,7 @@ It does not close `G090_GPU`.
 |---|---|
 | `cargo fmt` | PASS |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 47 passed, 0 failed |
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 16 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 17 passed, 0 failed |
 | `cargo test -p xlog-cuda --test build_script_tests -- --nocapture` | PASS, 4 passed, 0 failed |
 | `cargo test -p xlog-runtime --lib` | PASS, 128 passed, 0 failed |
 | `cargo check -p xlog-cuda -p xlog-runtime -p xlog-logic -p xlog-ir` | PASS |
@@ -81,7 +81,7 @@ It does not close `G090_GPU`.
 | M090_GPU.10 row-count guard | nonzero-arity membership fails closed if only row-count metadata is available | PARTIAL | Invalid tuple-key metadata is rejected, row-count-only membership remains a negative certification fixture, and accepted unary/binary/multi-membership fixtures prove final output is filtered by tuple key rather than row-count-only membership; broader accepted coverage is still incomplete. |
 | M090_GPU.7 parity | GPU output matches semantic oracle on all G91, FAEEL, GPT, and splitting fixtures | BLOCKED | Bounded membership-gated final-output device buffers exist, but semantic oracle-matched GPU output from accepted stable-model membership is not proven yet. |
 | M090_GPU.8 transfer budget | host-device transfers are bounded and reported; no per-candidate host round trip in hot path | PARTIAL | `EpistemicGpuTransferBudgetTrace` records zero tracked data-plane H2D/D2H calls in the bounded hot path and rejects tracked deltas; broader accepted-execution transfer accounting remains incomplete. |
-| M090_GPU.11 production path reuse | source audit and runtime counters prove existing RIR/runtime/WCOJ/K-clique/helper-split paths executed where eligible | PARTIAL | Source audit plus accepted K5 execution prove reuse of reduced RIR lowering, production relation IDs, `execute_plan`, K-clique WCOJ counters, sorted-layout and helper-split planner metadata, existing relation buffers for one accepted WCOJ-eligible reduction, accepted-runtime solver SAT/UNSAT plus workspace-backed UNSAT, bounded lifecycle, learned-clause arena publication, bounded MaxSAT, and bounded status-aware portfolio routing through GPU CDCL, and accepted-runtime probabilistic source/program exact compile, bounded compile/evaluate, PIR/CNF encoding, query-evaluation, and gradient-evaluation routing; cross-candidate learned-clause import/reuse plus broader probabilistic knowledge-compilation coverage remain incomplete. |
+| M090_GPU.11 production path reuse | source audit and runtime counters prove existing RIR/runtime/WCOJ/K-clique/helper-split paths executed where eligible | PARTIAL | Source audit plus accepted K5 execution prove reuse of reduced RIR lowering, production relation IDs, `execute_plan`, K-clique WCOJ counters, sorted-layout and helper-split planner metadata, existing relation buffers for one accepted WCOJ-eligible reduction, accepted-runtime solver SAT/UNSAT plus workspace-backed UNSAT, bounded lifecycle, learned-clause arena publication, bounded MaxSAT, and bounded status-aware portfolio routing through GPU CDCL, and accepted-runtime probabilistic source/program exact compile, source/program bounded compile/evaluate, PIR/CNF encoding, query-evaluation, and gradient-evaluation routing; cross-candidate learned-clause import/reuse plus broader probabilistic knowledge-compilation coverage remain incomplete. |
 
 ## Remaining Blocker
 

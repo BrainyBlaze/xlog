@@ -32,7 +32,7 @@ membership filters final rows on device. This is not a closure claim for
 
 | Command | Result |
 |---|---|
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 16 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 17 passed, 0 failed |
 
 ## Non-Closure Notes
 

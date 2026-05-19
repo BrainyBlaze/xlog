@@ -39,6 +39,10 @@ pub struct EpistemicProbProductionTrace {
     pub gpu_cnf_encodes: u64,
     /// Number of accepted compile-and-evaluate runs through the GPU exact path.
     pub gpu_knowledge_compilation_end_to_end_runs: u64,
+    /// Number of accepted source compile-and-evaluate runs through the GPU exact path.
+    pub gpu_source_knowledge_compilation_end_to_end_runs: u64,
+    /// Number of accepted parsed-program compile-and-evaluate runs through the GPU exact path.
+    pub gpu_program_knowledge_compilation_end_to_end_runs: u64,
     /// CPU-only probability recomputations performed by this adapter.
     pub cpu_only_probability_recomputations: u64,
     /// Fixture `EpistemicCircuit` evaluations performed by this adapter.
@@ -172,6 +176,10 @@ impl EpistemicProbProductionAdapter {
             .trace
             .gpu_knowledge_compilation_end_to_end_runs
             .saturating_add(1);
+        self.trace.gpu_source_knowledge_compilation_end_to_end_runs = self
+            .trace
+            .gpu_source_knowledge_compilation_end_to_end_runs
+            .saturating_add(1);
         self.trace.require_zero_cpu_recompute()?;
         Ok(result)
     }
@@ -207,6 +215,10 @@ impl EpistemicProbProductionAdapter {
         self.trace.gpu_knowledge_compilation_end_to_end_runs = self
             .trace
             .gpu_knowledge_compilation_end_to_end_runs
+            .saturating_add(1);
+        self.trace.gpu_program_knowledge_compilation_end_to_end_runs = self
+            .trace
+            .gpu_program_knowledge_compilation_end_to_end_runs
             .saturating_add(1);
         self.trace.require_zero_cpu_recompute()?;
         Ok(result)

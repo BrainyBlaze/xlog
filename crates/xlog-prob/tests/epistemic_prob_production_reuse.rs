@@ -29,6 +29,8 @@ fn production_prob_adapter_reuses_gpu_exact_path_not_fixture_circuit() {
     assert!(production.contains("gpu_pir_graph_uploads"));
     assert!(production.contains("gpu_cnf_encodes"));
     assert!(production.contains("gpu_knowledge_compilation_end_to_end_runs"));
+    assert!(production.contains("gpu_source_knowledge_compilation_end_to_end_runs"));
+    assert!(production.contains("gpu_program_knowledge_compilation_end_to_end_runs"));
     assert!(production.contains("gpu_exact_query_evaluations"));
     assert!(production.contains("gpu_exact_gradient_evaluations"));
     assert!(production.contains("cpu_only_probability_recomputations: 0"));

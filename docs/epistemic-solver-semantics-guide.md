@@ -346,7 +346,9 @@ hot-path transfers, and non-empty final device output are proven.
 `compile_and_evaluate_source_with_gpu_execution_result` and
 `compile_and_evaluate_program_with_gpu_execution_result` consume the same
 accepted runtime evidence once before compiling through `ExactDdnnfProgram` and
-evaluating queries from that compiled GPU exact state.
+evaluating queries from that compiled GPU exact state. The production trace
+keeps separate source and parsed-program end-to-end counters as well as the
+aggregate knowledge-compilation counter.
 `encode_source_pir_cnf_with_gpu_execution_result` and
 `encode_program_pir_cnf_with_gpu_execution_result` apply the same accepted
 runtime boundary before uploading `GpuPirGraph`/`GpuPirRoots` and calling
