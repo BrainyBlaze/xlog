@@ -319,7 +319,7 @@ adapter for epistemic callers. It is a thin wrapper over the existing
 workspace-backed UNSAT, bounded weighted MaxSAT candidate checks, single-result
 and multi-result MaxSAT search pruning, single-result and multi-result
 weighted MaxSAT selection encoding, heterogeneous MaxSAT scheduler jobs, and
-bounded SAT/MaxSAT portfolio jobs
+single-result plus multi-result bounded SAT/MaxSAT portfolio jobs
 through the GPU CDCL path and exposes zero CPU assignment/MaxSAT enumeration
 counters in `GpuSolverProductionTrace`.
 `solve_expect_sat_with_gpu_execution_result` and
@@ -387,6 +387,10 @@ counters.
 applies the boundary before dispatching bounded SAT and MaxSAT jobs through the
 same adapter, propagating UNKNOWN/TIMEOUT portfolio statuses without CPU search,
 and recording portfolio counters.
+`solve_multi_candidate_portfolio_with_gpu_execution_results` validates multiple
+accepted GPU runtime results up front, then repeats the same SAT/MaxSAT/status
+portfolio jobs once per accepted evidence record while aggregating
+candidate-evidence and `gpu_portfolio_*` counters.
 `xlog_solve::production_capabilities` reports that GPU CDCL SAT/UNSAT is
 available along with the bounded GPU-backed MaxSAT and SAT/MaxSAT portfolio
 adapters. `GpuSolverProductionTrace::require_production_metric_eligibility`

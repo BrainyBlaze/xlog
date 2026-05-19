@@ -3593,6 +3593,104 @@ fn accepted_gpu_execution_result_gates_solver_maxsat_and_portfolio_paths() {
 }
 
 #[test]
+fn accepted_gpu_execution_results_gate_multi_candidate_portfolio_path() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X).
+        "#,
+    )
+    .expect("parse nonzero-arity epistemic fixture");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile nonzero-arity epistemic executable");
+
+    let make_result = |edge_rows: &[u32]| {
+        let mut executor =
+            Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+        for (name, rel_id) in &executable.relation_ids {
+            executor.register_relation(*rel_id, name);
+        }
+        executor.put_relation("node", upload_unary_u32(&fix.memory, &[1, 2]));
+        executor.put_relation("edge", upload_unary_u32(&fix.memory, edge_rows));
+
+        executor
+            .execute_epistemic_gpu_execution(
+                &executable,
+                EpistemicGpuWorkspaceCapacities {
+                    max_candidates: 2,
+                    max_worlds: 1,
+                    max_models_per_reduction: 2,
+                },
+            )
+            .expect("execute accepted epistemic fixture")
+    };
+    let result_a = make_result(&[1]);
+    let result_b = make_result(&[2]);
+
+    let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
+    let maxsat_candidate =
+        GpuCnf::from_host(&sat_instance, &fix.provider).expect("upload MaxSAT candidate CNF");
+    let portfolio_sat =
+        GpuCnf::from_host(&sat_instance, &fix.provider).expect("upload portfolio SAT CNF");
+    let branch_limit = upload_u32_scalar(&fix.provider, 1);
+    let maxsat_candidates = [GpuSolverProductionMaxSatCandidate {
+        score: 5,
+        cnf: &maxsat_candidate,
+        branch_var_limit: &branch_limit,
+    }];
+    let portfolio_jobs = [
+        GpuSolverProductionPortfolioJob::Sat {
+            cnf: &portfolio_sat,
+            branch_var_limit: &branch_limit,
+        },
+        GpuSolverProductionPortfolioJob::MaxSat {
+            candidates: &maxsat_candidates,
+        },
+        GpuSolverProductionPortfolioJob::Unknown {
+            reason: "bounded branch budget exhausted before a determined status",
+        },
+        GpuSolverProductionPortfolioJob::Timeout { budget_micros: 10 },
+    ];
+    let mut adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+
+    let report = adapter
+        .solve_multi_candidate_portfolio_with_gpu_execution_results(
+            &fix.provider,
+            &[&result_a, &result_b],
+            &portfolio_jobs,
+        )
+        .expect("accepted GPU runtime evidence must gate two-record portfolio path");
+
+    assert_eq!(report.candidate_evidence_records, 2);
+    assert_eq!(report.jobs, 8);
+    assert_eq!(report.sat_jobs, 2);
+    assert_eq!(report.maxsat_jobs, 2);
+    assert_eq!(report.unknown_jobs, 2);
+    assert_eq!(report.timeout_jobs, 2);
+    assert_eq!(report.maxsat_optimum_scores, 10);
+
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 2);
+    assert_eq!(trace.gpu_maxsat_candidate_solves, 2);
+    assert_eq!(trace.gpu_maxsat_optima, 2);
+    assert_eq!(trace.gpu_portfolio_jobs, 8);
+    assert_eq!(trace.gpu_portfolio_sat_jobs, 2);
+    assert_eq!(trace.gpu_portfolio_maxsat_jobs, 2);
+    assert_eq!(trace.gpu_portfolio_unknown_status_jobs, 2);
+    assert_eq!(trace.gpu_portfolio_timeout_status_jobs, 2);
+    assert_eq!(trace.cpu_assignment_enumerations, 0);
+    assert_eq!(trace.cpu_maxsat_enumerations, 0);
+}
+
+#[test]
 fn accepted_gpu_execution_results_gate_multi_candidate_maxsat_path() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");

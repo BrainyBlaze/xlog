@@ -291,6 +291,8 @@ pub enum GpuSolverProductionPortfolioJob<'a> {
 /// Summary of one bounded GPU SAT/MaxSAT/status-aware portfolio run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GpuSolverProductionPortfolioReport {
+    /// Number of accepted GPU epistemic candidate evidence records consumed.
+    pub candidate_evidence_records: u64,
     /// Number of portfolio jobs executed.
     pub jobs: u64,
     /// Number of SAT jobs executed.
@@ -1716,15 +1718,8 @@ impl GpuSolverProductionAdapter {
         Ok(report)
     }
 
-    /// Execute a bounded SAT/MaxSAT/status-aware portfolio after accepted GPU epistemic execution.
-    ///
-    /// The portfolio is a production adapter over existing GPU CDCL calls. It records
-    /// per-job counters and rejects empty portfolios without falling back to the CPU
-    /// semantic-oracle solver.
-    pub fn solve_portfolio_with_gpu_execution_result(
+    fn solve_portfolio_jobs(
         &mut self,
-        provider: &CudaKernelProvider,
-        result: &EpistemicGpuExecutionResult,
         jobs: &[GpuSolverProductionPortfolioJob<'_>],
     ) -> Result<GpuSolverProductionPortfolioReport> {
         if jobs.is_empty() {
@@ -1734,14 +1729,11 @@ impl GpuSolverProductionAdapter {
             });
         }
 
-        require_accepted_gpu_solver_evidence(provider, result)?;
-
-        let mut report = GpuSolverProductionPortfolioReport {
-            jobs: jobs.len() as u64,
-            ..GpuSolverProductionPortfolioReport::default()
-        };
+        let mut report = GpuSolverProductionPortfolioReport::default();
         for job in jobs {
             self.trace.gpu_portfolio_jobs = self.trace.gpu_portfolio_jobs.saturating_add(1);
+            report.jobs = report.jobs.saturating_add(1);
+
             match job {
                 GpuSolverProductionPortfolioJob::Sat {
                     cnf,
@@ -1796,10 +1788,82 @@ impl GpuSolverProductionAdapter {
             }
         }
 
+        Ok(report)
+    }
+
+    fn add_portfolio_report(
+        report: &mut GpuSolverProductionPortfolioReport,
+        step_report: GpuSolverProductionPortfolioReport,
+    ) {
+        report.jobs = report.jobs.saturating_add(step_report.jobs);
+        report.sat_jobs = report.sat_jobs.saturating_add(step_report.sat_jobs);
+        report.maxsat_jobs = report.maxsat_jobs.saturating_add(step_report.maxsat_jobs);
+        report.unknown_jobs = report.unknown_jobs.saturating_add(step_report.unknown_jobs);
+        report.timeout_jobs = report.timeout_jobs.saturating_add(step_report.timeout_jobs);
+        report.maxsat_optimum_scores = report
+            .maxsat_optimum_scores
+            .saturating_add(step_report.maxsat_optimum_scores);
+    }
+
+    /// Execute a bounded SAT/MaxSAT/status-aware portfolio after accepted GPU epistemic execution.
+    ///
+    /// The portfolio is a production adapter over existing GPU CDCL calls. It records
+    /// per-job counters and rejects empty portfolios without falling back to the CPU
+    /// semantic-oracle solver.
+    pub fn solve_portfolio_with_gpu_execution_result(
+        &mut self,
+        provider: &CudaKernelProvider,
+        result: &EpistemicGpuExecutionResult,
+        jobs: &[GpuSolverProductionPortfolioJob<'_>],
+    ) -> Result<GpuSolverProductionPortfolioReport> {
+        require_accepted_gpu_solver_evidence(provider, result)?;
+
+        let mut report = self.solve_portfolio_jobs(jobs)?;
+        report.candidate_evidence_records = 1;
+
         self.trace.accepted_gpu_candidate_evidence_consumed = self
             .trace
             .accepted_gpu_candidate_evidence_consumed
             .saturating_add(1);
+        self.trace.require_zero_cpu_search()?;
+        Ok(report)
+    }
+
+    /// Execute the same bounded portfolio once per accepted GPU epistemic candidate.
+    pub fn solve_multi_candidate_portfolio_with_gpu_execution_results(
+        &mut self,
+        provider: &CudaKernelProvider,
+        results: &[&EpistemicGpuExecutionResult],
+        jobs: &[GpuSolverProductionPortfolioJob<'_>],
+    ) -> Result<GpuSolverProductionPortfolioReport> {
+        if results.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production portfolio".to_string(),
+                context: "multi-candidate portfolio requires at least one accepted GPU result"
+                    .to_string(),
+            });
+        }
+        if jobs.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production portfolio".to_string(),
+                context: "accepted solver portfolio requires at least one GPU job".to_string(),
+            });
+        }
+        for result in results {
+            require_accepted_gpu_solver_evidence(provider, result)?;
+        }
+
+        let mut report = GpuSolverProductionPortfolioReport::default();
+        for _ in results {
+            let step_report = self.solve_portfolio_jobs(jobs)?;
+            report.candidate_evidence_records = report.candidate_evidence_records.saturating_add(1);
+            Self::add_portfolio_report(&mut report, step_report);
+            self.trace.accepted_gpu_candidate_evidence_consumed = self
+                .trace
+                .accepted_gpu_candidate_evidence_consumed
+                .saturating_add(1);
+        }
+
         self.trace.require_zero_cpu_search()?;
         Ok(report)
     }

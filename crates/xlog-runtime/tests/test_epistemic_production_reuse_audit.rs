@@ -153,6 +153,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(solver.contains("encode_weighted_maxsat_search_candidates"));
     assert!(solver.contains("solve_maxsat_schedule_with_gpu_execution_results"));
     assert!(solver.contains("solve_portfolio_with_gpu_execution_result"));
+    assert!(solver.contains("solve_multi_candidate_portfolio_with_gpu_execution_results"));
     assert!(solver.contains("GpuSolverProductionLifecycleStep"));
     assert!(solver.contains("GpuSolverProductionExpectation"));
     assert!(solver.contains("GpuSolverProductionExpectation::Unknown"));
