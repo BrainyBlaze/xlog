@@ -308,6 +308,11 @@ workspace-backed UNSAT solve over the same GPU CNF. Distinct candidate CNFs
 are rejected before import, incrementing
 `gpu_learned_clause_reuse_rejections` while keeping CPU learned-clause transfer
 counters at zero.
+`solve_multi_candidate_learned_clause_reuse_with_gpu_execution_results`
+validates multiple accepted GPU runtime results up front, then repeats the
+same-device-CNF learned-clause publication/import path through the existing GPU
+CDCL workspace once per accepted evidence record while keeping learned-clause
+transfer counters at zero.
 `solve_weighted_maxsat_candidates_with_gpu_execution_result` applies the same
 boundary before certifying bounded MaxSAT candidate CNFs through GPU CDCL and
 returning the best declared score. `solve_portfolio_with_gpu_execution_result`
@@ -323,8 +328,8 @@ or that record CPU assignment, MaxSAT, or learned-clause transfer counters.
 
 The adapter is partial v0.9 evidence only. It now proves same-CNF reuse,
 distinct-CNF fail-closed rejection, a two-record accepted lifecycle, and bounded
-UNKNOWN/TIMEOUT lifecycle propagation, but not broader multi-candidate
-learned-clause lifecycle or full MaxSAT coverage.
+UNKNOWN/TIMEOUT lifecycle propagation, plus two-record same-CNF learned-clause
+reuse, but not full MaxSAT coverage.
 
 `xlog_solve::SolverService` provides the bounded solver API used by semantic
 fixtures:

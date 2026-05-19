@@ -30,6 +30,8 @@ fn production_solver_adapter_reuses_gpu_cdcl_not_cpu_oracle() {
     assert!(production
         .contains("solve_unsat_and_publish_learned_clause_arena_with_gpu_execution_result"));
     assert!(production.contains("solve_unsat_then_reuse_learned_clauses_with_gpu_execution_result"));
+    assert!(production
+        .contains("solve_multi_candidate_learned_clause_reuse_with_gpu_execution_results"));
     assert!(production.contains("solve_weighted_maxsat_candidates_with_gpu_execution_result"));
     assert!(production.contains("solve_portfolio_with_gpu_execution_result"));
     assert!(production.contains("GpuSolverProductionLearnedClauseArenaReport"));

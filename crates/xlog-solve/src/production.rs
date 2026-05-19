@@ -104,6 +104,8 @@ pub struct GpuSolverProductionLearnedClauseArenaReport {
 /// Summary of a bounded GPU CDCL learned-clause reuse run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GpuSolverProductionLearnedClauseReuseReport {
+    /// Number of accepted GPU epistemic candidate evidence records consumed.
+    pub candidate_evidence_records: u64,
     /// Number of accepted candidate solves represented by this bounded reuse run.
     pub candidates: u64,
     /// Number of UNSAT solves executed through the reusable GPU CDCL workspace.
@@ -717,21 +719,14 @@ impl GpuSolverProductionAdapter {
         })
     }
 
-    /// Publish learned clauses from one accepted GPU UNSAT solve and import them into another.
-    ///
-    /// This is deliberately bounded to same-device-CNF reuse. The existing GPU proof trace is
-    /// valid for the imported solve only when the base CNF buffers are the same.
-    pub fn solve_unsat_then_reuse_learned_clauses_with_gpu_execution_result(
+    fn solve_unsat_then_reuse_learned_clauses(
         &mut self,
-        provider: &CudaKernelProvider,
-        result: &EpistemicGpuExecutionResult,
         workspace: &mut GpuCdclWorkspace,
         source_cnf: &GpuCnf,
         source_branch_var_limit: &TrackedCudaSlice<u32>,
         target_cnf: &GpuCnf,
         target_branch_var_limit: &TrackedCudaSlice<u32>,
     ) -> Result<GpuSolverProductionLearnedClauseReuseReport> {
-        require_accepted_gpu_solver_evidence(provider, result)?;
         if let Err(err) = require_same_gpu_cnf_for_learned_clause_reuse(source_cnf, target_cnf) {
             self.trace.gpu_learned_clause_reuse_rejections = self
                 .trace
@@ -806,13 +801,10 @@ impl GpuSolverProductionAdapter {
             .trace
             .gpu_learned_clause_reused_solves
             .saturating_add(1);
-        self.trace.accepted_gpu_candidate_evidence_consumed = self
-            .trace
-            .accepted_gpu_candidate_evidence_consumed
-            .saturating_add(1);
         self.trace.require_zero_cpu_search()?;
 
         Ok(GpuSolverProductionLearnedClauseReuseReport {
+            candidate_evidence_records: 0,
             candidates: 2,
             unsat_solves: 2,
             gpu_learned_clause_arena_publications: 1,
@@ -820,6 +812,93 @@ impl GpuSolverProductionAdapter {
             gpu_learned_clause_reused_solves: 1,
             cpu_learned_clause_transfers: self.trace.cpu_learned_clause_transfers,
         })
+    }
+
+    /// Publish learned clauses from one accepted GPU UNSAT solve and import them into another.
+    ///
+    /// This is deliberately bounded to same-device-CNF reuse. The existing GPU proof trace is
+    /// valid for the imported solve only when the base CNF buffers are the same.
+    pub fn solve_unsat_then_reuse_learned_clauses_with_gpu_execution_result(
+        &mut self,
+        provider: &CudaKernelProvider,
+        result: &EpistemicGpuExecutionResult,
+        workspace: &mut GpuCdclWorkspace,
+        source_cnf: &GpuCnf,
+        source_branch_var_limit: &TrackedCudaSlice<u32>,
+        target_cnf: &GpuCnf,
+        target_branch_var_limit: &TrackedCudaSlice<u32>,
+    ) -> Result<GpuSolverProductionLearnedClauseReuseReport> {
+        require_accepted_gpu_solver_evidence(provider, result)?;
+        let mut report = self.solve_unsat_then_reuse_learned_clauses(
+            workspace,
+            source_cnf,
+            source_branch_var_limit,
+            target_cnf,
+            target_branch_var_limit,
+        )?;
+        report.candidate_evidence_records = 1;
+        self.trace.accepted_gpu_candidate_evidence_consumed = self
+            .trace
+            .accepted_gpu_candidate_evidence_consumed
+            .saturating_add(1);
+        self.trace.require_zero_cpu_search()?;
+        Ok(report)
+    }
+
+    /// Publish and reuse learned clauses once per accepted GPU epistemic candidate.
+    pub fn solve_multi_candidate_learned_clause_reuse_with_gpu_execution_results(
+        &mut self,
+        provider: &CudaKernelProvider,
+        results: &[&EpistemicGpuExecutionResult],
+        workspace: &mut GpuCdclWorkspace,
+        source_cnf: &GpuCnf,
+        source_branch_var_limit: &TrackedCudaSlice<u32>,
+        target_cnf: &GpuCnf,
+        target_branch_var_limit: &TrackedCudaSlice<u32>,
+    ) -> Result<GpuSolverProductionLearnedClauseReuseReport> {
+        if results.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver learned-clause reuse".to_string(),
+                context:
+                    "multi-candidate learned-clause reuse requires at least one accepted GPU result"
+                        .to_string(),
+            });
+        }
+        require_same_gpu_cnf_for_learned_clause_reuse(source_cnf, target_cnf)?;
+        for result in results {
+            require_accepted_gpu_solver_evidence(provider, result)?;
+        }
+
+        let mut report = GpuSolverProductionLearnedClauseReuseReport::default();
+        for _ in results {
+            let step_report = self.solve_unsat_then_reuse_learned_clauses(
+                workspace,
+                source_cnf,
+                source_branch_var_limit,
+                target_cnf,
+                target_branch_var_limit,
+            )?;
+            report.candidate_evidence_records = report.candidate_evidence_records.saturating_add(1);
+            report.candidates = report.candidates.saturating_add(step_report.candidates);
+            report.unsat_solves = report.unsat_solves.saturating_add(step_report.unsat_solves);
+            report.gpu_learned_clause_arena_publications = report
+                .gpu_learned_clause_arena_publications
+                .saturating_add(step_report.gpu_learned_clause_arena_publications);
+            report.gpu_learned_clause_imports = report
+                .gpu_learned_clause_imports
+                .saturating_add(step_report.gpu_learned_clause_imports);
+            report.gpu_learned_clause_reused_solves = report
+                .gpu_learned_clause_reused_solves
+                .saturating_add(step_report.gpu_learned_clause_reused_solves);
+            report.cpu_learned_clause_transfers = self.trace.cpu_learned_clause_transfers;
+            self.trace.accepted_gpu_candidate_evidence_consumed = self
+                .trace
+                .accepted_gpu_candidate_evidence_consumed
+                .saturating_add(1);
+        }
+
+        self.trace.require_zero_cpu_search()?;
+        Ok(report)
     }
 
     fn solve_weighted_maxsat_candidates(

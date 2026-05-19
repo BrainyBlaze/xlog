@@ -69,6 +69,9 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
         solver.contains("solve_unsat_and_publish_learned_clause_arena_with_gpu_execution_result")
     );
     assert!(solver.contains("solve_unsat_then_reuse_learned_clauses_with_gpu_execution_result"));
+    assert!(
+        solver.contains("solve_multi_candidate_learned_clause_reuse_with_gpu_execution_results")
+    );
     assert!(solver.contains("solve_weighted_maxsat_candidates_with_gpu_execution_result"));
     assert!(solver.contains("solve_portfolio_with_gpu_execution_result"));
     assert!(solver.contains("GpuSolverProductionLifecycleStep"));

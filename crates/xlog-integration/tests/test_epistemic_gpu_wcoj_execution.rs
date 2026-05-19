@@ -1982,6 +1982,7 @@ fn accepted_gpu_execution_result_gates_solver_same_cnf_learned_clause_reuse() {
         .expect("accepted GPU runtime evidence must gate learned-clause reuse");
 
     assert_eq!(workspace.assign_device_ptr(), assign_ptr_before);
+    assert_eq!(report.candidate_evidence_records, 1);
     assert_eq!(report.candidates, 2);
     assert_eq!(report.unsat_solves, 2);
     assert_eq!(report.gpu_learned_clause_arena_publications, 1);
@@ -1995,6 +1996,96 @@ fn accepted_gpu_execution_result_gates_solver_same_cnf_learned_clause_reuse() {
     assert_eq!(trace.gpu_learned_clause_arena_publications, 1);
     assert_eq!(trace.gpu_learned_clause_imports, 1);
     assert_eq!(trace.gpu_learned_clause_reused_solves, 1);
+    assert_eq!(trace.cpu_learned_clause_transfers, 0);
+    assert_eq!(trace.cpu_assignment_enumerations, 0);
+    assert_eq!(trace.cpu_maxsat_enumerations, 0);
+}
+
+#[test]
+fn accepted_gpu_execution_results_gate_multi_candidate_learned_clause_reuse() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X).
+        "#,
+    )
+    .expect("parse nonzero-arity epistemic fixture");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile nonzero-arity epistemic executable");
+
+    let make_result = |edge_rows: &[u32]| {
+        let mut executor =
+            Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+        for (name, rel_id) in &executable.relation_ids {
+            executor.register_relation(*rel_id, name);
+        }
+        executor.put_relation("node", upload_unary_u32(&fix.memory, &[1, 2]));
+        executor.put_relation("edge", upload_unary_u32(&fix.memory, edge_rows));
+
+        executor
+            .execute_epistemic_gpu_execution(
+                &executable,
+                EpistemicGpuWorkspaceCapacities {
+                    max_candidates: 2,
+                    max_worlds: 1,
+                    max_models_per_reduction: 2,
+                },
+            )
+            .expect("execute accepted epistemic fixture")
+    };
+    let result_a = make_result(&[1]);
+    let result_b = make_result(&[2]);
+
+    let unsat_instance = SolveInstance::new(
+        1,
+        vec![
+            Clause::new(vec![Literal::positive(0)]),
+            Clause::new(vec![Literal::negative(0)]),
+        ],
+    );
+    let unsat_cnf = GpuCnf::from_host(&unsat_instance, &fix.provider).expect("upload UNSAT CNF");
+    let branch_limit = upload_u32_scalar(&fix.provider, 1);
+    let mut adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let mut workspace = adapter
+        .new_workspace(unsat_cnf.var_cap, unsat_cnf.clause_cap)
+        .expect("new workspace");
+    let assign_ptr_before = workspace.assign_device_ptr();
+
+    let report = adapter
+        .solve_multi_candidate_learned_clause_reuse_with_gpu_execution_results(
+            &fix.provider,
+            &[&result_a, &result_b],
+            &mut workspace,
+            &unsat_cnf,
+            &branch_limit,
+            &unsat_cnf,
+            &branch_limit,
+        )
+        .expect("accepted GPU runtime evidence must gate multi-candidate learned-clause reuse");
+
+    assert_eq!(workspace.assign_device_ptr(), assign_ptr_before);
+    assert_eq!(report.candidate_evidence_records, 2);
+    assert_eq!(report.candidates, 4);
+    assert_eq!(report.unsat_solves, 4);
+    assert_eq!(report.gpu_learned_clause_arena_publications, 2);
+    assert_eq!(report.gpu_learned_clause_imports, 2);
+    assert_eq!(report.gpu_learned_clause_reused_solves, 2);
+    assert_eq!(report.cpu_learned_clause_transfers, 0);
+
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 2);
+    assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 4);
+    assert_eq!(trace.gpu_learned_clause_arena_publications, 2);
+    assert_eq!(trace.gpu_learned_clause_imports, 2);
+    assert_eq!(trace.gpu_learned_clause_reused_solves, 2);
     assert_eq!(trace.cpu_learned_clause_transfers, 0);
     assert_eq!(trace.cpu_assignment_enumerations, 0);
     assert_eq!(trace.cpu_maxsat_enumerations, 0);
