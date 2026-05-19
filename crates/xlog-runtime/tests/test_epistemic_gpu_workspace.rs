@@ -117,6 +117,26 @@ fn runtime_preflight_records_workspace_and_wcoj_route_surfaces() {
 }
 
 #[test]
+fn runtime_preflight_records_epistemic_operator_metrics() {
+    let executable = executable_with_operator_mix();
+
+    let preflight = EpistemicGpuRuntimePreflight::for_executable_plan(
+        &executable,
+        EpistemicGpuWorkspaceCapacities {
+            max_candidates: 8,
+            max_worlds: 4,
+            max_models_per_reduction: 2,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(preflight.know_operator_count, 1);
+    assert_eq!(preflight.possible_operator_count, 1);
+    assert_eq!(preflight.not_know_operator_count, 1);
+    assert_eq!(preflight.not_possible_operator_count, 1);
+}
+
+#[test]
 fn runtime_preflight_rejects_nonzero_cpu_fallback_counters() {
     let mut executable = executable_with_kclique_wcoj_plan();
     executable.gpu_plan.cpu_fallbacks.candidate_enumeration = 1;
@@ -1197,6 +1217,42 @@ fn epistemic_literal(predicate: &str, op: EirEpistemicOp) -> EirEpistemicLiteral
             arity: 0,
             terms: Vec::new(),
         },
+    }
+}
+
+fn negated_epistemic_literal(predicate: &str, op: EirEpistemicOp) -> EirEpistemicLiteral {
+    EirEpistemicLiteral {
+        op,
+        negated: true,
+        atom: EirAtom {
+            predicate: predicate.to_string(),
+            arity: 0,
+            terms: Vec::new(),
+        },
+    }
+}
+
+fn executable_with_operator_mix() -> EpistemicExecutablePlan {
+    let gpu_plan = EpistemicGpuPlan::new(
+        EirEpistemicMode::Faeel,
+        vec![
+            epistemic_literal("known_gate", EirEpistemicOp::Know),
+            epistemic_literal("possible_gate", EirEpistemicOp::Possible),
+            negated_epistemic_literal("not_known_gate", EirEpistemicOp::Know),
+            negated_epistemic_literal("not_possible_gate", EirEpistemicOp::Possible),
+        ],
+        vec![EpistemicReductionPlan {
+            rule_index: 0,
+            head_predicate: "out".to_string(),
+            relational_body_atoms: 1,
+            wcoj_status: EpistemicWcojReductionStatus::NotWcojCandidate,
+        }],
+    );
+
+    EpistemicExecutablePlan {
+        gpu_plan,
+        relation_ids: std::collections::BTreeMap::new(),
+        reduced_runtime_plan: runtime_plan_with_kclique_wcoj(),
     }
 }
 

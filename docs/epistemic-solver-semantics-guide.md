@@ -88,9 +88,10 @@ metadata, model-membership bytes checked, world-view slots checked, kernel
 launches, zero host writes, and CUDA-event elapsed timing. The row-map kernel
 filters output rows by accepted membership, world-view state, all variable-bound
 tuple-key relation matches, and binding polarity before the final tuple kernel
-compacts reduced output columns. Accepted unary, binary, multi-membership, and
-`not know` fixtures now prove final rows are filtered by bound tuple keys on
-device.
+compacts reduced output columns. Accepted unary, possible, binary,
+multi-membership, and `not know` fixtures now prove final rows are filtered by
+bound tuple keys on device, and preflight records explicit
+`know`/`possible`/`not know`/`not possible` operator counts.
 `EpistemicGpuRuntimeWcojCertification` then requires actual production WCOJ
 counter deltas before WCOJ evidence can be certified, and its certified result
 carries the dispatched plan's edge-permutation, sorted-layout, and helper-split
@@ -109,7 +110,7 @@ buffers with row-scoped ground-key comparison through specialized
 arity-one/two/three kernels and a generic arity-N kernel, plus row-scoped
 variable-bound comparison against reduced-output columns and `not know` polarity
 through the generic arity-N kernel. Final tuple output is gated by the staged
-membership and world-view buffers, with accepted unary, binary,
+membership and world-view buffers, with accepted unary, possible, binary,
 multi-membership, and not-know bound-key row-filter fixtures. Full world-view
 semantics, solver coupling, probabilistic production-path reuse, and broader
 accepted semantic parity do not dispatch yet.

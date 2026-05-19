@@ -43,7 +43,7 @@ Predecessor evidence:
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace candidate_validation` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace validation` | PASS, 7 passed, 0 failed |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace materialization` | PASS, 5 passed, 0 failed |
-| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 47 passed, 0 failed |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 48 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_records_device_semantic_trace_counts -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_gpt` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_faeel` | PASS, 3 passed, 0 failed |

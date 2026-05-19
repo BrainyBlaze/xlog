@@ -10,7 +10,10 @@ use xlog_cuda::{
     LaunchAsync,
 };
 use xlog_ir::rir::{MultiwayPlan, RirNode};
-use xlog_ir::{EirTerm, EpistemicCpuFallbackCounters, EpistemicExecutablePlan, EpistemicGpuPlan};
+use xlog_ir::{
+    EirEpistemicOp, EirTerm, EpistemicCpuFallbackCounters, EpistemicExecutablePlan,
+    EpistemicGpuPlan,
+};
 
 use super::Executor;
 
@@ -1001,6 +1004,14 @@ pub struct EpistemicGpuRuntimePreflight {
     pub helper_split_spec_count: usize,
     /// Tuple-membership bindings certified for stable-model membership checks.
     pub tuple_membership_binding_count: usize,
+    /// Non-negated `know` operators represented by the executable GPU plan.
+    pub know_operator_count: usize,
+    /// Non-negated `possible` operators represented by the executable GPU plan.
+    pub possible_operator_count: usize,
+    /// Negated `know` operators represented as `not know`.
+    pub not_know_operator_count: usize,
+    /// Negated `possible` operators represented as `not possible`.
+    pub not_possible_operator_count: usize,
     /// Forbidden CPU fallback counters copied from the GPU semantic contract.
     pub cpu_fallbacks: EpistemicCpuFallbackCounters,
 }
@@ -1034,6 +1045,19 @@ impl EpistemicGpuRuntimePreflight {
             summarize_runtime_routes(&rule.body, &mut routes);
         }
 
+        let mut know_operator_count = 0usize;
+        let mut possible_operator_count = 0usize;
+        let mut not_know_operator_count = 0usize;
+        let mut not_possible_operator_count = 0usize;
+        for literal in &executable.gpu_plan.epistemic_literals {
+            match (literal.op, literal.negated) {
+                (EirEpistemicOp::Know, false) => know_operator_count += 1,
+                (EirEpistemicOp::Possible, false) => possible_operator_count += 1,
+                (EirEpistemicOp::Know, true) => not_know_operator_count += 1,
+                (EirEpistemicOp::Possible, true) => not_possible_operator_count += 1,
+            }
+        }
+
         Ok(Self {
             workspace_layout,
             reduced_runtime_rule_count,
@@ -1045,6 +1069,10 @@ impl EpistemicGpuRuntimePreflight {
             sorted_layout_requirement_count: routes.sorted_layout_requirement_count,
             helper_split_spec_count: routes.helper_split_spec_count,
             tuple_membership_binding_count: executable.gpu_plan.tuple_membership_bindings.len(),
+            know_operator_count,
+            possible_operator_count,
+            not_know_operator_count,
+            not_possible_operator_count,
             cpu_fallbacks: executable.gpu_plan.cpu_fallbacks,
         })
     }
