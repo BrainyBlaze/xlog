@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+No user-facing changes are staged after the v0.8.5 closure proposal.
+
+## [0.8.5] — 2026-05-19
+
+Language Completeness and Developer Experience. This release refreshes the
+public language surface for finite terms/lists/meta constructs, explicit NAF,
+magic-set planning, probabilistic aggregate inference, approximate inference
+configuration, incremental parsing, and CLI inspectability while preserving
+the v0.8.0 DTS-DLM runtime compatibility surface.
+
 ### Added
 
 - Added the v0.8.5 language-completeness documentation contract, including
@@ -53,6 +63,28 @@ All notable changes to this project are documented in this file.
   falls back to the regular hash join instead of aborting valid queries.
 - Updated the public CUDA certification count to 207/207 after the current
   full-suite and recorded-launch certification reruns.
+- Fixed v0.8.5 list-helper reservation so ordinary `pair/2` relations remain
+  compatible while reserved pair-helper arities still fail closed.
+
+### Migration Notes
+
+- Existing v0.8.0 programs remain compatible. The G085_INT gate revalidated
+  the v0.8.0 DTS example/source guards and strict deterministic D2H runtime
+  paths.
+- New finite list/meta features intentionally reject non-finite, dynamic, or
+  CPU-only term forms. Unsupported forms emit typed `v0.8.5 ... error`
+  diagnostics with remediation guidance.
+- `xlog explain`, `xlog repl`, and `xlog watch --once --explain` are safe
+  inspectability paths for v0.8.5 programs and do not authorize release
+  publishing by themselves.
+
+### Release Status
+
+- Closure proposal: `docs/plans/2026-05-19-v085-closure-proposal.md`.
+- Certification evidence: `docs/evidence/2026-05-18-v085-*` and
+  `docs/evidence/2026-05-19-v085-*`.
+- No push, tag, merge, or release-board update is authorized by the local
+  closure proposal.
 
 ## [0.8.0] — 2026-05-18
 
