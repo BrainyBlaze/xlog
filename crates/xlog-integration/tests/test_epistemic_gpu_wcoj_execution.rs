@@ -1275,6 +1275,19 @@ fn accepted_multiple_memberships_filter_final_rows_by_all_bound_tuple_keys() {
         "#,
     )
     .expect("parse multi-membership epistemic fixture");
+    let oracle = run_generate_propagate_test(
+        &program,
+        vec![
+            EpistemicInterpretation::new(),
+            EpistemicInterpretation::new().with_known("edge", 1),
+            EpistemicInterpretation::new().with_known("color", 1),
+            EpistemicInterpretation::new()
+                .with_known("edge", 1)
+                .with_known("color", 1),
+        ],
+        GeneratePropagateTestConfig { max_candidates: 4 },
+    )
+    .expect("run multi-membership GPT oracle");
     let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
         .expect("compile multi-membership epistemic executable");
     assert_eq!(executable.gpu_plan.epistemic_literals.len(), 2);
@@ -1301,8 +1314,39 @@ fn accepted_multiple_memberships_filter_final_rows_by_all_bound_tuple_keys() {
 
     assert_eq!(result.prepared.preflight.tuple_membership_binding_count, 2);
     assert_eq!(
+        result.semantic_trace.generated_candidates,
+        oracle.trace.generated
+    );
+    assert_eq!(result.semantic_trace.guesses, oracle.trace.guesses);
+    assert_eq!(
+        result.semantic_trace.propagated_candidates,
+        oracle.trace.propagated
+    );
+    assert_eq!(result.semantic_trace.pruned_candidates, oracle.trace.pruned);
+    assert_eq!(result.semantic_trace.tested_candidates, oracle.trace.tested);
+    assert_eq!(
+        result.semantic_trace.accepted_candidates,
+        oracle.trace.accepted
+    );
+    assert_eq!(
         result.semantic_trace.accepted_world_views, 1,
         "only the candidate whose assumptions are supported by every required membership can pass"
+    );
+    assert_eq!(
+        result.semantic_trace.accepted_world_views,
+        oracle.trace.accepted_world_views
+    );
+    assert_eq!(
+        result.semantic_trace.rejected_candidates,
+        oracle.trace.rejected
+    );
+    assert_eq!(
+        result.semantic_trace.accepted_candidate_indices,
+        oracle.accepted_candidate_indices
+    );
+    assert_eq!(
+        result.semantic_trace.rejected_candidate_indices,
+        oracle.rejected_candidate_indices
     );
     assert_eq!(
         result.model_membership.membership_source,

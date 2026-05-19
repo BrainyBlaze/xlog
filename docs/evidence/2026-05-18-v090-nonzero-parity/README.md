@@ -28,7 +28,7 @@ reject final output rows on device. It is not a closure claim for `G090_GPU`,
 | Accepted possible fixture | `test_epistemic_gpu_wcoj_execution::accepted_possible_nonzero_arity_membership_records_operator_metrics` runs `accepted(X) :- node(X), possible edge(X)` with `node = [1, 2, 3]` and `edge = [2, 3]`; the final device output downloads as `[2, 3]` and preflight records `possible_operator_count == 1`. |
 | Accepted not-possible fixture | `test_epistemic_gpu_wcoj_execution::accepted_not_possible_nonzero_arity_membership_records_operator_and_polarity_metrics` runs `accepted(X) :- node(X), not possible edge(X)` with `node = [1, 2, 3]` and `edge = [2]`; the final device output downloads as `[1, 3]`, preflight records `not_possible_operator_count == 1`, and final tuple materialization records one negated row filter. |
 | Accepted binary fixture | `test_epistemic_gpu_wcoj_execution::accepted_binary_membership_filters_final_rows_by_bound_tuple_key` runs `accepted(X, Y) :- pair(X, Y), know edge(X, Y)` with `pair = [(1, 2), (2, 3)]` and `edge = [(1, 2)]`; the final device output downloads as `[(1, 2)]`. |
-| Accepted multi-membership fixture | `test_epistemic_gpu_wcoj_execution::accepted_multiple_memberships_filter_final_rows_by_all_bound_tuple_keys` runs `accepted(X) :- node(X), know edge(X), know color(X)`, returns `[2]`, and asserts exactly one accepted world view for the fully supported candidate. |
+| Accepted multi-membership fixture | `test_epistemic_gpu_wcoj_execution::accepted_multiple_memberships_filter_final_rows_by_all_bound_tuple_keys` runs `accepted(X) :- node(X), know edge(X), know color(X)`, returns `[2]`, and compares generated/propagated/tested/accepted/rejected counts plus accepted/rejected candidate indices against the bounded GPT oracle for the four-candidate two-literal matrix. |
 | Missing-required multi-membership fixture | `test_epistemic_gpu_wcoj_execution::world_view_validation_rejects_candidates_missing_one_required_membership` runs `accepted(X) :- node(X), know edge(X), know color(X)` with no `color` tuple support, rejects all four candidates at the world-view boundary, and leaves final output empty. |
 | Accepted negated unary fixture | `test_epistemic_gpu_wcoj_execution::accepted_not_know_nonzero_arity_membership_filters_final_rows_by_absent_bound_tuple_key` runs `accepted(X) :- node(X), not know edge(X)` with `node = [1, 2, 3]` and `edge = [1, 3]`; the final device output downloads as `[2]`. |
 | Split possible-vs-not-known fixture | `test_epistemic_gpu_wcoj_execution::split_gpu_world_view_distinguishes_absent_possible_from_not_known` executes split components over `node = [1, 2, 3]` and an empty `edge` tuple source; `possible edge(X)` returns `[]` while `not know edge(X)` returns `[1, 2, 3]` through the accepted GPU runtime path. |
@@ -42,6 +42,7 @@ reject final output rows on device. It is not a closure claim for `G090_GPU`,
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_possible_nonzero_arity_membership_records_operator_metrics -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_not_possible_nonzero_arity_membership_records_operator_and_polarity_metrics -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_binary_membership_filters_final_rows_by_bound_tuple_key -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_multiple_memberships_filter_final_rows_by_all_bound_tuple_keys -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_not_know_nonzero_arity_membership_filters_final_rows_by_absent_bound_tuple_key -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution split_gpu_world_view_distinguishes_absent_possible_from_not_known -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 59 passed, 0 failed |
@@ -52,9 +53,10 @@ reject final output rows on device. It is not a closure claim for `G090_GPU`,
 
 - This covers unary and binary variable-bound `know` membership fixtures,
   unary variable-bound `possible` and `not possible` membership metrics,
-  multi-membership acceptance and missing-required rejection, and unary
-  variable-bound `not know` absent-key filtering plus split possible-vs-not-known
-  output parity over the same absent tuple source.
+  multi-membership acceptance with two-literal GPT trace/candidate-index oracle
+  parity, missing-required rejection, and unary variable-bound `not know`
+  absent-key filtering plus split possible-vs-not-known output parity over the
+  same absent tuple source.
 - It does not prove the full G91, FAEEL, GPT, splitting, solver, or
   probabilistic parity matrix.
 - Multiple-epistemic-literal final-row filters now have focused positive and
