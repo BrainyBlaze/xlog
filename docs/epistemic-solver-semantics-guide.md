@@ -290,7 +290,9 @@ output, then dispatch SAT/UNSAT through GPU CDCL.
 `solve_assumption_lifecycle_with_gpu_execution_result` applies the same
 accepted runtime boundary before recording balanced push/retract counters and
 dispatching a bounded SAT/UNSAT lifecycle through existing GPU CDCL calls and a
-reusable workspace.
+reusable workspace. Lifecycle expectations also support bounded UNKNOWN and
+TIMEOUT status propagation with diagnostic/budget validation and zero CPU search
+counters.
 `solve_multi_candidate_assumption_lifecycle_with_gpu_execution_results` applies
 that boundary to multiple accepted GPU runtime results, dispatches the same
 SAT/UNSAT lifecycle per result through GPU CDCL, reports
@@ -320,8 +322,9 @@ GPU candidate evidence, that have no existing GPU solver production counter,
 or that record CPU assignment, MaxSAT, or learned-clause transfer counters.
 
 The adapter is partial v0.9 evidence only. It now proves same-CNF reuse,
-distinct-CNF fail-closed rejection, and a two-record accepted lifecycle, but not
-broader status-aware lifecycle or full MaxSAT coverage.
+distinct-CNF fail-closed rejection, a two-record accepted lifecycle, and bounded
+UNKNOWN/TIMEOUT lifecycle propagation, but not broader multi-candidate
+learned-clause lifecycle or full MaxSAT coverage.
 
 `xlog_solve::SolverService` provides the bounded solver API used by semantic
 fixtures:

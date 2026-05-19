@@ -73,6 +73,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(solver.contains("solve_portfolio_with_gpu_execution_result"));
     assert!(solver.contains("GpuSolverProductionLifecycleStep"));
     assert!(solver.contains("GpuSolverProductionExpectation"));
+    assert!(solver.contains("GpuSolverProductionExpectation::Unknown"));
+    assert!(solver.contains("GpuSolverProductionExpectation::Timeout"));
     assert!(solver.contains("GpuSolverProductionLearnedClauseArenaReport"));
     assert!(solver.contains("GpuSolverProductionLearnedClauseReuseReport"));
     assert!(solver.contains("GpuSolverProductionMaxSatCandidate"));
@@ -80,6 +82,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(solver.contains("GpuSolverProductionPortfolioJob::Unknown"));
     assert!(solver.contains("GpuSolverProductionPortfolioJob::Timeout"));
     assert!(solver.contains("candidate_evidence_records"));
+    assert!(solver.contains("gpu_lifecycle_unknown_status_steps"));
+    assert!(solver.contains("gpu_lifecycle_timeout_status_steps"));
     assert!(solver.contains("gpu_assumption_pushes"));
     assert!(solver.contains("gpu_assumption_retractions"));
     assert!(solver.contains("gpu_lifecycle_workspace_reuses"));

@@ -46,6 +46,16 @@ pub enum GpuSolverProductionExpectation {
     Sat,
     /// The step must be UNSAT under the currently pushed assumptions.
     Unsat,
+    /// The accepted lifecycle step ended without a determined SAT/UNSAT status.
+    Unknown {
+        /// Diagnostic reason reported by the GPU-backed lifecycle scheduler.
+        reason: &'static str,
+    },
+    /// The accepted lifecycle step exhausted its GPU-backed budget.
+    Timeout {
+        /// Nonzero timeout budget observed by the lifecycle scheduler.
+        budget_micros: u64,
+    },
 }
 
 /// One accepted solver lifecycle step backed by existing GPU CDCL inputs.
@@ -72,6 +82,10 @@ pub struct GpuSolverProductionLifecycleReport {
     pub assumption_retractions: u64,
     /// Number of UNSAT steps that reused the provided GPU CDCL workspace allocation.
     pub workspace_reuses: u64,
+    /// Number of lifecycle steps that propagated UNKNOWN without CPU search.
+    pub unknown_steps: u64,
+    /// Number of lifecycle steps that propagated TIMEOUT without CPU search.
+    pub timeout_steps: u64,
 }
 
 /// Summary of a GPU CDCL learned-clause arena publication.
@@ -203,6 +217,10 @@ pub struct GpuSolverProductionTrace {
     pub gpu_assumption_retractions: u64,
     /// Number of lifecycle UNSAT steps that reused the same GPU CDCL workspace.
     pub gpu_lifecycle_workspace_reuses: u64,
+    /// Number of lifecycle UNKNOWN statuses propagated without CPU search.
+    pub gpu_lifecycle_unknown_status_steps: u64,
+    /// Number of lifecycle TIMEOUT statuses propagated without CPU search.
+    pub gpu_lifecycle_timeout_status_steps: u64,
     /// Number of device learned-clause arenas published by accepted GPU CDCL solves.
     pub gpu_learned_clause_arena_publications: u64,
     /// Number of device learned-count buffers published with learned-clause arenas.
@@ -302,6 +320,8 @@ impl GpuSolverProductionTrace {
             .gpu_cdcl_sat_solves
             .saturating_add(self.gpu_cdcl_unsat_solves)
             .saturating_add(self.gpu_cdcl_workspace_unsat_solves)
+            .saturating_add(self.gpu_lifecycle_unknown_status_steps)
+            .saturating_add(self.gpu_lifecycle_timeout_status_steps)
             .saturating_add(self.gpu_maxsat_candidate_solves)
             .saturating_add(self.gpu_portfolio_jobs);
         if gpu_production_events == 0 {
@@ -440,6 +460,8 @@ impl GpuSolverProductionAdapter {
         let pushes_before = self.trace.gpu_assumption_pushes;
         let retractions_before = self.trace.gpu_assumption_retractions;
         let workspace_reuses_before = self.trace.gpu_lifecycle_workspace_reuses;
+        let unknown_steps_before = self.trace.gpu_lifecycle_unknown_status_steps;
+        let timeout_steps_before = self.trace.gpu_lifecycle_timeout_status_steps;
 
         for step in steps {
             self.trace.gpu_assumption_pushes = self.trace.gpu_assumption_pushes.saturating_add(1);
@@ -464,6 +486,36 @@ impl GpuSolverProductionAdapter {
                                 self.trace.gpu_lifecycle_workspace_reuses.saturating_add(1);
                         }
                     })
+                }
+                GpuSolverProductionExpectation::Unknown { reason } => {
+                    if reason.trim().is_empty() {
+                        Err(XlogError::UnsupportedEpistemicConstruct {
+                            construct: "GPU solver production lifecycle".to_string(),
+                            context: "UNKNOWN lifecycle status requires a diagnostic reason"
+                                .to_string(),
+                        })
+                    } else {
+                        self.trace.gpu_lifecycle_unknown_status_steps = self
+                            .trace
+                            .gpu_lifecycle_unknown_status_steps
+                            .saturating_add(1);
+                        Ok(())
+                    }
+                }
+                GpuSolverProductionExpectation::Timeout { budget_micros } => {
+                    if budget_micros == 0 {
+                        Err(XlogError::UnsupportedEpistemicConstruct {
+                            construct: "GPU solver production lifecycle".to_string(),
+                            context: "TIMEOUT lifecycle status requires a nonzero budget"
+                                .to_string(),
+                        })
+                    } else {
+                        self.trace.gpu_lifecycle_timeout_status_steps = self
+                            .trace
+                            .gpu_lifecycle_timeout_status_steps
+                            .saturating_add(1);
+                        Ok(())
+                    }
                 }
             };
             self.trace.gpu_assumption_retractions =
@@ -498,6 +550,14 @@ impl GpuSolverProductionAdapter {
                 .trace
                 .gpu_lifecycle_workspace_reuses
                 .saturating_sub(workspace_reuses_before),
+            unknown_steps: self
+                .trace
+                .gpu_lifecycle_unknown_status_steps
+                .saturating_sub(unknown_steps_before),
+            timeout_steps: self
+                .trace
+                .gpu_lifecycle_timeout_status_steps
+                .saturating_sub(timeout_steps_before),
         })
     }
 
@@ -571,6 +631,12 @@ impl GpuSolverProductionAdapter {
             report.workspace_reuses = report
                 .workspace_reuses
                 .saturating_add(step_report.workspace_reuses);
+            report.unknown_steps = report
+                .unknown_steps
+                .saturating_add(step_report.unknown_steps);
+            report.timeout_steps = report
+                .timeout_steps
+                .saturating_add(step_report.timeout_steps);
             self.trace.accepted_gpu_candidate_evidence_consumed = self
                 .trace
                 .accepted_gpu_candidate_evidence_consumed

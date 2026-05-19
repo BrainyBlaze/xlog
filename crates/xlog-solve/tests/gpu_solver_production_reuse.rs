@@ -40,7 +40,11 @@ fn production_solver_adapter_reuses_gpu_cdcl_not_cpu_oracle() {
     assert!(production.contains("GpuSolverProductionPortfolioJob::Timeout"));
     assert!(production.contains("GpuSolverProductionLifecycleStep"));
     assert!(production.contains("GpuSolverProductionExpectation"));
+    assert!(production.contains("GpuSolverProductionExpectation::Unknown"));
+    assert!(production.contains("GpuSolverProductionExpectation::Timeout"));
     assert!(production.contains("candidate_evidence_records"));
+    assert!(production.contains("gpu_lifecycle_unknown_status_steps"));
+    assert!(production.contains("gpu_lifecycle_timeout_status_steps"));
     assert!(production.contains("gpu_assumption_pushes"));
     assert!(production.contains("gpu_assumption_retractions"));
     assert!(production.contains("gpu_lifecycle_workspace_reuses"));
