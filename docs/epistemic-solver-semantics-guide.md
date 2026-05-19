@@ -1,17 +1,20 @@
 # v0.9.0 Epistemic And Solver Semantics Guide
 
-This guide describes the bounded semantic-oracle layer currently implemented on
-`feat/v090-epistemic-solver-semantics`. The corrected v0.9.0 goal requires
-fully GPU-native accepted epistemic execution; this fixture layer is useful
-evidence, but it is not a release path and does not close `G090_GPU`,
-`G090_SOLVER`, `G090_PROB`, `G090_CERT`, or `G090_CLOSE`.
+This guide describes the bounded semantic-oracle layer and the partial accepted
+GPU runtime/production-reuse evidence currently implemented on
+`feat/v090-epistemic-solver-semantics`. The corrected v0.9.0 goal still
+requires fully GPU-native accepted epistemic execution across the semantic
+matrix; the current fixture and bounded accepted-runtime layers are useful
+evidence, but they do not close `G090_GPU`, `G090_SOLVER`, `G090_PROB`,
+`G090_CERT`, or `G090_CLOSE`.
 
 ## Current Boundary
 
 Epistemic literals are parsed and represented explicitly. Direct lowering to RIR
 still returns `UnsupportedEpistemicConstruct`, so `xlog run` is not the accepted
-execution path for epistemic programs yet. Use the fixture tests listed below as
-semantic oracle tests only.
+execution path for arbitrary epistemic programs yet. Use the fixture and
+integration tests listed below as bounded semantic-oracle and accepted-runtime
+evidence, not as release closure.
 
 `plan_epistemic_gpu_execution` now builds a production-facing GPU execution
 contract from parsed AST/EIR. That contract records required GPU phases,
@@ -116,33 +119,43 @@ arity-one/two/three kernels and a generic arity-N kernel, plus row-scoped
 variable-bound comparison against reduced-output columns and negated polarity
 through the generic arity-N kernel. Final tuple output is gated by the staged
 membership and world-view buffers, with accepted unary, possible, not-possible,
-binary, multi-membership, missing-required multi-membership, and `not know`
-bound-key row-filter fixtures. Full
-world-view semantics, solver coupling, probabilistic production-path reuse, and
-broader accepted semantic parity do not dispatch yet.
+binary `know`, binary `possible`, binary `not possible`, multi-membership,
+missing-required multi-membership, and `not know` bound-key row-filter
+fixtures. Full arbitrary-world enumeration, complete semantic parity, and
+release-wide solver/probabilistic coverage do not dispatch yet, but bounded
+accepted runtime fixtures now feed the solver and probabilistic production
+adapters described below.
 
 ## GPU And WCOJ Scope
 
-The current epistemic algorithms are not fully GPU-native and do not use the
-full WCOJ execution stack. In particular, the bounded v0.9 layer does not route
-epistemic Generate-Propagate-Test, splitting, or solver-service execution
-through:
+The current epistemic algorithms are still not fully GPU-native across the full
+semantic matrix, but the accepted bounded runtime path now exercises the
+production GPU/WCOJ stack for specific certification fixtures:
 
-- WCOJ planner eligibility;
-- WCOJ layout construction;
-- skew-aware scheduling;
-- helper splitting;
-- semantic population of GPU-resident world-view/candidate buffers from actual
-  reduced stable-model tuples;
-- semantic final query tuple materialization from accepted world views;
-- GPU portfolio SAT/MaxSAT dispatch.
+- WCOJ planner eligibility, layout, skew-aware scheduling, helper-splitting
+  specs, helper relation rewrites, and runtime histogram metadata are observed
+  for accepted K5/K6/K7/K8 epistemic reductions.
+- Candidate generation, propagation staging, candidate-buffer validation,
+  tuple-source model-membership staging, world-view validation,
+  accepted-candidate materialization, final-result flag staging, final-row map
+  construction, and membership-gated final tuple materialization use GPU
+  workspace/output buffers with zero CPU candidate/world-view fallback counters.
+- Unary and binary nonzero-arity `know`/`possible`/`not possible` slices, unary
+  `not know`, multi-membership, missing-required rejection, split
+  possible-vs-not-known, G91 self-support, and independently founded FAEEL
+  fixtures compare bounded GPU traces against semantic or GPT oracles.
+- Solver SAT/UNSAT, lifecycle, learned-clause, MaxSAT, scheduler, and portfolio
+  slices route accepted GPU evidence into existing GPU CDCL/CNF adapter paths.
+- Probabilistic source/program compile, condition, PIR/CNF encode, query, and
+  gradient slices route accepted GPU evidence into existing GPU exact/provenance
+  paths.
 
-Those paths are required G090_GPU/G090_SOLVER/G090_PROB work before v0.9.0 can
-close. Existing non-epistemic programs continue to use the normal parser,
-stratifier, RIR lowering, runtime, and WCOJ infrastructure where eligible. The
-current epistemic branch proves semantic boundary, fixture contracts, GPU-plan,
-reduced-runtime-plan, workspace, runtime-preflight, dispatch-counter guard, and
-reduced-plan execution-trace contracts plus bounded staging kernels only.
+Those paths are still partial G090_GPU/G090_SOLVER/G090_PROB evidence. Before
+v0.9.0 can close, release certification must broaden arbitrary EIR semantic
+parity, accepted split coverage, solver semantic integration, probabilistic
+world-view coverage, and the post-v0.8 compatibility rerun. Existing
+non-epistemic programs continue to use the normal parser, stratifier, RIR
+lowering, runtime, and WCOJ infrastructure where eligible.
 
 ## Prior Goal Reuse
 
@@ -178,18 +191,18 @@ epistemic WCOJ planner. The same plan contract now also records one
 reject plans that cannot identify the reduced stable-model tuple predicate to
 check.
 
-Release certification must replace the current CPU fixture hot paths with:
+Release certification must finish and broaden:
 
-- runtime dispatch from accepted EIR into executable GPU plans;
-- runtime allocation/use of GPU-resident candidate, world-view,
-  model-membership, and rejection buffers;
-- GPU kernels for candidate generation, propagation, validation, and
-  materialization, including semantic final tuple materialization from accepted
-  world views;
+- arbitrary EIR runtime dispatch into executable GPU plans;
+- GPU-resident candidate, world-view, model-membership, and rejection buffers
+  across the full fixture matrix;
+- GPU kernels for all Generate-Propagate-Test phases and semantic final tuple
+  materialization from accepted world views;
 - post-hot-path final-result transfer accounting for accepted device outputs;
 - WCOJ planner eligibility, layout construction, skew scheduling, and helper
-  splitting for eligible epistemic reductions;
-- GPU-native SAT/MaxSAT/portfolio solving or documented GPU-backed adapters;
+  splitting beyond the current bounded K-clique fixtures;
+- GPU-native SAT/MaxSAT/portfolio solving or documented GPU-backed adapters
+  for the remaining semantic cases;
 - zero CPU fallback counters for candidate enumeration, world-view validation,
   solver search, and probabilistic recomputation.
 
@@ -422,12 +435,14 @@ or that record CPU assignment, MaxSAT, or learned-clause transfer counters.
 The adapter is partial v0.9 evidence only. It now proves same-CNF reuse,
 distinct-CNF fail-closed rejection, a two-record accepted lifecycle, and bounded
 UNKNOWN/TIMEOUT lifecycle propagation, plus two-record same-CNF learned-clause
-reuse, two-record/two-CNF bounded MaxSAT candidate-set execution, bounded
-GPU-CDCL pruning of UNSAT MaxSAT search candidates for one and two accepted
-evidence records, and bounded weighted soft-clause selection encoding for one
-and two accepted evidence records, plus a two-record heterogeneous MaxSAT
-scheduler over candidate-set, search-prune, encoded-search, UNKNOWN, and
-TIMEOUT jobs. Broader solver semantic integration remains open.
+reuse, a mixed `possible`/`not possible` operator-result lifecycle,
+two-record/two-CNF bounded MaxSAT candidate-set execution, bounded GPU-CDCL
+pruning of UNSAT MaxSAT search candidates for one and two accepted evidence
+records, and bounded weighted soft-clause selection encoding for one and two
+accepted evidence records, plus a two-record heterogeneous MaxSAT scheduler
+over candidate-set, search-prune, encoded-search, UNKNOWN, and TIMEOUT jobs and
+two-record status-aware portfolio dispatch. Broader solver semantic integration
+remains open.
 
 `xlog_solve::SolverService` provides the bounded solver API used by semantic
 fixtures:
@@ -533,8 +548,9 @@ exact/provenance/PIR/CNF counter, or record CPU/fixture recomputation.
 This adapter is partial v0.9 evidence only. It covers bounded zero-arity,
 nonzero-arity, negative nonzero-arity, parsed-program, two-record
 source-conditioned query, and two-record parsed-program-conditioned query
-cases, but not the full query-conditioned probabilistic matrix over accepted
-runtime world views.
+cases, including true `possible` and false `not possible` operator-result
+conditioning plus query/gradient/PIR-CNF reuse, but not the full
+query-conditioned probabilistic matrix over accepted runtime world views.
 
 Run the probabilistic fixture and production-adapter source guard:
 
@@ -563,7 +579,8 @@ cargo test -p xlog-logic --test test_epistemic_examples
 
 ## Certification Commands
 
-Current semantic-oracle validation snapshot:
+Current partial semantic-oracle, accepted GPU runtime, and production-reuse
+validation snapshot:
 
 ```bash
 cargo fmt --check
@@ -581,8 +598,9 @@ cargo check -p xlog-logic -p xlog-ir -p xlog-solve -p xlog-prob
 cargo check -p pyxlog
 ```
 
-These commands validate the CPU-side semantic oracle only. They are not a
-substitute for the remaining GPU-native certification evidence, which must
+These commands validate the current bounded semantic oracle, accepted GPU
+runtime fixtures, and solver/probability production-adapter slices. They are
+not a substitute for the remaining release certification evidence, which must
 broaden launch counts, kernel timings, accepted semantic parity, solver and
 probability traces, and zero CPU fallback counters. The v0.8 pyxlog/DTS
 compatibility subset still must be rerun after the v0.8 branch lands and this

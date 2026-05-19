@@ -1383,6 +1383,15 @@ fn accepted_binary_membership_filters_final_rows_by_bound_tuple_key() {
         "#,
     )
     .expect("parse binary epistemic fixture");
+    let oracle = run_generate_propagate_test(
+        &program,
+        vec![
+            EpistemicInterpretation::new(),
+            EpistemicInterpretation::new().with_known("edge", 2),
+        ],
+        GeneratePropagateTestConfig { max_candidates: 2 },
+    )
+    .expect("run binary GPT oracle");
     let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
         .expect("compile binary epistemic executable");
 
@@ -1405,6 +1414,41 @@ fn accepted_binary_membership_filters_final_rows_by_bound_tuple_key() {
         )
         .expect("execute binary epistemic fixture");
 
+    assert_eq!(result.prepared.preflight.know_operator_count, 1);
+    assert_eq!(result.prepared.preflight.possible_operator_count, 0);
+    assert_eq!(result.prepared.preflight.not_know_operator_count, 0);
+    assert_eq!(result.prepared.preflight.not_possible_operator_count, 0);
+    assert_eq!(
+        result.semantic_trace.generated_candidates,
+        oracle.trace.generated
+    );
+    assert_eq!(result.semantic_trace.guesses, oracle.trace.guesses);
+    assert_eq!(
+        result.semantic_trace.propagated_candidates,
+        oracle.trace.propagated
+    );
+    assert_eq!(result.semantic_trace.pruned_candidates, oracle.trace.pruned);
+    assert_eq!(result.semantic_trace.tested_candidates, oracle.trace.tested);
+    assert_eq!(
+        result.semantic_trace.accepted_candidates,
+        oracle.trace.accepted
+    );
+    assert_eq!(
+        result.semantic_trace.accepted_world_views,
+        oracle.trace.accepted_world_views
+    );
+    assert_eq!(
+        result.semantic_trace.rejected_candidates,
+        oracle.trace.rejected
+    );
+    assert_eq!(
+        result.semantic_trace.accepted_candidate_indices,
+        oracle.accepted_candidate_indices
+    );
+    assert_eq!(
+        result.semantic_trace.rejected_candidate_indices,
+        oracle.rejected_candidate_indices
+    );
     assert_eq!(
         result.model_membership.membership_source,
         EpistemicGpuModelMembershipSource::StableModelTupleBuffer
@@ -1413,6 +1457,206 @@ fn accepted_binary_membership_filters_final_rows_by_bound_tuple_key() {
         download_binary_u32(&fix.provider, &result.final_output),
         vec![(1, 2)],
         "final output must keep only reduced rows whose binary tuple key appears in the stable model"
+    );
+}
+
+#[test]
+fn accepted_binary_possible_membership_matches_gpt_oracle_parity() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred pair(u32, u32).
+        pred edge(u32, u32).
+        pred accepted(u32, u32).
+        accepted(X, Y) :- pair(X, Y), possible edge(X, Y).
+        "#,
+    )
+    .expect("parse binary possible epistemic fixture");
+    let oracle = run_generate_propagate_test(
+        &program,
+        vec![
+            EpistemicInterpretation::new(),
+            EpistemicInterpretation::new().with_known("edge", 2),
+        ],
+        GeneratePropagateTestConfig { max_candidates: 2 },
+    )
+    .expect("run binary possible GPT oracle");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile binary possible epistemic executable");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &executable.relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation(
+        "pair",
+        upload_binary_u32(&fix.memory, &[(1, 2), (2, 3), (3, 4)]),
+    );
+    executor.put_relation("edge", upload_binary_u32(&fix.memory, &[(1, 2), (3, 4)]));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 3,
+            },
+        )
+        .expect("execute binary possible epistemic fixture");
+
+    assert_eq!(result.prepared.preflight.know_operator_count, 0);
+    assert_eq!(result.prepared.preflight.possible_operator_count, 1);
+    assert_eq!(result.prepared.preflight.not_know_operator_count, 0);
+    assert_eq!(result.prepared.preflight.not_possible_operator_count, 0);
+    assert_eq!(
+        result.semantic_trace.generated_candidates,
+        oracle.trace.generated
+    );
+    assert_eq!(result.semantic_trace.guesses, oracle.trace.guesses);
+    assert_eq!(
+        result.semantic_trace.propagated_candidates,
+        oracle.trace.propagated
+    );
+    assert_eq!(result.semantic_trace.pruned_candidates, oracle.trace.pruned);
+    assert_eq!(result.semantic_trace.tested_candidates, oracle.trace.tested);
+    assert_eq!(
+        result.semantic_trace.accepted_candidates,
+        oracle.trace.accepted
+    );
+    assert_eq!(
+        result.semantic_trace.accepted_world_views,
+        oracle.trace.accepted_world_views
+    );
+    assert_eq!(
+        result.semantic_trace.rejected_candidates,
+        oracle.trace.rejected
+    );
+    assert_eq!(
+        result.semantic_trace.accepted_candidate_indices,
+        oracle.accepted_candidate_indices
+    );
+    assert_eq!(
+        result.semantic_trace.rejected_candidate_indices,
+        oracle.rejected_candidate_indices
+    );
+    assert_eq!(
+        result.model_membership.membership_source,
+        EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+    );
+    assert_eq!(
+        download_binary_u32(&fix.provider, &result.final_output),
+        vec![(1, 2), (3, 4)],
+        "binary possible must keep only bound tuple keys present in the stable model"
+    );
+}
+
+#[test]
+fn accepted_binary_not_possible_membership_matches_gpt_oracle_parity() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred pair(u32, u32).
+        pred edge(u32, u32).
+        pred accepted(u32, u32).
+        accepted(X, Y) :- pair(X, Y), not possible edge(X, Y).
+        "#,
+    )
+    .expect("parse binary not-possible epistemic fixture");
+    let oracle = run_generate_propagate_test(
+        &program,
+        vec![
+            // Candidate index 0 represents the negated literal as false.
+            EpistemicInterpretation::new().with_known("edge", 2),
+            // Candidate index 1 represents the negated literal as true.
+            EpistemicInterpretation::new(),
+        ],
+        GeneratePropagateTestConfig { max_candidates: 2 },
+    )
+    .expect("run binary not-possible GPT oracle");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile binary not-possible epistemic executable");
+    assert!(executable.gpu_plan.tuple_membership_bindings[0].negated);
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &executable.relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation(
+        "pair",
+        upload_binary_u32(&fix.memory, &[(1, 2), (2, 3), (3, 4)]),
+    );
+    executor.put_relation("edge", upload_binary_u32(&fix.memory, &[(2, 3)]));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 3,
+            },
+        )
+        .expect("execute binary not-possible epistemic fixture");
+
+    assert_eq!(result.prepared.preflight.know_operator_count, 0);
+    assert_eq!(result.prepared.preflight.possible_operator_count, 0);
+    assert_eq!(result.prepared.preflight.not_know_operator_count, 0);
+    assert_eq!(result.prepared.preflight.not_possible_operator_count, 1);
+    assert_eq!(
+        result.semantic_trace.generated_candidates,
+        oracle.trace.generated
+    );
+    assert_eq!(result.semantic_trace.guesses, oracle.trace.guesses);
+    assert_eq!(
+        result.semantic_trace.propagated_candidates,
+        oracle.trace.propagated
+    );
+    assert_eq!(result.semantic_trace.pruned_candidates, oracle.trace.pruned);
+    assert_eq!(result.semantic_trace.tested_candidates, oracle.trace.tested);
+    assert_eq!(
+        result.semantic_trace.accepted_candidates,
+        oracle.trace.accepted
+    );
+    assert_eq!(
+        result.semantic_trace.accepted_world_views,
+        oracle.trace.accepted_world_views
+    );
+    assert_eq!(
+        result.semantic_trace.rejected_candidates,
+        oracle.trace.rejected
+    );
+    assert_eq!(
+        result.semantic_trace.accepted_candidate_indices,
+        oracle.accepted_candidate_indices
+    );
+    assert_eq!(
+        result.semantic_trace.rejected_candidate_indices,
+        oracle.rejected_candidate_indices
+    );
+    assert_eq!(result.final_tuple_materialization.row_filter_count, 1);
+    assert_eq!(
+        result.final_tuple_materialization.negated_row_filter_count,
+        1
+    );
+    assert_eq!(
+        result.model_membership.membership_source,
+        EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+    );
+    assert_eq!(
+        download_binary_u32(&fix.provider, &result.final_output),
+        vec![(1, 2), (3, 4)],
+        "binary not possible must keep only tuple keys absent from the stable model"
     );
 }
 
