@@ -480,7 +480,10 @@ false parsed evidence entries and counted separately. The trace records
 `compile_and_evaluate_conditioned_program_for_gpu_execution_results` validate a
 batch of accepted GPU runtime records before running per-record conditioning,
 so different accepted world views can condition a shared source or parsed
-program query set without bypassing `ExactDdnnfProgram`.
+program query set without bypassing `ExactDdnnfProgram`. The source batch path
+also preserves false tuple assumptions per accepted record, so a two-record
+negative batch records two negative evidence facts and keeps probability
+recomputation on the existing exact path.
 `encode_source_pir_cnf_with_gpu_execution_result` and
 `encode_program_pir_cnf_with_gpu_execution_result` apply the same accepted
 runtime boundary before uploading `GpuPirGraph`/`GpuPirRoots` and calling
