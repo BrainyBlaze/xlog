@@ -1468,16 +1468,18 @@ WCOJ, and CLI paths.
 
 ### Documentation And Semantic Contract
 
-- [ ] Refresh `docs/language-reference.md` to the v0.8.5 language contract,
+- [x] Refresh `docs/language-reference.md` to the v0.8.5 language contract,
       including unsupported forms and GPU-native execution guarantees.
-- [ ] Add `docs/architecture/language-v085.md` with parser, term, probability,
+- [x] Add `docs/architecture/language-v085.md` with parser, term, probability,
       CLI, and v0.9.0 handoff contracts.
+      Evidence: `docs/evidence/2026-05-18-v085-docref/README.md`.
 
 ### Type And Term Model
 
-- [ ] Add domain alias preservation, named predicate columns, `list<T>`,
+- [x] Add domain alias preservation, named predicate columns, `list<T>`,
       finite `term`, finite `compound`, and static `predref` representation.
-- [ ] Reject non-finite or non-GPU-lowerable term forms with typed diagnostics.
+- [x] Reject non-finite or non-GPU-lowerable term forms with typed diagnostics.
+      Evidence: `docs/evidence/2026-05-18-v085-types/README.md`.
 
 ### Lists And Safe Meta-Predicates
 

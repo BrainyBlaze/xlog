@@ -46,10 +46,16 @@ REQUIRED_FEATURES = [
 ]
 
 
-def _base_xlog_command(args: argparse.Namespace) -> list[str]:
+def _base_xlog_command(args: argparse.Namespace, *, host_io: bool = False) -> list[str]:
+    if host_io and args.xlog_host_io_bin:
+        return [str(args.xlog_host_io_bin)]
     if args.xlog_bin:
         return [str(args.xlog_bin)]
-    return ["cargo", "run", "-q", "-p", "xlog-cli", "--"]
+    cmd = ["cargo", "run", "-q", "-p", "xlog-cli"]
+    if host_io:
+        cmd.extend(["--features", "host-io"])
+    cmd.append("--")
+    return cmd
 
 
 def _run_xlog(
@@ -57,8 +63,9 @@ def _run_xlog(
     xlog_args: list[str],
     *,
     input_text: str | None = None,
+    host_io: bool = False,
 ) -> dict[str, Any]:
-    cmd = _base_xlog_command(args) + xlog_args
+    cmd = _base_xlog_command(args, host_io=host_io) + xlog_args
     start = time.perf_counter()
     proc = subprocess.run(
         cmd,
@@ -93,6 +100,85 @@ def _load_expected(example_dir: Path) -> dict[str, Any]:
 def _check_required_substrings(haystack: str, needles: list[str], context: str) -> None:
     for needle in needles:
         _require(needle in haystack, f"{context} missing expected substring: {needle}")
+
+
+def _check_run(example: str, raw: dict[str, Any], expected: dict[str, Any]) -> dict[str, Any]:
+    expected_returncode = expected.get("returncode", 0)
+    _require(
+        raw["returncode"] == expected_returncode,
+        f"{example} run returncode mismatch: expected {expected_returncode}, got {raw['returncode']}\n"
+        f"STDOUT:\n{raw['stdout']}\nSTDERR:\n{raw['stderr']}",
+    )
+    _check_required_substrings(
+        raw["stdout"],
+        expected.get("stdout_contains", []),
+        f"{example} run stdout",
+    )
+    combined = f"{raw['stdout']}\n{raw['stderr']}"
+    _check_required_substrings(
+        combined,
+        expected.get("combined_contains", []),
+        f"{example} run output",
+    )
+    return {"status": "PASS", "returncode": raw["returncode"]}
+
+
+def _json_payload_from_stdout(example: str, stdout: str) -> dict[str, Any]:
+    start = stdout.find("{")
+    _require(start >= 0, f"{example} prob_json emitted no JSON object:\n{stdout}")
+    try:
+        return json.loads(stdout[start:])
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"{example} prob_json did not emit parseable JSON: {exc}\n{stdout}") from exc
+
+
+def _check_prob_json(
+    example: str,
+    raw: dict[str, Any],
+    expected: dict[str, Any],
+) -> dict[str, Any]:
+    _require(
+        raw["returncode"] == 0,
+        f"{example} prob_json failed with exit {raw['returncode']}\nSTDOUT:\n{raw['stdout']}\nSTDERR:\n{raw['stderr']}",
+    )
+    report = _json_payload_from_stdout(example, raw["stdout"])
+    if "engine" in expected:
+        _require(
+            report.get("engine") == expected["engine"],
+            f"{example} prob_json engine mismatch: {report}",
+        )
+    for field in ["total_samples", "seed"]:
+        if field in expected:
+            _require(
+                report.get(field) == expected[field],
+                f"{example} prob_json {field} mismatch: {report}",
+            )
+    if "confidence" in expected:
+        _require(
+            abs(float(report.get("confidence")) - float(expected["confidence"])) < 1e-12,
+            f"{example} prob_json confidence mismatch: {report}",
+        )
+
+    queries = report.get("queries", [])
+    by_atom = {query.get("atom"): query for query in queries}
+    for atom in expected.get("query_atoms", []):
+        _require(atom in by_atom, f"{example} prob_json missing query atom {atom}: {report}")
+    for atom, probability in expected.get("probabilities", {}).items():
+        _require(atom in by_atom, f"{example} prob_json missing probability atom {atom}: {report}")
+        actual = float(by_atom[atom]["prob"])
+        _require(
+            abs(actual - float(probability)) <= 1e-9,
+            f"{example} prob_json probability mismatch for {atom}: expected {probability}, got {actual}",
+        )
+    for atom, bounds in expected.get("probability_ranges", {}).items():
+        _require(atom in by_atom, f"{example} prob_json missing range atom {atom}: {report}")
+        actual = float(by_atom[atom]["prob"])
+        lower, upper = float(bounds[0]), float(bounds[1])
+        _require(
+            lower <= actual <= upper,
+            f"{example} prob_json probability for {atom} outside [{lower}, {upper}]: {actual}",
+        )
+    return report
 
 
 def _check_explain_json(
@@ -181,6 +267,16 @@ def _load_example_result(example: str, args: argparse.Namespace) -> dict[str, An
     check_results: dict[str, Any] = {}
     checks = expected.get("checks", {})
 
+    if "run" in checks:
+        raw = _run_xlog(args, ["run", program_arg])
+        raw_outputs["run"] = raw
+        check_results["run"] = _check_run(example, raw, checks["run"])
+
+    if "prob_json" in checks:
+        raw = _run_xlog(args, ["prob", program_arg, "--output", "json"], host_io=True)
+        raw_outputs["prob_json"] = raw
+        check_results["prob_json"] = _check_prob_json(example, raw, checks["prob_json"])
+
     if "explain_json" in checks:
         raw = _run_xlog(args, ["explain", "--format", "json", program_arg])
         raw_outputs["explain_json"] = raw
@@ -268,6 +364,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Summary JSON output path.")
     parser.add_argument("--timeout", type=int, default=120, help="Per-command timeout in seconds.")
     parser.add_argument("--xlog-bin", type=Path, help="Use an existing xlog binary instead of cargo run.")
+    parser.add_argument(
+        "--xlog-host-io-bin",
+        type=Path,
+        help="Use an existing host-io-enabled xlog binary for probabilistic semantic checks.",
+    )
     args = parser.parse_args(argv)
 
     _require(EXAMPLE_ROOT.exists(), f"Missing example root: {EXAMPLE_ROOT}")

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 
@@ -46,6 +47,15 @@ def test_v085_examples_layout_is_committed() -> None:
         assert (example / "README.md").exists(), name
 
 
+def test_v085_examples_expected_contracts_include_semantic_execution() -> None:
+    suite = ROOT / "examples/v085-language/showcase"
+
+    for name in EXAMPLES:
+        expected = json.loads((suite / name / "expected.json").read_text())
+        checks = expected["checks"]
+        assert any(key in checks for key in ["run", "prob_json"]), name
+
+
 def test_v085_examples_validator_and_evidence_contract_is_committed() -> None:
     validator = ROOT / "scripts/validate_v085_examples.py"
     evidence = ROOT / "docs/evidence/2026-05-19-v085-examples"
@@ -61,7 +71,9 @@ def test_v085_examples_validator_and_evidence_contract_is_committed() -> None:
         "interaction_count",
         "raw_outputs",
         "explain_json",
+        "prob_json",
         "repl",
+        "run",
         "watch",
     ]:
         assert needle in source

@@ -2,6 +2,16 @@
   "features": ["approx_inference", "prob_aggregate_mc"],
   "source_required_substrings": ["#pragma prob_confidence = 0.90", "#pragma prob_method = rejection", "#pragma prob_seed = 7"],
   "checks": {
+    "prob_json": {
+      "engine": "mc",
+      "total_samples": 128,
+      "seed": 7,
+      "confidence": 0.9,
+      "query_atoms": ["out_degree(1, 2)"],
+      "probabilities": {
+        "out_degree(1, 2)": 1.0
+      }
+    },
     "explain_json": {
       "min_statements": 9,
       "stratification_status": "ok",

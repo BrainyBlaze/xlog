@@ -3,6 +3,9 @@
 Date: 2026-05-19
 Branch: `feat/v085-language-completeness`
 Certification head before closure proposal: `25cf0f1e45c646abbd68b681d84632c6feb965ea`
+Post-review amendment: imported the governing goal document, closed the
+completed DOCREF/TYPES ROADMAP checkboxes, and strengthened the examples
+validator so every showcase has semantic output or diagnostic checks.
 
 ## Recommendation
 
@@ -29,7 +32,7 @@ epistemic/solver branch is expected to build on.
 | G085_APPROX | `470564c5` | PASS | `docs/evidence/2026-05-19-v085-approx/README.md` |
 | G085_INC_PARSE | `03f87db1` | PASS | `docs/evidence/2026-05-19-v085-incremental-parse/README.md` |
 | G085_CLI | `72d8c9de` | PASS | `docs/evidence/2026-05-19-v085-cli/README.md` |
-| G085_EXAMPLES | `19a1f6c5` | PASS | `docs/evidence/2026-05-19-v085-examples/README.md` |
+| G085_EXAMPLES | `19a1f6c5` plus post-review amendment | PASS | `docs/evidence/2026-05-19-v085-examples/README.md` |
 | G085_INT | `25cf0f1e` | PASS | `docs/evidence/2026-05-19-v085-int/README.md` |
 | G085_CLOSE | proposal commit | PASS | `docs/evidence/2026-05-19-v085-close/README.md` |
 
@@ -53,7 +56,7 @@ epistemic/solver branch is expected to build on.
 | M085_EXAMPLES.1 example count | PASS | `example_count=10` |
 | M085_EXAMPLES.2 feature coverage | PASS | every required v0.8.5 feature has at least one showcase example |
 | M085_EXAMPLES.3 interaction coverage | PASS | `interaction_count=10`, target `>=5` |
-| M085_EXAMPLES.4 validator | PASS | `python3 scripts/validate_v085_examples.py --output /tmp/v085_examples_validation_summary.json` |
+| M085_EXAMPLES.4 validator | PASS | `python3 scripts/validate_v085_examples.py --output /tmp/v085_examples_validation_summary_review.json`; all examples have `explain_json` plus semantic `run` or `prob_json` checks |
 | M085_EXAMPLES.5 evidence JSON | PASS | `docs/evidence/2026-05-19-v085-examples/validation_summary.json` committed |
 | M085_INT.1 format | PASS | `cargo fmt --check` |
 | M085_INT.2 logic tests | PASS | `cargo test -p xlog-logic` |
@@ -62,10 +65,10 @@ epistemic/solver branch is expected to build on.
 | M085_INT.5 runtime/integration | PASS | `cargo test -p xlog-runtime`; `cargo test -p xlog-integration` |
 | M085_INT.6 examples | PASS | v0.8.5 validator passed |
 | M085_INT.7 source audit | PASS | `no_cpu_d4_in_exact`, `no_dtoh_gpu_native`, and `no_dtoh_*` tests passed inside `cargo test -p xlog-prob` |
-| M085_INT.8 v0.8.0 compatibility | PASS | `pytest -q python/tests/test_v080_examples_source.py python/tests/test_v085_examples_source.py` -> `4 passed` |
+| M085_INT.8 v0.8.0 compatibility | PASS | `pytest -q python/tests/test_v080_examples_source.py python/tests/test_v085_examples_source.py` -> `5 passed` |
 | M085_INT.9 docs/hygiene | PASS | JSON validation, stale-marker scan, and `git diff --check` passed |
 | M085_CLOSE.1 metric table | PASS | this table marks every metric PASS |
-| M085_CLOSE.2 roadmap | PASS | `ROADMAP.md` has explicit v0.8.5 section with completed examples/certification items and v0.9.0 ordering preserved |
+| M085_CLOSE.2 roadmap | PASS | `ROADMAP.md` has explicit v0.8.5 section with completed DOCREF/TYPES/examples/certification items and v0.9.0 ordering preserved |
 | M085_CLOSE.3 changelog | PASS | `CHANGELOG.md` has explicit `0.8.5` entry, migration notes, and release-status note |
 | M085_CLOSE.4 closure proposal | PASS | this document |
 | M085_CLOSE.5 worktree | PASS | clean before close edits; final status checked after commit |
@@ -84,10 +87,10 @@ epistemic/solver branch is expected to build on.
 | `cargo test -p xlog-cli` | exit 0 |
 | `cargo test -p xlog-runtime` | exit 0 |
 | `cargo test -p xlog-integration` | exit 0 after fixing the `pair/2` compatibility regression |
-| `python3 scripts/validate_v085_examples.py --output /tmp/v085_examples_validation_summary.json` | exit 0; `example_count=10`; `interaction_count=10` |
-| `pytest -q python/tests/test_v080_examples_source.py python/tests/test_v085_examples_source.py` | exit 0; `4 passed` |
+| `python3 scripts/validate_v085_examples.py --output /tmp/v085_examples_validation_summary_review.json` | exit 0; `example_count=10`; `interaction_count=10`; every example has semantic `run` or `prob_json` checks |
+| `pytest -q python/tests/test_v080_examples_source.py python/tests/test_v085_examples_source.py` | exit 0; `5 passed` |
 | `python3 -m json.tool docs/evidence/2026-05-19-v085-examples/validation_summary.json` | exit 0 |
-| `python3 -m json.tool /tmp/v085_examples_validation_summary.json` | exit 0 |
+| `python3 -m json.tool /tmp/v085_examples_validation_summary_review.json` | exit 0 |
 | `git diff --check` | exit 0 |
 | targeted stale-marker scan | no matches |
 

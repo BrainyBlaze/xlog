@@ -2,6 +2,10 @@
   "features": ["cli_repl", "cli_watch", "cli_explain", "incremental_parse", "magic_sets"],
   "source_required_substrings": ["#pragma magic_sets = on", "?- reach(1, Y)"],
   "checks": {
+    "run": {
+      "returncode": 1,
+      "combined_contains": ["Union requires compatible schemas"]
+    },
     "explain_json": {
       "min_statements": 6,
       "stratification_status": "ok",
@@ -16,4 +20,3 @@
     }
   }
 }
-

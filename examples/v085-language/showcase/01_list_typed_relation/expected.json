@@ -2,6 +2,10 @@
   "features": ["types", "lists"],
   "source_required_substrings": ["pred bag(id: u32, xs: list<u32>)", "member(", "[Head | Tail]"],
   "checks": {
+    "run": {
+      "returncode": 0,
+      "stdout_contains": ["__xlog_query_0", "| 1  | 10", "__xlog_query_4", "| 2  | 0"]
+    },
     "explain_json": {
       "min_statements": 15,
       "stratification_status": "ok",
@@ -9,4 +13,3 @@
     }
   }
 }
-

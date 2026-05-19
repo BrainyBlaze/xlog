@@ -2,6 +2,10 @@
   "features": ["maplist", "lists", "types"],
   "source_required_substrings": ["maplist(good, [1, 2, 3])", "maplist(next, [1, 2, 3], L)", "pred next(input: u32, output: u32)"],
   "checks": {
+    "run": {
+      "returncode": 0,
+      "stdout_contains": ["__xlog_query_0", "| 1", "__xlog_query_1", "| 3", "__xlog_query_2", "| 1  | 3"]
+    },
     "explain_json": {
       "min_statements": 16,
       "stratification_status": "ok",
@@ -9,4 +13,3 @@
     }
   }
 }
-

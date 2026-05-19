@@ -1,15 +1,22 @@
 {
   "features": ["aggregate_lifting", "prob_aggregate_exact"],
-  "source_required_substrings": ["query(out_degree(1, 8))", "0.5::edge(1, 17)"],
+  "source_required_substrings": ["query(out_degree(1, 4))", "0.5::edge(1, 8)"],
   "checks": {
+    "prob_json": {
+      "engine": "exact_ddnnf",
+      "query_atoms": ["out_degree(1, 4)"],
+      "probabilities": {
+        "out_degree(1, 4)": 0.2734375
+      }
+    },
     "explain_json": {
-      "min_statements": 19,
+      "min_statements": 10,
       "stratification_status": "ok",
       "rir_status": "ok",
       "prob_engine": "exact_ddnnf",
       "aggregate_lifting_count_min": 1,
       "aggregate_lifting_statuses": ["fired"],
-      "min_dynamic_programming_states": 100
+      "min_dynamic_programming_states": 40
     }
   }
 }

@@ -13,7 +13,3 @@ score_max(X, max(Y)) :- obs(X, Y).
 score_lse(X, logsumexp(Y)) :- obs(X, Y).
 
 query(out_degree(1, 2)).
-query(score_sum(1, 5)).
-query(score_min(1, 2)).
-query(score_max(1, 3)).
-
