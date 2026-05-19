@@ -134,8 +134,9 @@ The next production slice should start at the lowering/runtime boundary:
    `evaluate_gpu_with_grads_with_gpu_execution_result`, and
    `evaluate_gpu_with_grads_for_gpu_execution_results`; conditioned exact
    evidence preserves true and false operator assumptions with negative,
-   operator-specific, and accepted G91/default FAEEL mode-specific trace
-   counters, and broader probabilistic coverage remains open.
+   source/program-specific, operator-specific, and accepted G91/default FAEEL
+   mode-specific trace counters, and broader probabilistic coverage remains
+   open.
 
 ## Validation Status
 
@@ -151,7 +152,7 @@ The next production slice should start at the lowering/runtime boundary:
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_binary_possible_membership_matches_gpt_oracle_parity -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_binary_not_possible_membership_matches_gpt_oracle_parity -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_binary_not_know_membership_matches_gpt_oracle_parity -- --nocapture` | PASS, 1 passed, 0 failed |
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 72 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 73 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_eir --test test_epistemic_g91 --test test_epistemic_faeel --test test_epistemic_gpt --test test_epistemic_split --test test_epistemic_world_view --test test_epistemic_examples` | PASS, 25 passed, 0 failed |
 | `cargo test -p xlog-solve --test gpu_solver_production_reuse` | PASS, 3 passed, 0 failed |
 | `cargo test -p xlog-solve --test solver_service_semantics` | PASS, 5 passed, 0 failed |

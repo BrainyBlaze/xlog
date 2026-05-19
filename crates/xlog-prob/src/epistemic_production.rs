@@ -100,6 +100,14 @@ pub struct EpistemicProbProductionTrace {
     pub gpu_conditioned_evidence_facts: u64,
     /// Number of false accepted assumptions compiled as exact evidence facts.
     pub gpu_conditioned_negative_evidence_facts: u64,
+    /// Number of source-conditioned accepted assumptions compiled as exact evidence facts.
+    pub gpu_source_conditioned_evidence_facts: u64,
+    /// Number of parsed-program-conditioned accepted assumptions compiled as exact evidence facts.
+    pub gpu_program_conditioned_evidence_facts: u64,
+    /// Number of false source-conditioned assumptions compiled as exact evidence facts.
+    pub gpu_source_conditioned_negative_evidence_facts: u64,
+    /// Number of false parsed-program-conditioned assumptions compiled as exact evidence facts.
+    pub gpu_program_conditioned_negative_evidence_facts: u64,
     /// Number of true `know` assumptions compiled as exact evidence facts.
     pub gpu_conditioned_know_evidence_facts: u64,
     /// Number of true `possible` assumptions compiled as exact evidence facts.
@@ -228,6 +236,13 @@ pub struct EpistemicProbProductionAdapter {
     trace: EpistemicProbProductionTrace,
 }
 
+#[cfg(feature = "host-io")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EpistemicProbConditionedEvidencePath {
+    Source,
+    Program,
+}
+
 impl EpistemicProbProductionAdapter {
     /// Create a production adapter with a GPU exact inference configuration.
     pub fn new(config: GpuConfig) -> Self {
@@ -250,6 +265,7 @@ impl EpistemicProbProductionAdapter {
     fn record_conditioned_evidence_counts(
         &mut self,
         counts: EpistemicProbConditionedEvidenceCounts,
+        path: EpistemicProbConditionedEvidencePath,
     ) {
         self.trace.gpu_conditioned_evidence_facts = self
             .trace
@@ -259,6 +275,28 @@ impl EpistemicProbProductionAdapter {
             .trace
             .gpu_conditioned_negative_evidence_facts
             .saturating_add(counts.negative as u64);
+        match path {
+            EpistemicProbConditionedEvidencePath::Source => {
+                self.trace.gpu_source_conditioned_evidence_facts = self
+                    .trace
+                    .gpu_source_conditioned_evidence_facts
+                    .saturating_add(counts.total as u64);
+                self.trace.gpu_source_conditioned_negative_evidence_facts = self
+                    .trace
+                    .gpu_source_conditioned_negative_evidence_facts
+                    .saturating_add(counts.negative as u64);
+            }
+            EpistemicProbConditionedEvidencePath::Program => {
+                self.trace.gpu_program_conditioned_evidence_facts = self
+                    .trace
+                    .gpu_program_conditioned_evidence_facts
+                    .saturating_add(counts.total as u64);
+                self.trace.gpu_program_conditioned_negative_evidence_facts = self
+                    .trace
+                    .gpu_program_conditioned_negative_evidence_facts
+                    .saturating_add(counts.negative as u64);
+            }
+        }
         self.trace.gpu_conditioned_know_evidence_facts = self
             .trace
             .gpu_conditioned_know_evidence_facts
@@ -416,7 +454,10 @@ impl EpistemicProbProductionAdapter {
         let exact = ExactDdnnfProgram::compile_from_program(&program, self.config)?;
         self.trace.gpu_exact_source_compiles =
             self.trace.gpu_exact_source_compiles.saturating_add(1);
-        self.record_conditioned_evidence_counts(evidence_counts);
+        self.record_conditioned_evidence_counts(
+            evidence_counts,
+            EpistemicProbConditionedEvidencePath::Source,
+        );
         let result = exact.evaluate()?;
         self.trace.gpu_exact_query_evaluations =
             self.trace.gpu_exact_query_evaluations.saturating_add(1);
@@ -494,7 +535,10 @@ impl EpistemicProbProductionAdapter {
         let exact = ExactDdnnfProgram::compile_from_program(&program, self.config)?;
         self.trace.gpu_exact_source_compiles =
             self.trace.gpu_exact_source_compiles.saturating_add(1);
-        self.record_conditioned_evidence_counts(evidence_counts);
+        self.record_conditioned_evidence_counts(
+            evidence_counts,
+            EpistemicProbConditionedEvidencePath::Source,
+        );
         let result = exact.evaluate_gpu_with_grads()?;
         self.trace.gpu_exact_gradient_evaluations =
             self.trace.gpu_exact_gradient_evaluations.saturating_add(1);
@@ -576,7 +620,10 @@ impl EpistemicProbProductionAdapter {
         let exact = ExactDdnnfProgram::compile_from_program(&program, self.config)?;
         self.trace.gpu_exact_program_compiles =
             self.trace.gpu_exact_program_compiles.saturating_add(1);
-        self.record_conditioned_evidence_counts(evidence_counts);
+        self.record_conditioned_evidence_counts(
+            evidence_counts,
+            EpistemicProbConditionedEvidencePath::Program,
+        );
         let result = exact.evaluate()?;
         self.trace.gpu_exact_query_evaluations =
             self.trace.gpu_exact_query_evaluations.saturating_add(1);
@@ -655,7 +702,10 @@ impl EpistemicProbProductionAdapter {
         let exact = ExactDdnnfProgram::compile_from_program(&program, self.config)?;
         self.trace.gpu_exact_program_compiles =
             self.trace.gpu_exact_program_compiles.saturating_add(1);
-        self.record_conditioned_evidence_counts(evidence_counts);
+        self.record_conditioned_evidence_counts(
+            evidence_counts,
+            EpistemicProbConditionedEvidencePath::Program,
+        );
         let result = exact.evaluate_gpu_with_grads()?;
         self.trace.gpu_exact_gradient_evaluations =
             self.trace.gpu_exact_gradient_evaluations.saturating_add(1);

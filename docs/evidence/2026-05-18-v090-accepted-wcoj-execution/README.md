@@ -42,7 +42,7 @@ in the materialization trace. This is not a closure claim for `G090_GPU`,
 | Command | Result |
 |---|---|
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_binary_not_know_membership_matches_gpt_oracle_parity -- --nocapture` | PASS, 1 passed, 0 failed |
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 72 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 73 passed, 0 failed |
 
 ## Non-Closure Notes
 

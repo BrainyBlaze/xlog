@@ -529,8 +529,10 @@ the same GPU exact path. Unary and binary false assumptions from `not know` are
 preserved as false parsed evidence entries and counted separately. The trace
 records `accepted_evidence_assumptions_consumed`,
 `gpu_conditioned_evidence_facts`, `gpu_conditioned_negative_evidence_facts`,
-and operator-specific counts for true `know`, true `possible`, false `know`
-(`not know`), and false `possible` (`not possible`) evidence facts.
+source/program-specific conditioned fact counters, source/program-specific
+negative conditioned fact counters, and operator-specific counts for true
+`know`, true `possible`, false `know` (`not know`), and false `possible`
+(`not possible`) evidence facts.
 `compile_and_evaluate_conditioned_source_for_gpu_execution_results` and
 `compile_and_evaluate_conditioned_program_for_gpu_execution_results` validate a
 batch of accepted GPU runtime records before running per-record conditioning,
@@ -566,9 +568,9 @@ source-conditioned query, and two-record parsed-program-conditioned query
 cases, including true `know`, true `possible`, false `possible`/`not possible`,
 and false `know`/`not know` operator-result
 conditioning, accepted G91/default FAEEL mode-specific trace counters,
-operator-specific conditioned evidence counters, plus query/gradient/PIR-CNF
-reuse, but not the full query-conditioned probabilistic matrix over accepted
-runtime world views.
+source/program-specific and operator-specific conditioned evidence counters,
+plus query/gradient/PIR-CNF reuse, but not the full query-conditioned
+probabilistic matrix over accepted runtime world views.
 
 Run the probabilistic fixture and production-adapter source guard:
 
