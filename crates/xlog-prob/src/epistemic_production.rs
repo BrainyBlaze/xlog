@@ -84,6 +84,10 @@ pub struct EpistemicProbProductionTrace {
     pub accepted_evidence_assumptions_consumed: u64,
     /// Number of GPU exact query evaluations routed through `ExactDdnnfProgram`.
     pub gpu_exact_query_evaluations: u64,
+    /// Number of source GPU exact query evaluations routed through `ExactDdnnfProgram`.
+    pub gpu_source_exact_query_evaluations: u64,
+    /// Number of parsed-program GPU exact query evaluations routed through `ExactDdnnfProgram`.
+    pub gpu_program_exact_query_evaluations: u64,
     /// Number of GPU gradient evaluations routed through `ExactDdnnfProgram`.
     pub gpu_exact_gradient_evaluations: u64,
     /// Number of source-conditioned GPU gradient evaluations routed through `ExactDdnnfProgram`.
@@ -401,6 +405,10 @@ impl EpistemicProbProductionAdapter {
         let result = program.evaluate()?;
         self.trace.gpu_exact_query_evaluations =
             self.trace.gpu_exact_query_evaluations.saturating_add(1);
+        self.trace.gpu_source_exact_query_evaluations = self
+            .trace
+            .gpu_source_exact_query_evaluations
+            .saturating_add(1);
         self.trace.gpu_knowledge_compilation_end_to_end_runs = self
             .trace
             .gpu_knowledge_compilation_end_to_end_runs
@@ -479,6 +487,10 @@ impl EpistemicProbProductionAdapter {
         let result = exact.evaluate()?;
         self.trace.gpu_exact_query_evaluations =
             self.trace.gpu_exact_query_evaluations.saturating_add(1);
+        self.trace.gpu_source_exact_query_evaluations = self
+            .trace
+            .gpu_source_exact_query_evaluations
+            .saturating_add(1);
         self.trace.gpu_knowledge_compilation_end_to_end_runs = self
             .trace
             .gpu_knowledge_compilation_end_to_end_runs
@@ -649,6 +661,10 @@ impl EpistemicProbProductionAdapter {
         let result = exact.evaluate()?;
         self.trace.gpu_exact_query_evaluations =
             self.trace.gpu_exact_query_evaluations.saturating_add(1);
+        self.trace.gpu_program_exact_query_evaluations = self
+            .trace
+            .gpu_program_exact_query_evaluations
+            .saturating_add(1);
         self.trace.gpu_knowledge_compilation_end_to_end_runs = self
             .trace
             .gpu_knowledge_compilation_end_to_end_runs
@@ -814,6 +830,10 @@ impl EpistemicProbProductionAdapter {
         let result = exact.evaluate()?;
         self.trace.gpu_exact_query_evaluations =
             self.trace.gpu_exact_query_evaluations.saturating_add(1);
+        self.trace.gpu_program_exact_query_evaluations = self
+            .trace
+            .gpu_program_exact_query_evaluations
+            .saturating_add(1);
         self.trace.gpu_knowledge_compilation_end_to_end_runs = self
             .trace
             .gpu_knowledge_compilation_end_to_end_runs

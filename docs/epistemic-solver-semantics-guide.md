@@ -150,7 +150,8 @@ production GPU/WCOJ stack for specific certification fixtures:
   slices route accepted GPU evidence into existing GPU CDCL/CNF adapter paths.
 - Probabilistic source/program compile, condition, PIR/CNF encode, query, and
   gradient slices route accepted GPU evidence into existing GPU exact/provenance
-  paths with source/program-specific PIR/CNF and conditioned-gradient counters.
+  paths with source/program-specific exact-query, PIR/CNF, and
+  conditioned-gradient counters.
 
 Those paths are still partial G090_GPU/G090_SOLVER/G090_PROB evidence. Before
 v0.9.0 can close, release certification must broaden arbitrary EIR semantic
@@ -573,6 +574,7 @@ source-conditioned query, and two-record parsed-program-conditioned query
 cases, including true `know`, true `possible`, false `possible`/`not possible`,
 and false `know`/`not know` operator-result
 conditioning, accepted G91/default FAEEL mode-specific trace counters,
+source/program-specific exact-query counters,
 source/program-specific conditioned gradient counters,
 source/program-specific and operator-specific conditioned evidence counters,
 source/program-specific PIR/CNF counters, plus query/gradient/PIR-CNF reuse,

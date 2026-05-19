@@ -86,6 +86,8 @@ fn production_prob_adapter_reuses_gpu_exact_path_not_fixture_circuit() {
     assert!(production.contains("evidence_term_to_ast_term"));
     assert!(production.contains("program.evidence.push"));
     assert!(production.contains("gpu_exact_query_evaluations"));
+    assert!(production.contains("gpu_source_exact_query_evaluations"));
+    assert!(production.contains("gpu_program_exact_query_evaluations"));
     assert!(production.contains("gpu_exact_gradient_evaluations"));
     assert!(production.contains("cpu_only_probability_recomputations: 0"));
     assert!(production.contains("fixture_circuit_evaluations: 0"));

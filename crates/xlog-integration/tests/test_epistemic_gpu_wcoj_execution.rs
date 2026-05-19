@@ -4769,6 +4769,86 @@ fn accepted_gpu_execution_result_gates_probabilistic_program_end_to_end_path() {
 }
 
 #[test]
+fn probabilistic_end_to_end_records_source_and_program_query_trace_counters() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let source_result = execute_unary_edge_epistemic_fixture(
+        &fix,
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X).
+        "#,
+        &[1],
+        &[1],
+    );
+    let program_result = execute_unary_edge_epistemic_fixture(
+        &fix,
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), not know edge(X).
+        "#,
+        &[1],
+        &[],
+    );
+    let prob_program = parse_program(
+        r#"
+        0.5::rain().
+        query(rain()).
+        "#,
+    )
+    .expect("parse probabilistic end-to-end program");
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut adapter = EpistemicProbProductionAdapter::new(config);
+    let source_evaluated = adapter
+        .compile_and_evaluate_source_with_gpu_execution_result(
+            r#"
+            0.5::rain().
+            query(rain()).
+            "#,
+            &fix.provider,
+            &source_result,
+            vec![EpistemicAssumption::known("edge", 1, true)],
+        )
+        .expect("accepted source evidence must gate source exact query path");
+    let program_evaluated = adapter
+        .compile_and_evaluate_program_with_gpu_execution_result(
+            &prob_program,
+            &fix.provider,
+            &program_result,
+            vec![EpistemicAssumption::known("edge", 1, false)],
+        )
+        .expect("accepted program evidence must gate parsed-program exact query path");
+
+    assert_eq!(source_evaluated.query_probs.len(), 1);
+    assert!((source_evaluated.query_probs[0].prob - 0.5).abs() < 1.0e-6);
+    assert_eq!(program_evaluated.query_probs.len(), 1);
+    assert!((program_evaluated.query_probs[0].prob - 0.5).abs() < 1.0e-6);
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_world_view_evidence_consumed, 2);
+    assert_eq!(trace.accepted_evidence_assumptions_consumed, 2);
+    assert_eq!(trace.gpu_exact_source_compiles, 1);
+    assert_eq!(trace.gpu_exact_program_compiles, 1);
+    assert_eq!(trace.gpu_exact_query_evaluations, 2);
+    assert_eq!(trace.gpu_source_exact_query_evaluations, 1);
+    assert_eq!(trace.gpu_program_exact_query_evaluations, 1);
+    assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 2);
+    assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 1);
+    assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 1);
+    assert_eq!(trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(trace.fixture_circuit_evaluations, 0);
+}
+
+#[test]
 fn accepted_gpu_execution_result_gates_probabilistic_pir_cnf_path() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
