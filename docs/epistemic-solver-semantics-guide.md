@@ -314,6 +314,8 @@ accepted-runtime parity.
 plans in order by delegating each item to the existing single-plan GPU runtime
 path. The accepted split integration fixture uses this adapter for two
 independent components and checks final component rows against tuple-intersection
+oracles. It also compares each component's generated, propagated, tested,
+accepted, rejected, and candidate-index trace fields against bounded GPT
 oracles while preserving zero CPU candidate/world-view fallback counters.
 
 Split runtime coverage also includes the existing world-view distinction between

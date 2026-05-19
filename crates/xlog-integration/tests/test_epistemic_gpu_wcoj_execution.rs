@@ -667,6 +667,44 @@ fn accepted_split_components_execute_gpu_runtime_and_match_component_oracles() {
         "#,
     )
     .expect("parse split epistemic fixture");
+    let edge_oracle_program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred a(u32).
+        a(X) :- node(X), know edge(X).
+        "#,
+    )
+    .expect("parse split edge oracle");
+    let color_oracle_program = parse_program(
+        r#"
+        pred node(u32).
+        pred color(u32).
+        pred b(u32).
+        b(X) :- node(X), know color(X).
+        "#,
+    )
+    .expect("parse split color oracle");
+    let split_oracles = vec![
+        run_generate_propagate_test(
+            &edge_oracle_program,
+            vec![
+                EpistemicInterpretation::new(),
+                EpistemicInterpretation::new().with_known("edge", 1),
+            ],
+            GeneratePropagateTestConfig { max_candidates: 2 },
+        )
+        .expect("run split edge oracle"),
+        run_generate_propagate_test(
+            &color_oracle_program,
+            vec![
+                EpistemicInterpretation::new(),
+                EpistemicInterpretation::new().with_known("color", 1),
+            ],
+            GeneratePropagateTestConfig { max_candidates: 2 },
+        )
+        .expect("run split color oracle"),
+    ];
     let split = compile_epistemic_gpu_split_execution_with_stats_snapshot(&program, None)
         .expect("compile split components through GPU executable path");
 
@@ -718,10 +756,39 @@ fn accepted_split_components_execute_gpu_runtime_and_match_component_oracles() {
         download_unary_u32(&fix.provider, &results[1].final_output),
         vec![2]
     );
-    for result in &results {
+    for (result, oracle) in results.iter().zip(split_oracles.iter()) {
         assert_eq!(
             result.model_membership.membership_source,
             EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+        );
+        assert_eq!(
+            result.semantic_trace.generated_candidates,
+            oracle.trace.generated
+        );
+        assert_eq!(
+            result.semantic_trace.propagated_candidates,
+            oracle.trace.propagated
+        );
+        assert_eq!(result.semantic_trace.tested_candidates, oracle.trace.tested);
+        assert_eq!(
+            result.semantic_trace.accepted_candidates,
+            oracle.trace.accepted
+        );
+        assert_eq!(
+            result.semantic_trace.accepted_world_views,
+            oracle.trace.accepted_world_views
+        );
+        assert_eq!(
+            result.semantic_trace.rejected_candidates,
+            oracle.trace.rejected
+        );
+        assert_eq!(
+            result.semantic_trace.accepted_candidate_indices,
+            oracle.accepted_candidate_indices
+        );
+        assert_eq!(
+            result.semantic_trace.rejected_candidate_indices,
+            oracle.rejected_candidate_indices
         );
         assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
         assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
