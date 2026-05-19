@@ -43,6 +43,39 @@ Current ref checks on 2026-05-19 showed:
 | `git merge-base --is-ancestor main HEAD` | exit `1` | v0.9 branch is not yet rebased/merged on top of the v0.8.6 bundle. |
 | `git merge-base --is-ancestor origin/main HEAD` | exit `1` | v0.9 branch is not yet rebased/merged on top of `origin/main`. |
 
+## v0.8.6 Bundle Integration Preflight
+
+A non-destructive preflight on 2026-05-19 used a throwaway detached worktree at
+`HEAD` and ran:
+
+```bash
+git merge --no-commit --no-ff main
+```
+
+The preflight did not move this branch. It exited `1` with 11 content conflicts:
+
+| Conflict file | Conflict-marker lines |
+|---|---:|
+| `crates/xlog-integration/src/bin/xlog_run.rs` | 3 |
+| `crates/xlog-logic/src/ast.rs` | 12 |
+| `crates/xlog-logic/src/grammar.pest` | 6 |
+| `crates/xlog-logic/src/lib.rs` | 3 |
+| `crates/xlog-logic/src/lower.rs` | 9 |
+| `crates/xlog-logic/src/parser.rs` | 14 |
+| `crates/xlog-logic/src/stratify.rs` | 3 |
+| `crates/xlog-prob/src/mc/buffers.rs` | 6 |
+| `crates/xlog-prob/src/mc/mod.rs` | 3 |
+| `crates/xlog-prob/src/provenance.rs` | 3 |
+| `crates/xlog-runtime/src/lib.rs` | 3 |
+
+The conflicted surface is the expected reuse seam between the v0.8.0/v0.8.5/v0.8.6
+bundle and v0.9.0: CLI execution, logic AST/parser/grammar/lowering/stratifier,
+probabilistic Monte Carlo/provenance APIs, and runtime exports. Any real
+integration must resolve these conflicts by preserving the v0.8.6 language,
+runtime, pyxlog, and packaging changes while reapplying the v0.9.0 epistemic
+EIR/GPU/probability/solver hooks. This evidence is a preflight only; it is not
+the required rebase/merge or compatibility rerun.
+
 ## Corrected Gate Table
 
 | Goal | Current Status | Evidence |
@@ -58,7 +91,7 @@ Current ref checks on 2026-05-19 showed:
 | G090_PROB | BLOCKED | Accepted GPU runtime evidence can gate source/program exact compilation, two-record and accepted split-batch direct source/program exact compilation, source/program bounded compile/evaluate with source/program-specific exact-query counters, two-record accepted source/program batch compile/evaluate, accepted split-batch source/program compile/evaluate plus conditioned source/program query and gradient evaluation with accepted batch/component counters, source/program zero-arity and concrete nonzero-arity true/false evidence conditioning with negative-evidence, source/program-specific, aggregate operator-specific, and source/program-specific operator-conditioned trace counters including true `know`, true `possible`, false `possible`/`not possible`, and false `know`/`not know` operator evidence, mode-specific accepted G91/FAEEL production trace counters, two-record positive and negative conditioned source query batches, two-record conditioned program query batches, conditioned source/program gradient evaluation with source/program-specific gradient counters, single-record, two-record, and accepted split-batch PIR/CNF encoding with source/program-specific PIR/CNF counters, and single-record, two-record, and accepted split-batch query/gradient evaluation through the existing GPU-native path, but broader probabilistic coverage on accepted world views is incomplete. |
 | G090_CERT | BLOCKED | Missing complete accepted-execution kernel timing, broader WCOJ runtime evidence, zero CPU fallback counters, and post-v0.8 rerun. |
 | G090_DOC | PARTIAL | Guide documents the semantic oracle, partial accepted GPU/WCOJ runtime path, solver/probability production adapters, and remaining blockers; full release documentation is still blocked by broader semantic parity and post-v0.8 certification. |
-| G090_CLOSE | BLOCKED | Requires G090_GPU/G090_SOLVER/G090_PROB/G090_CERT plus v0.8 integration/rebase. |
+| G090_CLOSE | BLOCKED | Requires G090_GPU/G090_SOLVER/G090_PROB/G090_CERT plus v0.8 integration/rebase. A 2026-05-19 throwaway-worktree merge preflight against `main`/`v0.8.6` found 11 content conflicts before any compatibility rerun could be attempted. |
 
 ## Current Semantic-Oracle Evidence
 
@@ -210,7 +243,7 @@ Closure remains blocked until certification includes all of the following:
   split-batch conditioned source/program query/gradient, split-batch PIR/CNF,
   exact query/gradient, and PIR/CNF GPU-native knowledge-compilation fixtures,
   with zero CPU-only probability recomputation;
-- post-v0.8.6 rebase compatibility evidence.
+- post-v0.8.6 conflict resolution, rebase/merge, and compatibility evidence.
 
 ## Release Hygiene
 
@@ -222,6 +255,6 @@ change was performed.
 Release decision: `HOLD_FOR_GPU_NATIVE_AND_V086_BUNDLE_REBASE`.
 
 The current branch is still incomplete. The next closing work must complete the
-corrected `G090_GPU` production runtime/WCOJ/GPU path, explicitly rebase or
-merge the branch on top of the merged v0.8.0/v0.8.5/v0.8.6 bundle, and then
-rerun the full certification set.
+corrected `G090_GPU` production runtime/WCOJ/GPU path, explicitly resolve the
+v0.8.6 bundle conflicts, rebase or merge the branch on top of the merged
+v0.8.0/v0.8.5/v0.8.6 bundle, and then rerun the full certification set.
