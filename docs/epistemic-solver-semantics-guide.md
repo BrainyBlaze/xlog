@@ -552,6 +552,10 @@ records up front, then reuse the existing GPU PIR/CNF encoder once per record.
 before calling `ExactDdnnfProgram::evaluate`.
 `evaluate_gpu_with_grads_with_gpu_execution_result` applies the same accepted
 runtime boundary before calling `ExactDdnnfProgram::evaluate_gpu_with_grads`.
+Conditioned source and parsed-program gradient paths also record
+source/program-specific conditioned gradient counters, so the production trace
+distinguishes source-conditioned gradient evaluation from parsed-program
+conditioned gradient evaluation.
 `evaluate_for_gpu_execution_results` and
 `evaluate_gpu_with_grads_for_gpu_execution_results` validate all accepted GPU
 runtime evidence records before reusing the already-compiled exact program for
@@ -568,6 +572,7 @@ source-conditioned query, and two-record parsed-program-conditioned query
 cases, including true `know`, true `possible`, false `possible`/`not possible`,
 and false `know`/`not know` operator-result
 conditioning, accepted G91/default FAEEL mode-specific trace counters,
+source/program-specific conditioned gradient counters,
 source/program-specific and operator-specific conditioned evidence counters,
 plus query/gradient/PIR-CNF reuse, but not the full query-conditioned
 probabilistic matrix over accepted runtime world views.

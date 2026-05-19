@@ -3950,6 +3950,100 @@ fn conditioned_probabilistic_evidence_records_source_and_program_trace_counters(
 }
 
 #[test]
+fn conditioned_probabilistic_gradients_record_source_and_program_trace_counters() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let source_result = execute_unary_edge_epistemic_fixture(
+        &fix,
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X).
+        "#,
+        &[1],
+        &[1],
+    );
+    let program_result = execute_unary_edge_epistemic_fixture(
+        &fix,
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), not know edge(X).
+        "#,
+        &[1],
+        &[],
+    );
+
+    let parsed_program = parse_program(
+        r#"
+        0.6::edge(1).
+        query(edge(1)).
+        "#,
+    )
+    .expect("parse conditioned gradient trace fixture");
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut adapter = EpistemicProbProductionAdapter::new(config);
+    let source_grads = adapter
+        .compile_and_evaluate_conditioned_source_with_grads_with_gpu_execution_result(
+            r#"
+            0.6::edge(1).
+            query(edge(1)).
+            "#,
+            &fix.provider,
+            &source_result,
+            vec![EpistemicAssumption::known_tuple(
+                "edge",
+                vec![EpistemicEvidenceTerm::integer(1)],
+                true,
+            )],
+        )
+        .expect("accepted source evidence must condition exact source gradient path");
+    let program_grads = adapter
+        .compile_and_evaluate_conditioned_program_with_grads_with_gpu_execution_result(
+            &parsed_program,
+            &fix.provider,
+            &program_result,
+            vec![EpistemicAssumption::known_tuple(
+                "edge",
+                vec![EpistemicEvidenceTerm::integer(1)],
+                false,
+            )],
+        )
+        .expect("accepted program evidence must condition exact parsed-program gradient path");
+
+    assert!((source_grads.query_grads[0].prob - 1.0).abs() < 1.0e-6);
+    assert!(program_grads.query_grads[0].prob.abs() < 1.0e-6);
+
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_world_view_evidence_consumed, 2);
+    assert_eq!(trace.accepted_evidence_assumptions_consumed, 2);
+    assert_eq!(trace.gpu_conditioned_evidence_facts, 2);
+    assert_eq!(trace.gpu_conditioned_negative_evidence_facts, 1);
+    assert_eq!(trace.gpu_source_conditioned_evidence_facts, 1);
+    assert_eq!(trace.gpu_program_conditioned_evidence_facts, 1);
+    assert_eq!(trace.gpu_source_conditioned_negative_evidence_facts, 0);
+    assert_eq!(trace.gpu_program_conditioned_negative_evidence_facts, 1);
+    assert_eq!(trace.gpu_exact_source_compiles, 1);
+    assert_eq!(trace.gpu_exact_program_compiles, 1);
+    assert_eq!(trace.gpu_exact_query_evaluations, 0);
+    assert_eq!(trace.gpu_exact_gradient_evaluations, 2);
+    assert_eq!(trace.gpu_source_conditioned_gradient_evaluations, 1);
+    assert_eq!(trace.gpu_program_conditioned_gradient_evaluations, 1);
+    assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 1);
+    assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 1);
+    assert_eq!(trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(trace.fixture_circuit_evaluations, 0);
+}
+
+#[test]
 fn accepted_gpu_execution_result_conditions_parsed_program_probabilistic_evidence() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");

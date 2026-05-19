@@ -86,6 +86,10 @@ pub struct EpistemicProbProductionTrace {
     pub gpu_exact_query_evaluations: u64,
     /// Number of GPU gradient evaluations routed through `ExactDdnnfProgram`.
     pub gpu_exact_gradient_evaluations: u64,
+    /// Number of source-conditioned GPU gradient evaluations routed through `ExactDdnnfProgram`.
+    pub gpu_source_conditioned_gradient_evaluations: u64,
+    /// Number of parsed-program-conditioned GPU gradient evaluations routed through `ExactDdnnfProgram`.
+    pub gpu_program_conditioned_gradient_evaluations: u64,
     /// Number of accepted PIR graphs uploaded through the existing GPU PIR layout.
     pub gpu_pir_graph_uploads: u64,
     /// Number of accepted PIR root sets encoded through the existing GPU CNF encoder.
@@ -542,6 +546,10 @@ impl EpistemicProbProductionAdapter {
         let result = exact.evaluate_gpu_with_grads()?;
         self.trace.gpu_exact_gradient_evaluations =
             self.trace.gpu_exact_gradient_evaluations.saturating_add(1);
+        self.trace.gpu_source_conditioned_gradient_evaluations = self
+            .trace
+            .gpu_source_conditioned_gradient_evaluations
+            .saturating_add(1);
         self.trace.gpu_knowledge_compilation_end_to_end_runs = self
             .trace
             .gpu_knowledge_compilation_end_to_end_runs
@@ -709,6 +717,10 @@ impl EpistemicProbProductionAdapter {
         let result = exact.evaluate_gpu_with_grads()?;
         self.trace.gpu_exact_gradient_evaluations =
             self.trace.gpu_exact_gradient_evaluations.saturating_add(1);
+        self.trace.gpu_program_conditioned_gradient_evaluations = self
+            .trace
+            .gpu_program_conditioned_gradient_evaluations
+            .saturating_add(1);
         self.trace.gpu_knowledge_compilation_end_to_end_runs = self
             .trace
             .gpu_knowledge_compilation_end_to_end_runs
