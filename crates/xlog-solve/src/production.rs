@@ -1922,6 +1922,39 @@ impl GpuSolverProductionAdapter {
         self.trace.require_zero_cpu_search()?;
         Ok(report)
     }
+
+    /// Execute a bounded SAT/MaxSAT/status-aware portfolio for accepted split/batch evidence.
+    ///
+    /// The batch evidence must prove every split component reused the existing
+    /// single-plan GPU runtime path before each component is delegated to the
+    /// existing multi-candidate portfolio adapter.
+    pub fn solve_portfolio_with_gpu_batch_execution_result(
+        &mut self,
+        provider: &CudaKernelProvider,
+        evidence: GpuSolverProductionBatchExecutionEvidence<'_>,
+        jobs: &[GpuSolverProductionPortfolioJob<'_>],
+    ) -> Result<GpuSolverProductionPortfolioReport> {
+        if jobs.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production portfolio".to_string(),
+                context: "accepted solver portfolio requires at least one GPU job".to_string(),
+            });
+        }
+        let results = require_accepted_gpu_solver_batch_evidence(provider, evidence.batch)?;
+        self.trace.accepted_gpu_batch_candidate_evidence_consumed = self
+            .trace
+            .accepted_gpu_batch_candidate_evidence_consumed
+            .saturating_add(1);
+        self.trace
+            .accepted_gpu_batch_candidate_component_evidence_consumed = self
+            .trace
+            .accepted_gpu_batch_candidate_component_evidence_consumed
+            .saturating_add(results.len() as u64);
+        let report = self
+            .solve_multi_candidate_portfolio_with_gpu_execution_results(provider, &results, jobs)?;
+        self.trace.require_zero_cpu_search()?;
+        Ok(report)
+    }
 }
 
 fn require_accepted_gpu_solver_evidence(

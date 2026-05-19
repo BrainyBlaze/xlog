@@ -450,6 +450,11 @@ and recording portfolio counters.
 accepted GPU runtime results up front, then repeats the same SAT/MaxSAT/status
 portfolio jobs once per accepted evidence record while aggregating
 candidate-evidence and `gpu_portfolio_*` counters.
+`solve_portfolio_with_gpu_batch_execution_result` consumes the same accepted
+split-batch evidence as the lifecycle adapter, then delegates each component to
+the existing multi-candidate portfolio path. It records the split-batch
+candidate/component counters together with doubled SAT/MaxSAT/UNKNOWN/TIMEOUT
+portfolio counters and zero CPU search.
 Accepted GPU candidate evidence also preserves the runtime epistemic mode;
 `GpuSolverProductionTrace` counts G91 and default FAEEL candidate evidence
 separately when either mode gates solver production work.
@@ -468,7 +473,7 @@ distinct-CNF fail-closed rejection, a two-record accepted lifecycle, and bounded
 UNKNOWN/TIMEOUT lifecycle propagation, plus two-record same-CNF learned-clause
 reuse, a mixed unary and binary `possible`/`not possible` plus binary `not know`
 operator-result lifecycle,
-accepted split-batch lifecycle evidence with batch/component counters,
+accepted split-batch lifecycle and portfolio evidence with batch/component counters,
 two-record/two-CNF bounded MaxSAT candidate-set execution, bounded GPU-CDCL
 pruning of UNSAT MaxSAT search candidates for one and two accepted evidence
 records, and bounded weighted soft-clause selection encoding for one and two
@@ -500,6 +505,7 @@ Run the solver service fixtures and production-adapter source guard:
 ```bash
 cargo test -p xlog-solve --test gpu_solver_production_reuse
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_lifecycle_path -- --nocapture
+cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_portfolio_path -- --nocapture
 cargo test -p xlog-solve --test solver_service_semantics
 ```
 

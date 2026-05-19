@@ -53,6 +53,7 @@ fn production_solver_adapter_reuses_gpu_cdcl_not_cpu_oracle() {
     assert!(production.contains("GpuSolverProductionMaxSatSearchCandidate"));
     assert!(production.contains("GpuSolverProductionMaxSatSearchStatus"));
     assert!(production.contains("solve_portfolio_with_gpu_execution_result"));
+    assert!(production.contains("solve_portfolio_with_gpu_batch_execution_result"));
     assert!(production.contains("GpuSolverProductionLearnedClauseArenaReport"));
     assert!(production.contains("GpuSolverProductionLearnedClauseReuseReport"));
     assert!(production.contains("GpuSolverProductionMaxSatCandidate"));
@@ -134,6 +135,7 @@ fn production_solver_capabilities_report_gpu_backed_maxsat_and_portfolio_paths()
     ));
     assert!(production.contains("solve_maxsat_schedule_with_gpu_execution_results"));
     assert!(production.contains("solve_portfolio_with_gpu_execution_result"));
+    assert!(production.contains("solve_portfolio_with_gpu_batch_execution_result"));
     assert!(production.contains("cpu_oracle_solver_allowed: false"));
 
     let capabilities = production_capabilities();
