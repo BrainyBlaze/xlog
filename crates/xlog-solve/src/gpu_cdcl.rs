@@ -78,7 +78,8 @@ pub struct GpuCdclSolver {
 /// Created via [`GpuCdclSolver::new_workspace`]. Passed as `&mut` to `_ws` solver methods.
 ///
 /// `reset_for_solve()` is intentionally a no-op: the `sat_cdcl_solve` kernel initializes
-/// all mutable state at launch (sat.cu:1220, 1293, 1329, 1341).
+/// mutable state at launch. The learned-import path preserves the learned/proof arenas
+/// below `out_learned_count[0]` and initializes the remaining workspace buffers.
 pub struct GpuCdclWorkspace {
     // Capacity limits (used for overflow checks)
     pub(crate) var_cap: usize,
@@ -129,10 +130,10 @@ pub struct GpuCdclWorkspace {
 }
 
 impl GpuCdclWorkspace {
-    /// No-op: the sat_cdcl_solve kernel initializes all mutable state at launch.
+    /// No-op: the sat_cdcl_solve kernel initializes mutable state at launch.
     #[inline]
     pub(crate) fn reset_for_solve(&mut self) {
-        // Intentionally empty. See sat.cu:1220, 1293, 1329, 1341.
+        // Intentionally empty; launch flags decide whether learned/proof arenas are imported.
     }
 
     /// Variable capacity this workspace was allocated for.
@@ -352,6 +353,13 @@ impl GpuCdclSolver {
         let mut out_status = memory.alloc::<i32>(1)?;
         let mut out_error = memory.alloc::<i32>(1)?;
         let mut out_learned_count = memory.alloc::<u32>(1)?;
+        self.provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&[0u32], &mut out_learned_count)
+            .map_err(|e| {
+                XlogError::Kernel(format!("Failed to init learned import count: {}", e))
+            })?;
 
         let sat_fn = self
             .provider
@@ -370,6 +378,7 @@ impl GpuCdclSolver {
         let cfg_max_proof_u32 = self.config.max_proof_u32;
         let cfg_restart_base = self.config.restart_base;
         let cfg_reduce_interval = self.config.reduce_interval;
+        let learned_import_count_param = (&out_learned_count).as_kernel_param();
 
         let mut params: Vec<*mut c_void> = vec![
             compile_needed.as_kernel_param(),
@@ -387,6 +396,7 @@ impl GpuCdclSolver {
             cfg_max_proof_u32.as_kernel_param(),
             cfg_restart_base.as_kernel_param(),
             cfg_reduce_interval.as_kernel_param(),
+            learned_import_count_param,
             (&mut assign).as_kernel_param(),
             (&mut level).as_kernel_param(),
             (&mut reason).as_kernel_param(),
@@ -459,6 +469,7 @@ impl GpuCdclSolver {
         decision_base_limit: &TrackedCudaSlice<u32>,
         decision_extra_base: &TrackedCudaSlice<u32>,
         decision_extra_count: &TrackedCudaSlice<u32>,
+        import_existing_learned: bool,
     ) -> Result<()> {
         let num_vars_cap = cnf.var_cap as usize;
         let num_clauses_cap = cnf.clause_cap as usize;
@@ -525,6 +536,15 @@ impl GpuCdclSolver {
 
         // No-op: the sat_cdcl_solve kernel initializes all mutable state at launch.
         ws.reset_for_solve();
+        if !import_existing_learned {
+            self.provider
+                .device()
+                .inner()
+                .htod_sync_copy_into(&[0u32], &mut ws.out_learned_count)
+                .map_err(|e| {
+                    XlogError::Kernel(format!("Failed to init learned import count: {}", e))
+                })?;
+        }
 
         let sat_fn = self
             .provider
@@ -542,6 +562,7 @@ impl GpuCdclSolver {
         let cfg_max_proof_u32 = self.config.max_proof_u32;
         let cfg_restart_base = self.config.restart_base;
         let cfg_reduce_interval = self.config.reduce_interval;
+        let learned_import_count_param = (&ws.out_learned_count).as_kernel_param();
 
         // Parameter order MUST match launch_cdcl_with_decision_ranges_gated exactly.
         let mut params: Vec<*mut c_void> = vec![
@@ -560,6 +581,7 @@ impl GpuCdclSolver {
             cfg_max_proof_u32.as_kernel_param(),
             cfg_restart_base.as_kernel_param(),
             cfg_reduce_interval.as_kernel_param(),
+            learned_import_count_param,
             (&mut ws.assign).as_kernel_param(),
             (&mut ws.level).as_kernel_param(),
             (&mut ws.reason).as_kernel_param(),
@@ -1296,6 +1318,50 @@ impl GpuCdclSolver {
         decision_extra_base: &TrackedCudaSlice<u32>,
         decision_extra_count: &TrackedCudaSlice<u32>,
     ) -> Result<()> {
+        self.solve_expect_unsat_with_decision_ranges_gated_ws_inner(
+            ws,
+            cnf,
+            compile_needed,
+            decision_base_limit,
+            decision_extra_base,
+            decision_extra_count,
+            false,
+        )
+    }
+
+    /// Solve and enforce UNSAT on GPU while importing the current workspace learned arena.
+    ///
+    /// The imported learned count is read from `ws.out_learned_count` on device. Callers must only
+    /// use this when the imported learned clauses are valid for `cnf`.
+    pub fn solve_expect_unsat_with_branch_limit_ws_importing_learned(
+        &self,
+        ws: &mut GpuCdclWorkspace,
+        cnf: &GpuCnf,
+        branch_var_limit: &TrackedCudaSlice<u32>,
+    ) -> Result<()> {
+        let compile_needed = self.alloc_u32_scalar(1)?;
+        let zero = self.alloc_u32_scalar(0)?;
+        self.solve_expect_unsat_with_decision_ranges_gated_ws_inner(
+            ws,
+            cnf,
+            &compile_needed,
+            branch_var_limit,
+            &zero,
+            &zero,
+            true,
+        )
+    }
+
+    fn solve_expect_unsat_with_decision_ranges_gated_ws_inner(
+        &self,
+        ws: &mut GpuCdclWorkspace,
+        cnf: &GpuCnf,
+        compile_needed: &TrackedCudaSlice<u32>,
+        decision_base_limit: &TrackedCudaSlice<u32>,
+        decision_extra_base: &TrackedCudaSlice<u32>,
+        decision_extra_count: &TrackedCudaSlice<u32>,
+        import_existing_learned: bool,
+    ) -> Result<()> {
         #[cfg(debug_assertions)]
         let trace = std::env::var_os("XLOG_CDCL_TRACE").is_some();
         #[cfg(debug_assertions)]
@@ -1308,6 +1374,7 @@ impl GpuCdclSolver {
             decision_base_limit,
             decision_extra_base,
             decision_extra_count,
+            import_existing_learned,
         )?;
 
         let device = self.provider.device().inner();

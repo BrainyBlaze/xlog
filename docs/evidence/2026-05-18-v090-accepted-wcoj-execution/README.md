@@ -35,7 +35,7 @@ is not a closure claim for `G090_GPU`, `G090_CERT`, or `G090_CLOSE`.
 
 | Command | Result |
 |---|---|
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 18 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 19 passed, 0 failed |
 
 ## Non-Closure Notes
 
@@ -47,6 +47,6 @@ is not a closure claim for `G090_GPU`, `G090_CERT`, or `G090_CLOSE`.
   nonzero-arity membership fixtures.
 - It does not prove the full G91, FAEEL, GPT, and splitting semantic parity
   matrix.
-- It does not close cross-candidate learned-clause import/reuse or broader
-  accepted probabilistic knowledge-compilation integration.
+- It does not close broader distinct-candidate learned-clause validity or
+  broader accepted probabilistic knowledge-compilation integration.
 - No closure-board edit, merge, push, or tag is implied.
