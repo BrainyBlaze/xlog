@@ -238,6 +238,14 @@ In the bounded fixture evaluator, `possible p/arity` succeeds when `p/arity` is
 either known or compatibility-possible. Non-epistemic programs remain isolated:
 the same non-epistemic source lowers to the same RIR under default mode and G91.
 
+Accepted GPU runtime coverage now includes
+`test_epistemic_gpu_wcoj_execution::g91_self_supported_possible_reaches_gpu_runtime_path`.
+That fixture runs explicit `#pragma epistemic_mode = g91` with
+`p() :- possible p().`, loads the reduced nullary fact through the existing
+relation-buffer path, validates stable tuple-source membership, accepts one
+world view, materializes `p()`, and records zero CPU candidate/world-view
+fallback counters. This is a G91 runtime parity slice, not full parity closure.
+
 ## FAEEL Default
 
 FAEEL is the default mode. In the bounded fixture evaluator:

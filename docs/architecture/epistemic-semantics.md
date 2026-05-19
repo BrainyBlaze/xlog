@@ -295,6 +295,15 @@ Non-epistemic programs remain isolated from mode selection. A program with no
 `BodyLiteral::Epistemic` compiles to the same RIR plan under the default mode
 and under `#pragma epistemic_mode = g91`.
 
+The accepted runtime fixture
+`test_epistemic_gpu_wcoj_execution::g91_self_supported_possible_reaches_gpu_runtime_path`
+exercises the G91-only self-support case `p() :- possible p().` through the
+production reduced runtime path. The reduced empty-body nullary fact is loaded
+through the existing relation-buffer/fact path, then model membership is read
+from the stable tuple-source buffer, one world view is accepted, and CPU
+candidate/world-view fallback counters remain zero. This fixture narrows the
+G91 parity gap but does not close full G91/FAEEL/GPT/splitting parity.
+
 ## FAEEL Default Fixture Semantics
 
 `faeel` is the default epistemic mode. The bounded FAEEL layer in

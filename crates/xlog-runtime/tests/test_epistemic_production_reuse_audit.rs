@@ -118,6 +118,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(
         integration.contains("faeel_independently_founded_self_possible_reaches_gpu_runtime_path")
     );
+    assert!(integration.contains("g91_self_supported_possible_reaches_gpu_runtime_path"));
     assert!(integration.contains("not_possible_operator_count"));
     assert!(integration.contains("negated_row_filter_count"));
     assert!(solver.contains("GpuCdclSolver::new"));

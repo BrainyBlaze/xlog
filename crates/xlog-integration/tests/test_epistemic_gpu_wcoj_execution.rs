@@ -9,6 +9,7 @@ use xlog_cuda::device_runtime::{
 };
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_ir::EirEpistemicMode;
 use xlog_logic::epistemic::{
     compile_epistemic_gpu_execution_with_stats_snapshot,
     compile_epistemic_gpu_split_execution_with_stats_snapshot,
@@ -1108,6 +1109,62 @@ fn world_view_validation_rejects_candidates_missing_one_required_membership() {
         download_unary_u32(&fix.provider, &result.final_output),
         Vec::<u32>::new(),
         "final output must remain empty when no candidate satisfies the full world-view boundary"
+    );
+}
+
+#[test]
+fn g91_self_supported_possible_reaches_gpu_runtime_path() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = g91
+        pred p().
+        p() :- possible p().
+        "#,
+    )
+    .expect("parse G91 self-supported possible fixture");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile G91 self-supported possible executable");
+
+    assert_eq!(executable.gpu_plan.mode, EirEpistemicMode::G91);
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &executable.relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    // The reduced G91 program is an empty-body nullary fact; seed it through
+    // the existing relation buffer path used by production fact loading.
+    executor.put_relation("p", upload_nullary(&fix.memory, 1));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("execute G91 self-supported possible fixture");
+
+    assert_eq!(result.prepared.preflight.possible_operator_count, 1);
+    assert_eq!(
+        result.model_membership.membership_source,
+        EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+    );
+    assert_eq!(result.semantic_trace.accepted_world_views, 1);
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
+    assert_eq!(
+        read_device_row_count(&fix.provider, &result.final_output).expect("final row count"),
+        1,
+        "explicit G91 compatibility should accept and materialize self-supported p()"
     );
 }
 

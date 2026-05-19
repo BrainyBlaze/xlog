@@ -21,7 +21,7 @@ Predecessor evidence:
 | Foundedness fixture | `test_epistemic_faeel.rs` accepts a candidate where `know fact()` is backed by `known fact/0`. |
 | No-model behavior | `test_epistemic_faeel.rs` returns typed `NoModel` values for unfounded possible-only support and contradictions. |
 | G91 distinction | `test_epistemic_g91.rs` preserves the intentional G91/FAEEL difference for `possible fact()`. |
-| Production executable guard | `compile_epistemic_gpu_execution` calls the FAEEL foundedness guard before reduced runtime compilation, rejecting unsupported `p() :- possible p().` under the default mode, permitting self-`possible` only when the same predicate has independent ordinary founded support, and preserving the explicit G91 compatibility fixture. |
+| Production executable guard | `compile_epistemic_gpu_execution` calls the FAEEL foundedness guard before reduced runtime compilation, rejecting unsupported `p() :- possible p().` under the default mode, permitting self-`possible` only when the same predicate has independent ordinary founded support, and preserving the explicit G91 compatibility fixture through accepted GPU runtime execution. |
 | Accepted runtime founded support | `test_epistemic_gpu_wcoj_execution::faeel_independently_founded_self_possible_reaches_gpu_runtime_path` proves an independently founded default-FAEEL self-`possible` fixture reaches accepted GPU runtime execution and materializes `p()`. |
 | Documentation | `docs/architecture/epistemic-semantics.md` documents bounded FAEEL semantics and no-model reasons. |
 
@@ -47,7 +47,7 @@ Predecessor evidence:
 | M090_FAEEL.2 golden fixtures | 100 percent pass | PASS | `cargo test -p xlog-logic --test test_epistemic_faeel`: 3/3 passed. |
 | M090_FAEEL.3 no-model behavior | typed result or diagnostic, not panic | PASS | `FaeelCandidateResult::NoModel(FaeelNoModelReason::...)` fixtures. |
 | M090_FAEEL.4 G91 distinction | fixtures show at least one intentional G91/FAEEL difference | PASS | `test_epistemic_g91::g91_possible_fixture_differs_from_faeel_default`. |
-| M090_FAEEL.5 foundedness guard | self-supported epistemic fixture rejected with documented reason | PASS | `test_epistemic_executable_plan::faeel_gpu_execution_rejects_self_supported_possible_before_runtime_dispatch` rejects default `p() :- possible p().` as `FAEEL foundedness guard`; `faeel_gpu_execution_allows_self_possible_with_independent_founded_support` permits the default-FAEEL case with ordinary support; `g91_gpu_execution_allows_self_supported_possible_compatibility_fixture` preserves explicit G91 compatibility. |
+| M090_FAEEL.5 foundedness guard | self-supported epistemic fixture rejected with documented reason | PASS | `test_epistemic_executable_plan::faeel_gpu_execution_rejects_self_supported_possible_before_runtime_dispatch` rejects default `p() :- possible p().` as `FAEEL foundedness guard`; `faeel_gpu_execution_allows_self_possible_with_independent_founded_support` permits the default-FAEEL case with ordinary support; `g91_gpu_execution_allows_self_supported_possible_compatibility_fixture` preserves explicit G91 compatibility and `test_epistemic_gpu_wcoj_execution::g91_self_supported_possible_reaches_gpu_runtime_path` proves the compatibility fixture reaches accepted GPU runtime execution. |
 
 ## Coordination Notes
 
