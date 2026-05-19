@@ -16,6 +16,10 @@ All notable changes to this project are documented in this file.
   deterministic subplans, with explicit off/on controls, relation-generation
   invalidation, unsafe-boundary diagnostics, and evidence-backed duplicate
   work reduction.
+- Added v0.8.6 adaptive runtime re-optimization adoption for
+  compiler-supplied candidate plans, with deterministic mis-plan telemetry,
+  GPU output equivalence, rollback diagnostics, and zero added data-plane DTOH
+  calls in the acceptance fixture.
 
 ### Changed
 

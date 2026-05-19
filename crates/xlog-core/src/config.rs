@@ -118,6 +118,18 @@ pub struct RuntimeConfig {
     /// to disabled so existing runtime behavior is preserved unless the caller
     /// opts in.
     pub common_subexpression_elimination: Option<bool>,
+    /// v0.8.6 G086_ADAPT — runtime adaptive re-optimization adoption gate.
+    ///
+    /// `Some(true)` allows an executor to compare a baseline plan against a
+    /// compiler-supplied candidate plan using runtime telemetry, adopt the
+    /// candidate only when deterministic mis-plan thresholds trigger, and roll
+    /// back on adverse candidates. `Some(false)` disables the adoption path.
+    /// `None` consults `XLOG_ADAPTIVE_REOPT`; unset defaults to disabled.
+    pub adaptive_reoptimization: Option<bool>,
+    /// Minimum mis-plan ratio required before the executor attempts to adopt a
+    /// candidate re-optimized plan. `None` consults
+    /// `XLOG_ADAPTIVE_REOPT_MIN_RATIO`; unset or invalid values default to 1.2.
+    pub adaptive_reoptimization_min_misplan_ratio: Option<f64>,
 }
 
 /// v0.6.5 W2.5 cost-model selector for WCOJ dispatch.
@@ -149,6 +161,8 @@ impl Default for RuntimeConfig {
             wcoj_4cycle_dispatch_disabled: None,
             wcoj_cost_model: None,
             common_subexpression_elimination: None,
+            adaptive_reoptimization: None,
+            adaptive_reoptimization_min_misplan_ratio: None,
         }
     }
 }
@@ -237,6 +251,21 @@ impl RuntimeConfig {
         self
     }
 
+    /// Enable or disable adaptive runtime re-optimization adoption.
+    pub fn with_adaptive_reoptimization(mut self, override_value: Option<bool>) -> Self {
+        self.adaptive_reoptimization = override_value;
+        self
+    }
+
+    /// Set the minimum mis-plan ratio for adaptive runtime re-optimization.
+    pub fn with_adaptive_reoptimization_min_misplan_ratio(
+        mut self,
+        override_value: Option<f64>,
+    ) -> Self {
+        self.adaptive_reoptimization_min_misplan_ratio = override_value;
+        self
+    }
+
     /// Resolve runtime common subexpression elimination by config/env/default.
     pub fn resolved_common_subexpression_elimination(&self) -> bool {
         if let Some(enabled) = self.common_subexpression_elimination {
@@ -253,6 +282,36 @@ impl RuntimeConfig {
             .unwrap_or(false)
     }
 
+    /// Resolve adaptive runtime re-optimization by config/env/default.
+    pub fn resolved_adaptive_reoptimization(&self) -> bool {
+        if let Some(enabled) = self.adaptive_reoptimization {
+            return enabled;
+        }
+
+        std::env::var("XLOG_ADAPTIVE_REOPT")
+            .map(|raw| {
+                matches!(
+                    raw.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "on" | "yes"
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    /// Resolve the deterministic mis-plan threshold for adaptive re-optimization.
+    pub fn resolved_adaptive_reoptimization_min_misplan_ratio(&self) -> f64 {
+        const DEFAULT_MIN_RATIO: f64 = 1.2;
+        if let Some(value) = self.adaptive_reoptimization_min_misplan_ratio {
+            return sanitize_adaptive_reoptimization_ratio(value, DEFAULT_MIN_RATIO);
+        }
+
+        std::env::var("XLOG_ADAPTIVE_REOPT_MIN_RATIO")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<f64>().ok())
+            .map(|value| sanitize_adaptive_reoptimization_ratio(value, DEFAULT_MIN_RATIO))
+            .unwrap_or(DEFAULT_MIN_RATIO)
+    }
+
     /// Resolve the effective WCOJ cost-model selector.
     pub fn resolved_wcoj_cost_model(&self) -> CostModelKind {
         if let Some(kind) = self.wcoj_cost_model {
@@ -265,6 +324,14 @@ impl RuntimeConfig {
             Some("skew") | Some("skewclassifier") | Some(_) => CostModelKind::SkewClassifier,
             None => CostModelKind::Cardinality,
         }
+    }
+}
+
+fn sanitize_adaptive_reoptimization_ratio(value: f64, fallback: f64) -> f64 {
+    if value.is_finite() && value >= 1.0 {
+        value
+    } else {
+        fallback
     }
 }
 

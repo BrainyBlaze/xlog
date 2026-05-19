@@ -478,6 +478,14 @@ impl Executor {
 
         if let (Some(l), Some(r)) = (left_rel, right_rel) {
             let input_rows = left.num_rows().saturating_mul(right.num_rows());
+            self.record_adaptive_join_observation(
+                l,
+                r,
+                left_keys,
+                right_keys,
+                input_rows,
+                out.num_rows(),
+            );
             self.stats.record_join_result(
                 l,
                 r,

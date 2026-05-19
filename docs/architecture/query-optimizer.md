@@ -133,6 +133,35 @@ The G086_CSE evidence records output parity, generation invalidation,
 unsafe-boundary rejection, CSE hit/miss telemetry, and zero added data-plane
 D2H calls for the duplicated-subplan fixture.
 
+### 6. Adaptive Runtime Re-Optimization
+
+v0.8.6 adds an adaptive adoption gate for compiler-supplied re-optimized
+candidate plans. The runtime does not reparse or recompile source text inside
+`Executor`; instead, callers compile a baseline plan and a candidate plan using
+the existing compiler and `StatsSnapshot` feedback path. `Executor` then owns
+the runtime safety checks:
+
+- `RuntimeConfig::with_adaptive_reoptimization(Some(true))` enables candidate
+  adoption for one runtime.
+- `RuntimeConfig::with_adaptive_reoptimization(Some(false))` disables it for
+  A/B comparison.
+- `XLOG_ADAPTIVE_REOPT=1` enables it when the config field is `None`.
+- `XLOG_ADAPTIVE_REOPT_MIN_RATIO` overrides the deterministic mis-plan ratio
+  threshold; unset defaults to `1.2`.
+
+The baseline always runs first through `Executor::execute_plan`, which records
+join observations before updating `StatsManager`: estimated rows, actual rows,
+cardinality delta, estimated/actual selectivity, relation heat, heat delta, and
+the deterministic mis-plan ratio. If the maximum ratio crosses the threshold,
+the candidate runs through the same `execute_plan` path. Candidate outputs are
+compared with the baseline snapshot by GPU full-row set difference in both
+directions; only metadata/control-plane row counts are read. A candidate that
+fails execution or diverges rolls back the baseline relation/statistics
+snapshot and records a typed diagnostic.
+
+This keeps adaptive execution inside the existing runtime/provider dispatch
+surface while allowing the compiler to keep owning plan construction.
+
 ## Unified Statistics Layer
 
 The optimizer integrates with `xlog-stats` for runtime feedback.
@@ -196,6 +225,11 @@ let plan = compiler.compile(source)?;
 let stats = executor.stats_snapshot();
 // Store for next compilation
 ```
+
+For runtime adaptive re-optimization, callers can compile a second candidate
+with a previous `StatsSnapshot` and pass both plans to
+`Executor::execute_plan_with_adaptive_candidate`. The executor adopts the
+candidate only when deterministic telemetry and GPU equivalence checks pass.
 
 ## GPU Key Packing
 

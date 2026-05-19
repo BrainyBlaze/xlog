@@ -1588,9 +1588,10 @@ engines, or parallel helper paths that bypass production dispatch are blockers.
       subplans in DTS-DLM, Mistaber, or certification workloads, including
       semantic equivalence checks and no extra data-plane host transfers.
       Evidence: `docs/evidence/2026-05-19-v086-cse/`.
-- [ ] Add adaptive query re-optimization during execution when runtime
+- [x] Add adaptive query re-optimization during execution when runtime
       telemetry shows stable mis-planning on consumer fixtures, bounded by
       deterministic replay and rollback gates.
+      Evidence: `docs/evidence/2026-05-19-v086-adaptive-reoptimization/`.
 - [ ] Add a persistent hash index manager with background GPU-resident
       building, invalidation, and budget-aware reuse after profiles identify
       index rebuild cost as a release blocker.

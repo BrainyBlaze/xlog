@@ -75,6 +75,106 @@ pub struct CommonSubexpressionStats {
     pub rejection_reasons: Vec<String>,
 }
 
+/// Runtime join observation used by adaptive re-optimization decisions.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdaptiveJoinObservation {
+    /// Left relation ID observed at the join boundary.
+    pub left_rel: RelId,
+    /// Right relation ID observed at the join boundary.
+    pub right_rel: RelId,
+    /// Estimated output rows before the join executed.
+    pub estimated_output_rows: u64,
+    /// Actual output rows observed after the join executed.
+    pub actual_output_rows: u64,
+    /// Absolute row-count delta between estimate and observation.
+    pub cardinality_delta_abs: u64,
+    /// Estimated selectivity before execution.
+    pub estimated_selectivity: f64,
+    /// Actual selectivity observed after execution.
+    pub actual_selectivity: f64,
+    /// Absolute selectivity delta.
+    pub selectivity_delta_abs: f64,
+    /// Runtime heat for the left relation.
+    pub left_heat: f32,
+    /// Runtime heat for the right relation.
+    pub right_heat: f32,
+    /// Absolute heat delta between the join inputs.
+    pub heat_delta_abs: f32,
+    /// Multiplicative mis-plan ratio, always at least 1.0.
+    pub misplan_ratio: f64,
+}
+
+/// Deterministic adaptive re-optimization decision action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdaptiveReoptimizationAction {
+    /// Adaptive re-optimization is explicitly disabled.
+    Disabled,
+    /// Telemetry did not cross the deterministic adaptation threshold.
+    Skipped,
+    /// Telemetry crossed the threshold and the candidate should be attempted.
+    AttemptCandidate,
+    /// Candidate output matched the baseline and was adopted.
+    Adopted,
+    /// Candidate failed or diverged and the baseline snapshot was restored.
+    RolledBack,
+}
+
+/// Typed adaptive re-optimization decision.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdaptiveReoptimizationDecision {
+    /// Decision action.
+    pub action: AdaptiveReoptimizationAction,
+    /// Stable reason label.
+    pub reason: String,
+    /// Maximum observed mis-plan ratio used by the decision.
+    pub max_misplan_ratio: f64,
+    /// Minimum threshold required to attempt a candidate.
+    pub min_misplan_ratio: f64,
+}
+
+/// Typed adaptive re-optimization diagnostic kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdaptiveReoptimizationDiagnosticKind {
+    /// Candidate execution returned an error.
+    CandidateExecutionFailed,
+    /// Candidate completed but did not produce baseline-equivalent outputs.
+    CandidateOutputMismatch,
+    /// Baseline relation snapshot was restored after an adverse candidate.
+    RollbackRestoredBaseline,
+}
+
+/// Typed adaptive re-optimization diagnostic.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdaptiveReoptimizationDiagnostic {
+    /// Diagnostic kind.
+    pub kind: AdaptiveReoptimizationDiagnosticKind,
+    /// Stable reason label or error text.
+    pub message: String,
+}
+
+/// Runtime adaptive re-optimization telemetry.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AdaptiveReoptimizationStats {
+    /// Number of adaptive entry-point invocations.
+    pub invocations: u64,
+    /// Number of invocations skipped because the feature was disabled.
+    pub disabled: u64,
+    /// Number of enabled invocations that did not attempt a candidate.
+    pub skipped: u64,
+    /// Number of candidate plans adopted.
+    pub adopted: u64,
+    /// Number of candidate plans rolled back.
+    pub rolled_back: u64,
+    /// Last deterministic decision.
+    pub last_decision: Option<AdaptiveReoptimizationDecision>,
+    /// Baseline join observations from the most recent execution.
+    pub last_observations: Vec<AdaptiveJoinObservation>,
+    /// Typed diagnostics emitted by the adaptive entry point.
+    pub diagnostics: Vec<AdaptiveReoptimizationDiagnostic>,
+    /// Tracked data-plane DTOH calls added during the most recent adaptive path.
+    pub data_plane_dtoh_calls: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum CommonSubexpressionKey {
     Scan {
@@ -140,6 +240,10 @@ pub struct Executor {
     common_subexpression_cache: HashMap<CommonSubexpressionKey, CudaBuffer>,
     /// Runtime CSE telemetry for evidence and diagnostics.
     common_subexpression_stats: CommonSubexpressionStats,
+    /// Runtime adaptive re-optimization telemetry for adoption/rollback evidence.
+    adaptive_reoptimization_stats: AdaptiveReoptimizationStats,
+    /// Per-plan join observations captured before `StatsManager` is updated.
+    adaptive_join_observations: Vec<AdaptiveJoinObservation>,
     /// Runtime configuration
     config: RuntimeConfig,
     /// Performance profiler for --stats output
@@ -310,6 +414,8 @@ impl Executor {
             join_index_cache: JoinIndexCache::new(max_index_cache_bytes),
             common_subexpression_cache: HashMap::new(),
             common_subexpression_stats: CommonSubexpressionStats::default(),
+            adaptive_reoptimization_stats: AdaptiveReoptimizationStats::default(),
+            adaptive_join_observations: Vec::new(),
             config,
             profiler: Profiler::default(),
             ilp_registry: IlpRegistry::new(),
@@ -422,6 +528,7 @@ impl Executor {
         self.store.clear();
         self.join_index_cache.clear();
         self.common_subexpression_cache.clear();
+        self.adaptive_join_observations.clear();
     }
 
     /// Targeted MC reset: preserve base/static relations and clear dynamic ones.
@@ -457,6 +564,7 @@ impl Executor {
 
         self.join_index_cache.clear();
         self.common_subexpression_cache.clear();
+        self.adaptive_join_observations.clear();
         Ok(())
     }
 
@@ -472,6 +580,7 @@ impl Executor {
         self.store.clear();
         self.join_index_cache.clear();
         self.common_subexpression_cache.clear();
+        self.adaptive_join_observations.clear();
         self.stats = StatsManager::new();
         self.profiler = Profiler::default();
     }
@@ -499,8 +608,247 @@ impl Executor {
         &self.common_subexpression_stats
     }
 
+    /// Return adaptive re-optimization telemetry for evidence and diagnostics.
+    pub fn adaptive_reoptimization_stats(&self) -> &AdaptiveReoptimizationStats {
+        &self.adaptive_reoptimization_stats
+    }
+
+    /// Replay the deterministic adaptive decision against captured telemetry.
+    pub fn replay_adaptive_reoptimization_decision(
+        &self,
+        observations: &[AdaptiveJoinObservation],
+    ) -> AdaptiveReoptimizationDecision {
+        self.adaptive_reoptimization_decision(observations)
+    }
+
     fn common_subexpression_enabled(&self) -> bool {
         self.config.resolved_common_subexpression_elimination()
+    }
+
+    fn adaptive_reoptimization_enabled(&self) -> bool {
+        self.config.resolved_adaptive_reoptimization()
+    }
+
+    fn adaptive_reoptimization_decision(
+        &self,
+        observations: &[AdaptiveJoinObservation],
+    ) -> AdaptiveReoptimizationDecision {
+        let min_misplan_ratio = self
+            .config
+            .resolved_adaptive_reoptimization_min_misplan_ratio();
+        let max_misplan_ratio = observations
+            .iter()
+            .map(|observation| observation.misplan_ratio)
+            .fold(1.0_f64, f64::max);
+
+        if !self.adaptive_reoptimization_enabled() {
+            return AdaptiveReoptimizationDecision {
+                action: AdaptiveReoptimizationAction::Disabled,
+                reason: "adaptive_reoptimization_disabled".to_string(),
+                max_misplan_ratio,
+                min_misplan_ratio,
+            };
+        }
+
+        if observations.is_empty() {
+            return AdaptiveReoptimizationDecision {
+                action: AdaptiveReoptimizationAction::Skipped,
+                reason: "no_join_telemetry".to_string(),
+                max_misplan_ratio,
+                min_misplan_ratio,
+            };
+        }
+
+        if max_misplan_ratio >= min_misplan_ratio {
+            AdaptiveReoptimizationDecision {
+                action: AdaptiveReoptimizationAction::AttemptCandidate,
+                reason: "misplan_threshold_crossed".to_string(),
+                max_misplan_ratio,
+                min_misplan_ratio,
+            }
+        } else {
+            AdaptiveReoptimizationDecision {
+                action: AdaptiveReoptimizationAction::Skipped,
+                reason: "misplan_threshold_not_crossed".to_string(),
+                max_misplan_ratio,
+                min_misplan_ratio,
+            }
+        }
+    }
+
+    fn record_adaptive_join_observation(
+        &mut self,
+        left_rel: RelId,
+        right_rel: RelId,
+        left_keys: &[usize],
+        right_keys: &[usize],
+        input_rows: u64,
+        actual_output_rows: u64,
+    ) {
+        let estimated_output_rows = self
+            .stats
+            .estimate_join_cardinality(left_rel, right_rel, left_keys, right_keys);
+        let estimated_selectivity = if input_rows > 0 {
+            estimated_output_rows as f64 / input_rows as f64
+        } else {
+            0.0
+        };
+        let actual_selectivity = if input_rows > 0 {
+            actual_output_rows as f64 / input_rows as f64
+        } else {
+            0.0
+        };
+        let cardinality_delta_abs = estimated_output_rows.abs_diff(actual_output_rows);
+        let selectivity_delta_abs = (estimated_selectivity - actual_selectivity).abs();
+        let left_heat = self
+            .stats
+            .get_relation_stats(left_rel)
+            .map(|stats| stats.heat)
+            .unwrap_or(0.0);
+        let right_heat = self
+            .stats
+            .get_relation_stats(right_rel)
+            .map(|stats| stats.heat)
+            .unwrap_or(0.0);
+        let heat_delta_abs = (left_heat - right_heat).abs();
+        let smaller = estimated_output_rows.min(actual_output_rows);
+        let larger = estimated_output_rows.max(actual_output_rows);
+        let misplan_ratio = if smaller == 0 {
+            if larger == 0 {
+                1.0
+            } else {
+                f64::INFINITY
+            }
+        } else {
+            (larger as f64 / smaller as f64).max(1.0)
+        };
+
+        self.adaptive_join_observations
+            .push(AdaptiveJoinObservation {
+                left_rel,
+                right_rel,
+                estimated_output_rows,
+                actual_output_rows,
+                cardinality_delta_abs,
+                estimated_selectivity,
+                actual_selectivity,
+                selectivity_delta_abs,
+                left_heat,
+                right_heat,
+                heat_delta_abs,
+                misplan_ratio,
+            });
+    }
+
+    fn plan_head_names(plan: &ExecutionPlan) -> Vec<String> {
+        let mut names = Vec::new();
+        for stratum in &plan.strata {
+            for scc_id in &stratum.sccs {
+                if let Some(rules) = plan.rules_by_scc.get(*scc_id as usize) {
+                    for rule in rules {
+                        if !names.iter().any(|name| name == &rule.head) {
+                            names.push(rule.head.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        if names.is_empty() {
+            for rules in &plan.rules_by_scc {
+                for rule in rules {
+                    if !names.iter().any(|name| name == &rule.head) {
+                        names.push(rule.head.clone());
+                    }
+                }
+            }
+        }
+
+        names
+    }
+
+    fn clone_store_snapshot(&self) -> Result<HashMap<String, CudaBuffer>> {
+        let names: Vec<String> = self.store.names().map(|name| name.to_string()).collect();
+        let mut snapshot = HashMap::with_capacity(names.len());
+        for name in names {
+            if let Some(buffer) = self.store.get(&name) {
+                snapshot.insert(name, self.clone_buffer(buffer)?);
+            }
+        }
+        Ok(snapshot)
+    }
+
+    fn restore_store_snapshot(&mut self, snapshot: HashMap<String, CudaBuffer>) {
+        let snapshot_names: HashSet<String> = snapshot.keys().cloned().collect();
+        let existing_names: Vec<String> = self.store.names().map(|name| name.to_string()).collect();
+        for name in existing_names {
+            if !snapshot_names.contains(&name) {
+                self.store.remove(&name);
+            }
+        }
+        for (name, buffer) in snapshot {
+            self.store.put(&name, buffer);
+        }
+    }
+
+    fn restore_stats_snapshot(&mut self, snapshot: &StatsSnapshot) {
+        self.stats.clear();
+        self.stats.merge_snapshot(snapshot);
+    }
+
+    fn clone_final_plan_output(&self, plan: &ExecutionPlan) -> Result<CudaBuffer> {
+        let head_names = Self::plan_head_names(plan);
+        if let Some(name) = head_names.last() {
+            let output = self.store.get(name).ok_or_else(|| {
+                XlogError::Execution(format!("adaptive reoptimization output missing: {name}"))
+            })?;
+            return self.clone_buffer(output);
+        }
+
+        self.provider.create_empty_buffer(Schema::new(vec![]))
+    }
+
+    fn plan_outputs_match(
+        &self,
+        head_names: &[String],
+        baseline_snapshot: &HashMap<String, CudaBuffer>,
+    ) -> Result<bool> {
+        for name in head_names {
+            let Some(baseline) = baseline_snapshot.get(name) else {
+                return Ok(false);
+            };
+            let Some(candidate) = self.store.get(name) else {
+                return Ok(false);
+            };
+            if !self.buffers_gpu_set_equivalent(baseline, candidate)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn buffers_gpu_set_equivalent(&self, left: &CudaBuffer, right: &CudaBuffer) -> Result<bool> {
+        if left.schema() != right.schema() {
+            return Ok(false);
+        }
+        let left_rows = self.provider.device_row_count(left)?;
+        let right_rows = self.provider.device_row_count(right)?;
+        if left_rows != right_rows {
+            return Ok(false);
+        }
+
+        let left_minus_right = self.provider.diff_full_row(left, right)?;
+        if self.provider.device_row_count(&left_minus_right)? != 0 {
+            return Ok(false);
+        }
+        let right_minus_left = self.provider.diff_full_row(right, left)?;
+        Ok(self.provider.device_row_count(&right_minus_left)? == 0)
+    }
+
+    fn record_adaptive_dtoh_delta(&mut self, before_dtoh_calls: u64) {
+        let after_dtoh_calls = self.provider.host_transfer_stats().dtoh_calls;
+        self.adaptive_reoptimization_stats.data_plane_dtoh_calls =
+            after_dtoh_calls.saturating_sub(before_dtoh_calls);
     }
 
     fn is_common_subexpression_cacheable(node: &RirNode) -> bool {
@@ -785,6 +1133,133 @@ impl Executor {
         self.rel_names.get(&rel_id).map(|s| s.as_str())
     }
 
+    /// Execute a baseline plan and conditionally adopt a compiler-supplied
+    /// re-optimized candidate plan.
+    ///
+    /// The baseline runs through the normal [`Self::execute_plan`] path first,
+    /// producing runtime join telemetry. If deterministic mis-plan thresholds
+    /// fire and adaptive re-optimization is enabled, the candidate also runs
+    /// through [`Self::execute_plan`]. Candidate outputs are compared on the GPU
+    /// with deterministic full-row set difference; divergent or failing
+    /// candidates roll back to the baseline relation/statistics snapshot.
+    pub fn execute_plan_with_adaptive_candidate(
+        &mut self,
+        baseline_plan: &ExecutionPlan,
+        candidate_plan: &ExecutionPlan,
+    ) -> Result<CudaBuffer> {
+        self.adaptive_reoptimization_stats.invocations = self
+            .adaptive_reoptimization_stats
+            .invocations
+            .saturating_add(1);
+        self.adaptive_reoptimization_stats.diagnostics.clear();
+        let before_dtoh_calls = self.provider.host_transfer_stats().dtoh_calls;
+
+        self.execute_plan(baseline_plan)?;
+        let baseline_observations = self.adaptive_join_observations.clone();
+        self.adaptive_reoptimization_stats.last_observations = baseline_observations.clone();
+        let decision = self.adaptive_reoptimization_decision(&baseline_observations);
+        self.adaptive_reoptimization_stats.last_decision = Some(decision.clone());
+
+        match decision.action {
+            AdaptiveReoptimizationAction::Disabled => {
+                self.adaptive_reoptimization_stats.disabled = self
+                    .adaptive_reoptimization_stats
+                    .disabled
+                    .saturating_add(1);
+                self.record_adaptive_dtoh_delta(before_dtoh_calls);
+                return self.clone_final_plan_output(baseline_plan);
+            }
+            AdaptiveReoptimizationAction::Skipped => {
+                self.adaptive_reoptimization_stats.skipped =
+                    self.adaptive_reoptimization_stats.skipped.saturating_add(1);
+                self.record_adaptive_dtoh_delta(before_dtoh_calls);
+                return self.clone_final_plan_output(baseline_plan);
+            }
+            AdaptiveReoptimizationAction::AttemptCandidate => {}
+            AdaptiveReoptimizationAction::Adopted | AdaptiveReoptimizationAction::RolledBack => {
+                unreachable!("decision replay never returns terminal adaptive actions")
+            }
+        }
+
+        let head_names = Self::plan_head_names(baseline_plan);
+        let baseline_snapshot = self.clone_store_snapshot()?;
+        let baseline_stats_snapshot = self.stats_snapshot();
+
+        if let Err(err) = self.execute_plan(candidate_plan) {
+            self.restore_store_snapshot(baseline_snapshot);
+            self.restore_stats_snapshot(&baseline_stats_snapshot);
+            self.adaptive_reoptimization_stats.rolled_back = self
+                .adaptive_reoptimization_stats
+                .rolled_back
+                .saturating_add(1);
+            self.adaptive_reoptimization_stats
+                .diagnostics
+                .push(AdaptiveReoptimizationDiagnostic {
+                    kind: AdaptiveReoptimizationDiagnosticKind::CandidateExecutionFailed,
+                    message: err.to_string(),
+                });
+            self.adaptive_reoptimization_stats
+                .diagnostics
+                .push(AdaptiveReoptimizationDiagnostic {
+                    kind: AdaptiveReoptimizationDiagnosticKind::RollbackRestoredBaseline,
+                    message: "baseline_snapshot_restored".to_string(),
+                });
+            self.adaptive_reoptimization_stats.last_observations = baseline_observations;
+            self.adaptive_reoptimization_stats.last_decision =
+                Some(AdaptiveReoptimizationDecision {
+                    action: AdaptiveReoptimizationAction::RolledBack,
+                    reason: "candidate_execution_failed".to_string(),
+                    max_misplan_ratio: decision.max_misplan_ratio,
+                    min_misplan_ratio: decision.min_misplan_ratio,
+                });
+            self.record_adaptive_dtoh_delta(before_dtoh_calls);
+            return self.clone_final_plan_output(baseline_plan);
+        }
+
+        if !self.plan_outputs_match(&head_names, &baseline_snapshot)? {
+            self.restore_store_snapshot(baseline_snapshot);
+            self.restore_stats_snapshot(&baseline_stats_snapshot);
+            self.adaptive_reoptimization_stats.rolled_back = self
+                .adaptive_reoptimization_stats
+                .rolled_back
+                .saturating_add(1);
+            self.adaptive_reoptimization_stats
+                .diagnostics
+                .push(AdaptiveReoptimizationDiagnostic {
+                    kind: AdaptiveReoptimizationDiagnosticKind::CandidateOutputMismatch,
+                    message: "candidate_output_mismatch".to_string(),
+                });
+            self.adaptive_reoptimization_stats
+                .diagnostics
+                .push(AdaptiveReoptimizationDiagnostic {
+                    kind: AdaptiveReoptimizationDiagnosticKind::RollbackRestoredBaseline,
+                    message: "baseline_snapshot_restored".to_string(),
+                });
+            self.adaptive_reoptimization_stats.last_observations = baseline_observations;
+            self.adaptive_reoptimization_stats.last_decision =
+                Some(AdaptiveReoptimizationDecision {
+                    action: AdaptiveReoptimizationAction::RolledBack,
+                    reason: "candidate_output_mismatch".to_string(),
+                    max_misplan_ratio: decision.max_misplan_ratio,
+                    min_misplan_ratio: decision.min_misplan_ratio,
+                });
+            self.record_adaptive_dtoh_delta(before_dtoh_calls);
+            return self.clone_final_plan_output(baseline_plan);
+        }
+
+        self.adaptive_reoptimization_stats.adopted =
+            self.adaptive_reoptimization_stats.adopted.saturating_add(1);
+        self.adaptive_reoptimization_stats.last_observations = baseline_observations;
+        self.adaptive_reoptimization_stats.last_decision = Some(AdaptiveReoptimizationDecision {
+            action: AdaptiveReoptimizationAction::Adopted,
+            reason: "candidate_adopted".to_string(),
+            max_misplan_ratio: decision.max_misplan_ratio,
+            min_misplan_ratio: decision.min_misplan_ratio,
+        });
+        self.record_adaptive_dtoh_delta(before_dtoh_calls);
+        self.clone_final_plan_output(candidate_plan)
+    }
+
     /// Execute a complete execution plan
     ///
     /// Iterates through strata in order, executing each one.
@@ -799,6 +1274,7 @@ impl Executor {
     /// # Errors
     /// Returns an error if any stratum or query execution fails
     pub fn execute_plan(&mut self, plan: &ExecutionPlan) -> Result<CudaBuffer> {
+        self.adaptive_join_observations.clear();
         self.common_subexpression_cache.clear();
         // Opt-in deterministic-Datalog D2H gate. Enabled only for the
         // duration of this call; the provider is shared so we restore the
@@ -857,6 +1333,8 @@ impl Executor {
 
         // Ensure all GPU work completes before returning control to callers.
         self.provider.device().synchronize()?;
+        self.adaptive_reoptimization_stats.last_observations =
+            self.adaptive_join_observations.clone();
 
         // If there are no strata, return empty buffer
         self.provider.create_empty_buffer(Schema::new(vec![]))
@@ -2791,6 +3269,193 @@ mod tests {
         assert!(reasons
             .iter()
             .any(|reason| reason == "specialized_dispatch_boundary"));
+    }
+
+    // ============== v0.8.6 Adaptive Runtime Re-Optimization Tests ==============
+
+    fn adaptive_scc() -> Scc {
+        Scc {
+            id: 0,
+            predicates: vec!["out".to_string()],
+            is_recursive: false,
+        }
+    }
+
+    fn adaptive_stratum() -> Stratum {
+        Stratum {
+            id: 0,
+            sccs: vec![0],
+        }
+    }
+
+    fn adaptive_rule(body: RirNode) -> CompiledRule {
+        CompiledRule {
+            head: "out".to_string(),
+            body,
+            meta: RirMeta::default(),
+        }
+    }
+
+    fn adaptive_plan(body: RirNode) -> ExecutionPlan {
+        ExecutionPlan {
+            sccs: vec![adaptive_scc()],
+            strata: vec![adaptive_stratum()],
+            rules_by_scc: vec![vec![adaptive_rule(body)]],
+            est_memory_peak: 0,
+        }
+    }
+
+    fn adaptive_baseline_join_plan() -> ExecutionPlan {
+        adaptive_plan(RirNode::Project {
+            input: Box::new(RirNode::Join {
+                left: Box::new(RirNode::Scan { rel: RelId(1) }),
+                right: Box::new(RirNode::Scan { rel: RelId(2) }),
+                left_keys: vec![0],
+                right_keys: vec![0],
+                join_type: JoinType::Inner,
+            }),
+            columns: vec![ProjectExpr::Column(0)],
+        })
+    }
+
+    fn adaptive_scan_candidate_plan(rel: RelId) -> ExecutionPlan {
+        adaptive_plan(RirNode::Scan { rel })
+    }
+
+    fn seed_adaptive_fixture(executor: &mut Executor, right: &[u32]) {
+        executor.register_relation(RelId(1), "left");
+        executor.register_relation(RelId(2), "right");
+        let left = create_test_buffer(executor, &[1, 2, 3, 4, 5, 6, 7, 8], "key");
+        let right = create_test_buffer(executor, right, "key");
+        executor.put_relation("left", left);
+        executor.put_relation("right", right);
+    }
+
+    #[test]
+    fn test_adaptive_reoptimization_disabled_uses_baseline_and_records_decision() {
+        let mut executor = match create_test_executor_with_config(
+            RuntimeConfig::default().with_adaptive_reoptimization(Some(false)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_adaptive_fixture(&mut executor, &[1, 2, 3, 4, 5, 6, 7, 8]);
+
+        let baseline = adaptive_baseline_join_plan();
+        let candidate = adaptive_scan_candidate_plan(RelId(2));
+        let result = executor
+            .execute_plan_with_adaptive_candidate(&baseline, &candidate)
+            .expect("disabled adaptation executes baseline");
+
+        assert_eq!(
+            read_buffer_u32(&executor, &result, 0),
+            (1..=8).collect::<Vec<_>>()
+        );
+        let stats = executor.adaptive_reoptimization_stats();
+        assert_eq!(stats.disabled, 1);
+        assert_eq!(stats.adopted, 0);
+        assert_eq!(stats.rolled_back, 0);
+        assert_eq!(
+            stats.last_decision.as_ref().map(|decision| decision.action),
+            Some(AdaptiveReoptimizationAction::Disabled)
+        );
+    }
+
+    #[test]
+    fn test_adaptive_reoptimization_adopts_equivalent_candidate_and_records_telemetry() {
+        let mut executor = match create_test_executor_with_config(
+            RuntimeConfig::default().with_adaptive_reoptimization(Some(true)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_adaptive_fixture(&mut executor, &[1, 2, 3, 4, 5, 6, 7, 8]);
+        executor.provider.reset_host_transfer_stats();
+
+        let baseline = adaptive_baseline_join_plan();
+        let candidate = adaptive_scan_candidate_plan(RelId(1));
+        let result = executor
+            .execute_plan_with_adaptive_candidate(&baseline, &candidate)
+            .expect("equivalent candidate is adopted");
+
+        assert_eq!(
+            read_buffer_u32(&executor, &result, 0),
+            (1..=8).collect::<Vec<_>>()
+        );
+        let stats = executor.adaptive_reoptimization_stats();
+        assert_eq!(stats.adopted, 1);
+        assert_eq!(stats.rolled_back, 0);
+        assert_eq!(stats.last_observations.len(), 1);
+        assert!(stats.last_observations[0].cardinality_delta_abs > 0);
+        assert!(stats.last_observations[0].selectivity_delta_abs > 0.0);
+        assert_eq!(stats.data_plane_dtoh_calls, 0);
+    }
+
+    #[test]
+    fn test_adaptive_reoptimization_rolls_back_bad_candidate_with_typed_diagnostic() {
+        let mut executor = match create_test_executor_with_config(
+            RuntimeConfig::default().with_adaptive_reoptimization(Some(true)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_adaptive_fixture(&mut executor, &[1, 2, 3, 4, 5, 6, 7, 8]);
+
+        let baseline = adaptive_baseline_join_plan();
+        let bad_candidate = adaptive_scan_candidate_plan(RelId(2));
+        executor.put_relation("right", create_test_buffer(&executor, &[99], "key"));
+        let result = executor
+            .execute_plan_with_adaptive_candidate(&baseline, &bad_candidate)
+            .expect("bad candidate rolls back to baseline output");
+
+        assert_eq!(read_buffer_u32(&executor, &result, 0), Vec::<u32>::new());
+        let out = executor.store().get("out").expect("rollback restored out");
+        assert_eq!(read_buffer_u32(&executor, out, 0), Vec::<u32>::new());
+        let stats = executor.adaptive_reoptimization_stats();
+        assert_eq!(stats.adopted, 0);
+        assert_eq!(stats.rolled_back, 1);
+        assert!(stats.diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == AdaptiveReoptimizationDiagnosticKind::CandidateOutputMismatch
+        }));
+    }
+
+    #[test]
+    fn test_adaptive_reoptimization_decisions_are_deterministic_under_replay() {
+        let mut executor = match create_test_executor_with_config(
+            RuntimeConfig::default().with_adaptive_reoptimization(Some(true)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_adaptive_fixture(&mut executor, &[1, 2, 3, 4, 5, 6, 7, 8]);
+        let baseline = adaptive_baseline_join_plan();
+        executor
+            .execute_plan(&baseline)
+            .expect("baseline execution records telemetry");
+        let observations = executor
+            .adaptive_reoptimization_stats()
+            .last_observations
+            .clone();
+
+        let first = executor.replay_adaptive_reoptimization_decision(&observations);
+        for _ in 0..100 {
+            assert_eq!(
+                executor.replay_adaptive_reoptimization_decision(&observations),
+                first
+            );
+        }
     }
 
     // ============== MC Relation Reset Tests ==============
