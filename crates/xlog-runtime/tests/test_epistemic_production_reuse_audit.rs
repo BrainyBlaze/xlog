@@ -212,6 +212,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(prob.contains("compile_program_with_gpu_execution_result"));
     assert!(prob.contains("EpistemicProbGpuExecutionEvidence"));
     assert!(prob.contains("compile_and_evaluate_source_for_gpu_execution_results"));
+    assert!(prob.contains("compile_and_evaluate_program_for_gpu_execution_results"));
     assert!(prob.contains("compile_and_evaluate_conditioned_source_for_gpu_execution_results"));
     assert!(prob.contains("compile_and_evaluate_conditioned_program_for_gpu_execution_results"));
     assert!(prob.contains("compile_and_evaluate_source_with_gpu_execution_result"));

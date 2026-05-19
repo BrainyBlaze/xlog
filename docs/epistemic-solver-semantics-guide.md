@@ -468,6 +468,10 @@ accepted GPU runtime evidence records up front, then runs one source
 compile/evaluate through `ExactDdnnfProgram` per accepted record while
 incrementing the same accepted-evidence, source-compile, query-evaluation, and
 knowledge-compilation counters.
+`compile_and_evaluate_program_for_gpu_execution_results` provides the same
+accepted-evidence batch gate for parsed probabilistic programs while keeping the
+parsed-program compile and program knowledge-compilation counters separate from
+source counters.
 `compile_and_evaluate_conditioned_source_with_gpu_execution_result` and
 `compile_and_evaluate_conditioned_program_with_gpu_execution_result`
 additionally turn accepted zero-arity and concrete nonzero-arity tuple

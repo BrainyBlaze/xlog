@@ -21,6 +21,7 @@ fn production_prob_adapter_reuses_gpu_exact_path_not_fixture_circuit() {
     assert!(production.contains("compile_and_evaluate_source_with_gpu_execution_result"));
     assert!(production.contains("EpistemicProbGpuExecutionEvidence"));
     assert!(production.contains("compile_and_evaluate_source_for_gpu_execution_results"));
+    assert!(production.contains("compile_and_evaluate_program_for_gpu_execution_results"));
     assert!(
         production.contains("compile_and_evaluate_conditioned_source_for_gpu_execution_results")
     );
