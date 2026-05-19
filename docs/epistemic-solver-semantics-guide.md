@@ -171,6 +171,7 @@ Release certification must replace the current CPU fixture hot paths with:
 - GPU kernels for candidate generation, propagation, validation, and
   materialization, including semantic final tuple materialization from accepted
   world views;
+- post-hot-path final-result transfer accounting for accepted device outputs;
 - WCOJ planner eligibility, layout construction, skew scheduling, and helper
   splitting for eligible epistemic reductions;
 - GPU-native SAT/MaxSAT/portfolio solving or documented GPU-backed adapters;

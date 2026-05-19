@@ -245,6 +245,25 @@ pub struct EpistemicGpuTransferBudgetTrace {
     pub per_candidate_host_round_trips: u64,
 }
 
+/// Trace accounting for the bounded final-result transfer after the GPU hot path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EpistemicGpuFinalResultTransferTrace {
+    /// Logical rows in the final device-resident output buffer.
+    pub final_output_rows: usize,
+    /// Number of final output columns that a caller may export.
+    pub final_output_column_count: usize,
+    /// Bytes in one final output row.
+    pub final_output_row_width_bytes: usize,
+    /// Bounded data-plane payload bytes represented by the final output.
+    pub final_output_payload_bytes: u64,
+    /// Device row-count metadata reads used for this accounting.
+    pub row_count_device_reads: u32,
+    /// Data-plane D2H calls issued by accepted execution. Execution returns a device buffer, so this is zero.
+    pub tracked_data_plane_dtoh_calls: u64,
+    /// Data-plane D2H bytes issued by accepted execution. Execution returns a device buffer, so this is zero.
+    pub tracked_data_plane_dtoh_bytes: u64,
+}
+
 /// Trace proving model-membership staging was performed by a GPU kernel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EpistemicGpuModelMembershipTrace {
@@ -576,6 +595,31 @@ impl EpistemicGpuTransferBudgetTrace {
             tracked_dtoh_calls,
             tracked_htod_calls,
             per_candidate_host_round_trips: 0,
+        })
+    }
+}
+
+impl EpistemicGpuFinalResultTransferTrace {
+    /// Account for the final device-resident output after the hot-path budget window closes.
+    pub fn from_final_output(
+        provider: &xlog_cuda::CudaKernelProvider,
+        final_output: &CudaBuffer,
+    ) -> Result<Self> {
+        let row_count_was_cached = final_output.cached_row_count().is_some();
+        let final_output_rows = provider.device_row_count(final_output)?;
+        let final_output_column_count = final_output.arity();
+        let final_output_row_width_bytes = final_output.schema().row_size_bytes();
+        let final_output_payload_bytes =
+            checked_product(final_output_rows, final_output_row_width_bytes)? as u64;
+
+        Ok(Self {
+            final_output_rows,
+            final_output_column_count,
+            final_output_row_width_bytes,
+            final_output_payload_bytes,
+            row_count_device_reads: u32::from(!row_count_was_cached),
+            tracked_data_plane_dtoh_calls: 0,
+            tracked_data_plane_dtoh_bytes: 0,
         })
     }
 }
@@ -1112,6 +1156,8 @@ pub struct EpistemicGpuExecutionResult {
     pub final_tuple_materialization: EpistemicGpuFinalTupleMaterializationTrace,
     /// Hot-path host-transfer budget trace for epistemic GPU execution.
     pub transfer_budget: EpistemicGpuTransferBudgetTrace,
+    /// Final-result transfer accounting after the GPU hot path.
+    pub final_result_transfer: EpistemicGpuFinalResultTransferTrace,
     /// Device-resident final query output buffer.
     pub final_output: CudaBuffer,
     /// Output buffer returned by the reduced production execution plan.
@@ -3517,6 +3563,8 @@ impl Executor {
             transfer_budget_start,
             transfer_budget_end,
         )?;
+        let final_result_transfer =
+            EpistemicGpuFinalResultTransferTrace::from_final_output(&self.provider, &final_output)?;
 
         Ok(EpistemicGpuExecutionResult {
             prepared,
@@ -3529,6 +3577,7 @@ impl Executor {
             final_result_materialization,
             final_tuple_materialization,
             transfer_budget,
+            final_result_transfer,
             final_output,
             output,
             trace,

@@ -988,10 +988,13 @@ fn execution_result_records_hot_path_transfer_budget_without_resetting_stats() {
     let source = include_str!("../src/executor/epistemic_workspace.rs");
 
     assert!(source.contains("pub transfer_budget: EpistemicGpuTransferBudgetTrace"));
+    assert!(source.contains("pub final_result_transfer: EpistemicGpuFinalResultTransferTrace"));
     assert!(source.contains("let transfer_budget_start = self.provider.host_transfer_stats()"));
     assert!(source.contains("let transfer_budget_end = self.provider.host_transfer_stats()"));
     assert!(source.contains("EpistemicGpuTransferBudgetTrace::from_host_transfer_stats"));
+    assert!(source.contains("EpistemicGpuFinalResultTransferTrace::from_final_output"));
     assert!(source.contains("transfer_budget,"));
+    assert!(source.contains("final_result_transfer,"));
     assert!(
         !source.contains("reset_host_transfer_stats"),
         "epistemic execution must snapshot the provider transfer counters, not reset shared stats"
@@ -1012,11 +1015,15 @@ fn execution_result_records_hot_path_transfer_budget_without_resetting_stats() {
     let transfer_end_pos = source
         .find("let transfer_budget_end = self.provider.host_transfer_stats()")
         .expect("transfer-budget end snapshot");
+    let final_transfer_pos = source
+        .find("let final_result_transfer =")
+        .expect("final-result transfer accounting");
 
     assert!(transfer_start_pos < candidate_generation_pos);
     assert!(final_materialization_pos < transfer_end_pos);
     assert!(final_materialization_pos < final_tuple_pos);
     assert!(final_tuple_pos < transfer_end_pos);
+    assert!(transfer_end_pos < final_transfer_pos);
 }
 
 #[test]

@@ -247,6 +247,21 @@ fn accepted_epistemic_k5_execution_certifies_production_wcoj_dispatch() {
         result.trace.counter_delta.wcoj_clique5_dispatch_count >= 1,
         "accepted epistemic K5 must dispatch through production K5 WCOJ"
     );
+    assert_eq!(result.final_result_transfer.final_output_rows, 1);
+    assert_eq!(result.final_result_transfer.final_output_column_count, 5);
+    assert_eq!(
+        result.final_result_transfer.final_output_payload_bytes,
+        5 * std::mem::size_of::<u32>() as u64
+    );
+    assert_eq!(result.final_result_transfer.row_count_device_reads, 1);
+    assert_eq!(
+        result.final_result_transfer.tracked_data_plane_dtoh_calls,
+        0
+    );
+    assert_eq!(
+        result.final_result_transfer.tracked_data_plane_dtoh_bytes,
+        0
+    );
     assert_eq!(
         read_device_row_count(&fix.provider, &result.final_output).expect("final row count"),
         1,

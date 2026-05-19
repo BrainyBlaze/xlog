@@ -34,12 +34,13 @@ pub mod wcoj_phase_timing;
 pub use epistemic_workspace::{
     EpistemicGpuCandidateGenerationTrace, EpistemicGpuCandidateValidationTrace,
     EpistemicGpuExecutionResult, EpistemicGpuFinalResultMaterializationTrace,
-    EpistemicGpuFinalTupleMaterializationTrace, EpistemicGpuKernelTimingTrace,
-    EpistemicGpuMaterializationTrace, EpistemicGpuModelMembershipSource,
-    EpistemicGpuModelMembershipTrace, EpistemicGpuPreparedExecution, EpistemicGpuPropagationTrace,
-    EpistemicGpuRuntimeCounters, EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace,
-    EpistemicGpuRuntimeWcojCertification, EpistemicGpuTransferBudgetTrace, EpistemicGpuWorkspace,
-    EpistemicGpuWorkspaceCapacities, EpistemicGpuWorkspaceLayout, EpistemicGpuWorkspaceResetTrace,
+    EpistemicGpuFinalResultTransferTrace, EpistemicGpuFinalTupleMaterializationTrace,
+    EpistemicGpuKernelTimingTrace, EpistemicGpuMaterializationTrace,
+    EpistemicGpuModelMembershipSource, EpistemicGpuModelMembershipTrace,
+    EpistemicGpuPreparedExecution, EpistemicGpuPropagationTrace, EpistemicGpuRuntimeCounters,
+    EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace, EpistemicGpuRuntimeWcojCertification,
+    EpistemicGpuTransferBudgetTrace, EpistemicGpuWorkspace, EpistemicGpuWorkspaceCapacities,
+    EpistemicGpuWorkspaceLayout, EpistemicGpuWorkspaceResetTrace,
     EpistemicGpuWorldViewValidationTrace,
 };
 use join_cache::JoinIndexCache;
