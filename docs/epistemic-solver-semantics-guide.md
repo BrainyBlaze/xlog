@@ -133,9 +133,10 @@ The current epistemic algorithms are still not fully GPU-native across the full
 semantic matrix, but the accepted bounded runtime path now exercises the
 production GPU/WCOJ stack for specific certification fixtures:
 
-- WCOJ planner eligibility, layout, skew-aware scheduling, helper-splitting
-  specs, helper relation rewrites, and runtime histogram metadata are observed
-  for accepted K5/K6/K7/K8 epistemic reductions.
+- WCOJ planner eligibility and runtime dispatch are observed for an accepted
+  v0.7.0 4-cycle `MultiWayJoin` reduction, and layout, skew-aware scheduling,
+  helper-splitting specs, helper relation rewrites, and runtime histogram
+  metadata are observed for accepted K5/K6/K7/K8 epistemic reductions.
 - Candidate generation, propagation staging, candidate-buffer validation,
   tuple-source model-membership staging, world-view validation,
   accepted-candidate materialization, final-result flag staging, final-row map
@@ -159,7 +160,7 @@ production GPU/WCOJ stack for specific certification fixtures:
 Those paths are still partial G090_GPU/G090_SOLVER/G090_PROB evidence. Before
 v0.9.0 can close, release certification must broaden arbitrary EIR semantic
 parity, accepted split coverage, solver semantic integration, probabilistic
-world-view coverage, and the post-v0.8 compatibility rerun. Existing
+world-view coverage, and the post-v0.7.0/v0.8.0/v0.8.5/v0.8.6 compatibility rerun. Existing
 non-epistemic programs continue to use the normal parser, stratifier, RIR
 lowering, runtime, and WCOJ infrastructure where eligible.
 
@@ -168,6 +169,9 @@ lowering, runtime, and WCOJ infrastructure where eligible.
 The current v0.9 branch reuses prior closure evidence only at the boundaries the
 runtime actually touches:
 
+- v0.7.0: reuse the general WCOJ architecture and runtime expansion, including
+  first-class `RirNode::MultiWayJoin`, deterministic 4-cycle dispatch,
+  recursive/SCC support, and variable-ordering/cost surfaces.
 - Goal 038: reuse the audit discipline. Historical proxy gates, superseded
   evidence, and board/tag actions are not treated as current v0.9 closure
   evidence.
@@ -180,19 +184,23 @@ runtime actually touches:
   replay certification only when the epistemic runtime path actually invokes
   those surfaces.
 
-Today the epistemic runtime consumes 38-B route metadata and fails closed when a
-WCOJ-required K-clique reduction lacks production counter deltas. It now
-certifies accepted K5, K6, K7, and K8 WCOJ dispatch through production runtime
-counters. The K5/K6 certified dispatch traces now include edge-permutation,
-stream-group scheduling, skew-scheduled helper, sorted-layout, and helper-split
-counts; K6 also carries runtime histogram metadata-build timing, while K7/K8
-record K-clique max-arity plus full edge-permutation and stream-group metadata
-through runtime preflight. Broader semantic parity coverage remains incomplete.
+Today the epistemic runtime consumes v0.7.0 `MultiWayJoin` metadata plus 38-B
+route metadata and fails closed when a WCOJ-required non-hash `MultiWayJoin` or
+K-clique reduction lacks production counter deltas. It now certifies accepted
+v0.7.0 4-cycle plus K5, K6, K7, and K8 WCOJ dispatch through production runtime
+counters. The v0.7.0 trace records `certified_multiway_reductions`; the K5/K6
+certified dispatch traces include edge-permutation, stream-group scheduling,
+skew-scheduled helper, sorted-layout, and helper-split counts; K6 also carries
+runtime histogram metadata-build timing, while K7/K8 record K-clique max-arity
+plus full edge-permutation and stream-group metadata through runtime preflight.
+Broader semantic parity coverage remains incomplete.
 
-The reduced-runtime-plan contract reuses the Goal-038-B WCOJ surfaces. K-clique
-epistemic reductions must pass through `MultiwayPlan`, `KCliqueVariableOrder`,
-sorted-layout requirements, and helper-splitting specs rather than a parallel
-epistemic WCOJ planner. The same plan contract now also records one
+The reduced-runtime-plan contract reuses the v0.7.0 general WCOJ surfaces and
+the Goal-038-B WCOJ surfaces. Non-K-clique epistemic reductions must pass
+through `RirNode::MultiWayJoin` and the existing production dispatch counters;
+K-clique epistemic reductions must pass through `MultiwayPlan`,
+`KCliqueVariableOrder`, sorted-layout requirements, and helper-splitting specs
+rather than a parallel epistemic WCOJ planner. The same plan contract now also records one
 `EpistemicTupleMembershipBinding` per epistemic literal so runtime preflight can
 reject plans that cannot identify the reduced stable-model tuple predicate to
 check.
@@ -206,7 +214,7 @@ Release certification must finish and broaden:
   materialization from accepted world views;
 - post-hot-path final-result transfer accounting for accepted device outputs;
 - WCOJ planner eligibility, layout construction, skew scheduling, and helper
-  splitting beyond the current bounded K-clique fixtures;
+  splitting beyond the current bounded v0.7.0 4-cycle and K-clique fixtures;
 - GPU-native SAT/MaxSAT/portfolio solving or documented GPU-backed adapters
   for the remaining semantic cases;
 - zero CPU fallback counters for candidate enumeration, world-view validation,
@@ -725,12 +733,13 @@ These commands validate the current bounded semantic oracle, accepted GPU
 runtime fixtures, and solver/probability production-adapter slices. They are
 not a substitute for the remaining release certification evidence, which must
 broaden launch counts, kernel timings, accepted semantic parity, solver and
-probability traces, and zero CPU fallback counters. The v0.8 pyxlog/DTS
-compatibility subset still must be rerun after the v0.8 branch lands and this
+probability traces, and zero CPU fallback counters. The
+v0.7.0/v0.8.0/v0.8.5/v0.8.6 compatibility subset must remain green after this
 branch is rebased or merged onto it.
 
 ## Roadmap Status
 
 This guide does not mark v0.9.0 roadmap rows DONE. ROADMAP and release-board
-state are closure artifacts and should be updated only after the v0.8 rebase,
-full certification, and coordinator approval.
+state are closure artifacts and should be updated only after the
+v0.7.0/v0.8.0/v0.8.5/v0.8.6 reuse baseline, full certification, and coordinator
+approval.

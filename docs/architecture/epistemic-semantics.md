@@ -115,22 +115,27 @@ that reduced program through the normal `Compiler` pipeline.
 
 That means reduced ordinary bodies reuse production lowering, optimizer passes,
 statistics snapshots, helper splitting, and WCOJ promotion. A WCOJ-eligible
-epistemic reduction can therefore produce a `RirNode::MultiWayJoin` in the
-reduced runtime plan instead of bypassing the WCOJ planner surface. K-clique
-reductions reuse the Goal-038-B `MultiwayPlan::WcojWithPlan` /
+epistemic reduction can therefore produce a v0.7.0 `RirNode::MultiWayJoin`,
+including the deterministic 4-cycle WCOJ dispatch route, in the reduced runtime
+plan instead of bypassing the WCOJ planner surface. K-clique reductions reuse
+the Goal-038-B `MultiwayPlan::WcojWithPlan` /
 `PlannedHashRoute` route, `KCliqueVariableOrder`, sorted-layout requirements,
 helper-splitting specs, and the compiler-created `__w37_helper_*` relation
 rewrite when buried-skew helper splitting is selected.
 
-The reuse boundary follows the prior closure evidence. Goal 038 is reused as an
-audit precedent: stale or proxy performance gates are not treated as current
-closure evidence. Goal 038-B is reused as the production K-clique WCOJ
-substrate: epistemic lowering must consume its planner, sorted-layout,
-histogram, cost-gate, and helper-splitting surfaces rather than define a
-parallel WCOJ path. Goal 039 is reused only as existing production substrate for
-chain dispatch, K7/K8 templates, sort-label/DLPack discipline, CUDA Graphs, and
-DTS replay certification; v0.9 epistemic evidence may cite those surfaces only
-when the epistemic runtime path actually dispatches through them.
+The reuse boundary follows the prior closure evidence. v0.7.0 is reused as the
+general WCOJ architecture and runtime expansion: epistemic lowering must consume
+the existing `MultiWayJoin`, 4-cycle dispatch, recursive/SCC, variable-ordering,
+and cost surfaces before any K-clique-specific evidence is considered. Goal 038
+is reused as an audit precedent: stale or proxy performance gates are not
+treated as current closure evidence. Goal 038-B is reused as the production
+K-clique WCOJ substrate: epistemic lowering must consume its planner,
+sorted-layout, histogram, cost-gate, and helper-splitting surfaces rather than
+define a parallel WCOJ path. Goal 039 is reused only as existing production
+substrate for chain dispatch, K7/K8 templates, sort-label/DLPack discipline,
+CUDA Graphs, and DTS replay certification; v0.9 epistemic evidence may cite
+those surfaces only when the epistemic runtime path actually dispatches through
+them.
 
 This still does not execute epistemic semantics. Runtime kernels must populate
 and validate the candidate/world-view buffers before the reduced plan is a
@@ -227,24 +232,26 @@ model output and solver coupling remain missing GPU phases.
 `EpistemicExecutablePlan` before launch. It computes the workspace layout,
 rejects nonzero forbidden CPU fallback counters, validates tuple-membership
 bindings, and records the reduced runtime rule count plus WCOJ route surfaces,
-including K-clique WCOJ plans, K-clique max arity, live edge-permutation slot
-counts, distinct stream-group scheduling ids, skew-scheduled helper-plan counts,
-planned-hash routes, sorted-layout requirements, helper-splitting specs, and
-the certified helper relation rule/scan counts plus tuple-membership binding
-count. If a
+including total `MultiWayJoin` reductions, planned-hash routes, K-clique WCOJ
+plans, K-clique max arity, live edge-permutation slot counts, distinct
+stream-group scheduling ids, skew-scheduled helper-plan counts,
+sorted-layout requirements, helper-splitting specs, and the certified helper
+relation rule/scan counts plus tuple-membership binding count. If a
 K-clique route carries helper-split specs but the reduced plan lacks matching
 compiler-created helper relation rules and WCOJ input scans of those helpers,
 preflight fails closed with `epistemic GPU helper-split certification`.
 `EpistemicGpuRuntimeCounters` snapshots the existing production WCOJ counters
 around a future epistemic dispatch, and
 `EpistemicGpuRuntimeWcojCertification` rejects preflight-only WCOJ metadata
-when required K-clique dispatch counters do not advance, and rejects dispatched
-K-clique evidence when the plan has sorted-layout obligations but no layout sort
-or layout fast-path counter advanced. Certified traces carry skew-scheduled
-helper-plan counts, helper-split specs, helper relation rules, and WCOJ helper
-input scans only after the reduced production plan has passed the helper rewrite
-gate. The accepted runtime entry point calls this certification gate immediately
-after reduced-plan dispatch and before model-membership/world-view staging, so a
+when required non-hash `MultiWayJoin` dispatch counters do not advance, rejects
+K-clique plans when K-clique dispatch counters do not advance, and rejects
+dispatched K-clique evidence when the plan has sorted-layout obligations but no
+layout sort or layout fast-path counter advanced. Certified traces carry
+`certified_multiway_reductions`, skew-scheduled helper-plan counts,
+helper-split specs, helper relation rules, and WCOJ helper input scans only
+after the reduced production plan has passed the helper rewrite gate. The
+accepted runtime entry point calls this certification gate immediately after
+reduced-plan dispatch and before model-membership/world-view staging, so a
 WCOJ-required epistemic reduction now fails closed if the production counters do
 not prove dispatch, layout reuse, and the helper rewrite surface.
 `Executor::execute_epistemic_gpu_execution` now wraps the reduced production

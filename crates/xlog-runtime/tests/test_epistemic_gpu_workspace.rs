@@ -259,8 +259,41 @@ fn runtime_wcoj_certification_rejects_preflight_only_metadata() {
     assert_eq!(
         EpistemicGpuRuntimeWcojCertification::for_preflight_and_delta(&preflight, &delta),
         EpistemicGpuRuntimeWcojCertification::MissingRequiredWcojDispatch {
+            required_multiway_reductions: 1,
             required_kclique_plans: 1,
             observed_wcoj_dispatches: 0,
+            observed_kclique_dispatches: 0,
+        }
+    );
+}
+
+#[test]
+fn runtime_wcoj_certification_rejects_v070_multiway_without_dispatch() {
+    let executable = executable_with_v070_4cycle_wcoj_plan();
+    let preflight = EpistemicGpuRuntimePreflight::for_executable_plan(
+        &executable,
+        EpistemicGpuWorkspaceCapacities {
+            max_candidates: 8,
+            max_worlds: 4,
+            max_models_per_reduction: 6,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(preflight.multiway_reduction_count, 1);
+    assert_eq!(preflight.kclique_wcoj_plan_count, 0);
+
+    let before = EpistemicGpuRuntimeCounters::default();
+    let after = EpistemicGpuRuntimeCounters::default();
+    let delta = after.saturating_delta_since(before);
+
+    assert_eq!(
+        EpistemicGpuRuntimeWcojCertification::for_preflight_and_delta(&preflight, &delta),
+        EpistemicGpuRuntimeWcojCertification::MissingRequiredWcojDispatch {
+            required_multiway_reductions: 1,
+            required_kclique_plans: 0,
+            observed_wcoj_dispatches: 0,
+            observed_kclique_dispatches: 0,
         }
     );
 }
@@ -292,6 +325,7 @@ fn runtime_wcoj_certification_accepts_actual_kclique_dispatch_delta() {
         EpistemicGpuRuntimeWcojCertification::for_preflight_and_delta(&preflight, &delta),
         EpistemicGpuRuntimeWcojCertification::Certified {
             observed_wcoj_dispatches: 1,
+            certified_multiway_reductions: 1,
             observed_kclique_dispatches: 1,
             certified_edge_permutation_slots: 10,
             certified_stream_groups: 1,
@@ -335,6 +369,7 @@ fn runtime_wcoj_certification_accepts_layout_fast_path_evidence() {
         EpistemicGpuRuntimeWcojCertification::for_preflight_and_delta(&preflight, &delta),
         EpistemicGpuRuntimeWcojCertification::Certified {
             observed_wcoj_dispatches: 1,
+            certified_multiway_reductions: 1,
             observed_kclique_dispatches: 1,
             certified_edge_permutation_slots: 10,
             certified_stream_groups: 1,
@@ -392,6 +427,7 @@ fn runtime_trace_preserves_counter_snapshots_and_wcoj_certification() {
         trace.wcoj_certification,
         EpistemicGpuRuntimeWcojCertification::Certified {
             observed_wcoj_dispatches: 1,
+            certified_multiway_reductions: 1,
             observed_kclique_dispatches: 1,
             certified_edge_permutation_slots: 10,
             certified_stream_groups: 1,
@@ -1477,6 +1513,25 @@ fn executable_with_kclique_helper_scan_outside_wcoj_plan() -> EpistemicExecutabl
     }
 }
 
+fn executable_with_v070_4cycle_wcoj_plan() -> EpistemicExecutablePlan {
+    let gpu_plan = EpistemicGpuPlan::new(
+        EirEpistemicMode::Faeel,
+        vec![epistemic_literal("gate", EirEpistemicOp::Know)],
+        vec![EpistemicReductionPlan {
+            rule_index: 0,
+            head_predicate: "cycle4".to_string(),
+            relational_body_atoms: 4,
+            wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
+        }],
+    );
+
+    EpistemicExecutablePlan {
+        gpu_plan,
+        relation_ids: std::collections::BTreeMap::new(),
+        reduced_runtime_plan: runtime_plan_with_v070_4cycle_wcoj(),
+    }
+}
+
 fn runtime_plan_with_kclique_wcoj() -> ExecutionPlan {
     let mut plan = ExecutionPlan::new(vec![Scc {
         id: 0,
@@ -1512,6 +1567,41 @@ fn runtime_plan_with_kclique_wcoj() -> ExecutionPlan {
             meta: RirMeta::default(),
         },
     ]];
+    plan
+}
+
+fn runtime_plan_with_v070_4cycle_wcoj() -> ExecutionPlan {
+    let mut plan = ExecutionPlan::new(vec![Scc {
+        id: 0,
+        predicates: vec!["cycle4".to_string()],
+        is_recursive: false,
+    }]);
+    plan.rules_by_scc = vec![vec![CompiledRule {
+        head: "cycle4".to_string(),
+        body: RirNode::MultiWayJoin {
+            inputs: (1..=4)
+                .map(|rel| RirNode::Scan {
+                    rel: xlog_core::RelId(rel),
+                })
+                .collect(),
+            slot_vars: vec![
+                vec![Some(0), Some(1)],
+                vec![Some(1), Some(2)],
+                vec![Some(2), Some(3)],
+                vec![Some(3), Some(0)],
+            ],
+            output_columns: vec![
+                ProjectExpr::Column(0),
+                ProjectExpr::Column(1),
+                ProjectExpr::Column(2),
+                ProjectExpr::Column(3),
+            ],
+            fallback: Box::new(RirNode::Unit),
+            plan: None,
+            var_order: None,
+        },
+        meta: RirMeta::default(),
+    }]];
     plan
 }
 

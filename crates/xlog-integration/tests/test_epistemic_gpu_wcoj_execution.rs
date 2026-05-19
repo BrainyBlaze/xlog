@@ -453,6 +453,78 @@ fn execute_binary_edge_epistemic_fixture(
 }
 
 #[test]
+fn accepted_epistemic_v070_4cycle_execution_certifies_production_wcoj_dispatch() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred e1(u32, u32).
+        pred e2(u32, u32).
+        pred e3(u32, u32).
+        pred e4(u32, u32).
+        pred gate().
+        pred cycle4(u32, u32, u32, u32).
+        gate().
+        cycle4(W, X, Y, Z) :- e1(W, X), e2(X, Y), e3(Y, Z), e4(Z, W), know gate().
+        "#,
+    )
+    .expect("parse epistemic v0.7 4-cycle fixture");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile epistemic v0.7 4-cycle executable");
+
+    let mut executor = Executor::new_with_config(
+        Arc::clone(&fix.provider),
+        RuntimeConfig::default().with_wcoj_4cycle_dispatch(Some(true)),
+    );
+    for (name, rel_id) in &executable.relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation("e1", upload_binary_u32(&fix.memory, &[(1, 2)]));
+    executor.put_relation("e2", upload_binary_u32(&fix.memory, &[(2, 3)]));
+    executor.put_relation("e3", upload_binary_u32(&fix.memory, &[(3, 4)]));
+    executor.put_relation("e4", upload_binary_u32(&fix.memory, &[(4, 1)]));
+    executor.put_relation("gate", upload_nullary(&fix.memory, 1));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("execute accepted epistemic v0.7 4-cycle");
+
+    assert_eq!(result.prepared.preflight.multiway_reduction_count, 1);
+    assert_eq!(result.prepared.preflight.kclique_wcoj_plan_count, 0);
+    assert!(matches!(
+        result.trace.wcoj_certification,
+        EpistemicGpuRuntimeWcojCertification::Certified {
+            observed_wcoj_dispatches: 1..,
+            certified_multiway_reductions: 1,
+            observed_kclique_dispatches: 0,
+            certified_edge_permutation_slots: 0,
+            ..
+        }
+    ));
+    assert!(
+        result.trace.counter_delta.wcoj_4cycle_dispatch_count >= 1,
+        "accepted epistemic 4-cycle must dispatch through the v0.7.0 production 4-cycle WCOJ path"
+    );
+    assert_eq!(result.final_result_transfer.final_output_rows, 1);
+    assert_eq!(result.final_result_transfer.final_output_column_count, 4);
+    assert_eq!(
+        download_quaternary_u32(&fix.provider, &result.final_output),
+        vec![(1, 2, 3, 4)],
+        "accepted epistemic 4-cycle final output must materialize the production WCOJ row"
+    );
+}
+
+#[test]
 fn accepted_epistemic_k5_execution_certifies_production_wcoj_dispatch() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");

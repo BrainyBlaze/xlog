@@ -1260,13 +1260,17 @@ impl EpistemicGpuRuntimeTrace {
     pub fn require_wcoj_certification(&self) -> Result<()> {
         match self.wcoj_certification {
             EpistemicGpuRuntimeWcojCertification::MissingRequiredWcojDispatch {
+                required_multiway_reductions,
                 required_kclique_plans,
                 observed_wcoj_dispatches,
+                observed_kclique_dispatches,
             } => Err(XlogError::UnsupportedEpistemicConstruct {
                 construct: "epistemic GPU WCOJ dispatch certification".to_string(),
                 context: format!(
-                    "required_kclique_plans={required_kclique_plans}, \
-                     observed_wcoj_dispatches={observed_wcoj_dispatches}"
+                    "required_multiway_reductions={required_multiway_reductions}, \
+                     required_kclique_plans={required_kclique_plans}, \
+                     observed_wcoj_dispatches={observed_wcoj_dispatches}, \
+                     observed_kclique_dispatches={observed_kclique_dispatches}"
                 ),
             }),
             EpistemicGpuRuntimeWcojCertification::MissingRequiredWcojLayout {
@@ -1376,7 +1380,7 @@ impl EpistemicGpuRuntimeCounters {
 /// WCOJ certification status for an epistemic runtime dispatch attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EpistemicGpuRuntimeWcojCertification {
-    /// The preflight did not require a K-clique WCOJ dispatch.
+    /// The preflight did not require a WCOJ dispatch.
     NotRequired {
         /// Observed executor-installed WCOJ dispatches.
         observed_wcoj_dispatches: u64,
@@ -1385,6 +1389,8 @@ pub enum EpistemicGpuRuntimeWcojCertification {
     Certified {
         /// Observed executor-installed WCOJ dispatches.
         observed_wcoj_dispatches: u64,
+        /// MultiWayJoin reductions certified by the observed WCOJ dispatches.
+        certified_multiway_reductions: usize,
         /// Observed executor-installed K-clique dispatches.
         observed_kclique_dispatches: u64,
         /// Edge-permutation slots certified by the dispatched K-clique plans.
@@ -1417,12 +1423,16 @@ pub enum EpistemicGpuRuntimeWcojCertification {
         /// Observed layout sort or fast-path events.
         observed_layout_events: u64,
     },
-    /// The plan had K-clique WCOJ obligations, but counters did not advance.
+    /// The plan had WCOJ obligations, but counters did not advance.
     MissingRequiredWcojDispatch {
+        /// MultiWayJoin reductions found during preflight after excluding planned hash routes.
+        required_multiway_reductions: usize,
         /// K-clique WCOJ plans found during preflight.
         required_kclique_plans: usize,
         /// Observed executor-installed WCOJ dispatches.
         observed_wcoj_dispatches: u64,
+        /// Observed executor-installed K-clique dispatches.
+        observed_kclique_dispatches: u64,
     },
 }
 
@@ -1558,17 +1568,24 @@ impl EpistemicGpuRuntimeWcojCertification {
     ) -> Self {
         let observed_wcoj_dispatches = delta.wcoj_dispatch_count();
         let observed_kclique_dispatches = delta.wcoj_clique_dispatch_count();
+        let required_multiway_reductions = preflight
+            .multiway_reduction_count
+            .saturating_sub(preflight.planned_hash_route_count);
 
-        if preflight.kclique_wcoj_plan_count == 0 {
+        if required_multiway_reductions == 0 {
             return Self::NotRequired {
                 observed_wcoj_dispatches,
             };
         }
 
-        if observed_kclique_dispatches < preflight.kclique_wcoj_plan_count as u64 {
+        if observed_wcoj_dispatches < required_multiway_reductions as u64
+            || observed_kclique_dispatches < preflight.kclique_wcoj_plan_count as u64
+        {
             return Self::MissingRequiredWcojDispatch {
+                required_multiway_reductions,
                 required_kclique_plans: preflight.kclique_wcoj_plan_count,
                 observed_wcoj_dispatches,
+                observed_kclique_dispatches,
             };
         }
 
@@ -1583,6 +1600,7 @@ impl EpistemicGpuRuntimeWcojCertification {
 
         Self::Certified {
             observed_wcoj_dispatches,
+            certified_multiway_reductions: required_multiway_reductions,
             observed_kclique_dispatches,
             certified_edge_permutation_slots: preflight.kclique_wcoj_edge_permutation_count,
             certified_stream_groups: preflight.kclique_stream_group_count,
