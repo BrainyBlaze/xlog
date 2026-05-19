@@ -1387,13 +1387,16 @@ release-certification consumer depends on them.
 - [x] Connect Python session deltas to runtime
       `RelationDelta` / `apply_deltas_and_recompute` so monotone
       insert-only SCCs avoid full recompute where the plan permits it.
-- [ ] Add batch update coalescing for repeated DTS-DLM Stage-4
-      `wmir_committed` updates.
-- [ ] Add change notification callbacks for session-managed relations,
-      scoped to explicit Python opt-in.
 - [x] Add DTS-DLM Stage-4 fixture proving delta updates produce
       byte-identical output to full `put_relation` replacement while
       reducing full-table re-upload work.
+
+Deferred completion scope moved to v0.8.6:
+
+- Batch update coalescing for repeated DTS-DLM Stage-4 `wmir_committed`
+  updates.
+- Change notification callbacks for session-managed relations, scoped to
+  explicit Python opt-in.
 
 ### Neural-Symbolic Bridge Integration
 
@@ -1418,8 +1421,6 @@ release-certification consumer depends on them.
 
 ### Native Exact Induction Consumer Integration
 
-- [ ] Add column-type dispatch beyond `U64`, including `U32` and
-      `Symbol` callers when needed by downstream tensorized ILP.
 - [x] Integrate native exact-induction backend into the downstream
       tensorized ILP consumer path. (Native `kernels/ilp_exact.cu` +
       manifest registration + `crates/pyxlog/src/ilp_exact.rs` wrapper
@@ -1434,23 +1435,30 @@ release-certification consumer depends on them.
 - [x] Decide and document the strict-per-topology compatibility policy
       for DTS-DLM, including how legacy Python-prototype behavior is
       compared against native per-topology-isolated scoring.
-- [ ] Add chain-topology shared-memory caching of L rows after profiling
-      confirms it is a hot path.
 - [x] Resolve `ilp_exact.ptx` packaging policy: `kernels/ilp_exact.cu`
       is source; generated `ilp_exact.portable.ptx` and `.cubin`
       artifacts are staged into `pyxlog/kernels/` and embedded by the
       xlog-cuda build, matching the current `ilp.cu` / `ilp_credit.cu`
       convention rather than checking generated PTX into git.
 
+Deferred completion scope moved to v0.8.6:
+
+- Column-type dispatch beyond `U64`, including `U32` and `Symbol`
+  callers for downstream tensorized ILP.
+- Chain-topology shared-memory caching of L rows, gated by profiling and
+  GPU-native speedup evidence.
+
 ### Profile-Gated Optimizer Work
 
-- [ ] Add common subexpression elimination when DTS-DLM M37-A+B or
-      certification profiles show duplicated subplans on the hot path.
-- [ ] Add adaptive query re-optimization during execution when runtime
-      telemetry shows stable mis-planning on DTS-DLM fixtures.
-- [ ] Add persistent hash index manager with background building after a
-      DTS-DLM or pyxlog-session profile identifies index rebuild cost as
-      a release blocker.
+Deferred completion scope moved to v0.8.6:
+
+- Common subexpression elimination when DTS-DLM M37-A+B, Mistaber, or
+  certification profiles show duplicated subplans on the hot path.
+- Adaptive query re-optimization during execution when runtime telemetry
+  shows stable mis-planning on consumer fixtures.
+- Persistent hash index manager with background building after DTS-DLM,
+  Mistaber, or pyxlog-session profiles identify index rebuild cost as a
+  release blocker.
 
 ### Deferred Product Backlog
 
@@ -1531,6 +1539,55 @@ WCOJ, and CLI paths.
 - [x] Add `scripts/validate_v085_examples.py` or equivalent validation with
       committed evidence JSON.
       Evidence: `docs/evidence/2026-05-19-v085-examples/validation_summary.json`.
+
+## v0.8.6 - DTS-DLM Runtime Completion and GPU-Native Optimizer Pack
+
+Status: planned. Governing goal document:
+`docs/plans/2026-05-19-agent-v086-dts-runtime-completion-goal.md`.
+
+v0.8.6 closes the seven v0.8.0 deferred completion items as a production
+runtime/optimizer hardening pack. Acceptance requires fully GPU-native data
+paths for accepted workloads, zero data-plane host transfers beyond explicit
+control-plane/final-result exceptions, profile-backed optimizer triggers, and
+consumer evidence for DTS-DLM, Mistaber `.xlog` workloads, v0.9.0
+epistemic/solver prerequisites, and pyxlog session users.
+
+Hard implementation rule: v0.8.6 must extend and reuse the existing xlog
+codebase. New code must compose with current parser, RIR/PIR, optimizer,
+runtime, CUDA provider, WCOJ, exact-induction, probabilistic, and pyxlog
+surfaces. Reimplementation of an existing subsystem, duplicate fixture-only
+engines, or parallel helper paths that bypass production dispatch are blockers.
+
+### Persistent Relation Maintenance Completion
+
+- [ ] Add device-resident batch update coalescing for repeated DTS-DLM
+      Stage-4 `wmir_committed` updates, with row-level insert/delete
+      coalescing before recompute and byte-identical output versus sequential
+      deltas.
+- [ ] Add explicit opt-in change notification callbacks for
+      session-managed relations, delivered from committed delta summaries
+      without forcing data-plane device-to-host transfers.
+
+### Native Exact Induction Completion
+
+- [ ] Add native exact-induction column-type dispatch beyond `U64`,
+      including `U32` and `Symbol` pair buffers, with explicit typed kernels
+      or safe physical-layout dispatch and no silent narrowing.
+- [ ] Add chain-topology shared-memory caching of L rows only after profile
+      evidence identifies the chain scorer as hot, with a required speedup
+      gate and parity against the existing strict per-topology semantics.
+
+### Profile-Gated Optimizer Completion
+
+- [ ] Add GPU-native common subexpression elimination for duplicated
+      subplans in DTS-DLM, Mistaber, or certification workloads, including
+      semantic equivalence checks and no extra data-plane host transfers.
+- [ ] Add adaptive query re-optimization during execution when runtime
+      telemetry shows stable mis-planning on consumer fixtures, bounded by
+      deterministic replay and rollback gates.
+- [ ] Add a persistent hash index manager with background GPU-resident
+      building, invalidation, and budget-aware reuse after profiles identify
+      index rebuild cost as a release blocker.
 
 ## v0.9.0 - Epistemic and Solver Semantics
 
