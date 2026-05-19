@@ -232,7 +232,7 @@ counts, distinct stream-group scheduling ids, planned-hash routes,
 sorted-layout requirements, helper-splitting specs, and the certified
 helper relation rule/scan counts plus tuple-membership binding count. If a
 K-clique route carries helper-split specs but the reduced plan lacks matching
-compiler-created helper relation rules and WCOJ scans of those helpers,
+compiler-created helper relation rules and WCOJ input scans of those helpers,
 preflight fails closed with `epistemic GPU helper-split certification`.
 `EpistemicGpuRuntimeCounters` snapshots the existing production WCOJ counters
 around a future epistemic dispatch, and
@@ -240,7 +240,7 @@ around a future epistemic dispatch, and
 when required K-clique dispatch counters do not advance, and rejects dispatched
 K-clique evidence when the plan has sorted-layout obligations but no layout sort
 or layout fast-path counter advanced. Certified traces carry helper-split specs,
-helper relation rules, and helper relation scans only after the reduced
+helper relation rules, and WCOJ helper input scans only after the reduced
 production plan has passed the helper rewrite gate. The accepted runtime entry
 point calls this certification gate immediately after reduced-plan dispatch and
 before model-membership/world-view staging, so a WCOJ-required epistemic

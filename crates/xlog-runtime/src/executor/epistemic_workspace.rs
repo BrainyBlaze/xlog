@@ -1030,7 +1030,7 @@ pub struct EpistemicGpuRuntimePreflight {
     pub helper_split_spec_count: usize,
     /// Compiler-created helper-split relation rules in the reduced runtime plan.
     pub helper_relation_rule_count: usize,
-    /// Scans of compiler-created helper-split relations in reduced WCOJ plans.
+    /// WCOJ input scans of compiler-created helper-split relations.
     pub helper_relation_scan_count: usize,
     /// Tuple-membership bindings certified for stable-model membership checks.
     pub tuple_membership_binding_count: usize,
@@ -3979,14 +3979,26 @@ fn helper_relation_ids(executable: &EpistemicExecutablePlan) -> BTreeSet<RelId> 
 
 fn count_helper_relation_scans(node: &RirNode, helper_relations: &BTreeSet<RelId>) -> usize {
     match node {
-        RirNode::Scan { rel } => usize::from(helper_relations.contains(rel)),
+        RirNode::Scan { .. } => 0,
         RirNode::MultiWayJoin {
-            inputs, fallback, ..
+            plan,
+            inputs,
+            fallback,
+            ..
         } => {
-            inputs
-                .iter()
-                .map(|input| count_helper_relation_scans(input, helper_relations))
-                .sum::<usize>()
+            let own_wcoj_inputs = if matches!(plan, Some(MultiwayPlan::WcojWithPlan(_))) {
+                inputs
+                    .iter()
+                    .map(|input| count_helper_relation_leaf_scans(input, helper_relations))
+                    .sum()
+            } else {
+                0
+            };
+            own_wcoj_inputs
+                + inputs
+                    .iter()
+                    .map(|input| count_helper_relation_scans(input, helper_relations))
+                    .sum::<usize>()
                 + count_helper_relation_scans(fallback, helper_relations)
         }
         RirNode::Filter { input, .. }
@@ -4016,6 +4028,52 @@ fn count_helper_relation_scans(node: &RirNode, helper_relations: &BTreeSet<RelId
             count_helper_relation_scans(left, helper_relations)
                 + count_helper_relation_scans(right, helper_relations)
                 + count_helper_relation_scans(fallback, helper_relations)
+        }
+        RirNode::TensorMaskedJoin { .. } | RirNode::Unit => 0,
+    }
+}
+
+fn count_helper_relation_leaf_scans(node: &RirNode, helper_relations: &BTreeSet<RelId>) -> usize {
+    match node {
+        RirNode::Scan { rel } => usize::from(helper_relations.contains(rel)),
+        RirNode::Filter { input, .. }
+        | RirNode::Project { input, .. }
+        | RirNode::Distinct { input, .. }
+        | RirNode::GroupBy { input, .. } => {
+            count_helper_relation_leaf_scans(input, helper_relations)
+        }
+        RirNode::Join { left, right, .. } | RirNode::Diff { left, right } => {
+            count_helper_relation_leaf_scans(left, helper_relations)
+                + count_helper_relation_leaf_scans(right, helper_relations)
+        }
+        RirNode::Union { inputs } => inputs
+            .iter()
+            .map(|input| count_helper_relation_leaf_scans(input, helper_relations))
+            .sum(),
+        RirNode::Fixpoint {
+            base, recursive, ..
+        } => {
+            count_helper_relation_leaf_scans(base, helper_relations)
+                + count_helper_relation_leaf_scans(recursive, helper_relations)
+        }
+        RirNode::MultiWayJoin {
+            inputs, fallback, ..
+        } => {
+            inputs
+                .iter()
+                .map(|input| count_helper_relation_leaf_scans(input, helper_relations))
+                .sum::<usize>()
+                + count_helper_relation_leaf_scans(fallback, helper_relations)
+        }
+        RirNode::ChainJoin {
+            left,
+            right,
+            fallback,
+            ..
+        } => {
+            count_helper_relation_leaf_scans(left, helper_relations)
+                + count_helper_relation_leaf_scans(right, helper_relations)
+                + count_helper_relation_leaf_scans(fallback, helper_relations)
         }
         RirNode::TensorMaskedJoin { .. } | RirNode::Unit => 0,
     }

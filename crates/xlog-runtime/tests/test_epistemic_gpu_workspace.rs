@@ -145,6 +145,31 @@ fn runtime_preflight_rejects_helper_split_specs_without_production_helper_rewrit
 }
 
 #[test]
+fn runtime_preflight_rejects_helper_relation_scan_outside_wcoj_plan() {
+    let executable = executable_with_kclique_helper_scan_outside_wcoj_plan();
+
+    let err = EpistemicGpuRuntimePreflight::for_executable_plan(
+        &executable,
+        EpistemicGpuWorkspaceCapacities {
+            max_candidates: 8,
+            max_worlds: 4,
+            max_models_per_reduction: 6,
+        },
+    )
+    .expect_err("helper relation scans must be consumed by the production WCOJ plan");
+
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
+            assert_eq!(construct, "epistemic GPU helper-split certification");
+            assert!(context.contains("helper_split_specs=1"));
+            assert!(context.contains("helper_relation_rules=1"));
+            assert!(context.contains("helper_relation_scans=0"));
+        }
+        other => panic!("expected helper-split certification error, got {other:?}"),
+    }
+}
+
+#[test]
 fn runtime_preflight_records_epistemic_operator_metrics() {
     let executable = executable_with_operator_mix();
 
@@ -1426,6 +1451,28 @@ fn executable_with_kclique_helper_metadata_only_plan() -> EpistemicExecutablePla
     }
 }
 
+fn executable_with_kclique_helper_scan_outside_wcoj_plan() -> EpistemicExecutablePlan {
+    let gpu_plan = EpistemicGpuPlan::new(
+        EirEpistemicMode::Faeel,
+        vec![epistemic_literal("gate", EirEpistemicOp::Know)],
+        vec![EpistemicReductionPlan {
+            rule_index: 0,
+            head_predicate: "clique5".to_string(),
+            relational_body_atoms: 10,
+            wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
+        }],
+    );
+
+    EpistemicExecutablePlan {
+        gpu_plan,
+        relation_ids: std::collections::BTreeMap::from([(
+            "__w37_helper_99".to_string(),
+            xlog_core::RelId(99),
+        )]),
+        reduced_runtime_plan: runtime_plan_with_helper_scan_outside_wcoj(),
+    }
+}
+
 fn runtime_plan_with_kclique_wcoj() -> ExecutionPlan {
     let mut plan = ExecutionPlan::new(vec![Scc {
         id: 0,
@@ -1452,6 +1499,51 @@ fn runtime_plan_with_kclique_wcoj() -> ExecutionPlan {
             head: "clique5".to_string(),
             body: RirNode::MultiWayJoin {
                 inputs,
+                slot_vars: vec![vec![Some(0), Some(1)]; 10],
+                output_columns: vec![ProjectExpr::Column(0)],
+                fallback: Box::new(RirNode::Unit),
+                plan: Some(MultiwayPlan::WcojWithPlan(kclique_order())),
+                var_order: Some(xlog_ir::rir::VariableOrder::kclique(kclique_order())),
+            },
+            meta: RirMeta::default(),
+        },
+    ]];
+    plan
+}
+
+fn runtime_plan_with_helper_scan_outside_wcoj() -> ExecutionPlan {
+    let mut plan = ExecutionPlan::new(vec![Scc {
+        id: 0,
+        predicates: vec![
+            "__w37_helper_99".to_string(),
+            "helper_probe".to_string(),
+            "clique5".to_string(),
+        ],
+        is_recursive: false,
+    }]);
+    plan.rules_by_scc = vec![vec![
+        CompiledRule {
+            head: "__w37_helper_99".to_string(),
+            body: RirNode::Scan {
+                rel: xlog_core::RelId(2),
+            },
+            meta: RirMeta::default(),
+        },
+        CompiledRule {
+            head: "helper_probe".to_string(),
+            body: RirNode::Scan {
+                rel: xlog_core::RelId(99),
+            },
+            meta: RirMeta::default(),
+        },
+        CompiledRule {
+            head: "clique5".to_string(),
+            body: RirNode::MultiWayJoin {
+                inputs: (1..=10)
+                    .map(|rel| RirNode::Scan {
+                        rel: xlog_core::RelId(rel),
+                    })
+                    .collect(),
                 slot_vars: vec![vec![Some(0), Some(1)]; 10],
                 output_columns: vec![ProjectExpr::Column(0)],
                 fallback: Box::new(RirNode::Unit),

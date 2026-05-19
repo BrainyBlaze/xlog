@@ -33,7 +33,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(audit.contains("layout sort or fast-path"));
     assert!(audit.contains("MissingRequiredWcojLayout"));
     assert!(audit.contains("helper relation rules"));
-    assert!(audit.contains("helper relation scans"));
+    assert!(audit.contains("WCOJ helper input scans"));
     assert!(audit.contains("kclique_stream_group_count"));
     assert!(audit.contains("certified_stream_groups"));
     assert!(audit.contains("possible_operator_count"));
@@ -71,6 +71,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(runtime.contains("helper_relation_scan_count"));
     assert!(runtime.contains("helper_relation_ids"));
     assert!(runtime.contains("count_helper_relation_scans"));
+    assert!(runtime.contains("count_helper_relation_leaf_scans"));
     assert!(runtime.contains("epistemic GPU helper-split certification"));
     assert!(runtime.contains("certified_edge_permutation_slots"));
     assert!(runtime.contains("certified_stream_groups"));
