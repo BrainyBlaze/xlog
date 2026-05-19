@@ -23,9 +23,9 @@ use xlog_prob::epistemic_production::{
 };
 use xlog_prob::exact::GpuConfig;
 use xlog_runtime::{
-    read_device_row_count, EpistemicGpuModelMembershipSource, EpistemicGpuRejectionReason,
-    EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeWcojCertification,
-    EpistemicGpuWorkspaceCapacities, Executor,
+    read_device_row_count, EpistemicGpuExecutionResult, EpistemicGpuModelMembershipSource,
+    EpistemicGpuRejectionReason, EpistemicGpuRuntimePreflight,
+    EpistemicGpuRuntimeWcojCertification, EpistemicGpuWorkspaceCapacities, Executor,
 };
 use xlog_solve::{
     Clause, GpuCdclConfig, GpuCnf, GpuSolverProductionAdapter, GpuSolverProductionExpectation,
@@ -203,6 +203,36 @@ fn download_binary_u32(provider: &CudaKernelProvider, buffer: &CudaBuffer) -> Ve
             )
         })
         .collect()
+}
+
+fn execute_unary_edge_epistemic_fixture(
+    fix: &RuntimeBackedFixture,
+    source: &str,
+    node_rows: &[u32],
+    edge_rows: &[u32],
+) -> EpistemicGpuExecutionResult {
+    let program = parse_program(source).expect("parse unary edge epistemic fixture");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile unary edge epistemic executable");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &executable.relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation("node", upload_unary_u32(&fix.memory, node_rows));
+    executor.put_relation("edge", upload_unary_u32(&fix.memory, edge_rows));
+
+    executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 2,
+            },
+        )
+        .expect("execute unary edge epistemic fixture")
 }
 
 #[test]
@@ -2499,6 +2529,130 @@ fn accepted_gpu_execution_result_conditions_negative_nonzero_arity_probabilistic
 }
 
 #[test]
+fn accepted_possible_operator_conditions_probabilistic_evidence() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let result = execute_unary_edge_epistemic_fixture(
+        &fix,
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), possible edge(X).
+        "#,
+        &[1, 2],
+        &[1],
+    );
+    assert_eq!(
+        download_unary_u32(&fix.provider, &result.final_output),
+        vec![1]
+    );
+    assert_eq!(result.prepared.preflight.possible_operator_count, 1);
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut adapter = EpistemicProbProductionAdapter::new(config);
+    let evaluated = adapter
+        .compile_and_evaluate_conditioned_source_with_gpu_execution_result(
+            r#"
+            0.4::edge(1).
+            query(edge(1)).
+            "#,
+            &fix.provider,
+            &result,
+            vec![EpistemicAssumption::possible_tuple(
+                "edge",
+                vec![EpistemicEvidenceTerm::integer(1)],
+                true,
+            )],
+        )
+        .expect("accepted possible GPU evidence must condition probabilistic exact evidence");
+
+    assert_eq!(evaluated.query_probs.len(), 1);
+    assert!(
+        (evaluated.query_probs[0].prob - 1.0).abs() < 1.0e-6,
+        "accepted possible edge(1) evidence must condition query probability to true"
+    );
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_world_view_evidence_consumed, 1);
+    assert_eq!(trace.accepted_evidence_assumptions_consumed, 1);
+    assert_eq!(trace.gpu_conditioned_evidence_facts, 1);
+    assert_eq!(trace.gpu_conditioned_negative_evidence_facts, 0);
+    assert_eq!(trace.gpu_exact_source_compiles, 1);
+    assert_eq!(trace.gpu_exact_query_evaluations, 1);
+    assert_eq!(trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(trace.fixture_circuit_evaluations, 0);
+}
+
+#[test]
+fn accepted_not_possible_operator_conditions_negative_probabilistic_evidence() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let result = execute_unary_edge_epistemic_fixture(
+        &fix,
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), not possible edge(X).
+        "#,
+        &[1, 2],
+        &[2],
+    );
+    assert_eq!(
+        download_unary_u32(&fix.provider, &result.final_output),
+        vec![1]
+    );
+    assert_eq!(result.prepared.preflight.not_possible_operator_count, 1);
+    assert_eq!(
+        result.final_tuple_materialization.negated_row_filter_count,
+        1
+    );
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut adapter = EpistemicProbProductionAdapter::new(config);
+    let evaluated = adapter
+        .compile_and_evaluate_conditioned_source_with_gpu_execution_result(
+            r#"
+            0.7::edge(1).
+            query(edge(1)).
+            "#,
+            &fix.provider,
+            &result,
+            vec![EpistemicAssumption::possible_tuple(
+                "edge",
+                vec![EpistemicEvidenceTerm::integer(1)],
+                false,
+            )],
+        )
+        .expect("accepted not-possible GPU evidence must condition negative exact evidence");
+
+    assert_eq!(evaluated.query_probs.len(), 1);
+    assert!(
+        evaluated.query_probs[0].prob.abs() < 1.0e-6,
+        "accepted not possible edge(1) evidence must condition query probability to false"
+    );
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_world_view_evidence_consumed, 1);
+    assert_eq!(trace.accepted_evidence_assumptions_consumed, 1);
+    assert_eq!(trace.gpu_conditioned_evidence_facts, 1);
+    assert_eq!(trace.gpu_conditioned_negative_evidence_facts, 1);
+    assert_eq!(trace.gpu_exact_source_compiles, 1);
+    assert_eq!(trace.gpu_exact_query_evaluations, 1);
+    assert_eq!(trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(trace.fixture_circuit_evaluations, 0);
+}
+
+#[test]
 fn accepted_gpu_execution_result_conditions_parsed_program_probabilistic_evidence() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
@@ -4092,6 +4246,110 @@ fn accepted_gpu_execution_results_gate_multi_candidate_solver_lifecycle_path() {
             ],
         )
         .expect("accepted GPU runtime evidence must gate multi-candidate solver lifecycle path");
+
+    assert_eq!(workspace.assign_device_ptr(), assign_ptr_before);
+    assert_eq!(report.candidate_evidence_records, 2);
+    assert_eq!(report.steps, 4);
+    assert_eq!(report.assumption_pushes, 4);
+    assert_eq!(report.assumption_retractions, 4);
+    assert_eq!(report.workspace_reuses, 2);
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 2);
+    assert_eq!(trace.gpu_assumption_pushes, 4);
+    assert_eq!(trace.gpu_assumption_retractions, 4);
+    assert_eq!(trace.gpu_lifecycle_workspace_reuses, 2);
+    assert_eq!(trace.gpu_cdcl_sat_solves, 2);
+    assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 2);
+    assert_eq!(trace.cpu_assignment_enumerations, 0);
+    assert_eq!(trace.cpu_maxsat_enumerations, 0);
+}
+
+#[test]
+fn accepted_operator_gpu_execution_results_gate_solver_lifecycle_path() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let possible_result = execute_unary_edge_epistemic_fixture(
+        &fix,
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), possible edge(X).
+        "#,
+        &[1, 2],
+        &[1],
+    );
+    let not_possible_result = execute_unary_edge_epistemic_fixture(
+        &fix,
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), not possible edge(X).
+        "#,
+        &[1, 2],
+        &[2],
+    );
+    assert_eq!(
+        download_unary_u32(&fix.provider, &possible_result.final_output),
+        vec![1]
+    );
+    assert_eq!(
+        download_unary_u32(&fix.provider, &not_possible_result.final_output),
+        vec![1]
+    );
+    assert_eq!(
+        possible_result.prepared.preflight.possible_operator_count,
+        1
+    );
+    assert_eq!(
+        not_possible_result
+            .prepared
+            .preflight
+            .not_possible_operator_count,
+        1
+    );
+
+    let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
+    let unsat_instance = SolveInstance::new(
+        1,
+        vec![
+            Clause::new(vec![Literal::positive(0)]),
+            Clause::new(vec![Literal::negative(0)]),
+        ],
+    );
+    let sat_cnf = GpuCnf::from_host(&sat_instance, &fix.provider).expect("upload SAT CNF");
+    let unsat_cnf = GpuCnf::from_host(&unsat_instance, &fix.provider).expect("upload UNSAT CNF");
+    let branch_limit = upload_u32_scalar(&fix.provider, 1);
+    let mut adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let mut workspace = adapter
+        .new_workspace(unsat_cnf.var_cap, unsat_cnf.clause_cap)
+        .expect("new workspace");
+    let assign_ptr_before = workspace.assign_device_ptr();
+
+    let report = adapter
+        .solve_multi_candidate_assumption_lifecycle_with_gpu_execution_results(
+            &fix.provider,
+            &[&possible_result, &not_possible_result],
+            &mut workspace,
+            &[
+                GpuSolverProductionLifecycleStep {
+                    cnf: &sat_cnf,
+                    branch_var_limit: &branch_limit,
+                    expectation: GpuSolverProductionExpectation::Sat,
+                },
+                GpuSolverProductionLifecycleStep {
+                    cnf: &unsat_cnf,
+                    branch_var_limit: &branch_limit,
+                    expectation: GpuSolverProductionExpectation::Unsat,
+                },
+            ],
+        )
+        .expect("accepted operator GPU evidence must gate solver lifecycle path");
 
     assert_eq!(workspace.assign_device_ptr(), assign_ptr_before);
     assert_eq!(report.candidate_evidence_records, 2);
