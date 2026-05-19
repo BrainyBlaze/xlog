@@ -1,0 +1,788 @@
+{
+  "compatibility_gates": {
+    "v080_examples": {
+      "duration_sec": 22.7207,
+      "example_count": 5,
+      "output": "docs/evidence/2026-05-19-v086-consumers/compat_v080_validation_summary.json",
+      "returncode": 0,
+      "script": "scripts/validate_v080_examples.py",
+      "status": "PASS"
+    },
+    "v080_v085_source_guards": {
+      "cmd": [
+        "/usr/local/bin/python",
+        "-m",
+        "pytest",
+        "-q",
+        "python/tests/test_v080_examples_source.py",
+        "python/tests/test_v085_examples_source.py"
+      ],
+      "duration_sec": 2.693352,
+      "returncode": 0,
+      "status": "PASS",
+      "stdout_preview": "......                                                                   [100%]\n6 passed in 0.03s\n"
+    },
+    "v085_examples": {
+      "duration_sec": 37.933738,
+      "example_count": 10,
+      "output": "docs/evidence/2026-05-19-v086-consumers/compat_v085_validation_summary.json",
+      "returncode": 0,
+      "script": "scripts/validate_v085_examples.py",
+      "status": "PASS"
+    }
+  },
+  "consumer_coverage": {
+    "dts-dlm": [
+      "01_dts_delta_optimizer"
+    ],
+    "mistaber-neutral": [
+      "02_neutral_material_flow",
+      "03_neutral_signal_diagnostics"
+    ],
+    "pyxlog-compatibility": [
+      "05_pyxlog_session_compatibility"
+    ],
+    "v090-substrate": [
+      "04_v090_substrate_primitives"
+    ]
+  },
+  "example_count": 5,
+  "feature_coverage": {
+    "adaptive_reoptimization": [
+      "01_dts_delta_optimizer",
+      "03_neutral_signal_diagnostics",
+      "04_v090_substrate_primitives"
+    ],
+    "chain_shared_memory": [
+      "04_v090_substrate_primitives"
+    ],
+    "common_subexpression_elimination": [
+      "01_dts_delta_optimizer",
+      "02_neutral_material_flow",
+      "03_neutral_signal_diagnostics",
+      "04_v090_substrate_primitives"
+    ],
+    "delta": [
+      "01_dts_delta_optimizer",
+      "05_pyxlog_session_compatibility"
+    ],
+    "exact_induction": [
+      "01_dts_delta_optimizer",
+      "04_v090_substrate_primitives"
+    ],
+    "persistent_hash_index": [
+      "01_dts_delta_optimizer",
+      "02_neutral_material_flow",
+      "04_v090_substrate_primitives"
+    ],
+    "production_path_reuse": [
+      "01_dts_delta_optimizer",
+      "02_neutral_material_flow",
+      "03_neutral_signal_diagnostics",
+      "04_v090_substrate_primitives",
+      "05_pyxlog_session_compatibility"
+    ],
+    "pyxlog_compatibility": [
+      "04_v090_substrate_primitives",
+      "05_pyxlog_session_compatibility"
+    ],
+    "v090_substrate": [
+      "04_v090_substrate_primitives"
+    ]
+  },
+  "per_example": [
+    {
+      "checks": [
+        "explain_json",
+        "run"
+      ],
+      "consumer": "dts-dlm",
+      "features": [
+        "delta",
+        "exact_induction",
+        "common_subexpression_elimination",
+        "adaptive_reoptimization",
+        "persistent_hash_index",
+        "production_path_reuse"
+      ],
+      "name": "01_dts_delta_optimizer",
+      "raw_measurements": {
+        "explain_duration_sec": 0.087714,
+        "run_duration_sec": 1.433354
+      },
+      "status": "PASS"
+    },
+    {
+      "checks": [
+        "explain_json",
+        "run"
+      ],
+      "consumer": "mistaber-neutral",
+      "features": [
+        "common_subexpression_elimination",
+        "persistent_hash_index",
+        "production_path_reuse"
+      ],
+      "name": "02_neutral_material_flow",
+      "raw_measurements": {
+        "explain_duration_sec": 0.084784,
+        "run_duration_sec": 1.638017
+      },
+      "status": "PASS"
+    },
+    {
+      "checks": [
+        "explain_json",
+        "run"
+      ],
+      "consumer": "mistaber-neutral",
+      "features": [
+        "adaptive_reoptimization",
+        "common_subexpression_elimination",
+        "production_path_reuse"
+      ],
+      "name": "03_neutral_signal_diagnostics",
+      "raw_measurements": {
+        "explain_duration_sec": 0.086194,
+        "run_duration_sec": 1.469814
+      },
+      "status": "PASS"
+    },
+    {
+      "checks": [
+        "explain_json",
+        "run"
+      ],
+      "consumer": "v090-substrate",
+      "features": [
+        "exact_induction",
+        "chain_shared_memory",
+        "common_subexpression_elimination",
+        "adaptive_reoptimization",
+        "persistent_hash_index",
+        "v090_substrate",
+        "pyxlog_compatibility",
+        "production_path_reuse"
+      ],
+      "name": "04_v090_substrate_primitives",
+      "raw_measurements": {
+        "explain_duration_sec": 0.091853,
+        "run_duration_sec": 1.426057
+      },
+      "status": "PASS"
+    },
+    {
+      "checks": [
+        "explain_json",
+        "run"
+      ],
+      "consumer": "pyxlog-compatibility",
+      "features": [
+        "delta",
+        "pyxlog_compatibility",
+        "production_path_reuse"
+      ],
+      "name": "05_pyxlog_session_compatibility",
+      "raw_measurements": {
+        "explain_duration_sec": 0.092537,
+        "run_duration_sec": 0.721263
+      },
+      "status": "PASS"
+    }
+  ],
+  "production_path_reuse": {
+    "checked_programs": [
+      "examples/v086-runtime/01_dts_delta_optimizer/program.xlog",
+      "examples/v086-runtime/02_neutral_material_flow/program.xlog",
+      "examples/v086-runtime/03_neutral_signal_diagnostics/program.xlog",
+      "examples/v086-runtime/04_v090_substrate_primitives/program.xlog",
+      "examples/v086-runtime/05_pyxlog_session_compatibility/program.xlog"
+    ],
+    "examples_run_through": "cargo run -q -p xlog-cli -- run/explain",
+    "fixture_only_bypass": false,
+    "private_hooks_used": false,
+    "status": "PASS",
+    "validator_contains_existing_gates": true,
+    "validator_reuses": [
+      "scripts/validate_v080_examples.py",
+      "scripts/validate_v085_examples.py",
+      "python/tests/test_v080_examples_source.py",
+      "python/tests/test_v085_examples_source.py"
+    ]
+  },
+  "raw_measurements": {
+    "example_timings": {
+      "01_dts_delta_optimizer": {
+        "explain_duration_sec": 0.087714,
+        "run_duration_sec": 1.433354
+      },
+      "02_neutral_material_flow": {
+        "explain_duration_sec": 0.084784,
+        "run_duration_sec": 1.638017
+      },
+      "03_neutral_signal_diagnostics": {
+        "explain_duration_sec": 0.086194,
+        "run_duration_sec": 1.469814
+      },
+      "04_v090_substrate_primitives": {
+        "explain_duration_sec": 0.091853,
+        "run_duration_sec": 1.426057
+      },
+      "05_pyxlog_session_compatibility": {
+        "explain_duration_sec": 0.092537,
+        "run_duration_sec": 0.721263
+      }
+    },
+    "feature_evidence": {
+      "adaptive_reoptimization": {
+        "path": "docs/evidence/2026-05-19-v086-adaptive-reoptimization/measurements.json",
+        "raw": {
+          "command": "cargo test -p xlog-runtime adaptive_reoptimization -- --nocapture",
+          "date": "2026-05-19",
+          "deterministic_fixture": {
+            "adapted_output_matches_baseline": true,
+            "adopted": 1,
+            "baseline_plan": "Project(Join(Scan(left), Scan(right)), Column(0))",
+            "candidate_plan": "Scan(left)",
+            "data_plane_dtoh_calls": 0,
+            "decision_replays": 100,
+            "rolled_back": 0,
+            "telemetry_fields": [
+              "estimated_output_rows",
+              "actual_output_rows",
+              "cardinality_delta_abs",
+              "estimated_selectivity",
+              "actual_selectivity",
+              "selectivity_delta_abs",
+              "left_heat",
+              "right_heat",
+              "heat_delta_abs",
+              "misplan_ratio"
+            ]
+          },
+          "disabled_fixture": {
+            "adopted": 0,
+            "decision": "Disabled",
+            "disabled": 1,
+            "rolled_back": 0
+          },
+          "node": "G086_ADAPT",
+          "performance_or_blocker": {
+            "blocker": "candidate adoption cannot replace baseline output unless GPU full-row equivalence succeeds; adverse candidates roll back with typed diagnostics",
+            "correctness_blocker_removed": true,
+            "speedup_gate_claimed": false
+          },
+          "rollback_fixture": {
+            "baseline_output_restored": true,
+            "candidate_output_mismatch_diagnostic": true,
+            "rollback_restored_baseline_diagnostic": true,
+            "rolled_back": 1
+          },
+          "transfer_budget": {
+            "tracked_data_plane_dtoh_calls": 0,
+            "uses_gpu_full_row_set_difference": true,
+            "uses_metadata_control_plane_counters": true
+          }
+        }
+      },
+      "chain_shared_memory": {
+        "path": "docs/evidence/2026-05-19-v086-chain-smem/measurements.json",
+        "raw": {
+          "chain_hot": {
+            "baseline": {
+              "chain_smem": false,
+              "dtoh_calls": 2,
+              "iterations": 12,
+              "max_seconds": 0.028317899035755545,
+              "median_seconds": 0.027507680497365072,
+              "min_seconds": 0.02734149800380692,
+              "query_pairs_negative": 32,
+              "query_pairs_positive": 32,
+              "result_signature": [
+                [
+                  "chain",
+                  "p_B",
+                  "p_C",
+                  32,
+                  0,
+                  0
+                ]
+              ],
+              "rows_per_candidate": 768,
+              "warmup": 3
+            },
+            "chain_smem": {
+              "chain_smem": true,
+              "dtoh_calls": 2,
+              "iterations": 12,
+              "max_seconds": 0.00541784503730014,
+              "median_seconds": 0.004927040485199541,
+              "min_seconds": 0.004898363025858998,
+              "query_pairs_negative": 32,
+              "query_pairs_positive": 32,
+              "result_signature": [
+                [
+                  "chain",
+                  "p_B",
+                  "p_C",
+                  32,
+                  0,
+                  0
+                ]
+              ],
+              "rows_per_candidate": 768,
+              "warmup": 3
+            },
+            "parity": true,
+            "speedup_ratio": 5.58300273358745
+          },
+          "fallback": {
+            "non_chain_uses_baseline_logic": true
+          },
+          "small": {
+            "baseline": {
+              "chain_smem": false,
+              "dtoh_calls": 2,
+              "iterations": 12,
+              "max_seconds": 0.0012547150254249573,
+              "median_seconds": 0.0011941255070269108,
+              "min_seconds": 0.0008972260402515531,
+              "query_pairs_negative": 8,
+              "query_pairs_positive": 8,
+              "result_signature": [
+                [
+                  "chain",
+                  "p_B",
+                  "p_C",
+                  8,
+                  0,
+                  0
+                ]
+              ],
+              "rows_per_candidate": 32,
+              "warmup": 3
+            },
+            "chain_smem": {
+              "chain_smem": true,
+              "dtoh_calls": 2,
+              "iterations": 12,
+              "max_seconds": 0.0016609960002824664,
+              "median_seconds": 0.0011783409863710403,
+              "min_seconds": 0.0011135960230603814,
+              "query_pairs_negative": 8,
+              "query_pairs_positive": 8,
+              "result_signature": [
+                [
+                  "chain",
+                  "p_B",
+                  "p_C",
+                  8,
+                  0,
+                  0
+                ]
+              ],
+              "rows_per_candidate": 32,
+              "warmup": 3
+            },
+            "parity": true,
+            "regression_percent": -1.3218477088869953
+          },
+          "transfer_budget": {
+            "added_dtoh_calls": 0,
+            "baseline_dtoh_calls": 2,
+            "chain_smem_dtoh_calls": 2
+          }
+        }
+      },
+      "common_subexpression_elimination": {
+        "path": "docs/evidence/2026-05-19-v086-cse/measurements.json",
+        "raw": {
+          "deterministic_fixture": {
+            "added_dtoh_calls": 0,
+            "disabled_cse_hits": 0,
+            "disabled_cse_misses": 0,
+            "duplicate_subplan_reduction_percent": 50.0,
+            "duplicate_subplans": 2,
+            "duplicate_subplans_evaluated_with_cse": 1,
+            "duplicate_subplans_evaluated_without_cse": 2,
+            "enabled_cse_hits": 1,
+            "enabled_cse_misses": 2,
+            "fixture": "duplicate inner join under set-union",
+            "output_parity": true,
+            "output_rows": 2
+          },
+          "generation_invalidation": {
+            "first_execution_hits": 1,
+            "second_execution_output_rows_after_right_relation_update": 1,
+            "total_hits_after_second_execution": 2
+          },
+          "unsafe_rejections": {
+            "aggregate_boundary": true,
+            "negation_or_difference_boundary": true,
+            "provenance_or_tensor_boundary": true,
+            "specialized_dispatch_boundary": true
+          }
+        }
+      },
+      "delta": {
+        "path": "docs/evidence/2026-05-19-v086-delta-coalesce/measurements.json",
+        "raw": {
+          "canceled_rows": 1,
+          "changed_relations": 1,
+          "coalesced_delete_rows": 0,
+          "coalesced_insert_rows": 3,
+          "coalesced_recompute_calls": 1,
+          "coalesced_result_rows": [
+            1,
+            3,
+            4
+          ],
+          "date": "2026-05-19",
+          "delta_row_reduction_ratio": 1.6666666667,
+          "final_output_transfer_excluded": true,
+          "fixture": "wmir_committed(u32)",
+          "goal_node": "G086_DELTA_COALESCE",
+          "hot_path_d2h_transfer_count": 0,
+          "hot_path_dtoh_bytes": 0,
+          "hot_path_dtoh_calls": 0,
+          "input_delta_count": 3,
+          "raw_input_delete_rows": 1,
+          "raw_input_delta_rows": 5,
+          "raw_input_insert_rows": 4,
+          "recompute_call_reduction_ratio": 3.0,
+          "replacement_result_rows": [
+            1,
+            3,
+            4
+          ],
+          "sequential_recompute_calls": 3,
+          "sequential_result_rows": [
+            1,
+            3,
+            4
+          ]
+        }
+      },
+      "exact_induction": {
+        "path": "docs/evidence/2026-05-19-v086-exact-types/measurements.json",
+        "raw": {
+          "core_dlpack_compatibility_tests_passed": 1,
+          "date": "2026-05-19",
+          "engine_unit_tests_passed": 23,
+          "goal_node": "G086_EXACT_TYPES",
+          "mixed_type_error": "Type error: induce_exact: candidate[0] buffer type mismatch: expected U32, got Symbol",
+          "provider_typed_tests_passed": 7,
+          "runtime_venv": "/tmp/xlog-v086-exact-types-venv",
+          "symbol": {
+            "3": {
+              "candidate_count": 3,
+              "dtoh_calls": 2,
+              "negative_count": 1,
+              "parity": true,
+              "positive_count": 2,
+              "schema": [
+                "symbol",
+                "symbol"
+              ],
+              "total_scored": 36
+            },
+            "5": {
+              "candidate_count": 5,
+              "dtoh_calls": 2,
+              "negative_count": 1,
+              "parity": true,
+              "positive_count": 2,
+              "schema": [
+                "symbol",
+                "symbol"
+              ],
+              "total_scored": 100
+            }
+          },
+          "u32": {
+            "3": {
+              "candidate_count": 3,
+              "dtoh_calls": 2,
+              "negative_count": 1,
+              "parity": true,
+              "positive_count": 2,
+              "schema": [
+                "u32",
+                "u32"
+              ],
+              "total_scored": 36
+            },
+            "5": {
+              "candidate_count": 5,
+              "dtoh_calls": 2,
+              "negative_count": 1,
+              "parity": true,
+              "positive_count": 2,
+              "schema": [
+                "u32",
+                "u32"
+              ],
+              "total_scored": 100
+            }
+          },
+          "unsupported_provider_error": "ilp_exact_score: positives buffer column 0 type = I32, expected U64, U32, or Symbol"
+        }
+      },
+      "persistent_hash_index": {
+        "path": "docs/evidence/2026-05-19-v086-persistent-hash-index/measurements.json",
+        "raw": {
+          "background_fixture": {
+            "background_build_requests": 1,
+            "background_builds_completed": 1,
+            "stream_safety_note": "requests stay on the existing provider build/reuse path; full asynchronous recorded builds remain follow-up work"
+          },
+          "budget_fixture": {
+            "evictions": 1,
+            "inserted_entries": 2,
+            "max_bytes": 100,
+            "retained_bytes": 60,
+            "retained_entries": 1
+          },
+          "commands": [
+            "cargo test -p xlog-runtime persistent_hash_index -- --nocapture",
+            "cargo test -p xlog-runtime persistent_cache -- --nocapture",
+            "cargo test -p xlog-runtime persistent_key -- --nocapture"
+          ],
+          "date": "2026-05-19",
+          "invalidation_fixture": {
+            "entries_after_mutation": 0,
+            "entries_before_mutation": 1,
+            "invalidations": 1
+          },
+          "manager_key": {
+            "includes_device_ordinal": true,
+            "includes_generation": true,
+            "includes_key_columns": true,
+            "includes_relation_id": true,
+            "includes_schema_signature": true
+          },
+          "node": "G086_INDEX",
+          "performance_or_blocker": {
+            "blocker": "full async background build speedup is not claimed; the completed slice makes reuse observable and stale-index/budget behavior deterministic",
+            "reuse_observed": true,
+            "speedup_gate_claimed": false
+          },
+          "repeated_session_fixture": {
+            "builds": 1,
+            "entries": 1,
+            "executions": 5,
+            "hits": 1,
+            "rows_per_side": 2500,
+            "stale_rejections": 0,
+            "tracked_dtoh_calls": 0,
+            "tracked_htod_calls": 0
+          }
+        }
+      }
+    }
+  },
+  "raw_outputs": {
+    "01_dts_delta_optimizer": {
+      "explain_json": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "explain",
+          "--format",
+          "json",
+          "examples/v086-runtime/01_dts_delta_optimizer/program.xlog"
+        ],
+        "duration_sec": 0.087714,
+        "returncode": 0,
+        "stderr_preview": "",
+        "stdout_preview": "{\n  \"parse\": {\n    \"statements\": 28,\n    \"cache_hits\": 0,\n    \"cache_misses\": 28\n  },\n  \"ast\": {\n    \"rules\": 16,\n    \"queries\": 3,\n    \"prob_queries\": 0\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 3\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 12\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"magic_sets\": {\n    \"status\": \"disabled\",\n    \"adorned_predicates\": [],\n    \"generated_predicates\": [],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"exact_ddnnf\",\n    \"aggregate_lifting_count\": 0\n  },\n  \"aggregate_lifting\": [\n  ]\n}\n"
+      },
+      "run": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "run",
+          "examples/v086-runtime/01_dts_delta_optimizer/program.xlog"
+        ],
+        "duration_sec": 1.433354,
+        "returncode": 0,
+        "stderr_preview": "",
+        "stdout_preview": "__xlog_query_0\n+------+-----+\n| item | dst |\n+------+-----+\n| 101  | 201 |\n| 104  | 204 |\n| 105  | 205 |\n+------+-----+\n__xlog_query_1\n+------+-----+\n| item | dst |\n+------+-----+\n| 101  | 201 |\n| 104  | 204 |\n+------+-----+\n__xlog_query_2\n+------------+---------+\n| computed_0 | count_0 |\n+------------+---------+\n| 4          | 4       |\n+------------+---------+\n"
+      }
+    },
+    "02_neutral_material_flow": {
+      "explain_json": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "explain",
+          "--format",
+          "json",
+          "examples/v086-runtime/02_neutral_material_flow/program.xlog"
+        ],
+        "duration_sec": 0.084784,
+        "returncode": 0,
+        "stderr_preview": "",
+        "stdout_preview": "{\n  \"parse\": {\n    \"statements\": 24,\n    \"cache_hits\": 0,\n    \"cache_misses\": 24\n  },\n  \"ast\": {\n    \"rules\": 14,\n    \"queries\": 3,\n    \"prob_queries\": 0\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 3\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 10\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"magic_sets\": {\n    \"status\": \"disabled\",\n    \"adorned_predicates\": [],\n    \"generated_predicates\": [],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"exact_ddnnf\",\n    \"aggregate_lifting_count\": 0\n  },\n  \"aggregate_lifting\": [\n  ]\n}\n"
+      },
+      "run": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "run",
+          "examples/v086-runtime/02_neutral_material_flow/program.xlog"
+        ],
+        "duration_sec": 1.638017,
+        "returncode": 0,
+        "stderr_preview": "",
+        "stdout_preview": "__xlog_query_0\n+-----+-----+\n| src | dst |\n+-----+-----+\n| 1   | 4   |\n| 2   | 6   |\n| 3   | 6   |\n+-----+-----+\n__xlog_query_1\n+-----+-----+\n| src | dst |\n+-----+-----+\n| 1   | 4   |\n+-----+-----+\n__xlog_query_2\n+-----+---------+\n| src | count_0 |\n+-----+---------+\n| 1   | 1       |\n| 2   | 1       |\n| 3   | 1       |\n+-----+---------+\n"
+      }
+    },
+    "03_neutral_signal_diagnostics": {
+      "explain_json": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "explain",
+          "--format",
+          "json",
+          "examples/v086-runtime/03_neutral_signal_diagnostics/program.xlog"
+        ],
+        "duration_sec": 0.086194,
+        "returncode": 0,
+        "stderr_preview": "",
+        "stdout_preview": "{\n  \"parse\": {\n    \"statements\": 27,\n    \"cache_hits\": 0,\n    \"cache_misses\": 27\n  },\n  \"ast\": {\n    \"rules\": 16,\n    \"queries\": 3,\n    \"prob_queries\": 0\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 3\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 11\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"magic_sets\": {\n    \"status\": \"disabled\",\n    \"adorned_predicates\": [],\n    \"generated_predicates\": [],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"exact_ddnnf\",\n    \"aggregate_lifting_count\": 0\n  },\n  \"aggregate_lifting\": [\n  ]\n}\n"
+      },
+      "run": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "run",
+          "examples/v086-runtime/03_neutral_signal_diagnostics/program.xlog"
+        ],
+        "duration_sec": 1.469814,
+        "returncode": 0,
+        "stderr_preview": "",
+        "stdout_preview": "__xlog_query_0\n+----+-----+\n| id | dst |\n+----+-----+\n| 10 | 11  |\n| 10 | 12  |\n| 11 | 12  |\n+----+-----+\n__xlog_query_1\n+----+-----+\n| id | dst |\n+----+-----+\n| 10 | 12  |\n+----+-----+\n__xlog_query_2\n+----+---------+\n| id | count_0 |\n+----+---------+\n| 10 | 2       |\n| 11 | 1       |\n+----+---------+\n"
+      }
+    },
+    "04_v090_substrate_primitives": {
+      "explain_json": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "explain",
+          "--format",
+          "json",
+          "examples/v086-runtime/04_v090_substrate_primitives/program.xlog"
+        ],
+        "duration_sec": 0.091853,
+        "returncode": 0,
+        "stderr_preview": "",
+        "stdout_preview": "{\n  \"parse\": {\n    \"statements\": 28,\n    \"cache_hits\": 0,\n    \"cache_misses\": 28\n  },\n  \"ast\": {\n    \"rules\": 16,\n    \"queries\": 3,\n    \"prob_queries\": 0\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 2\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 12\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"magic_sets\": {\n    \"status\": \"disabled\",\n    \"adorned_predicates\": [],\n    \"generated_predicates\": [],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"exact_ddnnf\",\n    \"aggregate_lifting_count\": 0\n  },\n  \"aggregate_lifting\": [\n  ]\n}\n"
+      },
+      "run": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "run",
+          "examples/v086-runtime/04_v090_substrate_primitives/program.xlog"
+        ],
+        "duration_sec": 1.426057,
+        "returncode": 0,
+        "stderr_preview": "",
+        "stdout_preview": "__xlog_query_0\n+-----+-----+\n| src | dst |\n+-----+-----+\n| 1   | 3   |\n+-----+-----+\n__xlog_query_1\n+----+-----+\n| id | dst |\n+----+-----+\n| 1  | 3   |\n+----+-----+\n__xlog_query_2\n+-----+---------+\n| src | count_0 |\n+-----+---------+\n| 1   | 1       |\n+-----+---------+\n"
+      }
+    },
+    "05_pyxlog_session_compatibility": {
+      "explain_json": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "explain",
+          "--format",
+          "json",
+          "examples/v086-runtime/05_pyxlog_session_compatibility/program.xlog"
+        ],
+        "duration_sec": 0.092537,
+        "returncode": 0,
+        "stderr_preview": "",
+        "stdout_preview": "{\n  \"parse\": {\n    \"statements\": 15,\n    \"cache_hits\": 0,\n    \"cache_misses\": 15\n  },\n  \"ast\": {\n    \"rules\": 8,\n    \"queries\": 2,\n    \"prob_queries\": 0\n  },\n  \"stratification\": {\n    \"status\": \"ok\",\n    \"strata\": 3\n  },\n  \"rir\": {\n    \"status\": \"ok\",\n    \"sccs\": 7\n  },\n  \"optimizer\": {\n    \"status\": \"ok\",\n    \"est_memory_peak\": 0\n  },\n  \"wcoj\": {\n    \"status\": \"reported\"\n  },\n  \"magic_sets\": {\n    \"status\": \"disabled\",\n    \"adorned_predicates\": [],\n    \"generated_predicates\": [],\n    \"declined_reasons\": []\n  },\n  \"probability\": {\n    \"engine\": \"exact_ddnnf\",\n    \"aggregate_lifting_count\": 0\n  },\n  \"aggregate_lifting\": [\n  ]\n}\n"
+      },
+      "run": {
+        "cmd": [
+          "cargo",
+          "run",
+          "-q",
+          "-p",
+          "xlog-cli",
+          "--",
+          "run",
+          "examples/v086-runtime/05_pyxlog_session_compatibility/program.xlog"
+        ],
+        "duration_sec": 0.721263,
+        "returncode": 0,
+        "stderr_preview": "",
+        "stdout_preview": "__xlog_query_0\n+----+\n| id |\n+----+\n| 1  |\n| 2  |\n| 3  |\n+----+\n__xlog_query_1\n+------------+---------+\n| computed_0 | count_0 |\n+------------+---------+\n| 0          | 3       |\n+------------+---------+\n"
+      }
+    }
+  },
+  "required_example_count": 5,
+  "reuse_audit": {
+    "duplicate_engine_helper_path": false,
+    "evidence_paths": [
+      "docs/evidence/2026-05-19-v086-delta-coalesce/measurements.json",
+      "docs/evidence/2026-05-19-v086-exact-types/measurements.json",
+      "docs/evidence/2026-05-19-v086-chain-smem/measurements.json",
+      "docs/evidence/2026-05-19-v086-cse/measurements.json",
+      "docs/evidence/2026-05-19-v086-adaptive-reoptimization/measurements.json",
+      "docs/evidence/2026-05-19-v086-persistent-hash-index/measurements.json"
+    ],
+    "reused_subsystems": [
+      "xlog-cli parser and explain pipeline",
+      "xlog-runtime production executor/provider dispatch",
+      "v0.8.0 DTS example validator",
+      "v0.8.5 language showcase validator",
+      "committed v0.8.6 feature evidence"
+    ],
+    "status": "PASS"
+  },
+  "status": "PASS",
+  "suite": "G086_CONSUMERS"
+}

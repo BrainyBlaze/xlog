@@ -1,0 +1,35 @@
+// Neutral signal-diagnostics workload for adaptive planning coverage.
+
+pred sensor(id: u32).
+pred signal_edge(src: u32, dst: u32).
+pred calibration_ok(id: u32).
+pred noisy_sensor(id: u32).
+pred stable_link(src: u32, dst: u32).
+pred monitored_pair(src: u32, dst: u32).
+pred diagnostic_pair(src: u32, dst: u32).
+pred stable_count(src: u32, count: u64).
+
+sensor(10).
+sensor(11).
+sensor(12).
+sensor(13).
+
+signal_edge(10, 11).
+signal_edge(11, 12).
+signal_edge(10, 12).
+signal_edge(12, 13).
+
+calibration_ok(10).
+calibration_ok(11).
+calibration_ok(12).
+
+noisy_sensor(13).
+
+stable_link(A, B) :- sensor(A), signal_edge(A, B), calibration_ok(A), not noisy_sensor(B).
+monitored_pair(A, C) :- stable_link(A, B), signal_edge(B, C), calibration_ok(C).
+diagnostic_pair(A, C) :- stable_link(A, B), signal_edge(B, C), not noisy_sensor(C).
+stable_count(A, count(B)) :- stable_link(A, B).
+
+?- stable_link(A, B).
+?- monitored_pair(A, C).
+?- stable_count(A, N).

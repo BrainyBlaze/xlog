@@ -1597,6 +1597,16 @@ engines, or parallel helper paths that bypass production dispatch are blockers.
       index rebuild cost as a release blocker.
       Evidence: `docs/evidence/2026-05-19-v086-persistent-hash-index/`.
 
+### Consumer Certification
+
+- [x] Add v0.8.6 runtime consumer certification examples and validator for
+      DTS-DLM, neutral Mistaber-derived `.xlog` workloads, v0.9.0 substrate
+      primitives, and public pyxlog session compatibility. The validator runs
+      the new examples through `xlog-cli run/explain`, invokes the existing
+      v0.8.0 and v0.8.5 validators, records raw timings/transfer evidence, and
+      audits production-path reuse instead of introducing a fixture-only engine.
+      Evidence: `docs/evidence/2026-05-19-v086-consumers/`.
+
 ## v0.9.0 - Epistemic and Solver Semantics
 
 ### xlog-logic

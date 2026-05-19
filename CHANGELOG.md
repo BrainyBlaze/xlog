@@ -24,6 +24,10 @@ All notable changes to this project are documented in this file.
   repeated session evaluations, including relation-generation/schema/device
   keys, stale-index invalidation, deterministic LRU budget eviction, and
   background-build mode counters.
+- Added v0.8.6 runtime consumer certification examples and validator for
+  DTS-DLM-shaped delta/optimizer workloads, neutral Mistaber-derived `.xlog`
+  fixtures, v0.9.0 substrate primitives, and public pyxlog compatibility,
+  reusing the v0.8.0/v0.8.5 validators and recording production-path evidence.
 
 ### Changed
 

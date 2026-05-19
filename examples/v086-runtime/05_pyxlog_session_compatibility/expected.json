@@ -1,0 +1,33 @@
+{
+  "consumer": "pyxlog-compatibility",
+  "features": [
+    "delta",
+    "pyxlog_compatibility",
+    "production_path_reuse"
+  ],
+  "source_required_substrings": [
+    "pred session_fact(id: u32)",
+    "pred session_delta(id: u32)",
+    "not rejected_delta(I)",
+    "session_count(0, count(I))"
+  ],
+  "checks": {
+    "run": {
+      "returncode": 0,
+      "stdout_contains": [
+        "__xlog_query_0",
+        "| 1",
+        "| 2",
+        "| 3",
+        "__xlog_query_1",
+        "| 0",
+        "| 3"
+      ]
+    },
+    "explain_json": {
+      "min_statements": 15,
+      "stratification_status": "ok",
+      "rir_status": "ok"
+    }
+  }
+}

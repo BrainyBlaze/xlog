@@ -166,6 +166,29 @@ snapshot and records a typed diagnostic.
 This keeps adaptive execution inside the existing runtime/provider dispatch
 surface while allowing the compiler to keep owning plan construction.
 
+### v0.9.0 Substrate Handoff
+
+The v0.9.0 epistemic/solver branch should consume the completed v0.8.6 runtime
+primitives rather than introducing a private execution path:
+
+- exact induction should use the typed native `U64`, `U32`, and `Symbol`
+  dispatch recorded in the G086_EXACT_TYPES evidence;
+- chain-shaped exact scorers should use the profile-gated shared-memory scorer
+  only when the topology gate fires;
+- duplicated deterministic solver subplans should use runtime CSE and its
+  unsafe-boundary diagnostics;
+- adaptive solver candidates should be compiled outside the executor and
+  passed through `Executor::execute_plan_with_adaptive_candidate`;
+- repeated solver joins should use the persistent hash-index manager and its
+  relation-generation/schema/device keys.
+
+The consumer certification fixture
+`examples/v086-runtime/04_v090_substrate_primitives/program.xlog` documents the
+public `.xlog` shape used for this handoff. Full asynchronous recorded
+persistent-index builds are not claimed by v0.8.6; the current manager records
+background-build request/completion telemetry on the existing provider
+build/reuse path.
+
 ## Unified Statistics Layer
 
 The optimizer integrates with `xlog-stats` for runtime feedback.
