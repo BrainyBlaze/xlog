@@ -287,6 +287,20 @@ fn rejects_unsafe_or_untyped_list_forms_with_typed_diagnostics() {
 }
 
 #[test]
+fn ordinary_pair_arity_two_relation_is_not_reserved_list_helper() {
+    let source = r#"
+        pair(1, 10). pair(1, 20). pair(2, 10).
+        blocked(1, 10).
+        keep(X, Y) :- pair(X, Y), not blocked(X, Y).
+        ?- keep(X, Y).
+    "#;
+
+    Compiler::new()
+        .compile(source)
+        .expect("ordinary pair/2 relation should compile");
+}
+
+#[test]
 fn list_type_refs_preserve_declared_element_types() {
     let program = parse_program(
         r#"

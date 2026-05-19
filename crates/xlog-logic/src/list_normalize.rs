@@ -229,7 +229,7 @@ impl ListNormalizer {
         if let Some(atoms) = self.expand_list_builtin(atom, var_list_types)? {
             return Ok(atoms);
         }
-        if is_pair_helper_name(&atom.predicate) {
+        if is_reserved_pair_helper(atom) {
             return Err(list_error(
                 "pair helpers are reserved for G085_META and are not implemented in G085_LIST",
             ));
@@ -973,10 +973,10 @@ fn list_to_set_pred(typ: ScalarType) -> String {
     format!("__xlog_list_to_set_{}", scalar_suffix(typ))
 }
 
-fn is_pair_helper_name(name: &str) -> bool {
+fn is_reserved_pair_helper(atom: &Atom) -> bool {
     matches!(
-        name,
-        "pair" | "pairs" | "zip" | "zip_with_index" | "enumerate"
+        (atom.predicate.as_str(), atom.terms.len()),
+        ("pair", 3) | ("pairs", 2) | ("zip", 3) | ("zip_with_index", 2) | ("enumerate", 2)
     )
 }
 
