@@ -69,7 +69,9 @@ semantic parity still fail closed.
 `epistemic_validate_world_views_u8` CUDA kernel and records
 `EpistemicGpuWorldViewValidationTrace` with one kernel launch, zero host
 writes, and CUDA-event elapsed timing for bounded world-view validation
-staging.
+staging. The kernel reads the candidate-assumption matrix as the semantic
+boundary and rejects a candidate unless every required epistemic literal has
+tuple-source support in the model-membership buffer.
 `Executor::materialize_epistemic_gpu_candidates` launches the
 `epistemic_materialize_accepted_candidates_u8` CUDA kernel and records
 `EpistemicGpuMaterializationTrace` with one kernel launch, zero host writes, and
@@ -90,9 +92,10 @@ filters output rows by accepted membership, world-view state, all variable-bound
 tuple-key relation matches, and binding polarity before the final tuple kernel
 compacts reduced output columns. The materialization trace records
 `row_filter_count` and `negated_row_filter_count`. Accepted unary, possible,
-not-possible, binary, multi-membership, and `not know` fixtures now prove final
-rows are filtered by bound tuple keys on device, and preflight records explicit
-`know`/`possible`/`not know`/`not possible` operator counts.
+not-possible, binary, multi-membership, missing-required multi-membership, and
+`not know` fixtures now prove final rows are filtered or rejected by bound tuple
+keys on device, and preflight records explicit `know`/`possible`/`not know`/
+`not possible` operator counts.
 `EpistemicGpuRuntimeWcojCertification` then requires actual production WCOJ
 counter deltas before WCOJ evidence can be certified, and its certified result
 carries the dispatched plan's edge-permutation, stream-group scheduling,
@@ -100,9 +103,10 @@ sorted-layout, and helper-split counts.
 `Executor::execute_epistemic_gpu_execution` wraps the reduced production
 runtime plan with preflight, workspace allocation, candidate-generation,
 propagation, candidate-validation, `execute_plan` plus before/after counter
-tracing, then model-membership staging, world-view validation staging, and
-accepted-candidate, final-result flag, and membership-gated final tuple
-materialization-staging kernel launches. It also snapshots provider
+tracing, then model-membership staging, candidate-assumption-aware world-view
+validation staging, and accepted-candidate, final-result flag, and
+membership-gated final tuple materialization-staging kernel launches. It also
+snapshots provider
 host-transfer counters around the hot path and records
 `EpistemicGpuTransferBudgetTrace`, which rejects tracked data-plane H2D/D2H
 deltas instead of resetting shared telemetry. That is still incomplete for the
@@ -112,7 +116,8 @@ arity-one/two/three kernels and a generic arity-N kernel, plus row-scoped
 variable-bound comparison against reduced-output columns and negated polarity
 through the generic arity-N kernel. Final tuple output is gated by the staged
 membership and world-view buffers, with accepted unary, possible, not-possible,
-binary, multi-membership, and `not know` bound-key row-filter fixtures. Full
+binary, multi-membership, missing-required multi-membership, and `not know`
+bound-key row-filter fixtures. Full
 world-view semantics, solver coupling, probabilistic production-path reuse, and
 broader accepted semantic parity do not dispatch yet.
 

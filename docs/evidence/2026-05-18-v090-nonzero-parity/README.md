@@ -11,9 +11,10 @@ Branch: `feat/v090-epistemic-solver-semantics`
 ## Scope
 
 This artifact records accepted runtime fixtures proving `know`, `possible`,
-`not possible`, and negated `not know` variable-bound nonzero-arity tuple
-membership can filter final output rows on device. It is not a closure claim for
-`G090_GPU`, `G090_CERT`, or `G090_CLOSE`.
+`not possible`, multi-membership, missing-required multi-membership, and
+negated `not know` variable-bound nonzero-arity tuple membership can filter or
+reject final output rows on device. It is not a closure claim for `G090_GPU`,
+`G090_CERT`, or `G090_CLOSE`.
 
 ## Implementation Evidence
 
@@ -27,6 +28,8 @@ membership can filter final output rows on device. It is not a closure claim for
 | Accepted possible fixture | `test_epistemic_gpu_wcoj_execution::accepted_possible_nonzero_arity_membership_records_operator_metrics` runs `accepted(X) :- node(X), possible edge(X)` with `node = [1, 2, 3]` and `edge = [2, 3]`; the final device output downloads as `[2, 3]` and preflight records `possible_operator_count == 1`. |
 | Accepted not-possible fixture | `test_epistemic_gpu_wcoj_execution::accepted_not_possible_nonzero_arity_membership_records_operator_and_polarity_metrics` runs `accepted(X) :- node(X), not possible edge(X)` with `node = [1, 2, 3]` and `edge = [2]`; the final device output downloads as `[1, 3]`, preflight records `not_possible_operator_count == 1`, and final tuple materialization records one negated row filter. |
 | Accepted binary fixture | `test_epistemic_gpu_wcoj_execution::accepted_binary_membership_filters_final_rows_by_bound_tuple_key` runs `accepted(X, Y) :- pair(X, Y), know edge(X, Y)` with `pair = [(1, 2), (2, 3)]` and `edge = [(1, 2)]`; the final device output downloads as `[(1, 2)]`. |
+| Accepted multi-membership fixture | `test_epistemic_gpu_wcoj_execution::accepted_multiple_memberships_filter_final_rows_by_all_bound_tuple_keys` runs `accepted(X) :- node(X), know edge(X), know color(X)`, returns `[2]`, and asserts exactly one accepted world view for the fully supported candidate. |
+| Missing-required multi-membership fixture | `test_epistemic_gpu_wcoj_execution::world_view_validation_rejects_candidates_missing_one_required_membership` runs `accepted(X) :- node(X), know edge(X), know color(X)` with no `color` tuple support, rejects all four candidates at the world-view boundary, and leaves final output empty. |
 | Accepted negated unary fixture | `test_epistemic_gpu_wcoj_execution::accepted_not_know_nonzero_arity_membership_filters_final_rows_by_absent_bound_tuple_key` runs `accepted(X) :- node(X), not know edge(X)` with `node = [1, 2, 3]` and `edge = [1, 3]`; the final device output downloads as `[2]`. |
 | Existing relation reuse | The fixture registers `EpistemicExecutablePlan::relation_ids`, seeds ordinary runtime relations, executes the reduced production runtime plan, and reads final output from the runtime-owned device buffer. |
 
@@ -39,16 +42,19 @@ membership can filter final output rows on device. It is not a closure claim for
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_not_possible_nonzero_arity_membership_records_operator_and_polarity_metrics -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_binary_membership_filters_final_rows_by_bound_tuple_key -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_not_know_nonzero_arity_membership_filters_final_rows_by_absent_bound_tuple_key -- --nocapture` | PASS, 1 passed, 0 failed |
-| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace -- --nocapture` | PASS, 51 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 48 passed, 0 failed |
+| `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace -- --nocapture` | PASS, 53 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_executable_plan -- --nocapture` | PASS, 3 passed, 0 failed |
 
 ## Non-Closure Notes
 
 - This covers unary and binary variable-bound `know` membership fixtures,
-  unary variable-bound `possible` and `not possible` membership metrics, and
-  unary variable-bound `not know` absent-key filtering.
+  unary variable-bound `possible` and `not possible` membership metrics,
+  multi-membership acceptance and missing-required rejection, and unary
+  variable-bound `not know` absent-key filtering.
 - It does not prove the full G91, FAEEL, GPT, splitting, solver, or
   probabilistic parity matrix.
-- Multiple-epistemic-literal final-row filters have a focused positive fixture,
-  but broader semantic parity still requires more coverage.
+- Multiple-epistemic-literal final-row filters now have focused positive and
+  missing-required fixtures, but broader semantic parity still requires more
+  coverage.
 - No closure-board edit, merge, push, or tag is implied.

@@ -45,6 +45,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(audit.contains("kclique_wcoj_max_arity"));
 
     let runtime = read_workspace_file("crates/xlog-runtime/src/executor/epistemic_workspace.rs");
+    let cuda = read_workspace_file("crates/xlog-cuda/kernels/epistemic.cu");
     let logic = read_workspace_file("crates/xlog-logic/src/epistemic.rs");
     let integration =
         read_workspace_file("crates/xlog-integration/tests/test_epistemic_gpu_wcoj_execution.rs");
@@ -97,6 +98,9 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(runtime.contains("EpistemicGpuSemanticTrace"));
     assert!(runtime.contains("from_device_rejection_reasons"));
     assert!(runtime.contains("dtoh_small_metadata_untracked"));
+    assert!(runtime.contains("&workspace.candidate_assumptions"));
+    assert!(cuda.contains("complete_membership"));
+    assert!(cuda.contains("candidate_assumptions[assumption_base + literal]"));
     assert!(runtime.contains("cpu_candidate_enumerations: 0"));
     assert!(runtime.contains("cpu_world_view_validations: 0"));
     assert!(runtime.contains("source_relation.column"));
@@ -104,6 +108,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(integration.contains(
         "accepted_not_possible_nonzero_arity_membership_records_operator_and_polarity_metrics"
     ));
+    assert!(integration
+        .contains("world_view_validation_rejects_candidates_missing_one_required_membership"));
     assert!(integration.contains("not_possible_operator_count"));
     assert!(integration.contains("negated_row_filter_count"));
     assert!(solver.contains("GpuCdclSolver::new"));

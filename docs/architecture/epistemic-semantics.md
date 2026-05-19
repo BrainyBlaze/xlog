@@ -249,9 +249,10 @@ and layout reuse.
 `Executor::execute_epistemic_gpu_execution` now wraps the reduced production
 runtime plan with preflight, workspace allocation, candidate-generation,
 propagation, candidate-validation, `execute_plan` plus before/after counter
-trace, then model-membership staging, world-view validation staging, and
-accepted-candidate, final-result flag, and final tuple materialization-staging
-kernel launches. The same execution path snapshots provider host-transfer counters
+trace, then model-membership staging, candidate-assumption-aware world-view
+validation staging, and accepted-candidate, final-result flag, and final tuple
+materialization-staging kernel launches. The same execution path snapshots
+provider host-transfer counters
 around that hot path and records `EpistemicGpuTransferBudgetTrace`, rejecting
 tracked data-plane H2D/D2H deltas instead of resetting shared provider
 telemetry.
@@ -262,9 +263,10 @@ runtime side and that WCOJ certification is tied to actual counter deltas around
 the production reduced-plan dispatch. Candidate-assumption generation,
 propagation staging, candidate-buffer validation, arity-zero through arity-three
 stable-model tuple-source model-membership staging with row-scoped ground key
-comparison over existing relation columns, bounded world-view validation staging,
-accepted-candidate materialization staging, and final-result flag plus final
-tuple materialization staging now have CUDA kernels, and the bounded hot path
+comparison over existing relation columns, bounded all-required-membership
+world-view validation staging, accepted-candidate materialization staging, and
+final-result flag plus final tuple materialization staging now have CUDA
+kernels, and the bounded hot path
 records zero tracked host transfers. Bound-variable tuple-key matching,
 arbitrary arity, full world-view semantics,
 solver/probability production-path reuse, and complete accepted-execution

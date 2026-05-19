@@ -1003,6 +1003,7 @@ fn accepted_multiple_memberships_filter_final_rows_by_all_bound_tuple_keys() {
     .expect("parse multi-membership epistemic fixture");
     let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
         .expect("compile multi-membership epistemic executable");
+    assert_eq!(executable.gpu_plan.epistemic_literals.len(), 2);
 
     let mut executor =
         Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
@@ -1017,7 +1018,7 @@ fn accepted_multiple_memberships_filter_final_rows_by_all_bound_tuple_keys() {
         .execute_epistemic_gpu_execution(
             &executable,
             EpistemicGpuWorkspaceCapacities {
-                max_candidates: 2,
+                max_candidates: 4,
                 max_worlds: 1,
                 max_models_per_reduction: 3,
             },
@@ -1025,6 +1026,10 @@ fn accepted_multiple_memberships_filter_final_rows_by_all_bound_tuple_keys() {
         .expect("execute multi-membership epistemic fixture");
 
     assert_eq!(result.prepared.preflight.tuple_membership_binding_count, 2);
+    assert_eq!(
+        result.semantic_trace.accepted_world_views, 1,
+        "only the candidate whose assumptions are supported by every required membership can pass"
+    );
     assert_eq!(
         result.model_membership.membership_source,
         EpistemicGpuModelMembershipSource::StableModelTupleBuffer
@@ -1039,6 +1044,60 @@ fn accepted_multiple_memberships_filter_final_rows_by_all_bound_tuple_keys() {
         download_unary_u32(&fix.provider, &result.final_output),
         vec![2],
         "final output must keep only rows accepted by all bound tuple-key memberships"
+    );
+}
+
+#[test]
+fn world_view_validation_rejects_candidates_missing_one_required_membership() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred color(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X), know color(X).
+        "#,
+    )
+    .expect("parse multi-membership rejection fixture");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile multi-membership rejection executable");
+    assert_eq!(executable.gpu_plan.epistemic_literals.len(), 2);
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &executable.relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation("node", upload_unary_u32(&fix.memory, &[1, 2]));
+    executor.put_relation("edge", upload_unary_u32(&fix.memory, &[1]));
+    executor.put_relation("color", upload_unary_u32(&fix.memory, &[]));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 4,
+                max_worlds: 1,
+                max_models_per_reduction: 2,
+            },
+        )
+        .expect("execute multi-membership rejection fixture");
+
+    assert_eq!(result.prepared.preflight.tuple_membership_binding_count, 2);
+    assert_eq!(
+        result.semantic_trace.accepted_world_views, 0,
+        "world-view validation must reject candidates missing any required epistemic membership"
+    );
+    assert_eq!(result.semantic_trace.rejected_candidates, 4);
+    assert_eq!(
+        download_unary_u32(&fix.provider, &result.final_output),
+        Vec::<u32>::new(),
+        "final output must remain empty when no candidate satisfies the full world-view boundary"
     );
 }
 

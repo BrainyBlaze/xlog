@@ -622,6 +622,7 @@ extern "C" __global__ void epistemic_validate_world_views_u8(
     uint32_t reduction_count,
     uint32_t models_per_reduction,
     uint32_t world_stride,
+    const uint8_t* __restrict__ candidate_assumptions,
     const uint8_t* __restrict__ model_membership,
     const uint8_t* __restrict__ world_views,
     uint32_t* __restrict__ rejection_reasons
@@ -639,12 +640,26 @@ extern "C" __global__ void epistemic_validate_world_views_u8(
 
     uint32_t per_candidate = reduction_count * models_per_reduction * literal_count;
     uint32_t base = candidate * per_candidate;
-    uint8_t observed_membership = 0u;
-    for (uint32_t offset = 0; offset < per_candidate; ++offset) {
-        observed_membership |= model_membership[base + offset];
+    uint32_t assumption_base = candidate * literal_count;
+    uint8_t complete_membership = 1u;
+    for (uint32_t literal = 0u; literal < literal_count; ++literal) {
+        uint8_t candidate_bit = candidate_assumptions[assumption_base + literal];
+        uint8_t literal_supported = 0u;
+        if (candidate_bit != 0u) {
+            for (uint32_t reduction = 0u; reduction < reduction_count; ++reduction) {
+                for (uint32_t model = 0u; model < models_per_reduction; ++model) {
+                    uint32_t offset =
+                        ((reduction * models_per_reduction + model) * literal_count) + literal;
+                    literal_supported |= model_membership[base + offset];
+                }
+            }
+        }
+        if (candidate_bit == 0u || literal_supported == 0u) {
+            complete_membership = 0u;
+        }
     }
 
-    if (observed_membership == 0u) {
+    if (complete_membership == 0u) {
         rejection_reasons[candidate] = 5u;
     }
 }

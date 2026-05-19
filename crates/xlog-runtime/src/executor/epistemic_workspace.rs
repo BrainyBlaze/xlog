@@ -3013,6 +3013,7 @@ impl Executor {
                         reduction_count,
                         models_per_reduction,
                         world_stride,
+                        &workspace.candidate_assumptions,
                         &workspace.model_membership,
                         &workspace.world_views,
                         &mut workspace.rejection_reasons,
