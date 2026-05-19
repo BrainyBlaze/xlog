@@ -1592,9 +1592,12 @@ engines, or parallel helper paths that bypass production dispatch are blockers.
       telemetry shows stable mis-planning on consumer fixtures, bounded by
       deterministic replay and rollback gates.
       Evidence: `docs/evidence/2026-05-19-v086-adaptive-reoptimization/`.
-- [x] Add a persistent hash index manager with background GPU-resident
-      building, invalidation, and budget-aware reuse after profiles identify
-      index rebuild cost as a release blocker.
+- [x] Add a persistent hash index manager with generation/schema/device keying,
+      stale-index invalidation, deterministic LRU budget eviction, repeated
+      session reuse, and background-build request/completion telemetry after
+      profiles identify index rebuild cost as a release blocker. Full
+      asynchronous recorded background-build speedup remains a named v0.8.6
+      closure blocker/follow-up rather than a claimed PASS metric.
       Evidence: `docs/evidence/2026-05-19-v086-persistent-hash-index/`.
 
 ### Consumer Certification

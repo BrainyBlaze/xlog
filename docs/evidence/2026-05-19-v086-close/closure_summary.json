@@ -1,0 +1,95 @@
+{
+  "branch": "feat/v086-runtime-completion",
+  "certification_head_before_closure": "b72f61ea",
+  "date": "2026-05-19",
+  "governing_goal": "docs/plans/2026-05-19-agent-v086-dts-runtime-completion-goal.md",
+  "proposal": "docs/plans/2026-05-19-v086-closure-proposal.md",
+  "release_decision": "SCOPE_AMENDMENT_REQUIRED",
+  "release_actions_authorized": {
+    "board_update": false,
+    "merge": false,
+    "push": false,
+    "tag": false
+  },
+  "status": "PASS_WITH_BLOCKED_SCOPE",
+  "subgoals": {
+    "G086_PRE": {
+      "commit": "e6edb49c",
+      "evidence": "docs/evidence/2026-05-19-v086-pre/README.md",
+      "status": "PASS"
+    },
+    "G086_DELTA_COALESCE": {
+      "commit": "6b18a7b9",
+      "evidence": "docs/evidence/2026-05-19-v086-delta-coalesce/README.md",
+      "status": "PASS"
+    },
+    "G086_NOTIFY": {
+      "commit": "9a79faea",
+      "evidence": "docs/evidence/2026-05-19-v086-notify/README.md",
+      "status": "PASS"
+    },
+    "G086_EXACT_TYPES": {
+      "commit": "d1967d94",
+      "evidence": "docs/evidence/2026-05-19-v086-exact-types/README.md",
+      "status": "PASS"
+    },
+    "G086_CHAIN_SMEM": {
+      "commit": "e1cddbb7 + ce78e32f",
+      "evidence": [
+        "docs/evidence/2026-05-19-v086-chain-smem-profile/README.md",
+        "docs/evidence/2026-05-19-v086-chain-smem/README.md"
+      ],
+      "status": "PASS"
+    },
+    "G086_CSE": {
+      "commit": "1363b05e",
+      "evidence": "docs/evidence/2026-05-19-v086-cse/README.md",
+      "status": "PASS"
+    },
+    "G086_ADAPT": {
+      "commit": "2d9bdc0f",
+      "evidence": "docs/evidence/2026-05-19-v086-adaptive-reoptimization/README.md",
+      "status": "PASS"
+    },
+    "G086_INDEX": {
+      "commit": "702e1f8f",
+      "evidence": "docs/evidence/2026-05-19-v086-persistent-hash-index/README.md",
+      "status": "PASS_WITH_BLOCKED_PERFORMANCE_SCOPE"
+    },
+    "G086_CONSUMERS": {
+      "commit": "37f16651",
+      "evidence": "docs/evidence/2026-05-19-v086-consumers/README.md",
+      "status": "PASS"
+    },
+    "G086_INT": {
+      "commit": "b72f61ea",
+      "evidence": "docs/evidence/2026-05-19-v086-int/README.md",
+      "status": "PASS"
+    },
+    "G086_CLOSE": {
+      "commit": "proposal commit",
+      "evidence": "docs/evidence/2026-05-19-v086-close/README.md",
+      "status": "PASS"
+    }
+  },
+  "blocked_or_scope_amendment_items": [
+    {
+      "goal": "G086_INDEX",
+      "metric": "M086_INDEX.5 performance/blocker",
+      "status": "BLOCKED",
+      "description": "Full asynchronous recorded persistent-index background-build speedup is not implemented or claimed. Completed scope covers deterministic persistent reuse, key hardening, invalidation, budget eviction, and background request/completion telemetry on the existing provider build/reuse path."
+    }
+  ],
+  "verification": {
+    "integration_evidence": "docs/evidence/2026-05-19-v086-int/README.md",
+    "consumer_evidence": "docs/evidence/2026-05-19-v086-consumers/validation_summary.json",
+    "latest_consumer_examples": {
+      "v080": 5,
+      "v085": 10,
+      "v086": 5
+    },
+    "python_bundle": "38 passed in 26.04s",
+    "workspace_check": "cargo check --workspace exit 0"
+  },
+  "v090_rebase_note": "v0.9.0 should rebase or merge after any accepted v0.8.6 landing because exact type dispatch, chain shared-memory scoring, runtime CSE, adaptive candidate adoption, and persistent-index telemetry affect the substrate expected by epistemic/solver work."
+}
