@@ -119,9 +119,9 @@ arity-one/two/three kernels and a generic arity-N kernel, plus row-scoped
 variable-bound comparison against reduced-output columns and negated polarity
 through the generic arity-N kernel. Final tuple output is gated by the staged
 membership and world-view buffers, with accepted unary, possible, not-possible,
-binary `know`, binary `possible`, binary `not possible`, quaternary generic
-arity-N `know`, multi-membership, missing-required multi-membership, and
-`not know` bound-key row-filter
+binary `know`, binary `possible`, binary `not possible`, binary `not know`,
+quaternary generic arity-N `know`, multi-membership, missing-required
+multi-membership, and unary `not know` bound-key row-filter
 fixtures. Full arbitrary-world enumeration, complete semantic parity, and
 release-wide solver/probabilistic coverage do not dispatch yet, but bounded
 accepted runtime fixtures now feed the solver and probabilistic production
@@ -142,8 +142,8 @@ production GPU/WCOJ stack for specific certification fixtures:
   construction, and membership-gated final tuple materialization use GPU
   workspace/output buffers with zero CPU candidate/world-view fallback counters.
 - Unary and binary nonzero-arity `know`/`possible`/`not possible` slices,
-  quaternary generic arity-N `know`, unary `not know`, multi-membership,
-  missing-required rejection, split
+  binary `not know`, quaternary generic arity-N `know`, unary `not know`,
+  multi-membership, missing-required rejection, split
   possible-vs-not-known, G91 self-support, and independently founded FAEEL
   fixtures compare bounded GPU traces against semantic or GPT oracles.
 - Solver SAT/UNSAT, lifecycle, learned-clause, MaxSAT, scheduler, and portfolio
@@ -313,9 +313,10 @@ The accepted multi-membership fixture also compares the two-literal
 including generated, propagated, tested, accepted, rejected, and
 accepted/rejected candidate-index fields.
 The unary nonzero-arity `possible edge(X)`, `not possible edge(X)`, and
-`not know edge(X)` fixtures compare the same trace and candidate-index fields
-against bounded GPT oracles; for the negated operators, candidate index 1 is
-the oracle slot where the negated literal is true.
+`not know edge(X)` fixtures, plus the binary `not know edge(X, Y)` fixture,
+compare the same trace and candidate-index fields against bounded GPT oracles;
+for the negated operators, candidate index 1 is the oracle slot where the
+negated literal is true.
 The quaternary `know fact4(A, B, C, D)` fixture exercises the generic arity-N
 bound-output tuple-key path and compares the same trace and candidate-index
 fields against a bounded GPT oracle.
