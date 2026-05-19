@@ -52,8 +52,8 @@ incomplete for the full epistemic hot path and does not close `G090_GPU`.
 | Preflight-only WCOJ evidence rejected | `EpistemicGpuRuntimeWcojCertification` reports `MissingRequiredWcojDispatch` when a K-clique WCOJ plan exists but runtime WCOJ counters do not advance. |
 | Runtime WCOJ gate | `EpistemicGpuRuntimeTrace::require_wcoj_certification` returns a typed `UnsupportedEpistemicConstruct` error for required K-clique WCOJ plans with zero observed WCOJ dispatches. |
 | Reduced-plan execution trace | `Executor::execute_epistemic_gpu_execution` prepares workspace, launches candidate generation, propagation, and candidate validation, executes the reduced production runtime plan with `execute_plan`, captures before/after counter deltas in `EpistemicGpuRuntimeTrace`, requires WCOJ certification, clones the named reduced output relation, then launches model-membership, world-view validation, accepted-candidate materialization, final-result flag staging, and final tuple materialization. |
-| Accepted WCOJ dispatch | `test_epistemic_gpu_wcoj_execution` proves one accepted K5 epistemic reduction reaches certified production WCOJ dispatch and final row materialization. |
-| K7/K8 preflight reuse | `test_epistemic_gpu_wcoj_execution::epistemic_k7_k8_reductions_reuse_g39_kclique_planner_preflight_surface` proves epistemic K7/K8 reductions reuse the G39 K-clique planner/preflight surface with `kclique_wcoj_max_arity` and complete 21/28 edge-permutation counts. |
+| Accepted WCOJ dispatch | `test_epistemic_gpu_wcoj_execution` proves accepted K5 and K7 epistemic reductions reach certified production WCOJ dispatch and final row materialization. |
+| K7/K8 preflight reuse | `test_epistemic_gpu_wcoj_execution::epistemic_k7_k8_reductions_reuse_g39_kclique_planner_preflight_surface` proves epistemic K7/K8 reductions reuse the G39 K-clique planner/preflight surface with `kclique_wcoj_max_arity` and complete 21/28 edge-permutation counts; `accepted_epistemic_k7_execution_certifies_production_wcoj_dispatch` additionally proves K7 runtime dispatch with `wcoj_clique7_dispatch_count >= 1`. |
 | Hot-path transfer budget | `EpistemicGpuTransferBudgetTrace` snapshots provider host-transfer counters around the GPU hot path and rejects tracked H2D/D2H deltas without resetting shared stats. |
 | Final-result transfer accounting | `EpistemicGpuFinalResultTransferTrace` runs after the hot-path transfer-budget window, reads final row-count metadata, records final output rows/columns/payload bytes, and confirms accepted execution issued zero data-plane D2H calls. |
 
@@ -64,7 +64,7 @@ incomplete for the full epistemic hot path and does not close `G090_GPU`.
 | `cargo fmt --check` | PASS |
 | `git diff --check` | PASS |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 47 passed, 0 failed |
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 22 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 23 passed, 0 failed |
 | `cargo test -p xlog-cuda --test build_script_tests -- --nocapture` | PASS, 4 passed, 0 failed |
 | `cargo test -p xlog-runtime --lib` | PASS, 128 passed, 0 failed |
 | `cargo check -p xlog-cuda -p xlog-runtime -p xlog-logic -p xlog-ir` | PASS |
@@ -75,7 +75,7 @@ incomplete for the full epistemic hot path and does not close `G090_GPU`.
 | Metric | Target | Status | Evidence |
 |---|---|---|---|
 | M090_GPU.1 production lowering | accepted epistemic fixture runs through production runtime dispatch | PARTIAL | Runtime API launches candidate generation, propagation, and candidate validation before reduced production-plan execution with counter tracing, then launches arity 0-3 and generic arity-N tuple-source-backed model-membership staging with row-scoped ground and variable-bound key comparison plus `not know` polarity, world-view validation, accepted-candidate materialization, final-result flag staging, final-row map construction, and final tuple materialization; broader full accepted semantics remain missing. |
-| M090_GPU.2 WCOJ eligibility | at least one epistemic reduction uses the WCOJ planner/path where eligible | PASS | Accepted K5 fixture records WCOJ/K-clique/helper metadata, passes the runtime WCOJ certification gate, observes production K5 dispatch counters, and materializes one final accepted row. K7/K8 preflight now proves broader G39 K-clique planner-surface reuse without claiming runtime dispatch. |
+| M090_GPU.2 WCOJ eligibility | at least one epistemic reduction uses the WCOJ planner/path where eligible | PASS | Accepted K5 fixture records WCOJ/K-clique/helper metadata, passes the runtime WCOJ certification gate, observes production K5 dispatch counters, and materializes one final accepted row. Accepted K7 fixture records K-clique max-arity/edge-permutation metadata, passes the runtime WCOJ certification gate, observes production K7 dispatch counters, and materializes one final accepted row. K8 preflight proves broader G39 K-clique planner-surface reuse without claiming runtime dispatch. |
 | M090_GPU.3 GPU buffers | candidate, world-view, and rejection state have GPU-resident representations | PARTIAL | Prepare API combines preflight with workspace allocation and device-side reset; candidate, propagation, candidate-validation, arity 0-3 and generic arity-N tuple-source model-membership staging with encoded ground key expectations and bound-output column metadata, bounded world-view-validation, accepted-candidate materialization, final-result flag buffers, and final-row maps can be populated or checked by CUDA kernels; broader semantic parity remains missing. |
 | M090_GPU.4 kernel coverage | GPU kernels cover candidate generation, propagation, validation, and materialization hot paths | PARTIAL | Candidate generation has `epistemic_generate_candidate_assumptions_u8`; propagation staging has `epistemic_propagate_candidates_u8`; candidate-buffer validation has `epistemic_validate_candidate_bits_u8`; tuple-source model membership has fixed arity-one/two/three kernels plus generic arity-N ground and variable-bound comparison over existing relation columns; bounded world-view validation has `epistemic_validate_world_views_u8`; materialization staging has `epistemic_materialize_accepted_candidates_u8`; final-result flag staging has `epistemic_materialize_final_result_flags_u8`; final tuple materialization has `epistemic_build_final_tuple_row_map_u8` and `epistemic_materialize_final_tuple_column_u8`. |
 | M090_GPU.5 CPU fallback ban | accepted trace records zero CPU candidate/world-view fallbacks | PARTIAL | Preflight rejects nonzero fallback counters, and candidate/propagation/validation/model-membership/world-view-validation/materialization/final-result/final-row traces record zero host writes; tuple-source staging reads existing device relation buffers and compares row-scoped ground and variable-bound keys on device. |
@@ -86,7 +86,7 @@ incomplete for the full epistemic hot path and does not close `G090_GPU`.
 
 ## Remaining Blocker
 
-The next slice must broaden accepted-execution parity beyond the K5 WCOJ
-fixture, convert broader K-clique preflight coverage into runtime dispatch
+The next slice must broaden accepted-execution parity beyond the K5/K7 WCOJ
+fixtures, convert remaining K8 preflight coverage into runtime dispatch
 evidence where required, extend solver/probability accepted-runtime traces, and
 complete zero CPU fallback certification.

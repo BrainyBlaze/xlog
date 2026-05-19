@@ -26,7 +26,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(audit.contains("G38 completion audit"));
     assert!(audit.contains("G38-B integration audit"));
     assert!(audit.contains("G39 completion audit"));
-    assert!(audit.contains("K7/K8 preflight"));
+    assert!(audit.contains("accepted K7 fixture"));
+    assert!(audit.contains("K8 epistemic reductions carry"));
     assert!(audit.contains("kclique_wcoj_max_arity"));
 
     let runtime = read_workspace_file("crates/xlog-runtime/src/executor/epistemic_workspace.rs");
@@ -76,6 +77,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(solver.contains("gpu_learned_count_buffer_publications"));
     assert!(solver.contains("gpu_learned_clause_imports"));
     assert!(solver.contains("gpu_learned_clause_reused_solves"));
+    assert!(solver.contains("gpu_learned_clause_reuse_rejections"));
     assert!(solver.contains("gpu_maxsat_candidate_solves"));
     assert!(solver.contains("gpu_maxsat_optima"));
     assert!(solver.contains("gpu_portfolio_jobs"));

@@ -307,6 +307,79 @@ fn epistemic_k7_k8_reductions_reuse_g39_kclique_planner_preflight_surface() {
 }
 
 #[test]
+fn accepted_epistemic_k7_execution_certifies_production_wcoj_dispatch() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let source = epistemic_kclique_source(7, true);
+    let program = parse_program(&source).expect("parse epistemic K7");
+    let rel_ids = rel_ids_for_reduced_kclique(7);
+    let stats = kclique_stats(&rel_ids, 7, Some((5, 5.0)));
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, Some(&stats))
+        .expect("compile epistemic executable K7");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &executable.relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    for (name, rows) in k_clique_inputs(7) {
+        executor.put_relation(&name, upload_binary_u32(&fix.memory, &rows));
+    }
+    executor.put_relation("gate", upload_nullary(&fix.memory, 1));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("execute accepted epistemic K7");
+
+    assert_eq!(result.prepared.preflight.kclique_wcoj_plan_count, 1);
+    assert_eq!(result.prepared.preflight.kclique_wcoj_max_arity, 7);
+    assert_eq!(
+        result
+            .prepared
+            .preflight
+            .kclique_wcoj_edge_permutation_count,
+        21
+    );
+    assert!(
+        result.prepared.preflight.sorted_layout_requirement_count >= 1,
+        "accepted K7 must carry production sorted-layout requirements"
+    );
+    assert!(matches!(
+        result.trace.wcoj_certification,
+        EpistemicGpuRuntimeWcojCertification::Certified {
+            observed_wcoj_dispatches: 1..,
+            observed_kclique_dispatches: 1..,
+            ..
+        }
+    ));
+    assert!(
+        result.trace.counter_delta.wcoj_clique7_dispatch_count >= 1,
+        "accepted epistemic K7 must dispatch through production K7 WCOJ"
+    );
+    assert_eq!(result.final_result_transfer.final_output_rows, 1);
+    assert_eq!(result.final_result_transfer.final_output_column_count, 7);
+    assert_eq!(
+        result.final_result_transfer.final_output_payload_bytes,
+        7 * std::mem::size_of::<u32>() as u64
+    );
+    assert_eq!(
+        read_device_row_count(&fix.provider, &result.final_output).expect("final row count"),
+        1,
+        "accepted epistemic K7 final output must materialize the production WCOJ row"
+    );
+}
+
+#[test]
 fn accepted_nonzero_arity_membership_filters_final_rows_by_bound_tuple_key() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
