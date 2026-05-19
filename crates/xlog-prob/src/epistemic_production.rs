@@ -311,6 +311,82 @@ impl EpistemicProbProductionAdapter {
         self.trace
     }
 
+    fn accepted_world_views_from_gpu_batch_execution_evidence(
+        &mut self,
+        provider: &CudaKernelProvider,
+        evidence: EpistemicProbGpuBatchExecutionEvidence<'_>,
+        construct: &str,
+    ) -> Result<Vec<AcceptedWorldViewEvidence>> {
+        if evidence.batch.results.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: construct.to_string(),
+                context: "probabilistic batch gating requires at least one accepted GPU component"
+                    .to_string(),
+            });
+        }
+        if evidence.assumptions_by_component.len() != evidence.batch.results.len() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: construct.to_string(),
+                context: format!(
+                    "assumption group count {} does not match GPU batch component count {}",
+                    evidence.assumptions_by_component.len(),
+                    evidence.batch.results.len()
+                ),
+            });
+        }
+
+        let batch_trace = evidence.batch.trace;
+        if batch_trace.component_count != evidence.batch.results.len()
+            || batch_trace.gpu_runtime_component_executions != evidence.batch.results.len()
+            || batch_trace.cpu_recomposition_steps != 0
+            || batch_trace.cpu_candidate_enumerations != 0
+            || batch_trace.cpu_world_view_validations != 0
+            || batch_trace.tracked_dtoh_calls != 0
+            || batch_trace.per_candidate_host_round_trips != 0
+        {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: construct.to_string(),
+                context: format!(
+                    "accepted GPU batch evidence requires complete GPU component execution and \
+                     zero CPU/host fallback counters, got components={}/{}, recomposition={}, \
+                     cpu_candidates={}, cpu_world_views={}, dtoh_calls={}, round_trips={}",
+                    batch_trace.gpu_runtime_component_executions,
+                    batch_trace.component_count,
+                    batch_trace.cpu_recomposition_steps,
+                    batch_trace.cpu_candidate_enumerations,
+                    batch_trace.cpu_world_view_validations,
+                    batch_trace.tracked_dtoh_calls,
+                    batch_trace.per_candidate_host_round_trips
+                ),
+            });
+        }
+
+        let mut accepted = Vec::with_capacity(evidence.batch.results.len());
+        for (result, assumptions) in evidence
+            .batch
+            .results
+            .iter()
+            .zip(evidence.assumptions_by_component.iter())
+        {
+            accepted.push(AcceptedWorldViewEvidence::from_gpu_execution_result(
+                provider,
+                result,
+                (*assumptions).to_vec(),
+            )?);
+        }
+
+        self.trace.accepted_gpu_batch_evidence_consumed = self
+            .trace
+            .accepted_gpu_batch_evidence_consumed
+            .saturating_add(1);
+        self.trace.accepted_gpu_batch_component_evidence_consumed = self
+            .trace
+            .accepted_gpu_batch_component_evidence_consumed
+            .saturating_add(accepted.len() as u64);
+
+        Ok(accepted)
+    }
+
     #[cfg(feature = "host-io")]
     fn record_conditioned_evidence_counts(
         &mut self,
@@ -1530,6 +1606,28 @@ impl EpistemicProbProductionAdapter {
         Ok(results)
     }
 
+    /// Encode source PIR/CNF once per accepted split/batch GPU epistemic component.
+    pub fn encode_source_pir_cnf_for_gpu_batch_execution_result(
+        &mut self,
+        source: &str,
+        provider: &Arc<CudaKernelProvider>,
+        evidence: EpistemicProbGpuBatchExecutionEvidence<'_>,
+    ) -> Result<Vec<EpistemicProbPirCnfEvidence>> {
+        let accepted = self.accepted_world_views_from_gpu_batch_execution_evidence(
+            provider.as_ref(),
+            evidence,
+            "epistemic probabilistic source PIR/CNF batch production",
+        )?;
+
+        let mut results = Vec::with_capacity(accepted.len());
+        for evidence in &accepted {
+            results.push(
+                self.encode_source_pir_cnf_with_accepted_world_view(source, provider, evidence)?,
+            );
+        }
+        Ok(results)
+    }
+
     /// Encode a parsed program through the existing GPU PIR and CNF production path.
     pub fn encode_program_pir_cnf_with_accepted_world_view(
         &mut self,
@@ -1584,6 +1682,28 @@ impl EpistemicProbProductionAdapter {
                 record.assumptions.to_vec(),
             )?);
         }
+
+        let mut results = Vec::with_capacity(accepted.len());
+        for evidence in &accepted {
+            results.push(
+                self.encode_program_pir_cnf_with_accepted_world_view(program, provider, evidence)?,
+            );
+        }
+        Ok(results)
+    }
+
+    /// Encode parsed-program PIR/CNF once per accepted split/batch GPU epistemic component.
+    pub fn encode_program_pir_cnf_for_gpu_batch_execution_result(
+        &mut self,
+        program: &Program,
+        provider: &Arc<CudaKernelProvider>,
+        evidence: EpistemicProbGpuBatchExecutionEvidence<'_>,
+    ) -> Result<Vec<EpistemicProbPirCnfEvidence>> {
+        let accepted = self.accepted_world_views_from_gpu_batch_execution_evidence(
+            provider.as_ref(),
+            evidence,
+            "epistemic probabilistic parsed-program PIR/CNF batch production",
+        )?;
 
         let mut results = Vec::with_capacity(accepted.len());
         for evidence in &accepted {
@@ -1655,6 +1775,27 @@ impl EpistemicProbProductionAdapter {
         Ok(results)
     }
 
+    /// Evaluate GPU exact query probabilities once per accepted split/batch GPU epistemic component.
+    #[cfg(feature = "host-io")]
+    pub fn evaluate_for_gpu_batch_execution_result(
+        &mut self,
+        program: &ExactDdnnfProgram,
+        provider: &CudaKernelProvider,
+        evidence: EpistemicProbGpuBatchExecutionEvidence<'_>,
+    ) -> Result<Vec<ExactResult>> {
+        let accepted = self.accepted_world_views_from_gpu_batch_execution_evidence(
+            provider,
+            evidence,
+            "epistemic probabilistic query evaluation batch production",
+        )?;
+
+        let mut results = Vec::with_capacity(accepted.len());
+        for evidence in &accepted {
+            results.push(self.evaluate(program, evidence)?);
+        }
+        Ok(results)
+    }
+
     /// Evaluate GPU exact gradients after accepted world-view evidence was consumed.
     #[cfg(feature = "host-io")]
     pub fn evaluate_gpu_with_grads(
@@ -1709,6 +1850,27 @@ impl EpistemicProbProductionAdapter {
                 record.assumptions.to_vec(),
             )?);
         }
+
+        let mut results = Vec::with_capacity(accepted.len());
+        for evidence in &accepted {
+            results.push(self.evaluate_gpu_with_grads(program, evidence)?);
+        }
+        Ok(results)
+    }
+
+    /// Evaluate GPU exact gradients once per accepted split/batch GPU epistemic component.
+    #[cfg(feature = "host-io")]
+    pub fn evaluate_gpu_with_grads_for_gpu_batch_execution_result(
+        &mut self,
+        program: &ExactDdnnfProgram,
+        provider: &CudaKernelProvider,
+        evidence: EpistemicProbGpuBatchExecutionEvidence<'_>,
+    ) -> Result<Vec<ExactResultWithGrads>> {
+        let accepted = self.accepted_world_views_from_gpu_batch_execution_evidence(
+            provider,
+            evidence,
+            "epistemic probabilistic gradient evaluation batch production",
+        )?;
 
         let mut results = Vec::with_capacity(accepted.len());
         for evidence in &accepted {

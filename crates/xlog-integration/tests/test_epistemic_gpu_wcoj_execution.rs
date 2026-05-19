@@ -6802,6 +6802,224 @@ fn accepted_gpu_execution_results_gate_batched_probabilistic_gradient_evaluation
 }
 
 #[test]
+fn accepted_split_batch_gates_probabilistic_pir_cnf_and_exact_evaluation_paths() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred color(u32).
+        pred a(u32).
+        pred b(u32).
+        a(X) :- node(X), know edge(X).
+        b(X) :- node(X), know color(X).
+        "#,
+    )
+    .expect("parse split epistemic fixture");
+    let split = compile_epistemic_gpu_split_execution_with_stats_snapshot(&program, None)
+        .expect("compile split components through GPU executable path");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    let mut relation_ids = BTreeMap::new();
+    for component in &split.components {
+        for (name, rel_id) in &component.executable.relation_ids {
+            if let Some(previous) = relation_ids.insert(name.clone(), *rel_id) {
+                assert_eq!(
+                    previous, *rel_id,
+                    "split components must preserve relation ids for shared declarations"
+                );
+            }
+        }
+    }
+    for (name, rel_id) in &relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation("node", upload_unary_u32(&fix.memory, &[1, 2, 3]));
+    executor.put_relation("edge", upload_unary_u32(&fix.memory, &[1, 3]));
+    executor.put_relation("color", upload_unary_u32(&fix.memory, &[2]));
+
+    let executables: Vec<_> = split
+        .components
+        .iter()
+        .map(|component| &component.executable)
+        .collect();
+    let batch = executor
+        .execute_epistemic_gpu_execution_batch_with_trace(
+            &executables,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 2,
+            },
+        )
+        .expect("execute split GPU components through runtime batch path");
+
+    let empty_assumptions: [EpistemicAssumption; 0] = [];
+    let assumption_groups: [&[EpistemicAssumption]; 2] = [&empty_assumptions, &empty_assumptions];
+    let probabilistic_source = r#"
+        0.3::edge(1).
+        0.7::color(2).
+        query(edge(1)).
+        query(color(2)).
+        "#;
+    let parsed_probabilistic_program = parse_program(probabilistic_source)
+        .expect("parse split-batch probabilistic source/program fixture");
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+
+    let mut source_pir_adapter = EpistemicProbProductionAdapter::new(config);
+    let source_pir_cnfs = source_pir_adapter
+        .encode_source_pir_cnf_for_gpu_batch_execution_result(
+            probabilistic_source,
+            &fix.provider,
+            EpistemicProbGpuBatchExecutionEvidence {
+                batch: &batch,
+                assumptions_by_component: &assumption_groups,
+            },
+        )
+        .expect("accepted split GPU batch evidence must gate source PIR/CNF encoding");
+    assert_eq!(source_pir_cnfs.len(), 2);
+    for pir_cnf in &source_pir_cnfs {
+        assert!(pir_cnf.pir_nodes > 0);
+        assert!(pir_cnf.root_count > 0);
+        assert!(pir_cnf.cnf_var_cap > 0);
+        assert!(pir_cnf.cnf_clause_cap > 0);
+    }
+    let source_pir_trace = source_pir_adapter.trace();
+    assert_eq!(source_pir_trace.accepted_gpu_batch_evidence_consumed, 1);
+    assert_eq!(
+        source_pir_trace.accepted_gpu_batch_component_evidence_consumed,
+        2
+    );
+    assert_eq!(source_pir_trace.accepted_world_view_evidence_consumed, 2);
+    assert_eq!(source_pir_trace.gpu_pir_graph_uploads, 2);
+    assert_eq!(source_pir_trace.gpu_source_pir_graph_uploads, 2);
+    assert_eq!(source_pir_trace.gpu_program_pir_graph_uploads, 0);
+    assert_eq!(source_pir_trace.gpu_cnf_encodes, 2);
+    assert_eq!(source_pir_trace.gpu_source_cnf_encodes, 2);
+    assert_eq!(source_pir_trace.gpu_program_cnf_encodes, 0);
+    assert_eq!(source_pir_trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(source_pir_trace.fixture_circuit_evaluations, 0);
+
+    let mut program_pir_adapter = EpistemicProbProductionAdapter::new(config);
+    let program_pir_cnfs = program_pir_adapter
+        .encode_program_pir_cnf_for_gpu_batch_execution_result(
+            &parsed_probabilistic_program,
+            &fix.provider,
+            EpistemicProbGpuBatchExecutionEvidence {
+                batch: &batch,
+                assumptions_by_component: &assumption_groups,
+            },
+        )
+        .expect("accepted split GPU batch evidence must gate parsed-program PIR/CNF encoding");
+    assert_eq!(program_pir_cnfs.len(), 2);
+    for pir_cnf in &program_pir_cnfs {
+        assert!(pir_cnf.pir_nodes > 0);
+        assert!(pir_cnf.root_count > 0);
+        assert!(pir_cnf.cnf_var_cap > 0);
+        assert!(pir_cnf.cnf_clause_cap > 0);
+    }
+    let program_pir_trace = program_pir_adapter.trace();
+    assert_eq!(program_pir_trace.accepted_gpu_batch_evidence_consumed, 1);
+    assert_eq!(
+        program_pir_trace.accepted_gpu_batch_component_evidence_consumed,
+        2
+    );
+    assert_eq!(program_pir_trace.accepted_world_view_evidence_consumed, 2);
+    assert_eq!(program_pir_trace.gpu_pir_graph_uploads, 2);
+    assert_eq!(program_pir_trace.gpu_source_pir_graph_uploads, 0);
+    assert_eq!(program_pir_trace.gpu_program_pir_graph_uploads, 2);
+    assert_eq!(program_pir_trace.gpu_cnf_encodes, 2);
+    assert_eq!(program_pir_trace.gpu_source_cnf_encodes, 0);
+    assert_eq!(program_pir_trace.gpu_program_cnf_encodes, 2);
+    assert_eq!(program_pir_trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(program_pir_trace.fixture_circuit_evaluations, 0);
+
+    let mut query_adapter = EpistemicProbProductionAdapter::new(config);
+    let exact = query_adapter
+        .compile_source_with_gpu_execution_result(
+            probabilistic_source,
+            &fix.provider,
+            &batch.results[0],
+            vec![],
+        )
+        .expect("accepted split component must gate probabilistic exact compile");
+    let evaluated = query_adapter
+        .evaluate_for_gpu_batch_execution_result(
+            &exact,
+            &fix.provider,
+            EpistemicProbGpuBatchExecutionEvidence {
+                batch: &batch,
+                assumptions_by_component: &assumption_groups,
+            },
+        )
+        .expect("accepted split GPU batch evidence must gate exact query evaluation");
+    assert_eq!(evaluated.len(), 2);
+    for result in &evaluated {
+        assert_eq!(result.query_probs.len(), 2);
+        assert!((result.query_probs[0].prob - 0.3).abs() < 1.0e-6);
+        assert!((result.query_probs[1].prob - 0.7).abs() < 1.0e-6);
+    }
+    let query_trace = query_adapter.trace();
+    assert_eq!(query_trace.accepted_gpu_batch_evidence_consumed, 1);
+    assert_eq!(
+        query_trace.accepted_gpu_batch_component_evidence_consumed,
+        2
+    );
+    assert_eq!(query_trace.accepted_world_view_evidence_consumed, 3);
+    assert_eq!(query_trace.gpu_exact_source_compiles, 1);
+    assert_eq!(query_trace.gpu_exact_query_evaluations, 2);
+    assert_eq!(query_trace.gpu_exact_gradient_evaluations, 0);
+    assert_eq!(query_trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(query_trace.fixture_circuit_evaluations, 0);
+
+    let mut gradient_adapter = EpistemicProbProductionAdapter::new(config);
+    let exact = gradient_adapter
+        .compile_source_with_gpu_execution_result(
+            probabilistic_source,
+            &fix.provider,
+            &batch.results[0],
+            vec![],
+        )
+        .expect("accepted split component must gate probabilistic exact compile");
+    let gradients = gradient_adapter
+        .evaluate_gpu_with_grads_for_gpu_batch_execution_result(
+            &exact,
+            &fix.provider,
+            EpistemicProbGpuBatchExecutionEvidence {
+                batch: &batch,
+                assumptions_by_component: &assumption_groups,
+            },
+        )
+        .expect("accepted split GPU batch evidence must gate exact gradient evaluation");
+    assert_eq!(gradients.len(), 2);
+    for result in &gradients {
+        assert_eq!(result.query_grads.len(), 2);
+        assert!((result.query_grads[0].prob - 0.3).abs() < 1.0e-6);
+        assert!((result.query_grads[1].prob - 0.7).abs() < 1.0e-6);
+    }
+    let gradient_trace = gradient_adapter.trace();
+    assert_eq!(gradient_trace.accepted_gpu_batch_evidence_consumed, 1);
+    assert_eq!(
+        gradient_trace.accepted_gpu_batch_component_evidence_consumed,
+        2
+    );
+    assert_eq!(gradient_trace.accepted_world_view_evidence_consumed, 3);
+    assert_eq!(gradient_trace.gpu_exact_source_compiles, 1);
+    assert_eq!(gradient_trace.gpu_exact_query_evaluations, 0);
+    assert_eq!(gradient_trace.gpu_exact_gradient_evaluations, 2);
+    assert_eq!(gradient_trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(gradient_trace.fixture_circuit_evaluations, 0);
+}
+
+#[test]
 fn accepted_gpu_execution_result_gates_solver_cdcl_sat_path() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");

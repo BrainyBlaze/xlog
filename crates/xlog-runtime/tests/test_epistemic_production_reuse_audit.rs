@@ -292,8 +292,12 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(prob.contains("encode_program_pir_cnf_with_gpu_execution_result"));
     assert!(prob.contains("encode_source_pir_cnf_for_gpu_execution_results"));
     assert!(prob.contains("encode_program_pir_cnf_for_gpu_execution_results"));
+    assert!(prob.contains("encode_source_pir_cnf_for_gpu_batch_execution_result"));
+    assert!(prob.contains("encode_program_pir_cnf_for_gpu_batch_execution_result"));
     assert!(prob.contains("evaluate_for_gpu_execution_results"));
+    assert!(prob.contains("evaluate_for_gpu_batch_execution_result"));
     assert!(prob.contains("evaluate_gpu_with_grads_for_gpu_execution_results"));
+    assert!(prob.contains("evaluate_gpu_with_grads_for_gpu_batch_execution_result"));
     assert!(prob.contains("GpuPirGraph::from_host"));
     assert!(prob.contains("encode_cnf_gpu"));
     assert!(prob.contains("gpu_pir_graph_uploads"));
@@ -344,6 +348,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
         .contains("accepted_split_batch_gates_probabilistic_conditioned_source_gradients"));
     assert!(integration
         .contains("accepted_split_batch_gates_probabilistic_conditioned_program_gradients"));
+    assert!(integration
+        .contains("accepted_split_batch_gates_probabilistic_pir_cnf_and_exact_evaluation_paths"));
 
     for (label, source) in [
         ("runtime", runtime.as_str()),
