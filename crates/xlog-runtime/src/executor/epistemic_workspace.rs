@@ -327,10 +327,14 @@ pub struct EpistemicGpuSemanticTrace {
     pub reduced_model_slots_checked: usize,
     /// Number of accepted candidates observed in the device rejection buffer.
     pub accepted_candidates: usize,
+    /// Candidate indices accepted by the device rejection buffer.
+    pub accepted_candidate_indices: Vec<usize>,
     /// Number of accepted world views represented by accepted candidates.
     pub accepted_world_views: usize,
     /// Number of rejected candidates observed in the device rejection buffer.
     pub rejected_candidates: usize,
+    /// Candidate indices rejected by the device rejection buffer.
+    pub rejected_candidate_indices: Vec<usize>,
     /// Nonzero rejection reason codes copied from the device rejection buffer.
     pub rejection_reasons: Vec<u32>,
     /// Bounded metadata reads from the device rejection buffer after the hot path.
@@ -754,14 +758,18 @@ impl EpistemicGpuSemanticTrace {
 
         let raw_rejection_reasons = provider
             .dtoh_small_metadata_untracked(&workspace.rejection_reasons, candidate_count)?;
-        let accepted_candidates = raw_rejection_reasons
-            .iter()
-            .filter(|reason| **reason == 0)
-            .count();
-        let rejection_reasons: Vec<u32> = raw_rejection_reasons
-            .into_iter()
-            .filter(|reason| *reason != 0)
-            .collect();
+        let mut accepted_candidate_indices = Vec::new();
+        let mut rejected_candidate_indices = Vec::new();
+        let mut rejection_reasons = Vec::new();
+        for (candidate_index, reason) in raw_rejection_reasons.into_iter().enumerate() {
+            if reason == 0 {
+                accepted_candidate_indices.push(candidate_index);
+            } else {
+                rejected_candidate_indices.push(candidate_index);
+                rejection_reasons.push(reason);
+            }
+        }
+        let accepted_candidates = accepted_candidate_indices.len();
         let rejected_candidates = rejection_reasons.len();
         let reduced_model_slots_checked = checked_product(
             checked_product(
@@ -781,8 +789,10 @@ impl EpistemicGpuSemanticTrace {
             tested_candidates: world_view_validation.candidates_checked,
             reduced_model_slots_checked,
             accepted_candidates,
+            accepted_candidate_indices,
             accepted_world_views: accepted_candidates,
             rejected_candidates,
+            rejected_candidate_indices,
             rejection_reasons,
             rejection_reason_device_reads: 1,
             rejection_reason_metadata_bytes,
