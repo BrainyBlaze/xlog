@@ -1,6 +1,6 @@
 {
   "branch": "feat/v086-runtime-completion",
-  "certification_head_before_closure": "pending-consumer-behavior-probe-commit",
+  "certification_head_before_closure": "2d390318",
   "implementation_evidence_head_before_hold_correction": "0e2a5420",
   "hold_correction_commit": "81badf314c09",
   "persistent_index_performance_commit": "df2dbc03",
@@ -60,17 +60,17 @@
       "status": "PASS"
     },
     "G086_CONSUMERS": {
-      "commit": "37f16651; hold correction 81badf31; pyxlog session amendment 611d8293; behavior-probe amendment pending",
+      "commit": "37f16651; hold correction 81badf31; pyxlog session amendment 611d8293; behavior-probe amendment 2d390318",
       "evidence": "docs/evidence/2026-05-19-v086-consumers/README.md",
       "status": "PASS"
     },
     "G086_INT": {
-      "commit": "b72f61ea; hold correction 81badf31",
+      "commit": "b72f61ea; hold correction 81badf31; behavior-probe amendment 2d390318",
       "evidence": "docs/evidence/2026-05-19-v086-int/README.md",
       "status": "PASS"
     },
     "G086_CLOSE": {
-      "commit": "09f5ad4b; hold correction 81badf31",
+      "commit": "09f5ad4b; hold correction 81badf31; behavior-probe amendment 2d390318",
       "evidence": "docs/evidence/2026-05-19-v086-close/README.md",
       "status": "PASS"
     }
@@ -102,5 +102,5 @@
   },
   "v090_rebase_note": "v0.9.0 should rebase on or merge after any accepted v0.8.6 landing because exact type dispatch, chain shared-memory scoring, runtime CSE, adaptive candidate adoption, persistent-index telemetry, and behavior-proven consumer certification affect the substrate expected by epistemic/solver work.",
   "pyxlog_persistent_index_session_reuse_commit": "611d8293",
-  "consumer_behavior_probe_commit": "pending"
+  "consumer_behavior_probe_commit": "2d390318"
 }

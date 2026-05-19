@@ -2,7 +2,7 @@
 
 Date: 2026-05-19
 Branch: `feat/v086-runtime-completion`
-Validation head after consumer behavior-probe amendment: pending commit
+Validation head after consumer behavior-probe amendment: `2d390318`
 Implementation evidence head before hold/correction amendment: `0e2a5420`
 Governing goal: `docs/plans/2026-05-19-agent-v086-dts-runtime-completion-goal.md`
 
@@ -42,9 +42,9 @@ proposal.
 | G086_CSE | `1363b05e` | PASS | `docs/evidence/2026-05-19-v086-cse/README.md` |
 | G086_ADAPT | `2d9bdc0f` | PASS | `docs/evidence/2026-05-19-v086-adaptive-reoptimization/README.md` |
 | G086_INDEX | `702e1f8f` + `0e2a5420`; hold correction `81badf31`; performance amendment `df2dbc03` | PASS | `docs/evidence/2026-05-19-v086-persistent-hash-index/README.md` |
-| G086_CONSUMERS | `37f16651`; hold correction `81badf31`; pyxlog session amendment `611d8293`; behavior-probe amendment pending | PASS | `docs/evidence/2026-05-19-v086-consumers/README.md` |
-| G086_INT | `b72f61ea`; hold correction `81badf31`; behavior-probe amendment pending | PASS | `docs/evidence/2026-05-19-v086-int/README.md` |
-| G086_CLOSE | `09f5ad4b`; hold correction `81badf31`; behavior-probe amendment pending | PASS with `MERGE_READY` decision | `docs/evidence/2026-05-19-v086-close/README.md` |
+| G086_CONSUMERS | `37f16651`; hold correction `81badf31`; pyxlog session amendment `611d8293`; behavior-probe amendment `2d390318` | PASS | `docs/evidence/2026-05-19-v086-consumers/README.md` |
+| G086_INT | `b72f61ea`; hold correction `81badf31`; behavior-probe amendment `2d390318` | PASS | `docs/evidence/2026-05-19-v086-int/README.md` |
+| G086_CLOSE | `09f5ad4b`; hold correction `81badf31`; behavior-probe amendment `2d390318` | PASS with `MERGE_READY` decision | `docs/evidence/2026-05-19-v086-close/README.md` |
 
 ## GQM Metric Table
 

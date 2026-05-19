@@ -1,6 +1,6 @@
 {
   "branch": "feat/v086-runtime-completion",
-  "commit_under_test": "pending-consumer-behavior-probe-commit",
+  "commit_under_test": "2d390318",
   "compatibility": {
     "v080_examples": {
       "example_count": 5,
@@ -19,7 +19,7 @@
       "summary": "docs/evidence/2026-05-19-v086-consumers/validation_summary.json"
     }
   },
-  "consumer_behavior_probe_commit": "pending",
+  "consumer_behavior_probe_commit": "2d390318",
   "consumer_behavior_probes": {
     "consumer_proof_gaps": [],
     "feature_coverage_source": "behavior_probes",
