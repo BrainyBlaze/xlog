@@ -352,6 +352,64 @@ fn accepted_binary_membership_filters_final_rows_by_bound_tuple_key() {
 }
 
 #[test]
+fn accepted_multiple_memberships_filter_final_rows_by_all_bound_tuple_keys() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred color(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X), know color(X).
+        "#,
+    )
+    .expect("parse multi-membership epistemic fixture");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile multi-membership epistemic executable");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &executable.relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation("node", upload_unary_u32(&fix.memory, &[1, 2, 3]));
+    executor.put_relation("edge", upload_unary_u32(&fix.memory, &[1, 2]));
+    executor.put_relation("color", upload_unary_u32(&fix.memory, &[2, 3]));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 3,
+            },
+        )
+        .expect("execute multi-membership epistemic fixture");
+
+    assert_eq!(result.prepared.preflight.tuple_membership_binding_count, 2);
+    assert_eq!(
+        result.model_membership.membership_source,
+        EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+    );
+    assert_eq!(
+        result
+            .final_tuple_materialization
+            .model_membership_bytes_checked,
+        result.model_membership.model_membership_bytes_written
+    );
+    assert_eq!(
+        download_unary_u32(&fix.provider, &result.final_output),
+        vec![2],
+        "final output must keep only rows accepted by all bound tuple-key memberships"
+    );
+}
+
+#[test]
 fn accepted_gpu_execution_result_gates_probabilistic_exact_path() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");

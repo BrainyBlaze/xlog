@@ -667,7 +667,9 @@ extern "C" __global__ void epistemic_build_final_tuple_row_map_u8(
     const uint32_t* __restrict__ rejection_reasons,
     const uint8_t* __restrict__ model_membership,
     const uint8_t* __restrict__ world_views,
-    const uint32_t* __restrict__ tuple_source_row_count,
+    const uint64_t* __restrict__ tuple_source_row_count_ptrs,
+    const uint32_t* __restrict__ row_filter_key_offsets,
+    const uint32_t* __restrict__ row_filter_key_counts,
     const uint64_t* __restrict__ tuple_key_col_ptrs,
     const uint32_t* __restrict__ tuple_key_col_widths,
     const uint64_t* __restrict__ expected_key_bits,
@@ -675,8 +677,7 @@ extern "C" __global__ void epistemic_build_final_tuple_row_map_u8(
     const uint8_t* __restrict__ tuple_key_match_modes,
     const uint64_t* __restrict__ bound_value_col_ptrs,
     const uint32_t* __restrict__ bound_value_col_widths,
-    uint32_t key_col_count,
-    uint8_t row_filter_enabled,
+    uint32_t row_filter_count,
     uint32_t* __restrict__ row_map,
     uint32_t* __restrict__ final_row_count
 ) {
@@ -697,25 +698,38 @@ extern "C" __global__ void epistemic_build_final_tuple_row_map_u8(
     if (accepted_membership == 0u) return;
 
     uint8_t row_matches = 1u;
-    if (row_filter_enabled != 0u) {
-        row_matches = 0u;
+    for (uint32_t filter = 0u; filter < row_filter_count; ++filter) {
+        const uint32_t* tuple_source_row_count =
+            reinterpret_cast<const uint32_t*>(tuple_source_row_count_ptrs[filter]);
+        if (tuple_source_row_count == nullptr) {
+            row_matches = 0u;
+            break;
+        }
+
+        uint8_t filter_matches = 0u;
         uint32_t tuple_rows = tuple_source_row_count[0];
+        uint32_t key_offset = row_filter_key_offsets[filter];
+        uint32_t key_col_count = row_filter_key_counts[filter];
         for (uint32_t tuple_row = 0u; tuple_row < tuple_rows; ++tuple_row) {
             if (epistemic_tuple_key_row_matches_arity_n(
-                    tuple_key_col_ptrs,
-                    tuple_key_col_widths,
-                    expected_key_bits,
-                    expected_key_type_codes,
-                    tuple_key_match_modes,
-                    bound_value_col_ptrs,
-                    bound_value_col_widths,
+                    tuple_key_col_ptrs + key_offset,
+                    tuple_key_col_widths + key_offset,
+                    expected_key_bits + key_offset,
+                    expected_key_type_codes + key_offset,
+                    tuple_key_match_modes + key_offset,
+                    bound_value_col_ptrs + key_offset,
+                    bound_value_col_widths + key_offset,
                     key_col_count,
                     tuple_row,
                     row
                 ) != 0u) {
-                row_matches = 1u;
+                filter_matches = 1u;
                 break;
             }
+        }
+        if (filter_matches == 0u) {
+            row_matches = 0u;
+            break;
         }
     }
 

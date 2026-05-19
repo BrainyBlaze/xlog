@@ -86,10 +86,10 @@ CUDA-event elapsed timing for final-result flag staging.
 `CudaBuffer`, including covered tuple bytes, device row-count read/write
 metadata, model-membership bytes checked, world-view slots checked, kernel
 launches, zero host writes, and CUDA-event elapsed timing. The row-map kernel
-filters output rows by accepted membership, world-view state, and any
-variable-bound tuple-key relation match before the final tuple kernel compacts
-reduced output columns. Accepted unary and binary fixtures now prove final rows
-are filtered by bound tuple keys on device.
+filters output rows by accepted membership, world-view state, and all
+variable-bound tuple-key relation matches before the final tuple kernel
+compacts reduced output columns. Accepted unary, binary, and multi-membership
+fixtures now prove final rows are filtered by bound tuple keys on device.
 `EpistemicGpuRuntimeWcojCertification` then requires actual production WCOJ
 counter deltas before WCOJ evidence can be certified.
 `Executor::execute_epistemic_gpu_execution` wraps the reduced production
@@ -105,9 +105,9 @@ relation buffers with row-scoped ground-key comparison through specialized
 arity-one/two/three kernels and a generic arity-N kernel, plus row-scoped
 variable-bound comparison against reduced-output columns through the generic
 arity-N kernel. Final tuple output is gated by the staged membership,
-world-view buffers, and accepted unary/binary bound-key row-filter fixtures. Full
-world-view semantics, solver coupling, probabilistic production-path reuse, and
-broader accepted semantic parity do not dispatch yet.
+world-view buffers, and accepted unary/binary/multi-membership bound-key
+row-filter fixtures. Full world-view semantics, solver coupling, probabilistic
+production-path reuse, and broader accepted semantic parity do not dispatch yet.
 
 ## GPU And WCOJ Scope
 

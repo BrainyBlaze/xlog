@@ -2980,32 +2980,30 @@ impl Executor {
         let models_per_reduction = models_per_reduction as u32;
         let world_stride = world_stride as u32;
         let output_row_capacity_u32 = output_row_capacity as u32;
-        let row_filter_binding_count = gpu_plan
+        let row_filter_bindings: Vec<_> = gpu_plan
             .tuple_membership_bindings
             .iter()
             .filter(|binding| binding.bound_output_columns.iter().any(Option::is_some))
-            .count();
-        if row_filter_binding_count > 1 {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "epistemic GPU final tuple row filtering".to_string(),
-                context: format!(
-                    "multiple variable-bound tuple filters are not yet supported: \
-                     {row_filter_binding_count}"
-                ),
+            .collect();
+        if row_filter_bindings.len() > u32::MAX as usize {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU final tuple row-filter count".to_string(),
+                estimated_bytes: row_filter_bindings.len() as u64,
+                budget_bytes: u32::MAX as u64,
             });
         }
 
-        let row_filter_binding = gpu_plan
-            .tuple_membership_bindings
-            .iter()
-            .find(|binding| binding.bound_output_columns.iter().any(Option::is_some));
-        let metadata_len = row_filter_binding
-            .map(|binding| binding.key_columns.len())
-            .unwrap_or(1)
-            .max(1);
+        let mut metadata_len = 0usize;
+        for binding in &row_filter_bindings {
+            metadata_len = checked_sum(metadata_len, binding.key_columns.len())?;
+        }
+        let metadata_len = metadata_len.max(1);
+        let row_filter_metadata_len = row_filter_bindings.len().max(1);
         let memory = self.provider.memory();
         let device = self.provider.device().inner();
-        let mut tuple_source_row_count = memory.alloc::<u32>(1)?;
+        let mut tuple_source_row_count_ptrs = memory.alloc::<u64>(row_filter_metadata_len)?;
+        let mut row_filter_key_offsets = memory.alloc::<u32>(row_filter_metadata_len)?;
+        let mut row_filter_key_counts = memory.alloc::<u32>(row_filter_metadata_len)?;
         let mut key_col_ptrs = memory.alloc::<u64>(metadata_len)?;
         let mut key_col_widths = memory.alloc::<u32>(metadata_len)?;
         let mut expected_key_bits = memory.alloc::<u64>(metadata_len)?;
@@ -3013,137 +3011,180 @@ impl Executor {
         let mut tuple_key_match_modes = memory.alloc::<u8>(metadata_len)?;
         let mut bound_value_col_ptrs = memory.alloc::<u64>(metadata_len)?;
         let mut bound_value_col_widths = memory.alloc::<u32>(metadata_len)?;
-        let mut row_filter_enabled = 0u8;
-        let mut key_col_count = 0u32;
+        let row_filter_count = row_filter_bindings.len() as u32;
+        let mut tuple_source_row_counts = Vec::with_capacity(row_filter_bindings.len());
 
-        if let Some(binding) = row_filter_binding {
-            if binding.key_columns.len() > u32::MAX as usize {
-                return Err(XlogError::ResourceExhausted {
-                    context: "epistemic GPU final tuple row-filter key arity".to_string(),
-                    estimated_bytes: binding.key_columns.len() as u64,
-                    budget_bytes: u32::MAX as u64,
-                });
-            }
-            let source_relation =
-                self.store()
-                    .get(binding.predicate.as_str())
-                    .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
-                        construct: "epistemic GPU final tuple row filtering".to_string(),
-                        context: format!(
-                            "missing tuple source relation {} for final row filter",
-                            binding.predicate
-                        ),
-                    })?;
-            tuple_source_row_count = self.clone_device_row_count(source_relation)?;
-            let mut key_col_ptrs_host = Vec::with_capacity(binding.key_columns.len());
-            let mut key_col_widths_host = Vec::with_capacity(binding.key_columns.len());
-            let mut expected_key_bits_host = Vec::with_capacity(binding.key_columns.len());
-            let mut expected_key_type_codes_host = Vec::with_capacity(binding.key_columns.len());
-            let mut tuple_key_match_modes_host = Vec::with_capacity(binding.key_columns.len());
-            let mut bound_value_col_ptrs_host = Vec::with_capacity(binding.key_columns.len());
-            let mut bound_value_col_widths_host = Vec::with_capacity(binding.key_columns.len());
+        if !row_filter_bindings.is_empty() {
+            let mut tuple_source_row_count_ptrs_host =
+                Vec::with_capacity(row_filter_bindings.len());
+            let mut row_filter_key_offsets_host = Vec::with_capacity(row_filter_bindings.len());
+            let mut row_filter_key_counts_host = Vec::with_capacity(row_filter_bindings.len());
+            let mut key_col_ptrs_host = Vec::with_capacity(metadata_len);
+            let mut key_col_widths_host = Vec::with_capacity(metadata_len);
+            let mut expected_key_bits_host = Vec::with_capacity(metadata_len);
+            let mut expected_key_type_codes_host = Vec::with_capacity(metadata_len);
+            let mut tuple_key_match_modes_host = Vec::with_capacity(metadata_len);
+            let mut bound_value_col_ptrs_host = Vec::with_capacity(metadata_len);
+            let mut bound_value_col_widths_host = Vec::with_capacity(metadata_len);
 
-            for (term_index, &key_col) in binding.key_columns.iter().enumerate() {
-                let key_col_ref = source_relation.column(key_col).ok_or_else(|| {
-                    XlogError::UnsupportedEpistemicConstruct {
-                        construct: "epistemic GPU final tuple row filtering".to_string(),
-                        context: format!(
-                            "tuple source relation {} missing key column {}",
-                            binding.predicate, key_col
-                        ),
-                    }
-                })?;
-                let key_col_type =
-                    source_relation
-                        .schema()
-                        .column_type(key_col)
-                        .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
-                            construct: "epistemic GPU final tuple row filtering".to_string(),
-                            context: format!(
-                                "tuple source relation {} missing schema for key column {}",
-                                binding.predicate, key_col
-                            ),
-                        })?;
-                let key_col_width = key_col_type.size_bytes();
-                if key_col_width > u32::MAX as usize {
+            for binding in &row_filter_bindings {
+                if binding.key_columns.len() > u32::MAX as usize {
                     return Err(XlogError::ResourceExhausted {
-                        context: "epistemic GPU final tuple row-filter key width".to_string(),
-                        estimated_bytes: key_col_width as u64,
+                        context: "epistemic GPU final tuple row-filter key arity".to_string(),
+                        estimated_bytes: binding.key_columns.len() as u64,
                         budget_bytes: u32::MAX as u64,
                     });
                 }
+                if key_col_ptrs_host.len() > u32::MAX as usize {
+                    return Err(XlogError::ResourceExhausted {
+                        context: "epistemic GPU final tuple row-filter key metadata".to_string(),
+                        estimated_bytes: key_col_ptrs_host.len() as u64,
+                        budget_bytes: u32::MAX as u64,
+                    });
+                }
+                row_filter_key_offsets_host.push(key_col_ptrs_host.len() as u32);
+                row_filter_key_counts_host.push(binding.key_columns.len() as u32);
 
-                key_col_ptrs_host.push(*key_col_ref.device_ptr() as u64);
-                key_col_widths_host.push(key_col_width as u32);
-                match &binding.key_terms[term_index] {
-                    EirTerm::Variable(variable_name) => {
-                        let bound_col_index =
-                            binding.bound_output_columns[term_index].ok_or_else(|| {
+                let source_relation =
+                    self.store()
+                        .get(binding.predicate.as_str())
+                        .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                            construct: "epistemic GPU final tuple row filtering".to_string(),
+                            context: format!(
+                                "missing tuple source relation {} for final row filter",
+                                binding.predicate
+                            ),
+                        })?;
+                let tuple_source_row_count = self.clone_device_row_count(source_relation)?;
+                tuple_source_row_count_ptrs_host.push(*tuple_source_row_count.device_ptr() as u64);
+                tuple_source_row_counts.push(tuple_source_row_count);
+
+                for (term_index, &key_col) in binding.key_columns.iter().enumerate() {
+                    let key_col_ref = source_relation.column(key_col).ok_or_else(|| {
+                        XlogError::UnsupportedEpistemicConstruct {
+                            construct: "epistemic GPU final tuple row filtering".to_string(),
+                            context: format!(
+                                "tuple source relation {} missing key column {}",
+                                binding.predicate, key_col
+                            ),
+                        }
+                    })?;
+                    let key_col_type =
+                        source_relation
+                            .schema()
+                            .column_type(key_col)
+                            .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                                construct: "epistemic GPU final tuple row filtering".to_string(),
+                                context: format!(
+                                    "tuple source relation {} missing schema for key column {}",
+                                    binding.predicate, key_col
+                                ),
+                            })?;
+                    let key_col_width = key_col_type.size_bytes();
+                    if key_col_width > u32::MAX as usize {
+                        return Err(XlogError::ResourceExhausted {
+                            context: "epistemic GPU final tuple row-filter key width".to_string(),
+                            estimated_bytes: key_col_width as u64,
+                            budget_bytes: u32::MAX as u64,
+                        });
+                    }
+
+                    key_col_ptrs_host.push(*key_col_ref.device_ptr() as u64);
+                    key_col_widths_host.push(key_col_width as u32);
+                    match &binding.key_terms[term_index] {
+                        EirTerm::Variable(variable_name) => {
+                            let bound_col_index = binding.bound_output_columns[term_index]
+                                .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                                    construct: "epistemic GPU final tuple row filtering"
+                                        .to_string(),
+                                    context: format!(
+                                        "tuple key variable {variable_name} has no reduced \
+                                             output column binding"
+                                    ),
+                                })?;
+                            let bound_col = output.column(bound_col_index).ok_or_else(|| {
                                 XlogError::UnsupportedEpistemicConstruct {
                                     construct: "epistemic GPU final tuple row filtering"
                                         .to_string(),
                                     context: format!(
-                                        "tuple key variable {variable_name} has no reduced output \
-                                     column binding"
+                                        "reduced output missing device column {bound_col_index} \
+                                         for variable {variable_name}"
                                     ),
                                 }
                             })?;
-                        let bound_col = output.column(bound_col_index).ok_or_else(|| {
-                            XlogError::UnsupportedEpistemicConstruct {
-                                construct: "epistemic GPU final tuple row filtering".to_string(),
-                                context: format!(
-                                    "reduced output missing device column {bound_col_index} for \
-                                     variable {variable_name}"
-                                ),
+                            let bound_col_type = output
+                                .schema()
+                                .column_type(bound_col_index)
+                                .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                                    construct: "epistemic GPU final tuple row filtering"
+                                        .to_string(),
+                                    context: format!(
+                                        "reduced output missing schema for variable \
+                                             {variable_name}"
+                                    ),
+                                })?;
+                            if bound_col_type != key_col_type {
+                                return Err(XlogError::UnsupportedEpistemicConstruct {
+                                    construct: "epistemic GPU final tuple row filtering"
+                                        .to_string(),
+                                    context: format!(
+                                        "bound variable {variable_name} has output type \
+                                         {bound_col_type:?}, but tuple source {} key column {} \
+                                         has type {key_col_type:?}",
+                                        binding.predicate, key_col
+                                    ),
+                                });
                             }
-                        })?;
-                        let bound_col_type = output
-                            .schema()
-                            .column_type(bound_col_index)
-                            .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
-                                construct: "epistemic GPU final tuple row filtering".to_string(),
-                                context: format!(
-                                    "reduced output missing schema for variable {variable_name}"
-                                ),
-                            })?;
-                        if bound_col_type != key_col_type {
-                            return Err(XlogError::UnsupportedEpistemicConstruct {
-                                construct: "epistemic GPU final tuple row filtering".to_string(),
-                                context: format!(
-                                    "bound variable {variable_name} has output type \
-                                     {bound_col_type:?}, but tuple source {} key column {} has \
-                                     type {key_col_type:?}",
-                                    binding.predicate, key_col
-                                ),
-                            });
+                            let bound_col_width = bound_col_type.size_bytes();
+                            if bound_col_width > u32::MAX as usize {
+                                return Err(XlogError::ResourceExhausted {
+                                    context: "epistemic GPU final tuple row-filter bound width"
+                                        .to_string(),
+                                    estimated_bytes: bound_col_width as u64,
+                                    budget_bytes: u32::MAX as u64,
+                                });
+                            }
+                            expected_key_bits_host.push(0);
+                            expected_key_type_codes_host.push(key_col_type.to_code());
+                            tuple_key_match_modes_host.push(TUPLE_KEY_MATCH_MODE_BOUND_OUTPUT);
+                            bound_value_col_ptrs_host.push(*bound_col.device_ptr() as u64);
+                            bound_value_col_widths_host.push(bound_col_width as u32);
                         }
-                        let bound_col_width = bound_col_type.size_bytes();
-                        if bound_col_width > u32::MAX as usize {
-                            return Err(XlogError::ResourceExhausted {
-                                context: "epistemic GPU final tuple row-filter bound width"
-                                    .to_string(),
-                                estimated_bytes: bound_col_width as u64,
-                                budget_bytes: u32::MAX as u64,
-                            });
+                        term => {
+                            let expectation = TupleKeyExpectation::from_term(term, key_col_type)?;
+                            expected_key_bits_host.push(expectation.bits);
+                            expected_key_type_codes_host.push(expectation.type_code);
+                            tuple_key_match_modes_host.push(TUPLE_KEY_MATCH_MODE_GROUND);
+                            bound_value_col_ptrs_host.push(0);
+                            bound_value_col_widths_host.push(0);
                         }
-                        expected_key_bits_host.push(0);
-                        expected_key_type_codes_host.push(key_col_type.to_code());
-                        tuple_key_match_modes_host.push(TUPLE_KEY_MATCH_MODE_BOUND_OUTPUT);
-                        bound_value_col_ptrs_host.push(*bound_col.device_ptr() as u64);
-                        bound_value_col_widths_host.push(bound_col_width as u32);
-                    }
-                    term => {
-                        let expectation = TupleKeyExpectation::from_term(term, key_col_type)?;
-                        expected_key_bits_host.push(expectation.bits);
-                        expected_key_type_codes_host.push(expectation.type_code);
-                        tuple_key_match_modes_host.push(TUPLE_KEY_MATCH_MODE_GROUND);
-                        bound_value_col_ptrs_host.push(0);
-                        bound_value_col_widths_host.push(0);
                     }
                 }
             }
 
             let metadata_context = "epistemic GPU final tuple row-filter metadata";
+            device
+                .htod_sync_copy_into(
+                    &tuple_source_row_count_ptrs_host,
+                    &mut tuple_source_row_count_ptrs,
+                )
+                .map_err(|e| {
+                    XlogError::execution_ctx(
+                        metadata_context,
+                        "upload tuple source row-count pointers",
+                        &e,
+                    )
+                })?;
+            device
+                .htod_sync_copy_into(&row_filter_key_offsets_host, &mut row_filter_key_offsets)
+                .map_err(|e| {
+                    XlogError::execution_ctx(metadata_context, "upload row-filter key offsets", &e)
+                })?;
+            device
+                .htod_sync_copy_into(&row_filter_key_counts_host, &mut row_filter_key_counts)
+                .map_err(|e| {
+                    XlogError::execution_ctx(metadata_context, "upload row-filter key counts", &e)
+                })?;
             device
                 .htod_sync_copy_into(&key_col_ptrs_host, &mut key_col_ptrs)
                 .map_err(|e| {
@@ -3187,16 +3228,26 @@ impl Executor {
                         &e,
                     )
                 })?;
-            row_filter_enabled = 1;
-            key_col_count = binding.key_columns.len() as u32;
-        }
-
-        if row_filter_enabled == 0 {
+        } else {
             let metadata_context = "epistemic GPU final tuple row-filter metadata";
             device
-                .memset_zeros(&mut tuple_source_row_count)
+                .memset_zeros(&mut tuple_source_row_count_ptrs)
                 .map_err(|e| {
-                    XlogError::execution_ctx(metadata_context, "tuple source row-count memset", &e)
+                    XlogError::execution_ctx(
+                        metadata_context,
+                        "tuple source row-count pointer memset",
+                        &e,
+                    )
+                })?;
+            device
+                .memset_zeros(&mut row_filter_key_offsets)
+                .map_err(|e| {
+                    XlogError::execution_ctx(metadata_context, "row-filter key offset memset", &e)
+                })?;
+            device
+                .memset_zeros(&mut row_filter_key_counts)
+                .map_err(|e| {
+                    XlogError::execution_ctx(metadata_context, "row-filter key count memset", &e)
                 })?;
             device.memset_zeros(&mut key_col_ptrs).map_err(|e| {
                 XlogError::execution_ctx(metadata_context, "key column pointer memset", &e)
@@ -3281,7 +3332,9 @@ impl Executor {
                     (&workspace.rejection_reasons).as_kernel_param(),
                     (&workspace.model_membership).as_kernel_param(),
                     (&workspace.world_views).as_kernel_param(),
-                    (&tuple_source_row_count).as_kernel_param(),
+                    (&tuple_source_row_count_ptrs).as_kernel_param(),
+                    (&row_filter_key_offsets).as_kernel_param(),
+                    (&row_filter_key_counts).as_kernel_param(),
                     (&key_col_ptrs).as_kernel_param(),
                     (&key_col_widths).as_kernel_param(),
                     (&expected_key_bits).as_kernel_param(),
@@ -3289,8 +3342,7 @@ impl Executor {
                     (&tuple_key_match_modes).as_kernel_param(),
                     (&bound_value_col_ptrs).as_kernel_param(),
                     (&bound_value_col_widths).as_kernel_param(),
-                    (&key_col_count).as_kernel_param(),
-                    (&row_filter_enabled).as_kernel_param(),
+                    (&row_filter_count).as_kernel_param(),
                     (&mut row_map).as_kernel_param(),
                     (&mut final_row_count).as_kernel_param(),
                 ];
