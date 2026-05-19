@@ -360,6 +360,10 @@ pub struct GpuSolverProductionTrace {
     pub accepted_not_possible_gpu_candidate_evidence_consumed: u64,
     /// Number of accepted GPU candidate evidence records containing `not know` operators.
     pub accepted_not_know_gpu_candidate_evidence_consumed: u64,
+    /// Number of accepted GPU candidate evidence records backed by nonzero-arity tuple keys.
+    pub accepted_nonzero_arity_gpu_candidate_evidence_consumed: u64,
+    /// Aggregate tuple-key column reads consumed from accepted GPU candidate evidence.
+    pub accepted_gpu_candidate_tuple_key_column_reads_consumed: u64,
     /// Number of SAT expectations dispatched through `GpuCdclSolver`.
     pub gpu_cdcl_sat_solves: u64,
     /// Number of UNSAT expectations dispatched through `GpuCdclSolver`.
@@ -582,6 +586,19 @@ impl GpuSolverProductionAdapter {
                 .accepted_not_know_gpu_candidate_evidence_consumed
                 .saturating_add(1);
         }
+        let tuple_key_column_reads = result.model_membership.tuple_source_key_column_device_reads;
+        if tuple_key_column_reads > 0 {
+            self.trace
+                .accepted_nonzero_arity_gpu_candidate_evidence_consumed = self
+                .trace
+                .accepted_nonzero_arity_gpu_candidate_evidence_consumed
+                .saturating_add(1);
+        }
+        self.trace
+            .accepted_gpu_candidate_tuple_key_column_reads_consumed = self
+            .trace
+            .accepted_gpu_candidate_tuple_key_column_reads_consumed
+            .saturating_add(tuple_key_column_reads as u64);
     }
 
     /// Solve and enforce SAT entirely on GPU.

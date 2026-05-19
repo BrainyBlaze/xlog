@@ -164,6 +164,9 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(integration
         .contains("accepted_split_batch_gates_solver_encoded_maxsat_and_scheduler_paths"));
     assert!(integration.contains(
+        "accepted_ternary_gpu_execution_result_records_solver_nonzero_arity_evidence_trace"
+    ));
+    assert!(integration.contains(
         "accepted_split_batch_rejects_invalid_encoded_maxsat_scheduler_before_scheduler_work"
     ));
     assert!(integration.contains("not_possible_operator_count"));
@@ -268,6 +271,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(solver.contains("accepted_possible_gpu_candidate_evidence_consumed"));
     assert!(solver.contains("accepted_not_possible_gpu_candidate_evidence_consumed"));
     assert!(solver.contains("accepted_not_know_gpu_candidate_evidence_consumed"));
+    assert!(solver.contains("accepted_nonzero_arity_gpu_candidate_evidence_consumed"));
+    assert!(solver.contains("accepted_gpu_candidate_tuple_key_column_reads_consumed"));
     assert!(solver.contains("require_production_metric_eligibility"));
     assert!(solver.contains("production solver metrics require accepted GPU candidate evidence"));
     assert!(solver.contains("read_device_row_count"));

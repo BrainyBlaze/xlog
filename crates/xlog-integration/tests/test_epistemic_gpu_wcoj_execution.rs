@@ -8691,6 +8691,84 @@ fn accepted_operator_gpu_execution_results_gate_solver_lifecycle_path() {
 }
 
 #[test]
+fn accepted_ternary_gpu_execution_result_records_solver_nonzero_arity_evidence_trace() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred triple(u32, u32, u32).
+        pred fact3(u32, u32, u32).
+        pred accepted(u32, u32, u32).
+        accepted(A, B, C) :- triple(A, B, C), know fact3(A, B, C).
+        "#,
+    )
+    .expect("parse ternary solver evidence fixture");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile ternary solver evidence executable");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &executable.relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation(
+        "triple",
+        upload_ternary_u32(&fix.memory, &[(1, 2, 3), (2, 3, 5), (8, 13, 21)]),
+    );
+    executor.put_relation("fact3", upload_ternary_u32(&fix.memory, &[(2, 3, 5)]));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 3,
+            },
+        )
+        .expect("execute ternary solver evidence fixture");
+    assert_eq!(
+        download_ternary_u32(&fix.provider, &result.final_output),
+        vec![(2, 3, 5)]
+    );
+    assert_eq!(
+        result.model_membership.tuple_source_key_column_device_reads,
+        3
+    );
+    assert_eq!(
+        result.model_membership.membership_source,
+        EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+    );
+
+    let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
+    let sat_cnf = GpuCnf::from_host(&sat_instance, &fix.provider).expect("upload SAT CNF");
+    let mut adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let assignment = adapter
+        .solve_expect_sat_with_gpu_execution_result(&fix.provider, &result, &sat_cnf)
+        .expect("accepted ternary GPU evidence must gate solver SAT path");
+    assert_ne!(*assignment.device_ptr(), 0);
+
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 1);
+    assert_eq!(
+        trace.accepted_nonzero_arity_gpu_candidate_evidence_consumed,
+        1
+    );
+    assert_eq!(
+        trace.accepted_gpu_candidate_tuple_key_column_reads_consumed,
+        3
+    );
+    assert_eq!(trace.accepted_know_gpu_candidate_evidence_consumed, 1);
+    assert_eq!(trace.gpu_cdcl_sat_solves, 1);
+    assert_eq!(trace.cpu_assignment_enumerations, 0);
+    assert_eq!(trace.cpu_maxsat_enumerations, 0);
+}
+
+#[test]
 fn accepted_gpu_execution_result_gates_solver_learned_clause_arena_publication() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
