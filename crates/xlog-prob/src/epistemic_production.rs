@@ -483,6 +483,42 @@ impl EpistemicProbProductionAdapter {
         self.compile_and_evaluate_conditioned_program_with_accepted_world_view(program, &evidence)
     }
 
+    /// Compile conditioned parsed program once per accepted GPU epistemic execution result.
+    #[cfg(feature = "host-io")]
+    pub fn compile_and_evaluate_conditioned_program_for_gpu_execution_results(
+        &mut self,
+        program: &Program,
+        provider: &CudaKernelProvider,
+        evidence_records: &[EpistemicProbGpuExecutionEvidence<'_>],
+    ) -> Result<Vec<ExactResult>> {
+        if evidence_records.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic probabilistic conditioned production batch".to_string(),
+                context: "batched conditioned program compilation requires at least one accepted GPU result"
+                    .to_string(),
+            });
+        }
+
+        let mut accepted = Vec::with_capacity(evidence_records.len());
+        for record in evidence_records {
+            accepted.push(AcceptedWorldViewEvidence::from_gpu_execution_result(
+                provider,
+                record.result,
+                record.assumptions.to_vec(),
+            )?);
+        }
+
+        let mut results = Vec::with_capacity(accepted.len());
+        for evidence in &accepted {
+            results.push(
+                self.compile_and_evaluate_conditioned_program_with_accepted_world_view(
+                    program, evidence,
+                )?,
+            );
+        }
+        Ok(results)
+    }
+
     /// Compile a parsed program and evaluate queries through the existing GPU exact path.
     #[cfg(feature = "host-io")]
     pub fn compile_and_evaluate_program_with_accepted_world_view(
