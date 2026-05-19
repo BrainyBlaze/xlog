@@ -20,7 +20,7 @@ use super::{
     dlpack_capsule_from_tensor, dlpack_from_py, enforce_call_memory_limit,
     parse_prob_engine_override, provider_from_config, provider_memory_stats, types,
     CompiledLogicProgram, CompiledProbProgram, CompiledProgram, LogicDeltaStats, LogicEvalResult,
-    LogicProgram, LogicQueryResult, LogicRelationSession, Program,
+    LogicProgram, LogicQueryResult, LogicRelationSession, Program, RelationChangeCallback,
 };
 
 #[pymethods]
@@ -189,6 +189,9 @@ impl CompiledLogicProgram {
             relation_store,
             evaluation_store: None,
             last_delta_stats: None,
+            relation_callbacks: Vec::new(),
+            next_relation_callback_id: 1,
+            relation_generations: HashMap::new(),
         })
     }
 
@@ -312,6 +315,7 @@ impl LogicRelationSession {
             )
         })?;
         let mut batch: Vec<(String, RelationDelta)> = Vec::with_capacity(seq.len()? as usize);
+        let mut relation_names: Vec<String> = Vec::new();
         for item in seq.try_iter()? {
             let item = item?;
             let dict = item.downcast::<PyDict>().map_err(|_| {
@@ -332,6 +336,7 @@ impl LogicRelationSession {
                     "apply_relation_delta_batch updates require insert_columns, delete_columns, or both",
                 ));
             }
+            relation_names.push(name.clone());
             batch.push((name, RelationDelta::new(insert, delete)));
         }
 
@@ -346,6 +351,7 @@ impl LogicRelationSession {
             .map_err(types::xlog_err)?;
         let stats = logic_delta_stats_from_report(report);
         self.last_delta_stats = Some(stats.clone());
+        self.fire_relation_callbacks(py, &relation_names, &stats)?;
         pack_delta_stats(py, &stats)
     }
 
@@ -359,6 +365,30 @@ impl LogicRelationSession {
                 Ok(dict.into())
             }
         }
+    }
+
+    pub fn register_relation_callback(
+        &mut self,
+        py: Python<'_>,
+        callback: PyObject,
+    ) -> PyResult<u64> {
+        if !callback.bind(py).is_callable() {
+            return Err(PyValueError::new_err(
+                "register_relation_callback expects a callable",
+            ));
+        }
+        let id = self.next_relation_callback_id;
+        self.next_relation_callback_id = self.next_relation_callback_id.saturating_add(1);
+        self.relation_callbacks
+            .push(RelationChangeCallback { id, callback });
+        Ok(id)
+    }
+
+    pub fn unregister_relation_callback(&mut self, callback_id: u64) -> bool {
+        let before = self.relation_callbacks.len();
+        self.relation_callbacks
+            .retain(|registered| registered.id != callback_id);
+        before != self.relation_callbacks.len()
     }
 
     pub fn cuda_graph_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
@@ -472,6 +502,7 @@ impl LogicRelationSession {
         insert: Option<xlog_cuda::CudaBuffer>,
         delete: Option<xlog_cuda::CudaBuffer>,
     ) -> PyResult<PyObject> {
+        let relation_names = vec![name.clone()];
         let mut deltas = HashMap::new();
         deltas.insert(name, RelationDelta::new(insert, delete));
         let report = self
@@ -497,8 +528,65 @@ impl LogicRelationSession {
             canceled_rows: report.canceled_rows,
         };
         self.last_delta_stats = Some(stats.clone());
+        self.fire_relation_callbacks(py, &relation_names, &stats)?;
         pack_delta_stats(py, &stats)
     }
+
+    fn fire_relation_callbacks(
+        &mut self,
+        py: Python<'_>,
+        relation_names: &[String],
+        stats: &LogicDeltaStats,
+    ) -> PyResult<()> {
+        if self.relation_callbacks.is_empty() || stats.changed_relations == 0 {
+            return Ok(());
+        }
+
+        let mut seen = HashSet::new();
+        let mut events: Vec<(String, u64)> = Vec::new();
+        for relation in relation_names {
+            if seen.insert(relation.clone()) {
+                let generation = self
+                    .relation_generations
+                    .entry(relation.clone())
+                    .and_modify(|current| *current = current.saturating_add(1))
+                    .or_insert(1);
+                events.push((relation.clone(), *generation));
+            }
+        }
+
+        for (relation, generation) in events {
+            let payload = relation_callback_payload(py, &relation, generation, stats)?;
+            for registered in &self.relation_callbacks {
+                registered.callback.call1(py, (payload.clone_ref(py),))?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn relation_callback_payload(
+    py: Python<'_>,
+    relation: &str,
+    generation: u64,
+    stats: &LogicDeltaStats,
+) -> PyResult<PyObject> {
+    let dict = PyDict::new(py);
+    dict.set_item("relation", relation)?;
+    dict.set_item("generation", generation)?;
+    dict.set_item("input_delta_count", stats.input_delta_count)?;
+    dict.set_item("insert_rows", stats.insert_rows)?;
+    dict.set_item("delete_rows", stats.delete_rows)?;
+    dict.set_item("has_deletes", stats.has_deletes)?;
+    dict.set_item("coalesced_insert_rows", stats.coalesced_insert_rows)?;
+    dict.set_item("coalesced_delete_rows", stats.coalesced_delete_rows)?;
+    dict.set_item("canceled_rows", stats.canceled_rows)?;
+    dict.set_item("affected_sccs", stats.affected_sccs)?;
+    dict.set_item("recomputed_sccs", stats.recomputed_sccs)?;
+    dict.set_item("incremental_sccs", stats.incremental_sccs)?;
+    dict.set_item("telemetry", pack_delta_stats(py, stats)?)?;
+    Ok(dict.into())
 }
 
 fn optional_delta_columns<'py>(dict: &Bound<'py, PyDict>, key: &str) -> Option<Bound<'py, PyAny>> {

@@ -396,6 +396,14 @@ pub struct LogicRelationSession {
     pub(crate) relation_store: RelationStore,
     pub(crate) evaluation_store: Option<RelationStore>,
     pub(crate) last_delta_stats: Option<LogicDeltaStats>,
+    pub(crate) relation_callbacks: Vec<RelationChangeCallback>,
+    pub(crate) next_relation_callback_id: u64,
+    pub(crate) relation_generations: HashMap<String, u64>,
+}
+
+pub(crate) struct RelationChangeCallback {
+    pub id: u64,
+    pub callback: PyObject,
 }
 
 #[derive(Clone, Debug)]

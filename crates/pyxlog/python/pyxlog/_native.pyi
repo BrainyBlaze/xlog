@@ -98,6 +98,19 @@ class LogicRelationSession:
         """Return statistics from the most recent relation delta update."""
         ...
 
+    def register_relation_callback(self, callback: Any) -> int:
+        """Register a session-level relation mutation callback.
+
+        The callable receives one metadata-only payload dictionary after each
+        successful relation delta commit. Returns a callback id for
+        ``unregister_relation_callback``.
+        """
+        ...
+
+    def unregister_relation_callback(self, callback_id: int) -> bool:
+        """Unregister a relation callback by id. Returns True when removed."""
+        ...
+
     def host_transfer_stats(self) -> dict[str, int]:
         """Return ``{dtoh_bytes: int, ...}`` transfer statistics."""
         ...

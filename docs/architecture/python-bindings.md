@@ -201,6 +201,38 @@ Direct `put_relation`, `remove_relation`, or `clear_relations` calls invalidate
 the cached runtime store and make the next `evaluate()` perform a full plan
 run before later deltas can reuse it.
 
+#### Relation Change Callbacks
+
+Persistent sessions expose opt-in metadata callbacks for relation delta
+commits:
+
+```python
+def register_relation_callback(callback) -> int: ...
+def unregister_relation_callback(callback_id: int) -> bool: ...
+
+events = []
+callback_id = session.register_relation_callback(events.append)
+session.apply_relation_delta_batch([
+    {"name": "wmir_committed", "insert_columns": [row_a, parent_a]},
+])
+session.unregister_relation_callback(callback_id)
+```
+
+Callbacks fire only after a delta commit succeeds. A failed or rolled-back
+delta does not invoke registered callbacks. The callback payload is a
+metadata-only dictionary with `relation`, `generation`, `input_delta_count`,
+`insert_rows`, `delete_rows`, `has_deletes`, `coalesced_insert_rows`,
+`coalesced_delete_rows`, `canceled_rows`, `affected_sccs`,
+`recomputed_sccs`, `incremental_sccs`, and nested `telemetry`.
+
+Callbacks are invoked synchronously while the pyxlog method holds the Python
+GIL. Registration order is callback order, and relation events are emitted in
+the caller's update order after duplicate relation names are coalesced. The
+G086_NOTIFY ordering fixture records 100 replays with identical callback
+sequences. Callback payload construction does not export DLPack tensors or
+download relation data-plane rows; use explicit `evaluate()` or
+`export_relation()` when row materialization is actually requested.
+
 #### v0.8.0 Runtime Controls And Diagnostics
 
 Long-running DTS-DLM callers can submit logic or probabilistic evaluations to a
