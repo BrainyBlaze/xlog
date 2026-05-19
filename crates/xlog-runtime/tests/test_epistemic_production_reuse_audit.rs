@@ -251,10 +251,16 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
         .contains("compile_and_evaluate_conditioned_source_with_grads_with_gpu_execution_result"));
     assert!(prob
         .contains("compile_and_evaluate_conditioned_source_with_grads_for_gpu_execution_results"));
+    assert!(prob.contains(
+        "compile_and_evaluate_conditioned_source_with_grads_for_gpu_batch_execution_result"
+    ));
     assert!(prob
         .contains("compile_and_evaluate_conditioned_program_with_grads_with_gpu_execution_result"));
     assert!(prob
         .contains("compile_and_evaluate_conditioned_program_with_grads_for_gpu_execution_results"));
+    assert!(prob.contains(
+        "compile_and_evaluate_conditioned_program_with_grads_for_gpu_batch_execution_result"
+    ));
     assert!(prob.contains("compile_and_evaluate_program_with_gpu_execution_result"));
     assert!(prob.contains("encode_source_pir_cnf_with_gpu_execution_result"));
     assert!(prob.contains("encode_program_pir_cnf_with_gpu_execution_result"));
@@ -306,6 +312,10 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(
         integration.contains("accepted_split_batch_gates_probabilistic_conditioned_program_path")
     );
+    assert!(integration
+        .contains("accepted_split_batch_gates_probabilistic_conditioned_source_gradients"));
+    assert!(integration
+        .contains("accepted_split_batch_gates_probabilistic_conditioned_program_gradients"));
 
     for (label, source) in [
         ("runtime", runtime.as_str()),
