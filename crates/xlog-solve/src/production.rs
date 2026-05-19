@@ -328,6 +328,14 @@ pub struct GpuSolverProductionTrace {
     pub accepted_g91_gpu_candidate_evidence_consumed: u64,
     /// Number of accepted FAEEL GPU epistemic candidate evidence records consumed.
     pub accepted_faeel_gpu_candidate_evidence_consumed: u64,
+    /// Number of accepted GPU candidate evidence records containing `know` operators.
+    pub accepted_know_gpu_candidate_evidence_consumed: u64,
+    /// Number of accepted GPU candidate evidence records containing `possible` operators.
+    pub accepted_possible_gpu_candidate_evidence_consumed: u64,
+    /// Number of accepted GPU candidate evidence records containing `not possible` operators.
+    pub accepted_not_possible_gpu_candidate_evidence_consumed: u64,
+    /// Number of accepted GPU candidate evidence records containing `not know` operators.
+    pub accepted_not_know_gpu_candidate_evidence_consumed: u64,
     /// Number of SAT expectations dispatched through `GpuCdclSolver`.
     pub gpu_cdcl_sat_solves: u64,
     /// Number of UNSAT expectations dispatched through `GpuCdclSolver`.
@@ -522,6 +530,32 @@ impl GpuSolverProductionAdapter {
             self.trace.accepted_faeel_gpu_candidate_evidence_consumed = self
                 .trace
                 .accepted_faeel_gpu_candidate_evidence_consumed
+                .saturating_add(1);
+        }
+        let preflight = &result.prepared.preflight;
+        if preflight.know_operator_count > 0 {
+            self.trace.accepted_know_gpu_candidate_evidence_consumed = self
+                .trace
+                .accepted_know_gpu_candidate_evidence_consumed
+                .saturating_add(1);
+        }
+        if preflight.possible_operator_count > 0 {
+            self.trace.accepted_possible_gpu_candidate_evidence_consumed = self
+                .trace
+                .accepted_possible_gpu_candidate_evidence_consumed
+                .saturating_add(1);
+        }
+        if preflight.not_possible_operator_count > 0 {
+            self.trace
+                .accepted_not_possible_gpu_candidate_evidence_consumed = self
+                .trace
+                .accepted_not_possible_gpu_candidate_evidence_consumed
+                .saturating_add(1);
+        }
+        if preflight.not_know_operator_count > 0 {
+            self.trace.accepted_not_know_gpu_candidate_evidence_consumed = self
+                .trace
+                .accepted_not_know_gpu_candidate_evidence_consumed
                 .saturating_add(1);
         }
     }

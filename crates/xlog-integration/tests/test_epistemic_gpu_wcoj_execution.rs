@@ -5989,6 +5989,13 @@ fn accepted_operator_gpu_execution_results_gate_solver_lifecycle_path() {
     assert_eq!(report.workspace_reuses, 5);
     let trace = adapter.trace();
     assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 5);
+    assert_eq!(trace.accepted_know_gpu_candidate_evidence_consumed, 0);
+    assert_eq!(trace.accepted_possible_gpu_candidate_evidence_consumed, 2);
+    assert_eq!(
+        trace.accepted_not_possible_gpu_candidate_evidence_consumed,
+        2
+    );
+    assert_eq!(trace.accepted_not_know_gpu_candidate_evidence_consumed, 1);
     assert_eq!(trace.gpu_assumption_pushes, 10);
     assert_eq!(trace.gpu_assumption_retractions, 10);
     assert_eq!(trace.gpu_lifecycle_workspace_reuses, 5);

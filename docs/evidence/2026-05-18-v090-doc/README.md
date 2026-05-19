@@ -23,7 +23,7 @@ Predecessor evidence:
 | Requirement | Evidence |
 |---|---|
 | Epistemic guide | `docs/epistemic-solver-semantics-guide.md` explains EIR, G91, FAEEL, GPT, splitting, world-view fixtures, partial accepted GPU runtime evidence, and the corrected GPU-native blocker. |
-| Solver guide | The same guide explains assumptions, incremental SAT, learned transfer, MaxSAT, portfolio/status propagation, the accepted GPU CDCL production adapter slices including G91/FAEEL mode-specific solver trace counters and binary `possible`/`not possible`/`not know` operator evidence, and why they still do not close `G090_SOLVER`. |
+| Solver guide | The same guide explains assumptions, incremental SAT, learned transfer, MaxSAT, portfolio/status propagation, the accepted GPU CDCL production adapter slices including G91/FAEEL mode-specific solver trace counters, accepted operator-family solver trace counters, and binary `possible`/`not possible`/`not know` operator evidence, and why they still do not close `G090_SOLVER`. |
 | GPU/WCOJ guide | The same guide now distinguishes the implemented bounded K5/K6/K7/K8 WCOJ dispatch, GPU buffer, tuple-membership, solver, and probabilistic production-reuse slices, including mode-specific accepted G91/FAEEL solver/probability trace evidence plus source/program-specific PIR/CNF, source/program-specific exact-query, source/program-specific conditioned-gradient, source/program-specific conditioned-evidence, and operator-specific probabilistic evidence counters, from the still-missing release-wide semantic parity and post-v0.8 certification gates. |
 | Runnable examples | `examples/epistemic/` has five `.xlog` fixtures run by `test_epistemic_examples`. |
 | Roadmap sync | No ROADMAP or release-board rows were edited in this slice. |

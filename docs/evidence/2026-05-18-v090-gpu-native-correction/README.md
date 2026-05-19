@@ -105,8 +105,9 @@ The next production slice should start at the lowering/runtime boundary:
    `solve_maxsat_schedule_with_gpu_execution_results`, and
    `solve_portfolio_with_gpu_execution_result` and
    `solve_multi_candidate_portfolio_with_gpu_execution_results`; accepted G91/default
-   FAEEL mode-specific solver evidence counters are recorded, but broader accepted solver
-   semantic integration remains open.
+   FAEEL mode-specific solver evidence counters plus accepted operator-family
+   solver evidence counters are recorded, but broader accepted solver semantic
+   integration remains open.
 7. Feed accepted world-view evidence into the existing GPU-native
    exact/provenance/PIR/CNF paths and report zero CPU-only probability
    recomputation.
