@@ -1419,6 +1419,15 @@ fn faeel_independently_founded_self_possible_reaches_gpu_runtime_path() {
         "#,
     )
     .expect("parse independently founded FAEEL fixture");
+    let oracle = run_generate_propagate_test(
+        &program,
+        vec![
+            EpistemicInterpretation::new(),
+            EpistemicInterpretation::new().with_known("p", 0),
+        ],
+        GeneratePropagateTestConfig { max_candidates: 2 },
+    )
+    .expect("run independently founded FAEEL oracle");
     let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
         .expect("compile independently founded FAEEL executable");
 
@@ -1447,6 +1456,35 @@ fn faeel_independently_founded_self_possible_reaches_gpu_runtime_path() {
         EpistemicGpuModelMembershipSource::StableModelTupleBuffer
     );
     assert_eq!(result.semantic_trace.accepted_world_views, 1);
+    assert_eq!(
+        result.semantic_trace.generated_candidates,
+        oracle.trace.generated
+    );
+    assert_eq!(
+        result.semantic_trace.propagated_candidates,
+        oracle.trace.propagated
+    );
+    assert_eq!(result.semantic_trace.tested_candidates, oracle.trace.tested);
+    assert_eq!(
+        result.semantic_trace.accepted_candidates,
+        oracle.trace.accepted
+    );
+    assert_eq!(
+        result.semantic_trace.accepted_world_views,
+        oracle.trace.accepted_world_views
+    );
+    assert_eq!(
+        result.semantic_trace.rejected_candidates,
+        oracle.trace.rejected
+    );
+    assert_eq!(
+        result.semantic_trace.accepted_candidate_indices,
+        oracle.accepted_candidate_indices
+    );
+    assert_eq!(
+        result.semantic_trace.rejected_candidate_indices,
+        oracle.rejected_candidate_indices
+    );
     assert_eq!(
         read_device_row_count(&fix.provider, &result.final_output).expect("final row count"),
         1,

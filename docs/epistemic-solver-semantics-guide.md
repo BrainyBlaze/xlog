@@ -291,6 +291,8 @@ GPU traces can be compared with the GPT oracle's phase counts,
 accepted/rejected candidate indices, and typed rejection expectations. The G91
 self-supported `possible p()` runtime fixture uses the mode-aware oracle for
 generated, propagated, tested, accepted, rejected, and candidate-index parity.
+The independently founded FAEEL self-`possible p()` runtime fixture uses the
+default oracle for the same trace/candidate-index parity.
 This is certification evidence for
 bounded runtime fixtures, not full semantic parity across every
 G91/FAEEL/GPT/splitting case.
