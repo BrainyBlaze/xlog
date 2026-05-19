@@ -1253,6 +1253,129 @@ impl GpuSolverProductionAdapter {
         })
     }
 
+    fn add_maxsat_lifecycle_step_report(
+        report: &mut GpuSolverProductionMaxSatLifecycleReport,
+        step_report: GpuSolverProductionMaxSatLifecycleReport,
+    ) {
+        report.candidate_evidence_records = report
+            .candidate_evidence_records
+            .saturating_add(step_report.candidate_evidence_records);
+        report.lifecycle.steps = report
+            .lifecycle
+            .steps
+            .saturating_add(step_report.lifecycle.steps);
+        report.lifecycle.assumption_pushes = report
+            .lifecycle
+            .assumption_pushes
+            .saturating_add(step_report.lifecycle.assumption_pushes);
+        report.lifecycle.assumption_retractions = report
+            .lifecycle
+            .assumption_retractions
+            .saturating_add(step_report.lifecycle.assumption_retractions);
+        report.lifecycle.workspace_reuses = report
+            .lifecycle
+            .workspace_reuses
+            .saturating_add(step_report.lifecycle.workspace_reuses);
+        report.lifecycle.unknown_steps = report
+            .lifecycle
+            .unknown_steps
+            .saturating_add(step_report.lifecycle.unknown_steps);
+        report.lifecycle.timeout_steps = report
+            .lifecycle
+            .timeout_steps
+            .saturating_add(step_report.lifecycle.timeout_steps);
+        report.maxsat.optimum_score = report
+            .maxsat
+            .optimum_score
+            .max(step_report.maxsat.optimum_score);
+        report.maxsat.candidates_checked = report
+            .maxsat
+            .candidates_checked
+            .saturating_add(step_report.maxsat.candidates_checked);
+        report.maxsat.satisfiable_candidates = report
+            .maxsat
+            .satisfiable_candidates
+            .saturating_add(step_report.maxsat.satisfiable_candidates);
+        report.maxsat.unsat_candidates_pruned = report
+            .maxsat
+            .unsat_candidates_pruned
+            .saturating_add(step_report.maxsat.unsat_candidates_pruned);
+        report.maxsat.gpu_cdcl_candidate_encodes = report
+            .maxsat
+            .gpu_cdcl_candidate_encodes
+            .saturating_add(step_report.maxsat.gpu_cdcl_candidate_encodes);
+        report.maxsat.gpu_cdcl_candidate_solves = report
+            .maxsat
+            .gpu_cdcl_candidate_solves
+            .saturating_add(step_report.maxsat.gpu_cdcl_candidate_solves);
+    }
+
+    /// Execute accepted solver lifecycle plus MaxSAT candidate-set work once per evidence record.
+    pub fn solve_multi_candidate_maxsat_lifecycle_with_gpu_execution_results(
+        &mut self,
+        provider: &CudaKernelProvider,
+        results: &[&EpistemicGpuExecutionResult],
+        workspace: &mut GpuCdclWorkspace,
+        steps: &[GpuSolverProductionLifecycleStep<'_>],
+        candidates: &[GpuSolverProductionMaxSatCandidate<'_>],
+    ) -> Result<GpuSolverProductionMaxSatLifecycleReport> {
+        if results.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU solver production MaxSAT lifecycle".to_string(),
+                context:
+                    "multi-candidate MaxSAT lifecycle requires at least one accepted GPU result"
+                        .to_string(),
+            });
+        }
+        for result in results {
+            require_accepted_gpu_solver_evidence(provider, result)?;
+        }
+
+        let mut report = GpuSolverProductionMaxSatLifecycleReport::default();
+        for result in results {
+            let lifecycle = self.solve_assumption_lifecycle_steps(workspace, steps)?;
+            let maxsat = self.solve_weighted_maxsat_candidates(candidates)?;
+            self.record_accepted_gpu_candidate_evidence(result);
+            Self::add_maxsat_lifecycle_step_report(
+                &mut report,
+                GpuSolverProductionMaxSatLifecycleReport {
+                    candidate_evidence_records: 1,
+                    lifecycle,
+                    maxsat,
+                },
+            );
+        }
+
+        self.trace.require_zero_cpu_search()?;
+        Ok(report)
+    }
+
+    /// Execute accepted split/batch solver lifecycle plus MaxSAT candidate-set work.
+    pub fn solve_maxsat_lifecycle_with_gpu_batch_execution_result(
+        &mut self,
+        provider: &CudaKernelProvider,
+        evidence: GpuSolverProductionBatchExecutionEvidence<'_>,
+        workspace: &mut GpuCdclWorkspace,
+        steps: &[GpuSolverProductionLifecycleStep<'_>],
+        candidates: &[GpuSolverProductionMaxSatCandidate<'_>],
+    ) -> Result<GpuSolverProductionMaxSatLifecycleReport> {
+        let results = require_accepted_gpu_solver_batch_evidence(provider, evidence.batch)?;
+        self.trace.accepted_gpu_batch_candidate_evidence_consumed = self
+            .trace
+            .accepted_gpu_batch_candidate_evidence_consumed
+            .saturating_add(1);
+        self.trace
+            .accepted_gpu_batch_candidate_component_evidence_consumed = self
+            .trace
+            .accepted_gpu_batch_candidate_component_evidence_consumed
+            .saturating_add(results.len() as u64);
+        let report = self.solve_multi_candidate_maxsat_lifecycle_with_gpu_execution_results(
+            provider, &results, workspace, steps, candidates,
+        )?;
+        self.trace.require_zero_cpu_search()?;
+        Ok(report)
+    }
+
     /// Solve a bounded weighted MaxSAT candidate set once per accepted GPU epistemic candidate.
     pub fn solve_multi_candidate_weighted_maxsat_with_gpu_execution_results(
         &mut self,

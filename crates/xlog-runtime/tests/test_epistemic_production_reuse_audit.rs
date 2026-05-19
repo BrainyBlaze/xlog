@@ -153,6 +153,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(
         integration.contains("accepted_gpu_execution_result_gates_solver_maxsat_lifecycle_path")
     );
+    assert!(integration.contains("accepted_split_batch_gates_solver_maxsat_lifecycle_path"));
     assert!(integration.contains("accepted_split_batch_gates_solver_portfolio_path"));
     assert!(integration.contains("accepted_split_batch_gates_solver_learned_clause_reuse_path"));
     assert!(integration.contains("accepted_split_batch_gates_solver_maxsat_path"));
@@ -171,6 +172,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
         solver.contains("solve_multi_candidate_assumption_lifecycle_with_gpu_execution_results")
     );
     assert!(solver.contains("solve_maxsat_lifecycle_with_gpu_execution_result"));
+    assert!(solver.contains("solve_multi_candidate_maxsat_lifecycle_with_gpu_execution_results"));
+    assert!(solver.contains("solve_maxsat_lifecycle_with_gpu_batch_execution_result"));
     assert!(solver.contains("GpuSolverProductionBatchExecutionEvidence"));
     assert!(solver.contains("solve_assumption_lifecycle_with_gpu_batch_execution_result"));
     assert!(solver.contains("require_accepted_gpu_solver_batch_evidence"));
