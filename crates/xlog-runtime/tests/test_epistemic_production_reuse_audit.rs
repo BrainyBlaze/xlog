@@ -207,6 +207,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(
         integration.contains("accepted_split_quaternary_not_possible_batch_matches_gpt_oracles")
     );
+    assert!(integration
+        .contains("accepted_split_quaternary_possible_and_not_know_batch_matches_gpt_oracles"));
     assert!(integration.contains("split_multi_membership_modal_coupling_rejects_gpu_batching"));
     assert!(integration
         .contains("accepted_split_all_binary_operator_batch_conditions_probabilistic_evidence"));

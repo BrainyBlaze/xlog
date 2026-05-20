@@ -277,6 +277,13 @@ The all-binary split-batch solver marker now extends the four-component
 `know`/`possible`/`not possible`/`not know` batch evidence through those same
 adapters without adding a parallel solver engine.
 
+Split quaternary possible/not-know parity audit note: the source audit now also
+requires `accepted_split_quaternary_possible_and_not_know_batch_matches_gpt_oracles`,
+proving the split `possible fact4/4` and `not know fact4/4` components match the
+bounded GPT oracles for semantic trace counts, accepted/rejected candidate
+indices, tuple-key final-row filtering, zero CPU recomposition/fallback
+counters, and aggregate CUDA-event timing.
+
 ## Forbidden Parallel Engines
 
 The accepted paths audited above must not introduce epistemic-only replacements

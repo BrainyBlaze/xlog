@@ -125,6 +125,13 @@ reaches source conditioned gradient evaluation with arity-four `possible` and
 conditioned-gradient evaluations, and zero CPU probability recomputation. This
 is not a closure proposal; `G090_PROB` and `G090_CLOSE` remain blocked.
 
+2026-05-20 split possible/not-know oracle follow-up: split quaternary
+`possible fact4/4` plus `not know fact4/4` batch execution now also matches the
+bounded GPT oracles for per-component semantic trace counts, accepted/rejected
+candidate indices, tuple-key final-row filtering, aggregate operator counts,
+CUDA-event timing, and zero CPU recomposition/fallback counters. This is not a
+closure proposal; `G090_GPU` and `G090_CLOSE` remain blocked.
+
 ## Ref Evidence
 
 | Ref | SHA |
@@ -219,6 +226,7 @@ Post-merge compatibility validation:
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution rejects_unrecorded_candidate_generation_timing -- --nocapture` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution aggregate_timing_requires_every_component_phase_to_be_recorded -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_possible_and_not_know_memberships_match_gpt_oracle_parity -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_possible_and_not_know_batch_matches_gpt_oracles -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_not_possible_gates_source_and_program_pir_cnf_and_exact_evaluation_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_not_possible_conditions_source_and_program_probabilistic_gradients -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_possible_and_not_know_results_gate_solver_and_probabilistic_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
