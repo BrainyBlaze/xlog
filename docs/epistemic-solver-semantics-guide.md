@@ -344,6 +344,10 @@ G91/FAEEL/GPT/splitting case.
 rejects a rule that couples more than one distinct epistemic body predicate. For
 accepted split fixtures, `recomposed_rule_indices()` must recover the original
 source rule order.
+Integration coverage now pins the GPU split-lowering boundary with
+`split_multi_membership_modal_coupling_rejects_gpu_batching`, which rejects the
+multi-membership `know edge(X)`/`know color(X)` fixture in a mixed program with
+`possible alt(X)`/`not possible blocked(X)` before component batching can run.
 
 `compile_epistemic_gpu_split_execution` lowers valid epistemic split components
 through `compile_epistemic_gpu_execution_with_stats_snapshot`, producing one

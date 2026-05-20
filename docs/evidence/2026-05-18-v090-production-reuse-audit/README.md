@@ -43,6 +43,8 @@ Solver audit note: the all-binary-operator split-batch solver fixtures prove the
 
 Probability audit note: the all-binary-operator split-batch probability fixtures now prove conditioned source/program query and gradient evidence plus all-binary split-batch source/program PIR-CNF plus already-compiled exact query/gradient evaluation through the existing GPU exact/provenance/PIR/CNF paths.
 
+Split guard audit note: `test_epistemic_production_reuse_audit` now requires the fail-closed `split_multi_membership_modal_coupling_rejects_gpu_batching` marker so unsafe multi-membership modal coupling cannot be documented as accepted split GPU batching evidence.
+
 ## Forbidden Parallel Engines
 
 The accepted paths audited above must not introduce epistemic-only replacements

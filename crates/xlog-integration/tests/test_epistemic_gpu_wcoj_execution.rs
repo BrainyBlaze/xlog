@@ -1610,6 +1610,36 @@ fn accepted_split_all_binary_operators_match_gpt_oracles() {
 }
 
 #[test]
+fn split_multi_membership_modal_coupling_rejects_gpu_batching() {
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred color(u32).
+        pred alt(u32).
+        pred blocked(u32).
+        pred both_known(u32).
+        pred safe_alt(u32).
+        both_known(X) :- node(X), know edge(X), know color(X).
+        safe_alt(X) :- node(X), possible alt(X), not possible blocked(X).
+        "#,
+    )
+    .expect("parse split multi-membership fixture");
+    let err = compile_epistemic_gpu_split_execution_with_stats_snapshot(&program, None)
+        .expect_err("multi-membership modal coupling must reject unsafe split batching");
+
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
+            assert_eq!(construct, "epistemic splitting");
+            assert!(context.contains("rule[0] couples epistemic predicates"));
+            assert!(context.contains("\"edge\""));
+            assert!(context.contains("\"color\""));
+        }
+        other => panic!("expected typed split rejection, got {other:?}"),
+    }
+}
+
+#[test]
 fn accepted_split_all_binary_operator_batch_conditions_probabilistic_evidence() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
