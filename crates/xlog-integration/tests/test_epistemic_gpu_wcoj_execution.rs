@@ -13840,6 +13840,161 @@ fn accepted_all_operator_mixed_membership_gates_probabilistic_program_gradient_a
 }
 
 #[test]
+fn accepted_all_operator_mixed_membership_gates_probabilistic_source_pir_and_exact_evaluation_paths(
+) {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let result = execute_all_operator_mixed_membership_fixture(&fix);
+    assert_eq!(
+        download_unary_u32(&fix.provider, &result.final_output),
+        vec![2]
+    );
+    assert_eq!(result.prepared.preflight.tuple_membership_binding_count, 4);
+    assert_eq!(result.prepared.preflight.know_operator_count, 1);
+    assert_eq!(result.prepared.preflight.possible_operator_count, 1);
+    assert_eq!(result.prepared.preflight.not_know_operator_count, 1);
+    assert_eq!(result.prepared.preflight.not_possible_operator_count, 1);
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+
+    let probabilistic_source = r#"
+        0.3::edge(2).
+        0.4::alt(2).
+        0.5::hidden(2).
+        0.6::blocked(2).
+        query(edge(2)).
+        query(alt(2)).
+        query(hidden(2)).
+        query(blocked(2)).
+        "#;
+    let assert_conditioned = |probs: &[f64]| {
+        let expected = [1.0, 1.0, 0.0, 0.0];
+        assert_eq!(probs.len(), expected.len());
+        for (actual, expected) in probs.iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() < 1.0e-6,
+                "conditioned all-operator probability mismatch: actual={actual} expected={expected}",
+            );
+        }
+    };
+    let assert_unconditioned = |probs: &[f64]| {
+        let expected = [0.3, 0.4, 0.5, 0.6];
+        assert_eq!(probs.len(), expected.len());
+        for (actual, expected) in probs.iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() < 1.0e-6,
+                "unconditioned all-operator probability mismatch: actual={actual} expected={expected}",
+            );
+        }
+    };
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut adapter = EpistemicProbProductionAdapter::new(config);
+    let conditioned_grads = adapter
+        .compile_and_evaluate_conditioned_source_with_grads_with_gpu_execution_result(
+            probabilistic_source,
+            &fix.provider,
+            &result,
+            all_operator_mixed_membership_assumptions(),
+        )
+        .expect("same-rule all-operator evidence must condition source gradients");
+    let pir_cnf = adapter
+        .encode_source_pir_cnf_with_gpu_execution_result(
+            probabilistic_source,
+            &fix.provider,
+            &result,
+            all_operator_mixed_membership_assumptions(),
+        )
+        .expect("same-rule all-operator evidence must gate source PIR/CNF");
+    let exact = adapter
+        .compile_source_with_gpu_execution_result(
+            probabilistic_source,
+            &fix.provider,
+            &result,
+            all_operator_mixed_membership_assumptions(),
+        )
+        .expect("same-rule all-operator evidence must gate source exact compile");
+    let evaluated = adapter
+        .evaluate_with_gpu_execution_result(
+            &exact,
+            &fix.provider,
+            &result,
+            all_operator_mixed_membership_assumptions(),
+        )
+        .expect("same-rule all-operator evidence must gate source exact query evaluation");
+    let evaluated_grads = adapter
+        .evaluate_gpu_with_grads_with_gpu_execution_result(
+            &exact,
+            &fix.provider,
+            &result,
+            all_operator_mixed_membership_assumptions(),
+        )
+        .expect("same-rule all-operator evidence must gate source exact gradient evaluation");
+
+    let conditioned_probs: Vec<f64> = conditioned_grads
+        .query_grads
+        .iter()
+        .map(|query| query.prob)
+        .collect();
+    assert_conditioned(&conditioned_probs);
+    assert!(pir_cnf.pir_nodes > 0);
+    assert!(pir_cnf.root_count > 0);
+    assert!(pir_cnf.cnf_var_cap > 0);
+    assert!(pir_cnf.cnf_clause_cap > 0);
+    let query_probs: Vec<f64> = evaluated
+        .query_probs
+        .iter()
+        .map(|query| query.prob)
+        .collect();
+    assert_unconditioned(&query_probs);
+    let gradient_probs: Vec<f64> = evaluated_grads
+        .query_grads
+        .iter()
+        .map(|query| query.prob)
+        .collect();
+    assert_unconditioned(&gradient_probs);
+
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_world_view_evidence_consumed, 5);
+    assert_eq!(trace.accepted_evidence_assumptions_consumed, 20);
+    assert_eq!(trace.gpu_conditioned_evidence_facts, 4);
+    assert_eq!(trace.gpu_conditioned_nonzero_arity_evidence_facts, 4);
+    assert_eq!(trace.gpu_conditioned_max_evidence_arity, 1);
+    assert_eq!(trace.gpu_conditioned_negative_evidence_facts, 2);
+    assert_eq!(trace.gpu_conditioned_know_evidence_facts, 1);
+    assert_eq!(trace.gpu_conditioned_possible_evidence_facts, 1);
+    assert_eq!(trace.gpu_conditioned_not_known_evidence_facts, 1);
+    assert_eq!(trace.gpu_conditioned_not_possible_evidence_facts, 1);
+    assert_eq!(trace.gpu_source_conditioned_evidence_facts, 4);
+    assert_eq!(trace.gpu_source_conditioned_nonzero_arity_evidence_facts, 4);
+    assert_eq!(trace.gpu_source_conditioned_max_evidence_arity, 1);
+    assert_eq!(trace.gpu_source_conditioned_negative_evidence_facts, 2);
+    assert_eq!(trace.gpu_source_conditioned_know_evidence_facts, 1);
+    assert_eq!(trace.gpu_source_conditioned_possible_evidence_facts, 1);
+    assert_eq!(trace.gpu_source_conditioned_not_known_evidence_facts, 1);
+    assert_eq!(trace.gpu_source_conditioned_not_possible_evidence_facts, 1);
+    assert_eq!(trace.gpu_exact_source_compiles, 2);
+    assert_eq!(trace.gpu_exact_query_evaluations, 1);
+    assert_eq!(trace.gpu_exact_gradient_evaluations, 2);
+    assert_eq!(trace.gpu_source_conditioned_gradient_evaluations, 1);
+    assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
+    assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 1);
+    assert_eq!(trace.gpu_pir_graph_uploads, 1);
+    assert_eq!(trace.gpu_source_pir_graph_uploads, 1);
+    assert_eq!(trace.gpu_program_pir_graph_uploads, 0);
+    assert_eq!(trace.gpu_cnf_encodes, 1);
+    assert_eq!(trace.gpu_source_cnf_encodes, 1);
+    assert_eq!(trace.gpu_program_cnf_encodes, 0);
+    assert_eq!(trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(trace.fixture_circuit_evaluations, 0);
+}
+
+#[test]
 fn conditioned_probabilistic_evidence_records_source_and_program_trace_counters() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
