@@ -44,7 +44,7 @@ claim for `G090_GPU`, `G090_CERT`, or `G090_CLOSE`.
 | Accepted all-operator mixed-membership fixture | `test_epistemic_gpu_wcoj_execution::accepted_all_operator_mixed_memberships_match_gpt_oracle_parity` runs `accepted(X) :- node(X), know edge(X), possible alt(X), not know hidden(X), not possible blocked(X)`, returns `[2]`, records one operator from each epistemic family, records four row filters with two negated filters, and compares generated/propagated/tested/accepted/rejected counts plus accepted/rejected candidate indices against the bounded GPT oracle for the 16-candidate all-operator matrix. |
 | Missing-required multi-membership fixture | `test_epistemic_gpu_wcoj_execution::world_view_validation_rejects_candidates_missing_one_required_membership` runs `accepted(X) :- node(X), know edge(X), know color(X)` with no `color` tuple support, rejects all four candidates at the world-view boundary, and leaves final output empty. |
 | Accepted negated unary fixture | `test_epistemic_gpu_wcoj_execution::accepted_not_know_nonzero_arity_membership_filters_final_rows_by_absent_bound_tuple_key` runs `accepted(X) :- node(X), not know edge(X)` with `node = [1, 2, 3]` and `edge = [1, 3]`; the final device output downloads as `[2]`, and the GPU trace/candidate-index fields match a bounded GPT oracle. |
-| Split all-operator fixtures | `test_epistemic_gpu_wcoj_execution::split_gpu_world_view_distinguishes_absent_possible_from_not_known` executes split components over `node = [1, 2, 3]` and an empty `edge` tuple source; `possible edge(X)` returns `[]` while `not know edge(X)` returns `[1, 2, 3]` through the accepted GPU runtime path. The present-tuple-source split fixture records two component executions with zero CPU recomposition and zero per-candidate host round trips while preserving per-component GPT trace/candidate-index parity, and `accepted_split_all_binary_operators_match_gpt_oracles` extends this to four shared-`pair/2` components covering binary `know`, `possible`, `not possible`, and `not know` with output, polarity, and GPT oracle parity. |
+| Split all-operator fixtures | `test_epistemic_gpu_wcoj_execution::split_gpu_world_view_distinguishes_absent_possible_from_not_known` executes split components over `node = [1, 2, 3]` and an empty `edge` tuple source; `possible edge(X)` returns `[]` while `not know edge(X)` returns `[1, 2, 3]` through the accepted GPU runtime path. The present-tuple-source split fixture records two component executions with zero CPU recomposition and zero per-candidate host round trips while preserving per-component GPT trace/candidate-index parity, `accepted_split_all_binary_operators_match_gpt_oracles` extends this to four shared-`pair/2` components covering binary `know`, `possible`, `not possible`, and `not know` with output, polarity, and GPT oracle parity, and `accepted_split_quaternary_not_possible_batch_matches_gpt_oracles` extends the split parity surface to arity-four `know fact4/4` plus `not possible fact4/4` components with tuple-key filtering, output, polarity, aggregate timing, and GPT candidate-index parity. |
 | Existing relation reuse | The fixture registers `EpistemicExecutablePlan::relation_ids`, seeds ordinary runtime relations, executes the reduced production runtime plan, and reads final output from the runtime-owned device buffer. |
 
 ## Validation
@@ -66,6 +66,7 @@ claim for `G090_GPU`, `G090_CERT`, or `G090_CLOSE`.
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_all_operator_mixed_memberships_match_gpt_oracle_parity -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_not_know_nonzero_arity_membership_filters_final_rows_by_absent_bound_tuple_key -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution split_gpu_world_view_distinguishes_absent_possible_from_not_known -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_not_possible_batch_matches_gpt_oracles -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 122 passed, 0 failed |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace -- --nocapture` | PASS, 53 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_executable_plan -- --nocapture` | PASS, 8 passed, 0 failed |
@@ -83,8 +84,9 @@ claim for `G090_GPU`, `G090_CERT`, or `G090_CLOSE`.
   missing-required rejection, and unary/binary variable-bound `not know` absent-key
   filtering with operator-level GPT trace/candidate-index oracle parity plus
   split possible-vs-not-known output parity over the same absent tuple source,
-  plus aggregate split-batch all-binary-operator output/oracle parity, zero CPU
-  recomposition, and zero per-candidate host-round-trip tracing.
+  plus aggregate split-batch all-binary-operator and split-quaternary operator
+  output/oracle parity, zero CPU recomposition, and zero per-candidate
+  host-round-trip tracing.
 - It does not prove the full G91, FAEEL, GPT, splitting, solver, or
   probabilistic parity matrix.
 - Multiple-epistemic-literal final-row filters now have focused positive,
