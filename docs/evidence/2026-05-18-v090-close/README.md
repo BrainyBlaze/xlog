@@ -45,19 +45,22 @@ lifecycle pushes/retractions, and zero CPU search/recomputation. The same
 split-batch evidence now also reaches existing solver learned-clause reuse and
 bounded MaxSAT candidate paths with two arena publications/imports/reused
 solves, four GPU CDCL candidate solves, two MaxSAT optima, and zero CPU search
-or learned-clause transfers. The same possible/not-know split batch now also
+or learned-clause transfers. The same search/scheduler/portfolio evidence now
+also covers the all-binary split batch with all four accepted operator-family counters,
+eight tuple-key column reads, four UNSAT prunes, eight encoded candidates,
+twenty-four scheduled GPU CDCL candidate solves, four SAT jobs, four MaxSAT
+jobs, and zero CPU search. The same possible/not-know split batch now also
 reaches existing MaxSAT search-pruning, weighted MaxSAT encoding/scheduler, and
 status-aware portfolio dispatch with two UNSAT prunes, four encoded candidates,
 twelve scheduled GPU CDCL candidate solves, two SAT jobs, two MaxSAT jobs, and
 zero CPU search. The same search/scheduler/portfolio evidence now also covers
 the split-batch quaternary `know fact4/4` plus `not possible fact4/4` fixture
 with one accepted `know` counter, one accepted `not possible` counter, eight
-tuple-key column reads, and zero CPU search. The same possible/not-know batch
-now also reaches probabilistic
-source/program gradients, source/program PIR/CNF, and already-compiled exact
-query/gradient evaluation with arity-four source/program evidence counters and
-zero CPU probability recomputation. `G090_SOLVER`, `G090_PROB`, and
-`G090_CLOSE` remain blocked.
+tuple-key column reads, and zero CPU search. The possible/not-know batch now
+also reaches probabilistic source/program gradients, source/program PIR/CNF, and
+already-compiled exact query/gradient evaluation with arity-four source/program
+evidence counters and zero CPU probability recomputation. `G090_SOLVER`,
+`G090_PROB`, and `G090_CLOSE` remain blocked.
 
 ## Ref Evidence
 
@@ -153,6 +156,7 @@ Post-merge compatibility validation:
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_possible_and_not_know_results_gate_solver_and_probabilistic_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_possible_and_not_know_batch_gates_solver_and_probabilistic_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_possible_and_not_know_batch_gates_solver_reuse_and_maxsat_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_all_binary_operator_batch_gates_solver_search_scheduler_and_portfolio_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_not_possible_batch_gates_solver_search_scheduler_and_portfolio_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_possible_and_not_know_batch_gates_solver_search_scheduler_and_portfolio_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_possible_and_not_know_batch_gates_probabilistic_gradient_pir_cnf_and_exact_evaluation_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
@@ -183,6 +187,8 @@ operator counters; `G090_SOLVER` now has the same split-batch evidence routed
 through the existing GPU CDCL lifecycle adapter with nonzero-arity tuple-key
 counters plus learned-clause reuse, bounded MaxSAT candidate solving, MaxSAT
 search pruning, weighted MaxSAT encoding/scheduler, and portfolio dispatch; the
+four-component split all-binary `know`/`possible`/`not possible`/`not know`
+fixture now has the same deeper solver search/scheduler/portfolio evidence; the
 two-component split quaternary `know fact4/4` plus `not possible fact4/4`
 fixture now has the same deeper solver search/scheduler/portfolio evidence; and
 `G090_PROB` now has the same split-batch evidence routed through the existing
@@ -286,7 +292,8 @@ The branch contains useful scaffolding:
   fail-closed invalid encoded MaxSAT scheduler rejection before accepted-batch
   evidence, scheduler, encode, or solver trace mutation,
   accepted split-batch solver lifecycle, all-binary-operator split-batch
-  solver lifecycle plus learned-clause reuse and MaxSAT with accepted
+  solver lifecycle plus learned-clause reuse, MaxSAT, MaxSAT search pruning,
+  weighted MaxSAT encoding/scheduler, and portfolio with accepted
   `know`/`possible`/`not possible`/`not know` component evidence counters,
   split-batch quaternary `know fact4/4` plus `not possible fact4/4`
   solver lifecycle, learned-clause reuse, MaxSAT, MaxSAT search pruning,

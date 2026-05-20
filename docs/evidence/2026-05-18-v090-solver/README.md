@@ -39,8 +39,10 @@ The current branch contains two solver layers:
   unsafe reuse. The split-batch lifecycle, learned-clause reuse, and MaxSAT
   gates now also cover the four binary-operator component batch with one
   `know`, one `possible`, one `not possible`, and one `not know` component,
-  recording the corresponding accepted operator-family solver counters. The
-  split-batch lifecycle, learned-clause reuse, and MaxSAT gates also cover a
+  recording the corresponding accepted operator-family solver counters; the
+  same all-binary batch now also gates MaxSAT search pruning, weighted MaxSAT
+  encoding/scheduler, and SAT/MaxSAT portfolio dispatch with zero CPU search.
+  The split-batch lifecycle, learned-clause reuse, and MaxSAT gates also cover a
   two-component quaternary batch with one `know fact4/4` component and one
   `not possible fact4/4` component, recording accepted nonzero-arity tuple-key
   reads plus zero CPU search and zero CPU learned-clause transfers; the same
@@ -152,6 +154,7 @@ post-v0.7.0/v0.8.0/v0.8.5/v0.8.6 certification.
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution rejects_unrecorded_candidate_generation_timing -- --nocapture` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution aggregate_timing_requires_every_component_phase_to_be_recorded -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_all_binary_operator_batch_gates_solver_reuse_and_maxsat_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_all_binary_operator_batch_gates_solver_search_scheduler_and_portfolio_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_operator_gpu_execution_results_gate_solver_lifecycle_path -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_all_operator_mixed_membership_gates_solver_lifecycle_path -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_all_operator_mixed_membership_gates_solver_reuse_maxsat_and_portfolio_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
@@ -216,12 +219,23 @@ encoding/scheduler, and SAT/MaxSAT portfolio dispatch. It records one accepted
 encoded candidates, twelve scheduled GPU CDCL candidate solves, two SAT jobs,
 two MaxSAT jobs, eight tuple-key column reads, and zero CPU search.
 
+2026-05-20 addendum: `accepted_split_all_binary_operator_batch_gates_solver_search_scheduler_and_portfolio_paths`
+extends `M090_SOLVER.4`, `M090_SOLVER.5`, `M090_SOLVER.8`, and
+`M090_SOLVER.9` with four-component split-batch binary `know`/`possible`/`not
+possible`/`not know` evidence for MaxSAT search pruning, weighted MaxSAT
+encoding/scheduler, and SAT/MaxSAT portfolio dispatch. It records all four
+accepted operator-family counters, four nonzero-arity evidence consumptions,
+eight tuple-key column reads, four UNSAT prunes, eight encoded candidates,
+twenty-four scheduled GPU CDCL candidate solves, four SAT jobs, four MaxSAT
+jobs, and zero CPU search.
+
 ## Coordination Notes
 
 - This file is not release-close evidence for `G090_SOLVER`.
 - The production adapter is partial accepted-runtime SAT, UNSAT,
   workspace-backed UNSAT, bounded lifecycle, accepted split-batch lifecycle,
-  all-binary-operator accepted split-batch lifecycle,
+  all-binary-operator accepted split-batch lifecycle plus learned-clause reuse,
+  MaxSAT, search pruning, weighted MaxSAT encoding/scheduler, and portfolio,
   split-batch quaternary `know`/`not possible fact4/4` lifecycle plus
   learned-clause reuse, MaxSAT, search pruning, weighted MaxSAT
   encoding/scheduler, and portfolio,
