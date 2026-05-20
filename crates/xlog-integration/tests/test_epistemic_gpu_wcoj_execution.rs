@@ -3609,6 +3609,119 @@ fn accepted_split_quaternary_all_operator_batch_records_device_workspace_buffers
 }
 
 #[test]
+fn accepted_split_all_binary_operator_batch_rejects_cpu_fallback_counters() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let (split, mut batch) = execute_split_all_binary_operator_batch(&fix);
+    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
+    assert_eq!(batch.trace.cpu_world_view_validations, 0);
+    assert_eq!(batch.trace.cpu_solver_search_fallbacks, 0);
+    assert_eq!(batch.trace.cpu_probability_recomputations, 0);
+
+    batch.trace.cpu_candidate_enumerations = 1;
+    batch.trace.cpu_world_view_validations = 1;
+    batch.trace.cpu_solver_search_fallbacks = 1;
+    batch.trace.cpu_probability_recomputations = 1;
+
+    let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
+    let sat_cnf = GpuCnf::from_host(&sat_instance, &fix.provider).expect("upload SAT CNF");
+    let branch_limit = upload_u32_scalar(&fix.provider, 1);
+    let mut solver_adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let mut workspace = solver_adapter
+        .new_workspace(sat_cnf.var_cap, sat_cnf.clause_cap)
+        .expect("new fallback rejection workspace");
+
+    let solver_err = match solver_adapter
+        .solve_assumption_lifecycle_with_gpu_batch_execution_result(
+            &fix.provider,
+            GpuSolverProductionBatchExecutionEvidence { batch: &batch },
+            &mut workspace,
+            &[GpuSolverProductionLifecycleStep {
+                cnf: &sat_cnf,
+                branch_var_limit: &branch_limit,
+                expectation: GpuSolverProductionExpectation::Sat,
+            }],
+        ) {
+        Ok(_) => panic!("solver all-binary batch evidence with CPU fallback counters must reject"),
+        Err(err) => err,
+    };
+    let solver_err = format!("{solver_err}");
+    assert!(solver_err.contains("CPU/host fallback counters"));
+    assert!(solver_err.contains("cpu_candidates=1"));
+    assert!(solver_err.contains("cpu_world_views=1"));
+    assert!(solver_err.contains("cpu_solver_search=1"));
+    assert!(solver_err.contains("cpu_probability_recompute=1"));
+
+    let terms = |a, b| {
+        vec![
+            EpistemicEvidenceTerm::integer(a),
+            EpistemicEvidenceTerm::integer(b),
+        ]
+    };
+    let assumption_groups_owned: Vec<Vec<EpistemicAssumption>> = split
+        .components
+        .iter()
+        .map(
+            |component| match component.component.rule_indices.as_slice() {
+                [0] => vec![EpistemicAssumption::known_tuple("edge", terms(1, 2), true)],
+                [1] => vec![EpistemicAssumption::possible_tuple(
+                    "alt",
+                    terms(2, 3),
+                    true,
+                )],
+                [2] => vec![EpistemicAssumption::possible_tuple(
+                    "blocked",
+                    terms(1, 2),
+                    false,
+                )],
+                [3] => vec![EpistemicAssumption::known_tuple("seen", terms(2, 3), false)],
+                other => panic!("unexpected split all-binary fallback rule indices: {other:?}"),
+            },
+        )
+        .collect();
+    let assumption_groups: Vec<&[EpistemicAssumption]> =
+        assumption_groups_owned.iter().map(Vec::as_slice).collect();
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut prob_adapter = EpistemicProbProductionAdapter::new(config);
+    let prob_err = match prob_adapter
+        .compile_and_evaluate_conditioned_source_for_gpu_batch_execution_result(
+            r#"
+        0.4::edge(1, 2).
+        0.5::alt(2, 3).
+        0.7::blocked(1, 2).
+        0.8::seen(2, 3).
+        query(edge(1, 2)).
+        query(alt(2, 3)).
+        query(blocked(1, 2)).
+        query(seen(2, 3)).
+        "#,
+            &fix.provider,
+            EpistemicProbGpuBatchExecutionEvidence {
+                batch: &batch,
+                assumptions_by_component: &assumption_groups,
+            },
+        ) {
+        Ok(_) => {
+            panic!("probabilistic all-binary batch evidence with CPU fallback counters must reject")
+        }
+        Err(err) => err,
+    };
+    let prob_err = format!("{prob_err}");
+    assert!(prob_err.contains("CPU/host fallback counters"));
+    assert!(prob_err.contains("cpu_candidates=1"));
+    assert!(prob_err.contains("cpu_world_views=1"));
+    assert!(prob_err.contains("cpu_solver_search=1"));
+    assert!(prob_err.contains("cpu_probability_recompute=1"));
+}
+
+#[test]
 fn accepted_split_quaternary_all_operator_batch_rejects_cpu_fallback_counters() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
