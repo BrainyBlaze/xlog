@@ -66,7 +66,7 @@ claim for `G090_GPU`, `G090_CERT`, or `G090_CLOSE`.
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution split_gpu_world_view_distinguishes_absent_possible_from_not_known -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 122 passed, 0 failed |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace -- --nocapture` | PASS, 53 passed, 0 failed |
-| `cargo test -p xlog-logic --test test_epistemic_executable_plan -- --nocapture` | PASS, 6 passed, 0 failed |
+| `cargo test -p xlog-logic --test test_epistemic_executable_plan -- --nocapture` | PASS, 8 passed, 0 failed |
 
 ## Non-Closure Notes
 

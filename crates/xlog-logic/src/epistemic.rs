@@ -232,6 +232,15 @@ fn reject_faeel_self_supported_possible(eir: &EirProgram) -> Result<()> {
                 && lit.atom.predicate == rule.head.predicate
                 && lit.atom.arity == rule.head.arity
             {
+                if lit.atom.arity > 0 {
+                    return Err(XlogError::UnsupportedEpistemicConstruct {
+                        construct: "FAEEL foundedness guard".to_string(),
+                        context: format!(
+                            "rule[{rule_index}] has nonzero-arity self-supported possible {}/{} in default FAEEL mode; accepted GPU lowering requires tuple-level foundedness proof or explicit g91 compatibility mode",
+                            lit.atom.predicate, lit.atom.arity
+                        ),
+                    });
+                }
                 if has_independent_founded_support(eir, &rule.head.predicate, rule.head.arity) {
                     continue;
                 }

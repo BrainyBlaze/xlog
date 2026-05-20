@@ -64,6 +64,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     let runtime = read_workspace_file("crates/xlog-runtime/src/executor/epistemic_workspace.rs");
     let cuda = read_workspace_file("crates/xlog-cuda/kernels/epistemic.cu");
     let logic = read_workspace_file("crates/xlog-logic/src/epistemic.rs");
+    let executable_plan_tests =
+        read_workspace_file("crates/xlog-logic/tests/test_epistemic_executable_plan.rs");
     let integration =
         read_workspace_file("crates/xlog-integration/tests/test_epistemic_gpu_wcoj_execution.rs");
     let solver = read_workspace_file("crates/xlog-solve/src/production.rs");
@@ -77,7 +79,12 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(logic.contains("rejected_candidate_indices"));
     assert!(logic.contains("reject_faeel_self_supported_possible"));
     assert!(logic.contains("FAEEL foundedness guard"));
+    assert!(logic.contains("lit.atom.arity > 0"));
+    assert!(logic.contains("tuple-level foundedness proof"));
     assert!(logic.contains("has_independent_founded_support"));
+    assert!(executable_plan_tests.contains(
+        "faeel_gpu_execution_rejects_nonzero_self_possible_without_tuple_level_foundedness_proof"
+    ));
     assert!(runtime.contains("self.execute_plan(&executable.reduced_runtime_plan)"));
     assert!(runtime.contains("execute_epistemic_gpu_execution_batch"));
     assert!(runtime.contains("execute_epistemic_gpu_execution_batch_with_trace"));

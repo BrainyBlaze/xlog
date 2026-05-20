@@ -25,7 +25,7 @@ Predecessor evidence: `docs/evidence/2026-05-18-v090-pre/README.md`
 |---|---|
 | `cargo fmt --check` | PASS |
 | `cargo test -p xlog-logic --test test_epistemic_eir` | PASS, 4 passed, 0 failed |
-| `cargo test -p xlog-logic --test test_epistemic_executable_plan` | PASS, 7 passed, 0 failed |
+| `cargo test -p xlog-logic --test test_epistemic_executable_plan` | PASS, 8 passed, 0 failed |
 | `cargo test -p xlog-logic test_parse_epistemic --lib` | PASS, 2 passed, 0 failed |
 | `cargo check -p xlog-logic -p xlog-ir -p xlog-solve -p xlog-prob` | PASS |
 | `cargo test -p xlog-logic --lib` | PASS, 238 passed, 0 failed |

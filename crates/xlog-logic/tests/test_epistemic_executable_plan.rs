@@ -156,6 +156,37 @@ fn faeel_gpu_execution_allows_self_possible_with_independent_founded_support() {
 }
 
 #[test]
+fn faeel_gpu_execution_rejects_nonzero_self_possible_without_tuple_level_foundedness_proof() {
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred node(u32).
+        pred p(u32).
+        seed(1).
+        node(1).
+        node(2).
+        p(X) :- seed(X).
+        p(X) :- node(X), possible p(X).
+        "#,
+    )
+    .unwrap();
+
+    let err = compile_epistemic_gpu_execution(&program).expect_err(
+        "default FAEEL lowering must reject nonzero-arity self-supported possible without tuple-level foundedness proof",
+    );
+
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
+            assert_eq!(construct, "FAEEL foundedness guard");
+            assert!(context.contains("rule["));
+            assert!(context.contains("possible p/1"));
+            assert!(context.contains("tuple-level foundedness"));
+        }
+        other => panic!("expected FAEEL tuple-level foundedness rejection, got {other:?}"),
+    }
+}
+
+#[test]
 fn g91_gpu_execution_allows_self_supported_possible_compatibility_fixture() {
     let program = parse_program(
         r#"
