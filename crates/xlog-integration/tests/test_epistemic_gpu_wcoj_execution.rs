@@ -8504,6 +8504,120 @@ fn accepted_quaternary_not_possible_probabilistic_evidence_records_negative_nonz
 }
 
 #[test]
+fn accepted_quaternary_not_possible_parsed_program_probabilistic_evidence_records_negative_nonzero_arity_trace(
+) {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred tuple4(u32, u32, u32, u32).
+        pred fact4(u32, u32, u32, u32).
+        pred accepted(u32, u32, u32, u32).
+        accepted(A, B, C, D) :- tuple4(A, B, C, D), not possible fact4(A, B, C, D).
+        "#,
+    )
+    .expect("parse quaternary not-possible parsed-program probabilistic evidence fixture");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile quaternary not-possible parsed-program probabilistic evidence executable");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &executable.relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation(
+        "tuple4",
+        upload_quaternary_u32(&fix.memory, &[(1, 2, 3, 4), (2, 3, 4, 5), (9, 9, 9, 9)]),
+    );
+    executor.put_relation("fact4", upload_quaternary_u32(&fix.memory, &[(2, 3, 4, 5)]));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 3,
+            },
+        )
+        .expect("execute quaternary not-possible parsed-program probabilistic evidence fixture");
+    assert_eq!(
+        download_quaternary_u32(&fix.provider, &result.final_output),
+        vec![(1, 2, 3, 4), (9, 9, 9, 9)]
+    );
+    assert_eq!(result.prepared.preflight.not_possible_operator_count, 1);
+    assert_eq!(
+        result.final_tuple_materialization.negated_row_filter_count,
+        1
+    );
+
+    let prob_program = parse_program(
+        r#"
+        0.8::fact4(1, 2, 3, 4).
+        query(fact4(1, 2, 3, 4)).
+        "#,
+    )
+    .expect("parse quaternary not-possible probabilistic program");
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut adapter = EpistemicProbProductionAdapter::new(config);
+    let evaluated = adapter
+        .compile_and_evaluate_conditioned_program_with_gpu_execution_result(
+            &prob_program,
+            &fix.provider,
+            &result,
+            vec![EpistemicAssumption::possible_tuple(
+                "fact4",
+                vec![
+                    EpistemicEvidenceTerm::integer(1),
+                    EpistemicEvidenceTerm::integer(2),
+                    EpistemicEvidenceTerm::integer(3),
+                    EpistemicEvidenceTerm::integer(4),
+                ],
+                false,
+            )],
+        )
+        .expect(
+            "accepted quaternary not-possible GPU evidence must condition parsed exact evidence",
+        );
+
+    assert_eq!(evaluated.query_probs.len(), 1);
+    assert!(
+        evaluated.query_probs[0].prob.abs() < 1.0e-6,
+        "accepted quaternary not possible fact4(1, 2, 3, 4) evidence must condition parsed query probability to false"
+    );
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_world_view_evidence_consumed, 1);
+    assert_eq!(trace.accepted_evidence_assumptions_consumed, 1);
+    assert_eq!(trace.gpu_conditioned_evidence_facts, 1);
+    assert_eq!(trace.gpu_conditioned_nonzero_arity_evidence_facts, 1);
+    assert_eq!(trace.gpu_source_conditioned_nonzero_arity_evidence_facts, 0);
+    assert_eq!(
+        trace.gpu_program_conditioned_nonzero_arity_evidence_facts,
+        1
+    );
+    assert_eq!(trace.gpu_conditioned_max_evidence_arity, 4);
+    assert_eq!(trace.gpu_source_conditioned_max_evidence_arity, 0);
+    assert_eq!(trace.gpu_program_conditioned_max_evidence_arity, 4);
+    assert_eq!(trace.gpu_conditioned_negative_evidence_facts, 1);
+    assert_eq!(trace.gpu_conditioned_possible_evidence_facts, 0);
+    assert_eq!(trace.gpu_conditioned_not_possible_evidence_facts, 1);
+    assert_eq!(trace.gpu_program_conditioned_not_possible_evidence_facts, 1);
+    assert_eq!(trace.gpu_exact_program_compiles, 1);
+    assert_eq!(trace.gpu_exact_source_compiles, 0);
+    assert_eq!(trace.gpu_exact_query_evaluations, 1);
+    assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
+    assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 1);
+    assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 0);
+    assert_eq!(trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(trace.fixture_circuit_evaluations, 0);
+}
+
+#[test]
 fn accepted_gpu_execution_result_conditions_negative_nonzero_arity_probabilistic_evidence() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
