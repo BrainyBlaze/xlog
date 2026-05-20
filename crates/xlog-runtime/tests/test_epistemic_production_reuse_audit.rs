@@ -222,6 +222,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(integration.contains(
         "accepted_split_quaternary_all_operator_batch_gates_probabilistic_pir_cnf_and_exact_evaluation_paths"
     ));
+    assert!(integration
+        .contains("accepted_split_quaternary_all_operator_batch_records_component_kernel_timing"));
     assert!(integration.contains(
         "accepted_split_all_binary_operator_batch_gates_probabilistic_program_and_gradient_paths"
     ));

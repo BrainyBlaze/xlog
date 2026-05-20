@@ -253,6 +253,15 @@ exact/provenance APIs, with four source PIR uploads, four parsed-program PIR
 uploads, four source CNF encodes, four parsed-program CNF encodes, four
 already-compiled query evaluations, four already-compiled gradient evaluations,
 and zero CPU probability recomputation.
+The split-batch quaternary all-operator component timing marker
+`accepted_split_quaternary_all_operator_batch_records_component_kernel_timing`
+proves the same four accepted arity-four components record CUDA-event timing for
+candidate generation, propagation, candidate validation, stable-model tuple
+membership, world-view validation, accepted materialization, final-result
+materialization, and final tuple materialization. It also requires nonzero GPU
+launch counts, zero host writes per phase, four stable-model tuple-source
+membership records, sixteen tuple-key column device reads, thirty-two aggregate
+event pairs, and zero CPU recomposition/candidate/world-view fallback counters.
 All accepted probability split-batch entrypoints now call the single
 `accepted_world_views_from_gpu_batch_execution_evidence` validator, and
 `production_prob_batch_paths_use_single_gpu_batch_gate` source-audits that no
