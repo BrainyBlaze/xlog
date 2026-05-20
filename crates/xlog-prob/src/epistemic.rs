@@ -191,6 +191,10 @@ pub enum CompilerAdapterKind {
     GpuD4,
     /// Alternative external Decision-DNNF text adapter.
     ExternalDdnnfText,
+    /// Alternative external c2d Decision-DNNF compiler adapter.
+    ExternalC2d,
+    /// Alternative external miniC2D Decision-DNNF compiler adapter.
+    ExternalMiniC2d,
 }
 
 /// Implementation status for an adapter.
@@ -254,6 +258,30 @@ impl KnowledgeCompilerAdapter {
         Self {
             name: name.into(),
             kind: CompilerAdapterKind::ExternalDdnnfText,
+            support: CompilerAdapterSupport::DesignOnly,
+            input_format: CompilerInputFormat::DimacsCnf,
+            output_format: CompilerOutputFormat::DecisionDnnfText,
+            incremental_evidence: false,
+        }
+    }
+
+    /// Return the explicit c2d Decision-DNNF text adapter design.
+    pub fn external_c2d() -> Self {
+        Self {
+            name: "c2d".to_string(),
+            kind: CompilerAdapterKind::ExternalC2d,
+            support: CompilerAdapterSupport::DesignOnly,
+            input_format: CompilerInputFormat::DimacsCnf,
+            output_format: CompilerOutputFormat::DecisionDnnfText,
+            incremental_evidence: false,
+        }
+    }
+
+    /// Return the explicit miniC2D Decision-DNNF text adapter design.
+    pub fn external_mini_c2d() -> Self {
+        Self {
+            name: "miniC2D".to_string(),
+            kind: CompilerAdapterKind::ExternalMiniC2d,
             support: CompilerAdapterSupport::DesignOnly,
             input_format: CompilerInputFormat::DimacsCnf,
             output_format: CompilerOutputFormat::DecisionDnnfText,

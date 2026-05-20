@@ -404,6 +404,10 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(prob_epistemic.contains("from_gpu_execution_result"));
     assert!(prob_epistemic.contains("read_device_row_count"));
     assert!(prob_epistemic.contains("require_stable_model_tuple_source"));
+    assert!(prob_epistemic.contains("pub fn external_c2d"));
+    assert!(prob_epistemic.contains("pub fn external_mini_c2d"));
+    assert!(prob_epistemic.contains("CompilerAdapterKind::ExternalC2d"));
+    assert!(prob_epistemic.contains("CompilerAdapterKind::ExternalMiniC2d"));
     assert!(
         integration.contains("accepted_split_batch_gates_probabilistic_conditioned_source_path")
     );

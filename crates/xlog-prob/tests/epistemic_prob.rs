@@ -65,6 +65,29 @@ fn external_ddnnf_text_compiler_adapter_is_explicitly_represented() {
 }
 
 #[test]
+fn c2d_and_minic2d_compiler_adapters_are_explicitly_represented() {
+    let c2d = KnowledgeCompilerAdapter::external_c2d();
+    let minic2d = KnowledgeCompilerAdapter::external_mini_c2d();
+
+    assert_eq!(c2d.name, "c2d");
+    assert_eq!(c2d.kind, CompilerAdapterKind::ExternalC2d);
+    assert_eq!(c2d.support, CompilerAdapterSupport::DesignOnly);
+    assert_eq!(c2d.input_format, CompilerInputFormat::DimacsCnf);
+    assert_eq!(c2d.output_format, CompilerOutputFormat::DecisionDnnfText);
+    assert!(!c2d.supports_incremental_evidence());
+
+    assert_eq!(minic2d.name, "miniC2D");
+    assert_eq!(minic2d.kind, CompilerAdapterKind::ExternalMiniC2d);
+    assert_eq!(minic2d.support, CompilerAdapterSupport::DesignOnly);
+    assert_eq!(minic2d.input_format, CompilerInputFormat::DimacsCnf);
+    assert_eq!(
+        minic2d.output_format,
+        CompilerOutputFormat::DecisionDnnfText
+    );
+    assert!(!minic2d.supports_incremental_evidence());
+}
+
+#[test]
 fn log_space_conditional_probability_is_tolerance_bounded() {
     let probability = conditional_probability_from_logs(
         0.21f64.ln(),

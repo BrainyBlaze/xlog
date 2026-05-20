@@ -621,7 +621,8 @@ cargo test -p xlog-solve --test solver_service_semantics
   `know:rain/0=true`;
 - GPU-D4/XGCF supports fixture-level incremental evidence updates without
   changing the circuit fingerprint;
-- an external Decision-DNNF text adapter is represented as `DesignOnly`;
+- generic Decision-DNNF text, c2d, and miniC2D adapter contracts are
+  represented as `DesignOnly`;
 - `conditional_probability_from_logs` normalizes probabilities with
   `EPISTEMIC_PROBABILITY_TOLERANCE = 1e-12`.
 
