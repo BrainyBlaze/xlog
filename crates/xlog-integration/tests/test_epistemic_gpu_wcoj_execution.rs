@@ -5309,6 +5309,486 @@ fn accepted_split_quaternary_not_possible_batch_gates_solver_reuse_and_maxsat_pa
 }
 
 #[test]
+fn accepted_split_quaternary_not_possible_batch_gates_solver_search_scheduler_and_portfolio_paths()
+{
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred tuple4(u32, u32, u32, u32).
+        pred fact4(u32, u32, u32, u32).
+        pred known4(u32, u32, u32, u32).
+        pred clear4(u32, u32, u32, u32).
+        known4(A, B, C, D) :- tuple4(A, B, C, D), know fact4(A, B, C, D).
+        clear4(A, B, C, D) :- tuple4(A, B, C, D), not possible fact4(A, B, C, D).
+        "#,
+    )
+    .expect("parse split quaternary not-possible solver search fixture");
+    let split = compile_epistemic_gpu_split_execution_with_stats_snapshot(&program, None)
+        .expect("compile split quaternary not-possible solver search components");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    let mut relation_ids = BTreeMap::new();
+    for component in &split.components {
+        for (name, rel_id) in &component.executable.relation_ids {
+            if let Some(previous) = relation_ids.insert(name.clone(), *rel_id) {
+                assert_eq!(
+                    previous, *rel_id,
+                    "split quaternary not-possible solver search components must preserve shared relation ids"
+                );
+            }
+        }
+    }
+    for (name, rel_id) in &relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation(
+        "tuple4",
+        upload_quaternary_u32(&fix.memory, &[(1, 2, 3, 4), (2, 3, 4, 5), (9, 9, 9, 9)]),
+    );
+    executor.put_relation("fact4", upload_quaternary_u32(&fix.memory, &[(2, 3, 4, 5)]));
+
+    let executables: Vec<_> = split
+        .components
+        .iter()
+        .map(|component| &component.executable)
+        .collect();
+    let batch = executor
+        .execute_epistemic_gpu_execution_batch_with_trace(
+            &executables,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 3,
+            },
+        )
+        .expect("execute split quaternary not-possible solver search through GPU batch path");
+
+    assert_eq!(batch.results.len(), 2);
+    assert_eq!(batch.trace.component_count, 2);
+    assert_eq!(batch.trace.know_operator_count, 1);
+    assert_eq!(batch.trace.possible_operator_count, 0);
+    assert_eq!(batch.trace.not_know_operator_count, 0);
+    assert_eq!(batch.trace.not_possible_operator_count, 1);
+    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
+    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
+    assert_eq!(batch.trace.cpu_world_view_validations, 0);
+    assert_eq!(batch.trace.tracked_dtoh_calls, 0);
+    assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
+    assert!(batch.trace.aggregate_kernel_timing.is_recorded());
+
+    for (idx, component) in split.components.iter().enumerate() {
+        match component.component.rule_indices.as_slice() {
+            [0] => {
+                assert_eq!(
+                    download_quaternary_u32(&fix.provider, &batch.results[idx].final_output),
+                    vec![(2, 3, 4, 5)]
+                );
+                assert_eq!(batch.results[idx].prepared.preflight.know_operator_count, 1);
+                assert_eq!(
+                    batch.results[idx]
+                        .model_membership
+                        .tuple_source_key_column_device_reads,
+                    4
+                );
+                assert_eq!(
+                    batch.results[idx].model_membership.membership_source,
+                    EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+                );
+            }
+            [1] => {
+                assert_eq!(
+                    download_quaternary_u32(&fix.provider, &batch.results[idx].final_output),
+                    vec![(1, 2, 3, 4), (9, 9, 9, 9)]
+                );
+                assert_eq!(
+                    batch.results[idx]
+                        .prepared
+                        .preflight
+                        .not_possible_operator_count,
+                    1
+                );
+                assert_eq!(
+                    batch.results[idx]
+                        .final_tuple_materialization
+                        .negated_row_filter_count,
+                    1
+                );
+                assert_eq!(
+                    batch.results[idx]
+                        .model_membership
+                        .tuple_source_key_column_device_reads,
+                    4
+                );
+                assert_eq!(
+                    batch.results[idx].model_membership.membership_source,
+                    EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+                );
+            }
+            other => {
+                panic!("unexpected split quaternary not-possible solver search rule indices: {other:?}")
+            }
+        }
+    }
+
+    let sat_low = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
+    let sat_high = SolveInstance::new(1, vec![Clause::new(vec![Literal::negative(0)])]);
+    let unsat = SolveInstance::new(
+        1,
+        vec![
+            Clause::new(vec![Literal::positive(0)]),
+            Clause::new(vec![Literal::negative(0)]),
+        ],
+    );
+    let gpu_sat_low = GpuCnf::from_host(&sat_low, &fix.provider).expect("upload SAT low");
+    let gpu_sat_high = GpuCnf::from_host(&sat_high, &fix.provider).expect("upload SAT high");
+    let gpu_unsat = GpuCnf::from_host(&unsat, &fix.provider).expect("upload UNSAT candidate");
+    let branch_limit = upload_u32_scalar(&fix.provider, 1);
+
+    let mut search_adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let mut search_workspace = search_adapter
+        .new_workspace(gpu_unsat.var_cap, gpu_unsat.clause_cap)
+        .expect("new not-possible MaxSAT search workspace");
+    let search_report = search_adapter
+        .solve_weighted_maxsat_search_with_gpu_batch_execution_result(
+            &fix.provider,
+            GpuSolverProductionBatchExecutionEvidence { batch: &batch },
+            &mut search_workspace,
+            &[
+                GpuSolverProductionMaxSatSearchCandidate {
+                    score: 7,
+                    cnf: &gpu_sat_low,
+                    branch_var_limit: &branch_limit,
+                    status: GpuSolverProductionMaxSatSearchStatus::Satisfiable,
+                },
+                GpuSolverProductionMaxSatSearchCandidate {
+                    score: 11,
+                    cnf: &gpu_unsat,
+                    branch_var_limit: &branch_limit,
+                    status: GpuSolverProductionMaxSatSearchStatus::Unsatisfiable,
+                },
+            ],
+        )
+        .expect("accepted not-possible split GPU batch evidence must gate MaxSAT search");
+
+    assert_eq!(search_report.candidate_evidence_records, 2);
+    assert_eq!(search_report.optimum_score, 7);
+    assert_eq!(search_report.candidates_checked, 4);
+    assert_eq!(search_report.satisfiable_candidates, 2);
+    assert_eq!(search_report.unsat_candidates_pruned, 2);
+    assert_eq!(search_report.gpu_cdcl_candidate_solves, 4);
+
+    let search_trace = search_adapter.trace();
+    assert_eq!(
+        search_trace.accepted_gpu_batch_candidate_evidence_consumed,
+        1
+    );
+    assert_eq!(
+        search_trace.accepted_gpu_batch_candidate_component_evidence_consumed,
+        2
+    );
+    assert_eq!(search_trace.accepted_gpu_candidate_evidence_consumed, 2);
+    assert_eq!(
+        search_trace.accepted_nonzero_arity_gpu_candidate_evidence_consumed,
+        2
+    );
+    assert_eq!(
+        search_trace.accepted_gpu_candidate_tuple_key_column_reads_consumed,
+        8
+    );
+    assert_eq!(
+        search_trace.accepted_know_gpu_candidate_evidence_consumed,
+        1
+    );
+    assert_eq!(
+        search_trace.accepted_possible_gpu_candidate_evidence_consumed,
+        0
+    );
+    assert_eq!(
+        search_trace.accepted_not_possible_gpu_candidate_evidence_consumed,
+        1
+    );
+    assert_eq!(
+        search_trace.accepted_not_know_gpu_candidate_evidence_consumed,
+        0
+    );
+    assert_eq!(search_trace.gpu_cdcl_sat_solves, 2);
+    assert_eq!(search_trace.gpu_cdcl_workspace_unsat_solves, 2);
+    assert_eq!(search_trace.gpu_maxsat_candidate_solves, 4);
+    assert_eq!(search_trace.gpu_maxsat_unsat_candidate_prunes, 2);
+    assert_eq!(search_trace.gpu_maxsat_optima, 2);
+    assert_eq!(search_trace.cpu_assignment_enumerations, 0);
+    assert_eq!(search_trace.cpu_maxsat_enumerations, 0);
+
+    let weighted = SolveInstance::with_weights(
+        1,
+        vec![
+            Clause::new(vec![Literal::positive(0)]),
+            Clause::new(vec![Literal::negative(0)]),
+        ],
+        vec![7.0, 9.0],
+    );
+    let both_soft_clauses = [0usize, 1usize];
+    let sat_soft_clause = [0usize];
+    let selections = [
+        GpuSolverProductionWeightedMaxSatSelection {
+            soft_clause_indices: &both_soft_clauses,
+            status: GpuSolverProductionMaxSatSearchStatus::Unsatisfiable,
+        },
+        GpuSolverProductionWeightedMaxSatSelection {
+            soft_clause_indices: &sat_soft_clause,
+            status: GpuSolverProductionMaxSatSearchStatus::Satisfiable,
+        },
+    ];
+
+    let mut encoded_adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let mut encoded_workspace = encoded_adapter
+        .new_workspace(1, 2)
+        .expect("new not-possible encoded MaxSAT workspace");
+    let encoded_report = encoded_adapter
+        .solve_weighted_maxsat_encoded_search_with_gpu_batch_execution_result(
+            &fix.provider,
+            GpuSolverProductionBatchExecutionEvidence { batch: &batch },
+            &mut encoded_workspace,
+            &weighted,
+            &branch_limit,
+            &selections,
+        )
+        .expect("accepted not-possible split GPU batch evidence must gate encoded MaxSAT");
+
+    assert_eq!(encoded_report.candidate_evidence_records, 2);
+    assert_eq!(encoded_report.optimum_score, 7);
+    assert_eq!(encoded_report.candidates_checked, 4);
+    assert_eq!(encoded_report.satisfiable_candidates, 2);
+    assert_eq!(encoded_report.unsat_candidates_pruned, 2);
+    assert_eq!(encoded_report.gpu_cdcl_candidate_encodes, 4);
+    assert_eq!(encoded_report.gpu_cdcl_candidate_solves, 4);
+
+    let encoded_trace = encoded_adapter.trace();
+    assert_eq!(
+        encoded_trace.accepted_gpu_batch_candidate_evidence_consumed,
+        1
+    );
+    assert_eq!(
+        encoded_trace.accepted_gpu_batch_candidate_component_evidence_consumed,
+        2
+    );
+    assert_eq!(encoded_trace.accepted_gpu_candidate_evidence_consumed, 2);
+    assert_eq!(
+        encoded_trace.accepted_nonzero_arity_gpu_candidate_evidence_consumed,
+        2
+    );
+    assert_eq!(
+        encoded_trace.accepted_gpu_candidate_tuple_key_column_reads_consumed,
+        8
+    );
+    assert_eq!(
+        encoded_trace.accepted_know_gpu_candidate_evidence_consumed,
+        1
+    );
+    assert_eq!(
+        encoded_trace.accepted_not_possible_gpu_candidate_evidence_consumed,
+        1
+    );
+    assert_eq!(encoded_trace.gpu_maxsat_candidate_encodes, 4);
+    assert_eq!(encoded_trace.gpu_maxsat_candidate_solves, 4);
+    assert_eq!(encoded_trace.gpu_maxsat_unsat_candidate_prunes, 2);
+    assert_eq!(encoded_trace.gpu_maxsat_optima, 2);
+    assert_eq!(encoded_trace.cpu_assignment_enumerations, 0);
+    assert_eq!(encoded_trace.cpu_maxsat_enumerations, 0);
+
+    let candidate_set = [
+        GpuSolverProductionMaxSatCandidate {
+            score: 3,
+            cnf: &gpu_sat_low,
+            branch_var_limit: &branch_limit,
+        },
+        GpuSolverProductionMaxSatCandidate {
+            score: 5,
+            cnf: &gpu_sat_high,
+            branch_var_limit: &branch_limit,
+        },
+    ];
+    let search_candidates = [
+        GpuSolverProductionMaxSatSearchCandidate {
+            score: 9,
+            cnf: &gpu_unsat,
+            branch_var_limit: &branch_limit,
+            status: GpuSolverProductionMaxSatSearchStatus::Unsatisfiable,
+        },
+        GpuSolverProductionMaxSatSearchCandidate {
+            score: 7,
+            cnf: &gpu_sat_low,
+            branch_var_limit: &branch_limit,
+            status: GpuSolverProductionMaxSatSearchStatus::Satisfiable,
+        },
+    ];
+    let jobs = [
+        GpuSolverProductionMaxSatScheduleJob::CandidateSet {
+            candidates: &candidate_set,
+        },
+        GpuSolverProductionMaxSatScheduleJob::Search {
+            candidates: &search_candidates,
+        },
+        GpuSolverProductionMaxSatScheduleJob::EncodedSearch {
+            weighted: &weighted,
+            branch_var_limit: &branch_limit,
+            selections: &selections,
+        },
+        GpuSolverProductionMaxSatScheduleJob::Unknown {
+            reason: "not-possible scheduler branch budget exhausted",
+        },
+        GpuSolverProductionMaxSatScheduleJob::Timeout { budget_micros: 25 },
+    ];
+    let mut scheduler_adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let mut scheduler_workspace = scheduler_adapter
+        .new_workspace(1, 2)
+        .expect("new not-possible generalized MaxSAT scheduler workspace");
+    let schedule_report = scheduler_adapter
+        .solve_maxsat_schedule_with_gpu_batch_execution_result(
+            &fix.provider,
+            GpuSolverProductionBatchExecutionEvidence { batch: &batch },
+            &mut scheduler_workspace,
+            &jobs,
+        )
+        .expect("accepted not-possible split GPU batch evidence must gate MaxSAT scheduler");
+
+    assert_eq!(schedule_report.candidate_evidence_records, 2);
+    assert_eq!(schedule_report.jobs, 10);
+    assert_eq!(schedule_report.candidate_set_jobs, 2);
+    assert_eq!(schedule_report.search_jobs, 2);
+    assert_eq!(schedule_report.encoded_search_jobs, 2);
+    assert_eq!(schedule_report.unknown_jobs, 2);
+    assert_eq!(schedule_report.timeout_jobs, 2);
+    assert_eq!(schedule_report.optimum_score, 7);
+    assert_eq!(schedule_report.candidates_checked, 12);
+    assert_eq!(schedule_report.satisfiable_candidates, 8);
+    assert_eq!(schedule_report.unsat_candidates_pruned, 4);
+    assert_eq!(schedule_report.gpu_cdcl_candidate_encodes, 4);
+    assert_eq!(schedule_report.gpu_cdcl_candidate_solves, 12);
+
+    let scheduler_trace = scheduler_adapter.trace();
+    assert_eq!(
+        scheduler_trace.accepted_gpu_batch_candidate_evidence_consumed,
+        1
+    );
+    assert_eq!(
+        scheduler_trace.accepted_gpu_batch_candidate_component_evidence_consumed,
+        2
+    );
+    assert_eq!(scheduler_trace.accepted_gpu_candidate_evidence_consumed, 2);
+    assert_eq!(
+        scheduler_trace.accepted_nonzero_arity_gpu_candidate_evidence_consumed,
+        2
+    );
+    assert_eq!(
+        scheduler_trace.accepted_gpu_candidate_tuple_key_column_reads_consumed,
+        8
+    );
+    assert_eq!(
+        scheduler_trace.accepted_know_gpu_candidate_evidence_consumed,
+        1
+    );
+    assert_eq!(
+        scheduler_trace.accepted_not_possible_gpu_candidate_evidence_consumed,
+        1
+    );
+    assert_eq!(scheduler_trace.gpu_maxsat_scheduler_jobs, 10);
+    assert_eq!(scheduler_trace.gpu_maxsat_scheduler_candidate_set_jobs, 2);
+    assert_eq!(scheduler_trace.gpu_maxsat_scheduler_search_jobs, 2);
+    assert_eq!(scheduler_trace.gpu_maxsat_scheduler_encoded_search_jobs, 2);
+    assert_eq!(scheduler_trace.gpu_maxsat_scheduler_unknown_status_jobs, 2);
+    assert_eq!(scheduler_trace.gpu_maxsat_scheduler_timeout_status_jobs, 2);
+    assert_eq!(scheduler_trace.gpu_maxsat_candidate_encodes, 4);
+    assert_eq!(scheduler_trace.gpu_maxsat_candidate_solves, 12);
+    assert_eq!(scheduler_trace.gpu_maxsat_unsat_candidate_prunes, 4);
+    assert_eq!(scheduler_trace.gpu_maxsat_optima, 6);
+    assert_eq!(scheduler_trace.cpu_assignment_enumerations, 0);
+    assert_eq!(scheduler_trace.cpu_maxsat_enumerations, 0);
+
+    let portfolio_sat =
+        GpuCnf::from_host(&sat_low, &fix.provider).expect("upload portfolio SAT CNF");
+    let portfolio_maxsat_candidates = [GpuSolverProductionMaxSatCandidate {
+        score: 5,
+        cnf: &gpu_sat_high,
+        branch_var_limit: &branch_limit,
+    }];
+    let portfolio_jobs = [
+        GpuSolverProductionPortfolioJob::Sat {
+            cnf: &portfolio_sat,
+            branch_var_limit: &branch_limit,
+        },
+        GpuSolverProductionPortfolioJob::MaxSat {
+            candidates: &portfolio_maxsat_candidates,
+        },
+        GpuSolverProductionPortfolioJob::Unknown {
+            reason: "not-possible portfolio branch budget exhausted",
+        },
+        GpuSolverProductionPortfolioJob::Timeout { budget_micros: 10 },
+    ];
+    let mut portfolio_adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let portfolio_report = portfolio_adapter
+        .solve_portfolio_with_gpu_batch_execution_result(
+            &fix.provider,
+            GpuSolverProductionBatchExecutionEvidence { batch: &batch },
+            &portfolio_jobs,
+        )
+        .expect("accepted not-possible split GPU batch evidence must gate portfolio path");
+
+    assert_eq!(portfolio_report.candidate_evidence_records, 2);
+    assert_eq!(portfolio_report.jobs, 8);
+    assert_eq!(portfolio_report.sat_jobs, 2);
+    assert_eq!(portfolio_report.maxsat_jobs, 2);
+    assert_eq!(portfolio_report.unknown_jobs, 2);
+    assert_eq!(portfolio_report.timeout_jobs, 2);
+    assert_eq!(portfolio_report.maxsat_optimum_scores, 10);
+
+    let portfolio_trace = portfolio_adapter.trace();
+    assert_eq!(
+        portfolio_trace.accepted_gpu_batch_candidate_evidence_consumed,
+        1
+    );
+    assert_eq!(
+        portfolio_trace.accepted_gpu_batch_candidate_component_evidence_consumed,
+        2
+    );
+    assert_eq!(portfolio_trace.accepted_gpu_candidate_evidence_consumed, 2);
+    assert_eq!(
+        portfolio_trace.accepted_nonzero_arity_gpu_candidate_evidence_consumed,
+        2
+    );
+    assert_eq!(
+        portfolio_trace.accepted_gpu_candidate_tuple_key_column_reads_consumed,
+        8
+    );
+    assert_eq!(
+        portfolio_trace.accepted_know_gpu_candidate_evidence_consumed,
+        1
+    );
+    assert_eq!(
+        portfolio_trace.accepted_not_possible_gpu_candidate_evidence_consumed,
+        1
+    );
+    assert_eq!(portfolio_trace.gpu_maxsat_candidate_solves, 2);
+    assert_eq!(portfolio_trace.gpu_maxsat_optima, 2);
+    assert_eq!(portfolio_trace.gpu_portfolio_jobs, 8);
+    assert_eq!(portfolio_trace.gpu_portfolio_sat_jobs, 2);
+    assert_eq!(portfolio_trace.gpu_portfolio_maxsat_jobs, 2);
+    assert_eq!(portfolio_trace.gpu_portfolio_unknown_status_jobs, 2);
+    assert_eq!(portfolio_trace.gpu_portfolio_timeout_status_jobs, 2);
+    assert_eq!(portfolio_trace.cpu_assignment_enumerations, 0);
+    assert_eq!(portfolio_trace.cpu_maxsat_enumerations, 0);
+}
+
+#[test]
 fn accepted_split_quaternary_possible_and_not_know_batch_gates_solver_reuse_and_maxsat_paths() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
