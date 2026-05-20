@@ -2202,6 +2202,202 @@ fn accepted_split_all_binary_operator_batch_conditions_probabilistic_evidence() 
 }
 
 #[test]
+fn accepted_split_quaternary_not_possible_batch_conditions_parsed_program_probabilistic_evidence() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred tuple4(u32, u32, u32, u32).
+        pred fact4(u32, u32, u32, u32).
+        pred known4(u32, u32, u32, u32).
+        pred clear4(u32, u32, u32, u32).
+        known4(A, B, C, D) :- tuple4(A, B, C, D), know fact4(A, B, C, D).
+        clear4(A, B, C, D) :- tuple4(A, B, C, D), not possible fact4(A, B, C, D).
+        "#,
+    )
+    .expect("parse split quaternary not-possible probabilistic fixture");
+    let split = compile_epistemic_gpu_split_execution_with_stats_snapshot(&program, None)
+        .expect("compile split quaternary not-possible components");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    let mut relation_ids = BTreeMap::new();
+    for component in &split.components {
+        for (name, rel_id) in &component.executable.relation_ids {
+            if let Some(previous) = relation_ids.insert(name.clone(), *rel_id) {
+                assert_eq!(
+                    previous, *rel_id,
+                    "split quaternary components must preserve shared relation ids"
+                );
+            }
+        }
+    }
+    for (name, rel_id) in &relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation(
+        "tuple4",
+        upload_quaternary_u32(&fix.memory, &[(1, 2, 3, 4), (2, 3, 4, 5), (9, 9, 9, 9)]),
+    );
+    executor.put_relation("fact4", upload_quaternary_u32(&fix.memory, &[(2, 3, 4, 5)]));
+
+    let executables: Vec<_> = split
+        .components
+        .iter()
+        .map(|component| &component.executable)
+        .collect();
+    let batch = executor
+        .execute_epistemic_gpu_execution_batch_with_trace(
+            &executables,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 3,
+            },
+        )
+        .expect("execute split quaternary not-possible batch through GPU runtime path");
+
+    assert_eq!(batch.results.len(), 2);
+    assert_eq!(batch.trace.component_count, 2);
+    assert_eq!(batch.trace.know_operator_count, 1);
+    assert_eq!(batch.trace.not_possible_operator_count, 1);
+    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
+    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
+    assert_eq!(batch.trace.cpu_world_view_validations, 0);
+    assert_eq!(batch.trace.tracked_dtoh_calls, 0);
+    assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
+
+    let assumption_groups_owned: Vec<Vec<EpistemicAssumption>> = split
+        .components
+        .iter()
+        .enumerate()
+        .map(
+            |(idx, component)| match component.component.rule_indices.as_slice() {
+                [0] => {
+                    assert_eq!(
+                        download_quaternary_u32(&fix.provider, &batch.results[idx].final_output),
+                        vec![(2, 3, 4, 5)]
+                    );
+                    vec![EpistemicAssumption::known_tuple(
+                        "fact4",
+                        vec![
+                            EpistemicEvidenceTerm::integer(2),
+                            EpistemicEvidenceTerm::integer(3),
+                            EpistemicEvidenceTerm::integer(4),
+                            EpistemicEvidenceTerm::integer(5),
+                        ],
+                        true,
+                    )]
+                }
+                [1] => {
+                    assert_eq!(
+                        download_quaternary_u32(&fix.provider, &batch.results[idx].final_output),
+                        vec![(1, 2, 3, 4), (9, 9, 9, 9)]
+                    );
+                    assert_eq!(
+                        batch.results[idx]
+                            .prepared
+                            .preflight
+                            .not_possible_operator_count,
+                        1
+                    );
+                    assert_eq!(
+                        batch.results[idx]
+                            .final_tuple_materialization
+                            .negated_row_filter_count,
+                        1
+                    );
+                    vec![EpistemicAssumption::possible_tuple(
+                        "fact4",
+                        vec![
+                            EpistemicEvidenceTerm::integer(1),
+                            EpistemicEvidenceTerm::integer(2),
+                            EpistemicEvidenceTerm::integer(3),
+                            EpistemicEvidenceTerm::integer(4),
+                        ],
+                        false,
+                    )]
+                }
+                other => panic!("unexpected split quaternary rule indices: {other:?}"),
+            },
+        )
+        .collect();
+    let assumption_groups: Vec<&[EpistemicAssumption]> =
+        assumption_groups_owned.iter().map(Vec::as_slice).collect();
+    let parsed_program = parse_program(
+        r#"
+        0.8::fact4(1, 2, 3, 4).
+        0.6::fact4(2, 3, 4, 5).
+        query(fact4(1, 2, 3, 4)).
+        query(fact4(2, 3, 4, 5)).
+        "#,
+    )
+    .expect("parse split quaternary probabilistic program");
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut adapter = EpistemicProbProductionAdapter::new(config);
+    let evaluated = adapter
+        .compile_and_evaluate_conditioned_program_for_gpu_batch_execution_result(
+            &parsed_program,
+            &fix.provider,
+            EpistemicProbGpuBatchExecutionEvidence {
+                batch: &batch,
+                assumptions_by_component: &assumption_groups,
+            },
+        )
+        .expect("accepted split quaternary GPU evidence must condition parsed exact evidence");
+
+    assert_eq!(evaluated.len(), 2);
+    for (component, evaluated_result) in split.components.iter().zip(evaluated.iter()) {
+        let expected = match component.component.rule_indices.as_slice() {
+            [0] => [0.8, 1.0],
+            [1] => [0.0, 0.6],
+            other => panic!("unexpected split quaternary rule indices: {other:?}"),
+        };
+        assert_eq!(evaluated_result.query_probs.len(), expected.len());
+        for (actual, expected) in evaluated_result.query_probs.iter().zip(expected) {
+            assert!(
+                (actual.prob - expected).abs() < 1.0e-6,
+                "conditioned split quaternary probability mismatch: actual={} expected={}",
+                actual.prob,
+                expected
+            );
+        }
+    }
+
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_gpu_batch_evidence_consumed, 1);
+    assert_eq!(trace.accepted_gpu_batch_component_evidence_consumed, 2);
+    assert_eq!(trace.accepted_world_view_evidence_consumed, 2);
+    assert_eq!(trace.accepted_evidence_assumptions_consumed, 2);
+    assert_eq!(trace.gpu_conditioned_evidence_facts, 2);
+    assert_eq!(trace.gpu_conditioned_nonzero_arity_evidence_facts, 2);
+    assert_eq!(trace.gpu_source_conditioned_nonzero_arity_evidence_facts, 0);
+    assert_eq!(
+        trace.gpu_program_conditioned_nonzero_arity_evidence_facts,
+        2
+    );
+    assert_eq!(trace.gpu_conditioned_max_evidence_arity, 4);
+    assert_eq!(trace.gpu_source_conditioned_max_evidence_arity, 0);
+    assert_eq!(trace.gpu_program_conditioned_max_evidence_arity, 4);
+    assert_eq!(trace.gpu_conditioned_negative_evidence_facts, 1);
+    assert_eq!(trace.gpu_conditioned_know_evidence_facts, 1);
+    assert_eq!(trace.gpu_conditioned_not_possible_evidence_facts, 1);
+    assert_eq!(trace.gpu_program_conditioned_not_possible_evidence_facts, 1);
+    assert_eq!(trace.gpu_exact_program_compiles, 2);
+    assert_eq!(trace.gpu_exact_query_evaluations, 2);
+    assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 2);
+    assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 2);
+    assert_eq!(trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(trace.fixture_circuit_evaluations, 0);
+}
+
+#[test]
 fn accepted_split_all_binary_operator_batch_gates_probabilistic_program_and_gradient_paths() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
