@@ -478,6 +478,9 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(integration.contains(
         "accepted_split_quaternary_not_possible_batch_conditions_parsed_program_probabilistic_evidence"
     ));
+    assert!(integration.contains(
+        "accepted_split_quaternary_not_possible_batch_gates_probabilistic_gradient_pir_cnf_and_exact_evaluation_paths"
+    ));
 
     for (label, source) in [
         ("runtime", runtime.as_str()),
