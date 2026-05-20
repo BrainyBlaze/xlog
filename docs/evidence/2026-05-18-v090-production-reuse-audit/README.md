@@ -238,6 +238,13 @@ proves a four-component arity-four batch consumes one accepted `know`,
 records accepted batch/component evidence, four source-conditioned arity-four
 evidence facts, two negative facts, four exact-query evaluations, and zero CPU
 probability recomputation.
+The split-batch quaternary all-operator program/gradient marker
+`accepted_split_quaternary_all_operator_batch_gates_probabilistic_program_and_gradient_paths`
+proves the same accepted batch also routes through parsed-program conditioned
+queries plus source and parsed-program conditioned gradients while preserving
+arity-four source/program evidence counters, one conditioned counter for every
+operator family, two negative facts, four gradient evaluations per gradient
+path, and zero CPU probability recomputation.
 All accepted probability split-batch entrypoints now call the single
 `accepted_world_views_from_gpu_batch_execution_evidence` validator, and
 `production_prob_batch_paths_use_single_gpu_batch_gate` source-audits that no

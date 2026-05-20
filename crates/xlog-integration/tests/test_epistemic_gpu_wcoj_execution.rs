@@ -3192,6 +3192,380 @@ fn accepted_split_quaternary_all_operator_batch_conditions_probabilistic_evidenc
 }
 
 #[test]
+fn accepted_split_quaternary_all_operator_batch_gates_probabilistic_program_and_gradient_paths() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let (split, batch) = execute_split_quaternary_all_operator_batch(&fix);
+
+    assert_eq!(batch.results.len(), 4);
+    assert_eq!(batch.trace.component_count, 4);
+    assert_eq!(batch.trace.gpu_runtime_component_executions, 4);
+    assert_eq!(batch.trace.know_operator_count, 1);
+    assert_eq!(batch.trace.possible_operator_count, 1);
+    assert_eq!(batch.trace.not_possible_operator_count, 1);
+    assert_eq!(batch.trace.not_know_operator_count, 1);
+    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
+    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
+    assert_eq!(batch.trace.cpu_world_view_validations, 0);
+    assert_eq!(batch.trace.tracked_dtoh_calls, 0);
+    assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
+    assert!(batch.trace.aggregate_kernel_timing.is_recorded());
+
+    let terms = |a, b, c, d| {
+        vec![
+            EpistemicEvidenceTerm::integer(a),
+            EpistemicEvidenceTerm::integer(b),
+            EpistemicEvidenceTerm::integer(c),
+            EpistemicEvidenceTerm::integer(d),
+        ]
+    };
+    let assumption_groups_owned: Vec<Vec<EpistemicAssumption>> = split
+        .components
+        .iter()
+        .map(
+            |component| match component.component.rule_indices.as_slice() {
+                [0] => vec![EpistemicAssumption::known_tuple(
+                    "edge4",
+                    terms(2, 3, 4, 5),
+                    true,
+                )],
+                [1] => vec![EpistemicAssumption::possible_tuple(
+                    "alt4",
+                    terms(3, 4, 5, 6),
+                    true,
+                )],
+                [2] => vec![EpistemicAssumption::possible_tuple(
+                    "blocked_fact4",
+                    terms(1, 2, 3, 4),
+                    false,
+                )],
+                [3] => vec![EpistemicAssumption::known_tuple(
+                    "hidden_fact4",
+                    terms(2, 3, 4, 5),
+                    false,
+                )],
+                other => panic!("unexpected split quaternary all-operator indices: {other:?}"),
+            },
+        )
+        .collect();
+    let assumption_groups: Vec<&[EpistemicAssumption]> =
+        assumption_groups_owned.iter().map(Vec::as_slice).collect();
+
+    let probabilistic_source = r#"
+        0.8::edge4(2, 3, 4, 5).
+        0.7::alt4(3, 4, 5, 6).
+        0.6::blocked_fact4(1, 2, 3, 4).
+        0.5::hidden_fact4(2, 3, 4, 5).
+        query(edge4(2, 3, 4, 5)).
+        query(alt4(3, 4, 5, 6)).
+        query(blocked_fact4(1, 2, 3, 4)).
+        query(hidden_fact4(2, 3, 4, 5)).
+        "#;
+    let parsed_probabilistic_program =
+        parse_program(probabilistic_source).expect("parse split quaternary all-operator program");
+
+    let assert_expected = |rule_indices: &[usize], probs: &[f64]| {
+        let expected = match rule_indices {
+            [0] => [1.0, 0.7, 0.6, 0.5],
+            [1] => [0.8, 1.0, 0.6, 0.5],
+            [2] => [0.8, 0.7, 0.0, 0.5],
+            [3] => [0.8, 0.7, 0.6, 0.0],
+            other => panic!("unexpected split quaternary all-operator indices: {other:?}"),
+        };
+        assert_eq!(probs.len(), expected.len());
+        for (actual, expected) in probs.iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() < 1.0e-6,
+                "conditioned split quaternary all-operator probability mismatch: actual={actual} expected={expected}",
+            );
+        }
+    };
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+
+    let mut program_adapter = EpistemicProbProductionAdapter::new(config);
+    let program_evaluated = program_adapter
+        .compile_and_evaluate_conditioned_program_for_gpu_batch_execution_result(
+            &parsed_probabilistic_program,
+            &fix.provider,
+            EpistemicProbGpuBatchExecutionEvidence {
+                batch: &batch,
+                assumptions_by_component: &assumption_groups,
+            },
+        )
+        .expect(
+            "accepted split quaternary all-operator batch must condition parsed-program exact evidence",
+        );
+    assert_eq!(program_evaluated.len(), 4);
+    for (component, evaluated_result) in split.components.iter().zip(program_evaluated.iter()) {
+        let probs: Vec<f64> = evaluated_result
+            .query_probs
+            .iter()
+            .map(|query| query.prob)
+            .collect();
+        assert_expected(&component.component.rule_indices, &probs);
+    }
+
+    let program_trace = program_adapter.trace();
+    assert_eq!(program_trace.accepted_gpu_batch_evidence_consumed, 1);
+    assert_eq!(
+        program_trace.accepted_gpu_batch_component_evidence_consumed,
+        4
+    );
+    assert_eq!(program_trace.accepted_world_view_evidence_consumed, 4);
+    assert_eq!(program_trace.accepted_evidence_assumptions_consumed, 4);
+    assert_eq!(program_trace.gpu_conditioned_evidence_facts, 4);
+    assert_eq!(
+        program_trace.gpu_conditioned_nonzero_arity_evidence_facts,
+        4
+    );
+    assert_eq!(program_trace.gpu_conditioned_max_evidence_arity, 4);
+    assert_eq!(program_trace.gpu_conditioned_negative_evidence_facts, 2);
+    assert_eq!(program_trace.gpu_conditioned_know_evidence_facts, 1);
+    assert_eq!(program_trace.gpu_conditioned_possible_evidence_facts, 1);
+    assert_eq!(program_trace.gpu_conditioned_not_possible_evidence_facts, 1);
+    assert_eq!(program_trace.gpu_conditioned_not_known_evidence_facts, 1);
+    assert_eq!(program_trace.gpu_source_conditioned_evidence_facts, 0);
+    assert_eq!(program_trace.gpu_program_conditioned_evidence_facts, 4);
+    assert_eq!(
+        program_trace.gpu_program_conditioned_nonzero_arity_evidence_facts,
+        4
+    );
+    assert_eq!(program_trace.gpu_program_conditioned_max_evidence_arity, 4);
+    assert_eq!(
+        program_trace.gpu_program_conditioned_negative_evidence_facts,
+        2
+    );
+    assert_eq!(program_trace.gpu_program_conditioned_know_evidence_facts, 1);
+    assert_eq!(
+        program_trace.gpu_program_conditioned_possible_evidence_facts,
+        1
+    );
+    assert_eq!(
+        program_trace.gpu_program_conditioned_not_possible_evidence_facts,
+        1
+    );
+    assert_eq!(
+        program_trace.gpu_program_conditioned_not_known_evidence_facts,
+        1
+    );
+    assert_eq!(program_trace.gpu_exact_source_compiles, 0);
+    assert_eq!(program_trace.gpu_exact_program_compiles, 4);
+    assert_eq!(program_trace.gpu_exact_query_evaluations, 4);
+    assert_eq!(program_trace.gpu_source_exact_query_evaluations, 0);
+    assert_eq!(program_trace.gpu_program_exact_query_evaluations, 4);
+    assert_eq!(program_trace.gpu_knowledge_compilation_end_to_end_runs, 4);
+    assert_eq!(
+        program_trace.gpu_program_knowledge_compilation_end_to_end_runs,
+        4
+    );
+    assert_eq!(program_trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(program_trace.fixture_circuit_evaluations, 0);
+
+    let mut source_gradient_adapter = EpistemicProbProductionAdapter::new(config);
+    let source_gradients = source_gradient_adapter
+        .compile_and_evaluate_conditioned_source_with_grads_for_gpu_batch_execution_result(
+            probabilistic_source,
+            &fix.provider,
+            EpistemicProbGpuBatchExecutionEvidence {
+                batch: &batch,
+                assumptions_by_component: &assumption_groups,
+            },
+        )
+        .expect("accepted split quaternary all-operator batch must condition source gradients");
+    assert_eq!(source_gradients.len(), 4);
+    for (component, gradient_result) in split.components.iter().zip(source_gradients.iter()) {
+        let probs: Vec<f64> = gradient_result
+            .query_grads
+            .iter()
+            .map(|query| query.prob)
+            .collect();
+        assert_expected(&component.component.rule_indices, &probs);
+    }
+
+    let source_gradient_trace = source_gradient_adapter.trace();
+    assert_eq!(
+        source_gradient_trace.accepted_gpu_batch_evidence_consumed,
+        1
+    );
+    assert_eq!(
+        source_gradient_trace.accepted_gpu_batch_component_evidence_consumed,
+        4
+    );
+    assert_eq!(
+        source_gradient_trace.accepted_world_view_evidence_consumed,
+        4
+    );
+    assert_eq!(
+        source_gradient_trace.accepted_evidence_assumptions_consumed,
+        4
+    );
+    assert_eq!(source_gradient_trace.gpu_conditioned_evidence_facts, 4);
+    assert_eq!(
+        source_gradient_trace.gpu_conditioned_nonzero_arity_evidence_facts,
+        4
+    );
+    assert_eq!(
+        source_gradient_trace.gpu_source_conditioned_evidence_facts,
+        4
+    );
+    assert_eq!(
+        source_gradient_trace.gpu_source_conditioned_nonzero_arity_evidence_facts,
+        4
+    );
+    assert_eq!(
+        source_gradient_trace.gpu_source_conditioned_max_evidence_arity,
+        4
+    );
+    assert_eq!(
+        source_gradient_trace.gpu_source_conditioned_negative_evidence_facts,
+        2
+    );
+    assert_eq!(
+        source_gradient_trace.gpu_source_conditioned_know_evidence_facts,
+        1
+    );
+    assert_eq!(
+        source_gradient_trace.gpu_source_conditioned_possible_evidence_facts,
+        1
+    );
+    assert_eq!(
+        source_gradient_trace.gpu_source_conditioned_not_possible_evidence_facts,
+        1
+    );
+    assert_eq!(
+        source_gradient_trace.gpu_source_conditioned_not_known_evidence_facts,
+        1
+    );
+    assert_eq!(
+        source_gradient_trace.gpu_program_conditioned_evidence_facts,
+        0
+    );
+    assert_eq!(source_gradient_trace.gpu_exact_source_compiles, 4);
+    assert_eq!(source_gradient_trace.gpu_exact_program_compiles, 0);
+    assert_eq!(source_gradient_trace.gpu_exact_query_evaluations, 0);
+    assert_eq!(source_gradient_trace.gpu_exact_gradient_evaluations, 4);
+    assert_eq!(
+        source_gradient_trace.gpu_source_conditioned_gradient_evaluations,
+        4
+    );
+    assert_eq!(
+        source_gradient_trace.gpu_knowledge_compilation_end_to_end_runs,
+        4
+    );
+    assert_eq!(
+        source_gradient_trace.gpu_source_knowledge_compilation_end_to_end_runs,
+        4
+    );
+    assert_eq!(source_gradient_trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(source_gradient_trace.fixture_circuit_evaluations, 0);
+
+    let mut program_gradient_adapter = EpistemicProbProductionAdapter::new(config);
+    let program_gradients = program_gradient_adapter
+        .compile_and_evaluate_conditioned_program_with_grads_for_gpu_batch_execution_result(
+            &parsed_probabilistic_program,
+            &fix.provider,
+            EpistemicProbGpuBatchExecutionEvidence {
+                batch: &batch,
+                assumptions_by_component: &assumption_groups,
+            },
+        )
+        .expect(
+            "accepted split quaternary all-operator batch must condition parsed-program gradients",
+        );
+    assert_eq!(program_gradients.len(), 4);
+    for (component, gradient_result) in split.components.iter().zip(program_gradients.iter()) {
+        let probs: Vec<f64> = gradient_result
+            .query_grads
+            .iter()
+            .map(|query| query.prob)
+            .collect();
+        assert_expected(&component.component.rule_indices, &probs);
+    }
+
+    let program_gradient_trace = program_gradient_adapter.trace();
+    assert_eq!(
+        program_gradient_trace.accepted_gpu_batch_evidence_consumed,
+        1
+    );
+    assert_eq!(
+        program_gradient_trace.accepted_gpu_batch_component_evidence_consumed,
+        4
+    );
+    assert_eq!(
+        program_gradient_trace.accepted_world_view_evidence_consumed,
+        4
+    );
+    assert_eq!(
+        program_gradient_trace.accepted_evidence_assumptions_consumed,
+        4
+    );
+    assert_eq!(program_gradient_trace.gpu_conditioned_evidence_facts, 4);
+    assert_eq!(
+        program_gradient_trace.gpu_source_conditioned_evidence_facts,
+        0
+    );
+    assert_eq!(
+        program_gradient_trace.gpu_program_conditioned_evidence_facts,
+        4
+    );
+    assert_eq!(
+        program_gradient_trace.gpu_program_conditioned_nonzero_arity_evidence_facts,
+        4
+    );
+    assert_eq!(
+        program_gradient_trace.gpu_program_conditioned_max_evidence_arity,
+        4
+    );
+    assert_eq!(
+        program_gradient_trace.gpu_program_conditioned_negative_evidence_facts,
+        2
+    );
+    assert_eq!(
+        program_gradient_trace.gpu_program_conditioned_know_evidence_facts,
+        1
+    );
+    assert_eq!(
+        program_gradient_trace.gpu_program_conditioned_possible_evidence_facts,
+        1
+    );
+    assert_eq!(
+        program_gradient_trace.gpu_program_conditioned_not_possible_evidence_facts,
+        1
+    );
+    assert_eq!(
+        program_gradient_trace.gpu_program_conditioned_not_known_evidence_facts,
+        1
+    );
+    assert_eq!(program_gradient_trace.gpu_exact_source_compiles, 0);
+    assert_eq!(program_gradient_trace.gpu_exact_program_compiles, 4);
+    assert_eq!(program_gradient_trace.gpu_exact_query_evaluations, 0);
+    assert_eq!(program_gradient_trace.gpu_exact_gradient_evaluations, 4);
+    assert_eq!(
+        program_gradient_trace.gpu_program_conditioned_gradient_evaluations,
+        4
+    );
+    assert_eq!(
+        program_gradient_trace.gpu_knowledge_compilation_end_to_end_runs,
+        4
+    );
+    assert_eq!(
+        program_gradient_trace.gpu_program_knowledge_compilation_end_to_end_runs,
+        4
+    );
+    assert_eq!(
+        program_gradient_trace.cpu_only_probability_recomputations,
+        0
+    );
+    assert_eq!(program_gradient_trace.fixture_circuit_evaluations, 0);
+}
+
+#[test]
 fn accepted_split_quaternary_not_possible_batch_conditions_parsed_program_probabilistic_evidence() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
