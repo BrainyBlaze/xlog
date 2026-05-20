@@ -57,6 +57,15 @@ jobs, one accepted `possible` counter, one accepted `not know` counter, eight
 tuple-key column reads, and zero CPU search, MaxSAT enumeration, or
 learned-clause transfers.
 The source audit now also requires
+`accepted_quaternary_possible_and_not_know_results_gate_solver_search_and_scheduler_paths`,
+which proves those same two single-result quaternary accepted evidences reach
+MaxSAT search-pruning, weighted MaxSAT encoding, and generalized scheduler
+adapter paths with one accepted `possible` counter, one accepted `not know`
+counter, two nonzero-arity evidence consumptions, eight tuple-key column reads,
+two direct UNSAT prunes, four encoded candidates, twelve scheduled GPU CDCL
+candidate solves, four scheduler UNSAT prunes, UNKNOWN/TIMEOUT scheduler
+statuses, and zero CPU search or MaxSAT enumeration.
+The source audit now also requires
 `accepted_quaternary_not_possible_gates_solver_reuse_maxsat_and_portfolio_paths`,
 which proves single-result quaternary `not possible fact4/4` accepted GPU
 evidence reaches the existing learned-clause reuse, bounded MaxSAT, and

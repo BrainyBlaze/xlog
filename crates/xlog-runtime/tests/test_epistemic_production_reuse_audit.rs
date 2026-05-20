@@ -179,6 +179,9 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
         "accepted_quaternary_possible_and_not_know_results_gate_solver_reuse_maxsat_and_portfolio_paths"
     ));
     assert!(integration.contains(
+        "accepted_quaternary_possible_and_not_know_results_gate_solver_search_and_scheduler_paths"
+    ));
+    assert!(integration.contains(
         "accepted_split_quaternary_possible_and_not_know_batch_gates_solver_and_probabilistic_paths"
     ));
     assert!(integration.contains(
