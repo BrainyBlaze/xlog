@@ -51,7 +51,7 @@ not a closure claim for `G090_GPU`,
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_epistemic_v070_4cycle_execution_certifies_production_wcoj_dispatch -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_epistemic_k5_execution_certifies_production_wcoj_dispatch -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_binary_not_know_membership_matches_gpt_oracle_parity -- --nocapture` | PASS, 1 passed, 0 failed |
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 111 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 112 passed, 0 failed |
 
 ## Non-Closure Notes
 
@@ -63,9 +63,11 @@ not a closure claim for `G090_GPU`,
 - It retains K7/K8 planner/preflight reuse evidence for the G39 W6.4 K-clique
   template surface and now pairs K8 metadata with accepted runtime dispatch.
 - It satisfies accepted unary, possible-operator, not-possible-operator,
-  binary all-operator, quaternary generic-arity, multi-membership,
-  missing-required multi-membership, and negated `not know` variable-bound
-  nonzero-arity membership fixtures.
+  binary all-operator, quaternary generic-arity, all-`know`
+  multi-membership, mixed `know`/`possible` multi-membership, negated
+  `not know`/`not possible` multi-membership, missing-required
+  multi-membership, and negated `not know` variable-bound nonzero-arity
+  membership fixtures.
 - It adds batch-level split execution trace counters, but does not close the
   full splitting semantic parity matrix.
 - It does not prove the full G91, FAEEL, GPT, and splitting semantic parity

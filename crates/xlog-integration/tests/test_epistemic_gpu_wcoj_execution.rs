@@ -6023,6 +6023,133 @@ fn accepted_mixed_memberships_match_gpt_oracle_parity() {
 }
 
 #[test]
+fn accepted_negated_mixed_memberships_match_gpt_oracle_parity() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred blocked(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), not know edge(X), not possible blocked(X).
+        "#,
+    )
+    .expect("parse negated mixed-membership epistemic fixture");
+    let oracle = run_generate_propagate_test(
+        &program,
+        vec![
+            // Candidate index 0 represents both negated literals as false.
+            EpistemicInterpretation::new()
+                .with_known("edge", 1)
+                .with_known("blocked", 1),
+            // Candidate index 1 represents not-know false and not-possible true.
+            EpistemicInterpretation::new().with_known("edge", 1),
+            // Candidate index 2 represents not-know true and not-possible false.
+            EpistemicInterpretation::new().with_known("blocked", 1),
+            // Candidate index 3 represents both negated literals as true.
+            EpistemicInterpretation::new(),
+        ],
+        GeneratePropagateTestConfig { max_candidates: 4 },
+    )
+    .expect("run negated mixed-membership GPT oracle");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile negated mixed-membership epistemic executable");
+    assert_eq!(executable.gpu_plan.epistemic_literals.len(), 2);
+    assert!(
+        executable
+            .gpu_plan
+            .tuple_membership_bindings
+            .iter()
+            .all(|binding| binding.negated),
+        "both mixed negated memberships must compile as negated tuple-key filters"
+    );
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &executable.relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation("node", upload_unary_u32(&fix.memory, &[1, 2, 3]));
+    executor.put_relation("edge", upload_unary_u32(&fix.memory, &[1]));
+    executor.put_relation("blocked", upload_unary_u32(&fix.memory, &[3]));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 4,
+                max_worlds: 1,
+                max_models_per_reduction: 3,
+            },
+        )
+        .expect("execute negated mixed-membership epistemic fixture");
+
+    assert_eq!(result.prepared.preflight.tuple_membership_binding_count, 2);
+    assert_eq!(result.prepared.preflight.know_operator_count, 0);
+    assert_eq!(result.prepared.preflight.possible_operator_count, 0);
+    assert_eq!(result.prepared.preflight.not_know_operator_count, 1);
+    assert_eq!(result.prepared.preflight.not_possible_operator_count, 1);
+    assert_eq!(
+        result.semantic_trace.generated_candidates,
+        oracle.trace.generated
+    );
+    assert_eq!(result.semantic_trace.guesses, oracle.trace.guesses);
+    assert_eq!(
+        result.semantic_trace.propagated_candidates,
+        oracle.trace.propagated
+    );
+    assert_eq!(result.semantic_trace.pruned_candidates, oracle.trace.pruned);
+    assert_eq!(result.semantic_trace.tested_candidates, oracle.trace.tested);
+    assert_eq!(
+        result.semantic_trace.accepted_candidates,
+        oracle.trace.accepted
+    );
+    assert_eq!(
+        result.semantic_trace.accepted_world_views,
+        oracle.trace.accepted_world_views
+    );
+    assert_eq!(
+        result.semantic_trace.rejected_candidates,
+        oracle.trace.rejected
+    );
+    assert_eq!(
+        result.semantic_trace.accepted_candidate_indices,
+        oracle.accepted_candidate_indices
+    );
+    assert_eq!(
+        result.semantic_trace.rejected_candidate_indices,
+        oracle.rejected_candidate_indices
+    );
+    assert_eq!(
+        result.model_membership.membership_source,
+        EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+    );
+    assert_eq!(
+        result
+            .final_tuple_materialization
+            .model_membership_bytes_checked,
+        result.model_membership.model_membership_bytes_written
+    );
+    assert_eq!(result.final_tuple_materialization.row_filter_count, 2);
+    assert_eq!(
+        result.final_tuple_materialization.negated_row_filter_count,
+        2
+    );
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
+    assert_eq!(
+        download_unary_u32(&fix.provider, &result.final_output),
+        vec![2],
+        "negated mixed membership must keep only rows absent from both bound tuple-key sources"
+    );
+}
+
+#[test]
 fn world_view_validation_rejects_candidates_missing_one_required_membership() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
