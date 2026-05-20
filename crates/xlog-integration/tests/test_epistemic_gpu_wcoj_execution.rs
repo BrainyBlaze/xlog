@@ -2893,6 +2893,97 @@ fn accepted_split_quaternary_all_operator_batch_records_component_kernel_timing(
 }
 
 #[test]
+fn accepted_gpu_execution_result_records_device_workspace_buffers() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let result = execute_unary_edge_epistemic_fixture(
+        &fix,
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X).
+        "#,
+        &[1, 2],
+        &[1],
+    );
+    assert_eq!(
+        download_unary_u32(&fix.provider, &result.final_output),
+        vec![1]
+    );
+
+    let layout = result.prepared.preflight.workspace_layout;
+    let workspace = &result.prepared.workspace;
+    let reset = result.prepared.workspace_reset;
+
+    assert_eq!(workspace.layout, layout);
+    assert_eq!(
+        workspace.candidate_assumptions.len(),
+        layout.candidate_assumption_bytes
+    );
+    assert_eq!(workspace.world_views.len(), layout.world_view_bytes);
+    assert_eq!(
+        workspace.model_membership.len(),
+        layout.model_membership_bytes
+    );
+    assert_eq!(
+        workspace.rejection_reasons.len(),
+        layout.rejection_reason_slots
+    );
+
+    let workspace_ptrs = BTreeSet::from([
+        *workspace.candidate_assumptions.device_ptr(),
+        *workspace.world_views.device_ptr(),
+        *workspace.model_membership.device_ptr(),
+        *workspace.rejection_reasons.device_ptr(),
+    ]);
+    assert_eq!(workspace_ptrs.len(), 4);
+    assert!(workspace_ptrs.iter().all(|ptr| *ptr != 0));
+
+    assert_eq!(
+        reset.candidate_assumption_bytes,
+        layout.candidate_assumption_bytes
+    );
+    assert_eq!(reset.world_view_bytes, layout.world_view_bytes);
+    assert_eq!(reset.model_membership_bytes, layout.model_membership_bytes);
+    assert_eq!(
+        reset.rejection_reason_bytes,
+        layout.rejection_reason_slots * std::mem::size_of::<u32>()
+    );
+    assert_eq!(reset.device_zero_ops, 4);
+    assert_eq!(reset.host_write_ops, 0);
+    assert_eq!(reset.total_zeroed_bytes(), layout.total_bytes());
+
+    assert_eq!(
+        layout.candidate_assumption_bytes,
+        result.candidate_generation.candidate_assumption_bytes
+    );
+    assert_eq!(
+        layout.world_view_bytes,
+        result.propagation.world_view_bytes_written
+    );
+    assert_eq!(
+        layout.model_membership_bytes,
+        result.model_membership.model_membership_bytes_written
+    );
+    assert_eq!(
+        layout.rejection_reason_slots,
+        result.propagation.rejection_reason_slots_written
+    );
+    assert_eq!(
+        layout.rejection_reason_slots,
+        result.semantic_trace.generated_candidates
+    );
+    assert_eq!(
+        result.model_membership.membership_source,
+        EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+    );
+}
+
+#[test]
 fn accepted_split_quaternary_all_operator_batch_records_device_workspace_buffers() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");

@@ -24,6 +24,14 @@ hot-path phase lacks CUDA-event timing. Default FAEEL executable lowering now
 also rejects nonzero-arity self-`possible` rules unless tuple-level
 foundedness can be proven.
 
+2026-05-20 single-result workspace-buffer delta: accepted single-result GPU
+execution now has explicit device-residency coverage for candidate-assumption,
+world-view, model-membership, and rejection-reason workspace buffers, distinct
+device allocations, device reset byte accounting, four device zero operations,
+zero reset host writes, and trace byte counts tied back to the preflight layout.
+This narrows `G090_GPU`, but broader workspace residency certification remains
+incomplete.
+
 2026-05-20 single-result CPU-fallback gate delta: accepted single-result solver
 and probabilistic consumers now have explicit fail-closed coverage when
 candidate-enumeration, world-view-validation, solver-search, or probabilistic
@@ -407,10 +415,10 @@ The next production slice should start at the lowering/runtime boundary:
     split-batch quaternary `possible`/`not know fact4/4` conditioned source
     evidence plus source/program gradients, PIR/CNF, and exact query/gradient
     evaluation, split-batch quaternary all-operator component kernel timing and
-    device workspace-buffer residency, accepted-world-view boundary rejection,
-    single-result and split-batch CPU-fallback rejection, row-count-only
-    membership rejection, hot-path host-transfer rejection, plus conditioned
-    source, parsed-program,
+    single-result plus split-batch device workspace-buffer residency,
+    accepted-world-view boundary rejection, single-result and split-batch
+    CPU-fallback rejection, row-count-only membership rejection, hot-path
+    host-transfer rejection, plus conditioned source, parsed-program,
     source-gradient, parsed-program-gradient,
     source/program PIR-CNF, and exact
     query/gradient evidence with one accepted `know` and `possible` counter,

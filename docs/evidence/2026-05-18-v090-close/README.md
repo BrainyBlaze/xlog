@@ -187,6 +187,13 @@ solves, four SAT jobs, four MaxSAT jobs, one accepted counter for every
 epistemic operator family, sixteen tuple-key column reads, and zero CPU search.
 This is not a closure proposal; `G090_SOLVER` and `G090_CLOSE` remain blocked.
 
+2026-05-20 single-result workspace-buffer follow-up: accepted single-result GPU
+execution now records candidate-assumption, world-view, model-membership, and
+rejection-reason workspace buffers as distinct device allocations, with device
+reset byte accounting, four device zero operations, zero reset host writes, and
+trace byte counts tied back to the preflight layout. This is not a closure
+proposal; `G090_GPU` and `G090_CLOSE` remain blocked.
+
 2026-05-20 single-result row-count membership follow-up: accepted
 single-result solver and probabilistic consumers now reject model-membership
 evidence downgraded from stable-model tuple-source membership to row-count-only
@@ -364,20 +371,21 @@ four-component split all-binary `know`/`possible`/`not possible`/`not know`
 fixture now has the same deeper solver search/scheduler/portfolio evidence; the
 two-component split quaternary `know fact4/4` plus `not possible fact4/4`
 fixture now has the same deeper solver search/scheduler/portfolio evidence; and
-`G090_PROB` now has the same split-batch evidence routed through the existing
+  `G090_PROB` now has the same split-batch evidence routed through the existing
 conditioned source exact-query path with source-conditioned arity-four evidence
 counters, plus source/program gradients, source/program PIR/CNF, and exact
-query/gradient evaluation with zero CPU probability recomputation; the
-four-component split quaternary all-operator batch now also records per-component
-kernel timing across all eight GPU hot-path phases, device workspace-buffer
-residency for candidate-assumption, world-view, model-membership, and
-rejection-reason buffers, fail-closed solver/probability rejection of rejected
-world-view results, nonzero CPU fallback counters, row-count-only nonzero-arity
-membership, and hot-path host transfers, and reaches conditioned source/program
-exact-query, source/program gradient, source/program PIR-CNF, and
-already-compiled exact query/gradient evidence with one accepted `know`,
-`possible`, `not possible`, and `not know` counter, thirty-two aggregate
-CUDA-event pairs, and zero CPU probability recomputation; the
+query/gradient evaluation with zero CPU probability recomputation; the accepted
+single-result path and four-component split quaternary all-operator batch now
+also record device workspace-buffer residency for candidate-assumption,
+world-view, model-membership, and rejection-reason buffers, and the split batch
+records per-component kernel timing across all eight GPU hot-path phases,
+fail-closed solver/probability rejection of rejected world-view results, nonzero
+CPU fallback counters, row-count-only nonzero-arity membership, and hot-path
+host transfers, and reaches conditioned source/program exact-query,
+source/program gradient, source/program PIR-CNF, and already-compiled exact
+query/gradient evidence with one accepted `know`, `possible`, `not possible`,
+and `not know` counter, thirty-two aggregate CUDA-event pairs, and zero CPU
+probability recomputation; the
 single-result not-possible and possible/not-know evidence also now reaches
 source/program PIR/CNF plus already-compiled exact query/gradient adapters. These are
 bounded production-reuse additions only; the BLOCKED/PARTIAL statuses above are
@@ -568,7 +576,9 @@ Closure remains blocked until certification includes all of the following:
   accepted fixtures plus split-quaternary all-operator component timing and
   workspace-buffer residency plus split-batch and single-result row-count-only
   membership rejection;
-- GPU-resident candidate, world-view, model-membership, and rejection buffers;
+- broader GPU-resident candidate, world-view, model-membership, and rejection
+  buffers beyond the current single-result and split-quaternary all-operator
+  workspace-buffer residency fixtures;
 - zero CPU fallback counters for candidate enumeration and world-view
   validation beyond the current single-result and split-quaternary
   all-operator fail-closed consumer rejection fixtures;

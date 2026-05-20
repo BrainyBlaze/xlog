@@ -226,6 +226,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
         .contains("accepted_split_quaternary_all_operator_batch_records_component_kernel_timing"));
     assert!(integration
         .contains("accepted_split_quaternary_all_operator_batch_records_device_workspace_buffers"));
+    assert!(integration.contains("accepted_gpu_execution_result_records_device_workspace_buffers"));
     assert!(integration
         .contains("accepted_split_quaternary_all_operator_batch_rejects_cpu_fallback_counters"));
     assert!(integration.contains("accepted_gpu_execution_result_rejects_cpu_fallback_counters"));
