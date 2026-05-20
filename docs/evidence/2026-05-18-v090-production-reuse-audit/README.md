@@ -282,6 +282,12 @@ proves accepted solver and probabilistic batch consumers also fail closed when a
 nonzero-arity component is downgraded from stable-model tuple-source membership
 to row-count-only membership, preserving the tuple-membership reuse lock before
 solver lifecycle work or probability conditioning can proceed.
+The split-batch quaternary all-operator host-transfer marker
+`accepted_split_quaternary_all_operator_batch_rejects_hot_path_host_transfers`
+proves those same consumers fail closed when accepted batch evidence reports
+tracked hot-path D2H calls or per-candidate host round trips, preserving the
+transfer-budget gate before solver lifecycle work or probability conditioning
+can proceed.
 All accepted probability split-batch entrypoints now call the single
 `accepted_world_views_from_gpu_batch_execution_evidence` validator, and
 `production_prob_batch_paths_use_single_gpu_batch_gate` source-audits that no

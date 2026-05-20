@@ -3205,6 +3205,77 @@ fn accepted_split_quaternary_all_operator_batch_rejects_row_count_only_membershi
 }
 
 #[test]
+fn accepted_split_quaternary_all_operator_batch_rejects_hot_path_host_transfers() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let (_split, mut batch) = execute_split_quaternary_all_operator_batch(&fix);
+    assert_eq!(batch.trace.tracked_dtoh_calls, 0);
+    assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
+
+    batch.trace.tracked_dtoh_calls = 1;
+    batch.trace.per_candidate_host_round_trips = 1;
+
+    let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
+    let sat_cnf = GpuCnf::from_host(&sat_instance, &fix.provider).expect("upload SAT CNF");
+    let branch_limit = upload_u32_scalar(&fix.provider, 1);
+    let mut solver_adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let mut workspace = solver_adapter
+        .new_workspace(sat_cnf.var_cap, sat_cnf.clause_cap)
+        .expect("new host-transfer rejection workspace");
+
+    let solver_err = match solver_adapter
+        .solve_assumption_lifecycle_with_gpu_batch_execution_result(
+            &fix.provider,
+            GpuSolverProductionBatchExecutionEvidence { batch: &batch },
+            &mut workspace,
+            &[GpuSolverProductionLifecycleStep {
+                cnf: &sat_cnf,
+                branch_var_limit: &branch_limit,
+                expectation: GpuSolverProductionExpectation::Sat,
+            }],
+        ) {
+        Ok(_) => panic!("solver batch evidence with hot-path host transfers must reject"),
+        Err(err) => err,
+    };
+    let solver_err = format!("{solver_err}");
+    assert!(solver_err.contains("CPU/host fallback counters"));
+    assert!(solver_err.contains("dtoh_calls=1"));
+    assert!(solver_err.contains("round_trips=1"));
+
+    let empty_groups_owned: Vec<Vec<EpistemicAssumption>> = vec![Vec::new(); batch.results.len()];
+    let empty_groups: Vec<&[EpistemicAssumption]> =
+        empty_groups_owned.iter().map(Vec::as_slice).collect();
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut prob_adapter = EpistemicProbProductionAdapter::new(config);
+    let prob_err = match prob_adapter
+        .compile_and_evaluate_conditioned_source_for_gpu_batch_execution_result(
+            r#"
+        0.8::edge4(2, 3, 4, 5).
+        query(edge4(2, 3, 4, 5)).
+        "#,
+            &fix.provider,
+            EpistemicProbGpuBatchExecutionEvidence {
+                batch: &batch,
+                assumptions_by_component: &empty_groups,
+            },
+        ) {
+        Ok(_) => panic!("probabilistic batch evidence with hot-path host transfers must reject"),
+        Err(err) => err,
+    };
+    let prob_err = format!("{prob_err}");
+    assert!(prob_err.contains("CPU/host fallback counters"));
+    assert!(prob_err.contains("dtoh_calls=1"));
+    assert!(prob_err.contains("round_trips=1"));
+}
+
+#[test]
 fn split_multi_membership_modal_coupling_rejects_gpu_batching() {
     let program = parse_program(
         r#"
