@@ -245,6 +245,14 @@ queries plus source and parsed-program conditioned gradients while preserving
 arity-four source/program evidence counters, one conditioned counter for every
 operator family, two negative facts, four gradient evaluations per gradient
 path, and zero CPU probability recomputation.
+The split-batch quaternary all-operator PIR/CNF and exact-evaluation marker
+`accepted_split_quaternary_all_operator_batch_gates_probabilistic_pir_cnf_and_exact_evaluation_paths`
+proves the same batch reaches source and parsed-program PIR/CNF encoding plus
+already-compiled exact query and gradient evaluation through the existing GPU
+exact/provenance APIs, with four source PIR uploads, four parsed-program PIR
+uploads, four source CNF encodes, four parsed-program CNF encodes, four
+already-compiled query evaluations, four already-compiled gradient evaluations,
+and zero CPU probability recomputation.
 All accepted probability split-batch entrypoints now call the single
 `accepted_world_views_from_gpu_batch_execution_evidence` validator, and
 `production_prob_batch_paths_use_single_gpu_batch_gate` source-audits that no
