@@ -505,6 +505,19 @@ fn execute_all_operator_mixed_membership_fixture(
         .expect("execute all-operator mixed-membership epistemic fixture")
 }
 
+fn all_operator_mixed_membership_assumptions() -> Vec<EpistemicAssumption> {
+    vec![
+        EpistemicAssumption::known_tuple("edge", vec![EpistemicEvidenceTerm::integer(2)], true),
+        EpistemicAssumption::possible_tuple("alt", vec![EpistemicEvidenceTerm::integer(2)], true),
+        EpistemicAssumption::known_tuple("hidden", vec![EpistemicEvidenceTerm::integer(2)], false),
+        EpistemicAssumption::possible_tuple(
+            "blocked",
+            vec![EpistemicEvidenceTerm::integer(2)],
+            false,
+        ),
+    ]
+}
+
 #[test]
 fn accepted_epistemic_v070_4cycle_execution_certifies_production_wcoj_dispatch() {
     let Some(fix) = make_runtime_backed_fixture() else {
@@ -8558,28 +8571,7 @@ fn accepted_all_operator_mixed_membership_conditions_probabilistic_evidence() {
             "#,
             &fix.provider,
             &result,
-            vec![
-                EpistemicAssumption::known_tuple(
-                    "edge",
-                    vec![EpistemicEvidenceTerm::integer(2)],
-                    true,
-                ),
-                EpistemicAssumption::possible_tuple(
-                    "alt",
-                    vec![EpistemicEvidenceTerm::integer(2)],
-                    true,
-                ),
-                EpistemicAssumption::known_tuple(
-                    "hidden",
-                    vec![EpistemicEvidenceTerm::integer(2)],
-                    false,
-                ),
-                EpistemicAssumption::possible_tuple(
-                    "blocked",
-                    vec![EpistemicEvidenceTerm::integer(2)],
-                    false,
-                ),
-            ],
+            all_operator_mixed_membership_assumptions(),
         )
         .expect("same-rule all-operator GPU evidence must condition probabilistic exact evidence");
 
@@ -8610,6 +8602,114 @@ fn accepted_all_operator_mixed_membership_conditions_probabilistic_evidence() {
     assert_eq!(trace.gpu_source_conditioned_not_possible_evidence_facts, 1);
     assert_eq!(trace.gpu_exact_source_compiles, 1);
     assert_eq!(trace.gpu_exact_query_evaluations, 1);
+    assert_eq!(trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(trace.fixture_circuit_evaluations, 0);
+}
+
+#[test]
+fn accepted_all_operator_mixed_membership_gates_probabilistic_program_gradient_and_pir_paths() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let result = execute_all_operator_mixed_membership_fixture(&fix);
+    assert_eq!(
+        download_unary_u32(&fix.provider, &result.final_output),
+        vec![2]
+    );
+
+    let prob_program = parse_program(
+        r#"
+        0.3::edge(2).
+        0.4::alt(2).
+        0.5::hidden(2).
+        0.6::blocked(2).
+        query(edge(2)).
+        query(alt(2)).
+        query(hidden(2)).
+        query(blocked(2)).
+        "#,
+    )
+    .expect("parse all-operator probabilistic program");
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut adapter = EpistemicProbProductionAdapter::new(config);
+    let evaluated = adapter
+        .compile_and_evaluate_conditioned_program_with_gpu_execution_result(
+            &prob_program,
+            &fix.provider,
+            &result,
+            all_operator_mixed_membership_assumptions(),
+        )
+        .expect("same-rule all-operator evidence must condition parsed-program exact evidence");
+    let grads = adapter
+        .compile_and_evaluate_conditioned_program_with_grads_with_gpu_execution_result(
+            &prob_program,
+            &fix.provider,
+            &result,
+            all_operator_mixed_membership_assumptions(),
+        )
+        .expect("same-rule all-operator evidence must condition parsed-program gradients");
+    let pir_cnf = adapter
+        .encode_program_pir_cnf_with_gpu_execution_result(
+            &prob_program,
+            &fix.provider,
+            &result,
+            all_operator_mixed_membership_assumptions(),
+        )
+        .expect("same-rule all-operator evidence must gate parsed-program PIR/CNF");
+
+    assert_eq!(evaluated.query_probs.len(), 4);
+    assert!((evaluated.query_probs[0].prob - 1.0).abs() < 1.0e-6);
+    assert!((evaluated.query_probs[1].prob - 1.0).abs() < 1.0e-6);
+    assert!(evaluated.query_probs[2].prob.abs() < 1.0e-6);
+    assert!(evaluated.query_probs[3].prob.abs() < 1.0e-6);
+    assert_eq!(grads.query_grads.len(), 4);
+    assert!((grads.query_grads[0].prob - 1.0).abs() < 1.0e-6);
+    assert!((grads.query_grads[1].prob - 1.0).abs() < 1.0e-6);
+    assert!(grads.query_grads[2].prob.abs() < 1.0e-6);
+    assert!(grads.query_grads[3].prob.abs() < 1.0e-6);
+    assert!(pir_cnf.pir_nodes > 0);
+    assert!(pir_cnf.root_count > 0);
+    assert!(pir_cnf.cnf_var_cap > 0);
+    assert!(pir_cnf.cnf_clause_cap > 0);
+
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_world_view_evidence_consumed, 3);
+    assert_eq!(trace.accepted_evidence_assumptions_consumed, 12);
+    assert_eq!(trace.gpu_conditioned_evidence_facts, 8);
+    assert_eq!(trace.gpu_conditioned_nonzero_arity_evidence_facts, 8);
+    assert_eq!(trace.gpu_conditioned_max_evidence_arity, 1);
+    assert_eq!(trace.gpu_conditioned_negative_evidence_facts, 4);
+    assert_eq!(trace.gpu_conditioned_know_evidence_facts, 2);
+    assert_eq!(trace.gpu_conditioned_possible_evidence_facts, 2);
+    assert_eq!(trace.gpu_conditioned_not_known_evidence_facts, 2);
+    assert_eq!(trace.gpu_conditioned_not_possible_evidence_facts, 2);
+    assert_eq!(trace.gpu_program_conditioned_evidence_facts, 8);
+    assert_eq!(
+        trace.gpu_program_conditioned_nonzero_arity_evidence_facts,
+        8
+    );
+    assert_eq!(trace.gpu_program_conditioned_max_evidence_arity, 1);
+    assert_eq!(trace.gpu_program_conditioned_negative_evidence_facts, 4);
+    assert_eq!(trace.gpu_program_conditioned_know_evidence_facts, 2);
+    assert_eq!(trace.gpu_program_conditioned_possible_evidence_facts, 2);
+    assert_eq!(trace.gpu_program_conditioned_not_known_evidence_facts, 2);
+    assert_eq!(trace.gpu_program_conditioned_not_possible_evidence_facts, 2);
+    assert_eq!(trace.gpu_exact_program_compiles, 2);
+    assert_eq!(trace.gpu_exact_query_evaluations, 1);
+    assert_eq!(trace.gpu_program_exact_query_evaluations, 1);
+    assert_eq!(trace.gpu_exact_gradient_evaluations, 1);
+    assert_eq!(trace.gpu_program_conditioned_gradient_evaluations, 1);
+    assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 2);
+    assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 2);
+    assert_eq!(trace.gpu_pir_graph_uploads, 1);
+    assert_eq!(trace.gpu_program_pir_graph_uploads, 1);
+    assert_eq!(trace.gpu_cnf_encodes, 1);
+    assert_eq!(trace.gpu_program_cnf_encodes, 1);
     assert_eq!(trace.cpu_only_probability_recomputations, 0);
     assert_eq!(trace.fixture_circuit_evaluations, 0);
 }
@@ -11258,6 +11358,138 @@ fn accepted_all_operator_mixed_membership_gates_solver_lifecycle_path() {
     assert_eq!(trace.gpu_lifecycle_workspace_reuses, 1);
     assert_eq!(trace.gpu_cdcl_sat_solves, 1);
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 1);
+    assert_eq!(trace.cpu_assignment_enumerations, 0);
+    assert_eq!(trace.cpu_maxsat_enumerations, 0);
+}
+
+#[test]
+fn accepted_all_operator_mixed_membership_gates_solver_reuse_maxsat_and_portfolio_paths() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let result = execute_all_operator_mixed_membership_fixture(&fix);
+    assert_eq!(
+        download_unary_u32(&fix.provider, &result.final_output),
+        vec![2]
+    );
+    assert_eq!(
+        result.model_membership.tuple_source_key_column_device_reads,
+        4
+    );
+
+    let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
+    let unsat_instance = SolveInstance::new(
+        1,
+        vec![
+            Clause::new(vec![Literal::positive(0)]),
+            Clause::new(vec![Literal::negative(0)]),
+        ],
+    );
+    let sat_cnf = GpuCnf::from_host(&sat_instance, &fix.provider).expect("upload SAT CNF");
+    let unsat_cnf = GpuCnf::from_host(&unsat_instance, &fix.provider).expect("upload UNSAT CNF");
+    let branch_limit = upload_u32_scalar(&fix.provider, 1);
+    let mut adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let mut workspace = adapter
+        .new_workspace(unsat_cnf.var_cap, unsat_cnf.clause_cap)
+        .expect("new workspace");
+    let assign_ptr_before = workspace.assign_device_ptr();
+
+    let learned = adapter
+        .solve_unsat_then_reuse_learned_clauses_with_gpu_execution_result(
+            &fix.provider,
+            &result,
+            &mut workspace,
+            &unsat_cnf,
+            &branch_limit,
+            &unsat_cnf,
+            &branch_limit,
+        )
+        .expect("same-rule all-operator GPU evidence must gate learned-clause reuse");
+    let maxsat = adapter
+        .solve_weighted_maxsat_candidates_with_gpu_execution_result(
+            &fix.provider,
+            &result,
+            &[GpuSolverProductionMaxSatCandidate {
+                score: 11,
+                cnf: &sat_cnf,
+                branch_var_limit: &branch_limit,
+            }],
+        )
+        .expect("same-rule all-operator GPU evidence must gate MaxSAT through GPU CDCL");
+    let portfolio = adapter
+        .solve_portfolio_with_gpu_execution_result(
+            &fix.provider,
+            &result,
+            &[
+                GpuSolverProductionPortfolioJob::Sat {
+                    cnf: &sat_cnf,
+                    branch_var_limit: &branch_limit,
+                },
+                GpuSolverProductionPortfolioJob::MaxSat {
+                    candidates: &[GpuSolverProductionMaxSatCandidate {
+                        score: 11,
+                        cnf: &sat_cnf,
+                        branch_var_limit: &branch_limit,
+                    }],
+                },
+                GpuSolverProductionPortfolioJob::Unknown {
+                    reason: "bounded branch budget exhausted before a determined status",
+                },
+                GpuSolverProductionPortfolioJob::Timeout { budget_micros: 10 },
+            ],
+        )
+        .expect("same-rule all-operator GPU evidence must gate status-aware portfolio path");
+
+    assert_eq!(workspace.assign_device_ptr(), assign_ptr_before);
+    assert_eq!(learned.candidate_evidence_records, 1);
+    assert_eq!(learned.candidates, 2);
+    assert_eq!(learned.unsat_solves, 2);
+    assert_eq!(learned.gpu_learned_clause_arena_publications, 1);
+    assert_eq!(learned.gpu_learned_clause_imports, 1);
+    assert_eq!(learned.gpu_learned_clause_reused_solves, 1);
+    assert_eq!(learned.cpu_learned_clause_transfers, 0);
+    assert_eq!(maxsat.candidate_evidence_records, 1);
+    assert_eq!(maxsat.optimum_score, 11);
+    assert_eq!(maxsat.gpu_cdcl_candidate_solves, 1);
+    assert_eq!(portfolio.jobs, 4);
+    assert_eq!(portfolio.sat_jobs, 1);
+    assert_eq!(portfolio.maxsat_jobs, 1);
+    assert_eq!(portfolio.unknown_jobs, 1);
+    assert_eq!(portfolio.timeout_jobs, 1);
+    assert_eq!(portfolio.maxsat_optimum_scores, 11);
+
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 3);
+    assert_eq!(trace.accepted_know_gpu_candidate_evidence_consumed, 3);
+    assert_eq!(trace.accepted_possible_gpu_candidate_evidence_consumed, 3);
+    assert_eq!(
+        trace.accepted_not_possible_gpu_candidate_evidence_consumed,
+        3
+    );
+    assert_eq!(trace.accepted_not_know_gpu_candidate_evidence_consumed, 3);
+    assert_eq!(
+        trace.accepted_nonzero_arity_gpu_candidate_evidence_consumed,
+        3
+    );
+    assert_eq!(
+        trace.accepted_gpu_candidate_tuple_key_column_reads_consumed,
+        12
+    );
+    assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 2);
+    assert_eq!(trace.gpu_learned_clause_arena_publications, 1);
+    assert_eq!(trace.gpu_learned_clause_imports, 1);
+    assert_eq!(trace.gpu_learned_clause_reused_solves, 1);
+    assert_eq!(trace.cpu_learned_clause_transfers, 0);
+    assert_eq!(trace.gpu_maxsat_candidate_solves, 2);
+    assert_eq!(trace.gpu_maxsat_optima, 2);
+    assert_eq!(trace.gpu_portfolio_jobs, 4);
+    assert_eq!(trace.gpu_portfolio_sat_jobs, 1);
+    assert_eq!(trace.gpu_portfolio_maxsat_jobs, 1);
+    assert_eq!(trace.gpu_portfolio_unknown_status_jobs, 1);
+    assert_eq!(trace.gpu_portfolio_timeout_status_jobs, 1);
     assert_eq!(trace.cpu_assignment_enumerations, 0);
     assert_eq!(trace.cpu_maxsat_enumerations, 0);
 }

@@ -46,7 +46,8 @@ quaternary parsed-program accepted probabilistic evidence now record aggregate
 and source/program-specific nonzero-arity evidence counts plus maximum
 conditioned evidence arity in the production trace.
 The same-rule all-operator accepted runtime fixture now also conditions source
-queries from one accepted GPU execution result with four assumptions, proving
+and parsed-program queries and gradients from one accepted GPU execution result
+with four assumptions, and it gates parsed-program PIR/CNF encoding, proving
 `know`, `possible`, `not know`, and `not possible` evidence facts are consumed
 together without CPU recomputation.
 Accepted split-batch runtime evidence can now gate unconditioned source and
@@ -113,6 +114,7 @@ Broader probabilistic coverage and release certification remain incomplete.
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_g91_and_faeel_modes_gate_probabilistic_production_trace -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_operator_conditions_record_probabilistic_operator_trace_counters -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_all_operator_mixed_membership_conditions_probabilistic_evidence -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_all_operator_mixed_membership_gates_probabilistic_program_gradient_and_pir_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution conditioned_probabilistic_evidence_records_source_and_program_trace_counters -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_conditions_parsed_program_probabilistic_evidence -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_conditions_negative_parsed_program_probabilistic_evidence -- --nocapture` | PASS, 1 passed, 0 failed |

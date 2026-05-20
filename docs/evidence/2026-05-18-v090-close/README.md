@@ -27,9 +27,10 @@ the incomplete v0.9 GPU-native certification scope:
   reruns and an approved closure proposal after the GPU-native blockers clear.
 
 2026-05-20 update: the same-rule all-operator accepted GPU fixture now gates
-both the solver lifecycle production adapter and the probabilistic source
-conditioning adapter with zero CPU search/recomputation counters. This narrows
-the production-reuse gap, but it is not a closure proposal.
+solver lifecycle, learned-clause reuse, MaxSAT, portfolio, probabilistic
+source conditioning, parsed-program conditioning, gradients, and parsed-program
+PIR/CNF production adapters with zero CPU search/recomputation counters. This
+narrows the production-reuse gap, but it is not a closure proposal.
 
 ## Ref Evidence
 
@@ -117,7 +118,9 @@ Post-merge compatibility validation:
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_all_operator_mixed_memberships_match_gpt_oracle_parity -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_all_operator_mixed_membership_gates_solver_lifecycle_path -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_all_operator_mixed_membership_conditions_probabilistic_evidence -- --exact --nocapture` | PASS, 1 passed, 0 failed |
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 115 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_all_operator_mixed_membership_gates_solver_reuse_maxsat_and_portfolio_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_all_operator_mixed_membership_gates_probabilistic_program_gradient_and_pir_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 117 passed, 0 failed |
 | `python scripts/validate_v086_examples.py --output /tmp/v090-v086-compat-validation.json` | PASS, consumer certification PASS, examples PASS |
 
 ## Corrected Gate Table

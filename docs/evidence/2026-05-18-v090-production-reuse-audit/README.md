@@ -68,6 +68,12 @@ It also requires
 the same all-operator accepted world-view evidence reaches the solver and
 probabilistic production adapters before being cited as production-reuse
 evidence.
+The deeper production-reuse markers
+`accepted_all_operator_mixed_membership_gates_solver_reuse_maxsat_and_portfolio_paths`
+and
+`accepted_all_operator_mixed_membership_gates_probabilistic_program_gradient_and_pir_paths`
+extend that same evidence through solver learned-clause reuse, MaxSAT,
+portfolio, parsed-program conditioning, gradient, and PIR/CNF adapters.
 
 ## Forbidden Parallel Engines
 
