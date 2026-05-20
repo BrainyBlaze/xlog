@@ -32,6 +32,14 @@ zero reset host writes, and trace byte counts tied back to the preflight layout.
 This narrows `G090_GPU`, but broader workspace residency certification remains
 incomplete.
 
+2026-05-20 single-result kernel-timing delta: accepted single-result GPU
+execution now records kernel launches, zero host writes, and one CUDA-event
+timing pair for each hot-path phase: candidate generation, propagation,
+candidate validation, model membership, world-view validation, accepted
+materialization, final-result materialization, and final tuple materialization.
+This narrows the `M090_GPU.6` launch-evidence/timing gap, but broader timing
+coverage remains incomplete.
+
 2026-05-20 single-result CPU-fallback gate delta: accepted single-result solver
 and probabilistic consumers now have explicit fail-closed coverage when
 candidate-enumeration, world-view-validation, solver-search, or probabilistic
@@ -414,8 +422,8 @@ The next production slice should start at the lowering/runtime boundary:
    parsed-program PIR/CNF and exact query/gradient evidence,
     split-batch quaternary `possible`/`not know fact4/4` conditioned source
     evidence plus source/program gradients, PIR/CNF, and exact query/gradient
-    evaluation, split-batch quaternary all-operator component kernel timing and
-    single-result plus split-batch device workspace-buffer residency,
+    evaluation, single-result plus split-batch quaternary all-operator component
+    kernel timing and device workspace-buffer residency,
     accepted-world-view boundary rejection, single-result and split-batch
     CPU-fallback rejection, row-count-only membership rejection, hot-path
     host-transfer rejection, plus conditioned source, parsed-program,

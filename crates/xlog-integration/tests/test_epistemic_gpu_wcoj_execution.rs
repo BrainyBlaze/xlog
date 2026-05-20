@@ -2743,6 +2743,124 @@ fn aggregate_timing_requires_every_component_phase_to_be_recorded() {
 }
 
 #[test]
+fn accepted_gpu_execution_result_records_kernel_timing() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let result = execute_unary_edge_epistemic_fixture(
+        &fix,
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X).
+        "#,
+        &[1, 2],
+        &[1],
+    );
+    assert_eq!(
+        download_unary_u32(&fix.provider, &result.final_output),
+        vec![1]
+    );
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert_eq!(
+        result.model_membership.membership_source,
+        EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+    );
+    assert_eq!(
+        result.model_membership.tuple_source_row_count_device_reads,
+        1
+    );
+    assert_eq!(
+        result.model_membership.tuple_source_key_column_device_reads,
+        1
+    );
+    assert!(result.model_membership.model_membership_bytes_written > 0);
+    assert!(result.world_view_validation.model_membership_bytes_checked > 0);
+    assert!(
+        result
+            .final_tuple_materialization
+            .model_membership_bytes_checked
+            > 0
+    );
+    assert_eq!(result.final_tuple_materialization.row_filter_count, 1);
+    assert_eq!(
+        result.final_tuple_materialization.negated_row_filter_count,
+        0
+    );
+
+    let assert_phase =
+        |phase: &str,
+         kernel_launches: u32,
+         host_write_ops: u32,
+         timing: xlog_runtime::EpistemicGpuKernelTimingTrace| {
+            assert!(kernel_launches > 0, "{phase} must launch GPU kernels");
+            assert_eq!(host_write_ops, 0, "{phase} must avoid host writes");
+            assert!(
+                timing.is_recorded(),
+                "{phase} must record CUDA-event timing"
+            );
+            assert_eq!(timing.cuda_event_pairs, 1, "{phase} event pair count");
+            assert_eq!(timing.timing_sync_ops, 1, "{phase} timing sync count");
+        };
+
+    assert_phase(
+        "candidate generation",
+        result.candidate_generation.kernel_launches,
+        result.candidate_generation.host_write_ops,
+        result.candidate_generation.kernel_timing,
+    );
+    assert_phase(
+        "candidate propagation",
+        result.propagation.kernel_launches,
+        result.propagation.host_write_ops,
+        result.propagation.kernel_timing,
+    );
+    assert_phase(
+        "candidate validation",
+        result.candidate_validation.kernel_launches,
+        result.candidate_validation.host_write_ops,
+        result.candidate_validation.kernel_timing,
+    );
+    assert_phase(
+        "model membership",
+        result.model_membership.kernel_launches,
+        result.model_membership.host_write_ops,
+        result.model_membership.kernel_timing,
+    );
+    assert_phase(
+        "world-view validation",
+        result.world_view_validation.kernel_launches,
+        result.world_view_validation.host_write_ops,
+        result.world_view_validation.kernel_timing,
+    );
+    assert_phase(
+        "accepted materialization",
+        result.materialization.kernel_launches,
+        result.materialization.host_write_ops,
+        result.materialization.kernel_timing,
+    );
+    assert_phase(
+        "final result materialization",
+        result.final_result_materialization.kernel_launches,
+        result.final_result_materialization.host_write_ops,
+        result.final_result_materialization.kernel_timing,
+    );
+    assert_phase(
+        "final tuple materialization",
+        result.final_tuple_materialization.kernel_launches,
+        result.final_tuple_materialization.host_write_ops,
+        result.final_tuple_materialization.kernel_timing,
+    );
+
+    assert_eq!(result.aggregate_kernel_timing().cuda_event_pairs, 8);
+    assert_eq!(result.aggregate_kernel_timing().timing_sync_ops, 8);
+}
+
+#[test]
 fn accepted_split_quaternary_all_operator_batch_records_component_kernel_timing() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
