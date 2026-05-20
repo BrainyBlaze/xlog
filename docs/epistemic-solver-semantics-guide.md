@@ -145,9 +145,9 @@ production GPU/WCOJ stack for specific certification fixtures:
 - Unary and binary nonzero-arity `know`/`possible`/`not possible` slices,
   binary `not know`, quaternary generic arity-N `know`, unary `not know`,
   multi-membership, missing-required rejection, split
-  possible-vs-not-known, split binary `possible`/`not possible`, G91
-  self-support, and independently founded FAEEL fixtures compare bounded GPU
-  traces against semantic or GPT oracles.
+  possible-vs-not-known, split binary `possible`/`not possible`, split
+  all-binary-operator, G91 self-support, and independently founded FAEEL
+  fixtures compare bounded GPU traces against semantic or GPT oracles.
 - Solver SAT/UNSAT, lifecycle, split-batch learned-clause, MaxSAT,
   weighted MaxSAT encoding, scheduler, and portfolio slices route accepted GPU evidence into existing
   GPU CDCL/CNF adapter paths.
@@ -368,6 +368,12 @@ Split runtime coverage also includes binary operator components: independent
 shared `pair/2` input, map results by source rule index, compare each component
 against bounded GPT oracle traces, and record aggregate `possible` and
 `not possible` operator counts with zero CPU fallback counters.
+The all-binary-operator split fixture extends this to four independent
+components over the same `pair/2` input, covering `know`, `possible`,
+`not possible`, and `not know` together with per-component GPT oracle
+trace/candidate-index parity, row-filter polarity counts, one aggregate counter
+for each operator, zero CPU recomposition, zero fallback, zero tracked D2H, and
+zero per-candidate host round trips.
 It also includes the existing world-view distinction between
 absent `possible` and true `not know`: split `possible edge(X)` and
 `not know edge(X)` components execute over the same absent `edge` tuple source,
