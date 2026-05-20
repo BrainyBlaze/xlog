@@ -552,8 +552,10 @@ candidate evidence plus tuple-key column reads before GPU CDCL dispatch.
 available along with the bounded GPU-backed MaxSAT and SAT/MaxSAT portfolio
 adapters. `GpuSolverProductionTrace::require_production_metric_eligibility`
 is the automated metric gate: it rejects traces that did not consume accepted
-GPU candidate evidence, that have no existing GPU solver production counter,
-or that record CPU assignment, MaxSAT, or learned-clause transfer counters.
+GPU candidate evidence, that have no existing GPU CDCL/MaxSAT/scheduler or
+portfolio production-path counter, that only record lifecycle UNKNOWN/TIMEOUT
+status propagation, or that record CPU assignment, MaxSAT, or learned-clause
+transfer counters.
 
 The adapter is partial v0.9 evidence only. It now proves same-CNF reuse,
 distinct-CNF fail-closed rejection, a two-record accepted lifecycle, and bounded

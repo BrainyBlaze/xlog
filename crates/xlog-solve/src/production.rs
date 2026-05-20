@@ -429,6 +429,26 @@ pub struct GpuSolverProductionTrace {
 }
 
 impl GpuSolverProductionTrace {
+    fn gpu_solver_production_path_events(&self) -> u64 {
+        self.gpu_cdcl_sat_solves
+            .saturating_add(self.gpu_cdcl_unsat_solves)
+            .saturating_add(self.gpu_cdcl_workspace_unsat_solves)
+            .saturating_add(self.gpu_learned_clause_arena_publications)
+            .saturating_add(self.gpu_learned_count_buffer_publications)
+            .saturating_add(self.gpu_learned_clause_imports)
+            .saturating_add(self.gpu_learned_clause_reused_solves)
+            .saturating_add(self.gpu_maxsat_candidate_solves)
+            .saturating_add(self.gpu_maxsat_candidate_encodes)
+            .saturating_add(self.gpu_maxsat_scheduler_jobs)
+            .saturating_add(self.gpu_maxsat_scheduler_candidate_set_jobs)
+            .saturating_add(self.gpu_maxsat_scheduler_search_jobs)
+            .saturating_add(self.gpu_maxsat_scheduler_encoded_search_jobs)
+            .saturating_add(self.gpu_maxsat_unsat_candidate_prunes)
+            .saturating_add(self.gpu_portfolio_jobs)
+            .saturating_add(self.gpu_portfolio_sat_jobs)
+            .saturating_add(self.gpu_portfolio_maxsat_jobs)
+    }
+
     /// Require that no CPU search counters were used by the production adapter.
     pub fn require_zero_cpu_search(&self) -> Result<()> {
         if self.cpu_assignment_enumerations != 0 || self.cpu_maxsat_enumerations != 0 {
@@ -491,16 +511,7 @@ impl GpuSolverProductionTrace {
                     .to_string(),
             });
         }
-        let gpu_production_events = self
-            .gpu_cdcl_sat_solves
-            .saturating_add(self.gpu_cdcl_unsat_solves)
-            .saturating_add(self.gpu_cdcl_workspace_unsat_solves)
-            .saturating_add(self.gpu_lifecycle_unknown_status_steps)
-            .saturating_add(self.gpu_lifecycle_timeout_status_steps)
-            .saturating_add(self.gpu_maxsat_candidate_solves)
-            .saturating_add(self.gpu_maxsat_scheduler_jobs)
-            .saturating_add(self.gpu_portfolio_jobs);
-        if gpu_production_events == 0 {
+        if self.gpu_solver_production_path_events() == 0 {
             return Err(XlogError::UnsupportedEpistemicConstruct {
                 construct: "GPU solver production metric gate".to_string(),
                 context: "production solver metrics require an existing GPU CDCL/MaxSAT/portfolio counter"
