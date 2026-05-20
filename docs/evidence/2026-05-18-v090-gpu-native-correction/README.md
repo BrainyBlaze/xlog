@@ -109,6 +109,13 @@ conditioned evidence counters, source/program conditioned-gradient counters,
 and zero CPU probability recomputation. This narrows `G090_PROB` but does not
 close it.
 
+2026-05-20 possible/not-know source-gradient delta: the two-record
+`possible fact4/4` plus `not know fact4/4` accepted GPU evidence now also gates
+source conditioned gradient evaluation with arity-four `possible` and
+`not know` evidence counters, one negative evidence fact, two source
+conditioned-gradient evaluations, and zero CPU probability recomputation. This
+narrows `G090_PROB` but does not close it.
+
 ## Current Branch Classification
 
 | Area | Current branch state | Release status |
@@ -343,6 +350,7 @@ The next production slice should start at the lowering/runtime boundary:
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_not_possible_gates_source_and_program_pir_cnf_and_exact_evaluation_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_not_possible_conditions_source_and_program_probabilistic_gradients -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_possible_and_not_know_results_gate_solver_and_probabilistic_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_possible_and_not_know_results_gate_source_conditioned_probabilistic_gradients -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_possible_and_not_know_results_gate_parsed_program_probabilistic_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_possible_and_not_know_results_gate_source_pir_cnf_and_exact_evaluation_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_possible_and_not_know_results_gate_parsed_program_pir_cnf_and_exact_evaluation_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
