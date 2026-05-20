@@ -884,7 +884,7 @@ impl GpuSolverProductionAdapter {
     /// The batch evidence must prove every split component ran through the
     /// single-plan GPU runtime path with zero aggregate CPU recomposition,
     /// candidate/world-view fallback, tracked hot-path D2H, and per-candidate
-    /// host round trips.
+    /// host round trips, plus aggregate CUDA-event timing.
     pub fn solve_assumption_lifecycle_with_gpu_batch_execution_result(
         &mut self,
         provider: &CudaKernelProvider,
@@ -2504,20 +2504,23 @@ fn require_accepted_gpu_solver_batch_evidence<'a>(
         || trace.cpu_world_view_validations != 0
         || trace.tracked_dtoh_calls != 0
         || trace.per_candidate_host_round_trips != 0
+        || !trace.aggregate_kernel_timing.is_recorded()
     {
         return Err(XlogError::UnsupportedEpistemicConstruct {
             construct: "accepted GPU solver batch evidence".to_string(),
             context: format!(
                 "solver batch evidence requires complete GPU component execution and zero \
-                 CPU/host fallback counters, got components={}/{}, recomposition={}, \
-                 cpu_candidates={}, cpu_world_views={}, dtoh_calls={}, round_trips={}",
+                 CPU/host fallback counters plus aggregate CUDA-event timing, got \
+                 components={}/{}, recomposition={}, cpu_candidates={}, cpu_world_views={}, \
+                 dtoh_calls={}, round_trips={}, aggregate_timing_recorded={}",
                 trace.gpu_runtime_component_executions,
                 trace.component_count,
                 trace.cpu_recomposition_steps,
                 trace.cpu_candidate_enumerations,
                 trace.cpu_world_view_validations,
                 trace.tracked_dtoh_calls,
-                trace.per_candidate_host_round_trips
+                trace.per_candidate_host_round_trips,
+                trace.aggregate_kernel_timing.is_recorded()
             ),
         });
     }

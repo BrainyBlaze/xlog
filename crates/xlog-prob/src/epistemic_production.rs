@@ -291,7 +291,7 @@ pub struct EpistemicProbGpuExecutionEvidence<'a> {
 
 /// Accepted GPU batch execution evidence used for probabilistic production gating.
 pub struct EpistemicProbGpuBatchExecutionEvidence<'a> {
-    /// Accepted GPU batch execution result whose aggregate trace must be validated.
+    /// Accepted GPU batch execution result whose aggregate trace and timing must be validated.
     pub batch: &'a EpistemicGpuBatchExecutionResult,
     /// Epistemic assumptions represented by each accepted component world view.
     pub assumptions_by_component: &'a [&'a [EpistemicAssumption]],
@@ -366,20 +366,23 @@ impl EpistemicProbProductionAdapter {
             || batch_trace.cpu_world_view_validations != 0
             || batch_trace.tracked_dtoh_calls != 0
             || batch_trace.per_candidate_host_round_trips != 0
+            || !batch_trace.aggregate_kernel_timing.is_recorded()
         {
             return Err(XlogError::UnsupportedEpistemicConstruct {
                 construct: construct.to_string(),
                 context: format!(
                     "accepted GPU batch evidence requires complete GPU component execution and \
-                     zero CPU/host fallback counters, got components={}/{}, recomposition={}, \
-                     cpu_candidates={}, cpu_world_views={}, dtoh_calls={}, round_trips={}",
+                     zero CPU/host fallback counters plus aggregate CUDA-event timing, got \
+                     components={}/{}, recomposition={}, cpu_candidates={}, cpu_world_views={}, \
+                     dtoh_calls={}, round_trips={}, aggregate_timing_recorded={}",
                     batch_trace.gpu_runtime_component_executions,
                     batch_trace.component_count,
                     batch_trace.cpu_recomposition_steps,
                     batch_trace.cpu_candidate_enumerations,
                     batch_trace.cpu_world_view_validations,
                     batch_trace.tracked_dtoh_calls,
-                    batch_trace.per_candidate_host_round_trips
+                    batch_trace.per_candidate_host_round_trips,
+                    batch_trace.aggregate_kernel_timing.is_recorded()
                 ),
             });
         }
@@ -792,20 +795,23 @@ impl EpistemicProbProductionAdapter {
             || batch_trace.cpu_world_view_validations != 0
             || batch_trace.tracked_dtoh_calls != 0
             || batch_trace.per_candidate_host_round_trips != 0
+            || !batch_trace.aggregate_kernel_timing.is_recorded()
         {
             return Err(XlogError::UnsupportedEpistemicConstruct {
                 construct: "epistemic probabilistic batch production".to_string(),
                 context: format!(
                     "accepted GPU batch evidence requires complete GPU component execution and \
-                     zero CPU/host fallback counters, got components={}/{}, recomposition={}, \
-                     cpu_candidates={}, cpu_world_views={}, dtoh_calls={}, round_trips={}",
+                     zero CPU/host fallback counters plus aggregate CUDA-event timing, got \
+                     components={}/{}, recomposition={}, cpu_candidates={}, cpu_world_views={}, \
+                     dtoh_calls={}, round_trips={}, aggregate_timing_recorded={}",
                     batch_trace.gpu_runtime_component_executions,
                     batch_trace.component_count,
                     batch_trace.cpu_recomposition_steps,
                     batch_trace.cpu_candidate_enumerations,
                     batch_trace.cpu_world_view_validations,
                     batch_trace.tracked_dtoh_calls,
-                    batch_trace.per_candidate_host_round_trips
+                    batch_trace.per_candidate_host_round_trips,
+                    batch_trace.aggregate_kernel_timing.is_recorded()
                 ),
             });
         }
@@ -960,20 +966,23 @@ impl EpistemicProbProductionAdapter {
             || batch_trace.cpu_world_view_validations != 0
             || batch_trace.tracked_dtoh_calls != 0
             || batch_trace.per_candidate_host_round_trips != 0
+            || !batch_trace.aggregate_kernel_timing.is_recorded()
         {
             return Err(XlogError::UnsupportedEpistemicConstruct {
                 construct: "epistemic probabilistic batch production".to_string(),
                 context: format!(
                     "accepted GPU batch evidence requires complete GPU component execution and \
-                     zero CPU/host fallback counters, got components={}/{}, recomposition={}, \
-                     cpu_candidates={}, cpu_world_views={}, dtoh_calls={}, round_trips={}",
+                     zero CPU/host fallback counters plus aggregate CUDA-event timing, got \
+                     components={}/{}, recomposition={}, cpu_candidates={}, cpu_world_views={}, \
+                     dtoh_calls={}, round_trips={}, aggregate_timing_recorded={}",
                     batch_trace.gpu_runtime_component_executions,
                     batch_trace.component_count,
                     batch_trace.cpu_recomposition_steps,
                     batch_trace.cpu_candidate_enumerations,
                     batch_trace.cpu_world_view_validations,
                     batch_trace.tracked_dtoh_calls,
-                    batch_trace.per_candidate_host_round_trips
+                    batch_trace.per_candidate_host_round_trips,
+                    batch_trace.aggregate_kernel_timing.is_recorded()
                 ),
             });
         }
@@ -1134,20 +1143,23 @@ impl EpistemicProbProductionAdapter {
             || batch_trace.cpu_world_view_validations != 0
             || batch_trace.tracked_dtoh_calls != 0
             || batch_trace.per_candidate_host_round_trips != 0
+            || !batch_trace.aggregate_kernel_timing.is_recorded()
         {
             return Err(XlogError::UnsupportedEpistemicConstruct {
                 construct: "epistemic probabilistic batch production".to_string(),
                 context: format!(
                     "accepted GPU batch evidence requires complete GPU component execution and \
-                     zero CPU/host fallback counters, got components={}/{}, recomposition={}, \
-                     cpu_candidates={}, cpu_world_views={}, dtoh_calls={}, round_trips={}",
+                     zero CPU/host fallback counters plus aggregate CUDA-event timing, got \
+                     components={}/{}, recomposition={}, cpu_candidates={}, cpu_world_views={}, \
+                     dtoh_calls={}, round_trips={}, aggregate_timing_recorded={}",
                     batch_trace.gpu_runtime_component_executions,
                     batch_trace.component_count,
                     batch_trace.cpu_recomposition_steps,
                     batch_trace.cpu_candidate_enumerations,
                     batch_trace.cpu_world_view_validations,
                     batch_trace.tracked_dtoh_calls,
-                    batch_trace.per_candidate_host_round_trips
+                    batch_trace.per_candidate_host_round_trips,
+                    batch_trace.aggregate_kernel_timing.is_recorded()
                 ),
             });
         }
@@ -1306,20 +1318,23 @@ impl EpistemicProbProductionAdapter {
             || batch_trace.cpu_world_view_validations != 0
             || batch_trace.tracked_dtoh_calls != 0
             || batch_trace.per_candidate_host_round_trips != 0
+            || !batch_trace.aggregate_kernel_timing.is_recorded()
         {
             return Err(XlogError::UnsupportedEpistemicConstruct {
                 construct: "epistemic probabilistic batch production".to_string(),
                 context: format!(
                     "accepted GPU batch evidence requires complete GPU component execution and \
-                     zero CPU/host fallback counters, got components={}/{}, recomposition={}, \
-                     cpu_candidates={}, cpu_world_views={}, dtoh_calls={}, round_trips={}",
+                     zero CPU/host fallback counters plus aggregate CUDA-event timing, got \
+                     components={}/{}, recomposition={}, cpu_candidates={}, cpu_world_views={}, \
+                     dtoh_calls={}, round_trips={}, aggregate_timing_recorded={}",
                     batch_trace.gpu_runtime_component_executions,
                     batch_trace.component_count,
                     batch_trace.cpu_recomposition_steps,
                     batch_trace.cpu_candidate_enumerations,
                     batch_trace.cpu_world_view_validations,
                     batch_trace.tracked_dtoh_calls,
-                    batch_trace.per_candidate_host_round_trips
+                    batch_trace.per_candidate_host_round_trips,
+                    batch_trace.aggregate_kernel_timing.is_recorded()
                 ),
             });
         }
@@ -1481,20 +1496,23 @@ impl EpistemicProbProductionAdapter {
             || batch_trace.cpu_world_view_validations != 0
             || batch_trace.tracked_dtoh_calls != 0
             || batch_trace.per_candidate_host_round_trips != 0
+            || !batch_trace.aggregate_kernel_timing.is_recorded()
         {
             return Err(XlogError::UnsupportedEpistemicConstruct {
                 construct: "epistemic probabilistic batch production".to_string(),
                 context: format!(
                     "accepted GPU batch evidence requires complete GPU component execution and \
-                     zero CPU/host fallback counters, got components={}/{}, recomposition={}, \
-                     cpu_candidates={}, cpu_world_views={}, dtoh_calls={}, round_trips={}",
+                     zero CPU/host fallback counters plus aggregate CUDA-event timing, got \
+                     components={}/{}, recomposition={}, cpu_candidates={}, cpu_world_views={}, \
+                     dtoh_calls={}, round_trips={}, aggregate_timing_recorded={}",
                     batch_trace.gpu_runtime_component_executions,
                     batch_trace.component_count,
                     batch_trace.cpu_recomposition_steps,
                     batch_trace.cpu_candidate_enumerations,
                     batch_trace.cpu_world_view_validations,
                     batch_trace.tracked_dtoh_calls,
-                    batch_trace.per_candidate_host_round_trips
+                    batch_trace.per_candidate_host_round_trips,
+                    batch_trace.aggregate_kernel_timing.is_recorded()
                 ),
             });
         }
@@ -1645,20 +1663,23 @@ impl EpistemicProbProductionAdapter {
             || batch_trace.cpu_world_view_validations != 0
             || batch_trace.tracked_dtoh_calls != 0
             || batch_trace.per_candidate_host_round_trips != 0
+            || !batch_trace.aggregate_kernel_timing.is_recorded()
         {
             return Err(XlogError::UnsupportedEpistemicConstruct {
                 construct: "epistemic probabilistic batch production".to_string(),
                 context: format!(
                     "accepted GPU batch evidence requires complete GPU component execution and \
-                     zero CPU/host fallback counters, got components={}/{}, recomposition={}, \
-                     cpu_candidates={}, cpu_world_views={}, dtoh_calls={}, round_trips={}",
+                     zero CPU/host fallback counters plus aggregate CUDA-event timing, got \
+                     components={}/{}, recomposition={}, cpu_candidates={}, cpu_world_views={}, \
+                     dtoh_calls={}, round_trips={}, aggregate_timing_recorded={}",
                     batch_trace.gpu_runtime_component_executions,
                     batch_trace.component_count,
                     batch_trace.cpu_recomposition_steps,
                     batch_trace.cpu_candidate_enumerations,
                     batch_trace.cpu_world_view_validations,
                     batch_trace.tracked_dtoh_calls,
-                    batch_trace.per_candidate_host_round_trips
+                    batch_trace.per_candidate_host_round_trips,
+                    batch_trace.aggregate_kernel_timing.is_recorded()
                 ),
             });
         }

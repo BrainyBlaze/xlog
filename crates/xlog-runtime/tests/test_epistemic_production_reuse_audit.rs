@@ -225,6 +225,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(solver.contains("GpuSolverProductionBatchExecutionEvidence"));
     assert!(solver.contains("solve_assumption_lifecycle_with_gpu_batch_execution_result"));
     assert!(solver.contains("require_accepted_gpu_solver_batch_evidence"));
+    assert!(solver.contains("aggregate_kernel_timing.is_recorded()"));
     assert!(solver.contains("EpistemicGpuBatchExecutionResult"));
     assert!(
         solver.contains("solve_unsat_and_publish_learned_clause_arena_with_gpu_execution_result")
@@ -329,6 +330,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(prob.contains("compile_program_for_gpu_batch_execution_result"));
     assert!(prob.contains("EpistemicProbGpuExecutionEvidence"));
     assert!(prob.contains("EpistemicProbGpuBatchExecutionEvidence"));
+    assert!(prob.contains("aggregate_kernel_timing.is_recorded()"));
     assert!(prob.contains("compile_and_evaluate_source_for_gpu_execution_results"));
     assert!(prob.contains("compile_and_evaluate_source_for_gpu_batch_execution_result"));
     assert!(prob.contains("compile_and_evaluate_conditioned_source_for_gpu_batch_execution_result"));

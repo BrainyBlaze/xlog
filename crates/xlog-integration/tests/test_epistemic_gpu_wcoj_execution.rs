@@ -13,8 +13,8 @@ use xlog_ir::EirEpistemicMode;
 use xlog_logic::epistemic::{
     compile_epistemic_gpu_execution_with_stats_snapshot,
     compile_epistemic_gpu_split_execution_with_stats_snapshot, run_generate_propagate_test,
-    run_generate_propagate_test_with_mode, EpistemicInterpretation, FaeelNoModelReason,
-    GeneratePropagateTestConfig,
+    run_generate_propagate_test_with_mode, EpistemicInterpretation, EpistemicSplitExecutablePlan,
+    FaeelNoModelReason, GeneratePropagateTestConfig,
 };
 use xlog_logic::{parse_program, Compiler, EpistemicMode};
 use xlog_prob::epistemic::{EpistemicAssumption, EpistemicEvidenceTerm};
@@ -24,8 +24,8 @@ use xlog_prob::epistemic_production::{
 };
 use xlog_prob::exact::GpuConfig;
 use xlog_runtime::{
-    read_device_row_count, EpistemicGpuExecutionResult, EpistemicGpuModelMembershipSource,
-    EpistemicGpuRejectionReason, EpistemicGpuRuntimePreflight,
+    read_device_row_count, EpistemicGpuBatchExecutionResult, EpistemicGpuExecutionResult,
+    EpistemicGpuModelMembershipSource, EpistemicGpuRejectionReason, EpistemicGpuRuntimePreflight,
     EpistemicGpuRuntimeWcojCertification, EpistemicGpuWorkspaceCapacities, Executor,
 };
 use xlog_solve::{
@@ -450,6 +450,77 @@ fn execute_binary_edge_epistemic_fixture(
             },
         )
         .expect("execute binary edge epistemic fixture")
+}
+
+fn execute_split_all_binary_operator_batch(
+    fix: &RuntimeBackedFixture,
+) -> (
+    EpistemicSplitExecutablePlan,
+    EpistemicGpuBatchExecutionResult,
+) {
+    let program = parse_program(
+        r#"
+        pred pair(u32, u32).
+        pred edge(u32, u32).
+        pred alt(u32, u32).
+        pred blocked(u32, u32).
+        pred seen(u32, u32).
+        pred known_edge(u32, u32).
+        pred possible_alt(u32, u32).
+        pred clear_pair(u32, u32).
+        pred unknown_pair(u32, u32).
+        known_edge(X, Y) :- pair(X, Y), know edge(X, Y).
+        possible_alt(X, Y) :- pair(X, Y), possible alt(X, Y).
+        clear_pair(X, Y) :- pair(X, Y), not possible blocked(X, Y).
+        unknown_pair(X, Y) :- pair(X, Y), not know seen(X, Y).
+        "#,
+    )
+    .expect("parse split all binary operator fixture");
+    let split = compile_epistemic_gpu_split_execution_with_stats_snapshot(&program, None)
+        .expect("compile split all binary operator components");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    let mut relation_ids = BTreeMap::new();
+    for component in &split.components {
+        for (name, rel_id) in &component.executable.relation_ids {
+            if let Some(previous) = relation_ids.insert(name.clone(), *rel_id) {
+                assert_eq!(
+                    previous, *rel_id,
+                    "split all-operator components must preserve shared relation ids"
+                );
+            }
+        }
+    }
+    for (name, rel_id) in &relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation(
+        "pair",
+        upload_binary_u32(&fix.memory, &[(1, 2), (2, 3), (3, 4)]),
+    );
+    executor.put_relation("edge", upload_binary_u32(&fix.memory, &[(1, 2), (3, 4)]));
+    executor.put_relation("alt", upload_binary_u32(&fix.memory, &[(2, 3)]));
+    executor.put_relation("blocked", upload_binary_u32(&fix.memory, &[(3, 4)]));
+    executor.put_relation("seen", upload_binary_u32(&fix.memory, &[(1, 2)]));
+
+    let executables: Vec<_> = split
+        .components
+        .iter()
+        .map(|component| &component.executable)
+        .collect();
+    let batch = executor
+        .execute_epistemic_gpu_execution_batch_with_trace(
+            &executables,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 3,
+            },
+        )
+        .expect("execute split all binary operator components through GPU batch path");
+
+    (split, batch)
 }
 
 fn execute_all_operator_mixed_membership_fixture(
@@ -1675,6 +1746,124 @@ fn accepted_split_all_binary_operators_match_gpt_oracles() {
         assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
         assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
     }
+}
+
+#[test]
+fn accepted_split_batch_solver_gate_rejects_unrecorded_aggregate_kernel_timing() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let (_split, mut batch) = execute_split_all_binary_operator_batch(&fix);
+    assert!(batch.trace.aggregate_kernel_timing.is_recorded());
+    batch.trace.aggregate_kernel_timing = Default::default();
+
+    let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
+    let sat_cnf = GpuCnf::from_host(&sat_instance, &fix.provider).expect("upload SAT CNF");
+    let branch_limit = upload_u32_scalar(&fix.provider, 1);
+    let mut adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let mut workspace = adapter
+        .new_workspace(sat_cnf.var_cap, sat_cnf.clause_cap)
+        .expect("new workspace");
+
+    let err = match adapter.solve_assumption_lifecycle_with_gpu_batch_execution_result(
+        &fix.provider,
+        GpuSolverProductionBatchExecutionEvidence { batch: &batch },
+        &mut workspace,
+        &[GpuSolverProductionLifecycleStep {
+            cnf: &sat_cnf,
+            branch_var_limit: &branch_limit,
+            expectation: GpuSolverProductionExpectation::Sat,
+        }],
+    ) {
+        Ok(_) => panic!("solver batch evidence without aggregate timing must reject"),
+        Err(err) => err,
+    };
+    assert!(format!("{err}").contains("aggregate CUDA-event timing"));
+}
+
+#[test]
+fn accepted_split_batch_prob_gate_rejects_unrecorded_aggregate_kernel_timing() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let (split, mut batch) = execute_split_all_binary_operator_batch(&fix);
+    assert!(batch.trace.aggregate_kernel_timing.is_recorded());
+    batch.trace.aggregate_kernel_timing = Default::default();
+
+    let assumption_groups_owned: Vec<Vec<EpistemicAssumption>> = split
+        .components
+        .iter()
+        .map(
+            |component| match component.component.rule_indices.as_slice() {
+                [0] => vec![EpistemicAssumption::known_tuple(
+                    "edge",
+                    vec![
+                        EpistemicEvidenceTerm::integer(1),
+                        EpistemicEvidenceTerm::integer(2),
+                    ],
+                    true,
+                )],
+                [1] => vec![EpistemicAssumption::possible_tuple(
+                    "alt",
+                    vec![
+                        EpistemicEvidenceTerm::integer(2),
+                        EpistemicEvidenceTerm::integer(3),
+                    ],
+                    true,
+                )],
+                [2] => vec![EpistemicAssumption::possible_tuple(
+                    "blocked",
+                    vec![
+                        EpistemicEvidenceTerm::integer(1),
+                        EpistemicEvidenceTerm::integer(2),
+                    ],
+                    false,
+                )],
+                [3] => vec![EpistemicAssumption::known_tuple(
+                    "seen",
+                    vec![
+                        EpistemicEvidenceTerm::integer(2),
+                        EpistemicEvidenceTerm::integer(3),
+                    ],
+                    false,
+                )],
+                other => panic!("unexpected split all-operator rule indices: {other:?}"),
+            },
+        )
+        .collect();
+    let assumption_groups: Vec<&[EpistemicAssumption]> =
+        assumption_groups_owned.iter().map(Vec::as_slice).collect();
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut adapter = EpistemicProbProductionAdapter::new(config);
+    let err = match adapter.compile_and_evaluate_conditioned_source_for_gpu_batch_execution_result(
+        r#"
+            0.4::edge(1, 2).
+            0.5::alt(2, 3).
+            0.7::blocked(1, 2).
+            0.8::seen(2, 3).
+            query(edge(1, 2)).
+            query(alt(2, 3)).
+            query(blocked(1, 2)).
+            query(seen(2, 3)).
+            "#,
+        &fix.provider,
+        EpistemicProbGpuBatchExecutionEvidence {
+            batch: &batch,
+            assumptions_by_component: &assumption_groups,
+        },
+    ) {
+        Ok(_) => panic!("probabilistic batch evidence without aggregate timing must reject"),
+        Err(err) => err,
+    };
+    assert!(format!("{err}").contains("aggregate CUDA-event timing"));
 }
 
 #[test]
