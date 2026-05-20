@@ -17,7 +17,10 @@ use xlog_logic::epistemic::{
     FaeelNoModelReason, GeneratePropagateTestConfig,
 };
 use xlog_logic::{parse_program, Compiler, EpistemicMode};
-use xlog_prob::epistemic::{EpistemicAssumption, EpistemicEvidenceTerm};
+use xlog_prob::epistemic::{
+    CircuitUpdateMode, EpistemicAssumption, EpistemicCircuit, EpistemicEvidenceTerm,
+    KnowledgeCompilerAdapter,
+};
 use xlog_prob::epistemic_production::{
     EpistemicProbGpuBatchExecutionEvidence, EpistemicProbGpuExecutionEvidence,
     EpistemicProbProductionAdapter,
@@ -15222,6 +15225,78 @@ fn accepted_gpu_execution_result_conditions_nonzero_arity_probabilistic_evidence
     assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 1);
     assert_eq!(trace.cpu_only_probability_recomputations, 0);
     assert_eq!(trace.fixture_circuit_evaluations, 0);
+}
+
+#[test]
+fn accepted_gpu_execution_result_updates_incremental_probability_circuit() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let result = execute_unary_edge_epistemic_fixture(
+        &fix,
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X).
+        "#,
+        &[1, 2],
+        &[1],
+    );
+    assert_eq!(
+        download_unary_u32(&fix.provider, &result.final_output),
+        vec![1]
+    );
+
+    let assumption =
+        EpistemicAssumption::known_tuple("edge", vec![EpistemicEvidenceTerm::integer(1)], true);
+    let mut circuit = EpistemicCircuit::compile(
+        0.15,
+        vec![(assumption.clone(), 0.9)],
+        KnowledgeCompilerAdapter::gpu_d4(),
+    )
+    .expect("compile bounded incremental probability circuit");
+    let original_fingerprint = circuit.circuit_fingerprint();
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut adapter = EpistemicProbProductionAdapter::new(config);
+    let update = adapter
+        .apply_accepted_world_view_to_circuit_with_gpu_execution_result(
+            &mut circuit,
+            &fix.provider,
+            &result,
+            vec![assumption],
+        )
+        .expect("accepted GPU evidence must update incremental circuit evidence");
+
+    assert_eq!(update.mode, CircuitUpdateMode::IncrementalEvidence);
+    assert_eq!(update.compile_count, 1);
+    assert_eq!(update.circuit_fingerprint, original_fingerprint);
+    assert_eq!(circuit.incremental_update_count(), 1);
+    assert_eq!(
+        circuit.compiler_evidence_literals(),
+        vec!["know:edge/1(1)=true".to_string()]
+    );
+    assert!(circuit.query_probability().within_tolerance(0.9));
+
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_world_view_evidence_consumed, 1);
+    assert_eq!(trace.accepted_evidence_assumptions_consumed, 1);
+    assert_eq!(trace.accepted_incremental_circuit_updates, 1);
+    assert_eq!(trace.gpu_exact_source_compiles, 0);
+    assert_eq!(trace.gpu_exact_program_compiles, 0);
+    assert_eq!(trace.gpu_exact_query_evaluations, 0);
+    assert_eq!(trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(trace.fixture_circuit_evaluations, 0);
+    let metric_err = trace
+        .require_production_metric_eligibility()
+        .expect_err("incremental fixture circuit update alone must not satisfy production metrics");
+    assert!(format!("{metric_err}")
+        .contains("existing GPU exact/provenance/PIR/CNF/knowledge-compilation counter"));
 }
 
 #[test]

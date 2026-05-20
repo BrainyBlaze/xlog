@@ -64,6 +64,8 @@ fn production_prob_adapter_reuses_gpu_exact_path_not_fixture_circuit() {
     assert!(production.contains("evaluate_gpu_with_grads_with_gpu_execution_result"));
     assert!(production.contains("evaluate_for_gpu_execution_results"));
     assert!(production.contains("evaluate_gpu_with_grads_for_gpu_execution_results"));
+    assert!(production.contains("apply_accepted_world_view_to_circuit_with_gpu_execution_result"));
+    assert!(production.contains("accepted_incremental_circuit_updates"));
     assert!(production.contains("from_gpu_execution_result"));
     assert!(production.contains("ExactDdnnfProgram::compile_source_with_gpu"));
     assert!(production.contains("ExactDdnnfProgram::compile_from_program"));
@@ -197,6 +199,19 @@ fn production_prob_metric_gate_rejects_fixture_only_traces() {
     assert!(conditioned_negative
         .require_production_metric_eligibility()
         .is_ok());
+
+    let incremental_fixture_only = EpistemicProbProductionTrace {
+        accepted_world_view_evidence_consumed: 1,
+        accepted_incremental_circuit_updates: 1,
+        ..EpistemicProbProductionTrace::default()
+    };
+    let err = incremental_fixture_only
+        .require_production_metric_eligibility()
+        .expect_err(
+            "incremental fixture circuit updates alone must not satisfy production metrics",
+        );
+    assert!(format!("{err}")
+        .contains("existing GPU exact/provenance/PIR/CNF/knowledge-compilation counter"));
 
     let fixture = EpistemicProbProductionTrace {
         accepted_world_view_evidence_consumed: 1,

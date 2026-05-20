@@ -253,6 +253,16 @@ exact/provenance APIs, with four source PIR uploads, four parsed-program PIR
 uploads, four source CNF encodes, four parsed-program CNF encodes, four
 already-compiled query evaluations, four already-compiled gradient evaluations,
 and zero CPU probability recomputation.
+The incremental-circuit marker
+`accepted_gpu_execution_result_updates_incremental_probability_circuit` proves a
+single accepted GPU world view can cross the production accepted-evidence gate
+into a caller-owned bounded `EpistemicCircuit` through
+`apply_accepted_world_view_to_circuit_with_gpu_execution_result`, preserving the
+compiled fingerprint and compile count while recording
+`accepted_incremental_circuit_updates`, accepted evidence counters, and zero
+CPU/fixture recomputation counters. That trace remains fixture-only: the
+production metric gate still rejects it unless an existing GPU
+exact/provenance/PIR/CNF/knowledge-compilation path counter is also present.
 The split-batch quaternary all-operator component timing marker
 `accepted_split_quaternary_all_operator_batch_records_component_kernel_timing`
 proves the same four accepted arity-four components record CUDA-event timing for

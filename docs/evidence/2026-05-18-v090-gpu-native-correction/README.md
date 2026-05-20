@@ -96,6 +96,16 @@ already-compiled query evaluations, four already-compiled gradient evaluations,
 and zero CPU probability recomputation. This narrows `G090_PROB` but does not
 close it.
 
+2026-05-20 accepted incremental-circuit probability delta: single-result
+`know edge(1)` accepted GPU evidence now also gates
+`apply_accepted_world_view_to_circuit_with_gpu_execution_result`, updating a
+caller-owned bounded `EpistemicCircuit` by incremental evidence while preserving
+its compiled fingerprint and compile count. The trace records accepted evidence,
+`accepted_incremental_circuit_updates`, and zero CPU/fixture recomputation, and
+the production metric gate still rejects this fixture-only trace without an
+existing GPU exact/provenance/PIR/CNF/knowledge-compilation counter. This narrows
+`G090_PROB` but does not close it.
+
 2026-05-20 positive-quaternary solver delta: single-result `know fact4/4`
 accepted GPU evidence now also gates existing learned-clause reuse, bounded
 MaxSAT, and status-aware SAT/MaxSAT portfolio adapters with three accepted

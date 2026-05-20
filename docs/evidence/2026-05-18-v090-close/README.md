@@ -536,8 +536,10 @@ The branch contains useful scaffolding:
   two-record conditioned program query batches, single-record, two-record, and
   accepted split-batch PIR/CNF encoding with source/program-specific PIR/CNF
   counters, single-record, two-record, and accepted split-batch query
-  evaluation, and single-record, two-record, and accepted split-batch gradient
-  evaluation.
+  evaluation, single-record, two-record, and accepted split-batch gradient
+  evaluation, and accepted GPU evidence updates into caller-owned bounded
+  incremental circuit fixtures that preserve compile count/fingerprint while
+  remaining ineligible for production metrics by themselves.
 - bounded executable split components that reuse the existing epistemic GPU
   executable-plan path and a traced batch adapter over the existing single-plan
   GPU runtime execution path, with zero CPU recomposition counters, rather than
@@ -569,9 +571,9 @@ Closure remains blocked until certification includes all of the following:
   portfolio fixtures;
 - broader accepted-world-view probabilistic coverage beyond the bounded
   split-batch conditioned source/program query/gradient, split-batch PIR/CNF,
-  single-result and two-record source/program PIR/CNF, exact query/gradient, and PIR/CNF
-  GPU-native knowledge-compilation fixtures with zero CPU-only probability
-  recomputation;
+  single-result and two-record source/program PIR/CNF, exact query/gradient,
+  accepted incremental-circuit update fixture, and PIR/CNF GPU-native
+  knowledge-compilation fixtures with zero CPU-only probability recomputation;
 - broader final v0.9 certification evidence beyond the post-v0.7.0/v0.8.0/v0.8.5/v0.8.6 merge and
   compatibility validator.
 

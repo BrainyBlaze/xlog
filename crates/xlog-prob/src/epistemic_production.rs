@@ -22,7 +22,10 @@ use crate::compilation::{encode_cnf_gpu, GpuPirGraph, GpuPirRoots};
 use crate::epistemic::EpistemicAssumptionKind;
 #[cfg(feature = "host-io")]
 use crate::epistemic::EpistemicEvidenceTerm;
-use crate::epistemic::{AcceptedWorldViewEvidence, EpistemicAssumption};
+use crate::epistemic::{
+    AcceptedWorldViewEvidence, CircuitUpdate, CircuitUpdateMode, EpistemicAssumption,
+    EpistemicCircuit,
+};
 use crate::exact::{ExactDdnnfProgram, GpuConfig};
 #[cfg(feature = "host-io")]
 use crate::exact::{ExactResult, ExactResultWithGrads};
@@ -86,6 +89,10 @@ pub struct EpistemicProbProductionTrace {
     pub accepted_gpu_batch_evidence_consumed: u64,
     /// Number of accepted GPU batch components consumed as individual evidence records.
     pub accepted_gpu_batch_component_evidence_consumed: u64,
+    /// Number of accepted evidence applications that updated caller-owned incremental circuits.
+    ///
+    /// This is fixture coverage only and is intentionally excluded from production path events.
+    pub accepted_incremental_circuit_updates: u64,
     /// Number of GPU exact query evaluations routed through `ExactDdnnfProgram`.
     pub gpu_exact_query_evaluations: u64,
     /// Number of source GPU exact query evaluations routed through `ExactDdnnfProgram`.
@@ -332,6 +339,41 @@ impl EpistemicProbProductionAdapter {
     /// Return current production-path trace counters.
     pub fn trace(&self) -> EpistemicProbProductionTrace {
         self.trace
+    }
+
+    /// Apply accepted world-view evidence to a caller-owned incremental circuit fixture.
+    ///
+    /// This records the accepted evidence boundary and zero-CPU guard, but it is not a
+    /// production metric event. Production metric eligibility still requires an
+    /// existing GPU exact/provenance/PIR/CNF/knowledge-compilation path counter.
+    pub fn apply_accepted_world_view_to_circuit(
+        &mut self,
+        circuit: &mut EpistemicCircuit,
+        evidence: AcceptedWorldViewEvidence,
+    ) -> Result<CircuitUpdate> {
+        self.consume_accepted_evidence(&evidence)?;
+        let update = circuit.apply_accepted_world_view(evidence)?;
+        if update.mode == CircuitUpdateMode::IncrementalEvidence {
+            self.trace.accepted_incremental_circuit_updates = self
+                .trace
+                .accepted_incremental_circuit_updates
+                .saturating_add(1);
+        }
+        self.trace.require_zero_cpu_recompute()?;
+        Ok(update)
+    }
+
+    /// Apply accepted GPU epistemic execution evidence to a caller-owned incremental circuit.
+    pub fn apply_accepted_world_view_to_circuit_with_gpu_execution_result(
+        &mut self,
+        circuit: &mut EpistemicCircuit,
+        provider: &CudaKernelProvider,
+        result: &EpistemicGpuExecutionResult,
+        assumptions: Vec<EpistemicAssumption>,
+    ) -> Result<CircuitUpdate> {
+        let evidence =
+            AcceptedWorldViewEvidence::from_gpu_execution_result(provider, result, assumptions)?;
+        self.apply_accepted_world_view_to_circuit(circuit, evidence)
     }
 
     fn accepted_world_views_from_gpu_batch_execution_evidence(

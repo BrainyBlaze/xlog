@@ -589,6 +589,10 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(integration.contains(
         "accepted_split_quaternary_possible_and_not_know_batch_gates_probabilistic_gradient_pir_cnf_and_exact_evaluation_paths"
     ));
+    assert!(integration
+        .contains("accepted_gpu_execution_result_updates_incremental_probability_circuit"));
+    assert!(prob.contains("apply_accepted_world_view_to_circuit_with_gpu_execution_result"));
+    assert!(prob.contains("accepted_incremental_circuit_updates"));
 
     for (label, source) in [
         ("runtime", runtime.as_str()),
