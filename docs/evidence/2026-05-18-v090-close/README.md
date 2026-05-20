@@ -89,6 +89,14 @@ optimum, one SAT job, one MaxSAT job, UNKNOWN/TIMEOUT portfolio statuses, and
 zero CPU search or learned-clause transfers. This is not a closure proposal;
 `G090_SOLVER` and `G090_CLOSE` remain blocked.
 
+2026-05-20 positive-quaternary search follow-up: the same single-result
+`know fact4/4` accepted GPU evidence now also reaches MaxSAT search pruning,
+weighted MaxSAT encoding, and generalized scheduler dispatch with one accepted
+`know` counter, four tuple-key column reads, one direct UNSAT prune, two
+encoded candidates, six scheduled GPU CDCL candidate solves, UNKNOWN/TIMEOUT
+scheduler statuses, and zero CPU search. This is not a closure proposal;
+`G090_SOLVER` and `G090_CLOSE` remain blocked.
+
 ## Ref Evidence
 
 | Ref | SHA |
@@ -186,6 +194,7 @@ Post-merge compatibility validation:
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_not_possible_gates_source_and_program_pir_cnf_and_exact_evaluation_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_possible_and_not_know_results_gate_solver_and_probabilistic_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_gpu_execution_result_gates_solver_reuse_maxsat_and_portfolio_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_gpu_execution_result_gates_solver_search_and_scheduler_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_possible_and_not_know_results_gate_parsed_program_probabilistic_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_possible_and_not_know_results_gate_source_pir_cnf_and_exact_evaluation_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_possible_and_not_know_results_gate_parsed_program_pir_cnf_and_exact_evaluation_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |

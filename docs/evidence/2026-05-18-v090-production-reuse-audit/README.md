@@ -67,6 +67,14 @@ direct MaxSAT optimum, one SAT job, one MaxSAT job, one UNKNOWN job, one
 TIMEOUT job, and zero CPU search, MaxSAT enumeration, or learned-clause
 transfers.
 The source audit now also requires
+`accepted_quaternary_gpu_execution_result_gates_solver_search_and_scheduler_paths`,
+which proves the same single-result positive quaternary `know fact4/4` accepted
+GPU evidence reaches MaxSAT search-pruning, weighted MaxSAT encoding, and the
+generalized scheduler with one accepted `know` counter, one nonzero-arity
+evidence consumption, four tuple-key column reads, one direct UNSAT prune, two
+encoded candidates, six scheduled GPU CDCL candidate solves, UNKNOWN/TIMEOUT
+scheduler statuses, and zero CPU search or MaxSAT enumeration.
+The source audit now also requires
 `accepted_quaternary_possible_and_not_know_results_gate_solver_search_and_scheduler_paths`,
 which proves those same two single-result quaternary accepted evidences reach
 MaxSAT search-pruning, weighted MaxSAT encoding, and generalized scheduler

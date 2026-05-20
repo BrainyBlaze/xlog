@@ -81,6 +81,14 @@ MaxSAT job, UNKNOWN/TIMEOUT portfolio statuses, and zero CPU search or
 learned-clause transfers. This is bounded production-reuse evidence only;
 `G090_SOLVER` remains incomplete.
 
+2026-05-20 positive-quaternary search delta: the same single-result
+`know fact4/4` accepted GPU evidence now also gates MaxSAT search pruning,
+weighted MaxSAT encoding, and generalized MaxSAT scheduler dispatch with one
+accepted `know` counter, four tuple-key column reads, one direct UNSAT prune,
+two encoded candidates, six scheduled GPU CDCL candidate solves,
+UNKNOWN/TIMEOUT scheduler statuses, and zero CPU search. This narrows the
+positive-quaternary solver reuse gap but does not close `G090_SOLVER`.
+
 ## Current Branch Classification
 
 | Area | Current branch state | Release status |
@@ -325,6 +333,7 @@ The next production slice should start at the lowering/runtime boundary:
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_ternary_gpu_execution_result_records_solver_nonzero_arity_evidence_trace -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_gpu_execution_result_records_solver_nonzero_arity_evidence_trace -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_gpu_execution_result_gates_solver_reuse_maxsat_and_portfolio_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_gpu_execution_result_gates_solver_search_and_scheduler_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_epistemic_v070_4cycle_execution_certifies_production_wcoj_dispatch -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_epistemic_k5_execution_certifies_production_wcoj_dispatch -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_all_binary_operator_batch_gates_probabilistic_program_and_gradient_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |

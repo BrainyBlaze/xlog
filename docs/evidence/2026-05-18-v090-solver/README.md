@@ -171,6 +171,7 @@ post-v0.7.0/v0.8.0/v0.8.5/v0.8.6 certification.
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_ternary_gpu_execution_result_records_solver_nonzero_arity_evidence_trace -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_gpu_execution_result_records_solver_nonzero_arity_evidence_trace -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_gpu_execution_result_gates_solver_reuse_maxsat_and_portfolio_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_gpu_execution_result_gates_solver_search_and_scheduler_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_not_possible_solver_nonzero_arity_evidence_trace -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_not_possible_gates_solver_reuse_maxsat_and_portfolio_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_not_possible_gates_solver_search_and_scheduler_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
@@ -259,6 +260,16 @@ learned-clause arena publication/import/reused solve, one direct MaxSAT
 optimum, one SAT job, one MaxSAT job, one UNKNOWN job, one TIMEOUT job, and
 zero CPU search, MaxSAT enumeration, or learned-clause transfers.
 
+2026-05-20 addendum: `accepted_quaternary_gpu_execution_result_gates_solver_search_and_scheduler_paths`
+extends `M090_SOLVER.4`, `M090_SOLVER.8`, and `M090_SOLVER.9` with
+single-result positive quaternary `know fact4/4` accepted evidence for MaxSAT
+search pruning, weighted MaxSAT encoding, and generalized MaxSAT scheduler
+dispatch. It records one accepted `know` counter, one nonzero-arity evidence
+consumption, four tuple-key column reads, one direct UNSAT prune, two encoded
+candidates, six scheduled GPU CDCL candidate solves, two scheduler UNSAT
+prunes, UNKNOWN/TIMEOUT scheduler statuses, and zero CPU search or MaxSAT
+enumeration.
+
 2026-05-20 addendum: `accepted_quaternary_possible_and_not_know_results_gate_solver_search_and_scheduler_paths`
 extends `M090_SOLVER.4`, `M090_SOLVER.8`, and `M090_SOLVER.9` with
 two single-result quaternary `possible fact4/4` and `not know fact4/4`
@@ -317,8 +328,8 @@ candidates, six scheduled GPU CDCL candidate solves, and zero CPU search.
   scheduler,
   all-binary-operator accepted split-batch lifecycle plus learned-clause reuse,
   MaxSAT, search pruning, weighted MaxSAT encoding/scheduler, and portfolio,
-  single-result quaternary `know fact4/4` learned-clause reuse, MaxSAT, and
-  portfolio,
+  single-result quaternary `know fact4/4` learned-clause reuse, MaxSAT,
+  portfolio, MaxSAT search pruning, weighted MaxSAT encoding/scheduler,
   single-result quaternary `not possible fact4/4` learned-clause reuse,
   MaxSAT, MaxSAT search pruning, weighted MaxSAT encoding/scheduler, and
   portfolio,
