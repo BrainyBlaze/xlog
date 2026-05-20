@@ -92,6 +92,15 @@ proves the same two accepted single-result GPU evidences also route through
 recording parsed-program arity-four evidence, one negative fact per query and
 gradient pass, parsed-program `possible` and `not know` counters, exact query
 and gradient evaluations, and zero CPU probability recomputation.
+The parsed-program quaternary possible/not-know deep marker
+`accepted_quaternary_possible_and_not_know_results_gate_parsed_program_pir_cnf_and_exact_evaluation_paths`
+proves the same two accepted single-result GPU evidences also route through
+`encode_program_pir_cnf_for_gpu_execution_results`,
+`evaluate_for_gpu_execution_results`, and
+`evaluate_gpu_with_grads_for_gpu_execution_results`, recording parsed-program
+PIR/CNF uploads, two already-compiled exact query evaluations, two gradient
+evaluations, accepted-assumption evidence accounting, and zero CPU probability
+recomputation.
 The split-batch quaternary possible/not-know marker proves the probability
 adapter consumes the same two accepted components through
 `compile_and_evaluate_conditioned_source_for_gpu_batch_execution_result`,
