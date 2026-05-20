@@ -455,8 +455,9 @@ The branch contains useful scaffolding:
   epistemic reductions reuse the G39 K-clique template planner metadata, with
   complete 21/28 edge-permutation counts, stream-group counts, and zero
   planned-hash/CPU-fallback counters;
-- hot-path transfer-budget trace that rejects tracked data-plane H2D/D2H
-  deltas without resetting shared provider telemetry;
+- hot-path transfer-budget traces that reject tracked single-result and
+  split-batch data-plane H2D/D2H deltas without resetting shared provider
+  telemetry;
 - post-hot-path final-result transfer accounting that records final output
   rows, columns, payload bytes, row-count metadata reads, and zero accepted-path
   data-plane D2H calls;

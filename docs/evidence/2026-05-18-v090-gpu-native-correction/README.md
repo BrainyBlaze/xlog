@@ -32,6 +32,14 @@ accepted solver evidence accounting, lifecycle pushes, probability evidence
 facts, or CPU recomputation counters advance. This narrows `G090_GPU`,
 `G090_SOLVER`, and `G090_PROB`, but does not close them.
 
+2026-05-20 single-result transfer-budget gate delta: accepted single-result
+solver and probabilistic consumers now have explicit fail-closed coverage when
+tracked hot-path H2D/D2H calls or per-candidate host round trips become nonzero.
+The test proves rejection happens before accepted solver evidence accounting,
+lifecycle pushes, probability evidence facts, or CPU recomputation counters
+advance. This narrows the `M090_GPU.8` transfer-budget evidence gap, but does
+not close `G090_GPU`, `G090_SOLVER`, or `G090_PROB`.
+
 2026-05-20 follow-up delta: single-result quaternary `possible fact4/4` and
 `not know fact4/4` accepted GPU results now route through the existing solver
 SAT adapter and the existing probabilistic conditioned source adapter, recording

@@ -315,6 +315,12 @@ proves those same consumers fail closed when accepted batch evidence reports
 tracked hot-path D2H calls or per-candidate host round trips, preserving the
 transfer-budget gate before solver lifecycle work or probability conditioning
 can proceed.
+The single-result host-transfer marker
+`accepted_gpu_execution_result_rejects_hot_path_host_transfers` proves accepted
+solver and probabilistic single-result consumers also fail closed when accepted
+evidence reports tracked hot-path H2D/D2H calls or per-candidate host round
+trips, before accepted evidence accounting, solver lifecycle pushes, or
+probability evidence facts advance.
 The rejected world-view marker
 `rejected_gpu_execution_result_cannot_gate_solver_or_probability` proves a GPU
 execution that still ran the timed kernel path but materialized zero accepted

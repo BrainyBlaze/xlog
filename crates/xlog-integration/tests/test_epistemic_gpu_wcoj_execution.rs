@@ -3183,6 +3183,101 @@ fn accepted_gpu_execution_result_rejects_cpu_fallback_counters() {
 }
 
 #[test]
+fn accepted_gpu_execution_result_rejects_hot_path_host_transfers() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let mut result = execute_unary_edge_epistemic_fixture(
+        &fix,
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X).
+        "#,
+        &[1, 2],
+        &[1],
+    );
+    assert_eq!(
+        download_unary_u32(&fix.provider, &result.final_output),
+        vec![1]
+    );
+    assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
+    assert_eq!(result.transfer_budget.tracked_htod_calls, 0);
+    assert_eq!(result.transfer_budget.per_candidate_host_round_trips, 0);
+
+    result.transfer_budget.tracked_dtoh_calls = 1;
+    result.transfer_budget.tracked_htod_calls = 1;
+    result.transfer_budget.per_candidate_host_round_trips = 1;
+
+    let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
+    let sat_cnf = GpuCnf::from_host(&sat_instance, &fix.provider).expect("upload SAT CNF");
+    let branch_limit = upload_u32_scalar(&fix.provider, 1);
+    let mut solver_adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let mut workspace = solver_adapter
+        .new_workspace(sat_cnf.var_cap, sat_cnf.clause_cap)
+        .expect("new single-result transfer rejection workspace");
+
+    let solver_err = match solver_adapter.solve_assumption_lifecycle_with_gpu_execution_result(
+        &fix.provider,
+        &result,
+        &mut workspace,
+        &[GpuSolverProductionLifecycleStep {
+            cnf: &sat_cnf,
+            branch_var_limit: &branch_limit,
+            expectation: GpuSolverProductionExpectation::Sat,
+        }],
+    ) {
+        Ok(_) => panic!("solver evidence with single-result hot transfers must reject"),
+        Err(err) => err,
+    };
+    let solver_err = format!("{solver_err}");
+    assert!(solver_err.contains("zero hot-path transfers"));
+    assert!(solver_err.contains("dtoh_calls=1"));
+    assert!(solver_err.contains("htod_calls=1"));
+    assert!(solver_err.contains("per_candidate_round_trips=1"));
+    let solver_trace = solver_adapter.trace();
+    assert_eq!(solver_trace.accepted_gpu_candidate_evidence_consumed, 0);
+    assert_eq!(solver_trace.gpu_assumption_pushes, 0);
+    assert_eq!(solver_trace.cpu_assignment_enumerations, 0);
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut prob_adapter = EpistemicProbProductionAdapter::new(config);
+    let prob_err = match prob_adapter
+        .compile_and_evaluate_conditioned_source_with_gpu_execution_result(
+            r#"
+        0.8::edge(1).
+        query(edge(1)).
+        "#,
+            &fix.provider,
+            &result,
+            vec![EpistemicAssumption::known_tuple(
+                "edge",
+                vec![EpistemicEvidenceTerm::integer(1)],
+                true,
+            )],
+        ) {
+        Ok(_) => panic!("probability evidence with single-result hot transfers must reject"),
+        Err(err) => err,
+    };
+    let prob_err = format!("{prob_err}");
+    assert!(prob_err.contains("zero hot-path transfers"));
+    assert!(prob_err.contains("dtoh_calls=1"));
+    assert!(prob_err.contains("htod_calls=1"));
+    assert!(prob_err.contains("per_candidate_round_trips=1"));
+    let prob_trace = prob_adapter.trace();
+    assert_eq!(prob_trace.accepted_world_view_evidence_consumed, 0);
+    assert_eq!(prob_trace.gpu_conditioned_evidence_facts, 0);
+    assert_eq!(prob_trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(prob_trace.fixture_circuit_evaluations, 0);
+}
+
+#[test]
 fn accepted_split_quaternary_all_operator_batch_rejects_row_count_only_membership() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
