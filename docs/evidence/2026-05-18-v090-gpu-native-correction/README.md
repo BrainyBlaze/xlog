@@ -452,8 +452,8 @@ The next production slice should start at the lowering/runtime boundary:
    parsed-program PIR/CNF and exact query/gradient evidence,
     split-batch quaternary `possible`/`not know fact4/4` conditioned source
     evidence plus source/program gradients, PIR/CNF, and exact query/gradient
-    evaluation, single-result plus split-batch quaternary all-operator component
-    kernel timing and device workspace-buffer residency,
+    evaluation, single-result plus split-batch all-binary and quaternary
+    all-operator component kernel timing and device workspace-buffer residency,
     accepted-world-view boundary rejection, single-result and split-batch
     CPU-fallback rejection, row-count-only membership rejection, hot-path
     host-transfer rejection, plus conditioned source, parsed-program,

@@ -1927,6 +1927,217 @@ fn accepted_split_all_binary_operators_match_gpt_oracles() {
 }
 
 #[test]
+fn accepted_split_all_binary_operator_batch_records_timing_and_workspace_buffers() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let (split, batch) = execute_split_all_binary_operator_batch(&fix);
+
+    assert_eq!(split.components.len(), 4);
+    assert_eq!(split.recomposed_rule_indices(), vec![0, 1, 2, 3]);
+    assert_eq!(batch.results.len(), 4);
+    assert_eq!(batch.trace.component_count, 4);
+    assert_eq!(batch.trace.gpu_runtime_component_executions, 4);
+    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
+    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
+    assert_eq!(batch.trace.cpu_world_view_validations, 0);
+    assert_eq!(batch.trace.tracked_dtoh_calls, 0);
+    assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
+    assert!(batch.trace.aggregate_kernel_timing.is_recorded());
+    assert_eq!(batch.trace.aggregate_kernel_timing.cuda_event_pairs, 32);
+    assert_eq!(batch.trace.aggregate_kernel_timing.timing_sync_ops, 32);
+    assert_eq!(batch.trace.know_operator_count, 1);
+    assert_eq!(batch.trace.possible_operator_count, 1);
+    assert_eq!(batch.trace.not_possible_operator_count, 1);
+    assert_eq!(batch.trace.not_know_operator_count, 1);
+
+    let assert_phase =
+        |phase: &str,
+         kernel_launches: u32,
+         host_write_ops: u32,
+         timing: xlog_runtime::EpistemicGpuKernelTimingTrace| {
+            assert!(kernel_launches > 0, "{phase} must launch GPU kernels");
+            assert_eq!(host_write_ops, 0, "{phase} must avoid host writes");
+            assert!(
+                timing.is_recorded(),
+                "{phase} must record CUDA-event timing"
+            );
+            assert_eq!(timing.cuda_event_pairs, 1, "{phase} event pair count");
+            assert_eq!(timing.timing_sync_ops, 1, "{phase} timing sync count");
+        };
+
+    for (idx, component) in split.components.iter().enumerate() {
+        let result = &batch.results[idx];
+        let (expected_rows, expected_negated_filters) =
+            match component.component.rule_indices.as_slice() {
+                [0] => (vec![(1, 2), (3, 4)], 0),
+                [1] => (vec![(2, 3)], 0),
+                [2] => (vec![(1, 2), (2, 3)], 1),
+                [3] => (vec![(2, 3), (3, 4)], 1),
+                other => {
+                    panic!("unexpected split all-binary timing rule indices: {other:?}")
+                }
+            };
+
+        assert_eq!(
+            download_binary_u32(&fix.provider, &result.final_output),
+            expected_rows
+        );
+        assert_eq!(result.final_tuple_materialization.row_filter_count, 1);
+        assert_eq!(
+            result.final_tuple_materialization.negated_row_filter_count,
+            expected_negated_filters
+        );
+        assert_eq!(
+            result.model_membership.membership_source,
+            EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+        );
+        assert_eq!(
+            result.model_membership.tuple_source_row_count_device_reads,
+            1
+        );
+        assert_eq!(
+            result.model_membership.tuple_source_key_column_device_reads,
+            2
+        );
+        assert!(result.model_membership.model_membership_bytes_written > 0);
+        assert!(result.world_view_validation.model_membership_bytes_checked > 0);
+        assert!(
+            result
+                .final_tuple_materialization
+                .model_membership_bytes_checked
+                > 0
+        );
+
+        let layout = result.prepared.preflight.workspace_layout;
+        let workspace = &result.prepared.workspace;
+        let reset = result.prepared.workspace_reset;
+
+        assert_eq!(workspace.layout, layout);
+        assert_eq!(
+            workspace.candidate_assumptions.len(),
+            layout.candidate_assumption_bytes
+        );
+        assert_eq!(workspace.world_views.len(), layout.world_view_bytes);
+        assert_eq!(
+            workspace.model_membership.len(),
+            layout.model_membership_bytes
+        );
+        assert_eq!(
+            workspace.rejection_reasons.len(),
+            layout.rejection_reason_slots
+        );
+
+        let workspace_ptrs = BTreeSet::from([
+            *workspace.candidate_assumptions.device_ptr(),
+            *workspace.world_views.device_ptr(),
+            *workspace.model_membership.device_ptr(),
+            *workspace.rejection_reasons.device_ptr(),
+        ]);
+        assert_eq!(workspace_ptrs.len(), 4);
+        assert!(workspace_ptrs.iter().all(|ptr| *ptr != 0));
+
+        assert_eq!(
+            reset.candidate_assumption_bytes,
+            layout.candidate_assumption_bytes
+        );
+        assert_eq!(reset.world_view_bytes, layout.world_view_bytes);
+        assert_eq!(reset.model_membership_bytes, layout.model_membership_bytes);
+        assert_eq!(
+            reset.rejection_reason_bytes,
+            layout.rejection_reason_slots * std::mem::size_of::<u32>()
+        );
+        assert_eq!(reset.device_zero_ops, 4);
+        assert_eq!(reset.host_write_ops, 0);
+        assert_eq!(reset.total_zeroed_bytes(), layout.total_bytes());
+
+        assert_eq!(
+            layout.candidate_assumption_bytes,
+            result.candidate_generation.candidate_assumption_bytes
+        );
+        assert_eq!(
+            layout.world_view_bytes,
+            result.propagation.world_view_bytes_written
+        );
+        assert_eq!(
+            layout.model_membership_bytes,
+            result.model_membership.model_membership_bytes_written
+        );
+        assert_eq!(
+            layout.rejection_reason_slots,
+            result.propagation.rejection_reason_slots_written
+        );
+        assert_eq!(
+            layout.rejection_reason_slots,
+            result.semantic_trace.generated_candidates
+        );
+
+        assert_phase(
+            "candidate generation",
+            result.candidate_generation.kernel_launches,
+            result.candidate_generation.host_write_ops,
+            result.candidate_generation.kernel_timing,
+        );
+        assert_phase(
+            "candidate propagation",
+            result.propagation.kernel_launches,
+            result.propagation.host_write_ops,
+            result.propagation.kernel_timing,
+        );
+        assert_phase(
+            "candidate validation",
+            result.candidate_validation.kernel_launches,
+            result.candidate_validation.host_write_ops,
+            result.candidate_validation.kernel_timing,
+        );
+        assert_phase(
+            "model membership",
+            result.model_membership.kernel_launches,
+            result.model_membership.host_write_ops,
+            result.model_membership.kernel_timing,
+        );
+        assert_phase(
+            "world-view validation",
+            result.world_view_validation.kernel_launches,
+            result.world_view_validation.host_write_ops,
+            result.world_view_validation.kernel_timing,
+        );
+        assert_phase(
+            "accepted materialization",
+            result.materialization.kernel_launches,
+            result.materialization.host_write_ops,
+            result.materialization.kernel_timing,
+        );
+        assert_phase(
+            "final result materialization",
+            result.final_result_materialization.kernel_launches,
+            result.final_result_materialization.host_write_ops,
+            result.final_result_materialization.kernel_timing,
+        );
+        assert_phase(
+            "final tuple materialization",
+            result.final_tuple_materialization.kernel_launches,
+            result.final_tuple_materialization.host_write_ops,
+            result.final_tuple_materialization.kernel_timing,
+        );
+
+        let total_kernel_launches = result.candidate_generation.kernel_launches
+            + result.propagation.kernel_launches
+            + result.candidate_validation.kernel_launches
+            + result.model_membership.kernel_launches
+            + result.world_view_validation.kernel_launches
+            + result.materialization.kernel_launches
+            + result.final_result_materialization.kernel_launches
+            + result.final_tuple_materialization.kernel_launches;
+        assert_eq!(total_kernel_launches, 9);
+        assert_eq!(result.aggregate_kernel_timing().cuda_event_pairs, 8);
+        assert_eq!(result.aggregate_kernel_timing().timing_sync_ops, 8);
+    }
+}
+
+#[test]
 fn accepted_split_quaternary_all_operators_match_gpt_oracles() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");

@@ -309,6 +309,16 @@ materialization, and final tuple materialization. It also requires nonzero GPU
 launch counts, zero host writes per phase, four stable-model tuple-source
 membership records, sixteen tuple-key column device reads, thirty-two aggregate
 event pairs, and zero CPU recomposition/candidate/world-view fallback counters.
+The split-batch all-binary timing/workspace marker
+`accepted_split_all_binary_operator_batch_records_timing_and_workspace_buffers`
+proves the four accepted binary `know`/`possible`/`not possible`/`not know`
+components record CUDA-event timing across the same eight GPU hot-path phases,
+nonzero GPU launch counts, zero host writes per phase, stable-model tuple-source
+membership, eight tuple-key column device reads, thirty-two aggregate event
+pairs, and zero CPU recomposition/candidate/world-view fallback counters. It
+also checks candidate-assumption, world-view, model-membership, and
+rejection-reason buffers against each component's preflight workspace layout and
+device reset trace.
 The single-result workspace marker
 `accepted_gpu_execution_result_records_device_workspace_buffers` proves accepted
 single-result execution carries candidate-assumption, world-view,

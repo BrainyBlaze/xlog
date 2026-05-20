@@ -194,6 +194,15 @@ reset byte accounting, four device zero operations, zero reset host writes, and
 trace byte counts tied back to the preflight layout. This is not a closure
 proposal; `G090_GPU` and `G090_CLOSE` remain blocked.
 
+2026-05-20 split all-binary timing/workspace follow-up: the accepted
+four-component binary `know`/`possible`/`not possible`/`not know` split batch now
+records per-component timing across all eight GPU hot-path phases, nonzero GPU
+launch counts, stable-model tuple-source membership, eight tuple-key column
+reads, thirty-two aggregate CUDA-event pairs, zero host writes, and
+candidate/world-view/model-membership/rejection workspace buffers tied back to
+each component's preflight layout. This is not a closure proposal; `G090_GPU` and
+`G090_CLOSE` remain blocked.
+
 2026-05-20 single-result kernel-timing follow-up: accepted single-result GPU
 execution now records kernel launches, zero host writes, and one CUDA-event
 timing pair for candidate generation, propagation, candidate validation, model
@@ -412,11 +421,12 @@ fixture now has the same deeper solver search/scheduler/portfolio evidence; and
 conditioned source exact-query path with source-conditioned arity-four evidence
 counters, plus source/program gradients, source/program PIR/CNF, and exact
 query/gradient evaluation with zero CPU probability recomputation; the accepted
-single-result path and four-component split quaternary all-operator batch now
-also record per-result/per-component kernel timing across all eight GPU hot-path
-phases plus device workspace-buffer residency for candidate-assumption,
-world-view, model-membership, and rejection-reason buffers; the single-result
-path also records bounded final-result transfer accounting; the split batch also
+single-result path, four-component split all-binary batch, and four-component
+split quaternary all-operator batch now also record per-result/per-component
+kernel timing across all eight GPU hot-path phases plus device workspace-buffer
+residency for candidate-assumption, world-view, model-membership, and
+rejection-reason buffers; the single-result path also records bounded
+final-result transfer accounting; the split batch also
 records bounded final-result transfer accounting, fail-closed solver/probability
 rejection of rejected world-view results, nonzero CPU fallback counters,
 row-count-only nonzero-arity membership, and hot-path host transfers, and reaches
@@ -613,12 +623,12 @@ Closure remains blocked until certification includes all of the following:
 - broader nonzero GPU launch counts and kernel timings for actual stable-model
   tuple membership population beyond the current unary/possible/not-possible/
   binary/ternary-specialized/quaternary-generic/multi-membership/missing-required and `not know`
-  accepted fixtures plus single-result and split-quaternary all-operator
-  component timing, workspace-buffer residency, and row-count-only membership
-  rejection;
+  accepted fixtures plus single-result, split all-binary, and split-quaternary
+  all-operator component timing, workspace-buffer residency, and row-count-only
+  membership rejection;
 - broader GPU-resident candidate, world-view, model-membership, and rejection
-  buffers beyond the current single-result and split-quaternary all-operator
-  workspace-buffer residency fixtures;
+  buffers beyond the current single-result, split all-binary, and
+  split-quaternary all-operator workspace-buffer residency fixtures;
 - zero CPU fallback counters beyond the current single-result and
   split-quaternary all-operator fail-closed consumer rejection fixtures;
 - broader WCOJ-eligible epistemic reductions proving successful runtime

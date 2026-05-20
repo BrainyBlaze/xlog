@@ -235,6 +235,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     ));
     assert!(integration.contains("accepted_gpu_execution_result_records_kernel_timing"));
     assert!(integration
+        .contains("accepted_split_all_binary_operator_batch_records_timing_and_workspace_buffers"));
+    assert!(integration
         .contains("accepted_split_quaternary_all_operator_batch_records_component_kernel_timing"));
     assert!(
         integration.contains("accepted_gpu_execution_result_records_final_result_transfer_budget")
