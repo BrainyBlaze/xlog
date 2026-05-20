@@ -441,7 +441,11 @@ accepted split-batch evidence as the lifecycle adapter, then delegates each
 component to the existing multi-candidate same-device-CNF learned-clause reuse
 path. It records the split-batch candidate/component counters together with
 accepted candidate records, workspace-backed UNSAT solves, arena publications,
-imports, reused solves, and zero CPU learned-clause transfers.
+imports, reused solves, and zero CPU learned-clause transfers. The all-binary
+split-batch fixture also proves this gate consumes four `know`/`possible`/`not
+possible`/`not know` components, records all four accepted operator-family
+counters, and performs learned-clause publication/import/reuse without CPU
+learned-clause transfers.
 `solve_weighted_maxsat_candidates_with_gpu_execution_result` applies the same
 boundary before certifying bounded MaxSAT candidate CNFs through GPU CDCL and
 returning the best declared score.
@@ -454,6 +458,10 @@ same accepted split-batch evidence as the lifecycle adapter, then delegates
 each component to the existing multi-candidate weighted MaxSAT path. It records
 the split-batch candidate/component counters together with accepted candidate
 records, GPU CDCL candidate solves, optima, and zero CPU MaxSAT enumeration.
+The all-binary split-batch fixture proves the same MaxSAT path consumes four
+`know`/`possible`/`not possible`/`not know` components and advances all four
+accepted operator-family counters while solving the bounded candidate set
+through GPU CDCL.
 `solve_weighted_maxsat_search_with_gpu_execution_result` applies the accepted
 runtime boundary before scoring satisfiable MaxSAT candidates through GPU CDCL
 SAT and pruning UNSAT candidates through the workspace-backed GPU CDCL UNSAT
@@ -523,6 +531,7 @@ UNKNOWN/TIMEOUT lifecycle propagation, plus two-record same-CNF learned-clause
 reuse, a mixed unary and binary `possible`/`not possible` plus binary `not know`
 operator-result lifecycle,
 accepted split-batch lifecycle, all-binary-operator split-batch lifecycle,
+all-binary split-batch learned-clause reuse and MaxSAT,
 learned-clause reuse, MaxSAT, MaxSAT search pruning,
 weighted MaxSAT encoding/search, generalized MaxSAT scheduling, and portfolio evidence
 with batch/component counters,
@@ -559,6 +568,7 @@ Run the solver service fixtures and production-adapter source guard:
 cargo test -p xlog-solve --test gpu_solver_production_reuse
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_lifecycle_path -- --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_all_binary_operator_batch_gates_solver_lifecycle_path -- --exact --nocapture
+cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_all_binary_operator_batch_gates_solver_reuse_and_maxsat_paths -- --exact --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_learned_clause_reuse_path -- --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_maxsat_path -- --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_maxsat_search_pruning -- --nocapture

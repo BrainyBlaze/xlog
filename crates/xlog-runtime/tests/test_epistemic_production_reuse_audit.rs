@@ -156,6 +156,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(integration.contains("accepted_split_batch_gates_solver_lifecycle_path"));
     assert!(integration
         .contains("accepted_split_all_binary_operator_batch_gates_solver_lifecycle_path"));
+    assert!(integration
+        .contains("accepted_split_all_binary_operator_batch_gates_solver_reuse_and_maxsat_paths"));
     assert!(
         integration.contains("accepted_gpu_execution_result_gates_solver_maxsat_lifecycle_path")
     );
