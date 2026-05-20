@@ -62,6 +62,12 @@ All-operator mixed-membership audit note: the source audit also requires
 same-rule `know`/`possible`/`not know`/`not possible` tuple-membership matrix
 uses the same GPU tuple-source and mixed-polarity final-row filtering path
 before being cited as accepted semantic-parity evidence.
+It also requires
+`accepted_all_operator_mixed_membership_gates_solver_lifecycle_path` and
+`accepted_all_operator_mixed_membership_conditions_probabilistic_evidence`, so
+the same all-operator accepted world-view evidence reaches the solver and
+probabilistic production adapters before being cited as production-reuse
+evidence.
 
 ## Forbidden Parallel Engines
 

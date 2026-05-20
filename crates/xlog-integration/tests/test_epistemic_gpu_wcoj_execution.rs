@@ -452,6 +452,59 @@ fn execute_binary_edge_epistemic_fixture(
         .expect("execute binary edge epistemic fixture")
 }
 
+fn execute_all_operator_mixed_membership_fixture(
+    fix: &RuntimeBackedFixture,
+) -> EpistemicGpuExecutionResult {
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred alt(u32).
+        pred hidden(u32).
+        pred blocked(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X), possible alt(X), not know hidden(X), not possible blocked(X).
+        "#,
+    )
+    .expect("parse all-operator mixed-membership epistemic fixture");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile all-operator mixed-membership epistemic executable");
+    assert_eq!(executable.gpu_plan.epistemic_literals.len(), 4);
+    assert_eq!(executable.gpu_plan.tuple_membership_bindings.len(), 4);
+    assert_eq!(
+        executable
+            .gpu_plan
+            .tuple_membership_bindings
+            .iter()
+            .filter(|binding| binding.negated)
+            .count(),
+        2,
+        "not-know and not-possible memberships must compile as negated tuple-key filters"
+    );
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &executable.relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation("node", upload_unary_u32(&fix.memory, &[1, 2, 3, 4]));
+    executor.put_relation("edge", upload_unary_u32(&fix.memory, &[1, 2]));
+    executor.put_relation("alt", upload_unary_u32(&fix.memory, &[2, 3]));
+    executor.put_relation("hidden", upload_unary_u32(&fix.memory, &[1, 4]));
+    executor.put_relation("blocked", upload_unary_u32(&fix.memory, &[3, 4]));
+
+    executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 16,
+                max_worlds: 1,
+                max_models_per_reduction: 4,
+            },
+        )
+        .expect("execute all-operator mixed-membership epistemic fixture")
+}
+
 #[test]
 fn accepted_epistemic_v070_4cycle_execution_certifies_production_wcoj_dispatch() {
     let Some(fix) = make_runtime_backed_fixture() else {
@@ -6192,42 +6245,7 @@ fn accepted_all_operator_mixed_memberships_match_gpt_oracle_parity() {
         GeneratePropagateTestConfig { max_candidates: 16 },
     )
     .expect("run all-operator mixed-membership GPT oracle");
-    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
-        .expect("compile all-operator mixed-membership epistemic executable");
-    assert_eq!(executable.gpu_plan.epistemic_literals.len(), 4);
-    assert_eq!(executable.gpu_plan.tuple_membership_bindings.len(), 4);
-    assert_eq!(
-        executable
-            .gpu_plan
-            .tuple_membership_bindings
-            .iter()
-            .filter(|binding| binding.negated)
-            .count(),
-        2,
-        "not-know and not-possible memberships must compile as negated tuple-key filters"
-    );
-
-    let mut executor =
-        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
-    for (name, rel_id) in &executable.relation_ids {
-        executor.register_relation(*rel_id, name);
-    }
-    executor.put_relation("node", upload_unary_u32(&fix.memory, &[1, 2, 3, 4]));
-    executor.put_relation("edge", upload_unary_u32(&fix.memory, &[1, 2]));
-    executor.put_relation("alt", upload_unary_u32(&fix.memory, &[2, 3]));
-    executor.put_relation("hidden", upload_unary_u32(&fix.memory, &[1, 4]));
-    executor.put_relation("blocked", upload_unary_u32(&fix.memory, &[3, 4]));
-
-    let result = executor
-        .execute_epistemic_gpu_execution(
-            &executable,
-            EpistemicGpuWorkspaceCapacities {
-                max_candidates: 16,
-                max_worlds: 1,
-                max_models_per_reduction: 4,
-            },
-        )
-        .expect("execute all-operator mixed-membership epistemic fixture");
+    let result = execute_all_operator_mixed_membership_fixture(&fix);
 
     assert_eq!(result.prepared.preflight.tuple_membership_binding_count, 4);
     assert_eq!(result.prepared.preflight.know_operator_count, 1);
@@ -8493,6 +8511,105 @@ fn accepted_operator_conditions_record_probabilistic_operator_trace_counters() {
     assert_eq!(trace.gpu_conditioned_not_possible_evidence_facts, 1);
     assert_eq!(trace.gpu_exact_source_compiles, 4);
     assert_eq!(trace.gpu_exact_query_evaluations, 4);
+    assert_eq!(trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(trace.fixture_circuit_evaluations, 0);
+}
+
+#[test]
+fn accepted_all_operator_mixed_membership_conditions_probabilistic_evidence() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let result = execute_all_operator_mixed_membership_fixture(&fix);
+    assert_eq!(
+        download_unary_u32(&fix.provider, &result.final_output),
+        vec![2]
+    );
+    assert_eq!(result.prepared.preflight.tuple_membership_binding_count, 4);
+    assert_eq!(result.prepared.preflight.know_operator_count, 1);
+    assert_eq!(result.prepared.preflight.possible_operator_count, 1);
+    assert_eq!(result.prepared.preflight.not_know_operator_count, 1);
+    assert_eq!(result.prepared.preflight.not_possible_operator_count, 1);
+    assert_eq!(result.final_tuple_materialization.row_filter_count, 4);
+    assert_eq!(
+        result.final_tuple_materialization.negated_row_filter_count,
+        2
+    );
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut adapter = EpistemicProbProductionAdapter::new(config);
+    let evaluated = adapter
+        .compile_and_evaluate_conditioned_source_with_gpu_execution_result(
+            r#"
+            0.3::edge(2).
+            0.4::alt(2).
+            0.5::hidden(2).
+            0.6::blocked(2).
+            query(edge(2)).
+            query(alt(2)).
+            query(hidden(2)).
+            query(blocked(2)).
+            "#,
+            &fix.provider,
+            &result,
+            vec![
+                EpistemicAssumption::known_tuple(
+                    "edge",
+                    vec![EpistemicEvidenceTerm::integer(2)],
+                    true,
+                ),
+                EpistemicAssumption::possible_tuple(
+                    "alt",
+                    vec![EpistemicEvidenceTerm::integer(2)],
+                    true,
+                ),
+                EpistemicAssumption::known_tuple(
+                    "hidden",
+                    vec![EpistemicEvidenceTerm::integer(2)],
+                    false,
+                ),
+                EpistemicAssumption::possible_tuple(
+                    "blocked",
+                    vec![EpistemicEvidenceTerm::integer(2)],
+                    false,
+                ),
+            ],
+        )
+        .expect("same-rule all-operator GPU evidence must condition probabilistic exact evidence");
+
+    assert_eq!(evaluated.query_probs.len(), 4);
+    assert!((evaluated.query_probs[0].prob - 1.0).abs() < 1.0e-6);
+    assert!((evaluated.query_probs[1].prob - 1.0).abs() < 1.0e-6);
+    assert!(evaluated.query_probs[2].prob.abs() < 1.0e-6);
+    assert!(evaluated.query_probs[3].prob.abs() < 1.0e-6);
+
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_world_view_evidence_consumed, 1);
+    assert_eq!(trace.accepted_evidence_assumptions_consumed, 4);
+    assert_eq!(trace.gpu_conditioned_evidence_facts, 4);
+    assert_eq!(trace.gpu_conditioned_nonzero_arity_evidence_facts, 4);
+    assert_eq!(trace.gpu_conditioned_max_evidence_arity, 1);
+    assert_eq!(trace.gpu_conditioned_negative_evidence_facts, 2);
+    assert_eq!(trace.gpu_conditioned_know_evidence_facts, 1);
+    assert_eq!(trace.gpu_conditioned_possible_evidence_facts, 1);
+    assert_eq!(trace.gpu_conditioned_not_known_evidence_facts, 1);
+    assert_eq!(trace.gpu_conditioned_not_possible_evidence_facts, 1);
+    assert_eq!(trace.gpu_source_conditioned_evidence_facts, 4);
+    assert_eq!(trace.gpu_source_conditioned_nonzero_arity_evidence_facts, 4);
+    assert_eq!(trace.gpu_source_conditioned_max_evidence_arity, 1);
+    assert_eq!(trace.gpu_source_conditioned_negative_evidence_facts, 2);
+    assert_eq!(trace.gpu_source_conditioned_know_evidence_facts, 1);
+    assert_eq!(trace.gpu_source_conditioned_possible_evidence_facts, 1);
+    assert_eq!(trace.gpu_source_conditioned_not_known_evidence_facts, 1);
+    assert_eq!(trace.gpu_source_conditioned_not_possible_evidence_facts, 1);
+    assert_eq!(trace.gpu_exact_source_compiles, 1);
+    assert_eq!(trace.gpu_exact_query_evaluations, 1);
     assert_eq!(trace.cpu_only_probability_recomputations, 0);
     assert_eq!(trace.fixture_circuit_evaluations, 0);
 }
@@ -11042,6 +11159,105 @@ fn accepted_operator_gpu_execution_results_gate_solver_lifecycle_path() {
     assert_eq!(trace.gpu_lifecycle_workspace_reuses, 5);
     assert_eq!(trace.gpu_cdcl_sat_solves, 5);
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 5);
+    assert_eq!(trace.cpu_assignment_enumerations, 0);
+    assert_eq!(trace.cpu_maxsat_enumerations, 0);
+}
+
+#[test]
+fn accepted_all_operator_mixed_membership_gates_solver_lifecycle_path() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let result = execute_all_operator_mixed_membership_fixture(&fix);
+    assert_eq!(
+        download_unary_u32(&fix.provider, &result.final_output),
+        vec![2]
+    );
+    assert_eq!(result.prepared.preflight.tuple_membership_binding_count, 4);
+    assert_eq!(result.prepared.preflight.know_operator_count, 1);
+    assert_eq!(result.prepared.preflight.possible_operator_count, 1);
+    assert_eq!(result.prepared.preflight.not_know_operator_count, 1);
+    assert_eq!(result.prepared.preflight.not_possible_operator_count, 1);
+    assert_eq!(result.final_tuple_materialization.row_filter_count, 4);
+    assert_eq!(
+        result.final_tuple_materialization.negated_row_filter_count,
+        2
+    );
+    assert_eq!(
+        result.model_membership.tuple_source_key_column_device_reads,
+        4
+    );
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+
+    let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
+    let unsat_instance = SolveInstance::new(
+        1,
+        vec![
+            Clause::new(vec![Literal::positive(0)]),
+            Clause::new(vec![Literal::negative(0)]),
+        ],
+    );
+    let sat_cnf = GpuCnf::from_host(&sat_instance, &fix.provider).expect("upload SAT CNF");
+    let unsat_cnf = GpuCnf::from_host(&unsat_instance, &fix.provider).expect("upload UNSAT CNF");
+    let branch_limit = upload_u32_scalar(&fix.provider, 1);
+    let mut adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let mut workspace = adapter
+        .new_workspace(unsat_cnf.var_cap, unsat_cnf.clause_cap)
+        .expect("new workspace");
+    let assign_ptr_before = workspace.assign_device_ptr();
+
+    let report = adapter
+        .solve_assumption_lifecycle_with_gpu_execution_result(
+            &fix.provider,
+            &result,
+            &mut workspace,
+            &[
+                GpuSolverProductionLifecycleStep {
+                    cnf: &sat_cnf,
+                    branch_var_limit: &branch_limit,
+                    expectation: GpuSolverProductionExpectation::Sat,
+                },
+                GpuSolverProductionLifecycleStep {
+                    cnf: &unsat_cnf,
+                    branch_var_limit: &branch_limit,
+                    expectation: GpuSolverProductionExpectation::Unsat,
+                },
+            ],
+        )
+        .expect("same-rule all-operator GPU evidence must gate solver lifecycle path");
+
+    assert_eq!(workspace.assign_device_ptr(), assign_ptr_before);
+    assert_eq!(report.candidate_evidence_records, 1);
+    assert_eq!(report.steps, 2);
+    assert_eq!(report.assumption_pushes, 2);
+    assert_eq!(report.assumption_retractions, 2);
+    assert_eq!(report.workspace_reuses, 1);
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 1);
+    assert_eq!(trace.accepted_know_gpu_candidate_evidence_consumed, 1);
+    assert_eq!(trace.accepted_possible_gpu_candidate_evidence_consumed, 1);
+    assert_eq!(
+        trace.accepted_not_possible_gpu_candidate_evidence_consumed,
+        1
+    );
+    assert_eq!(trace.accepted_not_know_gpu_candidate_evidence_consumed, 1);
+    assert_eq!(
+        trace.accepted_nonzero_arity_gpu_candidate_evidence_consumed,
+        1
+    );
+    assert_eq!(
+        trace.accepted_gpu_candidate_tuple_key_column_reads_consumed,
+        4
+    );
+    assert_eq!(trace.gpu_assumption_pushes, 2);
+    assert_eq!(trace.gpu_assumption_retractions, 2);
+    assert_eq!(trace.gpu_lifecycle_workspace_reuses, 1);
+    assert_eq!(trace.gpu_cdcl_sat_solves, 1);
+    assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 1);
     assert_eq!(trace.cpu_assignment_enumerations, 0);
     assert_eq!(trace.cpu_maxsat_enumerations, 0);
 }

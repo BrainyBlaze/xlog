@@ -536,6 +536,10 @@ separately when either mode gates solver production work.
 The same trace records accepted operator-family evidence counters for `know`,
 `possible`, `not possible`, and `not know` when accepted runtime evidence gates
 solver lifecycle work.
+The same-rule all-operator fixture also gates solver lifecycle work from one
+accepted GPU execution result, requiring one `know`, one `possible`, one
+`not know`, and one `not possible` operator counter, four tuple-key column
+reads, balanced GPU push/retract counters, and zero CPU search counters.
 Accepted ternary and quaternary nonzero-arity evidence fixtures also gate the
 SAT path, requiring tuple-source membership and recording nonzero-arity
 candidate evidence plus tuple-key column reads before GPU CDCL dispatch.
@@ -595,6 +599,7 @@ cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_maxsat_search_pruning -- --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_encoded_maxsat_and_scheduler_paths -- --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_portfolio_path -- --nocapture
+cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_all_operator_mixed_membership_gates_solver_lifecycle_path -- --exact --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_gpu_execution_result_records_solver_nonzero_arity_evidence_trace -- --exact --nocapture
 cargo test -p xlog-solve --test solver_service_semantics
 ```
@@ -663,7 +668,11 @@ records `accepted_evidence_assumptions_consumed`,
 source/program-specific conditioned fact counters, source/program-specific
 negative conditioned fact counters, and operator-specific counts for true
 `know`, true `possible`, false `know` (`not know`), and false `possible`
-(`not possible`) evidence facts. The trace also splits those operator-specific
+(`not possible`) evidence facts. The same-rule all-operator fixture conditions
+source queries from one accepted GPU execution result with all four operator
+families at once, recording four nonzero-arity evidence facts, two negative
+facts, source-specific operator counters, and zero CPU probability
+recomputation. The trace also splits those operator-specific
 conditioned evidence counters by source and parsed-program paths, so a mixed
 source/program run can prove which exact input path consumed each operator
 family.
@@ -742,6 +751,7 @@ cargo test -p xlog-prob --test epistemic_prob
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_probabilistic_source_and_program_end_to_end_paths -- --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_probabilistic_conditioned_source_path -- --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_all_binary_operator_batch_conditions_probabilistic_evidence -- --exact --nocapture
+cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_all_operator_mixed_membership_conditions_probabilistic_evidence -- --exact --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_all_binary_operator_batch_gates_probabilistic_program_and_gradient_paths -- --exact --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_all_binary_operator_batch_gates_probabilistic_pir_cnf_and_exact_evaluation_paths -- --exact --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_probabilistic_conditioned_program_path -- --nocapture

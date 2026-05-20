@@ -53,7 +53,9 @@ propagation plus two-record learned-clause publication/import reuse, a mixed
 operator-result lifecycle path covering unary and binary `possible`, unary and
 binary `not possible`, and binary `not know` accepted evidence while recording
 accepted `possible`/`not possible`/`not know` operator-family solver trace
-counters,
+counters, a same-rule all-operator accepted evidence lifecycle gate covering
+`know`, `possible`, `not know`, and `not possible` together with tuple-key
+column-read evidence and zero CPU search counters,
 accepted split-batch lifecycle, all-binary-operator split-batch lifecycle
 plus all-binary split-batch learned-clause reuse and MaxSAT,
 single-result, two-record, and split-batch combined lifecycle-plus-MaxSAT,
@@ -129,6 +131,7 @@ post-v0.7.0/v0.8.0/v0.8.5/v0.8.6 certification.
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_all_binary_operator_batch_gates_solver_lifecycle_path -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_all_binary_operator_batch_gates_solver_reuse_and_maxsat_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_operator_gpu_execution_results_gate_solver_lifecycle_path -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_all_operator_mixed_membership_gates_solver_lifecycle_path -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_g91_and_faeel_modes_gate_solver_production_trace -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_ternary_gpu_execution_result_records_solver_nonzero_arity_evidence_trace -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_gpu_execution_result_records_solver_nonzero_arity_evidence_trace -- --exact --nocapture` | PASS, 1 passed, 0 failed |
