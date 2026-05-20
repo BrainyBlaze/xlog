@@ -140,6 +140,12 @@ through source and parsed-program PIR/CNF uploads, source and parsed-program
 already-compiled exact query evaluation, source and parsed-program gradient
 evaluation, accepted-assumption evidence accounting, and zero CPU probability
 recomputation.
+The quaternary not-possible conditioned-gradient marker
+`accepted_quaternary_not_possible_conditions_source_and_program_probabilistic_gradients`
+proves accepted single-result `not possible fact4/4` GPU evidence also routes
+through source and parsed-program conditioned gradient evaluation, recording
+source/program negative arity-four conditioned evidence, source/program
+conditioned gradient counters, and zero CPU probability recomputation.
 The positive quaternary deep marker
 `accepted_quaternary_gpu_execution_result_gates_source_and_program_pir_cnf_and_exact_evaluation_paths`
 proves accepted single-result `know fact4/4` GPU evidence also routes through

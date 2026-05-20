@@ -525,6 +525,9 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
         "accepted_quaternary_gpu_execution_result_gates_source_and_program_pir_cnf_and_exact_evaluation_paths"
     ));
     assert!(integration.contains(
+        "accepted_quaternary_not_possible_conditions_source_and_program_probabilistic_gradients"
+    ));
+    assert!(integration.contains(
         "accepted_quaternary_possible_and_not_know_results_gate_parsed_program_probabilistic_paths"
     ));
     assert!(integration.contains(
