@@ -2922,6 +2922,14 @@ fn accepted_split_quaternary_all_operator_batch_records_final_result_transfer_bu
     assert_eq!(batch.trace.gpu_runtime_component_executions, 4);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
+    assert_eq!(batch.trace.final_output_rows, 8);
+    assert_eq!(
+        batch.trace.final_output_payload_bytes,
+        8 * 4 * std::mem::size_of::<u32>() as u64
+    );
+    assert_eq!(batch.trace.final_result_row_count_device_reads, 4);
+    assert_eq!(batch.trace.final_result_data_plane_dtoh_calls, 0);
+    assert_eq!(batch.trace.final_result_data_plane_dtoh_bytes, 0);
 
     for (idx, component) in split.components.iter().enumerate() {
         let result = &batch.results[idx];

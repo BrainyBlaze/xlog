@@ -212,8 +212,10 @@ accepted-path data-plane D2H calls or bytes. This is not a closure proposal;
 split-batch quaternary `know`/`possible`/`not possible`/`not know` fixture now
 records aggregate zero hot-path D2H and per-candidate host-round-trip counters
 plus per-component final rows, arity, payload bytes, row-count metadata reads,
-and zero accepted-path data-plane D2H calls or bytes. This is not a closure
-proposal; `G090_GPU` and `G090_CLOSE` remain blocked.
+and zero accepted-path data-plane D2H calls or bytes. The batch trace also
+aggregates final output rows, payload bytes, final-result row-count metadata
+reads, and final-result data-plane D2H calls/bytes from component results. This
+is not a closure proposal; `G090_GPU` and `G090_CLOSE` remain blocked.
 
 2026-05-20 single-result row-count membership follow-up: accepted
 single-result solver and probabilistic consumers now reject model-membership

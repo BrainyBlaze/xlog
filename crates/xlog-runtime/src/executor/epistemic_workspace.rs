@@ -1530,6 +1530,16 @@ pub struct EpistemicGpuBatchExecutionTrace {
     pub tracked_dtoh_calls: u64,
     /// Per-candidate host round trips tracked across all components.
     pub per_candidate_host_round_trips: u64,
+    /// Final output rows represented across all component device buffers.
+    pub final_output_rows: usize,
+    /// Final output payload bytes represented across all component device buffers.
+    pub final_output_payload_bytes: u64,
+    /// Device row-count metadata reads used for component final-result accounting.
+    pub final_result_row_count_device_reads: u32,
+    /// Post-hot-path final-result data-plane D2H calls across all components.
+    pub final_result_data_plane_dtoh_calls: u64,
+    /// Post-hot-path final-result data-plane D2H bytes across all components.
+    pub final_result_data_plane_dtoh_bytes: u64,
     /// Accepted world views observed across component semantic traces.
     pub accepted_world_views: usize,
     /// Rejected candidates observed across component semantic traces.
@@ -1581,6 +1591,26 @@ impl EpistemicGpuBatchExecutionTrace {
             per_candidate_host_round_trips: results
                 .iter()
                 .map(|result| result.transfer_budget.per_candidate_host_round_trips)
+                .sum(),
+            final_output_rows: results
+                .iter()
+                .map(|result| result.final_result_transfer.final_output_rows)
+                .sum(),
+            final_output_payload_bytes: results
+                .iter()
+                .map(|result| result.final_result_transfer.final_output_payload_bytes)
+                .sum(),
+            final_result_row_count_device_reads: results
+                .iter()
+                .map(|result| result.final_result_transfer.row_count_device_reads)
+                .sum(),
+            final_result_data_plane_dtoh_calls: results
+                .iter()
+                .map(|result| result.final_result_transfer.tracked_data_plane_dtoh_calls)
+                .sum(),
+            final_result_data_plane_dtoh_bytes: results
+                .iter()
+                .map(|result| result.final_result_transfer.tracked_data_plane_dtoh_bytes)
                 .sum(),
             accepted_world_views: results
                 .iter()
