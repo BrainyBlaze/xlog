@@ -129,6 +129,13 @@ CDCL lifecycle adapter with one accepted `know`, `possible`, `not possible`,
 and `not know` counter, four nonzero-arity evidence consumptions, sixteen
 tuple-key column reads, balanced lifecycle pushes and retractions, workspace
 reuse, and zero CPU search.
+The source audit now also requires
+`accepted_split_quaternary_all_operator_batch_gates_solver_reuse_and_maxsat_paths`,
+which proves that same four-component accepted batch reaches existing
+learned-clause reuse and bounded MaxSAT candidate paths with four arena
+publications/imports/reused solves, eight GPU CDCL MaxSAT candidate solves, four
+MaxSAT optima, one accepted counter for every epistemic operator family, sixteen
+tuple-key column reads, and zero CPU search or learned-clause transfers.
 All accepted solver split-batch entrypoints now call the single
 `accepted_solver_results_from_gpu_batch_execution_evidence` validator/accounting
 helper, and `production_solver_batch_paths_use_single_gpu_batch_gate`

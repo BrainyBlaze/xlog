@@ -524,6 +524,86 @@ fn execute_split_all_binary_operator_batch(
     (split, batch)
 }
 
+fn execute_split_quaternary_all_operator_batch(
+    fix: &RuntimeBackedFixture,
+) -> (
+    EpistemicSplitExecutablePlan,
+    EpistemicGpuBatchExecutionResult,
+) {
+    let program = parse_program(
+        r#"
+        pred tuple4(u32, u32, u32, u32).
+        pred edge4(u32, u32, u32, u32).
+        pred alt4(u32, u32, u32, u32).
+        pred blocked_fact4(u32, u32, u32, u32).
+        pred hidden_fact4(u32, u32, u32, u32).
+        pred known4(u32, u32, u32, u32).
+        pred possible4(u32, u32, u32, u32).
+        pred clear4(u32, u32, u32, u32).
+        pred unknown4(u32, u32, u32, u32).
+        known4(A, B, C, D) :- tuple4(A, B, C, D), know edge4(A, B, C, D).
+        possible4(A, B, C, D) :- tuple4(A, B, C, D), possible alt4(A, B, C, D).
+        clear4(A, B, C, D) :- tuple4(A, B, C, D), not possible blocked_fact4(A, B, C, D).
+        unknown4(A, B, C, D) :- tuple4(A, B, C, D), not know hidden_fact4(A, B, C, D).
+        "#,
+    )
+    .expect("parse split quaternary all-operator fixture");
+    let split = compile_epistemic_gpu_split_execution_with_stats_snapshot(&program, None)
+        .expect("compile split quaternary all-operator components");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    let mut relation_ids = BTreeMap::new();
+    for component in &split.components {
+        for (name, rel_id) in &component.executable.relation_ids {
+            if let Some(previous) = relation_ids.insert(name.clone(), *rel_id) {
+                assert_eq!(
+                    previous, *rel_id,
+                    "split quaternary all-operator components must preserve shared relation ids"
+                );
+            }
+        }
+    }
+    for (name, rel_id) in &relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation(
+        "tuple4",
+        upload_quaternary_u32(
+            &fix.memory,
+            &[(1, 2, 3, 4), (2, 3, 4, 5), (3, 4, 5, 6), (9, 9, 9, 9)],
+        ),
+    );
+    executor.put_relation("edge4", upload_quaternary_u32(&fix.memory, &[(2, 3, 4, 5)]));
+    executor.put_relation("alt4", upload_quaternary_u32(&fix.memory, &[(3, 4, 5, 6)]));
+    executor.put_relation(
+        "blocked_fact4",
+        upload_quaternary_u32(&fix.memory, &[(9, 9, 9, 9)]),
+    );
+    executor.put_relation(
+        "hidden_fact4",
+        upload_quaternary_u32(&fix.memory, &[(1, 2, 3, 4)]),
+    );
+
+    let executables: Vec<_> = split
+        .components
+        .iter()
+        .map(|component| &component.executable)
+        .collect();
+    let batch = executor
+        .execute_epistemic_gpu_execution_batch_with_trace(
+            &executables,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 3,
+            },
+        )
+        .expect("execute split quaternary all-operator components through GPU batch path");
+
+    (split, batch)
+}
+
 fn execute_all_operator_mixed_membership_fixture(
     fix: &RuntimeBackedFixture,
 ) -> EpistemicGpuExecutionResult {
@@ -5745,6 +5825,219 @@ fn accepted_split_quaternary_all_operator_batch_gates_solver_lifecycle_path() {
     assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 4);
     assert_eq!(trace.cpu_assignment_enumerations, 0);
     assert_eq!(trace.cpu_maxsat_enumerations, 0);
+}
+
+#[test]
+fn accepted_split_quaternary_all_operator_batch_gates_solver_reuse_and_maxsat_paths() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let (split, batch) = execute_split_quaternary_all_operator_batch(&fix);
+
+    assert_eq!(split.components.len(), 4);
+    assert_eq!(split.recomposed_rule_indices(), vec![0, 1, 2, 3]);
+    assert_eq!(batch.results.len(), 4);
+    assert_eq!(batch.trace.component_count, 4);
+    assert_eq!(batch.trace.gpu_runtime_component_executions, 4);
+    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
+    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
+    assert_eq!(batch.trace.cpu_world_view_validations, 0);
+    assert_eq!(batch.trace.tracked_dtoh_calls, 0);
+    assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
+    assert!(batch.trace.aggregate_kernel_timing.is_recorded());
+    assert_eq!(batch.trace.aggregate_kernel_timing.cuda_event_pairs, 32);
+    assert_eq!(batch.trace.know_operator_count, 1);
+    assert_eq!(batch.trace.possible_operator_count, 1);
+    assert_eq!(batch.trace.not_possible_operator_count, 1);
+    assert_eq!(batch.trace.not_know_operator_count, 1);
+
+    for (idx, component) in split.components.iter().enumerate() {
+        let (expected_rows, expected_negated_filters) =
+            match component.component.rule_indices.as_slice() {
+                [0] => (vec![(2, 3, 4, 5)], 0),
+                [1] => (vec![(3, 4, 5, 6)], 0),
+                [2] => (vec![(1, 2, 3, 4), (2, 3, 4, 5), (3, 4, 5, 6)], 1),
+                [3] => (vec![(2, 3, 4, 5), (3, 4, 5, 6), (9, 9, 9, 9)], 1),
+                other => {
+                    panic!("unexpected split quaternary all-operator reuse rule indices: {other:?}")
+                }
+            };
+        assert_eq!(
+            download_quaternary_u32(&fix.provider, &batch.results[idx].final_output),
+            expected_rows
+        );
+        assert_eq!(
+            batch.results[idx]
+                .final_tuple_materialization
+                .negated_row_filter_count,
+            expected_negated_filters
+        );
+        assert_eq!(
+            batch.results[idx]
+                .model_membership
+                .tuple_source_key_column_device_reads,
+            4
+        );
+        assert_eq!(
+            batch.results[idx].model_membership.membership_source,
+            EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+        );
+    }
+
+    let unsat_instance = SolveInstance::new(
+        1,
+        vec![
+            Clause::new(vec![Literal::positive(0)]),
+            Clause::new(vec![Literal::negative(0)]),
+        ],
+    );
+    let source_cnf = GpuCnf::from_host(&unsat_instance, &fix.provider).expect("upload UNSAT CNF");
+    let branch_limit = upload_u32_scalar(&fix.provider, 1);
+    let mut reuse_adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let mut workspace = reuse_adapter
+        .new_workspace(source_cnf.var_cap, source_cnf.clause_cap)
+        .expect("new all-operator learned-clause reuse workspace");
+    let assign_ptr_before = workspace.assign_device_ptr();
+
+    let reuse_report = reuse_adapter
+        .solve_learned_clause_reuse_with_gpu_batch_execution_result(
+            &fix.provider,
+            GpuSolverProductionBatchExecutionEvidence { batch: &batch },
+            &mut workspace,
+            &source_cnf,
+            &branch_limit,
+            &source_cnf,
+            &branch_limit,
+        )
+        .expect("accepted all-operator split GPU batch evidence must gate learned-clause reuse");
+
+    assert_eq!(workspace.assign_device_ptr(), assign_ptr_before);
+    assert_eq!(reuse_report.candidate_evidence_records, 4);
+    assert_eq!(reuse_report.candidates, 8);
+    assert_eq!(reuse_report.unsat_solves, 8);
+    assert_eq!(reuse_report.gpu_learned_clause_arena_publications, 4);
+    assert_eq!(reuse_report.gpu_learned_clause_imports, 4);
+    assert_eq!(reuse_report.gpu_learned_clause_reused_solves, 4);
+    assert_eq!(reuse_report.cpu_learned_clause_transfers, 0);
+
+    let reuse_trace = reuse_adapter.trace();
+    assert_eq!(
+        reuse_trace.accepted_gpu_batch_candidate_evidence_consumed,
+        1
+    );
+    assert_eq!(
+        reuse_trace.accepted_gpu_batch_candidate_component_evidence_consumed,
+        4
+    );
+    assert_eq!(reuse_trace.accepted_gpu_candidate_evidence_consumed, 4);
+    assert_eq!(
+        reuse_trace.accepted_nonzero_arity_gpu_candidate_evidence_consumed,
+        4
+    );
+    assert_eq!(
+        reuse_trace.accepted_gpu_candidate_tuple_key_column_reads_consumed,
+        16
+    );
+    assert_eq!(reuse_trace.accepted_know_gpu_candidate_evidence_consumed, 1);
+    assert_eq!(
+        reuse_trace.accepted_possible_gpu_candidate_evidence_consumed,
+        1
+    );
+    assert_eq!(
+        reuse_trace.accepted_not_possible_gpu_candidate_evidence_consumed,
+        1
+    );
+    assert_eq!(
+        reuse_trace.accepted_not_know_gpu_candidate_evidence_consumed,
+        1
+    );
+    assert_eq!(reuse_trace.gpu_cdcl_workspace_unsat_solves, 8);
+    assert_eq!(reuse_trace.gpu_learned_clause_arena_publications, 4);
+    assert_eq!(reuse_trace.gpu_learned_count_buffer_publications, 4);
+    assert_eq!(reuse_trace.gpu_learned_clause_imports, 4);
+    assert_eq!(reuse_trace.gpu_learned_clause_reused_solves, 4);
+    assert_eq!(reuse_trace.cpu_learned_clause_transfers, 0);
+    assert_eq!(reuse_trace.cpu_assignment_enumerations, 0);
+    assert_eq!(reuse_trace.cpu_maxsat_enumerations, 0);
+
+    let candidate_low = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
+    let candidate_high = SolveInstance::new(1, vec![Clause::new(vec![Literal::negative(0)])]);
+    let gpu_candidate_low =
+        GpuCnf::from_host(&candidate_low, &fix.provider).expect("upload low-score MaxSAT CNF");
+    let gpu_candidate_high =
+        GpuCnf::from_host(&candidate_high, &fix.provider).expect("upload high-score MaxSAT CNF");
+    let mut maxsat_adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+
+    let maxsat_report = maxsat_adapter
+        .solve_weighted_maxsat_candidates_with_gpu_batch_execution_result(
+            &fix.provider,
+            GpuSolverProductionBatchExecutionEvidence { batch: &batch },
+            &[
+                GpuSolverProductionMaxSatCandidate {
+                    score: 3,
+                    cnf: &gpu_candidate_low,
+                    branch_var_limit: &branch_limit,
+                },
+                GpuSolverProductionMaxSatCandidate {
+                    score: 7,
+                    cnf: &gpu_candidate_high,
+                    branch_var_limit: &branch_limit,
+                },
+            ],
+        )
+        .expect("accepted all-operator split GPU batch evidence must gate MaxSAT through GPU CDCL");
+
+    assert_eq!(maxsat_report.candidate_evidence_records, 4);
+    assert_eq!(maxsat_report.optimum_score, 7);
+    assert_eq!(maxsat_report.candidates_checked, 8);
+    assert_eq!(maxsat_report.satisfiable_candidates, 8);
+    assert_eq!(maxsat_report.unsat_candidates_pruned, 0);
+    assert_eq!(maxsat_report.gpu_cdcl_candidate_encodes, 0);
+    assert_eq!(maxsat_report.gpu_cdcl_candidate_solves, 8);
+
+    let maxsat_trace = maxsat_adapter.trace();
+    assert_eq!(
+        maxsat_trace.accepted_gpu_batch_candidate_evidence_consumed,
+        1
+    );
+    assert_eq!(
+        maxsat_trace.accepted_gpu_batch_candidate_component_evidence_consumed,
+        4
+    );
+    assert_eq!(maxsat_trace.accepted_gpu_candidate_evidence_consumed, 4);
+    assert_eq!(
+        maxsat_trace.accepted_nonzero_arity_gpu_candidate_evidence_consumed,
+        4
+    );
+    assert_eq!(
+        maxsat_trace.accepted_gpu_candidate_tuple_key_column_reads_consumed,
+        16
+    );
+    assert_eq!(
+        maxsat_trace.accepted_know_gpu_candidate_evidence_consumed,
+        1
+    );
+    assert_eq!(
+        maxsat_trace.accepted_possible_gpu_candidate_evidence_consumed,
+        1
+    );
+    assert_eq!(
+        maxsat_trace.accepted_not_possible_gpu_candidate_evidence_consumed,
+        1
+    );
+    assert_eq!(
+        maxsat_trace.accepted_not_know_gpu_candidate_evidence_consumed,
+        1
+    );
+    assert_eq!(maxsat_trace.gpu_cdcl_sat_solves, 8);
+    assert_eq!(maxsat_trace.gpu_maxsat_candidate_solves, 8);
+    assert_eq!(maxsat_trace.gpu_maxsat_optima, 4);
+    assert_eq!(maxsat_trace.cpu_assignment_enumerations, 0);
+    assert_eq!(maxsat_trace.cpu_maxsat_enumerations, 0);
 }
 
 #[test]
