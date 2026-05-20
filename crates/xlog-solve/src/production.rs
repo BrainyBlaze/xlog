@@ -514,7 +514,7 @@ impl GpuSolverProductionTrace {
         if self.gpu_solver_production_path_events() == 0 {
             return Err(XlogError::UnsupportedEpistemicConstruct {
                 construct: "GPU solver production metric gate".to_string(),
-                context: "production solver metrics require an existing GPU CDCL/MaxSAT/portfolio counter"
+                context: "production solver metrics require an existing GPU CDCL/MaxSAT/scheduler/portfolio counter"
                     .to_string(),
             });
         }

@@ -24,11 +24,17 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(audit.contains("EpistemicGpuBatchExecutionTrace"));
     assert!(audit.contains("GpuSolverProductionAdapter"));
     assert!(audit.contains("GpuSolverProductionBatchExecutionEvidence"));
+    assert!(audit.contains("status-only UNKNOWN/TIMEOUT traces"));
+    assert!(audit.contains("existing GPU CDCL/MaxSAT/scheduler/portfolio production-path counter"));
     assert!(audit.contains("accepted_gpu_batch_candidate_evidence_consumed"));
     assert!(audit.contains("accepted_gpu_batch_candidate_component_evidence_consumed"));
     assert!(audit.contains("solve_weighted_maxsat_encoded_search_with_gpu_batch_execution_result"));
     assert!(audit.contains("solve_maxsat_schedule_with_gpu_batch_execution_result"));
     assert!(audit.contains("EpistemicProbProductionAdapter"));
+    assert!(audit.contains("conditioned evidence facts alone"));
+    assert!(
+        audit.contains("aggregate or source/program-specific GPU exact/provenance/PIR/CNF/knowledge-compilation path counter")
+    );
     assert!(audit.contains("G38 completion audit"));
     assert!(audit.contains("G38-B closure proposal and integration audit"));
     assert!(audit.contains("G39 completion audit and K7/K8 evidence"));
@@ -306,6 +312,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(solver.contains("accepted_nonzero_arity_gpu_candidate_evidence_consumed"));
     assert!(solver.contains("accepted_gpu_candidate_tuple_key_column_reads_consumed"));
     assert!(solver.contains("require_production_metric_eligibility"));
+    assert!(solver.contains("gpu_solver_production_path_events"));
     assert!(solver.contains("production solver metrics require accepted GPU candidate evidence"));
     assert!(solver.contains("read_device_row_count"));
     assert!(solver.contains("require_stable_model_tuple_source"));
@@ -399,6 +406,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(prob.contains("EpistemicProbProductionCapabilities"));
     assert!(prob.contains("fixture_circuit_allowed: false"));
     assert!(prob.contains("require_production_metric_eligibility"));
+    assert!(prob.contains("gpu_production_path_events"));
     assert!(prob.contains("production probability metrics require accepted world-view evidence"));
     assert!(prob.contains("cpu_only_probability_recomputations: 0"));
     assert!(prob_epistemic.contains("from_gpu_execution_result"));

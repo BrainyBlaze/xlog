@@ -213,7 +213,7 @@ fn production_solver_metric_gate_rejects_cpu_oracle_only_traces() {
     let err = status_only
         .require_production_metric_eligibility()
         .expect_err("status-only trace must not satisfy production solver metrics");
-    assert!(format!("{err}").contains("existing GPU CDCL/MaxSAT/portfolio counter"));
+    assert!(format!("{err}").contains("existing GPU CDCL/MaxSAT/scheduler/portfolio counter"));
 
     let batch_eligible = GpuSolverProductionTrace {
         accepted_gpu_candidate_evidence_consumed: 2,
