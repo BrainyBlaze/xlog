@@ -18923,6 +18923,186 @@ fn accepted_quaternary_gpu_execution_result_records_solver_nonzero_arity_evidenc
 }
 
 #[test]
+fn accepted_quaternary_gpu_execution_result_gates_solver_reuse_maxsat_and_portfolio_paths() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred tuple4(u32, u32, u32, u32).
+        pred fact4(u32, u32, u32, u32).
+        pred accepted(u32, u32, u32, u32).
+        accepted(A, B, C, D) :- tuple4(A, B, C, D), know fact4(A, B, C, D).
+        "#,
+    )
+    .expect("parse quaternary solver reuse fixture");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile quaternary solver reuse executable");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &executable.relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation(
+        "tuple4",
+        upload_quaternary_u32(&fix.memory, &[(1, 2, 3, 4), (2, 3, 4, 5), (9, 9, 9, 9)]),
+    );
+    executor.put_relation("fact4", upload_quaternary_u32(&fix.memory, &[(2, 3, 4, 5)]));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 3,
+            },
+        )
+        .expect("execute quaternary solver reuse fixture");
+    assert_eq!(
+        download_quaternary_u32(&fix.provider, &result.final_output),
+        vec![(2, 3, 4, 5)]
+    );
+    assert_eq!(result.prepared.preflight.know_operator_count, 1);
+    assert_eq!(result.prepared.preflight.possible_operator_count, 0);
+    assert_eq!(result.prepared.preflight.not_possible_operator_count, 0);
+    assert_eq!(result.prepared.preflight.not_know_operator_count, 0);
+    assert_eq!(result.final_tuple_materialization.row_filter_count, 1);
+    assert_eq!(
+        result.final_tuple_materialization.negated_row_filter_count,
+        0
+    );
+    assert_eq!(
+        result.model_membership.tuple_source_key_column_device_reads,
+        4
+    );
+    assert_eq!(
+        result.model_membership.membership_source,
+        EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+    );
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
+
+    let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
+    let unsat_instance = SolveInstance::new(
+        1,
+        vec![
+            Clause::new(vec![Literal::positive(0)]),
+            Clause::new(vec![Literal::negative(0)]),
+        ],
+    );
+    let sat_cnf = GpuCnf::from_host(&sat_instance, &fix.provider).expect("upload SAT CNF");
+    let unsat_cnf = GpuCnf::from_host(&unsat_instance, &fix.provider).expect("upload UNSAT CNF");
+    let branch_limit = upload_u32_scalar(&fix.provider, 1);
+    let mut adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let mut workspace = adapter
+        .new_workspace(unsat_cnf.var_cap, unsat_cnf.clause_cap)
+        .expect("new quaternary solver reuse workspace");
+    let assign_ptr_before = workspace.assign_device_ptr();
+
+    let learned = adapter
+        .solve_unsat_then_reuse_learned_clauses_with_gpu_execution_result(
+            &fix.provider,
+            &result,
+            &mut workspace,
+            &unsat_cnf,
+            &branch_limit,
+            &unsat_cnf,
+            &branch_limit,
+        )
+        .expect("accepted quaternary GPU evidence must gate learned-clause reuse");
+    let maxsat = adapter
+        .solve_weighted_maxsat_candidates_with_gpu_execution_result(
+            &fix.provider,
+            &result,
+            &[GpuSolverProductionMaxSatCandidate {
+                score: 13,
+                cnf: &sat_cnf,
+                branch_var_limit: &branch_limit,
+            }],
+        )
+        .expect("accepted quaternary GPU evidence must gate MaxSAT");
+    let portfolio = adapter
+        .solve_portfolio_with_gpu_execution_result(
+            &fix.provider,
+            &result,
+            &[
+                GpuSolverProductionPortfolioJob::Sat {
+                    cnf: &sat_cnf,
+                    branch_var_limit: &branch_limit,
+                },
+                GpuSolverProductionPortfolioJob::MaxSat {
+                    candidates: &[GpuSolverProductionMaxSatCandidate {
+                        score: 13,
+                        cnf: &sat_cnf,
+                        branch_var_limit: &branch_limit,
+                    }],
+                },
+                GpuSolverProductionPortfolioJob::Unknown {
+                    reason: "quaternary know branch budget exhausted",
+                },
+                GpuSolverProductionPortfolioJob::Timeout { budget_micros: 10 },
+            ],
+        )
+        .expect("accepted quaternary GPU evidence must gate portfolio path");
+
+    assert_eq!(workspace.assign_device_ptr(), assign_ptr_before);
+    assert_eq!(learned.candidate_evidence_records, 1);
+    assert_eq!(learned.candidates, 2);
+    assert_eq!(learned.unsat_solves, 2);
+    assert_eq!(learned.gpu_learned_clause_arena_publications, 1);
+    assert_eq!(learned.gpu_learned_clause_imports, 1);
+    assert_eq!(learned.gpu_learned_clause_reused_solves, 1);
+    assert_eq!(learned.cpu_learned_clause_transfers, 0);
+    assert_eq!(maxsat.candidate_evidence_records, 1);
+    assert_eq!(maxsat.optimum_score, 13);
+    assert_eq!(maxsat.gpu_cdcl_candidate_solves, 1);
+    assert_eq!(portfolio.jobs, 4);
+    assert_eq!(portfolio.sat_jobs, 1);
+    assert_eq!(portfolio.maxsat_jobs, 1);
+    assert_eq!(portfolio.unknown_jobs, 1);
+    assert_eq!(portfolio.timeout_jobs, 1);
+    assert_eq!(portfolio.maxsat_optimum_scores, 13);
+
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 3);
+    assert_eq!(
+        trace.accepted_nonzero_arity_gpu_candidate_evidence_consumed,
+        3
+    );
+    assert_eq!(
+        trace.accepted_gpu_candidate_tuple_key_column_reads_consumed,
+        12
+    );
+    assert_eq!(trace.accepted_know_gpu_candidate_evidence_consumed, 3);
+    assert_eq!(trace.accepted_possible_gpu_candidate_evidence_consumed, 0);
+    assert_eq!(
+        trace.accepted_not_possible_gpu_candidate_evidence_consumed,
+        0
+    );
+    assert_eq!(trace.accepted_not_know_gpu_candidate_evidence_consumed, 0);
+    assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 2);
+    assert_eq!(trace.gpu_learned_clause_arena_publications, 1);
+    assert_eq!(trace.gpu_learned_clause_imports, 1);
+    assert_eq!(trace.gpu_learned_clause_reused_solves, 1);
+    assert_eq!(trace.cpu_learned_clause_transfers, 0);
+    assert_eq!(trace.gpu_maxsat_candidate_solves, 2);
+    assert_eq!(trace.gpu_maxsat_optima, 2);
+    assert_eq!(trace.gpu_portfolio_jobs, 4);
+    assert_eq!(trace.gpu_portfolio_sat_jobs, 1);
+    assert_eq!(trace.gpu_portfolio_maxsat_jobs, 1);
+    assert_eq!(trace.gpu_portfolio_unknown_status_jobs, 1);
+    assert_eq!(trace.gpu_portfolio_timeout_status_jobs, 1);
+    assert_eq!(trace.cpu_assignment_enumerations, 0);
+    assert_eq!(trace.cpu_maxsat_enumerations, 0);
+}
+
+#[test]
 fn accepted_quaternary_not_possible_solver_nonzero_arity_evidence_trace() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
