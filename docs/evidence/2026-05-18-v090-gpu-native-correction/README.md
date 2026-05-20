@@ -40,6 +40,15 @@ lifecycle pushes, probability evidence facts, or CPU recomputation counters
 advance. This narrows the `M090_GPU.8` transfer-budget evidence gap, but does
 not close `G090_GPU`, `G090_SOLVER`, or `G090_PROB`.
 
+2026-05-20 single-result row-count membership gate delta: accepted
+single-result solver and probabilistic consumers now have explicit fail-closed
+coverage when model-membership evidence is downgraded from stable-model
+tuple-source membership to row-count-only membership. The test proves rejection
+happens before accepted solver evidence accounting, lifecycle pushes,
+probability evidence facts, or CPU recomputation counters advance. This narrows
+the nonzero-arity membership-source guard, but does not close `G090_GPU`,
+`G090_SOLVER`, or `G090_PROB`.
+
 2026-05-20 follow-up delta: single-result quaternary `possible fact4/4` and
 `not know fact4/4` accepted GPU results now route through the existing solver
 SAT adapter and the existing probabilistic conditioned source adapter, recording
@@ -399,8 +408,9 @@ The next production slice should start at the lowering/runtime boundary:
     evidence plus source/program gradients, PIR/CNF, and exact query/gradient
     evaluation, split-batch quaternary all-operator component kernel timing and
     device workspace-buffer residency, accepted-world-view boundary rejection,
-    CPU-fallback rejection, row-count-only membership rejection, hot-path
-    host-transfer rejection, plus conditioned source, parsed-program,
+    single-result and split-batch CPU-fallback rejection, row-count-only
+    membership rejection, hot-path host-transfer rejection, plus conditioned
+    source, parsed-program,
     source-gradient, parsed-program-gradient,
     source/program PIR-CNF, and exact
     query/gradient evidence with one accepted `know` and `possible` counter,

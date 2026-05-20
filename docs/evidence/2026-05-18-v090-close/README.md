@@ -187,6 +187,14 @@ solves, four SAT jobs, four MaxSAT jobs, one accepted counter for every
 epistemic operator family, sixteen tuple-key column reads, and zero CPU search.
 This is not a closure proposal; `G090_SOLVER` and `G090_CLOSE` remain blocked.
 
+2026-05-20 single-result row-count membership follow-up: accepted
+single-result solver and probabilistic consumers now reject model-membership
+evidence downgraded from stable-model tuple-source membership to row-count-only
+membership before accepted evidence accounting, solver lifecycle pushes,
+probability evidence facts, or CPU recomputation counters advance. This is not a
+closure proposal; `G090_GPU`, `G090_SOLVER`, `G090_PROB`, and `G090_CLOSE`
+remain blocked.
+
 ## Ref Evidence
 
 | Ref | SHA |
@@ -558,7 +566,8 @@ Closure remains blocked until certification includes all of the following:
   tuple membership population beyond the current unary/possible/not-possible/
   binary/ternary-specialized/quaternary-generic/multi-membership/missing-required and `not know`
   accepted fixtures plus split-quaternary all-operator component timing and
-  workspace-buffer residency plus row-count-only membership rejection;
+  workspace-buffer residency plus split-batch and single-result row-count-only
+  membership rejection;
 - GPU-resident candidate, world-view, model-membership, and rejection buffers;
 - zero CPU fallback counters for candidate enumeration and world-view
   validation beyond the current single-result and split-quaternary

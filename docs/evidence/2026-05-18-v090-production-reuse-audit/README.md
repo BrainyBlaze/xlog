@@ -309,6 +309,12 @@ proves accepted solver and probabilistic batch consumers also fail closed when a
 nonzero-arity component is downgraded from stable-model tuple-source membership
 to row-count-only membership, preserving the tuple-membership reuse lock before
 solver lifecycle work or probability conditioning can proceed.
+The single-result row-count guard marker
+`accepted_gpu_execution_result_rejects_row_count_only_membership` proves accepted
+solver and probabilistic single-result consumers also fail closed when accepted
+model-membership evidence is downgraded from stable-model tuple-source
+membership to row-count-only membership, before accepted evidence accounting,
+solver lifecycle pushes, or probability evidence facts advance.
 The split-batch quaternary all-operator host-transfer marker
 `accepted_split_quaternary_all_operator_batch_rejects_hot_path_host_transfers`
 proves those same consumers fail closed when accepted batch evidence reports
