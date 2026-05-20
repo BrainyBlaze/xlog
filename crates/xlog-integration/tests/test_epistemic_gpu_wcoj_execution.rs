@@ -10135,6 +10135,261 @@ fn accepted_quaternary_not_possible_parsed_program_probabilistic_evidence_record
 }
 
 #[test]
+fn accepted_quaternary_possible_and_not_know_results_gate_solver_and_probabilistic_paths() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let run_case = |label: &str,
+                    program_source: &str,
+                    expected_rows: Vec<(u32, u32, u32, u32)>,
+                    expected_possible: usize,
+                    expected_not_know: usize,
+                    expected_negated_filters: usize|
+     -> EpistemicGpuExecutionResult {
+        let program = parse_program(program_source).expect(label);
+        let executable =
+            compile_epistemic_gpu_execution_with_stats_snapshot(&program, None).expect(label);
+        assert_eq!(executable.gpu_plan.tuple_membership_bindings.len(), 1);
+        assert_eq!(executable.gpu_plan.tuple_membership_bindings[0].arity, 4);
+        assert_eq!(
+            executable.gpu_plan.tuple_membership_bindings[0].bound_output_columns,
+            vec![Some(0), Some(1), Some(2), Some(3)]
+        );
+        assert_eq!(
+            executable.gpu_plan.tuple_membership_bindings[0].negated,
+            expected_negated_filters == 1
+        );
+
+        let mut executor =
+            Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+        for (name, rel_id) in &executable.relation_ids {
+            executor.register_relation(*rel_id, name);
+        }
+        executor.put_relation(
+            "tuple4",
+            upload_quaternary_u32(&fix.memory, &[(1, 2, 3, 4), (2, 3, 4, 5), (9, 9, 9, 9)]),
+        );
+        executor.put_relation("fact4", upload_quaternary_u32(&fix.memory, &[(2, 3, 4, 5)]));
+
+        let result = executor
+            .execute_epistemic_gpu_execution(
+                &executable,
+                EpistemicGpuWorkspaceCapacities {
+                    max_candidates: 2,
+                    max_worlds: 1,
+                    max_models_per_reduction: 3,
+                },
+            )
+            .expect(label);
+
+        assert_eq!(result.prepared.preflight.know_operator_count, 0);
+        assert_eq!(
+            result.prepared.preflight.possible_operator_count,
+            expected_possible
+        );
+        assert_eq!(
+            result.prepared.preflight.not_know_operator_count,
+            expected_not_know
+        );
+        assert_eq!(result.prepared.preflight.not_possible_operator_count, 0);
+        assert_eq!(result.final_tuple_materialization.row_filter_count, 1);
+        assert_eq!(
+            result.final_tuple_materialization.negated_row_filter_count,
+            expected_negated_filters
+        );
+        assert_eq!(
+            result.model_membership.membership_source,
+            EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+        );
+        assert_eq!(
+            result.model_membership.tuple_source_key_column_device_reads,
+            4
+        );
+        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+        assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
+        assert_eq!(
+            download_quaternary_u32(&fix.provider, &result.final_output),
+            expected_rows,
+            "{label} must filter by the accepted arity-4 tuple key evidence"
+        );
+        result
+    };
+
+    let possible_result = run_case(
+        "quaternary possible production reuse",
+        r#"
+        pred tuple4(u32, u32, u32, u32).
+        pred fact4(u32, u32, u32, u32).
+        pred accepted(u32, u32, u32, u32).
+        accepted(A, B, C, D) :- tuple4(A, B, C, D), possible fact4(A, B, C, D).
+        "#,
+        vec![(2, 3, 4, 5)],
+        1,
+        0,
+        0,
+    );
+    let not_know_result = run_case(
+        "quaternary not-know production reuse",
+        r#"
+        pred tuple4(u32, u32, u32, u32).
+        pred fact4(u32, u32, u32, u32).
+        pred accepted(u32, u32, u32, u32).
+        accepted(A, B, C, D) :- tuple4(A, B, C, D), not know fact4(A, B, C, D).
+        "#,
+        vec![(1, 2, 3, 4), (9, 9, 9, 9)],
+        0,
+        1,
+        1,
+    );
+
+    let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
+    let sat_cnf = GpuCnf::from_host(&sat_instance, &fix.provider).expect("upload SAT CNF");
+    let mut solver =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let possible_assignment = solver
+        .solve_expect_sat_with_gpu_execution_result(&fix.provider, &possible_result, &sat_cnf)
+        .expect("accepted quaternary possible GPU evidence must gate solver SAT path");
+    assert_ne!(*possible_assignment.device_ptr(), 0);
+    let not_know_assignment = solver
+        .solve_expect_sat_with_gpu_execution_result(&fix.provider, &not_know_result, &sat_cnf)
+        .expect("accepted quaternary not-know GPU evidence must gate solver SAT path");
+    assert_ne!(*not_know_assignment.device_ptr(), 0);
+
+    let solver_trace = solver.trace();
+    assert_eq!(solver_trace.accepted_gpu_candidate_evidence_consumed, 2);
+    assert_eq!(
+        solver_trace.accepted_nonzero_arity_gpu_candidate_evidence_consumed,
+        2
+    );
+    assert_eq!(
+        solver_trace.accepted_gpu_candidate_tuple_key_column_reads_consumed,
+        8
+    );
+    assert_eq!(
+        solver_trace.accepted_possible_gpu_candidate_evidence_consumed,
+        1
+    );
+    assert_eq!(
+        solver_trace.accepted_not_know_gpu_candidate_evidence_consumed,
+        1
+    );
+    assert_eq!(
+        solver_trace.accepted_know_gpu_candidate_evidence_consumed,
+        0
+    );
+    assert_eq!(
+        solver_trace.accepted_not_possible_gpu_candidate_evidence_consumed,
+        0
+    );
+    assert_eq!(solver_trace.gpu_cdcl_sat_solves, 2);
+    assert_eq!(solver_trace.cpu_assignment_enumerations, 0);
+    assert_eq!(solver_trace.cpu_maxsat_enumerations, 0);
+
+    let possible_assumptions = [EpistemicAssumption::possible_tuple(
+        "fact4",
+        vec![
+            EpistemicEvidenceTerm::integer(2),
+            EpistemicEvidenceTerm::integer(3),
+            EpistemicEvidenceTerm::integer(4),
+            EpistemicEvidenceTerm::integer(5),
+        ],
+        true,
+    )];
+    let not_know_assumptions = [EpistemicAssumption::known_tuple(
+        "fact4",
+        vec![
+            EpistemicEvidenceTerm::integer(1),
+            EpistemicEvidenceTerm::integer(2),
+            EpistemicEvidenceTerm::integer(3),
+            EpistemicEvidenceTerm::integer(4),
+        ],
+        false,
+    )];
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut prob = EpistemicProbProductionAdapter::new(config);
+    let evaluated = prob
+        .compile_and_evaluate_conditioned_source_for_gpu_execution_results(
+            r#"
+            0.8::fact4(2, 3, 4, 5).
+            0.6::fact4(1, 2, 3, 4).
+            query(fact4(2, 3, 4, 5)).
+            query(fact4(1, 2, 3, 4)).
+            "#,
+            &fix.provider,
+            &[
+                EpistemicProbGpuExecutionEvidence {
+                    result: &possible_result,
+                    assumptions: &possible_assumptions,
+                },
+                EpistemicProbGpuExecutionEvidence {
+                    result: &not_know_result,
+                    assumptions: &not_know_assumptions,
+                },
+            ],
+        )
+        .expect("accepted quaternary possible/not-know GPU evidence must gate probability path");
+
+    assert_eq!(evaluated.len(), 2);
+    assert_eq!(evaluated[0].query_probs.len(), 2);
+    assert_eq!(evaluated[1].query_probs.len(), 2);
+    assert!(
+        (evaluated[0].query_probs[0].prob - 1.0).abs() < 1.0e-6,
+        "accepted possible fact4(2, 3, 4, 5) evidence must condition probability to true"
+    );
+    assert!(
+        evaluated[1].query_probs[1].prob.abs() < 1.0e-6,
+        "accepted not-know fact4(1, 2, 3, 4) evidence must condition probability to false"
+    );
+
+    let prob_trace = prob.trace();
+    assert_eq!(prob_trace.accepted_world_view_evidence_consumed, 2);
+    assert_eq!(prob_trace.accepted_evidence_assumptions_consumed, 2);
+    assert_eq!(prob_trace.gpu_conditioned_evidence_facts, 2);
+    assert_eq!(prob_trace.gpu_conditioned_nonzero_arity_evidence_facts, 2);
+    assert_eq!(
+        prob_trace.gpu_source_conditioned_nonzero_arity_evidence_facts,
+        2
+    );
+    assert_eq!(
+        prob_trace.gpu_program_conditioned_nonzero_arity_evidence_facts,
+        0
+    );
+    assert_eq!(prob_trace.gpu_conditioned_max_evidence_arity, 4);
+    assert_eq!(prob_trace.gpu_source_conditioned_max_evidence_arity, 4);
+    assert_eq!(prob_trace.gpu_program_conditioned_max_evidence_arity, 0);
+    assert_eq!(prob_trace.gpu_conditioned_negative_evidence_facts, 1);
+    assert_eq!(prob_trace.gpu_conditioned_possible_evidence_facts, 1);
+    assert_eq!(prob_trace.gpu_conditioned_not_known_evidence_facts, 1);
+    assert_eq!(prob_trace.gpu_conditioned_know_evidence_facts, 0);
+    assert_eq!(prob_trace.gpu_conditioned_not_possible_evidence_facts, 0);
+    assert_eq!(prob_trace.gpu_source_conditioned_possible_evidence_facts, 1);
+    assert_eq!(
+        prob_trace.gpu_source_conditioned_not_known_evidence_facts,
+        1
+    );
+    assert_eq!(prob_trace.gpu_exact_source_compiles, 2);
+    assert_eq!(prob_trace.gpu_exact_program_compiles, 0);
+    assert_eq!(prob_trace.gpu_exact_query_evaluations, 2);
+    assert_eq!(prob_trace.gpu_knowledge_compilation_end_to_end_runs, 2);
+    assert_eq!(
+        prob_trace.gpu_source_knowledge_compilation_end_to_end_runs,
+        2
+    );
+    assert_eq!(
+        prob_trace.gpu_program_knowledge_compilation_end_to_end_runs,
+        0
+    );
+    assert_eq!(prob_trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(prob_trace.fixture_circuit_evaluations, 0);
+}
+
+#[test]
 fn accepted_gpu_execution_result_conditions_negative_nonzero_arity_probabilistic_evidence() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
