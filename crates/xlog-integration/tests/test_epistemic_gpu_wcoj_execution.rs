@@ -2908,6 +2908,66 @@ fn accepted_gpu_execution_result_records_final_result_transfer_budget() {
 }
 
 #[test]
+fn accepted_split_quaternary_all_operator_batch_records_final_result_transfer_budget() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let (split, batch) = execute_split_quaternary_all_operator_batch(&fix);
+
+    assert_eq!(split.components.len(), 4);
+    assert_eq!(batch.results.len(), 4);
+    assert_eq!(batch.trace.component_count, 4);
+    assert_eq!(batch.trace.gpu_runtime_component_executions, 4);
+    assert_eq!(batch.trace.tracked_dtoh_calls, 0);
+    assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
+
+    for (idx, component) in split.components.iter().enumerate() {
+        let result = &batch.results[idx];
+        let expected_rows = match component.component.rule_indices.as_slice() {
+            [0] => vec![(2, 3, 4, 5)],
+            [1] => vec![(3, 4, 5, 6)],
+            [2] => vec![(1, 2, 3, 4), (2, 3, 4, 5), (3, 4, 5, 6)],
+            [3] => vec![(2, 3, 4, 5), (3, 4, 5, 6), (9, 9, 9, 9)],
+            other => panic!("unexpected split quaternary transfer rule indices: {other:?}"),
+        };
+        let expected_payload_bytes =
+            expected_rows.len() as u64 * 4 * std::mem::size_of::<u32>() as u64;
+
+        assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
+        assert_eq!(result.transfer_budget.tracked_htod_calls, 0);
+        assert_eq!(result.transfer_budget.per_candidate_host_round_trips, 0);
+        assert_eq!(
+            result.final_result_transfer.final_output_rows,
+            expected_rows.len()
+        );
+        assert_eq!(result.final_result_transfer.final_output_column_count, 4);
+        assert_eq!(
+            result.final_result_transfer.final_output_row_width_bytes,
+            4 * std::mem::size_of::<u32>()
+        );
+        assert_eq!(
+            result.final_result_transfer.final_output_payload_bytes,
+            expected_payload_bytes
+        );
+        assert_eq!(result.final_result_transfer.row_count_device_reads, 1);
+        assert_eq!(
+            result.final_result_transfer.tracked_data_plane_dtoh_calls,
+            0
+        );
+        assert_eq!(
+            result.final_result_transfer.tracked_data_plane_dtoh_bytes,
+            0
+        );
+        assert_eq!(
+            download_quaternary_u32(&fix.provider, &result.final_output),
+            expected_rows
+        );
+    }
+}
+
+#[test]
 fn accepted_split_quaternary_all_operator_batch_records_component_kernel_timing() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");

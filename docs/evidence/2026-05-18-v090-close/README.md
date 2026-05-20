@@ -208,6 +208,13 @@ for rows, columns, row width, payload bytes, row-count metadata reads, and zero
 accepted-path data-plane D2H calls or bytes. This is not a closure proposal;
 `G090_GPU` and `G090_CLOSE` remain blocked.
 
+2026-05-20 split-batch final-result transfer follow-up: the four-component
+split-batch quaternary `know`/`possible`/`not possible`/`not know` fixture now
+records aggregate zero hot-path D2H and per-candidate host-round-trip counters
+plus per-component final rows, arity, payload bytes, row-count metadata reads,
+and zero accepted-path data-plane D2H calls or bytes. This is not a closure
+proposal; `G090_GPU` and `G090_CLOSE` remain blocked.
+
 2026-05-20 single-result row-count membership follow-up: accepted
 single-result solver and probabilistic consumers now reject model-membership
 evidence downgraded from stable-model tuple-source membership to row-count-only
@@ -394,9 +401,10 @@ also record per-result/per-component kernel timing across all eight GPU hot-path
 phases plus device workspace-buffer residency for candidate-assumption,
 world-view, model-membership, and rejection-reason buffers; the single-result
 path also records bounded final-result transfer accounting; the split batch also
-records fail-closed solver/probability rejection of rejected world-view results,
-nonzero CPU fallback counters, row-count-only nonzero-arity membership, and
-hot-path host transfers, and reaches conditioned source/program exact-query,
+records bounded final-result transfer accounting, fail-closed solver/probability
+rejection of rejected world-view results, nonzero CPU fallback counters,
+row-count-only nonzero-arity membership, and hot-path host transfers, and reaches
+conditioned source/program exact-query,
 source/program gradient, source/program PIR-CNF, and already-compiled exact
 query/gradient evidence with one accepted `know`, `possible`, `not possible`,
 and `not know` counter, thirty-two aggregate CUDA-event pairs, and zero CPU

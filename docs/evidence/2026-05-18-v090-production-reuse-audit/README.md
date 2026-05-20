@@ -170,7 +170,12 @@ accepted single-result execution reports zero tracked hot-path H2D/D2H calls and
 zero per-candidate host round trips, then accounts for the bounded post-hot-path
 final output transfer window with final rows, column count, row width, payload
 bytes, row-count metadata reads, and zero accepted-path data-plane D2H calls or
-bytes.
+bytes. The split-batch all-operator transfer marker
+`accepted_split_quaternary_all_operator_batch_records_final_result_transfer_budget`
+extends the same accounting across four accepted arity-four components, including
+the aggregate zero hot-path D2H and per-candidate host-round-trip counters plus
+per-component final rows, arity, payload bytes, row-count metadata reads, and
+zero accepted-path data-plane D2H.
 
 Probability audit note: the all-binary-operator split-batch probability fixtures now prove conditioned source/program query and gradient evidence plus all-binary split-batch source/program PIR-CNF plus already-compiled exact query/gradient evaluation through the existing GPU exact/provenance/PIR/CNF paths. The split-batch quaternary fixtures also prove one `know fact4/4` component and one `not possible fact4/4` component condition parsed-program exact queries, source/program gradients, source/program PIR-CNF, and already-compiled exact query/gradient evaluation through the same accepted batch evidence gate while recording arity-four source/program evidence counters, negative-evidence counters, and zero CPU recomputation. The split-batch probability evidence gates also reject stale batch evidence when aggregate CUDA-event timing is absent or any component phase is untimed, and the single-result accepted-world-view gate rejects stale evidence when candidate-generation CUDA-event timing is absent.
 The quaternary not-possible deep marker
