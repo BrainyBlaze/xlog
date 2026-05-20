@@ -142,6 +142,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(runtime.contains("rejected_candidate_indices"));
     assert!(runtime.contains("dtoh_small_metadata_untracked"));
     assert!(runtime.contains("&workspace.candidate_assumptions"));
+    assert!(runtime.contains("cpu_solver_search_fallbacks"));
+    assert!(runtime.contains("cpu_probability_recomputations"));
     assert!(cuda.contains("complete_membership"));
     assert!(cuda.contains("candidate_assumptions[assumption_base + literal]"));
     assert!(runtime.contains("cpu_candidate_enumerations: 0"));

@@ -1526,6 +1526,10 @@ pub struct EpistemicGpuBatchExecutionTrace {
     pub cpu_candidate_enumerations: u64,
     /// CPU world-view validations observed across component semantic traces.
     pub cpu_world_view_validations: u64,
+    /// CPU solver-search fallbacks observed across component preflight traces.
+    pub cpu_solver_search_fallbacks: u64,
+    /// CPU probability recomputations observed across component preflight traces.
+    pub cpu_probability_recomputations: u64,
     /// Hot-path D2H calls tracked across all components.
     pub tracked_dtoh_calls: u64,
     /// Hot-path H2D calls tracked across all components.
@@ -1585,6 +1589,20 @@ impl EpistemicGpuBatchExecutionTrace {
             cpu_world_view_validations: results
                 .iter()
                 .map(|result| u64::from(result.semantic_trace.cpu_world_view_validations))
+                .sum(),
+            cpu_solver_search_fallbacks: results
+                .iter()
+                .map(|result| result.prepared.preflight.cpu_fallbacks.solver_search)
+                .sum(),
+            cpu_probability_recomputations: results
+                .iter()
+                .map(|result| {
+                    result
+                        .prepared
+                        .preflight
+                        .cpu_fallbacks
+                        .probabilistic_recompute
+                })
                 .sum(),
             tracked_dtoh_calls: results
                 .iter()

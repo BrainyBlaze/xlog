@@ -3313,9 +3313,13 @@ fn accepted_split_quaternary_all_operator_batch_rejects_cpu_fallback_counters() 
     let (split, mut batch) = execute_split_quaternary_all_operator_batch(&fix);
     assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
     assert_eq!(batch.trace.cpu_world_view_validations, 0);
+    assert_eq!(batch.trace.cpu_solver_search_fallbacks, 0);
+    assert_eq!(batch.trace.cpu_probability_recomputations, 0);
 
     batch.trace.cpu_candidate_enumerations = 1;
     batch.trace.cpu_world_view_validations = 1;
+    batch.trace.cpu_solver_search_fallbacks = 1;
+    batch.trace.cpu_probability_recomputations = 1;
 
     let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
     let sat_cnf = GpuCnf::from_host(&sat_instance, &fix.provider).expect("upload SAT CNF");
@@ -3344,6 +3348,8 @@ fn accepted_split_quaternary_all_operator_batch_rejects_cpu_fallback_counters() 
     assert!(solver_err.contains("CPU/host fallback counters"));
     assert!(solver_err.contains("cpu_candidates=1"));
     assert!(solver_err.contains("cpu_world_views=1"));
+    assert!(solver_err.contains("cpu_solver_search=1"));
+    assert!(solver_err.contains("cpu_probability_recompute=1"));
 
     let terms = |a, b, c, d| {
         vec![
@@ -3414,6 +3420,8 @@ fn accepted_split_quaternary_all_operator_batch_rejects_cpu_fallback_counters() 
     assert!(prob_err.contains("CPU/host fallback counters"));
     assert!(prob_err.contains("cpu_candidates=1"));
     assert!(prob_err.contains("cpu_world_views=1"));
+    assert!(prob_err.contains("cpu_solver_search=1"));
+    assert!(prob_err.contains("cpu_probability_recompute=1"));
 }
 
 #[test]

@@ -426,6 +426,8 @@ impl EpistemicProbProductionAdapter {
             || batch_trace.cpu_recomposition_steps != 0
             || batch_trace.cpu_candidate_enumerations != 0
             || batch_trace.cpu_world_view_validations != 0
+            || batch_trace.cpu_solver_search_fallbacks != 0
+            || batch_trace.cpu_probability_recomputations != 0
             || batch_trace.tracked_dtoh_calls != 0
             || batch_trace.tracked_htod_calls != 0
             || batch_trace.per_candidate_host_round_trips != 0
@@ -437,12 +439,15 @@ impl EpistemicProbProductionAdapter {
                     "accepted GPU batch evidence requires complete GPU component execution and \
                      zero CPU/host fallback counters plus aggregate CUDA-event timing, got \
                      components={}/{}, recomposition={}, cpu_candidates={}, cpu_world_views={}, \
-                     dtoh_calls={}, htod_calls={}, round_trips={}, aggregate_timing_recorded={}",
+                     cpu_solver_search={}, cpu_probability_recompute={}, dtoh_calls={}, \
+                     htod_calls={}, round_trips={}, aggregate_timing_recorded={}",
                     batch_trace.gpu_runtime_component_executions,
                     batch_trace.component_count,
                     batch_trace.cpu_recomposition_steps,
                     batch_trace.cpu_candidate_enumerations,
                     batch_trace.cpu_world_view_validations,
+                    batch_trace.cpu_solver_search_fallbacks,
+                    batch_trace.cpu_probability_recomputations,
                     batch_trace.tracked_dtoh_calls,
                     batch_trace.tracked_htod_calls,
                     batch_trace.per_candidate_host_round_trips,

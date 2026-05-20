@@ -48,6 +48,14 @@ accepted solver evidence accounting, lifecycle pushes, probability evidence
 facts, or CPU recomputation counters advance. This narrows `G090_GPU`,
 `G090_SOLVER`, and `G090_PROB`, but does not close them.
 
+2026-05-20 split-batch full CPU-fallback gate delta: accepted split-batch solver
+and probabilistic consumers now have aggregate fail-closed coverage for
+candidate-enumeration, world-view-validation, solver-search, and probabilistic
+recompute CPU fallback counters. `EpistemicGpuBatchExecutionTrace` records
+solver-search and probabilistic-recompute fallback totals in addition to the
+existing candidate/world-view counters. This narrows `G090_GPU`, `G090_SOLVER`,
+and `G090_PROB`, but does not close them.
+
 2026-05-20 single-result transfer-budget gate delta: accepted single-result
 solver and probabilistic consumers now have explicit fail-closed coverage when
 tracked hot-path H2D/D2H calls or per-candidate host round trips become nonzero.

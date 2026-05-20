@@ -218,6 +218,12 @@ reads, and final-result data-plane D2H calls/bytes from component results, and
 batch consumers now reject aggregate H2D evidence as well as D2H and round trips.
 This is not a closure proposal; `G090_GPU` and `G090_CLOSE` remain blocked.
 
+2026-05-20 split-batch full CPU-fallback follow-up: accepted split-batch solver
+and probabilistic consumers now reject aggregate solver-search and probabilistic
+recompute fallback counters in addition to candidate-enumeration and
+world-view-validation fallback counters. This is not a closure proposal;
+`G090_GPU`, `G090_SOLVER`, `G090_PROB`, and `G090_CLOSE` remain blocked.
+
 2026-05-20 single-result row-count membership follow-up: accepted
 single-result solver and probabilistic consumers now reject model-membership
 evidence downgraded from stable-model tuple-source membership to row-count-only
@@ -605,9 +611,8 @@ Closure remains blocked until certification includes all of the following:
 - broader GPU-resident candidate, world-view, model-membership, and rejection
   buffers beyond the current single-result and split-quaternary all-operator
   workspace-buffer residency fixtures;
-- zero CPU fallback counters for candidate enumeration and world-view
-  validation beyond the current single-result and split-quaternary
-  all-operator fail-closed consumer rejection fixtures;
+- zero CPU fallback counters beyond the current single-result and
+  split-quaternary all-operator fail-closed consumer rejection fixtures;
 - broader WCOJ-eligible epistemic reductions proving successful runtime
   dispatch beyond the current accepted v0.7.0 4-cycle and K5/K6/K7/K8 fixtures, including layout,
   skew-scheduling, and helper-splitting evidence where applicable;

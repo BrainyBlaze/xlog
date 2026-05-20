@@ -2480,6 +2480,8 @@ fn require_accepted_gpu_solver_batch_evidence<'a>(
         || trace.cpu_recomposition_steps != 0
         || trace.cpu_candidate_enumerations != 0
         || trace.cpu_world_view_validations != 0
+        || trace.cpu_solver_search_fallbacks != 0
+        || trace.cpu_probability_recomputations != 0
         || trace.tracked_dtoh_calls != 0
         || trace.tracked_htod_calls != 0
         || trace.per_candidate_host_round_trips != 0
@@ -2491,12 +2493,15 @@ fn require_accepted_gpu_solver_batch_evidence<'a>(
                 "solver batch evidence requires complete GPU component execution and zero \
                  CPU/host fallback counters plus aggregate CUDA-event timing, got \
                  components={}/{}, recomposition={}, cpu_candidates={}, cpu_world_views={}, \
-                 dtoh_calls={}, htod_calls={}, round_trips={}, aggregate_timing_recorded={}",
+                 cpu_solver_search={}, cpu_probability_recompute={}, dtoh_calls={}, \
+                 htod_calls={}, round_trips={}, aggregate_timing_recorded={}",
                 trace.gpu_runtime_component_executions,
                 trace.component_count,
                 trace.cpu_recomposition_steps,
                 trace.cpu_candidate_enumerations,
                 trace.cpu_world_view_validations,
+                trace.cpu_solver_search_fallbacks,
+                trace.cpu_probability_recomputations,
                 trace.tracked_dtoh_calls,
                 trace.tracked_htod_calls,
                 trace.per_candidate_host_round_trips,
