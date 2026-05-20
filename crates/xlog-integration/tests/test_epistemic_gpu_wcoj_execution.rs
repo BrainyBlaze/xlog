@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use cudarc::driver::sys;
@@ -2886,6 +2886,93 @@ fn accepted_split_quaternary_all_operator_batch_records_component_kernel_timing(
         assert_eq!(total_kernel_launches, 11);
         assert_eq!(result.aggregate_kernel_timing().cuda_event_pairs, 8);
         assert_eq!(result.aggregate_kernel_timing().timing_sync_ops, 8);
+    }
+}
+
+#[test]
+fn accepted_split_quaternary_all_operator_batch_records_device_workspace_buffers() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let (split, batch) = execute_split_quaternary_all_operator_batch(&fix);
+
+    assert_eq!(split.components.len(), 4);
+    assert_eq!(batch.results.len(), 4);
+    assert_eq!(batch.trace.component_count, 4);
+    assert_eq!(batch.trace.gpu_runtime_component_executions, 4);
+    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
+    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
+    assert_eq!(batch.trace.cpu_world_view_validations, 0);
+
+    for result in &batch.results {
+        let layout = result.prepared.preflight.workspace_layout;
+        let workspace = &result.prepared.workspace;
+        let reset = result.prepared.workspace_reset;
+
+        assert_eq!(workspace.layout, layout);
+        assert_eq!(
+            workspace.candidate_assumptions.len(),
+            layout.candidate_assumption_bytes
+        );
+        assert_eq!(workspace.world_views.len(), layout.world_view_bytes);
+        assert_eq!(
+            workspace.model_membership.len(),
+            layout.model_membership_bytes
+        );
+        assert_eq!(
+            workspace.rejection_reasons.len(),
+            layout.rejection_reason_slots
+        );
+
+        let workspace_ptrs = BTreeSet::from([
+            *workspace.candidate_assumptions.device_ptr(),
+            *workspace.world_views.device_ptr(),
+            *workspace.model_membership.device_ptr(),
+            *workspace.rejection_reasons.device_ptr(),
+        ]);
+        assert_eq!(workspace_ptrs.len(), 4);
+        assert!(workspace_ptrs.iter().all(|ptr| *ptr != 0));
+
+        assert_eq!(
+            reset.candidate_assumption_bytes,
+            layout.candidate_assumption_bytes
+        );
+        assert_eq!(reset.world_view_bytes, layout.world_view_bytes);
+        assert_eq!(reset.model_membership_bytes, layout.model_membership_bytes);
+        assert_eq!(
+            reset.rejection_reason_bytes,
+            layout.rejection_reason_slots * std::mem::size_of::<u32>()
+        );
+        assert_eq!(reset.device_zero_ops, 4);
+        assert_eq!(reset.host_write_ops, 0);
+        assert_eq!(reset.total_zeroed_bytes(), layout.total_bytes());
+
+        assert_eq!(
+            layout.candidate_assumption_bytes,
+            result.candidate_generation.candidate_assumption_bytes
+        );
+        assert_eq!(
+            layout.world_view_bytes,
+            result.propagation.world_view_bytes_written
+        );
+        assert_eq!(
+            layout.model_membership_bytes,
+            result.model_membership.model_membership_bytes_written
+        );
+        assert_eq!(
+            layout.rejection_reason_slots,
+            result.propagation.rejection_reason_slots_written
+        );
+        assert_eq!(
+            layout.rejection_reason_slots,
+            result.semantic_trace.generated_candidates
+        );
+        assert_eq!(
+            result.model_membership.membership_source,
+            EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+        );
     }
 }
 

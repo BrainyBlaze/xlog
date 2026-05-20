@@ -262,6 +262,14 @@ materialization, and final tuple materialization. It also requires nonzero GPU
 launch counts, zero host writes per phase, four stable-model tuple-source
 membership records, sixteen tuple-key column device reads, thirty-two aggregate
 event pairs, and zero CPU recomposition/candidate/world-view fallback counters.
+The split-batch quaternary all-operator workspace marker
+`accepted_split_quaternary_all_operator_batch_records_device_workspace_buffers`
+proves every accepted component keeps candidate-assumption, world-view,
+model-membership, and rejection-reason buffers in distinct `TrackedCudaSlice`
+device allocations. It also checks buffer lengths against the preflight
+workspace layout, device reset byte accounting, four device zero operations,
+zero reset host writes, and trace byte counts for generated candidates,
+propagated world views, model-membership bytes, and rejection slots.
 All accepted probability split-batch entrypoints now call the single
 `accepted_world_views_from_gpu_batch_execution_evidence` validator, and
 `production_prob_batch_paths_use_single_gpu_batch_gate` source-audits that no

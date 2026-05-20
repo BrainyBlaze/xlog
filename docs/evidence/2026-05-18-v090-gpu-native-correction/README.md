@@ -361,11 +361,12 @@ The next production slice should start at the lowering/runtime boundary:
    parsed-program PIR/CNF and exact query/gradient evidence,
     split-batch quaternary `possible`/`not know fact4/4` conditioned source
     evidence plus source/program gradients, PIR/CNF, and exact query/gradient
-    evaluation, split-batch quaternary all-operator component kernel timing plus
-    conditioned source, parsed-program, source-gradient,
-    parsed-program-gradient, source/program PIR-CNF, and exact query/gradient
-    evidence with one accepted `know`, `possible`, `not possible`, and
-    `not know` counter plus arity-four source/program-conditioned evidence,
+    evaluation, split-batch quaternary all-operator component kernel timing and
+    device workspace-buffer residency plus conditioned source, parsed-program,
+    source-gradient, parsed-program-gradient, source/program PIR-CNF, and exact
+    query/gradient evidence with one accepted `know` and `possible` counter,
+    plus accepted `not possible` and `not know` counters and arity-four
+    source/program-conditioned evidence,
     all-binary-operator split-batch conditioned source/program query and
     gradient evidence, and accepted
    G91/default FAEEL mode-specific trace counters,
@@ -392,6 +393,7 @@ The next production slice should start at the lowering/runtime boundary:
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution rejects_unrecorded_candidate_generation_timing -- --nocapture` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution aggregate_timing_requires_every_component_phase_to_be_recorded -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_all_operator_batch_records_component_kernel_timing -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_all_operator_batch_records_device_workspace_buffers -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_probabilistic_conditioned_program_path -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_probabilistic_conditioned_source_gradients -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_probabilistic_conditioned_program_gradients -- --nocapture` | PASS, 1 passed, 0 failed |

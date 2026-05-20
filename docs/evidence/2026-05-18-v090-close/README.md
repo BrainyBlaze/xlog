@@ -361,11 +361,13 @@ conditioned source exact-query path with source-conditioned arity-four evidence
 counters, plus source/program gradients, source/program PIR/CNF, and exact
 query/gradient evaluation with zero CPU probability recomputation; the
 four-component split quaternary all-operator batch now also records per-component
-kernel timing across all eight GPU hot-path phases and reaches conditioned
-source/program exact-query, source/program gradient, source/program PIR-CNF, and
-already-compiled exact query/gradient evidence with one accepted `know`,
-`possible`, `not possible`, and `not know` counter, thirty-two aggregate
-CUDA-event pairs, and zero CPU probability recomputation; the
+kernel timing across all eight GPU hot-path phases, device workspace-buffer
+residency for candidate-assumption, world-view, model-membership, and
+rejection-reason buffers, and reaches conditioned source/program exact-query,
+source/program gradient, source/program PIR-CNF, and already-compiled exact
+query/gradient evidence with one accepted `know`, `possible`, `not possible`,
+and `not know` counter, thirty-two aggregate CUDA-event pairs, and zero CPU
+probability recomputation; the
 single-result not-possible and possible/not-know evidence also now reaches
 source/program PIR/CNF plus already-compiled exact query/gradient adapters. These are
 bounded production-reuse additions only; the BLOCKED/PARTIAL statuses above are
@@ -427,7 +429,8 @@ The branch contains useful scaffolding:
   ternary specialized-arity, quaternary all-operator generic-arity, multi-membership,
   split-component, all-binary-operator split, split-quaternary-operator
   GPU-vs-GPT oracle trace parity fixtures, and split-quaternary all-operator
-  component-timing evidence with nonzero phase launch counts;
+  component-timing and workspace-buffer residency evidence with nonzero phase
+  launch counts;
 - runtime preflight that rejects nonzero CPU fallback counters and records
   WCOJ/K-clique/helper route metadata before launch, including max K-clique
   arity, live edge-permutation counts, distinct stream-group scheduling
@@ -547,7 +550,8 @@ Closure remains blocked until certification includes all of the following:
 - broader nonzero GPU launch counts and kernel timings for actual stable-model
   tuple membership population beyond the current unary/possible/not-possible/
   binary/ternary-specialized/quaternary-generic/multi-membership/missing-required and `not know`
-  accepted fixtures plus split-quaternary all-operator component timing;
+  accepted fixtures plus split-quaternary all-operator component timing and
+  workspace-buffer residency;
 - GPU-resident candidate, world-view, model-membership, and rejection buffers;
 - zero CPU fallback counters for candidate enumeration and world-view
   validation;
