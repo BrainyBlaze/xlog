@@ -41,6 +41,8 @@ tag gates remain separate user-authorized actions.
 
 Solver audit note: the all-binary-operator split-batch solver fixtures prove the lifecycle, learned-clause reuse, and MaxSAT paths consume four split components and advance the accepted `know`/`possible`/`not possible`/`not know` solver evidence counters without CPU search or learned-clause transfers.
 
+Probability audit note: the all-binary-operator split-batch probability fixtures now prove conditioned source/program query and gradient evidence plus all-binary split-batch source/program PIR-CNF plus already-compiled exact query/gradient evaluation through the existing GPU exact/provenance/PIR/CNF paths.
+
 ## Forbidden Parallel Engines
 
 The accepted paths audited above must not introduce epistemic-only replacements

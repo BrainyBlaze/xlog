@@ -37,7 +37,8 @@ certification evidence for `M090_CERT.8` or the final release decision.
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_epistemic_v070_4cycle_execution_certifies_production_wcoj_dispatch -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_epistemic_k5_execution_certifies_production_wcoj_dispatch -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_all_binary_operator_batch_gates_probabilistic_program_and_gradient_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 108 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_all_binary_operator_batch_gates_probabilistic_pir_cnf_and_exact_evaluation_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 109 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_semantic_trace_matches_gpt_oracle_rejection_reason -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_ternary_membership_matches_gpt_oracle_parity -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_membership_matches_gpt_oracle_parity -- --nocapture` | PASS, 1 passed, 0 failed |
@@ -114,7 +115,7 @@ certification evidence for `M090_CERT.8` or the final release decision.
 | `cargo test -p xlog-prob --tests` after merging the v0.7.0/v0.8.0/v0.8.5/v0.8.6 main bundle | PASS |
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace -- --nocapture` after merging the v0.7.0/v0.8.0/v0.8.5/v0.8.6 main bundle | PASS, 53 passed, 0 failed |
 | `cargo test -p xlog-solve --test gpu_solver_production_reuse` after merging the v0.7.0/v0.8.0/v0.8.5/v0.8.6 main bundle | PASS, 3 passed, 0 failed |
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` after merging the v0.7.0/v0.8.0/v0.8.5/v0.8.6 main bundle | PASS, 108 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` after merging the v0.7.0/v0.8.0/v0.8.5/v0.8.6 main bundle | PASS, 109 passed, 0 failed |
 | `cargo run -q -p xlog-cli --features host-io -- prob examples/v085-language/showcase/06_prob_aggregate_mc/program.xlog --output json` after merging the v0.7.0/v0.8.0/v0.8.5/v0.8.6 main bundle | PASS, MC output emitted `out_degree(1, 2)` |
 | `python scripts/validate_v086_examples.py --output /tmp/v090-v086-compat-validation.json` after merging the v0.7.0/v0.8.0/v0.8.5/v0.8.6 main bundle | PASS, consumer certification PASS, example execution PASS |
 
