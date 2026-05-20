@@ -126,7 +126,7 @@ pub struct EpistemicGpuWorkspaceResetTrace {
 }
 
 /// CUDA-event timing captured around one epistemic GPU kernel launch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EpistemicGpuKernelTimingTrace {
     /// CUDA event pairs recorded around the launch. Runtime traces require one.
     pub cuda_event_pairs: u32,
@@ -459,6 +459,24 @@ impl EpistemicGpuKernelTimingTrace {
     /// Whether CUDA-event timing was recorded for this trace.
     pub const fn is_recorded(&self) -> bool {
         self.cuda_event_pairs > 0
+    }
+
+    /// Saturating sum used when aggregating multi-kernel or split-batch traces.
+    pub fn saturating_add(self, other: Self) -> Self {
+        Self {
+            cuda_event_pairs: self.cuda_event_pairs.saturating_add(other.cuda_event_pairs),
+            timing_sync_ops: self.timing_sync_ops.saturating_add(other.timing_sync_ops),
+            kernel_elapsed_nanos: self
+                .kernel_elapsed_nanos
+                .saturating_add(other.kernel_elapsed_nanos),
+        }
+    }
+
+    /// Aggregate timing traces from a single execution or split-batch result.
+    pub fn sum(traces: impl IntoIterator<Item = Self>) -> Self {
+        traces
+            .into_iter()
+            .fold(Self::unrecorded(), Self::saturating_add)
     }
 }
 
@@ -1470,6 +1488,22 @@ pub struct EpistemicGpuExecutionResult {
     pub trace: EpistemicGpuRuntimeTrace,
 }
 
+impl EpistemicGpuExecutionResult {
+    /// Aggregate CUDA-event timing from all epistemic GPU hot-path kernels.
+    pub fn aggregate_kernel_timing(&self) -> EpistemicGpuKernelTimingTrace {
+        EpistemicGpuKernelTimingTrace::sum([
+            self.candidate_generation.kernel_timing,
+            self.propagation.kernel_timing,
+            self.candidate_validation.kernel_timing,
+            self.model_membership.kernel_timing,
+            self.world_view_validation.kernel_timing,
+            self.materialization.kernel_timing,
+            self.final_result_materialization.kernel_timing,
+            self.final_tuple_materialization.kernel_timing,
+        ])
+    }
+}
+
 /// Batch-level trace proving split components reused the single-plan GPU path.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EpistemicGpuBatchExecutionTrace {
@@ -1499,6 +1533,8 @@ pub struct EpistemicGpuBatchExecutionTrace {
     pub not_know_operator_count: usize,
     /// Negated `possible` operators observed as `not possible` across component preflight traces.
     pub not_possible_operator_count: usize,
+    /// Aggregate CUDA-event timing from all component hot-path kernels.
+    pub aggregate_kernel_timing: EpistemicGpuKernelTimingTrace,
 }
 
 impl EpistemicGpuBatchExecutionTrace {
@@ -1548,6 +1584,11 @@ impl EpistemicGpuBatchExecutionTrace {
                 .iter()
                 .map(|result| result.prepared.preflight.not_possible_operator_count)
                 .sum(),
+            aggregate_kernel_timing: EpistemicGpuKernelTimingTrace::sum(
+                results
+                    .iter()
+                    .map(|result| result.aggregate_kernel_timing()),
+            ),
         }
     }
 }

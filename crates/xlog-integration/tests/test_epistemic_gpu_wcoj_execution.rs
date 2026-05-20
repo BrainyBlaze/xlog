@@ -1589,6 +1589,8 @@ fn accepted_split_all_binary_operators_match_gpt_oracles() {
     assert_eq!(batch.trace.cpu_world_view_validations, 0);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
+    assert!(batch.trace.aggregate_kernel_timing.is_recorded());
+    assert_eq!(batch.trace.aggregate_kernel_timing.cuda_event_pairs, 32);
     assert_eq!(batch.trace.know_operator_count, 1);
     assert_eq!(batch.trace.possible_operator_count, 1);
     assert_eq!(batch.trace.not_know_operator_count, 1);

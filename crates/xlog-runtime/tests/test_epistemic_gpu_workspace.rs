@@ -1182,6 +1182,9 @@ fn staging_runtime_paths_record_cuda_event_timing_for_each_kernel() {
     assert!(source.contains("fn time_epistemic_gpu_kernel_launch"));
     assert!(source.contains("record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))"));
     assert!(source.contains("EpistemicGpuKernelTimingTrace::from_cuda_elapsed_ms"));
+    assert!(source.contains("pub aggregate_kernel_timing: EpistemicGpuKernelTimingTrace"));
+    assert!(source.contains("fn aggregate_kernel_timing(&self) -> EpistemicGpuKernelTimingTrace"));
+    assert!(source.contains(".map(|result| result.aggregate_kernel_timing())"));
 
     for label in [
         "epistemic GPU candidate generation",
