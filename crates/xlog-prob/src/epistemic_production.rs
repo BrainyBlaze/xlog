@@ -769,75 +769,11 @@ impl EpistemicProbProductionAdapter {
         provider: &CudaKernelProvider,
         evidence: EpistemicProbGpuBatchExecutionEvidence<'_>,
     ) -> Result<Vec<ExactResult>> {
-        if evidence.batch.results.is_empty() {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "epistemic probabilistic batch production".to_string(),
-                context: "probabilistic batch gating requires at least one accepted GPU component"
-                    .to_string(),
-            });
-        }
-        if evidence.assumptions_by_component.len() != evidence.batch.results.len() {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "epistemic probabilistic batch production".to_string(),
-                context: format!(
-                    "assumption group count {} does not match GPU batch component count {}",
-                    evidence.assumptions_by_component.len(),
-                    evidence.batch.results.len()
-                ),
-            });
-        }
-
-        let batch_trace = evidence.batch.trace;
-        if batch_trace.component_count != evidence.batch.results.len()
-            || batch_trace.gpu_runtime_component_executions != evidence.batch.results.len()
-            || batch_trace.cpu_recomposition_steps != 0
-            || batch_trace.cpu_candidate_enumerations != 0
-            || batch_trace.cpu_world_view_validations != 0
-            || batch_trace.tracked_dtoh_calls != 0
-            || batch_trace.per_candidate_host_round_trips != 0
-            || !batch_trace.aggregate_kernel_timing.is_recorded()
-        {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "epistemic probabilistic batch production".to_string(),
-                context: format!(
-                    "accepted GPU batch evidence requires complete GPU component execution and \
-                     zero CPU/host fallback counters plus aggregate CUDA-event timing, got \
-                     components={}/{}, recomposition={}, cpu_candidates={}, cpu_world_views={}, \
-                     dtoh_calls={}, round_trips={}, aggregate_timing_recorded={}",
-                    batch_trace.gpu_runtime_component_executions,
-                    batch_trace.component_count,
-                    batch_trace.cpu_recomposition_steps,
-                    batch_trace.cpu_candidate_enumerations,
-                    batch_trace.cpu_world_view_validations,
-                    batch_trace.tracked_dtoh_calls,
-                    batch_trace.per_candidate_host_round_trips,
-                    batch_trace.aggregate_kernel_timing.is_recorded()
-                ),
-            });
-        }
-
-        let mut accepted = Vec::with_capacity(evidence.batch.results.len());
-        for (result, assumptions) in evidence
-            .batch
-            .results
-            .iter()
-            .zip(evidence.assumptions_by_component.iter())
-        {
-            accepted.push(AcceptedWorldViewEvidence::from_gpu_execution_result(
-                provider,
-                result,
-                (*assumptions).to_vec(),
-            )?);
-        }
-
-        self.trace.accepted_gpu_batch_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_evidence_consumed
-            .saturating_add(1);
-        self.trace.accepted_gpu_batch_component_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_component_evidence_consumed
-            .saturating_add(accepted.len() as u64);
+        let accepted = self.accepted_world_views_from_gpu_batch_execution_evidence(
+            provider,
+            evidence,
+            "epistemic probabilistic batch production",
+        )?;
 
         let mut results = Vec::with_capacity(accepted.len());
         for evidence in &accepted {
@@ -940,75 +876,11 @@ impl EpistemicProbProductionAdapter {
         provider: &CudaKernelProvider,
         evidence: EpistemicProbGpuBatchExecutionEvidence<'_>,
     ) -> Result<Vec<ExactResult>> {
-        if evidence.batch.results.is_empty() {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "epistemic probabilistic batch production".to_string(),
-                context: "probabilistic batch gating requires at least one accepted GPU component"
-                    .to_string(),
-            });
-        }
-        if evidence.assumptions_by_component.len() != evidence.batch.results.len() {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "epistemic probabilistic batch production".to_string(),
-                context: format!(
-                    "assumption group count {} does not match GPU batch component count {}",
-                    evidence.assumptions_by_component.len(),
-                    evidence.batch.results.len()
-                ),
-            });
-        }
-
-        let batch_trace = evidence.batch.trace;
-        if batch_trace.component_count != evidence.batch.results.len()
-            || batch_trace.gpu_runtime_component_executions != evidence.batch.results.len()
-            || batch_trace.cpu_recomposition_steps != 0
-            || batch_trace.cpu_candidate_enumerations != 0
-            || batch_trace.cpu_world_view_validations != 0
-            || batch_trace.tracked_dtoh_calls != 0
-            || batch_trace.per_candidate_host_round_trips != 0
-            || !batch_trace.aggregate_kernel_timing.is_recorded()
-        {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "epistemic probabilistic batch production".to_string(),
-                context: format!(
-                    "accepted GPU batch evidence requires complete GPU component execution and \
-                     zero CPU/host fallback counters plus aggregate CUDA-event timing, got \
-                     components={}/{}, recomposition={}, cpu_candidates={}, cpu_world_views={}, \
-                     dtoh_calls={}, round_trips={}, aggregate_timing_recorded={}",
-                    batch_trace.gpu_runtime_component_executions,
-                    batch_trace.component_count,
-                    batch_trace.cpu_recomposition_steps,
-                    batch_trace.cpu_candidate_enumerations,
-                    batch_trace.cpu_world_view_validations,
-                    batch_trace.tracked_dtoh_calls,
-                    batch_trace.per_candidate_host_round_trips,
-                    batch_trace.aggregate_kernel_timing.is_recorded()
-                ),
-            });
-        }
-
-        let mut accepted = Vec::with_capacity(evidence.batch.results.len());
-        for (result, assumptions) in evidence
-            .batch
-            .results
-            .iter()
-            .zip(evidence.assumptions_by_component.iter())
-        {
-            accepted.push(AcceptedWorldViewEvidence::from_gpu_execution_result(
-                provider,
-                result,
-                (*assumptions).to_vec(),
-            )?);
-        }
-
-        self.trace.accepted_gpu_batch_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_evidence_consumed
-            .saturating_add(1);
-        self.trace.accepted_gpu_batch_component_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_component_evidence_consumed
-            .saturating_add(accepted.len() as u64);
+        let accepted = self.accepted_world_views_from_gpu_batch_execution_evidence(
+            provider,
+            evidence,
+            "epistemic probabilistic batch production",
+        )?;
 
         let mut results = Vec::with_capacity(accepted.len());
         for evidence in &accepted {
@@ -1117,75 +989,11 @@ impl EpistemicProbProductionAdapter {
         provider: &CudaKernelProvider,
         evidence: EpistemicProbGpuBatchExecutionEvidence<'_>,
     ) -> Result<Vec<ExactResultWithGrads>> {
-        if evidence.batch.results.is_empty() {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "epistemic probabilistic batch production".to_string(),
-                context: "probabilistic batch gating requires at least one accepted GPU component"
-                    .to_string(),
-            });
-        }
-        if evidence.assumptions_by_component.len() != evidence.batch.results.len() {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "epistemic probabilistic batch production".to_string(),
-                context: format!(
-                    "assumption group count {} does not match GPU batch component count {}",
-                    evidence.assumptions_by_component.len(),
-                    evidence.batch.results.len()
-                ),
-            });
-        }
-
-        let batch_trace = evidence.batch.trace;
-        if batch_trace.component_count != evidence.batch.results.len()
-            || batch_trace.gpu_runtime_component_executions != evidence.batch.results.len()
-            || batch_trace.cpu_recomposition_steps != 0
-            || batch_trace.cpu_candidate_enumerations != 0
-            || batch_trace.cpu_world_view_validations != 0
-            || batch_trace.tracked_dtoh_calls != 0
-            || batch_trace.per_candidate_host_round_trips != 0
-            || !batch_trace.aggregate_kernel_timing.is_recorded()
-        {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "epistemic probabilistic batch production".to_string(),
-                context: format!(
-                    "accepted GPU batch evidence requires complete GPU component execution and \
-                     zero CPU/host fallback counters plus aggregate CUDA-event timing, got \
-                     components={}/{}, recomposition={}, cpu_candidates={}, cpu_world_views={}, \
-                     dtoh_calls={}, round_trips={}, aggregate_timing_recorded={}",
-                    batch_trace.gpu_runtime_component_executions,
-                    batch_trace.component_count,
-                    batch_trace.cpu_recomposition_steps,
-                    batch_trace.cpu_candidate_enumerations,
-                    batch_trace.cpu_world_view_validations,
-                    batch_trace.tracked_dtoh_calls,
-                    batch_trace.per_candidate_host_round_trips,
-                    batch_trace.aggregate_kernel_timing.is_recorded()
-                ),
-            });
-        }
-
-        let mut accepted = Vec::with_capacity(evidence.batch.results.len());
-        for (result, assumptions) in evidence
-            .batch
-            .results
-            .iter()
-            .zip(evidence.assumptions_by_component.iter())
-        {
-            accepted.push(AcceptedWorldViewEvidence::from_gpu_execution_result(
-                provider,
-                result,
-                (*assumptions).to_vec(),
-            )?);
-        }
-
-        self.trace.accepted_gpu_batch_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_evidence_consumed
-            .saturating_add(1);
-        self.trace.accepted_gpu_batch_component_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_component_evidence_consumed
-            .saturating_add(accepted.len() as u64);
+        let accepted = self.accepted_world_views_from_gpu_batch_execution_evidence(
+            provider,
+            evidence,
+            "epistemic probabilistic batch production",
+        )?;
 
         let mut results = Vec::with_capacity(accepted.len());
         for evidence in &accepted {
@@ -1292,75 +1100,11 @@ impl EpistemicProbProductionAdapter {
         provider: &CudaKernelProvider,
         evidence: EpistemicProbGpuBatchExecutionEvidence<'_>,
     ) -> Result<Vec<ExactResult>> {
-        if evidence.batch.results.is_empty() {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "epistemic probabilistic batch production".to_string(),
-                context: "probabilistic batch gating requires at least one accepted GPU component"
-                    .to_string(),
-            });
-        }
-        if evidence.assumptions_by_component.len() != evidence.batch.results.len() {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "epistemic probabilistic batch production".to_string(),
-                context: format!(
-                    "assumption group count {} does not match GPU batch component count {}",
-                    evidence.assumptions_by_component.len(),
-                    evidence.batch.results.len()
-                ),
-            });
-        }
-
-        let batch_trace = evidence.batch.trace;
-        if batch_trace.component_count != evidence.batch.results.len()
-            || batch_trace.gpu_runtime_component_executions != evidence.batch.results.len()
-            || batch_trace.cpu_recomposition_steps != 0
-            || batch_trace.cpu_candidate_enumerations != 0
-            || batch_trace.cpu_world_view_validations != 0
-            || batch_trace.tracked_dtoh_calls != 0
-            || batch_trace.per_candidate_host_round_trips != 0
-            || !batch_trace.aggregate_kernel_timing.is_recorded()
-        {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "epistemic probabilistic batch production".to_string(),
-                context: format!(
-                    "accepted GPU batch evidence requires complete GPU component execution and \
-                     zero CPU/host fallback counters plus aggregate CUDA-event timing, got \
-                     components={}/{}, recomposition={}, cpu_candidates={}, cpu_world_views={}, \
-                     dtoh_calls={}, round_trips={}, aggregate_timing_recorded={}",
-                    batch_trace.gpu_runtime_component_executions,
-                    batch_trace.component_count,
-                    batch_trace.cpu_recomposition_steps,
-                    batch_trace.cpu_candidate_enumerations,
-                    batch_trace.cpu_world_view_validations,
-                    batch_trace.tracked_dtoh_calls,
-                    batch_trace.per_candidate_host_round_trips,
-                    batch_trace.aggregate_kernel_timing.is_recorded()
-                ),
-            });
-        }
-
-        let mut accepted = Vec::with_capacity(evidence.batch.results.len());
-        for (result, assumptions) in evidence
-            .batch
-            .results
-            .iter()
-            .zip(evidence.assumptions_by_component.iter())
-        {
-            accepted.push(AcceptedWorldViewEvidence::from_gpu_execution_result(
-                provider,
-                result,
-                (*assumptions).to_vec(),
-            )?);
-        }
-
-        self.trace.accepted_gpu_batch_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_evidence_consumed
-            .saturating_add(1);
-        self.trace.accepted_gpu_batch_component_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_component_evidence_consumed
-            .saturating_add(accepted.len() as u64);
+        let accepted = self.accepted_world_views_from_gpu_batch_execution_evidence(
+            provider,
+            evidence,
+            "epistemic probabilistic batch production",
+        )?;
 
         let mut results = Vec::with_capacity(accepted.len());
         for evidence in &accepted {
@@ -1470,75 +1214,11 @@ impl EpistemicProbProductionAdapter {
         provider: &CudaKernelProvider,
         evidence: EpistemicProbGpuBatchExecutionEvidence<'_>,
     ) -> Result<Vec<ExactResultWithGrads>> {
-        if evidence.batch.results.is_empty() {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "epistemic probabilistic batch production".to_string(),
-                context: "probabilistic batch gating requires at least one accepted GPU component"
-                    .to_string(),
-            });
-        }
-        if evidence.assumptions_by_component.len() != evidence.batch.results.len() {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "epistemic probabilistic batch production".to_string(),
-                context: format!(
-                    "assumption group count {} does not match GPU batch component count {}",
-                    evidence.assumptions_by_component.len(),
-                    evidence.batch.results.len()
-                ),
-            });
-        }
-
-        let batch_trace = evidence.batch.trace;
-        if batch_trace.component_count != evidence.batch.results.len()
-            || batch_trace.gpu_runtime_component_executions != evidence.batch.results.len()
-            || batch_trace.cpu_recomposition_steps != 0
-            || batch_trace.cpu_candidate_enumerations != 0
-            || batch_trace.cpu_world_view_validations != 0
-            || batch_trace.tracked_dtoh_calls != 0
-            || batch_trace.per_candidate_host_round_trips != 0
-            || !batch_trace.aggregate_kernel_timing.is_recorded()
-        {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "epistemic probabilistic batch production".to_string(),
-                context: format!(
-                    "accepted GPU batch evidence requires complete GPU component execution and \
-                     zero CPU/host fallback counters plus aggregate CUDA-event timing, got \
-                     components={}/{}, recomposition={}, cpu_candidates={}, cpu_world_views={}, \
-                     dtoh_calls={}, round_trips={}, aggregate_timing_recorded={}",
-                    batch_trace.gpu_runtime_component_executions,
-                    batch_trace.component_count,
-                    batch_trace.cpu_recomposition_steps,
-                    batch_trace.cpu_candidate_enumerations,
-                    batch_trace.cpu_world_view_validations,
-                    batch_trace.tracked_dtoh_calls,
-                    batch_trace.per_candidate_host_round_trips,
-                    batch_trace.aggregate_kernel_timing.is_recorded()
-                ),
-            });
-        }
-
-        let mut accepted = Vec::with_capacity(evidence.batch.results.len());
-        for (result, assumptions) in evidence
-            .batch
-            .results
-            .iter()
-            .zip(evidence.assumptions_by_component.iter())
-        {
-            accepted.push(AcceptedWorldViewEvidence::from_gpu_execution_result(
-                provider,
-                result,
-                (*assumptions).to_vec(),
-            )?);
-        }
-
-        self.trace.accepted_gpu_batch_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_evidence_consumed
-            .saturating_add(1);
-        self.trace.accepted_gpu_batch_component_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_component_evidence_consumed
-            .saturating_add(accepted.len() as u64);
+        let accepted = self.accepted_world_views_from_gpu_batch_execution_evidence(
+            provider,
+            evidence,
+            "epistemic probabilistic batch production",
+        )?;
 
         let mut results = Vec::with_capacity(accepted.len());
         for evidence in &accepted {
@@ -1637,75 +1317,11 @@ impl EpistemicProbProductionAdapter {
         provider: &CudaKernelProvider,
         evidence: EpistemicProbGpuBatchExecutionEvidence<'_>,
     ) -> Result<Vec<ExactResult>> {
-        if evidence.batch.results.is_empty() {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "epistemic probabilistic batch production".to_string(),
-                context: "probabilistic batch gating requires at least one accepted GPU component"
-                    .to_string(),
-            });
-        }
-        if evidence.assumptions_by_component.len() != evidence.batch.results.len() {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "epistemic probabilistic batch production".to_string(),
-                context: format!(
-                    "assumption group count {} does not match GPU batch component count {}",
-                    evidence.assumptions_by_component.len(),
-                    evidence.batch.results.len()
-                ),
-            });
-        }
-
-        let batch_trace = evidence.batch.trace;
-        if batch_trace.component_count != evidence.batch.results.len()
-            || batch_trace.gpu_runtime_component_executions != evidence.batch.results.len()
-            || batch_trace.cpu_recomposition_steps != 0
-            || batch_trace.cpu_candidate_enumerations != 0
-            || batch_trace.cpu_world_view_validations != 0
-            || batch_trace.tracked_dtoh_calls != 0
-            || batch_trace.per_candidate_host_round_trips != 0
-            || !batch_trace.aggregate_kernel_timing.is_recorded()
-        {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "epistemic probabilistic batch production".to_string(),
-                context: format!(
-                    "accepted GPU batch evidence requires complete GPU component execution and \
-                     zero CPU/host fallback counters plus aggregate CUDA-event timing, got \
-                     components={}/{}, recomposition={}, cpu_candidates={}, cpu_world_views={}, \
-                     dtoh_calls={}, round_trips={}, aggregate_timing_recorded={}",
-                    batch_trace.gpu_runtime_component_executions,
-                    batch_trace.component_count,
-                    batch_trace.cpu_recomposition_steps,
-                    batch_trace.cpu_candidate_enumerations,
-                    batch_trace.cpu_world_view_validations,
-                    batch_trace.tracked_dtoh_calls,
-                    batch_trace.per_candidate_host_round_trips,
-                    batch_trace.aggregate_kernel_timing.is_recorded()
-                ),
-            });
-        }
-
-        let mut accepted = Vec::with_capacity(evidence.batch.results.len());
-        for (result, assumptions) in evidence
-            .batch
-            .results
-            .iter()
-            .zip(evidence.assumptions_by_component.iter())
-        {
-            accepted.push(AcceptedWorldViewEvidence::from_gpu_execution_result(
-                provider,
-                result,
-                (*assumptions).to_vec(),
-            )?);
-        }
-
-        self.trace.accepted_gpu_batch_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_evidence_consumed
-            .saturating_add(1);
-        self.trace.accepted_gpu_batch_component_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_component_evidence_consumed
-            .saturating_add(accepted.len() as u64);
+        let accepted = self.accepted_world_views_from_gpu_batch_execution_evidence(
+            provider,
+            evidence,
+            "epistemic probabilistic batch production",
+        )?;
 
         let mut results = Vec::with_capacity(accepted.len());
         for evidence in &accepted {

@@ -26,6 +26,14 @@ recomputation. The default FAEEL executable-plan guard also now fails closed
 for nonzero-arity self-`possible` lowering unless tuple-level foundedness can
 be proven.
 
+2026-05-20 probability-gate delta: accepted probabilistic split-batch
+source/program compile, compile/evaluate, conditioned query, conditioned
+gradient, PIR/CNF, already-compiled query, and already-compiled gradient paths
+now all route through the single
+`accepted_world_views_from_gpu_batch_execution_evidence` validator. The source
+audit `production_prob_batch_paths_use_single_gpu_batch_gate` keeps aggregate
+component-count, timing, and zero CPU/host fallback checks centralized.
+
 ## Semantic-Oracle Validation
 
 | Gate | Evidence |

@@ -144,6 +144,22 @@ fn production_prob_capabilities_disallow_fixture_circuit_metrics() {
 }
 
 #[test]
+fn production_prob_batch_paths_use_single_gpu_batch_gate() {
+    let mut production_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    production_path.push("src");
+    production_path.push("epistemic_production.rs");
+    let production = fs::read_to_string(&production_path).unwrap_or_default();
+
+    let manual_batch_guard_count = production
+        .matches("batch_trace.component_count != evidence.batch.results.len()")
+        .count();
+    assert_eq!(
+        manual_batch_guard_count, 1,
+        "probabilistic split-batch paths must share the central accepted GPU batch gate"
+    );
+}
+
+#[test]
 fn production_prob_metric_gate_rejects_fixture_only_traces() {
     let empty = EpistemicProbProductionTrace::default();
     let err = empty

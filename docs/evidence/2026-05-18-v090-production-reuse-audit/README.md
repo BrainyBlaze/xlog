@@ -46,6 +46,11 @@ portfolio production-path counter before it can be eligible for production
 solver metrics.
 
 Probability audit note: the all-binary-operator split-batch probability fixtures now prove conditioned source/program query and gradient evidence plus all-binary split-batch source/program PIR-CNF plus already-compiled exact query/gradient evaluation through the existing GPU exact/provenance/PIR/CNF paths. The split-batch probability evidence gates also reject stale batch evidence when aggregate CUDA-event timing is absent or any component phase is untimed, and the single-result accepted-world-view gate rejects stale evidence when candidate-generation CUDA-event timing is absent.
+All accepted probability split-batch entrypoints now call the single
+`accepted_world_views_from_gpu_batch_execution_evidence` validator, and
+`production_prob_batch_paths_use_single_gpu_batch_gate` source-audits that no
+second manual batch guard can drift from the central timing and zero-fallback
+checks.
 The source audit also requires the design-only `KnowledgeCompilerAdapter`
 contracts for c2d and miniC2D, keeping alternative compiler adapters explicit
 without treating them as accepted production dispatch paths.
@@ -107,6 +112,7 @@ accepted paths audited by the source test.
 | Command | Expected result |
 |---|---|
 | `cargo test -p xlog-runtime --test test_epistemic_production_reuse_audit -- --nocapture` | PASS after this artifact exists and accepted-path source markers are present. |
+| `cargo test -p xlog-prob --test epistemic_prob_production_reuse -- --nocapture` | PASS after this artifact exists and probabilistic production source markers are present. |
 | `cargo fmt --check` | PASS |
 | `git diff --check` | PASS |
 
