@@ -95,10 +95,11 @@ filters output rows by accepted membership, world-view state, all variable-bound
 tuple-key relation matches, and binding polarity before the final tuple kernel
 compacts reduced output columns. The materialization trace records
 `row_filter_count` and `negated_row_filter_count`. Accepted unary, possible,
-not-possible, binary, quaternary generic-arity, multi-membership,
-missing-required multi-membership, and `not know` fixtures now prove final rows
-are filtered or rejected by bound tuple keys on device, and preflight records
-explicit `know`/`possible`/`not know`/`not possible` operator counts.
+not-possible, binary, quaternary generic-arity, all-`know` multi-membership,
+mixed `know`/`possible` multi-membership, missing-required multi-membership,
+and `not know` fixtures now prove final rows are filtered or rejected by bound
+tuple keys on device, and preflight records explicit
+`know`/`possible`/`not know`/`not possible` operator counts.
 `EpistemicGpuRuntimeWcojCertification` then requires actual production WCOJ
 counter deltas before WCOJ evidence can be certified, and its certified result
 carries the dispatched plan's edge-permutation, stream-group scheduling,
@@ -120,8 +121,9 @@ variable-bound comparison against reduced-output columns and negated polarity
 through the generic arity-N kernel. Final tuple output is gated by the staged
 membership and world-view buffers, with accepted unary, possible, not-possible,
 binary `know`, binary `possible`, binary `not possible`, binary `not know`,
-quaternary generic arity-N `know`, multi-membership, missing-required
-multi-membership, and unary `not know` bound-key row-filter
+quaternary generic arity-N `know`, all-`know` multi-membership,
+mixed `know`/`possible` multi-membership, missing-required multi-membership,
+and unary `not know` bound-key row-filter
 fixtures. Full arbitrary-world enumeration, complete semantic parity, and
 release-wide solver/probabilistic coverage do not dispatch yet, but bounded
 accepted runtime fixtures now feed the solver and probabilistic production
@@ -322,10 +324,14 @@ self-supported `possible p()` runtime fixture uses the mode-aware oracle for
 generated, propagated, tested, accepted, rejected, and candidate-index parity.
 The independently founded FAEEL self-`possible p()` runtime fixture uses the
 default oracle for the same trace/candidate-index parity.
-The accepted multi-membership fixture also compares the two-literal
-`know edge(X), know color(X)` candidate matrix against the bounded GPT oracle,
-including generated, propagated, tested, accepted, rejected, and
-accepted/rejected candidate-index fields.
+The accepted multi-membership fixtures also compare two-literal same-rule
+candidate matrices against bounded GPT oracles: `know edge(X), know color(X)`
+for all-`know` membership, and `know edge(X), possible alt(X)` for mixed
+operator membership. Both compare generated, propagated, tested, accepted,
+rejected, and accepted/rejected candidate-index fields; the mixed fixture also
+records one `know` operator, one `possible` operator, two positive row filters,
+zero CPU candidate/world-view fallback counters, and zero tracked hot-path D2H
+calls.
 The unary nonzero-arity `possible edge(X)`, `not possible edge(X)`, and
 `not know edge(X)` fixtures, plus the binary `not know edge(X, Y)` fixture,
 compare the same trace and candidate-index fields against bounded GPT oracles;
