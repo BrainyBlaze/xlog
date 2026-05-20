@@ -3264,6 +3264,202 @@ fn accepted_split_all_binary_operator_batch_gates_solver_lifecycle_path() {
 }
 
 #[test]
+fn accepted_split_quaternary_not_possible_batch_gates_solver_lifecycle_path() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred tuple4(u32, u32, u32, u32).
+        pred fact4(u32, u32, u32, u32).
+        pred known4(u32, u32, u32, u32).
+        pred clear4(u32, u32, u32, u32).
+        known4(A, B, C, D) :- tuple4(A, B, C, D), know fact4(A, B, C, D).
+        clear4(A, B, C, D) :- tuple4(A, B, C, D), not possible fact4(A, B, C, D).
+        "#,
+    )
+    .expect("parse split quaternary solver fixture");
+    let split = compile_epistemic_gpu_split_execution_with_stats_snapshot(&program, None)
+        .expect("compile split quaternary solver components");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    let mut relation_ids = BTreeMap::new();
+    for component in &split.components {
+        for (name, rel_id) in &component.executable.relation_ids {
+            if let Some(previous) = relation_ids.insert(name.clone(), *rel_id) {
+                assert_eq!(
+                    previous, *rel_id,
+                    "split quaternary solver components must preserve shared relation ids"
+                );
+            }
+        }
+    }
+    for (name, rel_id) in &relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation(
+        "tuple4",
+        upload_quaternary_u32(&fix.memory, &[(1, 2, 3, 4), (2, 3, 4, 5), (9, 9, 9, 9)]),
+    );
+    executor.put_relation("fact4", upload_quaternary_u32(&fix.memory, &[(2, 3, 4, 5)]));
+
+    let executables: Vec<_> = split
+        .components
+        .iter()
+        .map(|component| &component.executable)
+        .collect();
+    let batch = executor
+        .execute_epistemic_gpu_execution_batch_with_trace(
+            &executables,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 3,
+            },
+        )
+        .expect("execute split quaternary solver components through GPU batch path");
+
+    assert_eq!(batch.results.len(), 2);
+    assert_eq!(batch.trace.component_count, 2);
+    assert_eq!(batch.trace.know_operator_count, 1);
+    assert_eq!(batch.trace.not_possible_operator_count, 1);
+    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
+    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
+    assert_eq!(batch.trace.cpu_world_view_validations, 0);
+    assert_eq!(batch.trace.tracked_dtoh_calls, 0);
+    assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
+
+    for (idx, component) in split.components.iter().enumerate() {
+        match component.component.rule_indices.as_slice() {
+            [0] => {
+                assert_eq!(
+                    download_quaternary_u32(&fix.provider, &batch.results[idx].final_output),
+                    vec![(2, 3, 4, 5)]
+                );
+                assert_eq!(
+                    batch.results[idx]
+                        .model_membership
+                        .tuple_source_key_column_device_reads,
+                    4
+                );
+                assert_eq!(
+                    batch.results[idx].model_membership.membership_source,
+                    EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+                );
+            }
+            [1] => {
+                assert_eq!(
+                    download_quaternary_u32(&fix.provider, &batch.results[idx].final_output),
+                    vec![(1, 2, 3, 4), (9, 9, 9, 9)]
+                );
+                assert_eq!(
+                    batch.results[idx]
+                        .prepared
+                        .preflight
+                        .not_possible_operator_count,
+                    1
+                );
+                assert_eq!(
+                    batch.results[idx]
+                        .final_tuple_materialization
+                        .negated_row_filter_count,
+                    1
+                );
+                assert_eq!(
+                    batch.results[idx]
+                        .model_membership
+                        .tuple_source_key_column_device_reads,
+                    4
+                );
+                assert_eq!(
+                    batch.results[idx].model_membership.membership_source,
+                    EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+                );
+            }
+            other => panic!("unexpected split quaternary solver rule indices: {other:?}"),
+        }
+    }
+
+    let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
+    let unsat_instance = SolveInstance::new(
+        1,
+        vec![
+            Clause::new(vec![Literal::positive(0)]),
+            Clause::new(vec![Literal::negative(0)]),
+        ],
+    );
+    let sat_cnf = GpuCnf::from_host(&sat_instance, &fix.provider).expect("upload SAT CNF");
+    let unsat_cnf = GpuCnf::from_host(&unsat_instance, &fix.provider).expect("upload UNSAT CNF");
+    let branch_limit = upload_u32_scalar(&fix.provider, 1);
+    let mut adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let mut workspace = adapter
+        .new_workspace(unsat_cnf.var_cap, unsat_cnf.clause_cap)
+        .expect("new split quaternary solver workspace");
+    let assign_ptr_before = workspace.assign_device_ptr();
+
+    let report = adapter
+        .solve_assumption_lifecycle_with_gpu_batch_execution_result(
+            &fix.provider,
+            GpuSolverProductionBatchExecutionEvidence { batch: &batch },
+            &mut workspace,
+            &[
+                GpuSolverProductionLifecycleStep {
+                    cnf: &sat_cnf,
+                    branch_var_limit: &branch_limit,
+                    expectation: GpuSolverProductionExpectation::Sat,
+                },
+                GpuSolverProductionLifecycleStep {
+                    cnf: &unsat_cnf,
+                    branch_var_limit: &branch_limit,
+                    expectation: GpuSolverProductionExpectation::Unsat,
+                },
+            ],
+        )
+        .expect("accepted split quaternary GPU batch evidence must gate solver lifecycle path");
+
+    assert_eq!(workspace.assign_device_ptr(), assign_ptr_before);
+    assert_eq!(report.candidate_evidence_records, 2);
+    assert_eq!(report.steps, 4);
+    assert_eq!(report.assumption_pushes, 4);
+    assert_eq!(report.assumption_retractions, 4);
+    assert_eq!(report.workspace_reuses, 2);
+
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_gpu_batch_candidate_evidence_consumed, 1);
+    assert_eq!(
+        trace.accepted_gpu_batch_candidate_component_evidence_consumed,
+        2
+    );
+    assert_eq!(trace.accepted_gpu_candidate_evidence_consumed, 2);
+    assert_eq!(
+        trace.accepted_nonzero_arity_gpu_candidate_evidence_consumed,
+        2
+    );
+    assert_eq!(
+        trace.accepted_gpu_candidate_tuple_key_column_reads_consumed,
+        8
+    );
+    assert_eq!(trace.accepted_know_gpu_candidate_evidence_consumed, 1);
+    assert_eq!(trace.accepted_possible_gpu_candidate_evidence_consumed, 0);
+    assert_eq!(
+        trace.accepted_not_possible_gpu_candidate_evidence_consumed,
+        1
+    );
+    assert_eq!(trace.accepted_not_know_gpu_candidate_evidence_consumed, 0);
+    assert_eq!(trace.gpu_assumption_pushes, 4);
+    assert_eq!(trace.gpu_assumption_retractions, 4);
+    assert_eq!(trace.gpu_lifecycle_workspace_reuses, 2);
+    assert_eq!(trace.gpu_cdcl_sat_solves, 2);
+    assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 2);
+    assert_eq!(trace.cpu_assignment_enumerations, 0);
+    assert_eq!(trace.cpu_maxsat_enumerations, 0);
+}
+
+#[test]
 fn accepted_split_all_binary_operator_batch_gates_solver_reuse_and_maxsat_paths() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
