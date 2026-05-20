@@ -230,6 +230,14 @@ accepted batch also routes through conditioned source/program gradients,
 source/program PIR-CNF, and already-compiled exact query/gradient adapters while
 recording arity-four source/program evidence counters, batch/component
 evidence, and zero CPU probability recomputation.
+The split-batch quaternary all-operator source marker
+`accepted_split_quaternary_all_operator_batch_conditions_probabilistic_evidence`
+proves a four-component arity-four batch consumes one accepted `know`,
+`possible`, `not possible`, and `not know` evidence record through
+`compile_and_evaluate_conditioned_source_for_gpu_batch_execution_result`,
+records accepted batch/component evidence, four source-conditioned arity-four
+evidence facts, two negative facts, four exact-query evaluations, and zero CPU
+probability recomputation.
 All accepted probability split-batch entrypoints now call the single
 `accepted_world_views_from_gpu_batch_execution_evidence` validator, and
 `production_prob_batch_paths_use_single_gpu_batch_gate` source-audits that no

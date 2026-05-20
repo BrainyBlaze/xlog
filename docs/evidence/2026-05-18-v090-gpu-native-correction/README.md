@@ -72,6 +72,14 @@ GPU evidences now also gate source and parsed-program PIR/CNF plus
 already-compiled exact query/gradient paths. This narrows `G090_SOLVER` and
 `G090_PROB` but does not close either node.
 
+2026-05-20 split all-operator probability delta: the four-component
+split-batch quaternary `know`/`possible`/`not possible`/`not know` fixture now
+also gates the existing probabilistic conditioned source exact-query adapter,
+recording accepted batch/component evidence, arity-four source-conditioned
+evidence, one accepted counter for every epistemic operator family, two negative
+evidence facts, four exact-query evaluations, and zero CPU probability
+recomputation. This narrows `G090_PROB` but does not close it.
+
 2026-05-20 positive-quaternary solver delta: single-result `know fact4/4`
 accepted GPU evidence now also gates existing learned-clause reuse, bounded
 MaxSAT, and status-aware SAT/MaxSAT portfolio adapters with three accepted
@@ -335,10 +343,12 @@ The next production slice should start at the lowering/runtime boundary:
    quaternary `possible`/`not know fact4/4` conditioned source evidence,
    two-record quaternary `possible`/`not know fact4/4` source and
    parsed-program PIR/CNF and exact query/gradient evidence,
-   split-batch quaternary `possible`/`not know fact4/4` conditioned source
-   evidence plus source/program gradients, PIR/CNF, and exact query/gradient
-   evaluation, all-binary-operator split-batch
-   conditioned source/program query and gradient evidence, and accepted
+    split-batch quaternary `possible`/`not know fact4/4` conditioned source
+    evidence plus source/program gradients, PIR/CNF, and exact query/gradient
+    evaluation, split-batch quaternary all-operator conditioned source evidence
+    with one accepted `know`, `possible`, `not possible`, and `not know`
+    counter plus arity-four source-conditioned evidence, all-binary-operator split-batch
+    conditioned source/program query and gradient evidence, and accepted
    G91/default FAEEL mode-specific trace counters,
    and broader probabilistic coverage remains open.
 
@@ -373,6 +383,7 @@ The next production slice should start at the lowering/runtime boundary:
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_all_operator_batch_gates_solver_lifecycle_path -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_all_operator_batch_gates_solver_reuse_and_maxsat_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_all_operator_batch_gates_solver_search_scheduler_and_portfolio_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_all_operator_batch_conditions_probabilistic_evidence -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_rejects_empty_maxsat_lifecycle_before_lifecycle_work -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_rejects_all_unsat_maxsat_search_before_solver_work -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_rejects_all_unsat_encoded_maxsat_before_encoding_work -- --nocapture` | PASS, 1 passed, 0 failed |
