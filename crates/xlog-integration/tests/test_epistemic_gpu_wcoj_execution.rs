@@ -1139,6 +1139,229 @@ fn accepted_split_components_execute_gpu_runtime_and_match_component_oracles() {
 }
 
 #[test]
+fn accepted_split_binary_operator_components_match_gpt_oracles() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred pair(u32, u32).
+        pred edge(u32, u32).
+        pred blocked(u32, u32).
+        pred possible_edge(u32, u32).
+        pred clear_pair(u32, u32).
+        possible_edge(X, Y) :- pair(X, Y), possible edge(X, Y).
+        clear_pair(X, Y) :- pair(X, Y), not possible blocked(X, Y).
+        "#,
+    )
+    .expect("parse split binary operator fixture");
+    let possible_oracle_program = parse_program(
+        r#"
+        pred pair(u32, u32).
+        pred edge(u32, u32).
+        pred possible_edge(u32, u32).
+        possible_edge(X, Y) :- pair(X, Y), possible edge(X, Y).
+        "#,
+    )
+    .expect("parse split binary possible oracle");
+    let not_possible_oracle_program = parse_program(
+        r#"
+        pred pair(u32, u32).
+        pred blocked(u32, u32).
+        pred clear_pair(u32, u32).
+        clear_pair(X, Y) :- pair(X, Y), not possible blocked(X, Y).
+        "#,
+    )
+    .expect("parse split binary not-possible oracle");
+    let split_oracles = vec![
+        run_generate_propagate_test(
+            &possible_oracle_program,
+            vec![
+                EpistemicInterpretation::new(),
+                EpistemicInterpretation::new().with_known("edge", 2),
+            ],
+            GeneratePropagateTestConfig { max_candidates: 2 },
+        )
+        .expect("run split binary possible oracle"),
+        run_generate_propagate_test(
+            &not_possible_oracle_program,
+            vec![
+                EpistemicInterpretation::new().with_known("blocked", 2),
+                EpistemicInterpretation::new(),
+            ],
+            GeneratePropagateTestConfig { max_candidates: 2 },
+        )
+        .expect("run split binary not-possible oracle"),
+    ];
+    let split = compile_epistemic_gpu_split_execution_with_stats_snapshot(&program, None)
+        .expect("compile split binary operator components");
+
+    assert_eq!(split.components.len(), 2);
+    assert_eq!(split.recomposed_rule_indices(), vec![0, 1]);
+    let possible_component_idx = split
+        .components
+        .iter()
+        .position(|component| component.component.rule_indices == vec![0])
+        .expect("possible component must retain source rule index 0");
+    let not_possible_component_idx = split
+        .components
+        .iter()
+        .position(|component| component.component.rule_indices == vec![1])
+        .expect("not-possible component must retain source rule index 1");
+    assert_ne!(possible_component_idx, not_possible_component_idx);
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    let mut relation_ids = BTreeMap::new();
+    for component in &split.components {
+        for (name, rel_id) in &component.executable.relation_ids {
+            if let Some(previous) = relation_ids.insert(name.clone(), *rel_id) {
+                assert_eq!(
+                    previous, *rel_id,
+                    "split binary operator components must preserve shared relation ids"
+                );
+            }
+        }
+    }
+    for (name, rel_id) in &relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation(
+        "pair",
+        upload_binary_u32(&fix.memory, &[(1, 2), (2, 3), (3, 4)]),
+    );
+    executor.put_relation("edge", upload_binary_u32(&fix.memory, &[(1, 2), (3, 4)]));
+    executor.put_relation("blocked", upload_binary_u32(&fix.memory, &[(3, 4)]));
+
+    let executables: Vec<_> = split
+        .components
+        .iter()
+        .map(|component| &component.executable)
+        .collect();
+    let batch = executor
+        .execute_epistemic_gpu_execution_batch_with_trace(
+            &executables,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 3,
+            },
+        )
+        .expect("execute split binary operator components through GPU batch path");
+
+    assert_eq!(batch.trace.component_count, 2);
+    assert_eq!(batch.trace.gpu_runtime_component_executions, 2);
+    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
+    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
+    assert_eq!(batch.trace.cpu_world_view_validations, 0);
+    assert_eq!(batch.trace.tracked_dtoh_calls, 0);
+    assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
+    assert_eq!(batch.trace.know_operator_count, 0);
+    assert_eq!(batch.trace.possible_operator_count, 1);
+    assert_eq!(batch.trace.not_know_operator_count, 0);
+    assert_eq!(batch.trace.not_possible_operator_count, 1);
+    assert_eq!(
+        batch.trace.accepted_world_views,
+        split_oracles
+            .iter()
+            .map(|oracle| oracle.trace.accepted_world_views)
+            .sum::<usize>()
+    );
+    assert_eq!(
+        batch.trace.rejected_candidates,
+        split_oracles
+            .iter()
+            .map(|oracle| oracle.trace.rejected)
+            .sum::<usize>()
+    );
+
+    let results = &batch.results;
+    assert_eq!(results.len(), 2);
+    assert_eq!(
+        download_binary_u32(&fix.provider, &results[possible_component_idx].final_output),
+        vec![(1, 2), (3, 4)]
+    );
+    assert_eq!(
+        download_binary_u32(
+            &fix.provider,
+            &results[not_possible_component_idx].final_output
+        ),
+        vec![(1, 2), (2, 3)]
+    );
+    assert_eq!(
+        results[possible_component_idx]
+            .final_tuple_materialization
+            .row_filter_count,
+        1
+    );
+    assert_eq!(
+        results[possible_component_idx]
+            .final_tuple_materialization
+            .negated_row_filter_count,
+        0
+    );
+    assert_eq!(
+        results[not_possible_component_idx]
+            .final_tuple_materialization
+            .row_filter_count,
+        1
+    );
+    assert_eq!(
+        results[not_possible_component_idx]
+            .final_tuple_materialization
+            .negated_row_filter_count,
+        1
+    );
+    for (component, result) in split.components.iter().zip(results.iter()) {
+        let oracle = match component.component.rule_indices.as_slice() {
+            [0] => &split_oracles[0],
+            [1] => &split_oracles[1],
+            other => panic!("unexpected split binary operator rule indices: {other:?}"),
+        };
+        assert_eq!(
+            result.model_membership.membership_source,
+            EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+        );
+        assert_eq!(
+            result.semantic_trace.generated_candidates,
+            oracle.trace.generated
+        );
+        assert_eq!(result.semantic_trace.guesses, oracle.trace.guesses);
+        assert_eq!(
+            result.semantic_trace.propagated_candidates,
+            oracle.trace.propagated
+        );
+        assert_eq!(result.semantic_trace.pruned_candidates, oracle.trace.pruned);
+        assert_eq!(result.semantic_trace.tested_candidates, oracle.trace.tested);
+        assert_eq!(
+            result.semantic_trace.accepted_candidates,
+            oracle.trace.accepted
+        );
+        assert_eq!(
+            result.semantic_trace.accepted_world_views,
+            oracle.trace.accepted_world_views
+        );
+        assert_eq!(
+            result.semantic_trace.rejected_candidates,
+            oracle.trace.rejected
+        );
+        assert_eq!(
+            result.semantic_trace.accepted_candidate_indices,
+            oracle.accepted_candidate_indices
+        );
+        assert_eq!(
+            result.semantic_trace.rejected_candidate_indices,
+            oracle.rejected_candidate_indices
+        );
+        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+        assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
+    }
+}
+
+#[test]
 fn accepted_split_batch_gates_probabilistic_source_and_program_end_to_end_paths() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");

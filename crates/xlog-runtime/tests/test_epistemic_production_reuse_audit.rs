@@ -144,6 +144,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(
         integration.contains("split_gpu_world_view_distinguishes_absent_possible_from_not_known")
     );
+    assert!(integration.contains("accepted_split_binary_operator_components_match_gpt_oracles"));
     assert!(integration.contains("batch.trace.cpu_recomposition_steps"));
     assert!(integration.contains("batch.trace.per_candidate_host_round_trips"));
     assert!(integration.contains(
