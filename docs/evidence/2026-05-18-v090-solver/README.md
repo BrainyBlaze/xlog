@@ -157,7 +157,8 @@ post-v0.7.0/v0.8.0/v0.8.5/v0.8.6 certification.
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_encoded_maxsat_and_scheduler_paths -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_results_gate_multi_candidate_portfolio_path -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_portfolio_path -- --nocapture` | PASS, 1 passed, 0 failed |
-| `cargo test -p xlog-solve --test gpu_solver_production_reuse` | PASS, 3 passed, 0 failed |
+| `cargo test -p xlog-solve --test gpu_solver_production_reuse` | PASS, 4 passed, 0 failed |
+| `cargo test -p xlog-solve --test gpu_solver_production_reuse production_solver_batch_paths_use_single_gpu_batch_gate -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-solve --test gpu_solver_production_reuse production_solver_metric_gate_rejects_cpu_oracle_only_traces -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-solve --test solver_service_semantics` | PASS, 5 passed, 0 failed |
 | `cargo test -p xlog-solve --test no_dtoh_in_gpu_cdcl` | PASS, 1 passed, 0 failed |

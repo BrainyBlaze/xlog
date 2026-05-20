@@ -180,6 +180,32 @@ fn production_solver_capabilities_report_gpu_backed_maxsat_and_portfolio_paths()
 }
 
 #[test]
+fn production_solver_batch_paths_use_single_gpu_batch_gate() {
+    let mut production_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    production_path.push("src");
+    production_path.push("production.rs");
+    let production = fs::read_to_string(&production_path).unwrap_or_default();
+
+    assert!(production.contains("accepted_solver_results_from_gpu_batch_execution_evidence"));
+
+    let manual_batch_guard_count = production
+        .matches("trace.component_count != batch.results.len()")
+        .count();
+    assert_eq!(
+        manual_batch_guard_count, 1,
+        "solver split-batch paths must share the central accepted GPU batch gate"
+    );
+
+    let batch_accounting_count = production
+        .matches("accepted_gpu_batch_candidate_evidence_consumed = self")
+        .count();
+    assert_eq!(
+        batch_accounting_count, 1,
+        "solver split-batch paths must share accepted-batch trace accounting"
+    );
+}
+
+#[test]
 fn production_solver_metric_gate_rejects_cpu_oracle_only_traces() {
     let empty = GpuSolverProductionTrace::default();
     let err = empty

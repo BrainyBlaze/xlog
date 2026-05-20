@@ -550,6 +550,24 @@ impl GpuSolverProductionAdapter {
         self.trace
     }
 
+    fn accepted_solver_results_from_gpu_batch_execution_evidence<'a>(
+        &mut self,
+        provider: &CudaKernelProvider,
+        evidence: GpuSolverProductionBatchExecutionEvidence<'a>,
+    ) -> Result<Vec<&'a EpistemicGpuExecutionResult>> {
+        let results = require_accepted_gpu_solver_batch_evidence(provider, evidence.batch)?;
+        self.trace.accepted_gpu_batch_candidate_evidence_consumed = self
+            .trace
+            .accepted_gpu_batch_candidate_evidence_consumed
+            .saturating_add(1);
+        self.trace
+            .accepted_gpu_batch_candidate_component_evidence_consumed = self
+            .trace
+            .accepted_gpu_batch_candidate_component_evidence_consumed
+            .saturating_add(results.len() as u64);
+        Ok(results)
+    }
+
     /// Allocate a reusable GPU CDCL workspace through the existing solver.
     pub fn new_workspace(&self, max_var_cap: u32, max_clause_cap: u32) -> Result<GpuCdclWorkspace> {
         self.solver.new_workspace(max_var_cap, max_clause_cap)
@@ -899,16 +917,8 @@ impl GpuSolverProductionAdapter {
                 context: "accepted solver lifecycle requires at least one step".to_string(),
             });
         }
-        let results = require_accepted_gpu_solver_batch_evidence(provider, evidence.batch)?;
-        self.trace.accepted_gpu_batch_candidate_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_candidate_evidence_consumed
-            .saturating_add(1);
-        self.trace
-            .accepted_gpu_batch_candidate_component_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_candidate_component_evidence_consumed
-            .saturating_add(results.len() as u64);
+        let results =
+            self.accepted_solver_results_from_gpu_batch_execution_evidence(provider, evidence)?;
         let report = self.solve_multi_candidate_assumption_lifecycle_with_gpu_execution_results(
             provider, &results, workspace, steps,
         )?;
@@ -1174,16 +1184,8 @@ impl GpuSolverProductionAdapter {
         target_cnf: &GpuCnf,
         target_branch_var_limit: &TrackedCudaSlice<u32>,
     ) -> Result<GpuSolverProductionLearnedClauseReuseReport> {
-        let results = require_accepted_gpu_solver_batch_evidence(provider, evidence.batch)?;
-        self.trace.accepted_gpu_batch_candidate_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_candidate_evidence_consumed
-            .saturating_add(1);
-        self.trace
-            .accepted_gpu_batch_candidate_component_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_candidate_component_evidence_consumed
-            .saturating_add(results.len() as u64);
+        let results =
+            self.accepted_solver_results_from_gpu_batch_execution_evidence(provider, evidence)?;
         let report = self.solve_multi_candidate_learned_clause_reuse_with_gpu_execution_results(
             provider,
             &results,
@@ -1418,16 +1420,8 @@ impl GpuSolverProductionAdapter {
         candidates: &[GpuSolverProductionMaxSatCandidate<'_>],
     ) -> Result<GpuSolverProductionMaxSatLifecycleReport> {
         Self::require_maxsat_lifecycle_inputs(steps, candidates)?;
-        let results = require_accepted_gpu_solver_batch_evidence(provider, evidence.batch)?;
-        self.trace.accepted_gpu_batch_candidate_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_candidate_evidence_consumed
-            .saturating_add(1);
-        self.trace
-            .accepted_gpu_batch_candidate_component_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_candidate_component_evidence_consumed
-            .saturating_add(results.len() as u64);
+        let results =
+            self.accepted_solver_results_from_gpu_batch_execution_evidence(provider, evidence)?;
         let report = self.solve_multi_candidate_maxsat_lifecycle_with_gpu_execution_results(
             provider, &results, workspace, steps, candidates,
         )?;
@@ -1491,16 +1485,8 @@ impl GpuSolverProductionAdapter {
         evidence: GpuSolverProductionBatchExecutionEvidence<'_>,
         candidates: &[GpuSolverProductionMaxSatCandidate<'_>],
     ) -> Result<GpuSolverProductionMaxSatReport> {
-        let results = require_accepted_gpu_solver_batch_evidence(provider, evidence.batch)?;
-        self.trace.accepted_gpu_batch_candidate_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_candidate_evidence_consumed
-            .saturating_add(1);
-        self.trace
-            .accepted_gpu_batch_candidate_component_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_candidate_component_evidence_consumed
-            .saturating_add(results.len() as u64);
+        let results =
+            self.accepted_solver_results_from_gpu_batch_execution_evidence(provider, evidence)?;
         let report = self.solve_multi_candidate_weighted_maxsat_with_gpu_execution_results(
             provider, &results, candidates,
         )?;
@@ -1787,16 +1773,8 @@ impl GpuSolverProductionAdapter {
         candidates: &[GpuSolverProductionMaxSatSearchCandidate<'_>],
     ) -> Result<GpuSolverProductionMaxSatReport> {
         Self::require_weighted_maxsat_search_candidates(candidates)?;
-        let results = require_accepted_gpu_solver_batch_evidence(provider, evidence.batch)?;
-        self.trace.accepted_gpu_batch_candidate_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_candidate_evidence_consumed
-            .saturating_add(1);
-        self.trace
-            .accepted_gpu_batch_candidate_component_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_candidate_component_evidence_consumed
-            .saturating_add(results.len() as u64);
+        let results =
+            self.accepted_solver_results_from_gpu_batch_execution_evidence(provider, evidence)?;
         let report = self.solve_multi_candidate_weighted_maxsat_search_with_gpu_execution_results(
             provider, &results, workspace, candidates,
         )?;
@@ -1977,16 +1955,8 @@ impl GpuSolverProductionAdapter {
         selections: &[GpuSolverProductionWeightedMaxSatSelection<'_>],
     ) -> Result<GpuSolverProductionMaxSatReport> {
         Self::require_weighted_maxsat_search_selections(selections)?;
-        let results = require_accepted_gpu_solver_batch_evidence(provider, evidence.batch)?;
-        self.trace.accepted_gpu_batch_candidate_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_candidate_evidence_consumed
-            .saturating_add(1);
-        self.trace
-            .accepted_gpu_batch_candidate_component_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_candidate_component_evidence_consumed
-            .saturating_add(results.len() as u64);
+        let results =
+            self.accepted_solver_results_from_gpu_batch_execution_evidence(provider, evidence)?;
         let report = self
             .solve_multi_candidate_weighted_maxsat_encoded_search_with_gpu_execution_results(
                 provider,
@@ -2225,16 +2195,8 @@ impl GpuSolverProductionAdapter {
         jobs: &[GpuSolverProductionMaxSatScheduleJob<'_>],
     ) -> Result<GpuSolverProductionMaxSatScheduleReport> {
         Self::require_maxsat_schedule_jobs(jobs)?;
-        let results = require_accepted_gpu_solver_batch_evidence(provider, evidence.batch)?;
-        self.trace.accepted_gpu_batch_candidate_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_candidate_evidence_consumed
-            .saturating_add(1);
-        self.trace
-            .accepted_gpu_batch_candidate_component_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_candidate_component_evidence_consumed
-            .saturating_add(results.len() as u64);
+        let results =
+            self.accepted_solver_results_from_gpu_batch_execution_evidence(provider, evidence)?;
         let report = self.solve_maxsat_schedule_with_gpu_execution_results(
             provider, &results, workspace, jobs,
         )?;
@@ -2403,16 +2365,8 @@ impl GpuSolverProductionAdapter {
                 context: "accepted solver portfolio requires at least one GPU job".to_string(),
             });
         }
-        let results = require_accepted_gpu_solver_batch_evidence(provider, evidence.batch)?;
-        self.trace.accepted_gpu_batch_candidate_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_candidate_evidence_consumed
-            .saturating_add(1);
-        self.trace
-            .accepted_gpu_batch_candidate_component_evidence_consumed = self
-            .trace
-            .accepted_gpu_batch_candidate_component_evidence_consumed
-            .saturating_add(results.len() as u64);
+        let results =
+            self.accepted_solver_results_from_gpu_batch_execution_evidence(provider, evidence)?;
         let report = self
             .solve_multi_candidate_portfolio_with_gpu_execution_results(provider, &results, jobs)?;
         self.trace.require_zero_cpu_search()?;
