@@ -1,0 +1,10 @@
+pred termbag(t: term).
+termbag(point(1, 2)).
+
+functor_arity(A) :- functor(point(1, 2), point, A).
+stored_functor(F) :- termbag(T), functor(T, F, 2).
+univ_length(N) :- point(1, 2) =.. Parts, length(Parts, N).
+ground_ok(1) :- ground(point(1, 2)).
+var_ok(1) :- var(Unused).
+
+?- functor_arity(A).

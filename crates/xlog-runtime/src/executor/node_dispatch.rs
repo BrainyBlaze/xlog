@@ -97,6 +97,35 @@ impl Executor {
     /// # Errors
     /// Returns an error if the node execution fails
     pub fn execute_node(&mut self, node: &RirNode) -> Result<CudaBuffer> {
+        if !self.common_subexpression_enabled() || !Self::is_common_subexpression_cacheable(node) {
+            return self.execute_node_uncached(node);
+        }
+
+        let Some(key) = self.common_subexpression_key(node) else {
+            return self.execute_node_uncached(node);
+        };
+
+        if self.common_subexpression_cache.contains_key(&key) {
+            let cached = self
+                .common_subexpression_cache
+                .remove(&key)
+                .expect("cache key checked above");
+            let result = self.clone_buffer(&cached)?;
+            self.common_subexpression_cache.insert(key, cached);
+            self.common_subexpression_stats.hits =
+                self.common_subexpression_stats.hits.saturating_add(1);
+            return Ok(result);
+        }
+
+        self.common_subexpression_stats.misses =
+            self.common_subexpression_stats.misses.saturating_add(1);
+        let result = self.execute_node_uncached(node)?;
+        let cached = self.clone_buffer(&result)?;
+        self.common_subexpression_cache.insert(key, cached);
+        Ok(result)
+    }
+
+    fn execute_node_uncached(&mut self, node: &RirNode) -> Result<CudaBuffer> {
         match node {
             RirNode::Unit => {
                 // Materialize the relational "unit" ({()}) as a 0-arity buffer with one row.
@@ -357,7 +386,7 @@ impl Executor {
         // relation scan and has become "hot" in runtime
         // statistics. Only runs if W4.2 nested-loop didn't
         // dispatch.
-        if out.is_none() {
+        if out.is_none() && self.config.resolved_persistent_hash_indexes() {
             if let Some(build_rel) = right_rel {
                 let build_heat = self
                     .stats
@@ -377,11 +406,13 @@ impl Executor {
 
                 if let Some(build_name) = self.get_rel_name(build_rel).map(|s| s.to_string()) {
                     if let Some(version) = self.store.version(&build_name) {
-                        let key = JoinIndexKey {
-                            rel: build_rel,
+                        let key = JoinIndexKey::new(
+                            build_rel,
                             version,
-                            key_cols: right_keys.to_vec(),
-                        };
+                            right_keys.to_vec(),
+                            right.schema(),
+                            self.provider.device().ordinal() as u32,
+                        );
 
                         let indexed_result = {
                             self.join_index_cache.get(&key).map(|index| {
@@ -400,33 +431,56 @@ impl Executor {
                             match indexed_result {
                                 Ok(joined) => out = Some(joined),
                                 Err(err) if is_join_index_mismatch(&err) => {
-                                    self.join_index_cache.remove(&key);
+                                    self.join_index_cache.remove_stale(&key);
                                 }
                                 Err(err) => return Err(err),
                             }
                         } else if should_index {
-                            match self.provider.build_join_index_v2(right, right_keys) {
+                            let background_build = self
+                                .config
+                                .resolved_persistent_hash_index_background_build();
+                            if background_build {
+                                self.join_index_cache.record_background_build_request();
+                            }
+                            let build_result = if background_build {
+                                self.provider
+                                    .build_join_index_v2_background(right, right_keys)
+                            } else {
+                                self.provider.build_join_index_v2(right, right_keys)
+                            };
+                            match build_result {
                                 Ok(index) => {
-                                    match self.provider.hash_join_v2_with_index(
-                                        left,
-                                        right,
-                                        left_keys,
-                                        right_keys,
-                                        cuda_join_type,
-                                        &index,
-                                        None,
-                                    ) {
-                                        Ok(joined) => {
-                                            self.join_index_cache.insert(key, index);
-                                            if let Some(stats) =
-                                                self.stats.get_relation_stats_mut(build_rel)
-                                            {
-                                                stats.has_index = true;
-                                            }
-                                            out = Some(joined);
+                                    if background_build {
+                                        self.join_index_cache.record_background_build_complete();
+                                        self.join_index_cache.insert(key, index);
+                                        self.join_index_cache.record_background_build_deferred();
+                                        if let Some(stats) =
+                                            self.stats.get_relation_stats_mut(build_rel)
+                                        {
+                                            stats.has_index = true;
                                         }
-                                        Err(err) if is_join_index_mismatch(&err) => {}
-                                        Err(err) => return Err(err),
+                                    } else {
+                                        match self.provider.hash_join_v2_with_index(
+                                            left,
+                                            right,
+                                            left_keys,
+                                            right_keys,
+                                            cuda_join_type,
+                                            &index,
+                                            None,
+                                        ) {
+                                            Ok(joined) => {
+                                                self.join_index_cache.insert(key, index);
+                                                if let Some(stats) =
+                                                    self.stats.get_relation_stats_mut(build_rel)
+                                                {
+                                                    stats.has_index = true;
+                                                }
+                                                out = Some(joined);
+                                            }
+                                            Err(err) if is_join_index_mismatch(&err) => {}
+                                            Err(err) => return Err(err),
+                                        }
                                     }
                                 }
                                 Err(_) => {
@@ -449,6 +503,14 @@ impl Executor {
 
         if let (Some(l), Some(r)) = (left_rel, right_rel) {
             let input_rows = left.num_rows().saturating_mul(right.num_rows());
+            self.record_adaptive_join_observation(
+                l,
+                r,
+                left_keys,
+                right_keys,
+                input_rows,
+                out.num_rows(),
+            );
             self.stats.record_join_result(
                 l,
                 r,

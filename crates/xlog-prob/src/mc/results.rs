@@ -23,6 +23,16 @@ use super::{EvalStats, McProgram, Relation, SccKind, SccPlan};
 use xlog_logic::ast::Program;
 
 #[cfg(feature = "host-io")]
+use crate::aggregates::AggState;
+#[cfg(feature = "host-io")]
+fn v085_mc_result_term_error(context: &str, kind: &str) -> XlogError {
+    XlogError::Compilation(format!(
+        "v0.8.5 term form '{}' is parsed but not supported in MC result {} before its G085 implementation node",
+        kind, context
+    ))
+}
+
+#[cfg(feature = "host-io")]
 impl McProgram {
     pub(super) fn apply_sample_facts(
         &self,
@@ -465,6 +475,12 @@ fn eval_rule(
                     next_states.push(binding);
                 }
             }
+            BodyLiteral::Univ(_) => {
+                return Err(XlogError::Compilation(
+                    "v0.8.5 meta error: univ literal was not normalized before MC result materialization"
+                        .to_string(),
+                ));
+            }
         }
         states = next_states;
         if states.is_empty() {
@@ -568,6 +584,12 @@ fn atom_matches_bound(
                     "Aggregate not allowed in body atom".to_string(),
                 ));
             }
+            Term::List(_) => return Err(v085_mc_result_term_error("matching", "list")),
+            Term::Cons { .. } => return Err(v085_mc_result_term_error("matching", "cons")),
+            Term::Compound { .. } => {
+                return Err(v085_mc_result_term_error("matching", "compound"));
+            }
+            Term::PredRef(_) => return Err(v085_mc_result_term_error("matching", "predref")),
         }
     }
     Ok(true)
@@ -604,196 +626,33 @@ fn materialize_head_non_aggregate(
                     "Aggregate term in non-aggregate rule head".to_string(),
                 ));
             }
+            Term::List(_) => {
+                return Err(v085_mc_result_term_error(
+                    "non-aggregate head materialization",
+                    "list",
+                ));
+            }
+            Term::Cons { .. } => {
+                return Err(v085_mc_result_term_error(
+                    "non-aggregate head materialization",
+                    "cons",
+                ));
+            }
+            Term::Compound { .. } => {
+                return Err(v085_mc_result_term_error(
+                    "non-aggregate head materialization",
+                    "compound",
+                ));
+            }
+            Term::PredRef(_) => {
+                return Err(v085_mc_result_term_error(
+                    "non-aggregate head materialization",
+                    "predref",
+                ));
+            }
         }
     }
     Ok(out)
-}
-
-#[derive(Debug, Clone)]
-#[cfg(feature = "host-io")]
-enum AggState {
-    Count(u64),
-    SumI128(i128),
-    SumF64(f64),
-    Min(Option<Value>),
-    Max(Option<Value>),
-    LogSumExp { max: f64, sumexp: f64, init: bool },
-}
-
-#[cfg(feature = "host-io")]
-impl AggState {
-    fn new(op: AggOp) -> Self {
-        match op {
-            AggOp::Count => AggState::Count(0),
-            AggOp::Sum => AggState::SumI128(0),
-            AggOp::Min => AggState::Min(None),
-            AggOp::Max => AggState::Max(None),
-            AggOp::LogSumExp => AggState::LogSumExp {
-                max: f64::NEG_INFINITY,
-                sumexp: 0.0,
-                init: false,
-            },
-        }
-    }
-
-    fn update(&mut self, op: AggOp, v: &Value) -> Result<()> {
-        match op {
-            AggOp::Count => match self {
-                AggState::Count(c) => {
-                    *c = c.saturating_add(1);
-                    Ok(())
-                }
-                _ => Err(XlogError::Compilation(
-                    "Internal aggregate state mismatch".to_string(),
-                )),
-            },
-            AggOp::Sum => match self {
-                AggState::SumI128(acc) => match v {
-                    Value::I64(i) => {
-                        *acc += *i as i128;
-                        Ok(())
-                    }
-                    Value::F64(bits) => {
-                        let f = f64::from_bits(*bits);
-                        let acc_f = *acc as f64;
-                        *self = AggState::SumF64(acc_f + f);
-                        Ok(())
-                    }
-                    _ => Err(XlogError::Compilation(
-                        "sum() aggregate requires numeric input".to_string(),
-                    )),
-                },
-                AggState::SumF64(acc) => match v {
-                    Value::I64(i) => {
-                        *acc += *i as f64;
-                        Ok(())
-                    }
-                    Value::F64(bits) => {
-                        *acc += f64::from_bits(*bits);
-                        Ok(())
-                    }
-                    _ => Err(XlogError::Compilation(
-                        "sum() aggregate requires numeric input".to_string(),
-                    )),
-                },
-                _ => Err(XlogError::Compilation(
-                    "Internal aggregate state mismatch".to_string(),
-                )),
-            },
-            AggOp::Min => match self {
-                AggState::Min(current) => {
-                    match current {
-                        None => *current = Some(v.clone()),
-                        Some(c) => {
-                            if value_le(v, c)? {
-                                *current = Some(v.clone());
-                            }
-                        }
-                    }
-                    Ok(())
-                }
-                _ => Err(XlogError::Compilation(
-                    "Internal aggregate state mismatch".to_string(),
-                )),
-            },
-            AggOp::Max => match self {
-                AggState::Max(current) => {
-                    match current {
-                        None => *current = Some(v.clone()),
-                        Some(c) => {
-                            if value_le(c, v)? {
-                                *current = Some(v.clone());
-                            }
-                        }
-                    }
-                    Ok(())
-                }
-                _ => Err(XlogError::Compilation(
-                    "Internal aggregate state mismatch".to_string(),
-                )),
-            },
-            AggOp::LogSumExp => match self {
-                AggState::LogSumExp { max, sumexp, init } => {
-                    let x = match v {
-                        Value::I64(i) => *i as f64,
-                        Value::F64(bits) => f64::from_bits(*bits),
-                        _ => {
-                            return Err(XlogError::Compilation(
-                                "logsumexp() aggregate requires numeric input".to_string(),
-                            ))
-                        }
-                    };
-                    if x.is_nan() {
-                        return Err(XlogError::Compilation(
-                            "logsumexp() aggregate encountered NaN".to_string(),
-                        ));
-                    }
-                    if !*init {
-                        *max = x;
-                        *sumexp = 1.0;
-                        *init = true;
-                        return Ok(());
-                    }
-                    if x > *max {
-                        *sumexp = *sumexp * (*max - x).exp() + 1.0;
-                        *max = x;
-                    } else {
-                        *sumexp += (x - *max).exp();
-                    }
-                    Ok(())
-                }
-                _ => Err(XlogError::Compilation(
-                    "Internal aggregate state mismatch".to_string(),
-                )),
-            },
-        }
-    }
-
-    fn finish(&self, op: AggOp) -> Result<Value> {
-        match (op, self) {
-            (AggOp::Count, AggState::Count(c)) => {
-                let v: i64 = (*c)
-                    .try_into()
-                    .map_err(|_| XlogError::Compilation("count() overflowed i64".to_string()))?;
-                Ok(Value::I64(v))
-            }
-            (AggOp::Sum, AggState::SumI128(acc)) => {
-                let v: i64 = (*acc)
-                    .try_into()
-                    .map_err(|_| XlogError::Compilation("sum() overflowed i64".to_string()))?;
-                Ok(Value::I64(v))
-            }
-            (AggOp::Sum, AggState::SumF64(v)) => Ok(Value::F64(v.to_bits())),
-            (AggOp::Min, AggState::Min(v)) => v.clone().ok_or_else(|| {
-                XlogError::Compilation("min() aggregate produced no value".to_string())
-            }),
-            (AggOp::Max, AggState::Max(v)) => v.clone().ok_or_else(|| {
-                XlogError::Compilation("max() aggregate produced no value".to_string())
-            }),
-            (AggOp::LogSumExp, AggState::LogSumExp { max, sumexp, init }) => {
-                if !*init {
-                    return Ok(Value::F64(f64::NEG_INFINITY.to_bits()));
-                }
-                Ok(Value::F64((max + sumexp.ln()).to_bits()))
-            }
-            _ => Err(XlogError::Compilation(
-                "Internal aggregate state mismatch".to_string(),
-            )),
-        }
-    }
-}
-
-#[cfg(feature = "host-io")]
-fn value_le(a: &Value, b: &Value) -> Result<bool> {
-    match (a, b) {
-        (Value::I64(x), Value::I64(y)) => Ok(x <= y),
-        (Value::F64(x), Value::F64(y)) => Ok(f64::from_bits(*x) <= f64::from_bits(*y)),
-        (Value::Symbol(x), Value::Symbol(y)) => Ok(x <= y),
-        (Value::String(x), Value::String(y)) => Ok(x <= y),
-        _ => Err(XlogError::Compilation(
-            "min/max aggregate requires consistent comparable types".to_string(),
-        )),
-    }
 }
 
 #[cfg(feature = "host-io")]
@@ -832,6 +691,24 @@ fn eval_aggregate_head(
                 ));
             }
             Term::Integer(_) | Term::Float(_) | Term::String(_) | Term::Symbol(_) => {}
+            Term::List(_) => {
+                return Err(v085_mc_result_term_error("aggregate head planning", "list"));
+            }
+            Term::Cons { .. } => {
+                return Err(v085_mc_result_term_error("aggregate head planning", "cons"));
+            }
+            Term::Compound { .. } => {
+                return Err(v085_mc_result_term_error(
+                    "aggregate head planning",
+                    "compound",
+                ));
+            }
+            Term::PredRef(_) => {
+                return Err(v085_mc_result_term_error(
+                    "aggregate head planning",
+                    "predref",
+                ));
+            }
         }
     }
 
@@ -889,6 +766,30 @@ fn eval_aggregate_head(
                     tuple.push(value_from_term(term)?);
                 }
                 Term::Anonymous => unreachable!(),
+                Term::List(_) => {
+                    return Err(v085_mc_result_term_error(
+                        "aggregate head materialization",
+                        "list",
+                    ));
+                }
+                Term::Cons { .. } => {
+                    return Err(v085_mc_result_term_error(
+                        "aggregate head materialization",
+                        "cons",
+                    ));
+                }
+                Term::Compound { .. } => {
+                    return Err(v085_mc_result_term_error(
+                        "aggregate head materialization",
+                        "compound",
+                    ));
+                }
+                Term::PredRef(_) => {
+                    return Err(v085_mc_result_term_error(
+                        "aggregate head materialization",
+                        "predref",
+                    ));
+                }
             }
         }
         out.push(tuple);

@@ -34,6 +34,13 @@ use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 
 use validate::{classify_request, PreKernelOutcome, RequestMetadata};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExactPairType {
+    U64,
+    U32,
+    Symbol,
+}
+
 /// Inputs to one [`induce_exact`] call.
 ///
 /// Each candidate is a `(RelId, &CudaBuffer)` pair: the `RelId` is a label that
@@ -69,14 +76,14 @@ pub fn induce_exact(
         return Ok(ExactInductionResult::default());
     }
 
-    // Buffer-level validation (arity 2, U64 symbol columns). Runs before
+    // Buffer-level validation (arity 2, accepted typed pair columns). Runs before
     // metadata extraction so we fail loud on pyxlog-side assembly bugs.
-    validate_pair_buffer(request.positives, "positives")?;
+    let pair_type = validate_pair_buffer(request.positives, "positives")?;
     if let Some(neg) = request.negatives {
-        validate_pair_buffer(neg, "negatives")?;
+        require_pair_type(neg, "negatives", pair_type)?;
     }
     for (i, (_, buf)) in request.candidates.iter().enumerate() {
-        validate_pair_buffer(buf, &format!("candidate[{}]", i))?;
+        require_pair_type(buf, &format!("candidate[{}]", i), pair_type)?;
     }
 
     // Extract row counts from the cached host-side metadata. The DLPack ingest
@@ -173,7 +180,7 @@ fn score_and_reduce(
     })
 }
 
-fn validate_pair_buffer(buf: &CudaBuffer, label: &str) -> Result<()> {
+fn validate_pair_buffer(buf: &CudaBuffer, label: &str) -> Result<ExactPairType> {
     if buf.arity() != 2 {
         return Err(XlogError::Execution(format!(
             "induce_exact: {} buffer has arity {}, expected 2",
@@ -181,6 +188,7 @@ fn validate_pair_buffer(buf: &CudaBuffer, label: &str) -> Result<()> {
             buf.arity(),
         )));
     }
+    let mut pair_type = None;
     for col_idx in 0..2 {
         let t = buf.schema().column_type(col_idx).ok_or_else(|| {
             XlogError::Type(format!(
@@ -188,12 +196,38 @@ fn validate_pair_buffer(buf: &CudaBuffer, label: &str) -> Result<()> {
                 label, col_idx,
             ))
         })?;
-        if t != ScalarType::U64 {
-            return Err(XlogError::Type(format!(
-                "induce_exact: {} buffer column {} has type {:?}, expected U64",
-                label, col_idx, t,
-            )));
+        let col_type = match t {
+            ScalarType::U64 => ExactPairType::U64,
+            ScalarType::U32 => ExactPairType::U32,
+            ScalarType::Symbol => ExactPairType::Symbol,
+            _ => {
+                return Err(XlogError::Type(format!(
+                    "induce_exact: {} buffer column {} has type {:?}, expected U64, U32, or Symbol",
+                    label, col_idx, t,
+                )));
+            }
+        };
+        if let Some(expected) = pair_type {
+            if expected != col_type {
+                return Err(XlogError::Type(format!(
+                    "induce_exact: {} buffer column {} type mismatch: {:?} vs {:?}",
+                    label, col_idx, expected, col_type,
+                )));
+            }
+        } else {
+            pair_type = Some(col_type);
         }
+    }
+    Ok(pair_type.expect("arity 2 loop sets pair type"))
+}
+
+fn require_pair_type(buf: &CudaBuffer, label: &str, expected: ExactPairType) -> Result<()> {
+    let actual = validate_pair_buffer(buf, label)?;
+    if actual != expected {
+        return Err(XlogError::Type(format!(
+            "induce_exact: {} buffer type mismatch: expected {:?}, got {:?}",
+            label, expected, actual,
+        )));
     }
     Ok(())
 }

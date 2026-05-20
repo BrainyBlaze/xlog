@@ -1,12 +1,17 @@
 # XLOG Language Reference
 
-> **Release context:** XLOG `v0.5.2`
-> **Language coverage:** Core language surface through `v0.5.2`
-> **Last Updated:** April 2026
+> **Release context:** XLOG `v0.8.5`
+> **Language coverage:** Core v0.8.0 language plus the v0.8.5 language-completeness contract
+> **Last Updated:** May 2026
 
 This document provides a comprehensive reference for the XLOG language,
 covering all syntax, semantics, and features of XLOG as a GPU-native logic
 programming language.
+
+The v0.8.5 additions are specified here as the release contract. During the
+v0.8.5 implementation branch, each addition remains unsupported until its
+corresponding `G085_*` implementation node lands. Unsupported forms must fail
+with typed diagnostics rather than silently falling back to CPU evaluation.
 
 ---
 
@@ -15,28 +20,34 @@ programming language.
 1. [Overview](#overview)
 2. [Basic Syntax](#basic-syntax)
 3. [Data Types](#data-types)
-4. [Predicates and Declarations](#predicates-and-declarations)
-5. [Facts](#facts)
-6. [Rules](#rules)
-7. [Queries](#queries)
-8. [Constraints](#constraints)
-9. [Variables and Wildcards](#variables-and-wildcards)
-10. [Comparisons](#comparisons)
-11. [Arithmetic Expressions](#arithmetic-expressions)
-12. [Negation](#negation)
-13. [Aggregations](#aggregations)
-14. [User-Defined Functions](#user-defined-functions)
-15. [Modules](#modules)
-16. [Symbols](#symbols)
-17. [Probabilistic Logic](#probabilistic-logic)
-18. [Neural Predicates](#neural-predicates)
-19. [Learnable Rules](#learnable-rules)
-20. [Term Embeddings](#term-embeddings)
-21. [GPU ILP Configuration](#gpu-ilp-configuration)
-22. [Pragmas and Directives](#pragmas-and-directives)
-23. [Float Predicates and IEEE 754 Semantics](#float-predicates-and-ieee-754-semantics)
-24. [Comments](#comments)
-25. [Complete Grammar Reference](#complete-grammar-reference)
+4. [v0.8.5 Language Contract](#v085-language-contract)
+5. [Predicates and Declarations](#predicates-and-declarations)
+6. [Facts](#facts)
+7. [Rules](#rules)
+8. [Queries](#queries)
+9. [Constraints](#constraints)
+10. [Variables and Wildcards](#variables-and-wildcards)
+11. [Comparisons](#comparisons)
+12. [Arithmetic Expressions](#arithmetic-expressions)
+13. [Negation](#negation)
+14. [Aggregations](#aggregations)
+15. [Lists](#lists)
+16. [Safe Meta-Predicates](#safe-meta-predicates)
+17. [Magic Sets](#magic-sets)
+18. [User-Defined Functions](#user-defined-functions)
+19. [Modules](#modules)
+20. [Symbols](#symbols)
+21. [Probabilistic Logic](#probabilistic-logic)
+22. [Approximate Inference](#approximate-inference)
+23. [Neural Predicates](#neural-predicates)
+24. [Learnable Rules](#learnable-rules)
+25. [Term Embeddings](#term-embeddings)
+26. [GPU ILP Configuration](#gpu-ilp-configuration)
+27. [Pragmas and Directives](#pragmas-and-directives)
+28. [CLI Developer Experience](#cli-developer-experience)
+29. [Float Predicates and IEEE 754 Semantics](#float-predicates-and-ieee-754-semantics)
+30. [Comments](#comments)
+31. [Complete Grammar Reference](#complete-grammar-reference)
 
 ---
 
@@ -49,6 +60,10 @@ logic programs into backend-specific GPU execution paths. It supports:
 - **Arithmetic operations**: Comparisons, computed values via `is`, and built-in functions
 - **Aggregations**: `count`, `sum`, `min`, `max`, and `logsumexp`
 - **Probabilistic reasoning**: Probabilistic facts, annotated disjunctions, evidence, and queries
+- **v0.8.5 language contract**: Finite lists, safe meta-predicates, explicit
+  negation contracts, magic-set planning, probabilistic aggregate semantics,
+  approximate inference configuration, incremental parsing, and CLI
+  inspectability
 - **GPU execution**: All core operations (joins, sorts, aggregations) run on the GPU
 
 ### Hello World Example
@@ -176,6 +191,91 @@ temperature(1, 22.5).         // Correct: u32, f64
 temperature(1, 22).           // Error: 22 inferred as i64, not f64
 temperature(1, cast(22, f64)). // Correct: explicit cast
 ```
+
+### v0.8.5 Type Forms
+
+v0.8.5 extends the type model with finite language-level terms that must lower
+to typed relation layouts before execution:
+
+| Type form | Meaning | Execution status |
+|-----------|---------|------------------|
+| `domain name: type` | Named alias for an existing scalar type | Existing source form; v0.8.5 requires alias preservation in diagnostics and schema metadata |
+| `column: type` | Named predicate column | v0.8.5 contract; rejected until `G085_TYPES` lands |
+| `list<T>` | Finite homogeneous list of `T` | v0.8.5 contract; accepted lists lower to helper relations, not CPU term heaps |
+| `term` | Finite ground term value | v0.8.5 contract; only finite, typed terms are accepted |
+| `compound` | Finite compound term with functor and arity | v0.8.5 contract; unsupported recursive or open compounds are rejected |
+| `predref` | Static predicate reference for `maplist` and related meta use | v0.8.5 contract; runtime-variable predicate names are rejected |
+
+Unsupported type forms must fail during parsing or semantic analysis before
+runtime execution starts.
+
+---
+
+## v0.8.5 Language Contract
+
+v0.8.5 is a language-surface expansion over the v0.8.0 runtime. New syntax is
+accepted only when it can be normalized into the existing typed AST, RIR,
+probabilistic IR, optimizer, runtime, WCOJ, and CLI paths.
+
+### Execution Responsibilities
+
+| Layer | Allowed work |
+|-------|--------------|
+| Parser and AST | Recognize source syntax, preserve spans, and represent finite high-level terms |
+| Semantic analysis | Type check, safety check, reject unbounded or dynamic forms, and desugar high-level constructs |
+| Optimizer and planner | Rewrite programs, including magic sets, while preserving output semantics |
+| Runtime and probability engines | Execute accepted relational, aggregate, exact, and MC work through production GPU-capable paths |
+| CLI | Orchestrate commands, format diagnostics, and transfer only requested final results |
+
+Accepted v0.8.5 features must not execute by constructing an arbitrary CPU
+Prolog term heap, running dynamic CPU predicate calls, or using a hidden
+CPU-only fallback for a GPU-claimed path.
+
+### Feature Coverage Matrix
+
+| Feature | Syntax | Semantics | Example | Unsupported forms | Execution path |
+|---------|--------|-----------|---------|-------------------|----------------|
+| Incremental parsing | Statement-level `.xlog` source units with stable spans | Reuse unchanged statement parses and invalidate changed statements plus dependent module state | Editing one rule in a REPL/watch session preserves parse cache for unchanged facts | Cache reuse across changed module dependencies without invalidation | Parser/session cache only; no runtime execution |
+| List syntax and built-ins | `[]`, `[A, B]`, `[H|T]`, `list<T>` | Finite, typed lists normalize to helper relations | `has_member(X) :- member(X, [1,2,3]).` | Open-ended generators, cyclic lists, heterogeneous lists without a declared finite term type | AST/desugar to typed helper relations and normal runtime joins/aggregates |
+| Safe meta-predicates | `ground`, `var`, `nonvar`, `functor`, `=..`, `findall`, `maplist` | Static inspection and finite collection only | `xs(L) :- findall(X, edge(1, X), L).` | Unrestricted `call/N`, dynamic database mutation, runtime-variable predicate names | Compile-time/static expansion plus typed relational lowering |
+| Deterministic NAF | `not atom(...)` | Closed-world stratified negation over deterministic relations; named variables in the negated atom must be bound by a prior source-order binder | `leaf(X) :- node(X), not edge(X, _).` | Unbound variables in negated atoms, unstratified deterministic cycles | Existing stratification and runtime anti-join paths |
+| Magic sets | `#pragma magic_sets = on|off|auto` and compiler configuration override | Bound deterministic recursive queries may be rewritten with adornments and magic predicates | `?- reach(1, Y).` specializes recursive reachability | Unsafe interaction with negation, aggregates, meta/list helpers, mutual recursion, or SIPS cases if equivalence cannot be proven | Source/RIR rewrite before optimizer and WCOJ planning |
+| Probabilistic aggregates | Aggregate heads and aggregate outputs in `query`/`evidence` | Finite aggregate outcomes in exact and MC inference | `query(out_degree(1, 2)).` over probabilistic `edge` facts | Exact aggregate domains over cap, unsupported numeric operator/domain pairs | Exact provenance/PIR or MC sampling plus deterministic aggregate execution |
+| Aggregate lifting | Finite-domain aggregate metadata and caps | Use lifted compact-domain computation when identical to finite exact enumeration | Small count/sum domains avoid naive enumeration | Domain cap exceeded, non-finite domains, unsupported floating tolerance | Probabilistic aggregate planner and exact/MC engines |
+| Approximate inference | `#pragma prob_engine = mc`, samples, seed, confidence, method | MC estimates are reproducible under fixed seed and report uncertainty | `#pragma prob_samples = 10000` with `query(rain).` | Invalid confidence ranges, unsupported methods, hidden default override ambiguity | Existing MC engine with documented source/CLI precedence |
+| CLI explain | `xlog explain --format text|json|dot file.xlog` | Show parse, strata, RIR, optimized RIR, magic-set, WCOJ, and probability sections when applicable | `xlog explain --format json reach.xlog` | Unknown output formats or unavailable sections without a typed reason | CLI orchestration plus compiler/explain APIs |
+| CLI REPL | `xlog repl` | Interactive multiline fact/rule/query session using parser cache | Add facts, then query relation state | GPU execution before a command requests it, unsupported mutation semantics | CLI session cache plus normal compile/run on submitted programs |
+| CLI watch | `xlog watch file.xlog` | Rerun or re-explain changed files with debounce and typed diagnostics | Edit a rule and see updated diagnostics/output | Silent stale cache reuse after file/module change | CLI file watcher plus parser/session cache and normal commands |
+
+### Diagnostic Contract
+
+Unsupported v0.8.5 forms must report:
+
+- the feature area, such as `list`, `meta`, `naf`, `magic_sets`, or
+  `prob_aggregate`;
+- the source span when available;
+- the reason the form is unsafe, unbounded, or not GPU-lowerable;
+- a remediation, such as adding a positive binder, a finite cap, or a static
+  predicate reference.
+
+Diagnostic examples:
+
+```text
+list error at program.xlog:12: unbounded append/3 generation is unsupported; bind at least two list arguments or add a finite split mode.
+meta error at program.xlog:8: maplist predicate argument must be a static predref; replace runtime variable P with a named predicate.
+v0.8.5 naf error: unbound variable Y in negated atom edge/2; bind it before not with a positive atom or deterministic is expression, or use '_' for existential positions.
+magic_sets declined at program.xlog:21: recursive query crosses an aggregate boundary; run with #pragma magic_sets = off or isolate the aggregate.
+prob_aggregate error at program.xlog:17: exact aggregate domain exceeds cap 1024; add a finite cap or use prob_engine = mc.
+```
+
+### Source-Audit Status
+
+At the `G085_DOCREF` checkpoint, the current source still rejects the new
+v0.8.5 parser/runtime forms except where an older feature already exists, such
+as scalar terms, deterministic `not atom`, deterministic aggregates, exact/MC
+probabilistic inference, and the `run`/`prob` CLI commands. Later `G085_*`
+implementation nodes must update this section and the grammar appendix when
+they turn a contract row into shipped support.
 
 ---
 
@@ -517,7 +617,11 @@ safe_ratio(X, Y, R) :-
 
 ## Negation
 
-XLOG supports **stratified negation** using the `not` keyword. Negated atoms must be **stratifiable** (no cycles through negation).
+XLOG supports deterministic **negation as failure** using the `not` keyword.
+In deterministic programs, `not atom(...)` is closed-world, stratified
+negation. This is distinct from probabilistic nonmonotone negation, where exact
+inference may use Well-Founded Semantics (WFS) for accepted probabilistic
+programs.
 
 ### Syntax
 
@@ -562,18 +666,27 @@ childless(X) :- person(X), not has_child(X).
 p(X) :- q(X), not p(X).
 ```
 
-XLOG detects unstratifiable programs at compile time and reports an error.
+XLOG detects unstratifiable deterministic programs at compile time and reports
+a `v0.8.5 naf error`. Low-level stratification analysis still reports the
+underlying dependency cycle for callers that use it directly.
 
 ### Domain Safety
 
-Variables in negated atoms must be **bound** by positive atoms in the same rule:
+Named variables in negated atoms must be **bound** by a prior source-order
+binder in the same rule body. Positive atoms bind their named variables, and a
+deterministic `is` expression binds its target after the expression appears.
+Source order matters: a later positive atom does not make an earlier negated
+atom safe. Use `_` for existential positions inside negated atoms.
 
 ```xlog
 // Valid: X is bound by node(X) before used in not edge(X, _)
 leaf(X) :- node(X), not edge(X, _).
 
-// Invalid: Y is not bound by any positive atom
+// Invalid: Y is not bound by a prior source-order binder
 // bad(X) :- node(X), not edge(X, Y).  // ERROR
+
+// Invalid: X is bound too late
+// bad(X) :- not edge(X, _), node(X).  // ERROR
 ```
 
 ---
@@ -681,6 +794,213 @@ score(X, logsumexp(Y)) :- obs(X, Y).
 // score(1) = log(exp(0) + exp(1) + exp(2)) = log(1 + e + e^2) ≈ 2.407
 // score(2) = log(exp(0) + exp(0)) = log(2) ≈ 0.693
 ```
+
+---
+
+## Lists
+
+v0.8.5 defines finite list syntax and list built-ins. Lists are accepted only
+when they are finite and typed; accepted programs lower to relation layouts and
+normal GPU-capable execution paths.
+
+Implementation status after `G085_META`: scalar, symbol, nested finite list,
+and finite meta term IDs are normalized to `u64` list identifiers plus
+`__xlog_list_*` helper relations. `list<T>` predicate columns lower to scalar
+list-id columns while helper relations carry length, item, cons, append, sort,
+msort, and set facts. The current implementation accepts finite literals,
+declared `list<T>` columns, safe `[Head | Tail]` patterns in declared list
+columns, and the built-ins below when their list argument has a finite literal
+or a known `list<T>` type.
+
+### Syntax
+
+```xlog
+[]                 // empty list
+[A, B, C]          // finite list literal
+[Head | Tail]      // finite cons pattern when Tail is bound to a finite list
+list<u32>          // homogeneous finite list type
+```
+
+### Built-Ins
+
+| Built-in | Contract |
+|----------|----------|
+| `is_list(X)` | Succeeds when `X` is a finite list value |
+| `member(X, L)` | Enumerates or checks finite membership |
+| `memberchk(X, L)` | Deterministic membership check |
+| `length(L, N)` | Computes the finite list length |
+| `nth(N, L, X)` | Binds/checks zero-based element `N` |
+| `append(A, B, C)` | Concatenates finite lists when at least two sides are bound enough to avoid generation |
+| `sort(L, S)` | Sorts finite list values with duplicate removal |
+| `msort(L, S)` | Sorts finite list values preserving duplicates |
+| `list_to_set(L, S)` | Removes duplicates while producing a finite normalized list |
+
+Pair helpers may be added as typed helpers when they lower to finite relation
+columns. Unsupported helpers must be rejected with a typed diagnostic rather
+than simulated by a CPU term evaluator.
+
+Current implementation limits:
+
+- `append(A, B, C)` accepts finite first and second list literals in this node;
+  split generation such as `append(A, B, [1,2,3])` is rejected as unbounded;
+- `sort`, `msort`, and `list_to_set` require a finite input literal in this
+  node;
+- `term`, `compound`, and `predref` list elements lower to finite `u64` meta
+  term IDs when they appear in declared `list<term>`, `list<compound>`, or
+  `list<predref>` contexts.
+
+### Examples
+
+```xlog
+pred seed(u32).
+pred selected(u32).
+
+selected(X) :- seed(_), member(X, [1, 2, 3]).
+```
+
+```xlog
+pred path(symbol, list<symbol>).
+pred path_len(symbol, u32).
+
+path_len(Name, N) :- path(Name, Steps), length(Steps, N).
+```
+
+### Unsupported Forms
+
+The following forms are outside the v0.8.5 contract:
+
+- unbounded list generation, such as asking `append(A, B, [1,2,3])` to
+  enumerate every split unless a finite split mode is explicitly implemented;
+- cyclic lists;
+- heterogeneous lists unless represented through a declared finite `term`
+  domain;
+- list evaluation that requires an arbitrary CPU Prolog term heap.
+
+---
+
+## Safe Meta-Predicates
+
+v0.8.5 safe meta-predicates provide finite term inspection and static
+predicate mapping. They do not introduce an unrestricted Prolog dynamic
+database or unrestricted `call/N`.
+
+Implementation status after `G085_META`: accepted safe meta forms normalize
+before stratification and lowering into ordinary helper relations such as
+`__xlog_meta_functor`, `__xlog_meta_univ`, `__xlog_meta_findall_*`, and
+`__xlog_meta_maplist_*`. Finite `term`, `compound`, and `predref` predicate
+columns lower to `u64` term IDs; compound metadata and univ parts are stored in
+typed helper relations. `findall` and `maplist` currently accept finite source
+facts and finite list literals only; derived-goal collection and non-literal
+maplist inputs are explicitly rejected until an aggregate-backed collection
+path lands.
+
+### Supported Meta-Predicates
+
+| Predicate | Contract |
+|-----------|----------|
+| `ground(Term)` | True when the term is fully ground after static analysis or finite binding |
+| `var(Term)` | True only at the supported static/runtime boundary for unbound variables |
+| `nonvar(Term)` | True when `Term` is known not to be a variable |
+| `functor(Term, Name, Arity)` | Inspects or checks a finite compound term's functor and arity |
+| `Term =.. Parts` | Converts between finite compound terms and a finite `[Functor, Args...]` list |
+| `findall(Template, Goal, List)` | Collects finite goal results into a normalized list relation; empty result succeeds with `[]` |
+| `maplist(PredRef, List)` | Statically expands a unary predicate reference over a finite list |
+| `maplist(PredRef, ListA, ListB)` | Statically expands a binary predicate reference over aligned finite lists |
+
+### Examples
+
+```xlog
+pred edge(u32, u32).
+pred fanout(u32, list<u32>).
+
+fanout(Ys) :- findall(Y, edge(1, Y), Ys).
+```
+
+```xlog
+pred positive(u32).
+pred all_positive(list<u32>).
+
+all_positive(1) :- maplist(positive, [1, 2, 3]).
+```
+
+### Unsupported Forms
+
+- runtime-variable predicate names in `maplist` or any future call-like form;
+- `assert`, `retract`, dynamic database mutation, or IO predicates;
+- `findall` over derived goals or goals with variables that are neither bound
+  before `findall` nor collected by the template;
+- non-literal `maplist` inputs in the current `G085_META` subset;
+- constructing recursive or open compound terms with `=..`;
+- higher-arity `maplist` unless explicitly implemented and tested.
+
+---
+
+## Magic Sets
+
+Magic-set rewriting specializes bound deterministic recursive queries by adding
+derived magic predicates and adorned rules before optimization. The accepted
+`G085_MAGIC` subset is a source-level rewrite over positive recursive rules
+that can be proven query-equivalent under the supported left-to-right SIPS.
+
+### Configuration
+
+```xlog
+#pragma magic_sets = auto
+#pragma magic_sets = on
+#pragma magic_sets = off
+```
+
+`auto` lets the compiler apply the rewrite only when it can prove that the
+transformed program preserves query output. `on` requests the rewrite and fails
+with a typed `v0.8.5 magic_sets error` if the compiler cannot safely apply it.
+`off` disables the rewrite.
+
+### Example
+
+```xlog
+pred edge(u32, u32).
+pred reach(u32, u32).
+
+reach(X, Y) :- edge(X, Y).
+reach(X, Z) :- reach(X, Y), edge(Y, Z).
+
+?- reach(1, Y).
+```
+
+The bound query argument `1` may seed a magic predicate so recursive evaluation
+does not materialize unreachable source components. `xlog explain` must show
+the adornment, generated magic predicates, and any declined-rewrite reason.
+
+The compiler currently emits helper predicates such as
+`__xlog_magic_reach_bf`, where `b` marks a bound argument and `f` marks a free
+argument. Accepted rules continue through the normal AST, stratification,
+lowering, optimizer, WCOJ, and runtime paths.
+
+### Supported Subset
+
+- deterministic programs with `?-` queries over recursive predicates;
+- at least one scalar constant in the queried recursive atom;
+- positive recursive rules over the same head predicate;
+- source-order binding propagation through prior positive body atoms;
+- `auto`, `on`, and `off` source pragmas.
+
+### Declined Forms
+
+`auto` leaves the program unchanged and records a decline reason. `on` fails
+with a typed diagnostic for:
+
+- unbound recursive calls under the supported SIPS;
+- rules with negation, aggregation, comparison, `is`, or unnormalized univ in
+  the recursive target;
+- recursive rules that cross v0.8.5 list/meta helper predicates;
+- mutual-recursive SCCs in the current subset;
+- probabilistic profiles, which remain governed by the probabilistic engine.
+
+### Unsupported Forms
+
+Magic-set rewriting must decline or fail before execution when negation,
+aggregates, list/meta constructs, or probabilistic rules would make equivalence
+uncertain. It must not create a runtime side engine.
 
 ---
 
@@ -1032,17 +1352,69 @@ XLOG supports two inference engines:
 | **Monte Carlo** | `--prob-engine mc` | Sampling-based; approximate with confidence intervals |
 
 **Exact inference** supports:
-- **Stratified negation**: Automatic layer detection and two-valued evaluation
-- **Non-monotone negation**: Well-Founded Semantics (WFS) for cyclic programs
+- **Stratified deterministic negation**: Automatic layer detection and
+  two-valued evaluation for deterministic `not atom` programs
+- **Probabilistic non-monotone negation**: Well-Founded Semantics (WFS) for
+  accepted cyclic probabilistic programs
+- **Finite probabilistic aggregates**: `count`, `sum`, `min`, `max`, and
+  `logsumexp` aggregate outputs compiled through provenance/PIR when the exact
+  finite domain cap is respected
 - **Gradients**: Correct gradient flow through negated literals
 
-**Exact inference** does not support aggregation in probabilistic rule bodies.
+**Probabilistic aggregates in v0.8.5:** finite `count`, `sum`, `min`, `max`,
+and `logsumexp` aggregate programs are supported for exact and MC inference in
+the finite `G085_PROB_AGG` subset. Exact mode enumerates finite aggregate
+outcomes into provenance/PIR formulas, so `query` and `evidence` may reference
+aggregate output tuples. Exact enumeration is capped at 16 uncertain
+contributing rows per group; cap excess fails with a typed
+`v0.8.5 prob_aggregate error` that recommends MC or reducing the finite domain.
 
-**Monte Carlo** supports all programs including aggregation and non-monotone recursion:
+**Monte Carlo** supports probabilistic rules and non-monotone recursion.
+Aggregate support follows the v0.8.5 probabilistic aggregate contract and must
+run through GPU sampling plus deterministic aggregate execution when accepted:
 
 ```bash
 xlog prob program.xlog --prob-engine mc --samples 10000 --seed 42
 ```
+
+### Probabilistic Aggregates
+
+Finite probabilistic aggregate programs may query or condition on aggregate
+outputs:
+
+```xlog
+0.5::edge(1, 2).
+0.5::edge(1, 3).
+
+out_degree(X, count(Y)) :- edge(X, Y).
+query(out_degree(1, 2)).
+```
+
+Exact mode compiles each supported finite aggregate outcome into a Boolean PIR
+formula over contributing row-presence formulas. Empty probabilistic groups do
+not materialize `count(..., 0)` tuples. MC mode samples worlds on the GPU and
+executes the shared deterministic aggregate path for each accepted sample batch.
+
+### Aggregate Lifting
+
+Small-domain aggregate lifting is permitted only when the lifted computation is
+semantically identical to finite exact enumeration. Explain output must report
+the detected finite domain, cap, operator, and whether lifting fired, declined,
+or fell back to supported exact enumeration.
+
+In the `G085_AGG_LIFT` subset, finite probabilistic `count` aggregate heads use
+exact cardinality dynamic programming when every aggregate expression in the
+head is `count(...)`. The lift constructs formulas for exactly `k` contributing
+rows over the same row-presence formulas used by finite enumeration, so it does
+not change exact semantics. The count lift accepts up to 64 uncertain rows per
+group; larger count domains fail closed with a typed `v0.8.5 agg_lift error`.
+
+`sum`, `min`, `max`, and `logsumexp` remain on exact finite outcome enumeration
+in this subset. Their explain entries report `fallback_exact_enumeration` with a
+per-operator rationale and continue to use the 16-uncertain-row exact aggregate
+cap. `xlog explain --format json` emits an `aggregate_lifting` array containing
+the predicate, group key, operator, finite-domain source, domain size, cap,
+status, reason, naive outcome count, and dynamic-programming state count.
 
 ### Monte Carlo Sampling Methods (v0.5.0)
 
@@ -1059,7 +1431,8 @@ forceable, XLOG falls back to rejection sampling.
 
 ### Negation in Probabilistic Programs
 
-Exact inference supports both stratified and non-monotone negation:
+Probabilistic exact inference supports both stratified probabilistic negation
+and accepted non-monotone WFS profiles:
 
 ```xlog
 // Stratified negation (layered evaluation)
@@ -1097,7 +1470,7 @@ The inference engine can be specified in the source file:
 
 ```xlog
 // Non-monotone negation works with exact inference (uses WFS)
-:- prob_engine = exact_ddnnf.
+#pragma prob_engine = exact_ddnnf
 
 0.5::flip.
 p :- flip.
@@ -1110,8 +1483,8 @@ query(p).  // WFS: p is undefined in worlds where bias is false
 For approximate inference with confidence intervals:
 
 ```xlog
-:- prob_engine = mc.
-:- samples = 10000.
+#pragma prob_engine = mc
+#pragma prob_samples = 10000
 
 0.5::flip.
 p :- flip.
@@ -1119,6 +1492,57 @@ q :- not p.
 
 query(p).  // P(p) ≈ 0.5 ± CI
 ```
+
+---
+
+## Approximate Inference
+
+Approximate inference is the source and CLI contract for Monte Carlo
+probabilistic reasoning. It must be reproducible under a fixed seed and must
+report uncertainty, sample counts, evidence handling, and sampling method.
+
+### Source Pragmas
+
+```xlog
+#pragma prob_engine = mc
+#pragma prob_samples = 10000
+#pragma prob_seed = 42
+#pragma prob_confidence = 0.95
+#pragma prob_method = evidence_clamping
+```
+
+| Pragma | Meaning |
+|--------|---------|
+| `prob_samples` | Number of MC samples |
+| `prob_seed` | Fixed random seed; identical input plus seed must replay identical counts |
+| `prob_confidence` | Confidence level for reported intervals |
+| `prob_method` | Sampling method, such as `rejection` or `evidence_clamping` |
+| `prob_max_nonmonotone_iterations` | Bound for nonmonotone WFS/MC iteration where applicable |
+
+CLI flags override source pragmas when both are provided; the effective
+configuration must be visible in CLI output and explain JSON.
+
+In the `G085_APPROX` subset, `xlog prob` uses source `#pragma prob_engine = mc`
+when `--prob-engine` is not supplied. CLI flags override source pragmas
+field-by-field: `--samples`, `--seed`, `--confidence`, `--prob-method`, and
+`--prob-max-nonmonotone-iterations` replace only their matching source values.
+`--output json` emits a machine-readable MC report with the same probability,
+standard-error, confidence-interval, sample-count, evidence-count, seed,
+confidence, and sampling-method fields as the pretty/csv batch output.
+
+### Output Contract
+
+Approximate output formats must include:
+
+- probability estimate;
+- standard error;
+- confidence interval low/high;
+- sample count;
+- evidence count or acceptance/clamping count;
+- seed and method.
+
+Invalid confidence ranges, unsupported methods, or ambiguous precedence must
+fail before sampling begins.
 
 ---
 
@@ -1302,6 +1726,11 @@ trainer.reset_host_transfer_stats()
 
 Pragmas configure compiler and runtime behavior.
 
+The current source grammar accepts `prob_engine`, `prob_cache`,
+`max_recursion_depth`, and `magic_sets`. The additional v0.8.5 pragmas below
+define the release contract and remain implementation-gated until their
+corresponding `G085_*` nodes land.
+
 ### Syntax
 
 ```xlog
@@ -1315,6 +1744,12 @@ Pragmas configure compiler and runtime behavior.
 | `prob_engine` | `exact_ddnnf`, `mc` | Select probabilistic inference engine |
 | `prob_cache` | `on`, `off` | Enable/disable probability caching |
 | `max_recursion_depth` | integer | Maximum recursion iterations |
+| `magic_sets` | `auto`, `on`, `off` | Control bound-recursive magic-set rewriting |
+| `prob_samples` | integer | Monte Carlo sample count |
+| `prob_seed` | integer | Monte Carlo random seed |
+| `prob_confidence` | float in `(0, 1)` | Monte Carlo confidence level |
+| `prob_method` | `rejection`, `evidence_clamping` | Monte Carlo sampling method |
+| `prob_max_nonmonotone_iterations` | integer | Bound nonmonotone probabilistic iteration where applicable |
 
 ### Examples
 
@@ -1327,7 +1762,87 @@ Pragmas configure compiler and runtime behavior.
 
 // Limit recursion depth
 #pragma max_recursion_depth = 100
+
+// Let the compiler specialize safe bound recursive queries
+#pragma magic_sets = auto
+
+// Configure approximate inference
+#pragma prob_samples = 10000
+#pragma prob_seed = 42
+#pragma prob_confidence = 0.95
+#pragma prob_method = evidence_clamping
 ```
+
+---
+
+## CLI Developer Experience
+
+v0.8.5 adds developer-experience commands that make the language inspectable
+and interactive without changing the runtime execution contract.
+
+### `xlog explain`
+
+```bash
+xlog explain [--format text|json|dot] <FILE>
+```
+
+The `G085_CLI` subset of explain reports deterministic parse, AST,
+stratification, RIR, optimizer, WCOJ, magic-set, and probability sections
+without requiring GPU execution. JSON output is deterministic for fixed input.
+
+Full explain output must include deterministic sections when applicable:
+
+- parse and AST summary;
+- predicate declarations and schema metadata;
+- stratification and negation safety;
+- RIR and optimized RIR summaries;
+- magic-set adornments, generated predicates, and declined reasons;
+- WCOJ eligibility and selected execution path;
+- probabilistic engine, aggregate, and approximate-inference sections for
+  probabilistic programs.
+
+JSON output must be deterministic for fixed input. Unknown formats are rejected
+before compilation.
+
+### Incremental Parsing
+
+`xlog_logic::ParserSession` is the shared parser cache for explain, REPL, and
+watch workflows. It splits `.xlog` source into statement units, records stable
+text hashes and byte/line spans, and reparses only changed statements through
+the production parser. Cache statistics report hits, misses, invalidations,
+module invalidations, statement count, and an estimated statement-unit speedup.
+
+Module invalidation removes the changed module and cached sources that import
+that module name. Incremental parse diagnostics include the original
+line/column and byte span before forwarding the underlying parser error.
+
+### `xlog repl`
+
+```bash
+xlog repl [--module-path DIR[:DIR...]]
+```
+
+The REPL accepts multiline facts, rules, declarations, pragmas, and queries.
+It shares the incremental parser/session cache and does not require GPU access
+until the user submits a command that needs execution.
+The `G085_CLI` smoke implementation reads a multiline stdin session, preserves
+the accumulated parser state, and reports statement/rule/query counts.
+
+### `xlog watch`
+
+```bash
+xlog watch [--debounce-ms N] [--explain] <FILE>
+```
+
+Watch mode reruns compilation, execution, or explanation after file changes.
+It must debounce rapid writes, invalidate changed statements and dependent
+module state, and display typed diagnostics without reusing stale parse
+results.
+The `G085_CLI` smoke implementation supports `--once`, `--explain`, and
+`--debounce-ms`, using the shared parser session before any execution path.
+
+Unsupported REPL/watch mutation semantics, such as dynamic `assert` or
+`retract`, remain outside the language.
 
 ---
 
@@ -1420,7 +1935,9 @@ Block comments (`/* ... */`) are **not supported**.
 
 ## Complete Grammar Reference
 
-The following is a summary of the XLOG grammar in PEG notation.
+The following is a summary of the current XLOG grammar plus the v0.8.5 contract
+extensions in PEG-style notation. Contract extensions are source-audited again
+as their implementation nodes land.
 
 ### Lexical Elements
 
@@ -1445,10 +1962,51 @@ type_spec = { "u32" | "u64" | "i32" | "i64" | "f32" | "f64" | "bool" | "symbol" 
 type_list = { type_spec ~ ("," ~ type_spec)* }
 ```
 
+v0.8.5 contract:
+
+```pest
+type_spec = {
+    scalar_type
+    | domain_ref
+    | list_type
+    | "term"
+    | "compound"
+    | "predref"
+}
+scalar_type = { "u32" | "u64" | "i32" | "i64" | "f32" | "f64" | "bool" | "symbol" }
+domain_ref = { ident }
+list_type = { "list" ~ "<" ~ type_spec ~ ">" }
+named_column = { ident ~ ":" ~ type_spec }
+pred_column = { named_column | type_spec }
+type_list = { pred_column ~ ("," ~ pred_column)* }
+```
+
 ### Terms and Atoms
 
 ```pest
 term = { var_or_anon | float_num | integer | string_lit | ident }
+term_list = { term ~ ("," ~ term)* }
+atom = { ident ~ "(" ~ term_list? ~ ")" }
+```
+
+v0.8.5 contract:
+
+```pest
+list_literal = { "[" ~ (term ~ ("," ~ term)*)? ~ "]" }
+cons_pattern = { "[" ~ term ~ "|" ~ term ~ "]" }
+compound_term = { ident ~ "(" ~ term_list? ~ ")" }
+predref_term = { ident }
+term = {
+    var_or_anon
+    | float_num
+    | integer
+    | string_lit
+    | list_literal
+    | cons_pattern
+    | compound_term
+    | predref_term
+    | ident
+}
 term_list = { term ~ ("," ~ term)* }
 atom = { ident ~ "(" ~ term_list? ~ ")" }
 ```
@@ -1491,7 +2049,14 @@ aggregate = { agg_op ~ "(" ~ variable ~ ")" }
 
 ```pest
 negated_atom = { "not" ~ atom }
-body_literal = { negated_atom | atom | comparison | is_expr }
+meta_goal = {
+    ("ground" | "var" | "nonvar") ~ "(" ~ term ~ ")"
+    | "functor" ~ "(" ~ term ~ "," ~ term ~ "," ~ term ~ ")"
+    | term ~ "=.." ~ term
+    | "findall" ~ "(" ~ term ~ "," ~ atom ~ "," ~ term ~ ")"
+    | "maplist" ~ "(" ~ predref_term ~ "," ~ term ~ ("," ~ term)? ~ ")"
+}
+body_literal = { negated_atom | meta_goal | atom | comparison | is_expr }
 body = { body_literal ~ ("," ~ body_literal)* }
 
 head = { ident ~ "(" ~ head_term_list? ~ ")" }
@@ -1546,7 +2111,36 @@ prob_cache_value = { "on" | "off" }
 pragma_prob_engine = { "#pragma" ~ "prob_engine" ~ "=" ~ prob_engine_value }
 pragma_prob_cache = { "#pragma" ~ "prob_cache" ~ "=" ~ prob_cache_value }
 pragma_max_recursion = { "#pragma" ~ "max_recursion_depth" ~ "=" ~ integer }
-pragma = { pragma_prob_engine | pragma_prob_cache | pragma_max_recursion }
+pragma_magic_sets = { "#pragma" ~ "magic_sets" ~ "=" ~ ("auto" | "on" | "off") }
+pragma_prob_samples = { "#pragma" ~ "prob_samples" ~ "=" ~ integer }
+pragma_prob_seed = { "#pragma" ~ "prob_seed" ~ "=" ~ integer }
+pragma_prob_confidence = { "#pragma" ~ "prob_confidence" ~ "=" ~ float_num }
+pragma_prob_method = { "#pragma" ~ "prob_method" ~ "=" ~ ("rejection" | "evidence_clamping") }
+pragma_prob_max_nonmonotone_iterations = {
+    "#pragma" ~ "prob_max_nonmonotone_iterations" ~ "=" ~ integer
+}
+pragma = {
+    pragma_prob_engine
+    | pragma_prob_cache
+    | pragma_max_recursion
+    | pragma_magic_sets
+    | pragma_prob_samples
+    | pragma_prob_seed
+    | pragma_prob_confidence
+    | pragma_prob_method
+    | pragma_prob_max_nonmonotone_iterations
+}
+```
+
+### CLI Examples
+
+```bash
+xlog run program.xlog
+xlog prob program.xlog --prob-engine exact_ddnnf
+xlog prob program.xlog --prob-engine mc --samples 10000 --seed 42
+xlog explain --format json program.xlog
+xlog repl
+xlog watch --debounce-ms 250 program.xlog
 ```
 
 ### Program Structure
@@ -1576,6 +2170,7 @@ program = { SOI ~ statement* ~ EOI }
 ## See Also
 
 - [Architecture Guide](ARCHITECTURE.md) - System design and implementation details
+- [v0.8.5 Language Architecture Contract](architecture/language-v085.md) - Parser, term, probability, CLI, and v0.9.0 handoff contract
 - [Arithmetic Expressions](architecture/arithmetic-expressions.md) - Detailed `is` syntax documentation
 - [Probabilistic Tier](architecture/xlog-prob.md) - Exact and Monte Carlo inference
 - [GPU Execution](architecture/gpu-execution.md) - GPU-resident evaluation details

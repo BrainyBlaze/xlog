@@ -1,0 +1,9 @@
+append_len(N) :- append([10], [20, 30], L), length(L, N).
+sorted_member(X) :- sort([30, 10, 20, 10], L), member(X, L).
+stable_sorted_len(N) :- msort([30, 10, 20, 10], L), length(L, N).
+set_len(N) :- list_to_set([30, 10, 30, 20], L), length(L, N).
+
+?- append_len(N).
+?- sorted_member(X).
+?- stable_sorted_len(N).
+?- set_len(N).

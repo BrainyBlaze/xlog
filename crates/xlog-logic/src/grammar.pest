@@ -29,7 +29,10 @@ bool_lit = { "true" | "false" }
 prob_num = @{ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
 
 // Terms
-term = { var_or_anon | float_num | integer | string_lit | ident }
+list_literal = { "[" ~ (term ~ ("," ~ term)*)? ~ "]" }
+cons_pattern = { "[" ~ term ~ "|" ~ term ~ "]" }
+compound_term = { ident ~ "(" ~ term_list? ~ ")" }
+term = { var_or_anon | cons_pattern | list_literal | compound_term | float_num | integer | string_lit | ident }
 
 // Atoms
 atom = { ident ~ "(" ~ term_list? ~ ")" }
@@ -72,7 +75,8 @@ is_expr = { variable ~ "is" ~ arith_expr }
 
 // Body literals
 negated_atom = { "not" ~ atom }
-body_literal = { negated_atom | atom | comparison | is_expr }
+univ = { term ~ "=.." ~ term }
+body_literal = { negated_atom | univ | atom | comparison | is_expr }
 body = { body_literal ~ ("," ~ body_literal)* }
 
 // Head with optional aggregate
@@ -109,14 +113,34 @@ evidence_stmt = { "evidence" ~ "(" ~ atom ~ "," ~ bool_lit ~ ")" ~ "." }
 // Pragmas / directives
 prob_engine_value = { "exact_ddnnf" | "mc" }
 prob_cache_value = { "on" | "off" }
+magic_sets_value = { "auto" | "on" | "off" }
+prob_method_value = { "rejection" | "evidence_clamping" }
 pragma_prob_engine = { "#pragma" ~ "prob_engine" ~ "=" ~ prob_engine_value }
 pragma_prob_cache = { "#pragma" ~ "prob_cache" ~ "=" ~ prob_cache_value }
+pragma_prob_samples = { "#pragma" ~ "prob_samples" ~ "=" ~ integer }
+pragma_prob_seed = { "#pragma" ~ "prob_seed" ~ "=" ~ integer }
+pragma_prob_confidence = { "#pragma" ~ "prob_confidence" ~ "=" ~ float_num }
+pragma_prob_method = { "#pragma" ~ "prob_method" ~ "=" ~ prob_method_value }
+pragma_prob_max_nonmonotone_iterations = { "#pragma" ~ "prob_max_nonmonotone_iterations" ~ "=" ~ integer }
 pragma_max_recursion = { "#pragma" ~ "max_recursion_depth" ~ "=" ~ integer }
-pragma = { pragma_prob_engine | pragma_prob_cache | pragma_max_recursion }
+pragma_magic_sets = { "#pragma" ~ "magic_sets" ~ "=" ~ magic_sets_value }
+pragma = {
+    pragma_prob_engine
+    | pragma_prob_cache
+    | pragma_prob_samples
+    | pragma_prob_seed
+    | pragma_prob_confidence
+    | pragma_prob_method
+    | pragma_prob_max_nonmonotone_iterations
+    | pragma_max_recursion
+    | pragma_magic_sets
+}
 
 // Domain declarations
 domain_decl = { "domain" ~ ident ~ ":" ~ type_spec ~ "." }
-type_spec = { "u32" | "u64" | "i32" | "i64" | "f32" | "f64" | "bool" | "symbol" }
+scalar_type = { "u32" | "u64" | "i32" | "i64" | "f32" | "f64" | "bool" | "symbol" }
+list_type = { "list" ~ "<" ~ type_spec ~ ">" }
+type_spec = { list_type | "term" | "compound" | "predref" | scalar_type | ident }
 
 // Type annotation for function parameters: X: f64
 type_annotation = { ":" ~ type_spec }
@@ -156,7 +180,8 @@ private_mod = { "private" }
 
 // Predicate declarations
 pred_decl = { private_mod? ~ "pred" ~ ident ~ "(" ~ type_list? ~ ")" ~ "." }
-type_list = { type_spec ~ ("," ~ type_spec)* }
+pred_column = { ident ~ ":" ~ type_spec | type_spec }
+type_list = { pred_column ~ ("," ~ pred_column)* }
 
 // Learnable rule: parameterized by a named tensor mask
 // mask_name starts with ASCII_ALPHA (upper OR lower), unlike ident which

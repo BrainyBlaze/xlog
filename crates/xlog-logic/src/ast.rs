@@ -17,6 +17,24 @@ pub enum Term {
     String(String),
     /// Interned symbol ID -- use `xlog_core::symbol::resolve(id)` to get the string.
     Symbol(u32),
+    /// Finite list literal.
+    List(Vec<Term>),
+    /// Finite cons pattern `[Head | Tail]`.
+    Cons {
+        /// Head term.
+        head: Box<Term>,
+        /// Tail term.
+        tail: Box<Term>,
+    },
+    /// Finite compound term.
+    Compound {
+        /// Functor name.
+        functor: String,
+        /// Compound arguments.
+        args: Vec<Term>,
+    },
+    /// Static predicate reference.
+    PredRef(String),
     /// Aggregate expression (e.g. `count(X)`).
     Aggregate(AggExpr),
 }
@@ -39,7 +57,15 @@ impl Term {
 
     /// Returns true if this is a ground (non-variable, non-aggregate) term.
     pub fn is_constant(&self) -> bool {
-        !self.is_any_variable() && !matches!(self, Term::Aggregate(_))
+        !self.is_any_variable()
+            && !matches!(
+                self,
+                Term::Aggregate(_)
+                    | Term::List(_)
+                    | Term::Cons { .. }
+                    | Term::Compound { .. }
+                    | Term::PredRef(_)
+            )
     }
 
     /// Returns the variable name, or None for anonymous/constants
@@ -47,6 +73,27 @@ impl Term {
         match self {
             Term::Variable(name) => Some(name),
             _ => None,
+        }
+    }
+
+    /// Return all named variables referenced by this term.
+    pub fn variables(&self) -> Vec<&str> {
+        match self {
+            Term::Variable(name) => vec![name.as_str()],
+            Term::List(items) => items.iter().flat_map(Term::variables).collect(),
+            Term::Cons { head, tail } => {
+                let mut vars = head.variables();
+                vars.extend(tail.variables());
+                vars
+            }
+            Term::Compound { args, .. } => args.iter().flat_map(Term::variables).collect(),
+            Term::Anonymous
+            | Term::Integer(_)
+            | Term::Float(_)
+            | Term::String(_)
+            | Term::Symbol(_)
+            | Term::PredRef(_)
+            | Term::Aggregate(_) => vec![],
         }
     }
 }
@@ -194,10 +241,7 @@ impl Atom {
 
     /// Collect all named variables in this atom.
     pub fn variables(&self) -> Vec<&str> {
-        self.terms
-            .iter()
-            .filter_map(|t| t.variable_name())
-            .collect()
+        self.terms.iter().flat_map(Term::variables).collect()
     }
 }
 
@@ -229,6 +273,15 @@ pub struct Comparison {
     pub right: Term,
 }
 
+/// A finite univ expression (`Term =.. Parts`) in a rule body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Univ {
+    /// Term side of the univ relation.
+    pub term: Term,
+    /// Parts-list side of the univ relation.
+    pub parts: Term,
+}
+
 /// A literal in the body of a rule
 #[derive(Debug, Clone, PartialEq)]
 pub enum BodyLiteral {
@@ -240,6 +293,8 @@ pub enum BodyLiteral {
     Comparison(Comparison),
     /// Is-expression binding (e.g. `Z is X + Y`).
     IsExpr(IsExpr),
+    /// Finite univ relation (`Term =.. Parts`).
+    Univ(Univ),
 }
 
 impl BodyLiteral {
@@ -257,7 +312,7 @@ impl BodyLiteral {
     pub fn atom(&self) -> Option<&Atom> {
         match self {
             BodyLiteral::Positive(a) | BodyLiteral::Negated(a) => Some(a),
-            BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) => None,
+            BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => None,
         }
     }
 
@@ -267,17 +322,18 @@ impl BodyLiteral {
             BodyLiteral::Positive(a) | BodyLiteral::Negated(a) => a.variables(),
             BodyLiteral::Comparison(c) => {
                 let mut vars = vec![];
-                if let Some(v) = c.left.variable_name() {
-                    vars.push(v);
-                }
-                if let Some(v) = c.right.variable_name() {
-                    vars.push(v);
-                }
+                vars.extend(c.left.variables());
+                vars.extend(c.right.variables());
                 vars
             }
             BodyLiteral::IsExpr(is_expr) => {
                 let mut vars = is_expr.expr.variables();
                 vars.push(is_expr.target.as_str());
+                vars
+            }
+            BodyLiteral::Univ(univ) => {
+                let mut vars = univ.term.variables();
+                vars.extend(univ.parts.variables());
                 vars
             }
         }
@@ -363,15 +419,47 @@ pub enum ProbCache {
     Off,
 }
 
+/// Monte Carlo sampling method selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbMethod {
+    /// Rejection sampling.
+    Rejection,
+    /// Forceable evidence clamping.
+    EvidenceClamping,
+}
+
+/// Magic-set rewrite mode for bound recursive deterministic queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MagicSetsMode {
+    /// Apply the rewrite when the compiler can prove the supported safe subset.
+    Auto,
+    /// Require the rewrite and fail with a typed diagnostic if it is unsafe.
+    On,
+    /// Disable magic-set rewriting.
+    Off,
+}
+
 /// Compilation/evaluation directives (e.g., `#pragma ...`).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Directives {
     /// Override for the probabilistic inference engine.
     pub prob_engine: Option<ProbEngine>,
     /// Override for circuit caching.
     pub prob_cache: Option<ProbCache>,
+    /// Monte Carlo sample count.
+    pub prob_samples: Option<usize>,
+    /// Monte Carlo deterministic RNG seed.
+    pub prob_seed: Option<u64>,
+    /// Monte Carlo confidence level.
+    pub prob_confidence: Option<f64>,
+    /// Monte Carlo sampling method.
+    pub prob_method: Option<ProbMethod>,
+    /// Maximum nonmonotone MC iterations.
+    pub prob_max_nonmonotone_iterations: Option<usize>,
     /// Maximum UDF recursion depth.
     pub max_recursion_depth: Option<u32>,
+    /// Magic-set rewrite mode.
+    pub magic_sets: Option<MagicSetsMode>,
 }
 
 impl Directives {
@@ -383,6 +471,26 @@ impl Directives {
     /// Return the configured max recursion depth, defaulting to 1000.
     pub fn max_recursion_depth_or_default(&self) -> u32 {
         self.max_recursion_depth.unwrap_or(1000)
+    }
+
+    /// Return the configured MC sample count, defaulting to 10000.
+    pub fn prob_samples_or_default(&self) -> usize {
+        self.prob_samples.unwrap_or(10000)
+    }
+
+    /// Return the configured MC seed, defaulting to 0.
+    pub fn prob_seed_or_default(&self) -> u64 {
+        self.prob_seed.unwrap_or(0)
+    }
+
+    /// Return the configured MC confidence, defaulting to 0.95.
+    pub fn prob_confidence_or_default(&self) -> f64 {
+        self.prob_confidence.unwrap_or(0.95)
+    }
+
+    /// Return the configured nonmonotone MC iteration cap, defaulting to 1024.
+    pub fn prob_max_nonmonotone_iterations_or_default(&self) -> usize {
+        self.prob_max_nonmonotone_iterations.unwrap_or(1024)
     }
 }
 
@@ -488,13 +596,41 @@ pub struct DomainDecl {
     pub typ: ScalarType,
 }
 
+/// A type reference in source declarations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeRef {
+    /// Built-in scalar type.
+    Scalar(ScalarType),
+    /// Domain alias resolved during semantic analysis.
+    Domain(String),
+    /// Finite homogeneous list type.
+    List(Box<TypeRef>),
+    /// Finite term type.
+    Term,
+    /// Finite compound term type.
+    Compound,
+    /// Static predicate reference type.
+    PredRef,
+}
+
+/// Predicate declaration column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PredColumn {
+    /// Optional source-level column name.
+    pub name: Option<String>,
+    /// Column type reference.
+    pub typ: TypeRef,
+}
+
 /// Predicate declaration
 #[derive(Debug, Clone, PartialEq)]
 pub struct PredDecl {
     /// Predicate name.
     pub name: String,
     /// Column types.
-    pub types: Vec<ScalarType>,
+    pub types: Vec<TypeRef>,
+    /// Declared columns, including optional names.
+    pub columns: Vec<PredColumn>,
     /// Whether this predicate is module-private.
     pub is_private: bool,
 }
@@ -621,6 +757,11 @@ impl Program {
             || !self.prob_queries.is_empty()
             || self.directives.prob_engine.is_some()
             || self.directives.prob_cache.is_some()
+            || self.directives.prob_samples.is_some()
+            || self.directives.prob_seed.is_some()
+            || self.directives.prob_confidence.is_some()
+            || self.directives.prob_method.is_some()
+            || self.directives.prob_max_nonmonotone_iterations.is_some()
     }
 
     /// Return the probabilistic engine (from directives, or the default).

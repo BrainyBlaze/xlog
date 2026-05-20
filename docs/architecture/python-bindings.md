@@ -184,13 +184,60 @@ session.apply_relation_delta(
     insert_columns=[added_row_id, added_parent_id],
     delete_columns=[removed_row_id, removed_parent_id],
 )
+
+session.apply_relation_delta_batch([
+    {"name": "wmir_committed", "insert_columns": [row_a, parent_a]},
+    {"name": "wmir_committed", "delete_columns": [row_b, parent_b]},
+])
 ```
 
 The delta stats dictionary contains `changed_relations`, `insert_rows`,
-`delete_rows`, `affected_sccs`, `recomputed_sccs`, and `incremental_sccs`.
+`delete_rows`, `affected_sccs`, `recomputed_sccs`, `incremental_sccs`,
+`input_delta_count`, `coalesced_insert_rows`, `coalesced_delete_rows`, and
+`canceled_rows`. Batch updates coalesce repeated relation mutations before
+runtime recompute using existing device-resident set operations; callback or
+diagnostic code must not materialize relation rows on the host.
 Direct `put_relation`, `remove_relation`, or `clear_relations` calls invalidate
 the cached runtime store and make the next `evaluate()` perform a full plan
 run before later deltas can reuse it.
+
+Persistent sessions retain their runtime executor across `evaluate()` and
+delta recompute calls, so persistent hash indexes can be reused through public
+pyxlog mutation loops. `session.join_index_cache_stats()` returns the retained
+executor's `lookups`, `hits`, `misses`, `builds`, invalidation counters,
+background-build counters, `entries`, and `total_bytes`.
+
+#### Relation Change Callbacks
+
+Persistent sessions expose opt-in metadata callbacks for relation delta
+commits:
+
+```python
+def register_relation_callback(callback) -> int: ...
+def unregister_relation_callback(callback_id: int) -> bool: ...
+
+events = []
+callback_id = session.register_relation_callback(events.append)
+session.apply_relation_delta_batch([
+    {"name": "wmir_committed", "insert_columns": [row_a, parent_a]},
+])
+session.unregister_relation_callback(callback_id)
+```
+
+Callbacks fire only after a delta commit succeeds. A failed or rolled-back
+delta does not invoke registered callbacks. The callback payload is a
+metadata-only dictionary with `relation`, `generation`, `input_delta_count`,
+`insert_rows`, `delete_rows`, `has_deletes`, `coalesced_insert_rows`,
+`coalesced_delete_rows`, `canceled_rows`, `affected_sccs`,
+`recomputed_sccs`, `incremental_sccs`, and nested `telemetry`.
+
+Callbacks are invoked synchronously while the pyxlog method holds the Python
+GIL. Registration order is callback order, and relation events are emitted in
+the caller's update order after duplicate relation names are coalesced. The
+G086_NOTIFY ordering fixture records 100 replays with identical callback
+sequences. Callback payload construction does not export DLPack tensors or
+download relation data-plane rows; use explicit `evaluate()` or
+`export_relation()` when row materialization is actually requested.
 
 #### v0.8.0 Runtime Controls And Diagnostics
 

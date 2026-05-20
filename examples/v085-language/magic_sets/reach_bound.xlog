@@ -1,0 +1,14 @@
+#pragma magic_sets = on
+
+pred edge(src: u32, dst: u32).
+pred reach(src: u32, dst: u32).
+
+edge(1, 2).
+edge(2, 3).
+edge(10, 11).
+edge(11, 12).
+
+reach(X, Y) :- edge(X, Y).
+reach(X, Z) :- reach(X, Y), edge(Y, Z).
+
+?- reach(1, Y).

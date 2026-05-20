@@ -3501,6 +3501,110 @@ impl super::CudaKernelProvider {
         })
     }
 
+    /// Build a cached join index for background persistent-index mode.
+    ///
+    /// When recorded hash joins are enabled and the provider has a runtime-backed
+    /// manager, the build is enqueued on the provider's recorded operation stream
+    /// and dependency-recorded like the indexed join consumer path. Otherwise this
+    /// falls back to the legacy synchronous builder.
+    pub fn build_join_index_v2_background(
+        &self,
+        right: &CudaBuffer,
+        right_keys: &[usize],
+    ) -> Result<JoinIndexV2> {
+        if Self::use_recorded_hash_join_env()
+            && !right_keys.is_empty()
+            && right_keys.len() <= 4
+            && right.num_rows() > 0
+        {
+            if let Some(launch_stream) = self.recorded_op_stream_or_init() {
+                return self.build_join_index_v2_recorded(right, right_keys, launch_stream);
+            }
+        }
+
+        self.build_join_index_v2(right, right_keys)
+    }
+
+    /// Recorded-stream join-index builder used by persistent background builds.
+    ///
+    /// The build side is packed and bucketized on `launch_stream`; the returned
+    /// `JoinIndexV2` carries runtime-tracked buffers whose writes were committed
+    /// through the launch recorder / stream dependency machinery.
+    pub fn build_join_index_v2_recorded(
+        &self,
+        right: &CudaBuffer,
+        right_keys: &[usize],
+        launch_stream: StreamId,
+    ) -> Result<JoinIndexV2> {
+        let runtime = self.memory.runtime().ok_or_else(|| {
+            XlogError::Kernel(
+                "build_join_index_v2_recorded requires a runtime-backed GpuMemoryManager"
+                    .to_string(),
+            )
+        })?;
+        let cu_stream = runtime
+            .stream_pool()
+            .resolve(launch_stream)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "build_join_index_v2_recorded: launch_stream StreamId({}) does not resolve",
+                    launch_stream.0
+                ))
+            })?;
+
+        let num_right = self.device_row_count(right)?;
+        if num_right == 0 {
+            return Err(XlogError::Kernel(
+                "Cannot build join index for empty relation".to_string(),
+            ));
+        }
+        if num_right > u32::MAX as usize {
+            return Err(XlogError::Kernel(format!(
+                "Join index supports at most {} rows, got {}",
+                u32::MAX,
+                num_right
+            )));
+        }
+        if right_keys.is_empty() {
+            return Err(XlogError::Kernel(
+                "Join requires at least one key column".to_string(),
+            ));
+        }
+        if right_keys.len() > 4 {
+            return Err(XlogError::Kernel(
+                "build_join_index_v2_recorded: max 4 key columns supported".to_string(),
+            ));
+        }
+        for &k in right_keys {
+            if k >= right.arity() {
+                return Err(XlogError::Kernel(format!(
+                    "Right key column index {} out of bounds (arity {})",
+                    k,
+                    right.arity()
+                )));
+            }
+        }
+
+        let num_right = num_right as u32;
+        let right_packed =
+            self.pack_keys_gpu_on_stream(right, right_keys, &cu_stream, launch_stream, runtime)?;
+        let table = self.build_hash_table_v2_on_stream(
+            &right_packed.hashes,
+            num_right,
+            &cu_stream,
+            launch_stream,
+            runtime,
+        )?;
+
+        Ok(JoinIndexV2 {
+            right_num_rows: num_right,
+            right_keys: right_keys.to_vec(),
+            key_bytes: right_packed.key_bytes,
+            packed_keys: right_packed.packed_keys,
+            table,
+        })
+    }
+
     /// Hash join using a cached build-side join index.
     ///
     /// The `index` must have been built for the same `right` buffer and `right_keys`.

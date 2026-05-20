@@ -83,12 +83,40 @@ class LogicRelationSession:
         """Apply insert and/or delete rows to a stored relation."""
         ...
 
+    def apply_relation_delta_batch(self, updates: list[dict[str, Any]]) -> dict[str, Any]:
+        """Apply a batch of relation deltas with device-side coalescing.
+
+        Each update dictionary contains ``name`` plus optional
+        ``insert_columns`` and ``delete_columns`` DLPack column sequences. The
+        returned stats include ``input_delta_count``,
+        ``coalesced_insert_rows``, ``coalesced_delete_rows``, and
+        ``canceled_rows``.
+        """
+        ...
+
     def delta_stats(self) -> dict[str, Any]:
         """Return statistics from the most recent relation delta update."""
         ...
 
+    def register_relation_callback(self, callback: Any) -> int:
+        """Register a session-level relation mutation callback.
+
+        The callable receives one metadata-only payload dictionary after each
+        successful relation delta commit. Returns a callback id for
+        ``unregister_relation_callback``.
+        """
+        ...
+
+    def unregister_relation_callback(self, callback_id: int) -> bool:
+        """Unregister a relation callback by id. Returns True when removed."""
+        ...
+
     def host_transfer_stats(self) -> dict[str, int]:
         """Return ``{dtoh_bytes: int, ...}`` transfer statistics."""
+        ...
+
+    def join_index_cache_stats(self) -> dict[str, int]:
+        """Return persistent hash-index cache telemetry for this session."""
         ...
 
     def reset_host_transfer_stats(self) -> None:

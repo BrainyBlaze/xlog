@@ -1,0 +1,41 @@
+{
+  "consumer": "v090-substrate",
+  "features": [
+    "exact_induction",
+    "chain_shared_memory",
+    "common_subexpression_elimination",
+    "adaptive_reoptimization",
+    "persistent_hash_index",
+    "v090_substrate",
+    "pyxlog_compatibility",
+    "production_path_reuse"
+  ],
+  "source_required_substrings": [
+    "pred epistemic_world(id: u32)",
+    "pred exact_candidate(src: u32, dst: u32)",
+    "pred reusable_index_key(src: u32)",
+    "solver_edge(A, B), solver_edge(B, C)",
+    "adaptive_candidate(A, C)"
+  ],
+  "checks": {
+    "run": {
+      "returncode": 0,
+      "stdout_contains": [
+        "__xlog_query_0",
+        "| 1",
+        "| 3",
+        "__xlog_query_1",
+        "| 1",
+        "| 3",
+        "__xlog_query_2",
+        "| 1",
+        "| 1"
+      ]
+    },
+    "explain_json": {
+      "min_statements": 26,
+      "stratification_status": "ok",
+      "rir_status": "ok"
+    }
+  }
+}

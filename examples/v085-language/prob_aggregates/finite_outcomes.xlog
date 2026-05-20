@@ -1,0 +1,18 @@
+// Finite probabilistic aggregate outcomes for exact provenance and MC sampling.
+
+0.5::edge(1, 2).
+0.25::edge(1, 3).
+
+0.5::obs(1, 2).
+0.25::obs(1, 3).
+
+out_degree(X, count(Y)) :- edge(X, Y).
+score_sum(X, sum(Y)) :- obs(X, Y).
+score_min(X, min(Y)) :- obs(X, Y).
+score_max(X, max(Y)) :- obs(X, Y).
+score_lse(X, logsumexp(Y)) :- obs(X, Y).
+
+query(out_degree(1, 2)).
+query(score_sum(1, 5)).
+query(score_min(1, 2)).
+query(score_max(1, 3)).

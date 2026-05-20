@@ -1,0 +1,31 @@
+{
+  "date": "2026-05-19",
+  "goal_node": "G086_CHAIN_SMEM",
+  "phase": "PROFILE_TRIGGER_ONLY",
+  "runtime_venv": "/tmp/xlog-v086-exact-types-venv",
+  "script": "scripts/measure_v086_chain_smem.py",
+  "small": {
+    "rows_per_candidate": 32,
+    "query_pairs_positive": 8,
+    "query_pairs_negative": 8,
+    "iterations": 12,
+    "warmup": 3,
+    "median_seconds": 0.0008779879717621952,
+    "min_seconds": 0.0007938360213302076,
+    "max_seconds": 0.0010512439766898751,
+    "dtoh_calls": 2
+  },
+  "chain_hot": {
+    "rows_per_candidate": 768,
+    "query_pairs_positive": 32,
+    "query_pairs_negative": 32,
+    "iterations": 12,
+    "warmup": 3,
+    "median_seconds": 0.027476257004309446,
+    "min_seconds": 0.027041922963690013,
+    "max_seconds": 0.027681432955432683,
+    "dtoh_calls": 2
+  },
+  "hot_to_small_median_ratio": 31.294571096643047,
+  "profile_trigger_pass": true
+}

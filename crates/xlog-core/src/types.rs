@@ -71,7 +71,8 @@ impl ScalarType {
     /// and differ only in signedness. This allows importing PyTorch signed integer
     /// tensors (int32/int64) into unsigned schema columns (u32/u64) and vice versa,
     /// since the bit patterns are identical on GPU and xlog kernels operate on raw
-    /// column buffers without signedness-dependent semantics.
+    /// column buffers without signedness-dependent semantics. Symbol schemas may
+    /// import physical 32-bit tensor IDs while preserving their logical schema type.
     ///
     /// Float and bool types require exact match.
     pub fn dlpack_compatible(&self, other: ScalarType) -> bool {
@@ -84,6 +85,8 @@ impl ScalarType {
                 | (ScalarType::I32, ScalarType::U32)
                 | (ScalarType::U64, ScalarType::I64)
                 | (ScalarType::I64, ScalarType::U64)
+                | (ScalarType::Symbol, ScalarType::U32)
+                | (ScalarType::Symbol, ScalarType::I32)
         )
     }
 
@@ -407,8 +410,11 @@ mod tests {
         assert!(!ScalarType::F32.dlpack_compatible(ScalarType::I32));
         assert!(!ScalarType::F64.dlpack_compatible(ScalarType::I64));
 
-        // Bool/Symbol require exact match
+        // Bool requires exact match. Symbol columns preserve logical type in
+        // the schema, but import from physical u32 tensors for GPU-resident IDs.
         assert!(!ScalarType::Bool.dlpack_compatible(ScalarType::U32));
-        assert!(!ScalarType::Symbol.dlpack_compatible(ScalarType::U32));
+        assert!(ScalarType::Symbol.dlpack_compatible(ScalarType::U32));
+        assert!(ScalarType::Symbol.dlpack_compatible(ScalarType::I32));
+        assert!(!ScalarType::U32.dlpack_compatible(ScalarType::Symbol));
     }
 }

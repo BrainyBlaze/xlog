@@ -6,6 +6,7 @@ use std::sync::Arc;
 use xlog_core::{symbol, Result, Schema, XlogError};
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 use xlog_logic::{BodyLiteral, Compiler, Program, Query, Term};
+use xlog_runtime::executor::JoinIndexCacheStats;
 use xlog_runtime::{DeltaRecomputeStats, ExecutionStats, Executor, RelationDelta, RelationStore};
 
 /// Result of evaluating a single query in a Datalog program.
@@ -28,8 +29,23 @@ pub struct LogicEvalResult {
     pub stats: Option<ExecutionStats>,
 }
 
+/// Runtime state retained by a persistent logic session.
+pub struct LogicSessionRuntime {
+    executor: Executor,
+    profiling: bool,
+}
+
+impl LogicSessionRuntime {
+    /// Return persistent hash-index cache telemetry for the retained executor.
+    pub fn join_index_cache_stats(&self) -> JoinIndexCacheStats {
+        self.executor.join_index_cache_stats()
+    }
+}
+
 /// Summary for a persistent-session relation delta update.
 pub struct LogicDeltaReport {
+    /// Number of relation delta entries supplied by the caller before coalescing.
+    pub input_delta_count: usize,
     /// Number of changed relation names in the delta batch.
     pub changed_relations: usize,
     /// Total inserted rows across all changed relations.
@@ -44,6 +60,27 @@ pub struct LogicDeltaReport {
     pub recomputed_sccs: usize,
     /// Number of affected SCCs updated without clearing prior output.
     pub incremental_sccs: usize,
+    /// Net insert rows after batch coalescing and insert/delete cancellation.
+    pub coalesced_insert_rows: u64,
+    /// Net delete rows after batch coalescing and insert/delete cancellation.
+    pub coalesced_delete_rows: u64,
+    /// Rows canceled because an insert and delete for the same relation matched in the batch.
+    pub canceled_rows: u64,
+}
+
+struct CoalescedRelationDeltaBatch {
+    deltas: HashMap<String, RelationDelta>,
+    input_delta_count: usize,
+    changed_relations: usize,
+    coalesced_insert_rows: u64,
+    coalesced_delete_rows: u64,
+    canceled_rows: u64,
+}
+
+#[derive(Default)]
+struct PendingRelationDelta {
+    insert: Option<CudaBuffer>,
+    delete: Option<CudaBuffer>,
 }
 
 /// A compiled Datalog program ready for GPU evaluation.
@@ -64,11 +101,13 @@ impl LogicProgram {
         let max_recursion = program.directives.max_recursion_depth.unwrap_or(100);
         let expanded = xlog_logic::expand_program_functions(&program, max_recursion)
             .map_err(|e| XlogError::Compilation(e.to_string()))?;
+        let normalized = xlog_logic::normalize_v085_meta(&expanded)?;
+        let normalized = xlog_logic::normalize_v085_lists(&normalized)?;
 
         let mut compiler = Compiler::new();
-        let plan = compiler.compile_program(&expanded)?;
+        let plan = compiler.compile_program(&normalized)?;
         Ok(Self {
-            program: expanded,
+            program: normalized,
             plan,
             schemas: compiler.schemas().clone(),
             rel_ids: compiler.rel_ids().clone(),
@@ -101,11 +140,13 @@ impl LogicProgram {
         let max_recursion = merged.directives.max_recursion_depth.unwrap_or(100);
         let expanded = xlog_logic::expand_program_functions(&merged, max_recursion)
             .map_err(|e| XlogError::Compilation(e.to_string()))?;
+        let normalized = xlog_logic::normalize_v085_meta(&expanded)?;
+        let normalized = xlog_logic::normalize_v085_lists(&normalized)?;
 
         let mut compiler = Compiler::new();
-        let plan = compiler.compile_program(&expanded)?;
+        let plan = compiler.compile_program(&normalized)?;
         Ok(Self {
-            program: expanded,
+            program: normalized,
             plan,
             schemas: compiler.schemas().clone(),
             rel_ids: compiler.rel_ids().clone(),
@@ -129,7 +170,7 @@ impl LogicProgram {
     ) -> Result<RelationStore> {
         let mut store = RelationStore::new(provider.clone());
         for (name, schema) in &self.schemas {
-            if is_user_visible_relation(name) {
+            if is_user_visible_relation(name) || is_list_helper_relation(name) {
                 store.put(name, provider.create_empty_buffer(schema.clone())?);
             }
         }
@@ -173,6 +214,41 @@ impl LogicProgram {
         };
 
         let cached_store = self.clone_relation_store(&provider, executor.store())?;
+        let result = self.logic_result_from_store(provider.as_ref(), &cached_store, stats)?;
+        Ok((result, cached_store))
+    }
+
+    /// Create retained runtime state for a persistent relation session.
+    pub fn create_session_runtime(
+        &self,
+        provider: Arc<CudaKernelProvider>,
+        relation_store: &RelationStore,
+        profiling: bool,
+    ) -> Result<LogicSessionRuntime> {
+        Ok(LogicSessionRuntime {
+            executor: self.executor_from_relation_store(provider, relation_store, profiling)?,
+            profiling,
+        })
+    }
+
+    /// Evaluate with retained session runtime state and return a materialized store snapshot.
+    pub fn evaluate_with_session_runtime(
+        &self,
+        provider: Arc<CudaKernelProvider>,
+        runtime: &mut LogicSessionRuntime,
+    ) -> Result<(LogicEvalResult, RelationStore)> {
+        runtime.executor.set_profiling(runtime.profiling);
+        runtime.executor.execute_plan(&self.plan)?;
+        self.enforce_constraints(&provider, &runtime.executor)?;
+
+        let total_output_rows = self.total_query_rows(runtime.executor.store())?;
+        let stats = if runtime.profiling {
+            Some(runtime.executor.execution_stats(total_output_rows))
+        } else {
+            None
+        };
+
+        let cached_store = self.clone_relation_store(&provider, runtime.executor.store())?;
         let result = self.logic_result_from_store(provider.as_ref(), &cached_store, stats)?;
         Ok((result, cached_store))
     }
@@ -235,6 +311,142 @@ impl LogicProgram {
         *cached_store = Some(self.clone_relation_store(&provider, executor.store())?);
 
         Ok(logic_delta_report(delta_stats, insert_rows, delete_rows))
+    }
+
+    /// Apply relation deltas while preserving retained session runtime state.
+    pub fn apply_relation_deltas_with_session_runtime(
+        &self,
+        provider: Arc<CudaKernelProvider>,
+        relation_store: &mut RelationStore,
+        cached_store: &mut Option<RelationStore>,
+        session_runtime: &mut Option<LogicSessionRuntime>,
+        deltas: HashMap<String, RelationDelta>,
+    ) -> Result<LogicDeltaReport> {
+        let insert_rows = deltas
+            .values()
+            .filter_map(|d| d.insert.as_ref())
+            .map(|b| b.num_rows())
+            .sum();
+        let delete_rows = deltas
+            .values()
+            .filter_map(|d| d.delete.as_ref())
+            .map(|b| b.num_rows())
+            .sum();
+
+        if session_runtime.is_none() {
+            let seed_store: &RelationStore = match cached_store.as_ref() {
+                Some(store) => store,
+                None => &*relation_store,
+            };
+            *session_runtime =
+                Some(self.create_session_runtime(provider.clone(), seed_store, false)?);
+        }
+
+        if cached_store.is_none() {
+            let runtime = session_runtime.as_mut().ok_or_else(|| {
+                XlogError::Execution("Missing session runtime for cached evaluation".to_string())
+            })?;
+            let (_, store) = self.evaluate_with_session_runtime(provider.clone(), runtime)?;
+            *cached_store = Some(store);
+        }
+
+        let runtime = session_runtime.as_mut().ok_or_else(|| {
+            XlogError::Execution("Missing session runtime for delta update".to_string())
+        })?;
+        let delta_stats = runtime
+            .executor
+            .apply_deltas_and_recompute(&self.plan, &deltas)?;
+        self.enforce_constraints(&provider, &runtime.executor)?;
+
+        for name in deltas.keys() {
+            let updated = runtime.executor.store().get(name).ok_or_else(|| {
+                XlogError::Execution(format!(
+                    "Delta relation {} missing after runtime recompute",
+                    name
+                ))
+            })?;
+            relation_store.put(name, provider.clone_buffer(updated)?);
+        }
+
+        *cached_store = Some(self.clone_relation_store(&provider, runtime.executor.store())?);
+
+        Ok(logic_delta_report(delta_stats, insert_rows, delete_rows))
+    }
+
+    /// Apply an ordered batch of relation deltas after device-side coalescing.
+    pub fn apply_relation_delta_batch(
+        &self,
+        provider: Arc<CudaKernelProvider>,
+        relation_store: &mut RelationStore,
+        cached_store: &mut Option<RelationStore>,
+        delta_batch: Vec<(String, RelationDelta)>,
+    ) -> Result<LogicDeltaReport> {
+        let coalesced = coalesce_relation_delta_batch(provider.as_ref(), delta_batch)?;
+        if coalesced.deltas.is_empty() {
+            return Ok(LogicDeltaReport {
+                input_delta_count: coalesced.input_delta_count,
+                changed_relations: 0,
+                insert_rows: 0,
+                delete_rows: 0,
+                has_deletes: false,
+                affected_sccs: 0,
+                recomputed_sccs: 0,
+                incremental_sccs: 0,
+                coalesced_insert_rows: 0,
+                coalesced_delete_rows: 0,
+                canceled_rows: coalesced.canceled_rows,
+            });
+        }
+
+        let mut report =
+            self.apply_relation_deltas(provider, relation_store, cached_store, coalesced.deltas)?;
+        report.input_delta_count = coalesced.input_delta_count;
+        report.changed_relations = coalesced.changed_relations;
+        report.coalesced_insert_rows = coalesced.coalesced_insert_rows;
+        report.coalesced_delete_rows = coalesced.coalesced_delete_rows;
+        report.canceled_rows = coalesced.canceled_rows;
+        Ok(report)
+    }
+
+    /// Apply an ordered batch of relation deltas while preserving session runtime state.
+    pub fn apply_relation_delta_batch_with_session_runtime(
+        &self,
+        provider: Arc<CudaKernelProvider>,
+        relation_store: &mut RelationStore,
+        cached_store: &mut Option<RelationStore>,
+        session_runtime: &mut Option<LogicSessionRuntime>,
+        delta_batch: Vec<(String, RelationDelta)>,
+    ) -> Result<LogicDeltaReport> {
+        let coalesced = coalesce_relation_delta_batch(provider.as_ref(), delta_batch)?;
+        if coalesced.deltas.is_empty() {
+            return Ok(LogicDeltaReport {
+                input_delta_count: coalesced.input_delta_count,
+                changed_relations: 0,
+                insert_rows: 0,
+                delete_rows: 0,
+                has_deletes: false,
+                affected_sccs: 0,
+                recomputed_sccs: 0,
+                incremental_sccs: 0,
+                coalesced_insert_rows: 0,
+                coalesced_delete_rows: 0,
+                canceled_rows: coalesced.canceled_rows,
+            });
+        }
+
+        let mut report = self.apply_relation_deltas_with_session_runtime(
+            provider,
+            relation_store,
+            cached_store,
+            session_runtime,
+            coalesced.deltas,
+        )?;
+        report.input_delta_count = coalesced.input_delta_count;
+        report.changed_relations = coalesced.changed_relations;
+        report.coalesced_insert_rows = coalesced.coalesced_insert_rows;
+        report.coalesced_delete_rows = coalesced.coalesced_delete_rows;
+        report.canceled_rows = coalesced.canceled_rows;
+        Ok(report)
     }
 
     /// Evaluate the program with the given input relations (no profiling).
@@ -520,12 +732,17 @@ fn is_user_visible_relation(name: &str) -> bool {
     !name.starts_with("__")
 }
 
+fn is_list_helper_relation(name: &str) -> bool {
+    name.starts_with("__xlog_list_")
+}
+
 fn logic_delta_report(
     stats: DeltaRecomputeStats,
     insert_rows: u64,
     delete_rows: u64,
 ) -> LogicDeltaReport {
     LogicDeltaReport {
+        input_delta_count: stats.changed_relations,
         changed_relations: stats.changed_relations,
         insert_rows,
         delete_rows,
@@ -533,7 +750,122 @@ fn logic_delta_report(
         affected_sccs: stats.affected_sccs,
         recomputed_sccs: stats.recomputed_sccs,
         incremental_sccs: stats.incremental_sccs,
+        coalesced_insert_rows: insert_rows,
+        coalesced_delete_rows: delete_rows,
+        canceled_rows: 0,
     }
+}
+
+fn coalesce_relation_delta_batch(
+    provider: &CudaKernelProvider,
+    delta_batch: Vec<(String, RelationDelta)>,
+) -> Result<CoalescedRelationDeltaBatch> {
+    let input_delta_count = delta_batch.len();
+    let mut pending_by_relation: HashMap<String, PendingRelationDelta> = HashMap::new();
+    let mut canceled_rows = 0u64;
+
+    for (name, delta) in delta_batch {
+        let pending = pending_by_relation.entry(name).or_default();
+        if let Some(insert) = delta.insert {
+            merge_insert_delta(provider, pending, insert, &mut canceled_rows)?;
+        }
+        if let Some(delete) = delta.delete {
+            merge_delete_delta(provider, pending, delete, &mut canceled_rows)?;
+        }
+    }
+
+    let mut deltas = HashMap::new();
+    let mut coalesced_insert_rows = 0u64;
+    let mut coalesced_delete_rows = 0u64;
+    for (name, pending) in pending_by_relation {
+        let insert = pending.insert.and_then(non_empty_buffer);
+        let delete = pending.delete.and_then(non_empty_buffer);
+        if insert.is_none() && delete.is_none() {
+            continue;
+        }
+        coalesced_insert_rows += insert.as_ref().map(buffer_rows).unwrap_or(0);
+        coalesced_delete_rows += delete.as_ref().map(buffer_rows).unwrap_or(0);
+        deltas.insert(name, RelationDelta::new(insert, delete));
+    }
+
+    let changed_relations = deltas.len();
+    Ok(CoalescedRelationDeltaBatch {
+        deltas,
+        input_delta_count,
+        changed_relations,
+        coalesced_insert_rows,
+        coalesced_delete_rows,
+        canceled_rows,
+    })
+}
+
+fn merge_insert_delta(
+    provider: &CudaKernelProvider,
+    pending: &mut PendingRelationDelta,
+    insert: CudaBuffer,
+    canceled_rows: &mut u64,
+) -> Result<()> {
+    let mut incoming = provider.dedup_full_row(&insert)?;
+    if let Some(delete) = pending.delete.take().and_then(non_empty_buffer) {
+        let delete_before = buffer_rows(&delete);
+        let delete_after = provider.diff_full_row(&delete, &incoming)?;
+        let insert_after = provider.diff_full_row(&incoming, &delete)?;
+        *canceled_rows += delete_before.saturating_sub(buffer_rows(&delete_after));
+        pending.delete = non_empty_buffer(delete_after);
+        incoming = insert_after;
+    }
+    pending.insert = merge_optional_buffer(provider, pending.insert.take(), incoming)?;
+    Ok(())
+}
+
+fn merge_delete_delta(
+    provider: &CudaKernelProvider,
+    pending: &mut PendingRelationDelta,
+    delete: CudaBuffer,
+    canceled_rows: &mut u64,
+) -> Result<()> {
+    let mut incoming = provider.dedup_full_row(&delete)?;
+    if let Some(insert) = pending.insert.take().and_then(non_empty_buffer) {
+        let insert_before = buffer_rows(&insert);
+        let insert_after = provider.diff_full_row(&insert, &incoming)?;
+        let delete_after = provider.diff_full_row(&incoming, &insert)?;
+        *canceled_rows += insert_before.saturating_sub(buffer_rows(&insert_after));
+        pending.insert = non_empty_buffer(insert_after);
+        incoming = delete_after;
+    }
+    pending.delete = merge_optional_buffer(provider, pending.delete.take(), incoming)?;
+    Ok(())
+}
+
+fn merge_optional_buffer(
+    provider: &CudaKernelProvider,
+    existing: Option<CudaBuffer>,
+    incoming: CudaBuffer,
+) -> Result<Option<CudaBuffer>> {
+    let Some(incoming) = non_empty_buffer(incoming) else {
+        return Ok(existing.and_then(non_empty_buffer));
+    };
+    match existing.and_then(non_empty_buffer) {
+        Some(existing) => provider
+            .union_gpu(&existing, &incoming)
+            .map(non_empty_buffer),
+        None => Ok(Some(incoming)),
+    }
+}
+
+fn non_empty_buffer(buffer: CudaBuffer) -> Option<CudaBuffer> {
+    if buffer.is_empty() {
+        None
+    } else {
+        Some(buffer)
+    }
+}
+
+fn buffer_rows(buffer: &CudaBuffer) -> u64 {
+    buffer
+        .cached_row_count()
+        .map(u64::from)
+        .unwrap_or_else(|| buffer.num_rows())
 }
 
 fn ensure_schema_type_compatible(expected: &Schema, actual: &Schema) -> Result<()> {
@@ -658,9 +990,9 @@ fn query_output_vars(Query { atom }: &Query) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for term in &atom.terms {
-        if let Term::Variable(name) = term {
-            if seen.insert(name.as_str()) {
-                out.push(name.clone());
+        for name in term.variables() {
+            if seen.insert(name) {
+                out.push(name.to_string());
             }
         }
     }
@@ -675,6 +1007,17 @@ fn format_term(term: &Term) -> String {
         Term::Float(f) => f.to_string(),
         Term::String(s) => format!("{:?}", s),
         Term::Symbol(id) => symbol::resolve(*id),
+        Term::List(items) => format!(
+            "[{}]",
+            items.iter().map(format_term).collect::<Vec<_>>().join(", ")
+        ),
+        Term::Cons { head, tail } => format!("[{} | {}]", format_term(head), format_term(tail)),
+        Term::Compound { functor, args } => format!(
+            "{}({})",
+            functor,
+            args.iter().map(format_term).collect::<Vec<_>>().join(", ")
+        ),
+        Term::PredRef(name) => format!("predref({})", name),
         Term::Aggregate(a) => format!("{:?}({})", a.op, a.variable),
     }
 }
@@ -703,8 +1046,199 @@ fn format_constraint(body: &[BodyLiteral]) -> String {
             }
             BodyLiteral::Comparison(c) => format!("{:?} {:?} {:?}", c.left, c.op, c.right),
             BodyLiteral::IsExpr(is) => format!("{} is {:?}", is.target, is.expr),
+            BodyLiteral::Univ(univ) => {
+                format!(
+                    "{} =.. {}",
+                    format_term(&univ.term),
+                    format_term(&univ.parts)
+                )
+            }
         })
         .collect::<Vec<_>>()
         .join(", ");
     format!(":- {}.", lits)
+}
+
+#[cfg(test)]
+mod v086_delta_coalesce_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use xlog_core::{MemoryBudget, ScalarType};
+    use xlog_cuda::{CudaDevice, GpuMemoryManager};
+
+    fn test_provider() -> Option<Arc<CudaKernelProvider>> {
+        let device = Arc::new(CudaDevice::new(0).ok()?);
+        let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
+        let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
+        Some(Arc::new(CudaKernelProvider::new(device, memory).ok()?))
+    }
+
+    fn test_buffer(provider: &CudaKernelProvider, rows: &[u32]) -> CudaBuffer {
+        let schema = Schema::new(vec![("id".to_string(), ScalarType::U32)]);
+        let bytes: Vec<u8> = rows.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let mut col = provider.memory().alloc::<u8>(bytes.len()).expect("alloc");
+        provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&bytes, &mut col)
+            .expect("upload rows");
+        let mut d_num_rows = provider.memory().alloc::<u32>(1).expect("alloc rows");
+        let row_count = rows.len() as u32;
+        provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&[row_count], &mut d_num_rows)
+            .expect("upload row count");
+        CudaBuffer::from_columns(vec![col.into()], rows.len() as u64, d_num_rows, schema)
+    }
+
+    fn read_u32(provider: &CudaKernelProvider, buffer: &CudaBuffer) -> Vec<u32> {
+        provider
+            .download_column::<u32>(buffer, 0)
+            .expect("download")
+    }
+
+    fn sorted_query_rows(provider: &CudaKernelProvider, result: &LogicEvalResult) -> Vec<u32> {
+        let mut rows = read_u32(provider, &result.queries[0].buffer);
+        rows.sort_unstable();
+        rows
+    }
+
+    #[test]
+    fn coalesce_batch_cancels_insert_delete_pairs_on_device() {
+        let provider = match test_provider() {
+            Some(provider) => provider,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+
+        let batch = vec![
+            (
+                "wmir_committed".to_string(),
+                RelationDelta::new(Some(test_buffer(&provider, &[7, 8])), None),
+            ),
+            (
+                "wmir_committed".to_string(),
+                RelationDelta::new(None, Some(test_buffer(&provider, &[8]))),
+            ),
+            (
+                "wmir_committed".to_string(),
+                RelationDelta::new(Some(test_buffer(&provider, &[9])), None),
+            ),
+        ];
+
+        let report = coalesce_relation_delta_batch(provider.as_ref(), batch)
+            .expect("coalesce relation delta batch");
+        let delta = report
+            .deltas
+            .get("wmir_committed")
+            .expect("coalesced relation");
+        let insert = delta.insert.as_ref().expect("coalesced insert");
+        assert_eq!(read_u32(&provider, insert), vec![7, 9]);
+        assert!(delta.delete.as_ref().map(|b| b.is_empty()).unwrap_or(true));
+        assert_eq!(report.input_delta_count, 3);
+        assert_eq!(report.changed_relations, 1);
+        assert_eq!(report.coalesced_insert_rows, 2);
+        assert_eq!(report.coalesced_delete_rows, 0);
+        assert_eq!(report.canceled_rows, 1);
+    }
+
+    #[test]
+    fn relation_delta_batch_updates_runtime_store_and_reports_coalesced_counts() -> Result<()> {
+        let Some(provider) = test_provider() else {
+            eprintln!("Skipping test: no CUDA device available");
+            return Ok(());
+        };
+
+        let source = r#"
+            pred wmir_committed(u32).
+            pred out(u32).
+
+            out(X) :- wmir_committed(X).
+
+            ?- out(X).
+        "#;
+        let program = LogicProgram::compile(source)?;
+        let mut coalesced_store = program.create_relation_store(provider.clone())?;
+        let mut coalesced_cache = None;
+
+        provider.reset_host_transfer_stats();
+        provider.reset_d2h_transfer_count();
+        let report = program.apply_relation_delta_batch(
+            provider.clone(),
+            &mut coalesced_store,
+            &mut coalesced_cache,
+            vec![
+                (
+                    "wmir_committed".to_string(),
+                    RelationDelta::new(Some(test_buffer(&provider, &[1, 2, 3])), None),
+                ),
+                (
+                    "wmir_committed".to_string(),
+                    RelationDelta::new(None, Some(test_buffer(&provider, &[2]))),
+                ),
+                (
+                    "wmir_committed".to_string(),
+                    RelationDelta::new(Some(test_buffer(&provider, &[4])), None),
+                ),
+            ],
+        )?;
+        let transfer_stats = provider.host_transfer_stats();
+
+        assert_eq!(report.input_delta_count, 3);
+        assert_eq!(report.changed_relations, 1);
+        assert_eq!(report.insert_rows, 3);
+        assert_eq!(report.delete_rows, 0);
+        assert_eq!(report.coalesced_insert_rows, 3);
+        assert_eq!(report.coalesced_delete_rows, 0);
+        assert_eq!(report.canceled_rows, 1);
+        assert_eq!(transfer_stats.dtoh_bytes, 0);
+        assert_eq!(transfer_stats.dtoh_calls, 0);
+        assert_eq!(provider.d2h_transfer_count(), 0);
+
+        let coalesced = program.evaluate_cached_relation_store(
+            provider.clone(),
+            coalesced_cache
+                .as_ref()
+                .expect("cached store after delta batch"),
+        )?;
+        let coalesced_rows = sorted_query_rows(&provider, &coalesced);
+
+        let mut sequential_store = program.create_relation_store(provider.clone())?;
+        let mut sequential_cache = None;
+        for delta in [
+            RelationDelta::new(Some(test_buffer(&provider, &[1, 2, 3])), None),
+            RelationDelta::new(None, Some(test_buffer(&provider, &[2]))),
+            RelationDelta::new(Some(test_buffer(&provider, &[4])), None),
+        ] {
+            program.apply_relation_deltas(
+                provider.clone(),
+                &mut sequential_store,
+                &mut sequential_cache,
+                HashMap::from([("wmir_committed".to_string(), delta)]),
+            )?;
+        }
+        let sequential = program.evaluate_cached_relation_store(
+            provider.clone(),
+            sequential_cache
+                .as_ref()
+                .expect("cached store after sequential deltas"),
+        )?;
+        let sequential_rows = sorted_query_rows(&provider, &sequential);
+
+        let mut replacement_store = program.create_relation_store(provider.clone())?;
+        replacement_store.put("wmir_committed", test_buffer(&provider, &[1, 3, 4]));
+        let replacement =
+            program.evaluate_with_relation_store(provider.clone(), &replacement_store, false)?;
+        let replacement_rows = sorted_query_rows(&provider, &replacement);
+
+        assert_eq!(coalesced_rows, vec![1, 3, 4]);
+        assert_eq!(coalesced_rows, sequential_rows);
+        assert_eq!(coalesced_rows, replacement_rows);
+        Ok(())
+    }
 }

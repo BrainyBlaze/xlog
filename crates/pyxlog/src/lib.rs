@@ -395,11 +395,21 @@ pub struct LogicRelationSession {
     pub(crate) provider: Arc<CudaKernelProvider>,
     pub(crate) relation_store: RelationStore,
     pub(crate) evaluation_store: Option<RelationStore>,
+    pub(crate) session_runtime: Option<gpu_logic::LogicSessionRuntime>,
     pub(crate) last_delta_stats: Option<LogicDeltaStats>,
+    pub(crate) relation_callbacks: Vec<RelationChangeCallback>,
+    pub(crate) next_relation_callback_id: u64,
+    pub(crate) relation_generations: HashMap<String, u64>,
+}
+
+pub(crate) struct RelationChangeCallback {
+    pub id: u64,
+    pub callback: PyObject,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct LogicDeltaStats {
+    pub input_delta_count: usize,
     pub changed_relations: usize,
     pub insert_rows: u64,
     pub delete_rows: u64,
@@ -407,6 +417,9 @@ pub(crate) struct LogicDeltaStats {
     pub affected_sccs: usize,
     pub recomputed_sccs: usize,
     pub incremental_sccs: usize,
+    pub coalesced_insert_rows: u64,
+    pub coalesced_delete_rows: u64,
+    pub canceled_rows: u64,
 }
 
 #[pyclass]

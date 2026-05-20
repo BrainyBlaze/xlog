@@ -130,6 +130,8 @@ def ensure_pyxlog_available(mode: str) -> None:
     staged_pkg = target_dir / "pyxlog"
     staged_pkg.mkdir(exist_ok=True)
     for child in source_pkg.iterdir():
+        if child.name.startswith("_native") and child.suffix in {".so", ".dylib", ".pyd"}:
+            continue
         dest = staged_pkg / child.name
         if dest.exists() or dest.is_symlink():
             if dest.is_dir() and not dest.is_symlink():

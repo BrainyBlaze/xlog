@@ -1,0 +1,15 @@
+{
+  "features": ["findall", "aggregate_query", "lists"],
+  "source_required_substrings": ["pred neighbor_count(src: u32, count: u64)", "findall(D, edge(S, D), L)", "neighbor_count(S, count(D))", "length(L, N)"],
+  "checks": {
+    "run": {
+      "returncode": 0,
+      "stdout_contains": ["__xlog_query_0", "| 1", "__xlog_query_1", "| 2", "__xlog_query_2", "| 2"]
+    },
+    "explain_json": {
+      "min_statements": 11,
+      "stratification_status": "ok",
+      "rir_status": "ok"
+    }
+  }
+}

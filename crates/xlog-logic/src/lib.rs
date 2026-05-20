@@ -34,7 +34,11 @@ pub mod compiler_config;
 pub mod expand;
 pub mod function;
 pub mod hypergraph;
+pub mod incremental_parse;
+pub mod list_normalize;
 pub mod lower;
+pub mod magic_sets;
+pub mod meta_normalize;
 pub mod module;
 pub mod optimizer;
 pub mod parser;
@@ -47,12 +51,18 @@ pub mod wcoj_var_ordering;
 
 // Re-export main types
 pub use ast::{
-    AnnotatedDisjunction, Atom, BodyLiteral, Constraint, Directives, Evidence, ProbCache,
-    ProbEngine, ProbFact, ProbQuery, Program, Query, Rule, Term,
+    AnnotatedDisjunction, Atom, BodyLiteral, Constraint, Directives, Evidence, MagicSetsMode,
+    ProbCache, ProbEngine, ProbFact, ProbMethod, ProbQuery, Program, Query, Rule, Term, Univ,
 };
 pub use compile::{compile, Compiler};
 pub use expand::expand_program_functions;
+pub use incremental_parse::{
+    IncrementalParseResult, ParseCacheStats, ParserSession, StatementSpan, StatementUnit,
+};
+pub use list_normalize::normalize_v085_lists;
 pub use lower::Lowerer;
+pub use magic_sets::{rewrite_v085_magic_sets, MagicSetReport, MagicSetRewrite, MagicSetStatus};
+pub use meta_normalize::normalize_v085_meta;
 pub use optimizer::{Optimizer, OptimizerConfig, PlanCost};
 pub use parser::{parse_program, parse_statement};
 pub use stratify::{find_sccs_for_lowering, stratify, DependencyGraph, Stratum};

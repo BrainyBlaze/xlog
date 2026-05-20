@@ -11,9 +11,9 @@ use xlog_core::ScalarType;
 use xlog_core::{RelId, Result, RuntimeConfig, Schema, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
-use xlog_ir::ExecutionPlan;
 #[cfg(test)]
-use xlog_ir::{CompareOp, ConstValue, Expr, JoinType, ProjectExpr, RirNode, Stratum};
+use xlog_ir::{CompareOp, ConstValue, Stratum};
+use xlog_ir::{ExecutionPlan, Expr, JoinType, ProjectExpr, RirNode};
 use xlog_stats::{StatsManager, StatsSnapshot};
 
 use crate::ilp_registry::{IlpRegistry, IlpTaggedResult};
@@ -31,6 +31,7 @@ mod wcoj_dispatch;
 #[cfg(feature = "wcoj-phase-timing")]
 pub mod wcoj_phase_timing;
 use join_cache::JoinIndexCache;
+pub use join_cache::JoinIndexCacheStats;
 
 /// Incremental update for a base relation.
 pub struct RelationDelta {
@@ -60,6 +61,148 @@ pub struct DeltaRecomputeStats {
     pub recomputed_sccs: usize,
     /// Number of affected SCCs updated without clearing prior output.
     pub incremental_sccs: usize,
+}
+
+/// Runtime common subexpression elimination telemetry.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CommonSubexpressionStats {
+    /// Number of safe subplan cache hits.
+    pub hits: u64,
+    /// Number of safe subplans evaluated and inserted into the cache.
+    pub misses: u64,
+    /// Number of subplans rejected because they cross an unsafe boundary.
+    pub unsafe_rejections: u64,
+    /// Rejection reason labels observed during the current executor lifetime.
+    pub rejection_reasons: Vec<String>,
+}
+
+/// Runtime join observation used by adaptive re-optimization decisions.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdaptiveJoinObservation {
+    /// Left relation ID observed at the join boundary.
+    pub left_rel: RelId,
+    /// Right relation ID observed at the join boundary.
+    pub right_rel: RelId,
+    /// Estimated output rows before the join executed.
+    pub estimated_output_rows: u64,
+    /// Actual output rows observed after the join executed.
+    pub actual_output_rows: u64,
+    /// Absolute row-count delta between estimate and observation.
+    pub cardinality_delta_abs: u64,
+    /// Estimated selectivity before execution.
+    pub estimated_selectivity: f64,
+    /// Actual selectivity observed after execution.
+    pub actual_selectivity: f64,
+    /// Absolute selectivity delta.
+    pub selectivity_delta_abs: f64,
+    /// Runtime heat for the left relation.
+    pub left_heat: f32,
+    /// Runtime heat for the right relation.
+    pub right_heat: f32,
+    /// Absolute heat delta between the join inputs.
+    pub heat_delta_abs: f32,
+    /// Multiplicative mis-plan ratio, always at least 1.0.
+    pub misplan_ratio: f64,
+}
+
+/// Deterministic adaptive re-optimization decision action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdaptiveReoptimizationAction {
+    /// Adaptive re-optimization is explicitly disabled.
+    Disabled,
+    /// Telemetry did not cross the deterministic adaptation threshold.
+    Skipped,
+    /// Telemetry crossed the threshold and the candidate should be attempted.
+    AttemptCandidate,
+    /// Candidate output matched the baseline and was adopted.
+    Adopted,
+    /// Candidate failed or diverged and the baseline snapshot was restored.
+    RolledBack,
+}
+
+/// Typed adaptive re-optimization decision.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdaptiveReoptimizationDecision {
+    /// Decision action.
+    pub action: AdaptiveReoptimizationAction,
+    /// Stable reason label.
+    pub reason: String,
+    /// Maximum observed mis-plan ratio used by the decision.
+    pub max_misplan_ratio: f64,
+    /// Minimum threshold required to attempt a candidate.
+    pub min_misplan_ratio: f64,
+}
+
+/// Typed adaptive re-optimization diagnostic kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdaptiveReoptimizationDiagnosticKind {
+    /// Candidate execution returned an error.
+    CandidateExecutionFailed,
+    /// Candidate completed but did not produce baseline-equivalent outputs.
+    CandidateOutputMismatch,
+    /// Baseline relation snapshot was restored after an adverse candidate.
+    RollbackRestoredBaseline,
+}
+
+/// Typed adaptive re-optimization diagnostic.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdaptiveReoptimizationDiagnostic {
+    /// Diagnostic kind.
+    pub kind: AdaptiveReoptimizationDiagnosticKind,
+    /// Stable reason label or error text.
+    pub message: String,
+}
+
+/// Runtime adaptive re-optimization telemetry.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AdaptiveReoptimizationStats {
+    /// Number of adaptive entry-point invocations.
+    pub invocations: u64,
+    /// Number of invocations skipped because the feature was disabled.
+    pub disabled: u64,
+    /// Number of enabled invocations that did not attempt a candidate.
+    pub skipped: u64,
+    /// Number of candidate plans adopted.
+    pub adopted: u64,
+    /// Number of candidate plans rolled back.
+    pub rolled_back: u64,
+    /// Last deterministic decision.
+    pub last_decision: Option<AdaptiveReoptimizationDecision>,
+    /// Baseline join observations from the most recent execution.
+    pub last_observations: Vec<AdaptiveJoinObservation>,
+    /// Typed diagnostics emitted by the adaptive entry point.
+    pub diagnostics: Vec<AdaptiveReoptimizationDiagnostic>,
+    /// Tracked data-plane DTOH calls added during the most recent adaptive path.
+    pub data_plane_dtoh_calls: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum CommonSubexpressionKey {
+    Scan {
+        rel: RelId,
+        generation: u64,
+    },
+    Filter {
+        input: Box<CommonSubexpressionKey>,
+        predicate: String,
+    },
+    Project {
+        input: Box<CommonSubexpressionKey>,
+        columns: Vec<String>,
+    },
+    Join {
+        left: Box<CommonSubexpressionKey>,
+        right: Box<CommonSubexpressionKey>,
+        left_keys: Vec<usize>,
+        right_keys: Vec<usize>,
+    },
+    Union {
+        inputs: Vec<CommonSubexpressionKey>,
+    },
+    Distinct {
+        input: Box<CommonSubexpressionKey>,
+        key_cols: Vec<usize>,
+    },
 }
 
 /// Query executor that interprets RIR nodes using GPU kernels
@@ -94,6 +237,14 @@ pub struct Executor {
     stats: StatsManager,
     /// Cached build-side join indexes (adaptive indexing)
     join_index_cache: JoinIndexCache,
+    /// Per-execution CSE cache for safe deterministic subplans.
+    common_subexpression_cache: HashMap<CommonSubexpressionKey, CudaBuffer>,
+    /// Runtime CSE telemetry for evidence and diagnostics.
+    common_subexpression_stats: CommonSubexpressionStats,
+    /// Runtime adaptive re-optimization telemetry for adoption/rollback evidence.
+    adaptive_reoptimization_stats: AdaptiveReoptimizationStats,
+    /// Per-plan join observations captured before `StatsManager` is updated.
+    adaptive_join_observations: Vec<AdaptiveJoinObservation>,
     /// Runtime configuration
     config: RuntimeConfig,
     /// Performance profiler for --stats output
@@ -262,6 +413,10 @@ impl Executor {
             name_to_rel: HashMap::new(),
             stats: StatsManager::new(),
             join_index_cache: JoinIndexCache::new(max_index_cache_bytes),
+            common_subexpression_cache: HashMap::new(),
+            common_subexpression_stats: CommonSubexpressionStats::default(),
+            adaptive_reoptimization_stats: AdaptiveReoptimizationStats::default(),
+            adaptive_join_observations: Vec::new(),
             config,
             profiler: Profiler::default(),
             ilp_registry: IlpRegistry::new(),
@@ -367,12 +522,19 @@ impl Executor {
         &self.stats
     }
 
+    /// Return persistent join-index manager telemetry.
+    pub fn join_index_cache_stats(&self) -> JoinIndexCacheStats {
+        self.join_index_cache.stats()
+    }
+
     /// Reset executor state for Monte Carlo sampling.
     ///
     /// Clears relation storage and join index cache while preserving relation registrations.
     pub fn reset_for_mc(&mut self) {
         self.store.clear();
         self.join_index_cache.clear();
+        self.common_subexpression_cache.clear();
+        self.adaptive_join_observations.clear();
     }
 
     /// Targeted MC reset: preserve base/static relations and clear dynamic ones.
@@ -407,6 +569,8 @@ impl Executor {
         }
 
         self.join_index_cache.clear();
+        self.common_subexpression_cache.clear();
+        self.adaptive_join_observations.clear();
         Ok(())
     }
 
@@ -421,6 +585,8 @@ impl Executor {
         self.ilp_last_result = None;
         self.store.clear();
         self.join_index_cache.clear();
+        self.common_subexpression_cache.clear();
+        self.adaptive_join_observations.clear();
         self.stats = StatsManager::new();
         self.profiler = Profiler::default();
     }
@@ -443,7 +609,492 @@ impl Executor {
         snapshot
     }
 
+    /// Return runtime CSE telemetry for evidence and diagnostics.
+    pub fn common_subexpression_stats(&self) -> &CommonSubexpressionStats {
+        &self.common_subexpression_stats
+    }
+
+    /// Return adaptive re-optimization telemetry for evidence and diagnostics.
+    pub fn adaptive_reoptimization_stats(&self) -> &AdaptiveReoptimizationStats {
+        &self.adaptive_reoptimization_stats
+    }
+
+    /// Replay the deterministic adaptive decision against captured telemetry.
+    pub fn replay_adaptive_reoptimization_decision(
+        &self,
+        observations: &[AdaptiveJoinObservation],
+    ) -> AdaptiveReoptimizationDecision {
+        self.adaptive_reoptimization_decision(observations)
+    }
+
+    fn common_subexpression_enabled(&self) -> bool {
+        self.config.resolved_common_subexpression_elimination()
+    }
+
+    fn adaptive_reoptimization_enabled(&self) -> bool {
+        self.config.resolved_adaptive_reoptimization()
+    }
+
+    fn adaptive_reoptimization_decision(
+        &self,
+        observations: &[AdaptiveJoinObservation],
+    ) -> AdaptiveReoptimizationDecision {
+        let min_misplan_ratio = self
+            .config
+            .resolved_adaptive_reoptimization_min_misplan_ratio();
+        let max_misplan_ratio = observations
+            .iter()
+            .map(|observation| observation.misplan_ratio)
+            .fold(1.0_f64, f64::max);
+
+        if !self.adaptive_reoptimization_enabled() {
+            return AdaptiveReoptimizationDecision {
+                action: AdaptiveReoptimizationAction::Disabled,
+                reason: "adaptive_reoptimization_disabled".to_string(),
+                max_misplan_ratio,
+                min_misplan_ratio,
+            };
+        }
+
+        if observations.is_empty() {
+            return AdaptiveReoptimizationDecision {
+                action: AdaptiveReoptimizationAction::Skipped,
+                reason: "no_join_telemetry".to_string(),
+                max_misplan_ratio,
+                min_misplan_ratio,
+            };
+        }
+
+        if max_misplan_ratio >= min_misplan_ratio {
+            AdaptiveReoptimizationDecision {
+                action: AdaptiveReoptimizationAction::AttemptCandidate,
+                reason: "misplan_threshold_crossed".to_string(),
+                max_misplan_ratio,
+                min_misplan_ratio,
+            }
+        } else {
+            AdaptiveReoptimizationDecision {
+                action: AdaptiveReoptimizationAction::Skipped,
+                reason: "misplan_threshold_not_crossed".to_string(),
+                max_misplan_ratio,
+                min_misplan_ratio,
+            }
+        }
+    }
+
+    fn record_adaptive_join_observation(
+        &mut self,
+        left_rel: RelId,
+        right_rel: RelId,
+        left_keys: &[usize],
+        right_keys: &[usize],
+        input_rows: u64,
+        actual_output_rows: u64,
+    ) {
+        let estimated_output_rows = self
+            .stats
+            .estimate_join_cardinality(left_rel, right_rel, left_keys, right_keys);
+        let estimated_selectivity = if input_rows > 0 {
+            estimated_output_rows as f64 / input_rows as f64
+        } else {
+            0.0
+        };
+        let actual_selectivity = if input_rows > 0 {
+            actual_output_rows as f64 / input_rows as f64
+        } else {
+            0.0
+        };
+        let cardinality_delta_abs = estimated_output_rows.abs_diff(actual_output_rows);
+        let selectivity_delta_abs = (estimated_selectivity - actual_selectivity).abs();
+        let left_heat = self
+            .stats
+            .get_relation_stats(left_rel)
+            .map(|stats| stats.heat)
+            .unwrap_or(0.0);
+        let right_heat = self
+            .stats
+            .get_relation_stats(right_rel)
+            .map(|stats| stats.heat)
+            .unwrap_or(0.0);
+        let heat_delta_abs = (left_heat - right_heat).abs();
+        let smaller = estimated_output_rows.min(actual_output_rows);
+        let larger = estimated_output_rows.max(actual_output_rows);
+        let misplan_ratio = if smaller == 0 {
+            if larger == 0 {
+                1.0
+            } else {
+                f64::INFINITY
+            }
+        } else {
+            (larger as f64 / smaller as f64).max(1.0)
+        };
+
+        self.adaptive_join_observations
+            .push(AdaptiveJoinObservation {
+                left_rel,
+                right_rel,
+                estimated_output_rows,
+                actual_output_rows,
+                cardinality_delta_abs,
+                estimated_selectivity,
+                actual_selectivity,
+                selectivity_delta_abs,
+                left_heat,
+                right_heat,
+                heat_delta_abs,
+                misplan_ratio,
+            });
+    }
+
+    fn plan_head_names(plan: &ExecutionPlan) -> Vec<String> {
+        let mut names = Vec::new();
+        for stratum in &plan.strata {
+            for scc_id in &stratum.sccs {
+                if let Some(rules) = plan.rules_by_scc.get(*scc_id as usize) {
+                    for rule in rules {
+                        if !names.iter().any(|name| name == &rule.head) {
+                            names.push(rule.head.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        if names.is_empty() {
+            for rules in &plan.rules_by_scc {
+                for rule in rules {
+                    if !names.iter().any(|name| name == &rule.head) {
+                        names.push(rule.head.clone());
+                    }
+                }
+            }
+        }
+
+        names
+    }
+
+    fn clone_store_snapshot(&self) -> Result<HashMap<String, CudaBuffer>> {
+        let names: Vec<String> = self.store.names().map(|name| name.to_string()).collect();
+        let mut snapshot = HashMap::with_capacity(names.len());
+        for name in names {
+            if let Some(buffer) = self.store.get(&name) {
+                snapshot.insert(name, self.clone_buffer(buffer)?);
+            }
+        }
+        Ok(snapshot)
+    }
+
+    fn restore_store_snapshot(&mut self, snapshot: HashMap<String, CudaBuffer>) {
+        let snapshot_names: HashSet<String> = snapshot.keys().cloned().collect();
+        let existing_names: Vec<String> = self.store.names().map(|name| name.to_string()).collect();
+        for name in existing_names {
+            if !snapshot_names.contains(&name) {
+                self.store.remove(&name);
+            }
+        }
+        for (name, buffer) in snapshot {
+            self.store.put(&name, buffer);
+        }
+    }
+
+    fn restore_stats_snapshot(&mut self, snapshot: &StatsSnapshot) {
+        self.stats.clear();
+        self.stats.merge_snapshot(snapshot);
+    }
+
+    fn clone_final_plan_output(&self, plan: &ExecutionPlan) -> Result<CudaBuffer> {
+        let head_names = Self::plan_head_names(plan);
+        if let Some(name) = head_names.last() {
+            let output = self.store.get(name).ok_or_else(|| {
+                XlogError::Execution(format!("adaptive reoptimization output missing: {name}"))
+            })?;
+            return self.clone_buffer(output);
+        }
+
+        self.provider.create_empty_buffer(Schema::new(vec![]))
+    }
+
+    fn plan_outputs_match(
+        &self,
+        head_names: &[String],
+        baseline_snapshot: &HashMap<String, CudaBuffer>,
+    ) -> Result<bool> {
+        for name in head_names {
+            let Some(baseline) = baseline_snapshot.get(name) else {
+                return Ok(false);
+            };
+            let Some(candidate) = self.store.get(name) else {
+                return Ok(false);
+            };
+            if !self.buffers_gpu_set_equivalent(baseline, candidate)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn buffers_gpu_set_equivalent(&self, left: &CudaBuffer, right: &CudaBuffer) -> Result<bool> {
+        if left.schema() != right.schema() {
+            return Ok(false);
+        }
+        let left_rows = self.provider.device_row_count(left)?;
+        let right_rows = self.provider.device_row_count(right)?;
+        if left_rows != right_rows {
+            return Ok(false);
+        }
+
+        let left_minus_right = self.provider.diff_full_row(left, right)?;
+        if self.provider.device_row_count(&left_minus_right)? != 0 {
+            return Ok(false);
+        }
+        let right_minus_left = self.provider.diff_full_row(right, left)?;
+        Ok(self.provider.device_row_count(&right_minus_left)? == 0)
+    }
+
+    fn record_adaptive_dtoh_delta(&mut self, before_dtoh_calls: u64) {
+        let after_dtoh_calls = self.provider.host_transfer_stats().dtoh_calls;
+        self.adaptive_reoptimization_stats.data_plane_dtoh_calls =
+            after_dtoh_calls.saturating_sub(before_dtoh_calls);
+    }
+
+    fn is_common_subexpression_cacheable(node: &RirNode) -> bool {
+        !matches!(node, RirNode::Unit | RirNode::Scan { .. })
+    }
+
+    fn record_common_subexpression_rejection(&mut self, reason: &'static str) {
+        self.common_subexpression_stats.unsafe_rejections = self
+            .common_subexpression_stats
+            .unsafe_rejections
+            .saturating_add(1);
+        if !self
+            .common_subexpression_stats
+            .rejection_reasons
+            .iter()
+            .any(|seen| seen == reason)
+        {
+            self.common_subexpression_stats
+                .rejection_reasons
+                .push(reason.to_string());
+        }
+    }
+
+    fn common_subexpression_key(&mut self, node: &RirNode) -> Option<CommonSubexpressionKey> {
+        match node {
+            RirNode::Unit => None,
+            RirNode::Scan { rel } => {
+                let generation = self
+                    .get_rel_name(*rel)
+                    .and_then(|name| self.store.version(name))
+                    .unwrap_or(0);
+                Some(CommonSubexpressionKey::Scan {
+                    rel: *rel,
+                    generation,
+                })
+            }
+            RirNode::Filter { input, predicate } => {
+                let input = self.common_subexpression_key(input)?;
+                Some(CommonSubexpressionKey::Filter {
+                    input: Box::new(input),
+                    predicate: Self::expr_cse_key(predicate),
+                })
+            }
+            RirNode::Project { input, columns } => {
+                let input = self.common_subexpression_key(input)?;
+                Some(CommonSubexpressionKey::Project {
+                    input: Box::new(input),
+                    columns: columns.iter().map(Self::project_expr_cse_key).collect(),
+                })
+            }
+            RirNode::Join {
+                left,
+                right,
+                left_keys,
+                right_keys,
+                join_type,
+            } => {
+                if *join_type != JoinType::Inner {
+                    self.record_common_subexpression_rejection("negation_or_outer_join_boundary");
+                    return None;
+                }
+                let left = self.common_subexpression_key(left)?;
+                let right = self.common_subexpression_key(right)?;
+                Some(CommonSubexpressionKey::Join {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    left_keys: left_keys.clone(),
+                    right_keys: right_keys.clone(),
+                })
+            }
+            RirNode::Union { inputs } => {
+                let mut input_keys = Vec::with_capacity(inputs.len());
+                for input in inputs {
+                    input_keys.push(self.common_subexpression_key(input)?);
+                }
+                Some(CommonSubexpressionKey::Union { inputs: input_keys })
+            }
+            RirNode::Distinct { input, key_cols } => {
+                let input = self.common_subexpression_key(input)?;
+                Some(CommonSubexpressionKey::Distinct {
+                    input: Box::new(input),
+                    key_cols: key_cols.clone(),
+                })
+            }
+            RirNode::Diff { .. } => {
+                self.record_common_subexpression_rejection("negation_or_difference_boundary");
+                None
+            }
+            RirNode::GroupBy { .. } => {
+                self.record_common_subexpression_rejection("aggregate_boundary");
+                None
+            }
+            RirNode::Fixpoint { .. } => {
+                self.record_common_subexpression_rejection("recursive_or_mutable_boundary");
+                None
+            }
+            RirNode::TensorMaskedJoin { .. } => {
+                self.record_common_subexpression_rejection("provenance_or_tensor_boundary");
+                None
+            }
+            RirNode::MultiWayJoin { .. } | RirNode::ChainJoin { .. } => {
+                self.record_common_subexpression_rejection("specialized_dispatch_boundary");
+                None
+            }
+        }
+    }
+
+    fn expr_cse_key(expr: &Expr) -> String {
+        match expr {
+            Expr::Column(idx) => format!("col:{idx}"),
+            Expr::Const(value) => format!("const:{}", Self::const_cse_key(value)),
+            Expr::Compare { left, op, right } => format!(
+                "cmp:{}:{}:{}",
+                Self::expr_cse_key(left),
+                Self::compare_op_cse_key(*op),
+                Self::expr_cse_key(right)
+            ),
+            Expr::And(items) => format!(
+                "and:[{}]",
+                items
+                    .iter()
+                    .map(Self::expr_cse_key)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            Expr::Or(items) => format!(
+                "or:[{}]",
+                items
+                    .iter()
+                    .map(Self::expr_cse_key)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            Expr::Not(inner) => format!("not:{}", Self::expr_cse_key(inner)),
+            Expr::Add(left, right) => {
+                format!(
+                    "add:{}:{}",
+                    Self::expr_cse_key(left),
+                    Self::expr_cse_key(right)
+                )
+            }
+            Expr::Sub(left, right) => {
+                format!(
+                    "sub:{}:{}",
+                    Self::expr_cse_key(left),
+                    Self::expr_cse_key(right)
+                )
+            }
+            Expr::Mul(left, right) => {
+                format!(
+                    "mul:{}:{}",
+                    Self::expr_cse_key(left),
+                    Self::expr_cse_key(right)
+                )
+            }
+            Expr::Div(left, right) => {
+                format!(
+                    "div:{}:{}",
+                    Self::expr_cse_key(left),
+                    Self::expr_cse_key(right)
+                )
+            }
+            Expr::Mod(left, right) => {
+                format!(
+                    "mod:{}:{}",
+                    Self::expr_cse_key(left),
+                    Self::expr_cse_key(right)
+                )
+            }
+            Expr::Abs(inner) => format!("abs:{}", Self::expr_cse_key(inner)),
+            Expr::Min(left, right) => {
+                format!(
+                    "min:{}:{}",
+                    Self::expr_cse_key(left),
+                    Self::expr_cse_key(right)
+                )
+            }
+            Expr::Max(left, right) => {
+                format!(
+                    "max:{}:{}",
+                    Self::expr_cse_key(left),
+                    Self::expr_cse_key(right)
+                )
+            }
+            Expr::Pow(left, right) => {
+                format!(
+                    "pow:{}:{}",
+                    Self::expr_cse_key(left),
+                    Self::expr_cse_key(right)
+                )
+            }
+            Expr::Cast(inner, ty) => format!("cast:{:?}:{}", ty, Self::expr_cse_key(inner)),
+            Expr::Conditional {
+                condition,
+                then_expr,
+                else_expr,
+            } => format!(
+                "if:{}:{}:{}",
+                Self::expr_cse_key(condition),
+                Self::expr_cse_key(then_expr),
+                Self::expr_cse_key(else_expr)
+            ),
+        }
+    }
+
+    fn project_expr_cse_key(expr: &ProjectExpr) -> String {
+        match expr {
+            ProjectExpr::Column(idx) => format!("col:{idx}"),
+            ProjectExpr::Computed(expr, ty) => {
+                format!("computed:{:?}:{}", ty, Self::expr_cse_key(expr))
+            }
+        }
+    }
+
+    fn const_cse_key(value: &xlog_ir::ConstValue) -> String {
+        match value {
+            xlog_ir::ConstValue::U32(value) => format!("u32:{value}"),
+            xlog_ir::ConstValue::U64(value) => format!("u64:{value}"),
+            xlog_ir::ConstValue::I32(value) => format!("i32:{value}"),
+            xlog_ir::ConstValue::I64(value) => format!("i64:{value}"),
+            xlog_ir::ConstValue::F32(value) => format!("f32:{:08x}", value.to_bits()),
+            xlog_ir::ConstValue::F64(value) => format!("f64:{:016x}", value.to_bits()),
+            xlog_ir::ConstValue::Bool(value) => format!("bool:{value}"),
+            xlog_ir::ConstValue::Symbol(value) => format!("symbol:{value:?}"),
+        }
+    }
+
+    fn compare_op_cse_key(op: xlog_ir::CompareOp) -> &'static str {
+        match op {
+            xlog_ir::CompareOp::Eq => "eq",
+            xlog_ir::CompareOp::Ne => "ne",
+            xlog_ir::CompareOp::Lt => "lt",
+            xlog_ir::CompareOp::Le => "le",
+            xlog_ir::CompareOp::Gt => "gt",
+            xlog_ir::CompareOp::Ge => "ge",
+        }
+    }
+
     fn store_put(&mut self, name: &str, buffer: CudaBuffer) {
+        self.common_subexpression_cache.clear();
         self.store.put(name, buffer);
         if let Some(&rel_id) = self.name_to_rel.get(name) {
             self.join_index_cache.invalidate_rel(rel_id);
@@ -451,6 +1102,7 @@ impl Executor {
     }
 
     fn store_remove(&mut self, name: &str) -> Option<CudaBuffer> {
+        self.common_subexpression_cache.clear();
         if let Some(&rel_id) = self.name_to_rel.get(name) {
             self.join_index_cache.invalidate_rel(rel_id);
         }
@@ -487,6 +1139,133 @@ impl Executor {
         self.rel_names.get(&rel_id).map(|s| s.as_str())
     }
 
+    /// Execute a baseline plan and conditionally adopt a compiler-supplied
+    /// re-optimized candidate plan.
+    ///
+    /// The baseline runs through the normal [`Self::execute_plan`] path first,
+    /// producing runtime join telemetry. If deterministic mis-plan thresholds
+    /// fire and adaptive re-optimization is enabled, the candidate also runs
+    /// through [`Self::execute_plan`]. Candidate outputs are compared on the GPU
+    /// with deterministic full-row set difference; divergent or failing
+    /// candidates roll back to the baseline relation/statistics snapshot.
+    pub fn execute_plan_with_adaptive_candidate(
+        &mut self,
+        baseline_plan: &ExecutionPlan,
+        candidate_plan: &ExecutionPlan,
+    ) -> Result<CudaBuffer> {
+        self.adaptive_reoptimization_stats.invocations = self
+            .adaptive_reoptimization_stats
+            .invocations
+            .saturating_add(1);
+        self.adaptive_reoptimization_stats.diagnostics.clear();
+        let before_dtoh_calls = self.provider.host_transfer_stats().dtoh_calls;
+
+        self.execute_plan(baseline_plan)?;
+        let baseline_observations = self.adaptive_join_observations.clone();
+        self.adaptive_reoptimization_stats.last_observations = baseline_observations.clone();
+        let decision = self.adaptive_reoptimization_decision(&baseline_observations);
+        self.adaptive_reoptimization_stats.last_decision = Some(decision.clone());
+
+        match decision.action {
+            AdaptiveReoptimizationAction::Disabled => {
+                self.adaptive_reoptimization_stats.disabled = self
+                    .adaptive_reoptimization_stats
+                    .disabled
+                    .saturating_add(1);
+                self.record_adaptive_dtoh_delta(before_dtoh_calls);
+                return self.clone_final_plan_output(baseline_plan);
+            }
+            AdaptiveReoptimizationAction::Skipped => {
+                self.adaptive_reoptimization_stats.skipped =
+                    self.adaptive_reoptimization_stats.skipped.saturating_add(1);
+                self.record_adaptive_dtoh_delta(before_dtoh_calls);
+                return self.clone_final_plan_output(baseline_plan);
+            }
+            AdaptiveReoptimizationAction::AttemptCandidate => {}
+            AdaptiveReoptimizationAction::Adopted | AdaptiveReoptimizationAction::RolledBack => {
+                unreachable!("decision replay never returns terminal adaptive actions")
+            }
+        }
+
+        let head_names = Self::plan_head_names(baseline_plan);
+        let baseline_snapshot = self.clone_store_snapshot()?;
+        let baseline_stats_snapshot = self.stats_snapshot();
+
+        if let Err(err) = self.execute_plan(candidate_plan) {
+            self.restore_store_snapshot(baseline_snapshot);
+            self.restore_stats_snapshot(&baseline_stats_snapshot);
+            self.adaptive_reoptimization_stats.rolled_back = self
+                .adaptive_reoptimization_stats
+                .rolled_back
+                .saturating_add(1);
+            self.adaptive_reoptimization_stats
+                .diagnostics
+                .push(AdaptiveReoptimizationDiagnostic {
+                    kind: AdaptiveReoptimizationDiagnosticKind::CandidateExecutionFailed,
+                    message: err.to_string(),
+                });
+            self.adaptive_reoptimization_stats
+                .diagnostics
+                .push(AdaptiveReoptimizationDiagnostic {
+                    kind: AdaptiveReoptimizationDiagnosticKind::RollbackRestoredBaseline,
+                    message: "baseline_snapshot_restored".to_string(),
+                });
+            self.adaptive_reoptimization_stats.last_observations = baseline_observations;
+            self.adaptive_reoptimization_stats.last_decision =
+                Some(AdaptiveReoptimizationDecision {
+                    action: AdaptiveReoptimizationAction::RolledBack,
+                    reason: "candidate_execution_failed".to_string(),
+                    max_misplan_ratio: decision.max_misplan_ratio,
+                    min_misplan_ratio: decision.min_misplan_ratio,
+                });
+            self.record_adaptive_dtoh_delta(before_dtoh_calls);
+            return self.clone_final_plan_output(baseline_plan);
+        }
+
+        if !self.plan_outputs_match(&head_names, &baseline_snapshot)? {
+            self.restore_store_snapshot(baseline_snapshot);
+            self.restore_stats_snapshot(&baseline_stats_snapshot);
+            self.adaptive_reoptimization_stats.rolled_back = self
+                .adaptive_reoptimization_stats
+                .rolled_back
+                .saturating_add(1);
+            self.adaptive_reoptimization_stats
+                .diagnostics
+                .push(AdaptiveReoptimizationDiagnostic {
+                    kind: AdaptiveReoptimizationDiagnosticKind::CandidateOutputMismatch,
+                    message: "candidate_output_mismatch".to_string(),
+                });
+            self.adaptive_reoptimization_stats
+                .diagnostics
+                .push(AdaptiveReoptimizationDiagnostic {
+                    kind: AdaptiveReoptimizationDiagnosticKind::RollbackRestoredBaseline,
+                    message: "baseline_snapshot_restored".to_string(),
+                });
+            self.adaptive_reoptimization_stats.last_observations = baseline_observations;
+            self.adaptive_reoptimization_stats.last_decision =
+                Some(AdaptiveReoptimizationDecision {
+                    action: AdaptiveReoptimizationAction::RolledBack,
+                    reason: "candidate_output_mismatch".to_string(),
+                    max_misplan_ratio: decision.max_misplan_ratio,
+                    min_misplan_ratio: decision.min_misplan_ratio,
+                });
+            self.record_adaptive_dtoh_delta(before_dtoh_calls);
+            return self.clone_final_plan_output(baseline_plan);
+        }
+
+        self.adaptive_reoptimization_stats.adopted =
+            self.adaptive_reoptimization_stats.adopted.saturating_add(1);
+        self.adaptive_reoptimization_stats.last_observations = baseline_observations;
+        self.adaptive_reoptimization_stats.last_decision = Some(AdaptiveReoptimizationDecision {
+            action: AdaptiveReoptimizationAction::Adopted,
+            reason: "candidate_adopted".to_string(),
+            max_misplan_ratio: decision.max_misplan_ratio,
+            min_misplan_ratio: decision.min_misplan_ratio,
+        });
+        self.record_adaptive_dtoh_delta(before_dtoh_calls);
+        self.clone_final_plan_output(candidate_plan)
+    }
+
     /// Execute a complete execution plan
     ///
     /// Iterates through strata in order, executing each one.
@@ -501,6 +1280,8 @@ impl Executor {
     /// # Errors
     /// Returns an error if any stratum or query execution fails
     pub fn execute_plan(&mut self, plan: &ExecutionPlan) -> Result<CudaBuffer> {
+        self.adaptive_join_observations.clear();
+        self.common_subexpression_cache.clear();
         // Opt-in deterministic-Datalog D2H gate. Enabled only for the
         // duration of this call; the provider is shared so we restore the
         // prior state on every exit path (including errors). This PR ships
@@ -558,6 +1339,8 @@ impl Executor {
 
         // Ensure all GPU work completes before returning control to callers.
         self.provider.device().synchronize()?;
+        self.adaptive_reoptimization_stats.last_observations =
+            self.adaptive_join_observations.clone();
 
         // If there are no strata, return empty buffer
         self.provider.create_empty_buffer(Schema::new(vec![]))
@@ -1044,6 +1827,7 @@ impl Drop for D2hGateGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
     use xlog_core::MemoryBudget;
     use xlog_cuda::{CudaDevice, GpuMemoryManager};
     use xlog_ir::{CompiledRule, RirMeta, Scc};
@@ -1062,6 +1846,17 @@ mod tests {
         let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
         let provider = Arc::new(CudaKernelProvider::new(device, memory).ok()?);
         Some(Executor::new(provider))
+    }
+
+    fn create_test_executor_with_config(config: RuntimeConfig) -> Option<Executor> {
+        if !has_cuda_device() {
+            return None;
+        }
+        let device = Arc::new(CudaDevice::new(0).ok()?);
+        let budget = MemoryBudget::with_limit(1024 * 1024 * 1024); // 1 GB
+        let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
+        let provider = Arc::new(CudaKernelProvider::new(device, memory).ok()?);
+        Some(Executor::new_with_config(provider, config))
     }
 
     fn device_row_count(executor: &Executor, rows: u64) -> TrackedCudaSlice<u32> {
@@ -2277,6 +3072,700 @@ mod tests {
 
         let values = read_buffer_u32(&executor, &result, 0);
         assert_eq!(values, vec![3, 4, 5]);
+    }
+
+    // ============== v0.8.6 Common Subexpression Elimination Tests ==============
+
+    fn duplicate_join_union_plan() -> RirNode {
+        let join = RirNode::Join {
+            left: Box::new(RirNode::Scan { rel: RelId(1) }),
+            right: Box::new(RirNode::Scan { rel: RelId(2) }),
+            left_keys: vec![0],
+            right_keys: vec![0],
+            join_type: JoinType::Inner,
+        };
+        RirNode::Union {
+            inputs: vec![join.clone(), join],
+        }
+    }
+
+    fn seed_cse_join_fixture(executor: &mut Executor, right: &[u32]) {
+        executor.register_relation(RelId(1), "left");
+        executor.register_relation(RelId(2), "right");
+        let left = create_test_buffer(executor, &[1, 2, 3, 4], "key");
+        let right = create_test_buffer(executor, right, "key");
+        executor.put_relation("left", left);
+        executor.put_relation("right", right);
+    }
+
+    #[test]
+    fn test_common_subexpression_cache_reuses_duplicate_inner_join_when_enabled() {
+        let mut executor = match create_test_executor_with_config(
+            RuntimeConfig::default().with_common_subexpression_elimination(Some(true)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_cse_join_fixture(&mut executor, &[2, 3, 5]);
+
+        let result = executor
+            .execute_node(&duplicate_join_union_plan())
+            .expect("duplicate join union executes");
+
+        assert_eq!(buffer_row_count(&executor, &result), 2);
+        let stats = executor.common_subexpression_stats();
+        assert_eq!(stats.hits, 1);
+        assert!(stats.misses >= 1);
+        assert_eq!(stats.unsafe_rejections, 0);
+    }
+
+    #[test]
+    fn test_common_subexpression_off_on_preserves_output_and_records_reuse_only_when_enabled() {
+        let mut disabled = match create_test_executor_with_config(
+            RuntimeConfig::default().with_common_subexpression_elimination(Some(false)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        let mut enabled = match create_test_executor_with_config(
+            RuntimeConfig::default().with_common_subexpression_elimination(Some(true)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_cse_join_fixture(&mut disabled, &[2, 3, 5]);
+        seed_cse_join_fixture(&mut enabled, &[2, 3, 5]);
+        let plan = duplicate_join_union_plan();
+
+        disabled.provider.reset_d2h_transfer_count();
+        enabled.provider.reset_d2h_transfer_count();
+        let disabled_result = disabled.execute_node(&plan).expect("disabled CSE output");
+        let enabled_result = enabled.execute_node(&plan).expect("enabled CSE output");
+        let disabled_d2h = disabled.provider.d2h_transfer_count();
+        let enabled_d2h = enabled.provider.d2h_transfer_count();
+
+        assert_eq!(
+            read_buffer_u32(&disabled, &disabled_result, 0),
+            read_buffer_u32(&enabled, &enabled_result, 0)
+        );
+        assert_eq!(enabled_d2h, disabled_d2h);
+        assert_eq!(disabled.common_subexpression_stats().hits, 0);
+        assert_eq!(disabled.common_subexpression_stats().misses, 0);
+        assert_eq!(enabled.common_subexpression_stats().hits, 1);
+    }
+
+    #[test]
+    fn test_common_subexpression_cache_invalidates_on_relation_generation_change() {
+        let mut executor = match create_test_executor_with_config(
+            RuntimeConfig::default().with_common_subexpression_elimination(Some(true)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_cse_join_fixture(&mut executor, &[2, 3, 5]);
+        let plan = duplicate_join_union_plan();
+
+        executor.execute_node(&plan).expect("first execution");
+        assert_eq!(executor.common_subexpression_stats().hits, 1);
+
+        let changed_right = create_test_buffer(&executor, &[4], "key");
+        executor.put_relation("right", changed_right);
+        let result = executor.execute_node(&plan).expect("second execution");
+
+        assert_eq!(buffer_row_count(&executor, &result), 1);
+        let stats = executor.common_subexpression_stats();
+        assert_eq!(stats.hits, 2);
+        assert!(stats.misses >= 2);
+    }
+
+    #[test]
+    fn test_common_subexpression_cache_rejects_unsafe_difference_boundary() {
+        let mut executor = match create_test_executor_with_config(
+            RuntimeConfig::default().with_common_subexpression_elimination(Some(true)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_cse_join_fixture(&mut executor, &[2, 3, 5]);
+        let diff = RirNode::Diff {
+            left: Box::new(RirNode::Scan { rel: RelId(1) }),
+            right: Box::new(RirNode::Scan { rel: RelId(2) }),
+        };
+
+        executor
+            .execute_node(&RirNode::Union {
+                inputs: vec![diff.clone(), diff],
+            })
+            .expect("unsafe duplicate diff still executes without CSE sharing");
+
+        let stats = executor.common_subexpression_stats();
+        assert_eq!(stats.hits, 0);
+        assert!(stats.unsafe_rejections >= 1);
+        assert!(stats
+            .rejection_reasons
+            .iter()
+            .any(|reason| reason == "negation_or_difference_boundary"));
+    }
+
+    #[test]
+    fn test_common_subexpression_key_rejects_aggregate_and_tensor_boundaries() {
+        let mut executor = match create_test_executor_with_config(
+            RuntimeConfig::default().with_common_subexpression_elimination(Some(true)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        let aggregate = RirNode::GroupBy {
+            input: Box::new(RirNode::Scan { rel: RelId(1) }),
+            key_cols: vec![0],
+            aggs: vec![(0, xlog_core::AggOp::Count)],
+        };
+        let tensor = RirNode::TensorMaskedJoin {
+            mask_name: "W".to_string(),
+            schema_size: 1,
+            left_keys: vec![0],
+            right_keys: vec![0],
+            rel_index: vec![(RelId(1), "left".to_string())],
+            head_rel_name: "head".to_string(),
+            head_rel_id: RelId(3),
+            max_active_rules: 1,
+            head_projection: vec![0],
+        };
+        let chain = RirNode::ChainJoin {
+            left: Box::new(RirNode::Scan { rel: RelId(1) }),
+            right: Box::new(RirNode::Scan { rel: RelId(2) }),
+            left_key: 0,
+            right_key: 0,
+            output_columns: vec![ProjectExpr::Column(0)],
+            fallback: Box::new(RirNode::Join {
+                left: Box::new(RirNode::Scan { rel: RelId(1) }),
+                right: Box::new(RirNode::Scan { rel: RelId(2) }),
+                left_keys: vec![0],
+                right_keys: vec![0],
+                join_type: JoinType::Inner,
+            }),
+        };
+
+        assert!(executor.common_subexpression_key(&aggregate).is_none());
+        assert!(executor.common_subexpression_key(&tensor).is_none());
+        assert!(executor.common_subexpression_key(&chain).is_none());
+
+        let reasons = &executor.common_subexpression_stats().rejection_reasons;
+        assert!(reasons.iter().any(|reason| reason == "aggregate_boundary"));
+        assert!(reasons
+            .iter()
+            .any(|reason| reason == "provenance_or_tensor_boundary"));
+        assert!(reasons
+            .iter()
+            .any(|reason| reason == "specialized_dispatch_boundary"));
+    }
+
+    // ============== v0.8.6 Adaptive Runtime Re-Optimization Tests ==============
+
+    fn adaptive_scc() -> Scc {
+        Scc {
+            id: 0,
+            predicates: vec!["out".to_string()],
+            is_recursive: false,
+        }
+    }
+
+    fn adaptive_stratum() -> Stratum {
+        Stratum {
+            id: 0,
+            sccs: vec![0],
+        }
+    }
+
+    fn adaptive_rule(body: RirNode) -> CompiledRule {
+        CompiledRule {
+            head: "out".to_string(),
+            body,
+            meta: RirMeta::default(),
+        }
+    }
+
+    fn adaptive_plan(body: RirNode) -> ExecutionPlan {
+        ExecutionPlan {
+            sccs: vec![adaptive_scc()],
+            strata: vec![adaptive_stratum()],
+            rules_by_scc: vec![vec![adaptive_rule(body)]],
+            est_memory_peak: 0,
+        }
+    }
+
+    fn adaptive_baseline_join_plan() -> ExecutionPlan {
+        adaptive_plan(RirNode::Project {
+            input: Box::new(RirNode::Join {
+                left: Box::new(RirNode::Scan { rel: RelId(1) }),
+                right: Box::new(RirNode::Scan { rel: RelId(2) }),
+                left_keys: vec![0],
+                right_keys: vec![0],
+                join_type: JoinType::Inner,
+            }),
+            columns: vec![ProjectExpr::Column(0)],
+        })
+    }
+
+    fn adaptive_scan_candidate_plan(rel: RelId) -> ExecutionPlan {
+        adaptive_plan(RirNode::Scan { rel })
+    }
+
+    fn seed_adaptive_fixture(executor: &mut Executor, right: &[u32]) {
+        executor.register_relation(RelId(1), "left");
+        executor.register_relation(RelId(2), "right");
+        let left = create_test_buffer(executor, &[1, 2, 3, 4, 5, 6, 7, 8], "key");
+        let right = create_test_buffer(executor, right, "key");
+        executor.put_relation("left", left);
+        executor.put_relation("right", right);
+    }
+
+    #[test]
+    fn test_adaptive_reoptimization_disabled_uses_baseline_and_records_decision() {
+        let mut executor = match create_test_executor_with_config(
+            RuntimeConfig::default().with_adaptive_reoptimization(Some(false)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_adaptive_fixture(&mut executor, &[1, 2, 3, 4, 5, 6, 7, 8]);
+
+        let baseline = adaptive_baseline_join_plan();
+        let candidate = adaptive_scan_candidate_plan(RelId(2));
+        let result = executor
+            .execute_plan_with_adaptive_candidate(&baseline, &candidate)
+            .expect("disabled adaptation executes baseline");
+
+        assert_eq!(
+            read_buffer_u32(&executor, &result, 0),
+            (1..=8).collect::<Vec<_>>()
+        );
+        let stats = executor.adaptive_reoptimization_stats();
+        assert_eq!(stats.disabled, 1);
+        assert_eq!(stats.adopted, 0);
+        assert_eq!(stats.rolled_back, 0);
+        assert_eq!(
+            stats.last_decision.as_ref().map(|decision| decision.action),
+            Some(AdaptiveReoptimizationAction::Disabled)
+        );
+    }
+
+    #[test]
+    fn test_adaptive_reoptimization_adopts_equivalent_candidate_and_records_telemetry() {
+        let mut executor = match create_test_executor_with_config(
+            RuntimeConfig::default().with_adaptive_reoptimization(Some(true)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_adaptive_fixture(&mut executor, &[1, 2, 3, 4, 5, 6, 7, 8]);
+        executor.provider.reset_host_transfer_stats();
+
+        let baseline = adaptive_baseline_join_plan();
+        let candidate = adaptive_scan_candidate_plan(RelId(1));
+        let result = executor
+            .execute_plan_with_adaptive_candidate(&baseline, &candidate)
+            .expect("equivalent candidate is adopted");
+
+        assert_eq!(
+            read_buffer_u32(&executor, &result, 0),
+            (1..=8).collect::<Vec<_>>()
+        );
+        let stats = executor.adaptive_reoptimization_stats();
+        assert_eq!(stats.adopted, 1);
+        assert_eq!(stats.rolled_back, 0);
+        assert_eq!(stats.last_observations.len(), 1);
+        assert!(stats.last_observations[0].cardinality_delta_abs > 0);
+        assert!(stats.last_observations[0].selectivity_delta_abs > 0.0);
+        assert_eq!(stats.data_plane_dtoh_calls, 0);
+    }
+
+    #[test]
+    fn test_adaptive_reoptimization_rolls_back_bad_candidate_with_typed_diagnostic() {
+        let mut executor = match create_test_executor_with_config(
+            RuntimeConfig::default().with_adaptive_reoptimization(Some(true)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_adaptive_fixture(&mut executor, &[1, 2, 3, 4, 5, 6, 7, 8]);
+
+        let baseline = adaptive_baseline_join_plan();
+        let bad_candidate = adaptive_scan_candidate_plan(RelId(2));
+        executor.put_relation("right", create_test_buffer(&executor, &[99], "key"));
+        let result = executor
+            .execute_plan_with_adaptive_candidate(&baseline, &bad_candidate)
+            .expect("bad candidate rolls back to baseline output");
+
+        assert_eq!(read_buffer_u32(&executor, &result, 0), Vec::<u32>::new());
+        let out = executor.store().get("out").expect("rollback restored out");
+        assert_eq!(read_buffer_u32(&executor, out, 0), Vec::<u32>::new());
+        let stats = executor.adaptive_reoptimization_stats();
+        assert_eq!(stats.adopted, 0);
+        assert_eq!(stats.rolled_back, 1);
+        assert!(stats.diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == AdaptiveReoptimizationDiagnosticKind::CandidateOutputMismatch
+        }));
+    }
+
+    #[test]
+    fn test_adaptive_reoptimization_decisions_are_deterministic_under_replay() {
+        let mut executor = match create_test_executor_with_config(
+            RuntimeConfig::default().with_adaptive_reoptimization(Some(true)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_adaptive_fixture(&mut executor, &[1, 2, 3, 4, 5, 6, 7, 8]);
+        let baseline = adaptive_baseline_join_plan();
+        executor
+            .execute_plan(&baseline)
+            .expect("baseline execution records telemetry");
+        let observations = executor
+            .adaptive_reoptimization_stats()
+            .last_observations
+            .clone();
+
+        let first = executor.replay_adaptive_reoptimization_decision(&observations);
+        for _ in 0..100 {
+            assert_eq!(
+                executor.replay_adaptive_reoptimization_decision(&observations),
+                first
+            );
+        }
+    }
+
+    // ============== v0.8.6 Persistent Hash Index Manager Tests ==============
+
+    fn persistent_index_join_plan() -> ExecutionPlan {
+        adaptive_baseline_join_plan()
+    }
+
+    fn persistent_index_heavy_join_plan(repetitions: usize) -> ExecutionPlan {
+        let mut inputs = Vec::with_capacity(repetitions);
+        for _ in 0..repetitions {
+            inputs.push(RirNode::Project {
+                input: Box::new(RirNode::Join {
+                    left: Box::new(RirNode::Scan { rel: RelId(1) }),
+                    right: Box::new(RirNode::Scan { rel: RelId(2) }),
+                    left_keys: vec![0],
+                    right_keys: vec![0],
+                    join_type: JoinType::Semi,
+                }),
+                columns: vec![ProjectExpr::Column(0)],
+            });
+        }
+        adaptive_plan(RirNode::Union { inputs })
+    }
+
+    fn seed_persistent_index_fixture(executor: &mut Executor, rows: u32) {
+        executor.register_relation(RelId(1), "left");
+        executor.register_relation(RelId(2), "right");
+        let values: Vec<u32> = (0..rows).collect();
+        let left = create_test_buffer(executor, &values, "key");
+        let right = create_test_buffer(executor, &values, "key");
+        executor.put_relation("left", left);
+        executor.put_relation("right", right);
+    }
+
+    fn seed_persistent_index_performance_fixture(
+        executor: &mut Executor,
+        left_rows: u32,
+        right_rows: u32,
+    ) {
+        executor.register_relation(RelId(1), "left");
+        executor.register_relation(RelId(2), "right");
+        let left_values: Vec<u32> = (0..left_rows).collect();
+        let right_values: Vec<u32> = (0..right_rows).collect();
+        let left = create_test_buffer(executor, &left_values, "key");
+        let right = create_test_buffer(executor, &right_values, "key");
+        executor.put_relation("left", left);
+        executor.put_relation("right", right);
+    }
+
+    fn warm_persistent_index(executor: &mut Executor, plan: &ExecutionPlan, times: usize) {
+        for _ in 0..times {
+            executor.execute_plan(plan).expect("persistent index plan");
+        }
+    }
+
+    fn median_duration(samples: &mut [Duration]) -> Duration {
+        samples.sort_unstable();
+        samples[samples.len() / 2]
+    }
+
+    fn measure_persistent_index_fixture(
+        mut executor: Executor,
+        plan: &ExecutionPlan,
+        warmup: usize,
+        iterations: usize,
+    ) -> (
+        Duration,
+        u64,
+        JoinIndexCacheStats,
+        xlog_cuda::provider::HostTransferStats,
+    ) {
+        let mut output_rows = None;
+        warm_persistent_index(&mut executor, plan, warmup);
+        executor.provider.reset_host_transfer_stats();
+
+        let mut samples = Vec::with_capacity(iterations);
+        for _ in 0..iterations {
+            let start = Instant::now();
+            let output = executor.execute_plan(plan).expect("persistent index plan");
+            executor
+                .provider
+                .device()
+                .synchronize()
+                .expect("sync device");
+            samples.push(start.elapsed());
+            output_rows = Some(if let Some(buffer) = executor.store().get("out") {
+                executor
+                    .buffer_row_count(buffer)
+                    .expect("read output row count")
+                    .into()
+            } else {
+                output.num_rows()
+            });
+        }
+
+        (
+            median_duration(&mut samples),
+            output_rows.expect("at least one measured execution"),
+            executor.join_index_cache_stats(),
+            executor.provider.host_transfer_stats(),
+        )
+    }
+
+    #[test]
+    fn test_persistent_hash_index_reuses_across_repeated_session_evaluations() {
+        let mut executor = match create_test_executor_with_config(
+            RuntimeConfig::default().with_persistent_hash_indexes(Some(true)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_persistent_index_fixture(&mut executor, 2_500);
+        let plan = persistent_index_join_plan();
+        executor.provider.reset_host_transfer_stats();
+
+        warm_persistent_index(&mut executor, &plan, 5);
+
+        let stats = executor.join_index_cache_stats();
+        let transfers = executor.provider.host_transfer_stats();
+        assert_eq!(stats.builds, 1);
+        assert!(stats.hits >= 1);
+        assert_eq!(stats.stale_rejections, 0);
+        assert_eq!(stats.entries, 1);
+        assert!(stats.total_bytes > 0);
+        assert_eq!(transfers.dtoh_calls, 0);
+        assert_eq!(transfers.htod_calls, 0);
+    }
+
+    #[test]
+    fn test_persistent_hash_index_invalidates_on_relation_generation_change() {
+        let mut executor = match create_test_executor_with_config(
+            RuntimeConfig::default().with_persistent_hash_indexes(Some(true)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_persistent_index_fixture(&mut executor, 2_500);
+        let plan = persistent_index_join_plan();
+        warm_persistent_index(&mut executor, &plan, 5);
+        assert_eq!(executor.join_index_cache_stats().entries, 1);
+
+        let changed_values: Vec<u32> = (10_000..12_500).collect();
+        let changed_right = create_test_buffer(&executor, &changed_values, "key");
+        executor.put_relation("right", changed_right);
+
+        let stats = executor.join_index_cache_stats();
+        assert_eq!(stats.entries, 0);
+        assert!(stats.invalidations >= 1);
+    }
+
+    #[test]
+    fn test_persistent_hash_index_background_build_records_requests() {
+        let mut executor = match create_test_executor_with_config(
+            RuntimeConfig::default()
+                .with_persistent_hash_indexes(Some(true))
+                .with_persistent_hash_index_background_build(Some(true)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_persistent_index_fixture(&mut executor, 2_500);
+        let plan = persistent_index_join_plan();
+
+        warm_persistent_index(&mut executor, &plan, 5);
+
+        let stats = executor.join_index_cache_stats();
+        assert_eq!(stats.background_build_requests, 1);
+        assert_eq!(stats.background_builds_completed, 1);
+        assert_eq!(stats.entries, 1);
+    }
+
+    #[test]
+    fn test_persistent_hash_index_background_build_defers_current_join_reuse() {
+        let mut executor = match create_test_executor_with_config(
+            RuntimeConfig::default()
+                .with_persistent_hash_indexes(Some(true))
+                .with_persistent_hash_index_background_build(Some(true)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_persistent_index_fixture(&mut executor, 2_500);
+        let plan = persistent_index_join_plan();
+
+        let mut before_build = executor.join_index_cache_stats();
+        let mut after_build = None;
+        for _ in 0..5 {
+            executor
+                .execute_plan(&plan)
+                .expect("background-build warm evaluation");
+            let stats = executor.join_index_cache_stats();
+            if stats.background_build_requests > before_build.background_build_requests {
+                after_build = Some(stats);
+                break;
+            }
+            before_build = stats;
+        }
+
+        let after_first = after_build.expect("background build request observed");
+        assert_eq!(after_first.background_build_requests, 1);
+        assert_eq!(after_first.background_builds_completed, 1);
+        assert_eq!(after_first.background_builds_deferred, 1);
+        assert_eq!(
+            after_first.hits, before_build.hits,
+            "background build must not be consumed by the same evaluation that requested it"
+        );
+        assert_eq!(after_first.entries, 1);
+
+        executor
+            .execute_plan(&plan)
+            .expect("second evaluation reuses completed background index");
+        let after_second = executor.join_index_cache_stats();
+        assert_eq!(after_second.background_build_requests, 1);
+        assert_eq!(after_second.background_builds_deferred, 1);
+        assert!(after_second.hits >= 1);
+    }
+
+    #[test]
+    fn test_persistent_hash_index_performance_fixture_meets_speedup_target() {
+        const LEFT_ROWS: u32 = 8;
+        const RIGHT_ROWS: u32 = 8_000_000;
+        const JOIN_REPETITIONS: usize = 1;
+        const WARMUP: usize = 12;
+        const ITERATIONS: usize = 9;
+
+        let mut cached = match create_test_executor_with_config(
+            RuntimeConfig::default().with_persistent_hash_indexes(Some(true)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_persistent_index_performance_fixture(&mut cached, LEFT_ROWS, RIGHT_ROWS);
+
+        let mut uncached = match create_test_executor_with_config(
+            RuntimeConfig::default().with_persistent_hash_indexes(Some(false)),
+        ) {
+            Some(e) => e,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+        seed_persistent_index_performance_fixture(&mut uncached, LEFT_ROWS, RIGHT_ROWS);
+
+        let plan = persistent_index_heavy_join_plan(JOIN_REPETITIONS);
+        let (cached_median, cached_rows, cached_stats, cached_transfers) =
+            measure_persistent_index_fixture(cached, &plan, WARMUP, ITERATIONS);
+        let (uncached_median, uncached_rows, uncached_stats, uncached_transfers) =
+            measure_persistent_index_fixture(uncached, &plan, WARMUP, ITERATIONS);
+
+        let speedup_ratio = uncached_median.as_secs_f64() / cached_median.as_secs_f64();
+        eprintln!(
+            "persistent_hash_index_perf left_rows={} right_rows={} join_repetitions={} warmup={} iterations={} \
+             cached_median_sec={:.9} uncached_median_sec={:.9} speedup_ratio={:.3} \
+             cached_output_rows={} uncached_output_rows={} cached_builds={} cached_hits={} \
+             uncached_builds={} cached_dtoh_calls={} cached_htod_calls={}",
+            LEFT_ROWS,
+            RIGHT_ROWS,
+            JOIN_REPETITIONS,
+            WARMUP,
+            ITERATIONS,
+            cached_median.as_secs_f64(),
+            uncached_median.as_secs_f64(),
+            speedup_ratio,
+            cached_rows,
+            uncached_rows,
+            cached_stats.builds,
+            cached_stats.hits,
+            uncached_stats.builds,
+            cached_transfers.dtoh_calls,
+            cached_transfers.htod_calls
+        );
+
+        assert_eq!(cached_rows, uncached_rows);
+        assert_eq!(cached_rows, LEFT_ROWS as u64);
+        assert_eq!(cached_stats.builds, 1);
+        assert!(cached_stats.hits >= ITERATIONS as u64);
+        assert_eq!(uncached_stats.builds, 0);
+        assert_eq!(cached_transfers.dtoh_calls, 0);
+        assert_eq!(cached_transfers.htod_calls, 0);
+        assert_eq!(uncached_transfers.dtoh_calls, 0);
+        assert_eq!(uncached_transfers.htod_calls, 0);
+        assert!(
+            speedup_ratio >= 1.5,
+            "persistent index speedup {:.3} below 1.5 target",
+            speedup_ratio
+        );
     }
 
     // ============== MC Relation Reset Tests ==============

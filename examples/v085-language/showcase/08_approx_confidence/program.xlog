@@ -1,0 +1,13 @@
+#pragma prob_engine = mc
+#pragma prob_samples = 128
+#pragma prob_seed = 7
+#pragma prob_confidence = 0.90
+#pragma prob_method = rejection
+
+1.0::edge(1, 2).
+1.0::edge(1, 3).
+
+out_degree(X, count(Y)) :- edge(X, Y).
+
+query(out_degree(1, 2)).
+

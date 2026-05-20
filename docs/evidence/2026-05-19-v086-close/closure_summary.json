@@ -1,0 +1,115 @@
+{
+  "branch": "feat/v086-runtime-completion",
+  "certification_head_before_closure": "c5ff5248",
+  "implementation_evidence_head_before_hold_correction": "0e2a5420",
+  "hold_correction_commit": "81badf314c09",
+  "persistent_index_performance_commit": "df2dbc03",
+  "post_release_validator_hardening_commit": "b4fdcd79",
+  "date": "2026-05-19",
+  "governing_goal": "docs/plans/2026-05-19-agent-v086-dts-runtime-completion-goal.md",
+  "proposal": "docs/plans/2026-05-19-v086-closure-proposal.md",
+  "release_decision": "MERGE_READY",
+  "release_tag": "v0.8.6",
+  "release_authorization": "Coordinator authorized release-board update, commit, merge, push, and annotated v0.8.6 tag on 2026-05-19 after MERGE_READY blockers were cleared.",
+  "release_actions_authorized": {
+    "board_update": true,
+    "merge": true,
+    "push": true,
+    "tag": true
+  },
+  "status": "MERGE_READY",
+  "subgoals": {
+    "G086_PRE": {
+      "commit": "e6edb49c",
+      "evidence": "docs/evidence/2026-05-19-v086-pre/README.md",
+      "status": "PASS"
+    },
+    "G086_DELTA_COALESCE": {
+      "commit": "6b18a7b9",
+      "evidence": "docs/evidence/2026-05-19-v086-delta-coalesce/README.md",
+      "status": "PASS"
+    },
+    "G086_NOTIFY": {
+      "commit": "9a79faea",
+      "evidence": "docs/evidence/2026-05-19-v086-notify/README.md",
+      "status": "PASS"
+    },
+    "G086_EXACT_TYPES": {
+      "commit": "d1967d94",
+      "evidence": "docs/evidence/2026-05-19-v086-exact-types/README.md",
+      "status": "PASS"
+    },
+    "G086_CHAIN_SMEM": {
+      "commit": "e1cddbb7 + ce78e32f",
+      "evidence": [
+        "docs/evidence/2026-05-19-v086-chain-smem-profile/README.md",
+        "docs/evidence/2026-05-19-v086-chain-smem/README.md"
+      ],
+      "status": "PASS"
+    },
+    "G086_CSE": {
+      "commit": "1363b05e",
+      "evidence": "docs/evidence/2026-05-19-v086-cse/README.md",
+      "status": "PASS"
+    },
+    "G086_ADAPT": {
+      "commit": "2d9bdc0f",
+      "evidence": "docs/evidence/2026-05-19-v086-adaptive-reoptimization/README.md",
+      "status": "PASS"
+    },
+    "G086_INDEX": {
+      "commit": "702e1f8f + 0e2a5420; hold correction 81badf31; performance amendment df2dbc03",
+      "evidence": "docs/evidence/2026-05-19-v086-persistent-hash-index/README.md",
+      "status": "PASS"
+    },
+    "G086_CONSUMERS": {
+      "commit": "37f16651; hold correction 81badf31; pyxlog session amendment 611d8293; behavior-probe amendment 2d390318; behavior-probe trace c5ff5248",
+      "evidence": "docs/evidence/2026-05-19-v086-consumers/README.md",
+      "status": "PASS"
+    },
+    "G086_INT": {
+      "commit": "b72f61ea; hold correction 81badf31; behavior-probe amendment 2d390318; behavior-probe trace c5ff5248",
+      "evidence": "docs/evidence/2026-05-19-v086-int/README.md",
+      "status": "PASS"
+    },
+    "G086_CLOSE": {
+      "commit": "09f5ad4b; hold correction 81badf31; behavior-probe amendment 2d390318; behavior-probe trace c5ff5248",
+      "evidence": "docs/evidence/2026-05-19-v086-close/README.md",
+      "status": "PASS"
+    }
+  },
+  "blocked_or_scope_amendment_items": [],
+  "unclaimed_performance_metrics": [],
+  "verification": {
+    "integration_evidence": "docs/evidence/2026-05-19-v086-int/README.md",
+    "consumer_evidence": "docs/evidence/2026-05-19-v086-consumers/validation_summary.json",
+    "consumer_certification_status": "PASS",
+    "latest_consumer_examples": {
+      "v080": 5,
+      "v085": 10,
+      "v086": 5
+    },
+    "python_bundle": "44 passed in 86.31s (0:01:26)",
+    "workspace_check": "cargo check --workspace exit 0",
+    "pyxlog_persistent_index_session_reuse": {
+      "status": "PASS",
+      "evidence": "python/tests/test_v086_pyxlog_persistent_index_runtime.py",
+      "summary": "public LogicRelationSession delta loop records persistent index build/hit and zero tracked host transfers"
+    },
+    "consumer_behavior_probes": {
+      "status": "PASS",
+      "feature_coverage_source": "behavior_probes",
+      "probe_count": 9,
+      "consumer_proof_gaps": []
+    },
+    "release_validator_revalidation": {
+      "status": "PASS",
+      "command": "python scripts/validate_v086_examples.py --output /tmp/v086-release-revalidate.json --timeout 120",
+      "output": "/tmp/v086-release-revalidate.json",
+      "kernel_staging": "fresh Cargo xlog-cuda artifacts staged into target/debug/pyxlog/kernels; no manual XLOG_CUBIN_DIR override"
+    }
+  },
+  "v090_rebase_note": "v0.9.0 should rebase on or merge after any accepted v0.8.6 landing because exact type dispatch, chain shared-memory scoring, runtime CSE, adaptive candidate adoption, persistent-index telemetry, and behavior-proven consumer certification affect the substrate expected by epistemic/solver work.",
+  "pyxlog_persistent_index_session_reuse_commit": "611d8293",
+  "consumer_behavior_probe_commit": "2d390318"
+}
