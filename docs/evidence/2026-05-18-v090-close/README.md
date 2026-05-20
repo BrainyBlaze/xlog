@@ -45,11 +45,15 @@ lifecycle pushes/retractions, and zero CPU search/recomputation. The same
 split-batch evidence now also reaches existing solver learned-clause reuse and
 bounded MaxSAT candidate paths with two arena publications/imports/reused
 solves, four GPU CDCL candidate solves, two MaxSAT optima, and zero CPU search
-or learned-clause transfers. The same possible/not-know batch now also reaches
-probabilistic source/program gradients, source/program PIR/CNF, and
-already-compiled exact query/gradient evaluation with arity-four source/program
-evidence counters and zero CPU probability recomputation. `G090_SOLVER`,
-`G090_PROB`, and `G090_CLOSE` remain blocked.
+or learned-clause transfers. The same possible/not-know split batch now also
+reaches existing MaxSAT search-pruning, weighted MaxSAT encoding/scheduler, and
+status-aware portfolio dispatch with two UNSAT prunes, four encoded candidates,
+twelve scheduled GPU CDCL candidate solves, two SAT jobs, two MaxSAT jobs, and
+zero CPU search. The same possible/not-know batch now also reaches probabilistic
+source/program gradients, source/program PIR/CNF, and already-compiled exact
+query/gradient evaluation with arity-four source/program evidence counters and
+zero CPU probability recomputation. `G090_SOLVER`, `G090_PROB`, and
+`G090_CLOSE` remain blocked.
 
 ## Ref Evidence
 
@@ -145,6 +149,7 @@ Post-merge compatibility validation:
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_possible_and_not_know_results_gate_solver_and_probabilistic_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_possible_and_not_know_batch_gates_solver_and_probabilistic_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_possible_and_not_know_batch_gates_solver_reuse_and_maxsat_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_possible_and_not_know_batch_gates_solver_search_scheduler_and_portfolio_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_possible_and_not_know_batch_gates_probabilistic_gradient_pir_cnf_and_exact_evaluation_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 122 passed, 0 failed |
 | `python scripts/validate_v086_examples.py --output /tmp/v090-v086-compat-validation.json` | PASS, consumer certification PASS, examples PASS |
@@ -171,7 +176,8 @@ two-component split quaternary `possible fact4/4` plus `not know fact4/4`
 accepted runtime fixture with zero CPU recomposition and batch/component
 operator counters; `G090_SOLVER` now has the same split-batch evidence routed
 through the existing GPU CDCL lifecycle adapter with nonzero-arity tuple-key
-counters plus learned-clause reuse and bounded MaxSAT candidate solving; and
+counters plus learned-clause reuse, bounded MaxSAT candidate solving, MaxSAT
+search pruning, weighted MaxSAT encoding/scheduler, and portfolio dispatch; and
 `G090_PROB` now has the same split-batch evidence routed through the existing
 conditioned source exact-query path with source-conditioned arity-four evidence
 counters, plus source/program gradients, source/program PIR/CNF, and exact
@@ -279,10 +285,11 @@ The branch contains useful scaffolding:
   solver lifecycle, learned-clause reuse, and MaxSAT evidence with
   nonzero-arity tuple-key counters,
   split-batch quaternary `possible fact4/4` plus `not know fact4/4`
-  solver lifecycle, learned-clause reuse, and MaxSAT evidence with
+  solver lifecycle, learned-clause reuse, MaxSAT, MaxSAT search pruning,
+  weighted MaxSAT encoding/scheduler, and portfolio evidence with
   nonzero-arity tuple-key counters,
-  learned-clause reuse, MaxSAT,
-  weighted MaxSAT encoding/search, generalized MaxSAT scheduling, and portfolio dispatch with batch/component counters,
+  learned-clause reuse, MaxSAT, weighted MaxSAT encoding/search, generalized
+  MaxSAT scheduling, and portfolio dispatch with batch/component counters,
   accepted G91/default FAEEL mode-specific solver trace counters,
   learned-clause arena publication, same-device-CNF learned-clause
   import/reuse, two-record and accepted split-batch learned-clause reuse,

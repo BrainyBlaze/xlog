@@ -60,6 +60,13 @@ and bounded MaxSAT candidate paths with two arena publications/imports/reused
 solves, four GPU CDCL candidate solves, two MaxSAT optima, one accepted
 `possible` counter, one accepted `not know` counter, and zero CPU search or
 learned-clause transfers.
+The source audit now also requires
+`accepted_split_quaternary_possible_and_not_know_batch_gates_solver_search_scheduler_and_portfolio_paths`,
+which proves the same accepted batch reaches the existing MaxSAT search-pruning,
+weighted MaxSAT encoding/scheduler, and status-aware portfolio paths with two
+UNSAT prunes, four encoded candidates, twelve scheduled GPU CDCL candidate
+solves, two SAT jobs, two MaxSAT jobs, one accepted `possible` counter, one
+accepted `not know` counter, eight tuple-key column reads, and zero CPU search.
 All accepted solver split-batch entrypoints now call the single
 `accepted_solver_results_from_gpu_batch_execution_evidence` validator/accounting
 helper, and `production_solver_batch_paths_use_single_gpu_batch_gate`
@@ -133,6 +140,10 @@ and
 `accepted_all_operator_mixed_membership_gates_probabilistic_program_gradient_and_pir_paths`
 extend that same evidence through solver learned-clause reuse, MaxSAT,
 portfolio, parsed-program conditioning, gradient, and PIR/CNF adapters.
+The possible/not-know split-batch solver marker extends the same arity-four
+batch evidence through MaxSAT search pruning, weighted MaxSAT
+encoding/scheduler, and portfolio adapters without adding a parallel solver
+engine.
 
 ## Forbidden Parallel Engines
 

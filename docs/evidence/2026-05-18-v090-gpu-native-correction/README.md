@@ -37,11 +37,16 @@ counters, balanced lifecycle pushes/retractions, exact-query counters, and zero
 CPU search/recomputation. The same split-batch evidence now also gates existing
 learned-clause reuse and bounded MaxSAT candidate solving with two arena
 publications/imports/reused solves, four GPU CDCL candidate solves, two MaxSAT
-optima, and zero CPU search or learned-clause transfers. The same possible/not-know
-batch now also gates probabilistic source/program gradients, source/program
-PIR/CNF, and already-compiled exact query/gradient evaluation with arity-four
-source/program evidence counters and zero CPU probability recomputation. This
-narrows `G090_SOLVER` and `G090_PROB` but does not close either node.
+optima, and zero CPU search or learned-clause transfers. The same
+possible/not-know split batch now also gates existing MaxSAT search-pruning,
+weighted MaxSAT encoding/scheduler, and status-aware portfolio dispatch with
+two UNSAT prunes, four encoded candidates, twelve scheduled GPU CDCL candidate
+solves, two SAT jobs, two MaxSAT jobs, and zero CPU search. The same
+possible/not-know batch now also gates probabilistic source/program gradients,
+source/program PIR/CNF, and already-compiled exact query/gradient evaluation
+with arity-four source/program evidence counters and zero CPU probability
+recomputation. This narrows `G090_SOLVER` and `G090_PROB` but does not close
+either node.
 
 ## Current Branch Classification
 
@@ -131,7 +136,8 @@ The next production slice should start at the lowering/runtime boundary:
    accepted ternary and quaternary nonzero-arity SAT evidence tracing,
    single-result quaternary `possible`/`not know fact4/4` SAT evidence,
    split-batch quaternary `possible`/`not know fact4/4` lifecycle,
-   learned-clause reuse, and MaxSAT evidence,
+   learned-clause reuse, MaxSAT, MaxSAT search pruning, weighted MaxSAT
+   encoding/scheduler, and portfolio evidence,
    single-result, two-record, and split-batch combined lifecycle-plus-MaxSAT,
    learned-clause reuse, split-batch MaxSAT, split-batch MaxSAT search pruning, and split-batch portfolio dispatch,
    learned-clause arena publication, same-device-CNF
@@ -259,6 +265,7 @@ The next production slice should start at the lowering/runtime boundary:
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_possible_and_not_know_results_gate_solver_and_probabilistic_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_possible_and_not_know_batch_gates_solver_and_probabilistic_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_possible_and_not_know_batch_gates_solver_reuse_and_maxsat_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_possible_and_not_know_batch_gates_solver_search_scheduler_and_portfolio_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_possible_and_not_know_batch_gates_probabilistic_gradient_pir_cnf_and_exact_evaluation_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_ternary_gpu_execution_result_records_solver_nonzero_arity_evidence_trace -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_gpu_execution_result_records_solver_nonzero_arity_evidence_trace -- --exact --nocapture` | PASS, 1 passed, 0 failed |
