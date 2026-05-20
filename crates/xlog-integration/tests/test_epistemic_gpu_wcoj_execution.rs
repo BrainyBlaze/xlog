@@ -1785,6 +1785,96 @@ fn accepted_split_batch_solver_gate_rejects_unrecorded_aggregate_kernel_timing()
 }
 
 #[test]
+fn accepted_single_solver_gate_rejects_unrecorded_candidate_generation_timing() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let mut result = execute_unary_edge_epistemic_fixture(
+        &fix,
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X).
+        "#,
+        &[1, 2],
+        &[1],
+    );
+    assert!(result.candidate_generation.kernel_timing.is_recorded());
+    result.candidate_generation.kernel_timing = Default::default();
+
+    let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
+    let sat_cnf = GpuCnf::from_host(&sat_instance, &fix.provider).expect("upload SAT CNF");
+    let branch_limit = upload_u32_scalar(&fix.provider, 1);
+    let mut adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let mut workspace = adapter
+        .new_workspace(sat_cnf.var_cap, sat_cnf.clause_cap)
+        .expect("new workspace");
+
+    let err = match adapter.solve_assumption_lifecycle_with_gpu_execution_result(
+        &fix.provider,
+        &result,
+        &mut workspace,
+        &[GpuSolverProductionLifecycleStep {
+            cnf: &sat_cnf,
+            branch_var_limit: &branch_limit,
+            expectation: GpuSolverProductionExpectation::Sat,
+        }],
+    ) {
+        Ok(_) => panic!("solver evidence without candidate-generation timing must reject"),
+        Err(err) => err,
+    };
+    assert!(format!("{err}").contains("CUDA-event timing"));
+}
+
+#[test]
+fn accepted_single_prob_gate_rejects_unrecorded_candidate_generation_timing() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let mut result = execute_unary_edge_epistemic_fixture(
+        &fix,
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X).
+        "#,
+        &[1, 2],
+        &[1],
+    );
+    assert!(result.candidate_generation.kernel_timing.is_recorded());
+    result.candidate_generation.kernel_timing = Default::default();
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut adapter = EpistemicProbProductionAdapter::new(config);
+    let err = match adapter.compile_and_evaluate_conditioned_source_with_gpu_execution_result(
+        r#"
+            0.7::edge(1).
+            query(edge(1)).
+            "#,
+        &fix.provider,
+        &result,
+        vec![EpistemicAssumption::known_tuple(
+            "edge",
+            vec![EpistemicEvidenceTerm::integer(1)],
+            true,
+        )],
+    ) {
+        Ok(_) => panic!("probabilistic evidence without candidate-generation timing must reject"),
+        Err(err) => err,
+    };
+    assert!(format!("{err}").contains("CUDA-event timing"));
+}
+
+#[test]
 fn accepted_split_batch_prob_gate_rejects_unrecorded_aggregate_kernel_timing() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");

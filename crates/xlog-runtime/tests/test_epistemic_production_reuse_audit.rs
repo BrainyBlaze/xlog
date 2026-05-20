@@ -28,6 +28,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(audit.contains("existing GPU CDCL/MaxSAT/scheduler/portfolio production-path counter"));
     assert!(audit.contains("accepted_gpu_batch_candidate_evidence_consumed"));
     assert!(audit.contains("accepted_gpu_batch_candidate_component_evidence_consumed"));
+    assert!(audit.contains("single-result solver evidence gate"));
+    assert!(audit.contains("single-result accepted-world-view gate"));
     assert!(audit.contains("solve_weighted_maxsat_encoded_search_with_gpu_batch_execution_result"));
     assert!(audit.contains("solve_maxsat_schedule_with_gpu_batch_execution_result"));
     assert!(audit.contains("EpistemicProbProductionAdapter"));
@@ -226,6 +228,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(solver.contains("solve_assumption_lifecycle_with_gpu_batch_execution_result"));
     assert!(solver.contains("require_accepted_gpu_solver_batch_evidence"));
     assert!(solver.contains("aggregate_kernel_timing.is_recorded()"));
+    assert!(solver.contains("candidate_generation.kernel_timing"));
+    assert!(solver.contains("timing_recorded"));
     assert!(solver.contains("EpistemicGpuBatchExecutionResult"));
     assert!(
         solver.contains("solve_unsat_and_publish_learned_clause_arena_with_gpu_execution_result")
@@ -331,6 +335,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(prob.contains("EpistemicProbGpuExecutionEvidence"));
     assert!(prob.contains("EpistemicProbGpuBatchExecutionEvidence"));
     assert!(prob.contains("aggregate_kernel_timing.is_recorded()"));
+    assert!(prob_epistemic.contains("candidate_generation.kernel_timing"));
+    assert!(prob_epistemic.contains("timing_recorded"));
     assert!(prob.contains("compile_and_evaluate_source_for_gpu_execution_results"));
     assert!(prob.contains("compile_and_evaluate_source_for_gpu_batch_execution_result"));
     assert!(prob.contains("compile_and_evaluate_conditioned_source_for_gpu_batch_execution_result"));

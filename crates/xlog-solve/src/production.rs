@@ -11,6 +11,7 @@ use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::CudaKernelProvider;
 use xlog_runtime::{
     read_device_row_count, EpistemicGpuBatchExecutionResult, EpistemicGpuExecutionResult,
+    EpistemicGpuKernelTimingTrace,
 };
 
 use crate::{GpuCdclConfig, GpuCdclSolver, GpuCdclWorkspace, GpuCnf, Objective, SolveInstance};
@@ -2433,29 +2434,52 @@ fn require_accepted_gpu_solver_evidence(
         .model_membership
         .require_stable_model_tuple_source()?;
     require_gpu_kernel_trace(
+        "candidate generation",
+        result.candidate_generation.kernel_launches,
+        result.candidate_generation.host_write_ops,
+        result.candidate_generation.kernel_timing,
+    )?;
+    require_gpu_kernel_trace(
+        "candidate propagation",
+        result.propagation.kernel_launches,
+        result.propagation.host_write_ops,
+        result.propagation.kernel_timing,
+    )?;
+    require_gpu_kernel_trace(
+        "candidate validation",
+        result.candidate_validation.kernel_launches,
+        result.candidate_validation.host_write_ops,
+        result.candidate_validation.kernel_timing,
+    )?;
+    require_gpu_kernel_trace(
         "model membership",
         result.model_membership.kernel_launches,
         result.model_membership.host_write_ops,
+        result.model_membership.kernel_timing,
     )?;
     require_gpu_kernel_trace(
         "world-view validation",
         result.world_view_validation.kernel_launches,
         result.world_view_validation.host_write_ops,
+        result.world_view_validation.kernel_timing,
     )?;
     require_gpu_kernel_trace(
         "accepted-candidate materialization",
         result.materialization.kernel_launches,
         result.materialization.host_write_ops,
+        result.materialization.kernel_timing,
     )?;
     require_gpu_kernel_trace(
         "final-result materialization",
         result.final_result_materialization.kernel_launches,
         result.final_result_materialization.host_write_ops,
+        result.final_result_materialization.kernel_timing,
     )?;
     require_gpu_kernel_trace(
         "final tuple materialization",
         result.final_tuple_materialization.kernel_launches,
         result.final_tuple_materialization.host_write_ops,
+        result.final_tuple_materialization.kernel_timing,
     )?;
     if result.transfer_budget.tracked_dtoh_calls != 0
         || result.transfer_budget.tracked_htod_calls != 0
@@ -2580,13 +2604,16 @@ fn require_gpu_kernel_trace(
     phase: &'static str,
     kernel_launches: u32,
     host_write_ops: u32,
+    kernel_timing: EpistemicGpuKernelTimingTrace,
 ) -> Result<()> {
-    if kernel_launches == 0 || host_write_ops != 0 {
+    if kernel_launches == 0 || host_write_ops != 0 || !kernel_timing.is_recorded() {
         return Err(XlogError::UnsupportedEpistemicConstruct {
             construct: "accepted GPU solver candidate evidence".to_string(),
             context: format!(
                 "solver evidence requires GPU {phase} trace with nonzero launches and \
-                 zero host writes, got launches={kernel_launches}, host_writes={host_write_ops}"
+                 zero host writes plus CUDA-event timing, got launches={kernel_launches}, \
+                 host_writes={host_write_ops}, timing_recorded={}",
+                kernel_timing.is_recorded()
             ),
         });
     }
