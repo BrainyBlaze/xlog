@@ -140,6 +140,12 @@ through source and parsed-program PIR/CNF uploads, source and parsed-program
 already-compiled exact query evaluation, source and parsed-program gradient
 evaluation, accepted-assumption evidence accounting, and zero CPU probability
 recomputation.
+The positive quaternary deep marker
+`accepted_quaternary_gpu_execution_result_gates_source_and_program_pir_cnf_and_exact_evaluation_paths`
+proves accepted single-result `know fact4/4` GPU evidence also routes through
+source and parsed-program PIR/CNF uploads plus source and parsed-program
+already-compiled exact query and gradient evaluation with accepted-assumption
+evidence accounting and zero CPU probability recomputation.
 The same quaternary possible/not-know source-audit marker proves the
 probability adapter consumes two accepted single-result GPU evidences through
 `compile_and_evaluate_conditioned_source_for_gpu_execution_results`, records
