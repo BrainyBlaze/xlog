@@ -591,7 +591,11 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     ));
     assert!(integration
         .contains("accepted_gpu_execution_result_updates_incremental_probability_circuit"));
+    assert!(integration.contains(
+        "accepted_split_all_binary_operator_batch_updates_incremental_probability_circuit"
+    ));
     assert!(prob.contains("apply_accepted_world_view_to_circuit_with_gpu_execution_result"));
+    assert!(prob.contains("apply_accepted_world_views_to_circuit_for_gpu_batch_execution_result"));
     assert!(prob.contains("accepted_incremental_circuit_updates"));
 
     for (label, source) in [

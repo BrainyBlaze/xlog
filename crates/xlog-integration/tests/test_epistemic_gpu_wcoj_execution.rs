@@ -3496,6 +3496,127 @@ fn accepted_split_all_binary_operator_batch_conditions_probabilistic_evidence() 
 }
 
 #[test]
+fn accepted_split_all_binary_operator_batch_updates_incremental_probability_circuit() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let (split, batch) = execute_split_all_binary_operator_batch(&fix);
+    assert_eq!(batch.results.len(), 4);
+    assert_eq!(batch.trace.component_count, 4);
+    assert_eq!(batch.trace.gpu_runtime_component_executions, 4);
+    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
+    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
+    assert_eq!(batch.trace.cpu_world_view_validations, 0);
+    assert_eq!(batch.trace.tracked_dtoh_calls, 0);
+    assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
+    assert!(batch.trace.aggregate_kernel_timing.is_recorded());
+
+    let assumption_groups_owned: Vec<Vec<EpistemicAssumption>> = split
+        .components
+        .iter()
+        .map(
+            |component| match component.component.rule_indices.as_slice() {
+                [0] => vec![EpistemicAssumption::known_tuple(
+                    "edge",
+                    vec![
+                        EpistemicEvidenceTerm::integer(1),
+                        EpistemicEvidenceTerm::integer(2),
+                    ],
+                    true,
+                )],
+                [1] => vec![EpistemicAssumption::possible_tuple(
+                    "alt",
+                    vec![
+                        EpistemicEvidenceTerm::integer(2),
+                        EpistemicEvidenceTerm::integer(3),
+                    ],
+                    true,
+                )],
+                [2] => vec![EpistemicAssumption::possible_tuple(
+                    "blocked",
+                    vec![
+                        EpistemicEvidenceTerm::integer(1),
+                        EpistemicEvidenceTerm::integer(2),
+                    ],
+                    false,
+                )],
+                [3] => vec![EpistemicAssumption::known_tuple(
+                    "seen",
+                    vec![
+                        EpistemicEvidenceTerm::integer(2),
+                        EpistemicEvidenceTerm::integer(3),
+                    ],
+                    false,
+                )],
+                other => panic!("unexpected split all-operator rule indices: {other:?}"),
+            },
+        )
+        .collect();
+    let assumption_groups: Vec<&[EpistemicAssumption]> =
+        assumption_groups_owned.iter().map(Vec::as_slice).collect();
+    let conditioned = assumption_groups_owned
+        .iter()
+        .flat_map(|group| group.iter().cloned())
+        .map(|assumption| (assumption, 0.9))
+        .collect();
+    let mut circuit =
+        EpistemicCircuit::compile(0.15, conditioned, KnowledgeCompilerAdapter::gpu_d4())
+            .expect("compile split-batch incremental probability circuit");
+    let original_fingerprint = circuit.circuit_fingerprint();
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut adapter = EpistemicProbProductionAdapter::new(config);
+    let updates = adapter
+        .apply_accepted_world_views_to_circuit_for_gpu_batch_execution_result(
+            &mut circuit,
+            &fix.provider,
+            EpistemicProbGpuBatchExecutionEvidence {
+                batch: &batch,
+                assumptions_by_component: &assumption_groups,
+            },
+        )
+        .expect("accepted split GPU evidence must update incremental circuit evidence");
+
+    assert_eq!(updates.len(), 4);
+    for update in &updates {
+        assert_eq!(update.mode, CircuitUpdateMode::IncrementalEvidence);
+        assert_eq!(update.compile_count, 1);
+        assert_eq!(update.circuit_fingerprint, original_fingerprint);
+    }
+    assert_eq!(circuit.incremental_update_count(), 4);
+    assert_eq!(
+        circuit.compiler_evidence_literals(),
+        vec![
+            "know:edge/2(1,2)=true".to_string(),
+            "know:seen/2(2,3)=false".to_string(),
+            "possible:alt/2(2,3)=true".to_string(),
+            "possible:blocked/2(1,2)=false".to_string(),
+        ]
+    );
+
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_gpu_batch_evidence_consumed, 1);
+    assert_eq!(trace.accepted_gpu_batch_component_evidence_consumed, 4);
+    assert_eq!(trace.accepted_world_view_evidence_consumed, 4);
+    assert_eq!(trace.accepted_evidence_assumptions_consumed, 4);
+    assert_eq!(trace.accepted_incremental_circuit_updates, 4);
+    assert_eq!(trace.gpu_exact_source_compiles, 0);
+    assert_eq!(trace.gpu_exact_program_compiles, 0);
+    assert_eq!(trace.gpu_exact_query_evaluations, 0);
+    assert_eq!(trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(trace.fixture_circuit_evaluations, 0);
+    let metric_err = trace.require_production_metric_eligibility().expect_err(
+        "split incremental fixture circuit update alone must not satisfy production metrics",
+    );
+    assert!(format!("{metric_err}")
+        .contains("existing GPU exact/provenance/PIR/CNF/knowledge-compilation counter"));
+}
+
+#[test]
 fn accepted_split_quaternary_all_operator_batch_conditions_probabilistic_evidence() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");

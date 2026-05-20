@@ -376,6 +376,26 @@ impl EpistemicProbProductionAdapter {
         self.apply_accepted_world_view_to_circuit(circuit, evidence)
     }
 
+    /// Apply accepted split/batch GPU epistemic execution evidence to an incremental circuit.
+    pub fn apply_accepted_world_views_to_circuit_for_gpu_batch_execution_result(
+        &mut self,
+        circuit: &mut EpistemicCircuit,
+        provider: &CudaKernelProvider,
+        evidence: EpistemicProbGpuBatchExecutionEvidence<'_>,
+    ) -> Result<Vec<CircuitUpdate>> {
+        let accepted = self.accepted_world_views_from_gpu_batch_execution_evidence(
+            provider,
+            evidence,
+            "epistemic probabilistic incremental circuit batch production",
+        )?;
+
+        let mut updates = Vec::with_capacity(accepted.len());
+        for evidence in accepted {
+            updates.push(self.apply_accepted_world_view_to_circuit(circuit, evidence)?);
+        }
+        Ok(updates)
+    }
+
     fn accepted_world_views_from_gpu_batch_execution_evidence(
         &mut self,
         provider: &CudaKernelProvider,

@@ -65,6 +65,9 @@ fn production_prob_adapter_reuses_gpu_exact_path_not_fixture_circuit() {
     assert!(production.contains("evaluate_for_gpu_execution_results"));
     assert!(production.contains("evaluate_gpu_with_grads_for_gpu_execution_results"));
     assert!(production.contains("apply_accepted_world_view_to_circuit_with_gpu_execution_result"));
+    assert!(
+        production.contains("apply_accepted_world_views_to_circuit_for_gpu_batch_execution_result")
+    );
     assert!(production.contains("accepted_incremental_circuit_updates"));
     assert!(production.contains("from_gpu_execution_result"));
     assert!(production.contains("ExactDdnnfProgram::compile_source_with_gpu"));

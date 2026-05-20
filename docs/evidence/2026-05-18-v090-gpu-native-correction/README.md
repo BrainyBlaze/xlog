@@ -106,6 +106,16 @@ the production metric gate still rejects this fixture-only trace without an
 existing GPU exact/provenance/PIR/CNF/knowledge-compilation counter. This narrows
 `G090_PROB` but does not close it.
 
+2026-05-20 split-batch incremental-circuit probability delta: accepted
+all-binary split-batch GPU evidence now also gates
+`apply_accepted_world_views_to_circuit_for_gpu_batch_execution_result`, updating
+the same caller-owned bounded `EpistemicCircuit` once per accepted component.
+The trace records one accepted batch, four accepted components, four incremental
+circuit updates, and zero CPU/fixture recomputation, and the production metric
+gate still rejects this fixture-only trace without an existing GPU
+exact/provenance/PIR/CNF/knowledge-compilation counter. This narrows `G090_PROB`
+but does not close it.
+
 2026-05-20 positive-quaternary solver delta: single-result `know fact4/4`
 accepted GPU evidence now also gates existing learned-clause reuse, bounded
 MaxSAT, and status-aware SAT/MaxSAT portfolio adapters with three accepted

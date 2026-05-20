@@ -263,6 +263,17 @@ compiled fingerprint and compile count while recording
 CPU/fixture recomputation counters. That trace remains fixture-only: the
 production metric gate still rejects it unless an existing GPU
 exact/provenance/PIR/CNF/knowledge-compilation path counter is also present.
+The split-batch incremental-circuit marker
+`accepted_split_all_binary_operator_batch_updates_incremental_probability_circuit`
+proves accepted split-batch GPU evidence also crosses the same central batch
+gate before updating a caller-owned bounded `EpistemicCircuit` once per accepted
+component through
+`apply_accepted_world_views_to_circuit_for_gpu_batch_execution_result`. It
+records one accepted batch, four accepted components, four accepted world-view
+evidences, four accepted assumptions, four incremental circuit updates, and zero
+CPU/fixture recomputation counters, while remaining ineligible for production
+metrics without a separate GPU exact/provenance/PIR/CNF/knowledge-compilation
+counter.
 The split-batch quaternary all-operator component timing marker
 `accepted_split_quaternary_all_operator_batch_records_component_kernel_timing`
 proves the same four accepted arity-four components record CUDA-event timing for
