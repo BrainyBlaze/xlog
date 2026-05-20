@@ -173,9 +173,9 @@ bytes, row-count metadata reads, and zero accepted-path data-plane D2H calls or
 bytes. The split-batch all-operator transfer marker
 `accepted_split_quaternary_all_operator_batch_records_final_result_transfer_budget`
 extends the same accounting across four accepted arity-four components, including
-the aggregate zero hot-path D2H and per-candidate host-round-trip counters plus
-per-component final rows, arity, payload bytes, row-count metadata reads, and
-zero accepted-path data-plane D2H. The batch trace now also aggregates final
+the aggregate zero hot-path H2D/D2H and per-candidate host-round-trip counters
+plus per-component final rows, arity, payload bytes, row-count metadata reads,
+and zero accepted-path data-plane D2H. The batch trace now also aggregates final
 output rows, payload bytes, final-result row-count metadata reads, and
 final-result data-plane D2H calls/bytes from component results.
 
@@ -352,7 +352,7 @@ solver lifecycle pushes, or probability evidence facts advance.
 The split-batch quaternary all-operator host-transfer marker
 `accepted_split_quaternary_all_operator_batch_rejects_hot_path_host_transfers`
 proves those same consumers fail closed when accepted batch evidence reports
-tracked hot-path D2H calls or per-candidate host round trips, preserving the
+tracked hot-path H2D/D2H calls or per-candidate host round trips, preserving the
 transfer-budget gate before solver lifecycle work or probability conditioning
 can proceed.
 The single-result host-transfer marker

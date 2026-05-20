@@ -130,6 +130,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(runtime.contains("planned_hash_route_count"));
     assert!(runtime.contains("EpistemicGpuFinalResultTransferTrace"));
     assert!(runtime.contains("from_final_output(&self.provider, &final_output)"));
+    assert!(runtime.contains("tracked_htod_calls"));
     assert!(runtime.contains("final_result_row_count_device_reads"));
     assert!(runtime.contains("final_result_data_plane_dtoh_calls"));
     assert!(runtime.contains("final_result_data_plane_dtoh_bytes"));

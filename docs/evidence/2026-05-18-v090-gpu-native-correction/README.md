@@ -66,11 +66,13 @@ incomplete.
 
 2026-05-20 split-batch final-result transfer delta: the four-component
 split-batch quaternary `know`/`possible`/`not possible`/`not know` fixture now
-records aggregate zero hot-path D2H and per-candidate host-round-trip counters
-plus per-component final rows, arity, payload bytes, row-count metadata reads,
-and zero accepted-path data-plane D2H calls or bytes. `EpistemicGpuBatchExecutionTrace`
-also aggregates final output rows, payload bytes, final-result row-count metadata
-reads, and final-result data-plane D2H calls/bytes from component results. This
+records aggregate zero hot-path H2D/D2H and per-candidate host-round-trip
+counters plus per-component final rows, arity, payload bytes, row-count metadata
+reads, and zero accepted-path data-plane D2H calls or bytes.
+`EpistemicGpuBatchExecutionTrace` also aggregates final output rows, payload
+bytes, final-result row-count metadata reads, and final-result data-plane D2H
+calls/bytes from component results. Batch solver and probabilistic consumers now
+fail closed on aggregate H2D evidence as well as D2H and round trips. This
 narrows `M090_GPU.8`, but broader transfer-budget certification remains
 incomplete.
 

@@ -3816,9 +3816,11 @@ fn accepted_split_quaternary_all_operator_batch_rejects_hot_path_host_transfers(
 
     let (_split, mut batch) = execute_split_quaternary_all_operator_batch(&fix);
     assert_eq!(batch.trace.tracked_dtoh_calls, 0);
+    assert_eq!(batch.trace.tracked_htod_calls, 0);
     assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
 
     batch.trace.tracked_dtoh_calls = 1;
+    batch.trace.tracked_htod_calls = 1;
     batch.trace.per_candidate_host_round_trips = 1;
 
     let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
@@ -3847,6 +3849,7 @@ fn accepted_split_quaternary_all_operator_batch_rejects_hot_path_host_transfers(
     let solver_err = format!("{solver_err}");
     assert!(solver_err.contains("CPU/host fallback counters"));
     assert!(solver_err.contains("dtoh_calls=1"));
+    assert!(solver_err.contains("htod_calls=1"));
     assert!(solver_err.contains("round_trips=1"));
 
     let empty_groups_owned: Vec<Vec<EpistemicAssumption>> = vec![Vec::new(); batch.results.len()];
@@ -3875,6 +3878,7 @@ fn accepted_split_quaternary_all_operator_batch_rejects_hot_path_host_transfers(
     let prob_err = format!("{prob_err}");
     assert!(prob_err.contains("CPU/host fallback counters"));
     assert!(prob_err.contains("dtoh_calls=1"));
+    assert!(prob_err.contains("htod_calls=1"));
     assert!(prob_err.contains("round_trips=1"));
 }
 

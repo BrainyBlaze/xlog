@@ -1528,6 +1528,8 @@ pub struct EpistemicGpuBatchExecutionTrace {
     pub cpu_world_view_validations: u64,
     /// Hot-path D2H calls tracked across all components.
     pub tracked_dtoh_calls: u64,
+    /// Hot-path H2D calls tracked across all components.
+    pub tracked_htod_calls: u64,
     /// Per-candidate host round trips tracked across all components.
     pub per_candidate_host_round_trips: u64,
     /// Final output rows represented across all component device buffers.
@@ -1587,6 +1589,10 @@ impl EpistemicGpuBatchExecutionTrace {
             tracked_dtoh_calls: results
                 .iter()
                 .map(|result| result.transfer_budget.tracked_dtoh_calls)
+                .sum(),
+            tracked_htod_calls: results
+                .iter()
+                .map(|result| result.transfer_budget.tracked_htod_calls)
                 .sum(),
             per_candidate_host_round_trips: results
                 .iter()
