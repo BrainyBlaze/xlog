@@ -52,7 +52,14 @@ which proves split-batch quaternary `possible fact4/4` and
 `not know fact4/4` accepted GPU components reach the same GPU CDCL lifecycle
 adapter with accepted batch/component evidence, two nonzero-arity evidence
 consumptions, eight tuple-key column reads, balanced lifecycle pushes and
-retractions, workspace reuse, and zero CPU search.
+retractions, workspace reuse, and zero CPU search. The source audit now also
+requires
+`accepted_split_quaternary_possible_and_not_know_batch_gates_solver_reuse_and_maxsat_paths`,
+which proves the same accepted batch reaches the existing learned-clause reuse
+and bounded MaxSAT candidate paths with two arena publications/imports/reused
+solves, four GPU CDCL candidate solves, two MaxSAT optima, one accepted
+`possible` counter, one accepted `not know` counter, and zero CPU search or
+learned-clause transfers.
 All accepted solver split-batch entrypoints now call the single
 `accepted_solver_results_from_gpu_batch_execution_evidence` validator/accounting
 helper, and `production_solver_batch_paths_use_single_gpu_batch_gate`

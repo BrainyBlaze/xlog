@@ -34,8 +34,11 @@ search/recomputation. The split-batch quaternary `possible fact4/4` plus
 through the existing GPU CDCL lifecycle adapter and probabilistic conditioned
 source adapter with batch/component counters, arity-four tuple/evidence
 counters, balanced lifecycle pushes/retractions, exact-query counters, and zero
-CPU search/recomputation. This narrows `G090_SOLVER` and `G090_PROB` but does
-not close either node.
+CPU search/recomputation. The same split-batch evidence now also gates existing
+learned-clause reuse and bounded MaxSAT candidate solving with two arena
+publications/imports/reused solves, four GPU CDCL candidate solves, two MaxSAT
+optima, and zero CPU search or learned-clause transfers. This narrows
+`G090_SOLVER` and `G090_PROB` but does not close either node.
 
 ## Current Branch Classification
 
@@ -124,7 +127,8 @@ The next production slice should start at the lowering/runtime boundary:
    split-batch learned-clause reuse and MaxSAT,
    accepted ternary and quaternary nonzero-arity SAT evidence tracing,
    single-result quaternary `possible`/`not know fact4/4` SAT evidence,
-   split-batch quaternary `possible`/`not know fact4/4` lifecycle evidence,
+   split-batch quaternary `possible`/`not know fact4/4` lifecycle,
+   learned-clause reuse, and MaxSAT evidence,
    single-result, two-record, and split-batch combined lifecycle-plus-MaxSAT,
    learned-clause reuse, split-batch MaxSAT, split-batch MaxSAT search pruning, and split-batch portfolio dispatch,
    learned-clause arena publication, same-device-CNF
@@ -250,6 +254,7 @@ The next production slice should start at the lowering/runtime boundary:
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_possible_and_not_know_memberships_match_gpt_oracle_parity -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_possible_and_not_know_results_gate_solver_and_probabilistic_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_possible_and_not_know_batch_gates_solver_and_probabilistic_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_possible_and_not_know_batch_gates_solver_reuse_and_maxsat_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_ternary_gpu_execution_result_records_solver_nonzero_arity_evidence_trace -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_gpu_execution_result_records_solver_nonzero_arity_evidence_trace -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_epistemic_v070_4cycle_execution_certifies_production_wcoj_dispatch -- --exact --nocapture` | PASS, 1 passed, 0 failed |
