@@ -12620,6 +12620,133 @@ fn accepted_quaternary_parsed_program_probabilistic_evidence_records_nonzero_ari
 }
 
 #[test]
+fn accepted_quaternary_gpu_execution_result_conditions_source_and_program_probabilistic_gradients()
+{
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred tuple4(u32, u32, u32, u32).
+        pred fact4(u32, u32, u32, u32).
+        pred accepted(u32, u32, u32, u32).
+        accepted(A, B, C, D) :- tuple4(A, B, C, D), know fact4(A, B, C, D).
+        "#,
+    )
+    .expect("parse quaternary conditioned-gradient probabilistic evidence fixture");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile quaternary conditioned-gradient probabilistic evidence executable");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &executable.relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation(
+        "tuple4",
+        upload_quaternary_u32(&fix.memory, &[(1, 2, 3, 4), (2, 3, 4, 5), (9, 9, 9, 9)]),
+    );
+    executor.put_relation("fact4", upload_quaternary_u32(&fix.memory, &[(2, 3, 4, 5)]));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 3,
+            },
+        )
+        .expect("execute quaternary conditioned-gradient probabilistic evidence fixture");
+    assert_eq!(
+        download_quaternary_u32(&fix.provider, &result.final_output),
+        vec![(2, 3, 4, 5)]
+    );
+    assert_eq!(result.prepared.preflight.know_operator_count, 1);
+    assert_eq!(
+        result.model_membership.tuple_source_key_column_device_reads,
+        4
+    );
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+
+    let probabilistic_source = r#"
+        0.8::fact4(2, 3, 4, 5).
+        query(fact4(2, 3, 4, 5)).
+        "#;
+    let prob_program = parse_program(probabilistic_source)
+        .expect("parse quaternary gradient probabilistic program");
+    let assumptions = vec![EpistemicAssumption::known_tuple(
+        "fact4",
+        vec![
+            EpistemicEvidenceTerm::integer(2),
+            EpistemicEvidenceTerm::integer(3),
+            EpistemicEvidenceTerm::integer(4),
+            EpistemicEvidenceTerm::integer(5),
+        ],
+        true,
+    )];
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut adapter = EpistemicProbProductionAdapter::new(config);
+    let source_grads = adapter
+        .compile_and_evaluate_conditioned_source_with_grads_with_gpu_execution_result(
+            probabilistic_source,
+            &fix.provider,
+            &result,
+            assumptions.clone(),
+        )
+        .expect("accepted quaternary know evidence must condition source gradients");
+    let program_grads = adapter
+        .compile_and_evaluate_conditioned_program_with_grads_with_gpu_execution_result(
+            &prob_program,
+            &fix.provider,
+            &result,
+            assumptions,
+        )
+        .expect("accepted quaternary know evidence must condition parsed-program gradients");
+
+    assert_eq!(source_grads.query_grads.len(), 1);
+    assert_eq!(program_grads.query_grads.len(), 1);
+    assert!((source_grads.query_grads[0].prob - 1.0).abs() < 1.0e-6);
+    assert!((program_grads.query_grads[0].prob - 1.0).abs() < 1.0e-6);
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_world_view_evidence_consumed, 2);
+    assert_eq!(trace.accepted_evidence_assumptions_consumed, 2);
+    assert_eq!(trace.gpu_conditioned_evidence_facts, 2);
+    assert_eq!(trace.gpu_conditioned_nonzero_arity_evidence_facts, 2);
+    assert_eq!(trace.gpu_conditioned_max_evidence_arity, 4);
+    assert_eq!(trace.gpu_conditioned_negative_evidence_facts, 0);
+    assert_eq!(trace.gpu_conditioned_know_evidence_facts, 2);
+    assert_eq!(trace.gpu_source_conditioned_evidence_facts, 1);
+    assert_eq!(trace.gpu_source_conditioned_nonzero_arity_evidence_facts, 1);
+    assert_eq!(trace.gpu_source_conditioned_max_evidence_arity, 4);
+    assert_eq!(trace.gpu_source_conditioned_know_evidence_facts, 1);
+    assert_eq!(trace.gpu_program_conditioned_evidence_facts, 1);
+    assert_eq!(
+        trace.gpu_program_conditioned_nonzero_arity_evidence_facts,
+        1
+    );
+    assert_eq!(trace.gpu_program_conditioned_max_evidence_arity, 4);
+    assert_eq!(trace.gpu_program_conditioned_know_evidence_facts, 1);
+    assert_eq!(trace.gpu_exact_source_compiles, 1);
+    assert_eq!(trace.gpu_exact_program_compiles, 1);
+    assert_eq!(trace.gpu_exact_query_evaluations, 0);
+    assert_eq!(trace.gpu_exact_gradient_evaluations, 2);
+    assert_eq!(trace.gpu_source_conditioned_gradient_evaluations, 1);
+    assert_eq!(trace.gpu_program_conditioned_gradient_evaluations, 1);
+    assert_eq!(trace.gpu_knowledge_compilation_end_to_end_runs, 2);
+    assert_eq!(trace.gpu_source_knowledge_compilation_end_to_end_runs, 1);
+    assert_eq!(trace.gpu_program_knowledge_compilation_end_to_end_runs, 1);
+    assert_eq!(trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(trace.fixture_circuit_evaluations, 0);
+}
+
+#[test]
 fn accepted_quaternary_gpu_execution_result_gates_source_and_program_pir_cnf_and_exact_evaluation_paths(
 ) {
     let Some(fix) = make_runtime_backed_fixture() else {
