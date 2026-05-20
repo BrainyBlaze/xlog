@@ -522,7 +522,8 @@ distinct-CNF fail-closed rejection, a two-record accepted lifecycle, and bounded
 UNKNOWN/TIMEOUT lifecycle propagation, plus two-record same-CNF learned-clause
 reuse, a mixed unary and binary `possible`/`not possible` plus binary `not know`
 operator-result lifecycle,
-accepted split-batch lifecycle, learned-clause reuse, MaxSAT, MaxSAT search pruning,
+accepted split-batch lifecycle, all-binary-operator split-batch lifecycle,
+learned-clause reuse, MaxSAT, MaxSAT search pruning,
 weighted MaxSAT encoding/search, generalized MaxSAT scheduling, and portfolio evidence
 with batch/component counters,
 two-record/two-CNF bounded MaxSAT candidate-set execution, bounded GPU-CDCL
@@ -557,6 +558,7 @@ Run the solver service fixtures and production-adapter source guard:
 ```bash
 cargo test -p xlog-solve --test gpu_solver_production_reuse
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_lifecycle_path -- --nocapture
+cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_all_binary_operator_batch_gates_solver_lifecycle_path -- --exact --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_learned_clause_reuse_path -- --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_maxsat_path -- --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_maxsat_search_pruning -- --nocapture
