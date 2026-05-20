@@ -7343,6 +7343,162 @@ fn accepted_quaternary_not_possible_membership_matches_gpt_oracle_parity() {
 }
 
 #[test]
+fn accepted_quaternary_possible_and_not_know_memberships_match_gpt_oracle_parity() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let run_case = |label: &str,
+                    program_source: &str,
+                    oracle_candidates: Vec<EpistemicInterpretation>,
+                    expected_rows: Vec<(u32, u32, u32, u32)>,
+                    expected_possible: usize,
+                    expected_not_know: usize,
+                    expected_negated_filters: usize| {
+        let program = parse_program(program_source).expect(label);
+        let oracle = run_generate_propagate_test(
+            &program,
+            oracle_candidates,
+            GeneratePropagateTestConfig { max_candidates: 2 },
+        )
+        .expect(label);
+        let executable =
+            compile_epistemic_gpu_execution_with_stats_snapshot(&program, None).expect(label);
+        assert_eq!(executable.gpu_plan.tuple_membership_bindings.len(), 1);
+        assert_eq!(executable.gpu_plan.tuple_membership_bindings[0].arity, 4);
+        assert_eq!(
+            executable.gpu_plan.tuple_membership_bindings[0].bound_output_columns,
+            vec![Some(0), Some(1), Some(2), Some(3)]
+        );
+        assert_eq!(
+            executable.gpu_plan.tuple_membership_bindings[0].negated,
+            expected_negated_filters == 1
+        );
+
+        let mut executor =
+            Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+        for (name, rel_id) in &executable.relation_ids {
+            executor.register_relation(*rel_id, name);
+        }
+        executor.put_relation(
+            "tuple4",
+            upload_quaternary_u32(&fix.memory, &[(1, 2, 3, 4), (2, 3, 4, 5), (9, 9, 9, 9)]),
+        );
+        executor.put_relation("fact4", upload_quaternary_u32(&fix.memory, &[(2, 3, 4, 5)]));
+
+        let result = executor
+            .execute_epistemic_gpu_execution(
+                &executable,
+                EpistemicGpuWorkspaceCapacities {
+                    max_candidates: 2,
+                    max_worlds: 1,
+                    max_models_per_reduction: 3,
+                },
+            )
+            .expect(label);
+
+        assert_eq!(result.prepared.preflight.know_operator_count, 0);
+        assert_eq!(
+            result.prepared.preflight.possible_operator_count,
+            expected_possible
+        );
+        assert_eq!(
+            result.prepared.preflight.not_know_operator_count,
+            expected_not_know
+        );
+        assert_eq!(result.prepared.preflight.not_possible_operator_count, 0);
+        assert_eq!(
+            result.semantic_trace.generated_candidates,
+            oracle.trace.generated
+        );
+        assert_eq!(result.semantic_trace.guesses, oracle.trace.guesses);
+        assert_eq!(
+            result.semantic_trace.propagated_candidates,
+            oracle.trace.propagated
+        );
+        assert_eq!(result.semantic_trace.pruned_candidates, oracle.trace.pruned);
+        assert_eq!(result.semantic_trace.tested_candidates, oracle.trace.tested);
+        assert_eq!(
+            result.semantic_trace.accepted_candidates,
+            oracle.trace.accepted
+        );
+        assert_eq!(
+            result.semantic_trace.accepted_world_views,
+            oracle.trace.accepted_world_views
+        );
+        assert_eq!(
+            result.semantic_trace.rejected_candidates,
+            oracle.trace.rejected
+        );
+        assert_eq!(
+            result.semantic_trace.accepted_candidate_indices,
+            oracle.accepted_candidate_indices
+        );
+        assert_eq!(
+            result.semantic_trace.rejected_candidate_indices,
+            oracle.rejected_candidate_indices
+        );
+        assert_eq!(result.final_tuple_materialization.row_filter_count, 1);
+        assert_eq!(
+            result.final_tuple_materialization.negated_row_filter_count,
+            expected_negated_filters
+        );
+        assert_eq!(
+            result.model_membership.membership_source,
+            EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+        );
+        assert_eq!(
+            result.model_membership.tuple_source_key_column_device_reads,
+            4
+        );
+        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+        assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
+        assert_eq!(
+            download_quaternary_u32(&fix.provider, &result.final_output),
+            expected_rows,
+            "{label} must filter by the arity-4 tuple key on device"
+        );
+    };
+
+    run_case(
+        "quaternary possible GPT oracle parity",
+        r#"
+        pred tuple4(u32, u32, u32, u32).
+        pred fact4(u32, u32, u32, u32).
+        pred accepted(u32, u32, u32, u32).
+        accepted(A, B, C, D) :- tuple4(A, B, C, D), possible fact4(A, B, C, D).
+        "#,
+        vec![
+            EpistemicInterpretation::new(),
+            EpistemicInterpretation::new().with_known("fact4", 4),
+        ],
+        vec![(2, 3, 4, 5)],
+        1,
+        0,
+        0,
+    );
+    run_case(
+        "quaternary not-know GPT oracle parity",
+        r#"
+        pred tuple4(u32, u32, u32, u32).
+        pred fact4(u32, u32, u32, u32).
+        pred accepted(u32, u32, u32, u32).
+        accepted(A, B, C, D) :- tuple4(A, B, C, D), not know fact4(A, B, C, D).
+        "#,
+        vec![
+            EpistemicInterpretation::new().with_known("fact4", 4),
+            EpistemicInterpretation::new(),
+        ],
+        vec![(1, 2, 3, 4), (9, 9, 9, 9)],
+        0,
+        1,
+        1,
+    );
+}
+
+#[test]
 fn accepted_binary_possible_membership_matches_gpt_oracle_parity() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
