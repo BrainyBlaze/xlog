@@ -1750,6 +1750,269 @@ fn accepted_split_all_binary_operators_match_gpt_oracles() {
 }
 
 #[test]
+fn accepted_split_quaternary_all_operators_match_gpt_oracles() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred tuple4(u32, u32, u32, u32).
+        pred edge4(u32, u32, u32, u32).
+        pred alt4(u32, u32, u32, u32).
+        pred blocked_fact4(u32, u32, u32, u32).
+        pred hidden_fact4(u32, u32, u32, u32).
+        pred known4(u32, u32, u32, u32).
+        pred possible4(u32, u32, u32, u32).
+        pred clear4(u32, u32, u32, u32).
+        pred unknown4(u32, u32, u32, u32).
+        known4(A, B, C, D) :- tuple4(A, B, C, D), know edge4(A, B, C, D).
+        possible4(A, B, C, D) :- tuple4(A, B, C, D), possible alt4(A, B, C, D).
+        clear4(A, B, C, D) :- tuple4(A, B, C, D), not possible blocked_fact4(A, B, C, D).
+        unknown4(A, B, C, D) :- tuple4(A, B, C, D), not know hidden_fact4(A, B, C, D).
+        "#,
+    )
+    .expect("parse split quaternary all-operator fixture");
+    let know_oracle_program = parse_program(
+        r#"
+        pred tuple4(u32, u32, u32, u32).
+        pred edge4(u32, u32, u32, u32).
+        pred known4(u32, u32, u32, u32).
+        known4(A, B, C, D) :- tuple4(A, B, C, D), know edge4(A, B, C, D).
+        "#,
+    )
+    .expect("parse split quaternary know oracle");
+    let possible_oracle_program = parse_program(
+        r#"
+        pred tuple4(u32, u32, u32, u32).
+        pred alt4(u32, u32, u32, u32).
+        pred possible4(u32, u32, u32, u32).
+        possible4(A, B, C, D) :- tuple4(A, B, C, D), possible alt4(A, B, C, D).
+        "#,
+    )
+    .expect("parse split quaternary possible oracle");
+    let not_possible_oracle_program = parse_program(
+        r#"
+        pred tuple4(u32, u32, u32, u32).
+        pred blocked_fact4(u32, u32, u32, u32).
+        pred clear4(u32, u32, u32, u32).
+        clear4(A, B, C, D) :- tuple4(A, B, C, D), not possible blocked_fact4(A, B, C, D).
+        "#,
+    )
+    .expect("parse split quaternary not-possible oracle");
+    let not_know_oracle_program = parse_program(
+        r#"
+        pred tuple4(u32, u32, u32, u32).
+        pred hidden_fact4(u32, u32, u32, u32).
+        pred unknown4(u32, u32, u32, u32).
+        unknown4(A, B, C, D) :- tuple4(A, B, C, D), not know hidden_fact4(A, B, C, D).
+        "#,
+    )
+    .expect("parse split quaternary not-know oracle");
+    let split_oracles = vec![
+        run_generate_propagate_test(
+            &know_oracle_program,
+            vec![
+                EpistemicInterpretation::new(),
+                EpistemicInterpretation::new().with_known("edge4", 4),
+            ],
+            GeneratePropagateTestConfig { max_candidates: 2 },
+        )
+        .expect("run split quaternary know oracle"),
+        run_generate_propagate_test(
+            &possible_oracle_program,
+            vec![
+                EpistemicInterpretation::new(),
+                EpistemicInterpretation::new().with_known("alt4", 4),
+            ],
+            GeneratePropagateTestConfig { max_candidates: 2 },
+        )
+        .expect("run split quaternary possible oracle"),
+        run_generate_propagate_test(
+            &not_possible_oracle_program,
+            vec![
+                EpistemicInterpretation::new().with_known("blocked_fact4", 4),
+                EpistemicInterpretation::new(),
+            ],
+            GeneratePropagateTestConfig { max_candidates: 2 },
+        )
+        .expect("run split quaternary not-possible oracle"),
+        run_generate_propagate_test(
+            &not_know_oracle_program,
+            vec![
+                EpistemicInterpretation::new().with_known("hidden_fact4", 4),
+                EpistemicInterpretation::new(),
+            ],
+            GeneratePropagateTestConfig { max_candidates: 2 },
+        )
+        .expect("run split quaternary not-know oracle"),
+    ];
+    let split = compile_epistemic_gpu_split_execution_with_stats_snapshot(&program, None)
+        .expect("compile split quaternary all-operator components");
+
+    assert_eq!(split.components.len(), 4);
+    assert_eq!(split.recomposed_rule_indices(), vec![0, 1, 2, 3]);
+    for rule_idx in 0..4 {
+        assert!(
+            split
+                .components
+                .iter()
+                .any(|component| component.component.rule_indices == vec![rule_idx]),
+            "split quaternary all-operator fixture must retain source rule index {rule_idx}"
+        );
+    }
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    let mut relation_ids = BTreeMap::new();
+    for component in &split.components {
+        for (name, rel_id) in &component.executable.relation_ids {
+            if let Some(previous) = relation_ids.insert(name.clone(), *rel_id) {
+                assert_eq!(
+                    previous, *rel_id,
+                    "split quaternary all-operator components must preserve shared relation ids"
+                );
+            }
+        }
+    }
+    for (name, rel_id) in &relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation(
+        "tuple4",
+        upload_quaternary_u32(
+            &fix.memory,
+            &[(1, 2, 3, 4), (2, 3, 4, 5), (3, 4, 5, 6), (9, 9, 9, 9)],
+        ),
+    );
+    executor.put_relation("edge4", upload_quaternary_u32(&fix.memory, &[(2, 3, 4, 5)]));
+    executor.put_relation("alt4", upload_quaternary_u32(&fix.memory, &[(3, 4, 5, 6)]));
+    executor.put_relation(
+        "blocked_fact4",
+        upload_quaternary_u32(&fix.memory, &[(9, 9, 9, 9)]),
+    );
+    executor.put_relation(
+        "hidden_fact4",
+        upload_quaternary_u32(&fix.memory, &[(1, 2, 3, 4)]),
+    );
+
+    let executables: Vec<_> = split
+        .components
+        .iter()
+        .map(|component| &component.executable)
+        .collect();
+    let batch = executor
+        .execute_epistemic_gpu_execution_batch_with_trace(
+            &executables,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 3,
+            },
+        )
+        .expect("execute split quaternary all-operator components through GPU batch path");
+
+    assert_eq!(batch.trace.component_count, 4);
+    assert_eq!(batch.trace.gpu_runtime_component_executions, 4);
+    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
+    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
+    assert_eq!(batch.trace.cpu_world_view_validations, 0);
+    assert_eq!(batch.trace.tracked_dtoh_calls, 0);
+    assert_eq!(batch.trace.per_candidate_host_round_trips, 0);
+    assert!(batch.trace.aggregate_kernel_timing.is_recorded());
+    assert_eq!(batch.trace.aggregate_kernel_timing.cuda_event_pairs, 32);
+    assert_eq!(batch.trace.know_operator_count, 1);
+    assert_eq!(batch.trace.possible_operator_count, 1);
+    assert_eq!(batch.trace.not_know_operator_count, 1);
+    assert_eq!(batch.trace.not_possible_operator_count, 1);
+    assert_eq!(
+        batch.trace.accepted_world_views,
+        split_oracles
+            .iter()
+            .map(|oracle| oracle.trace.accepted_world_views)
+            .sum::<usize>()
+    );
+    assert_eq!(
+        batch.trace.rejected_candidates,
+        split_oracles
+            .iter()
+            .map(|oracle| oracle.trace.rejected)
+            .sum::<usize>()
+    );
+
+    let results = &batch.results;
+    assert_eq!(results.len(), 4);
+    for (component, result) in split.components.iter().zip(results.iter()) {
+        let rule_idx = *component
+            .component
+            .rule_indices
+            .first()
+            .expect("split component must carry one source rule index");
+        let oracle = &split_oracles[rule_idx];
+        let (expected_rows, expected_negated_filters) = match rule_idx {
+            0 => (vec![(2, 3, 4, 5)], 0),
+            1 => (vec![(3, 4, 5, 6)], 0),
+            2 => (vec![(1, 2, 3, 4), (2, 3, 4, 5), (3, 4, 5, 6)], 1),
+            3 => (vec![(2, 3, 4, 5), (3, 4, 5, 6), (9, 9, 9, 9)], 1),
+            other => panic!("unexpected split quaternary all-operator rule index: {other}"),
+        };
+
+        assert_eq!(
+            result.model_membership.membership_source,
+            EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+        );
+        assert_eq!(
+            result.model_membership.tuple_source_key_column_device_reads,
+            4
+        );
+        assert_eq!(
+            download_quaternary_u32(&fix.provider, &result.final_output),
+            expected_rows
+        );
+        assert_eq!(result.final_tuple_materialization.row_filter_count, 1);
+        assert_eq!(
+            result.final_tuple_materialization.negated_row_filter_count,
+            expected_negated_filters
+        );
+        assert_eq!(
+            result.semantic_trace.generated_candidates,
+            oracle.trace.generated
+        );
+        assert_eq!(result.semantic_trace.guesses, oracle.trace.guesses);
+        assert_eq!(
+            result.semantic_trace.propagated_candidates,
+            oracle.trace.propagated
+        );
+        assert_eq!(result.semantic_trace.pruned_candidates, oracle.trace.pruned);
+        assert_eq!(result.semantic_trace.tested_candidates, oracle.trace.tested);
+        assert_eq!(
+            result.semantic_trace.accepted_candidates,
+            oracle.trace.accepted
+        );
+        assert_eq!(
+            result.semantic_trace.accepted_world_views,
+            oracle.trace.accepted_world_views
+        );
+        assert_eq!(
+            result.semantic_trace.rejected_candidates,
+            oracle.trace.rejected
+        );
+        assert_eq!(
+            result.semantic_trace.accepted_candidate_indices,
+            oracle.accepted_candidate_indices
+        );
+        assert_eq!(
+            result.semantic_trace.rejected_candidate_indices,
+            oracle.rejected_candidate_indices
+        );
+        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+        assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
+    }
+}
+
+#[test]
 fn accepted_split_quaternary_not_possible_batch_matches_gpt_oracles() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");

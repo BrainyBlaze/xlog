@@ -284,6 +284,14 @@ bounded GPT oracles for semantic trace counts, accepted/rejected candidate
 indices, tuple-key final-row filtering, zero CPU recomposition/fallback
 counters, and aggregate CUDA-event timing.
 
+Split quaternary all-operator parity audit note: the source audit now also
+requires `accepted_split_quaternary_all_operators_match_gpt_oracles`, proving
+four arity-four split components cover `know`, `possible`, `not possible`, and
+`not know` against bounded GPT oracles with distinct tuple-source relations,
+tuple-key column reads, mixed-polarity final-row filtering, aggregate
+all-operator counts, aggregate CUDA-event timing, and zero CPU
+recomposition/fallback counters.
+
 ## Forbidden Parallel Engines
 
 The accepted paths audited above must not introduce epistemic-only replacements
