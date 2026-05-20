@@ -122,6 +122,13 @@ weighted MaxSAT encoding/scheduler, and status-aware portfolio paths with two
 UNSAT prunes, four encoded candidates, twelve scheduled GPU CDCL candidate
 solves, two SAT jobs, two MaxSAT jobs, one accepted `possible` counter, one
 accepted `not know` counter, eight tuple-key column reads, and zero CPU search.
+The source audit now also requires
+`accepted_split_quaternary_all_operator_batch_gates_solver_lifecycle_path`,
+which proves a four-component arity-four split batch reaches the existing GPU
+CDCL lifecycle adapter with one accepted `know`, `possible`, `not possible`,
+and `not know` counter, four nonzero-arity evidence consumptions, sixteen
+tuple-key column reads, balanced lifecycle pushes and retractions, workspace
+reuse, and zero CPU search.
 All accepted solver split-batch entrypoints now call the single
 `accepted_solver_results_from_gpu_batch_execution_evidence` validator/accounting
 helper, and `production_solver_batch_paths_use_single_gpu_batch_gate`
