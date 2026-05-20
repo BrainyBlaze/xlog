@@ -159,10 +159,23 @@ fn production_prob_metric_gate_rejects_fixture_only_traces() {
     };
     assert!(eligible.require_production_metric_eligibility().is_ok());
 
+    let conditioned_only = EpistemicProbProductionTrace {
+        accepted_world_view_evidence_consumed: 1,
+        gpu_conditioned_evidence_facts: 1,
+        gpu_conditioned_negative_evidence_facts: 1,
+        ..EpistemicProbProductionTrace::default()
+    };
+    let err = conditioned_only
+        .require_production_metric_eligibility()
+        .expect_err("conditioned evidence facts alone must not satisfy production metrics");
+    assert!(format!("{err}")
+        .contains("existing GPU exact/provenance/PIR/CNF/knowledge-compilation counter"));
+
     let conditioned_negative = EpistemicProbProductionTrace {
         accepted_world_view_evidence_consumed: 1,
         gpu_conditioned_evidence_facts: 1,
         gpu_conditioned_negative_evidence_facts: 1,
+        gpu_source_knowledge_compilation_end_to_end_runs: 1,
         ..EpistemicProbProductionTrace::default()
     };
     assert!(conditioned_negative

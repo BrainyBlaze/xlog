@@ -734,7 +734,9 @@ per-record query or gradient evaluation.
 for production metrics, and
 `EpistemicProbProductionTrace::require_production_metric_eligibility` rejects
 traces that lack accepted world-view evidence, lack an existing GPU
-exact/provenance/PIR/CNF counter, or record CPU/fixture recomputation.
+exact/provenance/PIR/CNF/knowledge-compilation counter, only record
+conditioned evidence facts without a production-path counter, or record
+CPU/fixture recomputation.
 
 This adapter is partial v0.9 evidence only. It covers bounded zero-arity,
 nonzero-arity, negative nonzero-arity, parsed-program, ternary and quaternary

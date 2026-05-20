@@ -171,6 +171,26 @@ pub struct EpistemicProbProductionTrace {
 }
 
 impl EpistemicProbProductionTrace {
+    fn gpu_production_path_events(&self) -> u64 {
+        self.gpu_exact_source_compiles
+            .saturating_add(self.gpu_exact_program_compiles)
+            .saturating_add(self.gpu_exact_query_evaluations)
+            .saturating_add(self.gpu_source_exact_query_evaluations)
+            .saturating_add(self.gpu_program_exact_query_evaluations)
+            .saturating_add(self.gpu_exact_gradient_evaluations)
+            .saturating_add(self.gpu_source_conditioned_gradient_evaluations)
+            .saturating_add(self.gpu_program_conditioned_gradient_evaluations)
+            .saturating_add(self.gpu_pir_graph_uploads)
+            .saturating_add(self.gpu_source_pir_graph_uploads)
+            .saturating_add(self.gpu_program_pir_graph_uploads)
+            .saturating_add(self.gpu_cnf_encodes)
+            .saturating_add(self.gpu_source_cnf_encodes)
+            .saturating_add(self.gpu_program_cnf_encodes)
+            .saturating_add(self.gpu_knowledge_compilation_end_to_end_runs)
+            .saturating_add(self.gpu_source_knowledge_compilation_end_to_end_runs)
+            .saturating_add(self.gpu_program_knowledge_compilation_end_to_end_runs)
+    }
+
     /// Require that no CPU-only probability recomputation counters were used.
     pub fn require_zero_cpu_recompute(&self) -> Result<()> {
         if self.cpu_only_probability_recomputations != 0 || self.fixture_circuit_evaluations != 0 {
@@ -234,19 +254,10 @@ impl EpistemicProbProductionTrace {
                     .to_string(),
             });
         }
-        let gpu_production_events = self
-            .gpu_exact_source_compiles
-            .saturating_add(self.gpu_exact_program_compiles)
-            .saturating_add(self.gpu_exact_query_evaluations)
-            .saturating_add(self.gpu_exact_gradient_evaluations)
-            .saturating_add(self.gpu_pir_graph_uploads)
-            .saturating_add(self.gpu_cnf_encodes)
-            .saturating_add(self.gpu_knowledge_compilation_end_to_end_runs)
-            .saturating_add(self.gpu_conditioned_evidence_facts);
-        if gpu_production_events == 0 {
+        if self.gpu_production_path_events() == 0 {
             return Err(XlogError::UnsupportedEpistemicConstruct {
                 construct: "epistemic probabilistic production metric gate".to_string(),
-                context: "production probability metrics require an existing GPU exact/provenance/PIR/CNF counter"
+                context: "production probability metrics require an existing GPU exact/provenance/PIR/CNF/knowledge-compilation counter"
                     .to_string(),
             });
         }

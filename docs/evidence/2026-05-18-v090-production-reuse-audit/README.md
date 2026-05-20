@@ -45,6 +45,10 @@ Probability audit note: the all-binary-operator split-batch probability fixtures
 The source audit also requires the design-only `KnowledgeCompilerAdapter`
 contracts for c2d and miniC2D, keeping alternative compiler adapters explicit
 without treating them as accepted production dispatch paths.
+The production metric gate now rejects conditioned evidence fact counters by
+themselves; a trace also needs an aggregate or source/program-specific GPU
+exact/provenance/PIR/CNF/knowledge-compilation path counter before it can be
+eligible for production probability metrics.
 
 Split guard audit note: `test_epistemic_production_reuse_audit` now requires the fail-closed `split_multi_membership_modal_coupling_rejects_gpu_batching` marker so unsafe multi-membership modal coupling cannot be documented as accepted split GPU batching evidence.
 
