@@ -224,6 +224,12 @@ recompute fallback counters in addition to candidate-enumeration and
 world-view-validation fallback counters. This is not a closure proposal;
 `G090_GPU`, `G090_SOLVER`, `G090_PROB`, and `G090_CLOSE` remain blocked.
 
+2026-05-20 K7/K8 WCOJ metadata follow-up: accepted K7/K8 epistemic execution
+now has explicit runtime evidence for certified edge-permutation slots,
+sorted-layout requirements, metadata-build counts, and metadata-build nanoseconds
+after production K-clique WCOJ dispatch counters advance. This is not a closure
+proposal; `G090_GPU` and `G090_CLOSE` remain blocked.
+
 2026-05-20 single-result row-count membership follow-up: accepted
 single-result solver and probabilistic consumers now reject model-membership
 evidence downgraded from stable-model tuple-source membership to row-count-only

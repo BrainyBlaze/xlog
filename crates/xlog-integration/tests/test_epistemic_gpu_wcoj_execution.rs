@@ -990,6 +990,88 @@ fn epistemic_k7_k8_reductions_reuse_g39_kclique_planner_preflight_surface() {
 }
 
 #[test]
+fn accepted_epistemic_k7_k8_execution_certifies_metadata_build_timing() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    for k in [7u8, 8u8] {
+        let source = epistemic_kclique_source(k, true);
+        let program = parse_program(&source).expect("parse epistemic K-clique");
+        let rel_ids = rel_ids_for_reduced_kclique(k);
+        let stats = kclique_stats(&rel_ids, k, Some((k - 2, 5.0)));
+        let executable =
+            compile_epistemic_gpu_execution_with_stats_snapshot(&program, Some(&stats))
+                .expect("compile epistemic executable K-clique");
+
+        let mut executor =
+            Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+        for (name, rel_id) in &executable.relation_ids {
+            executor.register_relation(*rel_id, name);
+        }
+        for (name, rows) in k_clique_inputs(usize::from(k)) {
+            executor.put_relation(&name, upload_binary_u32(&fix.memory, &rows));
+        }
+        executor.put_relation("gate", upload_nullary(&fix.memory, 1));
+
+        let result = executor
+            .execute_epistemic_gpu_execution(
+                &executable,
+                EpistemicGpuWorkspaceCapacities {
+                    max_candidates: 2,
+                    max_worlds: 1,
+                    max_models_per_reduction: 1,
+                },
+            )
+            .expect("execute accepted epistemic K-clique");
+
+        let expected_edges = usize::from(k) * usize::from(k - 1) / 2;
+        assert_eq!(result.prepared.preflight.kclique_wcoj_plan_count, 1);
+        assert_eq!(result.prepared.preflight.kclique_wcoj_max_arity, k);
+        assert_eq!(
+            result
+                .prepared
+                .preflight
+                .kclique_wcoj_edge_permutation_count,
+            expected_edges
+        );
+        assert_eq!(result.prepared.preflight.kclique_stream_group_count, 1);
+        assert!(
+            result.prepared.preflight.sorted_layout_requirement_count >= 1,
+            "accepted K{k} must carry sorted-layout obligations"
+        );
+
+        match result.trace.wcoj_certification {
+            EpistemicGpuRuntimeWcojCertification::Certified {
+                certified_edge_permutation_slots,
+                certified_stream_groups,
+                certified_sorted_layout_requirements,
+                observed_metadata_builds,
+                observed_metadata_build_nanos,
+                ..
+            } => {
+                assert_eq!(certified_edge_permutation_slots, expected_edges);
+                assert!(certified_stream_groups >= 1);
+                assert!(certified_sorted_layout_requirements >= 1);
+                assert!(observed_metadata_builds >= 1);
+                assert!(observed_metadata_build_nanos >= 1);
+            }
+            _ => panic!("accepted K{k} must certify production K-clique WCOJ dispatch"),
+        }
+
+        let dispatch_count = match k {
+            7 => result.trace.counter_delta.wcoj_clique7_dispatch_count,
+            8 => result.trace.counter_delta.wcoj_clique8_dispatch_count,
+            other => panic!("unexpected K-clique arity: {other}"),
+        };
+        assert!(dispatch_count >= 1);
+        assert!(result.trace.counter_delta.kclique_metadata_build_count >= 1);
+        assert!(result.trace.counter_delta.kclique_metadata_build_nanos >= 1);
+    }
+}
+
+#[test]
 fn accepted_epistemic_k7_execution_certifies_production_wcoj_dispatch() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");

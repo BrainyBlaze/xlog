@@ -344,7 +344,8 @@ The next production slice should start at the lowering/runtime boundary:
    accepted v0.7.0 4-cycle dispatch, accepted K5/K6/K7/K8 dispatch plus K5 certified helper/layout metrics,
    fail-closed layout sort/fast-path certification, K6 G38-B
    helper/histogram metadata count and timing reuse, and K7/K8
-   planner/preflight reuse; broader helper/skew runtime coverage remains open.
+   planner/preflight plus runtime metadata-build timing reuse; broader
+   helper/skew runtime coverage remains open.
 6. Replace CPU solver fixture search in accepted execution with GPU-native
    SAT/MaxSAT/portfolio services or a documented GPU-backed adapter. PARTIAL
    for accepted-runtime SAT, UNSAT, reusable workspace-backed UNSAT,

@@ -159,6 +159,9 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
         integration.contains("faeel_independently_founded_self_possible_reaches_gpu_runtime_path")
     );
     assert!(integration.contains("g91_self_supported_possible_reaches_gpu_runtime_path"));
+    assert!(
+        integration.contains("accepted_epistemic_k7_k8_execution_certifies_metadata_build_timing")
+    );
     assert!(integration
         .contains("accepted_gpu_execution_semantic_trace_matches_gpt_oracle_rejection_reason"));
     assert!(integration.contains("run_generate_propagate_test"));
