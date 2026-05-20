@@ -38,6 +38,11 @@ CPU search/recomputation. The same split-batch evidence now also gates existing
 learned-clause reuse and bounded MaxSAT candidate solving with two arena
 publications/imports/reused solves, four GPU CDCL candidate solves, two MaxSAT
 optima, and zero CPU search or learned-clause transfers. The same
+all-operator mixed-membership evidence now also gates MaxSAT search pruning,
+weighted MaxSAT encoding, and generalized scheduler dispatch with one accepted
+`know`, `possible`, `not possible`, and `not know` counter, four tuple-key
+column reads, two encoded candidates, six scheduled GPU CDCL candidate solves,
+and zero CPU search. The same
 search/scheduler/portfolio evidence now also covers the all-binary split batch
 with all four accepted operator-family counters, eight tuple-key column reads,
 four UNSAT prunes, eight encoded candidates, twenty-four scheduled GPU CDCL
@@ -139,6 +144,9 @@ The next production slice should start at the lowering/runtime boundary:
    SAT/MaxSAT/portfolio services or a documented GPU-backed adapter. PARTIAL
    for accepted-runtime SAT, UNSAT, reusable workspace-backed UNSAT,
    bounded unary/binary operator lifecycle, accepted split-batch lifecycle,
+   same-rule all-operator mixed-membership lifecycle, learned-clause reuse,
+   MaxSAT, portfolio, MaxSAT search pruning, weighted MaxSAT encoding, and
+   scheduler,
    all-binary-operator accepted split-batch lifecycle plus all-binary
    split-batch learned-clause reuse, MaxSAT, MaxSAT search pruning, weighted
    MaxSAT encoding/scheduler, and portfolio,
@@ -291,6 +299,7 @@ The next production slice should start at the lowering/runtime boundary:
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_all_operator_mixed_membership_gates_solver_lifecycle_path -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_all_operator_mixed_membership_conditions_probabilistic_evidence -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_all_operator_mixed_membership_gates_solver_reuse_maxsat_and_portfolio_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_all_operator_mixed_membership_gates_solver_search_and_scheduler_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_all_operator_mixed_membership_gates_probabilistic_program_gradient_and_pir_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 122 passed, 0 failed |
 | `cargo test -p xlog-logic --test test_epistemic_eir --test test_epistemic_g91 --test test_epistemic_faeel --test test_epistemic_gpt --test test_epistemic_split --test test_epistemic_world_view --test test_epistemic_examples` | PASS, 25 passed, 0 failed |

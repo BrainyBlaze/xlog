@@ -45,8 +45,13 @@ lifecycle pushes/retractions, and zero CPU search/recomputation. The same
 split-batch evidence now also reaches existing solver learned-clause reuse and
 bounded MaxSAT candidate paths with two arena publications/imports/reused
 solves, four GPU CDCL candidate solves, two MaxSAT optima, and zero CPU search
-or learned-clause transfers. The same search/scheduler/portfolio evidence now
-also covers the all-binary split batch with all four accepted operator-family counters,
+or learned-clause transfers. The same-rule all-operator mixed-membership
+evidence now also reaches MaxSAT search pruning, weighted MaxSAT encoding, and
+generalized scheduler dispatch with all four accepted operator-family counters,
+four tuple-key column reads, two encoded candidates, six scheduled GPU CDCL
+candidate solves, and zero CPU search. The same search/scheduler/portfolio
+evidence now also covers the all-binary split batch with all four accepted
+operator-family counters,
 eight tuple-key column reads, four UNSAT prunes, eight encoded candidates,
 twenty-four scheduled GPU CDCL candidate solves, four SAT jobs, four MaxSAT
 jobs, and zero CPU search. The same possible/not-know split batch now also
@@ -149,6 +154,7 @@ Post-merge compatibility validation:
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_all_operator_mixed_membership_gates_solver_lifecycle_path -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_all_operator_mixed_membership_conditions_probabilistic_evidence -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_all_operator_mixed_membership_gates_solver_reuse_maxsat_and_portfolio_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_all_operator_mixed_membership_gates_solver_search_and_scheduler_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_all_operator_mixed_membership_gates_probabilistic_program_gradient_and_pir_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution rejects_unrecorded_candidate_generation_timing -- --nocapture` | PASS, 2 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution aggregate_timing_requires_every_component_phase_to_be_recorded -- --nocapture` | PASS, 1 passed, 0 failed |
@@ -187,6 +193,8 @@ operator counters; `G090_SOLVER` now has the same split-batch evidence routed
 through the existing GPU CDCL lifecycle adapter with nonzero-arity tuple-key
 counters plus learned-clause reuse, bounded MaxSAT candidate solving, MaxSAT
 search pruning, weighted MaxSAT encoding/scheduler, and portfolio dispatch; the
+same-rule all-operator mixed-membership fixture now has deeper solver
+search/scheduler evidence; the
 four-component split all-binary `know`/`possible`/`not possible`/`not know`
 fixture now has the same deeper solver search/scheduler/portfolio evidence; the
 two-component split quaternary `know fact4/4` plus `not possible fact4/4`
@@ -291,6 +299,10 @@ The branch contains useful scaffolding:
   fail-closed all-UNSAT encoded MaxSAT rejection before accepted-evidence or encode trace mutation,
   fail-closed invalid encoded MaxSAT scheduler rejection before accepted-batch
   evidence, scheduler, encode, or solver trace mutation,
+  same-rule all-operator mixed-membership solver lifecycle plus learned-clause
+  reuse, MaxSAT, portfolio, MaxSAT search pruning, weighted MaxSAT encoding,
+  and scheduler with accepted `know`/`possible`/`not possible`/`not know`
+  counters,
   accepted split-batch solver lifecycle, all-binary-operator split-batch
   solver lifecycle plus learned-clause reuse, MaxSAT, MaxSAT search pruning,
   weighted MaxSAT encoding/scheduler, and portfolio with accepted

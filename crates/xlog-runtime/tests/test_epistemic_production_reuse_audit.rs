@@ -182,6 +182,9 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
         "accepted_all_operator_mixed_membership_gates_solver_reuse_maxsat_and_portfolio_paths"
     ));
     assert!(integration.contains(
+        "accepted_all_operator_mixed_membership_gates_solver_search_and_scheduler_paths"
+    ));
+    assert!(integration.contains(
         "accepted_all_operator_mixed_membership_gates_probabilistic_program_gradient_and_pir_paths"
     ));
     assert!(

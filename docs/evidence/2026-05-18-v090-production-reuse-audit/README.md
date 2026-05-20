@@ -137,9 +137,14 @@ evidence.
 The deeper production-reuse markers
 `accepted_all_operator_mixed_membership_gates_solver_reuse_maxsat_and_portfolio_paths`
 and
-`accepted_all_operator_mixed_membership_gates_probabilistic_program_gradient_and_pir_paths`
+`accepted_all_operator_mixed_membership_gates_solver_search_and_scheduler_paths`
 extend that same evidence through solver learned-clause reuse, MaxSAT,
-portfolio, parsed-program conditioning, gradient, and PIR/CNF adapters.
+portfolio, MaxSAT search pruning, weighted MaxSAT encoding, and scheduler
+adapters.
+The probabilistic marker
+`accepted_all_operator_mixed_membership_gates_probabilistic_program_gradient_and_pir_paths`
+extends that same evidence through parsed-program conditioning, gradient, and
+PIR/CNF adapters.
 The possible/not-know split-batch solver marker extends the same arity-four
 batch evidence through MaxSAT search pruning, weighted MaxSAT
 encoding/scheduler, and portfolio adapters without adding a parallel solver
