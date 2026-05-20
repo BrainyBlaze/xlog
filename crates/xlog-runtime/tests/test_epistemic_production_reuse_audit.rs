@@ -261,6 +261,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(integration.contains(
         "accepted_quaternary_not_possible_gates_solver_reuse_maxsat_and_portfolio_paths"
     ));
+    assert!(integration
+        .contains("accepted_quaternary_not_possible_gates_solver_search_and_scheduler_paths"));
     assert!(integration.contains(
         "accepted_split_batch_rejects_invalid_encoded_maxsat_scheduler_before_scheduler_work"
     ));

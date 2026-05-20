@@ -56,6 +56,14 @@ tuple-key column reads, one learned-clause arena publication/import/reused
 solve, one direct MaxSAT optimum, one SAT job, one MaxSAT job, one UNKNOWN job,
 one TIMEOUT job, and zero CPU search, MaxSAT enumeration, or learned-clause
 transfers.
+The source audit now also requires
+`accepted_quaternary_not_possible_gates_solver_search_and_scheduler_paths`,
+which proves the same single-result quaternary `not possible fact4/4` accepted
+GPU evidence reaches MaxSAT search-pruning, weighted MaxSAT encoding, and the
+generalized scheduler with one accepted `not possible` counter, one
+nonzero-arity evidence consumption, four tuple-key column reads, one direct
+UNSAT prune, two encoded candidates, six scheduled GPU CDCL candidate solves,
+UNKNOWN/TIMEOUT scheduler statuses, and zero CPU search or MaxSAT enumeration.
 The audit also requires
 `accepted_split_quaternary_possible_and_not_know_batch_gates_solver_and_probabilistic_paths`,
 which proves split-batch quaternary `possible fact4/4` and
