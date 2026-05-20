@@ -364,11 +364,11 @@ four-component split quaternary all-operator batch now also records per-componen
 kernel timing across all eight GPU hot-path phases, device workspace-buffer
 residency for candidate-assumption, world-view, model-membership, and
 rejection-reason buffers, fail-closed solver/probability rejection of nonzero
-CPU fallback counters, and reaches conditioned source/program exact-query,
-source/program gradient, source/program PIR-CNF, and already-compiled exact
-query/gradient evidence with one accepted `know`, `possible`, `not possible`,
-and `not know` counter, thirty-two aggregate CUDA-event pairs, and zero CPU
-probability recomputation; the
+CPU fallback counters and row-count-only nonzero-arity membership, and reaches
+conditioned source/program exact-query, source/program gradient, source/program
+PIR-CNF, and already-compiled exact query/gradient evidence with one accepted
+`know`, `possible`, `not possible`, and `not know` counter, thirty-two aggregate
+CUDA-event pairs, and zero CPU probability recomputation; the
 single-result not-possible and possible/not-know evidence also now reaches
 source/program PIR/CNF plus already-compiled exact query/gradient adapters. These are
 bounded production-reuse additions only; the BLOCKED/PARTIAL statuses above are
@@ -431,7 +431,8 @@ The branch contains useful scaffolding:
   split-component, all-binary-operator split, split-quaternary-operator
   GPU-vs-GPT oracle trace parity fixtures, and split-quaternary all-operator
   component-timing, workspace-buffer residency, and CPU-fallback rejection
-  evidence with nonzero phase launch counts;
+  evidence with nonzero phase launch counts plus fail-closed row-count-only
+  membership rejection;
 - runtime preflight that rejects nonzero CPU fallback counters and records
   WCOJ/K-clique/helper route metadata before launch, including max K-clique
   arity, live edge-permutation counts, distinct stream-group scheduling
@@ -552,7 +553,7 @@ Closure remains blocked until certification includes all of the following:
   tuple membership population beyond the current unary/possible/not-possible/
   binary/ternary-specialized/quaternary-generic/multi-membership/missing-required and `not know`
   accepted fixtures plus split-quaternary all-operator component timing and
-  workspace-buffer residency;
+  workspace-buffer residency plus row-count-only membership rejection;
 - GPU-resident candidate, world-view, model-membership, and rejection buffers;
 - zero CPU fallback counters for candidate enumeration and world-view
   validation beyond the split-quaternary all-operator fail-closed consumer
