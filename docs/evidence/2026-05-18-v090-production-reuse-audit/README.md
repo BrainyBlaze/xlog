@@ -46,6 +46,16 @@ which proves single-result quaternary `possible fact4/4` and
 `not know fact4/4` accepted GPU results reach the existing solver SAT gate, record one
 accepted `possible` counter, one accepted `not know` counter, two nonzero-arity
 evidence consumptions, eight tuple-key column reads, and zero CPU search.
+The source audit now also requires
+`accepted_quaternary_not_possible_gates_solver_reuse_maxsat_and_portfolio_paths`,
+which proves single-result quaternary `not possible fact4/4` accepted GPU
+evidence reaches the existing learned-clause reuse, bounded MaxSAT, and
+status-aware portfolio adapter paths with three accepted `not possible`
+evidence consumptions, three nonzero-arity evidence consumptions, twelve
+tuple-key column reads, one learned-clause arena publication/import/reused
+solve, one direct MaxSAT optimum, one SAT job, one MaxSAT job, one UNKNOWN job,
+one TIMEOUT job, and zero CPU search, MaxSAT enumeration, or learned-clause
+transfers.
 The audit also requires
 `accepted_split_quaternary_possible_and_not_know_batch_gates_solver_and_probabilistic_paths`,
 which proves split-batch quaternary `possible fact4/4` and
