@@ -60,6 +60,7 @@ incomplete for the full epistemic hot path and does not close `G090_GPU`.
 | K7/K8 preflight reuse | `test_epistemic_gpu_wcoj_execution::epistemic_k7_k8_reductions_reuse_g39_kclique_planner_preflight_surface` proves epistemic K7/K8 reductions reuse the G39 K-clique planner/preflight surface with `kclique_wcoj_max_arity`, complete 21/28 edge-permutation counts, and `kclique_stream_group_count == 1`; `accepted_epistemic_k7_execution_certifies_production_wcoj_dispatch` and `accepted_epistemic_k8_execution_certifies_production_wcoj_dispatch` additionally prove K7/K8 runtime dispatch with `wcoj_clique7_dispatch_count >= 1` and `wcoj_clique8_dispatch_count >= 1`. |
 | Hot-path transfer budget | `EpistemicGpuTransferBudgetTrace` snapshots provider host-transfer counters around the GPU hot path and rejects tracked H2D/D2H deltas without resetting shared stats. |
 | Final-result transfer accounting | `EpistemicGpuFinalResultTransferTrace` runs after the hot-path transfer-budget window, reads final row-count metadata, records final output rows/columns/payload bytes, and confirms accepted execution issued zero data-plane D2H calls. |
+| Aggregate timing completeness | `EpistemicGpuExecutionResult::aggregate_kernel_timing` now reports recorded timing only when every required hot-path phase has CUDA-event timing, and `EpistemicGpuBatchExecutionTrace::from_component_results` reports recorded aggregate timing only when every component's aggregate timing is complete. `test_epistemic_gpu_wcoj_execution::aggregate_timing_requires_every_component_phase_to_be_recorded` pins the fail-closed behavior. |
 
 ## Validation
 
@@ -70,7 +71,8 @@ incomplete for the full epistemic hot path and does not close `G090_GPU`.
 | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace` | PASS, 54 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_epistemic_v070_4cycle_execution_certifies_production_wcoj_dispatch -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_epistemic_k5_execution_certifies_production_wcoj_dispatch -- --exact --nocapture` | PASS, 1 passed, 0 failed |
-| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 121 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution aggregate_timing_requires_every_component_phase_to_be_recorded -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 122 passed, 0 failed |
 | `cargo test -p xlog-cuda --test build_script_tests -- --nocapture` | PASS, 4 passed, 0 failed |
 | `cargo test -p xlog-runtime --lib` | PASS, 128 passed, 0 failed |
 | `cargo check -p xlog-cuda -p xlog-runtime -p xlog-logic -p xlog-ir` | PASS |

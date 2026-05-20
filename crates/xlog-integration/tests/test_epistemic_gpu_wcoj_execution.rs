@@ -24,9 +24,10 @@ use xlog_prob::epistemic_production::{
 };
 use xlog_prob::exact::GpuConfig;
 use xlog_runtime::{
-    read_device_row_count, EpistemicGpuBatchExecutionResult, EpistemicGpuExecutionResult,
-    EpistemicGpuModelMembershipSource, EpistemicGpuRejectionReason, EpistemicGpuRuntimePreflight,
-    EpistemicGpuRuntimeWcojCertification, EpistemicGpuWorkspaceCapacities, Executor,
+    read_device_row_count, EpistemicGpuBatchExecutionResult, EpistemicGpuBatchExecutionTrace,
+    EpistemicGpuExecutionResult, EpistemicGpuModelMembershipSource, EpistemicGpuRejectionReason,
+    EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeWcojCertification,
+    EpistemicGpuWorkspaceCapacities, Executor,
 };
 use xlog_solve::{
     Clause, GpuCdclConfig, GpuCnf, GpuSolverProductionAdapter,
@@ -1954,6 +1955,33 @@ fn accepted_split_batch_prob_gate_rejects_unrecorded_aggregate_kernel_timing() {
         Err(err) => err,
     };
     assert!(format!("{err}").contains("aggregate CUDA-event timing"));
+}
+
+#[test]
+fn aggregate_timing_requires_every_component_phase_to_be_recorded() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let (_split, mut batch) = execute_split_all_binary_operator_batch(&fix);
+    assert!(batch.trace.aggregate_kernel_timing.is_recorded());
+    assert!(batch.results[0]
+        .candidate_generation
+        .kernel_timing
+        .is_recorded());
+
+    batch.results[0].candidate_generation.kernel_timing = Default::default();
+    batch.trace = EpistemicGpuBatchExecutionTrace::from_component_results(&batch.results);
+
+    assert!(
+        !batch.results[0].aggregate_kernel_timing().is_recorded(),
+        "single-result aggregate timing must fail closed when any hot-path phase lacks CUDA events"
+    );
+    assert!(
+        !batch.trace.aggregate_kernel_timing.is_recorded(),
+        "batch aggregate timing must fail closed when any component phase lacks CUDA events"
+    );
 }
 
 #[test]

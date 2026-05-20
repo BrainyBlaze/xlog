@@ -1491,7 +1491,7 @@ pub struct EpistemicGpuExecutionResult {
 impl EpistemicGpuExecutionResult {
     /// Aggregate CUDA-event timing from all epistemic GPU hot-path kernels.
     pub fn aggregate_kernel_timing(&self) -> EpistemicGpuKernelTimingTrace {
-        EpistemicGpuKernelTimingTrace::sum([
+        let traces = [
             self.candidate_generation.kernel_timing,
             self.propagation.kernel_timing,
             self.candidate_validation.kernel_timing,
@@ -1500,7 +1500,16 @@ impl EpistemicGpuExecutionResult {
             self.materialization.kernel_timing,
             self.final_result_materialization.kernel_timing,
             self.final_tuple_materialization.kernel_timing,
-        ])
+        ];
+
+        if traces
+            .iter()
+            .all(EpistemicGpuKernelTimingTrace::is_recorded)
+        {
+            EpistemicGpuKernelTimingTrace::sum(traces)
+        } else {
+            EpistemicGpuKernelTimingTrace::unrecorded()
+        }
     }
 }
 
@@ -1540,6 +1549,19 @@ pub struct EpistemicGpuBatchExecutionTrace {
 impl EpistemicGpuBatchExecutionTrace {
     /// Build an aggregate trace from completed component results.
     pub fn from_component_results(results: &[EpistemicGpuExecutionResult]) -> Self {
+        let aggregate_kernel_timing = if results
+            .iter()
+            .all(|result| result.aggregate_kernel_timing().is_recorded())
+        {
+            EpistemicGpuKernelTimingTrace::sum(
+                results
+                    .iter()
+                    .map(|result| result.aggregate_kernel_timing()),
+            )
+        } else {
+            EpistemicGpuKernelTimingTrace::unrecorded()
+        };
+
         Self {
             component_count: results.len(),
             gpu_runtime_component_executions: results.len(),
@@ -1584,11 +1606,7 @@ impl EpistemicGpuBatchExecutionTrace {
                 .iter()
                 .map(|result| result.prepared.preflight.not_possible_operator_count)
                 .sum(),
-            aggregate_kernel_timing: EpistemicGpuKernelTimingTrace::sum(
-                results
-                    .iter()
-                    .map(|result| result.aggregate_kernel_timing()),
-            ),
+            aggregate_kernel_timing,
         }
     }
 }

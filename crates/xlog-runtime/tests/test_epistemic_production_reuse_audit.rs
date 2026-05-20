@@ -30,6 +30,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(audit.contains("accepted_gpu_batch_candidate_component_evidence_consumed"));
     assert!(audit.contains("single-result solver evidence gate"));
     assert!(audit.contains("single-result accepted-world-view gate"));
+    assert!(audit.contains("any component phase is untimed"));
     assert!(audit.contains("solve_weighted_maxsat_encoded_search_with_gpu_batch_execution_result"));
     assert!(audit.contains("solve_maxsat_schedule_with_gpu_batch_execution_result"));
     assert!(audit.contains("EpistemicProbProductionAdapter"));
@@ -82,6 +83,9 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(runtime.contains("execute_epistemic_gpu_execution_batch_with_trace"));
     assert!(runtime.contains("self.execute_epistemic_gpu_execution(executable, capacities)"));
     assert!(runtime.contains("EpistemicGpuBatchExecutionTrace"));
+    assert!(runtime.contains("let traces = ["));
+    assert!(runtime.contains("EpistemicGpuKernelTimingTrace::is_recorded"));
+    assert!(runtime.contains("|result| result.aggregate_kernel_timing().is_recorded()"));
     assert!(runtime.contains("cpu_recomposition_steps: 0"));
     assert!(runtime.contains("summarize_runtime_routes"));
     assert!(runtime.contains("MultiwayPlan::WcojWithPlan"));
@@ -209,6 +213,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(integration.contains(
         "accepted_split_batch_rejects_invalid_encoded_maxsat_scheduler_before_scheduler_work"
     ));
+    assert!(integration.contains("aggregate_timing_requires_every_component_phase_to_be_recorded"));
     assert!(integration.contains("not_possible_operator_count"));
     assert!(integration.contains("negated_row_filter_count"));
     assert!(solver.contains("GpuCdclSolver::new"));
