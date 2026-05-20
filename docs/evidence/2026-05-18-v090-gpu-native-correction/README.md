@@ -29,8 +29,13 @@ foundedness can be proven.
 SAT adapter and the existing probabilistic conditioned source adapter, recording
 arity-four tuple/evidence counters, one accepted `possible` counter, one
 accepted `not know` counter, exact-query counters, and zero CPU
-search/recomputation. This narrows `G090_SOLVER` and `G090_PROB` but does not
-close either node.
+search/recomputation. The split-batch quaternary `possible fact4/4` plus
+`not know fact4/4` fixture now routes the same accepted component evidence
+through the existing GPU CDCL lifecycle adapter and probabilistic conditioned
+source adapter with batch/component counters, arity-four tuple/evidence
+counters, balanced lifecycle pushes/retractions, exact-query counters, and zero
+CPU search/recomputation. This narrows `G090_SOLVER` and `G090_PROB` but does
+not close either node.
 
 ## Current Branch Classification
 
@@ -119,6 +124,7 @@ The next production slice should start at the lowering/runtime boundary:
    split-batch learned-clause reuse and MaxSAT,
    accepted ternary and quaternary nonzero-arity SAT evidence tracing,
    single-result quaternary `possible`/`not know fact4/4` SAT evidence,
+   split-batch quaternary `possible`/`not know fact4/4` lifecycle evidence,
    single-result, two-record, and split-batch combined lifecycle-plus-MaxSAT,
    learned-clause reuse, split-batch MaxSAT, split-batch MaxSAT search pruning, and split-batch portfolio dispatch,
    learned-clause arena publication, same-device-CNF
@@ -195,7 +201,8 @@ The next production slice should start at the lowering/runtime boundary:
    source/program-specific conditioned-evidence, source/program-specific
    operator-conditioned evidence, source/program-specific conditioned-gradient,
    operator-specific, two-record quaternary `possible`/`not know fact4/4`
-   conditioned source evidence, all-binary-operator split-batch conditioned
+   conditioned source evidence, split-batch quaternary `possible`/`not know
+   fact4/4` conditioned source evidence, all-binary-operator split-batch conditioned
    source/program query and gradient evidence, and accepted G91/default FAEEL
    mode-specific trace counters,
    and broader probabilistic coverage remains open.
@@ -242,6 +249,7 @@ The next production slice should start at the lowering/runtime boundary:
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_not_possible_batch_matches_gpt_oracles -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_possible_and_not_know_memberships_match_gpt_oracle_parity -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_possible_and_not_know_results_gate_solver_and_probabilistic_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_possible_and_not_know_batch_gates_solver_and_probabilistic_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_ternary_gpu_execution_result_records_solver_nonzero_arity_evidence_trace -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_gpu_execution_result_records_solver_nonzero_arity_evidence_trace -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_epistemic_v070_4cycle_execution_certifies_production_wcoj_dispatch -- --exact --nocapture` | PASS, 1 passed, 0 failed |

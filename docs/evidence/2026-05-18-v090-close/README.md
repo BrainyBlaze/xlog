@@ -37,8 +37,12 @@ tuple-level foundedness can be proven.
 2026-05-20 follow-up: single-result quaternary `possible fact4/4` and
 `not know fact4/4` accepted GPU results now reach the existing solver SAT gate
 and probabilistic conditioned source gate with arity-four counters and zero CPU
-search/recomputation. `G090_SOLVER`, `G090_PROB`, and `G090_CLOSE` remain
-blocked.
+search/recomputation. The split-batch quaternary `possible fact4/4` plus
+`not know fact4/4` fixture now reaches the existing GPU CDCL lifecycle adapter
+and probabilistic conditioned source batch gate with accepted batch/component
+counters, arity-four tuple/evidence counters, exact-query counters, balanced
+lifecycle pushes/retractions, and zero CPU search/recomputation. `G090_SOLVER`,
+`G090_PROB`, and `G090_CLOSE` remain blocked.
 
 ## Ref Evidence
 
@@ -132,6 +136,7 @@ Post-merge compatibility validation:
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution aggregate_timing_requires_every_component_phase_to_be_recorded -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_possible_and_not_know_memberships_match_gpt_oracle_parity -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_possible_and_not_know_results_gate_solver_and_probabilistic_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_possible_and_not_know_batch_gates_solver_and_probabilistic_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 122 passed, 0 failed |
 | `python scripts/validate_v086_examples.py --output /tmp/v090-v086-compat-validation.json` | PASS, consumer certification PASS, examples PASS |
 
@@ -151,6 +156,17 @@ Post-merge compatibility validation:
 | G090_CERT | BLOCKED | v0.7.0/v0.8.0/v0.8.5/v0.8.6 compatibility reruns passed after the integration merge, and split-batch aggregate CUDA-event timing now exists and fails closed on partial component timing, but the complete accepted-execution kernel-timing matrix, broader semantic/probabilistic coverage, and final GPU-native certification remain missing. |
 | G090_DOC | PARTIAL | Guide documents the semantic oracle, partial accepted GPU/WCOJ runtime path, solver/probability production adapters, and remaining blockers; full release documentation is still blocked by broader semantic parity and post-v0.7.0/v0.8.0/v0.8.5/v0.8.6 certification. |
 | G090_CLOSE | BLOCKED | The v0.7.0/v0.8.0/v0.8.5/v0.8.6 bundle has been merged into the feature branch and compatibility validation passed, but closure still requires G090_GPU/G090_SOLVER/G090_PROB/G090_CERT completion plus an approved closure proposal. |
+
+2026-05-20 split-batch production-reuse addendum: `G090_SPLIT` now also has a
+two-component split quaternary `possible fact4/4` plus `not know fact4/4`
+accepted runtime fixture with zero CPU recomposition and batch/component
+operator counters; `G090_SOLVER` now has the same split-batch evidence routed
+through the existing GPU CDCL lifecycle adapter with nonzero-arity tuple-key
+counters; and `G090_PROB` now has the same split-batch evidence routed through
+the existing conditioned source exact-query path with source-conditioned
+arity-four evidence counters and zero CPU probability recomputation. These are
+bounded production-reuse additions only; the BLOCKED/PARTIAL statuses above are
+unchanged.
 
 ## Current Semantic-Oracle Evidence
 
@@ -251,6 +267,8 @@ The branch contains useful scaffolding:
   split-batch quaternary `know fact4/4` plus `not possible fact4/4`
   solver lifecycle, learned-clause reuse, and MaxSAT evidence with
   nonzero-arity tuple-key counters,
+  split-batch quaternary `possible fact4/4` plus `not know fact4/4`
+  solver lifecycle evidence with nonzero-arity tuple-key counters,
   learned-clause reuse, MaxSAT,
   weighted MaxSAT encoding/search, generalized MaxSAT scheduling, and portfolio dispatch with batch/component counters,
   accepted G91/default FAEEL mode-specific solver trace counters,
@@ -282,8 +300,9 @@ The branch contains useful scaffolding:
   source/program-specific operator-conditioned trace counters,
   split-batch conditioned source/program query and gradient evaluation with accepted batch/component
   counters, including all-binary-operator split-batch conditioned
-  source/program query and gradient fixtures plus quaternary split-batch
-  source/program gradient, PIR/CNF, and exact query/gradient fixtures,
+  source/program query and gradient fixtures, quaternary split-batch
+  possible/not-know conditioned source query evidence, plus quaternary
+  split-batch source/program gradient, PIR/CNF, and exact query/gradient fixtures,
   mode-specific accepted G91/FAEEL production trace counters,
   two-record positive and negative conditioned source query batches,
   two-record conditioned program query batches, single-record, two-record, and
