@@ -297,6 +297,12 @@ proves accepted solver and probabilistic batch consumers fail closed when
 candidate-enumeration or world-view-validation CPU fallback counters become
 nonzero, preserving the central batch evidence gate before solver lifecycle work
 or probability conditioning can proceed.
+The single-result CPU-fallback marker
+`accepted_gpu_execution_result_rejects_cpu_fallback_counters` proves accepted
+solver and probabilistic single-result consumers also fail closed when
+candidate-enumeration, world-view-validation, solver-search, or probabilistic
+CPU fallback counters become nonzero, before accepted evidence accounting,
+solver lifecycle pushes, or probability evidence facts advance.
 The split-batch quaternary all-operator row-count guard marker
 `accepted_split_quaternary_all_operator_batch_rejects_row_count_only_membership`
 proves accepted solver and probabilistic batch consumers also fail closed when a

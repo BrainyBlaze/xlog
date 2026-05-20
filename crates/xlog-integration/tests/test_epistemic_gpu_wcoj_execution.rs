@@ -9,7 +9,7 @@ use xlog_cuda::device_runtime::{
 };
 use xlog_cuda::memory::TrackedCudaSlice;
 use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
-use xlog_ir::EirEpistemicMode;
+use xlog_ir::{EirEpistemicMode, EpistemicCpuFallbackCounters};
 use xlog_logic::epistemic::{
     compile_epistemic_gpu_execution_with_stats_snapshot,
     compile_epistemic_gpu_split_execution_with_stats_snapshot, run_generate_propagate_test,
@@ -3090,6 +3090,96 @@ fn accepted_split_quaternary_all_operator_batch_rejects_cpu_fallback_counters() 
     assert!(prob_err.contains("CPU/host fallback counters"));
     assert!(prob_err.contains("cpu_candidates=1"));
     assert!(prob_err.contains("cpu_world_views=1"));
+}
+
+#[test]
+fn accepted_gpu_execution_result_rejects_cpu_fallback_counters() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let mut result = execute_unary_edge_epistemic_fixture(
+        &fix,
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X).
+        "#,
+        &[1, 2],
+        &[1],
+    );
+    assert_eq!(
+        download_unary_u32(&fix.provider, &result.final_output),
+        vec![1]
+    );
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+
+    result.prepared.preflight.cpu_fallbacks = EpistemicCpuFallbackCounters {
+        candidate_enumeration: 1,
+        world_view_validation: 1,
+        solver_search: 1,
+        probabilistic_recompute: 1,
+    };
+
+    let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
+    let sat_cnf = GpuCnf::from_host(&sat_instance, &fix.provider).expect("upload SAT CNF");
+    let branch_limit = upload_u32_scalar(&fix.provider, 1);
+    let mut solver_adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let mut workspace = solver_adapter
+        .new_workspace(sat_cnf.var_cap, sat_cnf.clause_cap)
+        .expect("new single-result fallback rejection workspace");
+
+    let solver_err = match solver_adapter.solve_assumption_lifecycle_with_gpu_execution_result(
+        &fix.provider,
+        &result,
+        &mut workspace,
+        &[GpuSolverProductionLifecycleStep {
+            cnf: &sat_cnf,
+            branch_var_limit: &branch_limit,
+            expectation: GpuSolverProductionExpectation::Sat,
+        }],
+    ) {
+        Ok(_) => panic!("solver evidence with single-result CPU fallbacks must reject"),
+        Err(err) => err,
+    };
+    assert!(format!("{solver_err}").contains("zero epistemic CPU fallback counters"));
+    let solver_trace = solver_adapter.trace();
+    assert_eq!(solver_trace.accepted_gpu_candidate_evidence_consumed, 0);
+    assert_eq!(solver_trace.gpu_assumption_pushes, 0);
+    assert_eq!(solver_trace.cpu_assignment_enumerations, 0);
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut prob_adapter = EpistemicProbProductionAdapter::new(config);
+    let prob_err = match prob_adapter
+        .compile_and_evaluate_conditioned_source_with_gpu_execution_result(
+            r#"
+        0.8::edge(1).
+        query(edge(1)).
+        "#,
+            &fix.provider,
+            &result,
+            vec![EpistemicAssumption::known_tuple(
+                "edge",
+                vec![EpistemicEvidenceTerm::integer(1)],
+                true,
+            )],
+        ) {
+        Ok(_) => panic!("probability evidence with single-result CPU fallbacks must reject"),
+        Err(err) => err,
+    };
+    assert!(format!("{prob_err}").contains("zero epistemic CPU fallback counters"));
+    let prob_trace = prob_adapter.trace();
+    assert_eq!(prob_trace.accepted_world_view_evidence_consumed, 0);
+    assert_eq!(prob_trace.gpu_conditioned_evidence_facts, 0);
+    assert_eq!(prob_trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(prob_trace.fixture_circuit_evaluations, 0);
 }
 
 #[test]

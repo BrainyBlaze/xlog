@@ -24,6 +24,14 @@ hot-path phase lacks CUDA-event timing. Default FAEEL executable lowering now
 also rejects nonzero-arity self-`possible` rules unless tuple-level
 foundedness can be proven.
 
+2026-05-20 single-result CPU-fallback gate delta: accepted single-result solver
+and probabilistic consumers now have explicit fail-closed coverage when
+candidate-enumeration, world-view-validation, solver-search, or probabilistic
+CPU fallback counters become nonzero. The test proves rejection happens before
+accepted solver evidence accounting, lifecycle pushes, probability evidence
+facts, or CPU recomputation counters advance. This narrows `G090_GPU`,
+`G090_SOLVER`, and `G090_PROB`, but does not close them.
+
 2026-05-20 follow-up delta: single-result quaternary `possible fact4/4` and
 `not know fact4/4` accepted GPU results now route through the existing solver
 SAT adapter and the existing probabilistic conditioned source adapter, recording

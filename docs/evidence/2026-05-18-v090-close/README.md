@@ -538,8 +538,9 @@ The branch contains useful scaffolding:
   counters, single-record, two-record, and accepted split-batch query
   evaluation, single-record, two-record, and accepted split-batch gradient
   evaluation, and accepted GPU evidence updates into caller-owned bounded
-  single-result and split-batch incremental circuit fixtures that preserve compile count/fingerprint while
-  remaining ineligible for production metrics by themselves.
+  single-result and split-batch incremental circuit fixtures that preserve
+  compile count/fingerprint while remaining ineligible for production metrics by
+  themselves.
 - bounded executable split components that reuse the existing epistemic GPU
   executable-plan path and a traced batch adapter over the existing single-plan
   GPU runtime execution path, with zero CPU recomposition counters, rather than
@@ -559,8 +560,8 @@ Closure remains blocked until certification includes all of the following:
   workspace-buffer residency plus row-count-only membership rejection;
 - GPU-resident candidate, world-view, model-membership, and rejection buffers;
 - zero CPU fallback counters for candidate enumeration and world-view
-  validation beyond the split-quaternary all-operator fail-closed consumer
-  rejection fixture;
+  validation beyond the current single-result and split-quaternary
+  all-operator fail-closed consumer rejection fixtures;
 - broader WCOJ-eligible epistemic reductions proving successful runtime
   dispatch beyond the current accepted v0.7.0 4-cycle and K5/K6/K7/K8 fixtures, including layout,
   skew-scheduling, and helper-splitting evidence where applicable;
