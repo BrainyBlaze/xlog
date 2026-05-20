@@ -233,6 +233,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     ));
     assert!(integration
         .contains("accepted_split_quaternary_all_operator_batch_rejects_hot_path_host_transfers"));
+    assert!(integration.contains("rejected_gpu_execution_result_cannot_gate_solver_or_probability"));
     assert!(integration.contains(
         "accepted_split_all_binary_operator_batch_gates_probabilistic_program_and_gradient_paths"
     ));

@@ -288,6 +288,12 @@ proves those same consumers fail closed when accepted batch evidence reports
 tracked hot-path D2H calls or per-candidate host round trips, preserving the
 transfer-budget gate before solver lifecycle work or probability conditioning
 can proceed.
+The rejected world-view marker
+`rejected_gpu_execution_result_cannot_gate_solver_or_probability` proves a GPU
+execution that still ran the timed kernel path but materialized zero accepted
+world views cannot gate solver lifecycle work or probabilistic conditioning.
+This keeps accepted-world-view evidence distinct from raw generated guesses or
+rejected candidates.
 All accepted probability split-batch entrypoints now call the single
 `accepted_world_views_from_gpu_batch_execution_evidence` validator, and
 `production_prob_batch_paths_use_single_gpu_batch_gate` source-audits that no

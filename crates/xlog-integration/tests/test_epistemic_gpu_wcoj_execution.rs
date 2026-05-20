@@ -13816,6 +13816,111 @@ fn world_view_validation_rejects_candidates_missing_one_required_membership() {
 }
 
 #[test]
+fn rejected_gpu_execution_result_cannot_gate_solver_or_probability() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred color(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X), know color(X).
+        "#,
+    )
+    .expect("parse rejected world-view fixture");
+    let executable = compile_epistemic_gpu_execution_with_stats_snapshot(&program, None)
+        .expect("compile rejected world-view executable");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    for (name, rel_id) in &executable.relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation("node", upload_unary_u32(&fix.memory, &[1, 2]));
+    executor.put_relation("edge", upload_unary_u32(&fix.memory, &[1]));
+    executor.put_relation("color", upload_unary_u32(&fix.memory, &[]));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 4,
+                max_worlds: 1,
+                max_models_per_reduction: 2,
+            },
+        )
+        .expect("execute rejected world-view fixture");
+
+    assert_eq!(result.semantic_trace.accepted_world_views, 0);
+    assert_eq!(
+        read_device_row_count(&fix.provider, &result.final_output).expect("final row count"),
+        0
+    );
+    assert_eq!(
+        result.model_membership.membership_source,
+        EpistemicGpuModelMembershipSource::StableModelTupleBuffer
+    );
+    assert!(result.aggregate_kernel_timing().is_recorded());
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+
+    let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
+    let sat_cnf = GpuCnf::from_host(&sat_instance, &fix.provider).expect("upload SAT CNF");
+    let branch_limit = upload_u32_scalar(&fix.provider, 1);
+    let mut solver_adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let mut workspace = solver_adapter
+        .new_workspace(sat_cnf.var_cap, sat_cnf.clause_cap)
+        .expect("new rejected world-view workspace");
+
+    let solver_err = match solver_adapter.solve_assumption_lifecycle_with_gpu_execution_result(
+        &fix.provider,
+        &result,
+        &mut workspace,
+        &[GpuSolverProductionLifecycleStep {
+            cnf: &sat_cnf,
+            branch_var_limit: &branch_limit,
+            expectation: GpuSolverProductionExpectation::Sat,
+        }],
+    ) {
+        Ok(_) => panic!("solver evidence must reject an execution with no accepted world view"),
+        Err(err) => err,
+    };
+    assert!(
+        format!("{solver_err}").contains("non-empty accepted GPU final output"),
+        "unexpected solver rejection: {solver_err}"
+    );
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut prob_adapter = EpistemicProbProductionAdapter::new(config);
+    let prob_err = match prob_adapter
+        .compile_and_evaluate_conditioned_source_with_gpu_execution_result(
+            r#"
+        0.8::edge(1).
+        query(edge(1)).
+        "#,
+            &fix.provider,
+            &result,
+            vec![EpistemicAssumption::known("edge", 1, true)],
+        ) {
+        Ok(_) => {
+            panic!("probability evidence must reject an execution with no accepted world view")
+        }
+        Err(err) => err,
+    };
+    assert!(
+        format!("{prob_err}").contains("non-empty accepted GPU final output"),
+        "unexpected probability rejection: {prob_err}"
+    );
+}
+
+#[test]
 fn g91_self_supported_possible_reaches_gpu_runtime_path() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");

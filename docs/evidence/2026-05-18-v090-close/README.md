@@ -363,13 +363,13 @@ query/gradient evaluation with zero CPU probability recomputation; the
 four-component split quaternary all-operator batch now also records per-component
 kernel timing across all eight GPU hot-path phases, device workspace-buffer
 residency for candidate-assumption, world-view, model-membership, and
-rejection-reason buffers, fail-closed solver/probability rejection of nonzero
-CPU fallback counters, row-count-only nonzero-arity membership, and hot-path host
-transfers, and reaches conditioned source/program exact-query, source/program
-gradient, source/program PIR-CNF, and already-compiled exact query/gradient
-evidence with one accepted `know`, `possible`, `not possible`, and `not know`
-counter, thirty-two aggregate CUDA-event pairs, and zero CPU probability
-recomputation; the
+rejection-reason buffers, fail-closed solver/probability rejection of rejected
+world-view results, nonzero CPU fallback counters, row-count-only nonzero-arity
+membership, and hot-path host transfers, and reaches conditioned source/program
+exact-query, source/program gradient, source/program PIR-CNF, and
+already-compiled exact query/gradient evidence with one accepted `know`,
+`possible`, `not possible`, and `not know` counter, thirty-two aggregate
+CUDA-event pairs, and zero CPU probability recomputation; the
 single-result not-possible and possible/not-know evidence also now reaches
 source/program PIR/CNF plus already-compiled exact query/gradient adapters. These are
 bounded production-reuse additions only; the BLOCKED/PARTIAL statuses above are
@@ -433,7 +433,7 @@ The branch contains useful scaffolding:
   GPU-vs-GPT oracle trace parity fixtures, and split-quaternary all-operator
   component-timing, workspace-buffer residency, and CPU-fallback rejection
   evidence with nonzero phase launch counts plus fail-closed row-count-only
-  membership and host-transfer rejection;
+  membership, host-transfer, and rejected-world-view evidence rejection;
 - runtime preflight that rejects nonzero CPU fallback counters and records
   WCOJ/K-clique/helper route metadata before launch, including max K-clique
   arity, live edge-permutation counts, distinct stream-group scheduling
