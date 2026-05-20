@@ -51,6 +51,62 @@ fn incremental_assumption_update_reuses_circuit_when_adapter_supports_it() {
 }
 
 #[test]
+fn changed_assumption_replaces_active_evidence_without_rebuilding_circuit() {
+    let rain_true = EpistemicAssumption::known("rain", 0, true);
+    let rain_false = EpistemicAssumption::known("rain", 0, false);
+    let true_world_view =
+        EpistemicWorldView::from_worlds(vec![EpistemicWorld::new().with_fact("rain", 0)]).unwrap();
+    let false_world_view = EpistemicWorldView::from_worlds(vec![EpistemicWorld::new()]).unwrap();
+    let mut circuit = EpistemicCircuit::compile(
+        0.25,
+        vec![(rain_true.clone(), 0.75), (rain_false.clone(), 0.10)],
+        KnowledgeCompilerAdapter::gpu_d4(),
+    )
+    .unwrap();
+    let original_fingerprint = circuit.circuit_fingerprint();
+
+    let first_update = circuit
+        .apply_accepted_world_view(
+            AcceptedWorldViewEvidence::new(&true_world_view, vec![rain_true]).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(first_update.mode, CircuitUpdateMode::IncrementalEvidence);
+    assert_eq!(
+        circuit.compiler_evidence_literals(),
+        vec!["know:rain/0=true"]
+    );
+    assert!(circuit.query_probability().within_tolerance(0.75));
+
+    let changed_update = circuit
+        .apply_accepted_world_view(
+            AcceptedWorldViewEvidence::new(&false_world_view, vec![rain_false.clone()]).unwrap(),
+        )
+        .unwrap();
+
+    assert_eq!(changed_update.mode, CircuitUpdateMode::IncrementalEvidence);
+    assert_eq!(changed_update.compile_count, 1);
+    assert_eq!(changed_update.circuit_fingerprint, original_fingerprint);
+    assert_eq!(circuit.incremental_update_count(), 2);
+    assert_eq!(
+        circuit.compiler_evidence_literals(),
+        vec!["know:rain/0=false"]
+    );
+    assert!(circuit.query_probability().within_tolerance(0.10));
+
+    let unchanged_update = circuit
+        .apply_accepted_world_view(
+            AcceptedWorldViewEvidence::new(&false_world_view, vec![rain_false]).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(unchanged_update.mode, CircuitUpdateMode::Unchanged);
+    assert_eq!(circuit.incremental_update_count(), 2);
+    assert_eq!(
+        circuit.compiler_evidence_literals(),
+        vec!["know:rain/0=false"]
+    );
+}
+
+#[test]
 fn external_ddnnf_text_compiler_adapter_is_explicitly_represented() {
     let adapter = KnowledgeCompilerAdapter::external_ddnnf_text("d4-compatible-ddnnf");
 

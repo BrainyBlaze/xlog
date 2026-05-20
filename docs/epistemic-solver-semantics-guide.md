@@ -620,7 +620,8 @@ cargo test -p xlog-solve --test solver_service_semantics
 - epistemic assumptions become fixture evidence literals such as
   `know:rain/0=true`;
 - GPU-D4/XGCF supports fixture-level incremental evidence updates without
-  changing the circuit fingerprint;
+  changing the circuit fingerprint, including replacing stale active evidence
+  when an accepted assumption changes;
 - generic Decision-DNNF text, c2d, and miniC2D adapter contracts are
   represented as `DesignOnly`;
 - `conditional_probability_from_logs` normalizes probabilities with

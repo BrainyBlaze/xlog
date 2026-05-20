@@ -182,6 +182,13 @@ impl EpistemicAssumption {
             )
         }
     }
+
+    fn same_evidence_key(&self, other: &Self) -> bool {
+        self.kind == other.kind
+            && self.predicate == other.predicate
+            && self.arity == other.arity
+            && self.terms == other.terms
+    }
 }
 
 /// Knowledge compiler adapter kind.
@@ -550,9 +557,20 @@ impl EpistemicCircuit {
 
     /// Apply an epistemic assumption as probabilistic evidence.
     pub fn apply_assumption(&mut self, assumption: EpistemicAssumption) -> Result<CircuitUpdate> {
-        if !self.active_assumptions.insert(assumption) {
+        if self.active_assumptions.contains(&assumption) {
             return Ok(self.update_result(CircuitUpdateMode::Unchanged));
         }
+
+        let stale_assumptions = self
+            .active_assumptions
+            .iter()
+            .filter(|active| active.same_evidence_key(&assumption))
+            .cloned()
+            .collect::<Vec<_>>();
+        for stale in stale_assumptions {
+            self.active_assumptions.remove(&stale);
+        }
+        self.active_assumptions.insert(assumption);
 
         if self.adapter.supports_incremental_evidence() {
             self.incremental_update_count += 1;
