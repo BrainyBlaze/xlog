@@ -78,6 +78,13 @@ portfolio production-path counter before it can be eligible for production
 solver metrics.
 
 Probability audit note: the all-binary-operator split-batch probability fixtures now prove conditioned source/program query and gradient evidence plus all-binary split-batch source/program PIR-CNF plus already-compiled exact query/gradient evaluation through the existing GPU exact/provenance/PIR/CNF paths. The split-batch quaternary fixtures also prove one `know fact4/4` component and one `not possible fact4/4` component condition parsed-program exact queries, source/program gradients, source/program PIR-CNF, and already-compiled exact query/gradient evaluation through the same accepted batch evidence gate while recording arity-four source/program evidence counters, negative-evidence counters, and zero CPU recomputation. The split-batch probability evidence gates also reject stale batch evidence when aggregate CUDA-event timing is absent or any component phase is untimed, and the single-result accepted-world-view gate rejects stale evidence when candidate-generation CUDA-event timing is absent.
+The quaternary not-possible deep marker
+`accepted_quaternary_not_possible_gates_source_and_program_pir_cnf_and_exact_evaluation_paths`
+proves accepted single-result `not possible fact4/4` GPU evidence also routes
+through source and parsed-program PIR/CNF uploads, source and parsed-program
+already-compiled exact query evaluation, source and parsed-program gradient
+evaluation, accepted-assumption evidence accounting, and zero CPU probability
+recomputation.
 The same quaternary possible/not-know source-audit marker proves the
 probability adapter consumes two accepted single-result GPU evidences through
 `compile_and_evaluate_conditioned_source_for_gpu_execution_results`, records
