@@ -84,6 +84,11 @@ records accepted batch/component evidence, source-conditioned arity-four
 evidence, one negative fact, source-conditioned `possible` and `not know`
 counters, two GPU exact query evaluations, and zero CPU probability
 recomputation.
+The split-batch quaternary possible/not-know deep marker proves the same
+accepted batch also routes through conditioned source/program gradients,
+source/program PIR-CNF, and already-compiled exact query/gradient adapters while
+recording arity-four source/program evidence counters, batch/component
+evidence, and zero CPU probability recomputation.
 All accepted probability split-batch entrypoints now call the single
 `accepted_world_views_from_gpu_batch_execution_evidence` validator, and
 `production_prob_batch_paths_use_single_gpu_batch_gate` source-audits that no
