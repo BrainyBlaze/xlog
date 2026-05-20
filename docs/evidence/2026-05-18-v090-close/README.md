@@ -363,7 +363,8 @@ query/gradient evaluation with zero CPU probability recomputation; the
 four-component split quaternary all-operator batch now also records per-component
 kernel timing across all eight GPU hot-path phases, device workspace-buffer
 residency for candidate-assumption, world-view, model-membership, and
-rejection-reason buffers, and reaches conditioned source/program exact-query,
+rejection-reason buffers, fail-closed solver/probability rejection of nonzero
+CPU fallback counters, and reaches conditioned source/program exact-query,
 source/program gradient, source/program PIR-CNF, and already-compiled exact
 query/gradient evidence with one accepted `know`, `possible`, `not possible`,
 and `not know` counter, thirty-two aggregate CUDA-event pairs, and zero CPU
@@ -429,8 +430,8 @@ The branch contains useful scaffolding:
   ternary specialized-arity, quaternary all-operator generic-arity, multi-membership,
   split-component, all-binary-operator split, split-quaternary-operator
   GPU-vs-GPT oracle trace parity fixtures, and split-quaternary all-operator
-  component-timing and workspace-buffer residency evidence with nonzero phase
-  launch counts;
+  component-timing, workspace-buffer residency, and CPU-fallback rejection
+  evidence with nonzero phase launch counts;
 - runtime preflight that rejects nonzero CPU fallback counters and records
   WCOJ/K-clique/helper route metadata before launch, including max K-clique
   arity, live edge-permutation counts, distinct stream-group scheduling
@@ -554,7 +555,8 @@ Closure remains blocked until certification includes all of the following:
   workspace-buffer residency;
 - GPU-resident candidate, world-view, model-membership, and rejection buffers;
 - zero CPU fallback counters for candidate enumeration and world-view
-  validation;
+  validation beyond the split-quaternary all-operator fail-closed consumer
+  rejection fixture;
 - broader WCOJ-eligible epistemic reductions proving successful runtime
   dispatch beyond the current accepted v0.7.0 4-cycle and K5/K6/K7/K8 fixtures, including layout,
   skew-scheduling, and helper-splitting evidence where applicable;
