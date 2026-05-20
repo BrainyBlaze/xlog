@@ -686,7 +686,8 @@ This adapter is partial v0.9 evidence only. It covers bounded zero-arity,
 nonzero-arity, negative nonzero-arity, parsed-program, ternary and quaternary
 source nonzero-arity evidence, quaternary parsed-program nonzero-arity evidence,
 two-record source-conditioned query, split-batch source/program compile/evaluate,
-split-batch conditioned source/program query and gradient, and two-record parsed-program-conditioned query
+split-batch conditioned source/program query and gradient, all-binary-operator
+split-batch conditioned source query, and two-record parsed-program-conditioned query
 cases, including true `know`, true `possible`, false `possible`/`not possible`,
 and false `know`/`not know` operator-result
 conditioning, accepted G91/default FAEEL mode-specific trace counters,
@@ -705,6 +706,7 @@ cargo test -p xlog-prob --test epistemic_prob_production_reuse
 cargo test -p xlog-prob --test epistemic_prob
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_probabilistic_source_and_program_end_to_end_paths -- --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_probabilistic_conditioned_source_path -- --nocapture
+cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_all_binary_operator_batch_conditions_probabilistic_evidence -- --exact --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_probabilistic_conditioned_program_path -- --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_source_probabilistic_evidence_records_nonzero_arity_trace -- --exact --nocapture
 cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_parsed_program_probabilistic_evidence_records_nonzero_arity_trace -- --exact --nocapture
