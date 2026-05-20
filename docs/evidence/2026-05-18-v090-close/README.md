@@ -201,6 +201,13 @@ membership, world-view validation, accepted materialization, final-result
 materialization, and final tuple materialization. This is not a closure
 proposal; `G090_GPU` and `G090_CLOSE` remain blocked.
 
+2026-05-20 single-result final-result transfer follow-up: accepted
+single-result GPU execution now records zero hot-path H2D/D2H calls, zero
+per-candidate host round trips, and bounded post-hot-path final output accounting
+for rows, columns, row width, payload bytes, row-count metadata reads, and zero
+accepted-path data-plane D2H calls or bytes. This is not a closure proposal;
+`G090_GPU` and `G090_CLOSE` remain blocked.
+
 2026-05-20 single-result row-count membership follow-up: accepted
 single-result solver and probabilistic consumers now reject model-membership
 evidence downgraded from stable-model tuple-source membership to row-count-only
@@ -385,7 +392,8 @@ query/gradient evaluation with zero CPU probability recomputation; the accepted
 single-result path and four-component split quaternary all-operator batch now
 also record per-result/per-component kernel timing across all eight GPU hot-path
 phases plus device workspace-buffer residency for candidate-assumption,
-world-view, model-membership, and rejection-reason buffers; the split batch also
+world-view, model-membership, and rejection-reason buffers; the single-result
+path also records bounded final-result transfer accounting; the split batch also
 records fail-closed solver/probability rejection of rejected world-view results,
 nonzero CPU fallback counters, row-count-only nonzero-arity membership, and
 hot-path host transfers, and reaches conditioned source/program exact-query,

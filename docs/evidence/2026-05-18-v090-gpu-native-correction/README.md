@@ -56,6 +56,14 @@ lifecycle pushes, probability evidence facts, or CPU recomputation counters
 advance. This narrows the `M090_GPU.8` transfer-budget evidence gap, but does
 not close `G090_GPU`, `G090_SOLVER`, or `G090_PROB`.
 
+2026-05-20 single-result final-result transfer delta: accepted single-result
+GPU execution now explicitly records zero hot-path transfers and zero
+per-candidate host round trips, then accounts for the allowed post-hot-path final
+output window with row count, column count, row width, payload bytes, row-count
+metadata reads, and zero accepted-path data-plane D2H calls or bytes. This
+narrows `M090_GPU.8`, but broader transfer-budget certification remains
+incomplete.
+
 2026-05-20 single-result row-count membership gate delta: accepted
 single-result solver and probabilistic consumers now have explicit fail-closed
 coverage when model-membership evidence is downgraded from stable-model

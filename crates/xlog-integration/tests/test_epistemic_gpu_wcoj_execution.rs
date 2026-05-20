@@ -2861,6 +2861,53 @@ fn accepted_gpu_execution_result_records_kernel_timing() {
 }
 
 #[test]
+fn accepted_gpu_execution_result_records_final_result_transfer_budget() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let result = execute_unary_edge_epistemic_fixture(
+        &fix,
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred accepted(u32).
+        accepted(X) :- node(X), know edge(X).
+        "#,
+        &[1, 2],
+        &[1],
+    );
+
+    assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
+    assert_eq!(result.transfer_budget.tracked_htod_calls, 0);
+    assert_eq!(result.transfer_budget.per_candidate_host_round_trips, 0);
+    assert_eq!(result.final_result_transfer.final_output_rows, 1);
+    assert_eq!(result.final_result_transfer.final_output_column_count, 1);
+    assert_eq!(
+        result.final_result_transfer.final_output_row_width_bytes,
+        std::mem::size_of::<u32>()
+    );
+    assert_eq!(
+        result.final_result_transfer.final_output_payload_bytes,
+        std::mem::size_of::<u32>() as u64
+    );
+    assert_eq!(result.final_result_transfer.row_count_device_reads, 1);
+    assert_eq!(
+        result.final_result_transfer.tracked_data_plane_dtoh_calls,
+        0
+    );
+    assert_eq!(
+        result.final_result_transfer.tracked_data_plane_dtoh_bytes,
+        0
+    );
+    assert_eq!(
+        download_unary_u32(&fix.provider, &result.final_output),
+        vec![1]
+    );
+}
+
+#[test]
 fn accepted_split_quaternary_all_operator_batch_records_component_kernel_timing() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");
