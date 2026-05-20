@@ -226,9 +226,10 @@ world-view-validation fallback counters. This is not a closure proposal;
 
 2026-05-20 K7/K8 WCOJ metadata follow-up: accepted K7/K8 epistemic execution
 now has explicit runtime evidence for certified edge-permutation slots,
-sorted-layout requirements, metadata-build counts, and metadata-build nanoseconds
-after production K-clique WCOJ dispatch counters advance. This is not a closure
-proposal; `G090_GPU` and `G090_CLOSE` remain blocked.
+sorted-layout requirements, observed layout sort or fast-path events,
+metadata-build counts, and metadata-build nanoseconds after production
+K-clique WCOJ dispatch counters advance. This is not a closure proposal;
+`G090_GPU` and `G090_CLOSE` remain blocked.
 
 2026-05-20 single-result row-count membership follow-up: accepted
 single-result solver and probabilistic consumers now reject model-membership
@@ -507,7 +508,8 @@ The branch contains useful scaffolding:
   plus runtime histogram metadata-build counters;
 - K7/K8 preflight evidence, plus K7/K8 runtime evidence, that generated
   epistemic reductions reuse the G39 K-clique template planner metadata, with
-  complete 21/28 edge-permutation counts, stream-group counts, and zero
+  complete 21/28 edge-permutation counts, stream-group counts, observed layout
+  sort or fast-path events, metadata-build timing, and zero
   planned-hash/CPU-fallback counters;
 - hot-path transfer-budget traces that reject tracked single-result and
   split-batch data-plane H2D/D2H deltas without resetting shared provider

@@ -162,6 +162,8 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(
         integration.contains("accepted_epistemic_k7_k8_execution_certifies_metadata_build_timing")
     );
+    assert!(integration.contains("observed_layout_sorts"));
+    assert!(integration.contains("observed_layout_fast_path_hits"));
     assert!(integration
         .contains("accepted_gpu_execution_semantic_trace_matches_gpt_oracle_rejection_reason"));
     assert!(integration.contains("run_generate_propagate_test"));

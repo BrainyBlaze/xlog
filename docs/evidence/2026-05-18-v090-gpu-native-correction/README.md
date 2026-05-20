@@ -321,7 +321,8 @@ The next production slice should start at the lowering/runtime boundary:
    registration metadata, accepted v0.7.0 4-cycle and K5/K6/K7/K8 WCOJ dispatch fixtures,
    fail-closed layout sort/fast-path certification, K6 G38-B
    helper/histogram metadata count and timing reuse, and K7/K8 K-clique
-   preflight reuse of G39 planner metadata.
+   preflight plus runtime layout-event and metadata-build timing reuse of G39
+   planner metadata.
 4. Add GPU-resident candidate/world-view/rejection buffer population and launch
    telemetry. PARTIAL for bounded candidate-assumption generation, propagation
    staging, candidate-buffer validation, tuple-source model-membership staging
@@ -344,7 +345,7 @@ The next production slice should start at the lowering/runtime boundary:
    accepted v0.7.0 4-cycle dispatch, accepted K5/K6/K7/K8 dispatch plus K5 certified helper/layout metrics,
    fail-closed layout sort/fast-path certification, K6 G38-B
    helper/histogram metadata count and timing reuse, and K7/K8
-   planner/preflight plus runtime metadata-build timing reuse; broader
+   planner/preflight plus runtime layout-event and metadata-build timing reuse; broader
    helper/skew runtime coverage remains open.
 6. Replace CPU solver fixture search in accepted execution with GPU-native
    SAT/MaxSAT/portfolio services or a documented GPU-backed adapter. PARTIAL

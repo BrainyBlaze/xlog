@@ -1047,6 +1047,8 @@ fn accepted_epistemic_k7_k8_execution_certifies_metadata_build_timing() {
                 certified_edge_permutation_slots,
                 certified_stream_groups,
                 certified_sorted_layout_requirements,
+                observed_layout_sorts,
+                observed_layout_fast_path_hits,
                 observed_metadata_builds,
                 observed_metadata_build_nanos,
                 ..
@@ -1054,6 +1056,10 @@ fn accepted_epistemic_k7_k8_execution_certifies_metadata_build_timing() {
                 assert_eq!(certified_edge_permutation_slots, expected_edges);
                 assert!(certified_stream_groups >= 1);
                 assert!(certified_sorted_layout_requirements >= 1);
+                assert!(
+                    observed_layout_sorts + observed_layout_fast_path_hits >= 1,
+                    "accepted K{k} must observe a layout sort or fast-path event"
+                );
                 assert!(observed_metadata_builds >= 1);
                 assert!(observed_metadata_build_nanos >= 1);
             }
@@ -1068,6 +1074,12 @@ fn accepted_epistemic_k7_k8_execution_certifies_metadata_build_timing() {
         assert!(dispatch_count >= 1);
         assert!(result.trace.counter_delta.kclique_metadata_build_count >= 1);
         assert!(result.trace.counter_delta.kclique_metadata_build_nanos >= 1);
+        assert!(
+            result.trace.counter_delta.wcoj_layout_sort_invocation_count
+                + result.trace.counter_delta.wcoj_layout_fast_path_hit_count
+                >= 1,
+            "accepted K{k} must report a WCOJ layout sort or fast-path counter event"
+        );
     }
 }
 
