@@ -97,9 +97,9 @@ compacts reduced output columns. The materialization trace records
 `row_filter_count` and `negated_row_filter_count`. Accepted unary, possible,
 not-possible, binary, quaternary generic-arity, all-`know` multi-membership,
 mixed `know`/`possible` multi-membership, negated `not know`/`not possible`
-multi-membership, missing-required multi-membership, and `not know` fixtures
-now prove final rows are filtered or rejected by bound tuple keys on device,
-and preflight records explicit
+multi-membership, same-rule all-operator multi-membership, missing-required
+multi-membership, and `not know` fixtures now prove final rows are filtered or
+rejected by bound tuple keys on device, and preflight records explicit
 `know`/`possible`/`not know`/`not possible` operator counts.
 `EpistemicGpuRuntimeWcojCertification` then requires actual production WCOJ
 counter deltas before WCOJ evidence can be certified, and its certified result
@@ -124,8 +124,8 @@ membership and world-view buffers, with accepted unary, possible, not-possible,
 binary `know`, binary `possible`, binary `not possible`, binary `not know`,
 quaternary generic arity-N `know`, all-`know` multi-membership,
 mixed `know`/`possible` multi-membership, negated `not know`/`not possible`
-multi-membership, missing-required multi-membership, and unary `not know`
-bound-key row-filter
+multi-membership, same-rule all-operator multi-membership, missing-required
+multi-membership, and unary `not know` bound-key row-filter
 fixtures. Full arbitrary-world enumeration, complete semantic parity, and
 release-wide solver/probabilistic coverage do not dispatch yet, but bounded
 accepted runtime fixtures now feed the solver and probabilistic production
@@ -149,8 +149,8 @@ production GPU/WCOJ stack for specific certification fixtures:
 - Unary and binary nonzero-arity `know`/`possible`/`not possible` slices,
   binary `not know`, quaternary generic arity-N `know`, unary `not know`,
   all-`know` multi-membership, mixed `know`/`possible` multi-membership,
-  negated `not know`/`not possible` multi-membership,
-  missing-required rejection, split
+  negated `not know`/`not possible` multi-membership, same-rule all-operator
+  multi-membership, missing-required rejection, split
   possible-vs-not-known, split binary `possible`/`not possible`, split
   all-binary-operator, G91 self-support, and independently founded FAEEL
   fixtures compare bounded GPU traces against semantic or GPT oracles.
@@ -328,17 +328,20 @@ self-supported `possible p()` runtime fixture uses the mode-aware oracle for
 generated, propagated, tested, accepted, rejected, and candidate-index parity.
 The independently founded FAEEL self-`possible p()` runtime fixture uses the
 default oracle for the same trace/candidate-index parity.
-The accepted multi-membership fixtures also compare two-literal same-rule
-candidate matrices against bounded GPT oracles: `know edge(X), know color(X)`
-for all-`know` membership, `know edge(X), possible alt(X)` for mixed positive
-operator membership, and `not know edge(X), not possible blocked(X)` for
-negated mixed operator membership. They compare generated, propagated, tested,
-accepted, rejected, and accepted/rejected candidate-index fields; the mixed
-positive fixture records one `know` operator, one `possible` operator, and two
-positive row filters, while the negated mixed fixture records one `not know`
-operator, one `not possible` operator, and two negated row filters. Both keep
-zero CPU candidate/world-view fallback counters and zero tracked hot-path D2H
-calls.
+The accepted multi-membership fixtures compare same-rule candidate matrices
+against bounded GPT oracles: `know edge(X), know color(X)` for all-`know`
+membership, `know edge(X), possible alt(X)` for mixed positive operator
+membership, `not know edge(X), not possible blocked(X)` for negated mixed
+operator membership, and
+`know edge(X), possible alt(X), not know hidden(X), not possible blocked(X)` for
+the all-operator matrix. They compare generated, propagated, tested, accepted,
+rejected, and accepted/rejected candidate-index fields; the mixed positive
+fixture records one `know` operator, one `possible` operator, and two positive
+row filters, the negated mixed fixture records one `not know` operator, one
+`not possible` operator, and two negated row filters, and the all-operator
+fixture records one operator from each epistemic family plus four row filters
+with two negated filters. These fixtures keep zero CPU candidate/world-view
+fallback counters and zero tracked hot-path D2H calls.
 The unary nonzero-arity `possible edge(X)`, `not possible edge(X)`, and
 `not know edge(X)` fixtures, plus the binary `not know edge(X, Y)` fixture,
 compare the same trace and candidate-index fields against bounded GPT oracles;

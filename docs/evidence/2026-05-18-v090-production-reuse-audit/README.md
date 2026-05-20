@@ -57,6 +57,12 @@ Negated mixed-membership audit note: the source audit also requires
 negated final-row filtering path before being cited as accepted semantic-parity
 evidence.
 
+All-operator mixed-membership audit note: the source audit also requires
+`accepted_all_operator_mixed_memberships_match_gpt_oracle_parity`, proving a
+same-rule `know`/`possible`/`not know`/`not possible` tuple-membership matrix
+uses the same GPU tuple-source and mixed-polarity final-row filtering path
+before being cited as accepted semantic-parity evidence.
+
 ## Forbidden Parallel Engines
 
 The accepted paths audited above must not introduce epistemic-only replacements

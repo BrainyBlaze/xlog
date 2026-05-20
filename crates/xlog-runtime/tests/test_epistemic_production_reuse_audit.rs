@@ -143,6 +143,7 @@ fn production_reuse_audit_reports_no_parallel_epistemic_engines() {
     assert!(integration.contains("accepted_ternary_membership_matches_gpt_oracle_parity"));
     assert!(integration.contains("accepted_mixed_memberships_match_gpt_oracle_parity"));
     assert!(integration.contains("accepted_negated_mixed_memberships_match_gpt_oracle_parity"));
+    assert!(integration.contains("accepted_all_operator_mixed_memberships_match_gpt_oracle_parity"));
     assert!(
         integration.contains("split_gpu_world_view_distinguishes_absent_possible_from_not_known")
     );
