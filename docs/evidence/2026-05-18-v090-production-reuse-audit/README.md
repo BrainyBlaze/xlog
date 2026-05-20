@@ -136,6 +136,13 @@ learned-clause reuse and bounded MaxSAT candidate paths with four arena
 publications/imports/reused solves, eight GPU CDCL MaxSAT candidate solves, four
 MaxSAT optima, one accepted counter for every epistemic operator family, sixteen
 tuple-key column reads, and zero CPU search or learned-clause transfers.
+The source audit now also requires
+`accepted_split_quaternary_all_operator_batch_gates_solver_search_scheduler_and_portfolio_paths`,
+which proves the same accepted batch reaches MaxSAT search-pruning, weighted
+MaxSAT encoding/scheduler, and status-aware portfolio paths with four direct
+UNSAT prunes, eight encoded candidates, twenty-four scheduled GPU CDCL candidate
+solves, four SAT jobs, four MaxSAT jobs, one accepted counter for every
+epistemic operator family, sixteen tuple-key column reads, and zero CPU search.
 All accepted solver split-batch entrypoints now call the single
 `accepted_solver_results_from_gpu_batch_execution_evidence` validator/accounting
 helper, and `production_solver_batch_paths_use_single_gpu_batch_gate`
