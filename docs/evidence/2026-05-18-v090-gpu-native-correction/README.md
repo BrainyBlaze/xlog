@@ -50,10 +50,11 @@ facts, or CPU recomputation counters advance. This narrows `G090_GPU`,
 
 2026-05-20 split-batch full CPU-fallback gate delta: accepted split-batch solver
 and probabilistic consumers now have aggregate fail-closed coverage for the
-all-binary and quaternary all-operator batches when candidate-enumeration,
-world-view-validation, solver-search, or probabilistic recompute CPU fallback
-counters become nonzero. `EpistemicGpuBatchExecutionTrace` records solver-search
-and probabilistic-recompute fallback totals in addition to the existing
+all-binary, quaternary possible/not-know, and quaternary all-operator batches
+when candidate-enumeration, world-view-validation, solver-search, or
+probabilistic recompute CPU fallback counters become nonzero.
+`EpistemicGpuBatchExecutionTrace` records solver-search and
+probabilistic-recompute fallback totals in addition to the existing
 candidate/world-view counters. This narrows `G090_GPU`, `G090_SOLVER`, and
 `G090_PROB`, but does not close them.
 

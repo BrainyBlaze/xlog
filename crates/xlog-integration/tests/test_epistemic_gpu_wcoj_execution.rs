@@ -607,6 +607,67 @@ fn execute_split_quaternary_all_operator_batch(
     (split, batch)
 }
 
+fn execute_split_quaternary_possible_and_not_know_batch(
+    fix: &RuntimeBackedFixture,
+) -> (
+    EpistemicSplitExecutablePlan,
+    EpistemicGpuBatchExecutionResult,
+) {
+    let program = parse_program(
+        r#"
+        pred tuple4(u32, u32, u32, u32).
+        pred fact4(u32, u32, u32, u32).
+        pred possible4(u32, u32, u32, u32).
+        pred unknown4(u32, u32, u32, u32).
+        possible4(A, B, C, D) :- tuple4(A, B, C, D), possible fact4(A, B, C, D).
+        unknown4(A, B, C, D) :- tuple4(A, B, C, D), not know fact4(A, B, C, D).
+        "#,
+    )
+    .expect("parse split quaternary possible/not-know fixture");
+    let split = compile_epistemic_gpu_split_execution_with_stats_snapshot(&program, None)
+        .expect("compile split quaternary possible/not-know components");
+
+    let mut executor =
+        Executor::new_with_config(Arc::clone(&fix.provider), RuntimeConfig::default());
+    let mut relation_ids = BTreeMap::new();
+    for component in &split.components {
+        for (name, rel_id) in &component.executable.relation_ids {
+            if let Some(previous) = relation_ids.insert(name.clone(), *rel_id) {
+                assert_eq!(
+                    previous, *rel_id,
+                    "split quaternary possible/not-know components must preserve shared relation ids"
+                );
+            }
+        }
+    }
+    for (name, rel_id) in &relation_ids {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation(
+        "tuple4",
+        upload_quaternary_u32(&fix.memory, &[(1, 2, 3, 4), (2, 3, 4, 5), (9, 9, 9, 9)]),
+    );
+    executor.put_relation("fact4", upload_quaternary_u32(&fix.memory, &[(2, 3, 4, 5)]));
+
+    let executables: Vec<_> = split
+        .components
+        .iter()
+        .map(|component| &component.executable)
+        .collect();
+    let batch = executor
+        .execute_epistemic_gpu_execution_batch_with_trace(
+            &executables,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 1,
+                max_models_per_reduction: 3,
+            },
+        )
+        .expect("execute split quaternary possible/not-know components through GPU batch path");
+
+    (split, batch)
+}
+
 fn execute_all_operator_mixed_membership_fixture(
     fix: &RuntimeBackedFixture,
 ) -> EpistemicGpuExecutionResult {
@@ -3710,6 +3771,125 @@ fn accepted_split_all_binary_operator_batch_rejects_cpu_fallback_counters() {
         ) {
         Ok(_) => {
             panic!("probabilistic all-binary batch evidence with CPU fallback counters must reject")
+        }
+        Err(err) => err,
+    };
+    let prob_err = format!("{prob_err}");
+    assert!(prob_err.contains("CPU/host fallback counters"));
+    assert!(prob_err.contains("cpu_candidates=1"));
+    assert!(prob_err.contains("cpu_world_views=1"));
+    assert!(prob_err.contains("cpu_solver_search=1"));
+    assert!(prob_err.contains("cpu_probability_recompute=1"));
+}
+
+#[test]
+fn accepted_split_quaternary_possible_and_not_know_batch_rejects_cpu_fallback_counters() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let (split, mut batch) = execute_split_quaternary_possible_and_not_know_batch(&fix);
+    assert_eq!(split.components.len(), 2);
+    assert_eq!(split.recomposed_rule_indices(), vec![0, 1]);
+    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
+    assert_eq!(batch.trace.cpu_world_view_validations, 0);
+    assert_eq!(batch.trace.cpu_solver_search_fallbacks, 0);
+    assert_eq!(batch.trace.cpu_probability_recomputations, 0);
+
+    batch.trace.cpu_candidate_enumerations = 1;
+    batch.trace.cpu_world_view_validations = 1;
+    batch.trace.cpu_solver_search_fallbacks = 1;
+    batch.trace.cpu_probability_recomputations = 1;
+
+    let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
+    let sat_cnf = GpuCnf::from_host(&sat_instance, &fix.provider).expect("upload SAT CNF");
+    let branch_limit = upload_u32_scalar(&fix.provider, 1);
+    let mut solver_adapter =
+        GpuSolverProductionAdapter::new(Arc::clone(&fix.provider), GpuCdclConfig::default());
+    let mut workspace = solver_adapter
+        .new_workspace(sat_cnf.var_cap, sat_cnf.clause_cap)
+        .expect("new possible/not-know fallback rejection workspace");
+
+    let solver_err = match solver_adapter
+        .solve_assumption_lifecycle_with_gpu_batch_execution_result(
+            &fix.provider,
+            GpuSolverProductionBatchExecutionEvidence { batch: &batch },
+            &mut workspace,
+            &[GpuSolverProductionLifecycleStep {
+                cnf: &sat_cnf,
+                branch_var_limit: &branch_limit,
+                expectation: GpuSolverProductionExpectation::Sat,
+            }],
+        ) {
+        Ok(_) => {
+            panic!("solver possible/not-know batch evidence with CPU fallback counters must reject")
+        }
+        Err(err) => err,
+    };
+    let solver_err = format!("{solver_err}");
+    assert!(solver_err.contains("CPU/host fallback counters"));
+    assert!(solver_err.contains("cpu_candidates=1"));
+    assert!(solver_err.contains("cpu_world_views=1"));
+    assert!(solver_err.contains("cpu_solver_search=1"));
+    assert!(solver_err.contains("cpu_probability_recompute=1"));
+
+    let terms = |a, b, c, d| {
+        vec![
+            EpistemicEvidenceTerm::integer(a),
+            EpistemicEvidenceTerm::integer(b),
+            EpistemicEvidenceTerm::integer(c),
+            EpistemicEvidenceTerm::integer(d),
+        ]
+    };
+    let assumption_groups_owned: Vec<Vec<EpistemicAssumption>> = split
+        .components
+        .iter()
+        .map(
+            |component| match component.component.rule_indices.as_slice() {
+                [0] => vec![EpistemicAssumption::possible_tuple(
+                    "fact4",
+                    terms(2, 3, 4, 5),
+                    true,
+                )],
+                [1] => vec![EpistemicAssumption::known_tuple(
+                    "fact4",
+                    terms(1, 2, 3, 4),
+                    false,
+                )],
+                other => {
+                    panic!(
+                        "unexpected split quaternary possible/not-know fallback indices: {other:?}"
+                    )
+                }
+            },
+        )
+        .collect();
+    let assumption_groups: Vec<&[EpistemicAssumption]> =
+        assumption_groups_owned.iter().map(Vec::as_slice).collect();
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut prob_adapter = EpistemicProbProductionAdapter::new(config);
+    let prob_err = match prob_adapter
+        .compile_and_evaluate_conditioned_source_for_gpu_batch_execution_result(
+            r#"
+        0.8::fact4(2, 3, 4, 5).
+        0.6::fact4(1, 2, 3, 4).
+        query(fact4(2, 3, 4, 5)).
+        query(fact4(1, 2, 3, 4)).
+        "#,
+            &fix.provider,
+            EpistemicProbGpuBatchExecutionEvidence {
+                batch: &batch,
+                assumptions_by_component: &assumption_groups,
+            },
+        ) {
+        Ok(_) => {
+            panic!(
+                "probabilistic possible/not-know batch evidence with CPU fallback counters must reject"
+            )
         }
         Err(err) => err,
     };

@@ -335,9 +335,11 @@ device allocations. It also checks buffer lengths against the preflight
 workspace layout, device reset byte accounting, four device zero operations,
 zero reset host writes, and trace byte counts for generated candidates,
 propagated world views, model-membership bytes, and rejection slots.
-The split-batch all-binary and quaternary all-operator CPU-fallback markers
-`accepted_split_all_binary_operator_batch_rejects_cpu_fallback_counters` and
-`accepted_split_quaternary_all_operator_batch_rejects_cpu_fallback_counters`
+The split-batch all-binary, quaternary possible/not-know, and quaternary
+all-operator CPU-fallback markers
+`accepted_split_all_binary_operator_batch_rejects_cpu_fallback_counters`,
+`accepted_split_quaternary_possible_and_not_know_batch_rejects_cpu_fallback_counters`,
+and `accepted_split_quaternary_all_operator_batch_rejects_cpu_fallback_counters`
 prove accepted solver and probabilistic batch consumers fail closed when
 candidate-enumeration, world-view-validation, solver-search, or probabilistic
 recompute CPU fallback counters become nonzero. The aggregate batch trace now

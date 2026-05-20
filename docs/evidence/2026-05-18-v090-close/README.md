@@ -227,12 +227,12 @@ reads, and final-result data-plane D2H calls/bytes from component results, and
 batch consumers now reject aggregate H2D evidence as well as D2H and round trips.
 This is not a closure proposal; `G090_GPU` and `G090_CLOSE` remain blocked.
 
-2026-05-20 split-batch full CPU-fallback follow-up: accepted all-binary and
-quaternary all-operator split-batch solver and probabilistic consumers now
-reject aggregate solver-search and probabilistic recompute fallback counters in
-addition to candidate-enumeration and world-view-validation fallback counters.
-This is not a closure proposal; `G090_GPU`, `G090_SOLVER`, `G090_PROB`, and
-`G090_CLOSE` remain blocked.
+2026-05-20 split-batch full CPU-fallback follow-up: accepted all-binary,
+quaternary possible/not-know, and quaternary all-operator split-batch solver and
+probabilistic consumers now reject aggregate solver-search and probabilistic
+recompute fallback counters in addition to candidate-enumeration and
+world-view-validation fallback counters. This is not a closure proposal;
+`G090_GPU`, `G090_SOLVER`, `G090_PROB`, and `G090_CLOSE` remain blocked.
 
 2026-05-20 K7/K8 WCOJ metadata follow-up: accepted K7/K8 epistemic execution
 now has explicit runtime evidence for certified edge-permutation slots,
@@ -497,7 +497,8 @@ The branch contains useful scaffolding:
   ternary specialized-arity, quaternary all-operator generic-arity, multi-membership,
   split-component, all-binary-operator split, split-quaternary-operator
   GPU-vs-GPT oracle trace parity fixtures, split all-binary component-timing,
-  workspace-buffer residency, and CPU-fallback rejection evidence, and
+  workspace-buffer residency, and CPU-fallback rejection evidence,
+  split-quaternary possible/not-know CPU-fallback rejection evidence, and
   split-quaternary all-operator component-timing, workspace-buffer residency,
   and CPU-fallback rejection evidence with nonzero phase launch counts plus
   fail-closed row-count-only membership, host-transfer, and rejected-world-view
@@ -633,7 +634,8 @@ Closure remains blocked until certification includes all of the following:
   buffers beyond the current single-result, split all-binary, and
   split-quaternary all-operator workspace-buffer residency fixtures;
 - zero CPU fallback counters beyond the current single-result, split all-binary,
-  and split-quaternary all-operator fail-closed consumer rejection fixtures;
+  split-quaternary possible/not-know, and split-quaternary all-operator
+  fail-closed consumer rejection fixtures;
 - broader WCOJ-eligible epistemic reductions proving successful runtime
   dispatch beyond the current accepted v0.7.0 4-cycle and K5/K6/K7/K8 fixtures, including layout,
   skew-scheduling, and helper-splitting evidence where applicable;
