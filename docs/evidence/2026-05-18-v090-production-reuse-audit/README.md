@@ -84,6 +84,15 @@ probability adapter consumes two accepted single-result GPU evidences through
 source-conditioned arity-four evidence, one negative fact, `possible` and
 `not know` operator-family counters, two GPU exact query evaluations, and zero CPU
 probability recomputation.
+The source quaternary possible/not-know deep marker
+`accepted_quaternary_possible_and_not_know_results_gate_source_pir_cnf_and_exact_evaluation_paths`
+proves the same two accepted single-result GPU evidences also route through
+`encode_source_pir_cnf_for_gpu_execution_results`,
+`evaluate_for_gpu_execution_results`, and
+`evaluate_gpu_with_grads_for_gpu_execution_results`, recording source PIR/CNF
+uploads, two already-compiled exact query evaluations, two gradient
+evaluations, accepted-assumption evidence accounting, and zero CPU probability
+recomputation.
 The parsed-program quaternary possible/not-know marker
 `accepted_quaternary_possible_and_not_know_results_gate_parsed_program_probabilistic_paths`
 proves the same two accepted single-result GPU evidences also route through
