@@ -13995,6 +13995,106 @@ fn accepted_all_operator_mixed_membership_gates_probabilistic_source_pir_and_exa
 }
 
 #[test]
+fn accepted_all_operator_mixed_membership_gates_probabilistic_program_exact_evaluation_paths() {
+    let Some(fix) = make_runtime_backed_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+
+    let result = execute_all_operator_mixed_membership_fixture(&fix);
+    assert_eq!(
+        download_unary_u32(&fix.provider, &result.final_output),
+        vec![2]
+    );
+    assert_eq!(result.prepared.preflight.tuple_membership_binding_count, 4);
+    assert_eq!(result.prepared.preflight.know_operator_count, 1);
+    assert_eq!(result.prepared.preflight.possible_operator_count, 1);
+    assert_eq!(result.prepared.preflight.not_know_operator_count, 1);
+    assert_eq!(result.prepared.preflight.not_possible_operator_count, 1);
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+
+    let prob_program = parse_program(
+        r#"
+        0.3::edge(2).
+        0.4::alt(2).
+        0.5::hidden(2).
+        0.6::blocked(2).
+        query(edge(2)).
+        query(alt(2)).
+        query(hidden(2)).
+        query(blocked(2)).
+        "#,
+    )
+    .expect("parse all-operator probabilistic program");
+    let assert_unconditioned = |probs: &[f64]| {
+        let expected = [0.3, 0.4, 0.5, 0.6];
+        assert_eq!(probs.len(), expected.len());
+        for (actual, expected) in probs.iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() < 1.0e-6,
+                "unconditioned all-operator program probability mismatch: actual={actual} expected={expected}",
+            );
+        }
+    };
+
+    let mut config = GpuConfig::default();
+    config.device_ordinal = 0;
+    config.memory_bytes = 64 * 1024 * 1024;
+    let mut adapter = EpistemicProbProductionAdapter::new(config);
+    let exact = adapter
+        .compile_program_with_gpu_execution_result(
+            &prob_program,
+            &fix.provider,
+            &result,
+            all_operator_mixed_membership_assumptions(),
+        )
+        .expect("same-rule all-operator evidence must gate parsed-program exact compile");
+    let evaluated = adapter
+        .evaluate_with_gpu_execution_result(
+            &exact,
+            &fix.provider,
+            &result,
+            all_operator_mixed_membership_assumptions(),
+        )
+        .expect("same-rule all-operator evidence must gate parsed-program exact query evaluation");
+    let evaluated_grads = adapter
+        .evaluate_gpu_with_grads_with_gpu_execution_result(
+            &exact,
+            &fix.provider,
+            &result,
+            all_operator_mixed_membership_assumptions(),
+        )
+        .expect(
+            "same-rule all-operator evidence must gate parsed-program exact gradient evaluation",
+        );
+
+    let query_probs: Vec<f64> = evaluated
+        .query_probs
+        .iter()
+        .map(|query| query.prob)
+        .collect();
+    assert_unconditioned(&query_probs);
+    let gradient_probs: Vec<f64> = evaluated_grads
+        .query_grads
+        .iter()
+        .map(|query| query.prob)
+        .collect();
+    assert_unconditioned(&gradient_probs);
+
+    let trace = adapter.trace();
+    assert_eq!(trace.accepted_world_view_evidence_consumed, 3);
+    assert_eq!(trace.accepted_evidence_assumptions_consumed, 12);
+    assert_eq!(trace.gpu_conditioned_evidence_facts, 0);
+    assert_eq!(trace.gpu_exact_source_compiles, 0);
+    assert_eq!(trace.gpu_exact_program_compiles, 1);
+    assert_eq!(trace.gpu_exact_query_evaluations, 1);
+    assert_eq!(trace.gpu_exact_gradient_evaluations, 1);
+    assert_eq!(trace.cpu_only_probability_recomputations, 0);
+    assert_eq!(trace.fixture_circuit_evaluations, 0);
+}
+
+#[test]
 fn conditioned_probabilistic_evidence_records_source_and_program_trace_counters() {
     let Some(fix) = make_runtime_backed_fixture() else {
         eprintln!("Skipping: CUDA runtime unavailable");

@@ -149,6 +149,10 @@ The source probabilistic marker
 `accepted_all_operator_mixed_membership_gates_probabilistic_source_pir_and_exact_evaluation_paths`
 extends the same evidence through source-conditioned gradients, source PIR/CNF,
 and already-compiled exact query/gradient evaluation adapters.
+The parsed-program exact-evaluation marker
+`accepted_all_operator_mixed_membership_gates_probabilistic_program_exact_evaluation_paths`
+extends that same accepted evidence through parsed-program exact compile plus
+already-compiled exact query/gradient evaluation adapters.
 The possible/not-know split-batch solver marker extends the same arity-four
 batch evidence through MaxSAT search pruning, weighted MaxSAT
 encoding/scheduler, and portfolio adapters without adding a parallel solver
