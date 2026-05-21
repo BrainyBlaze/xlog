@@ -6,7 +6,8 @@
 
 > **Branch status:** `v0.8.7-dev` - Living-World Diagnostics and Provenance
 > Pack. This worktree layers generated-rule provenance, source/generated rule
-> provenance, direct query proof traces, relation-delta debug summaries with
+> provenance, generated-rule diagnostics over inline and external candidate
+> rows, direct query proof traces, relation-delta debug summaries with
 > optional full-recompute equivalence probes and planner telemetry, native
 > biomedical graph stream provenance, validation evidence staging, temporal and
 > general relation evidence APIs, and nn/4 lineage/hot-loop diagnostics over the

@@ -74,6 +74,12 @@ For generated-rule candidates, JSON output also emits
 
 This is the XLOG-GENRULE-002 surface for explaining both accepted generated-rule
 rows and rejected rows whose predicates or threshold checks failed.
+Generated-rule diagnostics cover inline generated facts and external candidate
+relations. For external inputs such as the BFO generated Hugging Face program,
+`xlog explain --format json` resolves `xlog_hypothesis_execution.json`, reads
+`relation_input_columns` plus `relation_input_path`, binds those rows to the
+candidate input atom, and computes threshold decisions inside the CLI report
+rather than relying on Python-only rejection sidecars.
 
 pyxlog exposes the same records as Python dictionaries on:
 

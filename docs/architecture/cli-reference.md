@@ -153,6 +153,13 @@ with `row_key`, `accepted`, `failed_predicates`, `threshold_comparisons`, and
 `aggregate_inputs` so accepted and rejected generated rows can be audited from
 the CLI JSON report.
 
+When a generated-rule program uses an external candidate input relation instead
+of inline facts, `xlog explain --format json` also looks for a colocated
+execution manifest (`xlog_hypothesis_execution.json`) and relation JSON file.
+The manifest's `relation_input_columns` and `relation_input_path` let the CLI
+bind external rows to rule variables and compute the same row-level threshold
+decisions in `generated_rule_diagnostics`.
+
 `--format dot` prints the magic-set dependency graph.
 
 **Examples:**

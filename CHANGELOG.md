@@ -28,7 +28,9 @@ All notable changes to this project are documented in this file.
   row hashes, relation/split histograms, and bounded-memory chunk diagnostics.
 - Added `xlog explain --format json` generated-rule row diagnostics with
   accepted/rejected row decisions, failed predicates, threshold comparisons,
-  and aggregate inputs.
+  and aggregate inputs. The CLI now also binds external candidate relation rows
+  from colocated execution manifests so BFO generated HF rules produce non-empty
+  row-level diagnostics through the XLOG explain surface.
 - Added pyxlog session evidence APIs:
   `put_relation_with_provenance(...)`, `evidence(...)`, and
   `RelationEvidence.provenance()`.

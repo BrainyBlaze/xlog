@@ -178,7 +178,7 @@ fn explain(args: ExplainArgs) -> Result<()> {
     })?;
     let mut parser_session = ParserSession::new();
     let parsed = parser_session.parse_path(&args.source, &source)?;
-    let report = build_explain_report(parsed)?;
+    let report = build_explain_report(parsed, Some(&args.source))?;
     match args.format {
         ExplainFormat::Text => print_explain_text(&report),
         ExplainFormat::Json => print_explain_json(&report),
@@ -220,7 +220,7 @@ fn watch(args: WatchArgs) -> Result<()> {
             parsed.stats.statement_count, parsed.stats.hits, parsed.stats.misses
         );
         if args.explain {
-            let report = build_explain_report(parsed)?;
+            let report = build_explain_report(parsed, Some(&args.source))?;
             print_explain_text(&report);
         }
         if args.once {
@@ -247,14 +247,17 @@ struct ExplainReport {
     optimizer_memory_peak: u64,
 }
 
-fn build_explain_report(parsed: xlog_logic::IncrementalParseResult) -> Result<ExplainReport> {
+fn build_explain_report(
+    parsed: xlog_logic::IncrementalParseResult,
+    source_path: Option<&Path>,
+) -> Result<ExplainReport> {
     let program = parsed.program;
     let magic_rewrite = rewrite_v085_magic_sets(&program)?;
     let rule_provenance = xlog_logic::rule_provenance(&program, Some(&magic_rewrite.program));
     let proof_traces = xlog_logic::query_proof_traces(&program, &rule_provenance);
     let magic_sets = magic_rewrite.report;
     let aggregate_lifting = explain_aggregate_lifting(&program)?;
-    let generated_rule_diagnostics = explain_generated_rule_diagnostics(&program);
+    let generated_rule_diagnostics = explain_generated_rule_diagnostics(&program, source_path);
     let (stratification_status, stratification_count) = match stratify(&program) {
         Ok(strata) => ("ok".to_string(), strata.len()),
         Err(err) => (format!("error: {}", err), 0),
@@ -321,31 +324,27 @@ struct ThresholdComparison {
     passed: bool,
 }
 
-fn explain_generated_rule_diagnostics(program: &Program) -> Vec<GeneratedRuleDiagnostic> {
+fn explain_generated_rule_diagnostics(
+    program: &Program,
+    source_path: Option<&Path>,
+) -> Vec<GeneratedRuleDiagnostic> {
+    let external_rows = source_path
+        .map(|path| load_external_relation_rows(program, path))
+        .unwrap_or_default();
     let mut diagnostics = Vec::new();
     for rule in program
         .rules
         .iter()
         .filter(|rule| !rule.body.is_empty() && generated_rule_candidate(rule))
     {
-        let Some(source_atom) = rule.body.iter().find_map(|literal| match literal {
-            BodyLiteral::Positive(atom) if atom.predicate.starts_with("generated_") => Some(atom),
-            _ => None,
-        }) else {
+        let Some(source_atom) = diagnostic_source_atom(rule) else {
             continue;
         };
         let mut row_decisions = Vec::new();
-        for fact in program.rules.iter().filter(|fact| {
-            fact.body.is_empty()
-                && fact.head.predicate == source_atom.predicate
-                && fact.head.terms.len() == source_atom.terms.len()
-        }) {
-            let mut bindings = HashMap::new();
-            for (pattern, value) in source_atom.terms.iter().zip(&fact.head.terms) {
-                if let Term::Variable(name) = pattern {
-                    bindings.insert(name.clone(), value.clone());
-                }
-            }
+        for source_row in source_rows_for_atom(program, &external_rows, source_atom) {
+            let Some(bindings) = bindings_for_source_row(source_atom, &source_row) else {
+                continue;
+            };
 
             let mut threshold_comparisons = Vec::new();
             for comparison in rule.body.iter().filter_map(|literal| match literal {
@@ -388,9 +387,7 @@ fn explain_generated_rule_diagnostics(program: &Program) -> Vec<GeneratedRuleDia
                     .map(|comparison| comparison.predicate.clone()),
             );
             row_decisions.push(GeneratedRuleRowDecision {
-                row_key: fact
-                    .head
-                    .terms
+                row_key: source_row
                     .first()
                     .map(term_label)
                     .unwrap_or_else(|| source_atom.predicate.clone()),
@@ -400,8 +397,7 @@ fn explain_generated_rule_diagnostics(program: &Program) -> Vec<GeneratedRuleDia
                 aggregate_inputs: vec![format!(
                     "{}({})",
                     source_atom.predicate,
-                    fact.head
-                        .terms
+                    source_row
                         .iter()
                         .map(term_label)
                         .collect::<Vec<_>>()
@@ -423,12 +419,223 @@ fn explain_generated_rule_diagnostics(program: &Program) -> Vec<GeneratedRuleDia
 
 fn generated_rule_candidate(rule: &xlog_logic::ast::Rule) -> bool {
     rule.head.predicate.starts_with("generated_")
+        || rule.head.predicate.starts_with("xlog_accepted_")
+        || rule.head.predicate.starts_with("xlog_rejected_")
         || rule.body.iter().any(|literal| match literal {
             BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
-                atom.predicate.starts_with("generated_")
+                diagnostic_source_predicate(&atom.predicate)
             }
             BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => false,
         })
+}
+
+fn diagnostic_source_atom(rule: &xlog_logic::ast::Rule) -> Option<&xlog_logic::ast::Atom> {
+    rule.body.iter().find_map(|literal| match literal {
+        BodyLiteral::Positive(atom) if diagnostic_source_predicate(&atom.predicate) => Some(atom),
+        _ => None,
+    })
+}
+
+fn diagnostic_source_predicate(predicate: &str) -> bool {
+    predicate.starts_with("generated_")
+        || predicate.ends_with("_candidate_input")
+        || (predicate.contains("candidate") && predicate.ends_with("_input"))
+}
+
+fn source_rows_for_atom(
+    program: &Program,
+    external_rows: &HashMap<String, Vec<Vec<Term>>>,
+    atom: &xlog_logic::ast::Atom,
+) -> Vec<Vec<Term>> {
+    let mut rows = program
+        .rules
+        .iter()
+        .filter(|fact| {
+            fact.body.is_empty()
+                && fact.head.predicate == atom.predicate
+                && fact.head.terms.len() == atom.terms.len()
+        })
+        .map(|fact| fact.head.terms.clone())
+        .collect::<Vec<_>>();
+    if let Some(external) = external_rows.get(&atom.predicate) {
+        rows.extend(external.clone());
+    }
+    rows
+}
+
+fn bindings_for_source_row(
+    atom: &xlog_logic::ast::Atom,
+    row: &[Term],
+) -> Option<HashMap<String, Term>> {
+    if atom.terms.len() != row.len() {
+        return None;
+    }
+    let mut bindings = HashMap::new();
+    for (pattern, value) in atom.terms.iter().zip(row) {
+        match pattern {
+            Term::Variable(name) => {
+                if let Some(existing) = bindings.get(name) {
+                    if existing != value {
+                        return None;
+                    }
+                } else {
+                    bindings.insert(name.clone(), value.clone());
+                }
+            }
+            Term::Anonymous => {}
+            _ if pattern == value => {}
+            _ => return None,
+        }
+    }
+    Some(bindings)
+}
+
+fn load_external_relation_rows(
+    program: &Program,
+    source_path: &Path,
+) -> HashMap<String, Vec<Vec<Term>>> {
+    let mut loaded = HashMap::new();
+    for decl in &program.predicates {
+        let Some((relation_path, columns)) = external_relation_source(source_path, decl) else {
+            continue;
+        };
+        if columns.len() != decl.columns.len() {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(&relation_path) else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&source) else {
+            continue;
+        };
+        let Some(rows) = json.get("rows").and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        let mut relation_rows = Vec::new();
+        for row in rows {
+            let Some(object) = row.as_object() else {
+                continue;
+            };
+            let mut terms = Vec::with_capacity(columns.len());
+            let mut complete = true;
+            for column in &columns {
+                match object.get(column).and_then(json_value_to_term) {
+                    Some(term) => terms.push(term),
+                    None => {
+                        complete = false;
+                        break;
+                    }
+                }
+            }
+            if complete {
+                relation_rows.push(terms);
+            }
+        }
+        if !relation_rows.is_empty() {
+            loaded.insert(decl.name.clone(), relation_rows);
+        }
+    }
+    loaded
+}
+
+fn external_relation_source(
+    source_path: &Path,
+    decl: &xlog_logic::ast::PredDecl,
+) -> Option<(PathBuf, Vec<String>)> {
+    if let Some(from_manifest) = external_relation_source_from_manifest(source_path, decl) {
+        return Some(from_manifest);
+    }
+    let columns = declared_column_names(decl)?;
+    let source_dir = source_path.parent()?;
+    for candidate in relation_json_candidates(source_dir, &decl.name) {
+        if candidate.exists() {
+            return Some((candidate, columns));
+        }
+    }
+    None
+}
+
+fn external_relation_source_from_manifest(
+    source_path: &Path,
+    decl: &xlog_logic::ast::PredDecl,
+) -> Option<(PathBuf, Vec<String>)> {
+    let source_dir = source_path.parent()?;
+    let mut manifests = vec![source_dir.join("xlog_hypothesis_execution.json")];
+    if let Some(parent) = source_dir.parent() {
+        manifests.push(parent.join("xlog_hypothesis_execution.json"));
+    }
+    for manifest_path in manifests {
+        let Ok(source) = std::fs::read_to_string(&manifest_path) else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&source) else {
+            continue;
+        };
+        let Some(columns) = json
+            .get("relation_input_columns")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+        else {
+            continue;
+        };
+        if columns.len() != decl.columns.len() {
+            continue;
+        }
+        let Some(path_value) = json
+            .get("relation_input_path")
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        let relation_path = PathBuf::from(path_value);
+        let relation_path = if relation_path.is_absolute() {
+            relation_path
+        } else {
+            manifest_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(relation_path)
+        };
+        if relation_path.exists() {
+            return Some((relation_path, columns));
+        }
+    }
+    None
+}
+
+fn declared_column_names(decl: &xlog_logic::ast::PredDecl) -> Option<Vec<String>> {
+    decl.columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect()
+}
+
+fn relation_json_candidates(source_dir: &Path, predicate: &str) -> Vec<PathBuf> {
+    let mut candidates = vec![source_dir.join(format!("{predicate}.json"))];
+    if let Some(stem) = predicate.strip_suffix("_input") {
+        candidates.push(source_dir.join(format!("{stem}_relation.json")));
+    }
+    candidates
+}
+
+fn json_value_to_term(value: &serde_json::Value) -> Option<Term> {
+    if let Some(value) = value.as_i64() {
+        Some(Term::Integer(value))
+    } else if let Some(value) = value.as_u64() {
+        i64::try_from(value).ok().map(Term::Integer)
+    } else if let Some(value) = value.as_str() {
+        Some(Term::String(value.to_string()))
+    } else {
+        value
+            .as_bool()
+            .map(|value| Term::Integer(if value { 1 } else { 0 }))
+    }
 }
 
 fn predicate_failures(

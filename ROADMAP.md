@@ -1646,7 +1646,8 @@ host-readable API.
       `proof_traces`, including generated magic-set rewrite rules when present.
 - [x] Extend `xlog explain --format json` with `generated_rule_diagnostics`
       row decisions, failed predicates, threshold comparisons, and aggregate
-      inputs for accepted and rejected generated-rule rows.
+      inputs for accepted and rejected generated-rule rows, including external
+      candidate rows resolved from colocated execution manifests.
 - [x] Expose `rule_provenance()` and `proof_traces()` from deterministic
       pyxlog programs, persistent relation sessions, and probabilistic pyxlog
       programs.
