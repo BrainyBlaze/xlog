@@ -201,9 +201,12 @@ def _logic_session_put_temporal_relation(
     stream_id: str | None = None,
     order_column: str | None = None,
     source: str | None = None,
+    process_boundary: str | None = None,
+    temporal_order: Any = None,
 ) -> dict[str, Any]:
     self.put_relation(name, dlpack_columns)
     metadata = {
+        "status": "ok",
         "relation": name,
         "timestamp_column": timestamp_column,
         "dataset_id": dataset_id,
@@ -213,6 +216,8 @@ def _logic_session_put_temporal_relation(
         "stream_id": stream_id,
         "order_column": order_column,
         "source": source,
+        "process_boundary": process_boundary,
+        "temporal_order": temporal_order,
     }
     _TEMPORAL_PROVENANCE.setdefault(id(self), {})[name] = metadata
     _record_relation_evidence(
@@ -243,6 +248,53 @@ def _logic_session_temporal_provenance(
     if name is None:
         return {relation: dict(metadata) for relation, metadata in records.items()}
     return dict(records.get(name, {}))
+
+
+def put_temporal_relation(
+    session: Any,
+    name: str,
+    dlpack_columns: Any,
+    *,
+    timestamp_column: str,
+    dataset_id: str | None = None,
+    row_hashes: Any = None,
+    field_hashes: Any = None,
+    uncertainty: Any = None,
+    stream_id: str | None = None,
+    order_column: str | None = None,
+    source: str | None = None,
+    process_boundary: str | None = None,
+    temporal_order: Any = None,
+) -> dict[str, Any]:
+    """Upload a temporal relation through a session and record provenance."""
+
+    return session.put_temporal_relation(
+        name,
+        dlpack_columns,
+        timestamp_column=timestamp_column,
+        dataset_id=dataset_id,
+        row_hashes=row_hashes,
+        field_hashes=field_hashes,
+        uncertainty=uncertainty,
+        stream_id=stream_id,
+        order_column=order_column,
+        source=source,
+        process_boundary=process_boundary,
+        temporal_order=temporal_order,
+    )
+
+
+def temporal_provenance(session: Any, name: str) -> dict[str, Any]:
+    """Return temporal provenance for one session relation."""
+
+    metadata = session.temporal_provenance(name)
+    if not metadata:
+        return {
+            "status": "unavailable",
+            "relation": name,
+            "reason": "no temporal provenance recorded for relation",
+        }
+    return dict(metadata)
 
 
 def _logic_session_put_relation_with_provenance(
@@ -480,6 +532,12 @@ if _NATIVE_AVAILABLE:
     _install_v080_runtime_api()
 
 try:
-    __all__ = list(__all__) + ["AsyncEvaluation", "LogicQueryChunk", "RelationEvidence"]
+    __all__ = list(__all__) + [
+        "AsyncEvaluation",
+        "LogicQueryChunk",
+        "RelationEvidence",
+        "put_temporal_relation",
+        "temporal_provenance",
+    ]
 except NameError:
     pass

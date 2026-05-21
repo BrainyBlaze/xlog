@@ -284,13 +284,33 @@ session.put_temporal_relation(
     uncertainty=uncertainty,
     stream_id="camera-a",
     order_column="seq",
+    source="hf://dataset/split",
+    process_boundary="observation_process",
+    temporal_order=["seq"],
 )
 session.temporal_provenance("stream_row")
+
+pyxlog.put_temporal_relation(
+    session,
+    "stream_row_copy",
+    columns,
+    timestamp_column="event_ts",
+    dataset_id="hf-live",
+    row_hashes=row_hashes,
+    field_hashes=field_hashes,
+    uncertainty=uncertainty,
+    stream_id="camera-a",
+    order_column="seq",
+    source="hf://dataset/split",
+    process_boundary="observation_process",
+    temporal_order=["seq"],
+)
+pyxlog.temporal_provenance(session, "stream_row_copy")
 ```
 
 The temporal metadata shape preserves `timestamp_column`, `dataset_id`,
-`row_hashes`, `field_hashes`, `uncertainty`, `stream_id`, source, and temporal
-order via `order_column`.
+`row_hashes`, `field_hashes`, `uncertainty`, `stream_id`, `source`,
+`order_column`, `process_boundary`, and `temporal_order`.
 
 General relation evidence uses the same session-side provenance store without
 requiring temporal columns:

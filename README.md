@@ -18,6 +18,7 @@
 > See `ROADMAP.md`, `CHANGELOG.md`,
 > `docs/architecture/ucr-xlog-diagnostics.md`,
 > `docs/architecture/living-world-diagnostics-v087.md`,
+> `docs/architecture/lwm-diagnostics-provenance.md`,
 > `docs/architecture/python-bindings.md`,
 > `examples/BFO/universal_case_reasoner/`, `examples/v086-runtime/`,
 > `examples/v085-language/`, and `examples/v080-dts/`.

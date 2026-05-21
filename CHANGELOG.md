@@ -22,11 +22,14 @@ v0.8.9 UCR diagnostic surfaces.
 - Added `xlog-induce` generated-rule provenance records with support rows,
   rejected alternatives, falsification counts, predicate inventory, and a
   stable generation trace hash.
+- Added v0.8.8 `InducedRuleProvenance` / `InducedRuleRegistry` aliases for
+  native induced-rule provenance consumers.
 - Added pyxlog persistent-session delta debug output with changed relation
   names, metadata-only debug traces, and an opt-in full-recompute equivalence
   check.
 - Added pyxlog temporal relation metadata helpers for session-managed
-  relations.
+  relations, including process-boundary and temporal-order metadata used by the
+  living-world validation package.
 - Added `CompiledProgram.neural_hot_loop_diagnostics()` with transfer,
   CUDA Graph, circuit-cache, and explicit unavailable-status diagnostics for
   unsupported hot-loop counters.
@@ -73,6 +76,8 @@ v0.8.9 UCR diagnostic surfaces.
   validator tooling, and the resolved `xlog_issue_ledger.json`.
 - Added `docs/architecture/ucr-xlog-diagnostics.md` as the architecture record
   for all six `UCR-XLOG-*` issue resolutions and their regression locations.
+- Added `docs/architecture/lwm-diagnostics-provenance.md` as the issue-by-issue
+  architecture note for the v0.8.8 living-world diagnostics surface.
 
 ### Changed
 
@@ -100,6 +105,8 @@ v0.8.9 UCR diagnostic surfaces.
   rule diagnostics, biomedical graph streaming, relation-delta planner
   telemetry, pyxlog evidence APIs, nn/4 training lineage, and validation
   staging.
+- Added `python/tests/test_v088_lwm_source.py` to lock the v0.8.8 pyxlog stubs,
+  docs, and Rust/Python source API surfaces.
 - Added focused regressions for UCR-XLOG-001 through UCR-XLOG-006:
   `python/tests/test_nn4_dilp_training_surface.py`,
   `crates/xlog-logic/tests/differentiable_proof_trace.rs`,

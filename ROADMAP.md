@@ -1703,6 +1703,45 @@ unless the caller already selected a host-readable API.
       biomedical graph streaming, relation-delta planner telemetry, and
       induction provenance.
 
+## v0.8.8 - Living-World Diagnostics Provenance Refinement
+
+Status: integrated into the active v0.8.9 branch; standalone release tag and
+publication are still pending. Architecture source of truth:
+`docs/architecture/lwm-diagnostics-provenance.md`.
+
+v0.8.8 hardens the living-world diagnostics pack with stable induced-rule
+aliases, explicit process-boundary and temporal-order provenance, source-level
+coverage for the v0.8.8 pyxlog surface, and BFO reproducer-oriented
+documentation.
+
+### Native Induction Provenance
+
+- [x] Add native `InducedRuleProvenance`, `InducedRuleRegistry`, support-row,
+      alternative, and source-kind aliases for living-world induced-rule
+      consumers while preserving the Project 1 induction provenance registry.
+- [x] Preserve search-space size, predicate inventory, support rows, rejected
+      alternatives, falsification counts, stable rule ids, and generation trace
+      hashes without requiring Python-side law artifacts.
+
+### Delta, Temporal, and Neural Diagnostics
+
+- [x] Keep `LogicRelationSession.apply_relation_delta_debug(...)` visible in
+      pyxlog stubs and documentation with changed relation names, equivalence
+      evidence, and compact debug trace output.
+- [x] Extend temporal provenance docs and wrappers with `process_boundary` and
+      `temporal_order` metadata in addition to timestamp, dataset, row hash,
+      field hash, uncertainty, stream, order, and source metadata.
+- [x] Keep `CompiledProgram.neural_hot_loop_diagnostics()` documented as the
+      unified post-load transfer, control-plane, scalar-sync, CUDA graph, and
+      circuit-cache diagnostic surface.
+
+### Validation
+
+- [x] Add `python/tests/test_v088_lwm_source.py` for pyxlog stubs, docs, and
+      Rust/Python source-surface coverage.
+- [x] Add `docs/architecture/lwm-diagnostics-provenance.md` as the issue-by-
+      issue v0.8.8 architecture note.
+
 ## v0.8.9 - Universal Case Reasoner Diagnostic Pack
 
 Status: implementation branch `feat/v089-integrated-xlog-fixes`; not tagged.

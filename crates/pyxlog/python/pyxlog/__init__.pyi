@@ -92,8 +92,31 @@ class _V080RuntimeApiMixin:
         stream_id: Optional[str] = None,
         order_column: Optional[str] = None,
         source: Optional[str] = None,
+        process_boundary: Optional[str] = None,
+        temporal_order: Any = None,
     ) -> dict[str, Any]: ...
     def temporal_provenance(self, name: Optional[str] = None) -> dict[str, Any]: ...
+
+
+def put_temporal_relation(
+    session: Any,
+    name: str,
+    dlpack_columns: Any,
+    *,
+    timestamp_column: str,
+    dataset_id: Optional[str] = None,
+    row_hashes: Any = None,
+    field_hashes: Any = None,
+    uncertainty: Any = None,
+    stream_id: Optional[str] = None,
+    order_column: Optional[str] = None,
+    source: Optional[str] = None,
+    process_boundary: Optional[str] = None,
+    temporal_order: Any = None,
+) -> dict[str, Any]: ...
+
+
+def temporal_provenance(session: Any, name: str) -> dict[str, Any]: ...
 
 
 class _V080StreamingMixin:
@@ -109,7 +132,7 @@ class _V080StreamingMixin:
 # def delete_relation(self, name: str, dlpack_columns: Any) -> dict[str, Any]: ...
 # def apply_relation_delta(self, name: str, insert_columns: Optional[Any] = None, delete_columns: Optional[Any] = None) -> dict[str, Any]: ...
 # def delta_stats(self) -> dict[str, Any]: ...
-# def put_temporal_relation(self, name: str, dlpack_columns: Any, *, timestamp_column: str, dataset_id: Optional[str] = None, row_hashes: Optional[list[str]] = None, field_hashes: Optional[dict[str, list[str]]] = None, uncertainty: Any = None, stream_id: Optional[str] = None, order_column: Optional[str] = None, source: Optional[str] = None) -> dict[str, Any]: ...
+# def put_temporal_relation(self, name: str, dlpack_columns: Any, *, timestamp_column: str, dataset_id: Optional[str] = None, row_hashes: Optional[list[str]] = None, field_hashes: Optional[dict[str, list[str]]] = None, uncertainty: Any = None, stream_id: Optional[str] = None, order_column: Optional[str] = None, source: Optional[str] = None, process_boundary: Optional[str] = None, temporal_order: Any = None) -> dict[str, Any]: ...
 # def temporal_provenance(self, name: Optional[str] = None) -> dict[str, Any]: ...
 # def iter_chunks(self, chunk_rows: int = 1024) -> Iterator[LogicQueryChunk]: ...
 # def iter_query_chunks(self, chunk_rows: int = 1024) -> Iterator[LogicQueryChunk]: ...

@@ -59,7 +59,8 @@ pub use ast::{
 };
 pub use compile::{compile, Compiler};
 pub use diagnostics::{
-    query_proof_traces, rule_provenance, QueryProofTrace, RuleProvenance, RuleSourceKind,
+    build_query_proof_traces, build_rule_provenance, format_atom, query_proof_traces,
+    rule_provenance, QueryProofTrace, RuleProvenance, RuleSourceKind,
 };
 pub use expand::expand_program_functions;
 pub use incremental_parse::{

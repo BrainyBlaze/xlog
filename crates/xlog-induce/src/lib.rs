@@ -27,12 +27,12 @@ pub mod score;
 pub mod types;
 mod validate;
 
-pub use provenance::{
-    InducedRuleProvenance, InductionAlternative, InductionProvenanceRegistry, InductionSupportRow,
-    RuleSourceKind,
-};
+pub use provenance::InductionProvenanceRegistry;
 pub use reduce::{reduce_per_topology, ScoredPair};
-pub use types::{ExactInductionConfig, ExactInductionResult, ScoredCandidate, Topology};
+pub use types::{
+    ExactInductionConfig, ExactInductionResult, InducedRuleProvenance, InducedRuleRegistry,
+    InductionAlternative, InductionSupportRow, RuleSourceKind, ScoredCandidate, Topology,
+};
 
 use xlog_core::{RelId, Result, ScalarType, XlogError};
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
