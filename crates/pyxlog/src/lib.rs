@@ -422,6 +422,7 @@ pub(crate) struct LogicDeltaStats {
     pub coalesced_delete_rows: u64,
     pub canceled_rows: u64,
     pub equivalent_to_full_recompute: Option<bool>,
+    pub planner_telemetry: gpu_logic::DeltaPlannerTelemetry,
     pub debug_trace: Vec<String>,
 }
 

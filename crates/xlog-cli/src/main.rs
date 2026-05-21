@@ -10,8 +10,7 @@ use arrow::util::pretty::pretty_format_batches;
 use xlog_core::{symbol, MemoryBudget, Result, XlogError};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_gpu::logic::LogicProgram;
-use xlog_logic::ast::ProbEngine;
-use xlog_logic::ast::Program;
+use xlog_logic::ast::{BodyLiteral, CompOp, ProbEngine, Program, Term};
 use xlog_logic::compile::load_modules;
 #[cfg(feature = "host-io")]
 use xlog_logic::parse_program;
@@ -237,6 +236,7 @@ struct ExplainReport {
     parse_stats: xlog_logic::ParseCacheStats,
     magic_sets: MagicSetReport,
     aggregate_lifting: Vec<AggregateLiftReport>,
+    generated_rule_diagnostics: Vec<GeneratedRuleDiagnostic>,
     rule_provenance: Vec<RuleProvenance>,
     proof_traces: Vec<QueryProofTrace>,
     stratification_status: String,
@@ -254,6 +254,7 @@ fn build_explain_report(parsed: xlog_logic::IncrementalParseResult) -> Result<Ex
     let proof_traces = xlog_logic::query_proof_traces(&program, &rule_provenance);
     let magic_sets = magic_rewrite.report;
     let aggregate_lifting = explain_aggregate_lifting(&program)?;
+    let generated_rule_diagnostics = explain_generated_rule_diagnostics(&program);
     let (stratification_status, stratification_count) = match stratify(&program) {
         Ok(strata) => ("ok".to_string(), strata.len()),
         Err(err) => (format!("error: {}", err), 0),
@@ -274,6 +275,7 @@ fn build_explain_report(parsed: xlog_logic::IncrementalParseResult) -> Result<Ex
         parse_stats: parsed.stats,
         magic_sets,
         aggregate_lifting,
+        generated_rule_diagnostics,
         rule_provenance,
         proof_traces,
         stratification_status,
@@ -293,6 +295,269 @@ fn explain_aggregate_lifting(program: &Program) -> Result<Vec<AggregateLiftRepor
         return Ok(Vec::new());
     }
     Ok(xlog_prob::provenance::extract_from_program(program)?.aggregate_lifting)
+}
+
+struct GeneratedRuleDiagnostic {
+    rule_head: String,
+    source_relation: String,
+    row_decisions: Vec<GeneratedRuleRowDecision>,
+}
+
+struct GeneratedRuleRowDecision {
+    row_key: String,
+    accepted: bool,
+    failed_predicates: Vec<String>,
+    threshold_comparisons: Vec<ThresholdComparison>,
+    aggregate_inputs: Vec<String>,
+}
+
+struct ThresholdComparison {
+    predicate: String,
+    left: String,
+    op: String,
+    right: String,
+    left_value: String,
+    right_value: String,
+    passed: bool,
+}
+
+fn explain_generated_rule_diagnostics(program: &Program) -> Vec<GeneratedRuleDiagnostic> {
+    let mut diagnostics = Vec::new();
+    for rule in program
+        .rules
+        .iter()
+        .filter(|rule| !rule.body.is_empty() && generated_rule_candidate(rule))
+    {
+        let Some(source_atom) = rule.body.iter().find_map(|literal| match literal {
+            BodyLiteral::Positive(atom) if atom.predicate.starts_with("generated_") => Some(atom),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let mut row_decisions = Vec::new();
+        for fact in program.rules.iter().filter(|fact| {
+            fact.body.is_empty()
+                && fact.head.predicate == source_atom.predicate
+                && fact.head.terms.len() == source_atom.terms.len()
+        }) {
+            let mut bindings = HashMap::new();
+            for (pattern, value) in source_atom.terms.iter().zip(&fact.head.terms) {
+                if let Term::Variable(name) = pattern {
+                    bindings.insert(name.clone(), value.clone());
+                }
+            }
+
+            let mut threshold_comparisons = Vec::new();
+            for comparison in rule.body.iter().filter_map(|literal| match literal {
+                BodyLiteral::Comparison(comparison) => Some(comparison),
+                _ => None,
+            }) {
+                let left_value = bound_term(&comparison.left, &bindings);
+                let right_value = bound_term(&comparison.right, &bindings);
+                let passed = left_value
+                    .as_ref()
+                    .zip(right_value.as_ref())
+                    .and_then(|(left, right)| compare_terms(left, comparison.op, right))
+                    .unwrap_or(false);
+                threshold_comparisons.push(ThresholdComparison {
+                    predicate: format!(
+                        "{} {} {}",
+                        term_label(&comparison.left),
+                        comp_op_label(comparison.op),
+                        term_label(&comparison.right)
+                    ),
+                    left: term_label(&comparison.left),
+                    op: comp_op_label(comparison.op).to_string(),
+                    right: term_label(&comparison.right),
+                    left_value: left_value
+                        .as_ref()
+                        .map(term_label)
+                        .unwrap_or_else(|| "unbound".to_string()),
+                    right_value: right_value
+                        .as_ref()
+                        .map(term_label)
+                        .unwrap_or_else(|| "unbound".to_string()),
+                    passed,
+                });
+            }
+            let mut failed_predicates = predicate_failures(program, rule, source_atom, &bindings);
+            failed_predicates.extend(
+                threshold_comparisons
+                    .iter()
+                    .filter(|comparison| !comparison.passed)
+                    .map(|comparison| comparison.predicate.clone()),
+            );
+            row_decisions.push(GeneratedRuleRowDecision {
+                row_key: fact
+                    .head
+                    .terms
+                    .first()
+                    .map(term_label)
+                    .unwrap_or_else(|| source_atom.predicate.clone()),
+                accepted: failed_predicates.is_empty(),
+                failed_predicates,
+                threshold_comparisons,
+                aggregate_inputs: vec![format!(
+                    "{}({})",
+                    source_atom.predicate,
+                    fact.head
+                        .terms
+                        .iter()
+                        .map(term_label)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )],
+            });
+        }
+
+        if !row_decisions.is_empty() {
+            diagnostics.push(GeneratedRuleDiagnostic {
+                rule_head: rule.head.predicate.clone(),
+                source_relation: source_atom.predicate.clone(),
+                row_decisions,
+            });
+        }
+    }
+    diagnostics
+}
+
+fn generated_rule_candidate(rule: &xlog_logic::ast::Rule) -> bool {
+    rule.head.predicate.starts_with("generated_")
+        || rule.body.iter().any(|literal| match literal {
+            BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
+                atom.predicate.starts_with("generated_")
+            }
+            BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => false,
+        })
+}
+
+fn predicate_failures(
+    program: &Program,
+    rule: &xlog_logic::ast::Rule,
+    source_atom: &xlog_logic::ast::Atom,
+    bindings: &HashMap<String, Term>,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    for literal in &rule.body {
+        match literal {
+            BodyLiteral::Positive(atom) if atom.predicate != source_atom.predicate => {
+                if !matching_fact_exists(program, atom, bindings) {
+                    failures.push(atom_label(atom));
+                }
+            }
+            BodyLiteral::Negated(atom) => {
+                if matching_fact_exists(program, atom, bindings) {
+                    failures.push(format!("not {}", atom_label(atom)));
+                }
+            }
+            BodyLiteral::Positive(_)
+            | BodyLiteral::Comparison(_)
+            | BodyLiteral::IsExpr(_)
+            | BodyLiteral::Univ(_) => {}
+        }
+    }
+    failures
+}
+
+fn matching_fact_exists(
+    program: &Program,
+    atom: &xlog_logic::ast::Atom,
+    bindings: &HashMap<String, Term>,
+) -> bool {
+    program.rules.iter().any(|fact| {
+        fact.body.is_empty()
+            && fact.head.predicate == atom.predicate
+            && fact.head.terms.len() == atom.terms.len()
+            && atom
+                .terms
+                .iter()
+                .zip(&fact.head.terms)
+                .all(|(pattern, value)| match bound_term(pattern, bindings) {
+                    Some(bound) => bound == *value,
+                    None => false,
+                })
+    })
+}
+
+fn atom_label(atom: &xlog_logic::ast::Atom) -> String {
+    format!(
+        "{}({})",
+        atom.predicate,
+        atom.terms
+            .iter()
+            .map(term_label)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn bound_term(term: &Term, bindings: &HashMap<String, Term>) -> Option<Term> {
+    match term {
+        Term::Variable(name) => bindings.get(name).cloned(),
+        _ => Some(term.clone()),
+    }
+}
+
+fn compare_terms(left: &Term, op: CompOp, right: &Term) -> Option<bool> {
+    match (left, right) {
+        (Term::Integer(left), Term::Integer(right)) => Some(compare_i64(*left, op, *right)),
+        (Term::String(left), Term::String(right)) => match op {
+            CompOp::Eq => Some(left == right),
+            CompOp::Ne => Some(left != right),
+            _ => None,
+        },
+        (Term::Symbol(left), Term::Symbol(right)) => match op {
+            CompOp::Eq => Some(left == right),
+            CompOp::Ne => Some(left != right),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn compare_i64(left: i64, op: CompOp, right: i64) -> bool {
+    match op {
+        CompOp::Eq => left == right,
+        CompOp::Ne => left != right,
+        CompOp::Lt => left < right,
+        CompOp::Le => left <= right,
+        CompOp::Gt => left > right,
+        CompOp::Ge => left >= right,
+    }
+}
+
+fn comp_op_label(op: CompOp) -> &'static str {
+    match op {
+        CompOp::Eq => "==",
+        CompOp::Ne => "!=",
+        CompOp::Lt => "<",
+        CompOp::Le => "<=",
+        CompOp::Gt => ">",
+        CompOp::Ge => ">=",
+    }
+}
+
+fn term_label(term: &Term) -> String {
+    match term {
+        Term::Variable(name) => name.clone(),
+        Term::Anonymous => "_".to_string(),
+        Term::Integer(value) => value.to_string(),
+        Term::Float(value) => value.to_string(),
+        Term::String(value) => value.clone(),
+        Term::Symbol(id) => symbol::resolve(*id),
+        Term::List(items) => format!(
+            "[{}]",
+            items.iter().map(term_label).collect::<Vec<_>>().join(", ")
+        ),
+        Term::Cons { head, tail } => format!("{}|{}", term_label(head), term_label(tail)),
+        Term::Compound { functor, args } => format!(
+            "{}({})",
+            functor,
+            args.iter().map(term_label).collect::<Vec<_>>().join(", ")
+        ),
+        Term::PredRef(name) => name.clone(),
+        Term::Aggregate(agg) => format!("{:?}({})", agg.op, agg.variable),
+    }
 }
 
 fn print_explain_text(report: &ExplainReport) {
@@ -485,6 +750,8 @@ fn print_explain_json(report: &ExplainReport) {
     print_rule_provenance_json(&report.rule_provenance);
     println!(",");
     print_proof_traces_json(&report.proof_traces);
+    println!(",");
+    print_generated_rule_diagnostics_json(&report.generated_rule_diagnostics);
     println!("}}");
 }
 
@@ -543,6 +810,78 @@ fn print_proof_traces_json(entries: &[QueryProofTrace]) {
             "      \"rejected_alternatives\": {}",
             json_string_array(&entry.rejected_alternatives)
         );
+        println!("    }}{}", suffix);
+    }
+    println!("  ]");
+}
+
+fn print_generated_rule_diagnostics_json(entries: &[GeneratedRuleDiagnostic]) {
+    println!("  \"generated_rule_diagnostics\": [");
+    for (idx, entry) in entries.iter().enumerate() {
+        let suffix = if idx + 1 == entries.len() { "" } else { "," };
+        println!("    {{");
+        println!(
+            "      \"rule_head\": \"{}\",",
+            json_escape(&entry.rule_head)
+        );
+        println!(
+            "      \"source_relation\": \"{}\",",
+            json_escape(&entry.source_relation)
+        );
+        println!("      \"row_decisions\": [");
+        for (row_idx, row) in entry.row_decisions.iter().enumerate() {
+            let row_suffix = if row_idx + 1 == entry.row_decisions.len() {
+                ""
+            } else {
+                ","
+            };
+            println!("        {{");
+            println!("          \"row_key\": \"{}\",", json_escape(&row.row_key));
+            println!("          \"accepted\": {},", row.accepted);
+            println!(
+                "          \"failed_predicates\": {},",
+                json_string_array(&row.failed_predicates)
+            );
+            println!("          \"threshold_comparisons\": [");
+            for (comparison_idx, comparison) in row.threshold_comparisons.iter().enumerate() {
+                let comparison_suffix = if comparison_idx + 1 == row.threshold_comparisons.len() {
+                    ""
+                } else {
+                    ","
+                };
+                println!("            {{");
+                println!(
+                    "              \"predicate\": \"{}\",",
+                    json_escape(&comparison.predicate)
+                );
+                println!(
+                    "              \"left\": \"{}\",",
+                    json_escape(&comparison.left)
+                );
+                println!("              \"op\": \"{}\",", json_escape(&comparison.op));
+                println!(
+                    "              \"right\": \"{}\",",
+                    json_escape(&comparison.right)
+                );
+                println!(
+                    "              \"left_value\": \"{}\",",
+                    json_escape(&comparison.left_value)
+                );
+                println!(
+                    "              \"right_value\": \"{}\",",
+                    json_escape(&comparison.right_value)
+                );
+                println!("              \"passed\": {}", comparison.passed);
+                println!("            }}{}", comparison_suffix);
+            }
+            println!("          ],");
+            println!(
+                "          \"aggregate_inputs\": {}",
+                json_string_array(&row.aggregate_inputs)
+            );
+            println!("        }}{}", row_suffix);
+        }
+        println!("      ]");
         println!("    }}{}", suffix);
     }
     println!("  ]");

@@ -22,10 +22,12 @@ the DTS-DLM runtime completion and GPU-native optimizer pack: device-resident
 delta coalescing, relation-change callbacks, typed exact induction,
 profile-gated chain shared-memory scoring, runtime CSE, adaptive
 re-optimization, persistent hash-index reuse, and behavior-probe-backed
-consumer certification. The current v0.8.7 development worktree adds the
-Living-World Diagnostics and Provenance Pack: induced-rule provenance,
-source/generated rule provenance, proof traces, delta debug/equivalence probes,
-temporal relation metadata, and nn/4 hot-loop diagnostics.
+  consumer certification. The current v0.8.7 development worktree adds the
+  Living-World Diagnostics and Provenance Pack: induced/generated-rule
+  provenance, generated-rule row decisions, source rule provenance, proof
+  traces, native biomedical graph stream provenance, delta
+  debug/equivalence/planner telemetry, validation staging, temporal/general
+  relation evidence, and nn/4 lineage/hot-loop diagnostics.
 
 This roadmap is version-oriented so planned work is not hidden inside subsystem
 sections. Historical and current-main work uses checked boxes. Future work uses
@@ -1630,9 +1632,11 @@ are still pending. Architecture source of truth:
 `docs/architecture/living-world-diagnostics-v087.md`.
 
 v0.8.7 closes the living-world auditability gaps without changing the production
-data path. New surfaces report rule metadata, proof frontiers, relation-delta
-counters, temporal/source metadata, and neural hot-loop state; they do not force
-host row materialization unless the caller already selected a host-readable API.
+data path. New surfaces report rule metadata, generated-rule row decisions,
+proof frontiers, streamed graph provenance, relation-delta planner telemetry,
+validation staging events, relation evidence, and neural lineage/hot-loop state;
+they do not force host row materialization unless the caller already selected a
+host-readable API.
 
 ### Rule And Proof Diagnostics
 
@@ -1640,6 +1644,9 @@ host row materialization unless the caller already selected a host-readable API.
       `RuleSourceKind`, and `QueryProofTrace`.
 - [x] Extend `xlog explain` text and JSON reports with `rule_provenance` and
       `proof_traces`, including generated magic-set rewrite rules when present.
+- [x] Extend `xlog explain --format json` with `generated_rule_diagnostics`
+      row decisions, failed predicates, threshold comparisons, and aggregate
+      inputs for accepted and rejected generated-rule rows.
 - [x] Expose `rule_provenance()` and `proof_traces()` from deterministic
       pyxlog programs, persistent relation sessions, and probabilistic pyxlog
       programs.
@@ -1655,14 +1662,24 @@ host row materialization unless the caller already selected a host-readable API.
 
 ### Delta And Temporal Diagnostics
 
+- [x] Add native biomedical graph streaming through `xlog_gpu::biokg`, covering
+      JSONL/CSV/N-Triples edge streams, typed edge sinks, row hashes, relation
+      histograms, split provenance, and bounded-memory chunk diagnostics.
 - [x] Extend persistent-session delta reports with `changed_relation_names` and
       metadata-only `debug_trace` entries.
 - [x] Add `LogicRelationSession.apply_relation_delta_debug(...)` with opt-in
       `check_equivalence=True` full-recompute comparison through query-store
       equivalence.
+- [x] Add `DeltaPlannerTelemetry` with affected SCCs, cache reuse, fallback
+      decisions, estimated/measured speedup, and planner guidance.
 - [x] Add pyxlog temporal relation helpers that attach `timestamp_column`,
       `dataset_id`, row hashes, field hashes, uncertainty metadata, stream id,
       ordering column, and source metadata to session-managed relations.
+- [x] Add pyxlog general relation evidence APIs:
+      `put_relation_with_provenance(...)`, `evidence(...)`, and
+      `RelationEvidence.provenance()`.
+- [x] Add promote-only-on-PASS validation staging via
+      `scripts.validation_staging.ValidationStagingRun`.
 
 ### Neural Hot-Loop Diagnostics
 
@@ -1670,6 +1687,9 @@ host row materialization unless the caller already selected a host-readable API.
       transfer stats, CUDA Graph counters, circuit-cache counters, and explicit
       unavailable statuses for unsupported per-iteration control-plane and
       scalar-sync counters.
+- [x] Add nn/4 lineage APIs for `checkpoint_hash`, `split_hashes`,
+      `calibration_metrics`, `cuda_device`, `influence_audit`, and
+      `changed_acceptance` records.
 
 ### Documentation And Validation
 
@@ -1677,8 +1697,10 @@ host row materialization unless the caller already selected a host-readable API.
       `docs/architecture/living-world-diagnostics-v087.md`.
 - [x] Update the Python bindings, CLI reference, and bounded exact-induction
       architecture docs for the new public surfaces.
-- [x] Add source-level coverage for the v0.8.7 Python diagnostics API surface
-      and Rust tests for CLI explain diagnostics plus induction provenance.
+- [x] Add source-level coverage for the v0.8.7 Python diagnostics API surface,
+      validation staging, Rust tests for CLI generated-rule diagnostics,
+      biomedical graph streaming, relation-delta planner telemetry, and
+      induction provenance.
 
 ## v0.9.0 - Epistemic and Solver Semantics
 

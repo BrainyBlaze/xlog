@@ -23,14 +23,31 @@ All notable changes to this project are documented in this file.
 - Added `CompiledProgram.neural_hot_loop_diagnostics()` with transfer,
   CUDA Graph, circuit-cache, and explicit unavailable-status diagnostics for
   unsupported hot-loop counters.
+- Added native biomedical graph stream ingestion telemetry through
+  `xlog_gpu::biokg`, including JSONL/CSV/N-Triples parsing, typed edge sinks,
+  row hashes, relation/split histograms, and bounded-memory chunk diagnostics.
+- Added `xlog explain --format json` generated-rule row diagnostics with
+  accepted/rejected row decisions, failed predicates, threshold comparisons,
+  and aggregate inputs.
+- Added pyxlog session evidence APIs:
+  `put_relation_with_provenance(...)`, `evidence(...)`, and
+  `RelationEvidence.provenance()`.
+- Added pyxlog nn/4 lineage metadata for checkpoint hashes, split hashes,
+  calibration metrics, CUDA device, influence audits, and changed-acceptance
+  records.
+- Added `DeltaPlannerTelemetry` for relation-delta cache reuse, fallback
+  decisions, affected SCCs, estimated/measured speedup, and planner advice.
+- Added `scripts.validation_staging.ValidationStagingRun` so long-running
+  validation artifacts promote to canonical evidence only after a complete PASS.
 
 ### Changed
 
 - Updated README and ROADMAP status to describe the `v0.8.7-dev`
   diagnostics/provenance worktree while keeping `v0.8.6` as the latest tagged
   release.
-- Updated architecture docs for Python bindings, CLI explain diagnostics, and
-  bounded exact-induction provenance.
+- Updated architecture docs for Python bindings, CLI explain diagnostics,
+  GPU execution, bounded exact-induction provenance, relation evidence, graph
+  ingestion, delta planner telemetry, nn/4 lineage, and validation staging.
 
 ## [0.8.6] — 2026-05-19
 

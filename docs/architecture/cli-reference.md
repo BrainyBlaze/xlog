@@ -143,12 +143,15 @@ xlog explain [OPTIONS] <SOURCE>
 
 Text output prints compact sections for parse stats, magic-set rewrites,
 aggregate lifting, rule provenance, proof traces, stratification, RIR, and
-optimizer status. JSON output includes full `rule_provenance` and
-`proof_traces` arrays. The rule provenance records contain `rule_id`, `head`,
-`source_kind`, `source_span`, `generation_trace_hash`,
+optimizer status. JSON output includes full `rule_provenance`, `proof_traces`,
+and `generated_rule_diagnostics` arrays. The rule provenance records contain
+`rule_id`, `head`, `source_kind`, `source_span`, `generation_trace_hash`,
 `support_relation_ids`, and `counterexample_relation_ids`. Proof trace records
 contain `query_id`, `query`, `answer_relation`, `rule_ids`, `source_facts`, and
-`rejected_alternatives`.
+`rejected_alternatives`. Generated-rule diagnostics contain `row_decisions`
+with `row_key`, `accepted`, `failed_predicates`, `threshold_comparisons`, and
+`aggregate_inputs` so accepted and rejected generated rows can be audited from
+the CLI JSON report.
 
 `--format dot` prints the magic-set dependency graph.
 

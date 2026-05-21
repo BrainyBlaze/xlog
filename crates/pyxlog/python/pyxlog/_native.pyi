@@ -368,6 +368,10 @@ class CompiledProgram:
         """
         ...
 
+    # Top-level pyxlog wraps register_network with nn/4 lineage metadata:
+    # checkpoint_hash, split_hashes, calibration_metrics, cuda_device,
+    # influence_audit, nn4_lineage, record_nn4_influence, changed_acceptance.
+
     def register_embedding(
         self,
         name: str,

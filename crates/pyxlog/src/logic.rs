@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -353,6 +354,7 @@ impl LogicRelationSession {
     ) -> PyResult<PyObject> {
         let (batch, relation_names) =
             self.parse_relation_delta_batch("apply_relation_delta_debug", updates)?;
+        let delta_start = Instant::now();
         let report = self
             .program
             .apply_relation_delta_batch_with_session_runtime(
@@ -363,8 +365,10 @@ impl LogicRelationSession {
                 batch,
             )
             .map_err(types::xlog_err)?;
+        let delta_micros = delta_start.elapsed().as_micros().max(1) as u64;
         let mut stats = logic_delta_stats_from_report(report);
         if check_equivalence {
+            let full_start = Instant::now();
             let (_, full_store) = self
                 .program
                 .evaluate_with_relation_store_and_cache(
@@ -373,6 +377,7 @@ impl LogicRelationSession {
                     false,
                 )
                 .map_err(types::xlog_err)?;
+            let full_micros = full_start.elapsed().as_micros() as u64;
             let cached_store = self.evaluation_store.as_ref().ok_or_else(|| {
                 PyRuntimeError::new_err("delta debug missing cached store after delta application")
             })?;
@@ -385,6 +390,18 @@ impl LogicRelationSession {
                     )
                     .map_err(types::xlog_err)?,
             );
+            let speedup = full_micros as f64 / delta_micros as f64;
+            stats.planner_telemetry.measured_delta_speedup = Some(speedup);
+            if speedup >= 1.0 {
+                stats
+                    .planner_telemetry
+                    .planner_advice
+                    .push(format!("delta path is faster by {speedup:.2}x"));
+            } else {
+                stats.planner_telemetry.planner_advice.push(format!(
+                    "full recompute may be faster; delta measured {speedup:.2}x"
+                ));
+            }
         }
         self.last_delta_stats = Some(stats.clone());
         self.fire_relation_callbacks(py, &relation_names, &stats)?;
@@ -641,6 +658,7 @@ impl LogicRelationSession {
             coalesced_delete_rows: report.coalesced_delete_rows,
             canceled_rows: report.canceled_rows,
             equivalent_to_full_recompute: None,
+            planner_telemetry: report.planner_telemetry,
             debug_trace: report.debug_trace,
         };
         self.last_delta_stats = Some(stats.clone());
@@ -732,6 +750,7 @@ fn logic_delta_stats_from_report(report: gpu_logic::LogicDeltaReport) -> LogicDe
         coalesced_delete_rows: report.coalesced_delete_rows,
         canceled_rows: report.canceled_rows,
         equivalent_to_full_recompute: None,
+        planner_telemetry: report.planner_telemetry,
         debug_trace: report.debug_trace,
     }
 }
@@ -758,7 +777,27 @@ fn pack_delta_stats(py: Python<'_>, stats: &LogicDeltaStats) -> PyResult<PyObjec
         "equivalent_to_full_recompute",
         stats.equivalent_to_full_recompute,
     )?;
+    dict.set_item(
+        "planner_telemetry",
+        pack_delta_planner_telemetry(py, &stats.planner_telemetry)?,
+    )?;
     dict.set_item("debug_trace", stats.debug_trace.clone())?;
+    Ok(dict.into())
+}
+
+fn pack_delta_planner_telemetry(
+    py: Python<'_>,
+    telemetry: &gpu_logic::DeltaPlannerTelemetry,
+) -> PyResult<PyObject> {
+    let dict = PyDict::new(py);
+    dict.set_item("cache_reused", telemetry.cache_reused)?;
+    dict.set_item("fallback_decision", telemetry.fallback_decision.clone())?;
+    dict.set_item("affected_sccs", telemetry.affected_sccs)?;
+    dict.set_item("recomputed_sccs", telemetry.recomputed_sccs)?;
+    dict.set_item("incremental_sccs", telemetry.incremental_sccs)?;
+    dict.set_item("estimated_delta_speedup", telemetry.estimated_delta_speedup)?;
+    dict.set_item("measured_delta_speedup", telemetry.measured_delta_speedup)?;
+    dict.set_item("planner_advice", telemetry.planner_advice.clone())?;
     Ok(dict.into())
 }
 

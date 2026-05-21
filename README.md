@@ -7,8 +7,10 @@
 > **Branch status:** `v0.8.7-dev` - Living-World Diagnostics and Provenance
 > Pack. This worktree layers generated-rule provenance, source/generated rule
 > provenance, direct query proof traces, relation-delta debug summaries with
-> optional full-recompute equivalence probes, temporal relation metadata, and
-> nn/4 hot-loop diagnostics over the v0.8.6 DTS-DLM runtime completion surface.
+> optional full-recompute equivalence probes and planner telemetry, native
+> biomedical graph stream provenance, validation evidence staging, temporal and
+> general relation evidence APIs, and nn/4 lineage/hot-loop diagnostics over the
+> v0.8.6 DTS-DLM runtime completion surface.
 > The latest tagged release remains `v0.8.6`; published artifacts may lag this
 > workspace. See `ROADMAP.md`, `CHANGELOG.md`,
 > `docs/architecture/living-world-diagnostics-v087.md`,
@@ -66,7 +68,7 @@ XLOG is not a DSL bolted onto a tensor framework. It is a full typed logic progr
 | **Probabilistic** | Exact inference via knowledge compilation (D4 -> XGCF), Monte Carlo sampling, WFS negation |
 | **v0.8.5 language** | Finite `list<T>` and `term` surfaces, safe `findall` / `maplist` / inspection predicates, deterministic NAF, magic sets, aggregate lifting, approximate-inference pragmas |
 | **v0.8.6 runtime** | Delta coalescing, relation callbacks, typed exact induction, chain shared-memory scoring, runtime CSE, adaptive re-optimization, persistent hash-index reuse, behavior-probe consumer certification |
-| **v0.8.7 diagnostics** | Generated-rule provenance, source/generated rule provenance, proof traces, delta debug/equivalence probes, temporal relation metadata, nn/4 hot-loop diagnostics |
+| **v0.8.7 diagnostics** | Generated-rule row decisions, source/generated rule provenance, proof traces, native biomedical graph stream provenance, delta planner telemetry/equivalence probes, validation staging, temporal/general relation evidence, nn/4 lineage and hot-loop diagnostics |
 | **Neural-symbolic** | Neural predicates (`nn/k`), PyTorch autograd integration, circuit caching, term embeddings |
 | **dILP training** | Sparse GPU mask, deterministic mode, promotion pipeline, holdout validation, artifact save/load |
 | **Bounded exact induction** | `xlog-induce` plus `ilp_exact` CUDA scoring with top-K per topology and fixed-size D2H summaries |

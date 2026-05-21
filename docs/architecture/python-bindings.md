@@ -205,7 +205,10 @@ The delta stats dictionary contains `changed_relations`, `insert_rows`,
 `delete_rows`, `affected_sccs`, `recomputed_sccs`, `incremental_sccs`,
 `input_delta_count`, `coalesced_insert_rows`, `coalesced_delete_rows`, and
 `canceled_rows`. v0.8.7 delta debug output also includes
-`changed_relation_names`, `equivalent_to_full_recompute`, and `debug_trace`.
+`changed_relation_names`, `equivalent_to_full_recompute`, `debug_trace`, and
+nested `planner_telemetry`. Planner telemetry reports `cache_reused`,
+`fallback_decision`, affected/recomputed/incremental SCC counts,
+`estimated_delta_speedup`, `measured_delta_speedup`, and `planner_advice`.
 `equivalent_to_full_recompute` is `None` unless the caller opts into
 `check_equivalence=True`.
 Batch updates coalesce repeated relation mutations before runtime recompute
@@ -288,6 +291,39 @@ The temporal metadata shape preserves `timestamp_column`, `dataset_id`,
 `row_hashes`, `field_hashes`, `uncertainty`, `stream_id`, source, and temporal
 order via `order_column`.
 
+General relation evidence uses the same session-side provenance store without
+requiring temporal columns:
+
+```python
+session.put_relation_with_provenance(
+    "biokg_edge",
+    columns,
+    relation_schema=["subject", "predicate", "object"],
+    source_path="primekg_edges.jsonl",
+    source_hash="sha256:...",
+    row_hashes=row_hashes,
+    accepted_count=len(row_hashes),
+    rejected_count=0,
+    output_path="evidence/biokg_edge.arrow",
+    output_hash="sha256:...",
+)
+session.evidence()
+session.relation("biokg_edge").provenance()
+```
+
+```python
+def evidence(name: str | None = None) -> dict: ...
+def relation(name: str) -> RelationEvidence: ...
+class RelationEvidence:
+    def provenance(self) -> dict: ...
+```
+
+`Session.evidence()` returns a `program_hash` and per-relation dictionaries.
+`Relation.provenance()` / `RelationEvidence.provenance()` returns the stored
+`relation_schema`, `source_hash`, `row_hashes`, `field_hashes`,
+`accepted_count`, `rejected_count`, `output_path`, `output_hash`, and
+`decision_counts` fields.
+
 #### v0.8.0 Runtime Controls And Diagnostics
 
 Long-running DTS-DLM callers can submit logic or probabilistic evaluations to a
@@ -352,6 +388,33 @@ reports `post_load_dtoh_bytes`, `post_load_htod_bytes`,
 `cuda_graph`, and nested `circuit_cache` diagnostics from the same runtime API.
 When this runtime cannot yet provide a separate control-plane or scalar-sync
 counter, the corresponding value is `None` and a `*_status` field explains why.
+The top-level `pyxlog` wrapper also carries nn/4 training lineage:
+
+```python
+program.register_network(
+    "mnist_net",
+    net,
+    optimizer,
+    checkpoint_hash="sha256:...",
+    split_hashes={"train": "sha256:...", "validation": "sha256:..."},
+    calibration_metrics={"ece": 0.03},
+    cuda_device=0,
+    influence_audit={"calibration_set": "heldout-a"},
+)
+program.record_nn4_influence(
+    "mnist_net",
+    query="addition(0, 1, 1)",
+    changed_acceptance=True,
+    before=False,
+    after=True,
+)
+program.nn4_lineage()
+program.neural_hot_loop_diagnostics()["nn4_lineage"]
+```
+
+The lineage payload contains `checkpoint_hash`, `split_hashes`,
+`calibration_metrics`, `cuda_device`, `influence_audit`, and
+`changed_acceptance` evidence recorded through `record_nn4_influence(...)`.
 
 ### Program (Probabilistic)
 
