@@ -21,11 +21,16 @@
 //!                     go green with real candidates.
 
 pub mod index;
+pub mod provenance;
 pub mod reduce;
 pub mod score;
 pub mod types;
 mod validate;
 
+pub use provenance::{
+    InducedRuleProvenance, InductionAlternative, InductionProvenanceRegistry, InductionSupportRow,
+    RuleSourceKind,
+};
 pub use reduce::{reduce_per_topology, ScoredPair};
 pub use types::{ExactInductionConfig, ExactInductionResult, ScoredCandidate, Topology};
 

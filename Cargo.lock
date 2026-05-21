@@ -2317,6 +2317,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "cudarc",
+ "serde_json",
  "thiserror",
  "xlog-core",
  "xlog-cuda",

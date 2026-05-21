@@ -4,12 +4,50 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
-v0.8.9 Universal Case Reasoner Diagnostic Pack. This branch promotes the
-reusable XLOG and pyxlog gaps exposed by the BFO Universal Case Reasoner into
-core APIs, focused regressions, and release-facing documentation.
+v0.8.9 Integrated BFO Diagnostics Pack. This branch consolidates the reusable
+XLOG and pyxlog gaps exposed by the BFO Autonomous Science Engine, Living World
+Model, and Universal Case Reasoner into core APIs, focused regressions, and
+release-facing documentation. It includes the Project 1/v0.8.7 diagnostics and
+biomedical graph fixes, the v0.8.8 living-world provenance refinements, and the
+v0.8.9 UCR diagnostic surfaces.
 
 ### Added
 
+- Added the v0.8.7 Living-World Diagnostics architecture document covering
+  induced-rule provenance, rule provenance, proof traces, delta debug,
+  temporal relation metadata, and neural hot-loop diagnostics.
+- Added shared `xlog-logic` rule provenance and query proof trace diagnostics,
+  surfaced through `xlog explain --format json` and pyxlog
+  `rule_provenance()` / `proof_traces()` methods.
+- Added `xlog-induce` generated-rule provenance records with support rows,
+  rejected alternatives, falsification counts, predicate inventory, and a
+  stable generation trace hash.
+- Added pyxlog persistent-session delta debug output with changed relation
+  names, metadata-only debug traces, and an opt-in full-recompute equivalence
+  check.
+- Added pyxlog temporal relation metadata helpers for session-managed
+  relations.
+- Added `CompiledProgram.neural_hot_loop_diagnostics()` with transfer,
+  CUDA Graph, circuit-cache, and explicit unavailable-status diagnostics for
+  unsupported hot-loop counters.
+- Added native biomedical graph stream ingestion telemetry through
+  `xlog_gpu::biokg`, including JSONL/CSV/N-Triples parsing, typed edge sinks,
+  row hashes, relation/split histograms, and bounded-memory chunk diagnostics.
+- Added `xlog explain --format json` generated-rule row diagnostics with
+  accepted/rejected row decisions, failed predicates, threshold comparisons,
+  and aggregate inputs. The CLI now also binds external candidate relation rows
+  from colocated execution manifests so BFO generated HF rules produce non-empty
+  row-level diagnostics through the XLOG explain surface.
+- Added pyxlog session evidence APIs:
+  `put_relation_with_provenance(...)`, `evidence(...)`, and
+  `RelationEvidence.provenance()`.
+- Added pyxlog nn/4 lineage metadata for checkpoint hashes, split hashes,
+  calibration metrics, CUDA device, influence audits, and changed-acceptance
+  records.
+- Added `DeltaPlannerTelemetry` for relation-delta cache reuse, fallback
+  decisions, affected SCCs, estimated/measured speedup, and planner advice.
+- Added `scripts.validation_staging.ValidationStagingRun` so long-running
+  validation artifacts promote to canonical evidence only after a complete PASS.
 - Added `pyxlog.ilp.neurosymbolic.train_neurosymbolic_program(...)` for one
   source that combines `nn/4` declarations, trainable symbolic rules, and a
   training objective that updates neural parameters plus symbolic rule weights.
@@ -38,13 +76,17 @@ core APIs, focused regressions, and release-facing documentation.
 
 ### Changed
 
+- Updated architecture docs for Python bindings, CLI explain diagnostics,
+  GPU execution, bounded exact-induction provenance, relation evidence, graph
+  ingestion, delta planner telemetry, nn/4 lineage, validation staging, UCR
+  dILP diagnostics, and transfer diagnostics.
 - `train_and_promote(...)` now accepts training-fold, held-out-domain, and
   base-kernel checksum metadata so promotion results can carry reusable transfer
   audit evidence.
 - `pyxlog` can import pure-Python helper modules when `pyxlog._native` is absent;
   native-backed entry points still fail explicitly instead of pretending to run.
 - README, roadmap, dILP architecture, and Python binding docs now describe the
-  unreleased v0.8.9 UCR diagnostic surfaces and BFO validation package.
+  unreleased integrated v0.8.9 BFO diagnostic surfaces and validation packages.
 
 ### Fixed
 
@@ -54,6 +96,10 @@ core APIs, focused regressions, and release-facing documentation.
 
 ### Tests
 
+- Added Project 1/v0.8.7-focused source and regression coverage for generated
+  rule diagnostics, biomedical graph streaming, relation-delta planner
+  telemetry, pyxlog evidence APIs, nn/4 training lineage, and validation
+  staging.
 - Added focused regressions for UCR-XLOG-001 through UCR-XLOG-006:
   `python/tests/test_nn4_dilp_training_surface.py`,
   `crates/xlog-logic/tests/differentiable_proof_trace.rs`,

@@ -13,9 +13,13 @@ The `pyxlog` Python module provides:
 - v0.8.9 UCR diagnostics for learned-rule inventories, CUDA hot-loop audits, and grouped transfer metrics
 - Zero-copy GPU tensor exchange via DLPack (primary interop boundary)
 - Optional experimental Arrow C Device interop (feature-gated)
+- v0.8.7 diagnostics for rule provenance, proof traces, relation delta debug,
+  temporal relation metadata, and neural hot-loop audits
 
 Host-read convenience outputs (probabilities, gradients, confidence intervals) are behind a `host-io`
 Cargo feature so GPU-native call sites can enforce a "no DTOH for results" contract.
+For the full v0.8.7 diagnostics map, see
+[`living-world-diagnostics-v087.md`](living-world-diagnostics-v087.md).
 
 ## Installation
 
@@ -190,14 +194,27 @@ session.apply_relation_delta_batch([
     {"name": "wmir_committed", "insert_columns": [row_a, parent_a]},
     {"name": "wmir_committed", "delete_columns": [row_b, parent_b]},
 ])
+
+def apply_relation_delta_debug(updates, check_equivalence=False) -> dict: ...
+debug = session.apply_relation_delta_debug(
+    [{"name": "wmir_committed", "insert_columns": [row_c, parent_c]}],
+    check_equivalence=True,
+)
 ```
 
 The delta stats dictionary contains `changed_relations`, `insert_rows`,
 `delete_rows`, `affected_sccs`, `recomputed_sccs`, `incremental_sccs`,
 `input_delta_count`, `coalesced_insert_rows`, `coalesced_delete_rows`, and
-`canceled_rows`. Batch updates coalesce repeated relation mutations before
-runtime recompute using existing device-resident set operations; callback or
-diagnostic code must not materialize relation rows on the host.
+`canceled_rows`. v0.8.7 delta debug output also includes
+`changed_relation_names`, `equivalent_to_full_recompute`, `debug_trace`, and
+nested `planner_telemetry`. Planner telemetry reports `cache_reused`,
+`fallback_decision`, affected/recomputed/incremental SCC counts,
+`estimated_delta_speedup`, `measured_delta_speedup`, and `planner_advice`.
+`equivalent_to_full_recompute` is `None` unless the caller opts into
+`check_equivalence=True`.
+Batch updates coalesce repeated relation mutations before runtime recompute
+using existing device-resident set operations; callback or diagnostic code must
+not materialize relation rows on the host.
 Direct `put_relation`, `remove_relation`, or `clear_relations` calls invalidate
 the cached runtime store and make the next `evaluate()` perform a full plan
 run before later deltas can reuse it.
@@ -239,6 +256,74 @@ G086_NOTIFY ordering fixture records 100 replays with identical callback
 sequences. Callback payload construction does not export DLPack tensors or
 download relation data-plane rows; use explicit `evaluate()` or
 `export_relation()` when row materialization is actually requested.
+
+#### Rule, Proof, And Temporal Provenance
+
+Compiled logic/probabilistic programs and sessions expose source-level introspection:
+
+```python
+def rule_provenance() -> list[dict]: ...
+def proof_traces() -> list[dict]: ...
+```
+
+`rule_provenance()` returns stable `rule_id`, `source_kind`,
+`generation_trace_hash`, `support_relation_ids`, and
+`counterexample_relation_ids` fields. `proof_traces()` returns each query's
+answer relation, deriving rule ids, source facts, and rejected alternatives.
+
+Temporal stream loads can keep provenance metadata next to the relation:
+
+```python
+session.put_temporal_relation(
+    "stream_row",
+    columns,
+    timestamp_column="event_ts",
+    dataset_id="hf-live",
+    row_hashes=row_hashes,
+    field_hashes=field_hashes,
+    uncertainty=uncertainty,
+    stream_id="camera-a",
+    order_column="seq",
+)
+session.temporal_provenance("stream_row")
+```
+
+The temporal metadata shape preserves `timestamp_column`, `dataset_id`,
+`row_hashes`, `field_hashes`, `uncertainty`, `stream_id`, source, and temporal
+order via `order_column`.
+
+General relation evidence uses the same session-side provenance store without
+requiring temporal columns:
+
+```python
+session.put_relation_with_provenance(
+    "biokg_edge",
+    columns,
+    relation_schema=["subject", "predicate", "object"],
+    source_path="primekg_edges.jsonl",
+    source_hash="sha256:...",
+    row_hashes=row_hashes,
+    accepted_count=len(row_hashes),
+    rejected_count=0,
+    output_path="evidence/biokg_edge.arrow",
+    output_hash="sha256:...",
+)
+session.evidence()
+session.relation("biokg_edge").provenance()
+```
+
+```python
+def evidence(name: str | None = None) -> dict: ...
+def relation(name: str) -> RelationEvidence: ...
+class RelationEvidence:
+    def provenance(self) -> dict: ...
+```
+
+`Session.evidence()` returns a `program_hash` and per-relation dictionaries.
+`Relation.provenance()` / `RelationEvidence.provenance()` returns the stored
+`relation_schema`, `source_hash`, `row_hashes`, `field_hashes`,
+`accepted_count`, `rejected_count`, `output_path`, `output_hash`, and
+`decision_counts` fields.
 
 #### v0.8.0 Runtime Controls And Diagnostics
 
@@ -287,6 +372,8 @@ program.progress_stats()
 program.memory_stats()
 program.host_transfer_stats()
 program.cuda_graph_stats()
+def neural_hot_loop_diagnostics() -> dict: ...
+program.neural_hot_loop_diagnostics()
 ```
 
 `memory_stats()` reports `allocated_bytes`, `memory_limit_bytes`,
@@ -295,6 +382,40 @@ program.cuda_graph_stats()
 `csm_cuda_graph_fallbacks`, and `csm_cuda_graph_cache_hits`. Environments that
 cannot provide a future diagnostic must report an explicit unavailable status or
 error rather than fabricating a zero-valued probe.
+
+`neural_hot_loop_diagnostics()` is the unified nn/4 hot-loop audit surface. It
+reports `post_load_dtoh_bytes`, `post_load_htod_bytes`,
+`control_plane_bytes_per_iteration`, `scalar_sync_checks`, nested
+`cuda_graph`, and nested `circuit_cache` diagnostics from the same runtime API.
+When this runtime cannot yet provide a separate control-plane or scalar-sync
+counter, the corresponding value is `None` and a `*_status` field explains why.
+The top-level `pyxlog` wrapper also carries nn/4 training lineage:
+
+```python
+program.register_network(
+    "mnist_net",
+    net,
+    optimizer,
+    checkpoint_hash="sha256:...",
+    split_hashes={"train": "sha256:...", "validation": "sha256:..."},
+    calibration_metrics={"ece": 0.03},
+    cuda_device=0,
+    influence_audit={"calibration_set": "heldout-a"},
+)
+program.record_nn4_influence(
+    "mnist_net",
+    query="addition(0, 1, 1)",
+    changed_acceptance=True,
+    before=False,
+    after=True,
+)
+program.nn4_lineage()
+program.neural_hot_loop_diagnostics()["nn4_lineage"]
+```
+
+The lineage payload contains `checkpoint_hash`, `split_hashes`,
+`calibration_metrics`, `cuda_device`, `influence_audit`, and
+`changed_acceptance` evidence recorded through `record_nn4_influence(...)`.
 
 ### Program (Probabilistic)
 
@@ -965,13 +1086,18 @@ for batch in data_loader:
 Current limitations:
 - Linux x86_64 + CUDA only
 - Published PyPI wheels follow tagged releases and may lag the current `main` branch workspace version
-- v0.8.0 async evaluation and per-call memory APIs require this branch's
-  workspace build until the next tagged wheel is published
+- v0.8.0 async evaluation and per-call memory APIs require this workspace build
+  until the next tagged wheel is published
+- v0.8.7/v0.8.9 diagnostics APIs require this workspace build until the next
+  tagged wheel is published
 - Pure-Python helper modules can import without `pyxlog._native`, but
   native-backed compile/evaluate APIs still require the PyO3 extension
 
 ## See Also
 
+- [v0.8.7 Living-World Diagnostics](living-world-diagnostics-v087.md) — Rule
+  provenance, proof traces, delta debug, temporal metadata, and nn/4 hot-loop
+  audit surface
 - [dILP Training Architecture](dilp-training.md) — System design, mask backends, promotion pipeline
 - [Universal Case Reasoner Diagnostics](ucr-xlog-diagnostics.md) — v0.8.9 reusable UCR audit surfaces
 - [Data Interoperability](cudf-interop.md) — DLPack and Arrow details

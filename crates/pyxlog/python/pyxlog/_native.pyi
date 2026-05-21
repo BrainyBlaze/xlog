@@ -51,6 +51,14 @@ class CompiledLogicProgram:
         """Return memory-limit, current-allocation, and peak-memory diagnostics."""
         ...
 
+    def rule_provenance(self) -> list[dict[str, Any]]:
+        """Return rule ids, source kinds, trace hashes, and support relation ids."""
+        ...
+
+    def proof_traces(self) -> list[dict[str, Any]]:
+        """Return direct query proof traces naming source facts and rule ids."""
+        ...
+
     def session(self) -> LogicRelationSession:
         """Create a stateful session for incremental relation updates."""
         ...
@@ -94,8 +102,24 @@ class LogicRelationSession:
         """
         ...
 
+    def apply_relation_delta_debug(
+        self,
+        updates: list[dict[str, Any]],
+        check_equivalence: bool = False,
+    ) -> dict[str, Any]:
+        """Apply a delta batch and return changed_relation_names, debug_trace, and optional equivalent_to_full_recompute."""
+        ...
+
     def delta_stats(self) -> dict[str, Any]:
         """Return statistics from the most recent relation delta update."""
+        ...
+
+    def rule_provenance(self) -> list[dict[str, Any]]:
+        """Return rule ids, source kinds, trace hashes, and support relation ids."""
+        ...
+
+    def proof_traces(self) -> list[dict[str, Any]]:
+        """Return direct query proof traces naming source facts and rule ids."""
         ...
 
     def register_relation_callback(self, callback: Any) -> int:
@@ -125,6 +149,15 @@ class LogicRelationSession:
 
     def cuda_graph_stats(self) -> dict[str, int]:
         """Return CUDA Graph capture, launch, fallback, and cache-hit counters."""
+        ...
+
+    def neural_hot_loop_diagnostics(self) -> dict[str, Any]:
+        """Return unified nn/4 hot-loop diagnostics.
+
+        Keys include ``post_load_dtoh_bytes``, ``post_load_htod_bytes``,
+        ``control_plane_bytes_per_iteration``, ``scalar_sync_checks``,
+        ``cuda_graph``, and ``circuit_cache``.
+        """
         ...
 
     def memory_stats(self) -> dict[str, Any]:
@@ -242,6 +275,14 @@ class CompiledProgram:
         """
         ...
 
+    def rule_provenance(self) -> list[dict[str, Any]]:
+        """Return rule ids, source kinds, trace hashes, and support relation ids."""
+        ...
+
+    def proof_traces(self) -> list[dict[str, Any]]:
+        """Return direct query proof traces naming source facts and rule ids."""
+        ...
+
     def host_transfer_stats(self) -> dict[str, int]:
         """Return ``{dtoh_bytes: int, ...}`` transfer statistics."""
         ...
@@ -326,6 +367,10 @@ class CompiledProgram:
             Maximum number of cache entries (default 10000).
         """
         ...
+
+    # Top-level pyxlog wraps register_network with nn/4 lineage metadata:
+    # checkpoint_hash, split_hashes, calibration_metrics, cuda_device,
+    # influence_audit, nn4_lineage, record_nn4_influence, changed_acceptance.
 
     def register_embedding(
         self,

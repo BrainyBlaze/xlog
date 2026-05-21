@@ -42,12 +42,97 @@ impl LogicSessionRuntime {
     }
 }
 
+/// Planner-grade telemetry for a persistent-session relation delta update.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DeltaPlannerTelemetry {
+    /// True when the relation-delta path reused an existing session/cache.
+    pub cache_reused: bool,
+    /// Planner decision used for this delta update.
+    pub fallback_decision: String,
+    /// Number of SCCs affected by the delta dependency closure.
+    pub affected_sccs: usize,
+    /// Number of SCCs recomputed from scratch.
+    pub recomputed_sccs: usize,
+    /// Number of SCCs updated incrementally.
+    pub incremental_sccs: usize,
+    /// Estimated speedup of delta evaluation over full recompute when available.
+    pub estimated_delta_speedup: Option<f64>,
+    /// Measured speedup of delta evaluation over full recompute when both timings are available.
+    pub measured_delta_speedup: Option<f64>,
+    /// Human-readable planner guidance for downstream diagnostics.
+    pub planner_advice: Vec<String>,
+}
+
+impl DeltaPlannerTelemetry {
+    /// Build planner telemetry from a delta report and optional timing evidence.
+    pub fn from_delta_report(
+        report: &LogicDeltaReport,
+        cache_reused: bool,
+        measured_micros: Option<(u64, u64)>,
+    ) -> Self {
+        let fallback_decision = if report.affected_sccs == 0 {
+            "no_op"
+        } else if report.has_deletes || report.recomputed_sccs > 0 {
+            "full_recompute_fallback"
+        } else {
+            "incremental"
+        }
+        .to_string();
+        let estimated_delta_speedup = if report.affected_sccs > 0 {
+            Some((report.affected_sccs.max(1) as f64) / (report.incremental_sccs.max(1) as f64))
+        } else {
+            None
+        };
+        let measured_delta_speedup = measured_micros.and_then(|(delta_us, full_us)| {
+            if delta_us == 0 {
+                None
+            } else {
+                Some(full_us as f64 / delta_us as f64)
+            }
+        });
+
+        let mut planner_advice = Vec::new();
+        if fallback_decision == "full_recompute_fallback" {
+            planner_advice.push(
+                "full recompute fallback selected; inspect deletes or affected SCC fanout"
+                    .to_string(),
+            );
+        } else if let Some(speedup) = measured_delta_speedup {
+            if speedup >= 1.0 {
+                planner_advice.push(format!("delta path is faster by {speedup:.2}x"));
+            } else {
+                planner_advice.push(format!(
+                    "full recompute may be faster; delta measured {speedup:.2}x"
+                ));
+            }
+        } else if fallback_decision == "incremental" {
+            planner_advice.push(
+                "incremental delta path selected; run equivalence timing to measure speedup"
+                    .to_string(),
+            );
+        }
+
+        Self {
+            cache_reused,
+            fallback_decision,
+            affected_sccs: report.affected_sccs,
+            recomputed_sccs: report.recomputed_sccs,
+            incremental_sccs: report.incremental_sccs,
+            estimated_delta_speedup,
+            measured_delta_speedup,
+            planner_advice,
+        }
+    }
+}
+
 /// Summary for a persistent-session relation delta update.
 pub struct LogicDeltaReport {
     /// Number of relation delta entries supplied by the caller before coalescing.
     pub input_delta_count: usize,
     /// Number of changed relation names in the delta batch.
     pub changed_relations: usize,
+    /// Changed relation names after coalescing.
+    pub changed_relation_names: Vec<String>,
     /// Total inserted rows across all changed relations.
     pub insert_rows: u64,
     /// Total deleted rows across all changed relations.
@@ -66,6 +151,10 @@ pub struct LogicDeltaReport {
     pub coalesced_delete_rows: u64,
     /// Rows canceled because an insert and delete for the same relation matched in the batch.
     pub canceled_rows: u64,
+    /// Planner-grade cache, fallback, and speedup telemetry.
+    pub planner_telemetry: DeltaPlannerTelemetry,
+    /// Metadata-only debug trace for the delta recompute.
+    pub debug_trace: Vec<String>,
 }
 
 struct CoalescedRelationDeltaBatch {
@@ -161,6 +250,17 @@ impl LogicProgram {
     /// Return the full schema map (relation name to schema).
     pub fn schemas(&self) -> &HashMap<String, Schema> {
         &self.schemas
+    }
+
+    /// Return stable rule provenance for source-visible rules.
+    pub fn rule_provenance(&self) -> Vec<xlog_logic::RuleProvenance> {
+        xlog_logic::rule_provenance(&self.program, None)
+    }
+
+    /// Return direct proof traces for source queries.
+    pub fn proof_traces(&self) -> Vec<xlog_logic::QueryProofTrace> {
+        let provenance = self.rule_provenance();
+        xlog_logic::query_proof_traces(&self.program, &provenance)
     }
 
     /// Create a persistent user-visible relation store initialized with inline facts.
@@ -280,6 +380,9 @@ impl LogicProgram {
             .filter_map(|d| d.delete.as_ref())
             .map(|b| b.num_rows())
             .sum();
+        let cache_reused = cached_store.is_some();
+        let mut changed_relation_names = deltas.keys().cloned().collect::<Vec<_>>();
+        changed_relation_names.sort();
 
         if cached_store.is_none() {
             let (_, store) = self.evaluate_with_relation_store_and_cache(
@@ -310,7 +413,12 @@ impl LogicProgram {
 
         *cached_store = Some(self.clone_relation_store(&provider, executor.store())?);
 
-        Ok(logic_delta_report(delta_stats, insert_rows, delete_rows))
+        let mut report = logic_delta_report(delta_stats, insert_rows, delete_rows);
+        report.changed_relation_names = changed_relation_names;
+        report.planner_telemetry =
+            DeltaPlannerTelemetry::from_delta_report(&report, cache_reused, None);
+        report.debug_trace = delta_debug_trace(&report);
+        Ok(report)
     }
 
     /// Apply relation deltas while preserving retained session runtime state.
@@ -332,6 +440,9 @@ impl LogicProgram {
             .filter_map(|d| d.delete.as_ref())
             .map(|b| b.num_rows())
             .sum();
+        let cache_reused = session_runtime.is_some() || cached_store.is_some();
+        let mut changed_relation_names = deltas.keys().cloned().collect::<Vec<_>>();
+        changed_relation_names.sort();
 
         if session_runtime.is_none() {
             let seed_store: &RelationStore = match cached_store.as_ref() {
@@ -370,7 +481,12 @@ impl LogicProgram {
 
         *cached_store = Some(self.clone_relation_store(&provider, runtime.executor.store())?);
 
-        Ok(logic_delta_report(delta_stats, insert_rows, delete_rows))
+        let mut report = logic_delta_report(delta_stats, insert_rows, delete_rows);
+        report.changed_relation_names = changed_relation_names;
+        report.planner_telemetry =
+            DeltaPlannerTelemetry::from_delta_report(&report, cache_reused, None);
+        report.debug_trace = delta_debug_trace(&report);
+        Ok(report)
     }
 
     /// Apply an ordered batch of relation deltas after device-side coalescing.
@@ -386,6 +502,7 @@ impl LogicProgram {
             return Ok(LogicDeltaReport {
                 input_delta_count: coalesced.input_delta_count,
                 changed_relations: 0,
+                changed_relation_names: Vec::new(),
                 insert_rows: 0,
                 delete_rows: 0,
                 has_deletes: false,
@@ -395,6 +512,11 @@ impl LogicProgram {
                 coalesced_insert_rows: 0,
                 coalesced_delete_rows: 0,
                 canceled_rows: coalesced.canceled_rows,
+                planner_telemetry: DeltaPlannerTelemetry {
+                    fallback_decision: "no_op".to_string(),
+                    ..DeltaPlannerTelemetry::default()
+                },
+                debug_trace: vec![format!("canceled_rows={}", coalesced.canceled_rows)],
             });
         }
 
@@ -405,6 +527,8 @@ impl LogicProgram {
         report.coalesced_insert_rows = coalesced.coalesced_insert_rows;
         report.coalesced_delete_rows = coalesced.coalesced_delete_rows;
         report.canceled_rows = coalesced.canceled_rows;
+        report.planner_telemetry = DeltaPlannerTelemetry::from_delta_report(&report, true, None);
+        report.debug_trace = delta_debug_trace(&report);
         Ok(report)
     }
 
@@ -422,6 +546,7 @@ impl LogicProgram {
             return Ok(LogicDeltaReport {
                 input_delta_count: coalesced.input_delta_count,
                 changed_relations: 0,
+                changed_relation_names: Vec::new(),
                 insert_rows: 0,
                 delete_rows: 0,
                 has_deletes: false,
@@ -431,6 +556,11 @@ impl LogicProgram {
                 coalesced_insert_rows: 0,
                 coalesced_delete_rows: 0,
                 canceled_rows: coalesced.canceled_rows,
+                planner_telemetry: DeltaPlannerTelemetry {
+                    fallback_decision: "no_op".to_string(),
+                    ..DeltaPlannerTelemetry::default()
+                },
+                debug_trace: vec![format!("canceled_rows={}", coalesced.canceled_rows)],
             });
         }
 
@@ -446,6 +576,8 @@ impl LogicProgram {
         report.coalesced_insert_rows = coalesced.coalesced_insert_rows;
         report.coalesced_delete_rows = coalesced.coalesced_delete_rows;
         report.canceled_rows = coalesced.canceled_rows;
+        report.planner_telemetry = DeltaPlannerTelemetry::from_delta_report(&report, true, None);
+        report.debug_trace = delta_debug_trace(&report);
         Ok(report)
     }
 
@@ -529,6 +661,28 @@ impl LogicProgram {
         };
 
         Ok(LogicEvalResult { queries, stats })
+    }
+
+    /// Compare query result relations between two stores using GPU set difference.
+    pub fn relation_stores_query_equivalent(
+        &self,
+        provider: &CudaKernelProvider,
+        left: &RelationStore,
+        right: &RelationStore,
+    ) -> Result<bool> {
+        for idx in 0..self.program.queries.len() {
+            let name = format!("__xlog_query_{}", idx);
+            let Some(left_buffer) = left.get(&name) else {
+                return Ok(false);
+            };
+            let Some(right_buffer) = right.get(&name) else {
+                return Ok(false);
+            };
+            if !buffers_gpu_set_equivalent(provider, left_buffer, right_buffer)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn executor_from_relation_store(
@@ -744,6 +898,7 @@ fn logic_delta_report(
     LogicDeltaReport {
         input_delta_count: stats.changed_relations,
         changed_relations: stats.changed_relations,
+        changed_relation_names: Vec::new(),
         insert_rows,
         delete_rows,
         has_deletes: stats.has_deletes,
@@ -753,7 +908,50 @@ fn logic_delta_report(
         coalesced_insert_rows: insert_rows,
         coalesced_delete_rows: delete_rows,
         canceled_rows: 0,
+        planner_telemetry: DeltaPlannerTelemetry::default(),
+        debug_trace: Vec::new(),
     }
+}
+
+fn delta_debug_trace(report: &LogicDeltaReport) -> Vec<String> {
+    vec![
+        format!("changed_relation_names={:?}", report.changed_relation_names),
+        format!("affected_sccs={}", report.affected_sccs),
+        format!("recomputed_sccs={}", report.recomputed_sccs),
+        format!("incremental_sccs={}", report.incremental_sccs),
+        format!("insert_rows={}", report.insert_rows),
+        format!("delete_rows={}", report.delete_rows),
+        format!(
+            "planner_fallback_decision={}",
+            report.planner_telemetry.fallback_decision
+        ),
+        format!(
+            "estimated_delta_speedup={:?}",
+            report.planner_telemetry.estimated_delta_speedup
+        ),
+    ]
+}
+
+fn buffers_gpu_set_equivalent(
+    provider: &CudaKernelProvider,
+    left: &CudaBuffer,
+    right: &CudaBuffer,
+) -> Result<bool> {
+    if left.schema() != right.schema() {
+        return Ok(false);
+    }
+    let left_rows = provider.device_row_count(left)?;
+    let right_rows = provider.device_row_count(right)?;
+    if left_rows != right_rows {
+        return Ok(false);
+    }
+
+    let left_minus_right = provider.diff_full_row(left, right)?;
+    if provider.device_row_count(&left_minus_right)? != 0 {
+        return Ok(false);
+    }
+    let right_minus_left = provider.diff_full_row(right, left)?;
+    Ok(provider.device_row_count(&right_minus_left)? == 0)
 }
 
 fn coalesce_relation_delta_batch(
