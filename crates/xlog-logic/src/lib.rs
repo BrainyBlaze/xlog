@@ -31,6 +31,7 @@
 pub mod ast;
 pub mod compile;
 pub mod compiler_config;
+pub mod diagnostics;
 pub mod expand;
 pub mod function;
 pub mod hypergraph;
@@ -55,6 +56,9 @@ pub use ast::{
     ProbCache, ProbEngine, ProbFact, ProbMethod, ProbQuery, Program, Query, Rule, Term, Univ,
 };
 pub use compile::{compile, Compiler};
+pub use diagnostics::{
+    build_query_proof_traces, build_rule_provenance, format_atom, QueryProofTrace, RuleProvenance,
+};
 pub use expand::expand_program_functions;
 pub use incremental_parse::{
     IncrementalParseResult, ParseCacheStats, ParserSession, StatementSpan, StatementUnit,

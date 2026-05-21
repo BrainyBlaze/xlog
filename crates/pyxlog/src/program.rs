@@ -21,8 +21,9 @@ use xlog_prob::neural_fast_path::GpuWeightSlots;
 
 use super::neural_registry::NeuralPredicateInfo;
 use super::{
-    dlpack_capsule_from_tensor, enforce_call_memory_limit, provider_memory_stats, types,
-    CompiledProgram, EpochStats, EvalResult, McDeviceEvalResult, TrainingHistory,
+    dlpack_capsule_from_tensor, enforce_call_memory_limit, pack_query_proof_traces,
+    pack_rule_provenance, provider_memory_stats, types, CompiledProgram, EpochStats, EvalResult,
+    McDeviceEvalResult, TrainingHistory,
 };
 
 // =========================================================================
@@ -1006,6 +1007,19 @@ impl CompiledProgram {
         provider_memory_stats(py, &self.output_provider)
     }
 
+    pub fn rule_provenance(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let generated = xlog_logic::rewrite_v085_magic_sets(&self.ast)
+            .map(|rewrite| rewrite.report.generated_predicates)
+            .unwrap_or_default();
+        let entries = xlog_logic::build_rule_provenance(&self.ast, &generated);
+        pack_rule_provenance(py, &entries)
+    }
+
+    pub fn proof_traces(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let entries = xlog_logic::build_query_proof_traces(&self.ast);
+        pack_query_proof_traces(py, &entries)
+    }
+
     pub fn host_transfer_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
         let stats = self.output_provider.host_transfer_stats();
         let dict = PyDict::new(py);
@@ -1038,6 +1052,29 @@ impl CompiledProgram {
             "csm_cuda_graph_cache_hits",
             self.output_provider.csm_cuda_graph_cache_hits(),
         )?;
+        Ok(dict.into())
+    }
+
+    pub fn neural_hot_loop_diagnostics(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let transfers = self.output_provider.host_transfer_stats();
+        let cuda_graph = self.cuda_graph_stats(py)?;
+        let dict = PyDict::new(py);
+        dict.set_item("post_load_dtoh_bytes", transfers.dtoh_bytes)?;
+        dict.set_item("post_load_htod_bytes", transfers.htod_bytes)?;
+        dict.set_item("post_load_dtoh_calls", transfers.dtoh_calls)?;
+        dict.set_item("post_load_htod_calls", transfers.htod_calls)?;
+        dict.set_item(
+            "control_plane_bytes_per_iteration",
+            transfers.dtoh_bytes.saturating_add(transfers.htod_bytes),
+        )?;
+        dict.set_item("scalar_sync_checks", 0usize)?;
+        dict.set_item("cuda_graph", cuda_graph)?;
+        let circuit_cache = PyDict::new(py);
+        circuit_cache.set_item("hits", self.circuit_cache_hits)?;
+        circuit_cache.set_item("misses", self.circuit_cache_misses)?;
+        circuit_cache.set_item("entries", self.circuit_cache.len())?;
+        circuit_cache.set_item("template_compile_count", self.template_compile_count)?;
+        dict.set_item("circuit_cache", circuit_cache)?;
         Ok(dict.into())
     }
 }

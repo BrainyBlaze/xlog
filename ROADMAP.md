@@ -1,7 +1,7 @@
 # XLOG Development Roadmap
 
-Last updated: May 19, 2026
-Current tagged release: v0.8.6. v0.6.0 shipped the stream-safe runtime
+Last updated: May 21, 2026
+Current tagged release: v0.8.6; active worktree milestone: v0.8.8. v0.6.0 shipped the stream-safe runtime
 and recorded launch discipline. v0.6.1 shipped recorded CSM hash-join
 dispatch and explicit CSM cert-mode labeling. v0.6.2 shipped the first
 productized WCOJ slice: hypergraph planner / oracle foundations plus
@@ -22,7 +22,10 @@ the DTS-DLM runtime completion and GPU-native optimizer pack: device-resident
 delta coalescing, relation-change callbacks, typed exact induction,
 profile-gated chain shared-memory scoring, runtime CSE, adaptive
 re-optimization, persistent hash-index reuse, and behavior-probe-backed
-consumer certification.
+consumer certification. v0.8.8 adds the BFO living-world diagnostics and
+provenance pack: native induced-rule provenance, rule/proof introspection,
+pyxlog delta debug evidence, temporal relation provenance helpers, and unified
+neural hot-loop diagnostics.
 
 This roadmap is version-oriented so planned work is not hidden inside subsystem
 sections. Historical and current-main work uses checked boxes. Future work uses
@@ -30,8 +33,9 @@ unchecked boxes and is assigned to a concrete future version.
 After the tagged v0.8.0 feature pack, v0.8.5 completed the Language
 Completeness and Developer Experience train. v0.8.6 closed the deferred
 DTS-DLM runtime / GPU-native optimizer completion backlog that v0.9.0 needs as
-runtime substrate. v0.9.0 is the active Epistemic/Solver Semantics train and v0.10.0 is the
-Multi-GPU / Out-of-Core train.
+runtime substrate. v0.8.8 closes the BFO living-world model's upstream
+diagnostics/provenance findings. v0.9.0 remains the Epistemic/Solver Semantics
+train and v0.10.0 is the Multi-GPU / Out-of-Core train.
 
 ## v0.0.1 - Workspace Foundation
 
@@ -1618,6 +1622,51 @@ engines, or parallel helper paths that bypass production dispatch are blockers.
       backed by validator-owned behavior probes, and public pyxlog persistent
       index session reuse has a passing behavior probe.
       Evidence: `docs/evidence/2026-05-19-v086-consumers/`.
+
+## v0.8.8 - Living-World Diagnostics and Provenance Pack
+
+Status: complete in the `feat/v088-lwm-issue-fixes` worktree. Governing issue
+ledger: `.worktrees/bfo-living-world-model/examples/BFO/living_world_model/xlog_issue_ledger.json`.
+Architecture note: `docs/architecture/lwm-diagnostics-provenance.md`.
+
+### Native Induction Provenance
+
+- [x] Add a native metadata primitive for generated/mined rule provenance:
+      `InducedRuleProvenance`, `InductionSupportRow`,
+      `InductionAlternative`, `RuleSourceKind`, and `InducedRuleRegistry`.
+- [x] Preserve search-space size, predicate inventory, support rows, rejected
+      alternatives, falsification counts, stable rule ids, and generation trace
+      hashes without requiring Python-side law artifacts.
+
+### Rule and Proof Introspection
+
+- [x] Add shared `xlog-logic` rule provenance and query proof-trace models.
+- [x] Extend `xlog explain --format json` with `rule_provenance` and
+      `proof_traces`, including source and generated-rule distinctions.
+- [x] Expose `rule_provenance()` and `proof_traces()` through pyxlog compiled
+      logic sessions and probabilistic programs.
+
+### Delta, Temporal, and Neural Diagnostics
+
+- [x] Add `LogicRelationSession.apply_relation_delta_debug(...)` with changed
+      relation names, delta stats, debug trace, and optional full-recompute
+      equivalence shape checks.
+- [x] Add pyxlog temporal provenance helpers:
+      `put_temporal_relation(...)` and `temporal_provenance(...)`, carrying
+      timestamp column, dataset id, row hashes, field hashes, uncertainty,
+      stream id, process boundary, and temporal order.
+- [x] Add `CompiledProgram.neural_hot_loop_diagnostics()` for post-load DTOH/H2D
+      counters, control-plane bytes, scalar sync checks, CUDA graph stats, and
+      circuit-cache telemetry.
+
+### Validation
+
+- [x] Add `crates/xlog-induce/tests/rule_induction_provenance.rs`.
+- [x] Extend `crates/xlog-cli/tests/explain_cli_tests.rs` for generated-rule
+      provenance and contradiction proof traces.
+- [x] Add `python/tests/test_v088_lwm_source.py` for pyxlog stubs, docs, and
+      Rust/Python source-surface coverage.
+- [x] Smoke-check the BFO reproducers through `xlog explain --format json`.
 
 ## v0.9.0 - Epistemic and Solver Semantics
 

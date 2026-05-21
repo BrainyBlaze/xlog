@@ -66,6 +66,7 @@ class LogicQueryChunk:
 _V080_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pyxlog-v080")
 _V080_ORIGINALS: dict[tuple[type, str], Any] = {}
 _V080_PROGRESS: dict[int, dict[str, Any]] = {}
+_TEMPORAL_PROVENANCE: dict[tuple[int, str], dict[str, Any]] = {}
 
 
 def _progress_for(obj: Any) -> dict[str, Any]:
@@ -148,6 +149,48 @@ def _logic_eval_iter_query_chunks(
         yield from query.iter_chunks(chunk_rows=chunk_rows)
 
 
+def put_temporal_relation(
+    session: Any,
+    name: str,
+    dlpack_columns: Any,
+    *,
+    timestamp_column: str,
+    dataset_id: str | None = None,
+    row_hashes: Any = None,
+    field_hashes: Any = None,
+    uncertainty: Any = None,
+    stream_id: str | None = None,
+    process_boundary: str | None = None,
+    temporal_order: Any = None,
+) -> dict[str, Any]:
+    session.put_relation(name, dlpack_columns)
+    metadata = {
+        "status": "ok",
+        "relation": name,
+        "timestamp_column": timestamp_column,
+        "dataset_id": dataset_id,
+        "row_hashes": row_hashes,
+        "field_hashes": field_hashes,
+        "uncertainty": uncertainty,
+        "stream_id": stream_id,
+        "process_boundary": process_boundary,
+        "temporal_order": temporal_order,
+    }
+    _TEMPORAL_PROVENANCE[(id(session), name)] = metadata
+    return dict(metadata)
+
+
+def temporal_provenance(session: Any, name: str) -> dict[str, Any]:
+    metadata = _TEMPORAL_PROVENANCE.get((id(session), name))
+    if metadata is None:
+        return {
+            "status": "unavailable",
+            "relation": name,
+            "reason": "no temporal provenance recorded for relation",
+        }
+    return dict(metadata)
+
+
 def _logic_program_evaluate(self: Any, *args: Any, **kwargs: Any) -> Any:
     return _recorded_call(
         self, _V080_ORIGINALS[(CompiledLogicProgram, "evaluate")], *args, **kwargs
@@ -204,6 +247,11 @@ def _install_v080_runtime_api() -> None:
 _install_v080_runtime_api()
 
 try:
-    __all__ = list(__all__) + ["AsyncEvaluation", "LogicQueryChunk"]
+    __all__ = list(__all__) + [
+        "AsyncEvaluation",
+        "LogicQueryChunk",
+        "put_temporal_relation",
+        "temporal_provenance",
+    ]
 except NameError:
     pass

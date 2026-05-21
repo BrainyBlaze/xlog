@@ -15,6 +15,9 @@ use xlog_logic::ast::Program;
 use xlog_logic::compile::load_modules;
 #[cfg(feature = "host-io")]
 use xlog_logic::parse_program;
+use xlog_logic::{
+    build_query_proof_traces, build_rule_provenance, QueryProofTrace, RuleProvenance,
+};
 use xlog_logic::{rewrite_v085_magic_sets, MagicSetReport, MagicSetStatus, ParserSession};
 use xlog_logic::{stratify, Compiler};
 #[cfg(feature = "host-io")]
@@ -235,6 +238,8 @@ struct ExplainReport {
     program: Program,
     parse_stats: xlog_logic::ParseCacheStats,
     magic_sets: MagicSetReport,
+    rule_provenance: Vec<RuleProvenance>,
+    proof_traces: Vec<QueryProofTrace>,
     aggregate_lifting: Vec<AggregateLiftReport>,
     stratification_status: String,
     stratification_count: usize,
@@ -247,6 +252,8 @@ struct ExplainReport {
 fn build_explain_report(parsed: xlog_logic::IncrementalParseResult) -> Result<ExplainReport> {
     let program = parsed.program;
     let magic_sets = rewrite_v085_magic_sets(&program)?.report;
+    let rule_provenance = build_rule_provenance(&program, &magic_sets.generated_predicates);
+    let proof_traces = build_query_proof_traces(&program);
     let aggregate_lifting = explain_aggregate_lifting(&program)?;
     let (stratification_status, stratification_count) = match stratify(&program) {
         Ok(strata) => ("ok".to_string(), strata.len()),
@@ -267,6 +274,8 @@ fn build_explain_report(parsed: xlog_logic::IncrementalParseResult) -> Result<Ex
         program,
         parse_stats: parsed.stats,
         magic_sets,
+        rule_provenance,
+        proof_traces,
         aggregate_lifting,
         stratification_status,
         stratification_count,
@@ -305,6 +314,27 @@ fn print_explain_text(report: &ExplainReport) {
     println!("wcoj:");
     println!("  status: reported");
     print_magic_text(&report.magic_sets);
+    if !report.rule_provenance.is_empty() {
+        println!("rule_provenance:");
+        for entry in &report.rule_provenance {
+            println!(
+                "  - rule_id: {} source_kind: {} head: {}",
+                entry.rule_id, entry.source_kind, entry.head
+            );
+        }
+    }
+    if !report.proof_traces.is_empty() {
+        println!("proof_traces:");
+        for entry in &report.proof_traces {
+            println!(
+                "  - query: {} answer_relation: {} rules: {} facts: {}",
+                entry.query,
+                entry.answer_relation,
+                entry.rule_ids.len(),
+                entry.source_facts.len()
+            );
+        }
+    }
     if !report.aggregate_lifting.is_empty() {
         println!("aggregate_lifting:");
         for entry in &report.aggregate_lifting {
@@ -401,6 +431,72 @@ fn print_explain_json(report: &ExplainReport) {
         json_string_array(&report.magic_sets.declined_reasons)
     );
     println!("  }},");
+    println!("  \"rule_provenance\": [");
+    for (idx, entry) in report.rule_provenance.iter().enumerate() {
+        let suffix = if idx + 1 == report.rule_provenance.len() {
+            ""
+        } else {
+            ","
+        };
+        println!("    {{");
+        println!("      \"rule_id\": \"{}\",", json_escape(&entry.rule_id));
+        println!(
+            "      \"source_kind\": \"{}\",",
+            json_escape(&entry.source_kind)
+        );
+        println!("      \"head\": \"{}\",", json_escape(&entry.head));
+        match &entry.source_span {
+            Some(source_span) => {
+                println!("      \"source_span\": \"{}\",", json_escape(source_span))
+            }
+            None => println!("      \"source_span\": null,"),
+        }
+        match &entry.generation_trace_hash {
+            Some(hash) => println!(
+                "      \"generation_trace_hash\": \"{}\",",
+                json_escape(hash)
+            ),
+            None => println!("      \"generation_trace_hash\": null,"),
+        }
+        println!(
+            "      \"support_relation_ids\": {},",
+            json_string_array(&entry.support_relation_ids)
+        );
+        println!(
+            "      \"counterexample_relation_ids\": {}",
+            json_string_array(&entry.counterexample_relation_ids)
+        );
+        println!("    }}{}", suffix);
+    }
+    println!("  ],");
+    println!("  \"proof_traces\": [");
+    for (idx, entry) in report.proof_traces.iter().enumerate() {
+        let suffix = if idx + 1 == report.proof_traces.len() {
+            ""
+        } else {
+            ","
+        };
+        println!("    {{");
+        println!("      \"query\": \"{}\",", json_escape(&entry.query));
+        println!(
+            "      \"answer_relation\": \"{}\",",
+            json_escape(&entry.answer_relation)
+        );
+        println!(
+            "      \"rule_ids\": {},",
+            json_string_array(&entry.rule_ids)
+        );
+        println!(
+            "      \"source_facts\": {},",
+            json_string_array(&entry.source_facts)
+        );
+        println!(
+            "      \"rejected_alternatives\": {}",
+            json_string_array(&entry.rejected_alternatives)
+        );
+        println!("    }}{}", suffix);
+    }
+    println!("  ],");
     println!("  \"probability\": {{");
     println!(
         "    \"engine\": \"{}\",",

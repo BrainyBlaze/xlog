@@ -197,6 +197,21 @@ The delta stats dictionary contains `changed_relations`, `insert_rows`,
 `canceled_rows`. Batch updates coalesce repeated relation mutations before
 runtime recompute using existing device-resident set operations; callback or
 diagnostic code must not materialize relation rows on the host.
+For delta debugging, `session.apply_relation_delta_debug(...)` applies the same
+transaction path and returns a dictionary with `changed_relation_names`,
+`equivalent_to_full_recompute`, `equivalence_checked`, nested `delta_stats`, and
+a compact `debug_trace`. Use `check_equivalence=True` when a live stream needs
+the session-managed delta answer compared against a full recompute shape check.
+
+```python
+def apply_relation_delta_debug(
+    name: str,
+    insert_columns=None,
+    delete_columns=None,
+    check_equivalence: bool = True,
+) -> dict: ...
+```
+
 Direct `put_relation`, `remove_relation`, or `clear_relations` calls invalidate
 the cached runtime store and make the next `evaluate()` perform a full plan
 run before later deltas can reuse it.
@@ -286,6 +301,7 @@ program.progress_stats()
 program.memory_stats()
 program.host_transfer_stats()
 program.cuda_graph_stats()
+program.neural_hot_loop_diagnostics()
 ```
 
 `memory_stats()` reports `allocated_bytes`, `memory_limit_bytes`,
@@ -294,6 +310,59 @@ program.cuda_graph_stats()
 `csm_cuda_graph_fallbacks`, and `csm_cuda_graph_cache_hits`. Environments that
 cannot provide a future diagnostic must report an explicit unavailable status or
 error rather than fabricating a zero-valued probe.
+
+`neural_hot_loop_diagnostics()` unifies `post_load_dtoh_bytes`,
+`post_load_htod_bytes`, `control_plane_bytes_per_iteration`,
+`scalar_sync_checks`, `cuda_graph`, and `circuit_cache` in one API so `nn/4`
+hot-loop audits do not have to combine pyxlog counters, CUDA graph telemetry,
+and cache counters by hand.
+
+```python
+def neural_hot_loop_diagnostics() -> dict: ...
+```
+
+#### Rule and Proof Introspection
+
+Compiled deterministic and probabilistic programs expose `rule_provenance()` and
+`proof_traces()`. Rule provenance records include `rule_id`, `source_kind`,
+`head`, `source_span`, `generation_trace_hash`, `support_relation_ids`, and
+`counterexample_relation_ids`, distinguishing source-authored rules from
+generated, mined, imported, or runtime-injected rules. Proof traces include the
+source query, answer relation, deriving `rule_ids`, `source_facts`, and
+`rejected_alternatives` when present.
+
+```python
+def rule_provenance() -> list[dict]: ...
+def proof_traces() -> list[dict]: ...
+```
+
+#### Temporal Provenance Helpers
+
+Use `pyxlog.put_temporal_relation(...)` when loading live stream facts with
+timestamp and provenance metadata:
+
+```python
+pyxlog.put_temporal_relation(
+    session,
+    "observation",
+    [entity, timestamp, value],
+    timestamp_column="timestamp",
+    dataset_id="living-world",
+    row_hashes=row_hashes,
+    field_hashes=field_hashes,
+    uncertainty=uncertainty,
+    stream_id="camera-0",
+)
+meta = pyxlog.temporal_provenance(session, "observation")
+```
+
+The helper delegates relation loading to `session.put_relation(...)` and records
+the metadata keys `timestamp_column`, `dataset_id`, `row_hashes`,
+`field_hashes`, `uncertainty`, `stream_id`, `process_boundary`, and
+`temporal_order` for later diagnostics.
+
+For the issue-by-issue v0.8.8 architecture surface behind these APIs, see
+[`lwm-diagnostics-provenance.md`](lwm-diagnostics-provenance.md).
 
 ### Program (Probabilistic)
 

@@ -4,7 +4,38 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
-No changes yet.
+v0.8.8 Living-World Diagnostics and Provenance Pack.
+
+### Added
+
+- Added native induced-rule provenance records and an `InducedRuleRegistry` in
+  `xlog-induce`, covering generated/mined/source/imported/runtime-injected rule
+  origin, search-space size, predicate inventory, support rows, rejected
+  alternatives, and falsification counts.
+- Added shared `xlog-logic` rule provenance and query proof-trace diagnostics,
+  exposed through `xlog explain --format json` as `rule_provenance` and
+  `proof_traces`.
+- Added pyxlog `rule_provenance()` and `proof_traces()` methods for compiled
+  deterministic sessions and probabilistic programs.
+- Added `LogicRelationSession.apply_relation_delta_debug(...)` for changed
+  relation names, delta stats, debug trace, and optional equivalence shape
+  checks against full recompute.
+- Added pyxlog temporal provenance helpers:
+  `put_temporal_relation(...)` and `temporal_provenance(...)`.
+- Added `CompiledProgram.neural_hot_loop_diagnostics()` to unify post-load
+  transfer counters, control-plane byte estimates, scalar sync checks, CUDA
+  graph telemetry, and circuit-cache telemetry.
+- Added architecture documentation in
+  `docs/architecture/lwm-diagnostics-provenance.md` and expanded
+  `docs/architecture/python-bindings.md` for the new APIs.
+
+### Tests
+
+- Added `crates/xlog-induce/tests/rule_induction_provenance.rs`.
+- Extended `crates/xlog-cli/tests/explain_cli_tests.rs` for rule provenance and
+  contradiction proof traces.
+- Added `python/tests/test_v088_lwm_source.py` to lock pyxlog stubs, docs, and
+  source API surfaces.
 
 ## [0.8.6] — 2026-05-19
 

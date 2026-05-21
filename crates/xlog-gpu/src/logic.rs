@@ -163,6 +163,19 @@ impl LogicProgram {
         &self.schemas
     }
 
+    /// Return structured source-rule provenance for this compiled program.
+    pub fn rule_provenance(&self) -> Vec<xlog_logic::RuleProvenance> {
+        let generated = xlog_logic::rewrite_v085_magic_sets(&self.program)
+            .map(|rewrite| rewrite.report.generated_predicates)
+            .unwrap_or_default();
+        xlog_logic::build_rule_provenance(&self.program, &generated)
+    }
+
+    /// Return proof-oriented traces for source queries.
+    pub fn proof_traces(&self) -> Vec<xlog_logic::QueryProofTrace> {
+        xlog_logic::build_query_proof_traces(&self.program)
+    }
+
     /// Create a persistent user-visible relation store initialized with inline facts.
     pub fn create_relation_store(
         &self,

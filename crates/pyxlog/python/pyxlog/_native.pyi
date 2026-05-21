@@ -51,6 +51,14 @@ class CompiledLogicProgram:
         """Return memory-limit, current-allocation, and peak-memory diagnostics."""
         ...
 
+    def rule_provenance(self) -> list[dict[str, Any]]:
+        """Return source/generated rule provenance records."""
+        ...
+
+    def proof_traces(self) -> list[dict[str, Any]]:
+        """Return query proof traces naming rule ids and source facts."""
+        ...
+
     def session(self) -> LogicRelationSession:
         """Create a stateful session for incremental relation updates."""
         ...
@@ -94,6 +102,16 @@ class LogicRelationSession:
         """
         ...
 
+    def apply_relation_delta_debug(
+        self,
+        name: str,
+        insert_columns: Optional[Any] = None,
+        delete_columns: Optional[Any] = None,
+        check_equivalence: bool = True,
+    ) -> dict[str, Any]:
+        """Apply a relation delta and return changed_relation_names, equivalent_to_full_recompute, and debug_trace."""
+        ...
+
     def delta_stats(self) -> dict[str, Any]:
         """Return statistics from the most recent relation delta update."""
         ...
@@ -127,8 +145,28 @@ class LogicRelationSession:
         """Return CUDA Graph capture, launch, fallback, and cache-hit counters."""
         ...
 
+    def neural_hot_loop_diagnostics(self) -> dict[str, Any]:
+        """Return post_load_dtoh_bytes, post_load_htod_bytes, control_plane_bytes_per_iteration, scalar_sync_checks, cuda_graph, and circuit_cache."""
+        ...
+
+    def rule_provenance(self) -> list[dict[str, Any]]:
+        """Return source/generated rule provenance records."""
+        ...
+
+    def proof_traces(self) -> list[dict[str, Any]]:
+        """Return query proof traces naming rule ids and source facts."""
+        ...
+
     def memory_stats(self) -> dict[str, Any]:
         """Return memory-limit, current-allocation, and peak-memory diagnostics."""
+        ...
+
+    def rule_provenance(self) -> list[dict[str, Any]]:
+        """Return source/generated rule provenance records."""
+        ...
+
+    def proof_traces(self) -> list[dict[str, Any]]:
+        """Return query proof traces naming rule ids and source facts."""
         ...
 
     def export_relation(self, name: str) -> list[Any]:

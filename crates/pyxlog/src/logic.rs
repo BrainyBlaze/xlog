@@ -17,10 +17,11 @@ use std::collections::HashMap as StdHashMap;
 
 use super::neural_registry::NeuralPredicateRegistry;
 use super::{
-    dlpack_capsule_from_tensor, dlpack_from_py, enforce_call_memory_limit,
-    parse_prob_engine_override, provider_from_config, provider_memory_stats, types,
-    CompiledLogicProgram, CompiledProbProgram, CompiledProgram, LogicDeltaStats, LogicEvalResult,
-    LogicProgram, LogicQueryResult, LogicRelationSession, Program, RelationChangeCallback,
+    dlpack_capsule_from_tensor, dlpack_from_py, enforce_call_memory_limit, pack_query_proof_traces,
+    pack_rule_provenance, parse_prob_engine_override, provider_from_config, provider_memory_stats,
+    types, CompiledLogicProgram, CompiledProbProgram, CompiledProgram, LogicDeltaStats,
+    LogicEvalResult, LogicProgram, LogicQueryResult, LogicRelationSession, Program,
+    RelationChangeCallback,
 };
 
 #[pymethods]
@@ -200,6 +201,14 @@ impl CompiledLogicProgram {
     pub fn memory_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
         provider_memory_stats(py, &self.provider)
     }
+
+    pub fn rule_provenance(&self, py: Python<'_>) -> PyResult<PyObject> {
+        pack_rule_provenance(py, &self.program.rule_provenance())
+    }
+
+    pub fn proof_traces(&self, py: Python<'_>) -> PyResult<PyObject> {
+        pack_query_proof_traces(py, &self.program.proof_traces())
+    }
 }
 
 impl CompiledLogicProgram {}
@@ -376,6 +385,70 @@ impl LogicRelationSession {
         }
     }
 
+    #[pyo3(signature = (name, insert_columns=None, delete_columns=None, check_equivalence=true))]
+    pub fn apply_relation_delta_debug(
+        &mut self,
+        py: Python<'_>,
+        name: String,
+        insert_columns: Option<&Bound<'_, PyAny>>,
+        delete_columns: Option<&Bound<'_, PyAny>>,
+        check_equivalence: bool,
+    ) -> PyResult<PyObject> {
+        if insert_columns.is_none() && delete_columns.is_none() {
+            return Err(PyValueError::new_err(
+                "apply_relation_delta_debug requires insert_columns, delete_columns, or both",
+            ));
+        }
+        let insert = insert_columns
+            .map(|columns| self.relation_delta_buffer(&name, columns))
+            .transpose()?;
+        let delete = delete_columns
+            .map(|columns| self.relation_delta_buffer(&name, columns))
+            .transpose()?;
+        let delta_stats = self.apply_single_relation_delta(py, name.clone(), insert, delete)?;
+
+        let equivalent_to_full_recompute = if check_equivalence {
+            let delta_result = self
+                .evaluation_store
+                .as_ref()
+                .ok_or_else(|| {
+                    PyRuntimeError::new_err("missing cached delta store after relation update")
+                })
+                .and_then(|store| {
+                    self.program
+                        .evaluate_cached_relation_store(self.provider.clone(), store)
+                        .map_err(types::xlog_err)
+                })?;
+            let (full_result, _) = self
+                .program
+                .evaluate_with_relation_store_and_cache(
+                    self.provider.clone(),
+                    &self.relation_store,
+                    false,
+                )
+                .map_err(types::xlog_err)?;
+            logic_results_equivalent_by_shape(&self.provider, &delta_result, &full_result)?
+        } else {
+            false
+        };
+
+        let dict = PyDict::new(py);
+        dict.set_item("status", "ok")?;
+        dict.set_item("changed_relation_names", vec![name.clone()])?;
+        dict.set_item("equivalence_checked", check_equivalence)?;
+        dict.set_item("equivalent_to_full_recompute", equivalent_to_full_recompute)?;
+        dict.set_item("delta_stats", delta_stats)?;
+        dict.set_item(
+            "debug_trace",
+            vec![
+                format!("relation_delta:{}", name),
+                "session_runtime_delta_path".to_string(),
+                "full_recompute_equivalence_shape_check".to_string(),
+            ],
+        )?;
+        Ok(dict.into())
+    }
+
     pub fn register_relation_callback(
         &mut self,
         py: Python<'_>,
@@ -501,6 +574,14 @@ impl LogicRelationSession {
         self.evaluation_store = None;
         self.session_runtime = None;
         self.last_delta_stats = None;
+    }
+
+    pub fn rule_provenance(&self, py: Python<'_>) -> PyResult<PyObject> {
+        pack_rule_provenance(py, &self.program.rule_provenance())
+    }
+
+    pub fn proof_traces(&self, py: Python<'_>) -> PyResult<PyObject> {
+        pack_query_proof_traces(py, &self.program.proof_traces())
     }
 }
 
@@ -667,6 +748,33 @@ fn pack_delta_stats(py: Python<'_>, stats: &LogicDeltaStats) -> PyResult<PyObjec
     dict.set_item("coalesced_delete_rows", stats.coalesced_delete_rows)?;
     dict.set_item("canceled_rows", stats.canceled_rows)?;
     Ok(dict.into())
+}
+
+fn logic_results_equivalent_by_shape(
+    provider: &Arc<xlog_cuda::CudaKernelProvider>,
+    left: &gpu_logic::LogicEvalResult,
+    right: &gpu_logic::LogicEvalResult,
+) -> PyResult<bool> {
+    if left.queries.len() != right.queries.len() {
+        return Ok(false);
+    }
+    for (left_query, right_query) in left.queries.iter().zip(&right.queries) {
+        if left_query.columns != right_query.columns
+            || left_query.sort_labels != right_query.sort_labels
+        {
+            return Ok(false);
+        }
+        let left_rows = provider
+            .validated_logical_row_count(&left_query.buffer)
+            .map_err(types::xlog_err)?;
+        let right_rows = provider
+            .validated_logical_row_count(&right_query.buffer)
+            .map_err(types::xlog_err)?;
+        if left_rows != right_rows {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn collect_dlpack_columns(

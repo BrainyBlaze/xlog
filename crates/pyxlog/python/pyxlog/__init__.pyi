@@ -81,6 +81,25 @@ class _V080RuntimeApiMixin:
     def delta_stats(self) -> dict[str, Any]: ...
 
 
+def put_temporal_relation(
+    session: Any,
+    name: str,
+    dlpack_columns: Any,
+    *,
+    timestamp_column: str,
+    dataset_id: Optional[str] = None,
+    row_hashes: Any = None,
+    field_hashes: Any = None,
+    uncertainty: Any = None,
+    stream_id: Optional[str] = None,
+    process_boundary: Optional[str] = None,
+    temporal_order: Any = None,
+) -> dict[str, Any]: ...
+
+
+def temporal_provenance(session: Any, name: str) -> dict[str, Any]: ...
+
+
 class _V080StreamingMixin:
     def iter_chunks(self, chunk_rows: int = 1024) -> Iterator[LogicQueryChunk]: ...
     def iter_query_chunks(self, chunk_rows: int = 1024) -> Iterator[LogicQueryChunk]: ...
