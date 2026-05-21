@@ -1,0 +1,5 @@
+nn(production_root_net, [X], Y, [distractor_root, primary_root]) :: neural_root_observation(X, Y).
+
+neural_ranked_root(X, Y) :- neural_root_observation(X, Y).
+
+?- neural_ranked_root(X, Y).

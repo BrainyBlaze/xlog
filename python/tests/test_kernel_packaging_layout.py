@@ -84,6 +84,16 @@ def test_install_pyxlog_for_python_dry_run_targets_explicit_interpreter() -> Non
     assert "maturin develop" not in result.stdout
 
 
+def test_stage_pyxlog_kernels_rebuilds_before_resolving_release_out_dir() -> None:
+    script = (ROOT / "scripts" / "stage_pyxlog_kernels.sh").read_text(encoding="utf-8")
+    main_body = script.split('cd "$repo_root"', maxsplit=1)[1]
+
+    assert main_body.index("build_pyxlog_release") < main_body.index("target_dir=")
+    assert main_body.index("build_pyxlog_release") < main_body.index(
+        'resolve_kernel_out_dir_from_dep_info "$target_dir"'
+    )
+
+
 def test_public_docs_use_explicit_pyxlog_python_install() -> None:
     docs = {
         "README.md": (ROOT / "README.md").read_text(encoding="utf-8"),

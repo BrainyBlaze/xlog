@@ -4,7 +4,65 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
-No changes yet.
+v0.8.9 Universal Case Reasoner Diagnostic Pack. This branch promotes the
+reusable XLOG and pyxlog gaps exposed by the BFO Universal Case Reasoner into
+core APIs, focused regressions, and release-facing documentation.
+
+### Added
+
+- Added `pyxlog.ilp.neurosymbolic.train_neurosymbolic_program(...)` for one
+  source that combines `nn/4` declarations, trainable symbolic rules, and a
+  training objective that updates neural parameters plus symbolic rule weights.
+- Added `xlog_logic::DifferentiableProofTraceMap` with stable proof IDs,
+  support atoms, symbolic clause weights, binary logistic loss, and gradient
+  application hooks.
+- Added `pyxlog.ilp.inventory.build_rule_inventory(...)` and
+  `PromotionResult.rule_inventory` for selected/rejected clauses, training
+  folds, held-out domains, promotion gates, and base-kernel checksum metadata.
+- Added `pyxlog.runtime_audit.CudaExecutionAudit` and
+  `HostMaterializationError` for fail-closed CUDA hot-loop audits covering
+  `.cpu()`, `.tolist()`, `.item()`, score-row downloads, and recorded H2D/D2H
+  transfers.
+- Added `xlog_logic::diagnose_module_boundaries(...)` for frozen kernel
+  predicates, adapter-only fact modules, held-out module declarations, and
+  held-out-label candidate provenance.
+- Added `pyxlog.transfer_diagnostics.compute_transfer_diagnostics(...)` for
+  grouped macro F1, minimum group F1, bootstrap confidence intervals, baseline
+  uplift, paired sign tests, and missing-domain or missing-variant failures.
+- Added the BFO Universal Case Reasoner validation package under
+  `examples/BFO/universal_case_reasoner/`, including requirements, validation
+  plan, BFO programs, evidence JSON, minimal reproducers, project-specific tests,
+  validator tooling, and the resolved `xlog_issue_ledger.json`.
+- Added `docs/architecture/ucr-xlog-diagnostics.md` as the architecture record
+  for all six `UCR-XLOG-*` issue resolutions and their regression locations.
+
+### Changed
+
+- `train_and_promote(...)` now accepts training-fold, held-out-domain, and
+  base-kernel checksum metadata so promotion results can carry reusable transfer
+  audit evidence.
+- `pyxlog` can import pure-Python helper modules when `pyxlog._native` is absent;
+  native-backed entry points still fail explicitly instead of pretending to run.
+- README, roadmap, dILP architecture, and Python binding docs now describe the
+  unreleased v0.8.9 UCR diagnostic surfaces and BFO validation package.
+
+### Fixed
+
+- Hardened `scripts/stage_pyxlog_kernels.sh` so pyxlog release kernel staging
+  builds the release target before resolving the release `OUT_DIR`, preventing
+  stale kernel artifacts from being selected after source changes.
+
+### Tests
+
+- Added focused regressions for UCR-XLOG-001 through UCR-XLOG-006:
+  `python/tests/test_nn4_dilp_training_surface.py`,
+  `crates/xlog-logic/tests/differentiable_proof_trace.rs`,
+  `python/tests/test_ilp_rule_inventory.py`,
+  `python/tests/test_nn4_cuda_no_host_transfer_contract.py`,
+  `crates/xlog-logic/tests/module_boundary_diagnostics.rs`, and
+  `python/tests/test_transfer_metric_diagnostics.py`.
+- Extended `python/tests/test_kernel_packaging_layout.py` to verify pyxlog
+  staging rebuild order before release `OUT_DIR` discovery.
 
 ## [0.8.6] — 2026-05-19
 

@@ -10,6 +10,7 @@ The `pyxlog` Python module provides:
 - Probabilistic inference via `Program`
 - Term embedding registration and lookup via `register_embedding` / `forward_embedding`
 - Differentiable ILP training via `pyxlog.ilp` (rule learning from examples)
+- v0.8.9 UCR diagnostics for learned-rule inventories, CUDA hot-loop audits, and grouped transfer metrics
 - Zero-copy GPU tensor exchange via DLPack (primary interop boundary)
 - Optional experimental Arrow C Device interop (feature-gated)
 
@@ -608,7 +609,50 @@ promotion.gates           # list[GateResult]
 promotion.novel_count     # int | None
 promotion.novel_rate      # float | None
 promotion.committed_source # str | None
+promotion.rule_inventory  # RuleInventory | None
 ```
+
+### v0.8.9 UCR Diagnostics
+
+The BFO Universal Case Reasoner work adds reusable pyxlog helpers for the audit
+surface that used to live in example validators:
+
+```python
+from pyxlog.ilp.neurosymbolic import (
+    NeuroSymbolicTrainingConfig,
+    train_neurosymbolic_program,
+)
+from pyxlog.runtime_audit import CudaExecutionAudit
+from pyxlog.transfer_diagnostics import PredictionRecord, compute_transfer_diagnostics
+
+trained = train_neurosymbolic_program(
+    source,
+    networks={"ranker": model},
+    examples=rows,
+    config=NeuroSymbolicTrainingConfig(steps=16),
+)
+inventory = trained.learned_rule_inventory
+
+with CudaExecutionAudit(forbid_host_materialization=True) as audit:
+    scores = model(batch)
+    audit.record_nn4_scores("ranker", scores, device_resident=True)
+
+diagnostics = compute_transfer_diagnostics(
+    [PredictionRecord(domain="d0", variant="clean", y_true=1, y_pred=1)],
+    required_domains=("d0",),
+    required_variants=("clean",),
+)
+assert diagnostics.passed
+```
+
+`train_and_promote(...)` accepts transfer-audit metadata through
+`training_fold`, `held_out_domains`, `base_kernel_checksum_before`, and
+`base_kernel_checksum_after`. The returned `PromotionResult.rule_inventory`
+records those values with selected and rejected clauses, scores, and gate
+outcomes.
+
+For the full architecture map, see
+[`ucr-xlog-diagnostics.md`](ucr-xlog-diagnostics.md).
 
 ### Device Query APIs
 
@@ -923,10 +967,13 @@ Current limitations:
 - Published PyPI wheels follow tagged releases and may lag the current `main` branch workspace version
 - v0.8.0 async evaluation and per-call memory APIs require this branch's
   workspace build until the next tagged wheel is published
+- Pure-Python helper modules can import without `pyxlog._native`, but
+  native-backed compile/evaluate APIs still require the PyO3 extension
 
 ## See Also
 
 - [dILP Training Architecture](dilp-training.md) — System design, mask backends, promotion pipeline
+- [Universal Case Reasoner Diagnostics](ucr-xlog-diagnostics.md) — v0.8.9 reusable UCR audit surfaces
 - [Data Interoperability](cudf-interop.md) — DLPack and Arrow details
 - [Probabilistic Tier](xlog-prob.md) — Inference engine details
 - [CLI Reference](cli-reference.md) — Command-line alternative

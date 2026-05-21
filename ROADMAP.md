@@ -1,6 +1,6 @@
 # XLOG Development Roadmap
 
-Last updated: May 19, 2026
+Last updated: May 21, 2026
 Current tagged release: v0.8.6. v0.6.0 shipped the stream-safe runtime
 and recorded launch discipline. v0.6.1 shipped recorded CSM hash-join
 dispatch and explicit CSM cert-mode labeling. v0.6.2 shipped the first
@@ -23,6 +23,10 @@ delta coalescing, relation-change callbacks, typed exact induction,
 profile-gated chain shared-memory scoring, runtime CSE, adaptive
 re-optimization, persistent hash-index reuse, and behavior-probe-backed
 consumer certification.
+The unreleased v0.8.9 branch adds the Universal Case Reasoner diagnostic pack:
+joint `nn/4` plus symbolic rule-weight training, differentiable proof traces,
+learned-rule inventories, CUDA host-transfer audits, module-boundary diagnostics,
+grouped transfer metrics, and the BFO UCR validation package.
 
 This roadmap is version-oriented so planned work is not hidden inside subsystem
 sections. Historical and current-main work uses checked boxes. Future work uses
@@ -30,7 +34,8 @@ unchecked boxes and is assigned to a concrete future version.
 After the tagged v0.8.0 feature pack, v0.8.5 completed the Language
 Completeness and Developer Experience train. v0.8.6 closed the deferred
 DTS-DLM runtime / GPU-native optimizer completion backlog that v0.9.0 needs as
-runtime substrate. v0.9.0 is the active Epistemic/Solver Semantics train and v0.10.0 is the
+runtime substrate. v0.8.9 is the active pre-v0.9.0 UCR diagnostic branch.
+v0.9.0 remains the Epistemic/Solver Semantics train and v0.10.0 is the
 Multi-GPU / Out-of-Core train.
 
 ## v0.0.1 - Workspace Foundation
@@ -1618,6 +1623,64 @@ engines, or parallel helper paths that bypass production dispatch are blockers.
       backed by validator-owned behavior probes, and public pyxlog persistent
       index session reuse has a passing behavior probe.
       Evidence: `docs/evidence/2026-05-19-v086-consumers/`.
+
+## v0.8.9 - Universal Case Reasoner Diagnostic Pack
+
+Status: implementation branch `feat/v089-ucr-xlog-issue-fixes`; not tagged.
+Architecture summary: `docs/architecture/ucr-xlog-diagnostics.md`.
+Issue ledger: `examples/BFO/universal_case_reasoner/xlog_issue_ledger.json`.
+
+v0.8.9 promotes the reusable XLOG gaps exposed by the BFO Universal Case
+Reasoner into core XLOG and pyxlog surfaces. Acceptance requires each
+`UCR-XLOG-*` ledger item to have a reusable implementation, a minimal
+reproducer, and a focused regression test outside the project-specific validator.
+
+### Neural-Symbolic Training
+
+- [x] Add `pyxlog.ilp.neurosymbolic.train_neurosymbolic_program(...)` so one
+      source can declare `nn/4` predicates, trainable symbolic rules, and a
+      training objective that updates neural parameters and symbolic weights.
+      Evidence: `python/tests/test_nn4_dilp_training_surface.py`.
+- [x] Allow pure-Python pyxlog helper tests to import `pyxlog` when
+      `pyxlog._native` is absent, while keeping native-backed APIs fail-closed.
+
+### Differentiable Proofs And Rule Inventories
+
+- [x] Add `xlog_logic::DifferentiableProofTraceMap` with stable proof IDs,
+      support atoms, symbolic clause weights, logistic loss, and nonzero
+      gradient hooks.
+      Evidence: `crates/xlog-logic/tests/differentiable_proof_trace.rs`.
+- [x] Add `pyxlog.ilp.inventory.build_rule_inventory(...)` and
+      `PromotionResult.rule_inventory`, including selected/rejected clauses,
+      training fold, held-out domains, promotion gates, and base-kernel checksum
+      metadata.
+      Evidence: `python/tests/test_ilp_rule_inventory.py`.
+
+### Runtime And Transfer Diagnostics
+
+- [x] Add `pyxlog.runtime_audit.CudaExecutionAudit` to fail hot-loop CUDA
+      ranking tests on `.cpu()`, `.tolist()`, `.item()`, score-row downloads, or
+      recorded H2D/D2H transfers.
+      Evidence: `python/tests/test_nn4_cuda_no_host_transfer_contract.py`.
+- [x] Add `xlog_logic::diagnose_module_boundaries(...)` for frozen kernel
+      predicates, adapter-only fact modules, held-out domain declarations, and
+      held-out-label candidate provenance.
+      Evidence: `crates/xlog-logic/tests/module_boundary_diagnostics.rs`.
+- [x] Add `pyxlog.transfer_diagnostics.compute_transfer_diagnostics(...)` for
+      grouped macro F1, minimum-domain F1, bootstrap confidence intervals,
+      baseline uplift, paired sign tests, and missing-domain or missing-variant
+      failures.
+      Evidence: `python/tests/test_transfer_metric_diagnostics.py`.
+
+### BFO UCR Example And Packaging
+
+- [x] Add `examples/BFO/universal_case_reasoner/` with goals, requirements,
+      validation plan, BFO programs, evidence files, minimal reproducers,
+      project-specific tests, validator tooling, and the resolved UCR issue
+      ledger.
+- [x] Harden `scripts/stage_pyxlog_kernels.sh` so pyxlog release kernel staging
+      builds before resolving the release `OUT_DIR`.
+      Evidence: `python/tests/test_kernel_packaging_layout.py`.
 
 ## v0.9.0 - Epistemic and Solver Semantics
 

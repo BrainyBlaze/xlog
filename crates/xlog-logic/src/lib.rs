@@ -40,9 +40,11 @@ pub mod lower;
 pub mod magic_sets;
 pub mod meta_normalize;
 pub mod module;
+pub mod module_diagnostics;
 pub mod optimizer;
 pub mod parser;
 pub mod promote;
+pub mod proof_trace;
 pub mod resolver;
 pub mod stratify;
 #[allow(dead_code)] // reserved API: type inference not yet wired to main pipeline
@@ -63,6 +65,12 @@ pub use list_normalize::normalize_v085_lists;
 pub use lower::Lowerer;
 pub use magic_sets::{rewrite_v085_magic_sets, MagicSetReport, MagicSetRewrite, MagicSetStatus};
 pub use meta_normalize::normalize_v085_meta;
+pub use module_diagnostics::{
+    diagnose_module_boundaries, CandidateSourceKind, ModuleBoundaryInput, ModuleBoundaryReport,
+    ModuleDeclaration, ModuleDeclarationKind, ModuleManifest, ModuleRole, ModuleViolation,
+    ModuleViolationKind,
+};
 pub use optimizer::{Optimizer, OptimizerConfig, PlanCost};
 pub use parser::{parse_program, parse_statement};
+pub use proof_trace::{DifferentiableProofTraceMap, ProofTrace, ProofTraceSpec};
 pub use stratify::{find_sccs_for_lowering, stratify, DependencyGraph, Stratum};

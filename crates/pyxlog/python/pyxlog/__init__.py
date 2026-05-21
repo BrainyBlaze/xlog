@@ -1,3 +1,4 @@
+# ruff: noqa: E402,F405
 from pyxlog._kernel_paths import configure_kernel_search_path
 
 configure_kernel_search_path()
@@ -7,12 +8,27 @@ import asyncio
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Iterator
 
-import pyxlog._native as _native
-from pyxlog._native import *  # noqa: F401,F403
+try:
+    import pyxlog._native as _native
+    from pyxlog._native import *  # noqa: F401,F403
+    _NATIVE_AVAILABLE = True
+except ModuleNotFoundError as exc:
+    if exc.name != "pyxlog._native":
+        raise
+    _native = None
+    _NATIVE_AVAILABLE = False
+    __all__: list[str] = []
 
-__doc__ = _native.__doc__
-if hasattr(_native, "__all__"):
+__doc__ = _native.__doc__ if _native is not None else "pyxlog pure-Python helpers"
+if _native is not None and hasattr(_native, "__all__"):
     __all__ = _native.__all__
+elif _native is None:
+    class _NativeUnavailableIlpProgramFactory:
+        @staticmethod
+        def compile(*args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("pyxlog._native is not available")
+
+    IlpProgramFactory = _NativeUnavailableIlpProgramFactory
 
 
 class AsyncEvaluation:
@@ -201,7 +217,8 @@ def _install_v080_runtime_api() -> None:
     setattr(CompiledLogicProgram, "_v080_runtime_api_installed", True)
 
 
-_install_v080_runtime_api()
+if _NATIVE_AVAILABLE:
+    _install_v080_runtime_api()
 
 try:
     __all__ = list(__all__) + ["AsyncEvaluation", "LogicQueryChunk"]
