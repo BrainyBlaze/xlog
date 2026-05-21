@@ -411,6 +411,7 @@ pub(crate) struct RelationChangeCallback {
 pub(crate) struct LogicDeltaStats {
     pub input_delta_count: usize,
     pub changed_relations: usize,
+    pub changed_relation_names: Vec<String>,
     pub insert_rows: u64,
     pub delete_rows: u64,
     pub has_deletes: bool,
@@ -420,6 +421,8 @@ pub(crate) struct LogicDeltaStats {
     pub coalesced_insert_rows: u64,
     pub coalesced_delete_rows: u64,
     pub canceled_rows: u64,
+    pub equivalent_to_full_recompute: Option<bool>,
+    pub debug_trace: Vec<String>,
 }
 
 #[pyclass]

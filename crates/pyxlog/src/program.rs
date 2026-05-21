@@ -10,7 +10,7 @@
 use cudarc::driver::DeviceSlice;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 
 use xlog_core::{ScalarType, Schema};
 use xlog_prob::exact::ExactDdnnfProgram;
@@ -1006,6 +1006,17 @@ impl CompiledProgram {
         provider_memory_stats(py, &self.output_provider)
     }
 
+    pub fn rule_provenance(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let provenance = xlog_logic::rule_provenance(&self.ast, None);
+        pack_rule_provenance(py, &provenance)
+    }
+
+    pub fn proof_traces(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let provenance = xlog_logic::rule_provenance(&self.ast, None);
+        let traces = xlog_logic::query_proof_traces(&self.ast, &provenance);
+        pack_proof_traces(py, &traces)
+    }
+
     pub fn host_transfer_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
         let stats = self.output_provider.host_transfer_stats();
         let dict = PyDict::new(py);
@@ -1018,6 +1029,57 @@ impl CompiledProgram {
 
     pub fn reset_host_transfer_stats(&self) {
         self.output_provider.reset_host_transfer_stats()
+    }
+
+    pub fn neural_hot_loop_diagnostics(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let transfers = self.output_provider.host_transfer_stats();
+        let dict = PyDict::new(py);
+        dict.set_item("post_load_dtoh_bytes", transfers.dtoh_bytes)?;
+        dict.set_item("post_load_htod_bytes", transfers.htod_bytes)?;
+        dict.set_item("post_load_dtoh_calls", transfers.dtoh_calls)?;
+        dict.set_item("post_load_htod_calls", transfers.htod_calls)?;
+        dict.set_item("control_plane_bytes_per_iteration", py.None())?;
+        dict.set_item(
+            "control_plane_status",
+            "unavailable: per-iteration control-plane byte counter is not registered",
+        )?;
+        dict.set_item("scalar_sync_checks", py.None())?;
+        dict.set_item(
+            "scalar_sync_status",
+            "unavailable: scalar synchronization counter is not registered",
+        )?;
+
+        let cuda_graph = PyDict::new(py);
+        cuda_graph.set_item(
+            "csm_cuda_graph_captures",
+            self.output_provider.csm_cuda_graph_captures(),
+        )?;
+        cuda_graph.set_item(
+            "csm_cuda_graph_launches",
+            self.output_provider.csm_cuda_graph_launches(),
+        )?;
+        cuda_graph.set_item(
+            "csm_cuda_graph_fallbacks",
+            self.output_provider.csm_cuda_graph_fallbacks(),
+        )?;
+        cuda_graph.set_item(
+            "csm_cuda_graph_cache_hits",
+            self.output_provider.csm_cuda_graph_cache_hits(),
+        )?;
+        dict.set_item("cuda_graph", cuda_graph)?;
+
+        let circuit_cache = PyDict::new(py);
+        circuit_cache.set_item("circuit_cache_size", self.circuit_cache.len())?;
+        circuit_cache.set_item("circuit_cache_hits", self.circuit_cache_hits)?;
+        circuit_cache.set_item("circuit_cache_misses", self.circuit_cache_misses)?;
+        circuit_cache.set_item("template_compile_count", self.template_compile_count)?;
+        circuit_cache.set_item(
+            "query_signature_cache_size",
+            self.query_signature_cache.len(),
+        )?;
+        dict.set_item("circuit_cache", circuit_cache)?;
+
+        Ok(dict.into())
     }
 
     pub fn cuda_graph_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
@@ -1040,4 +1102,44 @@ impl CompiledProgram {
         )?;
         Ok(dict.into())
     }
+}
+
+fn pack_rule_provenance(
+    py: Python<'_>,
+    entries: &[xlog_logic::RuleProvenance],
+) -> PyResult<PyObject> {
+    let list = PyList::empty(py);
+    for entry in entries {
+        let dict = PyDict::new(py);
+        dict.set_item("rule_id", &entry.rule_id)?;
+        dict.set_item("head", &entry.head)?;
+        dict.set_item("source_kind", entry.source_kind.as_str())?;
+        dict.set_item("source_span", entry.source_span.clone())?;
+        dict.set_item("generation_trace_hash", entry.generation_trace_hash.clone())?;
+        dict.set_item("support_relation_ids", entry.support_relation_ids.clone())?;
+        dict.set_item(
+            "counterexample_relation_ids",
+            entry.counterexample_relation_ids.clone(),
+        )?;
+        list.append(dict)?;
+    }
+    Ok(list.into())
+}
+
+fn pack_proof_traces(
+    py: Python<'_>,
+    entries: &[xlog_logic::QueryProofTrace],
+) -> PyResult<PyObject> {
+    let list = PyList::empty(py);
+    for entry in entries {
+        let dict = PyDict::new(py);
+        dict.set_item("query_id", &entry.query_id)?;
+        dict.set_item("query", &entry.query)?;
+        dict.set_item("answer_relation", &entry.answer_relation)?;
+        dict.set_item("rule_ids", entry.rule_ids.clone())?;
+        dict.set_item("source_facts", entry.source_facts.clone())?;
+        dict.set_item("rejected_alternatives", entry.rejected_alternatives.clone())?;
+        list.append(dict)?;
+    }
+    Ok(list.into())
 }

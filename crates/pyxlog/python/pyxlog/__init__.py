@@ -66,6 +66,7 @@ class LogicQueryChunk:
 _V080_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pyxlog-v080")
 _V080_ORIGINALS: dict[tuple[type, str], Any] = {}
 _V080_PROGRESS: dict[int, dict[str, Any]] = {}
+_TEMPORAL_PROVENANCE: dict[int, dict[str, dict[str, Any]]] = {}
 
 
 def _progress_for(obj: Any) -> dict[str, Any]:
@@ -148,6 +149,45 @@ def _logic_eval_iter_query_chunks(
         yield from query.iter_chunks(chunk_rows=chunk_rows)
 
 
+def _logic_session_put_temporal_relation(
+    self: Any,
+    name: str,
+    dlpack_columns: Any,
+    *,
+    timestamp_column: str,
+    dataset_id: str | None = None,
+    row_hashes: list[str] | None = None,
+    field_hashes: dict[str, list[str]] | None = None,
+    uncertainty: Any = None,
+    stream_id: str | None = None,
+    order_column: str | None = None,
+    source: str | None = None,
+) -> dict[str, Any]:
+    self.put_relation(name, dlpack_columns)
+    metadata = {
+        "relation": name,
+        "timestamp_column": timestamp_column,
+        "dataset_id": dataset_id,
+        "row_hashes": list(row_hashes or []),
+        "field_hashes": dict(field_hashes or {}),
+        "uncertainty": uncertainty,
+        "stream_id": stream_id,
+        "order_column": order_column,
+        "source": source,
+    }
+    _TEMPORAL_PROVENANCE.setdefault(id(self), {})[name] = metadata
+    return dict(metadata)
+
+
+def _logic_session_temporal_provenance(
+    self: Any, name: str | None = None
+) -> dict[str, Any]:
+    records = _TEMPORAL_PROVENANCE.get(id(self), {})
+    if name is None:
+        return {relation: dict(metadata) for relation, metadata in records.items()}
+    return dict(records.get(name, {}))
+
+
 def _logic_program_evaluate(self: Any, *args: Any, **kwargs: Any) -> Any:
     return _recorded_call(
         self, _V080_ORIGINALS[(CompiledLogicProgram, "evaluate")], *args, **kwargs
@@ -196,6 +236,8 @@ def _install_v080_runtime_api() -> None:
 
     setattr(CompiledLogicProgram, "evaluate_stream", _logic_program_evaluate_stream)
     setattr(LogicRelationSession, "evaluate_stream", _logic_session_evaluate_stream)
+    setattr(LogicRelationSession, "put_temporal_relation", _logic_session_put_temporal_relation)
+    setattr(LogicRelationSession, "temporal_provenance", _logic_session_temporal_provenance)
     setattr(LogicQueryResult, "iter_chunks", _logic_query_iter_chunks)
     setattr(LogicEvalResult, "iter_query_chunks", _logic_eval_iter_query_chunks)
     setattr(CompiledLogicProgram, "_v080_runtime_api_installed", True)

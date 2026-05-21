@@ -68,3 +68,94 @@ query(out_degree(1, 2)).
     assert!(stdout.contains("\"wcoj\""), "{stdout}");
     assert!(stdout.contains("\"probability\""), "{stdout}");
 }
+
+#[test]
+fn test_xlog_explain_json_reports_rule_provenance_for_source_and_generated_rules() {
+    let program = std::env::temp_dir().join(format!(
+        "xlog_rule_provenance_explain_{}.xlog",
+        std::process::id()
+    ));
+    std::fs::write(
+        &program,
+        r#"
+#pragma magic_sets=on
+pred edge(i32, i32).
+pred reach(i32, i32).
+edge(1, 2).
+edge(2, 3).
+reach(X, Y) :- edge(X, Y).
+reach(X, Z) :- reach(X, Y), edge(Y, Z).
+?- reach(1, N).
+"#,
+    )
+    .expect("write rule provenance fixture");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "explain",
+            "--format",
+            "json",
+            program.to_str().expect("valid path"),
+        ])
+        .output()
+        .expect("run xlog explain json");
+    assert!(
+        output.status.success(),
+        "xlog explain failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("\"rule_provenance\""), "{stdout}");
+    assert!(stdout.contains("\"rule_id\""), "{stdout}");
+    assert!(stdout.contains("\"source_kind\": \"source\""), "{stdout}");
+    assert!(
+        stdout.contains("\"source_kind\": \"generated\""),
+        "{stdout}"
+    );
+    assert!(stdout.contains("__xlog_magic_reach_bf"), "{stdout}");
+    assert!(stdout.contains("\"generation_trace_hash\""), "{stdout}");
+    assert!(stdout.contains("\"support_relation_ids\""), "{stdout}");
+}
+
+#[test]
+fn test_xlog_explain_json_reports_contradiction_query_trace() {
+    let program = std::env::temp_dir().join(format!(
+        "xlog_contradiction_trace_explain_{}.xlog",
+        std::process::id()
+    ));
+    std::fs::write(
+        &program,
+        r#"
+holds(a).
+not_holds(a).
+contradiction(X) :- holds(X), not_holds(X).
+?- contradiction(X).
+"#,
+    )
+    .expect("write contradiction trace fixture");
+
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "explain",
+            "--format",
+            "json",
+            program.to_str().expect("valid path"),
+        ])
+        .output()
+        .expect("run xlog explain json");
+    assert!(
+        output.status.success(),
+        "xlog explain failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(stdout.contains("\"proof_traces\""), "{stdout}");
+    assert!(
+        stdout.contains("\"query\": \"contradiction(X)\""),
+        "{stdout}"
+    );
+    assert!(stdout.contains("\"rule_ids\""), "{stdout}");
+    assert!(stdout.contains("\"source_facts\""), "{stdout}");
+    assert!(stdout.contains("holds(a)"), "{stdout}");
+    assert!(stdout.contains("not_holds(a)"), "{stdout}");
+}

@@ -1,6 +1,6 @@
 # XLOG Development Roadmap
 
-Last updated: May 19, 2026
+Last updated: May 21, 2026
 Current tagged release: v0.8.6. v0.6.0 shipped the stream-safe runtime
 and recorded launch discipline. v0.6.1 shipped recorded CSM hash-join
 dispatch and explicit CSM cert-mode labeling. v0.6.2 shipped the first
@@ -22,7 +22,10 @@ the DTS-DLM runtime completion and GPU-native optimizer pack: device-resident
 delta coalescing, relation-change callbacks, typed exact induction,
 profile-gated chain shared-memory scoring, runtime CSE, adaptive
 re-optimization, persistent hash-index reuse, and behavior-probe-backed
-consumer certification.
+consumer certification. The current v0.8.7 development worktree adds the
+Living-World Diagnostics and Provenance Pack: induced-rule provenance,
+source/generated rule provenance, proof traces, delta debug/equivalence probes,
+temporal relation metadata, and nn/4 hot-loop diagnostics.
 
 This roadmap is version-oriented so planned work is not hidden inside subsystem
 sections. Historical and current-main work uses checked boxes. Future work uses
@@ -30,8 +33,9 @@ unchecked boxes and is assigned to a concrete future version.
 After the tagged v0.8.0 feature pack, v0.8.5 completed the Language
 Completeness and Developer Experience train. v0.8.6 closed the deferred
 DTS-DLM runtime / GPU-native optimizer completion backlog that v0.9.0 needs as
-runtime substrate. v0.9.0 is the active Epistemic/Solver Semantics train and v0.10.0 is the
-Multi-GPU / Out-of-Core train.
+runtime substrate. v0.8.7 is the current diagnostics/provenance worktree layered
+on that runtime substrate. v0.9.0 is the active Epistemic/Solver Semantics train
+and v0.10.0 is the Multi-GPU / Out-of-Core train.
 
 ## v0.0.1 - Workspace Foundation
 
@@ -1618,6 +1622,63 @@ engines, or parallel helper paths that bypass production dispatch are blockers.
       backed by validator-owned behavior probes, and public pyxlog persistent
       index session reuse has a passing behavior probe.
       Evidence: `docs/evidence/2026-05-19-v086-consumers/`.
+
+## v0.8.7 - Living-World Diagnostics and Provenance Pack
+
+Status: implemented in the current v0.8.7 worktree; release tag and publication
+are still pending. Architecture source of truth:
+`docs/architecture/living-world-diagnostics-v087.md`.
+
+v0.8.7 closes the living-world auditability gaps without changing the production
+data path. New surfaces report rule metadata, proof frontiers, relation-delta
+counters, temporal/source metadata, and neural hot-loop state; they do not force
+host row materialization unless the caller already selected a host-readable API.
+
+### Rule And Proof Diagnostics
+
+- [x] Add shared `xlog-logic` diagnostics records for `RuleProvenance`,
+      `RuleSourceKind`, and `QueryProofTrace`.
+- [x] Extend `xlog explain` text and JSON reports with `rule_provenance` and
+      `proof_traces`, including generated magic-set rewrite rules when present.
+- [x] Expose `rule_provenance()` and `proof_traces()` from deterministic
+      pyxlog programs, persistent relation sessions, and probabilistic pyxlog
+      programs.
+
+### Induction Provenance
+
+- [x] Add `xlog-induce` generated-rule provenance records with selected rule
+      source, search-space size, predicate inventory, positive support rows,
+      rejected alternatives, selected-rule falsification count, and stable
+      generation trace hash.
+- [x] Add an in-memory `InductionProvenanceRegistry` for callers that promote
+      generated rules and need to retain their audit records.
+
+### Delta And Temporal Diagnostics
+
+- [x] Extend persistent-session delta reports with `changed_relation_names` and
+      metadata-only `debug_trace` entries.
+- [x] Add `LogicRelationSession.apply_relation_delta_debug(...)` with opt-in
+      `check_equivalence=True` full-recompute comparison through query-store
+      equivalence.
+- [x] Add pyxlog temporal relation helpers that attach `timestamp_column`,
+      `dataset_id`, row hashes, field hashes, uncertainty metadata, stream id,
+      ordering column, and source metadata to session-managed relations.
+
+### Neural Hot-Loop Diagnostics
+
+- [x] Add `CompiledProgram.neural_hot_loop_diagnostics()` with post-load
+      transfer stats, CUDA Graph counters, circuit-cache counters, and explicit
+      unavailable statuses for unsupported per-iteration control-plane and
+      scalar-sync counters.
+
+### Documentation And Validation
+
+- [x] Document the full v0.8.7 diagnostics architecture in
+      `docs/architecture/living-world-diagnostics-v087.md`.
+- [x] Update the Python bindings, CLI reference, and bounded exact-induction
+      architecture docs for the new public surfaces.
+- [x] Add source-level coverage for the v0.8.7 Python diagnostics API surface
+      and Rust tests for CLI explain diagnostics plus induction provenance.
 
 ## v0.9.0 - Epistemic and Solver Semantics
 

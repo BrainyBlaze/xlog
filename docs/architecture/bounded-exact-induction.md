@@ -269,6 +269,32 @@ pub struct ExactInductionResult {
 }
 ```
 
+## Generated Rule Provenance
+
+v0.8.7 adds audit records for generated/mined rules in
+`crates/xlog-induce/src/provenance.rs`. The scorer still returns
+`ExactInductionResult`; provenance is the companion layer for callers that
+promote a candidate into a generated rule and need to retain why it was selected.
+
+```rust
+pub struct InducedRuleProvenance {
+    pub rule_id: String,
+    pub rule_source: String,
+    pub source_kind: RuleSourceKind,
+    pub search_space_size: u64,
+    pub predicate_inventory: Vec<String>,
+    pub support_rows: Vec<InductionSupportRow>,
+    pub rejected_alternatives: Vec<InductionAlternative>,
+    pub falsification_count: u64,
+    pub generation_trace_hash: String,
+}
+```
+
+`InductionSupportRow` records retained positive support by relation, row index,
+and caller-supplied row hash. `InductionAlternative` records rejected candidate
+rules with support and falsification counts. `InductionProvenanceRegistry`
+stores the generated-rule records in memory for the caller's audit path.
+
 ## Python Surface
 
 ```python
@@ -362,5 +388,8 @@ Evidence: `docs/evidence/2026-05-19-v086-chain-smem/`.
 - `docs/architecture/cuda-certification.md` — CUDA certification suite
   (C01–C25 + G01–G08); `ilp_exact` is not yet in the formal certification
   registry because its PTX is not committed (see above).
+- `docs/architecture/living-world-diagnostics-v087.md` — v0.8.7 provenance
+  and diagnostics surfaces for generated rules, source rules, proof traces,
+  deltas, temporal metadata, and neural hot loops.
 - `ROADMAP.md` → "Bounded Exact Induction (`xlog-induce`) — DTS M8
   Phase 1" — milestone-level status, planned DTS-side integration.

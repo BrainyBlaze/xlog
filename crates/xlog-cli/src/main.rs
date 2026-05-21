@@ -17,6 +17,7 @@ use xlog_logic::compile::load_modules;
 use xlog_logic::parse_program;
 use xlog_logic::{rewrite_v085_magic_sets, MagicSetReport, MagicSetStatus, ParserSession};
 use xlog_logic::{stratify, Compiler};
+use xlog_logic::{QueryProofTrace, RuleProvenance};
 #[cfg(feature = "host-io")]
 use xlog_prob::exact::ExactDdnnfProgram;
 #[cfg(feature = "host-io")]
@@ -236,6 +237,8 @@ struct ExplainReport {
     parse_stats: xlog_logic::ParseCacheStats,
     magic_sets: MagicSetReport,
     aggregate_lifting: Vec<AggregateLiftReport>,
+    rule_provenance: Vec<RuleProvenance>,
+    proof_traces: Vec<QueryProofTrace>,
     stratification_status: String,
     stratification_count: usize,
     rir_status: String,
@@ -246,7 +249,10 @@ struct ExplainReport {
 
 fn build_explain_report(parsed: xlog_logic::IncrementalParseResult) -> Result<ExplainReport> {
     let program = parsed.program;
-    let magic_sets = rewrite_v085_magic_sets(&program)?.report;
+    let magic_rewrite = rewrite_v085_magic_sets(&program)?;
+    let rule_provenance = xlog_logic::rule_provenance(&program, Some(&magic_rewrite.program));
+    let proof_traces = xlog_logic::query_proof_traces(&program, &rule_provenance);
+    let magic_sets = magic_rewrite.report;
     let aggregate_lifting = explain_aggregate_lifting(&program)?;
     let (stratification_status, stratification_count) = match stratify(&program) {
         Ok(strata) => ("ok".to_string(), strata.len()),
@@ -268,6 +274,8 @@ fn build_explain_report(parsed: xlog_logic::IncrementalParseResult) -> Result<Ex
         parse_stats: parsed.stats,
         magic_sets,
         aggregate_lifting,
+        rule_provenance,
+        proof_traces,
         stratification_status,
         stratification_count,
         rir_status,
@@ -316,6 +324,28 @@ fn print_explain_text(report: &ExplainReport) {
                 entry.domain_size,
                 entry.uncertain_rows,
                 entry.cap
+            );
+        }
+    }
+    if !report.rule_provenance.is_empty() {
+        println!("rule_provenance:");
+        for entry in &report.rule_provenance {
+            println!(
+                "  - id: {} source_kind: {} head: {}",
+                entry.rule_id,
+                entry.source_kind.as_str(),
+                entry.head
+            );
+        }
+    }
+    if !report.proof_traces.is_empty() {
+        println!("proof_traces:");
+        for entry in &report.proof_traces {
+            println!(
+                "  - query: {} rules: {} source_facts: {}",
+                entry.query,
+                entry.rule_ids.len(),
+                entry.source_facts.len()
             );
         }
     }
@@ -451,8 +481,71 @@ fn print_explain_json(report: &ExplainReport) {
         );
         println!("    }}{}", suffix);
     }
-    println!("  ]");
+    println!("  ],");
+    print_rule_provenance_json(&report.rule_provenance);
+    println!(",");
+    print_proof_traces_json(&report.proof_traces);
     println!("}}");
+}
+
+fn print_rule_provenance_json(entries: &[RuleProvenance]) {
+    println!("  \"rule_provenance\": [");
+    for (idx, entry) in entries.iter().enumerate() {
+        let suffix = if idx + 1 == entries.len() { "" } else { "," };
+        println!("    {{");
+        println!("      \"rule_id\": \"{}\",", json_escape(&entry.rule_id));
+        println!("      \"head\": \"{}\",", json_escape(&entry.head));
+        println!(
+            "      \"source_kind\": \"{}\",",
+            json_escape(entry.source_kind.as_str())
+        );
+        println!(
+            "      \"source_span\": {},",
+            json_optional_string(entry.source_span.as_deref())
+        );
+        println!(
+            "      \"generation_trace_hash\": {},",
+            json_optional_string(entry.generation_trace_hash.as_deref())
+        );
+        println!(
+            "      \"support_relation_ids\": {},",
+            json_string_array(&entry.support_relation_ids)
+        );
+        println!(
+            "      \"counterexample_relation_ids\": {}",
+            json_string_array(&entry.counterexample_relation_ids)
+        );
+        println!("    }}{}", suffix);
+    }
+    println!("  ]");
+}
+
+fn print_proof_traces_json(entries: &[QueryProofTrace]) {
+    println!("  \"proof_traces\": [");
+    for (idx, entry) in entries.iter().enumerate() {
+        let suffix = if idx + 1 == entries.len() { "" } else { "," };
+        println!("    {{");
+        println!("      \"query_id\": \"{}\",", json_escape(&entry.query_id));
+        println!("      \"query\": \"{}\",", json_escape(&entry.query));
+        println!(
+            "      \"answer_relation\": \"{}\",",
+            json_escape(&entry.answer_relation)
+        );
+        println!(
+            "      \"rule_ids\": {},",
+            json_string_array(&entry.rule_ids)
+        );
+        println!(
+            "      \"source_facts\": {},",
+            json_string_array(&entry.source_facts)
+        );
+        println!(
+            "      \"rejected_alternatives\": {}",
+            json_string_array(&entry.rejected_alternatives)
+        );
+        println!("    }}{}", suffix);
+    }
+    println!("  ]");
 }
 
 fn print_magic_dot(report: &MagicSetReport) {
@@ -505,6 +598,13 @@ fn json_value(value: &Value) -> String {
         }
         Value::Symbol(id) => format!("\"{}\"", json_escape(&symbol::resolve(*id))),
         Value::String(s) => format!("\"{}\"", json_escape(s)),
+    }
+}
+
+fn json_optional_string(value: Option<&str>) -> String {
+    match value {
+        Some(value) => format!("\"{}\"", json_escape(value)),
+        None => "null".to_string(),
     }
 }
 

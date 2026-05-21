@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PySequence};
+use pyo3::types::{PyDict, PyList, PySequence};
 
 use xlog_cuda::DlpackManagedTensor;
 use xlog_gpu::logic as gpu_logic;
@@ -200,6 +200,14 @@ impl CompiledLogicProgram {
     pub fn memory_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
         provider_memory_stats(py, &self.provider)
     }
+
+    pub fn rule_provenance(&self, py: Python<'_>) -> PyResult<PyObject> {
+        pack_rule_provenance(py, &self.program.rule_provenance())
+    }
+
+    pub fn proof_traces(&self, py: Python<'_>) -> PyResult<PyObject> {
+        pack_proof_traces(py, &self.program.proof_traces())
+    }
 }
 
 impl CompiledLogicProgram {}
@@ -317,36 +325,8 @@ impl LogicRelationSession {
         py: Python<'_>,
         updates: &Bound<'_, PyAny>,
     ) -> PyResult<PyObject> {
-        let seq = updates.downcast::<PySequence>().map_err(|_| {
-            PyValueError::new_err(
-                "apply_relation_delta_batch expects a sequence of update dictionaries",
-            )
-        })?;
-        let mut batch: Vec<(String, RelationDelta)> = Vec::with_capacity(seq.len()? as usize);
-        let mut relation_names: Vec<String> = Vec::new();
-        for item in seq.try_iter()? {
-            let item = item?;
-            let dict = item.downcast::<PyDict>().map_err(|_| {
-                PyValueError::new_err("apply_relation_delta_batch updates must be dictionaries")
-            })?;
-            let name_obj = dict.get_item("name")?.ok_or_else(|| {
-                PyValueError::new_err("apply_relation_delta_batch update missing 'name'")
-            })?;
-            let name: String = name_obj.extract()?;
-            let insert = optional_delta_columns(dict, "insert_columns")
-                .map(|columns| self.relation_delta_buffer(&name, &columns))
-                .transpose()?;
-            let delete = optional_delta_columns(dict, "delete_columns")
-                .map(|columns| self.relation_delta_buffer(&name, &columns))
-                .transpose()?;
-            if insert.is_none() && delete.is_none() {
-                return Err(PyValueError::new_err(
-                    "apply_relation_delta_batch updates require insert_columns, delete_columns, or both",
-                ));
-            }
-            relation_names.push(name.clone());
-            batch.push((name, RelationDelta::new(insert, delete)));
-        }
+        let (batch, relation_names) =
+            self.parse_relation_delta_batch("apply_relation_delta_batch", updates)?;
 
         let report = self
             .program
@@ -364,6 +344,53 @@ impl LogicRelationSession {
         pack_delta_stats(py, &stats)
     }
 
+    #[pyo3(signature = (updates, check_equivalence=false))]
+    pub fn apply_relation_delta_debug(
+        &mut self,
+        py: Python<'_>,
+        updates: &Bound<'_, PyAny>,
+        check_equivalence: bool,
+    ) -> PyResult<PyObject> {
+        let (batch, relation_names) =
+            self.parse_relation_delta_batch("apply_relation_delta_debug", updates)?;
+        let report = self
+            .program
+            .apply_relation_delta_batch_with_session_runtime(
+                self.provider.clone(),
+                &mut self.relation_store,
+                &mut self.evaluation_store,
+                &mut self.session_runtime,
+                batch,
+            )
+            .map_err(types::xlog_err)?;
+        let mut stats = logic_delta_stats_from_report(report);
+        if check_equivalence {
+            let (_, full_store) = self
+                .program
+                .evaluate_with_relation_store_and_cache(
+                    self.provider.clone(),
+                    &self.relation_store,
+                    false,
+                )
+                .map_err(types::xlog_err)?;
+            let cached_store = self.evaluation_store.as_ref().ok_or_else(|| {
+                PyRuntimeError::new_err("delta debug missing cached store after delta application")
+            })?;
+            stats.equivalent_to_full_recompute = Some(
+                self.program
+                    .relation_stores_query_equivalent(
+                        self.provider.as_ref(),
+                        &full_store,
+                        cached_store,
+                    )
+                    .map_err(types::xlog_err)?,
+            );
+        }
+        self.last_delta_stats = Some(stats.clone());
+        self.fire_relation_callbacks(py, &relation_names, &stats)?;
+        pack_delta_stats(py, &stats)
+    }
+
     pub fn delta_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
         match &self.last_delta_stats {
             Some(stats) => pack_delta_stats(py, stats),
@@ -374,6 +401,14 @@ impl LogicRelationSession {
                 Ok(dict.into())
             }
         }
+    }
+
+    pub fn rule_provenance(&self, py: Python<'_>) -> PyResult<PyObject> {
+        pack_rule_provenance(py, &self.program.rule_provenance())
+    }
+
+    pub fn proof_traces(&self, py: Python<'_>) -> PyResult<PyObject> {
+        pack_proof_traces(py, &self.program.proof_traces())
     }
 
     pub fn register_relation_callback(
@@ -505,6 +540,44 @@ impl LogicRelationSession {
 }
 
 impl LogicRelationSession {
+    fn parse_relation_delta_batch(
+        &self,
+        method_name: &str,
+        updates: &Bound<'_, PyAny>,
+    ) -> PyResult<(Vec<(String, RelationDelta)>, Vec<String>)> {
+        let seq = updates.downcast::<PySequence>().map_err(|_| {
+            PyValueError::new_err(format!(
+                "{method_name} expects a sequence of update dictionaries"
+            ))
+        })?;
+        let mut batch: Vec<(String, RelationDelta)> = Vec::with_capacity(seq.len()? as usize);
+        let mut relation_names: Vec<String> = Vec::new();
+        for item in seq.try_iter()? {
+            let item = item?;
+            let dict = item.downcast::<PyDict>().map_err(|_| {
+                PyValueError::new_err(format!("{method_name} updates must be dictionaries"))
+            })?;
+            let name_obj = dict.get_item("name")?.ok_or_else(|| {
+                PyValueError::new_err(format!("{method_name} update missing 'name'"))
+            })?;
+            let name: String = name_obj.extract()?;
+            let insert = optional_delta_columns(dict, "insert_columns")
+                .map(|columns| self.relation_delta_buffer(&name, &columns))
+                .transpose()?;
+            let delete = optional_delta_columns(dict, "delete_columns")
+                .map(|columns| self.relation_delta_buffer(&name, &columns))
+                .transpose()?;
+            if insert.is_none() && delete.is_none() {
+                return Err(PyValueError::new_err(format!(
+                    "{method_name} updates require insert_columns, delete_columns, or both"
+                )));
+            }
+            relation_names.push(name.clone());
+            batch.push((name, RelationDelta::new(insert, delete)));
+        }
+        Ok((batch, relation_names))
+    }
+
     fn relation_delta_buffer(
         &self,
         name: &str,
@@ -557,6 +630,7 @@ impl LogicRelationSession {
         let stats = LogicDeltaStats {
             input_delta_count: report.input_delta_count,
             changed_relations: report.changed_relations,
+            changed_relation_names: report.changed_relation_names,
             insert_rows: report.insert_rows,
             delete_rows: report.delete_rows,
             has_deletes: report.has_deletes,
@@ -566,6 +640,8 @@ impl LogicRelationSession {
             coalesced_insert_rows: report.coalesced_insert_rows,
             coalesced_delete_rows: report.coalesced_delete_rows,
             canceled_rows: report.canceled_rows,
+            equivalent_to_full_recompute: None,
+            debug_trace: report.debug_trace,
         };
         self.last_delta_stats = Some(stats.clone());
         self.fire_relation_callbacks(py, &relation_names, &stats)?;
@@ -616,6 +692,10 @@ fn relation_callback_payload(
     dict.set_item("relation", relation)?;
     dict.set_item("generation", generation)?;
     dict.set_item("input_delta_count", stats.input_delta_count)?;
+    dict.set_item(
+        "changed_relation_names",
+        stats.changed_relation_names.clone(),
+    )?;
     dict.set_item("insert_rows", stats.insert_rows)?;
     dict.set_item("delete_rows", stats.delete_rows)?;
     dict.set_item("has_deletes", stats.has_deletes)?;
@@ -625,6 +705,7 @@ fn relation_callback_payload(
     dict.set_item("affected_sccs", stats.affected_sccs)?;
     dict.set_item("recomputed_sccs", stats.recomputed_sccs)?;
     dict.set_item("incremental_sccs", stats.incremental_sccs)?;
+    dict.set_item("debug_trace", stats.debug_trace.clone())?;
     dict.set_item("telemetry", pack_delta_stats(py, stats)?)?;
     Ok(dict.into())
 }
@@ -640,6 +721,7 @@ fn logic_delta_stats_from_report(report: gpu_logic::LogicDeltaReport) -> LogicDe
     LogicDeltaStats {
         input_delta_count: report.input_delta_count,
         changed_relations: report.changed_relations,
+        changed_relation_names: report.changed_relation_names,
         insert_rows: report.insert_rows,
         delete_rows: report.delete_rows,
         has_deletes: report.has_deletes,
@@ -649,6 +731,8 @@ fn logic_delta_stats_from_report(report: gpu_logic::LogicDeltaReport) -> LogicDe
         coalesced_insert_rows: report.coalesced_insert_rows,
         coalesced_delete_rows: report.coalesced_delete_rows,
         canceled_rows: report.canceled_rows,
+        equivalent_to_full_recompute: None,
+        debug_trace: report.debug_trace,
     }
 }
 
@@ -657,6 +741,10 @@ fn pack_delta_stats(py: Python<'_>, stats: &LogicDeltaStats) -> PyResult<PyObjec
     dict.set_item("status", "ok")?;
     dict.set_item("input_delta_count", stats.input_delta_count)?;
     dict.set_item("changed_relations", stats.changed_relations)?;
+    dict.set_item(
+        "changed_relation_names",
+        stats.changed_relation_names.clone(),
+    )?;
     dict.set_item("insert_rows", stats.insert_rows)?;
     dict.set_item("delete_rows", stats.delete_rows)?;
     dict.set_item("has_deletes", stats.has_deletes)?;
@@ -666,7 +754,52 @@ fn pack_delta_stats(py: Python<'_>, stats: &LogicDeltaStats) -> PyResult<PyObjec
     dict.set_item("coalesced_insert_rows", stats.coalesced_insert_rows)?;
     dict.set_item("coalesced_delete_rows", stats.coalesced_delete_rows)?;
     dict.set_item("canceled_rows", stats.canceled_rows)?;
+    dict.set_item(
+        "equivalent_to_full_recompute",
+        stats.equivalent_to_full_recompute,
+    )?;
+    dict.set_item("debug_trace", stats.debug_trace.clone())?;
     Ok(dict.into())
+}
+
+fn pack_rule_provenance(
+    py: Python<'_>,
+    entries: &[xlog_logic::RuleProvenance],
+) -> PyResult<PyObject> {
+    let list = PyList::empty(py);
+    for entry in entries {
+        let dict = PyDict::new(py);
+        dict.set_item("rule_id", &entry.rule_id)?;
+        dict.set_item("head", &entry.head)?;
+        dict.set_item("source_kind", entry.source_kind.as_str())?;
+        dict.set_item("source_span", entry.source_span.clone())?;
+        dict.set_item("generation_trace_hash", entry.generation_trace_hash.clone())?;
+        dict.set_item("support_relation_ids", entry.support_relation_ids.clone())?;
+        dict.set_item(
+            "counterexample_relation_ids",
+            entry.counterexample_relation_ids.clone(),
+        )?;
+        list.append(dict)?;
+    }
+    Ok(list.into())
+}
+
+fn pack_proof_traces(
+    py: Python<'_>,
+    entries: &[xlog_logic::QueryProofTrace],
+) -> PyResult<PyObject> {
+    let list = PyList::empty(py);
+    for entry in entries {
+        let dict = PyDict::new(py);
+        dict.set_item("query_id", &entry.query_id)?;
+        dict.set_item("query", &entry.query)?;
+        dict.set_item("answer_relation", &entry.answer_relation)?;
+        dict.set_item("rule_ids", entry.rule_ids.clone())?;
+        dict.set_item("source_facts", entry.source_facts.clone())?;
+        dict.set_item("rejected_alternatives", entry.rejected_alternatives.clone())?;
+        list.append(dict)?;
+    }
+    Ok(list.into())
 }
 
 fn collect_dlpack_columns(

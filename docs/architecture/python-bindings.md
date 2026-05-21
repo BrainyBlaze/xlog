@@ -12,9 +12,13 @@ The `pyxlog` Python module provides:
 - Differentiable ILP training via `pyxlog.ilp` (rule learning from examples)
 - Zero-copy GPU tensor exchange via DLPack (primary interop boundary)
 - Optional experimental Arrow C Device interop (feature-gated)
+- v0.8.7 diagnostics for rule provenance, proof traces, relation delta debug,
+  temporal relation metadata, and neural hot-loop audits
 
 Host-read convenience outputs (probabilities, gradients, confidence intervals) are behind a `host-io`
 Cargo feature so GPU-native call sites can enforce a "no DTOH for results" contract.
+For the full v0.8.7 diagnostics map, see
+[`living-world-diagnostics-v087.md`](living-world-diagnostics-v087.md).
 
 ## Installation
 
@@ -189,14 +193,24 @@ session.apply_relation_delta_batch([
     {"name": "wmir_committed", "insert_columns": [row_a, parent_a]},
     {"name": "wmir_committed", "delete_columns": [row_b, parent_b]},
 ])
+
+def apply_relation_delta_debug(updates, check_equivalence=False) -> dict: ...
+debug = session.apply_relation_delta_debug(
+    [{"name": "wmir_committed", "insert_columns": [row_c, parent_c]}],
+    check_equivalence=True,
+)
 ```
 
 The delta stats dictionary contains `changed_relations`, `insert_rows`,
 `delete_rows`, `affected_sccs`, `recomputed_sccs`, `incremental_sccs`,
 `input_delta_count`, `coalesced_insert_rows`, `coalesced_delete_rows`, and
-`canceled_rows`. Batch updates coalesce repeated relation mutations before
-runtime recompute using existing device-resident set operations; callback or
-diagnostic code must not materialize relation rows on the host.
+`canceled_rows`. v0.8.7 delta debug output also includes
+`changed_relation_names`, `equivalent_to_full_recompute`, and `debug_trace`.
+`equivalent_to_full_recompute` is `None` unless the caller opts into
+`check_equivalence=True`.
+Batch updates coalesce repeated relation mutations before runtime recompute
+using existing device-resident set operations; callback or diagnostic code must
+not materialize relation rows on the host.
 Direct `put_relation`, `remove_relation`, or `clear_relations` calls invalidate
 the cached runtime store and make the next `evaluate()` perform a full plan
 run before later deltas can reuse it.
@@ -238,6 +252,41 @@ G086_NOTIFY ordering fixture records 100 replays with identical callback
 sequences. Callback payload construction does not export DLPack tensors or
 download relation data-plane rows; use explicit `evaluate()` or
 `export_relation()` when row materialization is actually requested.
+
+#### Rule, Proof, And Temporal Provenance
+
+Compiled logic/probabilistic programs and sessions expose source-level introspection:
+
+```python
+def rule_provenance() -> list[dict]: ...
+def proof_traces() -> list[dict]: ...
+```
+
+`rule_provenance()` returns stable `rule_id`, `source_kind`,
+`generation_trace_hash`, `support_relation_ids`, and
+`counterexample_relation_ids` fields. `proof_traces()` returns each query's
+answer relation, deriving rule ids, source facts, and rejected alternatives.
+
+Temporal stream loads can keep provenance metadata next to the relation:
+
+```python
+session.put_temporal_relation(
+    "stream_row",
+    columns,
+    timestamp_column="event_ts",
+    dataset_id="hf-live",
+    row_hashes=row_hashes,
+    field_hashes=field_hashes,
+    uncertainty=uncertainty,
+    stream_id="camera-a",
+    order_column="seq",
+)
+session.temporal_provenance("stream_row")
+```
+
+The temporal metadata shape preserves `timestamp_column`, `dataset_id`,
+`row_hashes`, `field_hashes`, `uncertainty`, `stream_id`, source, and temporal
+order via `order_column`.
 
 #### v0.8.0 Runtime Controls And Diagnostics
 
@@ -286,6 +335,8 @@ program.progress_stats()
 program.memory_stats()
 program.host_transfer_stats()
 program.cuda_graph_stats()
+def neural_hot_loop_diagnostics() -> dict: ...
+program.neural_hot_loop_diagnostics()
 ```
 
 `memory_stats()` reports `allocated_bytes`, `memory_limit_bytes`,
@@ -294,6 +345,13 @@ program.cuda_graph_stats()
 `csm_cuda_graph_fallbacks`, and `csm_cuda_graph_cache_hits`. Environments that
 cannot provide a future diagnostic must report an explicit unavailable status or
 error rather than fabricating a zero-valued probe.
+
+`neural_hot_loop_diagnostics()` is the unified nn/4 hot-loop audit surface. It
+reports `post_load_dtoh_bytes`, `post_load_htod_bytes`,
+`control_plane_bytes_per_iteration`, `scalar_sync_checks`, nested
+`cuda_graph`, and nested `circuit_cache` diagnostics from the same runtime API.
+When this runtime cannot yet provide a separate control-plane or scalar-sync
+counter, the corresponding value is `None` and a `*_status` field explains why.
 
 ### Program (Probabilistic)
 
@@ -921,11 +979,14 @@ for batch in data_loader:
 Current limitations:
 - Linux x86_64 + CUDA only
 - Published PyPI wheels follow tagged releases and may lag the current `main` branch workspace version
-- v0.8.0 async evaluation and per-call memory APIs require this branch's
-  workspace build until the next tagged wheel is published
+- v0.8.7 diagnostics APIs require this branch's workspace build until the next
+  tagged wheel is published
 
 ## See Also
 
+- [v0.8.7 Living-World Diagnostics](living-world-diagnostics-v087.md) — Rule
+  provenance, proof traces, delta debug, temporal metadata, and nn/4 hot-loop
+  audit surface
 - [dILP Training Architecture](dilp-training.md) — System design, mask backends, promotion pipeline
 - [Data Interoperability](cudf-interop.md) — DLPack and Arrow details
 - [Probabilistic Tier](xlog-prob.md) — Inference engine details

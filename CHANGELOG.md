@@ -4,7 +4,33 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
-No changes yet.
+### Added
+
+- Added the v0.8.7 Living-World Diagnostics architecture document covering
+  induced-rule provenance, rule provenance, proof traces, delta debug,
+  temporal relation metadata, and neural hot-loop diagnostics.
+- Added shared `xlog-logic` rule provenance and query proof trace diagnostics,
+  surfaced through `xlog explain --format json` and pyxlog
+  `rule_provenance()` / `proof_traces()` methods.
+- Added `xlog-induce` generated-rule provenance records with support rows,
+  rejected alternatives, falsification counts, predicate inventory, and a
+  stable generation trace hash.
+- Added pyxlog persistent-session delta debug output with changed relation
+  names, metadata-only debug traces, and an opt-in full-recompute equivalence
+  check.
+- Added pyxlog temporal relation metadata helpers for session-managed
+  relations.
+- Added `CompiledProgram.neural_hot_loop_diagnostics()` with transfer,
+  CUDA Graph, circuit-cache, and explicit unavailable-status diagnostics for
+  unsupported hot-loop counters.
+
+### Changed
+
+- Updated README and ROADMAP status to describe the `v0.8.7-dev`
+  diagnostics/provenance worktree while keeping `v0.8.6` as the latest tagged
+  release.
+- Updated architecture docs for Python bindings, CLI explain diagnostics, and
+  bounded exact-induction provenance.
 
 ## [0.8.6] — 2026-05-19
 
