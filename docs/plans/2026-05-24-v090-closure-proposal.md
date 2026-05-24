@@ -4,20 +4,28 @@ Date: 2026-05-24
 
 Branch: `feat/v090-epistemic-solver-semantics`
 
-HEAD at audit start: `c25cd22b`
+Audit start HEAD: `c25cd22b`
+
+Checkpoint commit: `d2d57cb2`
+
+Post-checkpoint split diagnostic amendment: `415343c8`
 
 Base/rebase state: local `main` at `bd45229d` is an ancestor of `HEAD`.
 
-Recommendation: `HOLD_FOR_FIXES`
+Recommendation: `MERGE_READY`
 
 ## Decision Rationale
 
-The current codebase has strong production-path evidence for the v0.9.0
-epistemic GPU runtime, WCOJ reuse, solver reuse, probabilistic reuse, and v0.8
-compatibility gates. The branch is not merge-ready because the worktree still
-contains uncommitted changes across 216 paths, so the final deliverable cannot
-truthfully list sub-goal commit SHAs for this work. External release-board
-mutation, commit, push, tag, and merge remain outside this proposal.
+The current codebase has stable local commits and post-checkpoint
+production-path evidence for the v0.9.0 epistemic GPU runtime, WCOJ reuse,
+solver reuse, probabilistic reuse, split diagnostic safety, and v0.8
+compatibility gates. The previous `HOLD_FOR_FIXES` blocker was the uncommitted
+216-path worktree plus a stale post-checkpoint split diagnostic assertion. The
+216-path checkpoint is now committed as `d2d57cb2`, the split diagnostic
+assertion correction is committed as `415343c8`, and the final runtime gates
+listed below have been rerun after those code changes. External release-board
+mutation, push, tag, merge, and main-branch mutation remain outside this
+proposal and still require explicit coordinator authorization.
 
 This proposal supersedes older v0.9.0 evidence notes that described the GPU,
 solver, probability, and certification nodes as blocked by missing
@@ -30,7 +38,7 @@ current-status sections now point back to this closure ledger.
 
 | Check | Current evidence |
 |---|---|
-| `git rev-parse --short HEAD` | `c25cd22b` |
+| `git rev-parse --short HEAD` | `415343c8` |
 | `git rev-parse --short main` | `bd45229d` |
 | `git merge-base HEAD main` | `bd45229d` |
 | `git merge-base --is-ancestor main HEAD` | exit `0` |
@@ -54,12 +62,12 @@ The current branch has the following recent real-pilot evidence:
 | Probabilistic accepted evidence | `cargo test -p xlog-prob --features host-io --test epistemic_prob_gpu_accepted_evidence -- --test-threads=1` | PASS, 31 tests |
 | Probabilistic production reuse | `cargo test -p xlog-prob --test epistemic_prob_production_reuse -- --test-threads=1` | PASS, 7 tests |
 | EIR/G91/FAEEL/GPT/splitting/world-view/lowering | focused `xlog-logic` semantic and lowering pilots listed in the 2026-05-24 refresh below | PASS, 69 tests |
-| Cross-crate GPU/WCOJ/solver/probability integration | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --test-threads=1` | PASS, 206 tests in 484.82s |
+| Cross-crate GPU/WCOJ/solver/probability integration | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --test-threads=1` | PASS, 206 tests in 572.94s after `415343c8` |
 | W5.2 measured K-clique pilot | `cargo test -p xlog-integration --test test_w52_measurement_pilot -- --test-threads=1 --nocapture`; `cargo check -p xlog-integration --test test_w52_measurement_pilot` | PASS, 1 test; compile check PASS; `elapsed_nanos=45152515`, `vram_delta_bytes=33554432`, `metadata_build_count=1` |
 | Untracked pilot test target compilation | `cargo check -p xlog-solve --test gpu_solver_accepted_evidence`; `cargo check -p xlog-prob --features host-io --test epistemic_prob_gpu_accepted_evidence`; `cargo check -p xlog-integration --test test_w52_measurement_pilot` | PASS |
 | Modified core crate compile sweep | `cargo check -p xlog-ir -p xlog-logic -p xlog-runtime -p xlog-cuda -p xlog-solve -p xlog-prob -p xlog-integration -p xlog-induce -p xlog-cli` | PASS |
 | Modified core test-binary compile sweep | per-package `cargo test --tests --no-run` for `xlog-ir`, `xlog-logic`, `xlog-runtime`, `xlog-cuda`, `xlog-solve`, `xlog-prob --features host-io`, and `xlog-integration` | PASS |
-| v0.8 DTS compatibility | `PYTHONPATH=target/debug python3 scripts/validate_v080_examples.py --output /tmp/xlog-v090-v080-validation-summary-current.json --timeout 180` | PASS, 5 examples |
+| v0.8 DTS compatibility | `PYTHONPATH=target/debug python3 scripts/validate_v080_examples.py --output /tmp/xlog-v090-v080-validation-summary-post-checkpoint.json --timeout 180` | PASS, 5 examples after `415343c8` |
 | pyxlog extension compile sanity | `cargo test -p pyxlog --no-run` | PASS |
 | Exact induction default-dispatch pilot | `PYTHONPATH=target/debug python3 -m pytest --collect-only -q python/tests/test_ilp_exact_induce_default_dispatch.py`; `PYTHONPATH=target/debug python3 -m pytest -q python/tests/test_ilp_exact_induce_default_dispatch.py` | PASS, 2 collected, 2 passed |
 | Python ILP dirty-suite collection | `PYTHONPATH=target/debug:crates/pyxlog/python python3 -m pytest --collect-only -q python/tests/test_v086_exact_types_runtime.py python/tests/test_kernel_packaging_layout.py python/tests/test_ilp_types.py python/tests/test_ilp_trainer.py python/tests/test_ilp_reset.py python/tests/test_ilp_recursive.py python/tests/test_ilp_exact_induce_default_dispatch.py python/tests/test_ilp_exact_induce.py python/tests/test_ilp_d2h_gate.py python/tests/test_ilp_credit_gpu.py` | PASS, 115 tests collected in 0.10s |
@@ -68,7 +76,7 @@ The current branch has the following recent real-pilot evidence:
 | Python ILP trainer split runtime | `python3 -m pytest -q python/tests/test_ilp_trainer.py::...` split across all 33 collected trainer tests with `PYTHONPATH=target/debug:crates/pyxlog/python` and single-thread BLAS/Rayon caps | PASS, 33 tests total |
 | Formatting | `nice -n 10 env CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 RAYON_NUM_THREADS=1 cargo fmt --check` | PASS |
 | Diff whitespace | `git diff --check`; no-index `git diff --check` over all five untracked paths | PASS |
-| Conflict markers | `git grep -n -E '^(<<<<<<<\|=======$\|>>>>>>>)' -- .` | PASS, 0 matches |
+| Conflict markers | `rg -n "^(<<<<<<< .+|>>>>>>> .+)$|^=======$" --glob '!target/**' --glob '!**/*.log'` | PASS, 0 matches |
 
 ## 2026-05-24 Focused Refresh
 
@@ -91,13 +99,14 @@ These commands used `CARGO_BUILD_JOBS=1`, `RUST_TEST_THREADS=1`,
 | K-clique WCOJ dispatch, nonzero tuple-key reads, zero CPU fallback counters | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace accepted_gpu_execution_dispatches_kclique_wcoj_reduction_through_runtime_path -- --test-threads=1` | PASS, 1 test | Do not revisit unless `crates/xlog-runtime/src/executor/epistemic_workspace.rs`, WCOJ dispatch, or tuple-membership code changes. |
 | Row-count-only nonzero-arity membership is rejected | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace runtime_execution_rejects_nonzero_arity_row_count_only_membership_binding -- --test-threads=1` | PASS, 1 test | Do not revisit unless nonzero-arity membership binding or model-membership evidence code changes. |
 | Split execution stays on GPU runtime subplans with zero CPU recomposition/fallback counters | `cargo test -p xlog-runtime --test test_epistemic_gpu_workspace batch_execution_runs_split_components_through_gpu_runtime_subplans -- --test-threads=1` | PASS, 1 test | Do not revisit unless split batching or runtime batch trace aggregation changes. |
+| Split modal-coupling rejection reports arity-qualified unsafe predicates | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution split_multi_membership_modal_coupling_rejects_gpu_batching -- --exact --nocapture --test-threads=1` | Failed before `415343c8` on stale `"edge"`/`"color"` assertions; PASS, 1 test after asserting `edge/1` and `color/1`. | Do not revisit unless split modal-coupling diagnostics, arity handling, or `split_multi_membership_modal_coupling_rejects_gpu_batching` changes. |
 | Parsed EIR-to-WCOJ runtime path dispatches through production planner/runtime | `cargo test -p xlog-runtime --features epistemic-logic-tests --test test_epistemic_gpu_workspace parsed_epistemic_kclique_reduction_dispatches_wcoj_runtime_path -- --test-threads=1` | PASS, 1 test | Do not revisit unless parser/EIR lowering, K-clique planning, or runtime WCOJ certification changes. |
 | WCOJ production-reuse gates fail closed on preflight-only evidence and data-plane transfers | `cargo test -p xlog-runtime --test test_epistemic_production_reuse_audit -- --test-threads=1` | PASS, 4 tests | Do not revisit unless WCOJ certification or transfer-budget gate code changes. |
 | Solver accepted evidence covers assumptions, learned clauses, MaxSAT, scheduler, portfolio, status distinction, and zero CPU search | `cargo test -p xlog-solve --test gpu_solver_accepted_evidence -- --test-threads=1` | PASS, 21 tests | Do not revisit unless `crates/xlog-solve/src/production.rs`, solver service APIs, or accepted-evidence tests change. |
 | Solver production metric gate rejects CPU oracle-only and impossible accounting traces | `cargo test -p xlog-solve --test gpu_solver_production_reuse -- --test-threads=1` | PASS, 8 tests | Do not revisit unless production solver metric eligibility or CPU-oracle gating changes. |
 | Probabilistic accepted evidence feeds GPU exact/provenance/PIR/CNF/query/gradient/incremental paths | `cargo test -p xlog-prob --features host-io --test epistemic_prob_gpu_accepted_evidence -- --test-threads=1` | PASS, 31 tests | Do not revisit unless `crates/xlog-prob/src/epistemic.rs`, `epistemic_production.rs`, or accepted-evidence tests change. |
 | Probabilistic production metric gate rejects fixture-only and CPU-recompute paths | `cargo test -p xlog-prob --test epistemic_prob_production_reuse -- --test-threads=1` | PASS, 7 tests | Do not revisit unless production probability metric eligibility or fixture-oracle gating changes. |
-| v0.8 DTS examples remain compatible after v0.9 semantic/runtime changes | `PYTHONPATH=target/debug python3 scripts/validate_v080_examples.py --output /tmp/xlog-v090-v080-validation-summary-current.json --timeout 180` | PASS, 5 examples | Do not revisit unless `examples/v080-dts`, DTS pyxlog examples, pyxlog runtime bindings, exact induction, relation deltas, neural bridge, or probabilistic async compatibility code changes. |
+| v0.8 DTS examples remain compatible after v0.9 semantic/runtime changes | `PYTHONPATH=target/debug python3 scripts/validate_v080_examples.py --output /tmp/xlog-v090-v080-validation-summary-post-checkpoint.json --timeout 180` | PASS, 5 examples after `415343c8` | Do not revisit unless `examples/v080-dts`, DTS pyxlog examples, pyxlog runtime bindings, exact induction, relation deltas, neural bridge, or probabilistic async compatibility code changes. |
 | Exact induction public default dispatches to native backend, with Python reference scorer requiring explicit opt-in | `PYTHONPATH=target/debug python3 -m pytest python/tests/test_ilp_exact_induce_default_dispatch.py -q` | PASS, 2 tests | Do not revisit unless `crates/pyxlog/python/pyxlog/ilp/exact_induce.py`, exact-induction examples, or backend-dispatch policy changes. |
 | Formatting | `cargo fmt --check` | PASS | Re-run after formatting-sensitive edits. |
 | Strict ILP relation-native hot loop has no CUDA scalar materialization fallback | `PYTHONPATH=target/debug python3 -m pytest python/tests/test_ilp_d2h_gate.py::test_compiled_relation_training_strict_hot_loop_forbids_cuda_scalar_materialization -q` | PASS, 1 test | Do not revisit unless `crates/pyxlog/python/pyxlog/ilp/trainer.py` strict training logic changes. |
@@ -164,9 +173,9 @@ locks before reconciling historical evidence wording.
 | G090_GPU | PASS for current acceptance matrix | GPU buffers, kernel timing, transfer budget, WCOJ/K-clique dispatch, row-count guard, nonzero tuple-key membership, and zero CPU fallback gates are covered by runtime and integration pilots. |
 | G090_SOLVER | PASS for current acceptance matrix | Accepted runtime evidence gates GPU CDCL SAT/UNSAT, assumptions, learned clauses, MaxSAT, scheduler, portfolio, and status propagation through `xlog-solve` production APIs. |
 | G090_PROB | PASS for current acceptance matrix | Accepted world-view evidence gates GPU exact/provenance, PIR/CNF, conditioned query, gradient, and incremental circuit paths through `xlog-prob` production APIs. |
-| G090_CERT | PASS for code/runtime pilots, HOLD for release packaging | Semantic, runtime, solver, probability, integration, compatibility, fmt, and diff checks pass; final release packaging cannot close while changes remain uncommitted. |
+| G090_CERT | PASS | Semantic, runtime, solver, probability, integration, compatibility, fmt, diff, and conflict-marker checks pass after the local checkpoint and diagnostic amendment. |
 | G090_DOC | PASS for current evidence set | The guide and evidence docs now distinguish current accepted-path evidence from dated historical blockers. |
-| G090_CLOSE | HOLD_FOR_FIXES | Main is integrated, but the dirty worktree prevents final sub-goal commit SHA accounting and merge-ready recommendation. |
+| G090_CLOSE | PASS with `MERGE_READY` decision | Main is integrated, stable local checkpoint SHAs exist, and the post-checkpoint validation bundle passed. No push, tag, merge, external release-board update, or main-branch mutation was performed. |
 
 ## KPI Status
 
@@ -183,69 +192,63 @@ locks before reconciling historical evidence wording.
 | KPI090.9 Solver semantics | PASS |
 | KPI090.10 Probabilistic coherence | PASS |
 | KPI090.11 v0.8 compatibility after rebase | PASS |
-| KPI090.12 Release hygiene | HOLD, no push/tag/merge/external release-board update performed; worktree remains dirty |
+| KPI090.12 Release hygiene | PASS for local closure, no push/tag/merge/external release-board update performed |
 | KPI090.13 Nonzero-arity membership | PASS |
 | KPI090.14 Production-path reuse | PASS |
 | KPI090.15 Fixture containment | PASS |
 
-## Pre-Checkpoint Dirty-Set Accounting
+## Sub-Goal SHA Table
 
-No checkpoint commit was created by this proposal. The sub-goal SHA table is
-therefore intentionally pending: assigning SHAs before a commit would be false.
-Current dirty-state accounting from `git status --porcelain=v1` is:
+The 216-path implementation checkpoint is `d2d57cb2`. The only
+post-checkpoint code amendment is `415343c8`, which aligns the split
+multi-membership diagnostic assertion with the arity-qualified
+`split_epistemic_program` contract already covered by the logic split suite.
 
-| GQM/release bucket | Total paths | Modified | Deleted | Untracked | SHA status |
-|---|---:|---:|---:|---:|---|
-| G090_EIR/G91/FAEEL/GPT/SPLIT | 25 | 25 | 0 | 0 | `PENDING_CHECKPOINT_AUTHORIZATION` |
-| G090_EIR/GPU contract | 3 | 3 | 0 | 0 | `PENDING_CHECKPOINT_AUTHORIZATION` |
-| G090_GPU CUDA/WCOJ | 45 | 41 | 4 | 0 | `PENDING_CHECKPOINT_AUTHORIZATION` |
-| G090_GPU runtime | 16 | 15 | 1 | 0 | `PENDING_CHECKPOINT_AUTHORIZATION` |
-| G090_SOLVER | 15 | 14 | 0 | 1 | `PENDING_CHECKPOINT_AUTHORIZATION` |
-| G090_PROB | 52 | 37 | 14 | 1 | `PENDING_CHECKPOINT_AUTHORIZATION` |
-| G090_CERT integration | 28 | 25 | 2 | 1 | `PENDING_CHECKPOINT_AUTHORIZATION` |
-| KPI090.11 v0.8/pyxlog compatibility | 22 | 21 | 0 | 1 | `PENDING_CHECKPOINT_AUTHORIZATION` |
-| G090_DOC/CLOSE | 8 | 7 | 0 | 1 | `PENDING_CHECKPOINT_AUTHORIZATION` |
-| Workspace/CLI support | 2 | 2 | 0 | 0 | `PENDING_CHECKPOINT_AUTHORIZATION` |
+| GQM/release bucket | Stable commit evidence | Status |
+|---|---|---|
+| G090_PRE | `d2d57cb2` | PASS |
+| G090_EIR | `d2d57cb2` | PASS |
+| G090_G91 | `d2d57cb2` | PASS |
+| G090_FAEEL | `d2d57cb2` | PASS |
+| G090_GPT | `d2d57cb2` | PASS |
+| G090_SPLIT | `d2d57cb2`; diagnostic amendment `415343c8` | PASS |
+| G090_GPU | `d2d57cb2` | PASS |
+| G090_SOLVER | `d2d57cb2` | PASS |
+| G090_PROB | `d2d57cb2` | PASS |
+| G090_CERT | `d2d57cb2`; post-checkpoint validation and diagnostic amendment `415343c8` | PASS |
+| G090_DOC | `d2d57cb2`; this closure-ledger update | PASS |
+| G090_CLOSE | `d2d57cb2`; `415343c8`; this closure-ledger update | PASS with `MERGE_READY` decision |
 
-The five untracked paths are:
+## Remaining Release Actions Requiring Authorization
 
-- `crates/xlog-integration/tests/test_w52_measurement_pilot.rs`
-- `crates/xlog-prob/tests/epistemic_prob_gpu_accepted_evidence.rs`
-- `crates/xlog-solve/tests/gpu_solver_accepted_evidence.rs`
-- `docs/plans/2026-05-24-v090-closure-proposal.md`
-- `python/tests/test_ilp_exact_induce_default_dispatch.py`
+No code or runtime fixes remain under the validated v0.9.0 closure scope. The
+following actions are still not performed and still require explicit
+coordinator authorization:
 
-The deleted tracked paths are the source-audit test cluster already mapped to
-real behavioral replacement evidence in the deletion review above.
+1. Push the feature branch.
+2. Mutate any external release board.
+3. Tag a release.
+4. Merge or mutate `main`.
 
-## Remaining Fixes Before MERGE_READY
-
-1. Commit or otherwise checkpoint the 216-path worktree so every sub-goal can be
-   tied to stable commit SHAs.
-2. Rerun the final agreed validation bundle after the checkpoint, including the
-   heavy integration test and v0.8 compatibility validator.
-3. Produce a final commit-SHA table and coordinator-facing release decision.
-4. Obtain explicit coordinator authorization before any commit, push, tag,
-   external release-board update, merge, or main-branch mutation.
+If any code changes after `415343c8`, rerun the relevant focused pilot plus the
+final integration and compatibility gates before preserving `MERGE_READY`.
 
 ## Risk Summary
 
-- The test evidence is strong, but uncommitted state makes the final branch
-  identity unstable.
-- Dirty-state audit currently shows `190` modified paths, `21` deleted tracked
-  paths, and `5` untracked paths. The WCOJ/CUDA, xlog-prob, and integration
-  bench source-audit deletion clusters now have fresh behavioral replacement
-  evidence above.
+- The branch identity is now stable through local checkpoint commits; release
+  actions are still intentionally unperformed.
+- The WCOJ/CUDA, xlog-prob, and integration bench source-audit deletion
+  clusters now have fresh behavioral replacement evidence above.
 - Historical evidence READMEs still retain dated `BLOCKED` rows as audit
   history, but their current-status ledgers now supersede those rows for the
   current worktree.
 - The full workspace remains broad; final validation should be rerun after any
-  checkpoint or evidence refresh.
+  future code change before preserving `MERGE_READY`.
 
 ## Release Decision
 
-`HOLD_FOR_FIXES`.
+`MERGE_READY`.
 
-The next state can become `MERGE_READY` only after stable commit SHAs exist, the
-final validation bundle is rerun, and coordinator authorization is granted for
-any release workflow mutation.
+This is a local closure recommendation only. Push, tag, merge, main-branch
+mutation, and external release-board update remain pending explicit coordinator
+authorization.
