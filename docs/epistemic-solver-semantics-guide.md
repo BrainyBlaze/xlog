@@ -172,9 +172,10 @@ fixtures:
   counters.
 
 Those paths are current PASS evidence for the bounded
-G090_GPU/G090_SOLVER/G090_PROB acceptance matrix. Before v0.9.0 can close,
-release packaging still requires checkpointed commit SHAs, the final validation
-rerun, a coordinator-facing release decision, and coordinator authorization.
+G090_GPU/G090_SOLVER/G090_PROB acceptance matrix. The v0.9.0 closure proposal
+records checkpointed commit SHAs, the final validation bundle, and the
+coordinator-facing `MERGE_READY` decision; push, tag, release-board update,
+merge, or main-branch mutation still require separate coordinator authorization.
 Existing
 non-epistemic programs continue to use the normal parser, stratifier, RIR
 lowering, runtime, and WCOJ infrastructure where eligible.
@@ -832,16 +833,15 @@ cargo check -p pyxlog
 ```
 
 These commands validate the current bounded semantic oracle, accepted GPU
-runtime fixtures, and solver/probability production-adapter slices. They are
-not a substitute for the remaining release certification evidence, which must
-broaden launch counts, kernel timings, accepted semantic parity, solver and
-probability traces, and zero CPU fallback counters. The
-v0.7.0/v0.8.0/v0.8.5/v0.8.6 compatibility subset must remain green after this
-branch is rebased or merged onto it.
+runtime fixtures, and solver/probability production-adapter slices. The final
+closure proposal reads them with the post-checkpoint GPU/WCOJ/solver/probability
+integration and v0.8 compatibility evidence. Any future code/runtime change must
+rerun the relevant focused pilot plus the final integration and compatibility
+gates before preserving `MERGE_READY`.
 
 ## Roadmap Status
 
-This guide does not mark v0.9.0 roadmap rows DONE. ROADMAP and release-board
-state are closure artifacts and should be updated only after the
-v0.7.0/v0.8.0/v0.8.5/v0.8.6 reuse baseline, full certification, and coordinator
-approval.
+`ROADMAP.md` now marks the v0.9.0 rows DONE according to the closure evidence,
+with the A3 same-process multi-executor CUDA primary-context item explicitly
+retargeted out of v0.9.0 closure. External release-board state was not mutated
+and still requires separate coordinator authorization.
