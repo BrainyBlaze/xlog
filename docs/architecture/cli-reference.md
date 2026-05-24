@@ -4,22 +4,22 @@ This document describes the `xlog` command-line interface for running determinis
 
 ## Overview
 
-The `xlog` CLI is implemented in the `xlog-cli` crate. The current v0.8.0
+The `xlog` CLI is implemented in the `xlog-cli` crate. The current v0.8.6
 source exposes two execution subcommands:
 
 - `xlog run` — Deterministic program execution
 - `xlog prob` — Probabilistic program execution
 
-The v0.8.5 language contract adds developer-experience commands:
+The v0.8.5 language contract added developer-experience commands, which ship as
+of v0.8.5:
 
 - `xlog explain` — Inspect parse, strata, RIR, optimizer, magic-set, WCOJ, and
   probabilistic plans
 - `xlog repl` — Interactive multiline source/query session
 - `xlog watch` — Debounced file-change rerun with typed diagnostics
 
-Those commands remain implementation-gated until `G085_CLI` lands; unsupported
-commands in the current source should fail explicitly rather than silently
-falling back to another mode.
+Unsupported subcommands fail explicitly rather than silently falling back to
+another mode.
 
 ## Installation
 

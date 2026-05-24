@@ -1,6 +1,6 @@
 # XLOG Language Reference
 
-> **Release context:** XLOG `v0.8.5`
+> **Release context:** XLOG `v0.8.6`
 > **Language coverage:** Core v0.8.0 language plus the v0.8.5 language-completeness contract
 > **Last Updated:** May 2026
 
@@ -8,10 +8,10 @@ This document provides a comprehensive reference for the XLOG language,
 covering all syntax, semantics, and features of XLOG as a GPU-native logic
 programming language.
 
-The v0.8.5 additions are specified here as the release contract. During the
-v0.8.5 implementation branch, each addition remains unsupported until its
-corresponding `G085_*` implementation node lands. Unsupported forms must fail
-with typed diagnostics rather than silently falling back to CPU evaluation.
+The v0.8.5 language-completeness additions documented here shipped in the
+`v0.8.5` release and remain part of the current `v0.8.6` surface. Unsupported
+forms (unbounded, dynamic, or non-GPU-lowerable) fail with typed diagnostics
+rather than silently falling back to CPU evaluation.
 
 ---
 
@@ -200,7 +200,7 @@ to typed relation layouts before execution:
 | Type form | Meaning | Execution status |
 |-----------|---------|------------------|
 | `domain name: type` | Named alias for an existing scalar type | Existing source form; v0.8.5 requires alias preservation in diagnostics and schema metadata |
-| `column: type` | Named predicate column | v0.8.5 contract; rejected until `G085_TYPES` lands |
+| `column: type` | Named predicate column | v0.8.5 contract; named predicate columns are accepted and preserved in schema metadata |
 | `list<T>` | Finite homogeneous list of `T` | v0.8.5 contract; accepted lists lower to helper relations, not CPU term heaps |
 | `term` | Finite ground term value | v0.8.5 contract; only finite, typed terms are accepted |
 | `compound` | Finite compound term with functor and arity | v0.8.5 contract; unsupported recursive or open compounds are rejected |
@@ -270,12 +270,12 @@ prob_aggregate error at program.xlog:17: exact aggregate domain exceeds cap 1024
 
 ### Source-Audit Status
 
-At the `G085_DOCREF` checkpoint, the current source still rejects the new
-v0.8.5 parser/runtime forms except where an older feature already exists, such
-as scalar terms, deterministic `not atom`, deterministic aggregates, exact/MC
-probabilistic inference, and the `run`/`prob` CLI commands. Later `G085_*`
-implementation nodes must update this section and the grammar appendix when
-they turn a contract row into shipped support.
+All v0.8.5 language-contract rows above shipped in the `v0.8.5` release and are
+supported in the current `v0.8.6` source: finite lists, safe meta-predicates,
+deterministic NAF, magic sets, probabilistic aggregates, aggregate lifting,
+approximate-inference pragmas, incremental parsing, and the `explain`/`repl`/
+`watch` CLI commands — alongside the pre-existing scalar terms, deterministic
+aggregates, exact/MC inference, and `run`/`prob` commands.
 
 ---
 
