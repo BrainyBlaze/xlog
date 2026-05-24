@@ -1628,8 +1628,9 @@ engines, or parallel helper paths that bypass production dispatch are blockers.
 
 ## v0.8.7 - Living-World Diagnostics and Provenance Pack
 
-Status: integrated into the active v0.8.9 branch; standalone release tag and
-publication are still pending. Architecture source of truth:
+Status: integrated into the v0.9.0 release candidate through the local
+`integration/v090-v089-union` merge commit `8a7dbd3f`; no standalone v0.8.7
+tag or publication is claimed here. Architecture source of truth:
 `docs/architecture/living-world-diagnostics-v087.md`.
 
 v0.8.7 closes the initial living-world and Project 1 auditability gaps without
@@ -1705,8 +1706,9 @@ unless the caller already selected a host-readable API.
 
 ## v0.8.8 - Living-World Diagnostics Provenance Refinement
 
-Status: integrated into the active v0.8.9 branch; standalone release tag and
-publication are still pending. Architecture source of truth:
+Status: integrated into the v0.9.0 release candidate through the local
+`integration/v090-v089-union` merge commit `8a7dbd3f`; no standalone v0.8.8
+tag or publication is claimed here. Architecture source of truth:
 `docs/architecture/lwm-diagnostics-provenance.md`.
 
 v0.8.8 hardens the living-world diagnostics pack with stable induced-rule
@@ -1744,7 +1746,9 @@ documentation.
 
 ## v0.8.9 - Universal Case Reasoner Diagnostic Pack
 
-Status: implementation branch `feat/v089-integrated-xlog-fixes`; not tagged.
+Status: integrated into the v0.9.0 release candidate through the local
+`integration/v090-v089-union` merge commit `8a7dbd3f`, sourced from
+`feat/v089-ucr-xlog-issue-fixes`; no standalone v0.8.9 tag is claimed here.
 Architecture summary: `docs/architecture/ucr-xlog-diagnostics.md`.
 Issue ledger: `examples/BFO/universal_case_reasoner/xlog_issue_ledger.json`.
 
