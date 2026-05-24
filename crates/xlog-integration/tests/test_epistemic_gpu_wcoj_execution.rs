@@ -6197,8 +6197,8 @@ fn split_multi_membership_modal_coupling_rejects_gpu_batching() {
         xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
             assert_eq!(construct, "epistemic splitting");
             assert!(context.contains("rule[0] couples epistemic predicates"));
-            assert!(context.contains("\"edge\""));
-            assert!(context.contains("\"color\""));
+            assert!(context.contains("edge/1"));
+            assert!(context.contains("color/1"));
         }
         other => panic!("expected typed split rejection, got {other:?}"),
     }
