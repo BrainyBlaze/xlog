@@ -10,13 +10,13 @@ use arrow::util::pretty::pretty_format_batches;
 use xlog_core::{symbol, MemoryBudget, Result, XlogError};
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 use xlog_gpu::logic::LogicProgram;
-use xlog_logic::ast::ProbEngine;
-use xlog_logic::ast::Program;
+use xlog_logic::ast::{BodyLiteral, CompOp, ProbEngine, Program, Term};
 use xlog_logic::compile::load_modules;
 #[cfg(feature = "host-io")]
 use xlog_logic::parse_program;
 use xlog_logic::{rewrite_v085_magic_sets, MagicSetReport, MagicSetStatus, ParserSession};
 use xlog_logic::{stratify, Compiler};
+use xlog_logic::{QueryProofTrace, RuleProvenance};
 #[cfg(feature = "host-io")]
 use xlog_prob::exact::ExactDdnnfProgram;
 #[cfg(feature = "host-io")]
@@ -178,7 +178,7 @@ fn explain(args: ExplainArgs) -> Result<()> {
     })?;
     let mut parser_session = ParserSession::new();
     let parsed = parser_session.parse_path(&args.source, &source)?;
-    let report = build_explain_report(parsed)?;
+    let report = build_explain_report(parsed, Some(&args.source))?;
     match args.format {
         ExplainFormat::Text => print_explain_text(&report),
         ExplainFormat::Json => print_explain_json(&report),
@@ -220,7 +220,7 @@ fn watch(args: WatchArgs) -> Result<()> {
             parsed.stats.statement_count, parsed.stats.hits, parsed.stats.misses
         );
         if args.explain {
-            let report = build_explain_report(parsed)?;
+            let report = build_explain_report(parsed, Some(&args.source))?;
             print_explain_text(&report);
         }
         if args.once {
@@ -236,6 +236,9 @@ struct ExplainReport {
     parse_stats: xlog_logic::ParseCacheStats,
     magic_sets: MagicSetReport,
     aggregate_lifting: Vec<AggregateLiftReport>,
+    generated_rule_diagnostics: Vec<GeneratedRuleDiagnostic>,
+    rule_provenance: Vec<RuleProvenance>,
+    proof_traces: Vec<QueryProofTrace>,
     stratification_status: String,
     stratification_count: usize,
     rir_status: String,
@@ -244,10 +247,17 @@ struct ExplainReport {
     optimizer_memory_peak: u64,
 }
 
-fn build_explain_report(parsed: xlog_logic::IncrementalParseResult) -> Result<ExplainReport> {
+fn build_explain_report(
+    parsed: xlog_logic::IncrementalParseResult,
+    source_path: Option<&Path>,
+) -> Result<ExplainReport> {
     let program = parsed.program;
-    let magic_sets = rewrite_v085_magic_sets(&program)?.report;
+    let magic_rewrite = rewrite_v085_magic_sets(&program)?;
+    let rule_provenance = xlog_logic::rule_provenance(&program, Some(&magic_rewrite.program));
+    let proof_traces = xlog_logic::query_proof_traces(&program, &rule_provenance);
+    let magic_sets = magic_rewrite.report;
     let aggregate_lifting = explain_aggregate_lifting(&program)?;
+    let generated_rule_diagnostics = explain_generated_rule_diagnostics(&program, source_path);
     let (stratification_status, stratification_count) = match stratify(&program) {
         Ok(strata) => ("ok".to_string(), strata.len()),
         Err(err) => (format!("error: {}", err), 0),
@@ -268,6 +278,9 @@ fn build_explain_report(parsed: xlog_logic::IncrementalParseResult) -> Result<Ex
         parse_stats: parsed.stats,
         magic_sets,
         aggregate_lifting,
+        generated_rule_diagnostics,
+        rule_provenance,
+        proof_traces,
         stratification_status,
         stratification_count,
         rir_status,
@@ -285,6 +298,475 @@ fn explain_aggregate_lifting(program: &Program) -> Result<Vec<AggregateLiftRepor
         return Ok(Vec::new());
     }
     Ok(xlog_prob::provenance::extract_from_program(program)?.aggregate_lifting)
+}
+
+struct GeneratedRuleDiagnostic {
+    rule_head: String,
+    source_relation: String,
+    row_decisions: Vec<GeneratedRuleRowDecision>,
+}
+
+struct GeneratedRuleRowDecision {
+    row_key: String,
+    accepted: bool,
+    failed_predicates: Vec<String>,
+    threshold_comparisons: Vec<ThresholdComparison>,
+    aggregate_inputs: Vec<String>,
+}
+
+struct ThresholdComparison {
+    predicate: String,
+    left: String,
+    op: String,
+    right: String,
+    left_value: String,
+    right_value: String,
+    passed: bool,
+}
+
+fn explain_generated_rule_diagnostics(
+    program: &Program,
+    source_path: Option<&Path>,
+) -> Vec<GeneratedRuleDiagnostic> {
+    let external_rows = source_path
+        .map(|path| load_external_relation_rows(program, path))
+        .unwrap_or_default();
+    let mut diagnostics = Vec::new();
+    for rule in program
+        .rules
+        .iter()
+        .filter(|rule| !rule.body.is_empty() && generated_rule_candidate(rule))
+    {
+        let Some(source_atom) = diagnostic_source_atom(rule) else {
+            continue;
+        };
+        let mut row_decisions = Vec::new();
+        for source_row in source_rows_for_atom(program, &external_rows, source_atom) {
+            let Some(bindings) = bindings_for_source_row(source_atom, &source_row) else {
+                continue;
+            };
+
+            let mut threshold_comparisons = Vec::new();
+            for comparison in rule.body.iter().filter_map(|literal| match literal {
+                BodyLiteral::Comparison(comparison) => Some(comparison),
+                _ => None,
+            }) {
+                let left_value = bound_term(&comparison.left, &bindings);
+                let right_value = bound_term(&comparison.right, &bindings);
+                let passed = left_value
+                    .as_ref()
+                    .zip(right_value.as_ref())
+                    .and_then(|(left, right)| compare_terms(left, comparison.op, right))
+                    .unwrap_or(false);
+                threshold_comparisons.push(ThresholdComparison {
+                    predicate: format!(
+                        "{} {} {}",
+                        term_label(&comparison.left),
+                        comp_op_label(comparison.op),
+                        term_label(&comparison.right)
+                    ),
+                    left: term_label(&comparison.left),
+                    op: comp_op_label(comparison.op).to_string(),
+                    right: term_label(&comparison.right),
+                    left_value: left_value
+                        .as_ref()
+                        .map(term_label)
+                        .unwrap_or_else(|| "unbound".to_string()),
+                    right_value: right_value
+                        .as_ref()
+                        .map(term_label)
+                        .unwrap_or_else(|| "unbound".to_string()),
+                    passed,
+                });
+            }
+            let mut failed_predicates = predicate_failures(program, rule, source_atom, &bindings);
+            failed_predicates.extend(
+                threshold_comparisons
+                    .iter()
+                    .filter(|comparison| !comparison.passed)
+                    .map(|comparison| comparison.predicate.clone()),
+            );
+            row_decisions.push(GeneratedRuleRowDecision {
+                row_key: source_row
+                    .first()
+                    .map(term_label)
+                    .unwrap_or_else(|| source_atom.predicate.clone()),
+                accepted: failed_predicates.is_empty(),
+                failed_predicates,
+                threshold_comparisons,
+                aggregate_inputs: vec![format!(
+                    "{}({})",
+                    source_atom.predicate,
+                    source_row
+                        .iter()
+                        .map(term_label)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )],
+            });
+        }
+
+        if !row_decisions.is_empty() {
+            diagnostics.push(GeneratedRuleDiagnostic {
+                rule_head: rule.head.predicate.clone(),
+                source_relation: source_atom.predicate.clone(),
+                row_decisions,
+            });
+        }
+    }
+    diagnostics
+}
+
+fn generated_rule_candidate(rule: &xlog_logic::ast::Rule) -> bool {
+    rule.head.predicate.starts_with("generated_")
+        || rule.head.predicate.starts_with("xlog_accepted_")
+        || rule.head.predicate.starts_with("xlog_rejected_")
+        || rule.body.iter().any(|literal| match literal {
+            BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
+                diagnostic_source_predicate(&atom.predicate)
+            }
+            BodyLiteral::Epistemic(_) => false,
+            BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => false,
+        })
+}
+
+fn diagnostic_source_atom(rule: &xlog_logic::ast::Rule) -> Option<&xlog_logic::ast::Atom> {
+    rule.body.iter().find_map(|literal| match literal {
+        BodyLiteral::Positive(atom) if diagnostic_source_predicate(&atom.predicate) => Some(atom),
+        _ => None,
+    })
+}
+
+fn diagnostic_source_predicate(predicate: &str) -> bool {
+    predicate.starts_with("generated_")
+        || predicate.ends_with("_candidate_input")
+        || (predicate.contains("candidate") && predicate.ends_with("_input"))
+}
+
+fn source_rows_for_atom(
+    program: &Program,
+    external_rows: &HashMap<String, Vec<Vec<Term>>>,
+    atom: &xlog_logic::ast::Atom,
+) -> Vec<Vec<Term>> {
+    let mut rows = program
+        .rules
+        .iter()
+        .filter(|fact| {
+            fact.body.is_empty()
+                && fact.head.predicate == atom.predicate
+                && fact.head.terms.len() == atom.terms.len()
+        })
+        .map(|fact| fact.head.terms.clone())
+        .collect::<Vec<_>>();
+    if let Some(external) = external_rows.get(&atom.predicate) {
+        rows.extend(external.clone());
+    }
+    rows
+}
+
+fn bindings_for_source_row(
+    atom: &xlog_logic::ast::Atom,
+    row: &[Term],
+) -> Option<HashMap<String, Term>> {
+    if atom.terms.len() != row.len() {
+        return None;
+    }
+    let mut bindings = HashMap::new();
+    for (pattern, value) in atom.terms.iter().zip(row) {
+        match pattern {
+            Term::Variable(name) => {
+                if let Some(existing) = bindings.get(name) {
+                    if existing != value {
+                        return None;
+                    }
+                } else {
+                    bindings.insert(name.clone(), value.clone());
+                }
+            }
+            Term::Anonymous => {}
+            _ if pattern == value => {}
+            _ => return None,
+        }
+    }
+    Some(bindings)
+}
+
+fn load_external_relation_rows(
+    program: &Program,
+    source_path: &Path,
+) -> HashMap<String, Vec<Vec<Term>>> {
+    let mut loaded = HashMap::new();
+    for decl in &program.predicates {
+        let Some((relation_path, columns)) = external_relation_source(source_path, decl) else {
+            continue;
+        };
+        if columns.len() != decl.columns.len() {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(&relation_path) else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&source) else {
+            continue;
+        };
+        let Some(rows) = json.get("rows").and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        let mut relation_rows = Vec::new();
+        for row in rows {
+            let Some(object) = row.as_object() else {
+                continue;
+            };
+            let mut terms = Vec::with_capacity(columns.len());
+            let mut complete = true;
+            for column in &columns {
+                match object.get(column).and_then(json_value_to_term) {
+                    Some(term) => terms.push(term),
+                    None => {
+                        complete = false;
+                        break;
+                    }
+                }
+            }
+            if complete {
+                relation_rows.push(terms);
+            }
+        }
+        if !relation_rows.is_empty() {
+            loaded.insert(decl.name.clone(), relation_rows);
+        }
+    }
+    loaded
+}
+
+fn external_relation_source(
+    source_path: &Path,
+    decl: &xlog_logic::ast::PredDecl,
+) -> Option<(PathBuf, Vec<String>)> {
+    if let Some(from_manifest) = external_relation_source_from_manifest(source_path, decl) {
+        return Some(from_manifest);
+    }
+    let columns = declared_column_names(decl)?;
+    let source_dir = source_path.parent()?;
+    for candidate in relation_json_candidates(source_dir, &decl.name) {
+        if candidate.exists() {
+            return Some((candidate, columns));
+        }
+    }
+    None
+}
+
+fn external_relation_source_from_manifest(
+    source_path: &Path,
+    decl: &xlog_logic::ast::PredDecl,
+) -> Option<(PathBuf, Vec<String>)> {
+    let source_dir = source_path.parent()?;
+    let mut manifests = vec![source_dir.join("xlog_hypothesis_execution.json")];
+    if let Some(parent) = source_dir.parent() {
+        manifests.push(parent.join("xlog_hypothesis_execution.json"));
+    }
+    for manifest_path in manifests {
+        let Ok(source) = std::fs::read_to_string(&manifest_path) else {
+            continue;
+        };
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(&source) else {
+            continue;
+        };
+        let Some(columns) = json
+            .get("relation_input_columns")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+        else {
+            continue;
+        };
+        if columns.len() != decl.columns.len() {
+            continue;
+        }
+        let Some(path_value) = json
+            .get("relation_input_path")
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        let relation_path = PathBuf::from(path_value);
+        let relation_path = if relation_path.is_absolute() {
+            relation_path
+        } else {
+            manifest_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(relation_path)
+        };
+        if relation_path.exists() {
+            return Some((relation_path, columns));
+        }
+    }
+    None
+}
+
+fn declared_column_names(decl: &xlog_logic::ast::PredDecl) -> Option<Vec<String>> {
+    decl.columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect()
+}
+
+fn relation_json_candidates(source_dir: &Path, predicate: &str) -> Vec<PathBuf> {
+    let mut candidates = vec![source_dir.join(format!("{predicate}.json"))];
+    if let Some(stem) = predicate.strip_suffix("_input") {
+        candidates.push(source_dir.join(format!("{stem}_relation.json")));
+    }
+    candidates
+}
+
+fn json_value_to_term(value: &serde_json::Value) -> Option<Term> {
+    if let Some(value) = value.as_i64() {
+        Some(Term::Integer(value))
+    } else if let Some(value) = value.as_u64() {
+        i64::try_from(value).ok().map(Term::Integer)
+    } else if let Some(value) = value.as_str() {
+        Some(Term::String(value.to_string()))
+    } else {
+        value
+            .as_bool()
+            .map(|value| Term::Integer(if value { 1 } else { 0 }))
+    }
+}
+
+fn predicate_failures(
+    program: &Program,
+    rule: &xlog_logic::ast::Rule,
+    source_atom: &xlog_logic::ast::Atom,
+    bindings: &HashMap<String, Term>,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    for literal in &rule.body {
+        match literal {
+            BodyLiteral::Positive(atom) if atom.predicate != source_atom.predicate => {
+                if !matching_fact_exists(program, atom, bindings) {
+                    failures.push(atom_label(atom));
+                }
+            }
+            BodyLiteral::Negated(atom) => {
+                if matching_fact_exists(program, atom, bindings) {
+                    failures.push(format!("not {}", atom_label(atom)));
+                }
+            }
+            BodyLiteral::Positive(_)
+            | BodyLiteral::Epistemic(_)
+            | BodyLiteral::Comparison(_)
+            | BodyLiteral::IsExpr(_)
+            | BodyLiteral::Univ(_) => {}
+        }
+    }
+    failures
+}
+
+fn matching_fact_exists(
+    program: &Program,
+    atom: &xlog_logic::ast::Atom,
+    bindings: &HashMap<String, Term>,
+) -> bool {
+    program.rules.iter().any(|fact| {
+        fact.body.is_empty()
+            && fact.head.predicate == atom.predicate
+            && fact.head.terms.len() == atom.terms.len()
+            && atom
+                .terms
+                .iter()
+                .zip(&fact.head.terms)
+                .all(|(pattern, value)| match bound_term(pattern, bindings) {
+                    Some(bound) => bound == *value,
+                    None => false,
+                })
+    })
+}
+
+fn atom_label(atom: &xlog_logic::ast::Atom) -> String {
+    format!(
+        "{}({})",
+        atom.predicate,
+        atom.terms
+            .iter()
+            .map(term_label)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn bound_term(term: &Term, bindings: &HashMap<String, Term>) -> Option<Term> {
+    match term {
+        Term::Variable(name) => bindings.get(name).cloned(),
+        _ => Some(term.clone()),
+    }
+}
+
+fn compare_terms(left: &Term, op: CompOp, right: &Term) -> Option<bool> {
+    match (left, right) {
+        (Term::Integer(left), Term::Integer(right)) => Some(compare_i64(*left, op, *right)),
+        (Term::String(left), Term::String(right)) => match op {
+            CompOp::Eq => Some(left == right),
+            CompOp::Ne => Some(left != right),
+            _ => None,
+        },
+        (Term::Symbol(left), Term::Symbol(right)) => match op {
+            CompOp::Eq => Some(left == right),
+            CompOp::Ne => Some(left != right),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn compare_i64(left: i64, op: CompOp, right: i64) -> bool {
+    match op {
+        CompOp::Eq => left == right,
+        CompOp::Ne => left != right,
+        CompOp::Lt => left < right,
+        CompOp::Le => left <= right,
+        CompOp::Gt => left > right,
+        CompOp::Ge => left >= right,
+    }
+}
+
+fn comp_op_label(op: CompOp) -> &'static str {
+    match op {
+        CompOp::Eq => "==",
+        CompOp::Ne => "!=",
+        CompOp::Lt => "<",
+        CompOp::Le => "<=",
+        CompOp::Gt => ">",
+        CompOp::Ge => ">=",
+    }
+}
+
+fn term_label(term: &Term) -> String {
+    match term {
+        Term::Variable(name) => name.clone(),
+        Term::Anonymous => "_".to_string(),
+        Term::Integer(value) => value.to_string(),
+        Term::Float(value) => value.to_string(),
+        Term::String(value) => value.clone(),
+        Term::Symbol(id) => symbol::resolve(*id),
+        Term::List(items) => format!(
+            "[{}]",
+            items.iter().map(term_label).collect::<Vec<_>>().join(", ")
+        ),
+        Term::Cons { head, tail } => format!("{}|{}", term_label(head), term_label(tail)),
+        Term::Compound { functor, args } => format!(
+            "{}({})",
+            functor,
+            args.iter().map(term_label).collect::<Vec<_>>().join(", ")
+        ),
+        Term::PredRef(name) => name.clone(),
+        Term::Aggregate(agg) => format!("{:?}({})", agg.op, agg.variable),
+    }
 }
 
 fn print_explain_text(report: &ExplainReport) {
@@ -316,6 +798,28 @@ fn print_explain_text(report: &ExplainReport) {
                 entry.domain_size,
                 entry.uncertain_rows,
                 entry.cap
+            );
+        }
+    }
+    if !report.rule_provenance.is_empty() {
+        println!("rule_provenance:");
+        for entry in &report.rule_provenance {
+            println!(
+                "  - id: {} source_kind: {} head: {}",
+                entry.rule_id,
+                entry.source_kind.as_str(),
+                entry.head
+            );
+        }
+    }
+    if !report.proof_traces.is_empty() {
+        println!("proof_traces:");
+        for entry in &report.proof_traces {
+            println!(
+                "  - query: {} rules: {} source_facts: {}",
+                entry.query,
+                entry.rule_ids.len(),
+                entry.source_facts.len()
             );
         }
     }
@@ -451,8 +955,145 @@ fn print_explain_json(report: &ExplainReport) {
         );
         println!("    }}{}", suffix);
     }
-    println!("  ]");
+    println!("  ],");
+    print_rule_provenance_json(&report.rule_provenance);
+    println!(",");
+    print_proof_traces_json(&report.proof_traces);
+    println!(",");
+    print_generated_rule_diagnostics_json(&report.generated_rule_diagnostics);
     println!("}}");
+}
+
+fn print_rule_provenance_json(entries: &[RuleProvenance]) {
+    println!("  \"rule_provenance\": [");
+    for (idx, entry) in entries.iter().enumerate() {
+        let suffix = if idx + 1 == entries.len() { "" } else { "," };
+        println!("    {{");
+        println!("      \"rule_id\": \"{}\",", json_escape(&entry.rule_id));
+        println!("      \"head\": \"{}\",", json_escape(&entry.head));
+        println!(
+            "      \"source_kind\": \"{}\",",
+            json_escape(entry.source_kind.as_str())
+        );
+        println!(
+            "      \"source_span\": {},",
+            json_optional_string(entry.source_span.as_deref())
+        );
+        println!(
+            "      \"generation_trace_hash\": {},",
+            json_optional_string(entry.generation_trace_hash.as_deref())
+        );
+        println!(
+            "      \"support_relation_ids\": {},",
+            json_string_array(&entry.support_relation_ids)
+        );
+        println!(
+            "      \"counterexample_relation_ids\": {}",
+            json_string_array(&entry.counterexample_relation_ids)
+        );
+        println!("    }}{}", suffix);
+    }
+    println!("  ]");
+}
+
+fn print_proof_traces_json(entries: &[QueryProofTrace]) {
+    println!("  \"proof_traces\": [");
+    for (idx, entry) in entries.iter().enumerate() {
+        let suffix = if idx + 1 == entries.len() { "" } else { "," };
+        println!("    {{");
+        println!("      \"query_id\": \"{}\",", json_escape(&entry.query_id));
+        println!("      \"query\": \"{}\",", json_escape(&entry.query));
+        println!(
+            "      \"answer_relation\": \"{}\",",
+            json_escape(&entry.answer_relation)
+        );
+        println!(
+            "      \"rule_ids\": {},",
+            json_string_array(&entry.rule_ids)
+        );
+        println!(
+            "      \"source_facts\": {},",
+            json_string_array(&entry.source_facts)
+        );
+        println!(
+            "      \"rejected_alternatives\": {}",
+            json_string_array(&entry.rejected_alternatives)
+        );
+        println!("    }}{}", suffix);
+    }
+    println!("  ]");
+}
+
+fn print_generated_rule_diagnostics_json(entries: &[GeneratedRuleDiagnostic]) {
+    println!("  \"generated_rule_diagnostics\": [");
+    for (idx, entry) in entries.iter().enumerate() {
+        let suffix = if idx + 1 == entries.len() { "" } else { "," };
+        println!("    {{");
+        println!(
+            "      \"rule_head\": \"{}\",",
+            json_escape(&entry.rule_head)
+        );
+        println!(
+            "      \"source_relation\": \"{}\",",
+            json_escape(&entry.source_relation)
+        );
+        println!("      \"row_decisions\": [");
+        for (row_idx, row) in entry.row_decisions.iter().enumerate() {
+            let row_suffix = if row_idx + 1 == entry.row_decisions.len() {
+                ""
+            } else {
+                ","
+            };
+            println!("        {{");
+            println!("          \"row_key\": \"{}\",", json_escape(&row.row_key));
+            println!("          \"accepted\": {},", row.accepted);
+            println!(
+                "          \"failed_predicates\": {},",
+                json_string_array(&row.failed_predicates)
+            );
+            println!("          \"threshold_comparisons\": [");
+            for (comparison_idx, comparison) in row.threshold_comparisons.iter().enumerate() {
+                let comparison_suffix = if comparison_idx + 1 == row.threshold_comparisons.len() {
+                    ""
+                } else {
+                    ","
+                };
+                println!("            {{");
+                println!(
+                    "              \"predicate\": \"{}\",",
+                    json_escape(&comparison.predicate)
+                );
+                println!(
+                    "              \"left\": \"{}\",",
+                    json_escape(&comparison.left)
+                );
+                println!("              \"op\": \"{}\",", json_escape(&comparison.op));
+                println!(
+                    "              \"right\": \"{}\",",
+                    json_escape(&comparison.right)
+                );
+                println!(
+                    "              \"left_value\": \"{}\",",
+                    json_escape(&comparison.left_value)
+                );
+                println!(
+                    "              \"right_value\": \"{}\",",
+                    json_escape(&comparison.right_value)
+                );
+                println!("              \"passed\": {}", comparison.passed);
+                println!("            }}{}", comparison_suffix);
+            }
+            println!("          ],");
+            println!(
+                "          \"aggregate_inputs\": {}",
+                json_string_array(&row.aggregate_inputs)
+            );
+            println!("        }}{}", row_suffix);
+        }
+        println!("      ]");
+        println!("    }}{}", suffix);
+    }
+    println!("  ]");
 }
 
 fn print_magic_dot(report: &MagicSetReport) {
@@ -505,6 +1146,13 @@ fn json_value(value: &Value) -> String {
         }
         Value::Symbol(id) => format!("\"{}\"", json_escape(&symbol::resolve(*id))),
         Value::String(s) => format!("\"{}\"", json_escape(s)),
+    }
+}
+
+fn json_optional_string(value: Option<&str>) -> String {
+    match value {
+        Some(value) => format!("\"{}\"", json_escape(value)),
+        None => "null".to_string(),
     }
 }
 

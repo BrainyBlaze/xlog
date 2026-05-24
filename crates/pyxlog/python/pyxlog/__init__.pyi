@@ -79,6 +79,44 @@ class _V080RuntimeApiMixin:
         delete_columns: Optional[Any] = None,
     ) -> dict[str, Any]: ...
     def delta_stats(self) -> dict[str, Any]: ...
+    def put_temporal_relation(
+        self,
+        name: str,
+        dlpack_columns: Any,
+        *,
+        timestamp_column: str,
+        dataset_id: Optional[str] = None,
+        row_hashes: Optional[list[str]] = None,
+        field_hashes: Optional[dict[str, list[str]]] = None,
+        uncertainty: Any = None,
+        stream_id: Optional[str] = None,
+        order_column: Optional[str] = None,
+        source: Optional[str] = None,
+        process_boundary: Optional[str] = None,
+        temporal_order: Any = None,
+    ) -> dict[str, Any]: ...
+    def temporal_provenance(self, name: Optional[str] = None) -> dict[str, Any]: ...
+
+
+def put_temporal_relation(
+    session: Any,
+    name: str,
+    dlpack_columns: Any,
+    *,
+    timestamp_column: str,
+    dataset_id: Optional[str] = None,
+    row_hashes: Any = None,
+    field_hashes: Any = None,
+    uncertainty: Any = None,
+    stream_id: Optional[str] = None,
+    order_column: Optional[str] = None,
+    source: Optional[str] = None,
+    process_boundary: Optional[str] = None,
+    temporal_order: Any = None,
+) -> dict[str, Any]: ...
+
+
+def temporal_provenance(session: Any, name: str) -> dict[str, Any]: ...
 
 
 class _V080StreamingMixin:
@@ -94,6 +132,23 @@ class _V080StreamingMixin:
 # def delete_relation(self, name: str, dlpack_columns: Any) -> dict[str, Any]: ...
 # def apply_relation_delta(self, name: str, insert_columns: Optional[Any] = None, delete_columns: Optional[Any] = None) -> dict[str, Any]: ...
 # def delta_stats(self) -> dict[str, Any]: ...
+# def put_temporal_relation(self, name: str, dlpack_columns: Any, *, timestamp_column: str, dataset_id: Optional[str] = None, row_hashes: Optional[list[str]] = None, field_hashes: Optional[dict[str, list[str]]] = None, uncertainty: Any = None, stream_id: Optional[str] = None, order_column: Optional[str] = None, source: Optional[str] = None, process_boundary: Optional[str] = None, temporal_order: Any = None) -> dict[str, Any]: ...
+# def temporal_provenance(self, name: Optional[str] = None) -> dict[str, Any]: ...
 # def iter_chunks(self, chunk_rows: int = 1024) -> Iterator[LogicQueryChunk]: ...
 # def iter_query_chunks(self, chunk_rows: int = 1024) -> Iterator[LogicQueryChunk]: ...
 # memory_mb: Optional[int] = None
+
+
+class RelationEvidence:
+    def provenance(self) -> dict[str, Any]: ...
+
+
+# v0.8.7 evidence/provenance and nn/4 lineage monkey-patched APIs:
+# def put_relation_with_provenance(self, name: str, dlpack_columns: Any, *, relation_schema: Optional[list[str]] = None, source_path: Optional[str] = None, source_hash: Optional[str] = None, row_hashes: Optional[list[str]] = None, field_hashes: Optional[dict[str, list[str]]] = None, accepted_count: Optional[int] = None, rejected_count: Optional[int] = None, output_path: Optional[str] = None, output_hash: Optional[str] = None, decision_counts: Optional[dict[str, int]] = None) -> dict[str, Any]: ...
+# def evidence(self, name: Optional[str] = None) -> dict[str, Any]: ...
+# def relation(self, name: str) -> RelationEvidence: ...
+# class RelationEvidence: def provenance(self) -> dict[str, Any]: ...
+# evidence payload keys: program_hash, relation_schema, source_hash, row_hashes, accepted_count, rejected_count, output_hash, decision_counts
+# def nn4_lineage(self, name: Optional[str] = None) -> dict[str, Any]: ...
+# def record_nn4_influence(self, name: str, *, query: str, changed_acceptance: bool, before: Any = None, after: Any = None, evidence: Optional[dict[str, Any]] = None) -> dict[str, Any]: ...
+# nn/4 lineage keys: checkpoint_hash, split_hashes, calibration_metrics, cuda_device, influence_audit

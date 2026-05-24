@@ -19,13 +19,18 @@
 //!     device-side top-K selection and only transfers compact selected rows.
 
 pub mod index;
-#[cfg(test)]
-mod reduce;
+pub mod provenance;
+pub mod reduce;
 pub mod score;
 pub mod types;
 mod validate;
 
-pub use types::{ExactInductionConfig, ExactInductionResult, ScoredCandidate, Topology};
+pub use provenance::InductionProvenanceRegistry;
+pub use reduce::{reduce_per_topology, ScoredPair};
+pub use types::{
+    ExactInductionConfig, ExactInductionResult, InducedRuleProvenance, InducedRuleRegistry,
+    InductionAlternative, InductionSupportRow, RuleSourceKind, ScoredCandidate, Topology,
+};
 
 use xlog_core::{RelId, Result, ScalarType, XlogError};
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};

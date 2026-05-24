@@ -2,19 +2,27 @@
 
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
 [![CUDA Tests](https://img.shields.io/badge/CUDA%20tests-207%2F207-brightgreen.svg)](docs/architecture/cuda-certification.md)
-[![Version](https://img.shields.io/badge/version-v0.8.6-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.9.0--rc-blue.svg)](CHANGELOG.md)
 
-> **Release status:** `v0.8.6` - DTS-DLM Runtime Completion and GPU-Native
-> Optimizer Pack. The release closes the deferred v0.8.0 runtime completion
-> items with device-resident delta coalescing, relation-change callbacks,
-> typed exact-induction dispatch, profile-gated chain shared-memory scoring,
-> runtime CSE, adaptive re-optimization, persistent hash-index reuse, and
-> behavior-probe-backed consumer certification for DTS-DLM, Mistaber-derived
-> `.xlog` fixtures, v0.9.0 substrate prerequisites, and public pyxlog session
-> users. It preserves the v0.8.5 language-completeness surface. See
-> `ROADMAP.md`, `CHANGELOG.md`, `docs/architecture/python-bindings.md`,
-> `examples/v086-runtime/`, `examples/v085-language/`, and
-> `examples/v080-dts/`.
+> **Release status:** tagged release `v0.8.6`; current workspace
+> `v0.9.0-rc` integrates the v0.8.7-v0.8.9 BFO-derived diagnostics from the
+> Autonomous Science Engine, Living World Model, and Universal Case Reasoner as
+> predecessor surfaces, and adds the v0.9.0 GPU-native epistemic, solver, and
+> probabilistic release-candidate surface. The integrated diagnostics include
+> generated-rule diagnostics over inline and external candidate rows, native
+> biomedical graph stream provenance, source/generated rule provenance, proof
+> traces, relation-delta planner telemetry, validation staging,
+> temporal/general relation evidence, nn/4 lineage and hot-loop diagnostics,
+> joint `nn/4` plus symbolic rule-weight training, differentiable proof traces,
+> learned-rule inventories, CUDA host-transfer audits, module-boundary
+> diagnostics, grouped transfer metrics, and the BFO UCR validation package.
+> See `ROADMAP.md`, `CHANGELOG.md`,
+> `docs/architecture/ucr-xlog-diagnostics.md`,
+> `docs/architecture/living-world-diagnostics-v087.md`,
+> `docs/architecture/lwm-diagnostics-provenance.md`,
+> `docs/architecture/python-bindings.md`,
+> `examples/BFO/universal_case_reasoner/`, `examples/v086-runtime/`,
+> `examples/v085-language/`, and `examples/v080-dts/`.
 
 **XLOG is a GPU-native logic programming language for unified symbolic reasoning.**
 Neural-symbolic systems today keep symbolic reasoning on the CPU while neural computation runs on
@@ -67,6 +75,8 @@ XLOG is not a DSL bolted onto a tensor framework. It is a full typed logic progr
 | **Probabilistic** | Exact inference via knowledge compilation (D4 -> XGCF), Monte Carlo sampling, WFS negation |
 | **v0.8.5 language** | Finite `list<T>` and `term` surfaces, safe `findall` / `maplist` / inspection predicates, deterministic NAF, magic sets, aggregate lifting, approximate-inference pragmas |
 | **v0.8.6 runtime** | Delta coalescing, relation callbacks, typed exact induction, chain shared-memory scoring, runtime CSE, adaptive re-optimization, persistent hash-index reuse, behavior-probe consumer certification |
+| **v0.8.9 BFO diagnostics** | Generated-rule row decisions, source/generated rule provenance, proof traces, native biomedical graph stream provenance, delta planner telemetry/equivalence probes, validation staging, temporal/general relation evidence, nn/4 lineage and hot-loop diagnostics, joint `nn/4`/symbolic training, rule inventories, CUDA host-transfer audits, module-boundary diagnostics, grouped transfer metrics |
+| **v0.9.0 epistemic solver** | EIR, G91, FAEEL, Generate-Propagate-Test execution, epistemic splitting, GPU-native executable plans, solver-service integration, MaxSAT, GPU portfolio solving, and probabilistic epistemic evidence paths |
 | **Neural-symbolic** | Neural predicates (`nn/k`), PyTorch autograd integration, circuit caching, term embeddings |
 | **dILP training** | Sparse GPU mask, deterministic mode, promotion pipeline, holdout validation, artifact save/load |
 | **Bounded exact induction** | `xlog-induce` plus `ilp_exact` CUDA scoring with top-K per topology and fixed-size D2H summaries |
@@ -255,6 +265,12 @@ For DTS-DLM Python productization examples, see
 [`examples/v080-dts/`](examples/v080-dts/). For Rust and Python API usage, see
 [`examples/python/`](examples/python/) and
 [`docs/architecture/python-bindings.md`](docs/architecture/python-bindings.md).
+For the BFO Universal Case Reasoner validation package and its resolved XLOG
+issue ledger, see
+[`examples/BFO/universal_case_reasoner/`](examples/BFO/universal_case_reasoner/)
+and [`docs/architecture/ucr-xlog-diagnostics.md`](docs/architecture/ucr-xlog-diagnostics.md).
+For the v0.8.7 diagnostics and provenance surfaces, see
+[`docs/architecture/living-world-diagnostics-v087.md`](docs/architecture/living-world-diagnostics-v087.md).
 
 ---
 
@@ -277,6 +293,10 @@ For DTS-DLM Python productization examples, see
 ./target/release/xlog run program.xlog --stats
 ./target/release/xlog run program.xlog --stats --stats-format json
 
+# Explain diagnostics
+./target/release/xlog explain program.xlog
+./target/release/xlog explain --format json program.xlog
+
 ./target/release/xlog run --help
 ```
 
@@ -296,9 +316,11 @@ flag reference.
 | [Benchmarks](docs/BENCHMARKS.md) | Performance methodology and benchmark artifacts |
 | [WCOJ architecture guide](docs/wcoj-architecture-guide.md) | RIR, promoter, dispatch, cost model, recursive integration, and Phase-2 WCOJ mechanisms |
 | [WCOJ user guide](docs/wcoj-user-guide.md) | Eligibility, fallback behavior, performance tuning, env vars, troubleshooting, and DTS-DLM guidance |
+| [v0.8.7 living-world diagnostics](docs/architecture/living-world-diagnostics-v087.md) | Generated-rule provenance, source rule provenance, proof traces, delta debug, temporal metadata, and neural hot-loop diagnostics |
 | [Probabilistic tier](docs/architecture/xlog-prob.md) | Exact knowledge compilation and Monte Carlo inference |
 | [Solver services](docs/architecture/solver-services.md) | GPU CDCL verifier, SAT/MaxSAT services, workspace arena reuse |
 | [dILP training](docs/architecture/dilp-training.md) | Differentiable ILP trainer architecture and GPU hot-loop contract |
+| [UCR diagnostics](docs/architecture/ucr-xlog-diagnostics.md) | v0.8.9 BFO Universal Case Reasoner issue resolutions and reusable XLOG/pyxlog diagnostic surfaces |
 | [dILP showcase report](docs/architecture/dilp-showcase-report.md) | End-to-end dILP training results |
 | [CLI reference](docs/architecture/cli-reference.md) | Full flag and subcommand reference |
 | [Arrow / DLPack interop](docs/architecture/cudf-interop.md) | Zero-copy interop with cuDF, PyTorch, and JAX |

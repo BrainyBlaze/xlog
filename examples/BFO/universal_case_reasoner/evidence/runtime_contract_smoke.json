@@ -1,0 +1,39 @@
+{
+  "cuda_device": "NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU",
+  "delta": {
+    "checks": {
+      "delete": true,
+      "insert": true,
+      "mixed": true
+    },
+    "delta_output_equals_full_recompute_pct": 100.0,
+    "row_counts": {
+      "after_delete": 2,
+      "after_insert": 6,
+      "after_mixed": 2,
+      "initial": 3
+    }
+  },
+  "delta_output_equals_full_recompute_pct": 100.0,
+  "determinism": {
+    "byte_identical": true,
+    "digests": [
+      "4246dc637eed2cadb28afd6beb0cb0a49fcad68114a981b2df56171ee37248a9",
+      "4246dc637eed2cadb28afd6beb0cb0a49fcad68114a981b2df56171ee37248a9",
+      "4246dc637eed2cadb28afd6beb0cb0a49fcad68114a981b2df56171ee37248a9",
+      "4246dc637eed2cadb28afd6beb0cb0a49fcad68114a981b2df56171ee37248a9",
+      "4246dc637eed2cadb28afd6beb0cb0a49fcad68114a981b2df56171ee37248a9"
+    ],
+    "matching_runs": 5,
+    "runs": 5,
+    "seed": 0
+  },
+  "hot_loop_transfer_stats": {
+    "dtoh_bytes": 0,
+    "dtoh_calls": 0,
+    "htod_bytes": 0,
+    "htod_calls": 0
+  },
+  "pyxlog_version": "0.8.6",
+  "status": "PASS"
+}

@@ -1,0 +1,70 @@
+// Shared BFO kernel for universal case reasoning.
+//
+// This file is intentionally domain-neutral. Domain adapters may add facts and
+// mappings, but they may not edit these core category or relation declarations.
+
+pred bfo_category(symbol).
+pred bfo_relation_family(symbol).
+pred maps_to_bfo(symbol, symbol).
+pred participates_in(symbol, symbol).
+pred has_quality(symbol, symbol).
+pred realized_in(symbol, symbol).
+pred occurs_in(symbol, symbol).
+pred causally_upstream_of(symbol, symbol).
+pred has_participant(symbol, symbol).
+pred bearer_of(symbol, symbol).
+pred has_disposition(symbol, symbol).
+pred concretizes(symbol, symbol).
+pred derives_from(symbol, symbol).
+pred evidence_for(symbol, symbol).
+pred candidate_root_cause(symbol, symbol).
+pred failure_chain_step(symbol, symbol, symbol).
+pred risk_state(symbol, symbol).
+pred recommended_intervention(symbol, symbol).
+pred bfo_explanation(symbol, symbol, symbol).
+
+bfo_category("continuant").
+bfo_category("independent_continuant").
+bfo_category("material_entity").
+bfo_category("immaterial_entity").
+bfo_category("specifically_dependent_continuant").
+bfo_category("quality").
+bfo_category("realizable_entity").
+bfo_category("disposition").
+bfo_category("function").
+bfo_category("role").
+bfo_category("occurrent").
+bfo_category("process").
+bfo_category("process_boundary").
+bfo_category("temporal_region").
+
+bfo_relation_family("is_a").
+bfo_relation_family("part_of").
+bfo_relation_family("has_part").
+bfo_relation_family("participates_in").
+bfo_relation_family("has_participant").
+bfo_relation_family("inheres_in").
+bfo_relation_family("realized_in").
+bfo_relation_family("occurs_in").
+bfo_relation_family("causally_upstream_of").
+bfo_relation_family("derives_from").
+
+candidate_root_cause(Case, Cause) :-
+    evidence_for(Cause, Case),
+    causally_upstream_of(Cause, Case).
+
+failure_chain_step(Case, Upstream, Downstream) :-
+    evidence_for(Upstream, Case),
+    causally_upstream_of(Upstream, Downstream).
+
+risk_state(Case, Quality) :-
+    has_quality(Case, Quality),
+    maps_to_bfo(Quality, "quality").
+
+recommended_intervention(Case, Intervention) :-
+    candidate_root_cause(Case, Cause),
+    causally_upstream_of(Intervention, Cause).
+
+bfo_explanation(Case, Claim, Category) :-
+    evidence_for(Claim, Case),
+    maps_to_bfo(Claim, Category).

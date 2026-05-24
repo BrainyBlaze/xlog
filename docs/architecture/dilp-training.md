@@ -9,6 +9,7 @@ Programming engine that learns Datalog rules from positive/negative examples via
 2. **GPU-resident hot loop** — no semantic column downloads in the training step loop (P0 contract)
 3. **Sparse by default** — candidate-indexed soft-probs instead of materializing N³ tensors
 4. **Transactional promotion** — learned rules pass gate checks before entering the knowledge base
+5. **Auditable transfer evidence** — learned rules carry fold, held-out-domain, gate, and base-kernel checksum metadata
 
 ## Core Idea: Tensorized Super-Graph Masking
 
@@ -86,6 +87,8 @@ to the shipped trainer, see [`rfc-tensorized-ilp.md`](rfc-tensorized-ilp.md).
 |------|---------|
 | `pyxlog/ilp/trainer.py` | `train_only()` — multi-start training loop |
 | `pyxlog/ilp/promoter.py` | `train_and_promote()` — training + gate pipeline |
+| `pyxlog/ilp/neurosymbolic.py` | `train_neurosymbolic_program()` — joint `nn/4` and symbolic rule-weight training |
+| `pyxlog/ilp/inventory.py` | `build_rule_inventory()` — selected/rejected clause inventory with transfer metadata |
 | `pyxlog/ilp/backend.py` | `MaskBackend` protocol, `SparseMaskBackend`, `DenseMaskBackend` |
 | `pyxlog/ilp/temperature.py` | `AdaptiveTempController` — cosine-annealed τ schedule |
 | `pyxlog/ilp/entropy.py` | Entropy regularization helpers |
@@ -176,6 +179,31 @@ W (N×N×N logits) → Gumbel-Softmax(τ) → 3D soft mask
    - **Typed-schema gate** — optional hard gate requiring relation type metadata (or waiver-driven manual review)
 5. All pass → `PromotionStatus.PROMOTED` with `committed_source`
 
+### v0.8.9 UCR training surface
+
+The Universal Case Reasoner validation work added a higher-level training entry
+point for sources that mix neural predicates and trainable symbolic clauses:
+
+```python
+from pyxlog.ilp.neurosymbolic import NeuroSymbolicTrainingConfig, train_neurosymbolic_program
+
+result = train_neurosymbolic_program(
+    source,
+    networks={"score": torch_module},
+    examples=training_rows,
+    config=NeuroSymbolicTrainingConfig(steps=16, learning_rate=0.05),
+)
+```
+
+The source owns declarative `nn(...)`, `trainable_rule(...)`, and `train(...)`
+declarations. The result reports neural gradient norms, symbolic gradients,
+final symbolic weights, and a `RuleInventory` suitable for transfer audits.
+
+`train_and_promote(...)` also accepts `training_fold`, `held_out_domains`,
+`base_kernel_checksum_before`, and `base_kernel_checksum_after`. These fields are
+recorded on `PromotionResult.rule_inventory`, along with selected and rejected
+candidate clauses and gate outcomes.
+
 ## Artifact Persistence
 
 `LearnedArtifact` captures the full training result for reproducibility:
@@ -219,10 +247,12 @@ RFC. The live references are:
 |----------|---------|
 | [`rfc-tensorized-ilp.md`](rfc-tensorized-ilp.md) | Full RFC: mathematical foundation, hardware rationale, implementation map, and resolved design decisions |
 | [`dilp-showcase-report.md`](dilp-showcase-report.md) | Validation: four-stage showcase run analysis |
+| [`ucr-xlog-diagnostics.md`](ucr-xlog-diagnostics.md) | v0.8.9 Universal Case Reasoner issue resolutions and reusable diagnostics |
 
 ## See Also
 
 - [Python Bindings — ILP Training API](python-bindings.md#ilp-training-dilp-beta) — user-facing API reference
+- [Universal Case Reasoner Diagnostics](ucr-xlog-diagnostics.md) — proof traces, rule inventories, runtime audits, and transfer metrics
 - [GPU Execution](gpu-execution.md) — mask DAG evaluation, stream compaction
 - [Probabilistic Tier](xlog-prob.md) — XGCF circuits, provenance (shared infrastructure)
 - [Data Interoperability](cudf-interop.md) — DLPack details

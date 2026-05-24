@@ -118,14 +118,11 @@ build_pyxlog_release() {
 
 cd "$repo_root"
 
+build_pyxlog_release
 target_dir="$(resolve_target_dir)"
 kernel_out_dir="$(resolve_kernel_out_dir_from_dep_info "$target_dir" || true)"
 if [[ -z "$kernel_out_dir" ]]; then
   kernel_out_dir="$(resolve_kernel_out_dir_from_build_tree "$target_dir" || true)"
-fi
-if [[ -z "$kernel_out_dir" ]]; then
-  build_pyxlog_release
-  kernel_out_dir="$(resolve_kernel_out_dir_from_dep_info "$target_dir" || true)"
 fi
 if [[ -z "$kernel_out_dir" ]]; then
   kernel_out_dir="$(resolve_kernel_out_dir_from_build_tree "$target_dir")"

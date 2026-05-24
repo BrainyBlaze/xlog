@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 
 @dataclass(frozen=True)
@@ -418,3 +418,4 @@ class PromotionResult:
     committed_source: str | None = None
     ambiguous_alternatives: list[str] | None = None
     artifact: LearnedArtifact = field(default_factory=LearnedArtifact)
+    rule_inventory: Any | None = None

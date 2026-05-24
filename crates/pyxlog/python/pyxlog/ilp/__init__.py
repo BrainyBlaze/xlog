@@ -4,6 +4,7 @@ from pyxlog.ilp.entropy import entropy_weight_at_step, normalized_entropy
 from pyxlog.ilp.exact_induce import ExactInductionResult, ScoredCandidate, induce_exact
 from pyxlog.ilp.exceptions import IlpCandidateError, IlpConfigError, IlpTrainingError
 from pyxlog.ilp.holdout import loo_holdout_f1
+from pyxlog.ilp.inventory import RuleInventory, RuleInventoryClause, build_rule_inventory
 from pyxlog.ilp.temperature import AdaptiveTempController, TempMode
 from pyxlog.ilp.promoter import train_and_promote
 from pyxlog.ilp.trainer import train_on_compiled_relations, train_only
@@ -51,4 +52,7 @@ __all__ = [
     "train_on_compiled_relations",
     "train_and_promote",
     "loo_holdout_f1",
+    "RuleInventory",
+    "RuleInventoryClause",
+    "build_rule_inventory",
 ]

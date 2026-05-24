@@ -1,6 +1,6 @@
 # XLOG Development Roadmap
 
-Last updated: May 19, 2026
+Last updated: May 21, 2026
 Current tagged release: v0.8.6. v0.6.0 shipped the stream-safe runtime
 and recorded launch discipline. v0.6.1 shipped recorded CSM hash-join
 dispatch and explicit CSM cert-mode labeling. v0.6.2 shipped the first
@@ -22,7 +22,13 @@ the DTS-DLM runtime completion and GPU-native optimizer pack: device-resident
 delta coalescing, relation-change callbacks, typed exact induction,
 profile-gated chain shared-memory scoring, runtime CSE, adaptive
 re-optimization, persistent hash-index reuse, and behavior-probe-backed
-consumer certification.
+consumer certification. The v0.9.0 release-candidate branch now integrates the
+predecessor BFO-derived diagnostic packs: Project 1/v0.8.7 generated-rule and
+biomedical graph diagnostics, v0.8.8 living-world provenance refinements, and
+the Universal Case Reasoner diagnostic pack with joint `nn/4` plus symbolic
+rule-weight training, differentiable proof traces, learned-rule inventories,
+CUDA host-transfer audits, module-boundary diagnostics, grouped transfer
+metrics, and the BFO UCR validation package.
 
 This roadmap is version-oriented so planned work is not hidden inside subsystem
 sections. Historical and current-main work uses checked boxes. Future work uses
@@ -30,7 +36,8 @@ unchecked boxes and is assigned to a concrete future version.
 After the tagged v0.8.0 feature pack, v0.8.5 completed the Language
 Completeness and Developer Experience train. v0.8.6 closed the deferred
 DTS-DLM runtime / GPU-native optimizer completion backlog that v0.9.0 needs as
-runtime substrate. v0.9.0 is the active Epistemic/Solver Semantics train and v0.10.0 is the
+runtime substrate. v0.8.7-v0.8.9 are integrated predecessor diagnostics
+surfaces in the v0.9.0 Epistemic/Solver Semantics train, and v0.10.0 is the
 Multi-GPU / Out-of-Core train.
 
 ## v0.0.1 - Workspace Foundation
@@ -1618,6 +1625,181 @@ engines, or parallel helper paths that bypass production dispatch are blockers.
       backed by validator-owned behavior probes, and public pyxlog persistent
       index session reuse has a passing behavior probe.
       Evidence: `docs/evidence/2026-05-19-v086-consumers/`.
+
+## v0.8.7 - Living-World Diagnostics and Provenance Pack
+
+Status: integrated into the active v0.8.9 branch; standalone release tag and
+publication are still pending. Architecture source of truth:
+`docs/architecture/living-world-diagnostics-v087.md`.
+
+v0.8.7 closes the initial living-world and Project 1 auditability gaps without
+changing the production data path. New surfaces report rule metadata,
+generated-rule row decisions, proof frontiers, streamed graph provenance,
+relation-delta planner telemetry, validation staging events, relation evidence,
+and neural lineage/hot-loop state; they do not force host row materialization
+unless the caller already selected a host-readable API.
+
+### Rule And Proof Diagnostics
+
+- [x] Add shared `xlog-logic` diagnostics records for `RuleProvenance`,
+      `RuleSourceKind`, and `QueryProofTrace`.
+- [x] Extend `xlog explain` text and JSON reports with `rule_provenance` and
+      `proof_traces`, including generated magic-set rewrite rules when present.
+- [x] Extend `xlog explain --format json` with `generated_rule_diagnostics`
+      row decisions, failed predicates, threshold comparisons, and aggregate
+      inputs for accepted and rejected generated-rule rows, including external
+      candidate rows resolved from colocated execution manifests.
+- [x] Expose `rule_provenance()` and `proof_traces()` from deterministic
+      pyxlog programs, persistent relation sessions, and probabilistic pyxlog
+      programs.
+
+### Induction Provenance
+
+- [x] Add `xlog-induce` generated-rule provenance records with selected rule
+      source, search-space size, predicate inventory, positive support rows,
+      rejected alternatives, selected-rule falsification count, and stable
+      generation trace hash.
+- [x] Add an in-memory `InductionProvenanceRegistry` for callers that promote
+      generated rules and need to retain their audit records.
+
+### Delta And Temporal Diagnostics
+
+- [x] Add native biomedical graph streaming through `xlog_gpu::biokg`, covering
+      JSONL/CSV/N-Triples edge streams, typed edge sinks, row hashes, relation
+      histograms, split provenance, and bounded-memory chunk diagnostics.
+- [x] Extend persistent-session delta reports with `changed_relation_names` and
+      metadata-only `debug_trace` entries.
+- [x] Add `LogicRelationSession.apply_relation_delta_debug(...)` with opt-in
+      full-recompute comparison through query-store equivalence.
+- [x] Add `DeltaPlannerTelemetry` with affected SCCs, cache reuse, fallback
+      decisions, estimated/measured speedup, and planner guidance.
+- [x] Add pyxlog temporal relation helpers that attach `timestamp_column`,
+      `dataset_id`, row hashes, field hashes, uncertainty metadata, stream id,
+      ordering column, and source metadata to session-managed relations.
+- [x] Add pyxlog general relation evidence APIs:
+      `put_relation_with_provenance(...)`, `evidence(...)`, and
+      `RelationEvidence.provenance()`.
+- [x] Add promote-only-on-PASS validation staging via
+      `scripts.validation_staging.ValidationStagingRun`.
+
+### Neural Hot-Loop Diagnostics
+
+- [x] Add `CompiledProgram.neural_hot_loop_diagnostics()` with post-load
+      transfer stats, CUDA Graph counters, circuit-cache counters, and explicit
+      unavailable statuses for unsupported per-iteration control-plane and
+      scalar-sync counters.
+- [x] Add nn/4 lineage APIs for `checkpoint_hash`, `split_hashes`,
+      `calibration_metrics`, `cuda_device`, `influence_audit`, and
+      `changed_acceptance` records.
+
+### Documentation And Validation
+
+- [x] Document the full v0.8.7 diagnostics architecture in
+      `docs/architecture/living-world-diagnostics-v087.md`.
+- [x] Update the Python bindings, CLI reference, GPU execution, and bounded
+      exact-induction architecture docs for the new public surfaces.
+- [x] Add source-level coverage for the v0.8.7 Python diagnostics API surface,
+      validation staging, Rust tests for CLI generated-rule diagnostics,
+      biomedical graph streaming, relation-delta planner telemetry, and
+      induction provenance.
+
+## v0.8.8 - Living-World Diagnostics Provenance Refinement
+
+Status: integrated into the active v0.8.9 branch; standalone release tag and
+publication are still pending. Architecture source of truth:
+`docs/architecture/lwm-diagnostics-provenance.md`.
+
+v0.8.8 hardens the living-world diagnostics pack with stable induced-rule
+aliases, explicit process-boundary and temporal-order provenance, source-level
+coverage for the v0.8.8 pyxlog surface, and BFO reproducer-oriented
+documentation.
+
+### Native Induction Provenance
+
+- [x] Add native `InducedRuleProvenance`, `InducedRuleRegistry`, support-row,
+      alternative, and source-kind aliases for living-world induced-rule
+      consumers while preserving the Project 1 induction provenance registry.
+- [x] Preserve search-space size, predicate inventory, support rows, rejected
+      alternatives, falsification counts, stable rule ids, and generation trace
+      hashes without requiring Python-side law artifacts.
+
+### Delta, Temporal, and Neural Diagnostics
+
+- [x] Keep `LogicRelationSession.apply_relation_delta_debug(...)` visible in
+      pyxlog stubs and documentation with changed relation names, equivalence
+      evidence, and compact debug trace output.
+- [x] Extend temporal provenance docs and wrappers with `process_boundary` and
+      `temporal_order` metadata in addition to timestamp, dataset, row hash,
+      field hash, uncertainty, stream, order, and source metadata.
+- [x] Keep `CompiledProgram.neural_hot_loop_diagnostics()` documented as the
+      unified post-load transfer, control-plane, scalar-sync, CUDA graph, and
+      circuit-cache diagnostic surface.
+
+### Validation
+
+- [x] Add `python/tests/test_v088_lwm_source.py` for pyxlog stubs, docs, and
+      Rust/Python source-surface coverage.
+- [x] Add `docs/architecture/lwm-diagnostics-provenance.md` as the issue-by-
+      issue v0.8.8 architecture note.
+
+## v0.8.9 - Universal Case Reasoner Diagnostic Pack
+
+Status: implementation branch `feat/v089-integrated-xlog-fixes`; not tagged.
+Architecture summary: `docs/architecture/ucr-xlog-diagnostics.md`.
+Issue ledger: `examples/BFO/universal_case_reasoner/xlog_issue_ledger.json`.
+
+v0.8.9 promotes the reusable XLOG gaps exposed by the BFO demos into core XLOG
+and pyxlog surfaces. Acceptance requires each Project 1, living-world, and
+`UCR-XLOG-*` ledger item to have a reusable implementation, a minimal
+reproducer, and a focused regression test outside the project-specific
+validator.
+
+### Neural-Symbolic Training
+
+- [x] Add `pyxlog.ilp.neurosymbolic.train_neurosymbolic_program(...)` so one
+      source can declare `nn/4` predicates, trainable symbolic rules, and a
+      training objective that updates neural parameters and symbolic weights.
+      Evidence: `python/tests/test_nn4_dilp_training_surface.py`.
+- [x] Allow pure-Python pyxlog helper tests to import `pyxlog` when
+      `pyxlog._native` is absent, while keeping native-backed APIs fail-closed.
+
+### Differentiable Proofs And Rule Inventories
+
+- [x] Add `xlog_logic::DifferentiableProofTraceMap` with stable proof IDs,
+      support atoms, symbolic clause weights, logistic loss, and nonzero
+      gradient hooks.
+      Evidence: `crates/xlog-logic/tests/differentiable_proof_trace.rs`.
+- [x] Add `pyxlog.ilp.inventory.build_rule_inventory(...)` and
+      `PromotionResult.rule_inventory`, including selected/rejected clauses,
+      training fold, held-out domains, promotion gates, and base-kernel checksum
+      metadata.
+      Evidence: `python/tests/test_ilp_rule_inventory.py`.
+
+### Runtime And Transfer Diagnostics
+
+- [x] Add `pyxlog.runtime_audit.CudaExecutionAudit` to fail hot-loop CUDA
+      ranking tests on `.cpu()`, `.tolist()`, `.item()`, score-row downloads, or
+      recorded H2D/D2H transfers.
+      Evidence: `python/tests/test_nn4_cuda_no_host_transfer_contract.py`.
+- [x] Add `xlog_logic::diagnose_module_boundaries(...)` for frozen kernel
+      predicates, adapter-only fact modules, held-out domain declarations, and
+      held-out-label candidate provenance.
+      Evidence: `crates/xlog-logic/tests/module_boundary_diagnostics.rs`.
+- [x] Add `pyxlog.transfer_diagnostics.compute_transfer_diagnostics(...)` for
+      grouped macro F1, minimum-domain F1, bootstrap confidence intervals,
+      baseline uplift, paired sign tests, and missing-domain or missing-variant
+      failures.
+      Evidence: `python/tests/test_transfer_metric_diagnostics.py`.
+
+### BFO UCR Example And Packaging
+
+- [x] Add `examples/BFO/universal_case_reasoner/` with goals, requirements,
+      validation plan, BFO programs, evidence files, minimal reproducers,
+      project-specific tests, validator tooling, and the resolved UCR issue
+      ledger.
+- [x] Harden `scripts/stage_pyxlog_kernels.sh` so pyxlog release kernel staging
+      builds before resolving the release `OUT_DIR`.
+      Evidence: `python/tests/test_kernel_packaging_layout.py`.
 
 ## v0.9.0 - Epistemic and Solver Semantics
 

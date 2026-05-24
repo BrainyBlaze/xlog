@@ -1,0 +1,33 @@
+{
+  "baseline_metrics": {
+    "domain_symbolic": 0.0,
+    "neural_only": 0.7,
+    "neuro_symbolic": 1.0,
+    "shared_symbolic": 0.5
+  },
+  "bfo_candidate_count": 2,
+  "bfo_query_tensors_cuda": true,
+  "correct_root": "credential_exposure",
+  "cuda_device": "NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU",
+  "distractor_root": "account_drift",
+  "gradient_finite": true,
+  "held_out_case": "cybersecurity_intrusion",
+  "loss_is_cuda": true,
+  "neural": {
+    "gradient_finite": true,
+    "loss": 1.0000000505039327e-07,
+    "loss_is_cuda": true,
+    "output": "/home/dev/projects/xlog/.worktrees/v090-v089-union/examples/BFO/universal_case_reasoner/evidence/ablation_smoke.json",
+    "program": "programs/ablation_ranker.xlog",
+    "program_declares_nn4": true,
+    "top_label": "credential_exposure"
+  },
+  "neural_top_label": "credential_exposure",
+  "program_declares_nn4": true,
+  "pyxlog_version": "0.8.6",
+  "relative_uplift_over_best_baseline_pct": 42.857143,
+  "selected_primary_metric": "held_out_ranked_explanation_score",
+  "status": "PASS",
+  "strongest_baseline": "neural_only",
+  "strongest_baseline_value": 0.7
+}

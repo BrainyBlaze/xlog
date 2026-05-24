@@ -2,7 +2,9 @@
 
 Date: 2026-05-24
 
-Branch: `feat/v090-epistemic-solver-semantics`
+Target branch: `feat/v090-epistemic-solver-semantics`
+
+Local integration branch: `integration/v090-v089-union`
 
 Audit start HEAD: `c25cd22b`
 
@@ -11,6 +13,9 @@ Checkpoint commit: `d2d57cb2`
 Post-checkpoint split diagnostic amendment: `415343c8`
 
 Release-surface reconciliation: this document revision, docs-only.
+
+Predecessor diagnostics integration source:
+`feat/v089-ucr-xlog-issue-fixes` at `84e6a05c`.
 
 Base/rebase state: local `main` at `bd45229d` is an ancestor of `HEAD`.
 
@@ -28,7 +33,10 @@ assertion correction is committed as `415343c8`, and the final runtime gates
 listed below have been rerun after those code changes. The release-surface
 reconciliation updates `ROADMAP.md`, this closure ledger, the epistemic guide,
 and the current evidence READMEs so they no longer contradict the validated
-code state. External release-board mutation, push, tag, merge, and main-branch
+code state. The local integration branch also layers the v0.8.7-v0.8.9 BFO
+diagnostics/provenance predecessor surfaces from
+`feat/v089-ucr-xlog-issue-fixes` into the v0.9.0 release candidate. External
+release-board mutation, push, tag, target-branch fast-forward, and main-branch
 mutation remain outside this proposal and still require explicit coordinator
 authorization.
 
@@ -37,22 +45,31 @@ solver, probability, and certification nodes as blocked by missing
 production-path evidence. Their current-status sections now record PASS for the
 accepted v0.9.0 closure matrix while preserving historical audit detail.
 
-## Rebase And Conflict Report
+## Rebase And Predecessor Integration Report
 
-`main` is currently integrated into the feature branch:
+`main` is currently integrated into the feature branch, and the local
+integration branch includes the v0.8.9 diagnostics predecessor branch as a
+union merge:
 
 | Check | Current evidence |
 |---|---|
 | Last full runtime-validation HEAD | `cf91091d` |
 | `git rev-parse --short main` | `bd45229d` |
+| `git rev-parse --short feat/v089-ucr-xlog-issue-fixes` | `84e6a05c` |
+| `git rev-parse --short feat/v090-epistemic-solver-semantics` before union | `d612161e` |
 | `git merge-base HEAD main` | `bd45229d` |
 | `git merge-base --is-ancestor main HEAD` | exit `0` |
 | `git merge-base --is-ancestor HEAD main` | exit `1` |
 
 The historical main integration resolved the previously recorded conflict set
 across CLI execution, xlog-logic AST/parser/grammar/lowering/stratifier,
-xlog-prob Monte Carlo/provenance, and xlog-runtime exports. No merge, rebase, or
-external release-board operation was performed by this proposal.
+xlog-prob Monte Carlo/provenance, and xlog-runtime exports. No target-branch
+fast-forward, push, tag, main-branch mutation, or external release-board
+operation is authorized by this proposal. The v0.8.9 predecessor integration was
+resolved as a local union merge in
+`integration/v090-v089-union`; the real textual conflicts were limited to
+`crates/pyxlog/src/logic.rs`, `crates/xlog-induce/src/lib.rs`, and
+`crates/xlog-logic/src/lib.rs`.
 
 ## Current Validation Matrix
 
@@ -82,6 +99,35 @@ The current branch has the following recent real-pilot evidence:
 | Formatting | `nice -n 10 env CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 RAYON_NUM_THREADS=1 cargo fmt --check` | PASS |
 | Diff whitespace | `git diff --check`; no-index `git diff --check` over all five untracked paths | PASS |
 | Conflict markers | `rg -n "^(<<<<<<< .+|>>>>>>> .+)$|^=======$" --glob '!target/**' --glob '!**/*.log'` | PASS, 0 matches |
+
+## 2026-05-24 v0.8.9 Union-Merge Refresh
+
+The local `integration/v090-v089-union` branch merged
+`feat/v089-ucr-xlog-issue-fixes` into the v0.9.0 release candidate and reran
+the predecessor diagnostics plus v0.9.0 GPU/solver/probability gates. The pilot
+runs found and fixed three real integration issues: v0.8.9 diagnostics now
+format and source-track v0.9.0 `BodyLiteral::Epistemic` values in
+`xlog-logic`; `xlog-cli` generated-rule row diagnostics explicitly keep modal
+literal evaluation out of the row-level helper instead of relying on an
+exhaustiveness gap; and the BFO validator restores `XLOG_CUBIN_DIR` after its
+pyxlog availability probe so an installed wheel cannot leak stale packaged
+kernels into source-tree `cargo run` validation.
+
+| Gate | Command/evidence | Result |
+|---|---|---|
+| Union compile sweep | `CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 cargo check -p xlog-logic -p xlog-induce -p pyxlog -p xlog-cli -p xlog-gpu -p xlog-runtime -p xlog-solve -p xlog-prob -p xlog-integration` | PASS |
+| v0.8.9 logic diagnostics pilots | `cargo test -p xlog-logic --test differentiable_proof_trace --test module_boundary_diagnostics` | PASS, 3 tests |
+| v0.8.9 CLI diagnostics pilot | `cargo test -p xlog-cli --test generated_rule_diagnostics` | PASS, 2 tests |
+| v0.8.9 GPU diagnostics pilots | `cargo test -p xlog-gpu --test biokg_streaming_relation_loader --test relation_delta_planner_telemetry` | PASS, 2 tests |
+| v0.8.9 induction provenance pilot | `cargo test -p xlog-induce --test rule_induction_provenance` | PASS, 2 tests |
+| v0.9.0 GPU/WCOJ/solver/probability integration | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --test-threads=1` | PASS, 206 tests in 521.15s |
+| v0.9.0 solver accepted evidence | `cargo test -p xlog-solve --test gpu_solver_accepted_evidence -- --test-threads=1` | PASS, 21 tests |
+| v0.9.0 probabilistic accepted evidence | `cargo test -p xlog-prob --features host-io --test epistemic_prob_gpu_accepted_evidence -- --test-threads=1` | PASS, 31 tests |
+| v0.8.7-v0.8.9 Python diagnostics/source gate | `PYTHONPATH=target/debug:crates/pyxlog/python pytest -q python/tests/test_v087_lwm_source.py python/tests/test_v088_lwm_source.py python/tests/test_ilp_rule_inventory.py python/tests/test_nn4_cuda_no_host_transfer_contract.py python/tests/test_transfer_metric_diagnostics.py python/tests/test_kernel_packaging_layout.py` | PASS, 28 tests |
+| BFO UCR strict GPU validator | `examples/BFO/universal_case_reasoner/validate.sh --strict --gpu-required` | PASS |
+| Formatting | `cargo fmt --check` | PASS |
+| Staged whitespace | `git diff --cached --check` | PASS |
+| Conflict markers | Checklist pattern `rg -n '^(<<<<<<<|=======|>>>>>>>)' --glob '!target/**'` reports historical evidence-log separator lines; strict full-line marker scan `rg -n '^(<<<<<<< .+|=======$|>>>>>>> .+)$' --glob '!target/**'` | PASS, 0 actual conflict markers |
 
 ## 2026-05-24 Focused Refresh
 

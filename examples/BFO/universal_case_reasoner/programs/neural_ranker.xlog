@@ -1,0 +1,5 @@
+nn(case_net, [X], Y, [low, high]) :: neural_failure_signal(X, Y).
+
+root_cause_rank(X, Y) :- neural_failure_signal(X, Y).
+
+?- root_cause_rank(X, Y).
