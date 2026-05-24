@@ -17,7 +17,7 @@
     "gradient_finite": true,
     "loss": 1.0000000505039327e-07,
     "loss_is_cuda": true,
-    "output": "/home/dev/projects/xlog/.worktrees/v090-v089-union/examples/BFO/universal_case_reasoner/evidence/ablation_smoke.json",
+    "output": "/home/dev/projects/xlog/.worktrees/v090-epistemic/examples/BFO/universal_case_reasoner/evidence/ablation_smoke.json",
     "program": "programs/ablation_ranker.xlog",
     "program_declares_nn4": true,
     "top_label": "credential_exposure"
