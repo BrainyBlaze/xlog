@@ -491,6 +491,12 @@ BG090 - xlog v0.9.0 epistemic and solver semantics
 | KPI090.14 Production-path reuse | certification proves existing runtime/WCOJ, solver, and probabilistic production paths were reused |
 | KPI090.15 Fixture containment | semantic-oracle fixtures remain useful but cannot satisfy release closure metrics |
 
+Concurrency hardening note: the v0.6.0 A3 same-process multi-executor CUDA
+primary-context drift item remains a runtime-concurrency backlog item, not part
+of the v0.9.0 epistemic/solver closure KPI surface above. It must not be counted
+as implemented by this goal unless a future runtime hardening change certifies
+zero A3 drift in the `per_thread` and `shared` fixture modes.
+
 ## 7. Worktree Setup
 
 Coordinator command:

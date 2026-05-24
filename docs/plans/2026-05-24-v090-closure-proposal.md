@@ -10,6 +10,8 @@ Checkpoint commit: `d2d57cb2`
 
 Post-checkpoint split diagnostic amendment: `415343c8`
 
+Release-surface reconciliation: this document revision, docs-only.
+
 Base/rebase state: local `main` at `bd45229d` is an ancestor of `HEAD`.
 
 Recommendation: `MERGE_READY`
@@ -19,18 +21,21 @@ Recommendation: `MERGE_READY`
 The current codebase has stable local commits and post-checkpoint
 production-path evidence for the v0.9.0 epistemic GPU runtime, WCOJ reuse,
 solver reuse, probabilistic reuse, split diagnostic safety, and v0.8
-compatibility gates. The previous `HOLD_FOR_FIXES` blocker was the uncommitted
+compatibility gates. The previous blocker was the pre-checkpoint
 216-path worktree plus a stale post-checkpoint split diagnostic assertion. The
 216-path checkpoint is now committed as `d2d57cb2`, the split diagnostic
 assertion correction is committed as `415343c8`, and the final runtime gates
-listed below have been rerun after those code changes. External release-board
-mutation, push, tag, merge, and main-branch mutation remain outside this
-proposal and still require explicit coordinator authorization.
+listed below have been rerun after those code changes. The release-surface
+reconciliation updates `ROADMAP.md`, this closure ledger, the epistemic guide,
+and the current evidence READMEs so they no longer contradict the validated
+code state. External release-board mutation, push, tag, merge, and main-branch
+mutation remain outside this proposal and still require explicit coordinator
+authorization.
 
 This proposal supersedes older v0.9.0 evidence notes that described the GPU,
 solver, probability, and certification nodes as blocked by missing
-production-path evidence. Those notes remain useful historical evidence; their
-current-status sections now point back to this closure ledger.
+production-path evidence. Their current-status sections now record PASS for the
+accepted v0.9.0 closure matrix while preserving historical audit detail.
 
 ## Rebase And Conflict Report
 
@@ -38,7 +43,7 @@ current-status sections now point back to this closure ledger.
 
 | Check | Current evidence |
 |---|---|
-| `git rev-parse --short HEAD` | `415343c8` |
+| Last full runtime-validation HEAD | `cf91091d` |
 | `git rev-parse --short main` | `bd45229d` |
 | `git merge-base HEAD main` | `bd45229d` |
 | `git merge-base --is-ancestor main HEAD` | exit `0` |
@@ -174,7 +179,7 @@ locks before reconciling historical evidence wording.
 | G090_SOLVER | PASS for current acceptance matrix | Accepted runtime evidence gates GPU CDCL SAT/UNSAT, assumptions, learned clauses, MaxSAT, scheduler, portfolio, and status propagation through `xlog-solve` production APIs. |
 | G090_PROB | PASS for current acceptance matrix | Accepted world-view evidence gates GPU exact/provenance, PIR/CNF, conditioned query, gradient, and incremental circuit paths through `xlog-prob` production APIs. |
 | G090_CERT | PASS | Semantic, runtime, solver, probability, integration, compatibility, fmt, diff, and conflict-marker checks pass after the local checkpoint and diagnostic amendment. |
-| G090_DOC | PASS for current evidence set | The guide and evidence docs now distinguish current accepted-path evidence from dated historical blockers. |
+| G090_DOC | PASS | `ROADMAP.md`, the guide, and evidence docs now distinguish current accepted-path evidence from dated historical blockers and retarget the A3 same-process concurrency residual out of the v0.9.0 closure scope. |
 | G090_CLOSE | PASS with `MERGE_READY` decision | Main is integrated, stable local checkpoint SHAs exist, and the post-checkpoint validation bundle passed. No push, tag, merge, external release-board update, or main-branch mutation was performed. |
 
 ## KPI Status
@@ -197,6 +202,11 @@ locks before reconciling historical evidence wording.
 | KPI090.14 Production-path reuse | PASS |
 | KPI090.15 Fixture containment | PASS |
 
+Concurrency scope note: the v0.6.0 A3 same-process multi-executor CUDA
+primary-context drift item is not part of the v0.9.0 epistemic/solver KPI
+surface. It remains explicitly retargeted in `ROADMAP.md` as a future runtime
+hardening item with its original zero-drift pass criterion.
+
 ## Sub-Goal SHA Table
 
 The 216-path implementation checkpoint is `d2d57cb2`. The only
@@ -216,8 +226,8 @@ multi-membership diagnostic assertion with the arity-qualified
 | G090_SOLVER | `d2d57cb2` | PASS |
 | G090_PROB | `d2d57cb2` | PASS |
 | G090_CERT | `d2d57cb2`; post-checkpoint validation and diagnostic amendment `415343c8` | PASS |
-| G090_DOC | `d2d57cb2`; this closure-ledger update | PASS |
-| G090_CLOSE | `d2d57cb2`; `415343c8`; this closure-ledger update | PASS with `MERGE_READY` decision |
+| G090_DOC | `d2d57cb2`; this release-surface reconciliation revision | PASS |
+| G090_CLOSE | `d2d57cb2`; `415343c8`; this release-surface reconciliation revision | PASS with `MERGE_READY` decision |
 
 ## Remaining Release Actions Requiring Authorization
 
@@ -239,9 +249,9 @@ final integration and compatibility gates before preserving `MERGE_READY`.
   actions are still intentionally unperformed.
 - The WCOJ/CUDA, xlog-prob, and integration bench source-audit deletion
   clusters now have fresh behavioral replacement evidence above.
-- Historical evidence READMEs still retain dated `BLOCKED` rows as audit
-  history, but their current-status ledgers now supersede those rows for the
-  current worktree.
+- Historical evidence READMEs may retain dated `PARTIAL` or `BLOCKED` rows as
+  audit history, but their current-status ledgers and this closure table
+  supersede those rows for the current worktree.
 - The full workspace remains broad; final validation should be rerun after any
   future code change before preserving `MERGE_READY`.
 

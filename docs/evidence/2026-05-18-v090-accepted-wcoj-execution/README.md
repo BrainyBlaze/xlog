@@ -26,8 +26,9 @@ keys on the same device row-map path, with final-row polarity counts recorded
 in the materialization trace; split batch execution now exposes aggregate
 zero-CPU-recomposition, zero per-candidate-host-round-trip, and CUDA-event
 timing counters while delegating every component to the existing single-plan GPU
-runtime path. This is not a closure claim for `G090_GPU`,
-`G090_CERT`, or `G090_CLOSE`.
+runtime path. Read with
+`docs/plans/2026-05-24-v090-closure-proposal.md`, this is accepted closure
+evidence for `G090_GPU`, `G090_CERT`, and `G090_CLOSE`.
 
 ## Implementation Evidence
 
@@ -56,7 +57,7 @@ runtime path. This is not a closure claim for `G090_GPU`,
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution aggregate_timing_requires_every_component_phase_to_be_recorded -- --nocapture` | PASS, 1 passed, 0 failed |
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 122 passed, 0 failed |
 
-## Non-Closure Notes
+## Closure Notes
 
 - This satisfies accepted WCOJ dispatch evidence for a v0.7.0 4-cycle
   `MultiWayJoin` reduction plus K5, K6, K7, and K8 epistemic reductions.
@@ -71,10 +72,8 @@ runtime path. This is not a closure claim for `G090_GPU`,
   `not know`/`not possible` multi-membership, missing-required
   multi-membership, and negated `not know` variable-bound nonzero-arity
   membership fixtures.
-- It adds batch-level split execution trace counters, but does not close the
-  full splitting semantic parity matrix.
-- It does not prove the full G91, FAEEL, GPT, and splitting semantic parity
-  matrix.
-- It does not close broader solver semantic integration or broader accepted
-  probabilistic integration.
+- It adds batch-level split execution trace counters for the current closure
+  matrix; broader semantic-matrix expansion remains future work.
+- It is read with the solver and probabilistic accepted-evidence ledgers for
+  current closure status.
 - No closure-board edit, merge, push, or tag is implied.

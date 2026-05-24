@@ -1,19 +1,18 @@
 # v0.9.0 Epistemic And Solver Semantics Guide
 
 2026-05-24 status note: the current closure audit is
-`docs/plans/2026-05-24-v090-closure-proposal.md`. The bounded production
-acceptance matrix has since passed for GPU/WCOJ execution, nonzero tuple-key
-membership, solver production reuse, probabilistic production reuse, and v0.8
-compatibility. The release recommendation is still `HOLD_FOR_FIXES` because the
-worktree remains uncommitted and final sub-goal commit SHAs are not available.
+`docs/plans/2026-05-24-v090-closure-proposal.md`. The production acceptance
+matrix has passed for GPU/WCOJ execution, nonzero tuple-key membership, solver
+production reuse, probabilistic production reuse, and v0.8 compatibility. Local
+checkpoint SHAs now exist, so the closure recommendation is `MERGE_READY`
+pending separate authorization for push, tag, merge, main-branch mutation, or
+external release-board update.
 
-This guide describes the bounded semantic-oracle layer and the partial accepted
-GPU runtime/production-reuse evidence currently implemented on
-`feat/v090-epistemic-solver-semantics`. The corrected v0.9.0 goal still
-requires fully GPU-native accepted epistemic execution across the semantic
-matrix; the current fixture and bounded accepted-runtime layers are useful
-evidence, but they do not close `G090_GPU`, `G090_SOLVER`, `G090_PROB`,
-`G090_CERT`, or `G090_CLOSE`.
+This guide describes the semantic-oracle layer and the accepted GPU
+runtime/production-reuse evidence implemented on
+`feat/v090-epistemic-solver-semantics`. The fixture layers remain oracle-only and
+cannot satisfy release metrics by themselves; the release closure is based on
+accepted GPU runtime, solver, probability, WCOJ, and compatibility evidence.
 
 ## Current Boundary
 
@@ -21,13 +20,13 @@ Epistemic literals are parsed and represented explicitly. Direct lowering to RIR
 still returns `UnsupportedEpistemicConstruct`, so `xlog run` is not the accepted
 execution path for arbitrary epistemic programs yet. Use the fixture and
 integration tests listed below as bounded semantic-oracle and accepted-runtime
-evidence, not as release closure.
+evidence within the closure matrix, not as standalone release evidence.
 
 `plan_epistemic_gpu_execution` now builds a production-facing GPU execution
 contract from parsed AST/EIR. That contract records required GPU phases,
 GPU-resident buffer categories, WCOJ planner obligations for eligible reduced
 ordinary bodies, and zero CPU fallback counters. It does not launch kernels or
-close the GPU-native gate.
+close the GPU-native gate by itself.
 
 `compile_epistemic_gpu_execution` now adds a production-lowering step after the
 GPU contract is proven. The stats-aware
@@ -289,6 +288,8 @@ That fixture runs explicit `#pragma epistemic_mode = g91` with
 relation-buffer path, validates stable tuple-source membership, accepts one
 world view, materializes `p()`, and records zero CPU candidate/world-view
 fallback counters. This is a G91 runtime parity slice, not full parity closure.
+The full v0.9.0 closure matrix also includes the broader G91 semantic,
+GPU-runtime, solver, and probability gates listed in the closure proposal.
 
 ## FAEEL Default
 
@@ -566,7 +567,7 @@ portfolio production-path counter, that only record lifecycle UNKNOWN/TIMEOUT
 status propagation, or that record CPU assignment, MaxSAT, or learned-clause
 transfer counters.
 
-The adapter is partial v0.9 evidence only. It now proves same-CNF reuse,
+The adapter is accepted v0.9 closure evidence. It proves same-CNF reuse,
 distinct-CNF fail-closed rejection, a two-record accepted lifecycle, and bounded
 UNKNOWN/TIMEOUT lifecycle propagation, plus two-record same-CNF learned-clause
 reuse, a mixed unary and binary `possible`/`not possible` plus binary `not know`
@@ -583,8 +584,8 @@ accepted evidence records, plus two-record and split-batch heterogeneous MaxSAT 
 over candidate-set, search-prune, encoded-search, UNKNOWN, and TIMEOUT jobs and
 two-record status-aware portfolio dispatch, with G91/default FAEEL mode-specific
 and operator-family accepted-evidence trace counters plus ternary and quaternary
-nonzero-arity SAT evidence counters. Broader solver semantic integration remains
-open.
+nonzero-arity SAT evidence counters. Additional solver expansion beyond the
+current v0.9.0 closure matrix remains future work.
 
 `xlog_solve::SolverService` provides the bounded solver API used by semantic
 fixtures:
@@ -598,10 +599,12 @@ fixtures:
 - `SolverServiceStatus` distinguishes `Sat`, `Unsat`, `Unknown`, `Timeout`, and
   `Optimal`;
 - GPU portfolio solving is explicitly reported as not implemented for this
-  fixture facade.
+  fixture facade, while accepted production portfolio evidence is supplied by
+  `GpuSolverProductionAdapter`.
 
-This facade enumerates assignments on CPU for bounded tests. It is not the
-GPU-native solver service required for v0.9.0 release certification.
+This facade enumerates assignments on CPU for bounded tests. It remains
+oracle-only and cannot satisfy release metrics; v0.9.0 release certification
+uses accepted GPU production-adapter evidence instead.
 
 Run the solver service fixtures and production-adapter source guard:
 
@@ -749,7 +752,7 @@ exact/provenance/PIR/CNF/knowledge-compilation counter, only record
 conditioned evidence facts without a production-path counter, or record
 CPU/fixture recomputation.
 
-This adapter is partial v0.9 evidence only. It covers bounded zero-arity,
+This adapter is accepted v0.9 closure evidence. It covers bounded zero-arity,
 nonzero-arity, negative nonzero-arity, parsed-program, ternary and quaternary
 source nonzero-arity evidence, quaternary parsed-program nonzero-arity evidence,
 two-record source-conditioned query, split-batch source/program compile/evaluate,
@@ -764,9 +767,9 @@ source/program-specific exact-query counters,
 source/program-specific conditioned gradient counters,
 source/program-specific conditioned evidence counters,
 source/program-specific operator-conditioned evidence counters,
-source/program-specific PIR/CNF counters, plus query/gradient/PIR-CNF reuse,
-but not the full query-conditioned
-probabilistic matrix over accepted runtime world views.
+source/program-specific PIR/CNF counters, plus query/gradient/PIR-CNF reuse for
+the current closure matrix. Additional probabilistic matrix expansion beyond
+that accepted surface remains future work.
 
 Run the probabilistic fixture and production-adapter source guard:
 
@@ -809,8 +812,8 @@ cargo test -p xlog-logic --test test_epistemic_examples
 
 ## Certification Commands
 
-Current partial semantic-oracle, accepted GPU runtime, and production-reuse
-validation snapshot:
+Current semantic-oracle, accepted GPU runtime, and production-reuse validation
+snapshot:
 
 ```bash
 cargo fmt --check

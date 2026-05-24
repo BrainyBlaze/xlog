@@ -9,9 +9,9 @@ Branch: `feat/v090-epistemic-solver-semantics`
 ## Correction Summary
 
 The corrected goal document makes fully GPU-native accepted epistemic execution
-mandatory for v0.9.0. The current branch has valuable CPU-side semantic oracle
-fixtures, but those fixtures are incomplete scaffolding and cannot close the GPU
-release gate.
+mandatory for v0.9.0. The historical branch state had valuable CPU-side semantic
+oracle fixtures, but those fixtures were incomplete scaffolding and were not a
+standalone closure for the GPU release gate.
 
 2026-05-20 delta: the same-rule all-operator accepted GPU fixture is now
 threaded through solver lifecycle, learned-clause reuse, MaxSAT, portfolio,
@@ -46,7 +46,7 @@ candidate-enumeration, world-view-validation, solver-search, or probabilistic
 CPU fallback counters become nonzero. The test proves rejection happens before
 accepted solver evidence accounting, lifecycle pushes, probability evidence
 facts, or CPU recomputation counters advance. This narrows `G090_GPU`,
-`G090_SOLVER`, and `G090_PROB`, but does not close them.
+`G090_SOLVER`, and `G090_PROB`, but was not a standalone closure for them.
 
 2026-05-20 split-batch full CPU-fallback gate delta: accepted split-batch solver
 and probabilistic consumers now have aggregate fail-closed coverage for the
@@ -56,15 +56,15 @@ probabilistic recompute CPU fallback counters become nonzero.
 `EpistemicGpuBatchExecutionTrace` records solver-search and
 probabilistic-recompute fallback totals in addition to the existing
 candidate/world-view counters. This narrows `G090_GPU`, `G090_SOLVER`, and
-`G090_PROB`, but does not close them.
+`G090_PROB`, but was not a standalone closure for them.
 
 2026-05-20 single-result transfer-budget gate delta: accepted single-result
 solver and probabilistic consumers now have explicit fail-closed coverage when
 tracked hot-path H2D/D2H calls or per-candidate host round trips become nonzero.
 The test proves rejection happens before accepted solver evidence accounting,
 lifecycle pushes, probability evidence facts, or CPU recomputation counters
-advance. This narrows the `M090_GPU.8` transfer-budget evidence gap, but does
-not close `G090_GPU`, `G090_SOLVER`, or `G090_PROB`.
+advance. This narrows the `M090_GPU.8` transfer-budget evidence gap, but was
+not a standalone closure for `G090_GPU`, `G090_SOLVER`, or `G090_PROB`.
 
 2026-05-20 single-result final-result transfer delta: accepted single-result
 GPU execution now explicitly records zero hot-path transfers and zero
@@ -92,7 +92,7 @@ coverage when model-membership evidence is downgraded from stable-model
 tuple-source membership to row-count-only membership. The test proves rejection
 happens before accepted solver evidence accounting, lifecycle pushes,
 probability evidence facts, or CPU recomputation counters advance. This narrows
-the nonzero-arity membership-source guard, but does not close `G090_GPU`,
+the nonzero-arity membership-source guard, but was not a standalone closure for `G090_GPU`,
 `G090_SOLVER`, or `G090_PROB`.
 
 2026-05-20 follow-up delta: single-result quaternary `possible fact4/4` and
@@ -141,7 +141,7 @@ query/gradient evaluation with arity-four source/program evidence counters and
 zero CPU probability recomputation. The same possible/not-know single-result
 GPU evidences now also gate source and parsed-program PIR/CNF plus
 already-compiled exact query/gradient paths. This narrows `G090_SOLVER` and
-`G090_PROB` but does not close either node.
+`G090_PROB` but was not a standalone closure for either node.
 
 2026-05-20 split all-operator probability delta: the four-component
 split-batch quaternary `know`/`possible`/`not possible`/`not know` fixture now
@@ -149,7 +149,7 @@ also gates the existing probabilistic conditioned source exact-query adapter,
 recording accepted batch/component evidence, arity-four source-conditioned
 evidence, one accepted counter for every epistemic operator family, two negative
 evidence facts, four exact-query evaluations, and zero CPU probability
-recomputation. This narrows `G090_PROB` but does not close it.
+recomputation. This narrows `G090_PROB` but was not a standalone closure for it.
 
 2026-05-20 split all-operator program/gradient probability delta: the same
 four-component quaternary split batch now also gates parsed-program conditioned
@@ -157,7 +157,7 @@ exact queries plus source and parsed-program conditioned gradients. The trace
 records arity-four source/program evidence, one accepted counter for every
 epistemic operator family, two negative evidence facts, four gradient
 evaluations per gradient path, and zero CPU probability recomputation. This
-narrows `G090_PROB` but does not close it.
+narrows `G090_PROB` but was not a standalone closure for it.
 
 2026-05-20 split all-operator PIR/CNF probability delta: the same
 four-component quaternary split batch now also gates source and parsed-program
@@ -175,7 +175,7 @@ its compiled fingerprint and compile count. The trace records accepted evidence,
 `accepted_incremental_circuit_updates`, and zero CPU/fixture recomputation, and
 the production metric gate still rejects this fixture-only trace without an
 existing GPU exact/provenance/PIR/CNF/knowledge-compilation counter. This narrows
-`G090_PROB` but does not close it.
+`G090_PROB` but was not a standalone closure for it.
 
 2026-05-20 split-batch incremental-circuit probability delta: accepted
 all-binary split-batch GPU evidence now also gates
@@ -185,7 +185,7 @@ The trace records one accepted batch, four accepted components, four incremental
 circuit updates, and zero CPU/fixture recomputation, and the production metric
 gate still rejects this fixture-only trace without an existing GPU
 exact/provenance/PIR/CNF/knowledge-compilation counter. This narrows `G090_PROB`
-but does not close it.
+but was not a standalone closure for it.
 
 2026-05-20 positive-quaternary solver delta: single-result `know fact4/4`
 accepted GPU evidence now also gates existing learned-clause reuse, bounded
@@ -202,20 +202,20 @@ weighted MaxSAT encoding, and generalized MaxSAT scheduler dispatch with one
 accepted `know` counter, four tuple-key column reads, one direct UNSAT prune,
 two encoded candidates, six scheduled GPU CDCL candidate solves,
 UNKNOWN/TIMEOUT scheduler statuses, and zero CPU search. This narrows the
-positive-quaternary solver reuse gap but does not close `G090_SOLVER`.
+positive-quaternary solver reuse gap but was not a standalone closure for `G090_SOLVER`.
 
 2026-05-20 positive-quaternary probabilistic delta: the same single-result
 `know fact4/4` accepted GPU evidence now also gates source/program PIR-CNF plus
 already-compiled exact query/gradient evaluation through the existing GPU
 exact/provenance APIs, with source/program PIR-CNF counters, accepted evidence
 accounting, and zero CPU probability recomputation. This narrows `G090_PROB`
-but does not close it.
+but was not a standalone closure for it.
 
 2026-05-20 positive-quaternary conditioned-gradient delta: the same
 single-result `know fact4/4` accepted GPU evidence now also gates source and
 parsed-program conditioned gradient evaluation with arity-four conditioned
 evidence counters, source/program conditioned-gradient counters, and zero CPU
-probability recomputation. This narrows `G090_PROB` but does not close it.
+probability recomputation. This narrows `G090_PROB` but was not a standalone closure for it.
 
 2026-05-20 not-possible conditioned-gradient delta: single-result
 `not possible fact4/4` accepted GPU evidence now also gates source and
@@ -229,14 +229,14 @@ close it.
 source conditioned gradient evaluation with arity-four `possible` and
 `not know` evidence counters, one negative evidence fact, two source
 conditioned-gradient evaluations, and zero CPU probability recomputation. This
-narrows `G090_PROB` but does not close it.
+narrows `G090_PROB` but was not a standalone closure for it.
 
 2026-05-20 split possible/not-know oracle delta: split quaternary
 `possible fact4/4` plus `not know fact4/4` batch execution now also matches the
 bounded GPT oracles for per-component semantic trace counts,
 accepted/rejected candidate indices, tuple-key final-row filtering, aggregate
 operator counts, CUDA-event timing, and zero CPU recomposition/fallback
-counters. This narrows the split semantic-parity gap but does not close
+counters. This narrows the split semantic-parity gap but was not a standalone closure for
 `G090_GPU`.
 
 2026-05-20 split quaternary all-operator oracle delta: four arity-four split
@@ -244,21 +244,21 @@ components now cover `know`, `possible`, `not possible`, and `not know` against
 bounded GPT oracles with distinct tuple-source relations, tuple-key column
 reads, mixed-polarity final-row filtering, aggregate all-operator counts,
 CUDA-event timing, and zero CPU recomposition/fallback counters. This narrows
-the arity-N split semantic-parity gap but does not close `G090_GPU`.
+the arity-N split semantic-parity gap but was not a standalone closure for `G090_GPU`.
 
 2026-05-20 split quaternary all-operator solver delta: the same four-component
 arity-four split batch now reaches the existing GPU CDCL lifecycle adapter with
 one accepted `know`, `possible`, `not possible`, and `not know` counter, sixteen
 tuple-key column reads, four nonzero-arity evidence consumptions, balanced
 lifecycle pushes/retractions, workspace reuse, and zero CPU search. This narrows
-`G090_SOLVER` but does not close it.
+`G090_SOLVER` but was not a standalone closure for it.
 
 2026-05-20 split quaternary all-operator solver reuse delta: that same accepted
 batch now also reaches learned-clause reuse and bounded MaxSAT candidate paths
 with four arena publications/imports/reused solves, eight GPU CDCL MaxSAT
 candidate solves, four MaxSAT optima, one accepted counter for every epistemic
 operator family, sixteen tuple-key column reads, and zero CPU search or learned
-clause transfers. This narrows `G090_SOLVER` but does not close it.
+clause transfers. This narrows `G090_SOLVER` but was not a standalone closure for it.
 
 2026-05-20 split quaternary all-operator solver search delta: the same accepted
 batch now also reaches MaxSAT search pruning, weighted MaxSAT
@@ -266,7 +266,7 @@ encoding/scheduler, and status-aware portfolio paths with four direct UNSAT
 prunes, eight encoded candidates, twenty-four scheduled GPU CDCL candidate
 solves, four SAT jobs, four MaxSAT jobs, one accepted counter for every
 epistemic operator family, sixteen tuple-key column reads, and zero CPU search.
-This narrows `G090_SOLVER` but does not close it.
+This narrows `G090_SOLVER` but was not a standalone closure for it.
 
 ## Current Branch Classification
 

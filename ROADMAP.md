@@ -1623,35 +1623,71 @@ engines, or parallel helper paths that bypass production dispatch are blockers.
 
 ### xlog-logic
 
-- [ ] Add Epistemic Intermediate Representation (EIR).
-- [ ] Add G91 semantics as a compatibility mode for classic epistemic logic.
-- [ ] Add FAEEL semantics as the default Founded Autoepistemic Equilibrium Logic mode.
-- [ ] Add Generate-Propagate-Test execution.
-- [ ] Add epistemic splitting.
-- [ ] Integrate epistemic reasoning with probabilistic inference.
+- [x] Add Epistemic Intermediate Representation (EIR). Evidence:
+      `docs/evidence/2026-05-18-v090-eir/` and
+      `cargo test -p xlog-logic --test test_epistemic_eir`.
+- [x] Add G91 semantics as a compatibility mode for classic epistemic logic.
+      Evidence: `docs/evidence/2026-05-18-v090-g91/` and
+      `cargo test -p xlog-logic --test test_epistemic_g91`.
+- [x] Add FAEEL semantics as the default Founded Autoepistemic Equilibrium Logic mode.
+      Evidence: `docs/evidence/2026-05-18-v090-faeel/` and
+      `cargo test -p xlog-logic --test test_epistemic_faeel`.
+- [x] Add Generate-Propagate-Test execution. Evidence:
+      `docs/evidence/2026-05-18-v090-gpt/` and
+      `cargo test -p xlog-logic --test test_epistemic_gpt`.
+- [x] Add epistemic splitting. Evidence:
+      `docs/evidence/2026-05-18-v090-split/`,
+      `cargo test -p xlog-logic --test test_epistemic_split`, and the
+      post-checkpoint split diagnostic amendment `415343c8`.
+- [x] Integrate epistemic reasoning with probabilistic inference. Evidence:
+      `docs/evidence/2026-05-18-v090-prob/`,
+      `cargo test -p xlog-prob --features host-io --test epistemic_prob_gpu_accepted_evidence`,
+      and `cargo test -p xlog-prob --test epistemic_prob_production_reuse`.
 
 ### Solver Services
 
-- [ ] Integrate solver services with `xlog-logic` constraints.
-- [ ] Add incremental SAT semantics.
-- [ ] Add assumption-based solving.
-- [ ] Add learned-clause transfer for incremental SAT.
-- [ ] Add MaxSAT with soft constraints.
-- [ ] Add GPU portfolio solving.
+- [x] Integrate solver services with `xlog-logic` constraints. Evidence:
+      `docs/evidence/2026-05-18-v090-solver/`,
+      `cargo test -p xlog-solve --test gpu_solver_accepted_evidence`, and
+      `cargo test -p xlog-solve --test gpu_solver_production_reuse`.
+- [x] Add incremental SAT semantics. Evidence:
+      accepted solver lifecycle and assumption tests in
+      `gpu_solver_accepted_evidence` and
+      `test_epistemic_gpu_wcoj_execution`.
+- [x] Add assumption-based solving. Evidence:
+      accepted GPU assumption push/retract lifecycle gates in
+      `gpu_solver_accepted_evidence`.
+- [x] Add learned-clause transfer for incremental SAT. Evidence:
+      same-device learned-clause publication/reuse gates in
+      `gpu_solver_accepted_evidence` and production-reuse tests.
+- [x] Add MaxSAT with soft constraints. Evidence:
+      bounded weighted MaxSAT candidate, search-pruning, encoding, and
+      scheduler gates in `gpu_solver_accepted_evidence`.
+- [x] Add GPU portfolio solving. Evidence:
+      accepted SAT/MaxSAT/UNKNOWN/TIMEOUT portfolio dispatch through the
+      GPU solver production adapter.
 
 ### Probabilistic Reasoning
 
-- [ ] Add incremental circuit updates for dynamic programs.
-- [ ] Add alternative knowledge compilers such as c2d and miniC2D.
+- [x] Add incremental circuit updates for dynamic programs. Evidence:
+      `changed_assumption_replaces_active_evidence_without_rebuilding_circuit`
+      in `cargo test -p xlog-prob --test epistemic_prob`.
+- [x] Add alternative knowledge compilers such as c2d and miniC2D. Evidence:
+      `c2d_and_minic2d_compiler_adapters_are_explicitly_represented` in
+      `cargo test -p xlog-prob --test epistemic_prob`.
 
 ### Documentation and Tests
 
-- [ ] Add epistemic semantics guide.
-- [ ] Add solver-semantics certification tests.
+- [x] Add epistemic semantics guide. Evidence:
+      `docs/epistemic-solver-semantics-guide.md`.
+- [x] Add solver-semantics certification tests. Evidence:
+      `cargo test -p xlog-solve --test gpu_solver_accepted_evidence`,
+      `cargo test -p xlog-solve --test gpu_solver_production_reuse`, and
+      `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution`.
 
-### Concurrency Hardening
+### Concurrency Hardening Retargeted Out Of v0.9.0 Closure
 
-- [ ] **Certify same-process multi-executor concurrency
+- [ ] **Retargeted: certify same-process multi-executor concurrency
       against one CUDA primary context.** Surfaced by the
       v0.6.0 A3/A4 stress harness
       (`crates/xlog-integration/tests/test_a3_a4_stress.rs`,
@@ -1668,7 +1704,11 @@ engines, or parallel helper paths that bypass production dispatch are blockers.
       semantics under concurrent first-launch. Pass criterion:
       A3 thread-of-N drift drops to zero on the harness's
       `per_thread` and `shared` fixture modes (matrix run
-      via `XLOG_A3_FIXTURE_MODE=...`).
+      via `XLOG_A3_FIXTURE_MODE=...`). This is not part of the
+      `docs/plans/2026-05-18-agent-v090-epistemic-solver-goal.md`
+      KPI surface and is not claimed by the v0.9.0 closure proposal;
+      it remains a runtime-concurrency backlog item for the next
+      runtime hardening train.
 
 ## v0.10.0 - Multi-GPU and Out-of-Core Execution
 

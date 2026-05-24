@@ -89,7 +89,7 @@ claim for `G090_GPU`, `G090_CERT`, or `G090_CLOSE`.
   plus aggregate split-batch all-binary-operator and split-quaternary operator
   output/oracle parity, zero CPU recomposition, and zero per-candidate
   host-round-trip tracing.
-- It does not prove the full G91, FAEEL, GPT, splitting, solver, or
+- It leaves future work for the full G91, FAEEL, GPT, splitting, solver, or
   probabilistic parity matrix.
 - Multiple-epistemic-literal final-row filters now have focused positive,
   negated, all-operator, and missing-required fixtures, but broader semantic
