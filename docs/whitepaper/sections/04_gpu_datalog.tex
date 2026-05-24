@@ -20,7 +20,7 @@ All intermediate buffers---full relations, delta relations, union results, diffe
 
 \subsection{Kernel Design}
 
-xlog implements eight core relational CUDA kernels, totaling 3{,}633 lines of device code. Each kernel is a direct CUDA implementation, not a wrapper around cuBLAS, cuSPARSE, or Thrust.
+xlog implements eight core relational CUDA kernels, totaling 3{,}917 lines of device code. Each kernel is a direct CUDA implementation, not a wrapper around cuBLAS, cuSPARSE, or Thrust. The worst-case-optimal multiway join is a ninth relational kernel family (\texttt{wcoj.cu}, 2{,}262 LOC), described separately below.
 
 \begin{table}[htbp]
   \centering
@@ -31,14 +31,14 @@ xlog implements eight core relational CUDA kernels, totaling 3{,}633 lines of de
     \toprule
     \textbf{Kernel} & \textbf{LOC} & \textbf{Purpose} \\
     \midrule
-    \texttt{join.cu}    & 550  & Hash join with linked-list collision chains. FNV-1a composite hashing for multi-column keys. All scalar types supported by hashing raw bytes. Includes count $\to$ scan $\to$ materialize (CSM) variants for Inner and LeftOuter (indexed and non-indexed) under env-gated dispatch. \\
-    \texttt{sort.cu}    & 452  & 4-bit radix sort (8 passes over 32-bit keys). Stable: elements with equal digits preserve input order. Three-phase per pass: histogram, prefix sum, scatter. \\
+    \texttt{join.cu}    & 710  & Hash join with linked-list collision chains. FNV-1a composite hashing for multi-column keys. All scalar types supported by hashing raw bytes. Includes count $\to$ scan $\to$ materialize (CSM) variants for Inner and LeftOuter (indexed and non-indexed) under env-gated dispatch. \\
+    \texttt{sort.cu}    & 480  & 4-bit radix sort (8 passes over 32-bit keys). Stable: elements with equal digits preserve input order. Three-phase per pass: histogram, prefix sum, scatter. \\
     \texttt{filter.cu}  & 942  & Comparison operators (Eq, Ne, Lt, Le, Gt, Ge) for column-vs-constant and column-vs-column, with stream compaction via prefix sum. Fused compare-and-scan variants for all scalar types. \\
     \texttt{groupby.cu} & 248  & Sorted-input grouped aggregation. Detects group boundaries in sorted key columns, then applies per-group reduction (Count, Sum, Min, Max, LogSumExp). \\
-    \texttt{dedup.cu}   & 482  & Sort-based deduplication with prefix-sum compaction. Type-aware equality including IEEE~754 float handling: $-0.0$ and $+0.0$ equal, NaN equal only when bit-identical. GPU-native multi-column full-row deduplication and set difference (v0.5.5, PR \#50). \\
+    \texttt{dedup.cu}   & 565  & Sort-based deduplication with prefix-sum compaction. Type-aware equality including IEEE~754 float handling: $-0.0$ and $+0.0$ equal, NaN equal only when bit-identical. GPU-native multi-column full-row deduplication and set difference (v0.5.5, PR \#50). \\
     \texttt{set\_ops.cu} & 116 & Union (concat~+~sort~+~dedup) and set difference via sorted-array binary search. Columnar concat kernel copies both inputs into a pre-allocated output buffer. \\
     \texttt{scan.cu}    & 270  & Blelloch parallel prefix sum (inclusive). Block-level scan with shared memory, inter-block propagation via block sums. Building block for filter compaction, dedup, and group-by. \\
-    \texttt{pack.cu}    & 581  & Multi-column key packing on device. Packs up to 4 separate column buffers into row-major byte arrays and computes FNV-1a hashes, eliminating host roundtrips for multi-column join key preparation. \\
+    \texttt{pack.cu}    & 586  & Multi-column key packing on device. Packs up to 4 separate column buffers into row-major byte arrays and computes FNV-1a hashes, eliminating host roundtrips for multi-column join key preparation. \\
     \bottomrule
   \end{tabularx}
 \end{table}
@@ -58,6 +58,18 @@ The optimizer in \texttt{crates/xlog-logic/src/optimizer.rs} performs cost-based
 \textbf{Join ordering.} For queries involving up to \texttt{dp\_threshold} relations (default: 10), the optimizer uses dynamic programming to enumerate join orderings and select the minimum-cost plan. Join cardinality estimation uses cached selectivity data from \texttt{StatsManager.estimate\_join\_cardinality}, which multiplies left and right cardinalities by a selectivity factor derived from prior executions. When the relation count exceeds the threshold, the optimizer falls back to a greedy heuristic to avoid exponential planning time.
 
 \textbf{Feedback loop.} The \texttt{Executor} exposes a \texttt{stats\_snapshot()} method that captures a \texttt{StatsSnapshot} containing per-relation cardinality, byte size, access heat, column-level statistics, join selectivities, and a \texttt{RelId}-to-predicate-name mapping. This snapshot can be fed back into the \texttt{StatsManager} via \texttt{merge\_snapshot()} before the next compilation, closing the loop between execution and optimization. The predicate-name mapping ensures that statistics are applied correctly across compilations even when \texttt{RelId} assignments change.
+
+\subsection{Worst-Case Optimal Joins}
+
+Binary-join plans can materialize intermediate relations that are asymptotically larger than the final result---the classic pathology for cyclic queries such as triangle enumeration. xlog addresses this with a worst-case-optimal join (WCOJ) subsystem. A pure-Rust hypergraph planner (\texttt{xlog-logic::hypergraph}) analyzes rule bodies for multiway-join eligibility, derives a deterministic variable ordering from cardinality and selectivity statistics, and emits a \texttt{MultiWayJoin}/\texttt{ChainJoin} RIR node when promotion provably preserves output semantics; otherwise the binary-join plan is retained as a certified fallback. Planner verdicts and GPU outputs are certified against the same CPU oracle fixtures before executor wiring.
+
+The GPU side (\texttt{wcoj.cu}, 2{,}262 LOC) executes the join via count $\to$ device-side prefix scan $\to$ materialize over flat sorted-column storage, with a four-byte metadata D2H total and no count-vector transfer. A sorted-layout fast path proves already-sorted-and-unique inputs with a recorded checker kernel and clones on-device instead of re-sorting. Coverage extends from the canonical triangle to 4-cycles, K-clique templates (K${=}5$--$8$), recursive/SCC integration, and helper-relation splitting that exposes inner skew to root-level histograms.
+
+A default-on adaptive skew classifier decides per query whether to dispatch WCOJ: high-skew inputs take the WCOJ path while uniform or empty inputs fall back to the binary-join chain. \texttt{XLOG\_DISABLE\_WCOJ\_TRIANGLE=1} is the hard kill switch. \Cref{sec:eval} reports the measured speedup envelope on skewed paper-scale workloads.
+
+\subsection{Runtime Optimization Layer}
+
+v0.8.6 adds three runtime optimizations on top of the executor and provider stack, each with explicit off/on controls and zero added data-plane host transfers. \emph{Common-subexpression elimination} caches the results of safe deterministic subplans within an evaluation, invalidated on relation-generation change, removing duplicate work. \emph{Adaptive re-optimization} lets the executor adopt a compiler-supplied candidate plan (via \texttt{execute\_plan\_with\_adaptive\_candidate}) when deterministic mis-plan telemetry crosses a configurable ratio, with GPU output equivalence and rollback diagnostics. A \emph{persistent hash-index manager}, keyed on relation generation, schema, and device, retains built indices across repeated session evaluations with deterministic LRU eviction and background-build accounting; on a build-heavy repeated-session fixture it records a $3.21\times$ speedup against a $1.5\times$ target with zero tracked host transfers (\Cref{sec:eval}). Persistent sessions additionally coalesce relation-delta batches and expose opt-in, metadata-only relation-change callbacks.
 
 \subsection{Reversible Symbols}
 

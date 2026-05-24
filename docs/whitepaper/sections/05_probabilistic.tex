@@ -17,7 +17,7 @@ The probabilistic compilation pipeline transforms a Datalog program with probabi
   \label{fig:kc}
 \end{figure}
 
-The five kernel files total 9{,}076 lines of CUDA device code. Together with the eight relational kernels from \Cref{sec:datalog}, they account for the majority of xlog's 14.4K-line CUDA codebase.
+The five kernel files total 9{,}076 lines of CUDA device code. Together with the relational and worst-case-optimal-join kernels from \Cref{sec:datalog}, they account for the majority of xlog's 17.7K-line CUDA codebase.
 
 \textbf{Stage 1: PIR Extraction} (\texttt{pir.cu}, 600 LOC; host orchestration in \texttt{gpu\_pir\_intern.rs}). The PIR (Provenance IR) stage constructs a weighted Boolean formula from the ground program. Provenance tracking over the deterministic evaluation produces a \texttt{PirGraph} whose node types are \texttt{Lit}, \texttt{NegLit}, \texttt{And}, \texttt{Or}, and \texttt{Decision}. The GPU PIR interner performs device-side hash-consing: it uploads node batches to the GPU, computes FNV-1a hashes over node signatures (type, leaf ID, child lists), and deduplicates structurally identical subformulas using a GPU hash table with atomic insert operations. This deduplication is critical because grounding can produce exponentially many redundant subformulas; interning on device avoids materializing the full uninterned graph in host memory. The interner outputs a \texttt{GpuPirGraph} containing device-resident arrays for node types, child offsets, child indices, leaf IDs, and decision variable metadata.
 
@@ -51,6 +51,10 @@ The MC engine supports two sampling methods, selectable via \texttt{McSamplingMe
 \end{itemize}
 
 Both methods report confidence intervals for estimated probabilities. The sampling loop is structured to minimize per-sample overhead: probabilistic fact values are sampled in bulk on the GPU via the \texttt{sampling} submodule, the relation store is reset using a targeted \texttt{McSampleResetPlan} that preserves pure deterministic relations and clears only dynamic relations (avoiding a full store clone per sample), and per-sample pointer buffers are pre-allocated outside the sample loop. The current repository contains these hot-loop optimizations in code, but does not ship a standalone archived MC timing report with stable phase-by-phase numbers, so this paper limits itself to the implementation strategy rather than quoting unsupported per-benchmark deltas.
+
+\subsection{Probabilistic Aggregates}
+
+v0.8.5 extends probabilistic inference with finite aggregate queries. Aggregate heads and outputs over \texttt{count}, \texttt{sum}, \texttt{min}, \texttt{max}, and \texttt{logsumexp} are evaluated in both exact provenance/PIR inference and Monte Carlo deterministic aggregate execution, subject to a typed exact-domain cap that rejects domains too large for tractable enumeration (with a diagnostic recommending MC or a smaller finite domain). For small finite \texttt{count} domains, \emph{aggregate lifting} replaces naive world enumeration with exact cardinality dynamic programming over a compact state set---collapsing, for example, a $2^{17}$-outcome enumeration into roughly $170$ lifted states with identical results. Accepted fired \texttt{count} aggregate queries dispatch a GPU-native exact evaluator (\texttt{weights\_count\_lift\_exact}) rather than a CPU finite-world shortcut, keeping the exact aggregate path device-resident; explain metadata records which aggregate operators fired versus fell back to exact enumeration.
 
 \subsection{Well-Founded Semantics}
 

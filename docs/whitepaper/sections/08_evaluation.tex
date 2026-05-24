@@ -58,6 +58,35 @@ The GPU logic engine (\texttt{xlog-gpu}) targets throughput on three core operat
 
 These targets represent the current performance contract on the development GPU. Actual measured throughput depends on graph structure, key distribution, and output cardinality. The semi-naive fixpoint iteration benchmark (\texttt{crates/xlog-gpu/benches/logic\_bench.rs}) exercises the full recursive evaluation pipeline including delta maintenance and deduplication.
 
+\subsubsection{Worst-Case Optimal Joins}
+
+The WCOJ subsystem (\Cref{sec:datalog}) is measured against the binary-join baseline on four paper-scale program-analysis fixtures (call-graph edges, Andersen points-to, \texttt{ddisasm}-style disassembly, and a DTS-DLM analog), each with 4{,}194{,}304 input rows. \Cref{tab:wcoj} reports the artifact-backed speedups; both paths are required to produce identical row sets before timing, and every measurement is a median over 10 runs with coefficient of variation ${\le}0.05$.
+
+\begin{table}[htbp]
+  \centering
+  \caption{WCOJ vs.\ binary-join speedup on paper-scale fixtures (4.19M input rows each). Source: \texttt{docs/evidence/2026-05-18-g39-w39-dts-dlm-analog/}.}
+  \label{tab:wcoj}
+  \small
+  \begin{tabular}{@{}lr@{}}
+    \toprule
+    \textbf{Fixture} & \textbf{WCOJ speedup} \\
+    \midrule
+    \texttt{call\_graph\_edge} & $29.62\times$ \\
+    \texttt{andersen}         & $26.96\times$ \\
+    \texttt{ddisasm}          & $28.79\times$ \\
+    \texttt{dts\_dlm\_analog} & $26.60\times$ \\
+    \midrule
+    \textbf{Geometric mean}   & $\mathbf{27.96\times}$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+These are single-system measurements of xlog's own WCOJ path against its own binary-join path on skewed inputs, not comparisons against other engines; on uniform or empty inputs the adaptive classifier falls back to the binary-join chain. Peak observed allocation stayed at roughly $2.29$\,GB, well under the $38$\,GiB VRAM gate.
+
+\subsubsection{Runtime Optimization Layer}
+
+The v0.8.6 runtime optimizations (\Cref{sec:datalog}) are measured on dedicated repeated-session fixtures. The persistent hash-index manager records a $3.21\times$ speedup on a build-heavy repeated-session semi-join (cached median $0.079$\,s vs.\ uncached $0.255$\,s) against a $1.5\times$ target, with zero tracked device-to-host or host-to-device transfers (\texttt{docs/evidence/2026-05-19-v086-persistent-hash-index/}). The profile-gated shared-memory chain scorer records a $5.58\times$ speedup on a chain-hot fixture, with a bounded ${-}1.3\%$ regression on the small-input control (\texttt{docs/evidence/2026-05-19-v086-chain-smem/}). Common-subexpression elimination and adaptive re-optimization are validated for output equivalence and duplicate-work reduction with no added data-plane transfers, but are reported here as correctness-gated optimizations rather than headline speedups.
+
 \subsubsection{Probabilistic Subsystem}
 
 The probabilistic engine (\texttt{xlog-prob}) supports two inference modes: exact inference via Decision-DNNF knowledge compilation and GPU-accelerated Monte Carlo sampling.

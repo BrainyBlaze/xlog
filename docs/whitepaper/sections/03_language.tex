@@ -1,6 +1,6 @@
 \section{The xlog Language}\label{sec:lang}
 
-This section describes the xlog language surface: types, expressions, user-defined functions, modules, and stratified aggregations with constraints. Probabilistic facts (\texttt{p::f.}) and neural predicate declarations (\texttt{nn/k}) are language-level constructs described in \Cref{sec:prob} and \Cref{sec:nesy} respectively.
+This section describes the xlog language surface: types, expressions, user-defined functions, modules, and stratified aggregations with constraints. Probabilistic facts (\texttt{p::f.}) and neural predicate declarations (\texttt{nn/k}) are language-level constructs described in \Cref{sec:prob} and \Cref{sec:nesy} respectively. \Cref{sec:lang:completeness} covers the language-completeness surface added in v0.8.5---finite lists, safe meta-predicates, explicit negation-as-failure, magic-set planning, and probabilistic aggregates.
 
 \subsection{Design Philosophy}\label{sec:lang:philosophy}
 
@@ -95,3 +95,19 @@ A graph-degree computation with an integrity check that every edge source has a 
                  label={lst:agg}]{examples/06_agg.xlog}
 
 The \texttt{degree} rule lowers to a \texttt{GroupBy} over \texttt{edge} with \texttt{count} as the aggregator. The integrity constraint is desugared into an auxiliary rule whose body mirrors the constraint body (so the \texttt{not degree(X, \_)} literal here contributes an \texttt{Anti}-join); at evaluation completion the runtime asserts the auxiliary relation is empty and raises a diagnostic otherwise. \texttt{logsumexp} is included explicitly because it is the workhorse aggregation for probabilistic circuits (\Cref{sec:prob}), where log-space numerical stability is essential.
+
+\subsection{Language Completeness over Finite Domains}\label{sec:lang:completeness}
+
+Version 0.8.5 expands the surface toward language completeness while preserving the GPU-native execution discipline: every new construct must normalize into the existing typed AST, RIR, probabilistic IR, optimizer, and runtime paths. None of these features introduces a CPU Prolog term heap, dynamic predicate calls, or a hidden CPU-only fallback for a GPU-claimed path; forms that cannot be lowered safely are rejected at compile time with typed diagnostics rather than executed slowly.
+
+\textbf{Finite lists.} List literals (\texttt{[]}, \texttt{[A, B]}, cons patterns \texttt{[H|T]}) and the \texttt{list<T>} column type denote finite, homogeneous, typed lists. Lists and the core list built-ins normalize to \texttt{\_\_xlog\_list\_*} helper relations that lower through ordinary relational joins and aggregations; open-ended generators, cyclic lists, and untyped heterogeneous lists are rejected.
+
+\textbf{Safe meta-predicates.} Finite, statically-resolvable forms of \texttt{ground}, \texttt{var}, \texttt{nonvar}, \texttt{functor}, \texttt{=..} (univ), source-fact \texttt{findall}, and unary/binary \texttt{maplist} normalize to \texttt{\_\_xlog\_meta\_*} helper relations before stratification. Term, compound, and \texttt{predref} columns lower to \texttt{u64} term identifiers. Unrestricted \texttt{call/N}, dynamic database mutation, and runtime-variable predicate names remain outside the contract.
+
+\textbf{Explicit negation-as-failure.} Deterministic \texttt{not atom(\ldots)} is closed-world stratified negation over deterministic relations, lowering to the existing anti-join path. Source-order binding-safety diagnostics require every named variable in a negated atom to be bound by a prior positive binder. Probabilistic well-founded semantics (\Cref{sec:prob}) remains a separate exact-inference profile.
+
+\textbf{Magic-set planning.} The \texttt{\#pragma magic\_sets = auto|on|off} directive enables adornment-based rewriting of bound deterministic recursive queries: a query such as \texttt{?- reach(1, Y).} specializes recursive reachability to the reachable frontier, reducing materialized rows. The rewrite runs before optimizer and WCOJ planning and declines---with a typed diagnostic---when equivalence cannot be proven (e.g., unsafe interaction with negation, aggregates, or mutual recursion).
+
+\textbf{Probabilistic aggregates.} Finite \texttt{count}, \texttt{sum}, \texttt{min}, \texttt{max}, and \texttt{logsumexp} outcomes are supported as aggregate heads in exact provenance/PIR inference and in Monte Carlo deterministic aggregate execution, with typed exact-domain cap diagnostics. Small finite \texttt{count} domains use aggregate lifting---exact cardinality dynamic programming over a compact state set instead of naive world enumeration---and accepted fired \texttt{count} aggregates dispatch the GPU-native \texttt{weights\_count\_lift\_exact} evaluator rather than a CPU finite-world shortcut.
+
+\textbf{Approximate inference and incremental parsing.} Monte Carlo configuration is a first-class language feature via \texttt{\#pragma prob\_engine = mc} plus sample/seed/confidence pragmas, with documented source/CLI precedence and reported uncertainty. A statement-level incremental parser with stable spans reuses unchanged parses across edits, supporting interactive \texttt{xlog repl} and \texttt{xlog watch} developer workflows.
