@@ -104,6 +104,7 @@ impl Drop for ArrowDeviceArrayOwned {
 }
 
 impl ArrowDeviceArray {
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(
         device_type: i32,
         device_id: i32,

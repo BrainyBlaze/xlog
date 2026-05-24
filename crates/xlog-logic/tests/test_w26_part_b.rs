@@ -19,13 +19,15 @@ use xlog_stats::{JoinSelectivity, RelationStats, StatsSnapshot};
 // Helpers
 // ---------------------------------------------------------------
 
+type SelectivitySeed<'a> = (&'a str, &'a str, f64, Vec<usize>, Vec<usize>);
+
 /// Build a `StatsSnapshot` literal with heat + cardinality per rel.
 /// `seeded` = (predicate_name, cardinality, heat) per rel; RelIds
 /// assigned 0..n in input order. The compiler resolves them via
 /// predicate name during the optimizer's stats merge.
 fn make_snapshot_with_heat(
     seeded: &[(&str, u64, f32)],
-    selectivities: &[(&str, &str, f64, Vec<usize>, Vec<usize>)],
+    selectivities: &[SelectivitySeed<'_>],
 ) -> StatsSnapshot {
     let relations: Vec<RelationStats> = seeded
         .iter()

@@ -196,6 +196,37 @@ def test_pyxlog_kernel_path_helper_prefers_packaged_kernels() -> None:
                 os.environ["XLOG_CUBIN_DIR"] = original
 
 
+def test_pyxlog_kernel_path_helper_uses_symlinked_package_layout() -> None:
+    helper_path = PYXLOG_PACKAGE_ROOT / "_kernel_paths.py"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        package_root = Path(tmp) / "pyxlog"
+        kernels_dir = package_root / "kernels"
+        kernels_dir.mkdir(parents=True)
+        (kernels_dir / "ilp_exact.portable.ptx").write_text("ptx")
+        symlinked_helper = package_root / "_kernel_paths.py"
+        symlinked_helper.symlink_to(helper_path)
+
+        spec = importlib.util.spec_from_file_location(
+            "pyxlog_kernel_paths_symlink_test", symlinked_helper
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        original = os.environ.get("XLOG_CUBIN_DIR")
+        try:
+            os.environ.pop("XLOG_CUBIN_DIR", None)
+            configured = module.configure_kernel_search_path()
+            assert configured == str(kernels_dir)
+            assert os.environ["XLOG_CUBIN_DIR"] == str(kernels_dir)
+        finally:
+            if original is None:
+                os.environ.pop("XLOG_CUBIN_DIR", None)
+            else:
+                os.environ["XLOG_CUBIN_DIR"] = original
+
+
 def test_package_cli_release_help_works() -> None:
     result = subprocess.run(
         ["bash", "scripts/package_cli_release.sh", "--help"],

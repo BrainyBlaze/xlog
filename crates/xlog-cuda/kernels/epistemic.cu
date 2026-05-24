@@ -1,5 +1,15 @@
 #include <stdint.h>
 
+static constexpr uint8_t EPISTEMIC_MEMBERSHIP_LITERAL_PRESENT = 1u;
+static constexpr uint8_t EPISTEMIC_MEMBERSHIP_MODEL_ACTIVE = 2u;
+
+static __device__ uint8_t epistemic_complete_membership(
+    uint8_t active_model,
+    uint8_t literal_present
+) {
+    return static_cast<uint8_t>(active_model | literal_present);
+}
+
 extern "C" __global__ void epistemic_generate_candidate_assumptions_u8(
     uint32_t literal_count,
     uint32_t candidate_count,
@@ -25,13 +35,18 @@ extern "C" __global__ void epistemic_propagate_candidates_u8(
     uint32_t candidate = blockIdx.x * blockDim.x + threadIdx.x;
     if (candidate >= candidate_count) return;
 
-    uint8_t observed = 0;
-    uint32_t base = candidate * literal_count;
+    uint32_t candidate_base = candidate * literal_count;
+    uint32_t world_base = candidate * world_stride;
+    for (uint32_t byte = 0; byte < world_stride; ++byte) {
+        world_views[world_base + byte] = 0u;
+    }
     for (uint32_t literal = 0; literal < literal_count; ++literal) {
-        observed |= candidate_assumptions[base + literal];
+        uint8_t value = candidate_assumptions[candidate_base + literal] != 0u ? 1u : 0u;
+        uint32_t byte = literal >> 3u;
+        uint32_t bit = literal & 7u;
+        world_views[world_base + byte] |= static_cast<uint8_t>(value << bit);
     }
 
-    world_views[candidate * world_stride] = (observed == 255u) ? 0u : 1u;
     rejection_reasons[candidate] = 0u;
 }
 
@@ -47,14 +62,13 @@ extern "C" __global__ void epistemic_validate_candidate_bits_u8(
     if (candidate >= candidate_count) return;
 
     uint32_t reason = 0u;
-    if (world_views[candidate * world_stride] == 0u) {
-        reason = 2u;
-    }
-
     uint32_t base = candidate * literal_count;
+    uint32_t world_base = candidate * world_stride;
     for (uint32_t literal = 0; literal < literal_count; ++literal) {
         uint8_t value = candidate_assumptions[base + literal];
         if (value > 1u) {
+            reason = 3u;
+        } else if (((world_views[world_base + (literal >> 3u)] >> (literal & 7u)) & 1u) != value) {
             reason = 3u;
         }
     }
@@ -83,19 +97,22 @@ extern "C" __global__ void epistemic_populate_model_membership_u8(
     uint32_t inner = gid - candidate * per_candidate;
     uint32_t literal = inner % literal_count;
     uint32_t model_slot = inner / literal_count;
+    uint32_t model = model_slot % models_per_reduction;
 
-    uint8_t active_world = world_views[candidate * world_stride];
     uint8_t accepted_so_far = (rejection_reasons[candidate] == 0u) ? 1u : 0u;
     uint8_t has_reduced_output = (output_row_count[0] > 0u) ? 1u : 0u;
-    uint8_t candidate_bit = candidate_assumptions[candidate * literal_count + literal];
-    model_membership[gid] =
-        (active_world != 0u && accepted_so_far != 0u && has_reduced_output != 0u && model_slot < reduction_count * models_per_reduction)
-            ? candidate_bit
+    uint8_t active_model =
+        (accepted_so_far != 0u && has_reduced_output != 0u && model == 0u)
+            ? EPISTEMIC_MEMBERSHIP_MODEL_ACTIVE
             : 0u;
-
-    if (inner == 0u && active_world == 0u && rejection_reasons[candidate] == 0u) {
-        rejection_reasons[candidate] = 4u;
-    }
+    uint8_t literal_present =
+        (active_model != 0u && model_slot < reduction_count * models_per_reduction)
+            ? EPISTEMIC_MEMBERSHIP_LITERAL_PRESENT
+            : 0u;
+    model_membership[gid] =
+        (model_slot < reduction_count * models_per_reduction)
+            ? epistemic_complete_membership(active_model, literal_present)
+            : 0u;
 }
 
 extern "C" __global__ void epistemic_populate_model_membership_from_tuple_source_u8(
@@ -107,6 +124,7 @@ extern "C" __global__ void epistemic_populate_model_membership_from_tuple_source
     uint32_t literal_index,
     uint32_t reduction_index,
     uint8_t negated,
+    const uint32_t* __restrict__ output_row_count,
     const uint32_t* __restrict__ tuple_source_row_count,
     const uint8_t* __restrict__ candidate_assumptions,
     const uint8_t* __restrict__ world_views,
@@ -125,20 +143,19 @@ extern "C" __global__ void epistemic_populate_model_membership_from_tuple_source
             * literal_count)
         + literal_index;
 
-    uint8_t active_world = world_views[candidate * world_stride];
     uint8_t accepted_so_far = (rejection_reasons[candidate] == 0u) ? 1u : 0u;
+    uint8_t has_reduced_output = (output_row_count[0] > 0u) ? 1u : 0u;
     uint8_t has_tuple_source = (tuple_source_row_count[0] > 0u) ? 1u : 0u;
-    uint8_t literal_holds =
-        (negated != 0u) ? ((has_tuple_source == 0u) ? 1u : 0u) : has_tuple_source;
-    uint8_t candidate_bit = candidate_assumptions[candidate * literal_count + literal_index];
-    model_membership[membership_index] =
-        (active_world != 0u && accepted_so_far != 0u && literal_holds != 0u)
-            ? candidate_bit
+    uint8_t active_model =
+        (accepted_so_far != 0u && has_reduced_output != 0u && model == 0u)
+            ? EPISTEMIC_MEMBERSHIP_MODEL_ACTIVE
             : 0u;
-
-    if (model == 0u && active_world == 0u && rejection_reasons[candidate] == 0u) {
-        rejection_reasons[candidate] = 4u;
-    }
+    uint8_t literal_present =
+        (active_model != 0u && has_tuple_source != 0u)
+            ? EPISTEMIC_MEMBERSHIP_LITERAL_PRESENT
+            : 0u;
+    model_membership[membership_index] =
+        epistemic_complete_membership(active_model, literal_present);
 }
 
 static __device__ uint8_t epistemic_tuple_key_cell_matches(
@@ -212,6 +229,7 @@ extern "C" __global__ void epistemic_populate_model_membership_from_tuple_source
     uint32_t literal_index,
     uint32_t reduction_index,
     uint8_t negated,
+    const uint32_t* __restrict__ output_row_count,
     const uint32_t* __restrict__ tuple_source_row_count,
     const uint8_t* __restrict__ tuple_key_col0,
     uint32_t tuple_key_col0_width,
@@ -235,8 +253,8 @@ extern "C" __global__ void epistemic_populate_model_membership_from_tuple_source
         + literal_index;
 
     uint32_t tuple_rows = tuple_source_row_count[0];
-    uint8_t active_world = world_views[candidate * world_stride];
     uint8_t accepted_so_far = (rejection_reasons[candidate] == 0u) ? 1u : 0u;
+    uint8_t has_reduced_output = (output_row_count[0] > 0u) ? 1u : 0u;
     uint8_t tuple_matches = 0u;
     if (model == 0u) {
         for (uint32_t tuple_row = 0u; tuple_row < tuple_rows; ++tuple_row) {
@@ -252,19 +270,17 @@ extern "C" __global__ void epistemic_populate_model_membership_from_tuple_source
             }
         }
     }
-    uint8_t literal_holds =
-        (model == 0u)
-            ? ((negated != 0u) ? ((tuple_matches == 0u) ? 1u : 0u) : tuple_matches)
+    uint8_t literal_holds = (model == 0u) ? tuple_matches : 0u;
+    uint8_t active_model =
+        (accepted_so_far != 0u && has_reduced_output != 0u && model == 0u)
+            ? EPISTEMIC_MEMBERSHIP_MODEL_ACTIVE
             : 0u;
-    uint8_t candidate_bit = candidate_assumptions[candidate * literal_count + literal_index];
+    uint8_t literal_present =
+        (active_model != 0u && literal_holds != 0u)
+            ? EPISTEMIC_MEMBERSHIP_LITERAL_PRESENT
+            : 0u;
     model_membership[membership_index] =
-        (active_world != 0u && accepted_so_far != 0u && literal_holds != 0u)
-            ? candidate_bit
-            : 0u;
-
-    if (model == 0u && active_world == 0u && rejection_reasons[candidate] == 0u) {
-        rejection_reasons[candidate] = 4u;
-    }
+        epistemic_complete_membership(active_model, literal_present);
 }
 
 static __device__ uint8_t epistemic_tuple_key_row_matches_arity2(
@@ -304,6 +320,7 @@ extern "C" __global__ void epistemic_populate_model_membership_from_tuple_source
     uint32_t literal_index,
     uint32_t reduction_index,
     uint8_t negated,
+    const uint32_t* __restrict__ output_row_count,
     const uint32_t* __restrict__ tuple_source_row_count,
     const uint8_t* __restrict__ tuple_key_col0,
     uint32_t tuple_key_col0_width,
@@ -331,8 +348,8 @@ extern "C" __global__ void epistemic_populate_model_membership_from_tuple_source
         + literal_index;
 
     uint32_t tuple_rows = tuple_source_row_count[0];
-    uint8_t active_world = world_views[candidate * world_stride];
     uint8_t accepted_so_far = (rejection_reasons[candidate] == 0u) ? 1u : 0u;
+    uint8_t has_reduced_output = (output_row_count[0] > 0u) ? 1u : 0u;
     uint8_t tuple_matches = 0u;
     if (model == 0u) {
         for (uint32_t tuple_row = 0u; tuple_row < tuple_rows; ++tuple_row) {
@@ -352,19 +369,17 @@ extern "C" __global__ void epistemic_populate_model_membership_from_tuple_source
             }
         }
     }
-    uint8_t literal_holds =
-        (model == 0u)
-            ? ((negated != 0u) ? ((tuple_matches == 0u) ? 1u : 0u) : tuple_matches)
+    uint8_t literal_holds = (model == 0u) ? tuple_matches : 0u;
+    uint8_t active_model =
+        (accepted_so_far != 0u && has_reduced_output != 0u && model == 0u)
+            ? EPISTEMIC_MEMBERSHIP_MODEL_ACTIVE
             : 0u;
-    uint8_t candidate_bit = candidate_assumptions[candidate * literal_count + literal_index];
+    uint8_t literal_present =
+        (active_model != 0u && literal_holds != 0u)
+            ? EPISTEMIC_MEMBERSHIP_LITERAL_PRESENT
+            : 0u;
     model_membership[membership_index] =
-        (active_world != 0u && accepted_so_far != 0u && literal_holds != 0u)
-            ? candidate_bit
-            : 0u;
-
-    if (model == 0u && active_world == 0u && rejection_reasons[candidate] == 0u) {
-        rejection_reasons[candidate] = 4u;
-    }
+        epistemic_complete_membership(active_model, literal_present);
 }
 
 static __device__ uint8_t epistemic_tuple_key_row_matches_arity3(
@@ -415,6 +430,7 @@ extern "C" __global__ void epistemic_populate_model_membership_from_tuple_source
     uint32_t literal_index,
     uint32_t reduction_index,
     uint8_t negated,
+    const uint32_t* __restrict__ output_row_count,
     const uint32_t* __restrict__ tuple_source_row_count,
     const uint8_t* __restrict__ tuple_key_col0,
     uint32_t tuple_key_col0_width,
@@ -446,8 +462,8 @@ extern "C" __global__ void epistemic_populate_model_membership_from_tuple_source
         + literal_index;
 
     uint32_t tuple_rows = tuple_source_row_count[0];
-    uint8_t active_world = world_views[candidate * world_stride];
     uint8_t accepted_so_far = (rejection_reasons[candidate] == 0u) ? 1u : 0u;
+    uint8_t has_reduced_output = (output_row_count[0] > 0u) ? 1u : 0u;
     uint8_t tuple_matches = 0u;
     if (model == 0u) {
         for (uint32_t tuple_row = 0u; tuple_row < tuple_rows; ++tuple_row) {
@@ -471,19 +487,17 @@ extern "C" __global__ void epistemic_populate_model_membership_from_tuple_source
             }
         }
     }
-    uint8_t literal_holds =
-        (model == 0u)
-            ? ((negated != 0u) ? ((tuple_matches == 0u) ? 1u : 0u) : tuple_matches)
+    uint8_t literal_holds = (model == 0u) ? tuple_matches : 0u;
+    uint8_t active_model =
+        (accepted_so_far != 0u && has_reduced_output != 0u && model == 0u)
+            ? EPISTEMIC_MEMBERSHIP_MODEL_ACTIVE
             : 0u;
-    uint8_t candidate_bit = candidate_assumptions[candidate * literal_count + literal_index];
+    uint8_t literal_present =
+        (active_model != 0u && literal_holds != 0u)
+            ? EPISTEMIC_MEMBERSHIP_LITERAL_PRESENT
+            : 0u;
     model_membership[membership_index] =
-        (active_world != 0u && accepted_so_far != 0u && literal_holds != 0u)
-            ? candidate_bit
-            : 0u;
-
-    if (model == 0u && active_world == 0u && rejection_reasons[candidate] == 0u) {
-        rejection_reasons[candidate] = 4u;
-    }
+        epistemic_complete_membership(active_model, literal_present);
 }
 
 static __device__ uint8_t epistemic_tuple_key_row_matches_arity_n(
@@ -542,6 +556,7 @@ extern "C" __global__ void epistemic_populate_model_membership_from_tuple_source
     uint32_t literal_index,
     uint32_t reduction_index,
     uint8_t negated,
+    const uint32_t* __restrict__ output_row_count,
     const uint32_t* __restrict__ tuple_source_row_count,
     const uint64_t* __restrict__ tuple_key_col_ptrs,
     const uint32_t* __restrict__ tuple_key_col_widths,
@@ -571,49 +586,112 @@ extern "C" __global__ void epistemic_populate_model_membership_from_tuple_source
         + literal_index;
 
     uint32_t tuple_rows = tuple_source_row_count[0];
-    uint32_t bound_rows =
-        (has_bound_value_keys != 0u && bound_value_row_count != nullptr)
-            ? bound_value_row_count[0]
-            : 0u;
-    uint8_t active_world = world_views[candidate * world_stride];
+    uint32_t output_rows = (output_row_count != nullptr) ? output_row_count[0] : 0u;
+    uint32_t bound_value_rows =
+        (bound_value_row_count != nullptr) ? bound_value_row_count[0] : output_rows;
+    uint32_t bound_rows = (has_bound_value_keys != 0u) ? bound_value_rows : 0u;
     uint8_t accepted_so_far = (rejection_reasons[candidate] == 0u) ? 1u : 0u;
+    uint8_t has_reduced_output = (output_rows > 0u) ? 1u : 0u;
     uint8_t row_in_scope =
-        (has_bound_value_keys != 0u) ? ((model < bound_rows) ? 1u : 0u)
-                                    : ((model == 0u) ? 1u : 0u);
+        (has_bound_value_keys != 0u)
+            ? ((model < bound_rows) ? 1u : 0u)
+            : ((model == 0u) ? 1u : 0u);
     uint8_t tuple_matches = 0u;
     if (row_in_scope != 0u) {
-        uint32_t bound_row = (has_bound_value_keys != 0u) ? model : 0u;
-        for (uint32_t tuple_row = 0u; tuple_row < tuple_rows; ++tuple_row) {
-            if (epistemic_tuple_key_row_matches_arity_n(
-                    tuple_key_col_ptrs,
-                    tuple_key_col_widths,
-                    expected_key_bits,
-                    expected_key_type_codes,
-                    tuple_key_match_modes,
-                    bound_value_col_ptrs,
-                    bound_value_col_widths,
-                    key_col_count,
-                    tuple_row,
-                    bound_row
-                ) != 0u) {
-                tuple_matches = 1u;
+        uint32_t bound_begin = (has_bound_value_keys != 0u) ? model : 0u;
+        uint32_t bound_limit = (has_bound_value_keys != 0u) ? (model + 1u) : 1u;
+        for (uint32_t bound_row = bound_begin; bound_row < bound_limit; ++bound_row) {
+            for (uint32_t tuple_row = 0u; tuple_row < tuple_rows; ++tuple_row) {
+                if (epistemic_tuple_key_row_matches_arity_n(
+                        tuple_key_col_ptrs,
+                        tuple_key_col_widths,
+                        expected_key_bits,
+                        expected_key_type_codes,
+                        tuple_key_match_modes,
+                        bound_value_col_ptrs,
+                        bound_value_col_widths,
+                        key_col_count,
+                        tuple_row,
+                        bound_row
+                    ) != 0u) {
+                    tuple_matches = 1u;
+                    break;
+                }
+            }
+            if (tuple_matches != 0u) {
                 break;
             }
         }
     }
-    uint8_t literal_holds =
-        (row_in_scope != 0u)
-            ? ((negated != 0u) ? ((tuple_matches == 0u) ? 1u : 0u) : tuple_matches)
+    uint8_t literal_holds = (row_in_scope != 0u) ? tuple_matches : 0u;
+    uint8_t active_model =
+        (accepted_so_far != 0u && has_reduced_output != 0u && row_in_scope != 0u)
+            ? EPISTEMIC_MEMBERSHIP_MODEL_ACTIVE
             : 0u;
-    uint8_t candidate_bit = candidate_assumptions[candidate * literal_count + literal_index];
+    uint8_t literal_present =
+        (active_model != 0u && literal_holds != 0u)
+            ? EPISTEMIC_MEMBERSHIP_LITERAL_PRESENT
+            : 0u;
     model_membership[membership_index] =
-        (active_world != 0u && accepted_so_far != 0u && literal_holds != 0u)
-            ? candidate_bit
-            : 0u;
+        epistemic_complete_membership(active_model, literal_present);
+}
 
-    if (model == 0u && active_world == 0u && rejection_reasons[candidate] == 0u) {
-        rejection_reasons[candidate] = 4u;
+static __device__ uint8_t epistemic_model_slot_active(
+    const uint8_t* __restrict__ model_membership,
+    uint32_t literal_offset
+) {
+    return (model_membership[literal_offset] & EPISTEMIC_MEMBERSHIP_MODEL_ACTIVE) != 0u
+        ? 1u
+        : 0u;
+}
+
+static __device__ uint8_t epistemic_literal_present(
+    const uint8_t* __restrict__ model_membership,
+    uint32_t literal_offset
+) {
+    return (model_membership[literal_offset] & EPISTEMIC_MEMBERSHIP_LITERAL_PRESENT) != 0u
+        ? 1u
+        : 0u;
+}
+
+static __device__ uint8_t epistemic_modal_literal_holds(
+    uint32_t literal_count,
+    uint32_t models_per_reduction,
+    const uint8_t* __restrict__ model_membership,
+    uint32_t candidate_base,
+    uint32_t reduction,
+    uint32_t literal,
+    uint8_t op_code
+) {
+    uint8_t any_active_model = 0u;
+    uint8_t any_literal_model = 0u;
+    uint8_t all_active_models_hold_literal = 1u;
+
+    for (uint32_t model = 0u; model < models_per_reduction; ++model) {
+        uint32_t literal_offset =
+            candidate_base + ((reduction * models_per_reduction + model) * literal_count) + literal;
+        uint8_t literal_present =
+            epistemic_literal_present(model_membership, literal_offset);
+        if (literal_present != 0u) {
+            any_literal_model = 1u;
+        }
+
+        uint8_t active_model = epistemic_model_slot_active(model_membership, literal_offset);
+        if (active_model != 0u) {
+            any_active_model = 1u;
+            if (literal_present == 0u) {
+                all_active_models_hold_literal = 0u;
+            }
+        }
     }
+
+    if (op_code == 1u) {
+        return (any_active_model != 0u && all_active_models_hold_literal != 0u) ? 1u : 0u;
+    }
+    if (op_code == 2u) {
+        return any_literal_model;
+    }
+    return 0u;
 }
 
 extern "C" __global__ void epistemic_validate_world_views_u8(
@@ -622,6 +700,10 @@ extern "C" __global__ void epistemic_validate_world_views_u8(
     uint32_t reduction_count,
     uint32_t models_per_reduction,
     uint32_t world_stride,
+    const uint8_t* __restrict__ literal_op_codes,
+    const uint8_t* __restrict__ literal_negated,
+    const uint8_t* __restrict__ literal_bound_to_output,
+    const uint32_t* __restrict__ literal_reduction_indices,
     const uint8_t* __restrict__ candidate_assumptions,
     const uint8_t* __restrict__ model_membership,
     const uint8_t* __restrict__ world_views,
@@ -632,34 +714,41 @@ extern "C" __global__ void epistemic_validate_world_views_u8(
 
     if (rejection_reasons[candidate] != 0u) return;
 
-    uint8_t active_world = world_views[candidate * world_stride];
-    if (active_world == 0u) {
-        rejection_reasons[candidate] = 5u;
-        return;
-    }
-
     uint32_t per_candidate = reduction_count * models_per_reduction * literal_count;
     uint32_t base = candidate * per_candidate;
     uint32_t assumption_base = candidate * literal_count;
-    uint8_t complete_membership = 1u;
+    uint8_t candidate_matches_observed_literals = 1u;
     for (uint32_t literal = 0u; literal < literal_count; ++literal) {
-        uint8_t candidate_bit = candidate_assumptions[assumption_base + literal];
-        uint8_t literal_supported = 0u;
-        if (candidate_bit != 0u) {
-            for (uint32_t reduction = 0u; reduction < reduction_count; ++reduction) {
-                for (uint32_t model = 0u; model < models_per_reduction; ++model) {
-                    uint32_t offset =
-                        ((reduction * models_per_reduction + model) * literal_count) + literal;
-                    literal_supported |= model_membership[base + offset];
-                }
+        uint8_t expected_literal = candidate_assumptions[assumption_base + literal] != 0u ? 1u : 0u;
+        if (literal_bound_to_output[literal] != 0u) {
+            if (expected_literal == 0u) {
+                candidate_matches_observed_literals = 0u;
             }
+            continue;
         }
-        if (candidate_bit == 0u || literal_supported == 0u) {
-            complete_membership = 0u;
+        uint32_t reduction = literal_reduction_indices[literal];
+        uint8_t op_code = literal_op_codes[literal];
+        if (reduction >= reduction_count || (op_code != 1u && op_code != 2u)) {
+            candidate_matches_observed_literals = 0u;
+            continue;
+        }
+        uint8_t modal_holds = epistemic_modal_literal_holds(
+            literal_count,
+            models_per_reduction,
+            model_membership,
+            base,
+            reduction,
+            literal,
+            op_code
+        );
+        uint8_t observed_literal =
+            (literal_negated[literal] != 0u) ? ((modal_holds == 0u) ? 1u : 0u) : modal_holds;
+        if (expected_literal != observed_literal) {
+            candidate_matches_observed_literals = 0u;
         }
     }
 
-    if (complete_membership == 0u) {
+    if (candidate_matches_observed_literals == 0u) {
         rejection_reasons[candidate] = 5u;
     }
 }
@@ -704,14 +793,60 @@ static __device__ uint8_t epistemic_final_tuple_has_accepted_membership(
 ) {
     if (literal_count == 0u || reduction_count == 0u || models_per_reduction == 0u) return 0u;
 
-    uint32_t per_candidate = reduction_count * models_per_reduction * literal_count;
     for (uint32_t candidate = 0u; candidate < candidate_count; ++candidate) {
         if (rejection_reasons[candidate] != 0u) continue;
         if (world_views[candidate * world_stride] == 0u) continue;
+        uint8_t active_membership = 0u;
+        for (uint32_t reduction = 0u;
+             reduction < reduction_count && active_membership == 0u;
+             ++reduction) {
+            for (uint32_t model = 0u;
+                 model < models_per_reduction && active_membership == 0u;
+                 ++model) {
+                for (uint32_t literal = 0u; literal < literal_count; ++literal) {
+                    uint32_t literal_offset =
+                        (((candidate * reduction_count + reduction) * models_per_reduction + model)
+                            * literal_count)
+                        + literal;
+                    if (epistemic_model_slot_active(model_membership, literal_offset) != 0u) {
+                        active_membership = 1u;
+                        break;
+                    }
+                }
+            }
+        }
+        if (active_membership != 0u) return 1u;
+    }
 
-        uint32_t base = candidate * per_candidate;
-        for (uint32_t offset = 0u; offset < per_candidate; ++offset) {
-            if (model_membership[base + offset] != 0u) return 1u;
+    return 0u;
+}
+
+static __device__ uint8_t epistemic_final_tuple_has_accepted_membership_for_row(
+    uint32_t literal_count,
+    uint32_t candidate_count,
+    uint32_t reduction_count,
+    uint32_t models_per_reduction,
+    uint32_t world_stride,
+    uint32_t output_row,
+    const uint32_t* __restrict__ rejection_reasons,
+    const uint8_t* __restrict__ model_membership,
+    const uint8_t* __restrict__ world_views
+) {
+    if (output_row >= models_per_reduction) return 0u;
+
+    for (uint32_t candidate = 0u; candidate < candidate_count; ++candidate) {
+        if (rejection_reasons[candidate] != 0u) continue;
+        if (world_views[candidate * world_stride] == 0u) continue;
+        for (uint32_t reduction = 0u; reduction < reduction_count; ++reduction) {
+            for (uint32_t literal = 0u; literal < literal_count; ++literal) {
+                uint32_t literal_offset =
+                    (((candidate * reduction_count + reduction) * models_per_reduction + output_row)
+                        * literal_count)
+                    + literal;
+                if (epistemic_model_slot_active(model_membership, literal_offset) != 0u) {
+                    return 1u;
+                }
+            }
         }
     }
 
@@ -748,16 +883,28 @@ extern "C" __global__ void epistemic_build_final_tuple_row_map_u8(
     uint32_t rows = output_row_count[0];
     if (row >= rows || row >= output_row_capacity) return;
 
-    uint8_t accepted_membership = epistemic_final_tuple_has_accepted_membership(
-        literal_count,
-        candidate_count,
-        reduction_count,
-        models_per_reduction,
-        world_stride,
-        rejection_reasons,
-        model_membership,
-        world_views
-    );
+    uint8_t accepted_membership = (row_filter_count == 0u || row >= models_per_reduction)
+        ? epistemic_final_tuple_has_accepted_membership(
+            literal_count,
+            candidate_count,
+            reduction_count,
+            models_per_reduction,
+            world_stride,
+            rejection_reasons,
+            model_membership,
+            world_views
+        )
+        : epistemic_final_tuple_has_accepted_membership_for_row(
+            literal_count,
+            candidate_count,
+            reduction_count,
+            models_per_reduction,
+            world_stride,
+            row,
+            rejection_reasons,
+            model_membership,
+            world_views
+        );
     if (accepted_membership == 0u) return;
 
     uint8_t row_matches = 1u;
@@ -808,8 +955,26 @@ extern "C" __global__ void epistemic_build_final_tuple_row_map_u8(
     }
 }
 
+extern "C" __global__ void epistemic_close_final_tuple_rejections_u8(
+    uint32_t candidate_count,
+    uint32_t world_stride,
+    const uint32_t* __restrict__ final_row_count,
+    uint32_t* __restrict__ rejection_reasons,
+    uint8_t* __restrict__ world_views
+) {
+    uint32_t candidate = blockIdx.x * blockDim.x + threadIdx.x;
+    if (candidate >= candidate_count) return;
+
+    if (final_row_count[0] == 0u && rejection_reasons[candidate] == 0u) {
+        rejection_reasons[candidate] = 5u;
+    }
+    world_views[candidate * world_stride] =
+        (rejection_reasons[candidate] == 0u && final_row_count[0] > 0u) ? 1u : 0u;
+}
+
 extern "C" __global__ void epistemic_materialize_final_tuple_column_u8(
     uint32_t column_byte_len,
+    uint32_t column_row_width,
     uint32_t literal_count,
     uint32_t candidate_count,
     uint32_t reduction_count,
@@ -828,16 +993,15 @@ extern "C" __global__ void epistemic_materialize_final_tuple_column_u8(
 
     uint32_t rows = output_row_count[0];
     uint32_t final_rows = final_row_count[0];
-    if (rows == 0u || final_rows == 0u || column_byte_len == 0u) return;
+    if (rows == 0u || final_rows == 0u || column_byte_len == 0u || column_row_width == 0u) return;
 
-    uint32_t row_width = column_byte_len / rows;
-    if (row_width == 0u) return;
-    uint32_t total = final_rows * row_width;
-    if (gid >= total) return;
+    uint64_t total = static_cast<uint64_t>(final_rows) * static_cast<uint64_t>(column_row_width);
+    if (total > static_cast<uint64_t>(column_byte_len)) return;
+    if (static_cast<uint64_t>(gid) >= total) return;
 
-    uint32_t dst_row = gid / row_width;
-    uint32_t byte = gid - dst_row * row_width;
+    uint32_t dst_row = gid / column_row_width;
+    uint32_t byte = gid - dst_row * column_row_width;
     uint32_t src_row = row_map[dst_row];
     if (src_row >= rows) return;
-    final_column[gid] = source_column[src_row * row_width + byte];
+    final_column[gid] = source_column[src_row * column_row_width + byte];
 }

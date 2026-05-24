@@ -30,9 +30,7 @@ pub(super) fn alloc_compile_gate(
     let memory = provider.memory();
     let mut gate = memory.alloc::<u32>(1)?;
     provider
-        .device()
-        .inner()
-        .htod_sync_copy_into(&[value], &mut gate)
+        .htod_launch_metadata_sync_copy_into(&[value], &mut gate)
         .map_err(|e| XlogError::Kernel(format!("compile gate upload failed: {}", e)))?;
     Ok(gate)
 }
@@ -216,7 +214,7 @@ pub(crate) fn compute_free_var_mask_gpu_gated(
     let block_dim = 256u32;
 
     if cnf.lit_cap > 0 {
-        let grid_dim = (cnf.lit_cap + block_dim - 1) / block_dim;
+        let grid_dim = cnf.lit_cap.div_ceil(block_dim);
         let mark_clauses = device
             .get_func(D4_MODULE, d4_kernels::D4_MARK_VARS_IN_CLAUSES)
             .ok_or_else(|| {
@@ -244,7 +242,7 @@ pub(crate) fn compute_free_var_mask_gpu_gated(
     }
 
     if num_nodes > 0 {
-        let grid_dim = (num_nodes + block_dim - 1) / block_dim;
+        let grid_dim = num_nodes.div_ceil(block_dim);
         let mark_circuit = device
             .get_func(D4_MODULE, d4_kernels::D4_MARK_VARS_IN_CIRCUIT)
             .ok_or_else(|| {
@@ -275,7 +273,7 @@ pub(crate) fn compute_free_var_mask_gpu_gated(
     let mask_len_u32 = cnf.var_cap.checked_add(1).ok_or_else(|| {
         XlogError::Compilation("compute_free_var_mask_gpu: mask length overflow".to_string())
     })?;
-    let grid_dim = (mask_len_u32 + block_dim - 1) / block_dim;
+    let grid_dim = mask_len_u32.div_ceil(block_dim);
     let build_mask = device
         .get_func(D4_MODULE, d4_kernels::D4_BUILD_FREE_VAR_MASK)
         .ok_or_else(|| XlogError::Kernel("d4_build_free_var_mask kernel not found".to_string()))?;
@@ -306,7 +304,7 @@ pub(super) fn bitset_words_per_item(var_cap: u32) -> Result<u32> {
     let bits = var_cap
         .checked_add(1)
         .ok_or_else(|| XlogError::Kernel("bitset var_cap+1 overflow".to_string()))?;
-    Ok((bits + 31) / 32)
+    Ok(bits.div_ceil(32))
 }
 
 pub(super) fn checked_pool_len_u32(max_items: u32, stride: u32, context: &str) -> Result<u32> {
@@ -359,7 +357,7 @@ pub(crate) fn exclusive_scan_u32_inplace(
         return Ok(());
     }
 
-    let num_blocks = (n + block_size - 1) / block_size;
+    let num_blocks = n.div_ceil(block_size);
     let memory = provider.memory();
     let mut block_sums = memory.alloc::<u32>(num_blocks as usize)?;
 

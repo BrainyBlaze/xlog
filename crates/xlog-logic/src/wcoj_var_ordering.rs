@@ -527,9 +527,9 @@ pub fn triangle_lookup_perms(leader_idx: u8) -> Vec<LookupPerm> {
 /// **Locked semantics** per W2.1 plan §"Permutation Tables":
 /// * 0 (e_xy default) — identity `[Column(0), Column(1), Column(2)]`.
 /// * 1 (e_yz)         — `[Column(2), Column(0), Column(1)]`
-///                      because kernel-direct = `(Y, Z, X)`.
+///   because kernel-direct = `(Y, Z, X)`.
 /// * 2 (e_xz)         — `[Column(0), Column(2), Column(1)]`
-///                      because kernel-direct = `(X, Z, Y)`.
+///   because kernel-direct = `(X, Z, Y)`.
 pub fn triangle_kernel_output_cols(leader_idx: u8) -> Vec<ProjectExpr> {
     match leader_idx {
         0 => vec![

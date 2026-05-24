@@ -69,6 +69,12 @@ impl Executor {
             if let Some(buf) = self.try_dispatch_wcoj_clique6_on_body(node)? {
                 return Ok(buf);
             }
+            if let Some(buf) = self.try_dispatch_wcoj_clique7_on_body(node)? {
+                return Ok(buf);
+            }
+            if let Some(buf) = self.try_dispatch_wcoj_clique8_on_body(node)? {
+                return Ok(buf);
+            }
         }
         self.execute_node(node)
     }
@@ -108,7 +114,7 @@ impl Executor {
         let Some(order) = var_order.as_ref().and_then(|order| order.kclique.as_ref()) else {
             return false;
         };
-        if !matches!(order.k, 5 | 6) {
+        if !matches!(order.k, 5..=8) {
             return false;
         }
         inputs.iter().any(|input| {

@@ -22,6 +22,7 @@ xlog-logic = { workspace = true, optional = true }
 
 [features]
 default = []
+epistemic-logic-tests = ["dep:xlog-logic"]
 # Diagnostic-only: per-phase timing of WCOJ triangle dispatch
 # (classifier + 3 layouts + count/scan/total/materialize).
 # Forwards to xlog-cuda's `wcoj-phase-timing` so the events

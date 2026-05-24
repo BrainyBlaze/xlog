@@ -1,21 +1,26 @@
 //! Epistemic GPU workspace allocation.
 
-use std::{collections::BTreeSet, ffi::c_void};
+use std::{collections::BTreeSet, ffi::c_void, sync::Arc};
 
 use cudarc::driver::LaunchConfig;
-use xlog_core::{RelId, Result, ScalarType, XlogError};
-use xlog_cuda::provider::{epistemic_kernels, HostTransferStats, EPISTEMIC_MODULE};
-use xlog_cuda::{
-    memory::TrackedCudaSlice, sys, AsKernelParam, CudaBuffer, CudaColumn, DeviceSlice, DriverError,
-    LaunchAsync,
+use xlog_core::{RelId, Result, ScalarType, Schema, XlogError};
+use xlog_cuda::provider::{
+    epistemic_kernels, HostLaunchMetadataTransferStats, HostTransferStats, EPISTEMIC_MODULE,
 };
-use xlog_ir::rir::{MultiwayPlan, RirNode, StreamGroupId};
+use xlog_cuda::{
+    memory::{validate_logical_row_count, TrackedCudaSlice},
+    sys, AsKernelParam, CudaBuffer, CudaColumn, DeviceSlice, DriverError, LaunchAsync,
+};
+use xlog_ir::rir::{MultiwayPlan, PlannedHashReason, RirNode, StreamGroupId};
 use xlog_ir::{
     EirEpistemicMode, EirEpistemicOp, EirTerm, EpistemicCpuFallbackCounters,
-    EpistemicExecutablePlan, EpistemicGpuPlan,
+    EpistemicExecutablePlan, EpistemicGpuBufferKind, EpistemicGpuHotPathPhase, EpistemicGpuPlan,
+    EpistemicTupleMembershipBinding, EpistemicWcojReductionStatus,
 };
 
 use super::Executor;
+
+const XLOG_CONSTRAINT_RELATION_PREFIX: &str = "__xlog_constraint_";
 
 /// Capacity limits for an epistemic GPU workspace allocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,7 +70,10 @@ impl EpistemicGpuWorkspaceLayout {
         let literal_count = plan.epistemic_literals.len();
         let reduction_count = plan.reductions.len();
         let candidate_assumption_bytes = checked_product(capacities.max_candidates, literal_count)?;
-        let world_view_bytes = checked_product(capacities.max_candidates, capacities.max_worlds)?;
+        let world_view_stride = capacities
+            .max_worlds
+            .max(world_view_bitset_bytes_per_candidate(literal_count)?);
+        let world_view_bytes = checked_product(capacities.max_candidates, world_view_stride)?;
         let model_membership_bytes = checked_product(
             checked_product(
                 checked_product(
@@ -87,10 +95,21 @@ impl EpistemicGpuWorkspaceLayout {
 
     /// Total workspace byte size across every device buffer category.
     pub fn total_bytes(&self) -> usize {
-        self.candidate_assumption_bytes
-            + self.world_view_bytes
-            + self.model_membership_bytes
-            + self.rejection_reason_slots * std::mem::size_of::<u32>()
+        self.try_total_bytes()
+            .expect("epistemic GPU workspace layout byte total overflowed")
+    }
+
+    /// Checked total workspace byte size across every device buffer category.
+    pub fn try_total_bytes(&self) -> Result<usize> {
+        let rejection_reason_bytes =
+            checked_product(self.rejection_reason_slots, std::mem::size_of::<u32>())?;
+        checked_sum(
+            checked_sum(
+                checked_sum(self.candidate_assumption_bytes, self.world_view_bytes)?,
+                self.model_membership_bytes,
+            )?,
+            rejection_reason_bytes,
+        )
     }
 }
 
@@ -106,6 +125,36 @@ pub struct EpistemicGpuWorkspace {
     pub model_membership: TrackedCudaSlice<u8>,
     /// Structured rejection-reason code buffer.
     pub rejection_reasons: TrackedCudaSlice<u32>,
+}
+
+impl EpistemicGpuWorkspace {
+    /// Require retained device buffers to match the certified workspace layout.
+    pub fn require_buffer_lengths_match_layout(&self, construct: &str) -> Result<()> {
+        if self.candidate_assumptions.len() != self.layout.candidate_assumption_bytes
+            || self.world_views.len() != self.layout.world_view_bytes
+            || self.model_membership.len() != self.layout.model_membership_bytes
+            || self.rejection_reasons.len() != self.layout.rejection_reason_slots
+        {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: construct.to_string(),
+                context: format!(
+                    "prepared GPU workspace buffer lengths do not match layout: \
+                     candidate_bytes={}/{} world_view_bytes={}/{} model_membership_bytes={}/{} \
+                     rejection_reason_slots={}/{}",
+                    self.candidate_assumptions.len(),
+                    self.layout.candidate_assumption_bytes,
+                    self.world_views.len(),
+                    self.layout.world_view_bytes,
+                    self.model_membership.len(),
+                    self.layout.model_membership_bytes,
+                    self.rejection_reasons.len(),
+                    self.layout.rejection_reason_slots
+                ),
+            });
+        }
+
+        Ok(())
+    }
 }
 
 /// Trace proving an epistemic GPU workspace was initialized on device.
@@ -219,6 +268,12 @@ pub struct EpistemicGpuFinalTupleMaterializationTrace {
     pub output_row_count_device_reads: u32,
     /// Model-membership bytes checked by the kernels before tuple materialization.
     pub model_membership_bytes_checked: usize,
+    /// Bounded model slots available per reduction during final tuple materialization.
+    pub bounded_model_slots_per_reduction: usize,
+    /// Output row capacity that can be checked against row-specific model slots.
+    pub row_specific_membership_row_capacity: usize,
+    /// Output row capacity beyond the bounded model-slot window.
+    pub row_filter_row_capacity_outside_model_slot_window: usize,
     /// World-view slots checked by the kernels before tuple materialization.
     pub world_view_slots_checked: usize,
     /// Variable-bound tuple row filters applied by the final-row map kernel.
@@ -235,19 +290,31 @@ pub struct EpistemicGpuFinalTupleMaterializationTrace {
     pub kernel_timing: EpistemicGpuKernelTimingTrace,
 }
 
-/// Trace proving the epistemic GPU hot path avoided tracked host transfers.
+/// Trace proving the epistemic GPU hot path avoided tracked data-plane host transfers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EpistemicGpuTransferBudgetTrace {
     /// Number of candidate rows covered by this transfer-budget check.
     pub candidate_count: usize,
     /// Tracked device-to-host bytes observed inside the GPU hot path.
     pub tracked_dtoh_bytes: u64,
-    /// Tracked host-to-device bytes observed inside the GPU hot path.
+    /// Tracked data-plane host-to-device bytes observed inside the GPU hot path.
     pub tracked_htod_bytes: u64,
     /// Tracked device-to-host calls observed inside the GPU hot path.
     pub tracked_dtoh_calls: u64,
-    /// Tracked host-to-device calls observed inside the GPU hot path.
+    /// Tracked data-plane host-to-device calls observed inside the GPU hot path.
     pub tracked_htod_calls: u64,
+    /// Tracked aggregate host-to-device bytes observed inside the GPU hot path.
+    pub tracked_aggregate_htod_bytes: u64,
+    /// Tracked aggregate host-to-device calls observed inside the GPU hot path.
+    pub tracked_aggregate_htod_calls: u64,
+    /// Tracked launch-metadata host-to-device bytes observed inside the GPU hot path.
+    pub tracked_launch_metadata_htod_bytes: u64,
+    /// Tracked launch-metadata host-to-device calls observed inside the GPU hot path.
+    pub tracked_launch_metadata_htod_calls: u64,
+    /// Tracked data-plane host-to-device bytes observed inside the GPU hot path.
+    pub tracked_data_plane_htod_bytes: u64,
+    /// Tracked data-plane host-to-device calls observed inside the GPU hot path.
+    pub tracked_data_plane_htod_calls: u64,
     /// Per-candidate host round trips observed inside the GPU hot path.
     pub per_candidate_host_round_trips: u64,
 }
@@ -269,6 +336,45 @@ pub struct EpistemicGpuFinalResultTransferTrace {
     pub tracked_data_plane_dtoh_calls: u64,
     /// Data-plane D2H bytes issued by accepted execution. Execution returns a device buffer, so this is zero.
     pub tracked_data_plane_dtoh_bytes: u64,
+}
+
+/// Bounded validation of reduced integrity-constraint relations after GPU execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EpistemicGpuConstraintValidationTrace {
+    /// Number of compiler-generated `__xlog_constraint_N` relations checked.
+    pub checked_constraint_relations: usize,
+    /// Number of checked constraint relations that contained violating rows.
+    pub violated_constraint_relations: usize,
+    /// Constraint row-count reads that had to consult device metadata.
+    pub row_count_device_reads: u32,
+}
+
+impl EpistemicGpuConstraintValidationTrace {
+    /// Require reduced integrity-constraint validation to match preflight obligations.
+    pub fn require_matches_preflight(
+        &self,
+        construct: &str,
+        preflight: &EpistemicGpuRuntimePreflight,
+    ) -> Result<()> {
+        if self.checked_constraint_relations != preflight.reduced_constraint_relation_count
+            || self.violated_constraint_relations != 0
+            || self.row_count_device_reads as usize > self.checked_constraint_relations
+        {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: construct.to_string(),
+                context: format!(
+                    "constraint validation trace must match reduced runtime preflight, got \
+                     checked={} expected_checked={} violations={} row_count_reads={}",
+                    self.checked_constraint_relations,
+                    preflight.reduced_constraint_relation_count,
+                    self.violated_constraint_relations,
+                    self.row_count_device_reads
+                ),
+            });
+        }
+
+        Ok(())
+    }
 }
 
 /// Typed interpretation of nonzero GPU epistemic rejection codes.
@@ -448,17 +554,26 @@ impl EpistemicGpuKernelTimingTrace {
                 "invalid epistemic GPU kernel elapsed time: {elapsed_ms}"
             )));
         }
+        let elapsed_nanos = ((elapsed_ms as f64) * 1_000_000.0).round();
+        if elapsed_nanos >= u64::MAX as f64 {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU kernel timing trace".to_string(),
+                context: format!(
+                    "CUDA elapsed time {elapsed_ms}ms exceeds the u64 nanosecond trace counter"
+                ),
+            });
+        }
 
         Ok(Self {
             cuda_event_pairs: 1,
             timing_sync_ops: 1,
-            kernel_elapsed_nanos: (elapsed_ms as f64 * 1_000_000.0).round() as u64,
+            kernel_elapsed_nanos: elapsed_nanos as u64,
         })
     }
 
     /// Whether CUDA-event timing was recorded for this trace.
     pub const fn is_recorded(&self) -> bool {
-        self.cuda_event_pairs > 0
+        self.cuda_event_pairs > 0 && self.timing_sync_ops > 0
     }
 
     /// Saturating sum used when aggregating multi-kernel or split-batch traces.
@@ -472,11 +587,54 @@ impl EpistemicGpuKernelTimingTrace {
         }
     }
 
+    /// Checked sum used by accepted certification paths.
+    pub fn checked_add(self, other: Self) -> Result<Self> {
+        Ok(Self {
+            cuda_event_pairs: self
+                .cuda_event_pairs
+                .checked_add(other.cuda_event_pairs)
+                .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic GPU kernel timing trace".to_string(),
+                    context: format!(
+                        "CUDA event-pair counter overflowed while adding {} to {}",
+                        other.cuda_event_pairs, self.cuda_event_pairs
+                    ),
+                })?,
+            timing_sync_ops: self
+                .timing_sync_ops
+                .checked_add(other.timing_sync_ops)
+                .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic GPU kernel timing trace".to_string(),
+                    context: format!(
+                        "CUDA timing-sync counter overflowed while adding {} to {}",
+                        other.timing_sync_ops, self.timing_sync_ops
+                    ),
+                })?,
+            kernel_elapsed_nanos: self
+                .kernel_elapsed_nanos
+                .checked_add(other.kernel_elapsed_nanos)
+                .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic GPU kernel timing trace".to_string(),
+                    context: format!(
+                        "kernel elapsed-time counter overflowed while adding {} to {}",
+                        other.kernel_elapsed_nanos, self.kernel_elapsed_nanos
+                    ),
+                })?,
+        })
+    }
+
     /// Aggregate timing traces from a single execution or split-batch result.
     pub fn sum(traces: impl IntoIterator<Item = Self>) -> Self {
         traces
             .into_iter()
             .fold(Self::unrecorded(), Self::saturating_add)
+    }
+
+    /// Checked aggregate timing traces for accepted certification paths.
+    pub fn checked_sum(traces: impl IntoIterator<Item = Self>) -> Result<Self> {
+        traces
+            .into_iter()
+            .try_fold(Self::unrecorded(), Self::checked_add)
     }
 }
 
@@ -499,10 +657,16 @@ impl EpistemicGpuCandidateGenerationTrace {
             });
         }
 
+        let candidate_assumption_bytes = checked_product(literal_count, candidate_count)?;
+        require_u32_launch_bound(
+            candidate_assumption_bytes,
+            "epistemic GPU candidate generation launch",
+        )?;
+
         Ok(Self {
             literal_count,
             generated_candidates: candidate_count,
-            candidate_assumption_bytes: checked_product(literal_count, candidate_count)?,
+            candidate_assumption_bytes,
             kernel_launches: 1,
             host_write_ops: 0,
             kernel_timing: EpistemicGpuKernelTimingTrace::unrecorded(),
@@ -527,11 +691,16 @@ impl EpistemicGpuCandidateValidationTrace {
             candidate_count,
             "epistemic GPU candidate validation candidates",
         )?;
+        require_u32_launch_dimensions(
+            &[literal_count, candidate_count],
+            "epistemic GPU validation launch",
+        )?;
+        let candidate_assumption_bytes_checked = checked_product(literal_count, candidate_count)?;
 
         Ok(Self {
             literal_count,
             validated_candidates: candidate_count,
-            candidate_assumption_bytes_checked: checked_product(literal_count, candidate_count)?,
+            candidate_assumption_bytes_checked,
             world_view_bytes_checked: candidate_count,
             rejection_reason_slots_written: candidate_count,
             kernel_launches: 1,
@@ -548,12 +717,53 @@ impl EpistemicGpuCandidateValidationTrace {
         self.kernel_timing = kernel_timing;
         self
     }
+
+    /// Require validation coverage to match the generated candidate workspace.
+    pub fn require_matches_candidate_generation(
+        &self,
+        construct: &str,
+        candidate_generation: &EpistemicGpuCandidateGenerationTrace,
+    ) -> Result<()> {
+        let expected_world_view_bytes = checked_product(
+            world_view_bitset_bytes_per_candidate(candidate_generation.literal_count)?,
+            candidate_generation.generated_candidates,
+        )?;
+        if self.literal_count != candidate_generation.literal_count
+            || self.validated_candidates != candidate_generation.generated_candidates
+            || self.candidate_assumption_bytes_checked
+                != candidate_generation.candidate_assumption_bytes
+            || self.world_view_bytes_checked != expected_world_view_bytes
+            || self.rejection_reason_slots_written != candidate_generation.generated_candidates
+        {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: construct.to_string(),
+                context: format!(
+                    "candidate validation trace does not match generated GPU candidates: \
+                     literals={}/{} candidates={}/{} candidate_bytes={}/{} \
+                     world_view_bytes={}/{} rejection_slots={}/{}",
+                    self.literal_count,
+                    candidate_generation.literal_count,
+                    self.validated_candidates,
+                    candidate_generation.generated_candidates,
+                    self.candidate_assumption_bytes_checked,
+                    candidate_generation.candidate_assumption_bytes,
+                    self.world_view_bytes_checked,
+                    expected_world_view_bytes,
+                    self.rejection_reason_slots_written,
+                    candidate_generation.generated_candidates
+                ),
+            });
+        }
+
+        Ok(())
+    }
 }
 
 impl EpistemicGpuMaterializationTrace {
     /// Build a materialization trace for a bounded device launch.
     pub fn for_count(candidate_count: usize) -> Result<Self> {
         require_positive(candidate_count, "epistemic GPU materialization candidates")?;
+        require_u32_launch_bound(candidate_count, "epistemic GPU materialization launch")?;
 
         Ok(Self {
             materialized_candidates: candidate_count,
@@ -581,6 +791,7 @@ impl EpistemicGpuFinalResultMaterializationTrace {
             candidate_count,
             "epistemic GPU final-result materialization candidates",
         )?;
+        require_u32_launch_bound(candidate_count, "epistemic GPU final-result launch")?;
 
         Ok(Self {
             materialized_candidates: candidate_count,
@@ -620,6 +831,7 @@ impl EpistemicGpuFinalTupleMaterializationTrace {
                 budget_bytes: u32::MAX as u64,
             });
         }
+        require_u32_launch_bound(output_row_capacity, "epistemic GPU final-tuple output rows")?;
         require_positive(literal_count, "epistemic GPU final-tuple literals")?;
         require_positive(candidate_count, "epistemic GPU final-tuple candidates")?;
         require_positive(reduction_count, "epistemic GPU final-tuple reductions")?;
@@ -631,18 +843,34 @@ impl EpistemicGpuFinalTupleMaterializationTrace {
             )?,
             literal_count,
         )?;
+        require_u32_launch_bound(
+            model_membership_bytes_checked,
+            "epistemic GPU final-tuple membership launch",
+        )?;
+        let output_row_count_device_reads = checked_sum(output_column_count, 1)?;
+        let kernel_launches = checked_sum(output_row_count_device_reads, 1)?;
+        if kernel_launches > u32::MAX as usize {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU final-tuple kernel launches".to_string(),
+                estimated_bytes: kernel_launches as u64,
+                budget_bytes: u32::MAX as u64,
+            });
+        }
 
         Ok(Self {
             output_column_count,
             output_row_capacity,
             tuple_bytes_capacity,
-            output_row_count_device_reads: 1,
+            output_row_count_device_reads: output_row_count_device_reads as u32,
             model_membership_bytes_checked,
+            bounded_model_slots_per_reduction: models_per_reduction,
+            row_specific_membership_row_capacity: 0,
+            row_filter_row_capacity_outside_model_slot_window: 0,
             world_view_slots_checked: candidate_count,
             row_filter_count: 0,
             negated_row_filter_count: 0,
             final_row_count_device_writes: 1,
-            kernel_launches: output_column_count.max(1) as u32,
+            kernel_launches: kernel_launches as u32,
             host_write_ops: 0,
             kernel_timing: EpistemicGpuKernelTimingTrace::unrecorded(),
         })
@@ -672,7 +900,97 @@ impl EpistemicGpuFinalTupleMaterializationTrace {
         }
         self.row_filter_count = row_filter_count;
         self.negated_row_filter_count = negated_row_filter_count;
+        if row_filter_count > 0 {
+            self.row_specific_membership_row_capacity = self
+                .output_row_capacity
+                .min(self.bounded_model_slots_per_reduction);
+            self.row_filter_row_capacity_outside_model_slot_window = self
+                .output_row_capacity
+                .saturating_sub(self.row_specific_membership_row_capacity);
+        }
         Ok(self)
+    }
+
+    /// Require GPU evidence that row-filtered tuple output fits the validated coverage window.
+    pub fn require_row_filter_materialization_evidence(
+        &self,
+        construct: &str,
+        final_output_rows: usize,
+    ) -> Result<()> {
+        if final_output_rows > self.output_row_capacity {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: construct.to_string(),
+                context: format!(
+                    "final tuple materialization reported {} logical rows for output row \
+                     capacity {}",
+                    final_output_rows, self.output_row_capacity
+                ),
+            });
+        }
+        if self.negated_row_filter_count > self.row_filter_count {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: construct.to_string(),
+                context: format!(
+                    "row-filtered final tuple materialization reported {} negated row filters \
+                     for {} total row filters",
+                    self.negated_row_filter_count, self.row_filter_count
+                ),
+            });
+        }
+        if self.row_filter_count == 0 {
+            if self.row_specific_membership_row_capacity != 0
+                || self.row_filter_row_capacity_outside_model_slot_window != 0
+            {
+                return Err(XlogError::UnsupportedEpistemicConstruct {
+                    construct: construct.to_string(),
+                    context: format!(
+                        "final tuple materialization without row filters reported row-filter \
+                         coverage row_specific_capacity={} fallback_capacity={}",
+                        self.row_specific_membership_row_capacity,
+                        self.row_filter_row_capacity_outside_model_slot_window
+                    ),
+                });
+            }
+            return Ok(());
+        }
+
+        let covered_row_capacity = checked_sum(
+            self.row_specific_membership_row_capacity,
+            self.row_filter_row_capacity_outside_model_slot_window,
+        )?;
+        if self.output_row_capacity == 0
+            || self.row_specific_membership_row_capacity == 0
+            || covered_row_capacity != self.output_row_capacity
+        {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: construct.to_string(),
+                context: format!(
+                    "row-filtered final tuple materialization requires GPU row-filter coverage, \
+                     got row_filters={} final_output_rows={} output_row_capacity={} \
+                     row_specific_capacity={} fallback_capacity={} model_slots_per_reduction={}",
+                    self.row_filter_count,
+                    final_output_rows,
+                    self.output_row_capacity,
+                    self.row_specific_membership_row_capacity,
+                    self.row_filter_row_capacity_outside_model_slot_window,
+                    self.bounded_model_slots_per_reduction
+                ),
+            });
+        }
+
+        let fallback_rows =
+            final_output_rows.saturating_sub(self.row_specific_membership_row_capacity);
+        if fallback_rows > self.row_filter_row_capacity_outside_model_slot_window {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: construct.to_string(),
+                context: format!(
+                    "row-filtered final tuple materialization has {} logical rows beyond the \
+                     row-specific model-slot window but only {} fallback row-filter capacity",
+                    fallback_rows, self.row_filter_row_capacity_outside_model_slot_window
+                ),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -683,28 +1001,99 @@ impl EpistemicGpuTransferBudgetTrace {
         before: HostTransferStats,
         after: HostTransferStats,
     ) -> Result<Self> {
+        Self::from_host_transfer_stats_with_launch_metadata(
+            candidate_count,
+            before,
+            after,
+            HostLaunchMetadataTransferStats::default(),
+            HostLaunchMetadataTransferStats::default(),
+        )
+    }
+
+    /// Build a hot-path transfer trace while distinguishing bounded launch
+    /// metadata H2D from data-plane transfers.
+    pub fn from_host_transfer_stats_with_launch_metadata(
+        candidate_count: usize,
+        before: HostTransferStats,
+        after: HostTransferStats,
+        launch_metadata_before: HostLaunchMetadataTransferStats,
+        launch_metadata_after: HostLaunchMetadataTransferStats,
+    ) -> Result<Self> {
         require_positive(candidate_count, "epistemic GPU transfer-budget candidates")?;
 
         let tracked_dtoh_bytes =
             transfer_counter_delta("dtoh_bytes", before.dtoh_bytes, after.dtoh_bytes)?;
-        let tracked_htod_bytes =
+        let tracked_data_plane_htod_bytes =
             transfer_counter_delta("htod_bytes", before.htod_bytes, after.htod_bytes)?;
         let tracked_dtoh_calls =
             transfer_counter_delta("dtoh_calls", before.dtoh_calls, after.dtoh_calls)?;
-        let tracked_htod_calls =
+        let tracked_data_plane_htod_calls =
             transfer_counter_delta("htod_calls", before.htod_calls, after.htod_calls)?;
+        let tracked_launch_metadata_htod_bytes = transfer_counter_delta(
+            "launch_metadata_htod_bytes",
+            launch_metadata_before.htod_bytes,
+            launch_metadata_after.htod_bytes,
+        )?;
+        let tracked_launch_metadata_htod_calls = transfer_counter_delta(
+            "launch_metadata_htod_calls",
+            launch_metadata_before.htod_calls,
+            launch_metadata_after.htod_calls,
+        )?;
+        let tracked_aggregate_htod_bytes = tracked_data_plane_htod_bytes
+            .checked_add(tracked_launch_metadata_htod_bytes)
+            .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU transfer budget".to_string(),
+                context: format!(
+                    "aggregate H2D bytes overflowed while adding launch metadata: \
+                     data_plane_htod_bytes={tracked_data_plane_htod_bytes}, \
+                     launch_metadata_htod_bytes={tracked_launch_metadata_htod_bytes}"
+                ),
+            })?;
+        let tracked_aggregate_htod_calls = tracked_data_plane_htod_calls
+            .checked_add(tracked_launch_metadata_htod_calls)
+            .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU transfer budget".to_string(),
+                context: format!(
+                    "aggregate H2D calls overflowed while adding launch metadata: \
+                     data_plane_htod_calls={tracked_data_plane_htod_calls}, \
+                     launch_metadata_htod_calls={tracked_launch_metadata_htod_calls}"
+                ),
+            })?;
+
+        if tracked_launch_metadata_htod_bytes != 0 && tracked_launch_metadata_htod_calls == 0 {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU transfer budget".to_string(),
+                context: format!(
+                    "launch metadata H2D bytes require matching H2D calls, got bytes={} calls=0",
+                    tracked_launch_metadata_htod_bytes
+                ),
+            });
+        }
+        if tracked_launch_metadata_htod_calls != 0 && tracked_launch_metadata_htod_bytes == 0 {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU transfer budget".to_string(),
+                context: format!(
+                    "launch metadata H2D calls require matching payload bytes, got calls={} bytes=0",
+                    tracked_launch_metadata_htod_calls
+                ),
+            });
+        }
 
         if tracked_dtoh_bytes != 0
-            || tracked_htod_bytes != 0
+            || tracked_data_plane_htod_bytes != 0
             || tracked_dtoh_calls != 0
-            || tracked_htod_calls != 0
+            || tracked_data_plane_htod_calls != 0
         {
             return Err(XlogError::UnsupportedEpistemicConstruct {
                 construct: "epistemic GPU transfer budget".to_string(),
                 context: format!(
-                    "tracked host transfer in GPU hot path: dtoh_bytes={tracked_dtoh_bytes}, \
-                     htod_bytes={tracked_htod_bytes}, dtoh_calls={tracked_dtoh_calls}, \
-                     htod_calls={tracked_htod_calls}"
+                    "tracked host transfer in GPU hot path: tracked data-plane host transfer: \
+                     dtoh_bytes={tracked_dtoh_bytes}, \
+                     data_plane_htod_bytes={tracked_data_plane_htod_bytes}, \
+                     dtoh_calls={tracked_dtoh_calls}, \
+                     data_plane_htod_calls={tracked_data_plane_htod_calls}, \
+                     launch_metadata_htod_bytes={tracked_launch_metadata_htod_bytes}, \
+                     launch_metadata_htod_calls={tracked_launch_metadata_htod_calls}"
                 ),
             });
         }
@@ -712,9 +1101,15 @@ impl EpistemicGpuTransferBudgetTrace {
         Ok(Self {
             candidate_count,
             tracked_dtoh_bytes,
-            tracked_htod_bytes,
+            tracked_htod_bytes: tracked_data_plane_htod_bytes,
             tracked_dtoh_calls,
-            tracked_htod_calls,
+            tracked_htod_calls: tracked_data_plane_htod_calls,
+            tracked_aggregate_htod_bytes,
+            tracked_aggregate_htod_calls,
+            tracked_launch_metadata_htod_bytes,
+            tracked_launch_metadata_htod_calls,
+            tracked_data_plane_htod_bytes,
+            tracked_data_plane_htod_calls,
             per_candidate_host_round_trips: 0,
         })
     }
@@ -743,9 +1138,240 @@ impl EpistemicGpuFinalResultTransferTrace {
             tracked_data_plane_dtoh_bytes: 0,
         })
     }
+
+    /// Require retained final-result transfer accounting to match the final device buffer.
+    pub fn require_matches_final_output(
+        &self,
+        construct: &str,
+        final_output: &CudaBuffer,
+    ) -> Result<()> {
+        let Some(cached_rows) = final_output.cached_row_count() else {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: construct.to_string(),
+                context:
+                    "final-result transfer certification requires cached device final row count"
+                        .to_string(),
+            });
+        };
+        let logical_rows =
+            validate_logical_row_count(final_output.num_rows(), cached_rows as usize).map_err(
+                |err| XlogError::UnsupportedEpistemicConstruct {
+                    construct: construct.to_string(),
+                    context: format!("invalid final-output logical row count: {err}"),
+                },
+            )?;
+        let row_width = final_output.schema().row_size_bytes();
+        let payload_bytes = checked_product(logical_rows, row_width)? as u64;
+        if self.final_output_rows != logical_rows
+            || self.final_output_column_count != final_output.arity()
+            || self.final_output_row_width_bytes != row_width
+            || self.final_output_payload_bytes != payload_bytes
+        {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: construct.to_string(),
+                context: format!(
+                    "final-result transfer trace does not match final device output: rows={}/{} \
+                     columns={}/{} row_width={}/{} payload_bytes={}/{}",
+                    self.final_output_rows,
+                    logical_rows,
+                    self.final_output_column_count,
+                    final_output.arity(),
+                    self.final_output_row_width_bytes,
+                    row_width,
+                    self.final_output_payload_bytes,
+                    payload_bytes
+                ),
+            });
+        }
+        if self.row_count_device_reads > 1 {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: construct.to_string(),
+                context: format!(
+                    "final-result transfer reads one device row-count scalar at most, got {}",
+                    self.row_count_device_reads
+                ),
+            });
+        }
+
+        Ok(())
+    }
 }
 
 impl EpistemicGpuSemanticTrace {
+    /// Require semantic phase counts to match the retained GPU execution traces.
+    pub fn require_matches_execution_traces(
+        &self,
+        construct: &str,
+        candidate_generation: &EpistemicGpuCandidateGenerationTrace,
+        propagation: &EpistemicGpuPropagationTrace,
+        model_membership: &EpistemicGpuModelMembershipTrace,
+        world_view_validation: &EpistemicGpuWorldViewValidationTrace,
+    ) -> Result<()> {
+        let expected_pruned = self
+            .generated_candidates
+            .checked_sub(propagation.propagated_candidates)
+            .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                construct: construct.to_string(),
+                context: format!(
+                    "semantic trace phase counts cannot propagate more candidates than were \
+                     generated: generated={} propagated={}",
+                    self.generated_candidates, propagation.propagated_candidates
+                ),
+            })?;
+        let expected_reduced_model_slots = checked_product(
+            checked_product(
+                world_view_validation.candidates_checked,
+                model_membership.reduction_count,
+            )?,
+            model_membership.models_per_reduction,
+        )?;
+        let expected_guesses = checked_product(
+            candidate_generation.generated_candidates,
+            candidate_generation.literal_count,
+        )?;
+        if self.generated_candidates != candidate_generation.generated_candidates
+            || self.guesses != expected_guesses
+            || self.propagated_candidates != propagation.propagated_candidates
+            || self.pruned_candidates != expected_pruned
+            || self.tested_candidates != world_view_validation.candidates_checked
+            || self.reduced_model_slots_checked != expected_reduced_model_slots
+        {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: construct.to_string(),
+                context: format!(
+                    "semantic trace phase counts must match retained GPU execution traces, got \
+                     generated={} expected_generated={} guesses={} expected_guesses={} \
+                     propagated={} expected_propagated={} pruned={} expected_pruned={} \
+                     tested={} expected_tested={} reduced_model_slots={} \
+                     expected_reduced_model_slots={}",
+                    self.generated_candidates,
+                    candidate_generation.generated_candidates,
+                    self.guesses,
+                    expected_guesses,
+                    self.propagated_candidates,
+                    propagation.propagated_candidates,
+                    self.pruned_candidates,
+                    expected_pruned,
+                    self.tested_candidates,
+                    world_view_validation.candidates_checked,
+                    self.reduced_model_slots_checked,
+                    expected_reduced_model_slots
+                ),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Require bounded rejection-buffer metadata accounting to match generated candidates.
+    pub fn require_rejection_metadata_accounting(&self, construct: &str) -> Result<()> {
+        let expected_metadata_bytes =
+            checked_product(self.generated_candidates, std::mem::size_of::<u32>())? as u64;
+        if self.rejection_reason_device_reads != 1
+            || self.rejection_reason_metadata_bytes != expected_metadata_bytes
+        {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: construct.to_string(),
+                context: format!(
+                    "semantic trace rejection metadata accounting must match the bounded device \
+                     rejection-buffer read, got reads={} bytes={} expected_reads=1 \
+                     expected_bytes={}",
+                    self.rejection_reason_device_reads,
+                    self.rejection_reason_metadata_bytes,
+                    expected_metadata_bytes
+                ),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Require accepted/rejected candidate indices to partition generated candidates.
+    pub fn require_candidate_index_partition(&self, construct: &str) -> Result<()> {
+        let accounted_candidates = self.accepted_candidates.checked_add(self.rejected_candidates).ok_or_else(|| {
+            XlogError::UnsupportedEpistemicConstruct {
+                construct: construct.to_string(),
+                context: format!(
+                    "semantic trace candidate index partition accounting overflowed: accepted={} rejected={}",
+                    self.accepted_candidates, self.rejected_candidates
+                ),
+            }
+        })?;
+        if self.accepted_candidate_indices.len() != self.accepted_candidates
+            || self.rejected_candidate_indices.len() != self.rejected_candidates
+            || self.accepted_world_views != self.accepted_candidates
+            || accounted_candidates != self.generated_candidates
+        {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: construct.to_string(),
+                context: format!(
+                    "semantic trace candidate index partition requires counts and index vectors \
+                     to match generated candidates, got generated={} accepted={} \
+                     accepted_indices={} accepted_world_views={} rejected={} rejected_indices={}",
+                    self.generated_candidates,
+                    self.accepted_candidates,
+                    self.accepted_candidate_indices.len(),
+                    self.accepted_world_views,
+                    self.rejected_candidates,
+                    self.rejected_candidate_indices.len()
+                ),
+            });
+        }
+        if self.rejection_reasons.len() != self.rejected_candidates {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: construct.to_string(),
+                context: format!(
+                    "semantic trace rejection reason count must match rejected candidates, got \
+                     reasons={} rejected={}",
+                    self.rejection_reasons.len(),
+                    self.rejected_candidates
+                ),
+            });
+        }
+        self.typed_rejection_reasons()?;
+
+        let mut seen = BTreeSet::new();
+        for (kind, indices) in [
+            ("accepted", self.accepted_candidate_indices.as_slice()),
+            ("rejected", self.rejected_candidate_indices.as_slice()),
+        ] {
+            for &index in indices {
+                if index >= self.generated_candidates {
+                    return Err(XlogError::UnsupportedEpistemicConstruct {
+                        construct: construct.to_string(),
+                        context: format!(
+                            "semantic trace candidate index partition has out-of-range {kind} \
+                             index {index} for generated candidate count {}",
+                            self.generated_candidates
+                        ),
+                    });
+                }
+                if !seen.insert(index) {
+                    return Err(XlogError::UnsupportedEpistemicConstruct {
+                        construct: construct.to_string(),
+                        context: format!(
+                            "semantic trace candidate index partition contains duplicate \
+                             candidate index {index}"
+                        ),
+                    });
+                }
+            }
+        }
+        if seen.len() != self.generated_candidates {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: construct.to_string(),
+                context: format!(
+                    "semantic trace candidate index partition covers {} of {} generated \
+                     candidates",
+                    seen.len(),
+                    self.generated_candidates
+                ),
+            });
+        }
+
+        Ok(())
+    }
+
     /// Decode nonzero device rejection codes into typed GPU semantic reasons.
     pub fn typed_rejection_reasons(&self) -> Result<Vec<EpistemicGpuRejectionReason>> {
         self.rejection_reasons
@@ -773,6 +1399,72 @@ impl EpistemicGpuSemanticTrace {
                 budget_bytes: workspace.layout.rejection_reason_slots as u64,
             });
         }
+        if propagation.literal_count != candidate_generation.literal_count
+            || model_membership.literal_count != candidate_generation.literal_count
+            || world_view_validation.literal_count != candidate_generation.literal_count
+        {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU semantic trace".to_string(),
+                context: format!(
+                    "semantic trace requires all GPU stages to agree on literal count, got \
+                     generated={} propagated={} membership={} validation={}",
+                    candidate_generation.literal_count,
+                    propagation.literal_count,
+                    model_membership.literal_count,
+                    world_view_validation.literal_count
+                ),
+            });
+        }
+        let pruned_candidates = candidate_count
+            .checked_sub(propagation.propagated_candidates)
+            .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU semantic trace".to_string(),
+                context: format!(
+                    "semantic trace cannot prune more candidates than were generated: \
+                     generated={} propagated={}",
+                    candidate_count, propagation.propagated_candidates
+                ),
+            })?;
+        if propagation.rejection_reason_slots_written < candidate_count {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU semantic trace".to_string(),
+                context: format!(
+                    "semantic trace requires rejection metadata for every generated candidate, \
+                     got generated={} rejection_slots_initialized={}",
+                    candidate_count, propagation.rejection_reason_slots_written
+                ),
+            });
+        }
+        if model_membership.candidates_checked != candidate_count
+            || world_view_validation.candidates_checked != candidate_count
+        {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU semantic trace".to_string(),
+                context: format!(
+                    "semantic trace requires GPU validation coverage for every generated \
+                     candidate, got generated={} membership_checked={} validation_checked={}",
+                    candidate_count,
+                    model_membership.candidates_checked,
+                    world_view_validation.candidates_checked
+                ),
+            });
+        }
+        if model_membership.reduction_count != world_view_validation.reduction_count
+            || model_membership.models_per_reduction != world_view_validation.models_per_reduction
+        {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU semantic trace".to_string(),
+                context: format!(
+                    "semantic trace requires model-membership and world-view validation layouts \
+                     to match, got membership_reductions={} validation_reductions={} \
+                     membership_models_per_reduction={} validation_models_per_reduction={}",
+                    model_membership.reduction_count,
+                    world_view_validation.reduction_count,
+                    model_membership.models_per_reduction,
+                    world_view_validation.models_per_reduction
+                ),
+            });
+        }
 
         let raw_rejection_reasons = provider
             .dtoh_small_metadata_untracked(&workspace.rejection_reasons, candidate_count)?;
@@ -783,6 +1475,7 @@ impl EpistemicGpuSemanticTrace {
             if reason == 0 {
                 accepted_candidate_indices.push(candidate_index);
             } else {
+                EpistemicGpuRejectionReason::from_code(reason)?;
                 rejected_candidate_indices.push(candidate_index);
                 rejection_reasons.push(reason);
             }
@@ -801,9 +1494,9 @@ impl EpistemicGpuSemanticTrace {
 
         Ok(Self {
             generated_candidates: candidate_count,
-            guesses: candidate_count,
+            guesses: checked_product(candidate_count, candidate_generation.literal_count)?,
             propagated_candidates: propagation.propagated_candidates,
-            pruned_candidates: candidate_count.saturating_sub(propagation.propagated_candidates),
+            pruned_candidates,
             tested_candidates: world_view_validation.candidates_checked,
             reduced_model_slots_checked,
             accepted_candidates,
@@ -853,6 +1546,10 @@ impl EpistemicGpuModelMembershipTrace {
                 models_per_reduction,
             )?,
             literal_count,
+        )?;
+        require_u32_launch_bound(
+            model_membership_bytes_written,
+            "epistemic GPU model-membership launch",
         )?;
 
         Ok(Self {
@@ -931,6 +1628,10 @@ impl EpistemicGpuModelMembershipTrace {
             )?,
             literal_count,
         )?;
+        require_u32_launch_bound(
+            model_membership_bytes_written,
+            "epistemic GPU model-membership launch",
+        )?;
 
         Ok(Self {
             literal_count,
@@ -974,6 +1675,25 @@ impl EpistemicGpuModelMembershipTrace {
 
         Ok(())
     }
+
+    /// Require the tuple-key device reads planned for this model-membership trace.
+    pub fn require_planned_tuple_key_column_reads(
+        &self,
+        expected_key_column_reads: usize,
+    ) -> Result<()> {
+        if self.tuple_source_key_column_device_reads as usize != expected_key_column_reads {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU stable-model membership certification".to_string(),
+                context: format!(
+                    "model-membership tuple-key device column reads must match the planned \
+                     nonzero-arity tuple keys, got reads={} expected={}",
+                    self.tuple_source_key_column_device_reads, expected_key_column_reads
+                ),
+            });
+        }
+
+        Ok(())
+    }
 }
 
 impl EpistemicGpuWorldViewValidationTrace {
@@ -1007,6 +1727,10 @@ impl EpistemicGpuWorldViewValidationTrace {
             )?,
             literal_count,
         )?;
+        require_u32_launch_bound(
+            model_membership_bytes_checked,
+            "epistemic GPU world-view validation membership launch",
+        )?;
 
         Ok(Self {
             literal_count,
@@ -1037,6 +1761,10 @@ impl EpistemicGpuPropagationTrace {
     pub fn for_counts(literal_count: usize, candidate_count: usize) -> Result<Self> {
         require_positive(literal_count, "epistemic GPU propagation literals")?;
         require_positive(candidate_count, "epistemic GPU propagation candidates")?;
+        require_u32_launch_dimensions(
+            &[literal_count, candidate_count],
+            "epistemic GPU propagation launch",
+        )?;
 
         Ok(Self {
             literal_count,
@@ -1062,22 +1790,73 @@ impl EpistemicGpuPropagationTrace {
 impl EpistemicGpuWorkspaceResetTrace {
     /// Build the reset trace implied by a workspace layout.
     pub fn for_layout(layout: EpistemicGpuWorkspaceLayout) -> Self {
-        Self {
+        Self::try_for_layout(layout)
+            .expect("epistemic GPU workspace reset trace byte total overflowed")
+    }
+
+    /// Build the reset trace implied by a workspace layout, failing closed on overflow.
+    pub fn try_for_layout(layout: EpistemicGpuWorkspaceLayout) -> Result<Self> {
+        Ok(Self {
             candidate_assumption_bytes: layout.candidate_assumption_bytes,
             world_view_bytes: layout.world_view_bytes,
             model_membership_bytes: layout.model_membership_bytes,
-            rejection_reason_bytes: layout.rejection_reason_slots * std::mem::size_of::<u32>(),
+            rejection_reason_bytes: checked_product(
+                layout.rejection_reason_slots,
+                std::mem::size_of::<u32>(),
+            )?,
             device_zero_ops: 4,
             host_write_ops: 0,
-        }
+        })
     }
 
     /// Total bytes zeroed by the reset path.
     pub fn total_zeroed_bytes(&self) -> usize {
-        self.candidate_assumption_bytes
-            + self.world_view_bytes
-            + self.model_membership_bytes
-            + self.rejection_reason_bytes
+        self.try_total_zeroed_bytes()
+            .expect("epistemic GPU workspace reset byte total overflowed")
+    }
+
+    /// Checked total bytes zeroed by the reset path.
+    pub fn try_total_zeroed_bytes(&self) -> Result<usize> {
+        checked_sum(
+            checked_sum(
+                checked_sum(self.candidate_assumption_bytes, self.world_view_bytes)?,
+                self.model_membership_bytes,
+            )?,
+            self.rejection_reason_bytes,
+        )
+    }
+
+    /// Require the retained reset trace to match the prepared workspace layout.
+    pub fn require_matches_layout(
+        &self,
+        construct: &str,
+        layout: EpistemicGpuWorkspaceLayout,
+    ) -> Result<()> {
+        let expected = Self::try_for_layout(layout)?;
+        if *self != expected {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: construct.to_string(),
+                context: format!(
+                    "workspace reset trace does not match prepared GPU workspace layout: \
+                     candidate_bytes={}/{} world_view_bytes={}/{} model_membership_bytes={}/{} \
+                     rejection_reason_bytes={}/{} device_zero_ops={}/{} host_write_ops={}/{}",
+                    self.candidate_assumption_bytes,
+                    expected.candidate_assumption_bytes,
+                    self.world_view_bytes,
+                    expected.world_view_bytes,
+                    self.model_membership_bytes,
+                    expected.model_membership_bytes,
+                    self.rejection_reason_bytes,
+                    expected.rejection_reason_bytes,
+                    self.device_zero_ops,
+                    expected.device_zero_ops,
+                    self.host_write_ops,
+                    expected.host_write_ops
+                ),
+            });
+        }
+
+        Ok(())
     }
 }
 
@@ -1090,10 +1869,20 @@ pub struct EpistemicGpuRuntimePreflight {
     pub workspace_layout: EpistemicGpuWorkspaceLayout,
     /// Compiled reduced-runtime rule count.
     pub reduced_runtime_rule_count: usize,
+    /// Compiler-generated reduced integrity-constraint relations to validate.
+    pub reduced_constraint_relation_count: usize,
+    /// Reduced rules that the epistemic planner marked as requiring WCOJ eligibility.
+    pub wcoj_required_reduction_count: usize,
     /// Number of reduced rules carrying a `MultiWayJoin` route.
     pub multiway_reduction_count: usize,
     /// Number of K-clique WCOJ plans reused from the production planner.
     pub kclique_wcoj_plan_count: usize,
+    /// Number of triangle WCOJ routes reused from the production runtime.
+    pub wcoj_triangle_route_count: usize,
+    /// Number of 4-cycle WCOJ routes reused from the production runtime.
+    pub wcoj_4cycle_route_count: usize,
+    /// K-clique WCOJ plan counts by arity K=5..8.
+    pub kclique_wcoj_plan_count_by_arity: [usize; 4],
     /// Maximum K-clique arity observed across production WCOJ plans.
     pub kclique_wcoj_max_arity: u8,
     /// Live edge-permutation slots carried by production K-clique plans.
@@ -1104,6 +1893,12 @@ pub struct EpistemicGpuRuntimePreflight {
     pub kclique_skew_scheduled_plan_count: usize,
     /// Number of structured planned-hash routes.
     pub planned_hash_route_count: usize,
+    /// Planned-hash routes where complete planner costs predicted hash wins.
+    pub planned_hash_planner_wins_count: usize,
+    /// Planned-hash routes selected because complete WCOJ stats were unavailable.
+    pub planned_hash_incomplete_stats_count: usize,
+    /// Planned-hash routes carrying finite hash-vs-WCOJ cost evidence.
+    pub planned_hash_cost_evidence_count: usize,
     /// Sorted-layout edge-slot requirements carried by WCOJ plans.
     pub sorted_layout_requirement_count: usize,
     /// Helper-splitting specs carried by WCOJ plans.
@@ -1114,6 +1909,12 @@ pub struct EpistemicGpuRuntimePreflight {
     pub helper_relation_scan_count: usize,
     /// Tuple-membership bindings certified for stable-model membership checks.
     pub tuple_membership_binding_count: usize,
+    /// Solver assumption bindings exported by the semantic plan.
+    pub solver_assumption_binding_count: usize,
+    /// Solver production capabilities required by the semantic plan.
+    pub solver_required_capability_count: usize,
+    /// Distinct solver statuses required by the semantic plan.
+    pub solver_required_status_count: usize,
     /// Non-negated `know` operators represented by the executable GPU plan.
     pub know_operator_count: usize,
     /// Non-negated `possible` operators represented by the executable GPU plan.
@@ -1149,11 +1950,27 @@ impl EpistemicGpuRuntimePreflight {
             });
         }
         executable.gpu_plan.validate_tuple_membership_bindings()?;
+        executable.gpu_plan.validate_solver_contract()?;
+        require_single_epistemic_output_relation(&executable.gpu_plan)?;
+        require_epistemic_gpu_kernel_phases(&executable.gpu_plan)?;
+        require_epistemic_gpu_buffer_contract(&executable.gpu_plan)?;
 
         let workspace_layout =
             EpistemicGpuWorkspaceLayout::for_plan(&executable.gpu_plan, capacities)?;
         let mut routes = RuntimeRouteSummary::default();
         let mut reduced_runtime_rule_count = 0usize;
+        let mut reduced_constraint_relation_names = Vec::new();
+        let wcoj_required_reduction_count = executable
+            .gpu_plan
+            .reductions
+            .iter()
+            .filter(|reduction| {
+                matches!(
+                    reduction.wcoj_status,
+                    EpistemicWcojReductionStatus::RequiresPlannerEligibility
+                )
+            })
+            .count();
         let helper_relation_ids = helper_relation_ids(executable);
         let mut helper_relation_rule_count = 0usize;
         let mut helper_relation_scan_count = 0usize;
@@ -1165,12 +1982,64 @@ impl EpistemicGpuRuntimePreflight {
             .flatten()
         {
             reduced_runtime_rule_count += 1;
+            if rule.head.starts_with(XLOG_CONSTRAINT_RELATION_PREFIX)
+                && !reduced_constraint_relation_names
+                    .iter()
+                    .any(|name| name == &rule.head)
+            {
+                reduced_constraint_relation_names.push(rule.head.as_str());
+            }
             if rule.head.starts_with("__w37_helper_") {
                 helper_relation_rule_count += 1;
             }
             helper_relation_scan_count +=
                 count_helper_relation_scans(&rule.body, &helper_relation_ids);
             summarize_runtime_routes(&rule.body, &mut routes);
+        }
+
+        if wcoj_required_reduction_count > routes.multiway_reduction_count {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU WCOJ route certification".to_string(),
+                context: format!(
+                    "plan requires {} WCOJ-eligible epistemic reductions, but reduced runtime \
+                     plan exposes {} MultiWayJoin routes",
+                    wcoj_required_reduction_count, routes.multiway_reduction_count
+                ),
+            });
+        }
+
+        let planned_hash_reason_count = routes
+            .planned_hash_planner_wins_count
+            .checked_add(routes.planned_hash_incomplete_stats_count)
+            .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU planned-hash certification".to_string(),
+                context: "planned-hash reason counters overflowed".to_string(),
+            })?;
+        if planned_hash_reason_count != routes.planned_hash_route_count
+            || routes.planned_hash_cost_evidence_count < routes.planned_hash_planner_wins_count
+        {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU planned-hash certification".to_string(),
+                context: format!(
+                    "planned_hash_routes={}, planner_wins={}, incomplete_stats={}, \
+                     finite_cost_evidence={}",
+                    routes.planned_hash_route_count,
+                    routes.planned_hash_planner_wins_count,
+                    routes.planned_hash_incomplete_stats_count,
+                    routes.planned_hash_cost_evidence_count
+                ),
+            });
+        }
+
+        if routes.kclique_wcoj_plan_count > 0 && routes.kclique_wcoj_edge_permutation_count == 0 {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU K-clique WCOJ certification".to_string(),
+                context: format!(
+                    "K-clique WCOJ plans require live edge-permutation slots, got \
+                     kclique_plans={} edge_permutation_slots=0",
+                    routes.kclique_wcoj_plan_count
+                ),
+            });
         }
 
         if routes.helper_split_spec_count > 0
@@ -1206,18 +2075,39 @@ impl EpistemicGpuRuntimePreflight {
             epistemic_mode: executable.gpu_plan.mode,
             workspace_layout,
             reduced_runtime_rule_count,
+            reduced_constraint_relation_count: reduced_constraint_relation_names.len(),
+            wcoj_required_reduction_count,
             multiway_reduction_count: routes.multiway_reduction_count,
             kclique_wcoj_plan_count: routes.kclique_wcoj_plan_count,
+            wcoj_triangle_route_count: routes.wcoj_triangle_route_count,
+            wcoj_4cycle_route_count: routes.wcoj_4cycle_route_count,
+            kclique_wcoj_plan_count_by_arity: routes.kclique_wcoj_plan_count_by_arity,
             kclique_wcoj_max_arity: routes.kclique_wcoj_max_arity,
             kclique_wcoj_edge_permutation_count: routes.kclique_wcoj_edge_permutation_count,
             kclique_stream_group_count: routes.kclique_stream_groups.len(),
             kclique_skew_scheduled_plan_count: routes.kclique_skew_scheduled_plan_count,
             planned_hash_route_count: routes.planned_hash_route_count,
+            planned_hash_planner_wins_count: routes.planned_hash_planner_wins_count,
+            planned_hash_incomplete_stats_count: routes.planned_hash_incomplete_stats_count,
+            planned_hash_cost_evidence_count: routes.planned_hash_cost_evidence_count,
             sorted_layout_requirement_count: routes.sorted_layout_requirement_count,
             helper_split_spec_count: routes.helper_split_spec_count,
             helper_relation_rule_count,
             helper_relation_scan_count,
             tuple_membership_binding_count: executable.gpu_plan.tuple_membership_bindings.len(),
+            solver_assumption_binding_count: executable
+                .gpu_plan
+                .solver_contract
+                .assumption_bindings
+                .len(),
+            solver_required_capability_count: executable
+                .gpu_plan
+                .solver_contract
+                .distinct_required_capability_count(),
+            solver_required_status_count: executable
+                .gpu_plan
+                .solver_contract
+                .distinct_required_status_count(),
             know_operator_count,
             possible_operator_count,
             not_know_operator_count,
@@ -1231,6 +2121,8 @@ impl EpistemicGpuRuntimePreflight {
 pub struct EpistemicGpuPreparedExecution {
     /// Static preflight summary.
     pub preflight: EpistemicGpuRuntimePreflight,
+    /// Planned tuple-membership bindings certified before GPU execution.
+    pub tuple_membership_bindings: Vec<EpistemicTupleMembershipBinding>,
     /// Device-resident workspace buffers.
     pub workspace: EpistemicGpuWorkspace,
     /// Device-side initialization trace for the workspace buffers.
@@ -1246,7 +2138,7 @@ pub struct EpistemicGpuRuntimeTrace {
     pub counters_before: EpistemicGpuRuntimeCounters,
     /// Runtime counters after dispatch.
     pub counters_after: EpistemicGpuRuntimeCounters,
-    /// Saturating counter delta for the dispatch window.
+    /// Checked counter delta for the dispatch window.
     pub counter_delta: EpistemicGpuRuntimeCounters,
     /// WCOJ certification result derived from preflight obligations and deltas.
     pub wcoj_certification: EpistemicGpuRuntimeWcojCertification,
@@ -1259,19 +2151,30 @@ impl EpistemicGpuRuntimeTrace {
         counters_before: EpistemicGpuRuntimeCounters,
         counters_after: EpistemicGpuRuntimeCounters,
     ) -> Self {
-        let counter_delta = counters_after.saturating_delta_since(counters_before);
-        let wcoj_certification = EpistemicGpuRuntimeWcojCertification::for_preflight_and_delta(
+        Self::try_from_preflight_and_counters(preflight, counters_before, counters_after)
+            .expect("runtime counter snapshots must be monotonic")
+    }
+
+    /// Build a trace from static preflight data and runtime counter snapshots, failing closed
+    /// if runtime proof counters move backwards or overflow while being summarized.
+    pub fn try_from_preflight_and_counters(
+        preflight: EpistemicGpuRuntimePreflight,
+        counters_before: EpistemicGpuRuntimeCounters,
+        counters_after: EpistemicGpuRuntimeCounters,
+    ) -> Result<Self> {
+        let counter_delta = counters_after.checked_delta_since(counters_before)?;
+        let wcoj_certification = EpistemicGpuRuntimeWcojCertification::try_for_preflight_and_delta(
             &preflight,
             &counter_delta,
-        );
+        )?;
 
-        Self {
+        Ok(Self {
             preflight,
             counters_before,
             counters_after,
             counter_delta,
             wcoj_certification,
-        }
+        })
     }
 
     /// Fail closed when a WCOJ-required epistemic reduction lacks runtime evidence.
@@ -1299,6 +2202,18 @@ impl EpistemicGpuRuntimeTrace {
                 context: format!(
                     "required_sorted_layouts={required_sorted_layouts}, \
                      observed_layout_events={observed_layout_events}"
+                ),
+            }),
+            EpistemicGpuRuntimeWcojCertification::MissingRequiredKcliqueMetadata {
+                required_kclique_plans,
+                observed_metadata_builds,
+                observed_metadata_build_nanos,
+            } => Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU K-clique metadata certification".to_string(),
+                context: format!(
+                    "required_kclique_plans={required_kclique_plans}, \
+                     observed_metadata_builds={observed_metadata_builds}, \
+                     observed_metadata_build_nanos={observed_metadata_build_nanos}"
                 ),
             }),
             EpistemicGpuRuntimeWcojCertification::NotRequired { .. }
@@ -1334,9 +2249,123 @@ pub struct EpistemicGpuRuntimeCounters {
     pub kclique_metadata_build_count: u64,
     /// Provider-observed nanoseconds spent building K-clique metadata.
     pub kclique_metadata_build_nanos: u64,
+    /// Recursive Merge-phase K-clique histogram refresh boundaries observed by the executor.
+    pub kclique_histogram_refresh_count: u64,
+    /// Recursive Merge-phase K-clique histogram refresh accounting time observed by the executor.
+    pub kclique_histogram_refresh_nanos: u128,
 }
 
 impl EpistemicGpuRuntimeCounters {
+    fn checked_counter_delta(counter: &str, after: u64, before: u64) -> Result<u64> {
+        after
+            .checked_sub(before)
+            .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU runtime counter trace".to_string(),
+                context: format!(
+                    "runtime proof counter {counter} decreased from {before} to {after}"
+                ),
+            })
+    }
+
+    fn checked_counter_delta_u128(counter: &str, after: u128, before: u128) -> Result<u128> {
+        after
+            .checked_sub(before)
+            .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU runtime counter trace".to_string(),
+                context: format!(
+                    "runtime proof counter {counter} decreased from {before} to {after}"
+                ),
+            })
+    }
+
+    fn checked_counter_sum(counter: &str, values: &[u64]) -> Result<u64> {
+        values.iter().try_fold(0u64, |acc, value| {
+            acc.checked_add(*value)
+                .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic GPU runtime counter trace".to_string(),
+                    context: format!(
+                        "runtime proof counter {counter} overflowed while adding {value} to {acc}"
+                    ),
+                })
+        })
+    }
+
+    /// Checked delta from an earlier snapshot.
+    pub fn checked_delta_since(self, before: Self) -> Result<Self> {
+        Ok(Self {
+            wcoj_triangle_dispatch_count: Self::checked_counter_delta(
+                "wcoj_triangle_dispatch_count",
+                self.wcoj_triangle_dispatch_count,
+                before.wcoj_triangle_dispatch_count,
+            )?,
+            wcoj_4cycle_dispatch_count: Self::checked_counter_delta(
+                "wcoj_4cycle_dispatch_count",
+                self.wcoj_4cycle_dispatch_count,
+                before.wcoj_4cycle_dispatch_count,
+            )?,
+            w63_chain_dispatch_count: Self::checked_counter_delta(
+                "w63_chain_dispatch_count",
+                self.w63_chain_dispatch_count,
+                before.w63_chain_dispatch_count,
+            )?,
+            wcoj_clique5_dispatch_count: Self::checked_counter_delta(
+                "wcoj_clique5_dispatch_count",
+                self.wcoj_clique5_dispatch_count,
+                before.wcoj_clique5_dispatch_count,
+            )?,
+            wcoj_clique6_dispatch_count: Self::checked_counter_delta(
+                "wcoj_clique6_dispatch_count",
+                self.wcoj_clique6_dispatch_count,
+                before.wcoj_clique6_dispatch_count,
+            )?,
+            wcoj_clique7_dispatch_count: Self::checked_counter_delta(
+                "wcoj_clique7_dispatch_count",
+                self.wcoj_clique7_dispatch_count,
+                before.wcoj_clique7_dispatch_count,
+            )?,
+            wcoj_clique8_dispatch_count: Self::checked_counter_delta(
+                "wcoj_clique8_dispatch_count",
+                self.wcoj_clique8_dispatch_count,
+                before.wcoj_clique8_dispatch_count,
+            )?,
+            provider_wcoj_triangle_hg_dispatch_count: Self::checked_counter_delta(
+                "provider_wcoj_triangle_hg_dispatch_count",
+                self.provider_wcoj_triangle_hg_dispatch_count,
+                before.provider_wcoj_triangle_hg_dispatch_count,
+            )?,
+            wcoj_layout_sort_invocation_count: Self::checked_counter_delta(
+                "wcoj_layout_sort_invocation_count",
+                self.wcoj_layout_sort_invocation_count,
+                before.wcoj_layout_sort_invocation_count,
+            )?,
+            wcoj_layout_fast_path_hit_count: Self::checked_counter_delta(
+                "wcoj_layout_fast_path_hit_count",
+                self.wcoj_layout_fast_path_hit_count,
+                before.wcoj_layout_fast_path_hit_count,
+            )?,
+            kclique_metadata_build_count: Self::checked_counter_delta(
+                "kclique_metadata_build_count",
+                self.kclique_metadata_build_count,
+                before.kclique_metadata_build_count,
+            )?,
+            kclique_metadata_build_nanos: Self::checked_counter_delta(
+                "kclique_metadata_build_nanos",
+                self.kclique_metadata_build_nanos,
+                before.kclique_metadata_build_nanos,
+            )?,
+            kclique_histogram_refresh_count: Self::checked_counter_delta(
+                "kclique_histogram_refresh_count",
+                self.kclique_histogram_refresh_count,
+                before.kclique_histogram_refresh_count,
+            )?,
+            kclique_histogram_refresh_nanos: Self::checked_counter_delta_u128(
+                "kclique_histogram_refresh_nanos",
+                self.kclique_histogram_refresh_nanos,
+                before.kclique_histogram_refresh_nanos,
+            )?,
+        })
+    }
+
     /// Saturating delta from an earlier snapshot.
     pub fn saturating_delta_since(self, before: Self) -> Self {
         Self {
@@ -1376,22 +2405,53 @@ impl EpistemicGpuRuntimeCounters {
             kclique_metadata_build_nanos: self
                 .kclique_metadata_build_nanos
                 .saturating_sub(before.kclique_metadata_build_nanos),
+            kclique_histogram_refresh_count: self
+                .kclique_histogram_refresh_count
+                .saturating_sub(before.kclique_histogram_refresh_count),
+            kclique_histogram_refresh_nanos: self
+                .kclique_histogram_refresh_nanos
+                .saturating_sub(before.kclique_histogram_refresh_nanos),
         }
     }
 
     /// Total WCOJ dispatches installed by the executor.
     pub fn wcoj_dispatch_count(&self) -> u64 {
         self.wcoj_triangle_dispatch_count
-            + self.wcoj_4cycle_dispatch_count
-            + self.wcoj_clique_dispatch_count()
+            .saturating_add(self.wcoj_4cycle_dispatch_count)
+            .saturating_add(self.wcoj_clique_dispatch_count())
+    }
+
+    /// Checked total WCOJ dispatches installed by the executor.
+    pub fn checked_wcoj_dispatch_count(&self) -> Result<u64> {
+        Self::checked_counter_sum(
+            "wcoj_dispatch_count",
+            &[
+                self.wcoj_triangle_dispatch_count,
+                self.wcoj_4cycle_dispatch_count,
+                self.checked_wcoj_clique_dispatch_count()?,
+            ],
+        )
     }
 
     /// Total K-clique WCOJ dispatches installed by the executor.
     pub fn wcoj_clique_dispatch_count(&self) -> u64 {
         self.wcoj_clique5_dispatch_count
-            + self.wcoj_clique6_dispatch_count
-            + self.wcoj_clique7_dispatch_count
-            + self.wcoj_clique8_dispatch_count
+            .saturating_add(self.wcoj_clique6_dispatch_count)
+            .saturating_add(self.wcoj_clique7_dispatch_count)
+            .saturating_add(self.wcoj_clique8_dispatch_count)
+    }
+
+    /// Checked total K-clique WCOJ dispatches installed by the executor.
+    pub fn checked_wcoj_clique_dispatch_count(&self) -> Result<u64> {
+        Self::checked_counter_sum(
+            "wcoj_clique_dispatch_count",
+            &[
+                self.wcoj_clique5_dispatch_count,
+                self.wcoj_clique6_dispatch_count,
+                self.wcoj_clique7_dispatch_count,
+                self.wcoj_clique8_dispatch_count,
+            ],
+        )
     }
 }
 
@@ -1402,6 +2462,14 @@ pub enum EpistemicGpuRuntimeWcojCertification {
     NotRequired {
         /// Observed executor-installed WCOJ dispatches.
         observed_wcoj_dispatches: u64,
+        /// Structured planned-hash routes that replaced WCOJ dispatch obligations.
+        planned_hash_routes: usize,
+        /// Planned-hash routes where complete planner costs predicted hash wins.
+        planned_hash_planner_wins: usize,
+        /// Planned-hash routes selected because complete WCOJ stats were unavailable.
+        planned_hash_incomplete_stats: usize,
+        /// Planned-hash routes carrying finite hash-vs-WCOJ cost evidence.
+        planned_hash_cost_evidence: usize,
     },
     /// Runtime counters prove the required WCOJ dispatch happened.
     Certified {
@@ -1433,6 +2501,10 @@ pub enum EpistemicGpuRuntimeWcojCertification {
         observed_metadata_builds: u64,
         /// Observed provider time spent building K-clique metadata.
         observed_metadata_build_nanos: u64,
+        /// Observed recursive K-clique histogram refresh boundaries.
+        observed_histogram_refreshes: u64,
+        /// Observed recursive K-clique histogram refresh accounting time.
+        observed_histogram_refresh_nanos: u128,
     },
     /// The plan required sorted layouts, but no layout path executed.
     MissingRequiredWcojLayout {
@@ -1440,6 +2512,15 @@ pub enum EpistemicGpuRuntimeWcojCertification {
         required_sorted_layouts: usize,
         /// Observed layout sort or fast-path events.
         observed_layout_events: u64,
+    },
+    /// The plan dispatched a K-clique WCOJ route, but metadata-build counters did not advance.
+    MissingRequiredKcliqueMetadata {
+        /// K-clique WCOJ plans found during preflight.
+        required_kclique_plans: usize,
+        /// Observed provider K-clique metadata builds.
+        observed_metadata_builds: u64,
+        /// Observed provider time spent building K-clique metadata.
+        observed_metadata_build_nanos: u64,
     },
     /// The plan had WCOJ obligations, but counters did not advance.
     MissingRequiredWcojDispatch {
@@ -1454,8 +2535,32 @@ pub enum EpistemicGpuRuntimeWcojCertification {
     },
 }
 
+/// CUDA provider identity that produced an epistemic GPU execution result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EpistemicGpuProviderIdentity {
+    /// CUDA device ordinal used by the executor.
+    pub device_ordinal: usize,
+    /// Stable address of the executor's CUDA device wrapper.
+    pub device_ptr: usize,
+    /// Stable address of the executor's GPU memory manager.
+    pub memory_ptr: usize,
+}
+
+impl EpistemicGpuProviderIdentity {
+    /// Capture the device and memory-manager identity for a CUDA provider.
+    pub fn from_provider(provider: &xlog_cuda::CudaKernelProvider) -> Self {
+        Self {
+            device_ordinal: provider.device().ordinal(),
+            device_ptr: Arc::as_ptr(provider.device()) as usize,
+            memory_ptr: Arc::as_ptr(provider.memory()) as usize,
+        }
+    }
+}
+
 /// Output from executing the reduced production runtime plan for an epistemic program.
 pub struct EpistemicGpuExecutionResult {
+    /// CUDA provider identity that owns this result's device-resident buffers.
+    pub provider_identity: EpistemicGpuProviderIdentity,
     /// Prepared workspace and preflight state.
     pub prepared: EpistemicGpuPreparedExecution,
     /// Candidate-generation trace captured before reduced-plan dispatch.
@@ -1478,10 +2583,16 @@ pub struct EpistemicGpuExecutionResult {
     pub transfer_budget: EpistemicGpuTransferBudgetTrace,
     /// Final-result transfer accounting after the GPU hot path.
     pub final_result_transfer: EpistemicGpuFinalResultTransferTrace,
+    /// Reduced integrity-constraint validation after production runtime dispatch.
+    pub constraint_validation: EpistemicGpuConstraintValidationTrace,
     /// Device-derived semantic summary after world-view validation.
     pub semantic_trace: EpistemicGpuSemanticTrace,
+    /// Tuple-membership bindings that were validated and executed for this result.
+    pub tuple_membership_bindings: Vec<EpistemicTupleMembershipBinding>,
     /// Device-resident final query output buffer.
     pub final_output: CudaBuffer,
+    /// Device-resident final tuple evidence buffer before public projection.
+    pub tuple_evidence_output: Option<CudaBuffer>,
     /// Output buffer returned by the reduced production execution plan.
     pub output: CudaBuffer,
     /// Runtime counter trace for the reduced production plan dispatch.
@@ -1489,8 +2600,103 @@ pub struct EpistemicGpuExecutionResult {
 }
 
 impl EpistemicGpuExecutionResult {
+    /// Device-resident output used to derive concrete tuple-membership evidence.
+    pub fn tuple_evidence_output(&self) -> &CudaBuffer {
+        self.tuple_evidence_output
+            .as_ref()
+            .unwrap_or(&self.final_output)
+    }
+
+    /// Require that the retained runtime trace certifies the prepared execution.
+    pub fn require_runtime_dispatch_certification(&self) -> Result<()> {
+        if self.trace.preflight != self.prepared.preflight {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU runtime dispatch certification".to_string(),
+                context: "runtime trace preflight does not match prepared execution preflight"
+                    .to_string(),
+            });
+        }
+        if self.prepared.workspace.layout != self.prepared.preflight.workspace_layout {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU runtime dispatch certification".to_string(),
+                context: "prepared GPU workspace layout does not match preflight workspace layout"
+                    .to_string(),
+            });
+        }
+        self.prepared
+            .workspace
+            .require_buffer_lengths_match_layout("epistemic GPU runtime dispatch certification")?;
+        if self.tuple_membership_bindings.len()
+            != self.prepared.preflight.tuple_membership_binding_count
+        {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU runtime dispatch certification".to_string(),
+                context: format!(
+                    "runtime tuple-membership bindings do not match prepared preflight, got {} \
+                     bindings for preflight count {}",
+                    self.tuple_membership_bindings.len(),
+                    self.prepared.preflight.tuple_membership_binding_count
+                ),
+            });
+        }
+        if self.tuple_membership_bindings != self.prepared.tuple_membership_bindings {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU runtime dispatch certification".to_string(),
+                context: "runtime tuple-membership bindings do not match prepared GPU execution"
+                    .to_string(),
+            });
+        }
+        self.model_membership
+            .require_planned_tuple_key_column_reads(expected_tuple_key_column_reads(
+                &self.prepared.tuple_membership_bindings,
+            )?)?;
+        self.prepared.workspace_reset.require_matches_layout(
+            "epistemic GPU runtime dispatch certification",
+            self.prepared.preflight.workspace_layout,
+        )?;
+        self.final_result_transfer.require_matches_final_output(
+            "epistemic GPU runtime dispatch certification",
+            &self.final_output,
+        )?;
+        self.constraint_validation.require_matches_preflight(
+            "epistemic GPU runtime dispatch certification",
+            &self.prepared.preflight,
+        )?;
+        self.candidate_validation
+            .require_matches_candidate_generation(
+                "epistemic GPU runtime dispatch certification",
+                &self.candidate_generation,
+            )?;
+        self.semantic_trace.require_matches_execution_traces(
+            "epistemic GPU runtime dispatch certification",
+            &self.candidate_generation,
+            &self.propagation,
+            &self.model_membership,
+            &self.world_view_validation,
+        )?;
+        self.semantic_trace.require_rejection_metadata_accounting(
+            "epistemic GPU runtime dispatch certification",
+        )?;
+        self.semantic_trace
+            .require_candidate_index_partition("epistemic GPU runtime dispatch certification")?;
+        let aggregate_kernel_timing = self.try_aggregate_kernel_timing()?;
+        if !aggregate_kernel_timing.is_recorded() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU runtime dispatch certification".to_string(),
+                context: "accepted GPU execution did not record CUDA-event timing".to_string(),
+            });
+        }
+        self.trace.require_wcoj_certification()
+    }
+
     /// Aggregate CUDA-event timing from all epistemic GPU hot-path kernels.
     pub fn aggregate_kernel_timing(&self) -> EpistemicGpuKernelTimingTrace {
+        self.try_aggregate_kernel_timing()
+            .expect("epistemic GPU kernel timing aggregation overflowed")
+    }
+
+    /// Checked CUDA-event timing aggregation for certification paths.
+    pub fn try_aggregate_kernel_timing(&self) -> Result<EpistemicGpuKernelTimingTrace> {
         let traces = [
             self.candidate_generation.kernel_timing,
             self.propagation.kernel_timing,
@@ -1506,9 +2712,9 @@ impl EpistemicGpuExecutionResult {
             .iter()
             .all(EpistemicGpuKernelTimingTrace::is_recorded)
         {
-            EpistemicGpuKernelTimingTrace::sum(traces)
+            EpistemicGpuKernelTimingTrace::checked_sum(traces)
         } else {
-            EpistemicGpuKernelTimingTrace::unrecorded()
+            Ok(EpistemicGpuKernelTimingTrace::unrecorded())
         }
     }
 }
@@ -1532,8 +2738,14 @@ pub struct EpistemicGpuBatchExecutionTrace {
     pub cpu_probability_recomputations: u64,
     /// Hot-path D2H calls tracked across all components.
     pub tracked_dtoh_calls: u64,
-    /// Hot-path H2D calls tracked across all components.
+    /// Hot-path data-plane H2D calls tracked across all components.
     pub tracked_htod_calls: u64,
+    /// Hot-path aggregate H2D calls tracked across all components.
+    pub tracked_aggregate_htod_calls: u64,
+    /// Hot-path launch-metadata H2D calls tracked across all components.
+    pub tracked_launch_metadata_htod_calls: u64,
+    /// Hot-path data-plane H2D calls tracked across all components.
+    pub tracked_data_plane_htod_calls: u64,
     /// Per-candidate host round trips tracked across all components.
     pub per_candidate_host_round_trips: u64,
     /// Final output rows represented across all component device buffers.
@@ -1546,6 +2758,12 @@ pub struct EpistemicGpuBatchExecutionTrace {
     pub final_result_data_plane_dtoh_calls: u64,
     /// Post-hot-path final-result data-plane D2H bytes across all components.
     pub final_result_data_plane_dtoh_bytes: u64,
+    /// Reduced integrity-constraint relations checked across all components.
+    pub checked_constraint_relations: usize,
+    /// Reduced integrity-constraint relations with violating rows across all components.
+    pub violated_constraint_relations: usize,
+    /// Constraint row-count metadata reads used across all components.
+    pub constraint_row_count_device_reads: u32,
     /// Accepted world views observed across component semantic traces.
     pub accepted_world_views: usize,
     /// Rejected candidates observed across component semantic traces.
@@ -1565,104 +2783,230 @@ pub struct EpistemicGpuBatchExecutionTrace {
 impl EpistemicGpuBatchExecutionTrace {
     /// Build an aggregate trace from completed component results.
     pub fn from_component_results(results: &[EpistemicGpuExecutionResult]) -> Self {
-        let aggregate_kernel_timing = if results
-            .iter()
-            .all(|result| result.aggregate_kernel_timing().is_recorded())
-        {
-            EpistemicGpuKernelTimingTrace::sum(
-                results
-                    .iter()
-                    .map(|result| result.aggregate_kernel_timing()),
-            )
-        } else {
-            EpistemicGpuKernelTimingTrace::unrecorded()
-        };
+        Self::try_from_component_results(results)
+            .expect("epistemic GPU batch trace aggregation overflowed")
+    }
 
-        Self {
+    /// Build an aggregate trace from completed component results and fail closed
+    /// if any certification counter overflows.
+    pub fn try_from_component_results(results: &[EpistemicGpuExecutionResult]) -> Result<Self> {
+        let component_kernel_timings = results
+            .iter()
+            .map(EpistemicGpuExecutionResult::try_aggregate_kernel_timing)
+            .collect::<Result<Vec<_>>>()?;
+        let aggregate_kernel_timing = if component_kernel_timings
+            .iter()
+            .all(EpistemicGpuKernelTimingTrace::is_recorded)
+        {
+            EpistemicGpuKernelTimingTrace::checked_sum(component_kernel_timings)
+        } else {
+            Ok(EpistemicGpuKernelTimingTrace::unrecorded())
+        };
+        let aggregate_kernel_timing = aggregate_kernel_timing?;
+
+        Ok(Self {
             component_count: results.len(),
             gpu_runtime_component_executions: results.len(),
             cpu_recomposition_steps: 0,
-            cpu_candidate_enumerations: results
-                .iter()
-                .map(|result| u64::from(result.semantic_trace.cpu_candidate_enumerations))
-                .sum(),
-            cpu_world_view_validations: results
-                .iter()
-                .map(|result| u64::from(result.semantic_trace.cpu_world_view_validations))
-                .sum(),
-            cpu_solver_search_fallbacks: results
-                .iter()
-                .map(|result| result.prepared.preflight.cpu_fallbacks.solver_search)
-                .sum(),
-            cpu_probability_recomputations: results
-                .iter()
-                .map(|result| {
+            cpu_candidate_enumerations: checked_batch_sum_u64(
+                "cpu_candidate_enumerations",
+                results
+                    .iter()
+                    .map(|result| u64::from(result.semantic_trace.cpu_candidate_enumerations)),
+            )?,
+            cpu_world_view_validations: checked_batch_sum_u64(
+                "cpu_world_view_validations",
+                results
+                    .iter()
+                    .map(|result| u64::from(result.semantic_trace.cpu_world_view_validations)),
+            )?,
+            cpu_solver_search_fallbacks: checked_batch_sum_u64(
+                "cpu_solver_search_fallbacks",
+                results
+                    .iter()
+                    .map(|result| result.prepared.preflight.cpu_fallbacks.solver_search),
+            )?,
+            cpu_probability_recomputations: checked_batch_sum_u64(
+                "cpu_probability_recomputations",
+                results.iter().map(|result| {
                     result
                         .prepared
                         .preflight
                         .cpu_fallbacks
                         .probabilistic_recompute
-                })
-                .sum(),
-            tracked_dtoh_calls: results
-                .iter()
-                .map(|result| result.transfer_budget.tracked_dtoh_calls)
-                .sum(),
-            tracked_htod_calls: results
-                .iter()
-                .map(|result| result.transfer_budget.tracked_htod_calls)
-                .sum(),
-            per_candidate_host_round_trips: results
-                .iter()
-                .map(|result| result.transfer_budget.per_candidate_host_round_trips)
-                .sum(),
-            final_output_rows: results
-                .iter()
-                .map(|result| result.final_result_transfer.final_output_rows)
-                .sum(),
-            final_output_payload_bytes: results
-                .iter()
-                .map(|result| result.final_result_transfer.final_output_payload_bytes)
-                .sum(),
-            final_result_row_count_device_reads: results
-                .iter()
-                .map(|result| result.final_result_transfer.row_count_device_reads)
-                .sum(),
-            final_result_data_plane_dtoh_calls: results
-                .iter()
-                .map(|result| result.final_result_transfer.tracked_data_plane_dtoh_calls)
-                .sum(),
-            final_result_data_plane_dtoh_bytes: results
-                .iter()
-                .map(|result| result.final_result_transfer.tracked_data_plane_dtoh_bytes)
-                .sum(),
-            accepted_world_views: results
-                .iter()
-                .map(|result| result.semantic_trace.accepted_world_views)
-                .sum(),
-            rejected_candidates: results
-                .iter()
-                .map(|result| result.semantic_trace.rejected_candidates)
-                .sum(),
-            know_operator_count: results
-                .iter()
-                .map(|result| result.prepared.preflight.know_operator_count)
-                .sum(),
-            possible_operator_count: results
-                .iter()
-                .map(|result| result.prepared.preflight.possible_operator_count)
-                .sum(),
-            not_know_operator_count: results
-                .iter()
-                .map(|result| result.prepared.preflight.not_know_operator_count)
-                .sum(),
-            not_possible_operator_count: results
-                .iter()
-                .map(|result| result.prepared.preflight.not_possible_operator_count)
-                .sum(),
+                }),
+            )?,
+            tracked_dtoh_calls: checked_batch_sum_u64(
+                "tracked_dtoh_calls",
+                results
+                    .iter()
+                    .map(|result| result.transfer_budget.tracked_dtoh_calls),
+            )?,
+            tracked_htod_calls: checked_batch_sum_u64(
+                "tracked_htod_calls",
+                results
+                    .iter()
+                    .map(|result| result.transfer_budget.tracked_htod_calls),
+            )?,
+            tracked_aggregate_htod_calls: checked_batch_sum_u64(
+                "tracked_aggregate_htod_calls",
+                results
+                    .iter()
+                    .map(|result| result.transfer_budget.tracked_aggregate_htod_calls),
+            )?,
+            tracked_launch_metadata_htod_calls: checked_batch_sum_u64(
+                "tracked_launch_metadata_htod_calls",
+                results
+                    .iter()
+                    .map(|result| result.transfer_budget.tracked_launch_metadata_htod_calls),
+            )?,
+            tracked_data_plane_htod_calls: checked_batch_sum_u64(
+                "tracked_data_plane_htod_calls",
+                results
+                    .iter()
+                    .map(|result| result.transfer_budget.tracked_data_plane_htod_calls),
+            )?,
+            per_candidate_host_round_trips: checked_batch_sum_u64(
+                "per_candidate_host_round_trips",
+                results
+                    .iter()
+                    .map(|result| result.transfer_budget.per_candidate_host_round_trips),
+            )?,
+            final_output_rows: checked_batch_sum_usize(
+                "final_output_rows",
+                results
+                    .iter()
+                    .map(|result| result.final_result_transfer.final_output_rows),
+            )?,
+            final_output_payload_bytes: checked_batch_sum_u64(
+                "final_output_payload_bytes",
+                results
+                    .iter()
+                    .map(|result| result.final_result_transfer.final_output_payload_bytes),
+            )?,
+            final_result_row_count_device_reads: checked_batch_sum_u32(
+                "final_result_row_count_device_reads",
+                results
+                    .iter()
+                    .map(|result| result.final_result_transfer.row_count_device_reads),
+            )?,
+            final_result_data_plane_dtoh_calls: checked_batch_sum_u64(
+                "final_result_data_plane_dtoh_calls",
+                results
+                    .iter()
+                    .map(|result| result.final_result_transfer.tracked_data_plane_dtoh_calls),
+            )?,
+            final_result_data_plane_dtoh_bytes: checked_batch_sum_u64(
+                "final_result_data_plane_dtoh_bytes",
+                results
+                    .iter()
+                    .map(|result| result.final_result_transfer.tracked_data_plane_dtoh_bytes),
+            )?,
+            checked_constraint_relations: checked_batch_sum_usize(
+                "checked_constraint_relations",
+                results
+                    .iter()
+                    .map(|result| result.constraint_validation.checked_constraint_relations),
+            )?,
+            violated_constraint_relations: checked_batch_sum_usize(
+                "violated_constraint_relations",
+                results
+                    .iter()
+                    .map(|result| result.constraint_validation.violated_constraint_relations),
+            )?,
+            constraint_row_count_device_reads: checked_batch_sum_u32(
+                "constraint_row_count_device_reads",
+                results
+                    .iter()
+                    .map(|result| result.constraint_validation.row_count_device_reads),
+            )?,
+            accepted_world_views: checked_batch_sum_usize(
+                "accepted_world_views",
+                results
+                    .iter()
+                    .map(|result| result.semantic_trace.accepted_world_views),
+            )?,
+            rejected_candidates: checked_batch_sum_usize(
+                "rejected_candidates",
+                results
+                    .iter()
+                    .map(|result| result.semantic_trace.rejected_candidates),
+            )?,
+            know_operator_count: checked_batch_sum_usize(
+                "know_operator_count",
+                results
+                    .iter()
+                    .map(|result| result.prepared.preflight.know_operator_count),
+            )?,
+            possible_operator_count: checked_batch_sum_usize(
+                "possible_operator_count",
+                results
+                    .iter()
+                    .map(|result| result.prepared.preflight.possible_operator_count),
+            )?,
+            not_know_operator_count: checked_batch_sum_usize(
+                "not_know_operator_count",
+                results
+                    .iter()
+                    .map(|result| result.prepared.preflight.not_know_operator_count),
+            )?,
+            not_possible_operator_count: checked_batch_sum_usize(
+                "not_possible_operator_count",
+                results
+                    .iter()
+                    .map(|result| result.prepared.preflight.not_possible_operator_count),
+            )?,
             aggregate_kernel_timing,
-        }
+        })
     }
+}
+
+fn checked_batch_sum_u64(
+    counter: &'static str,
+    values: impl IntoIterator<Item = u64>,
+) -> Result<u64> {
+    values.into_iter().try_fold(0u64, |acc, value| {
+        acc.checked_add(value)
+            .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU batch execution trace".to_string(),
+                context: format!(
+                    "batch counter {counter} overflowed while aggregating component traces: \
+                     acc={acc} next={value}"
+                ),
+            })
+    })
+}
+
+fn checked_batch_sum_u32(
+    counter: &'static str,
+    values: impl IntoIterator<Item = u32>,
+) -> Result<u32> {
+    values.into_iter().try_fold(0u32, |acc, value| {
+        acc.checked_add(value)
+            .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU batch execution trace".to_string(),
+                context: format!(
+                    "batch counter {counter} overflowed while aggregating component traces: \
+                     acc={acc} next={value}"
+                ),
+            })
+    })
+}
+
+fn checked_batch_sum_usize(
+    counter: &'static str,
+    values: impl IntoIterator<Item = usize>,
+) -> Result<usize> {
+    values.into_iter().try_fold(0usize, |acc, value| {
+        acc.checked_add(value)
+            .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU batch execution trace".to_string(),
+                context: format!(
+                    "batch counter {counter} overflowed while aggregating component traces: \
+                     acc={acc} next={value}"
+                ),
+            })
+    })
 }
 
 /// Results plus aggregate trace from a split/batch epistemic GPU execution.
@@ -1673,45 +3017,143 @@ pub struct EpistemicGpuBatchExecutionResult {
     pub trace: EpistemicGpuBatchExecutionTrace,
 }
 
+impl EpistemicGpuBatchExecutionResult {
+    /// Require the retained aggregate trace to be derived from the component results.
+    pub fn require_trace_matches_components(&self, construct: &str) -> Result<()> {
+        if self.results.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: construct.to_string(),
+                context: "batch evidence requires at least one GPU component".to_string(),
+            });
+        }
+        let expected = EpistemicGpuBatchExecutionTrace::try_from_component_results(&self.results)?;
+        if self.trace != expected {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: construct.to_string(),
+                context: format!(
+                    "batch aggregate trace does not match component GPU execution results: \
+                     trace_components={}/{} expected_components={}/{} \
+                     trace_final_rows={} expected_final_rows={} trace_dtoh_calls={} \
+                     expected_dtoh_calls={} trace_data_plane_htod_calls={} \
+                     expected_data_plane_htod_calls={} trace_constraint_violations={} \
+                     expected_constraint_violations={} trace_accepted_world_views={} \
+                     expected_accepted_world_views={}",
+                    self.trace.gpu_runtime_component_executions,
+                    self.trace.component_count,
+                    expected.gpu_runtime_component_executions,
+                    expected.component_count,
+                    self.trace.final_output_rows,
+                    expected.final_output_rows,
+                    self.trace.tracked_dtoh_calls,
+                    expected.tracked_dtoh_calls,
+                    self.trace.tracked_data_plane_htod_calls,
+                    expected.tracked_data_plane_htod_calls,
+                    self.trace.violated_constraint_relations,
+                    expected.violated_constraint_relations,
+                    self.trace.accepted_world_views,
+                    expected.accepted_world_views
+                ),
+            });
+        }
+        if !self.trace.aggregate_kernel_timing.is_recorded() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: construct.to_string(),
+                context: "batch GPU execution did not record aggregate CUDA-event timing"
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
 impl EpistemicGpuRuntimeWcojCertification {
     /// Compare static preflight obligations with runtime counter deltas.
     pub fn for_preflight_and_delta(
         preflight: &EpistemicGpuRuntimePreflight,
         delta: &EpistemicGpuRuntimeCounters,
     ) -> Self {
-        let observed_wcoj_dispatches = delta.wcoj_dispatch_count();
-        let observed_kclique_dispatches = delta.wcoj_clique_dispatch_count();
-        let required_multiway_reductions = preflight
+        Self::try_for_preflight_and_delta(preflight, delta)
+            .expect("runtime WCOJ certification counters must not overflow")
+    }
+
+    /// Compare static preflight obligations with runtime counter deltas, failing closed
+    /// if certification counters overflow while being summarized.
+    pub fn try_for_preflight_and_delta(
+        preflight: &EpistemicGpuRuntimePreflight,
+        delta: &EpistemicGpuRuntimeCounters,
+    ) -> Result<Self> {
+        let observed_wcoj_dispatches = delta.checked_wcoj_dispatch_count()?;
+        let observed_kclique_dispatches = delta.checked_wcoj_clique_dispatch_count()?;
+        let wcoj_routed_reduction_count = preflight
             .multiway_reduction_count
-            .saturating_sub(preflight.planned_hash_route_count);
+            .checked_sub(preflight.planned_hash_route_count)
+            .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU WCOJ route certification".to_string(),
+                context: format!(
+                    "planned hash routes exceed observed route obligations: \
+                     multiway_reductions={} planned_hash_routes={}",
+                    preflight.multiway_reduction_count, preflight.planned_hash_route_count
+                ),
+            })?;
+        let required_multiway_reductions = wcoj_routed_reduction_count;
 
         if required_multiway_reductions == 0 {
-            return Self::NotRequired {
+            return Ok(Self::NotRequired {
                 observed_wcoj_dispatches,
-            };
+                planned_hash_routes: preflight.planned_hash_route_count,
+                planned_hash_planner_wins: preflight.planned_hash_planner_wins_count,
+                planned_hash_incomplete_stats: preflight.planned_hash_incomplete_stats_count,
+                planned_hash_cost_evidence: preflight.planned_hash_cost_evidence_count,
+            });
         }
 
         if observed_wcoj_dispatches < required_multiway_reductions as u64
             || observed_kclique_dispatches < preflight.kclique_wcoj_plan_count as u64
+            || delta.wcoj_triangle_dispatch_count < preflight.wcoj_triangle_route_count as u64
+            || delta.wcoj_4cycle_dispatch_count < preflight.wcoj_4cycle_route_count as u64
+            || delta.wcoj_clique5_dispatch_count
+                < preflight.kclique_wcoj_plan_count_by_arity[0] as u64
+            || delta.wcoj_clique6_dispatch_count
+                < preflight.kclique_wcoj_plan_count_by_arity[1] as u64
+            || delta.wcoj_clique7_dispatch_count
+                < preflight.kclique_wcoj_plan_count_by_arity[2] as u64
+            || delta.wcoj_clique8_dispatch_count
+                < preflight.kclique_wcoj_plan_count_by_arity[3] as u64
         {
-            return Self::MissingRequiredWcojDispatch {
+            return Ok(Self::MissingRequiredWcojDispatch {
                 required_multiway_reductions,
                 required_kclique_plans: preflight.kclique_wcoj_plan_count,
                 observed_wcoj_dispatches,
                 observed_kclique_dispatches,
-            };
+            });
         }
 
-        let observed_layout_events =
-            delta.wcoj_layout_sort_invocation_count + delta.wcoj_layout_fast_path_hit_count;
-        if preflight.sorted_layout_requirement_count > 0 && observed_layout_events == 0 {
-            return Self::MissingRequiredWcojLayout {
+        let observed_layout_events = EpistemicGpuRuntimeCounters::checked_counter_sum(
+            "wcoj_layout_events",
+            &[
+                delta.wcoj_layout_sort_invocation_count,
+                delta.wcoj_layout_fast_path_hit_count,
+            ],
+        )?;
+        if observed_layout_events < preflight.sorted_layout_requirement_count as u64 {
+            return Ok(Self::MissingRequiredWcojLayout {
                 required_sorted_layouts: preflight.sorted_layout_requirement_count,
                 observed_layout_events,
-            };
+            });
         }
 
-        Self::Certified {
+        if preflight.kclique_wcoj_plan_count > 0
+            && (delta.kclique_metadata_build_count < preflight.kclique_wcoj_plan_count as u64
+                || delta.kclique_metadata_build_nanos == 0)
+        {
+            return Ok(Self::MissingRequiredKcliqueMetadata {
+                required_kclique_plans: preflight.kclique_wcoj_plan_count,
+                observed_metadata_builds: delta.kclique_metadata_build_count,
+                observed_metadata_build_nanos: delta.kclique_metadata_build_nanos,
+            });
+        }
+
+        Ok(Self::Certified {
             observed_wcoj_dispatches,
             certified_multiway_reductions: required_multiway_reductions,
             observed_kclique_dispatches,
@@ -1726,10 +3168,13 @@ impl EpistemicGpuRuntimeWcojCertification {
             observed_layout_fast_path_hits: delta.wcoj_layout_fast_path_hit_count,
             observed_metadata_builds: delta.kclique_metadata_build_count,
             observed_metadata_build_nanos: delta.kclique_metadata_build_nanos,
-        }
+            observed_histogram_refreshes: delta.kclique_histogram_refresh_count,
+            observed_histogram_refresh_nanos: delta.kclique_histogram_refresh_nanos,
+        })
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum TupleSourceLaunch<'a> {
     ArityZero {
         literal_index: u32,
@@ -1903,6 +3348,8 @@ impl Executor {
             wcoj_layout_fast_path_hit_count: self.provider.wcoj_layout_fast_path_hit_count(),
             kclique_metadata_build_count: self.provider.kclique_metadata_build_count(),
             kclique_metadata_build_nanos: self.provider.kclique_metadata_build_nanos(),
+            kclique_histogram_refresh_count: self.kclique_histogram_refresh_count(),
+            kclique_histogram_refresh_nanos: self.kclique_histogram_refresh_nanos(),
         }
     }
 
@@ -1984,9 +3431,7 @@ impl Executor {
                 )
             })?;
 
-        Ok(EpistemicGpuWorkspaceResetTrace::for_layout(
-            workspace.layout,
-        ))
+        EpistemicGpuWorkspaceResetTrace::try_for_layout(workspace.layout)
     }
 
     /// Generate candidate-assumption bitsets directly into the GPU workspace.
@@ -2013,9 +3458,16 @@ impl Executor {
             });
         }
 
-        let literal_count = literal_count as u32;
-        let candidate_count = candidate_count as u32;
-        let total = trace.candidate_assumption_bytes as u32;
+        let literal_count =
+            checked_u32_dimension(literal_count, "epistemic GPU candidate generation literals")?;
+        let candidate_count = checked_u32_dimension(
+            candidate_count,
+            "epistemic GPU candidate generation candidates",
+        )?;
+        let total = checked_u32_dimension(
+            trace.candidate_assumption_bytes,
+            "epistemic GPU candidate generation launch elements",
+        )?;
         let func = self
             .provider
             .device()
@@ -2055,20 +3507,13 @@ impl Executor {
         literal_count: usize,
         candidate_count: usize,
     ) -> Result<EpistemicGpuPropagationTrace> {
-        let trace = EpistemicGpuPropagationTrace::for_counts(literal_count, candidate_count)?;
+        let mut trace = EpistemicGpuPropagationTrace::for_counts(literal_count, candidate_count)?;
         let candidate_assumption_bytes = checked_product(literal_count, candidate_count)?;
         if candidate_assumption_bytes > workspace.layout.candidate_assumption_bytes {
             return Err(XlogError::ResourceExhausted {
                 context: "epistemic GPU propagation candidate workspace".to_string(),
                 estimated_bytes: candidate_assumption_bytes as u64,
                 budget_bytes: workspace.layout.candidate_assumption_bytes as u64,
-            });
-        }
-        if trace.world_view_bytes_written > workspace.layout.world_view_bytes {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU propagation world-view workspace".to_string(),
-                estimated_bytes: trace.world_view_bytes_written as u64,
-                budget_bytes: workspace.layout.world_view_bytes as u64,
             });
         }
         if trace.rejection_reason_slots_written > workspace.layout.rejection_reason_slots {
@@ -2095,10 +3540,39 @@ impl Executor {
                 budget_bytes: u32::MAX as u64,
             });
         }
+        let world_view_bitset_bytes_per_candidate =
+            world_view_bitset_bytes_per_candidate(literal_count)?;
+        if world_view_bitset_bytes_per_candidate > world_stride {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU propagation world-view bitset stride".to_string(),
+                estimated_bytes: world_view_bitset_bytes_per_candidate as u64,
+                budget_bytes: world_stride as u64,
+            });
+        }
+        let world_view_bitset_bytes =
+            checked_product(world_view_bitset_bytes_per_candidate, candidate_count)?;
+        if world_view_bitset_bytes > workspace.layout.world_view_bytes {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU propagation world-view bitsets".to_string(),
+                estimated_bytes: world_view_bitset_bytes as u64,
+                budget_bytes: workspace.layout.world_view_bytes as u64,
+            });
+        }
+        trace.world_view_bytes_written = checked_product(world_stride, candidate_count)?;
+        if trace.world_view_bytes_written > workspace.layout.world_view_bytes {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU propagation world-view workspace".to_string(),
+                estimated_bytes: trace.world_view_bytes_written as u64,
+                budget_bytes: workspace.layout.world_view_bytes as u64,
+            });
+        }
 
-        let literal_count = literal_count as u32;
-        let candidate_count = candidate_count as u32;
-        let world_stride = world_stride as u32;
+        let literal_count =
+            checked_u32_dimension(literal_count, "epistemic GPU propagation literals")?;
+        let candidate_count =
+            checked_u32_dimension(candidate_count, "epistemic GPU propagation candidates")?;
+        let world_stride =
+            checked_u32_dimension(world_stride, "epistemic GPU propagation world stride")?;
         let func = self
             .provider
             .device()
@@ -2141,20 +3615,13 @@ impl Executor {
         literal_count: usize,
         candidate_count: usize,
     ) -> Result<EpistemicGpuCandidateValidationTrace> {
-        let trace =
+        let mut trace =
             EpistemicGpuCandidateValidationTrace::for_counts(literal_count, candidate_count)?;
         if trace.candidate_assumption_bytes_checked > workspace.layout.candidate_assumption_bytes {
             return Err(XlogError::ResourceExhausted {
                 context: "epistemic GPU validation candidate workspace".to_string(),
                 estimated_bytes: trace.candidate_assumption_bytes_checked as u64,
                 budget_bytes: workspace.layout.candidate_assumption_bytes as u64,
-            });
-        }
-        if trace.world_view_bytes_checked > workspace.layout.world_view_bytes {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU validation world-view workspace".to_string(),
-                estimated_bytes: trace.world_view_bytes_checked as u64,
-                budget_bytes: workspace.layout.world_view_bytes as u64,
             });
         }
         if trace.rejection_reason_slots_written > workspace.layout.rejection_reason_slots {
@@ -2181,10 +3648,39 @@ impl Executor {
                 budget_bytes: u32::MAX as u64,
             });
         }
+        let world_view_bitset_bytes_per_candidate =
+            world_view_bitset_bytes_per_candidate(literal_count)?;
+        if world_view_bitset_bytes_per_candidate > world_stride {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU validation world-view bitset stride".to_string(),
+                estimated_bytes: world_view_bitset_bytes_per_candidate as u64,
+                budget_bytes: world_stride as u64,
+            });
+        }
+        let world_view_bitset_bytes =
+            checked_product(world_view_bitset_bytes_per_candidate, candidate_count)?;
+        if world_view_bitset_bytes > workspace.layout.world_view_bytes {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU validation world-view bitsets".to_string(),
+                estimated_bytes: world_view_bitset_bytes as u64,
+                budget_bytes: workspace.layout.world_view_bytes as u64,
+            });
+        }
+        trace.world_view_bytes_checked = world_view_bitset_bytes;
+        if trace.world_view_bytes_checked > workspace.layout.world_view_bytes {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU validation world-view workspace".to_string(),
+                estimated_bytes: trace.world_view_bytes_checked as u64,
+                budget_bytes: workspace.layout.world_view_bytes as u64,
+            });
+        }
 
-        let literal_count = literal_count as u32;
-        let candidate_count = candidate_count as u32;
-        let world_stride = world_stride as u32;
+        let literal_count =
+            checked_u32_dimension(literal_count, "epistemic GPU validation literals")?;
+        let candidate_count =
+            checked_u32_dimension(candidate_count, "epistemic GPU validation candidates")?;
+        let world_stride =
+            checked_u32_dimension(world_stride, "epistemic GPU validation world stride")?;
         let func = self
             .provider
             .device()
@@ -2360,16 +3856,6 @@ impl Executor {
             .try_fold(0usize, |acc, binding| {
                 checked_sum(acc, binding.key_columns.len())
             })?;
-        let bound_tuple_source_count = gpu_plan
-            .tuple_membership_bindings
-            .iter()
-            .filter(|binding| {
-                binding
-                    .key_terms
-                    .iter()
-                    .any(|term| matches!(term, EirTerm::Variable(_)))
-            })
-            .count();
         let mut trace =
             EpistemicGpuModelMembershipTrace::for_stable_model_tuple_sources_with_key_columns(
                 literal_count,
@@ -2379,14 +3865,7 @@ impl Executor {
                 gpu_plan.tuple_membership_bindings.len(),
                 tuple_source_key_column_count,
             )?;
-        if bound_tuple_source_count > u32::MAX as usize {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU bound tuple-key source count".to_string(),
-                estimated_bytes: bound_tuple_source_count as u64,
-                budget_bytes: u32::MAX as u64,
-            });
-        }
-        trace.output_row_count_device_reads = bound_tuple_source_count as u32;
+        trace.output_row_count_device_reads = trace.kernel_launches;
         let candidate_assumption_bytes = checked_product(literal_count, candidate_count)?;
         if candidate_assumption_bytes > workspace.layout.candidate_assumption_bytes {
             return Err(XlogError::ResourceExhausted {
@@ -2753,7 +4232,7 @@ impl Executor {
                             });
                         }
 
-                        key_col_ptrs_host.push(*key_col_ref.device_ptr() as u64);
+                        key_col_ptrs_host.push(*key_col_ref.device_ptr());
                         key_col_widths_host.push(key_col_width as u32);
                         match &binding.key_terms[term_index] {
                             EirTerm::Variable(variable_name) => {
@@ -2813,7 +4292,7 @@ impl Executor {
                                 expected_key_bits_host.push(0);
                                 expected_key_type_codes_host.push(key_col_type.to_code());
                                 tuple_key_match_modes_host.push(TUPLE_KEY_MATCH_MODE_BOUND_OUTPUT);
-                                bound_value_col_ptrs_host.push(*bound_col.device_ptr() as u64);
+                                bound_value_col_ptrs_host.push(*bound_col.device_ptr());
                                 bound_value_col_widths_host.push(bound_col_width as u32);
                             }
                             term => {
@@ -2829,7 +4308,6 @@ impl Executor {
                     }
 
                     let memory = self.provider.memory();
-                    let device = self.provider.device().inner();
                     let mut key_col_ptrs = memory.alloc::<u64>(key_columns.len())?;
                     let mut key_col_widths = memory.alloc::<u32>(key_columns.len())?;
                     let mut expected_key_bits = memory.alloc::<u64>(key_columns.len())?;
@@ -2837,8 +4315,8 @@ impl Executor {
                     let mut tuple_key_match_modes = memory.alloc::<u8>(key_columns.len())?;
                     let mut bound_value_col_ptrs = memory.alloc::<u64>(key_columns.len())?;
                     let mut bound_value_col_widths = memory.alloc::<u32>(key_columns.len())?;
-                    device
-                        .htod_sync_copy_into(&key_col_ptrs_host, &mut key_col_ptrs)
+                    self.provider
+                        .htod_launch_metadata_sync_copy_into(&key_col_ptrs_host, &mut key_col_ptrs)
                         .map_err(|e| {
                             XlogError::execution_ctx(
                                 "epistemic GPU tuple-key metadata",
@@ -2846,8 +4324,11 @@ impl Executor {
                                 &e,
                             )
                         })?;
-                    device
-                        .htod_sync_copy_into(&key_col_widths_host, &mut key_col_widths)
+                    self.provider
+                        .htod_launch_metadata_sync_copy_into(
+                            &key_col_widths_host,
+                            &mut key_col_widths,
+                        )
                         .map_err(|e| {
                             XlogError::execution_ctx(
                                 "epistemic GPU tuple-key metadata",
@@ -2855,8 +4336,11 @@ impl Executor {
                                 &e,
                             )
                         })?;
-                    device
-                        .htod_sync_copy_into(&expected_key_bits_host, &mut expected_key_bits)
+                    self.provider
+                        .htod_launch_metadata_sync_copy_into(
+                            &expected_key_bits_host,
+                            &mut expected_key_bits,
+                        )
                         .map_err(|e| {
                             XlogError::execution_ctx(
                                 "epistemic GPU tuple-key metadata",
@@ -2864,8 +4348,8 @@ impl Executor {
                                 &e,
                             )
                         })?;
-                    device
-                        .htod_sync_copy_into(
+                    self.provider
+                        .htod_launch_metadata_sync_copy_into(
                             &expected_key_type_codes_host,
                             &mut expected_key_type_codes,
                         )
@@ -2876,8 +4360,8 @@ impl Executor {
                                 &e,
                             )
                         })?;
-                    device
-                        .htod_sync_copy_into(
+                    self.provider
+                        .htod_launch_metadata_sync_copy_into(
                             &tuple_key_match_modes_host,
                             &mut tuple_key_match_modes,
                         )
@@ -2888,8 +4372,11 @@ impl Executor {
                                 &e,
                             )
                         })?;
-                    device
-                        .htod_sync_copy_into(&bound_value_col_ptrs_host, &mut bound_value_col_ptrs)
+                    self.provider
+                        .htod_launch_metadata_sync_copy_into(
+                            &bound_value_col_ptrs_host,
+                            &mut bound_value_col_ptrs,
+                        )
                         .map_err(|e| {
                             XlogError::execution_ctx(
                                 "epistemic GPU tuple-key metadata",
@@ -2897,8 +4384,8 @@ impl Executor {
                                 &e,
                             )
                         })?;
-                    device
-                        .htod_sync_copy_into(
+                    self.provider
+                        .htod_launch_metadata_sync_copy_into(
                             &bound_value_col_widths_host,
                             &mut bound_value_col_widths,
                         )
@@ -3006,10 +4493,11 @@ impl Executor {
             })?;
         let config = LaunchConfig::for_num_elems(per_binding_launch_elems as u32);
 
-        let kernel_timing = self.time_epistemic_gpu_kernel_launch(
-            "epistemic GPU tuple-source model membership",
-            || unsafe {
-                for tuple_source in &tuple_sources {
+        let mut kernel_timings = Vec::with_capacity(tuple_sources.len());
+        for tuple_source in &tuple_sources {
+            let kernel_timing = self.time_epistemic_gpu_kernel_launch(
+                "epistemic GPU tuple-source model membership",
+                || unsafe {
                     match tuple_source {
                         TupleSourceLaunch::ArityZero {
                             literal_index,
@@ -3021,19 +4509,20 @@ impl Executor {
                             // checks above prove candidate, world-view, membership, rejection,
                             // and tuple-source row-count buffers cover all accesses.
                             let mut params: Vec<*mut c_void> = vec![
-                                (&literal_count).as_kernel_param(),
-                                (&candidate_count).as_kernel_param(),
-                                (&reduction_count).as_kernel_param(),
-                                (&models_per_reduction).as_kernel_param(),
-                                (&world_stride).as_kernel_param(),
+                                literal_count.as_kernel_param(),
+                                candidate_count.as_kernel_param(),
+                                reduction_count.as_kernel_param(),
+                                models_per_reduction.as_kernel_param(),
+                                world_stride.as_kernel_param(),
                                 literal_index.as_kernel_param(),
                                 reduction_index.as_kernel_param(),
                                 negated.as_kernel_param(),
+                                output.num_rows_device().as_kernel_param(),
                                 row_count.as_kernel_param(),
                                 (&workspace.candidate_assumptions).as_kernel_param(),
                                 (&workspace.world_views).as_kernel_param(),
-                                (&mut workspace.model_membership).as_kernel_param(),
-                                (&mut workspace.rejection_reasons).as_kernel_param(),
+                                (&workspace.model_membership).as_kernel_param(),
+                                (&workspace.rejection_reasons).as_kernel_param(),
                             ];
                             func.clone().launch(config, &mut params)?;
                         }
@@ -3051,14 +4540,15 @@ impl Executor {
                             // above cover workspace buffers, row_count comes from the named source
                             // relation, and key_col0/key_col0_width are schema-validated.
                             let mut params: Vec<*mut c_void> = vec![
-                                (&literal_count).as_kernel_param(),
-                                (&candidate_count).as_kernel_param(),
-                                (&reduction_count).as_kernel_param(),
-                                (&models_per_reduction).as_kernel_param(),
-                                (&world_stride).as_kernel_param(),
+                                literal_count.as_kernel_param(),
+                                candidate_count.as_kernel_param(),
+                                reduction_count.as_kernel_param(),
+                                models_per_reduction.as_kernel_param(),
+                                world_stride.as_kernel_param(),
                                 literal_index.as_kernel_param(),
                                 reduction_index.as_kernel_param(),
                                 negated.as_kernel_param(),
+                                output.num_rows_device().as_kernel_param(),
                                 row_count.as_kernel_param(),
                                 key_col0.as_kernel_param(),
                                 key_col0_width.as_kernel_param(),
@@ -3066,8 +4556,8 @@ impl Executor {
                                 expected_key_col0_type_code.as_kernel_param(),
                                 (&workspace.candidate_assumptions).as_kernel_param(),
                                 (&workspace.world_views).as_kernel_param(),
-                                (&mut workspace.model_membership).as_kernel_param(),
-                                (&mut workspace.rejection_reasons).as_kernel_param(),
+                                (&workspace.model_membership).as_kernel_param(),
+                                (&workspace.rejection_reasons).as_kernel_param(),
                             ];
                             func_arity1.clone().launch(config, &mut params)?;
                         }
@@ -3089,14 +4579,15 @@ impl Executor {
                             // above cover workspace buffers, row_count comes from the named source
                             // relation, and both key columns are schema-validated.
                             let mut params: Vec<*mut c_void> = vec![
-                                (&literal_count).as_kernel_param(),
-                                (&candidate_count).as_kernel_param(),
-                                (&reduction_count).as_kernel_param(),
-                                (&models_per_reduction).as_kernel_param(),
-                                (&world_stride).as_kernel_param(),
+                                literal_count.as_kernel_param(),
+                                candidate_count.as_kernel_param(),
+                                reduction_count.as_kernel_param(),
+                                models_per_reduction.as_kernel_param(),
+                                world_stride.as_kernel_param(),
                                 literal_index.as_kernel_param(),
                                 reduction_index.as_kernel_param(),
                                 negated.as_kernel_param(),
+                                output.num_rows_device().as_kernel_param(),
                                 row_count.as_kernel_param(),
                                 key_col0.as_kernel_param(),
                                 key_col0_width.as_kernel_param(),
@@ -3108,8 +4599,8 @@ impl Executor {
                                 expected_key_col1_type_code.as_kernel_param(),
                                 (&workspace.candidate_assumptions).as_kernel_param(),
                                 (&workspace.world_views).as_kernel_param(),
-                                (&mut workspace.model_membership).as_kernel_param(),
-                                (&mut workspace.rejection_reasons).as_kernel_param(),
+                                (&workspace.model_membership).as_kernel_param(),
+                                (&workspace.rejection_reasons).as_kernel_param(),
                             ];
                             func_arity2.clone().launch(config, &mut params)?;
                         }
@@ -3135,14 +4626,15 @@ impl Executor {
                             // above cover workspace buffers, row_count comes from the named source
                             // relation, and all key columns are schema-validated.
                             let mut params: Vec<*mut c_void> = vec![
-                                (&literal_count).as_kernel_param(),
-                                (&candidate_count).as_kernel_param(),
-                                (&reduction_count).as_kernel_param(),
-                                (&models_per_reduction).as_kernel_param(),
-                                (&world_stride).as_kernel_param(),
+                                literal_count.as_kernel_param(),
+                                candidate_count.as_kernel_param(),
+                                reduction_count.as_kernel_param(),
+                                models_per_reduction.as_kernel_param(),
+                                world_stride.as_kernel_param(),
                                 literal_index.as_kernel_param(),
                                 reduction_index.as_kernel_param(),
                                 negated.as_kernel_param(),
+                                output.num_rows_device().as_kernel_param(),
                                 row_count.as_kernel_param(),
                                 key_col0.as_kernel_param(),
                                 key_col0_width.as_kernel_param(),
@@ -3158,8 +4650,8 @@ impl Executor {
                                 expected_key_col2_type_code.as_kernel_param(),
                                 (&workspace.candidate_assumptions).as_kernel_param(),
                                 (&workspace.world_views).as_kernel_param(),
-                                (&mut workspace.model_membership).as_kernel_param(),
-                                (&mut workspace.rejection_reasons).as_kernel_param(),
+                                (&workspace.model_membership).as_kernel_param(),
+                                (&workspace.rejection_reasons).as_kernel_param(),
                             ];
                             func_arity3.clone().launch(config, &mut params)?;
                         }
@@ -3184,14 +4676,15 @@ impl Executor {
                             // relation, and pointer/width/expectation arrays are device-resident
                             // launch metadata for existing relation and reduced-output columns.
                             let mut params: Vec<*mut c_void> = vec![
-                                (&literal_count).as_kernel_param(),
-                                (&candidate_count).as_kernel_param(),
-                                (&reduction_count).as_kernel_param(),
-                                (&models_per_reduction).as_kernel_param(),
-                                (&world_stride).as_kernel_param(),
+                                literal_count.as_kernel_param(),
+                                candidate_count.as_kernel_param(),
+                                reduction_count.as_kernel_param(),
+                                models_per_reduction.as_kernel_param(),
+                                world_stride.as_kernel_param(),
                                 literal_index.as_kernel_param(),
                                 reduction_index.as_kernel_param(),
                                 negated.as_kernel_param(),
+                                output.num_rows_device().as_kernel_param(),
                                 row_count.as_kernel_param(),
                                 key_col_ptrs.as_kernel_param(),
                                 key_col_widths.as_kernel_param(),
@@ -3205,16 +4698,18 @@ impl Executor {
                                 has_bound_value_keys.as_kernel_param(),
                                 (&workspace.candidate_assumptions).as_kernel_param(),
                                 (&workspace.world_views).as_kernel_param(),
-                                (&mut workspace.model_membership).as_kernel_param(),
-                                (&mut workspace.rejection_reasons).as_kernel_param(),
+                                (&workspace.model_membership).as_kernel_param(),
+                                (&workspace.rejection_reasons).as_kernel_param(),
                             ];
                             func_arity_n.clone().launch(config, &mut params)?;
                         }
-                    }
-                }
-                Ok(())
-            },
-        )?;
+                    };
+                    Ok(())
+                },
+            )?;
+            kernel_timings.push(kernel_timing);
+        }
+        let kernel_timing = EpistemicGpuKernelTimingTrace::checked_sum(kernel_timings)?;
 
         Ok(trace.with_kernel_timing(kernel_timing))
     }
@@ -3223,11 +4718,13 @@ impl Executor {
     pub fn validate_epistemic_gpu_world_views(
         &self,
         workspace: &mut EpistemicGpuWorkspace,
-        literal_count: usize,
+        gpu_plan: &EpistemicGpuPlan,
         candidate_count: usize,
-        reduction_count: usize,
         models_per_reduction: usize,
     ) -> Result<EpistemicGpuWorldViewValidationTrace> {
+        gpu_plan.validate_tuple_membership_bindings()?;
+        let literal_count = gpu_plan.epistemic_literals.len();
+        let reduction_count = gpu_plan.reductions.len();
         let trace = EpistemicGpuWorldViewValidationTrace::for_counts(
             literal_count,
             candidate_count,
@@ -3277,6 +4774,65 @@ impl Executor {
             });
         }
 
+        let mut literal_op_codes_host = vec![0u8; literal_count];
+        let mut literal_negated_host = vec![0u8; literal_count];
+        let mut literal_bound_to_output_host = vec![0u8; literal_count];
+        let mut literal_reduction_indices_host = vec![0u32; literal_count];
+        for binding in &gpu_plan.tuple_membership_bindings {
+            literal_op_codes_host[binding.literal_index] = epistemic_operator_code(binding.op);
+            literal_negated_host[binding.literal_index] = u8::from(binding.negated);
+            literal_bound_to_output_host[binding.literal_index] =
+                u8::from(binding.bound_output_columns.iter().any(Option::is_some));
+            literal_reduction_indices_host[binding.literal_index] = binding.reduction_index as u32;
+        }
+        let memory = self.provider.memory();
+        let mut literal_op_codes = memory.alloc::<u8>(literal_count)?;
+        let mut literal_negated = memory.alloc::<u8>(literal_count)?;
+        let mut literal_bound_to_output = memory.alloc::<u8>(literal_count)?;
+        let mut literal_reduction_indices = memory.alloc::<u32>(literal_count)?;
+        self.provider
+            .htod_launch_metadata_sync_copy_into(&literal_op_codes_host, &mut literal_op_codes)
+            .map_err(|e| {
+                XlogError::execution_ctx(
+                    "epistemic GPU world-view validation metadata",
+                    "upload literal operator codes",
+                    &e,
+                )
+            })?;
+        self.provider
+            .htod_launch_metadata_sync_copy_into(&literal_negated_host, &mut literal_negated)
+            .map_err(|e| {
+                XlogError::execution_ctx(
+                    "epistemic GPU world-view validation metadata",
+                    "upload literal negation flags",
+                    &e,
+                )
+            })?;
+        self.provider
+            .htod_launch_metadata_sync_copy_into(
+                &literal_bound_to_output_host,
+                &mut literal_bound_to_output,
+            )
+            .map_err(|e| {
+                XlogError::execution_ctx(
+                    "epistemic GPU world-view validation metadata",
+                    "upload literal output-binding flags",
+                    &e,
+                )
+            })?;
+        self.provider
+            .htod_launch_metadata_sync_copy_into(
+                &literal_reduction_indices_host,
+                &mut literal_reduction_indices,
+            )
+            .map_err(|e| {
+                XlogError::execution_ctx(
+                    "epistemic GPU world-view validation metadata",
+                    "upload literal reduction indices",
+                    &e,
+                )
+            })?;
+
         let world_stride =
             workspace.layout.world_view_bytes / workspace.layout.rejection_reason_slots;
         if world_stride == 0 || world_stride > u32::MAX as usize {
@@ -3311,20 +4867,22 @@ impl Executor {
                 // SAFETY: kernel arguments match the PTX signature; the capacity checks
                 // above prove model-membership, world-view, and rejection buffers cover
                 // all reads and writes for the candidate range.
-                func.clone().launch(
-                    config,
-                    (
-                        literal_count,
-                        candidate_count,
-                        reduction_count,
-                        models_per_reduction,
-                        world_stride,
-                        &workspace.candidate_assumptions,
-                        &workspace.model_membership,
-                        &workspace.world_views,
-                        &mut workspace.rejection_reasons,
-                    ),
-                )
+                let mut params: Vec<*mut c_void> = vec![
+                    literal_count.as_kernel_param(),
+                    candidate_count.as_kernel_param(),
+                    reduction_count.as_kernel_param(),
+                    models_per_reduction.as_kernel_param(),
+                    world_stride.as_kernel_param(),
+                    (&literal_op_codes).as_kernel_param(),
+                    (&literal_negated).as_kernel_param(),
+                    (&literal_bound_to_output).as_kernel_param(),
+                    (&literal_reduction_indices).as_kernel_param(),
+                    (&workspace.candidate_assumptions).as_kernel_param(),
+                    (&workspace.model_membership).as_kernel_param(),
+                    (&workspace.world_views).as_kernel_param(),
+                    (&workspace.rejection_reasons).as_kernel_param(),
+                ];
+                func.clone().launch(config, &mut params)
             },
         )?;
 
@@ -3488,9 +5046,10 @@ impl Executor {
     }
 
     /// Materialize final query tuples into a device-resident output buffer.
+    #[allow(clippy::too_many_arguments)]
     pub fn materialize_epistemic_gpu_final_tuples(
         &self,
-        workspace: &EpistemicGpuWorkspace,
+        workspace: &mut EpistemicGpuWorkspace,
         output: &CudaBuffer,
         gpu_plan: &EpistemicGpuPlan,
         literal_count: usize,
@@ -3498,6 +5057,7 @@ impl Executor {
         reduction_count: usize,
         models_per_reduction: usize,
     ) -> Result<(CudaBuffer, EpistemicGpuFinalTupleMaterializationTrace)> {
+        gpu_plan.validate_tuple_membership_bindings()?;
         if candidate_count > workspace.layout.rejection_reason_slots {
             return Err(XlogError::ResourceExhausted {
                 context: "epistemic GPU final-tuple rejection workspace".to_string(),
@@ -3505,44 +5065,73 @@ impl Executor {
                 budget_bytes: workspace.layout.rejection_reason_slots as u64,
             });
         }
-        if literal_count > u32::MAX as usize
-            || candidate_count > u32::MAX as usize
-            || reduction_count > u32::MAX as usize
-            || models_per_reduction > u32::MAX as usize
-            || output.num_rows() > u32::MAX as u64
-        {
-            return Err(XlogError::ResourceExhausted {
-                context: "epistemic GPU final-tuple dimensions".to_string(),
-                estimated_bytes: literal_count
-                    .max(candidate_count)
-                    .max(reduction_count)
-                    .max(models_per_reduction)
-                    .max(output.num_rows() as usize) as u64,
-                budget_bytes: u32::MAX as u64,
-            });
-        }
-
+        let literal_count_u32 =
+            checked_u32_dimension(literal_count, "epistemic GPU final-tuple literals")?;
+        let candidate_count_u32 =
+            checked_u32_dimension(candidate_count, "epistemic GPU final-tuple candidates")?;
+        let reduction_count_u32 =
+            checked_u32_dimension(reduction_count, "epistemic GPU final-tuple reductions")?;
+        let models_per_reduction_u32 = checked_u32_dimension(
+            models_per_reduction,
+            "epistemic GPU final-tuple models per reduction",
+        )?;
+        let output_row_capacity =
+            usize::try_from(output.num_rows()).map_err(|_| XlogError::ResourceExhausted {
+                context: "epistemic GPU final-tuple output rows".to_string(),
+                estimated_bytes: output.num_rows(),
+                budget_bytes: usize::MAX as u64,
+            })?;
+        let output_row_capacity_u32 =
+            checked_u32_dimension(output_row_capacity, "epistemic GPU final-tuple output rows")?;
+        let final_output_columns = final_output_columns_for_materialization(output, gpu_plan)?;
         let mut tuple_bytes_capacity = 0usize;
-        let mut source_columns: Vec<(&CudaColumn, u32)> = Vec::with_capacity(output.arity());
-        let mut result_columns_raw: Vec<TrackedCudaSlice<u8>> = Vec::with_capacity(output.arity());
-        for col_idx in 0..output.arity() {
+        let mut source_columns: Vec<(&CudaColumn, u32, u32)> =
+            Vec::with_capacity(final_output_columns.len());
+        let mut result_columns_raw: Vec<TrackedCudaSlice<u8>> =
+            Vec::with_capacity(final_output_columns.len());
+        let mut final_schema_columns = Vec::with_capacity(final_output_columns.len());
+        let mut final_schema_sort_labels = Vec::with_capacity(final_output_columns.len());
+        for &col_idx in &final_output_columns {
             let src_col = output.column(col_idx).ok_or_else(|| {
                 XlogError::Execution(format!("epistemic final tuple missing column {col_idx}"))
             })?;
-            if src_col.len() > u32::MAX as usize {
+            let (column_name, column_type) = output
+                .schema()
+                .columns
+                .get(col_idx)
+                .ok_or_else(|| {
+                    XlogError::Execution(format!(
+                        "epistemic final tuple missing schema column {col_idx}"
+                    ))
+                })?
+                .clone();
+            let column_width = column_type.size_bytes();
+            let expected_column_bytes = checked_product(output_row_capacity, column_width)?;
+            if src_col.len() < expected_column_bytes {
                 return Err(XlogError::ResourceExhausted {
-                    context: "epistemic GPU final-tuple column".to_string(),
-                    estimated_bytes: src_col.len() as u64,
-                    budget_bytes: u32::MAX as u64,
+                    context: "epistemic GPU final-tuple column capacity".to_string(),
+                    estimated_bytes: expected_column_bytes as u64,
+                    budget_bytes: src_col.len() as u64,
                 });
             }
+            let column_byte_len =
+                checked_u32_dimension(src_col.len(), "epistemic GPU final-tuple column")?;
+            let column_width =
+                checked_u32_dimension(column_width, "epistemic GPU final-tuple column width")?;
             tuple_bytes_capacity = checked_sum(tuple_bytes_capacity, src_col.len())?;
-            source_columns.push((src_col, src_col.len() as u32));
+            source_columns.push((src_col, column_byte_len, column_width));
             result_columns_raw.push(self.provider.memory().alloc::<u8>(src_col.len())?);
+            final_schema_columns.push((column_name, column_type));
+            final_schema_sort_labels.push(
+                output
+                    .schema()
+                    .column_sort_label(col_idx)
+                    .unwrap_or("")
+                    .to_string(),
+            );
         }
 
         let mut final_row_count = self.provider.memory().alloc::<u32>(1)?;
-        let output_row_capacity = output.num_rows() as usize;
         let mut row_map = self
             .provider
             .memory()
@@ -3564,8 +5153,8 @@ impl Executor {
             .filter(|binding| binding.negated)
             .count();
         let trace = EpistemicGpuFinalTupleMaterializationTrace::for_counts(
-            output.arity(),
-            output.num_rows() as usize,
+            final_output_columns.len(),
+            output_row_capacity,
             tuple_bytes_capacity,
             literal_count,
             candidate_count,
@@ -3604,18 +5193,22 @@ impl Executor {
                 budget_bytes: u32::MAX as u64,
             });
         }
-        let literal_count = literal_count as u32;
-        let candidate_count_u32 = candidate_count as u32;
-        let reduction_count = reduction_count as u32;
-        let models_per_reduction = models_per_reduction as u32;
-        let world_stride = world_stride as u32;
-        let output_row_capacity_u32 = output_row_capacity as u32;
+        let world_stride =
+            checked_u32_dimension(world_stride, "epistemic GPU final-tuple world stride")?;
         let mut metadata_len = 0usize;
         for binding in &row_filter_bindings {
             metadata_len = checked_sum(metadata_len, binding.key_columns.len())?;
         }
         let metadata_len = metadata_len.max(1);
         let row_filter_metadata_len = row_filter_bindings.len().max(1);
+        checked_u32_dimension(
+            metadata_len,
+            "epistemic GPU final tuple row-filter key metadata",
+        )?;
+        checked_u32_dimension(
+            row_filter_metadata_len,
+            "epistemic GPU final tuple row-filter metadata",
+        )?;
         let memory = self.provider.memory();
         let device = self.provider.device().inner();
         let mut tuple_source_row_count_ptrs = memory.alloc::<u64>(row_filter_metadata_len)?;
@@ -3629,7 +5222,10 @@ impl Executor {
         let mut tuple_key_match_modes = memory.alloc::<u8>(metadata_len)?;
         let mut bound_value_col_ptrs = memory.alloc::<u64>(metadata_len)?;
         let mut bound_value_col_widths = memory.alloc::<u32>(metadata_len)?;
-        let row_filter_count = row_filter_bindings.len() as u32;
+        let row_filter_count = checked_u32_dimension(
+            row_filter_bindings.len(),
+            "epistemic GPU final tuple row-filter count",
+        )?;
         let mut tuple_source_row_counts = Vec::with_capacity(row_filter_bindings.len());
 
         if !row_filter_bindings.is_empty() {
@@ -3647,22 +5243,16 @@ impl Executor {
             let mut bound_value_col_widths_host = Vec::with_capacity(metadata_len);
 
             for binding in &row_filter_bindings {
-                if binding.key_columns.len() > u32::MAX as usize {
-                    return Err(XlogError::ResourceExhausted {
-                        context: "epistemic GPU final tuple row-filter key arity".to_string(),
-                        estimated_bytes: binding.key_columns.len() as u64,
-                        budget_bytes: u32::MAX as u64,
-                    });
-                }
-                if key_col_ptrs_host.len() > u32::MAX as usize {
-                    return Err(XlogError::ResourceExhausted {
-                        context: "epistemic GPU final tuple row-filter key metadata".to_string(),
-                        estimated_bytes: key_col_ptrs_host.len() as u64,
-                        budget_bytes: u32::MAX as u64,
-                    });
-                }
-                row_filter_key_offsets_host.push(key_col_ptrs_host.len() as u32);
-                row_filter_key_counts_host.push(binding.key_columns.len() as u32);
+                let row_filter_key_offset = checked_u32_dimension(
+                    key_col_ptrs_host.len(),
+                    "epistemic GPU final tuple row-filter key offset",
+                )?;
+                let row_filter_key_count = checked_u32_dimension(
+                    binding.key_columns.len(),
+                    "epistemic GPU final tuple row-filter key arity",
+                )?;
+                row_filter_key_offsets_host.push(row_filter_key_offset);
+                row_filter_key_counts_host.push(row_filter_key_count);
                 row_filter_negated_host.push(binding.negated as u8);
 
                 let source_relation =
@@ -3676,7 +5266,7 @@ impl Executor {
                             ),
                         })?;
                 let tuple_source_row_count = self.clone_device_row_count(source_relation)?;
-                tuple_source_row_count_ptrs_host.push(*tuple_source_row_count.device_ptr() as u64);
+                tuple_source_row_count_ptrs_host.push(*tuple_source_row_count.device_ptr());
                 tuple_source_row_counts.push(tuple_source_row_count);
 
                 for (term_index, &key_col) in binding.key_columns.iter().enumerate() {
@@ -3709,7 +5299,7 @@ impl Executor {
                         });
                     }
 
-                    key_col_ptrs_host.push(*key_col_ref.device_ptr() as u64);
+                    key_col_ptrs_host.push(*key_col_ref.device_ptr());
                     key_col_widths_host.push(key_col_width as u32);
                     match &binding.key_terms[term_index] {
                         EirTerm::Variable(variable_name) => {
@@ -3767,7 +5357,7 @@ impl Executor {
                             expected_key_bits_host.push(0);
                             expected_key_type_codes_host.push(key_col_type.to_code());
                             tuple_key_match_modes_host.push(TUPLE_KEY_MATCH_MODE_BOUND_OUTPUT);
-                            bound_value_col_ptrs_host.push(*bound_col.device_ptr() as u64);
+                            bound_value_col_ptrs_host.push(*bound_col.device_ptr());
                             bound_value_col_widths_host.push(bound_col_width as u32);
                         }
                         term => {
@@ -3783,8 +5373,8 @@ impl Executor {
             }
 
             let metadata_context = "epistemic GPU final tuple row-filter metadata";
-            device
-                .htod_sync_copy_into(
+            self.provider
+                .htod_launch_metadata_sync_copy_into(
                     &tuple_source_row_count_ptrs_host,
                     &mut tuple_source_row_count_ptrs,
                 )
@@ -3795,48 +5385,69 @@ impl Executor {
                         &e,
                     )
                 })?;
-            device
-                .htod_sync_copy_into(&row_filter_negated_host, &mut row_filter_negated)
+            self.provider
+                .htod_launch_metadata_sync_copy_into(
+                    &row_filter_negated_host,
+                    &mut row_filter_negated,
+                )
                 .map_err(|e| {
                     XlogError::execution_ctx(metadata_context, "upload row-filter polarity", &e)
                 })?;
-            device
-                .htod_sync_copy_into(&row_filter_key_offsets_host, &mut row_filter_key_offsets)
+            self.provider
+                .htod_launch_metadata_sync_copy_into(
+                    &row_filter_key_offsets_host,
+                    &mut row_filter_key_offsets,
+                )
                 .map_err(|e| {
                     XlogError::execution_ctx(metadata_context, "upload row-filter key offsets", &e)
                 })?;
-            device
-                .htod_sync_copy_into(&row_filter_key_counts_host, &mut row_filter_key_counts)
+            self.provider
+                .htod_launch_metadata_sync_copy_into(
+                    &row_filter_key_counts_host,
+                    &mut row_filter_key_counts,
+                )
                 .map_err(|e| {
                     XlogError::execution_ctx(metadata_context, "upload row-filter key counts", &e)
                 })?;
-            device
-                .htod_sync_copy_into(&key_col_ptrs_host, &mut key_col_ptrs)
+            self.provider
+                .htod_launch_metadata_sync_copy_into(&key_col_ptrs_host, &mut key_col_ptrs)
                 .map_err(|e| {
                     XlogError::execution_ctx(metadata_context, "upload key column pointers", &e)
                 })?;
-            device
-                .htod_sync_copy_into(&key_col_widths_host, &mut key_col_widths)
+            self.provider
+                .htod_launch_metadata_sync_copy_into(&key_col_widths_host, &mut key_col_widths)
                 .map_err(|e| {
                     XlogError::execution_ctx(metadata_context, "upload key column widths", &e)
                 })?;
-            device
-                .htod_sync_copy_into(&expected_key_bits_host, &mut expected_key_bits)
+            self.provider
+                .htod_launch_metadata_sync_copy_into(
+                    &expected_key_bits_host,
+                    &mut expected_key_bits,
+                )
                 .map_err(|e| {
                     XlogError::execution_ctx(metadata_context, "upload expected key bits", &e)
                 })?;
-            device
-                .htod_sync_copy_into(&expected_key_type_codes_host, &mut expected_key_type_codes)
+            self.provider
+                .htod_launch_metadata_sync_copy_into(
+                    &expected_key_type_codes_host,
+                    &mut expected_key_type_codes,
+                )
                 .map_err(|e| {
                     XlogError::execution_ctx(metadata_context, "upload expected key type codes", &e)
                 })?;
-            device
-                .htod_sync_copy_into(&tuple_key_match_modes_host, &mut tuple_key_match_modes)
+            self.provider
+                .htod_launch_metadata_sync_copy_into(
+                    &tuple_key_match_modes_host,
+                    &mut tuple_key_match_modes,
+                )
                 .map_err(|e| {
                     XlogError::execution_ctx(metadata_context, "upload tuple key match modes", &e)
                 })?;
-            device
-                .htod_sync_copy_into(&bound_value_col_ptrs_host, &mut bound_value_col_ptrs)
+            self.provider
+                .htod_launch_metadata_sync_copy_into(
+                    &bound_value_col_ptrs_host,
+                    &mut bound_value_col_ptrs,
+                )
                 .map_err(|e| {
                     XlogError::execution_ctx(
                         metadata_context,
@@ -3844,8 +5455,11 @@ impl Executor {
                         &e,
                     )
                 })?;
-            device
-                .htod_sync_copy_into(&bound_value_col_widths_host, &mut bound_value_col_widths)
+            self.provider
+                .htod_launch_metadata_sync_copy_into(
+                    &bound_value_col_widths_host,
+                    &mut bound_value_col_widths,
+                )
                 .map_err(|e| {
                     XlogError::execution_ctx(
                         metadata_context,
@@ -3927,6 +5541,19 @@ impl Executor {
             .ok_or_else(|| {
                 XlogError::Execution("epistemic final tuple row-map kernel not found".to_string())
             })?;
+        let close_rejections_func = self
+            .provider
+            .device()
+            .inner()
+            .get_func(
+                EPISTEMIC_MODULE,
+                epistemic_kernels::EPISTEMIC_CLOSE_FINAL_TUPLE_REJECTIONS_U8,
+            )
+            .ok_or_else(|| {
+                XlogError::Execution(
+                    "epistemic final tuple rejection-close kernel not found".to_string(),
+                )
+            })?;
         let func = self
             .provider
             .device()
@@ -3941,8 +5568,9 @@ impl Executor {
                 )
             })?;
 
-        let kernel_timing = self.time_epistemic_gpu_kernel_launch(
-            "epistemic GPU final tuple materialization",
+        let mut kernel_timings = Vec::with_capacity(checked_sum(source_columns.len(), 2)?);
+        let row_map_timing = self.time_epistemic_gpu_kernel_launch(
+            "epistemic GPU final tuple row map",
             || unsafe {
                 self.provider
                     .device()
@@ -3950,12 +5578,12 @@ impl Executor {
                     .memset_zeros(&mut final_row_count)?;
                 self.provider.device().inner().memset_zeros(&mut row_map)?;
                 let mut row_map_params: Vec<*mut c_void> = vec![
-                    (&output_row_capacity_u32).as_kernel_param(),
-                    (&literal_count).as_kernel_param(),
-                    (&candidate_count_u32).as_kernel_param(),
-                    (&reduction_count).as_kernel_param(),
-                    (&models_per_reduction).as_kernel_param(),
-                    (&world_stride).as_kernel_param(),
+                    output_row_capacity_u32.as_kernel_param(),
+                    literal_count_u32.as_kernel_param(),
+                    candidate_count_u32.as_kernel_param(),
+                    reduction_count_u32.as_kernel_param(),
+                    models_per_reduction_u32.as_kernel_param(),
+                    world_stride.as_kernel_param(),
                     output.num_rows_device().as_kernel_param(),
                     (&workspace.rejection_reasons).as_kernel_param(),
                     (&workspace.model_membership).as_kernel_param(),
@@ -3971,33 +5599,56 @@ impl Executor {
                     (&tuple_key_match_modes).as_kernel_param(),
                     (&bound_value_col_ptrs).as_kernel_param(),
                     (&bound_value_col_widths).as_kernel_param(),
-                    (&row_filter_count).as_kernel_param(),
-                    (&mut row_map).as_kernel_param(),
-                    (&mut final_row_count).as_kernel_param(),
+                    row_filter_count.as_kernel_param(),
+                    (&row_map).as_kernel_param(),
+                    (&final_row_count).as_kernel_param(),
                 ];
                 row_map_func.clone().launch(
                     LaunchConfig::for_num_elems(output_row_capacity_u32.max(1)),
                     &mut row_map_params,
                 )?;
+                Ok(())
+            },
+        )?;
+        kernel_timings.push(row_map_timing);
 
-                if source_columns.is_empty() {
-                    return Ok(());
-                }
+        let close_rejections_timing = self.time_epistemic_gpu_kernel_launch(
+            "epistemic GPU final tuple rejection closeout",
+            || unsafe {
+                let mut close_rejections_params: Vec<*mut c_void> = vec![
+                    candidate_count_u32.as_kernel_param(),
+                    world_stride.as_kernel_param(),
+                    (&final_row_count).as_kernel_param(),
+                    (&workspace.rejection_reasons).as_kernel_param(),
+                    (&workspace.world_views).as_kernel_param(),
+                ];
+                close_rejections_func.clone().launch(
+                    LaunchConfig::for_num_elems(candidate_count_u32.max(1)),
+                    &mut close_rejections_params,
+                )?;
+                Ok(())
+            },
+        )?;
+        kernel_timings.push(close_rejections_timing);
 
-                for ((src_col, column_byte_len), dst_col) in
-                    source_columns.iter().zip(result_columns_raw.iter_mut())
-                {
+        for ((src_col, column_byte_len, column_row_width), dst_col) in
+            source_columns.iter().zip(result_columns_raw.iter_mut())
+        {
+            let column_timing = self.time_epistemic_gpu_kernel_launch(
+                "epistemic GPU final tuple column materialization",
+                || unsafe {
                     // SAFETY: source and destination columns are valid device byte
-                    // buffers of identical length, the row-count scalar is
-                    // runtime-owned, and membership/world-view buffers were
-                    // capacity-checked.
+                    // buffers of identical length, the row-count scalar and schema
+                    // row width are runtime-owned, and membership/world-view buffers
+                    // were capacity-checked.
                     let mut params: Vec<*mut c_void> = vec![
                         column_byte_len.as_kernel_param(),
-                        (&literal_count).as_kernel_param(),
-                        (&candidate_count_u32).as_kernel_param(),
-                        (&reduction_count).as_kernel_param(),
-                        (&models_per_reduction).as_kernel_param(),
-                        (&world_stride).as_kernel_param(),
+                        column_row_width.as_kernel_param(),
+                        literal_count_u32.as_kernel_param(),
+                        candidate_count_u32.as_kernel_param(),
+                        reduction_count_u32.as_kernel_param(),
+                        models_per_reduction_u32.as_kernel_param(),
+                        world_stride.as_kernel_param(),
                         output.num_rows_device().as_kernel_param(),
                         (&workspace.rejection_reasons).as_kernel_param(),
                         (&workspace.model_membership).as_kernel_param(),
@@ -4005,25 +5656,35 @@ impl Executor {
                         (&row_map).as_kernel_param(),
                         (*src_col).as_kernel_param(),
                         dst_col.as_kernel_param(),
-                        (&mut final_row_count).as_kernel_param(),
+                        (&final_row_count).as_kernel_param(),
                     ];
                     func.clone().launch(
                         LaunchConfig::for_num_elems((*column_byte_len).max(1)),
                         &mut params,
                     )?;
-                }
-                Ok(())
-            },
-        )?;
+                    Ok(())
+                },
+            )?;
+            kernel_timings.push(column_timing);
+        }
+        let kernel_timing = EpistemicGpuKernelTimingTrace::checked_sum(kernel_timings)?;
 
         let result_columns: Vec<CudaColumn> =
             result_columns_raw.into_iter().map(Into::into).collect();
+        let final_schema = Schema::new(final_schema_columns)
+            .with_sort_labels(final_schema_sort_labels)
+            .map_err(|err| XlogError::Execution(format!("epistemic final schema: {err}")))?;
         let final_output = CudaBuffer::from_columns(
             result_columns,
             output.num_rows(),
             final_row_count,
-            output.schema().clone(),
+            final_schema,
         );
+        let final_output = if gpu_plan.final_output_columns.is_none() {
+            final_output
+        } else {
+            self.provider.dedup_full_row(&final_output)?
+        };
 
         Ok((final_output, trace.with_kernel_timing(kernel_timing)))
     }
@@ -4041,8 +5702,63 @@ impl Executor {
 
         Ok(EpistemicGpuPreparedExecution {
             preflight,
+            tuple_membership_bindings: executable.gpu_plan.tuple_membership_bindings.clone(),
             workspace,
             workspace_reset,
+        })
+    }
+
+    fn validate_epistemic_gpu_reduced_constraints(
+        &self,
+        executable: &EpistemicExecutablePlan,
+    ) -> Result<EpistemicGpuConstraintValidationTrace> {
+        let mut checked_constraint_relations = 0usize;
+        let mut violated_constraint_relations = 0usize;
+        let mut row_count_device_reads = 0u32;
+        let mut violations = Vec::new();
+
+        let mut relation_names = Vec::new();
+        for rule in executable
+            .reduced_runtime_plan
+            .rules_by_scc
+            .iter()
+            .flatten()
+        {
+            if rule.head.starts_with(XLOG_CONSTRAINT_RELATION_PREFIX)
+                && !relation_names.iter().any(|name| name == &rule.head)
+            {
+                relation_names.push(rule.head.as_str());
+            }
+        }
+
+        for relation_name in relation_names {
+            checked_constraint_relations += 1;
+            let relation = self.store().get(relation_name).ok_or_else(|| {
+                XlogError::Execution(format!(
+                    "missing reduced constraint relation {relation_name} after production runtime \
+                     dispatch"
+                ))
+            })?;
+            let row_count_was_cached = relation.cached_row_count().is_some();
+            let rows = self.provider.device_row_count(relation)?;
+            row_count_device_reads += u32::from(!row_count_was_cached);
+            if rows > 0 {
+                violated_constraint_relations += 1;
+                violations.push(format!("{relation_name}={rows}"));
+            }
+        }
+
+        if !violations.is_empty() {
+            return Err(XlogError::Execution(format!(
+                "epistemic GPU reduced constraint violation: {}",
+                violations.join(", ")
+            )));
+        }
+
+        Ok(EpistemicGpuConstraintValidationTrace {
+            checked_constraint_relations,
+            violated_constraint_relations,
+            row_count_device_reads,
         })
     }
 
@@ -4056,6 +5772,7 @@ impl Executor {
         let literal_count = executable.gpu_plan.epistemic_literals.len();
         let candidate_count = bounded_candidate_count(literal_count, capacities.max_candidates)?;
         let transfer_budget_start = self.provider.host_transfer_stats();
+        let launch_metadata_transfer_start = self.provider.host_launch_metadata_transfer_stats();
         let candidate_generation = self.generate_epistemic_gpu_candidates(
             &mut prepared.workspace,
             literal_count,
@@ -4074,11 +5791,11 @@ impl Executor {
         let counters_before = self.epistemic_gpu_runtime_counters();
         let _reduced_return = self.execute_plan(&executable.reduced_runtime_plan)?;
         let counters_after = self.epistemic_gpu_runtime_counters();
-        let trace = EpistemicGpuRuntimeTrace::from_preflight_and_counters(
+        let trace = EpistemicGpuRuntimeTrace::try_from_preflight_and_counters(
             prepared.preflight,
             counters_before,
             counters_after,
-        );
+        )?;
         trace.require_wcoj_certification()?;
         let output_relation = executable
             .gpu_plan
@@ -4110,11 +5827,13 @@ impl Executor {
             capacities.max_models_per_reduction,
         )?;
         model_membership.require_stable_model_tuple_source()?;
+        let expected_tuple_key_column_reads =
+            expected_tuple_key_column_reads(&executable.gpu_plan.tuple_membership_bindings)?;
+        model_membership.require_planned_tuple_key_column_reads(expected_tuple_key_column_reads)?;
         let world_view_validation = self.validate_epistemic_gpu_world_views(
             &mut prepared.workspace,
-            literal_count,
+            &executable.gpu_plan,
             candidate_count,
-            executable.gpu_plan.reductions.len(),
             capacities.max_models_per_reduction,
         )?;
         let materialization =
@@ -4126,7 +5845,7 @@ impl Executor {
         )?;
         let (final_output, final_tuple_materialization) = self
             .materialize_epistemic_gpu_final_tuples(
-                &prepared.workspace,
+                &mut prepared.workspace,
                 &output,
                 &executable.gpu_plan,
                 literal_count,
@@ -4134,14 +5853,39 @@ impl Executor {
                 executable.gpu_plan.reductions.len(),
                 capacities.max_models_per_reduction,
             )?;
+        let tuple_evidence_output = if executable.gpu_plan.final_output_columns.is_some() {
+            let mut evidence_plan = executable.gpu_plan.clone();
+            evidence_plan.final_output_columns = None;
+            let (evidence_output, _) = self.materialize_epistemic_gpu_final_tuples(
+                &mut prepared.workspace,
+                &output,
+                &evidence_plan,
+                literal_count,
+                candidate_count,
+                executable.gpu_plan.reductions.len(),
+                capacities.max_models_per_reduction,
+            )?;
+            Some(evidence_output)
+        } else {
+            None
+        };
         let transfer_budget_end = self.provider.host_transfer_stats();
-        let transfer_budget = EpistemicGpuTransferBudgetTrace::from_host_transfer_stats(
-            candidate_count,
-            transfer_budget_start,
-            transfer_budget_end,
-        )?;
+        let launch_metadata_transfer_end = self.provider.host_launch_metadata_transfer_stats();
+        let transfer_budget =
+            EpistemicGpuTransferBudgetTrace::from_host_transfer_stats_with_launch_metadata(
+                candidate_count,
+                transfer_budget_start,
+                transfer_budget_end,
+                launch_metadata_transfer_start,
+                launch_metadata_transfer_end,
+            )?;
         let final_result_transfer =
             EpistemicGpuFinalResultTransferTrace::from_final_output(&self.provider, &final_output)?;
+        final_tuple_materialization.require_row_filter_materialization_evidence(
+            "epistemic GPU final tuple materialization",
+            final_result_transfer.final_output_rows,
+        )?;
+        let constraint_validation = self.validate_epistemic_gpu_reduced_constraints(executable)?;
         let semantic_trace = EpistemicGpuSemanticTrace::from_device_rejection_reasons(
             &self.provider,
             &prepared.workspace,
@@ -4152,6 +5896,7 @@ impl Executor {
         )?;
 
         Ok(EpistemicGpuExecutionResult {
+            provider_identity: EpistemicGpuProviderIdentity::from_provider(&self.provider),
             prepared,
             candidate_generation,
             propagation,
@@ -4163,8 +5908,11 @@ impl Executor {
             final_tuple_materialization,
             transfer_budget,
             final_result_transfer,
+            constraint_validation,
             semantic_trace,
+            tuple_membership_bindings: executable.gpu_plan.tuple_membership_bindings.clone(),
             final_output,
+            tuple_evidence_output,
             output,
             trace,
         })
@@ -4208,7 +5956,7 @@ impl Executor {
         capacities: EpistemicGpuWorkspaceCapacities,
     ) -> Result<EpistemicGpuBatchExecutionResult> {
         let results = self.execute_epistemic_gpu_execution_batch(executables, capacities)?;
-        let trace = EpistemicGpuBatchExecutionTrace::from_component_results(&results);
+        let trace = EpistemicGpuBatchExecutionTrace::try_from_component_results(&results)?;
         Ok(EpistemicGpuBatchExecutionResult { results, trace })
     }
 }
@@ -4217,27 +5965,33 @@ impl Executor {
 struct RuntimeRouteSummary {
     multiway_reduction_count: usize,
     kclique_wcoj_plan_count: usize,
+    wcoj_triangle_route_count: usize,
+    wcoj_4cycle_route_count: usize,
+    kclique_wcoj_plan_count_by_arity: [usize; 4],
     kclique_wcoj_max_arity: u8,
     kclique_wcoj_edge_permutation_count: usize,
     kclique_stream_groups: BTreeSet<StreamGroupId>,
     kclique_skew_scheduled_plan_count: usize,
     planned_hash_route_count: usize,
+    planned_hash_planner_wins_count: usize,
+    planned_hash_incomplete_stats_count: usize,
+    planned_hash_cost_evidence_count: usize,
     sorted_layout_requirement_count: usize,
     helper_split_spec_count: usize,
 }
 
 fn summarize_runtime_routes(node: &RirNode, routes: &mut RuntimeRouteSummary) {
     match node {
-        RirNode::MultiWayJoin {
-            inputs,
-            plan,
-            fallback,
-            ..
-        } => {
+        RirNode::MultiWayJoin { inputs, plan, .. } => {
             routes.multiway_reduction_count += 1;
             match plan {
                 Some(MultiwayPlan::WcojWithPlan(order)) => {
                     routes.kclique_wcoj_plan_count += 1;
+                    if let Some(slot) = usize::from(order.k).checked_sub(5) {
+                        if slot < routes.kclique_wcoj_plan_count_by_arity.len() {
+                            routes.kclique_wcoj_plan_count_by_arity[slot] += 1;
+                        }
+                    }
                     routes.kclique_wcoj_max_arity = routes.kclique_wcoj_max_arity.max(order.k);
                     routes.kclique_wcoj_edge_permutation_count += order
                         .edge_permutation
@@ -4252,16 +6006,38 @@ fn summarize_runtime_routes(node: &RirNode, routes: &mut RuntimeRouteSummary) {
                         order.sorted_layout_requirements.edge_slots.len();
                     routes.helper_split_spec_count += order.helper_split_specs.len();
                 }
-                Some(MultiwayPlan::PlannedHashRoute { .. }) => {
+                Some(MultiwayPlan::PlannedHashRoute {
+                    reason,
+                    planner_evidence,
+                }) => {
                     routes.planned_hash_route_count += 1;
+                    match reason {
+                        PlannedHashReason::PlannerPredictsHashWins => {
+                            routes.planned_hash_planner_wins_count += 1;
+                            if planner_evidence.wcoj_cost.is_finite()
+                                && planner_evidence.hash_cost.is_finite()
+                                && planner_evidence.hash_cost <= planner_evidence.wcoj_cost
+                            {
+                                routes.planned_hash_cost_evidence_count += 1;
+                            }
+                        }
+                        PlannedHashReason::IncompleteStatsSafeDefault => {
+                            routes.planned_hash_incomplete_stats_count += 1;
+                        }
+                    }
                 }
-                None => {}
+                None => {
+                    if super::wcoj_dispatch::match_multiway_triangle(node).is_some() {
+                        routes.wcoj_triangle_route_count += 1;
+                    } else if super::wcoj_dispatch::match_multiway_4cycle(node).is_some() {
+                        routes.wcoj_4cycle_route_count += 1;
+                    }
+                }
             }
 
             for input in inputs {
                 summarize_runtime_routes(input, routes);
             }
-            summarize_runtime_routes(fallback, routes);
         }
         RirNode::Filter { input, .. }
         | RirNode::Project { input, .. }
@@ -4282,15 +6058,9 @@ fn summarize_runtime_routes(node: &RirNode, routes: &mut RuntimeRouteSummary) {
             summarize_runtime_routes(base, routes);
             summarize_runtime_routes(recursive, routes);
         }
-        RirNode::ChainJoin {
-            left,
-            right,
-            fallback,
-            ..
-        } => {
+        RirNode::ChainJoin { left, right, .. } => {
             summarize_runtime_routes(left, routes);
             summarize_runtime_routes(right, routes);
-            summarize_runtime_routes(fallback, routes);
         }
         RirNode::TensorMaskedJoin { .. } | RirNode::Scan { .. } | RirNode::Unit => {}
     }
@@ -4307,12 +6077,7 @@ fn helper_relation_ids(executable: &EpistemicExecutablePlan) -> BTreeSet<RelId> 
 fn count_helper_relation_scans(node: &RirNode, helper_relations: &BTreeSet<RelId>) -> usize {
     match node {
         RirNode::Scan { .. } => 0,
-        RirNode::MultiWayJoin {
-            plan,
-            inputs,
-            fallback,
-            ..
-        } => {
+        RirNode::MultiWayJoin { plan, inputs, .. } => {
             let own_wcoj_inputs = if matches!(plan, Some(MultiwayPlan::WcojWithPlan(_))) {
                 inputs
                     .iter()
@@ -4326,7 +6091,6 @@ fn count_helper_relation_scans(node: &RirNode, helper_relations: &BTreeSet<RelId
                     .iter()
                     .map(|input| count_helper_relation_scans(input, helper_relations))
                     .sum::<usize>()
-                + count_helper_relation_scans(fallback, helper_relations)
         }
         RirNode::Filter { input, .. }
         | RirNode::Project { input, .. }
@@ -4346,15 +6110,9 @@ fn count_helper_relation_scans(node: &RirNode, helper_relations: &BTreeSet<RelId
             count_helper_relation_scans(base, helper_relations)
                 + count_helper_relation_scans(recursive, helper_relations)
         }
-        RirNode::ChainJoin {
-            left,
-            right,
-            fallback,
-            ..
-        } => {
+        RirNode::ChainJoin { left, right, .. } => {
             count_helper_relation_scans(left, helper_relations)
                 + count_helper_relation_scans(right, helper_relations)
-                + count_helper_relation_scans(fallback, helper_relations)
         }
         RirNode::TensorMaskedJoin { .. } | RirNode::Unit => 0,
     }
@@ -4383,24 +6141,13 @@ fn count_helper_relation_leaf_scans(node: &RirNode, helper_relations: &BTreeSet<
             count_helper_relation_leaf_scans(base, helper_relations)
                 + count_helper_relation_leaf_scans(recursive, helper_relations)
         }
-        RirNode::MultiWayJoin {
-            inputs, fallback, ..
-        } => {
-            inputs
-                .iter()
-                .map(|input| count_helper_relation_leaf_scans(input, helper_relations))
-                .sum::<usize>()
-                + count_helper_relation_leaf_scans(fallback, helper_relations)
-        }
-        RirNode::ChainJoin {
-            left,
-            right,
-            fallback,
-            ..
-        } => {
+        RirNode::MultiWayJoin { inputs, .. } => inputs
+            .iter()
+            .map(|input| count_helper_relation_leaf_scans(input, helper_relations))
+            .sum(),
+        RirNode::ChainJoin { left, right, .. } => {
             count_helper_relation_leaf_scans(left, helper_relations)
                 + count_helper_relation_leaf_scans(right, helper_relations)
-                + count_helper_relation_leaf_scans(fallback, helper_relations)
         }
         RirNode::TensorMaskedJoin { .. } | RirNode::Unit => 0,
     }
@@ -4415,6 +6162,55 @@ fn require_positive(value: usize, context: &str) -> Result<()> {
         });
     }
     Ok(())
+}
+
+fn checked_u32_dimension(value: usize, context: &str) -> Result<u32> {
+    u32::try_from(value).map_err(|_| XlogError::ResourceExhausted {
+        context: context.to_string(),
+        estimated_bytes: value as u64,
+        budget_bytes: u32::MAX as u64,
+    })
+}
+
+fn final_output_columns_for_materialization(
+    output: &CudaBuffer,
+    gpu_plan: &EpistemicGpuPlan,
+) -> Result<Vec<usize>> {
+    let Some(final_output_columns) = &gpu_plan.final_output_columns else {
+        return Ok((0..output.arity()).collect());
+    };
+
+    let mut seen = vec![false; output.arity()];
+    for &column in final_output_columns {
+        if column >= output.arity() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU final output projection".to_string(),
+                context: format!(
+                    "final output column {} exceeds reduced output arity {}",
+                    column,
+                    output.arity()
+                ),
+            });
+        }
+        if seen[column] {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU final output projection".to_string(),
+                context: format!("duplicate final output column {}", column),
+            });
+        }
+        seen[column] = true;
+    }
+
+    Ok(final_output_columns.clone())
+}
+
+fn require_u32_launch_bound(value: usize, context: &str) -> Result<()> {
+    checked_u32_dimension(value, context).map(|_| ())
+}
+
+fn require_u32_launch_dimensions(values: &[usize], context: &str) -> Result<()> {
+    let max_value = values.iter().copied().max().unwrap_or(0);
+    require_u32_launch_bound(max_value, context)
 }
 
 fn checked_product(left: usize, right: usize) -> Result<usize> {
@@ -4433,6 +6229,93 @@ fn checked_sum(left: usize, right: usize) -> Result<usize> {
     })
 }
 
+fn require_epistemic_gpu_kernel_phases(gpu_plan: &EpistemicGpuPlan) -> Result<()> {
+    let required = [
+        EpistemicGpuHotPathPhase::CandidateGeneration,
+        EpistemicGpuHotPathPhase::Propagation,
+        EpistemicGpuHotPathPhase::CandidateValidation,
+        EpistemicGpuHotPathPhase::ModelMembership,
+        EpistemicGpuHotPathPhase::WorldViewValidation,
+        EpistemicGpuHotPathPhase::ResultMaterialization,
+        EpistemicGpuHotPathPhase::FinalResultMaterialization,
+        EpistemicGpuHotPathPhase::FinalTupleMaterialization,
+    ];
+
+    for phase in required {
+        if !gpu_plan.required_kernel_phases.contains(&phase) {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU kernel phase contract".to_string(),
+                context: format!(
+                    "accepted GPU execution requires kernel phase {:?}, but the plan declared {:?}",
+                    phase, gpu_plan.required_kernel_phases
+                ),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn require_epistemic_gpu_buffer_contract(gpu_plan: &EpistemicGpuPlan) -> Result<()> {
+    let required = [
+        EpistemicGpuBufferKind::CandidateAssumptions,
+        EpistemicGpuBufferKind::WorldViews,
+        EpistemicGpuBufferKind::ModelMembership,
+        EpistemicGpuBufferKind::RejectionReasons,
+    ];
+
+    for buffer in required {
+        if !gpu_plan.required_buffers.contains(&buffer) {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU buffer contract".to_string(),
+                context: format!(
+                    "accepted GPU execution requires buffer {:?}, but the plan declared {:?}",
+                    buffer, gpu_plan.required_buffers
+                ),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn require_single_epistemic_output_relation(gpu_plan: &EpistemicGpuPlan) -> Result<()> {
+    let output_relations: BTreeSet<&str> = gpu_plan
+        .reductions
+        .iter()
+        .map(|reduction| reduction.head_predicate.as_str())
+        .collect();
+    if output_relations.len() > 1 {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "epistemic GPU final output relation".to_string(),
+            context: format!(
+                "single-plan GPU execution materializes one final output buffer, but reductions \
+                 target multiple head predicates {:?}; use split GPU execution for independent \
+                 epistemic outputs",
+                output_relations
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn expected_tuple_key_column_reads(bindings: &[EpistemicTupleMembershipBinding]) -> Result<usize> {
+    bindings.iter().try_fold(0usize, |acc, binding| {
+        checked_sum(acc, binding.key_columns.len())
+    })
+}
+
+fn world_view_bitset_bytes_per_candidate(literal_count: usize) -> Result<usize> {
+    Ok(checked_sum(literal_count, 7)? / 8)
+}
+
+fn epistemic_operator_code(op: EirEpistemicOp) -> u8 {
+    match op {
+        EirEpistemicOp::Know => 1,
+        EirEpistemicOp::Possible => 2,
+    }
+}
+
 fn bounded_candidate_count(literal_count: usize, max_candidates: usize) -> Result<usize> {
     require_positive(literal_count, "epistemic GPU execution literals")?;
     require_positive(max_candidates, "epistemic GPU execution candidates")?;
@@ -4442,7 +6325,15 @@ fn bounded_candidate_count(literal_count: usize, max_candidates: usize) -> Resul
             context: format!("literal count {literal_count} exceeds 31-bit candidate mask"),
         });
     }
-    Ok(max_candidates.min(1usize << literal_count))
+    let required_candidates = 1usize << literal_count;
+    if max_candidates < required_candidates {
+        return Err(XlogError::ResourceExhausted {
+            context: "epistemic GPU execution candidate capacity".to_string(),
+            estimated_bytes: required_candidates as u64,
+            budget_bytes: max_candidates as u64,
+        });
+    }
+    Ok(required_candidates)
 }
 
 #[cfg(test)]

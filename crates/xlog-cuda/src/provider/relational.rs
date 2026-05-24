@@ -343,7 +343,7 @@ impl super::CudaKernelProvider {
                 )));
             }
 
-            let ptr = *col.device_ptr() as u64;
+            let ptr = *col.device_ptr();
             col_ptrs_host.push(ptr);
             col_sizes_host.push(elem_size as u32);
             col_types_host.push(scalar_type_code(ty));
@@ -354,18 +354,15 @@ impl super::CudaKernelProvider {
         let mut d_col_sizes = self.memory.alloc::<u32>(key_cols.len())?;
         let mut d_col_types = self.memory.alloc::<u8>(key_cols.len())?;
 
-        device
-            .htod_sync_copy_into(&col_ptrs_host, &mut d_col_ptrs)
+        self.htod_launch_metadata_sync_copy_into(&col_ptrs_host, &mut d_col_ptrs)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload key column ptrs: {}", e)))?;
-        device
-            .htod_sync_copy_into(&col_sizes_host, &mut d_col_sizes)
+        self.htod_launch_metadata_sync_copy_into(&col_sizes_host, &mut d_col_sizes)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload key column sizes: {}", e)))?;
-        device
-            .htod_sync_copy_into(&col_types_host, &mut d_col_types)
+        self.htod_launch_metadata_sync_copy_into(&col_types_host, &mut d_col_types)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload key column types: {}", e)))?;
 
         let block_size = 256u32;
-        let num_blocks = (num_rows + block_size - 1) / block_size;
+        let num_blocks = num_rows.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (num_blocks, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -535,7 +532,7 @@ impl super::CudaKernelProvider {
             let mut out_col = self.memory.alloc::<u8>(total_bytes)?;
 
             if total_bytes_u32 > 0 {
-                let grid_size = (total_bytes_u32 + block_size - 1) / block_size;
+                let grid_size = total_bytes_u32.div_ceil(block_size);
                 let config = LaunchConfig {
                     grid_dim: (grid_size, 1, 1),
                     block_dim: (block_size, 1, 1),
@@ -642,7 +639,7 @@ impl super::CudaKernelProvider {
         let b_keys_view = self.column_as_u32_view(b_key_col, num_b as usize)?;
 
         let block_size = 256u32;
-        let build_grid = (num_b + block_size - 1) / block_size;
+        let build_grid = num_b.div_ceil(block_size);
         let build_config = LaunchConfig {
             grid_dim: (build_grid, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -932,7 +929,7 @@ impl super::CudaKernelProvider {
 
         // Launch diff mark kernel
         let block_size = 256u32;
-        let grid_size = (num_a + block_size - 1) / block_size;
+        let grid_size = num_a.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -1091,8 +1088,8 @@ impl super::CudaKernelProvider {
             let ty = schema.column_type(col_idx).ok_or_else(|| {
                 XlogError::Kernel(format!("diff_full_row: column {} type missing", col_idx))
             })?;
-            a_col_ptrs.push(*a_col.device_ptr() as u64);
-            b_col_ptrs.push(*b_col.device_ptr() as u64);
+            a_col_ptrs.push(*a_col.device_ptr());
+            b_col_ptrs.push(*b_col.device_ptr());
             col_sizes.push(ty.size_bytes() as u32);
             col_types.push(scalar_type_code_dedup(ty));
         }
@@ -1101,21 +1098,17 @@ impl super::CudaKernelProvider {
         let mut d_b_ptrs = self.memory.alloc::<u64>(arity)?;
         let mut d_sizes = self.memory.alloc::<u32>(arity)?;
         let mut d_types = self.memory.alloc::<u8>(arity)?;
-        device
-            .htod_sync_copy_into(&a_col_ptrs, &mut d_a_ptrs)
+        self.htod_launch_metadata_sync_copy_into(&a_col_ptrs, &mut d_a_ptrs)
             .map_err(|e| XlogError::Kernel(format!("diff_full_row a ptr upload: {}", e)))?;
-        device
-            .htod_sync_copy_into(&b_col_ptrs, &mut d_b_ptrs)
+        self.htod_launch_metadata_sync_copy_into(&b_col_ptrs, &mut d_b_ptrs)
             .map_err(|e| XlogError::Kernel(format!("diff_full_row b ptr upload: {}", e)))?;
-        device
-            .htod_sync_copy_into(&col_sizes, &mut d_sizes)
+        self.htod_launch_metadata_sync_copy_into(&col_sizes, &mut d_sizes)
             .map_err(|e| XlogError::Kernel(format!("diff_full_row size upload: {}", e)))?;
-        device
-            .htod_sync_copy_into(&col_types, &mut d_types)
+        self.htod_launch_metadata_sync_copy_into(&col_types, &mut d_types)
             .map_err(|e| XlogError::Kernel(format!("diff_full_row type upload: {}", e)))?;
 
         let block_size = 256u32;
-        let grid = (a_rows + block_size - 1) / block_size;
+        let grid = a_rows.div_ceil(block_size);
         let cfg = LaunchConfig {
             grid_dim: (grid, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -1330,21 +1323,19 @@ impl super::CudaKernelProvider {
             let ty = sorted.schema().column_type(col_idx).ok_or_else(|| {
                 XlogError::Kernel(format!("Sorted column {} type missing", col_idx))
             })?;
-            col_ptrs_host.push(*col.device_ptr() as u64);
+            col_ptrs_host.push(*col.device_ptr());
             col_sizes_host.push(ty.size_bytes() as u32);
         }
 
         let mut d_col_ptrs = self.memory.alloc::<u64>(arity)?;
         let mut d_col_sizes = self.memory.alloc::<u32>(arity)?;
-        device
-            .htod_sync_copy_into(&col_ptrs_host, &mut d_col_ptrs)
+        self.htod_launch_metadata_sync_copy_into(&col_ptrs_host, &mut d_col_ptrs)
             .map_err(|e| XlogError::Kernel(format!("dedup_full_row_gpu col ptr upload: {}", e)))?;
-        device
-            .htod_sync_copy_into(&col_sizes_host, &mut d_col_sizes)
+        self.htod_launch_metadata_sync_copy_into(&col_sizes_host, &mut d_col_sizes)
             .map_err(|e| XlogError::Kernel(format!("dedup_full_row_gpu col size upload: {}", e)))?;
 
         let block_size = 256u32;
-        let grid = (n + block_size - 1) / block_size;
+        let grid = n.div_ceil(block_size);
         let cfg = LaunchConfig {
             grid_dim: (grid, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -1453,7 +1444,7 @@ impl super::CudaKernelProvider {
                     expected_bytes
                 )));
             }
-            col_ptrs_host.push(*col.device_ptr() as u64);
+            col_ptrs_host.push(*col.device_ptr());
             col_sizes_host.push(elem_size as u32);
             col_types_host.push(scalar_type_code_dedup(ty));
         }
@@ -1461,14 +1452,11 @@ impl super::CudaKernelProvider {
         let mut d_col_ptrs = self.memory.alloc::<u64>(arity)?;
         let mut d_col_sizes = self.memory.alloc::<u32>(arity)?;
         let mut d_col_types = self.memory.alloc::<u8>(arity)?;
-        device
-            .htod_sync_copy_into(&col_ptrs_host, &mut d_col_ptrs)
+        self.htod_launch_metadata_sync_copy_into(&col_ptrs_host, &mut d_col_ptrs)
             .map_err(|e| XlogError::Kernel(format!("small full-row sort ptr upload: {}", e)))?;
-        device
-            .htod_sync_copy_into(&col_sizes_host, &mut d_col_sizes)
+        self.htod_launch_metadata_sync_copy_into(&col_sizes_host, &mut d_col_sizes)
             .map_err(|e| XlogError::Kernel(format!("small full-row sort size upload: {}", e)))?;
-        device
-            .htod_sync_copy_into(&col_types_host, &mut d_col_types)
+        self.htod_launch_metadata_sync_copy_into(&col_types_host, &mut d_col_types)
             .map_err(|e| XlogError::Kernel(format!("small full-row sort type upload: {}", e)))?;
 
         let mut d_indices = self.memory.alloc::<u32>(row_count)?;
@@ -1530,7 +1518,7 @@ impl super::CudaKernelProvider {
     )> {
         let device = self.device.inner();
         let block_size = 256u32;
-        let num_blocks = (n + block_size - 1) / block_size;
+        let num_blocks = n.div_ceil(block_size);
 
         let d_prefix_sum = self.memory.alloc::<u32>(n as usize)?;
         let mut d_block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
@@ -1653,7 +1641,7 @@ impl super::CudaKernelProvider {
         let device = self.device.inner();
 
         let block_size = Self::SORT_BLOCK_SIZE;
-        let grid_size = (n + block_size - 1) / block_size;
+        let grid_size = n.div_ceil(block_size);
         let launch_config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -1936,6 +1924,7 @@ impl super::CudaKernelProvider {
         self.apply_permutation_gpu(input, &indices_a)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn radix_sort_u32_pairs_with_scratch(
         &self,
         keys_a: &mut crate::memory::TrackedCudaSlice<u32>,
@@ -1955,7 +1944,7 @@ impl super::CudaKernelProvider {
 
         let device = self.device.inner();
         let block_size = Self::SORT_BLOCK_SIZE;
-        let grid_size = (row_cap + block_size - 1) / block_size;
+        let grid_size = row_cap.div_ceil(block_size);
 
         let sort_config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
@@ -2089,7 +2078,7 @@ impl super::CudaKernelProvider {
         }
         let device = self.device.inner();
         let block_size = Self::SORT_BLOCK_SIZE;
-        let grid_size = (n + block_size - 1) / block_size;
+        let grid_size = n.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -2129,7 +2118,7 @@ impl super::CudaKernelProvider {
         }
         let device = self.device.inner();
         let block_size = Self::SORT_BLOCK_SIZE;
-        let grid_size = (n + block_size - 1) / block_size;
+        let grid_size = n.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -2171,7 +2160,7 @@ impl super::CudaKernelProvider {
         }
         let device = self.device.inner();
         let block_size = Self::SORT_BLOCK_SIZE;
-        let grid_size = (n + block_size - 1) / block_size;
+        let grid_size = n.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -2206,7 +2195,7 @@ impl super::CudaKernelProvider {
         }
         let device = self.device.inner();
         let block_size = Self::SORT_BLOCK_SIZE;
-        let grid_size = (n + block_size - 1) / block_size;
+        let grid_size = n.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -2239,7 +2228,7 @@ impl super::CudaKernelProvider {
         }
         let device = self.device.inner();
         let block_size = Self::SORT_BLOCK_SIZE;
-        let grid_size = (n + block_size - 1) / block_size;
+        let grid_size = n.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -2302,7 +2291,7 @@ impl super::CudaKernelProvider {
         }
         let device = self.device.inner();
         let block_size = 256u32;
-        let num_blocks = (n + block_size - 1) / block_size;
+        let num_blocks = n.div_ceil(block_size);
 
         let mut prefix_sum = self.memory.alloc::<u32>(n as usize)?;
         let mut block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
@@ -2361,9 +2350,7 @@ impl super::CudaKernelProvider {
         n: u32,
     ) -> Result<crate::memory::TrackedCudaSlice<u32>> {
         let mut d_count = self.memory.alloc::<u32>(1)?;
-        self.device
-            .inner()
-            .htod_sync_copy_into(&[0u32], &mut d_count)
+        self.htod_launch_metadata_sync_copy_into(&[0u32], &mut d_count)
             .map_err(|e| {
                 XlogError::Kernel(format!("count_mask_device: zero init failed: {}", e))
             })?;
@@ -2374,7 +2361,7 @@ impl super::CudaKernelProvider {
 
         let device = self.device.inner();
         let block_size = 256u32;
-        let grid_size = (n + block_size - 1) / block_size;
+        let grid_size = n.div_ceil(block_size);
 
         let count_fn = device
             .get_func(SCAN_MODULE, scan_kernels::COUNT_MASK)
@@ -2427,7 +2414,7 @@ impl super::CudaKernelProvider {
 
         let device = self.device.inner();
         let block_size = 256u32;
-        let grid_size = (n + block_size - 1) / block_size;
+        let grid_size = n.div_ceil(block_size);
 
         let count_fn = device
             .get_func(SCAN_MODULE, scan_kernels::COUNT_MASK)
@@ -2463,7 +2450,7 @@ impl super::CudaKernelProvider {
         let d_num_rows = input.num_rows_device();
         let device = self.device.inner();
 
-        let grid_size = (row_cap + Self::SORT_BLOCK_SIZE - 1) / Self::SORT_BLOCK_SIZE;
+        let grid_size = row_cap.div_ceil(Self::SORT_BLOCK_SIZE);
         let launch_config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (Self::SORT_BLOCK_SIZE, 1, 1),
@@ -2558,7 +2545,7 @@ impl super::CudaKernelProvider {
         let d_output_rows = self.upload_device_row_count(output_rows)?;
         let device = self.device.inner();
         let block_size = 256u32;
-        let grid_size = (output_rows + block_size - 1) / block_size;
+        let grid_size = output_rows.div_ceil(block_size);
         let launch_config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -2937,8 +2924,8 @@ impl super::CudaKernelProvider {
         // ----- 9. Combine columns + return drop-in result -----
         let combined_schema = self.combine_schemas(left.schema(), right.schema());
         let mut result_columns = Vec::with_capacity(combined_schema.arity());
-        result_columns.extend(gathered_left.columns.into_iter());
-        result_columns.extend(gathered_right.columns.into_iter());
+        result_columns.extend(gathered_left.columns);
+        result_columns.extend(gathered_right.columns);
         // `buffer_from_columns` takes `row_cap: u64` — see
         // `crates/xlog-cuda/src/provider/mod.rs:2133-2138`.
         self.buffer_from_columns(result_columns, output_rows as u64, combined_schema)
@@ -2952,10 +2939,10 @@ impl super::CudaKernelProvider {
     ///
     /// **Empty / single-row fast path** (per W4.3 plan iter-4 D1
     /// + F-W43-4): `n < 2` returns `Ok(true)` BEFORE allocation
-    /// or kernel launch. The detection kernel's grid `(n + 255)
-    /// / 256` is undefined for `n == 0`; single-row sequences
-    /// are trivially sorted. This is the load-bearing
-    /// invariant Cert G's empty-input subcases verify.
+    ///   or kernel launch. The detection kernel's grid `(n + 255)
+    ///   / 256` is undefined for `n == 0`; single-row sequences
+    ///   are trivially sorted. This is the load-bearing
+    ///   invariant Cert G's empty-input subcases verify.
     ///
     /// Validation:
     ///   * Key column index within arity bounds.
@@ -3020,9 +3007,7 @@ impl super::CudaKernelProvider {
         // default; kernel atomically writes 0 only on
         // detected violation).
         let mut d_result = self.memory.alloc::<u32>(1)?;
-        self.device
-            .inner()
-            .htod_sync_copy_into(&[1u32], &mut d_result)
+        self.htod_launch_metadata_sync_copy_into(&[1u32], &mut d_result)
             .map_err(|e| {
                 XlogError::Kernel(format!("is_sorted_ascending_u32: htod result init: {}", e))
             })?;
@@ -3295,8 +3280,8 @@ impl super::CudaKernelProvider {
         // ----- 9. Combine columns + return drop-in result -----
         let combined_schema = self.combine_schemas(left.schema(), right.schema());
         let mut result_columns = Vec::with_capacity(combined_schema.arity());
-        result_columns.extend(gathered_left.columns.into_iter());
-        result_columns.extend(gathered_right.columns.into_iter());
+        result_columns.extend(gathered_left.columns);
+        result_columns.extend(gathered_right.columns);
         self.buffer_from_columns(result_columns, output_rows as u64, combined_schema)
     }
 
@@ -3449,8 +3434,8 @@ impl super::CudaKernelProvider {
 
         let combined_schema = self.combine_schemas(left.schema(), right.schema());
         let mut result_columns = Vec::with_capacity(combined_schema.arity());
-        result_columns.extend(gathered_left.columns.into_iter());
-        result_columns.extend(gathered_right.columns.into_iter());
+        result_columns.extend(gathered_left.columns);
+        result_columns.extend(gathered_right.columns);
         self.buffer_from_columns(result_columns, output_rows as u64, combined_schema)
     }
 
@@ -3608,6 +3593,7 @@ impl super::CudaKernelProvider {
     /// Hash join using a cached build-side join index.
     ///
     /// The `index` must have been built for the same `right` buffer and `right_keys`.
+    #[allow(clippy::too_many_arguments)]
     pub fn hash_join_v2_with_index(
         &self,
         left: &CudaBuffer,
@@ -3806,7 +3792,7 @@ impl super::CudaKernelProvider {
                 .column(col_idx)
                 .ok_or_else(|| XlogError::Kernel(format!("Key column {} not found", col_idx)))?;
             // Get the device pointer as a raw u64 value
-            col_ptrs[i] = *col.device_ptr() as u64;
+            col_ptrs[i] = *col.device_ptr();
         }
         let mut packed_col_sizes = 0u64;
         for (i, size) in col_sizes.iter().copied().enumerate() {
@@ -3828,7 +3814,7 @@ impl super::CudaKernelProvider {
 
         // Launch configuration
         let block_size = 256u32;
-        let grid_size = (num_rows + block_size - 1) / block_size;
+        let grid_size = num_rows.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -3919,7 +3905,7 @@ impl super::CudaKernelProvider {
             let col = buffer
                 .column(col_idx)
                 .ok_or_else(|| XlogError::Kernel(format!("Key column {} not found", col_idx)))?;
-            col_ptrs.push(*col.device_ptr() as u64);
+            col_ptrs.push(*col.device_ptr());
         }
 
         let packed_bytes = (num_rows as u64)
@@ -3945,7 +3931,7 @@ impl super::CudaKernelProvider {
             })?;
 
         let block_size = 256u32;
-        let grid_size = (num_rows + block_size - 1) / block_size;
+        let grid_size = num_rows.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -4039,7 +4025,7 @@ impl super::CudaKernelProvider {
         }
 
         let block_size = 256u32;
-        let grid_size = (num_rows + block_size - 1) / block_size;
+        let grid_size = num_rows.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -4132,7 +4118,7 @@ impl super::CudaKernelProvider {
             bucket_entries,
             bucket_entry_hashes,
             bucket_mask,
-        } = self.build_hash_table_v2(&*hashes, num_rows)?;
+        } = self.build_hash_table_v2(hashes, num_rows)?;
         Ok(HashTableU64 {
             bucket_counts,
             bucket_offsets,
@@ -4213,7 +4199,7 @@ impl super::CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("hash_join_probe_v2 kernel not found".to_string()))?;
 
         let block_size = 256u32;
-        let probe_grid = (num_left + block_size - 1) / block_size;
+        let probe_grid = num_left.div_ceil(block_size);
         let probe_config = LaunchConfig {
             grid_dim: (probe_grid, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -4239,19 +4225,19 @@ impl super::CudaKernelProvider {
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
-                (&num_left).as_kernel_param(),
+                num_left.as_kernel_param(),
                 (&table.bucket_offsets).as_kernel_param(),
                 (&table.bucket_counts).as_kernel_param(),
                 (&table.bucket_entries).as_kernel_param(),
                 (&table.bucket_entry_hashes).as_kernel_param(),
-                (&table.bucket_mask).as_kernel_param(),
+                table.bucket_mask.as_kernel_param(),
                 (&left_packed.packed_keys).as_kernel_param(),
                 (&right_packed.packed_keys).as_kernel_param(),
-                (&left_packed.key_bytes).as_kernel_param(),
+                left_packed.key_bytes.as_kernel_param(),
                 (&d_dummy_left).as_kernel_param(),
                 (&d_dummy_right).as_kernel_param(),
                 (&d_count_only).as_kernel_param(),
-                (&max_output_count_only).as_kernel_param(),
+                max_output_count_only.as_kernel_param(),
             ];
             probe_func
                 .clone()
@@ -4303,19 +4289,19 @@ impl super::CudaKernelProvider {
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
-                (&num_left).as_kernel_param(),
+                num_left.as_kernel_param(),
                 (&table.bucket_offsets).as_kernel_param(),
                 (&table.bucket_counts).as_kernel_param(),
                 (&table.bucket_entries).as_kernel_param(),
                 (&table.bucket_entry_hashes).as_kernel_param(),
-                (&table.bucket_mask).as_kernel_param(),
+                table.bucket_mask.as_kernel_param(),
                 (&left_packed.packed_keys).as_kernel_param(),
                 (&right_packed.packed_keys).as_kernel_param(),
-                (&left_packed.key_bytes).as_kernel_param(),
+                left_packed.key_bytes.as_kernel_param(),
                 (&d_output_left).as_kernel_param(),
                 (&d_output_right).as_kernel_param(),
                 (&d_output_count).as_kernel_param(),
-                (&max_output).as_kernel_param(),
+                max_output.as_kernel_param(),
             ];
             probe_func
                 .clone()
@@ -4347,8 +4333,8 @@ impl super::CudaKernelProvider {
 
         let combined_schema = self.combine_schemas(left.schema(), right.schema());
         let mut result_columns = Vec::with_capacity(combined_schema.arity());
-        result_columns.extend(gathered_left.columns.into_iter());
-        result_columns.extend(gathered_right.columns.into_iter());
+        result_columns.extend(gathered_left.columns);
+        result_columns.extend(gathered_right.columns);
 
         self.buffer_from_columns(result_columns, result_count, combined_schema)
     }
@@ -4398,7 +4384,7 @@ impl super::CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("hash_join_probe_v2 kernel not found".to_string()))?;
 
         let block_size = 256u32;
-        let probe_grid = (num_left + block_size - 1) / block_size;
+        let probe_grid = num_left.div_ceil(block_size);
         let probe_config = LaunchConfig {
             grid_dim: (probe_grid, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -4419,19 +4405,19 @@ impl super::CudaKernelProvider {
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
-                (&num_left).as_kernel_param(),
+                num_left.as_kernel_param(),
                 (&table.bucket_offsets).as_kernel_param(),
                 (&table.bucket_counts).as_kernel_param(),
                 (&table.bucket_entries).as_kernel_param(),
                 (&table.bucket_entry_hashes).as_kernel_param(),
-                (&table.bucket_mask).as_kernel_param(),
+                table.bucket_mask.as_kernel_param(),
                 (&left_packed.packed_keys).as_kernel_param(),
                 (&index.packed_keys).as_kernel_param(),
-                (&index.key_bytes).as_kernel_param(),
+                index.key_bytes.as_kernel_param(),
                 (&d_dummy_left).as_kernel_param(),
                 (&d_dummy_right).as_kernel_param(),
                 (&d_count_only).as_kernel_param(),
-                (&max_output_count_only).as_kernel_param(),
+                max_output_count_only.as_kernel_param(),
             ];
             probe_func
                 .clone()
@@ -4478,19 +4464,19 @@ impl super::CudaKernelProvider {
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
-                (&num_left).as_kernel_param(),
+                num_left.as_kernel_param(),
                 (&table.bucket_offsets).as_kernel_param(),
                 (&table.bucket_counts).as_kernel_param(),
                 (&table.bucket_entries).as_kernel_param(),
                 (&table.bucket_entry_hashes).as_kernel_param(),
-                (&table.bucket_mask).as_kernel_param(),
+                table.bucket_mask.as_kernel_param(),
                 (&left_packed.packed_keys).as_kernel_param(),
                 (&index.packed_keys).as_kernel_param(),
-                (&index.key_bytes).as_kernel_param(),
+                index.key_bytes.as_kernel_param(),
                 (&d_output_left).as_kernel_param(),
                 (&d_output_right).as_kernel_param(),
                 (&d_output_count).as_kernel_param(),
-                (&max_output).as_kernel_param(),
+                max_output.as_kernel_param(),
             ];
             probe_func
                 .clone()
@@ -4517,8 +4503,8 @@ impl super::CudaKernelProvider {
 
         let combined_schema = self.combine_schemas(left.schema(), right.schema());
         let mut result_columns = Vec::with_capacity(combined_schema.arity());
-        result_columns.extend(gathered_left.columns.into_iter());
-        result_columns.extend(gathered_right.columns.into_iter());
+        result_columns.extend(gathered_left.columns);
+        result_columns.extend(gathered_right.columns);
 
         self.buffer_from_columns(result_columns, result_count, combined_schema)
     }
@@ -4596,7 +4582,7 @@ impl super::CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("hash_join_semi kernel not found".to_string()))?;
 
         let block_size = 256u32;
-        let grid_size = (num_left + block_size - 1) / block_size;
+        let grid_size = num_left.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -4718,7 +4704,7 @@ impl super::CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("hash_join_semi kernel not found".to_string()))?;
 
         let block_size = 256u32;
-        let grid_size = (num_probe_u32 + block_size - 1) / block_size;
+        let grid_size = num_probe_u32.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -4823,7 +4809,7 @@ impl super::CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("hash_join_semi kernel not found".to_string()))?;
 
         let block_size = 256u32;
-        let grid_size = (num_left + block_size - 1) / block_size;
+        let grid_size = num_left.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -4930,7 +4916,7 @@ impl super::CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("hash_join_anti kernel not found".to_string()))?;
 
         let block_size = 256u32;
-        let grid_size = (num_left + block_size - 1) / block_size;
+        let grid_size = num_left.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -5011,7 +4997,7 @@ impl super::CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("hash_join_anti kernel not found".to_string()))?;
 
         let block_size = 256u32;
-        let grid_size = (num_left + block_size - 1) / block_size;
+        let grid_size = num_left.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -5095,7 +5081,7 @@ impl super::CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("hash_join_semi kernel not found".to_string()))?;
 
         let block_size = 256u32;
-        let grid_size = (num_left + block_size - 1) / block_size;
+        let grid_size = num_left.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -5145,19 +5131,19 @@ impl super::CudaKernelProvider {
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
-                (&num_left).as_kernel_param(),
+                num_left.as_kernel_param(),
                 (&table.bucket_offsets).as_kernel_param(),
                 (&table.bucket_counts).as_kernel_param(),
                 (&table.bucket_entries).as_kernel_param(),
                 (&table.bucket_entry_hashes).as_kernel_param(),
-                (&table.bucket_mask).as_kernel_param(),
+                table.bucket_mask.as_kernel_param(),
                 (&left_packed.packed_keys).as_kernel_param(),
                 (&index.packed_keys).as_kernel_param(),
-                (&index.key_bytes).as_kernel_param(),
+                index.key_bytes.as_kernel_param(),
                 (&d_dummy_left).as_kernel_param(),
                 (&d_dummy_right).as_kernel_param(),
                 (&d_count_only).as_kernel_param(),
-                (&max_output_count_only).as_kernel_param(),
+                max_output_count_only.as_kernel_param(),
             ];
             probe_func
                 .clone()
@@ -5197,19 +5183,19 @@ impl super::CudaKernelProvider {
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
-                (&num_left).as_kernel_param(),
+                num_left.as_kernel_param(),
                 (&table.bucket_offsets).as_kernel_param(),
                 (&table.bucket_counts).as_kernel_param(),
                 (&table.bucket_entries).as_kernel_param(),
                 (&table.bucket_entry_hashes).as_kernel_param(),
-                (&table.bucket_mask).as_kernel_param(),
+                table.bucket_mask.as_kernel_param(),
                 (&left_packed.packed_keys).as_kernel_param(),
                 (&index.packed_keys).as_kernel_param(),
-                (&index.key_bytes).as_kernel_param(),
+                index.key_bytes.as_kernel_param(),
                 (&d_output_left).as_kernel_param(),
                 (&d_output_right).as_kernel_param(),
                 (&d_output_count).as_kernel_param(),
-                (&max_output).as_kernel_param(),
+                max_output.as_kernel_param(),
             ];
             probe_func
                 .clone()
@@ -5227,7 +5213,7 @@ impl super::CudaKernelProvider {
         // increments before bounds check, so count can exceed max_output).
         let inner_count = self
             .read_join_output_count_metadata(&d_output_count)?
-            .min(max_output) as u32;
+            .min(max_output);
 
         let mask_not_fn = device
             .get_func(FILTER_MODULE, filter_kernels::MASK_NOT)
@@ -5259,14 +5245,14 @@ impl super::CudaKernelProvider {
 
         if unmatched_rows == 0 {
             let mut result_columns = Vec::with_capacity(combined_schema.arity());
-            result_columns.extend(inner_left.columns.into_iter());
-            result_columns.extend(inner_right.columns.into_iter());
+            result_columns.extend(inner_left.columns);
+            result_columns.extend(inner_right.columns);
             return self.buffer_from_columns(result_columns, inner_count as u64, combined_schema);
         }
 
         if inner_count == 0 {
             let mut result_columns = Vec::with_capacity(combined_schema.arity());
-            result_columns.extend(unmatched_left.columns.into_iter());
+            result_columns.extend(unmatched_left.columns);
 
             for col_idx in 0..right.arity() {
                 let elem_size = right
@@ -5302,7 +5288,7 @@ impl super::CudaKernelProvider {
         for (col_idx, (inner_col, unmatched_col)) in inner_left
             .columns
             .into_iter()
-            .zip(unmatched_left.columns.into_iter())
+            .zip(unmatched_left.columns)
             .enumerate()
         {
             let elem_size = left
@@ -5466,7 +5452,7 @@ impl super::CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("hash_join_semi kernel not found".to_string()))?;
 
         let block_size = 256u32;
-        let grid_size = (num_left + block_size - 1) / block_size;
+        let grid_size = num_left.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -5519,19 +5505,19 @@ impl super::CudaKernelProvider {
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
-                (&num_left).as_kernel_param(),
+                num_left.as_kernel_param(),
                 (&table.bucket_offsets).as_kernel_param(),
                 (&table.bucket_counts).as_kernel_param(),
                 (&table.bucket_entries).as_kernel_param(),
                 (&table.bucket_entry_hashes).as_kernel_param(),
-                (&table.bucket_mask).as_kernel_param(),
+                table.bucket_mask.as_kernel_param(),
                 (&left_packed.packed_keys).as_kernel_param(),
                 (&right_packed.packed_keys).as_kernel_param(),
-                (&left_packed.key_bytes).as_kernel_param(),
+                left_packed.key_bytes.as_kernel_param(),
                 (&d_dummy_left).as_kernel_param(),
                 (&d_dummy_right).as_kernel_param(),
                 (&d_count_only).as_kernel_param(),
-                (&max_output_count_only).as_kernel_param(),
+                max_output_count_only.as_kernel_param(),
             ];
             probe_func
                 .clone()
@@ -5576,19 +5562,19 @@ impl super::CudaKernelProvider {
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
-                (&num_left).as_kernel_param(),
+                num_left.as_kernel_param(),
                 (&table.bucket_offsets).as_kernel_param(),
                 (&table.bucket_counts).as_kernel_param(),
                 (&table.bucket_entries).as_kernel_param(),
                 (&table.bucket_entry_hashes).as_kernel_param(),
-                (&table.bucket_mask).as_kernel_param(),
+                table.bucket_mask.as_kernel_param(),
                 (&left_packed.packed_keys).as_kernel_param(),
                 (&right_packed.packed_keys).as_kernel_param(),
-                (&left_packed.key_bytes).as_kernel_param(),
+                left_packed.key_bytes.as_kernel_param(),
                 (&d_output_left).as_kernel_param(),
                 (&d_output_right).as_kernel_param(),
                 (&d_output_count).as_kernel_param(),
-                (&max_output).as_kernel_param(),
+                max_output.as_kernel_param(),
             ];
             probe_func
                 .clone()
@@ -5606,7 +5592,7 @@ impl super::CudaKernelProvider {
         // increments before bounds check, so count can exceed max_output).
         let inner_count = self
             .read_join_output_count_metadata(&d_output_count)?
-            .min(max_output) as u32;
+            .min(max_output);
 
         // Build unmatched-left buffer by inverting has_match mask and compacting on-GPU.
         let mask_not_fn = device
@@ -5640,14 +5626,14 @@ impl super::CudaKernelProvider {
 
         if unmatched_rows == 0 {
             let mut result_columns = Vec::with_capacity(combined_schema.arity());
-            result_columns.extend(inner_left.columns.into_iter());
-            result_columns.extend(inner_right.columns.into_iter());
+            result_columns.extend(inner_left.columns);
+            result_columns.extend(inner_right.columns);
             return self.buffer_from_columns(result_columns, inner_count as u64, combined_schema);
         }
 
         if inner_count == 0 {
             let mut result_columns = Vec::with_capacity(combined_schema.arity());
-            result_columns.extend(unmatched_left.columns.into_iter());
+            result_columns.extend(unmatched_left.columns);
 
             for col_idx in 0..right.arity() {
                 let elem_size = right
@@ -5685,7 +5671,7 @@ impl super::CudaKernelProvider {
         for (col_idx, (inner_col, unmatched_col)) in inner_left
             .columns
             .into_iter()
-            .zip(unmatched_left.columns.into_iter())
+            .zip(unmatched_left.columns)
             .enumerate()
         {
             let elem_size = left
@@ -5933,7 +5919,7 @@ impl super::CudaKernelProvider {
     ) -> Result<Vec<(u32, u32, u32)>> {
         let total = n * n * n;
         let block_size = 256usize;
-        let grid_size = (total + block_size - 1) / block_size;
+        let grid_size = total.div_ceil(block_size);
 
         let mut out_i = self.memory().alloc::<u32>(total)?;
         let mut out_j = self.memory().alloc::<u32>(total)?;
@@ -5941,9 +5927,7 @@ impl super::CudaKernelProvider {
         let mut out_p = self.memory().alloc::<f32>(total)?;
         let mut count = self.memory().alloc::<u32>(1)?;
 
-        self.device()
-            .inner()
-            .htod_sync_copy_into(&[0u32], &mut count)
+        self.htod_launch_metadata_sync_copy_into(&[0u32], &mut count)
             .map_err(|e| XlogError::Kernel(format!("ILP htod count: {}", e)))?;
 
         let hard_col = mask_hard
@@ -6064,6 +6048,7 @@ impl super::CudaKernelProvider {
     /// `block_sums` allocations created by the inner scan are
     /// recorded directly inside
     /// [`Self::multiblock_scan_u32_view_inplace_on_stream`].
+    #[allow(clippy::too_many_arguments)]
     fn radix_sort_u32_pairs_with_scratch_on_stream(
         &self,
         keys_a: &mut TrackedCudaSlice<u32>,
@@ -6084,7 +6069,7 @@ impl super::CudaKernelProvider {
         }
         let device = self.device.inner();
         let block_size = Self::SORT_BLOCK_SIZE;
-        let grid_size = (row_cap + block_size - 1) / block_size;
+        let grid_size = row_cap.div_ceil(block_size);
         let sort_config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -6223,7 +6208,7 @@ impl super::CudaKernelProvider {
         let d_num_rows = input.num_rows_device();
         let device = self.device.inner();
 
-        let grid_size = (row_cap + Self::SORT_BLOCK_SIZE - 1) / Self::SORT_BLOCK_SIZE;
+        let grid_size = row_cap.div_ceil(Self::SORT_BLOCK_SIZE);
         let launch_config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (Self::SORT_BLOCK_SIZE, 1, 1),
@@ -6365,7 +6350,7 @@ impl super::CudaKernelProvider {
 
         let n = input.num_rows() as u32;
         let block_size = Self::SORT_BLOCK_SIZE;
-        let grid_size = (n + block_size - 1) / block_size;
+        let grid_size = n.div_ceil(block_size);
         let device = self.device.inner();
         let launch_config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
@@ -6659,8 +6644,8 @@ impl super::CudaKernelProvider {
         // Step 2: bytewise adjacent-equality mask. Allocate
         // d_col_ptrs / d_col_sizes / d_unique_mask up front
         // before the recorder. col_ptrs/sizes are populated
-        // synchronously via htod_sync_copy_into (host data,
-        // ordered before the launch_stream kernel sees them).
+        // synchronously as launch metadata (ordered before the
+        // launch_stream kernel sees them).
         let device = self.device.inner();
         let mut col_ptrs_host: Vec<u64> = Vec::with_capacity(arity);
         let mut col_sizes_host: Vec<u32> = Vec::with_capacity(arity);
@@ -6671,18 +6656,16 @@ impl super::CudaKernelProvider {
             let ty = sorted.schema().column_type(col_idx).ok_or_else(|| {
                 XlogError::Kernel(format!("Sorted column {} type missing", col_idx))
             })?;
-            col_ptrs_host.push(*c.device_ptr() as u64);
+            col_ptrs_host.push(*c.device_ptr());
             col_sizes_host.push(ty.size_bytes() as u32);
         }
         let mut d_col_ptrs = self.memory.alloc::<u64>(arity)?;
         let mut d_col_sizes = self.memory.alloc::<u32>(arity)?;
-        device
-            .htod_sync_copy_into(&col_ptrs_host, &mut d_col_ptrs)
+        self.htod_launch_metadata_sync_copy_into(&col_ptrs_host, &mut d_col_ptrs)
             .map_err(|e| {
                 XlogError::Kernel(format!("dedup_full_row_recorded col ptr upload: {}", e))
             })?;
-        device
-            .htod_sync_copy_into(&col_sizes_host, &mut d_col_sizes)
+        self.htod_launch_metadata_sync_copy_into(&col_sizes_host, &mut d_col_sizes)
             .map_err(|e| {
                 XlogError::Kernel(format!("dedup_full_row_recorded col size upload: {}", e))
             })?;
@@ -6707,7 +6690,7 @@ impl super::CudaKernelProvider {
         })?;
 
         let block_size = 256u32;
-        let grid = (n + block_size - 1) / block_size;
+        let grid = n.div_ceil(block_size);
         let cfg = LaunchConfig {
             grid_dim: (grid, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -6844,7 +6827,7 @@ impl super::CudaKernelProvider {
         }
 
         let block_size = 256u32;
-        let grid_size = (num_rows + block_size - 1) / block_size;
+        let grid_size = num_rows.div_ceil(block_size);
         let cfg = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -7077,7 +7060,7 @@ impl super::CudaKernelProvider {
             })?;
         let device = self.device.inner();
         let block_size = 256u32;
-        let grid_size = (output_rows + block_size - 1) / block_size;
+        let grid_size = output_rows.div_ceil(block_size);
         let launch_config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -7281,7 +7264,7 @@ impl super::CudaKernelProvider {
             .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_PROBE_V2)
             .ok_or_else(|| XlogError::Kernel("hash_join_probe_v2 kernel not found".to_string()))?;
         let block_size = 256u32;
-        let probe_grid = (num_left + block_size - 1) / block_size;
+        let probe_grid = num_left.div_ceil(block_size);
         let probe_config = LaunchConfig {
             grid_dim: (probe_grid, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -7347,19 +7330,19 @@ impl super::CudaKernelProvider {
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
-                (&num_left).as_kernel_param(),
+                num_left.as_kernel_param(),
                 (&table.bucket_offsets).as_kernel_param(),
                 (&table.bucket_counts).as_kernel_param(),
                 (&table.bucket_entries).as_kernel_param(),
                 (&table.bucket_entry_hashes).as_kernel_param(),
-                (&table.bucket_mask).as_kernel_param(),
+                table.bucket_mask.as_kernel_param(),
                 (&left_packed.packed_keys).as_kernel_param(),
                 (&right_packed.packed_keys).as_kernel_param(),
-                (&left_packed.key_bytes).as_kernel_param(),
+                left_packed.key_bytes.as_kernel_param(),
                 (&d_dummy_left).as_kernel_param(),
                 (&d_dummy_right).as_kernel_param(),
                 (&d_count_only).as_kernel_param(),
-                (&max_output_count_only).as_kernel_param(),
+                max_output_count_only.as_kernel_param(),
             ];
             probe_func
                 .clone()
@@ -7449,19 +7432,19 @@ impl super::CudaKernelProvider {
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
-                (&num_left).as_kernel_param(),
+                num_left.as_kernel_param(),
                 (&table.bucket_offsets).as_kernel_param(),
                 (&table.bucket_counts).as_kernel_param(),
                 (&table.bucket_entries).as_kernel_param(),
                 (&table.bucket_entry_hashes).as_kernel_param(),
-                (&table.bucket_mask).as_kernel_param(),
+                table.bucket_mask.as_kernel_param(),
                 (&left_packed.packed_keys).as_kernel_param(),
                 (&right_packed.packed_keys).as_kernel_param(),
-                (&left_packed.key_bytes).as_kernel_param(),
+                left_packed.key_bytes.as_kernel_param(),
                 (&d_output_left).as_kernel_param(),
                 (&d_output_right).as_kernel_param(),
                 (&d_output_count).as_kernel_param(),
-                (&max_output_u32).as_kernel_param(),
+                max_output_u32.as_kernel_param(),
             ];
             probe_func
                 .clone()
@@ -7547,8 +7530,8 @@ impl super::CudaKernelProvider {
 
         let combined_schema = self.combine_schemas(left.schema(), right.schema());
         let mut result_columns = Vec::with_capacity(combined_schema.arity());
-        result_columns.extend(gathered_left.columns.into_iter());
-        result_columns.extend(gathered_right.columns.into_iter());
+        result_columns.extend(gathered_left.columns);
+        result_columns.extend(gathered_right.columns);
         self.buffer_from_columns(result_columns, result_count, combined_schema)
     }
 
@@ -7691,7 +7674,7 @@ impl super::CudaKernelProvider {
 
         let device = self.device.inner();
         let block_size = 256u32;
-        let probe_grid = (probe_cap + block_size - 1) / block_size;
+        let probe_grid = probe_cap.div_ceil(block_size);
         let probe_config = LaunchConfig {
             grid_dim: (probe_grid, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -7941,17 +7924,17 @@ impl super::CudaKernelProvider {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
                 left.num_rows_device().as_kernel_param(),
-                (&probe_cap).as_kernel_param(),
+                probe_cap.as_kernel_param(),
                 (&table.bucket_offsets).as_kernel_param(),
                 (&table.bucket_counts).as_kernel_param(),
                 (&table.bucket_entries).as_kernel_param(),
                 (&table.bucket_entry_hashes).as_kernel_param(),
-                (&table.bucket_mask).as_kernel_param(),
+                table.bucket_mask.as_kernel_param(),
                 (&left_packed.packed_keys).as_kernel_param(),
                 (&right_packed.packed_keys).as_kernel_param(),
-                (&left_packed.key_bytes).as_kernel_param(),
+                left_packed.key_bytes.as_kernel_param(),
                 (&per_probe_offsets).as_kernel_param(),
-                (&output_capacity).as_kernel_param(),
+                output_capacity.as_kernel_param(),
                 (&d_output_left).as_kernel_param(),
                 (&d_output_right).as_kernel_param(),
                 (&d_overflow).as_kernel_param(),
@@ -8016,8 +7999,8 @@ impl super::CudaKernelProvider {
 
         let combined_schema = self.combine_schemas(left.schema(), right.schema());
         let mut result_columns = Vec::with_capacity(combined_schema.arity());
-        result_columns.extend(gathered_left.columns.into_iter());
-        result_columns.extend(gathered_right.columns.into_iter());
+        result_columns.extend(gathered_left.columns);
+        result_columns.extend(gathered_right.columns);
         self.buffer_from_columns(result_columns, output_capacity as u64, combined_schema)
     }
 
@@ -8122,7 +8105,7 @@ impl super::CudaKernelProvider {
 
         let device = self.device.inner();
         let block_size = 256u32;
-        let probe_grid = (probe_cap + block_size - 1) / block_size;
+        let probe_grid = probe_cap.div_ceil(block_size);
         let probe_config = LaunchConfig {
             grid_dim: (probe_grid, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -8285,17 +8268,17 @@ impl super::CudaKernelProvider {
                 let mut params: Vec<*mut c_void> = vec![
                     (&left_packed.hashes).as_kernel_param(),
                     left.num_rows_device().as_kernel_param(),
-                    (&probe_cap).as_kernel_param(),
+                    probe_cap.as_kernel_param(),
                     (&table.bucket_offsets).as_kernel_param(),
                     (&table.bucket_counts).as_kernel_param(),
                     (&table.bucket_entries).as_kernel_param(),
                     (&table.bucket_entry_hashes).as_kernel_param(),
-                    (&table.bucket_mask).as_kernel_param(),
+                    table.bucket_mask.as_kernel_param(),
                     (&left_packed.packed_keys).as_kernel_param(),
                     (&right_packed.packed_keys).as_kernel_param(),
-                    (&left_packed.key_bytes).as_kernel_param(),
+                    left_packed.key_bytes.as_kernel_param(),
                     (&per_probe_offsets).as_kernel_param(),
-                    (&output_capacity).as_kernel_param(),
+                    output_capacity.as_kernel_param(),
                     (&d_output_left).as_kernel_param(),
                     (&d_output_right).as_kernel_param(),
                     (&d_overflow).as_kernel_param(),
@@ -8386,9 +8369,7 @@ impl super::CudaKernelProvider {
 
         let probe_cap = entry.probe_capacity;
         let output_capacity = entry.output_capacity;
-        if probe_config.grid_dim.0
-            != (probe_cap + probe_config.block_dim.0 - 1) / probe_config.block_dim.0
-        {
+        if probe_config.grid_dim.0 != probe_cap.div_ceil(probe_config.block_dim.0) {
             return Err(XlogError::Kernel(format!(
                 "csm CUDA Graph replay probe grid mismatch: graph probe_cap={}, grid={:?}",
                 probe_cap, probe_config.grid_dim
@@ -8407,40 +8388,40 @@ impl super::CudaKernelProvider {
         let mut count_args: Vec<*mut c_void> = vec![
             (&left_packed.hashes).as_kernel_param(),
             left.num_rows_device().as_kernel_param(),
-            (&probe_cap).as_kernel_param(),
+            probe_cap.as_kernel_param(),
             (&table.bucket_offsets).as_kernel_param(),
             (&table.bucket_counts).as_kernel_param(),
             (&table.bucket_entries).as_kernel_param(),
             (&table.bucket_entry_hashes).as_kernel_param(),
-            (&table.bucket_mask).as_kernel_param(),
+            table.bucket_mask.as_kernel_param(),
             (&left_packed.packed_keys).as_kernel_param(),
             (&right_packed.packed_keys).as_kernel_param(),
-            (&left_packed.key_bytes).as_kernel_param(),
+            left_packed.key_bytes.as_kernel_param(),
             (&entry.per_probe_count).as_kernel_param(),
         ];
         let mut total_args: Vec<*mut c_void> = vec![
             (&entry.per_probe_offsets).as_kernel_param(),
             (&entry.per_probe_count).as_kernel_param(),
             left.num_rows_device().as_kernel_param(),
-            (&probe_cap).as_kernel_param(),
-            (&materialize_capacity_u32).as_kernel_param(),
+            probe_cap.as_kernel_param(),
+            materialize_capacity_u32.as_kernel_param(),
             (&entry.d_logical_count).as_kernel_param(),
             (&entry.d_overflow).as_kernel_param(),
         ];
         let mut materialize_args: Vec<*mut c_void> = vec![
             (&left_packed.hashes).as_kernel_param(),
             left.num_rows_device().as_kernel_param(),
-            (&probe_cap).as_kernel_param(),
+            probe_cap.as_kernel_param(),
             (&table.bucket_offsets).as_kernel_param(),
             (&table.bucket_counts).as_kernel_param(),
             (&table.bucket_entries).as_kernel_param(),
             (&table.bucket_entry_hashes).as_kernel_param(),
-            (&table.bucket_mask).as_kernel_param(),
+            table.bucket_mask.as_kernel_param(),
             (&left_packed.packed_keys).as_kernel_param(),
             (&right_packed.packed_keys).as_kernel_param(),
-            (&left_packed.key_bytes).as_kernel_param(),
+            left_packed.key_bytes.as_kernel_param(),
             (&entry.per_probe_offsets).as_kernel_param(),
-            (&output_capacity).as_kernel_param(),
+            output_capacity.as_kernel_param(),
             (&entry.d_output_left).as_kernel_param(),
             (&entry.d_output_right).as_kernel_param(),
             (&entry.d_overflow).as_kernel_param(),
@@ -8528,8 +8509,8 @@ impl super::CudaKernelProvider {
 
         let combined_schema = self.combine_schemas(left.schema(), right.schema());
         let mut result_columns = Vec::with_capacity(combined_schema.arity());
-        result_columns.extend(gathered_left.columns.into_iter());
-        result_columns.extend(gathered_right.columns.into_iter());
+        result_columns.extend(gathered_left.columns);
+        result_columns.extend(gathered_right.columns);
         self.buffer_from_columns(result_columns, output_rows as u64, combined_schema)
     }
 
@@ -8723,7 +8704,7 @@ impl super::CudaKernelProvider {
 
         let device = self.device.inner();
         let block_size = 256u32;
-        let probe_grid = (probe_cap + block_size - 1) / block_size;
+        let probe_grid = probe_cap.div_ceil(block_size);
         let probe_config = LaunchConfig {
             grid_dim: (probe_grid, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -8949,17 +8930,17 @@ impl super::CudaKernelProvider {
                 let mut params: Vec<*mut c_void> = vec![
                     (&left_packed.hashes).as_kernel_param(),
                     left.num_rows_device().as_kernel_param(),
-                    (&probe_cap).as_kernel_param(),
+                    probe_cap.as_kernel_param(),
                     (&table.bucket_offsets).as_kernel_param(),
                     (&table.bucket_counts).as_kernel_param(),
                     (&table.bucket_entries).as_kernel_param(),
                     (&table.bucket_entry_hashes).as_kernel_param(),
-                    (&table.bucket_mask).as_kernel_param(),
+                    table.bucket_mask.as_kernel_param(),
                     (&left_packed.packed_keys).as_kernel_param(),
                     (&right_packed.packed_keys).as_kernel_param(),
-                    (&left_packed.key_bytes).as_kernel_param(),
+                    left_packed.key_bytes.as_kernel_param(),
                     (&per_probe_offsets).as_kernel_param(),
-                    (&inner_count_u32).as_kernel_param(),
+                    inner_count_u32.as_kernel_param(),
                     (&d_output_left).as_kernel_param(),
                     (&d_output_right).as_kernel_param(),
                     (&d_overflow).as_kernel_param(),
@@ -9333,6 +9314,7 @@ impl super::CudaKernelProvider {
     /// recorders — dropping the index after the call returns
     /// is correctly serialized through the runtime's
     /// record-all + wait-all event chain.
+    #[allow(clippy::too_many_arguments)]
     pub fn hash_join_inner_v2_with_index_count_scan_materialize_recorded(
         &self,
         left: &CudaBuffer,
@@ -9443,7 +9425,7 @@ impl super::CudaKernelProvider {
 
         let device = self.device.inner();
         let block_size = 256u32;
-        let probe_grid = (probe_cap + block_size - 1) / block_size;
+        let probe_grid = probe_cap.div_ceil(block_size);
         let probe_config = LaunchConfig {
             grid_dim: (probe_grid, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -9684,17 +9666,17 @@ impl super::CudaKernelProvider {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
                 left.num_rows_device().as_kernel_param(),
-                (&probe_cap).as_kernel_param(),
+                probe_cap.as_kernel_param(),
                 (&table.bucket_offsets).as_kernel_param(),
                 (&table.bucket_counts).as_kernel_param(),
                 (&table.bucket_entries).as_kernel_param(),
                 (&table.bucket_entry_hashes).as_kernel_param(),
-                (&table.bucket_mask).as_kernel_param(),
+                table.bucket_mask.as_kernel_param(),
                 (&left_packed.packed_keys).as_kernel_param(),
                 (&index.packed_keys).as_kernel_param(),
-                (&index.key_bytes).as_kernel_param(),
+                index.key_bytes.as_kernel_param(),
                 (&per_probe_offsets).as_kernel_param(),
-                (&output_capacity).as_kernel_param(),
+                output_capacity.as_kernel_param(),
                 (&d_output_left).as_kernel_param(),
                 (&d_output_right).as_kernel_param(),
                 (&d_overflow).as_kernel_param(),
@@ -9765,8 +9747,8 @@ impl super::CudaKernelProvider {
 
         let combined_schema = self.combine_schemas(left.schema(), right.schema());
         let mut result_columns = Vec::with_capacity(combined_schema.arity());
-        result_columns.extend(gathered_left.columns.into_iter());
-        result_columns.extend(gathered_right.columns.into_iter());
+        result_columns.extend(gathered_left.columns);
+        result_columns.extend(gathered_right.columns);
         self.buffer_from_columns(result_columns, output_capacity as u64, combined_schema)
     }
 
@@ -9800,6 +9782,7 @@ impl super::CudaKernelProvider {
     ///     `right_keys`.
     ///   * `left_packed.key_bytes` mismatches `index.key_bytes`.
     ///   * Preflight / kernel / commit failures.
+    #[allow(clippy::too_many_arguments)]
     pub fn hash_join_left_outer_v2_with_index_count_scan_materialize_recorded(
         &self,
         left: &CudaBuffer,
@@ -9922,7 +9905,7 @@ impl super::CudaKernelProvider {
 
         let device = self.device.inner();
         let block_size = 256u32;
-        let probe_grid = (probe_cap + block_size - 1) / block_size;
+        let probe_grid = probe_cap.div_ceil(block_size);
         let probe_config = LaunchConfig {
             grid_dim: (probe_grid, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -10153,17 +10136,17 @@ impl super::CudaKernelProvider {
                 let mut params: Vec<*mut c_void> = vec![
                     (&left_packed.hashes).as_kernel_param(),
                     left.num_rows_device().as_kernel_param(),
-                    (&probe_cap).as_kernel_param(),
+                    probe_cap.as_kernel_param(),
                     (&table.bucket_offsets).as_kernel_param(),
                     (&table.bucket_counts).as_kernel_param(),
                     (&table.bucket_entries).as_kernel_param(),
                     (&table.bucket_entry_hashes).as_kernel_param(),
-                    (&table.bucket_mask).as_kernel_param(),
+                    table.bucket_mask.as_kernel_param(),
                     (&left_packed.packed_keys).as_kernel_param(),
                     (&index.packed_keys).as_kernel_param(),
-                    (&index.key_bytes).as_kernel_param(),
+                    index.key_bytes.as_kernel_param(),
                     (&per_probe_offsets).as_kernel_param(),
-                    (&inner_count_u32).as_kernel_param(),
+                    inner_count_u32.as_kernel_param(),
                     (&d_output_left).as_kernel_param(),
                     (&d_output_right).as_kernel_param(),
                     (&d_overflow).as_kernel_param(),
@@ -10536,6 +10519,7 @@ impl super::CudaKernelProvider {
     /// ≤4 keys, key-type match, row-count caps) are validated
     /// upstream by the public `hash_join_v2_with_limit` and inside
     /// each per-type method.
+    #[allow(clippy::too_many_arguments)]
     pub fn hash_join_v2_recorded(
         &self,
         left: &CudaBuffer,
@@ -10724,7 +10708,7 @@ impl super::CudaKernelProvider {
 
         let device = self.device.inner();
         let block_size = 256u32;
-        let grid_size = (num_left + block_size - 1) / block_size;
+        let grid_size = num_left.div_ceil(block_size);
         let cfg = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -10818,19 +10802,19 @@ impl super::CudaKernelProvider {
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
-                (&num_left).as_kernel_param(),
+                num_left.as_kernel_param(),
                 (&table.bucket_offsets).as_kernel_param(),
                 (&table.bucket_counts).as_kernel_param(),
                 (&table.bucket_entries).as_kernel_param(),
                 (&table.bucket_entry_hashes).as_kernel_param(),
-                (&table.bucket_mask).as_kernel_param(),
+                table.bucket_mask.as_kernel_param(),
                 (&left_packed.packed_keys).as_kernel_param(),
                 (&right_packed.packed_keys).as_kernel_param(),
-                (&left_packed.key_bytes).as_kernel_param(),
+                left_packed.key_bytes.as_kernel_param(),
                 (&d_dummy_left).as_kernel_param(),
                 (&d_dummy_right).as_kernel_param(),
                 (&d_count_only).as_kernel_param(),
-                (&max_output_count_only).as_kernel_param(),
+                max_output_count_only.as_kernel_param(),
             ];
             probe_func
                 .clone()
@@ -10921,19 +10905,19 @@ impl super::CudaKernelProvider {
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
-                (&num_left).as_kernel_param(),
+                num_left.as_kernel_param(),
                 (&table.bucket_offsets).as_kernel_param(),
                 (&table.bucket_counts).as_kernel_param(),
                 (&table.bucket_entries).as_kernel_param(),
                 (&table.bucket_entry_hashes).as_kernel_param(),
-                (&table.bucket_mask).as_kernel_param(),
+                table.bucket_mask.as_kernel_param(),
                 (&left_packed.packed_keys).as_kernel_param(),
                 (&right_packed.packed_keys).as_kernel_param(),
-                (&left_packed.key_bytes).as_kernel_param(),
+                left_packed.key_bytes.as_kernel_param(),
                 (&d_output_left).as_kernel_param(),
                 (&d_output_right).as_kernel_param(),
                 (&d_output_count).as_kernel_param(),
-                (&max_output_u32).as_kernel_param(),
+                max_output_u32.as_kernel_param(),
             ];
             probe_func
                 .clone()
@@ -11453,7 +11437,7 @@ impl super::CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel(format!("{} kernel not found", kernel_name)))?;
 
         let block_size = 256u32;
-        let grid_size = (num_left + block_size - 1) / block_size;
+        let grid_size = num_left.div_ceil(block_size);
         let cfg = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -11543,6 +11527,7 @@ impl super::CudaKernelProvider {
     /// through the legacy indexed recorded methods. `Semi` /
     /// `Anti` always route through their existing indexed
     /// recorded methods — no CSM implementation exists for them.
+    #[allow(clippy::too_many_arguments)]
     pub fn hash_join_v2_with_index_recorded(
         &self,
         left: &CudaBuffer,
@@ -11766,7 +11751,7 @@ impl super::CudaKernelProvider {
             .get_func(JOIN_MODULE, join_kernels::HASH_JOIN_PROBE_V2)
             .ok_or_else(|| XlogError::Kernel("hash_join_probe_v2 kernel not found".to_string()))?;
         let block_size = 256u32;
-        let probe_grid = (num_left + block_size - 1) / block_size;
+        let probe_grid = num_left.div_ceil(block_size);
         let probe_config = LaunchConfig {
             grid_dim: (probe_grid, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -11819,19 +11804,19 @@ impl super::CudaKernelProvider {
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
-                (&num_left).as_kernel_param(),
+                num_left.as_kernel_param(),
                 (&table.bucket_offsets).as_kernel_param(),
                 (&table.bucket_counts).as_kernel_param(),
                 (&table.bucket_entries).as_kernel_param(),
                 (&table.bucket_entry_hashes).as_kernel_param(),
-                (&table.bucket_mask).as_kernel_param(),
+                table.bucket_mask.as_kernel_param(),
                 (&left_packed.packed_keys).as_kernel_param(),
                 (&index.packed_keys).as_kernel_param(),
-                (&index.key_bytes).as_kernel_param(),
+                index.key_bytes.as_kernel_param(),
                 (&d_dummy_left).as_kernel_param(),
                 (&d_dummy_right).as_kernel_param(),
                 (&d_count_only).as_kernel_param(),
-                (&max_output_count_only).as_kernel_param(),
+                max_output_count_only.as_kernel_param(),
             ];
             probe_func
                 .clone()
@@ -11917,19 +11902,19 @@ impl super::CudaKernelProvider {
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
-                (&num_left).as_kernel_param(),
+                num_left.as_kernel_param(),
                 (&table.bucket_offsets).as_kernel_param(),
                 (&table.bucket_counts).as_kernel_param(),
                 (&table.bucket_entries).as_kernel_param(),
                 (&table.bucket_entry_hashes).as_kernel_param(),
-                (&table.bucket_mask).as_kernel_param(),
+                table.bucket_mask.as_kernel_param(),
                 (&left_packed.packed_keys).as_kernel_param(),
                 (&index.packed_keys).as_kernel_param(),
-                (&index.key_bytes).as_kernel_param(),
+                index.key_bytes.as_kernel_param(),
                 (&d_output_left).as_kernel_param(),
                 (&d_output_right).as_kernel_param(),
                 (&d_output_count).as_kernel_param(),
-                (&max_output_u32).as_kernel_param(),
+                max_output_u32.as_kernel_param(),
             ];
             probe_func
                 .clone()
@@ -11997,8 +11982,8 @@ impl super::CudaKernelProvider {
 
         let combined_schema = self.combine_schemas(left.schema(), right.schema());
         let mut result_columns = Vec::with_capacity(combined_schema.arity());
-        result_columns.extend(gathered_left.columns.into_iter());
-        result_columns.extend(gathered_right.columns.into_iter());
+        result_columns.extend(gathered_left.columns);
+        result_columns.extend(gathered_right.columns);
         self.buffer_from_columns(result_columns, result_count, combined_schema)
     }
 
@@ -12053,7 +12038,7 @@ impl super::CudaKernelProvider {
             .get_func(JOIN_MODULE, kernel_name)
             .ok_or_else(|| XlogError::Kernel(format!("{} kernel not found", kernel_name)))?;
         let block_size = 256u32;
-        let grid_size = (num_left + block_size - 1) / block_size;
+        let grid_size = num_left.div_ceil(block_size);
         let cfg = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -12146,7 +12131,7 @@ impl super::CudaKernelProvider {
 
         let device = self.device.inner();
         let block_size = 256u32;
-        let grid_size = (num_left + block_size - 1) / block_size;
+        let grid_size = num_left.div_ceil(block_size);
         let cfg = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -12241,19 +12226,19 @@ impl super::CudaKernelProvider {
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
-                (&num_left).as_kernel_param(),
+                num_left.as_kernel_param(),
                 (&table.bucket_offsets).as_kernel_param(),
                 (&table.bucket_counts).as_kernel_param(),
                 (&table.bucket_entries).as_kernel_param(),
                 (&table.bucket_entry_hashes).as_kernel_param(),
-                (&table.bucket_mask).as_kernel_param(),
+                table.bucket_mask.as_kernel_param(),
                 (&left_packed.packed_keys).as_kernel_param(),
                 (&index.packed_keys).as_kernel_param(),
-                (&index.key_bytes).as_kernel_param(),
+                index.key_bytes.as_kernel_param(),
                 (&d_dummy_left).as_kernel_param(),
                 (&d_dummy_right).as_kernel_param(),
                 (&d_count_only).as_kernel_param(),
-                (&max_output_count_only).as_kernel_param(),
+                max_output_count_only.as_kernel_param(),
             ];
             probe_func
                 .clone()
@@ -12342,19 +12327,19 @@ impl super::CudaKernelProvider {
         unsafe {
             let mut params: Vec<*mut c_void> = vec![
                 (&left_packed.hashes).as_kernel_param(),
-                (&num_left).as_kernel_param(),
+                num_left.as_kernel_param(),
                 (&table.bucket_offsets).as_kernel_param(),
                 (&table.bucket_counts).as_kernel_param(),
                 (&table.bucket_entries).as_kernel_param(),
                 (&table.bucket_entry_hashes).as_kernel_param(),
-                (&table.bucket_mask).as_kernel_param(),
+                table.bucket_mask.as_kernel_param(),
                 (&left_packed.packed_keys).as_kernel_param(),
                 (&index.packed_keys).as_kernel_param(),
-                (&index.key_bytes).as_kernel_param(),
+                index.key_bytes.as_kernel_param(),
                 (&d_output_left).as_kernel_param(),
                 (&d_output_right).as_kernel_param(),
                 (&d_output_count).as_kernel_param(),
-                (&max_output_u32).as_kernel_param(),
+                max_output_u32.as_kernel_param(),
             ];
             probe_func
                 .clone()

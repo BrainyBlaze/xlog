@@ -21,8 +21,8 @@
 //!     - `e_xy` lex-sorted+deduped by (X, Y),
 //!     - `e_yz` lex-sorted+deduped by (Y, Z),
 //!     - `e_xz` lex-sorted+deduped by (X, Z).
-//!     Physical layout construction is a separate slice — this
-//!     entry assumes the caller has already arranged input layout.
+//!       Physical layout construction is a separate slice — this
+//!       entry assumes the caller has already arranged input layout.
 //!   * **Two-phase count → device-scan → materialize.** Mirrors
 //!     SRDatalog (Sun et al., arXiv 2604.20073) Section 4's
 //!     deterministic two-phase pipeline. Row counts are
@@ -426,12 +426,9 @@ impl CudaKernelProvider {
         // Fast-path: see u32 entry for rationale + measurement
         // basis. Strictly lex-sorted AND full-row unique inputs
         // skip dedup_full_row_recorded.
-        match self.try_wcoj_layout_fast_path_u64(input, launch_stream) {
-            Ok(Some(out)) => {
-                self.record_wcoj_layout_fast_path_hit();
-                return Ok(out);
-            }
-            Ok(None) | Err(_) => {}
+        if let Ok(Some(out)) = self.try_wcoj_layout_fast_path_u64(input, launch_stream) {
+            self.record_wcoj_layout_fast_path_hit();
+            return Ok(out);
         }
         // dedup_full_row_recorded internally invokes sort_recorded
         // (U64-aware after commit 1) and the bytewise mask kernel
@@ -604,11 +601,10 @@ impl CudaKernelProvider {
     /// the input is already sorted+unique. Returns:
     ///   * `Ok(Some(out))` — fast-path hit; `out` is the layout.
     ///   * `Ok(None)`      — fast-path missed (n==0 or proof
-    ///                       failed). Caller falls through to
-    ///                       `dedup_full_row_recorded`.
+    ///     failed). Caller falls through to
+    ///     `dedup_full_row_recorded`.
     ///   * `Err(e)`        — checker pipeline error. Caller
-    ///                       treats this as "fall through" to
-    ///                       preserve correctness.
+    ///     treats this as "fall through" to preserve correctness.
     fn try_wcoj_layout_fast_path_u32(
         &self,
         input: &CudaBuffer,
@@ -678,21 +674,14 @@ impl CudaKernelProvider {
         // by stream order). Doing it as part of the recorded
         // window keeps the dealloc-safety chain intact.
         let one: u32 = 1;
-        let grid = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        let grid = n.div_ceil(BLOCK_SIZE);
         let queued_result: Result<()> = (|| {
-            unsafe {
-                let res = sys::cuMemcpyHtoDAsync_v2(
-                    *flag_buf.device_ptr(),
-                    &one as *const u32 as *const c_void,
-                    std::mem::size_of::<u32>(),
-                    cu_stream.cu_stream(),
-                );
-                if res != sys::cudaError_enum::CUDA_SUCCESS {
-                    return Err(XlogError::Kernel(format!(
-                        "wcoj_layout fast-path: H2D flag init failed: {res:?}"
-                    )));
-                }
-            }
+            self.htod_launch_metadata_async_copy_one(
+                &one,
+                &flag_buf,
+                &cu_stream,
+                "wcoj_layout fast-path flag init",
+            )?;
 
             // SAFETY: 4-arg signature
             //   wcoj_layout_check_sorted_unique_u32(
@@ -801,21 +790,14 @@ impl CudaKernelProvider {
             .map_err(|e| XlogError::Kernel(format!("wcoj_layout fast-path u64: preflight {e}")))?;
 
         let one: u32 = 1;
-        let grid = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        let grid = n.div_ceil(BLOCK_SIZE);
         let queued_result: Result<()> = (|| {
-            unsafe {
-                let res = sys::cuMemcpyHtoDAsync_v2(
-                    *flag_buf.device_ptr(),
-                    &one as *const u32 as *const c_void,
-                    std::mem::size_of::<u32>(),
-                    cu_stream.cu_stream(),
-                );
-                if res != sys::cudaError_enum::CUDA_SUCCESS {
-                    return Err(XlogError::Kernel(format!(
-                        "wcoj_layout fast-path u64: H2D flag init failed: {res:?}"
-                    )));
-                }
-            }
+            self.htod_launch_metadata_async_copy_one(
+                &one,
+                &flag_buf,
+                &cu_stream,
+                "wcoj_layout fast-path u64 flag init",
+            )?;
 
             unsafe {
                 kernel
@@ -923,18 +905,13 @@ impl CudaKernelProvider {
                         "wcoj_layout clone 4B: dtod col1 failed: {r1:?}"
                     )));
                 }
-                let r2 = sys::cuMemcpyHtoDAsync_v2(
-                    *out_d_num_rows.device_ptr(),
-                    &n as *const u32 as *const c_void,
-                    std::mem::size_of::<u32>(),
-                    cu_stream.cu_stream(),
-                );
-                if r2 != sys::cudaError_enum::CUDA_SUCCESS {
-                    return Err(XlogError::Kernel(format!(
-                        "wcoj_layout clone 4B: H2D d_num_rows failed: {r2:?}"
-                    )));
-                }
             }
+            self.htod_launch_metadata_async_copy_one(
+                &n,
+                &out_d_num_rows,
+                cu_stream,
+                "wcoj_layout clone 4B d_num_rows",
+            )?;
             Ok(())
         })();
         if let Err(e) = queued_result {
@@ -1009,18 +986,13 @@ impl CudaKernelProvider {
                         "wcoj_layout clone 8B: dtod col1 failed: {r1:?}"
                     )));
                 }
-                let r2 = sys::cuMemcpyHtoDAsync_v2(
-                    *out_d_num_rows.device_ptr(),
-                    &n as *const u32 as *const c_void,
-                    std::mem::size_of::<u32>(),
-                    cu_stream.cu_stream(),
-                );
-                if r2 != sys::cudaError_enum::CUDA_SUCCESS {
-                    return Err(XlogError::Kernel(format!(
-                        "wcoj_layout clone 8B: H2D d_num_rows failed: {r2:?}"
-                    )));
-                }
             }
+            self.htod_launch_metadata_async_copy_one(
+                &n,
+                &out_d_num_rows,
+                cu_stream,
+                "wcoj_layout clone 8B d_num_rows",
+            )?;
             Ok(())
         })();
         if let Err(e) = queued_result {
@@ -1311,6 +1283,7 @@ impl CudaKernelProvider {
     ///     runtime dispatcher (W3.2 step 7) routes every edge
     ///     through W3.1's `wcoj_layout_sort_*_recorded` before
     ///     calling here; provider does NOT layout-sort itself.
+    #[allow(clippy::too_many_arguments)]
     fn wcoj_clique_recorded_inner(
         &self,
         k: usize,
@@ -1482,8 +1455,8 @@ impl CudaKernelProvider {
         for buf in edges.iter() {
             let col0 = buf.column(0).expect("validated");
             let col1 = buf.column(1).expect("validated");
-            edge_col0_ptrs.push(*col0.device_ptr() as u64);
-            edge_col1_ptrs.push(*col1.device_ptr() as u64);
+            edge_col0_ptrs.push(*col0.device_ptr());
+            edge_col1_ptrs.push(*col1.device_ptr());
             edge_n_host.push(self.logical_row_count_u32(buf)?);
         }
 
@@ -1492,31 +1465,27 @@ impl CudaKernelProvider {
         let mut d_edge_col1 = self.memory.alloc::<u64>(expected_edges)?;
         let mut d_edge_n = self.memory.alloc::<u32>(expected_edges)?;
         let device = self.device.inner();
-        device
-            .htod_sync_copy_into(&edge_col0_ptrs, &mut d_edge_col0)
+        self.htod_launch_metadata_sync_copy_into(&edge_col0_ptrs, &mut d_edge_col0)
             .map_err(|e| {
                 XlogError::Kernel(format!(
                     "{}: htod edge_col0_ptrs failed: {}",
                     entry_label, e
                 ))
             })?;
-        device
-            .htod_sync_copy_into(&edge_col1_ptrs, &mut d_edge_col1)
+        self.htod_launch_metadata_sync_copy_into(&edge_col1_ptrs, &mut d_edge_col1)
             .map_err(|e| {
                 XlogError::Kernel(format!(
                     "{}: htod edge_col1_ptrs failed: {}",
                     entry_label, e
                 ))
             })?;
-        device
-            .htod_sync_copy_into(&edge_n_host, &mut d_edge_n)
+        self.htod_launch_metadata_sync_copy_into(&edge_n_host, &mut d_edge_n)
             .map_err(|e| {
                 XlogError::Kernel(format!("{}: htod edge_n failed: {}", entry_label, e))
             })?;
         let d_edge_order = if let Some(edge_order) = edge_order {
             let mut buf = self.memory.alloc::<u8>(expected_edges)?;
-            device
-                .htod_sync_copy_into(edge_order, &mut buf)
+            self.htod_launch_metadata_sync_copy_into(edge_order, &mut buf)
                 .map_err(|e| {
                     XlogError::Kernel(format!("{}: htod edge_order failed: {}", entry_label, e))
                 })?;
@@ -1526,8 +1495,7 @@ impl CudaKernelProvider {
         };
         let d_iteration_order = if let Some(iteration_order) = iteration_order {
             let mut buf = self.memory.alloc::<u8>(k)?;
-            device
-                .htod_sync_copy_into(iteration_order, &mut buf)
+            self.htod_launch_metadata_sync_copy_into(iteration_order, &mut buf)
                 .map_err(|e| {
                     XlogError::Kernel(format!(
                         "{}: htod iteration_order failed: {}",
@@ -1542,8 +1510,8 @@ impl CudaKernelProvider {
         // Phase 1: HG block counts + scan + total.
         let block_work_unit = crate::wcoj_metadata::WCOJ_HG_BLOCK_WORK_UNIT_DEFAULT;
         let grid = leader_work_total.div_ceil(block_work_unit);
-        let mut count_buf = self.memory.alloc::<u32>(grid as usize)?;
-        let mut thread_counts_buf = self
+        let count_buf = self.memory.alloc::<u32>(grid as usize)?;
+        let thread_counts_buf = self
             .memory
             .alloc::<u32>((grid as usize) * (BLOCK_SIZE as usize))?;
         let mut offsets_buf = self.memory.alloc::<u32>(grid as usize)?;
@@ -1621,11 +1589,11 @@ impl CudaKernelProvider {
         let null_order_ptr = 0_u64;
         let edge_order_param = match d_edge_order.as_ref() {
             Some(buf) => buf.as_kernel_param(),
-            None => (&null_order_ptr).as_kernel_param(),
+            None => null_order_ptr.as_kernel_param(),
         };
         let iteration_order_param = match d_iteration_order.as_ref() {
             Some(buf) => buf.as_kernel_param(),
-            None => (&null_order_ptr).as_kernel_param(),
+            None => null_order_ptr.as_kernel_param(),
         };
         unsafe {
             let mut params: Vec<*mut c_void> = match &leader_metadata {
@@ -1633,33 +1601,33 @@ impl CudaKernelProvider {
                     (&d_edge_col0).as_kernel_param(),
                     (&d_edge_col1).as_kernel_param(),
                     (&d_edge_n).as_kernel_param(),
-                    (&leader_edge_idx).as_kernel_param(),
+                    leader_edge_idx.as_kernel_param(),
                     edge_order_param,
                     iteration_order_param,
-                    (&n_leader).as_kernel_param(),
+                    n_leader.as_kernel_param(),
                     (&leader_metadata.unique_keys).as_kernel_param(),
                     (&leader_metadata.fan_out).as_kernel_param(),
                     (&leader_metadata.prefix_sum).as_kernel_param(),
-                    (&leader_metadata_key_count).as_kernel_param(),
-                    (&block_work_unit).as_kernel_param(),
-                    (&mut count_buf).as_kernel_param(),
-                    (&mut thread_counts_buf).as_kernel_param(),
+                    leader_metadata_key_count.as_kernel_param(),
+                    block_work_unit.as_kernel_param(),
+                    (&count_buf).as_kernel_param(),
+                    (&thread_counts_buf).as_kernel_param(),
                 ],
                 CliqueLeaderMetadata::U64(leader_metadata) => vec![
                     (&d_edge_col0).as_kernel_param(),
                     (&d_edge_col1).as_kernel_param(),
                     (&d_edge_n).as_kernel_param(),
-                    (&leader_edge_idx).as_kernel_param(),
+                    leader_edge_idx.as_kernel_param(),
                     edge_order_param,
                     iteration_order_param,
-                    (&n_leader).as_kernel_param(),
+                    n_leader.as_kernel_param(),
                     (&leader_metadata.unique_keys).as_kernel_param(),
                     (&leader_metadata.fan_out).as_kernel_param(),
                     (&leader_metadata.prefix_sum).as_kernel_param(),
-                    (&leader_metadata_key_count).as_kernel_param(),
-                    (&block_work_unit).as_kernel_param(),
-                    (&mut count_buf).as_kernel_param(),
-                    (&mut thread_counts_buf).as_kernel_param(),
+                    leader_metadata_key_count.as_kernel_param(),
+                    block_work_unit.as_kernel_param(),
+                    (&count_buf).as_kernel_param(),
+                    (&thread_counts_buf).as_kernel_param(),
                 ],
             };
             count_kernel
@@ -1750,32 +1718,23 @@ impl CudaKernelProvider {
         let mut out_col_ptrs: Vec<u64> = Vec::with_capacity(k);
         for _ in 0..k {
             let buf = self.memory.alloc::<u8>(bytes_per_col)?;
-            out_col_ptrs.push(*buf.device_ptr() as u64);
+            out_col_ptrs.push(*buf.device_ptr());
             out_col_bufs.push(buf);
         }
         let mut d_out_cols = self.memory.alloc::<u64>(k)?;
-        device
-            .htod_sync_copy_into(&out_col_ptrs, &mut d_out_cols)
+        self.htod_launch_metadata_sync_copy_into(&out_col_ptrs, &mut d_out_cols)
             .map_err(|e| {
                 XlogError::Kernel(format!("{}: htod out_col_ptrs failed: {}", entry_label, e))
             })?;
         let out_d_num_rows = self.memory.alloc::<u32>(1)?;
 
         // H2D output row count.
-        unsafe {
-            let res = sys::cuMemcpyHtoDAsync_v2(
-                *out_d_num_rows.device_ptr(),
-                &total_rows as *const u32 as *const c_void,
-                std::mem::size_of::<u32>(),
-                cu_stream.cu_stream(),
-            );
-            if res != sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "{}: H2D out_d_num_rows failed: {:?}",
-                    entry_label, res
-                )));
-            }
-        }
+        self.htod_launch_metadata_async_copy_one(
+            &total_rows,
+            &out_d_num_rows,
+            &cu_stream,
+            &format!("{entry_label}: out_d_num_rows"),
+        )?;
 
         let mut rec_mat = LaunchRecorder::new_strict(launch_stream);
         for buf in edges.iter() {
@@ -1859,36 +1818,36 @@ impl CudaKernelProvider {
                     (&d_edge_col0).as_kernel_param(),
                     (&d_edge_col1).as_kernel_param(),
                     (&d_edge_n).as_kernel_param(),
-                    (&leader_edge_idx).as_kernel_param(),
+                    leader_edge_idx.as_kernel_param(),
                     edge_order_param,
                     iteration_order_param,
-                    (&n_leader).as_kernel_param(),
+                    n_leader.as_kernel_param(),
                     (&leader_metadata.unique_keys).as_kernel_param(),
                     (&leader_metadata.fan_out).as_kernel_param(),
                     (&leader_metadata.prefix_sum).as_kernel_param(),
-                    (&leader_metadata_key_count).as_kernel_param(),
-                    (&block_work_unit).as_kernel_param(),
+                    leader_metadata_key_count.as_kernel_param(),
+                    block_work_unit.as_kernel_param(),
                     (&thread_counts_buf).as_kernel_param(),
                     (&offsets_buf).as_kernel_param(),
-                    (&total_rows).as_kernel_param(),
+                    total_rows.as_kernel_param(),
                     (&d_out_cols).as_kernel_param(),
                 ],
                 CliqueLeaderMetadata::U64(leader_metadata) => vec![
                     (&d_edge_col0).as_kernel_param(),
                     (&d_edge_col1).as_kernel_param(),
                     (&d_edge_n).as_kernel_param(),
-                    (&leader_edge_idx).as_kernel_param(),
+                    leader_edge_idx.as_kernel_param(),
                     edge_order_param,
                     iteration_order_param,
-                    (&n_leader).as_kernel_param(),
+                    n_leader.as_kernel_param(),
                     (&leader_metadata.unique_keys).as_kernel_param(),
                     (&leader_metadata.fan_out).as_kernel_param(),
                     (&leader_metadata.prefix_sum).as_kernel_param(),
-                    (&leader_metadata_key_count).as_kernel_param(),
-                    (&block_work_unit).as_kernel_param(),
+                    leader_metadata_key_count.as_kernel_param(),
+                    block_work_unit.as_kernel_param(),
                     (&thread_counts_buf).as_kernel_param(),
                     (&offsets_buf).as_kernel_param(),
-                    (&total_rows).as_kernel_param(),
+                    total_rows.as_kernel_param(),
                     (&d_out_cols).as_kernel_param(),
                 ],
             };

@@ -1,6 +1,6 @@
 //! GPU-native epistemic execution planning contracts.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use xlog_core::RelId;
 
@@ -14,10 +14,18 @@ pub enum EpistemicGpuHotPathPhase {
     CandidateGeneration,
     /// Candidate assumptions are propagated into reduced programs on device.
     Propagation,
+    /// Candidate bitsets are validated on device before production dispatch.
+    CandidateValidation,
+    /// Stable-model tuple membership is populated on device.
+    ModelMembership,
     /// Reduced-program stable models are checked against world-view guesses on device.
     WorldViewValidation,
     /// Accepted world views and query results are materialized from device buffers.
     ResultMaterialization,
+    /// Final result flags are materialized from device-side output metadata.
+    FinalResultMaterialization,
+    /// Final query tuples are materialized into a device-resident output buffer.
+    FinalTupleMaterialization,
 }
 
 /// GPU-resident buffer category required by accepted epistemic execution.
@@ -103,6 +111,104 @@ pub struct EpistemicTupleMembershipBinding {
     pub negated: bool,
 }
 
+/// Solver production capability required by accepted epistemic execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EpistemicSolverCapability {
+    /// Incremental SAT solve calls with pushed assumptions.
+    IncrementalSat,
+    /// Explicit push, solve, retract assumption lifecycle.
+    AssumptionLifecycle,
+    /// Learned-clause publication and reuse across valid incremental calls.
+    LearnedClauseTransfer,
+    /// Weighted MaxSAT soft-constraint solving.
+    WeightedMaxSat,
+    /// GPU-backed SAT/MaxSAT portfolio dispatch.
+    PortfolioSatMaxSat,
+}
+
+/// Solver status kind that must cross the epistemic boundary distinctly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EpistemicSolverStatusKind {
+    /// Satisfiable solver result.
+    Sat,
+    /// Unsatisfiable solver result.
+    Unsat,
+    /// Inconclusive solver result.
+    Unknown,
+    /// Budget-exhausted solver result.
+    Timeout,
+}
+
+/// Binding from an epistemic literal to a solver assumption obligation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpistemicSolverAssumptionBinding {
+    /// Index of the epistemic literal in `EpistemicGpuPlan::epistemic_literals`.
+    pub literal_index: usize,
+    /// Index of the reduced rule in `EpistemicGpuPlan::reductions`.
+    pub reduction_index: usize,
+    /// Predicate whose epistemic truth becomes a solver assumption.
+    pub predicate: String,
+    /// Predicate arity for the solver assumption.
+    pub arity: usize,
+    /// Source atom terms that define the solver assumption key.
+    pub terms: Vec<EirTerm>,
+    /// Epistemic operator represented by the assumption.
+    pub op: EirEpistemicOp,
+    /// Whether the epistemic literal is explicitly negated.
+    pub negated: bool,
+}
+
+/// Solver-service contract exported from the epistemic semantic plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpistemicSolverServiceContract {
+    /// Per-literal solver assumptions that must be pushed and retracted.
+    pub assumption_bindings: Vec<EpistemicSolverAssumptionBinding>,
+    /// Production solver capabilities required before this plan can count as accepted.
+    pub required_capabilities: Vec<EpistemicSolverCapability>,
+    /// Solver statuses that must remain distinct across the interface.
+    pub required_statuses: Vec<EpistemicSolverStatusKind>,
+}
+
+impl EpistemicSolverServiceContract {
+    /// Build the v0.9 production solver contract for the provided assumptions.
+    pub fn production_default(assumption_bindings: Vec<EpistemicSolverAssumptionBinding>) -> Self {
+        Self {
+            assumption_bindings,
+            required_capabilities: vec![
+                EpistemicSolverCapability::IncrementalSat,
+                EpistemicSolverCapability::AssumptionLifecycle,
+                EpistemicSolverCapability::LearnedClauseTransfer,
+                EpistemicSolverCapability::WeightedMaxSat,
+                EpistemicSolverCapability::PortfolioSatMaxSat,
+            ],
+            required_statuses: vec![
+                EpistemicSolverStatusKind::Sat,
+                EpistemicSolverStatusKind::Unsat,
+                EpistemicSolverStatusKind::Unknown,
+                EpistemicSolverStatusKind::Timeout,
+            ],
+        }
+    }
+
+    /// Count distinct required solver capabilities.
+    pub fn distinct_required_capability_count(&self) -> usize {
+        self.required_capabilities
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
+
+    /// Count distinct solver statuses that must cross the semantic boundary.
+    pub fn distinct_required_status_count(&self) -> usize {
+        self.required_statuses
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
+}
+
 /// Production-facing GPU execution contract for an epistemic program.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EpistemicGpuPlan {
@@ -110,14 +216,21 @@ pub struct EpistemicGpuPlan {
     pub mode: EirEpistemicMode,
     /// Epistemic literals preserved from EIR.
     pub epistemic_literals: Vec<EirEpistemicLiteral>,
-    /// GPU phases required by the hot path.
+    /// Coarse Generate-Propagate-Test phases required by the hot path.
     pub required_phases: Vec<EpistemicGpuHotPathPhase>,
+    /// Concrete GPU kernel phases required by accepted production execution.
+    pub required_kernel_phases: Vec<EpistemicGpuHotPathPhase>,
     /// GPU buffer classes required by the hot path.
     pub required_buffers: Vec<EpistemicGpuBufferKind>,
     /// Reduced ordinary-program planning summaries.
     pub reductions: Vec<EpistemicReductionPlan>,
     /// Per-literal stable-model tuple membership bindings.
     pub tuple_membership_bindings: Vec<EpistemicTupleMembershipBinding>,
+    /// Reduced-output columns copied into the public final output.
+    /// `None` means identity/all columns; `Some([])` is a real zero-arity projection.
+    pub final_output_columns: Option<Vec<usize>>,
+    /// Solver-service obligations exported by the epistemic semantic plan.
+    pub solver_contract: EpistemicSolverServiceContract,
     /// Forbidden CPU fallback counters. Release certification must keep these zero.
     pub cpu_fallbacks: EpistemicCpuFallbackCounters,
 }
@@ -144,6 +257,21 @@ impl EpistemicGpuPlan {
                 negated: literal.negated,
             })
             .collect();
+        let solver_assumption_bindings = epistemic_literals
+            .iter()
+            .enumerate()
+            .map(
+                |(literal_index, literal)| EpistemicSolverAssumptionBinding {
+                    literal_index,
+                    reduction_index: literal_index.min(reductions.len().saturating_sub(1)),
+                    predicate: literal.atom.predicate.clone(),
+                    arity: literal.atom.arity,
+                    terms: literal.atom.terms.clone(),
+                    op: literal.op,
+                    negated: literal.negated,
+                },
+            )
+            .collect();
 
         Self {
             mode,
@@ -154,6 +282,16 @@ impl EpistemicGpuPlan {
                 EpistemicGpuHotPathPhase::WorldViewValidation,
                 EpistemicGpuHotPathPhase::ResultMaterialization,
             ],
+            required_kernel_phases: vec![
+                EpistemicGpuHotPathPhase::CandidateGeneration,
+                EpistemicGpuHotPathPhase::Propagation,
+                EpistemicGpuHotPathPhase::CandidateValidation,
+                EpistemicGpuHotPathPhase::ModelMembership,
+                EpistemicGpuHotPathPhase::WorldViewValidation,
+                EpistemicGpuHotPathPhase::ResultMaterialization,
+                EpistemicGpuHotPathPhase::FinalResultMaterialization,
+                EpistemicGpuHotPathPhase::FinalTupleMaterialization,
+            ],
             required_buffers: vec![
                 EpistemicGpuBufferKind::CandidateAssumptions,
                 EpistemicGpuBufferKind::WorldViews,
@@ -162,6 +300,10 @@ impl EpistemicGpuPlan {
             ],
             reductions,
             tuple_membership_bindings,
+            final_output_columns: None,
+            solver_contract: EpistemicSolverServiceContract::production_default(
+                solver_assumption_bindings,
+            ),
             cpu_fallbacks: EpistemicCpuFallbackCounters::default(),
         }
     }
@@ -173,6 +315,163 @@ impl EpistemicGpuPlan {
     ) -> Self {
         self.tuple_membership_bindings = tuple_membership_bindings;
         self
+    }
+
+    /// Set the public projection applied after GPU tuple membership row filtering.
+    pub fn with_final_output_columns(mut self, final_output_columns: Option<Vec<usize>>) -> Self {
+        self.final_output_columns = final_output_columns;
+        self
+    }
+
+    /// Replace inferred solver obligations with planner-derived obligations.
+    pub fn with_solver_contract(mut self, solver_contract: EpistemicSolverServiceContract) -> Self {
+        self.solver_contract = solver_contract;
+        self
+    }
+
+    /// Validate that solver obligations match the epistemic semantic boundary.
+    pub fn validate_solver_contract(&self) -> xlog_core::Result<()> {
+        let contract = &self.solver_contract;
+        if contract.assumption_bindings.len() != self.epistemic_literals.len() {
+            return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic solver service contract".to_string(),
+                context: format!(
+                    "expected {} solver assumption bindings for epistemic literals, found {}",
+                    self.epistemic_literals.len(),
+                    contract.assumption_bindings.len()
+                ),
+            });
+        }
+
+        let distinct_capability_count = contract.distinct_required_capability_count();
+        if distinct_capability_count != contract.required_capabilities.len() {
+            return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic solver service contract".to_string(),
+                context: format!(
+                    "solver capability requirements must be distinct, got {} entries but {} distinct",
+                    contract.required_capabilities.len(),
+                    distinct_capability_count
+                ),
+            });
+        }
+
+        let distinct_status_count = contract.distinct_required_status_count();
+        if distinct_status_count != contract.required_statuses.len() {
+            return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic solver service contract".to_string(),
+                context: format!(
+                    "solver status requirements must be distinct, got {} entries but {} distinct",
+                    contract.required_statuses.len(),
+                    distinct_status_count
+                ),
+            });
+        }
+
+        for required in [
+            EpistemicSolverCapability::IncrementalSat,
+            EpistemicSolverCapability::AssumptionLifecycle,
+            EpistemicSolverCapability::LearnedClauseTransfer,
+            EpistemicSolverCapability::WeightedMaxSat,
+            EpistemicSolverCapability::PortfolioSatMaxSat,
+        ] {
+            if !contract.required_capabilities.contains(&required) {
+                return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic solver service contract".to_string(),
+                    context: format!("missing required solver capability {required:?}"),
+                });
+            }
+        }
+
+        for required in [
+            EpistemicSolverStatusKind::Sat,
+            EpistemicSolverStatusKind::Unsat,
+            EpistemicSolverStatusKind::Unknown,
+            EpistemicSolverStatusKind::Timeout,
+        ] {
+            if !contract.required_statuses.contains(&required) {
+                return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic solver service contract".to_string(),
+                    context: format!("missing required solver status {required:?}"),
+                });
+            }
+        }
+
+        let mut seen_literals = vec![false; self.epistemic_literals.len()];
+        for binding in &contract.assumption_bindings {
+            if binding.literal_index >= self.epistemic_literals.len() {
+                return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic solver service contract".to_string(),
+                    context: format!(
+                        "literal_index {} exceeds literal count {}",
+                        binding.literal_index,
+                        self.epistemic_literals.len()
+                    ),
+                });
+            }
+            if seen_literals[binding.literal_index] {
+                return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic solver service contract".to_string(),
+                    context: format!(
+                        "duplicate solver assumption for literal_index {}",
+                        binding.literal_index
+                    ),
+                });
+            }
+            seen_literals[binding.literal_index] = true;
+
+            if binding.reduction_index >= self.reductions.len() {
+                return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic solver service contract".to_string(),
+                    context: format!(
+                        "reduction_index {} exceeds reduction count {}",
+                        binding.reduction_index,
+                        self.reductions.len()
+                    ),
+                });
+            }
+
+            let literal = &self.epistemic_literals[binding.literal_index];
+            let tuple_binding =
+                self.tuple_membership_bindings
+                    .iter()
+                    .find(|tuple_binding| tuple_binding.literal_index == binding.literal_index)
+                    .ok_or_else(|| {
+                        xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                            construct: "epistemic solver service contract".to_string(),
+                            context: format!(
+                                "solver assumption for literal_index {} has no matching tuple-membership binding",
+                                binding.literal_index
+                            ),
+                        }
+                    })?;
+            if binding.reduction_index != tuple_binding.reduction_index {
+                return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic solver service contract".to_string(),
+                    context: format!(
+                        "solver assumption for literal_index {} uses reduction_index {}, but tuple membership uses {}",
+                        binding.literal_index,
+                        binding.reduction_index,
+                        tuple_binding.reduction_index
+                    ),
+                });
+            }
+            if binding.predicate != literal.atom.predicate
+                || binding.arity != literal.atom.arity
+                || binding.terms != literal.atom.terms
+                || binding.op != literal.op
+                || binding.negated != literal.negated
+            {
+                return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic solver service contract".to_string(),
+                    context: format!(
+                        "solver assumption for literal_index {} does not match epistemic literal",
+                        binding.literal_index
+                    ),
+                });
+            }
+        }
+
+        Ok(())
     }
 
     /// Validate that every epistemic literal has a matching tuple-membership binding.

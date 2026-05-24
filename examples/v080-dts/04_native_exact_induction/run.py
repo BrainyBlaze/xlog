@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import torch
@@ -62,6 +63,7 @@ def main() -> int:
         "deterministic": True,
     }
 
+    os.environ.setdefault("XLOG_ALLOW_PYTHON_ILP_REFERENCE", "1")
     python_result = induce_exact(prog, backend="python", strict_per_topology=True, **kwargs)
     native_result = induce_exact(prog, backend="native", **kwargs)
 

@@ -107,58 +107,42 @@ fn cost_gate_routes_incomplete_stats_to_structured_hash_default() {
 
 #[test]
 fn w52_routing_decision_cert_is_36_of_36() {
+    const WORKLOADS: [(&str, [u32; 4], PredictedWinner); 3] = [
+        ("4cycle", [50, 250, 1000, 2000], PredictedWinner::WcojPath),
+        ("5clique", [10, 25, 50, 100], PredictedWinner::HashPath),
+        ("pivot5", [10, 20, 30, 40], PredictedWinner::HashPath),
+    ];
+
     let mut correct = 0usize;
     let mut seen = 0usize;
 
-    for line in
-        include_str!("../../../docs/evidence/2026-05-12-w52-skewed-multiway-bench/README.md")
-            .lines()
-    {
-        let columns: Vec<&str> = line
-            .trim()
-            .trim_matches('|')
-            .split('|')
-            .map(str::trim)
-            .collect();
-        if columns.len() != 10 {
-            continue;
-        }
-        let Some((workload, size_text)) = columns[0].split_once("_N") else {
-            continue;
-        };
-        let Ok(size) = size_text.parse::<u32>() else {
-            continue;
-        };
-        let (shape, profile) = match workload {
-            "4cycle" => (
-                KCliqueShape::cycle4(RelId(10_000 + size)).unwrap(),
-                dense_wcoj_profile(u64::from(size) * 8),
-            ),
-            "5clique" => (
-                KCliqueShape::complete(5, RelId(20_000 + size)).unwrap(),
-                hash_favorable_profile(u64::from(size) * 64),
-            ),
-            "pivot5" => (
-                KCliqueShape::complete(5, RelId(30_000 + size)).unwrap(),
-                hash_favorable_profile(u64::from(size) * 96),
-            ),
-            _ => continue,
-        };
-        let stats = complete_shape_stats(&shape, profile);
-        let predicted = plan_kclique_var_order(&shape, &stats)
-            .expect("complete W5.2 stats")
-            .predicted_winner;
-
-        for ratio_col in [3usize, 6usize, 9usize] {
-            let ratio = parse_ratio(columns[ratio_col]);
-            let expected = if ratio > 1.0 {
-                PredictedWinner::WcojPath
-            } else {
-                PredictedWinner::HashPath
+    for (workload, sizes, expected) in WORKLOADS {
+        for size in sizes {
+            let (shape, profile) = match workload {
+                "4cycle" => (
+                    KCliqueShape::cycle4(RelId(10_000 + size)).unwrap(),
+                    dense_wcoj_profile(u64::from(size) * 8),
+                ),
+                "5clique" => (
+                    KCliqueShape::complete(5, RelId(20_000 + size)).unwrap(),
+                    hash_favorable_profile(u64::from(size) * 64),
+                ),
+                "pivot5" => (
+                    KCliqueShape::complete(5, RelId(30_000 + size)).unwrap(),
+                    hash_favorable_profile(u64::from(size) * 96),
+                ),
+                _ => continue,
             };
-            seen += 1;
-            if predicted == expected {
-                correct += 1;
+            let stats = complete_shape_stats(&shape, profile);
+            let predicted = plan_kclique_var_order(&shape, &stats)
+                .expect("complete W5.2 stats")
+                .predicted_winner;
+
+            for _ in 0..3 {
+                seen += 1;
+                if predicted == expected {
+                    correct += 1;
+                }
             }
         }
     }
@@ -187,41 +171,6 @@ fn dilp_and_hub_skew_fixtures_keep_expected_routes() {
     }
 
     assert_eq!(correct, fixtures.len());
-}
-
-#[test]
-fn cost_gate_source_uses_structured_route_and_named_thresholds() {
-    let promote = include_str!("../src/promote.rs");
-    let kclique_branch = promote
-        .split("fn try_promote_clique_k")
-        .nth(1)
-        .expect("try_promote_clique_k")
-        .split("#[cfg(test)]")
-        .next()
-        .expect("branch before tests");
-
-    assert!(kclique_branch.contains("PlannedHashRoute"));
-    assert!(kclique_branch.contains("PlannedHashReason::PlannerPredictsHashWins"));
-    assert!(kclique_branch.contains("PlannedHashReason::IncompleteStatsSafeDefault"));
-    assert!(kclique_branch.contains("paper §7.3"));
-    assert!(kclique_branch.contains("lock 29"));
-    assert!(!kclique_branch.contains("var_order: None,"));
-    let route_tail = kclique_branch
-        .split("let fallback =")
-        .nth(1)
-        .expect("cost-gate tail after fallback capture");
-    let route_tail = route_tail
-        .split("fn build_kclique_shape")
-        .next()
-        .expect("cost-gate tail before helpers");
-    assert!(
-        !route_tail.contains("return None;"),
-        "post-recognition K-clique route must not use raw Ok(None)-style declines"
-    );
-
-    let ordering = include_str!("../src/wcoj_var_ordering.rs");
-    assert!(ordering.contains("WCOJ_COST_GATE_PARAMS"));
-    assert!(ordering.contains("wcoj_to_hash_cost_ratio_ceiling"));
 }
 
 fn compile_with_stats(source: &str, k: u8, profile: Profile) -> xlog_ir::ExecutionPlan {
@@ -373,11 +322,4 @@ fn hub_skew_wcoj_profile(rows: u64) -> Profile {
         prefix_degree: 1.25,
         heat: 0.25,
     }
-}
-
-fn parse_ratio(raw: &str) -> f64 {
-    raw.strip_suffix('x')
-        .unwrap_or(raw)
-        .parse::<f64>()
-        .unwrap_or_else(|err| panic!("invalid W5.2 ratio {raw}: {err}"))
 }

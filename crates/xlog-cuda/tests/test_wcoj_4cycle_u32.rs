@@ -140,12 +140,12 @@ fn download_quads(buf: &CudaBuffer) -> Vec<(u32, u32, u32, u32)> {
         vec![0u8; n * 4],
         vec![0u8; n * 4],
     ];
-    for i in 0..4 {
+    for (i, col_bytes) in bytes.iter_mut().enumerate() {
         unsafe {
             let res = sys::cuMemcpyDtoH_v2(
-                bytes[i].as_mut_ptr() as *mut _,
+                col_bytes.as_mut_ptr() as *mut _,
                 *buf.column(i).unwrap().device_ptr(),
-                bytes[i].len(),
+                col_bytes.len(),
             );
             assert_eq!(res, sys::cudaError_enum::CUDA_SUCCESS);
         }

@@ -29,7 +29,7 @@ fn build_and_encode() -> String {
     // Create leaf nodes in HashMap iteration order (non-deterministic across processes).
     // Each "name" maps to a fixed LeafId, but the PirNodeId assignment order varies.
     let mut leaf_by_id: HashMap<u32, PirNodeId> = HashMap::new();
-    for (name, _) in &intern {
+    for name in intern.keys() {
         let idx: u32 = name.strip_prefix("node_").unwrap().parse().unwrap();
         leaf_by_id.insert(idx, pir.lit(LeafId::new(idx)));
     }

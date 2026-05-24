@@ -1238,22 +1238,17 @@ impl Optimizer {
     }
 }
 
-/// v0.6.5 slice 3 — selectivity-aware optimizer pass.
-///
-/// **No-op by default.** Slice 3 lays the seam; slices 4 / 5 may
-/// add real reordering logic that consults `stats` to pick join
-/// orderings on selectivity.
-///
-/// Walks `plan.rules_by_scc[*].body` and rewrites nodes in place.
-/// The default no-op preserves every existing plan tree
-/// byte-for-byte. Tests assert structural equality (Debug-format
-/// snapshot before/after) for triangle, 4-cycle, and recursive-
-/// SCC plans.
-///
-/// **Compile-pipeline ordering** (locked by slice 3): runs
-/// between `Optimizer::optimize` and `xlog_logic::promote::promote_multiway`.
-/// The slice 1 invariant — promoter sees the post-optimizer tree —
-/// is preserved.
+// v0.6.5 slice 3 — selectivity-aware optimizer pass.
+//
+// No-op by default. Slice 3 lays the seam; slices 4 / 5 may add real
+// reordering logic that consults `stats` to pick join orderings on selectivity.
+//
+// Walks `plan.rules_by_scc[*].body` and rewrites nodes in place. The default
+// no-op preserves every existing plan tree byte-for-byte. Tests assert
+// structural equality for triangle, 4-cycle, and recursive-SCC plans.
+//
+// Compile-pipeline ordering: runs between `Optimizer::optimize` and
+// `xlog_logic::promote::promote_multiway`.
 pub mod selectivity_pass {
     //! v0.6.5 W2.2 — selectivity-driven join reordering for
     //! canonical lowered triangle and 4-cycle bodies.
@@ -2436,6 +2431,7 @@ mod reorder {
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[allow(clippy::enum_variant_names)]
     enum TriangleInnerPair {
         YShared,
         XShared,
@@ -3377,9 +3373,11 @@ mod tests {
     #[test]
     fn test_optimizer_with_config() {
         let stats = make_stats_manager();
-        let mut config = OptimizerConfig::default();
-        config.dp_threshold = 5;
-        config.enable_pushdown = false;
+        let config = OptimizerConfig {
+            dp_threshold: 5,
+            enable_pushdown: false,
+            ..Default::default()
+        };
         let optimizer = Optimizer::with_config(stats, config);
 
         assert_eq!(optimizer.config().dp_threshold, 5);
@@ -3654,8 +3652,10 @@ mod tests {
     #[test]
     fn test_should_use_greedy() {
         let stats = make_stats_manager();
-        let mut config = OptimizerConfig::default();
-        config.dp_threshold = 2;
+        let config = OptimizerConfig {
+            dp_threshold: 2,
+            ..Default::default()
+        };
         let optimizer = Optimizer::with_config(stats, config);
 
         // Single relation: should NOT use greedy
@@ -3896,8 +3896,10 @@ mod tests {
     #[test]
     fn test_pushdown_disabled() {
         let stats = make_stats_manager();
-        let mut config = OptimizerConfig::default();
-        config.enable_pushdown = false;
+        let config = OptimizerConfig {
+            enable_pushdown: false,
+            ..Default::default()
+        };
         let optimizer = Optimizer::with_config(stats, config);
 
         // Filter that could be pushed

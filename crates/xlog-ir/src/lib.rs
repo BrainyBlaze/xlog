@@ -14,7 +14,8 @@ pub use eir::{
 pub use epistemic_plan::{
     EpistemicCpuFallbackCounters, EpistemicExecutablePlan, EpistemicGpuBufferKind,
     EpistemicGpuHotPathPhase, EpistemicGpuPlan, EpistemicReductionPlan,
-    EpistemicTupleMembershipBinding, EpistemicWcojReductionStatus,
+    EpistemicSolverAssumptionBinding, EpistemicSolverCapability, EpistemicSolverServiceContract,
+    EpistemicSolverStatusKind, EpistemicTupleMembershipBinding, EpistemicWcojReductionStatus,
 };
 pub use metadata::{LayoutHint, RirMeta, SkewSignature};
 pub use plan::{CompiledRule, ExecutionPlan, PlanBuilder, Scc, Stratum};

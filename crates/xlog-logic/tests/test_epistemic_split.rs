@@ -191,6 +191,69 @@ fn shared_extensional_inputs_do_not_coalesce_epistemic_split_components() {
 }
 
 #[test]
+fn split_executable_components_recompose_in_source_rule_order() {
+    let program = parse_program(
+        r#"
+        pred z_seed(u32).
+        pred z_gate(u32).
+        pred z_out(u32).
+        pred a_seed(u32).
+        pred a_gate(u32).
+        pred a_out(u32).
+        z_out(X) :- z_seed(X), know z_gate(X).
+        a_out(X) :- a_seed(X), know a_gate(X).
+        "#,
+    )
+    .unwrap();
+
+    let split = compile_epistemic_gpu_split_execution(&program).unwrap();
+    let component_rule_indices: Vec<Vec<usize>> = split
+        .components
+        .iter()
+        .map(|component| component.component.rule_indices.clone())
+        .collect();
+    assert_eq!(component_rule_indices, vec![vec![1], vec![0]]);
+
+    let recomposed_rule_indices: Vec<Vec<usize>> = split
+        .recomposed_components()
+        .iter()
+        .map(|component| component.component.rule_indices.clone())
+        .collect();
+    assert_eq!(recomposed_rule_indices, vec![vec![0], vec![1]]);
+}
+
+#[test]
+fn shared_modal_inputs_coalesce_epistemic_split_components() {
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred color(u32).
+        pred q(u32).
+        pred a(u32).
+        pred b(u32).
+        a(X) :- node(X), know q(X).
+        b(X) :- color(X), possible q(X).
+        "#,
+    )
+    .unwrap();
+
+    let split = split_epistemic_program(&program).unwrap();
+
+    assert_eq!(split.components.len(), 1);
+    assert_eq!(split.recomposed_rule_indices(), vec![0, 1]);
+    assert_eq!(
+        split.components[0].predicates,
+        vec![
+            "a".to_string(),
+            "b".to_string(),
+            "color".to_string(),
+            "node".to_string(),
+            "q".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn invalid_cross_component_split_returns_typed_rejection() {
     let program = parse_program("a() :- know p(), possible q().").unwrap();
     let err = split_epistemic_program(&program).unwrap_err();
@@ -198,6 +261,31 @@ fn invalid_cross_component_split_returns_typed_rejection() {
     match err {
         XlogError::UnsupportedEpistemicConstruct { construct, .. } => {
             assert_eq!(construct, "epistemic splitting");
+        }
+        other => panic!("expected typed split rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn invalid_cross_arity_modal_coupling_returns_typed_rejection() {
+    let program = parse_program(
+        r#"
+        pred a(u32, u32).
+        pred p(u32).
+        pred p(u32, u32).
+        a(X, Y) :- know p(X), possible p(X, Y).
+        "#,
+    )
+    .unwrap();
+    let err = split_epistemic_program(&program).unwrap_err();
+
+    match err {
+        XlogError::UnsupportedEpistemicConstruct {
+            construct, context, ..
+        } => {
+            assert_eq!(construct, "epistemic splitting");
+            assert!(context.contains("p/1"));
+            assert!(context.contains("p/2"));
         }
         other => panic!("expected typed split rejection, got {other:?}"),
     }

@@ -48,15 +48,16 @@ pub use gpu_cdcl::{GpuCdclConfig, GpuCdclRawOutput, GpuCdclSolver, GpuCdclWorksp
 pub use gpu_cnf::GpuCnf;
 pub use instance::{Clause, Literal, Objective, SolveInstance};
 pub use production::{
-    production_capabilities, GpuSolverProductionAdapter, GpuSolverProductionBatchExecutionEvidence,
-    GpuSolverProductionCapabilities, GpuSolverProductionCapabilityStatus,
-    GpuSolverProductionExpectation, GpuSolverProductionLearnedClauseArenaReport,
-    GpuSolverProductionLearnedClauseReuseReport, GpuSolverProductionLifecycleReport,
-    GpuSolverProductionLifecycleStep, GpuSolverProductionMaxSatCandidate,
-    GpuSolverProductionMaxSatLifecycleReport, GpuSolverProductionMaxSatReport,
-    GpuSolverProductionMaxSatScheduleJob, GpuSolverProductionMaxSatScheduleReport,
-    GpuSolverProductionMaxSatSearchCandidate, GpuSolverProductionMaxSatSearchStatus,
-    GpuSolverProductionPortfolioJob, GpuSolverProductionPortfolioReport, GpuSolverProductionTrace,
+    production_capabilities, GpuSolverAcceptedCandidateState, GpuSolverProductionAdapter,
+    GpuSolverProductionBatchExecutionEvidence, GpuSolverProductionCapabilities,
+    GpuSolverProductionCapabilityStatus, GpuSolverProductionExpectation,
+    GpuSolverProductionLearnedClauseArenaReport, GpuSolverProductionLearnedClauseReuseReport,
+    GpuSolverProductionLifecycleReport, GpuSolverProductionLifecycleStep,
+    GpuSolverProductionMaxSatCandidate, GpuSolverProductionMaxSatLifecycleReport,
+    GpuSolverProductionMaxSatReport, GpuSolverProductionMaxSatScheduleJob,
+    GpuSolverProductionMaxSatScheduleReport, GpuSolverProductionMaxSatSearchCandidate,
+    GpuSolverProductionMaxSatSearchStatus, GpuSolverProductionPortfolioJob,
+    GpuSolverProductionPortfolioReport, GpuSolverProductionTrace,
     GpuSolverProductionWeightedMaxSatSelection,
 };
 pub use proof::{compute_checksum, SolveProof, SolveResult, SolveStats, SolveStatus};

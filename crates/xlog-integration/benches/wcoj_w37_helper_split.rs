@@ -268,7 +268,7 @@ fn run_hand_split(prov: &Provider, input: &UploadedFixture, helper: &CudaBuffer)
         .expect("join cd");
     let with_helper = prov
         .provider
-        .hash_join_v2(&with_cd, &helper, &[5], &[0], JoinType::Inner)
+        .hash_join_v2(&with_cd, helper, &[5], &[0], JoinType::Inner)
         .expect("join helper");
     let with_af = prov
         .provider

@@ -450,16 +450,12 @@ impl McProgram {
             let mut d_forced_value = provider.memory().alloc::<u8>(num_vars.max(1))?;
             if is_clamped {
                 provider
-                    .device()
-                    .inner()
-                    .htod_sync_copy_into(&forcing.force_mask, &mut d_force_mask)
+                    .htod_sync_copy_into_tracked(&forcing.force_mask, &mut d_force_mask)
                     .map_err(|e| {
                         XlogError::Kernel(format!("Failed to upload force_mask: {}", e))
                     })?;
                 provider
-                    .device()
-                    .inner()
-                    .htod_sync_copy_into(&forcing.forced_value, &mut d_forced_value)
+                    .htod_sync_copy_into_tracked(&forcing.forced_value, &mut d_forced_value)
                     .map_err(|e| {
                         XlogError::Kernel(format!("Failed to upload forced_value: {}", e))
                     })?;
@@ -706,14 +702,14 @@ impl McProgram {
             method,
             provider.clone(),
             |executor, plan, count| {
-                let zero_ptr = *d_zero_count.device_ptr() as u64;
+                let zero_ptr = *d_zero_count.device_ptr();
 
                 query_ptrs_buf.clear();
                 for rel_name in plan.query_rel_names.iter().take(count) {
                     let ptr = executor
                         .store()
                         .get(rel_name)
-                        .map(|buf| *buf.num_rows_device().device_ptr() as u64)
+                        .map(|buf| *buf.num_rows_device().device_ptr())
                         .unwrap_or(zero_ptr);
                     query_ptrs_buf.push(ptr);
                 }
@@ -730,7 +726,7 @@ impl McProgram {
                         let ptr = executor
                             .store()
                             .get(rel_name)
-                            .map(|buf| *buf.num_rows_device().device_ptr() as u64)
+                            .map(|buf| *buf.num_rows_device().device_ptr())
                             .unwrap_or(zero_ptr);
                         evidence_ptrs_buf.push(ptr);
                     }
@@ -744,7 +740,7 @@ impl McProgram {
 
                 let block_dim = 128u32;
                 let threads = if count == 0 { 1 } else { count as u32 };
-                let grid_dim = (threads + block_dim - 1) / block_dim;
+                let grid_dim = threads.div_ceil(block_dim);
                 // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                 unsafe {
                     truth_fn
@@ -930,14 +926,10 @@ impl McProgram {
         let mut d_forced_value = provider.memory().alloc::<u8>(num_vars.max(1))?;
         if method == McSamplingMethod::EvidenceClamping && num_vars > 0 {
             provider
-                .device()
-                .inner()
-                .htod_sync_copy_into(&forcing.force_mask, &mut d_force_mask)
+                .htod_sync_copy_into_tracked(&forcing.force_mask, &mut d_force_mask)
                 .map_err(|e| XlogError::Kernel(format!("Failed to upload force_mask: {}", e)))?;
             provider
-                .device()
-                .inner()
-                .htod_sync_copy_into(&forcing.forced_value, &mut d_forced_value)
+                .htod_sync_copy_into_tracked(&forcing.forced_value, &mut d_forced_value)
                 .map_err(|e| XlogError::Kernel(format!("Failed to upload forced_value: {}", e)))?;
         } else {
             provider

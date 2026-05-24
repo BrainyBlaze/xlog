@@ -11,11 +11,11 @@
 //! Task progression:
 //!   * Task 2:  raised `PyNotImplementedError`.
 //!   * Task 3B.2: real name-to-`RelId` resolution, DLPack-backed
-//!                 positive/negative buffer construction, engine call, and
-//!                 dict-shaped return.
+//!     positive/negative buffer construction, engine call, and
+//!     dict-shaped return.
 //!   * Task 3B.4: the batched scoring kernel is wired through
-//!                 `CudaKernelProvider::ilp_exact_score`; native parity is
-//!                 locked by `python/tests/test_ilp_exact_induce.py`.
+//!     `CudaKernelProvider::ilp_exact_score`; native parity is
+//!     locked by `python/tests/test_ilp_exact_induce.py`.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;

@@ -33,8 +33,8 @@ fn gpu_cnf_hash_matches_cpu_reference() {
     let provider = Arc::new(CudaKernelProvider::new(device, memory).expect("provider"));
 
     let clauses = vec![
-        Clause::new(vec![Literal::new(1, true), Literal::new(2, false)]),
-        Clause::new(vec![Literal::new(2, true)]),
+        Clause::new(vec![Literal::negative(0), Literal::positive(1)]),
+        Clause::new(vec![Literal::negative(1)]),
     ];
     let instance = SolveInstance::new(2, clauses);
     let cnf = GpuCnf::from_host(&instance, &provider).expect("GpuCnf");

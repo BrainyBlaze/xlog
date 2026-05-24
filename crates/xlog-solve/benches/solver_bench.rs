@@ -393,10 +393,9 @@ fn bench_literal_operations(c: &mut Criterion) {
 
     group.bench_function("eval_batch", |b| {
         b.iter(|| {
-            literals
-                .iter()
-                .map(|lit| lit.eval(black_box(&assignment)))
-                .count()
+            literals.iter().for_each(|lit| {
+                black_box(lit.eval(black_box(&assignment)));
+            })
         });
     });
 
@@ -413,10 +412,9 @@ fn bench_literal_operations(c: &mut Criterion) {
     group.bench_function("from_packed_batch", |b| {
         let packed: Vec<u32> = literals.iter().map(|lit| lit.to_packed()).collect();
         b.iter(|| {
-            packed
-                .iter()
-                .map(|&p| Literal::from_packed(black_box(p)))
-                .count()
+            packed.iter().for_each(|&p| {
+                black_box(Literal::from_packed(black_box(p)));
+            })
         });
     });
 

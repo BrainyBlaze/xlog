@@ -79,7 +79,7 @@ fn test_extract_nonzero_budget_cap_top_priority() {
         .collect();
     for &fi in &flat_indices {
         assert!(
-            fi >= 40 && fi < 50,
+            (40..50).contains(&fi),
             "Expected top-10 entries (flat indices 40..49), got {}",
             fi
         );

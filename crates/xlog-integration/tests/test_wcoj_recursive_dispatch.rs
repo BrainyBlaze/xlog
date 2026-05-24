@@ -1,4 +1,6 @@
 // crates/xlog-integration/tests/test_wcoj_recursive_dispatch.rs
+#![allow(clippy::doc_lazy_continuation)]
+
 //! v0.6.5 slice 4 + W4.1 — recursive-SCC WCOJ dispatch certification.
 //!
 //! Locks the contract for `Executor::execute_wcoj_or_fallback_node`
@@ -215,13 +217,13 @@ fn download_quads(buf: &CudaBuffer) -> Vec<(u32, u32, u32, u32)> {
     }
     assert_eq!(buf.arity(), 4);
     let mut cols = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
-    for c in 0..4 {
-        cols[c] = vec![0u8; n * 4];
+    for (c, col_bytes) in cols.iter_mut().enumerate() {
+        *col_bytes = vec![0u8; n * 4];
         unsafe {
             sys::cuMemcpyDtoH_v2(
-                cols[c].as_mut_ptr() as *mut _,
+                col_bytes.as_mut_ptr() as *mut _,
                 *buf.column(c).unwrap().device_ptr(),
-                cols[c].len(),
+                col_bytes.len(),
             );
         }
     }

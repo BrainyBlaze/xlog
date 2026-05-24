@@ -2,12 +2,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use xlog_core::{Result, XlogError};
-use xlog_cuda::CudaKernelProvider;
-use xlog_ir::EirEpistemicMode;
-use xlog_logic::epistemic::EpistemicWorldView;
+use xlog_core::{symbol, Result, ScalarType, XlogError};
+use xlog_cuda::{CompareOp, CudaBuffer, CudaKernelProvider};
+use xlog_ir::{EirEpistemicMode, EirEpistemicOp, EirTerm, EpistemicTupleMembershipBinding};
+use xlog_logic::{
+    ast::{Atom, EpistemicLiteral, EpistemicOp, Term},
+    epistemic::{EpistemicWorldView, TruthValue},
+};
 use xlog_runtime::{
-    read_device_row_count, EpistemicGpuExecutionResult, EpistemicGpuKernelTimingTrace,
+    EpistemicGpuExecutionResult, EpistemicGpuKernelTimingTrace, EpistemicGpuProviderIdentity,
 };
 
 /// Default tolerance for deterministic probability fixtures.
@@ -332,6 +335,13 @@ pub struct AcceptedWorldViewEvidence {
     assumptions: Vec<EpistemicAssumption>,
     world_count: usize,
     gpu_epistemic_mode: Option<EirEpistemicMode>,
+    gpu_tuple_key_column_reads: usize,
+    gpu_final_tuple_row_filters: usize,
+    gpu_final_tuple_negated_row_filters: usize,
+    gpu_row_specific_membership_row_capacity: usize,
+    gpu_row_filter_fallback_row_capacity: usize,
+    gpu_checked_constraint_relations: usize,
+    gpu_constraint_row_count_device_reads: usize,
 }
 
 impl AcceptedWorldViewEvidence {
@@ -340,10 +350,26 @@ impl AcceptedWorldViewEvidence {
         world_view: &EpistemicWorldView,
         assumptions: Vec<EpistemicAssumption>,
     ) -> Result<Self> {
+        if assumptions.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "accepted world-view evidence".to_string(),
+                context:
+                    "probabilistic evidence requires at least one accepted epistemic assumption"
+                        .to_string(),
+            });
+        }
+        validate_world_view_assumptions(world_view, &assumptions)?;
         Ok(Self {
             assumptions,
             world_count: world_view.world_count(),
             gpu_epistemic_mode: None,
+            gpu_tuple_key_column_reads: 0,
+            gpu_final_tuple_row_filters: 0,
+            gpu_final_tuple_negated_row_filters: 0,
+            gpu_row_specific_membership_row_capacity: 0,
+            gpu_row_filter_fallback_row_capacity: 0,
+            gpu_checked_constraint_relations: 0,
+            gpu_constraint_row_count_device_reads: 0,
         })
     }
 
@@ -359,6 +385,23 @@ impl AcceptedWorldViewEvidence {
         result: &EpistemicGpuExecutionResult,
         assumptions: Vec<EpistemicAssumption>,
     ) -> Result<Self> {
+        let provider_identity = EpistemicGpuProviderIdentity::from_provider(provider);
+        if result.provider_identity != provider_identity {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "accepted GPU world-view evidence".to_string(),
+                context: format!(
+                    "probabilistic evidence provider mismatch: result device={} provider device={} \
+                     result_device_ptr={} provider_device_ptr={} result_memory_ptr={} \
+                     provider_memory_ptr={}",
+                    result.provider_identity.device_ordinal,
+                    provider_identity.device_ordinal,
+                    result.provider_identity.device_ptr,
+                    provider_identity.device_ptr,
+                    result.provider_identity.memory_ptr,
+                    provider_identity.memory_ptr
+                ),
+            });
+        }
         if !result.prepared.preflight.cpu_fallbacks.is_zero() {
             return Err(XlogError::UnsupportedEpistemicConstruct {
                 construct: "accepted GPU world-view evidence".to_string(),
@@ -366,9 +409,34 @@ impl AcceptedWorldViewEvidence {
                     .to_string(),
             });
         }
+        result.require_runtime_dispatch_certification()?;
         result
             .model_membership
             .require_stable_model_tuple_source()?;
+        if result.constraint_validation.violated_constraint_relations != 0 {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "accepted GPU world-view evidence".to_string(),
+                context: format!(
+                    "probabilistic evidence requires zero reduced constraint violations, got {} \
+                     across {} checked constraint relations",
+                    result.constraint_validation.violated_constraint_relations,
+                    result.constraint_validation.checked_constraint_relations
+                ),
+            });
+        }
+        if result.constraint_validation.row_count_device_reads as usize
+            > result.constraint_validation.checked_constraint_relations
+        {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "accepted GPU world-view evidence".to_string(),
+                context: format!(
+                    "probabilistic evidence constraint metadata reads cannot exceed checked \
+                     reduced constraint relations, got reads={} checked={}",
+                    result.constraint_validation.row_count_device_reads,
+                    result.constraint_validation.checked_constraint_relations
+                ),
+            });
+        }
         require_gpu_kernel_trace(
             "candidate generation",
             result.candidate_generation.kernel_launches,
@@ -417,23 +485,37 @@ impl AcceptedWorldViewEvidence {
             result.final_tuple_materialization.host_write_ops,
             result.final_tuple_materialization.kernel_timing,
         )?;
+        // The runtime has already captured this via read_device_row_count during
+        // the bounded final-result transfer; do not re-read it in the prob gate.
+        let accepted_rows = result.final_result_transfer.final_output_rows;
+        result
+            .final_tuple_materialization
+            .require_row_filter_materialization_evidence(
+                "accepted GPU world-view evidence",
+                accepted_rows,
+            )?;
         if result.transfer_budget.tracked_dtoh_calls != 0
             || result.transfer_budget.tracked_htod_calls != 0
+            || result.transfer_budget.tracked_data_plane_htod_calls != 0
             || result.transfer_budget.per_candidate_host_round_trips != 0
         {
             return Err(XlogError::UnsupportedEpistemicConstruct {
                 construct: "accepted GPU world-view evidence".to_string(),
                 context: format!(
-                    "probabilistic evidence requires zero hot-path transfers, got dtoh_calls={}, \
-                     htod_calls={}, per_candidate_round_trips={}",
+                    "probabilistic evidence requires zero hot-path transfers outside bounded \
+                     launch metadata, got dtoh_calls={}, htod_calls={}, \
+                     data_plane_htod_calls={}, launch_metadata_htod_calls={}, \
+                     per_candidate_round_trips={}",
                     result.transfer_budget.tracked_dtoh_calls,
                     result.transfer_budget.tracked_htod_calls,
+                    result.transfer_budget.tracked_data_plane_htod_calls,
+                    result.transfer_budget.tracked_launch_metadata_htod_calls,
                     result.transfer_budget.per_candidate_host_round_trips
                 ),
             });
         }
+        require_accepted_gpu_semantic_trace(result)?;
 
-        let accepted_rows = read_device_row_count(provider, &result.final_output)?;
         if accepted_rows == 0 {
             return Err(XlogError::UnsupportedEpistemicConstruct {
                 construct: "accepted GPU world-view evidence".to_string(),
@@ -441,11 +523,38 @@ impl AcceptedWorldViewEvidence {
                     .to_string(),
             });
         }
+        if result.semantic_trace.accepted_candidates == 0 {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "accepted GPU world-view evidence".to_string(),
+                context: "probabilistic evidence requires at least one GPU-accepted candidate"
+                    .to_string(),
+            });
+        }
+        let accepted_assumptions =
+            accepted_gpu_evidence_assumptions(provider, result, &assumptions)?;
 
         Ok(Self {
-            assumptions,
-            world_count: accepted_rows,
+            assumptions: accepted_assumptions,
+            world_count: result.semantic_trace.accepted_world_views,
             gpu_epistemic_mode: Some(result.prepared.preflight.epistemic_mode),
+            gpu_tuple_key_column_reads: result.model_membership.tuple_source_key_column_device_reads
+                as usize,
+            gpu_final_tuple_row_filters: result.final_tuple_materialization.row_filter_count,
+            gpu_final_tuple_negated_row_filters: result
+                .final_tuple_materialization
+                .negated_row_filter_count,
+            gpu_row_specific_membership_row_capacity: result
+                .final_tuple_materialization
+                .row_specific_membership_row_capacity,
+            gpu_row_filter_fallback_row_capacity: result
+                .final_tuple_materialization
+                .row_filter_row_capacity_outside_model_slot_window,
+            gpu_checked_constraint_relations: result
+                .constraint_validation
+                .checked_constraint_relations,
+            gpu_constraint_row_count_device_reads: result
+                .constraint_validation
+                .row_count_device_reads as usize,
         })
     }
 
@@ -459,6 +568,12 @@ impl AcceptedWorldViewEvidence {
         &self.assumptions
     }
 
+    pub(crate) fn with_assumptions(&self, assumptions: Vec<EpistemicAssumption>) -> Self {
+        let mut evidence = self.clone();
+        evidence.assumptions = assumptions;
+        evidence
+    }
+
     /// Epistemic mode reported by the accepted GPU runtime evidence, when present.
     pub fn gpu_epistemic_mode(&self) -> Option<EirEpistemicMode> {
         self.gpu_epistemic_mode
@@ -468,6 +583,929 @@ impl AcceptedWorldViewEvidence {
     pub fn assumption_count(&self) -> usize {
         self.assumptions.len()
     }
+
+    /// Accepted nonzero-arity epistemic assumptions represented by this evidence.
+    pub fn nonzero_arity_assumption_count(&self) -> usize {
+        self.assumptions
+            .iter()
+            .filter(|assumption| assumption.arity > 0)
+            .count()
+    }
+
+    /// Maximum accepted epistemic assumption arity represented by this evidence.
+    pub fn max_assumption_arity(&self) -> usize {
+        self.assumptions
+            .iter()
+            .map(|assumption| assumption.arity)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Tuple-key device column reads used while staging accepted GPU tuple evidence.
+    pub fn gpu_tuple_key_column_reads(&self) -> usize {
+        self.gpu_tuple_key_column_reads
+    }
+
+    /// GPU final-tuple row filters used to materialize variable-bound evidence.
+    pub fn gpu_final_tuple_row_filters(&self) -> usize {
+        self.gpu_final_tuple_row_filters
+    }
+
+    /// Negated GPU final-tuple row filters used to materialize variable-bound evidence.
+    pub fn gpu_final_tuple_negated_row_filters(&self) -> usize {
+        self.gpu_final_tuple_negated_row_filters
+    }
+
+    /// Final-output row capacity checked against row-specific GPU model slots.
+    pub fn gpu_row_specific_membership_row_capacity(&self) -> usize {
+        self.gpu_row_specific_membership_row_capacity
+    }
+
+    /// Final-output row capacity checked by fallback GPU row filters outside model slots.
+    pub fn gpu_row_filter_fallback_row_capacity(&self) -> usize {
+        self.gpu_row_filter_fallback_row_capacity
+    }
+
+    /// Reduced integrity-constraint relations checked by accepted GPU execution.
+    pub fn gpu_checked_constraint_relations(&self) -> usize {
+        self.gpu_checked_constraint_relations
+    }
+
+    /// Constraint row-count metadata reads used by accepted GPU execution.
+    pub fn gpu_constraint_row_count_device_reads(&self) -> usize {
+        self.gpu_constraint_row_count_device_reads
+    }
+}
+
+fn validate_world_view_assumptions(
+    world_view: &EpistemicWorldView,
+    assumptions: &[EpistemicAssumption],
+) -> Result<()> {
+    for assumption in assumptions {
+        let actual_value =
+            world_view.evaluate(&epistemic_literal_for_assumption(assumption)?) == TruthValue::True;
+        if actual_value != assumption.value {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "accepted world-view evidence".to_string(),
+                context: format!(
+                    "probabilistic evidence assumption {} was not accepted by world view",
+                    assumption.evidence_literal()
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn epistemic_literal_for_assumption(assumption: &EpistemicAssumption) -> Result<EpistemicLiteral> {
+    if assumption.arity > 0 && assumption.terms.is_empty() {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "accepted world-view evidence".to_string(),
+            context: format!(
+                "nonzero probabilistic evidence assumption {} requires concrete tuple terms",
+                assumption.evidence_literal()
+            ),
+        });
+    }
+    if !assumption.terms.is_empty() && assumption.terms.len() != assumption.arity {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "accepted world-view evidence".to_string(),
+            context: format!(
+                "probabilistic evidence assumption {} has arity {}, but {} concrete terms",
+                assumption.evidence_literal(),
+                assumption.arity,
+                assumption.terms.len()
+            ),
+        });
+    }
+
+    let terms = assumption
+        .terms
+        .iter()
+        .map(epistemic_evidence_term_to_logic_term)
+        .collect();
+    let op = match assumption.kind {
+        EpistemicAssumptionKind::Know => EpistemicOp::Know,
+        EpistemicAssumptionKind::Possible => EpistemicOp::Possible,
+    };
+
+    Ok(EpistemicLiteral {
+        op,
+        negated: false,
+        atom: Atom {
+            predicate: assumption.predicate.clone(),
+            terms,
+        },
+    })
+}
+
+fn epistemic_evidence_term_to_logic_term(term: &EpistemicEvidenceTerm) -> Term {
+    match term {
+        EpistemicEvidenceTerm::Integer(value) => Term::Integer(*value),
+        EpistemicEvidenceTerm::String(value) => Term::String(value.clone()),
+        EpistemicEvidenceTerm::Symbol(value) => Term::Symbol(*value),
+    }
+}
+
+fn require_accepted_gpu_semantic_trace(result: &EpistemicGpuExecutionResult) -> Result<()> {
+    let trace = &result.semantic_trace;
+    let accounted_candidates = trace
+        .accepted_candidates
+        .checked_add(trace.rejected_candidates)
+        .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+            construct: "accepted GPU world-view evidence".to_string(),
+            context: format!(
+                "probabilistic evidence semantic trace candidate accounting overflowed: \
+                 accepted={} rejected={}",
+                trace.accepted_candidates, trace.rejected_candidates
+            ),
+        })?;
+    if trace.generated_candidates != result.candidate_generation.generated_candidates
+        || trace.tested_candidates != result.world_view_validation.candidates_checked
+        || trace.accepted_candidates != trace.accepted_candidate_indices.len()
+        || trace.rejected_candidates != trace.rejected_candidate_indices.len()
+        || trace.accepted_world_views != trace.accepted_candidates
+        || accounted_candidates != trace.generated_candidates
+        || trace.cpu_candidate_enumerations != 0
+        || trace.cpu_world_view_validations != 0
+    {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "accepted GPU world-view evidence".to_string(),
+            context: format!(
+                "probabilistic evidence requires a consistent GPU semantic trace with zero CPU \
+                 fallbacks, got generated={}, tested={}, expected_generated={}, \
+                 expected_tested={}, accepted={} accepted_indices={}, accepted_world_views={}, \
+                 rejected={} rejected_indices={}, cpu_candidates={}, cpu_world_views={}",
+                trace.generated_candidates,
+                trace.tested_candidates,
+                result.candidate_generation.generated_candidates,
+                result.world_view_validation.candidates_checked,
+                trace.accepted_candidates,
+                trace.accepted_candidate_indices.len(),
+                trace.accepted_world_views,
+                trace.rejected_candidates,
+                trace.rejected_candidate_indices.len(),
+                trace.cpu_candidate_enumerations,
+                trace.cpu_world_view_validations
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn accepted_gpu_evidence_assumptions(
+    provider: &CudaKernelProvider,
+    result: &EpistemicGpuExecutionResult,
+    assumptions: &[EpistemicAssumption],
+) -> Result<Vec<EpistemicAssumption>> {
+    let preflight = &result.prepared.preflight;
+    if result.tuple_membership_bindings.len() != preflight.tuple_membership_binding_count {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "accepted GPU world-view evidence".to_string(),
+            context: format!(
+                "probabilistic evidence requires executed tuple-membership bindings, got {} \
+                 bindings for preflight count {}",
+                result.tuple_membership_bindings.len(),
+                preflight.tuple_membership_binding_count
+            ),
+        });
+    }
+    if !assumptions.is_empty() && assumptions.len() != preflight.tuple_membership_binding_count {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "accepted GPU world-view evidence".to_string(),
+            context: format!(
+                "probabilistic evidence must cover every GPU-validated tuple-membership binding, \
+                 or supply no assumption facts for gate-only production reuse; got {} assumptions \
+                 for {} bindings",
+                assumptions.len(),
+                preflight.tuple_membership_binding_count
+            ),
+        });
+    }
+    let assumptions =
+        resolve_gpu_evidence_assumptions(provider, result, assumptions, preflight.epistemic_mode)?;
+    let mut know_bindings = BTreeSet::new();
+    let mut possible_bindings = BTreeSet::new();
+    let mut not_know_bindings = BTreeSet::new();
+    let mut not_possible_bindings = BTreeSet::new();
+    let mut bound_tuple_bindings = BTreeSet::new();
+    let mut negated_bound_tuple_bindings = BTreeSet::new();
+    let mut accepted_assumptions = Vec::with_capacity(assumptions.len());
+    for assumption in &assumptions {
+        if assumption.arity > 0 && assumption.terms.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "accepted GPU world-view evidence".to_string(),
+                context: format!(
+                    "nonzero probabilistic evidence assumption {} requires concrete tuple terms",
+                    assumption.evidence_literal()
+                ),
+            });
+        }
+        if !assumption.terms.is_empty() && assumption.terms.len() != assumption.arity {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "accepted GPU world-view evidence".to_string(),
+                context: format!(
+                    "probabilistic evidence assumption {} has arity {}, but {} concrete terms",
+                    assumption.evidence_literal(),
+                    assumption.arity,
+                    assumption.terms.len()
+                ),
+            });
+        }
+        let Some(binding_match) =
+            find_gpu_evidence_binding(provider, result, assumption, preflight.epistemic_mode)?
+        else {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "accepted GPU world-view evidence".to_string(),
+                context: format!(
+                    "probabilistic evidence assumption {} was not validated by the accepted GPU \
+                     tuple-membership bindings",
+                    assumption.evidence_literal()
+                ),
+            });
+        };
+        if accepted_assumptions
+            .iter()
+            .any(|previous: &EpistemicAssumption| {
+                binding_match
+                    .accepted_assumption
+                    .same_evidence_key(previous)
+            })
+        {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "accepted GPU world-view evidence".to_string(),
+                context: format!(
+                    "probabilistic evidence duplicates epistemic assumption key {}",
+                    binding_match.accepted_assumption.evidence_literal()
+                ),
+            });
+        }
+        let binding = binding_match.binding;
+        let binding_key = (binding.literal_index, binding.reduction_index);
+        match (binding.op, binding.negated) {
+            (EirEpistemicOp::Know, false) => {
+                know_bindings.insert(binding_key);
+            }
+            (EirEpistemicOp::Possible, false) => {
+                possible_bindings.insert(binding_key);
+            }
+            (EirEpistemicOp::Know, true) => {
+                not_know_bindings.insert(binding_key);
+            }
+            (EirEpistemicOp::Possible, true) => {
+                not_possible_bindings.insert(binding_key);
+            }
+        }
+        if binding_match.matched_concrete_tuple_key
+            && binding.bound_output_columns.iter().any(Option::is_some)
+        {
+            bound_tuple_bindings.insert(binding_key);
+            if binding.negated {
+                negated_bound_tuple_bindings.insert(binding_key);
+            }
+        }
+        accepted_assumptions.push(binding_match.accepted_assumption);
+    }
+    if know_bindings.len() > preflight.know_operator_count
+        || possible_bindings.len() > preflight.possible_operator_count
+        || not_know_bindings.len() > preflight.not_know_operator_count
+        || not_possible_bindings.len() > preflight.not_possible_operator_count
+    {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "accepted GPU world-view evidence".to_string(),
+            context: format!(
+                "probabilistic evidence assumptions exceed GPU-validated operator counts: \
+                 know={}/{} possible={}/{} not_know={}/{} not_possible={}/{}",
+                know_bindings.len(),
+                preflight.know_operator_count,
+                possible_bindings.len(),
+                preflight.possible_operator_count,
+                not_know_bindings.len(),
+                preflight.not_know_operator_count,
+                not_possible_bindings.len(),
+                preflight.not_possible_operator_count
+            ),
+        });
+    }
+    let final_tuple_trace = result.final_tuple_materialization;
+    if bound_tuple_bindings.len() > final_tuple_trace.row_filter_count
+        || negated_bound_tuple_bindings.len() > final_tuple_trace.negated_row_filter_count
+    {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "accepted GPU world-view evidence".to_string(),
+            context: format!(
+                "probabilistic evidence supplied variable-bound tuple assumptions without \
+                 matching GPU final-tuple row-filter materialization: bound={}/{} \
+                 negated_bound={}/{}",
+                bound_tuple_bindings.len(),
+                final_tuple_trace.row_filter_count,
+                negated_bound_tuple_bindings.len(),
+                final_tuple_trace.negated_row_filter_count
+            ),
+        });
+    }
+    Ok(accepted_assumptions)
+}
+
+fn resolve_gpu_evidence_assumptions(
+    provider: &CudaKernelProvider,
+    result: &EpistemicGpuExecutionResult,
+    assumptions: &[EpistemicAssumption],
+    mode: EirEpistemicMode,
+) -> Result<Vec<EpistemicAssumption>> {
+    if assumptions.is_empty() {
+        return concrete_gpu_evidence_assumptions_for_all_bindings(provider, result);
+    }
+
+    let mut resolved = BTreeSet::new();
+    for assumption in assumptions {
+        if assumption.arity > 0 && assumption.terms.is_empty() {
+            for concrete in concrete_gpu_evidence_assumptions(provider, result, assumption, mode)? {
+                resolved.insert(concrete);
+            }
+        } else {
+            resolved.insert(assumption.clone());
+        }
+    }
+    Ok(resolved.into_iter().collect())
+}
+
+fn concrete_gpu_evidence_assumptions_for_all_bindings(
+    provider: &CudaKernelProvider,
+    result: &EpistemicGpuExecutionResult,
+) -> Result<Vec<EpistemicAssumption>> {
+    if result.tuple_membership_bindings.is_empty() {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "accepted GPU world-view evidence".to_string(),
+            context: "probabilistic evidence requires at least one accepted GPU tuple-membership \
+                      binding"
+                .to_string(),
+        });
+    }
+
+    let mut resolved = BTreeSet::new();
+    for binding in &result.tuple_membership_bindings {
+        let assumption = EpistemicAssumption {
+            kind: match binding.op {
+                EirEpistemicOp::Know => EpistemicAssumptionKind::Know,
+                EirEpistemicOp::Possible => EpistemicAssumptionKind::Possible,
+            },
+            predicate: binding.predicate.clone(),
+            arity: binding.arity,
+            terms: Vec::new(),
+            value: !binding.negated,
+        };
+        if binding.arity == 0 {
+            resolved.insert(assumption);
+        } else {
+            for concrete in concrete_gpu_evidence_assumptions_for_binding(
+                provider,
+                result.tuple_evidence_output(),
+                &assumption,
+                binding,
+            )? {
+                resolved.insert(concrete);
+            }
+        }
+    }
+
+    if resolved.is_empty() {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "accepted GPU world-view evidence".to_string(),
+            context: "accepted GPU tuple-membership bindings did not materialize any \
+                      probabilistic evidence assumptions"
+                .to_string(),
+        });
+    }
+    Ok(resolved.into_iter().collect())
+}
+
+fn concrete_gpu_evidence_assumptions(
+    provider: &CudaKernelProvider,
+    result: &EpistemicGpuExecutionResult,
+    assumption: &EpistemicAssumption,
+    mode: EirEpistemicMode,
+) -> Result<Vec<EpistemicAssumption>> {
+    let candidate_bindings = result
+        .tuple_membership_bindings
+        .iter()
+        .filter(|binding| {
+            assumption_kind_matches_binding(assumption, binding, mode)
+                && assumption.predicate == binding.predicate
+                && assumption.value != binding.negated
+        })
+        .collect::<Vec<_>>();
+
+    if candidate_bindings.is_empty() {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "accepted GPU world-view evidence".to_string(),
+            context: format!(
+                "nonzero probabilistic evidence assumption {} was not validated by any accepted \
+                 GPU tuple-membership binding",
+                assumption.evidence_literal()
+            ),
+        });
+    }
+
+    let arity_matched = candidate_bindings
+        .iter()
+        .copied()
+        .filter(|binding| binding.arity == assumption.arity)
+        .collect::<Vec<_>>();
+    if arity_matched.is_empty() {
+        let available_arities = candidate_bindings
+            .iter()
+            .map(|binding| binding.arity)
+            .collect::<BTreeSet<_>>();
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "accepted GPU world-view evidence".to_string(),
+            context: format!(
+                "nonzero probabilistic evidence assumption {} requires arity {}, but accepted \
+                 GPU tuple-membership bindings for the predicate have arities {:?}",
+                assumption.evidence_literal(),
+                assumption.arity,
+                available_arities
+            ),
+        });
+    }
+
+    let mut concrete = BTreeSet::new();
+    for binding in arity_matched {
+        for assumption in concrete_gpu_evidence_assumptions_for_binding(
+            provider,
+            result.tuple_evidence_output(),
+            assumption,
+            binding,
+        )? {
+            concrete.insert(assumption);
+        }
+    }
+
+    if concrete.is_empty() {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "accepted GPU world-view evidence".to_string(),
+            context: format!(
+                "nonzero probabilistic evidence assumption {} did not materialize any concrete \
+                 GPU tuple evidence",
+                assumption.evidence_literal()
+            ),
+        });
+    }
+    Ok(concrete.into_iter().collect())
+}
+
+fn concrete_gpu_evidence_assumptions_for_binding(
+    provider: &CudaKernelProvider,
+    final_output: &CudaBuffer,
+    assumption: &EpistemicAssumption,
+    binding: &EpistemicTupleMembershipBinding,
+) -> Result<Vec<EpistemicAssumption>> {
+    if binding.arity == 0 {
+        return Ok(vec![assumption.clone()]);
+    }
+    if binding.key_terms.len() != binding.arity
+        || binding.bound_output_columns.len() != binding.key_terms.len()
+    {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "accepted GPU world-view evidence".to_string(),
+            context: format!(
+                "GPU tuple-membership binding for {}/{} has inconsistent key metadata: \
+                 key_terms={} bound_output_columns={}",
+                binding.predicate,
+                binding.arity,
+                binding.key_terms.len(),
+                binding.bound_output_columns.len()
+            ),
+        });
+    }
+
+    let output_rows = provider.device_row_count(final_output)?;
+    if output_rows == 0 {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "accepted GPU world-view evidence".to_string(),
+            context: format!(
+                "nonzero probabilistic evidence assumption {} requires non-empty GPU final output",
+                assumption.evidence_literal()
+            ),
+        });
+    }
+
+    let mut output_columns = BTreeMap::new();
+    for output_col in binding.bound_output_columns.iter().flatten() {
+        if !output_columns.contains_key(output_col) {
+            let terms =
+                download_gpu_final_output_evidence_terms(provider, final_output, *output_col)?;
+            if terms.len() != output_rows {
+                return Err(XlogError::UnsupportedEpistemicConstruct {
+                    construct: "accepted GPU world-view evidence".to_string(),
+                    context: format!(
+                        "GPU final-output column {} produced {} evidence terms for {} rows",
+                        output_col,
+                        terms.len(),
+                        output_rows
+                    ),
+                });
+            }
+            output_columns.insert(*output_col, terms);
+        }
+    }
+
+    let row_count = if output_columns.is_empty() {
+        1
+    } else {
+        output_rows
+    };
+    let mut concrete = Vec::with_capacity(row_count);
+    for row in 0..row_count {
+        let mut terms = Vec::with_capacity(binding.key_terms.len());
+        for (key_term, output_col) in binding
+            .key_terms
+            .iter()
+            .zip(binding.bound_output_columns.iter())
+        {
+            match key_term {
+                EirTerm::Variable(_) => {
+                    let Some(output_col) = *output_col else {
+                        return Err(XlogError::UnsupportedEpistemicConstruct {
+                            construct: "accepted GPU world-view evidence".to_string(),
+                            context: format!(
+                                "probabilistic evidence assumption {} has an unbound variable \
+                                 tuple key",
+                                assumption.evidence_literal()
+                            ),
+                        });
+                    };
+                    let column_terms = output_columns.get(&output_col).ok_or_else(|| {
+                        XlogError::UnsupportedEpistemicConstruct {
+                            construct: "accepted GPU world-view evidence".to_string(),
+                            context: format!(
+                                "GPU final-output column {} was not staged for {}",
+                                output_col,
+                                assumption.evidence_literal()
+                            ),
+                        }
+                    })?;
+                    terms.push(column_terms[row].clone());
+                }
+                _ => terms.push(evidence_term_from_ground_eir_term(key_term, assumption)?),
+            }
+        }
+        concrete.push(match assumption.kind {
+            EpistemicAssumptionKind::Know => {
+                EpistemicAssumption::known_tuple(&assumption.predicate, terms, assumption.value)
+            }
+            EpistemicAssumptionKind::Possible => {
+                EpistemicAssumption::possible_tuple(&assumption.predicate, terms, assumption.value)
+            }
+        });
+    }
+    Ok(concrete)
+}
+
+fn download_gpu_final_output_evidence_terms(
+    provider: &CudaKernelProvider,
+    final_output: &CudaBuffer,
+    output_col: usize,
+) -> Result<Vec<EpistemicEvidenceTerm>> {
+    let col_type = final_output
+        .schema()
+        .column_type(output_col)
+        .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+            construct: "accepted GPU world-view evidence".to_string(),
+            context: format!(
+                "probabilistic evidence references missing GPU final-output column {}",
+                output_col
+            ),
+        })?;
+    match col_type {
+        ScalarType::U32 => Ok(provider
+            .download_column::<u32>(final_output, output_col)?
+            .into_iter()
+            .map(|value| EpistemicEvidenceTerm::Integer(i64::from(value)))
+            .collect()),
+        ScalarType::U64 => provider
+            .download_column::<u64>(final_output, output_col)?
+            .into_iter()
+            .map(|value| {
+                i64::try_from(value)
+                    .map(EpistemicEvidenceTerm::Integer)
+                    .map_err(|_| XlogError::UnsupportedEpistemicConstruct {
+                        construct: "accepted GPU world-view evidence".to_string(),
+                        context: format!(
+                            "GPU final-output column {} value {} exceeds exact evidence i64 \
+                                 range",
+                            output_col, value
+                        ),
+                    })
+            })
+            .collect(),
+        ScalarType::I32 => Ok(provider
+            .download_column::<i32>(final_output, output_col)?
+            .into_iter()
+            .map(|value| EpistemicEvidenceTerm::Integer(i64::from(value)))
+            .collect()),
+        ScalarType::I64 => Ok(provider
+            .download_column::<i64>(final_output, output_col)?
+            .into_iter()
+            .map(EpistemicEvidenceTerm::Integer)
+            .collect()),
+        ScalarType::Symbol => Ok(provider
+            .download_column::<u32>(final_output, output_col)?
+            .into_iter()
+            .map(EpistemicEvidenceTerm::Symbol)
+            .collect()),
+        ScalarType::Bool | ScalarType::F32 | ScalarType::F64 => {
+            Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "accepted GPU world-view evidence".to_string(),
+                context: format!(
+                    "GPU final-output column {} type {:?} cannot be used as exact epistemic \
+                     evidence",
+                    output_col, col_type
+                ),
+            })
+        }
+    }
+}
+
+fn evidence_term_from_ground_eir_term(
+    term: &EirTerm,
+    assumption: &EpistemicAssumption,
+) -> Result<EpistemicEvidenceTerm> {
+    match term {
+        EirTerm::Integer(value) => Ok(EpistemicEvidenceTerm::Integer(*value)),
+        EirTerm::String(value) => Ok(EpistemicEvidenceTerm::String(value.clone())),
+        EirTerm::Symbol(value) => Ok(EpistemicEvidenceTerm::Symbol(*value)),
+        EirTerm::Variable(_)
+        | EirTerm::Anonymous
+        | EirTerm::FloatBits(_)
+        | EirTerm::List(_)
+        | EirTerm::Cons { .. }
+        | EirTerm::Compound { .. }
+        | EirTerm::PredRef(_)
+        | EirTerm::Aggregate { .. } => Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "accepted GPU world-view evidence".to_string(),
+            context: format!(
+                "probabilistic evidence assumption {} uses unsupported tuple key term {:?}",
+                assumption.evidence_literal(),
+                term
+            ),
+        }),
+    }
+}
+
+struct GpuEvidenceBindingMatch<'a> {
+    binding: &'a EpistemicTupleMembershipBinding,
+    accepted_assumption: EpistemicAssumption,
+    matched_concrete_tuple_key: bool,
+}
+
+fn find_gpu_evidence_binding<'a>(
+    provider: &CudaKernelProvider,
+    result: &'a EpistemicGpuExecutionResult,
+    assumption: &EpistemicAssumption,
+    mode: EirEpistemicMode,
+) -> Result<Option<GpuEvidenceBindingMatch<'a>>> {
+    let mut saw_final_tuple_miss = false;
+    for binding in result
+        .tuple_membership_bindings
+        .iter()
+        .filter(|binding| assumption_matches_gpu_binding(assumption, binding, mode))
+    {
+        if assumption.arity > 0
+            && !assumption.terms.is_empty()
+            && binding.bound_output_columns.iter().any(Option::is_some)
+        {
+            let matched_rows = gpu_final_output_rows_matching_assumption(
+                provider,
+                result.tuple_evidence_output(),
+                assumption,
+                binding,
+            )?;
+            if matched_rows == 0 {
+                saw_final_tuple_miss = true;
+                continue;
+            }
+        }
+        return Ok(Some(GpuEvidenceBindingMatch {
+            binding,
+            accepted_assumption: assumption.clone(),
+            matched_concrete_tuple_key: !assumption.terms.is_empty(),
+        }));
+    }
+    if saw_final_tuple_miss {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "accepted GPU world-view evidence".to_string(),
+            context: format!(
+                "probabilistic evidence assumption {} did not match any GPU-materialized final \
+                 tuple row",
+                assumption.evidence_literal()
+            ),
+        });
+    }
+    Ok(None)
+}
+
+fn gpu_final_output_rows_matching_assumption(
+    provider: &CudaKernelProvider,
+    final_output: &CudaBuffer,
+    assumption: &EpistemicAssumption,
+    binding: &EpistemicTupleMembershipBinding,
+) -> Result<usize> {
+    let mut filtered: Option<CudaBuffer> = None;
+    let mut checked_variable_terms = 0usize;
+
+    for ((assumption_term, binding_term), bound_output_column) in assumption
+        .terms
+        .iter()
+        .zip(binding.key_terms.iter())
+        .zip(binding.bound_output_columns.iter())
+    {
+        if !matches!(binding_term, EirTerm::Variable(_)) {
+            continue;
+        }
+        let Some(output_col) = *bound_output_column else {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "accepted GPU world-view evidence".to_string(),
+                context: format!(
+                    "probabilistic evidence assumption {} has an unbound variable tuple key",
+                    assumption.evidence_literal()
+                ),
+            });
+        };
+        let input = filtered.as_ref().unwrap_or(final_output);
+        filtered = Some(filter_gpu_final_output_by_evidence_term(
+            provider,
+            input,
+            output_col,
+            assumption_term,
+            assumption,
+        )?);
+        checked_variable_terms += 1;
+    }
+
+    if checked_variable_terms == 0 {
+        return provider.device_row_count(final_output);
+    }
+    let filtered = filtered
+        .as_ref()
+        .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+            construct: "accepted GPU world-view evidence".to_string(),
+            context: format!(
+                "probabilistic evidence assumption {} did not produce a GPU final-output filter",
+                assumption.evidence_literal()
+            ),
+        })?;
+    provider.device_row_count(filtered)
+}
+
+fn filter_gpu_final_output_by_evidence_term(
+    provider: &CudaKernelProvider,
+    input: &CudaBuffer,
+    output_col: usize,
+    term: &EpistemicEvidenceTerm,
+    assumption: &EpistemicAssumption,
+) -> Result<CudaBuffer> {
+    let col_type = input.schema().column_type(output_col).ok_or_else(|| {
+        XlogError::UnsupportedEpistemicConstruct {
+            construct: "accepted GPU world-view evidence".to_string(),
+            context: format!(
+                "probabilistic evidence assumption {} references missing final-output column {}",
+                assumption.evidence_literal(),
+                output_col
+            ),
+        }
+    })?;
+
+    match (col_type, term) {
+        (ScalarType::U32, EpistemicEvidenceTerm::Integer(value)) => {
+            let value = u32::try_from(*value)
+                .map_err(|_| evidence_term_type_error(assumption, output_col, col_type, term))?;
+            provider.filter::<u32>(input, output_col, value, CompareOp::Eq)
+        }
+        (ScalarType::U64, EpistemicEvidenceTerm::Integer(value)) => {
+            let value = u64::try_from(*value)
+                .map_err(|_| evidence_term_type_error(assumption, output_col, col_type, term))?;
+            provider.filter::<u64>(input, output_col, value, CompareOp::Eq)
+        }
+        (ScalarType::I32, EpistemicEvidenceTerm::Integer(value)) => {
+            let value = i32::try_from(*value)
+                .map_err(|_| evidence_term_type_error(assumption, output_col, col_type, term))?;
+            provider.filter::<i32>(input, output_col, value, CompareOp::Eq)
+        }
+        (ScalarType::I64, EpistemicEvidenceTerm::Integer(value)) => {
+            provider.filter::<i64>(input, output_col, *value, CompareOp::Eq)
+        }
+        (ScalarType::Symbol, EpistemicEvidenceTerm::Symbol(value)) => {
+            provider.filter::<u32>(input, output_col, *value, CompareOp::Eq)
+        }
+        (ScalarType::Symbol, EpistemicEvidenceTerm::String(value)) => {
+            let value = symbol::intern(value);
+            provider.filter::<u32>(input, output_col, value, CompareOp::Eq)
+        }
+        _ => Err(evidence_term_type_error(
+            assumption, output_col, col_type, term,
+        )),
+    }
+}
+
+fn evidence_term_type_error(
+    assumption: &EpistemicAssumption,
+    output_col: usize,
+    col_type: ScalarType,
+    term: &EpistemicEvidenceTerm,
+) -> XlogError {
+    XlogError::UnsupportedEpistemicConstruct {
+        construct: "accepted GPU world-view evidence".to_string(),
+        context: format!(
+            "probabilistic evidence assumption {} term {:?} is incompatible with \
+             GPU final-output column {} type {:?}",
+            assumption.evidence_literal(),
+            term,
+            output_col,
+            col_type
+        ),
+    }
+}
+
+fn assumption_matches_gpu_binding(
+    assumption: &EpistemicAssumption,
+    binding: &EpistemicTupleMembershipBinding,
+    mode: EirEpistemicMode,
+) -> bool {
+    if assumption_kind_matches_binding(assumption, binding, mode)
+        && assumption.predicate == binding.predicate
+        && assumption.arity == binding.arity
+        && assumption.value != binding.negated
+    {
+        assumption_terms_match_binding(assumption, binding)
+    } else {
+        false
+    }
+}
+
+fn assumption_kind_matches_op(kind: EpistemicAssumptionKind, op: EirEpistemicOp) -> bool {
+    matches!(
+        (kind, op),
+        (EpistemicAssumptionKind::Know, EirEpistemicOp::Know)
+            | (EpistemicAssumptionKind::Possible, EirEpistemicOp::Possible)
+    )
+}
+
+fn assumption_kind_matches_binding(
+    assumption: &EpistemicAssumption,
+    binding: &EpistemicTupleMembershipBinding,
+    mode: EirEpistemicMode,
+) -> bool {
+    assumption_kind_matches_op(assumption.kind, binding.op)
+        || (matches!(mode, EirEpistemicMode::Faeel)
+            && assumption.kind == EpistemicAssumptionKind::Know
+            && assumption.value
+            && !binding.negated
+            && matches!(binding.op, EirEpistemicOp::Possible))
+}
+
+fn assumption_terms_match_binding(
+    assumption: &EpistemicAssumption,
+    binding: &EpistemicTupleMembershipBinding,
+) -> bool {
+    if assumption.arity == 0 {
+        return assumption.terms.is_empty() && binding.key_terms.is_empty();
+    }
+    if assumption.terms.is_empty() {
+        return false;
+    }
+    if assumption.terms.len() != binding.key_terms.len()
+        || binding.bound_output_columns.len() != binding.key_terms.len()
+    {
+        return false;
+    }
+
+    assumption
+        .terms
+        .iter()
+        .zip(binding.key_terms.iter())
+        .zip(binding.bound_output_columns.iter())
+        .all(
+            |((assumption_term, binding_term), bound_output_column)| match binding_term {
+                EirTerm::Variable(_) => bound_output_column.is_some(),
+                EirTerm::Integer(value) => {
+                    matches!(assumption_term, EpistemicEvidenceTerm::Integer(v) if v == value)
+                }
+                EirTerm::String(value) => {
+                    matches!(assumption_term, EpistemicEvidenceTerm::String(v) if v == value)
+                }
+                EirTerm::Symbol(value) => {
+                    matches!(assumption_term, EpistemicEvidenceTerm::Symbol(v) if v == value)
+                }
+                EirTerm::Anonymous
+                | EirTerm::FloatBits(_)
+                | EirTerm::List(_)
+                | EirTerm::Cons { .. }
+                | EirTerm::Compound { .. }
+                | EirTerm::PredRef(_)
+                | EirTerm::Aggregate { .. } => false,
+            },
+        )
 }
 
 fn require_gpu_kernel_trace(
@@ -751,7 +1789,27 @@ fn mix_assumption(hash: &mut u64, assumption: &EpistemicAssumption) {
     mix_u64(hash, assumption.kind as u64);
     mix_str(hash, &assumption.predicate);
     mix_u64(hash, assumption.arity as u64);
+    for term in &assumption.terms {
+        mix_evidence_term(hash, term);
+    }
     mix_u64(hash, u64::from(assumption.value));
+}
+
+fn mix_evidence_term(hash: &mut u64, term: &EpistemicEvidenceTerm) {
+    match term {
+        EpistemicEvidenceTerm::Integer(value) => {
+            mix_u64(hash, 0);
+            mix_u64(hash, *value as u64);
+        }
+        EpistemicEvidenceTerm::String(value) => {
+            mix_u64(hash, 1);
+            mix_str(hash, value);
+        }
+        EpistemicEvidenceTerm::Symbol(value) => {
+            mix_u64(hash, 2);
+            mix_u64(hash, u64::from(*value));
+        }
+    }
 }
 
 fn mix_str(hash: &mut u64, value: &str) {

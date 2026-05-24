@@ -33,15 +33,26 @@ pub struct GpuCnfEncoding {
     pub decision_var_limit: TrackedCudaSlice<u32>,
 }
 
-fn grid_dim(n: u32, block: u32) -> u32 {
-    let mut grid = (n + block - 1) / block;
-    if grid == 0 {
-        grid = 1;
+const MAX_GRID_X: u64 = 65_535;
+
+fn checked_grid_dim(n: u32, block: u32, context: &str) -> Result<u32> {
+    if block == 0 {
+        return Err(XlogError::Kernel(format!(
+            "{context}: CUDA launch block size must be nonzero"
+        )));
     }
-    if grid > 65_535 {
-        grid = 65_535;
+    let grid = if n == 0 {
+        1
+    } else {
+        u64::from(n).div_ceil(u64::from(block))
+    };
+    if grid > MAX_GRID_X {
+        return Err(XlogError::Kernel(format!(
+            "{context}: launch grid {grid} exceeds x-dimension limit {MAX_GRID_X} \
+             for {n} elements with block size {block}"
+        )));
     }
-    grid
+    Ok(grid as u32)
 }
 
 /// Encode a GPU PIR graph into GPU-resident Tseitin CNF.
@@ -50,7 +61,7 @@ pub fn encode_cnf_gpu(
     roots: &GpuPirRoots,
     provider: &Arc<CudaKernelProvider>,
 ) -> Result<GpuCnfEncoding> {
-    if roots.roots.len() == 0 {
+    if roots.roots.is_empty() {
         return Err(XlogError::Compilation(
             "Cannot encode CNF for empty PIR root set".to_string(),
         ));
@@ -132,12 +143,12 @@ pub fn encode_cnf_gpu(
     let mut base_node = memory.alloc::<u32>(1)?;
     let mut decision_var_limit = memory.alloc::<u32>(1)?;
 
-    let mut d_num_vars = memory.alloc::<u32>(1)?;
-    let mut d_num_clauses = memory.alloc::<u32>(1)?;
-    let mut d_num_lits = memory.alloc::<u32>(1)?;
+    let d_num_vars = memory.alloc::<u32>(1)?;
+    let d_num_clauses = memory.alloc::<u32>(1)?;
+    let d_num_lits = memory.alloc::<u32>(1)?;
 
     let mut d_offsets = memory.alloc::<u32>((clause_cap as usize) + 1)?;
-    let mut d_lits = memory.alloc::<i32>(lit_cap as usize)?;
+    let d_lits = memory.alloc::<i32>(lit_cap as usize)?;
 
     device
         .memset_zeros(&mut reachable)
@@ -226,7 +237,7 @@ pub fn encode_cnf_gpu(
 
     let block = 256u32;
 
-    let grid_roots = grid_dim(num_roots_u32, block);
+    let grid_roots = checked_grid_dim(num_roots_u32, block, "cnf_reachability_init")?;
     // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         reach_init_fn.clone().launch(
@@ -250,7 +261,7 @@ pub fn encode_cnf_gpu(
     }
     .map_err(|e| XlogError::Kernel(format!("cnf_reachability_init failed: {}", e)))?;
 
-    let grid_nodes = grid_dim(num_nodes_u32, block);
+    let grid_nodes = checked_grid_dim(num_nodes_u32, block, "cnf node kernels")?;
     // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         reach_bfs_fn.clone().launch(
@@ -339,7 +350,7 @@ pub fn encode_cnf_gpu(
     .map_err(|e| XlogError::Kernel(format!("cnf_compute_leaf_choice_totals failed: {}", e)))?;
 
     if leaf_cap > 0 {
-        let grid_leaf = grid_dim(leaf_cap, block);
+        let grid_leaf = checked_grid_dim(leaf_cap, block, "cnf_assign_leaf_var")?;
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assign_leaf_var_fn.clone().launch(
@@ -354,7 +365,7 @@ pub fn encode_cnf_gpu(
         .map_err(|e| XlogError::Kernel(format!("cnf_assign_leaf_var failed: {}", e)))?;
     }
     if choice_cap > 0 {
-        let grid_choice = grid_dim(choice_cap, block);
+        let grid_choice = checked_grid_dim(choice_cap, block, "cnf_assign_choice_var")?;
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             assign_choice_var_fn.clone().launch(
@@ -450,9 +461,9 @@ pub fn encode_cnf_gpu(
         var_cap.as_kernel_param(),
         clause_cap.as_kernel_param(),
         lit_cap.as_kernel_param(),
-        (&mut d_num_vars).as_kernel_param(),
-        (&mut d_num_clauses).as_kernel_param(),
-        (&mut d_num_lits).as_kernel_param(),
+        (&d_num_vars).as_kernel_param(),
+        (&d_num_clauses).as_kernel_param(),
+        (&d_num_lits).as_kernel_param(),
     ];
     // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
@@ -507,8 +518,8 @@ pub fn encode_cnf_gpu(
         num_nodes_u32.as_kernel_param(),
         leaf_cap.as_kernel_param(),
         choice_cap.as_kernel_param(),
-        (&mut d_offsets).as_kernel_param(),
-        (&mut d_lits).as_kernel_param(),
+        (&d_offsets).as_kernel_param(),
+        (&d_lits).as_kernel_param(),
     ];
 
     // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size

@@ -770,7 +770,7 @@ impl CompiledProgram {
             });
         }
 
-        let num_batches = (queries.len() + batch_size - 1) / batch_size;
+        let num_batches = queries.len().div_ceil(batch_size);
         let mut total_loss = 0.0;
 
         for (batch_idx, batch) in queries.chunks(batch_size).enumerate() {
@@ -834,7 +834,7 @@ impl CompiledProgram {
             });
         }
 
-        let num_batches = (queries.len() + batch_size - 1) / batch_size;
+        let num_batches = queries.len().div_ceil(batch_size);
         let mut total_loss = 0.0;
 
         for (batch_idx, batch) in queries.chunks(batch_size).enumerate() {

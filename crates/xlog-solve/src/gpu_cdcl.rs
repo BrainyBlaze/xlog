@@ -160,7 +160,7 @@ impl GpuCdclWorkspace {
 /// Raw CDCL outputs (device-resident) for debugging and research.
 ///
 /// Production verifier paths should prefer `solve_expect_sat*` / `solve_expect_unsat*`,
-/// which validate results on GPU and enforce expectations without host reads.
+/// which validate results on GPU and return typed errors for status mismatches.
 pub struct GpuCdclRawOutput {
     pub assignment: TrackedCudaSlice<i8>,
     pub out_status: TrackedCudaSlice<i32>,
@@ -168,7 +168,134 @@ pub struct GpuCdclRawOutput {
     pub out_learned_count: TrackedCudaSlice<u32>,
 }
 
+fn checked_solver_len_add_one(context: &str, value: usize) -> Result<usize> {
+    value
+        .checked_add(1)
+        .ok_or_else(|| XlogError::Kernel(format!("{context} length overflow")))
+}
+
+fn checked_solver_len_double(context: &str, value: usize) -> Result<usize> {
+    value
+        .checked_mul(2)
+        .ok_or_else(|| XlogError::Kernel(format!("{context} length overflow")))
+}
+
 impl GpuCdclSolver {
+    fn require_expected_status(
+        &self,
+        out_status: &TrackedCudaSlice<i32>,
+        out_error: &TrackedCudaSlice<i32>,
+        expected_status: i32,
+        context: &'static str,
+    ) -> Result<()> {
+        let actual_status = self
+            .provider
+            .dtoh_scalar_untracked(out_status, 0)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read {context} status: {e}")))?;
+        let actual_error = self
+            .provider
+            .dtoh_scalar_untracked(out_error, 0)
+            .map_err(|e| XlogError::Kernel(format!("Failed to read {context} error: {e}")))?;
+        if actual_error != 0 || actual_status != expected_status {
+            return Err(XlogError::Kernel(format!(
+                "{context} expected status {expected_status}, got status {actual_status} error {actual_error}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn provider_memory_ptr(&self) -> usize {
+        Arc::as_ptr(self.provider.memory()) as usize
+    }
+
+    fn require_slice_on_provider<T: cudarc::driver::DeviceRepr>(
+        &self,
+        name: &'static str,
+        slice: &TrackedCudaSlice<T>,
+    ) -> Result<()> {
+        let expected_memory = self.provider_memory_ptr();
+        let actual_memory = slice.memory_manager_ptr_value();
+        if actual_memory != expected_memory {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU CDCL solver provider boundary".to_string(),
+                context: format!(
+                    "{name} belongs to memory manager {actual_memory}, expected {expected_memory}"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn require_workspace_on_provider(&self, ws: &GpuCdclWorkspace) -> Result<()> {
+        macro_rules! require_workspace_slice {
+            ($field:ident) => {
+                self.require_slice_on_provider(
+                    concat!("workspace.", stringify!($field)),
+                    &ws.$field,
+                )?
+            };
+        }
+
+        require_workspace_slice!(assign);
+        require_workspace_slice!(level);
+        require_workspace_slice!(reason);
+        require_workspace_slice!(var_activity);
+        require_workspace_slice!(var_phase);
+        require_workspace_slice!(decision_heap);
+        require_workspace_slice!(decision_heap_pos);
+        require_workspace_slice!(trail);
+        require_workspace_slice!(trail_lim);
+        require_workspace_slice!(seen);
+        require_workspace_slice!(learnt_tmp);
+        require_workspace_slice!(proof_vars_tmp);
+        require_workspace_slice!(proof_reason_tmp);
+        require_workspace_slice!(watch0_pos);
+        require_workspace_slice!(watch1_pos);
+        require_workspace_slice!(watch_head);
+        require_workspace_slice!(watch_next);
+        require_workspace_slice!(watch_prev);
+        require_workspace_slice!(learned_offsets);
+        require_workspace_slice!(learned_lits);
+        require_workspace_slice!(learned_deleted);
+        require_workspace_slice!(learned_lbd);
+        require_workspace_slice!(learned_activity);
+        require_workspace_slice!(learned_locked);
+        require_workspace_slice!(proof_offsets);
+        require_workspace_slice!(proof_data);
+        require_workspace_slice!(out_status);
+        require_workspace_slice!(out_error);
+        require_workspace_slice!(out_learned_count);
+        Ok(())
+    }
+
+    pub(crate) fn require_workspace_capacity_for_cnf(
+        &self,
+        ws: &GpuCdclWorkspace,
+        var_cap: u32,
+        clause_cap: u32,
+    ) -> Result<()> {
+        let num_vars_cap = var_cap as usize;
+        if num_vars_cap > ws.var_cap {
+            return Err(XlogError::Kernel(format!(
+                "CNF var_cap {} exceeds workspace var_cap {}",
+                num_vars_cap, ws.var_cap
+            )));
+        }
+
+        let max_learned_clauses = self.config.max_learned_clauses as usize;
+        let max_total_clauses = (clause_cap as usize)
+            .checked_add(max_learned_clauses)
+            .ok_or_else(|| XlogError::Kernel("SAT clause capacity overflow".to_string()))?;
+        if max_total_clauses > ws.clause_total_cap {
+            return Err(XlogError::Kernel(format!(
+                "CNF clause_total {} exceeds workspace clause_total_cap {}",
+                max_total_clauses, ws.clause_total_cap
+            )));
+        }
+
+        Ok(())
+    }
+
     pub fn new(provider: Arc<CudaKernelProvider>, config: GpuCdclConfig) -> Self {
         Self { provider, config }
     }
@@ -185,9 +312,37 @@ impl GpuCdclSolver {
         let max_learned_lits = self.config.max_learned_lits as usize;
         let max_proof_u32 = self.config.max_proof_u32 as usize;
 
+        if max_var_cap == 0 {
+            return Err(XlogError::Compilation(
+                "GpuCdclSolver workspace requires max_var_cap > 0".to_string(),
+            ));
+        }
+        if self.config.max_learned_clauses == 0 {
+            return Err(XlogError::Compilation(
+                "GpuCdclSolver requires max_learned_clauses > 0".to_string(),
+            ));
+        }
+        if self.config.max_learned_lits == 0 {
+            return Err(XlogError::Compilation(
+                "GpuCdclSolver requires max_learned_lits > 0".to_string(),
+            ));
+        }
+        if self.config.max_proof_u32 < 2 {
+            return Err(XlogError::Compilation(
+                "GpuCdclSolver requires max_proof_u32 >= 2".to_string(),
+            ));
+        }
+
         let max_total_clauses = num_clauses_cap
             .checked_add(max_learned_clauses)
             .ok_or_else(|| XlogError::Kernel("SAT clause capacity overflow".to_string()))?;
+        let vars_plus_one =
+            checked_solver_len_add_one("SAT workspace variable arena", num_vars_cap)?;
+        let learned_offsets_len =
+            checked_solver_len_add_one("SAT workspace learned offsets", max_learned_clauses)?;
+        let watch_head_len = checked_solver_len_double("SAT workspace watch head", num_vars_cap)?;
+        let watch_clause_len =
+            checked_solver_len_double("SAT workspace watch clauses", max_total_clauses)?;
 
         let memory = self.provider.memory();
 
@@ -196,33 +351,33 @@ impl GpuCdclSolver {
             clause_total_cap: max_total_clauses,
 
             // Variable state
-            assign: memory.alloc::<i8>(num_vars_cap + 1)?,
-            level: memory.alloc::<u32>(num_vars_cap + 1)?,
-            reason: memory.alloc::<i32>(num_vars_cap + 1)?,
-            var_activity: memory.alloc::<u32>(num_vars_cap + 1)?,
-            var_phase: memory.alloc::<i8>(num_vars_cap + 1)?,
-            decision_heap: memory.alloc::<u32>(num_vars_cap + 1)?,
-            decision_heap_pos: memory.alloc::<u32>(num_vars_cap + 1)?,
+            assign: memory.alloc::<i8>(vars_plus_one)?,
+            level: memory.alloc::<u32>(vars_plus_one)?,
+            reason: memory.alloc::<i32>(vars_plus_one)?,
+            var_activity: memory.alloc::<u32>(vars_plus_one)?,
+            var_phase: memory.alloc::<i8>(vars_plus_one)?,
+            decision_heap: memory.alloc::<u32>(vars_plus_one)?,
+            decision_heap_pos: memory.alloc::<u32>(vars_plus_one)?,
 
             // Trail
-            trail: memory.alloc::<i32>(num_vars_cap + 1)?,
-            trail_lim: memory.alloc::<u32>(num_vars_cap + 1)?,
+            trail: memory.alloc::<i32>(vars_plus_one)?,
+            trail_lim: memory.alloc::<u32>(vars_plus_one)?,
 
             // Analysis scratch
-            seen: memory.alloc::<u8>(num_vars_cap + 1)?,
-            learnt_tmp: memory.alloc::<i32>(num_vars_cap + 1)?,
-            proof_vars_tmp: memory.alloc::<u32>(num_vars_cap + 1)?,
-            proof_reason_tmp: memory.alloc::<u32>(num_vars_cap + 1)?,
+            seen: memory.alloc::<u8>(vars_plus_one)?,
+            learnt_tmp: memory.alloc::<i32>(vars_plus_one)?,
+            proof_vars_tmp: memory.alloc::<u32>(vars_plus_one)?,
+            proof_reason_tmp: memory.alloc::<u32>(vars_plus_one)?,
 
             // Watch lists
             watch0_pos: memory.alloc::<u32>(max_total_clauses)?,
             watch1_pos: memory.alloc::<u32>(max_total_clauses)?,
-            watch_head: memory.alloc::<i32>(2 * num_vars_cap)?,
-            watch_next: memory.alloc::<i32>(2 * max_total_clauses)?,
-            watch_prev: memory.alloc::<i32>(2 * max_total_clauses)?,
+            watch_head: memory.alloc::<i32>(watch_head_len)?,
+            watch_next: memory.alloc::<i32>(watch_clause_len)?,
+            watch_prev: memory.alloc::<i32>(watch_clause_len)?,
 
             // Learned
-            learned_offsets: memory.alloc::<u32>(max_learned_clauses + 1)?,
+            learned_offsets: memory.alloc::<u32>(learned_offsets_len)?,
             learned_lits: memory.alloc::<i32>(max_learned_lits)?,
             learned_deleted: memory.alloc::<u8>(max_learned_clauses)?,
             learned_lbd: memory.alloc::<u32>(max_learned_clauses)?,
@@ -230,7 +385,7 @@ impl GpuCdclSolver {
             learned_locked: memory.alloc::<u8>(max_learned_clauses)?,
 
             // Proof
-            proof_offsets: memory.alloc::<u32>(max_learned_clauses + 1)?,
+            proof_offsets: memory.alloc::<u32>(learned_offsets_len)?,
             proof_data: memory.alloc::<u32>(max_proof_u32)?,
 
             // Outputs
@@ -244,9 +399,7 @@ impl GpuCdclSolver {
         let memory = self.provider.memory();
         let mut gate = memory.alloc::<u32>(1)?;
         self.provider
-            .device()
-            .inner()
-            .htod_sync_copy_into(&[value], &mut gate)
+            .htod_launch_metadata_sync_copy_into(&[value], &mut gate)
             .map_err(|e| XlogError::Kernel(format!("GpuCdclSolver gate upload failed: {}", e)))?;
         Ok(gate)
     }
@@ -261,6 +414,18 @@ impl GpuCdclSolver {
     ) -> Result<GpuCdclRun> {
         let num_vars_cap = cnf.var_cap as usize;
         let num_clauses_cap = cnf.clause_cap as usize;
+
+        cnf.require_provider_memory(&self.provider, "GPU CDCL solver provider boundary")?;
+        self.require_slice_on_provider("compile_needed", compile_needed)?;
+        self.require_slice_on_provider("decision_base_limit", decision_base_limit)?;
+        self.require_slice_on_provider("decision_extra_base", decision_extra_base)?;
+        self.require_slice_on_provider("decision_extra_count", decision_extra_count)?;
+        if compile_needed.len() != 1 {
+            return Err(XlogError::Compilation(format!(
+                "GpuCdclSolver requires compile_needed len=1, got {}",
+                compile_needed.len()
+            )));
+        }
 
         if cnf.var_cap == 0 {
             return Err(XlogError::Compilation(
@@ -308,55 +473,58 @@ impl GpuCdclSolver {
         let max_total_clauses = num_clauses_cap
             .checked_add(max_learned_clauses)
             .ok_or_else(|| XlogError::Kernel("SAT clause capacity overflow".to_string()))?;
+        let vars_plus_one = checked_solver_len_add_one("SAT variable arena", num_vars_cap)?;
+        let learned_offsets_len =
+            checked_solver_len_add_one("SAT learned offsets", max_learned_clauses)?;
+        let watch_head_len = checked_solver_len_double("SAT watch head", num_vars_cap)?;
+        let watch_clause_len = checked_solver_len_double("SAT watch clauses", max_total_clauses)?;
 
         let memory = self.provider.memory();
 
         // Variable state
-        let mut assign = memory.alloc::<i8>(num_vars_cap + 1)?;
-        let mut level = memory.alloc::<u32>(num_vars_cap + 1)?;
-        let mut reason = memory.alloc::<i32>(num_vars_cap + 1)?;
-        let mut var_activity = memory.alloc::<u32>(num_vars_cap + 1)?;
-        let mut var_phase = memory.alloc::<i8>(num_vars_cap + 1)?;
-        let mut decision_heap = memory.alloc::<u32>(num_vars_cap + 1)?;
-        let mut decision_heap_pos = memory.alloc::<u32>(num_vars_cap + 1)?;
+        let assign = memory.alloc::<i8>(vars_plus_one)?;
+        let level = memory.alloc::<u32>(vars_plus_one)?;
+        let reason = memory.alloc::<i32>(vars_plus_one)?;
+        let var_activity = memory.alloc::<u32>(vars_plus_one)?;
+        let var_phase = memory.alloc::<i8>(vars_plus_one)?;
+        let decision_heap = memory.alloc::<u32>(vars_plus_one)?;
+        let decision_heap_pos = memory.alloc::<u32>(vars_plus_one)?;
 
         // Trail / levels
-        let mut trail = memory.alloc::<i32>(num_vars_cap + 1)?;
-        let mut trail_lim = memory.alloc::<u32>(num_vars_cap + 1)?;
+        let trail = memory.alloc::<i32>(vars_plus_one)?;
+        let trail_lim = memory.alloc::<u32>(vars_plus_one)?;
 
         // Analysis scratch
-        let mut seen = memory.alloc::<u8>(num_vars_cap + 1)?;
-        let mut learnt_tmp = memory.alloc::<i32>(num_vars_cap + 1)?;
-        let mut proof_vars_tmp = memory.alloc::<u32>(num_vars_cap + 1)?;
-        let mut proof_reason_tmp = memory.alloc::<u32>(num_vars_cap + 1)?;
+        let seen = memory.alloc::<u8>(vars_plus_one)?;
+        let learnt_tmp = memory.alloc::<i32>(vars_plus_one)?;
+        let proof_vars_tmp = memory.alloc::<u32>(vars_plus_one)?;
+        let proof_reason_tmp = memory.alloc::<u32>(vars_plus_one)?;
 
         // Watched literals
-        let mut watch0_pos = memory.alloc::<u32>(max_total_clauses)?;
-        let mut watch1_pos = memory.alloc::<u32>(max_total_clauses)?;
-        let mut watch_head = memory.alloc::<i32>(2 * num_vars_cap)?;
-        let mut watch_next = memory.alloc::<i32>(2 * max_total_clauses)?;
-        let mut watch_prev = memory.alloc::<i32>(2 * max_total_clauses)?;
+        let watch0_pos = memory.alloc::<u32>(max_total_clauses)?;
+        let watch1_pos = memory.alloc::<u32>(max_total_clauses)?;
+        let watch_head = memory.alloc::<i32>(watch_head_len)?;
+        let watch_next = memory.alloc::<i32>(watch_clause_len)?;
+        let watch_prev = memory.alloc::<i32>(watch_clause_len)?;
 
         // Learned clause arena
-        let mut learned_offsets = memory.alloc::<u32>(max_learned_clauses + 1)?;
-        let mut learned_lits = memory.alloc::<i32>(max_learned_lits)?;
-        let mut learned_deleted = memory.alloc::<u8>(max_learned_clauses)?;
-        let mut learned_lbd = memory.alloc::<u32>(max_learned_clauses)?;
-        let mut learned_activity = memory.alloc::<u32>(max_learned_clauses)?;
-        let mut learned_locked = memory.alloc::<u8>(max_learned_clauses)?;
+        let learned_offsets = memory.alloc::<u32>(learned_offsets_len)?;
+        let learned_lits = memory.alloc::<i32>(max_learned_lits)?;
+        let learned_deleted = memory.alloc::<u8>(max_learned_clauses)?;
+        let learned_lbd = memory.alloc::<u32>(max_learned_clauses)?;
+        let learned_activity = memory.alloc::<u32>(max_learned_clauses)?;
+        let learned_locked = memory.alloc::<u8>(max_learned_clauses)?;
 
         // Proof trace arena
-        let mut proof_offsets = memory.alloc::<u32>(max_learned_clauses + 1)?;
-        let mut proof_data = memory.alloc::<u32>(max_proof_u32)?;
+        let proof_offsets = memory.alloc::<u32>(learned_offsets_len)?;
+        let proof_data = memory.alloc::<u32>(max_proof_u32)?;
 
         // Device-resident outputs
-        let mut out_status = memory.alloc::<i32>(1)?;
-        let mut out_error = memory.alloc::<i32>(1)?;
+        let out_status = memory.alloc::<i32>(1)?;
+        let out_error = memory.alloc::<i32>(1)?;
         let mut out_learned_count = memory.alloc::<u32>(1)?;
         self.provider
-            .device()
-            .inner()
-            .htod_sync_copy_into(&[0u32], &mut out_learned_count)
+            .htod_launch_metadata_sync_copy_into(&[0u32], &mut out_learned_count)
             .map_err(|e| {
                 XlogError::Kernel(format!("Failed to init learned import count: {}", e))
             })?;
@@ -397,35 +565,35 @@ impl GpuCdclSolver {
             cfg_restart_base.as_kernel_param(),
             cfg_reduce_interval.as_kernel_param(),
             learned_import_count_param,
-            (&mut assign).as_kernel_param(),
-            (&mut level).as_kernel_param(),
-            (&mut reason).as_kernel_param(),
-            (&mut var_activity).as_kernel_param(),
-            (&mut var_phase).as_kernel_param(),
-            (&mut decision_heap).as_kernel_param(),
-            (&mut decision_heap_pos).as_kernel_param(),
-            (&mut trail).as_kernel_param(),
-            (&mut trail_lim).as_kernel_param(),
-            (&mut seen).as_kernel_param(),
-            (&mut learnt_tmp).as_kernel_param(),
-            (&mut proof_vars_tmp).as_kernel_param(),
-            (&mut proof_reason_tmp).as_kernel_param(),
-            (&mut watch0_pos).as_kernel_param(),
-            (&mut watch1_pos).as_kernel_param(),
-            (&mut watch_head).as_kernel_param(),
-            (&mut watch_next).as_kernel_param(),
-            (&mut watch_prev).as_kernel_param(),
-            (&mut learned_offsets).as_kernel_param(),
-            (&mut learned_lits).as_kernel_param(),
-            (&mut learned_deleted).as_kernel_param(),
-            (&mut learned_lbd).as_kernel_param(),
-            (&mut learned_activity).as_kernel_param(),
-            (&mut learned_locked).as_kernel_param(),
-            (&mut proof_offsets).as_kernel_param(),
-            (&mut proof_data).as_kernel_param(),
-            (&mut out_status).as_kernel_param(),
-            (&mut out_error).as_kernel_param(),
-            (&mut out_learned_count).as_kernel_param(),
+            (&assign).as_kernel_param(),
+            (&level).as_kernel_param(),
+            (&reason).as_kernel_param(),
+            (&var_activity).as_kernel_param(),
+            (&var_phase).as_kernel_param(),
+            (&decision_heap).as_kernel_param(),
+            (&decision_heap_pos).as_kernel_param(),
+            (&trail).as_kernel_param(),
+            (&trail_lim).as_kernel_param(),
+            (&seen).as_kernel_param(),
+            (&learnt_tmp).as_kernel_param(),
+            (&proof_vars_tmp).as_kernel_param(),
+            (&proof_reason_tmp).as_kernel_param(),
+            (&watch0_pos).as_kernel_param(),
+            (&watch1_pos).as_kernel_param(),
+            (&watch_head).as_kernel_param(),
+            (&watch_next).as_kernel_param(),
+            (&watch_prev).as_kernel_param(),
+            (&learned_offsets).as_kernel_param(),
+            (&learned_lits).as_kernel_param(),
+            (&learned_deleted).as_kernel_param(),
+            (&learned_lbd).as_kernel_param(),
+            (&learned_activity).as_kernel_param(),
+            (&learned_locked).as_kernel_param(),
+            (&proof_offsets).as_kernel_param(),
+            (&proof_data).as_kernel_param(),
+            (&out_status).as_kernel_param(),
+            (&out_error).as_kernel_param(),
+            (&out_learned_count).as_kernel_param(),
         ];
 
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
@@ -461,6 +629,7 @@ impl GpuCdclSolver {
     ///
     /// Like `launch_cdcl_with_decision_ranges_gated` but uses `ws` buffers instead of
     /// allocating per call. Returns `Result<()>` — the caller reads `ws.out_*` directly.
+    #[allow(clippy::too_many_arguments)]
     fn launch_cdcl_with_workspace_gated(
         &self,
         ws: &mut GpuCdclWorkspace,
@@ -471,28 +640,20 @@ impl GpuCdclSolver {
         decision_extra_count: &TrackedCudaSlice<u32>,
         import_existing_learned: bool,
     ) -> Result<()> {
-        let num_vars_cap = cnf.var_cap as usize;
-        let num_clauses_cap = cnf.clause_cap as usize;
-
-        // Capacity checks: workspace must be large enough for this CNF.
-        if num_vars_cap > ws.var_cap {
-            return Err(XlogError::Kernel(format!(
-                "CNF var_cap {} exceeds workspace var_cap {}",
-                num_vars_cap, ws.var_cap
+        cnf.require_provider_memory(&self.provider, "GPU CDCL solver provider boundary")?;
+        self.require_workspace_on_provider(ws)?;
+        self.require_slice_on_provider("compile_needed", compile_needed)?;
+        self.require_slice_on_provider("decision_base_limit", decision_base_limit)?;
+        self.require_slice_on_provider("decision_extra_base", decision_extra_base)?;
+        self.require_slice_on_provider("decision_extra_count", decision_extra_count)?;
+        if compile_needed.len() != 1 {
+            return Err(XlogError::Compilation(format!(
+                "GpuCdclSolver requires compile_needed len=1, got {}",
+                compile_needed.len()
             )));
         }
 
-        let max_learned_clauses = self.config.max_learned_clauses as usize;
-        let max_total_clauses = num_clauses_cap
-            .checked_add(max_learned_clauses)
-            .ok_or_else(|| XlogError::Kernel("SAT clause capacity overflow".to_string()))?;
-
-        if max_total_clauses > ws.clause_total_cap {
-            return Err(XlogError::Kernel(format!(
-                "CNF clause_total {} exceeds workspace clause_total_cap {}",
-                max_total_clauses, ws.clause_total_cap
-            )));
-        }
+        self.require_workspace_capacity_for_cnf(ws, cnf.var_cap, cnf.clause_cap)?;
 
         // Replicate all validation checks from the existing launch method.
         if cnf.var_cap == 0 {
@@ -538,9 +699,7 @@ impl GpuCdclSolver {
         ws.reset_for_solve();
         if !import_existing_learned {
             self.provider
-                .device()
-                .inner()
-                .htod_sync_copy_into(&[0u32], &mut ws.out_learned_count)
+                .htod_launch_metadata_sync_copy_into(&[0u32], &mut ws.out_learned_count)
                 .map_err(|e| {
                     XlogError::Kernel(format!("Failed to init learned import count: {}", e))
                 })?;
@@ -582,35 +741,35 @@ impl GpuCdclSolver {
             cfg_restart_base.as_kernel_param(),
             cfg_reduce_interval.as_kernel_param(),
             learned_import_count_param,
-            (&mut ws.assign).as_kernel_param(),
-            (&mut ws.level).as_kernel_param(),
-            (&mut ws.reason).as_kernel_param(),
-            (&mut ws.var_activity).as_kernel_param(),
-            (&mut ws.var_phase).as_kernel_param(),
-            (&mut ws.decision_heap).as_kernel_param(),
-            (&mut ws.decision_heap_pos).as_kernel_param(),
-            (&mut ws.trail).as_kernel_param(),
-            (&mut ws.trail_lim).as_kernel_param(),
-            (&mut ws.seen).as_kernel_param(),
-            (&mut ws.learnt_tmp).as_kernel_param(),
-            (&mut ws.proof_vars_tmp).as_kernel_param(),
-            (&mut ws.proof_reason_tmp).as_kernel_param(),
-            (&mut ws.watch0_pos).as_kernel_param(),
-            (&mut ws.watch1_pos).as_kernel_param(),
-            (&mut ws.watch_head).as_kernel_param(),
-            (&mut ws.watch_next).as_kernel_param(),
-            (&mut ws.watch_prev).as_kernel_param(),
-            (&mut ws.learned_offsets).as_kernel_param(),
-            (&mut ws.learned_lits).as_kernel_param(),
-            (&mut ws.learned_deleted).as_kernel_param(),
-            (&mut ws.learned_lbd).as_kernel_param(),
-            (&mut ws.learned_activity).as_kernel_param(),
-            (&mut ws.learned_locked).as_kernel_param(),
-            (&mut ws.proof_offsets).as_kernel_param(),
-            (&mut ws.proof_data).as_kernel_param(),
-            (&mut ws.out_status).as_kernel_param(),
-            (&mut ws.out_error).as_kernel_param(),
-            (&mut ws.out_learned_count).as_kernel_param(),
+            (&ws.assign).as_kernel_param(),
+            (&ws.level).as_kernel_param(),
+            (&ws.reason).as_kernel_param(),
+            (&ws.var_activity).as_kernel_param(),
+            (&ws.var_phase).as_kernel_param(),
+            (&ws.decision_heap).as_kernel_param(),
+            (&ws.decision_heap_pos).as_kernel_param(),
+            (&ws.trail).as_kernel_param(),
+            (&ws.trail_lim).as_kernel_param(),
+            (&ws.seen).as_kernel_param(),
+            (&ws.learnt_tmp).as_kernel_param(),
+            (&ws.proof_vars_tmp).as_kernel_param(),
+            (&ws.proof_reason_tmp).as_kernel_param(),
+            (&ws.watch0_pos).as_kernel_param(),
+            (&ws.watch1_pos).as_kernel_param(),
+            (&ws.watch_head).as_kernel_param(),
+            (&ws.watch_next).as_kernel_param(),
+            (&ws.watch_prev).as_kernel_param(),
+            (&ws.learned_offsets).as_kernel_param(),
+            (&ws.learned_lits).as_kernel_param(),
+            (&ws.learned_deleted).as_kernel_param(),
+            (&ws.learned_lbd).as_kernel_param(),
+            (&ws.learned_activity).as_kernel_param(),
+            (&ws.learned_locked).as_kernel_param(),
+            (&ws.proof_offsets).as_kernel_param(),
+            (&ws.proof_data).as_kernel_param(),
+            (&ws.out_status).as_kernel_param(),
+            (&ws.out_error).as_kernel_param(),
+            (&ws.out_learned_count).as_kernel_param(),
         ];
 
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
@@ -793,6 +952,12 @@ impl GpuCdclSolver {
             decision_extra_base,
             decision_extra_count,
         )?;
+        self.require_expected_status(
+            &run.out_status,
+            &run.out_error,
+            SAT_STATUS_SAT,
+            "GPU CDCL SAT expectation",
+        )?;
 
         let device = self.provider.device().inner();
         let memory = self.provider.memory();
@@ -942,8 +1107,7 @@ impl GpuCdclSolver {
         self.solve_expect_unsat_with_branch_limit_gated(cnf, &compile_needed, branch_var_limit)
     }
 
-    /// Solve and enforce UNSAT entirely on GPU (no device->host reads), using an explicit decision
-    /// variable set:
+    /// Solve and enforce UNSAT with GPU proof verification, using an explicit decision variable set:
     /// - decision vars include all `v` in `1..=decision_base_limit[0]` and
     ///   `decision_extra_base[0]..(decision_extra_base[0] + decision_extra_count[0] - 1)`.
     pub fn solve_expect_unsat_with_decision_ranges(
@@ -1006,6 +1170,12 @@ impl GpuCdclSolver {
             decision_extra_base,
             decision_extra_count,
         )?;
+        self.require_expected_status(
+            &run.out_status,
+            &run.out_error,
+            SAT_STATUS_UNSAT,
+            "GPU CDCL UNSAT expectation",
+        )?;
 
         let device = self.provider.device().inner();
         let memory = self.provider.memory();
@@ -1042,8 +1212,8 @@ impl GpuCdclSolver {
         }
 
         let mut out_ok = memory.alloc::<i32>(1)?;
-        device
-            .htod_sync_copy_into(&[1i32], &mut out_ok)
+        self.provider
+            .htod_launch_metadata_sync_copy_into(&[1i32], &mut out_ok)
             .map_err(|e| XlogError::Kernel(format!("Failed to init proof out_ok: {}", e)))?;
 
         // sat_proof_check uses scratch buffers sized to `scratch_cap` per verifier block. To keep
@@ -1103,12 +1273,12 @@ impl GpuCdclSolver {
             scratch_map = Some(m);
             break;
         }
-        let mut scratch_a = scratch_a.ok_or_else(|| {
+        let scratch_a = scratch_a.ok_or_else(|| {
             last_alloc_err.unwrap_or_else(|| {
                 XlogError::Kernel("Failed to allocate proof scratch buffers".to_string())
             })
         })?;
-        let mut scratch_b = scratch_b
+        let scratch_b = scratch_b
             .ok_or_else(|| XlogError::Kernel("Missing proof scratch buffer".to_string()))?;
         let mut scratch_map = scratch_map
             .ok_or_else(|| XlogError::Kernel("Missing proof scratch map buffer".to_string()))?;
@@ -1141,7 +1311,7 @@ impl GpuCdclSolver {
             (&run.proof_offsets).as_kernel_param(),
             (&run.proof_data).as_kernel_param(),
             needed_cap_u32.as_kernel_param(),
-            (&mut needed).as_kernel_param(),
+            (&needed).as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
@@ -1187,11 +1357,11 @@ impl GpuCdclSolver {
             (&run.proof_data).as_kernel_param(),
             (&needed).as_kernel_param(),
             needed_cap_u32.as_kernel_param(),
-            (&mut scratch_a).as_kernel_param(),
-            (&mut scratch_b).as_kernel_param(),
-            (&mut scratch_map).as_kernel_param(),
+            (&scratch_a).as_kernel_param(),
+            (&scratch_b).as_kernel_param(),
+            (&scratch_map).as_kernel_param(),
             scratch_cap_u32.as_kernel_param(),
-            (&mut out_ok).as_kernel_param(),
+            (&out_ok).as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
@@ -1352,6 +1522,7 @@ impl GpuCdclSolver {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn solve_expect_unsat_with_decision_ranges_gated_ws_inner(
         &self,
         ws: &mut GpuCdclWorkspace,
@@ -1375,6 +1546,12 @@ impl GpuCdclSolver {
             decision_extra_base,
             decision_extra_count,
             import_existing_learned,
+        )?;
+        self.require_expected_status(
+            &ws.out_status,
+            &ws.out_error,
+            SAT_STATUS_UNSAT,
+            "GPU CDCL workspace UNSAT expectation",
         )?;
 
         let device = self.provider.device().inner();
@@ -1412,8 +1589,8 @@ impl GpuCdclSolver {
         }
 
         let mut out_ok = memory.alloc::<i32>(1)?;
-        device
-            .htod_sync_copy_into(&[1i32], &mut out_ok)
+        self.provider
+            .htod_launch_metadata_sync_copy_into(&[1i32], &mut out_ok)
             .map_err(|e| XlogError::Kernel(format!("Failed to init proof out_ok: {}", e)))?;
 
         // sat_proof_check uses scratch buffers sized to `scratch_cap` per verifier block. To keep
@@ -1473,12 +1650,12 @@ impl GpuCdclSolver {
             scratch_map = Some(m);
             break;
         }
-        let mut scratch_a = scratch_a.ok_or_else(|| {
+        let scratch_a = scratch_a.ok_or_else(|| {
             last_alloc_err.unwrap_or_else(|| {
                 XlogError::Kernel("Failed to allocate proof scratch buffers".to_string())
             })
         })?;
-        let mut scratch_b = scratch_b
+        let scratch_b = scratch_b
             .ok_or_else(|| XlogError::Kernel("Missing proof scratch buffer".to_string()))?;
         let mut scratch_map = scratch_map
             .ok_or_else(|| XlogError::Kernel("Missing proof scratch map buffer".to_string()))?;
@@ -1511,7 +1688,7 @@ impl GpuCdclSolver {
             (&ws.proof_offsets).as_kernel_param(),
             (&ws.proof_data).as_kernel_param(),
             needed_cap_u32.as_kernel_param(),
-            (&mut needed).as_kernel_param(),
+            (&needed).as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
@@ -1557,11 +1734,11 @@ impl GpuCdclSolver {
             (&ws.proof_data).as_kernel_param(),
             (&needed).as_kernel_param(),
             needed_cap_u32.as_kernel_param(),
-            (&mut scratch_a).as_kernel_param(),
-            (&mut scratch_b).as_kernel_param(),
-            (&mut scratch_map).as_kernel_param(),
+            (&scratch_a).as_kernel_param(),
+            (&scratch_b).as_kernel_param(),
+            (&scratch_map).as_kernel_param(),
             scratch_cap_u32.as_kernel_param(),
-            (&mut out_ok).as_kernel_param(),
+            (&out_ok).as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {

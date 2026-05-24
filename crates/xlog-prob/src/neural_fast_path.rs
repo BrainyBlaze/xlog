@@ -46,28 +46,51 @@ impl GpuWeightSlots {
     ///
     /// `groups[g][i]` is the CNF variable id corresponding to label/slot `i` of group `g`.
     pub fn upload(provider: &CudaKernelProvider, groups: &[Vec<u32>]) -> Result<Self> {
-        let mut offsets: Vec<u32> = Vec::with_capacity(groups.len().saturating_add(1));
+        if groups.len() > u32::MAX as usize {
+            return Err(XlogError::Compilation(
+                "Neural fast-path group count exceeds GPU u32 index space".to_string(),
+            ));
+        }
+        let offset_count = groups.len().checked_add(1).ok_or_else(|| {
+            XlogError::Compilation("Neural fast-path group offset count overflow".to_string())
+        })?;
+        let total_slots = groups.iter().try_fold(0usize, |acc, group| {
+            acc.checked_add(group.len()).ok_or_else(|| {
+                XlogError::Compilation("Neural fast-path slot count overflow".to_string())
+            })
+        })?;
+        if total_slots > u32::MAX as usize {
+            return Err(XlogError::Compilation(
+                "Neural fast-path slot count exceeds GPU u32 index space".to_string(),
+            ));
+        }
+
+        let mut offsets: Vec<u32> = Vec::with_capacity(offset_count);
         offsets.push(0);
 
-        let mut flat: Vec<u32> = Vec::new();
+        let mut flat: Vec<u32> = Vec::with_capacity(total_slots);
         for g in groups {
             flat.extend_from_slice(g);
-            offsets.push(flat.len() as u32);
+            let next_offset = u32::try_from(flat.len()).map_err(|_| {
+                XlogError::Compilation(
+                    "Neural fast-path slot offset exceeds GPU u32 index space".to_string(),
+                )
+            })?;
+            offsets.push(next_offset);
         }
 
         let memory = provider.memory().clone();
-        let device = provider.device().inner();
 
         let mut d_offsets = memory.alloc::<u32>(offsets.len())?;
-        device
-            .htod_sync_copy_into(&offsets, &mut d_offsets)
+        provider
+            .htod_sync_copy_into_tracked(&offsets, &mut d_offsets)
             .map_err(|e| {
                 XlogError::Kernel(format!("Failed to upload weight slot offsets: {}", e))
             })?;
 
         let mut d_vars = memory.alloc::<u32>(flat.len())?;
-        device
-            .htod_sync_copy_into(&flat, &mut d_vars)
+        provider
+            .htod_sync_copy_into_tracked(&flat, &mut d_vars)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload weight slot vars: {}", e)))?;
 
         Ok(Self {
@@ -78,15 +101,18 @@ impl GpuWeightSlots {
     }
 
     pub fn num_groups(&self) -> u32 {
-        self.group_offsets_host
-            .len()
-            .saturating_sub(1)
-            .try_into()
-            .unwrap_or(0)
+        debug_assert!(!self.group_offsets_host.is_empty());
+        (self.group_offsets_host.len() - 1) as u32
+    }
+
+    pub fn num_groups_usize(&self) -> usize {
+        debug_assert!(!self.group_offsets_host.is_empty());
+        self.group_offsets_host.len() - 1
     }
 
     pub fn total_slots(&self) -> u32 {
-        self.group_offsets_host.last().copied().unwrap_or(0)
+        debug_assert!(!self.group_offsets_host.is_empty());
+        self.group_offsets_host[self.group_offsets_host.len() - 1]
     }
 
     pub fn group_offsets(&self) -> &TrackedCudaSlice<u32> {

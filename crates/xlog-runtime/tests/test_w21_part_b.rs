@@ -24,7 +24,7 @@
 use std::sync::Arc;
 
 use cudarc::driver::sys;
-use xlog_core::{MemoryBudget, RuntimeConfig, ScalarType, Schema};
+use xlog_core::{MemoryBudget, RuntimeConfig, ScalarType, Schema, XlogError};
 use xlog_cuda::device_runtime::{
     AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
     LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
@@ -424,6 +424,52 @@ fn part_b_triangle_e_xz_leader() {
     // Slot 2 = e_xy unchanged → (X, Y).
     assert_eq!(schema_names(&slots[2]), vec!["X", "Y"]);
     assert_eq!(download_pairs(&slots[2]), vec![(1, 2), (3, 4)]);
+}
+
+#[test]
+fn prepare_leader_inputs_rejects_out_of_range_lookup_perm() {
+    let Some(fix) = make_runtime_fixture() else {
+        eprintln!("Skipping: CUDA runtime unavailable");
+        return;
+    };
+    let canonical = triangle_canonical_inputs(&fix.memory);
+    let canonical_refs: [&CudaBuffer; 3] = [&canonical[0], &canonical[1], &canonical[2]];
+    let var_order = VariableOrder::legacy(
+        0,
+        vec![
+            LookupPerm {
+                input_idx: 3,
+                swap_cols: false,
+            },
+            LookupPerm {
+                input_idx: 1,
+                swap_cols: false,
+            },
+        ],
+        vec![
+            ProjectExpr::Column(0),
+            ProjectExpr::Column(1),
+            ProjectExpr::Column(2),
+        ],
+    );
+    let stream = fix
+        .executor
+        .wcoj_dispatch_stream_or_init()
+        .expect("stream id");
+    let err = match fix
+        .executor
+        .prepare_leader_inputs(&canonical_refs, &var_order, stream)
+    {
+        Ok(_) => panic!("out-of-range lookup input must reject before indexing canonical inputs"),
+        Err(err) => err,
+    };
+
+    match err {
+        XlogError::Kernel(message) => {
+            assert!(message.contains("lookup_perms[0].input_idx 3 out of range for arity 3"));
+        }
+        other => panic!("expected kernel error for malformed lookup perm, got {other:?}"),
+    }
 }
 
 // ---------------------------------------------------------------

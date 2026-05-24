@@ -34,14 +34,15 @@ pub mod wcoj_phase_timing;
 pub use epistemic_workspace::{
     EpistemicGpuBatchExecutionResult, EpistemicGpuBatchExecutionTrace,
     EpistemicGpuCandidateGenerationTrace, EpistemicGpuCandidateValidationTrace,
-    EpistemicGpuExecutionResult, EpistemicGpuFinalResultMaterializationTrace,
-    EpistemicGpuFinalResultTransferTrace, EpistemicGpuFinalTupleMaterializationTrace,
-    EpistemicGpuKernelTimingTrace, EpistemicGpuMaterializationTrace,
-    EpistemicGpuModelMembershipSource, EpistemicGpuModelMembershipTrace,
-    EpistemicGpuPreparedExecution, EpistemicGpuPropagationTrace, EpistemicGpuRejectionReason,
-    EpistemicGpuRuntimeCounters, EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace,
-    EpistemicGpuRuntimeWcojCertification, EpistemicGpuTransferBudgetTrace, EpistemicGpuWorkspace,
-    EpistemicGpuWorkspaceCapacities, EpistemicGpuWorkspaceLayout, EpistemicGpuWorkspaceResetTrace,
+    EpistemicGpuConstraintValidationTrace, EpistemicGpuExecutionResult,
+    EpistemicGpuFinalResultMaterializationTrace, EpistemicGpuFinalResultTransferTrace,
+    EpistemicGpuFinalTupleMaterializationTrace, EpistemicGpuKernelTimingTrace,
+    EpistemicGpuMaterializationTrace, EpistemicGpuModelMembershipSource,
+    EpistemicGpuModelMembershipTrace, EpistemicGpuPreparedExecution, EpistemicGpuPropagationTrace,
+    EpistemicGpuProviderIdentity, EpistemicGpuRejectionReason, EpistemicGpuRuntimeCounters,
+    EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace, EpistemicGpuRuntimeWcojCertification,
+    EpistemicGpuTransferBudgetTrace, EpistemicGpuWorkspace, EpistemicGpuWorkspaceCapacities,
+    EpistemicGpuWorkspaceLayout, EpistemicGpuWorkspaceResetTrace,
     EpistemicGpuWorldViewValidationTrace,
 };
 use join_cache::JoinIndexCache;
@@ -1708,9 +1709,9 @@ impl Executor {
                 let base_val = Self::evaluate_expr_as_i64(base, columns, row_idx, schema)?;
                 let exp_val = Self::evaluate_expr_as_i64(exp, columns, row_idx, schema)?;
                 if exp_val < 0 {
-                    return Err(XlogError::Execution(
+                    Err(XlogError::Execution(
                         "Negative exponent in integer pow".to_string(),
-                    ));
+                    ))
                 } else if exp_val > u32::MAX as i64 {
                     // Exponent too large - would overflow anyway
                     Ok(i64::MAX)

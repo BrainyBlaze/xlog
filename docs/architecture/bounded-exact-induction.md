@@ -26,9 +26,10 @@ throwaway prototype.
 
 1. **Zero host marshalling in the scoring loop.** Setup H2D/D2D uploads are
    permitted but constant-size; the `(topology, L, R)` sweep itself performs
-   no host/device round trips. The tracked D2H counter on
-   `CudaKernelProvider` ticks exactly **twice per `induce_exact` call**
-   (one per count array), independent of candidate count.
+   no host/device round trips. The production `ilp_exact_score_topk` path
+   reduces on device and the tracked D2H counter on `CudaKernelProvider`
+   ticks exactly **once per `induce_exact` call** for the compact selected-row
+   export, independent of candidate count.
 2. **Per-topology semantic isolation.** Each `(topology, L, R)` triple is
    scored against the topology's rule template in isolation. There is no
    interference across topologies — a direct fix for the Python prototype's
@@ -74,7 +75,7 @@ xlog_induce::induce_exact(provider, &request)  (crates/xlog-induce/src/lib.rs)
     ├──► validate::classify_request   (empty cands / zero positives → empty result)
     │
     ▼
-CudaKernelProvider::ilp_exact_score(...)  (crates/xlog-cuda/src/provider/ilp_exact.rs)
+CudaKernelProvider::ilp_exact_score_topk(...)  (crates/xlog-cuda/src/provider/ilp_exact.rs)
     │
     ├── Setup (not D2H-counted):
     │     - D2D concat candidate arg0/arg1 columns
@@ -89,8 +90,10 @@ CudaKernelProvider::ilp_exact_score(...)  (crates/xlog-cuda/src/provider/ilp_exa
     │     block = (256, 1, 1)
     │     Each block writes exactly one slot in pos_covered and neg_covered.
     │
-    └── Download (2 D2H, tracked):
-          pos_covered, neg_covered as Vec<u32> (length 4*C*C each)
+    ├── Device top-K selection over pos_covered / neg_covered
+    │
+    └── Download (1 D2H, tracked):
+          compact selected top-K rows as u32 field tuples
     │
     ▼
 xlog_induce::reduce_per_topology  (host-side, deterministic lex sort)
@@ -177,8 +180,8 @@ The kernel is designed around the xlog-native D2H transfer counter
 (`CudaKernelProvider::d2h_transfer_count`, exposed to Python as
 `prog.d2h_transfer_count()`).
 
-- **Counted transfers per `induce_exact` call: 2** (one per count array)
-  regardless of candidate count, query count, or topology count. The
+- **Counted transfers per production `induce_exact` call: 1** (one compact
+  selected-row export) regardless of candidate count, query count, or topology count. The
   parity test `test_induce_exact_native_does_not_scale_d2h_with_candidate_pairs`
   enforces `large.d2h_transfer_count ≤ small.d2h_transfer_count + 2`,
   which passes trivially.

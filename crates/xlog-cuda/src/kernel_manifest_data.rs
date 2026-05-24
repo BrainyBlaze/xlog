@@ -456,6 +456,7 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "ilp_exact_score_u32",
             "ilp_exact_score_chain_smem",
             "ilp_exact_score_chain_smem_u32",
+            "ilp_exact_select_topk",
         ],
     },
     KernelModuleSpec {
@@ -475,6 +476,7 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "epistemic_materialize_accepted_candidates_u8",
             "epistemic_materialize_final_result_flags_u8",
             "epistemic_build_final_tuple_row_map_u8",
+            "epistemic_close_final_tuple_rejections_u8",
             "epistemic_materialize_final_tuple_column_u8",
         ],
     },
@@ -552,8 +554,8 @@ mod tests {
     }
 
     #[test]
-    fn kernel_modules_count_is_23() {
-        assert_eq!(KERNEL_MODULES.len(), 23);
+    fn kernel_modules_count_is_24() {
+        assert_eq!(KERNEL_MODULES.len(), 24);
     }
 
     #[test]

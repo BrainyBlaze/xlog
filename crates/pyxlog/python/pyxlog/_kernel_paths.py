@@ -8,7 +8,7 @@ KERNEL_ARTIFACT_SUFFIXES = (".cubin", ".portable.ptx")
 
 
 def package_kernel_dir(package_root: Path | None = None) -> Path:
-    root = package_root if package_root is not None else Path(__file__).resolve().parent
+    root = package_root if package_root is not None else Path(__file__).absolute().parent
     return root / "kernels"
 
 

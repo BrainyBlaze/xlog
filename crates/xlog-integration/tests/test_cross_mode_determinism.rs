@@ -3,16 +3,17 @@
 //! G_W53 / W5.3: one harness for WCOJ, binary-join fallback, recursive,
 //! and dynamic-rule-injection determinism on a shared fixture.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use cudarc::driver::sys;
-use xlog_core::{MemoryBudget, RuntimeConfig, ScalarType, Schema};
+use xlog_core::{MemoryBudget, RelId, RuntimeConfig, ScalarType, Schema};
 use xlog_cuda::device_runtime::{
     AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
     LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
 };
 use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_ir::ExecutionPlan;
 use xlog_logic::Compiler;
 use xlog_runtime::Executor;
 
@@ -95,6 +96,11 @@ struct ExecutionSnapshot {
 struct InjectionSnapshot {
     before: Vec<Vec<u32>>,
     after: Vec<Vec<u32>>,
+}
+
+struct CompiledFixture {
+    plan: ExecutionPlan,
+    rel_ids: HashMap<String, RelId>,
 }
 
 struct StrictTrainResultMock {
@@ -278,27 +284,33 @@ fn download_canonical_u32_rows(buf: &CudaBuffer) -> Vec<Vec<u32>> {
     rows
 }
 
-fn run_source(
+fn compile_source(source: &str) -> CompiledFixture {
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile(source).expect("compile");
+    CompiledFixture {
+        plan,
+        rel_ids: compiler.rel_ids().clone(),
+    }
+}
+
+fn run_compiled(
     fixture: &RuntimeFixture,
-    source: &str,
+    compiled: &CompiledFixture,
     inputs: &BTreeMap<&str, Vec<(u32, u32)>>,
     config: RuntimeConfig,
     output_relations: &[&str],
 ) -> ExecutionSnapshot {
-    let mut compiler = Compiler::new();
-    let plan = compiler.compile(source).expect("compile");
-
     let mut executor = Executor::new_with_config(Arc::clone(&fixture.provider), config);
-    for (name, rel_id) in compiler.rel_ids() {
+    for (name, rel_id) in &compiled.rel_ids {
         executor.register_relation(*rel_id, name);
     }
     for (name, rows) in inputs {
-        if compiler.rel_ids().contains_key(*name) {
+        if compiled.rel_ids.contains_key(*name) {
             executor.put_relation(name, upload_binary_u32(&fixture.memory, rows));
         }
     }
 
-    executor.execute_plan(&plan).expect("execute_plan");
+    executor.execute_plan(&compiled.plan).expect("execute_plan");
 
     let mut relations = BTreeMap::new();
     for relation in output_relations {
@@ -322,11 +334,13 @@ fn source_with_injected_rule(base: &str, rule: &str) -> String {
 fn dynamic_injection_snapshot(
     fixture: &RuntimeFixture,
     inputs: &BTreeMap<&str, Vec<(u32, u32)>>,
+    before_program: &CompiledFixture,
+    after_program: &CompiledFixture,
 ) -> InjectionSnapshot {
     let config = RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(false));
-    let before = run_source(
+    let before = run_compiled(
         fixture,
-        DYNAMIC_R1_SOURCE,
+        before_program,
         inputs,
         config.clone(),
         &["learned"],
@@ -334,8 +348,7 @@ fn dynamic_injection_snapshot(
     .relations
     .remove("learned")
     .expect("learned before");
-    let injected = source_with_injected_rule(DYNAMIC_R1_SOURCE, DYNAMIC_R2);
-    let after = run_source(fixture, &injected, inputs, config, &["learned"])
+    let after = run_compiled(fixture, after_program, inputs, config, &["learned"])
         .relations
         .remove("learned")
         .expect("learned after");
@@ -355,11 +368,13 @@ fn train_on_compiled_relations_simulator() -> StrictTrainResultMock {
 fn stage5_rollback_snapshot(
     fixture: &RuntimeFixture,
     inputs: &BTreeMap<&str, Vec<(u32, u32)>>,
+    before_program: &CompiledFixture,
+    after_program: &CompiledFixture,
 ) -> InjectionSnapshot {
     let config = RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(false));
-    let before = run_source(
+    let before = run_compiled(
         fixture,
-        STAGE5_R1_SOURCE,
+        before_program,
         inputs,
         config.clone(),
         &["arm_d_path"],
@@ -367,9 +382,7 @@ fn stage5_rollback_snapshot(
     .relations
     .remove("arm_d_path")
     .expect("arm_d_path before");
-    let strict_train_result = train_on_compiled_relations_simulator();
-    let injected = source_with_injected_rule(STAGE5_R1_SOURCE, strict_train_result.discovered_rule);
-    let after = run_source(fixture, &injected, inputs, config, &["arm_d_path"])
+    let after = run_compiled(fixture, after_program, inputs, config, &["arm_d_path"])
         .relations
         .remove("arm_d_path")
         .expect("arm_d_path after");
@@ -389,10 +402,12 @@ fn cross_mode_wcoj_binary_recursive_outputs_are_bit_exact_100x() {
         };
         let inputs = shared_inputs();
         let outputs = ["tri", "chain", "path"];
+        let cross_mode = compile_source(CROSS_MODE_SOURCE);
+        let recursive_triangle = compile_source(RECURSIVE_TRIANGLE_SOURCE);
 
-        let binary = run_source(
+        let binary = run_compiled(
             &fixture,
-            CROSS_MODE_SOURCE,
+            &cross_mode,
             &inputs,
             RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(false)),
             &outputs,
@@ -402,9 +417,9 @@ fn cross_mode_wcoj_binary_recursive_outputs_are_bit_exact_100x() {
             "binary-join fallback mode must not dispatch triangle WCOJ"
         );
 
-        let wcoj = run_source(
+        let wcoj = run_compiled(
             &fixture,
-            CROSS_MODE_SOURCE,
+            &cross_mode,
             &inputs,
             RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(true)),
             &outputs,
@@ -418,9 +433,9 @@ fn cross_mode_wcoj_binary_recursive_outputs_are_bit_exact_100x() {
             "WCOJ output must match binary-join fallback output on the shared fixture"
         );
 
-        let recursive = run_source(
+        let recursive = run_compiled(
             &fixture,
-            RECURSIVE_TRIANGLE_SOURCE,
+            &recursive_triangle,
             &inputs,
             RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(true)),
             &outputs,
@@ -446,9 +461,9 @@ fn cross_mode_wcoj_binary_recursive_outputs_are_bit_exact_100x() {
 
         let expected = wcoj.relations.clone();
         for iter in 0..ITERATIONS {
-            let trial = run_source(
+            let trial = run_compiled(
                 &fixture,
-                CROSS_MODE_SOURCE,
+                &cross_mode,
                 &inputs,
                 RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(true)),
                 &outputs,
@@ -481,18 +496,29 @@ fn dynamic_injection_and_stage5_rollback_are_bit_exact_100x() {
             return;
         };
         let inputs = shared_inputs();
+        let dynamic_before = compile_source(DYNAMIC_R1_SOURCE);
+        let dynamic_after_source = source_with_injected_rule(DYNAMIC_R1_SOURCE, DYNAMIC_R2);
+        let dynamic_after = compile_source(&dynamic_after_source);
+        let stage5_before = compile_source(STAGE5_R1_SOURCE);
+        let strict_train_result = train_on_compiled_relations_simulator();
+        let stage5_after_source =
+            source_with_injected_rule(STAGE5_R1_SOURCE, strict_train_result.discovered_rule);
+        let stage5_after = compile_source(&stage5_after_source);
 
-        let expected_dynamic = dynamic_injection_snapshot(&fixture, &inputs);
-        let expected_stage5 = stage5_rollback_snapshot(&fixture, &inputs);
+        let expected_dynamic =
+            dynamic_injection_snapshot(&fixture, &inputs, &dynamic_before, &dynamic_after);
+        let expected_stage5 =
+            stage5_rollback_snapshot(&fixture, &inputs, &stage5_before, &stage5_after);
 
         for iter in 0..ITERATIONS {
-            let dynamic = dynamic_injection_snapshot(&fixture, &inputs);
+            let dynamic =
+                dynamic_injection_snapshot(&fixture, &inputs, &dynamic_before, &dynamic_after);
             assert_eq!(
                 dynamic, expected_dynamic,
                 "dynamic-rule-injection run {iter} diverged"
             );
 
-            let stage5 = stage5_rollback_snapshot(&fixture, &inputs);
+            let stage5 = stage5_rollback_snapshot(&fixture, &inputs, &stage5_before, &stage5_after);
             assert_eq!(
                 stage5, expected_stage5,
                 "Stage 5 rollback injection run {iter} diverged"

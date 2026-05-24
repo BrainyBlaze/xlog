@@ -6,6 +6,7 @@
 //!   2. clique6 same at k=6.
 //!   3. clique7 same at k=7.
 //!   4. clique8 same at k=8.
+//!
 //! Dispatcher-decline cells:
 //!   5. clique5 dispatcher decline does NOT advance counter +
 //!      row set matches fallback (malformed-schema dispatch path).
@@ -417,12 +418,12 @@ fn download_k_row_set(buf: &CudaBuffer, k: usize) -> std::collections::BTreeSet<
         return std::collections::BTreeSet::new();
     }
     let mut cols: Vec<Vec<u8>> = (0..k).map(|_| vec![0u8; n * 4]).collect();
-    for c in 0..k {
+    for (c, col_bytes) in cols.iter_mut().enumerate().take(k) {
         unsafe {
             sys::cuMemcpyDtoH_v2(
-                cols[c].as_mut_ptr() as *mut _,
+                col_bytes.as_mut_ptr() as *mut _,
                 *buf.column(c).unwrap().device_ptr(),
-                cols[c].len(),
+                col_bytes.len(),
             );
         }
     }

@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 //! W4.2 production-kernel benchmark — nested-loop vs hash on the
 //! production eligibility envelope.
 //!

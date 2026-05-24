@@ -33,7 +33,7 @@ fn cnf_to_solve_instance(num_vars: u32, clauses: &[Vec<i32>]) -> SolveInstance {
             let lits: Vec<Literal> = clause
                 .iter()
                 .map(|&lit| {
-                    let var = (lit.unsigned_abs() - 1) as u32; // 1-indexed → 0-indexed
+                    let var = lit.unsigned_abs() - 1; // 1-indexed → 0-indexed
                     let negated = lit < 0;
                     Literal::new(var, negated)
                 })
@@ -69,7 +69,7 @@ fn build_encode_and_hash_gpu() -> Option<u64> {
 
     let mut pir = PirGraph::new();
     let mut leaf_by_id: HashMap<u32, PirNodeId> = HashMap::new();
-    for (name, _) in &intern {
+    for name in intern.keys() {
         let idx: u32 = name.strip_prefix("node_").unwrap().parse().unwrap();
         leaf_by_id.insert(idx, pir.lit(LeafId::new(idx)));
     }

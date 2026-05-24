@@ -65,7 +65,6 @@ query(sprinkler()).
         cdcl_learned_bytes: 4 * 1024 * 1024,
         cdcl_conflict_budget: None,
         incremental_verify: false,
-        ..Default::default()
     };
 
     // Collect the random-var list for smoothing (device-side compaction is tested elsewhere).
@@ -83,7 +82,7 @@ query(sprinkler()).
         .dtoh_sync_copy_into(&encoding.vars.choice_var, &mut choice_vars)
         .unwrap();
     let mut random_vars: Vec<u32> = Vec::new();
-    for v in leaf_vars.into_iter().chain(choice_vars.into_iter()) {
+    for v in leaf_vars.into_iter().chain(choice_vars) {
         if v != 0 {
             random_vars.push(v);
         }
@@ -145,7 +144,7 @@ query(sprinkler()).
         .dtoh_sync_copy_into(circuit.decision_var(), &mut decision_vars)
         .unwrap();
     assert!(
-        decision_vars.iter().any(|&v| v == sprinkler_var),
+        decision_vars.contains(&sprinkler_var),
         "expected circuit to branch on sprinkler var"
     );
 
@@ -260,7 +259,6 @@ query(dry()).
         cdcl_learned_bytes: 4 * 1024 * 1024,
         cdcl_conflict_budget: None,
         incremental_verify: false,
-        ..Default::default()
     };
 
     // Smoothing list: probabilistic vars only (same as production).
@@ -277,7 +275,7 @@ query(dry()).
         .dtoh_sync_copy_into(&encoding.vars.choice_var, &mut choice_vars)
         .unwrap();
     let mut random_vars: Vec<u32> = Vec::new();
-    for v in leaf_vars.into_iter().chain(choice_vars.into_iter()) {
+    for v in leaf_vars.into_iter().chain(choice_vars) {
         if v != 0 {
             random_vars.push(v);
         }
@@ -325,8 +323,7 @@ query(dry()).
         .unwrap();
 
     assert!(
-        lits.iter().any(|lit| lit.unsigned_abs() == dry_var)
-            || decision_vars.iter().any(|&v| v == dry_var),
+        lits.iter().any(|lit| lit.unsigned_abs() == dry_var) || decision_vars.contains(&dry_var),
         "expected circuit to mention derived query var dry (var={})",
         dry_var
     );
@@ -381,7 +378,6 @@ query(dry()).
         cdcl_learned_bytes: 4 * 1024 * 1024,
         cdcl_conflict_budget: None,
         incremental_verify: false,
-        ..Default::default()
     };
 
     // Smoothing list: probabilistic vars only (same as production).
@@ -516,7 +512,6 @@ query(dry()).
         cdcl_learned_bytes: 4 * 1024 * 1024,
         cdcl_conflict_budget: None,
         incremental_verify: false,
-        ..Default::default()
     };
 
     // Smoothing list: probabilistic vars only (same as production).
@@ -636,7 +631,7 @@ query(dry()).
         "meta_max_var mismatch after cache store"
     );
     let free_mask = compute_free_var_mask_gpu(&encoding.cnf, &circuit, &provider).unwrap();
-    cache.store_free_var_mask(&mut handle, &free_mask).unwrap();
+    cache.store_free_var_mask(&handle, &free_mask).unwrap();
 
     // Upload weights for cache storage.
     let weights_len = (encoding.vars.max_var as usize) + 1;

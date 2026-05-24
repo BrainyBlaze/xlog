@@ -921,7 +921,7 @@ fn emit_batch(
 ) -> Result<()> {
     match format {
         OutputFormat::Pretty => {
-            let formatted = pretty_format_batches(&[batch.clone()])
+            let formatted = pretty_format_batches(std::slice::from_ref(batch))
                 .map_err(|e| XlogError::Execution(format!("Pretty print failed: {}", e)))?;
             println!("{}\n{}", name, formatted);
         }

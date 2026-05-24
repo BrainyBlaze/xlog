@@ -430,8 +430,7 @@ fn eval_rule(
     full_scc: &HashMap<String, Relation>,
     delta_scc: Option<(usize, &HashMap<String, Relation>)>,
 ) -> Result<Vec<Vec<Value>>> {
-    let mut states: Vec<HashMap<String, Value>> = Vec::new();
-    states.push(HashMap::new());
+    let mut states: Vec<HashMap<String, Value>> = vec![HashMap::new()];
 
     for (idx, lit) in rule.body.iter().enumerate() {
         let mut next_states: Vec<HashMap<String, Value>> = Vec::new();
@@ -685,10 +684,12 @@ fn eval_aggregate_head(
             }
             Term::Aggregate(agg) => {
                 let key = (agg.op, agg.variable.clone());
-                if !agg_to_pos.contains_key(&key) {
+                if let std::collections::hash_map::Entry::Vacant(entry) =
+                    agg_to_pos.entry(key.clone())
+                {
                     let pos = agg_specs.len();
-                    agg_specs.push(key.clone());
-                    agg_to_pos.insert(key, pos);
+                    agg_specs.push(key);
+                    entry.insert(pos);
                 }
             }
             Term::Anonymous => {
@@ -862,7 +863,7 @@ pub(super) fn normal_quantile(p: f64) -> f64 {
         -3.969683028665376e+01,
         2.209460984245205e+02,
         -2.759285104469687e+02,
-        1.383577518672690e+02,
+        1.383_577_518_672_69e2,
         -3.066479806614716e+01,
         2.506628277459239e+00,
     ];

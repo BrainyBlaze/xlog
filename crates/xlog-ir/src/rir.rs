@@ -324,6 +324,7 @@ pub enum ConstValue {
 
 /// Relational IR node types
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum RirNode {
     /// A 0-arity relation containing exactly one empty tuple ({()}).
     ///

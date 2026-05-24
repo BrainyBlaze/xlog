@@ -17,28 +17,47 @@ use crate::compilation::gpu_d4::validate_cnf_gpu;
 
 use crate::gpu::GpuXgcf;
 
+const MAX_GRID_X: u64 = 65_535;
+
+fn checked_launch_grid(elements: u32, block: u32, context: &str) -> Result<u32> {
+    if block == 0 {
+        return Err(XlogError::Kernel(format!(
+            "{context}: CUDA launch block size must be nonzero"
+        )));
+    }
+    let grid = if elements == 0 {
+        1
+    } else {
+        u64::from(elements).div_ceil(u64::from(block))
+    };
+    if grid > MAX_GRID_X {
+        return Err(XlogError::Kernel(format!(
+            "{context}: launch grid {grid} exceeds x-dimension limit {MAX_GRID_X} \
+             for {elements} elements with block size {block}"
+        )));
+    }
+    Ok(grid as u32)
+}
+
+fn checked_clause_offset_span(clause_cap: u32, context: &str) -> Result<u32> {
+    clause_cap
+        .checked_add(1)
+        .ok_or_else(|| XlogError::Kernel(format!("{context}: clause offset span overflow")))
+}
+
 /// Configuration for GPU-native equivalence verification (phi equiv C).
 ///
 /// Controls the CDCL solver parameters and whether to reuse the solver
 /// workspace across multiple equivalence checks. Workspace reuse amortizes
 /// device-memory allocation when verifying many circuits in sequence (e.g.,
 /// during incremental compilation).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 #[non_exhaustive]
 pub struct GpuEquivalenceConfig {
     /// CDCL solver configuration for the equivalence verifier.
     pub cdcl: GpuCdclConfig,
     /// Reuse the CDCL workspace across successive verifier invocations.
     pub reuse_workspace: bool,
-}
-
-impl Default for GpuEquivalenceConfig {
-    fn default() -> Self {
-        Self {
-            cdcl: GpuCdclConfig::default(),
-            reuse_workspace: false,
-        }
-    }
 }
 
 /// GPU-resident equivalence queries + device metadata required to solve them without host reads.
@@ -133,13 +152,7 @@ fn build_circuit_cnf(
         .ok_or_else(|| XlogError::Kernel("sat_xgcf_cnf_counts kernel not found".to_string()))?;
 
     let block = 256u32;
-    let mut grid = (num_nodes_u32 + block - 1) / block;
-    if grid == 0 {
-        grid = 1;
-    }
-    if grid > 65_535 {
-        grid = 65_535;
-    }
+    let grid = checked_launch_grid(num_nodes_u32, block, "sat_xgcf_cnf_counts")?;
 
     // SAFETY: sat_xgcf_cnf_counts(compile_needed, node_type, child_offsets, num_nodes, internal_counts, clause_counts, lit_counts)
     unsafe {
@@ -199,11 +212,11 @@ fn build_circuit_cnf(
     // No device synchronize: next ops are alloc + kernel launches on same stream.
 
     // Output CNF buffers + device-resident meta.
-    let mut d_num_vars = memory.alloc::<u32>(1)?;
-    let mut d_num_clauses = memory.alloc::<u32>(1)?;
-    let mut d_num_lits = memory.alloc::<u32>(1)?;
+    let d_num_vars = memory.alloc::<u32>(1)?;
+    let d_num_clauses = memory.alloc::<u32>(1)?;
+    let d_num_lits = memory.alloc::<u32>(1)?;
     let mut d_offsets = memory.alloc::<u32>((clause_cap as usize) + 1)?;
-    let mut d_lits = memory.alloc::<i32>(lit_cap as usize)?;
+    let d_lits = memory.alloc::<i32>(lit_cap as usize)?;
 
     let totals_fn = device
         .get_func(SAT_MODULE, sat_kernels::SAT_XGCF_CNF_COMPUTE_TOTALS)
@@ -222,9 +235,9 @@ fn build_circuit_cnf(
         (base_num_vars).as_kernel_param(),
         clause_cap.as_kernel_param(),
         lit_cap.as_kernel_param(),
-        (&mut d_num_vars).as_kernel_param(),
-        (&mut d_num_clauses).as_kernel_param(),
-        (&mut d_num_lits).as_kernel_param(),
+        (&d_num_vars).as_kernel_param(),
+        (&d_num_clauses).as_kernel_param(),
+        (&d_num_lits).as_kernel_param(),
     ];
     // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
@@ -259,8 +272,8 @@ fn build_circuit_cnf(
         (&lit_base).as_kernel_param(),
         (base_num_vars).as_kernel_param(),
         num_nodes_u32.as_kernel_param(),
-        (&mut d_offsets).as_kernel_param(),
-        (&mut d_lits).as_kernel_param(),
+        (&d_offsets).as_kernel_param(),
+        (&d_lits).as_kernel_param(),
     ];
 
     // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
@@ -341,16 +354,16 @@ fn build_phi_and_not_c(
 
     let var_cap = circuit_cnf.cnf.var_cap;
 
-    let mut out_num_vars = memory.alloc::<u32>(1)?;
-    let mut out_num_clauses = memory.alloc::<u32>(1)?;
-    let mut out_num_lits = memory.alloc::<u32>(1)?;
-    let mut d_unused0 = memory.alloc::<u32>(1)?;
-    let mut d_unused1 = memory.alloc::<u32>(1)?;
-    let mut d_unused2 = memory.alloc::<u32>(1)?;
+    let out_num_vars = memory.alloc::<u32>(1)?;
+    let out_num_clauses = memory.alloc::<u32>(1)?;
+    let out_num_lits = memory.alloc::<u32>(1)?;
+    let d_unused0 = memory.alloc::<u32>(1)?;
+    let d_unused1 = memory.alloc::<u32>(1)?;
+    let d_unused2 = memory.alloc::<u32>(1)?;
 
     let mut d_zero = memory.alloc::<u32>(1)?;
-    device
-        .htod_sync_copy_into(&[0u32], &mut d_zero)
+    provider
+        .htod_launch_metadata_sync_copy_into(&[0u32], &mut d_zero)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload zero: {}", e)))?;
 
     let mut out_offsets = memory.alloc::<u32>((clause_cap as usize) + 1)?;
@@ -361,13 +374,9 @@ fn build_phi_and_not_c(
         .ok_or_else(|| XlogError::Kernel("sat_cnf_copy_into kernel not found".to_string()))?;
 
     let block = 256u32;
-    let mut grid = (phi_clause_cap.saturating_add(1).max(phi_lit_cap) + block - 1) / block;
-    if grid == 0 {
-        grid = 1;
-    }
-    if grid > 65_535 {
-        grid = 65_535;
-    }
+    let phi_copy_elems =
+        checked_clause_offset_span(phi_clause_cap, "sat_cnf_copy_into(phi)")?.max(phi_lit_cap);
+    let grid = checked_launch_grid(phi_copy_elems, block, "sat_cnf_copy_into(phi)")?;
 
     // Copy phi (exact sizes) into the front.
     // sat_cnf_copy_into(src_offsets, src_lits, src_num_clauses*, src_num_lits*, src_clause_cap, src_lit_cap,
@@ -399,20 +408,10 @@ fn build_phi_and_not_c(
     .map_err(|e| XlogError::Kernel(format!("sat_cnf_copy_into(phi) failed: {}", e)))?;
 
     // Copy CNF(C) after phi using device-resident bases (phi.num_clauses/phi.num_lits).
-    let mut grid_c = (circuit_cnf
-        .cnf
-        .clause_cap
-        .saturating_add(1)
-        .max(circuit_cnf.cnf.lit_cap)
-        + block
-        - 1)
-        / block;
-    if grid_c == 0 {
-        grid_c = 1;
-    }
-    if grid_c > 65_535 {
-        grid_c = 65_535;
-    }
+    let circuit_copy_elems =
+        checked_clause_offset_span(circuit_cnf.cnf.clause_cap, "sat_cnf_copy_into(circuit)")?
+            .max(circuit_cnf.cnf.lit_cap);
+    let grid_c = checked_launch_grid(circuit_copy_elems, block, "sat_cnf_copy_into(circuit)")?;
     // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         copy_fn.clone().launch(
@@ -474,14 +473,14 @@ fn build_phi_and_not_c(
         out_var_cap.as_kernel_param(),
         out_clause_cap.as_kernel_param(),
         out_lit_cap.as_kernel_param(),
-        (&mut out_num_vars).as_kernel_param(),
-        (&mut out_num_clauses).as_kernel_param(),
-        (&mut out_num_lits).as_kernel_param(),
-        (&mut d_unused0).as_kernel_param(),
-        (&mut d_unused1).as_kernel_param(),
-        (&mut d_unused2).as_kernel_param(),
-        (&mut out_offsets).as_kernel_param(),
-        (&mut out_lits).as_kernel_param(),
+        (&out_num_vars).as_kernel_param(),
+        (&out_num_clauses).as_kernel_param(),
+        (&out_num_lits).as_kernel_param(),
+        (&d_unused0).as_kernel_param(),
+        (&d_unused1).as_kernel_param(),
+        (&d_unused2).as_kernel_param(),
+        (&out_offsets).as_kernel_param(),
+        (&out_lits).as_kernel_param(),
     ];
 
     // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
@@ -561,13 +560,13 @@ fn build_c_and_not_phi(
     )
     .map_err(|_| XlogError::Kernel("C ∧ ¬phi literal capacity exceeds u32::MAX".to_string()))?;
 
-    let mut out_num_vars = memory.alloc::<u32>(1)?;
-    let mut out_num_clauses = memory.alloc::<u32>(1)?;
-    let mut out_num_lits = memory.alloc::<u32>(1)?;
+    let out_num_vars = memory.alloc::<u32>(1)?;
+    let out_num_clauses = memory.alloc::<u32>(1)?;
+    let out_num_lits = memory.alloc::<u32>(1)?;
 
     let mut d_zero = memory.alloc::<u32>(1)?;
-    device
-        .htod_sync_copy_into(&[0u32], &mut d_zero)
+    provider
+        .htod_launch_metadata_sync_copy_into(&[0u32], &mut d_zero)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload zero: {}", e)))?;
 
     // Device-resident exact extras for ¬phi (computed from phi.num_*).
@@ -575,9 +574,9 @@ fn build_c_and_not_phi(
     let mut d_extra_num_clauses = memory.alloc::<u32>(1)?;
     let mut d_extra_num_lits = memory.alloc::<u32>(1)?;
 
-    let mut d_unsat_var_base = memory.alloc::<u32>(1)?;
-    let mut d_notphi_clause_base = memory.alloc::<u32>(1)?;
-    let mut d_notphi_lit_base = memory.alloc::<u32>(1)?;
+    let d_unsat_var_base = memory.alloc::<u32>(1)?;
+    let d_notphi_clause_base = memory.alloc::<u32>(1)?;
+    let d_notphi_lit_base = memory.alloc::<u32>(1)?;
 
     let mut out_offsets = memory.alloc::<u32>((clause_cap as usize) + 1)?;
     let mut out_lits = memory.alloc::<i32>(lit_cap as usize)?;
@@ -588,20 +587,10 @@ fn build_c_and_not_phi(
 
     // Copy CNF(C) into the front (exact sizes).
     let block = 256u32;
-    let mut grid = (circuit_cnf
-        .cnf
-        .clause_cap
-        .saturating_add(1)
-        .max(circuit_cnf.cnf.lit_cap)
-        + block
-        - 1)
-        / block;
-    if grid == 0 {
-        grid = 1;
-    }
-    if grid > 65_535 {
-        grid = 65_535;
-    }
+    let circuit_copy_elems =
+        checked_clause_offset_span(circuit_cnf.cnf.clause_cap, "sat_cnf_copy_into(circuit)")?
+            .max(circuit_cnf.cnf.lit_cap);
+    let grid = checked_launch_grid(circuit_copy_elems, block, "sat_cnf_copy_into(circuit)")?;
     // sat_cnf_copy_into(...)
     // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
@@ -686,14 +675,14 @@ fn build_c_and_not_phi(
         out_var_cap.as_kernel_param(),
         out_clause_cap.as_kernel_param(),
         out_lit_cap.as_kernel_param(),
-        (&mut out_num_vars).as_kernel_param(),
-        (&mut out_num_clauses).as_kernel_param(),
-        (&mut out_num_lits).as_kernel_param(),
-        (&mut d_unsat_var_base).as_kernel_param(),
-        (&mut d_notphi_clause_base).as_kernel_param(),
-        (&mut d_notphi_lit_base).as_kernel_param(),
-        (&mut out_offsets).as_kernel_param(),
-        (&mut out_lits).as_kernel_param(),
+        (&out_num_vars).as_kernel_param(),
+        (&out_num_clauses).as_kernel_param(),
+        (&out_num_lits).as_kernel_param(),
+        (&d_unsat_var_base).as_kernel_param(),
+        (&d_notphi_clause_base).as_kernel_param(),
+        (&d_notphi_lit_base).as_kernel_param(),
+        (&out_offsets).as_kernel_param(),
+        (&out_lits).as_kernel_param(),
     ];
 
     // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
@@ -715,13 +704,7 @@ fn build_c_and_not_phi(
         .ok_or_else(|| XlogError::Kernel("sat_emit_not_phi kernel not found".to_string()))?;
 
     let block = 256u32;
-    let mut grid = (phi_clause_cap + block - 1) / block;
-    if grid == 0 {
-        grid = 1;
-    }
-    if grid > 65_535 {
-        grid = 65_535;
-    }
+    let grid = checked_launch_grid(phi_clause_cap, block, "sat_emit_not_phi")?;
 
     // SAFETY: sat_emit_not_phi(phi_offsets, phi_lits, phi_num_clauses*, unsat_var_base*, out_clause_base*, out_lit_base*, out_offsets, out_lits)
     unsafe {
@@ -824,10 +807,9 @@ pub fn build_equivalence_queries_gpu(
 ) -> Result<GpuEquivalenceQueries> {
     // Non-gated path: force compilation/verification on.
     let memory = provider.memory();
-    let device = provider.device().inner();
     let mut compile_needed = memory.alloc::<u32>(1)?;
-    device
-        .htod_sync_copy_into(&[1u32], &mut compile_needed)
+    provider
+        .htod_launch_metadata_sync_copy_into(&[1u32], &mut compile_needed)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload compile_needed=1: {}", e)))?;
 
     let circuit_cnf = build_circuit_cnf(

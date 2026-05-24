@@ -27,6 +27,45 @@ fn epistemic_literal_is_explicit_in_eir() {
 }
 
 #[test]
+fn epistemic_possible_and_negated_forms_are_explicit_in_eir() {
+    let program = parse_program(
+        r#"
+        reachable(X) :- node(X), possible path(X).
+        uncertain(X) :- node(X), not know blocked(X).
+        impossible(X) :- node(X), not possible repair(X).
+        "#,
+    )
+    .unwrap();
+
+    let eir = build_eir(&program).unwrap();
+    assert_eq!(eir.rules.len(), 3);
+
+    let possible = match &eir.rules[0].body[1] {
+        EirBodyLiteral::Epistemic(lit) => lit,
+        other => panic!("expected explicit possible literal, got {other:?}"),
+    };
+    assert_eq!(possible.op, EirEpistemicOp::Possible);
+    assert!(!possible.negated);
+    assert_eq!(possible.atom.predicate, "path");
+
+    let not_know = match &eir.rules[1].body[1] {
+        EirBodyLiteral::Epistemic(lit) => lit,
+        other => panic!("expected explicit not-know literal, got {other:?}"),
+    };
+    assert_eq!(not_know.op, EirEpistemicOp::Know);
+    assert!(not_know.negated);
+    assert_eq!(not_know.atom.predicate, "blocked");
+
+    let not_possible = match &eir.rules[2].body[1] {
+        EirBodyLiteral::Epistemic(lit) => lit,
+        other => panic!("expected explicit not-possible literal, got {other:?}"),
+    };
+    assert_eq!(not_possible.op, EirEpistemicOp::Possible);
+    assert!(not_possible.negated);
+    assert_eq!(not_possible.atom.predicate, "repair");
+}
+
+#[test]
 fn epistemic_literal_preserves_tuple_terms_for_gpu_key_matching() {
     let program = parse_program(
         r#"
@@ -61,6 +100,30 @@ fn nested_epistemic_literal_returns_typed_error() {
             assert_eq!(construct, "nested epistemic literal");
         }
         other => panic!("expected typed epistemic diagnostic, got {other:?}"),
+    }
+}
+
+#[test]
+fn negated_nested_epistemic_literal_returns_typed_error() {
+    let err = parse_program("bad(X) :- not know possible edge(X).").unwrap_err();
+    match err {
+        XlogError::UnsupportedEpistemicConstruct { construct, context } => {
+            assert_eq!(construct, "nested epistemic literal");
+            assert!(context.contains("not know possible edge(X)"));
+        }
+        other => panic!("expected typed negated epistemic diagnostic, got {other:?}"),
+    }
+}
+
+#[test]
+fn negated_possible_nested_epistemic_literal_returns_typed_error() {
+    let err = parse_program("bad(X) :- not possible know edge(X).").unwrap_err();
+    match err {
+        XlogError::UnsupportedEpistemicConstruct { construct, context } => {
+            assert_eq!(construct, "nested epistemic literal");
+            assert!(context.contains("not possible know edge(X)"));
+        }
+        other => panic!("expected typed negated possible epistemic diagnostic, got {other:?}"),
     }
 }
 

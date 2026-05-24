@@ -43,25 +43,25 @@ recognized as unsupported epistemic constructs and return a typed diagnostic.
 
 `xlog_logic::build_eir` converts parsed AST to EIR without lowering to RIR. This
 is the required entry point for G91, FAEEL, Generate-Propagate-Test, epistemic
-splitting, and the still-missing production GPU lowering work.
+splitting, and production GPU executable-plan lowering.
 
 ## Lowering Boundary
 
-Current RIR lowering rejects `BodyLiteral::Epistemic` with
+Direct ordinary RIR lowering rejects `BodyLiteral::Epistemic` with
 `XlogError::UnsupportedEpistemicConstruct { construct: "RIR lowering boundary",
 ... }`.
 
-That rejection is a current implementation boundary, not a release solution.
-Under the corrected v0.9.0 goal, accepted epistemic programs must lower from EIR
-into production executable plans and dispatch through GPU-native runtime and
-WCOJ paths where eligible. Non-epistemic programs continue using the existing
-parser, stratifier, RIR lowering, runtime, and probabilistic paths.
+That rejection is the direct-RIR boundary, not the accepted release path. Under
+the corrected v0.9.0 goal, accepted epistemic programs lower from EIR into
+production executable plans and dispatch through GPU-native runtime and WCOJ
+paths where eligible. Non-epistemic programs continue using the existing parser,
+stratifier, RIR lowering, runtime, and probabilistic paths.
 
 The probabilistic WFS/provenance code still rejects direct epistemic literals
-with typed `UnsupportedEpistemicConstruct` errors. The bounded `G090_PROB`
-contract lives in `xlog_prob::epistemic`: accepted world views are compiled as
-probabilistic evidence conditions for fixture-scale circuit update tests, not as
-hidden rewrites in the production provenance path.
+with typed `UnsupportedEpistemicConstruct` errors. The accepted `G090_PROB`
+contract consumes validated world-view evidence through the GPU exact/provenance
+production path; fixture-scale circuit update tests remain oracle evidence and
+do not replace production provenance execution.
 
 ## World-View Boundary
 
@@ -73,10 +73,10 @@ fixtures. It is a non-empty set of accepted stable models:
 - `not know p/arity` is true when `know p/arity` is false.
 - `not possible p/arity` is true when `possible p/arity` is false.
 
-The current fixtures construct world views directly so operator behavior is
-testable before production execution exists. They do not yet enumerate stable
-models, validate world views, or materialize accepted tuple results through
-the full GPU-native execution path.
+The semantic fixtures still construct world views directly so operator behavior
+remains independently testable. Accepted runtime pilots separately validate
+stable-model tuple membership, world-view validation, and accepted tuple
+materialization through the GPU-native execution path.
 
 ## GPU Execution Plan Contract
 
@@ -224,9 +224,9 @@ row-count scalar on device, recording
 capacity, covered tuple bytes, one output row-count device read, one final
 row-count device write, kernel launches, zero host writes, and CUDA-event
 elapsed timing.
-These are bounded candidate-buffer invariants and validation/materialization
-staging only; coupling model-membership bytes to actual reduced-runtime stable
-model output and solver coupling remain missing GPU phases.
+These traces now participate in accepted runtime pilots that couple
+model-membership bytes to reduced-runtime tuple output, final tuple
+materialization, and solver/probabilistic production gates.
 
 `EpistemicGpuRuntimePreflight::for_executable_plan` consumes an
 `EpistemicExecutablePlan` before launch. It computes the workspace layout,
@@ -329,8 +329,8 @@ The current executable fixture core is intentionally small:
   `FaeelNoModelReason::UnsatisfiedLiteral`.
 
 The bounded FAEEL evaluator is a certification fixture for foundedness and
-no-model behavior. It is not yet the full Generate-Propagate-Test executor; that
-pipeline is owned by `G090_GPT`.
+no-model behavior. The GPU accepted path validates the Generate-Propagate-Test
+trace contract separately through the runtime pilots owned by `G090_GPT`.
 
 At the production executable-plan boundary, default FAEEL also rejects direct
 self-support such as `p() :- possible p().` before reduced ordinary runtime
@@ -362,9 +362,9 @@ This fixture makes the phase boundary auditable. It does not yet enumerate
 candidate worlds from arbitrary EIR programs; later solver and splitting work can
 replace the explicit candidate input while preserving the trace contract.
 
-The release gate additionally requires these same Generate-Propagate-Test phases
-to run on GPU-resident buffers with launch counters, kernel timings, and zero CPU
-fallback counters.
+The accepted runtime pilots run these Generate-Propagate-Test phases on
+GPU-resident buffers with launch counters, kernel timings, and zero CPU fallback
+counters for the current certification matrix.
 
 ## Epistemic Splitting Fixture Contract
 

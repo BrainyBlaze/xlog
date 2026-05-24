@@ -1,5 +1,12 @@
 # v0.9.0 Epistemic And Solver Semantics Guide
 
+2026-05-24 status note: the current closure audit is
+`docs/plans/2026-05-24-v090-closure-proposal.md`. The bounded production
+acceptance matrix has since passed for GPU/WCOJ execution, nonzero tuple-key
+membership, solver production reuse, probabilistic production reuse, and v0.8
+compatibility. The release recommendation is still `HOLD_FOR_FIXES` because the
+worktree remains uncommitted and final sub-goal commit SHAs are not available.
+
 This guide describes the bounded semantic-oracle layer and the partial accepted
 GPU runtime/production-reuse evidence currently implemented on
 `feat/v090-epistemic-solver-semantics`. The corrected v0.9.0 goal still
@@ -125,17 +132,17 @@ binary `know`, binary `possible`, binary `not possible`, binary `not know`,
 quaternary generic arity-N `know`, all-`know` multi-membership,
 mixed `know`/`possible` multi-membership, negated `not know`/`not possible`
 multi-membership, same-rule all-operator multi-membership, missing-required
-multi-membership, and unary `not know` bound-key row-filter
-fixtures. Full arbitrary-world enumeration, complete semantic parity, and
-release-wide solver/probabilistic coverage do not dispatch yet, but bounded
-accepted runtime fixtures now feed the solver and probabilistic production
-adapters described below.
+multi-membership, and unary `not know` bound-key row-filter fixtures. The current
+release acceptance matrix is bounded to certified fixtures. Outside that matrix,
+arbitrary-world enumeration and additional solver/probabilistic coverage remain
+future scope; within it, accepted runtime fixtures feed the solver and
+probabilistic production adapters described below.
 
 ## GPU And WCOJ Scope
 
-The current epistemic algorithms are still not fully GPU-native across the full
-semantic matrix, but the accepted bounded runtime path now exercises the
-production GPU/WCOJ stack for specific certification fixtures:
+The accepted v0.9.0 certification path is GPU-native for the current bounded
+matrix and exercises the production GPU/WCOJ stack for specific certification
+fixtures:
 
 - WCOJ planner eligibility and runtime dispatch are observed for an accepted
   v0.7.0 4-cycle `MultiWayJoin` reduction, and layout, skew-aware scheduling,
@@ -165,10 +172,11 @@ production GPU/WCOJ stack for specific certification fixtures:
   source/program-specific exact-query, PIR/CNF, and conditioned-gradient
   counters.
 
-Those paths are still partial G090_GPU/G090_SOLVER/G090_PROB evidence. Before
-v0.9.0 can close, release certification must broaden arbitrary EIR semantic
-parity, accepted split coverage, solver semantic integration, probabilistic
-world-view coverage, and the post-v0.7.0/v0.8.0/v0.8.5/v0.8.6 compatibility rerun. Existing
+Those paths are current PASS evidence for the bounded
+G090_GPU/G090_SOLVER/G090_PROB acceptance matrix. Before v0.9.0 can close,
+release packaging still requires checkpointed commit SHAs, the final validation
+rerun, a coordinator-facing release decision, and coordinator authorization.
+Existing
 non-epistemic programs continue to use the normal parser, stratifier, RIR
 lowering, runtime, and WCOJ infrastructure where eligible.
 
@@ -201,7 +209,8 @@ certified dispatch traces include edge-permutation, stream-group scheduling,
 skew-scheduled helper, sorted-layout, and helper-split counts; K6 also carries
 runtime histogram metadata-build timing, while K7/K8 record K-clique max-arity
 plus full edge-permutation and stream-group metadata through runtime preflight.
-Broader semantic parity coverage remains incomplete.
+Broader examples outside the current acceptance matrix remain future scope unless
+the GQM/KPI acceptance set is expanded.
 
 The reduced-runtime-plan contract reuses the v0.7.0 general WCOJ surfaces and
 the Goal-038-B WCOJ surfaces. Non-K-clique epistemic reductions must pass

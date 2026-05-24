@@ -3,7 +3,10 @@ use std::sync::Arc;
 use xlog_core::MemoryBudget;
 use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 
-use xlog_solve::{Clause, GpuCdclConfig, GpuCdclSolver, GpuCnf, Literal, SolveInstance};
+use xlog_solve::{
+    Clause, GpuCdclConfig, GpuCdclSolver, GpuCnf, GpuSolverProductionAdapter, Literal,
+    SolveInstance,
+};
 
 fn try_provider() -> Option<Arc<CudaKernelProvider>> {
     let device = match CudaDevice::new(0) {
@@ -198,6 +201,55 @@ fn test_workspace_gated_ws_compile_not_needed() {
             &branch_limit,
         )
         .expect("gated_ws with compile_needed=0 should succeed (early-return)");
+}
+
+#[test]
+fn production_adapter_counts_real_gpu_sat_unsat_workspace_paths() {
+    let Some(provider) = try_provider() else {
+        return;
+    };
+
+    let sat_instance = SolveInstance::new(1, vec![Clause::new(vec![Literal::positive(0)])]);
+    let sat_cnf = GpuCnf::from_host(&sat_instance, &provider).expect("SAT GpuCnf upload");
+
+    let unsat_instance = SolveInstance::new(
+        1,
+        vec![
+            Clause::new(vec![Literal::positive(0)]),
+            Clause::new(vec![Literal::negative(0)]),
+        ],
+    );
+    let unsat_cnf = GpuCnf::from_host(&unsat_instance, &provider).expect("UNSAT GpuCnf upload");
+
+    let mut adapter = GpuSolverProductionAdapter::new(provider.clone(), GpuCdclConfig::default());
+    let mut ws = adapter
+        .new_workspace(unsat_cnf.var_cap, unsat_cnf.clause_cap)
+        .expect("new production workspace");
+    let branch_limit = solver_alloc_u32(&provider, unsat_cnf.var_cap as u32);
+    let assign_ptr_before = ws.assign_device_ptr();
+
+    let assignment = adapter
+        .solve_expect_sat(&sat_cnf)
+        .expect("production adapter SAT solve");
+    assert_eq!(assignment.len(), 2);
+    adapter
+        .solve_expect_unsat(&unsat_cnf)
+        .expect("production adapter UNSAT solve");
+    adapter
+        .solve_expect_unsat_with_branch_limit_ws(&mut ws, &unsat_cnf, &branch_limit)
+        .expect("production adapter workspace UNSAT solve");
+    assert_eq!(assign_ptr_before, ws.assign_device_ptr());
+
+    let trace = adapter.trace();
+    assert_eq!(trace.gpu_cdcl_sat_solves, 1);
+    assert_eq!(trace.gpu_cdcl_unsat_solves, 1);
+    assert_eq!(trace.gpu_cdcl_workspace_unsat_solves, 1);
+    assert_eq!(trace.cpu_assignment_enumerations, 0);
+    assert_eq!(trace.cpu_maxsat_enumerations, 0);
+    assert_eq!(trace.cpu_learned_clause_transfers, 0);
+    trace
+        .require_zero_cpu_search()
+        .expect("production adapter must not use CPU search");
 }
 
 /// Helper: upload a u32 scalar to the GPU.

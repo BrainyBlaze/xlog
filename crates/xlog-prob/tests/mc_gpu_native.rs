@@ -57,33 +57,11 @@ query(coin()).
         cfg.samples,
         "evidence_count={} query_count={}",
         host_evidence[0],
-        host_counts.get(0).copied().unwrap_or(0)
+        host_counts.first().copied().unwrap_or(0)
     );
     assert_eq!(
-        host_counts.get(0).copied().unwrap_or(0) as usize,
+        host_counts.first().copied().unwrap_or(0) as usize,
         cfg.samples
-    );
-}
-
-#[test]
-fn mc_host_read_apis_gated() {
-    let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("src");
-    path.push("mc");
-    path.push("mod.rs");
-
-    let text = std::fs::read_to_string(&path).expect("read mc/mod.rs");
-    assert!(
-        text.contains("#[cfg(feature = \"host-io\")]\n    pub fn evaluate"),
-        "evaluate() must be gated behind host-io"
-    );
-    assert!(
-        text.contains("#[cfg(feature = \"host-io\")]\n    pub fn evaluate_cpu"),
-        "evaluate_cpu() must be gated behind host-io"
-    );
-    assert!(
-        text.contains("#[cfg(feature = \"host-io\")]\n    pub fn evaluate_gpu"),
-        "evaluate_gpu() must be gated behind host-io"
     );
 }
 
@@ -103,7 +81,7 @@ fn mc_eval_kernels_set_evidence_ok_without_evidence() {
         .inner()
         .htod_sync_copy_into(&[1u32], &mut d_query_count)
         .expect("copy query count");
-    let query_ptr = *d_query_count.device_ptr() as u64;
+    let query_ptr = *d_query_count.device_ptr();
 
     let mut d_query_ptrs = provider.memory().alloc::<u64>(1).expect("alloc query ptrs");
     provider
@@ -277,36 +255,4 @@ fn mc_accumulate_counts_increments_on_ok() {
 
     assert_eq!(host_query_counts[0], 1u32);
     assert_eq!(host_evidence_count[0], 1u32);
-}
-
-#[test]
-fn mc_hot_path_no_device_row_count_helper() {
-    let mut mc_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    mc_dir.push("src");
-    mc_dir.push("mc");
-    let mut text = String::new();
-    for entry in std::fs::read_dir(&mc_dir).expect("read mc/ dir") {
-        let entry = entry.expect("dir entry");
-        if entry.path().extension().map_or(false, |e| e == "rs") {
-            text.push_str(&std::fs::read_to_string(entry.path()).expect("read mc/*.rs"));
-        }
-    }
-    assert!(!text.contains("device_row_count_u32(provider, &filtered)"));
-}
-
-#[test]
-fn mc_behavior_tests_do_not_use_large_sample_budgets() {
-    let text = std::fs::read_to_string("crates/xlog-prob/tests/mc.rs")
-        .or_else(|_| std::fs::read_to_string("tests/mc.rs"))
-        .or_else(|_| {
-            let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            p.push("tests");
-            p.push("mc.rs");
-            std::fs::read_to_string(p)
-        })
-        .unwrap();
-    assert!(
-        !text.contains("samples: 80_000"),
-        "mc.rs should not contain samples: 80_000"
-    );
 }

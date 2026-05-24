@@ -13,14 +13,15 @@ mod statistics;
 pub use executor::{
     DeltaRecomputeStats, EpistemicGpuBatchExecutionResult, EpistemicGpuBatchExecutionTrace,
     EpistemicGpuCandidateGenerationTrace, EpistemicGpuCandidateValidationTrace,
-    EpistemicGpuExecutionResult, EpistemicGpuFinalResultMaterializationTrace,
-    EpistemicGpuFinalResultTransferTrace, EpistemicGpuFinalTupleMaterializationTrace,
-    EpistemicGpuKernelTimingTrace, EpistemicGpuMaterializationTrace,
-    EpistemicGpuModelMembershipSource, EpistemicGpuModelMembershipTrace,
-    EpistemicGpuPreparedExecution, EpistemicGpuPropagationTrace, EpistemicGpuRejectionReason,
-    EpistemicGpuRuntimeCounters, EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace,
-    EpistemicGpuRuntimeWcojCertification, EpistemicGpuTransferBudgetTrace, EpistemicGpuWorkspace,
-    EpistemicGpuWorkspaceCapacities, EpistemicGpuWorkspaceLayout, EpistemicGpuWorkspaceResetTrace,
+    EpistemicGpuConstraintValidationTrace, EpistemicGpuExecutionResult,
+    EpistemicGpuFinalResultMaterializationTrace, EpistemicGpuFinalResultTransferTrace,
+    EpistemicGpuFinalTupleMaterializationTrace, EpistemicGpuKernelTimingTrace,
+    EpistemicGpuMaterializationTrace, EpistemicGpuModelMembershipSource,
+    EpistemicGpuModelMembershipTrace, EpistemicGpuPreparedExecution, EpistemicGpuPropagationTrace,
+    EpistemicGpuProviderIdentity, EpistemicGpuRejectionReason, EpistemicGpuRuntimeCounters,
+    EpistemicGpuRuntimePreflight, EpistemicGpuRuntimeTrace, EpistemicGpuRuntimeWcojCertification,
+    EpistemicGpuTransferBudgetTrace, EpistemicGpuWorkspace, EpistemicGpuWorkspaceCapacities,
+    EpistemicGpuWorkspaceLayout, EpistemicGpuWorkspaceResetTrace,
     EpistemicGpuWorldViewValidationTrace, Executor, RelationDelta,
 };
 pub use ilp_registry::{read_device_row_count, IlpRegistry, IlpTagEntry, IlpTaggedResult};

@@ -18,6 +18,8 @@ cudarc.workspace = true
 
 [dev-dependencies]
 criterion = "0.5"
+xlog-ir.workspace = true
+xlog-logic.workspace = true
 
 [[bench]]
 name = "solver_bench"

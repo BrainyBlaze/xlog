@@ -530,7 +530,7 @@ fn main() -> Result<()> {
 
         let rows = buf.num_rows() as usize;
         let shown = rows.min(limit);
-        for row_idx in 0..shown {
+        for (row_idx, _) in columns[0].iter().enumerate().take(shown) {
             let mut parts = Vec::with_capacity(vars.len());
             for (col_idx, var) in vars.iter().enumerate() {
                 parts.push(format!("{}={}", var, columns[col_idx][row_idx]));

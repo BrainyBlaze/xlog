@@ -1057,6 +1057,7 @@ impl Executor {
     /// wall times in milliseconds. The triangle's per-phase GPU
     /// times are pulled from the provider via
     /// `take_wcoj_triangle_phase_timing` after this returns.
+    #[allow(clippy::too_many_arguments)]
     fn run_wcoj_triangle_pipeline(
         &self,
         buf_xy: &CudaBuffer,
@@ -1630,6 +1631,7 @@ impl Executor {
     }
 
     /// Inner pipeline for 4-cycle: 4× layout construction + kernel.
+    #[allow(clippy::too_many_arguments)]
     fn run_wcoj_4cycle_pipeline(
         &self,
         buf_e1: &CudaBuffer,
@@ -1702,6 +1704,7 @@ impl Executor {
     /// in `lookup_perms`); kernel emits in `(a, b, c, d)` order
     /// per the rotated leader; final projection helper remaps
     /// to canonical `(W, X, Y, Z)` head order.
+    #[allow(clippy::too_many_arguments)]
     fn run_wcoj_4cycle_pipeline_w21(
         &self,
         buf_e1: &CudaBuffer,
@@ -1819,6 +1822,14 @@ impl Executor {
                 var_order.lookup_perms.len(),
                 n - 1
             )));
+        }
+        for (slot, lp) in var_order.lookup_perms.iter().enumerate() {
+            let input_idx = lp.input_idx as usize;
+            if input_idx >= n {
+                return Err(xlog_core::XlogError::Kernel(format!(
+                    "prepare_leader_inputs: lookup_perms[{slot}].input_idx {input_idx} out of range for arity {n}"
+                )));
+            }
         }
         // 4-cycle defense: no col-swaps allowed (locked table).
         if n == 4 {
@@ -2307,7 +2318,7 @@ fn kclique_dispatch_params(plan: &KCliqueVariableOrder, k: usize) -> Option<KCli
             clique_edge_idx_runtime(left_pos.min(right_pos), left_pos.max(right_pos), k)?;
         edge_order[logical_edge] = u8::try_from(slot).ok()?;
     }
-    if edge_order.iter().any(|slot| *slot == u8::MAX) {
+    if edge_order.contains(&u8::MAX) {
         return None;
     }
     let leader_edge_idx = u32::from(edge_order[clique_edge_idx_runtime(0, 1, k)?]);
@@ -2489,7 +2500,7 @@ mod tests {
     fn match_chain_rejects_non_scan_inputs() {
         let mut node = canonical_chain_join();
         if let RirNode::ChainJoin { left, .. } = &mut node {
-            *left = Box::new(RirNode::Unit);
+            **left = RirNode::Unit;
         }
         assert!(match_chain_join(&node).is_none());
     }

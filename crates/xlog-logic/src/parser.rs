@@ -1465,6 +1465,21 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_predicate_with_epistemic_keyword_prefix_as_atom() {
+        let input = "friend_of_friend(A, C) :- knows(A, B), knows(B, C), A != C.";
+        let program = parse_program(input).expect("parse ordinary predicate named knows");
+
+        assert_eq!(program.rules.len(), 1);
+        assert_eq!(program.rules[0].body.len(), 3);
+        assert!(
+            matches!(&program.rules[0].body[0], BodyLiteral::Positive(atom) if atom.predicate == "knows")
+        );
+        assert!(
+            matches!(&program.rules[0].body[1], BodyLiteral::Positive(atom) if atom.predicate == "knows")
+        );
+    }
+
+    #[test]
     fn test_parse_aggregate() {
         let input = "out_degree(X, count(Y)) :- edge(X, Y).";
         let result = parse_program(input);

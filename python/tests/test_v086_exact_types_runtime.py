@@ -81,6 +81,7 @@ def _assert_same_candidates(native_result, py_result) -> None:
     ],
 )
 def test_induce_exact_native_matches_python_reference_for_32_bit_pair_types(
+    monkeypatch,
     scalar_type: str,
     dtype: "torch.dtype",
 ) -> None:
@@ -88,6 +89,7 @@ def test_induce_exact_native_matches_python_reference_for_32_bit_pair_types(
     annotations = dict(prog.relation_type_annotations())
     assert annotations["p_A"] == [scalar_type, scalar_type]
     assert annotations["p_B"] == [scalar_type, scalar_type]
+    monkeypatch.setenv("XLOG_ALLOW_PYTHON_ILP_REFERENCE", "1")
 
     py_result = induce_exact(
         prog,
@@ -99,7 +101,7 @@ def test_induce_exact_native_matches_python_reference_for_32_bit_pair_types(
     native_result = induce_exact(prog, backend="native", **kwargs)
 
     _assert_same_candidates(native_result, py_result)
-    assert prog.d2h_transfer_count() == 2
+    assert prog.d2h_transfer_count() == 1
 
 
 def test_induce_exact_native_rejects_mixed_logical_pair_types() -> None:

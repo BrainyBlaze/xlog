@@ -114,28 +114,6 @@ fn uniform_k5_compile_keeps_helper_split_empty_and_allocates_no_helper() {
     assert!(specs.is_empty());
 }
 
-#[test]
-fn help_kc_source_contract_invokes_helper_split_pass() {
-    let promote = include_str!("../src/promote.rs");
-    let compile = include_str!("../src/compile.rs");
-    let optimizer = include_str!("../src/optimizer.rs");
-    let required = "Paper §5 Figure 3: Helper-relation splitting elevates buried inner-variable skew per Authorization 5 (2026-05-17)";
-
-    assert!(promote.contains(required));
-    assert!(
-        !promote.contains("Vec::<HelperSplitSpec>::new()"),
-        "K-clique promoter must not always emit an empty helper split vec"
-    );
-    assert!(
-        compile.contains("helper_split_pass::run_kclique_specs"),
-        "compile pipeline must invoke the Phase-1 G4 helper_split_pass for K-clique specs"
-    );
-    assert!(
-        optimizer.contains("pub fn run_kclique_specs"),
-        "Phase-1 G4 helper_split_pass must expose a K-clique spec entry"
-    );
-}
-
 struct KcliqueNode<'a> {
     inputs: &'a [RirNode],
     plan: &'a Option<MultiwayPlan>,

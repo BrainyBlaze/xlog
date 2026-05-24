@@ -34,12 +34,14 @@ use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 const RUNTIME_LIMIT: usize = 256 * 1024;
 const LOCAL_BUDGET: u64 = 1024 * 1024;
 
-fn build_runtime_provider() -> Option<(
+type RuntimeProviderFixture = (
     CudaKernelProvider,
     Arc<GpuMemoryManager>,
     Arc<XlogDeviceRuntime>,
     Arc<InMemorySink>,
-)> {
+);
+
+fn build_runtime_provider() -> Option<RuntimeProviderFixture> {
     let device = CudaDevice::new(0).ok().map(Arc::new)?;
     let pool = Arc::new(StreamPool::with_defaults(Arc::clone(&device)));
     let sink: Arc<InMemorySink> = Arc::new(InMemorySink::new());

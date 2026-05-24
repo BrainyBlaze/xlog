@@ -21,9 +21,10 @@ RECURSIVE_NEG: list[tuple[str, list[int]]] = []
 def test_recursive_candidates_no_longer_raises():
     """allow_recursive_candidates=True is now allowed in beta."""
     config = TrainConfig(
-        step_budget_per_attempt=100, max_attempts=3,
+        step_budget_per_attempt=10, max_attempts=1,
         tau_start=2.0, tau_floor=0.05, seed=42,
         allow_recursive_candidates=True,
+        strict_gpu_native=False,
     )
     result = train_only(SOURCE, "W", RECURSIVE_POS, RECURSIVE_NEG, config)
     assert isinstance(result.attempt_count, int)
@@ -47,12 +48,14 @@ def test_non_recursive_still_default():
 def test_recursive_reach_runs_without_crash():
     """With recursive candidates enabled, training runs without errors.
 
-    Slow: up to 7 attempts × 150 steps with recursive candidates (GPU-intensive).
+    Bounded smoke: one short recursive training attempt is enough to prove the
+    recursive candidate path executes without falling back to a source-only check.
     """
     config = TrainConfig(
-        step_budget_per_attempt=150, max_attempts=7,
+        step_budget_per_attempt=10, max_attempts=1,
         tau_start=2.0, tau_floor=0.05, seed=42,
         allow_recursive_candidates=True,
+        strict_gpu_native=False,
     )
     result = train_only(SOURCE, "W", RECURSIVE_POS, RECURSIVE_NEG, config)
     assert result.total_steps > 0

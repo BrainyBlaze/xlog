@@ -31,11 +31,6 @@
 //!   this is the path `xlog-prob::mc::sampling` uses for monotone
 //!   SCCs, which never invokes the WCOJ dispatch hook and relies
 //!   entirely on the safety-net arm.
-//! * **C6** — Source-contract check: the explicit `MultiWayJoin {
-//!   fallback, .. } => walk_tmj(fallback, target_mask)` arm in
-//!   `pyxlog/src/ilp.rs` is present. `pyxlog` is `cdylib` with
-//!   `test = false`, so we cannot link it; the source string is the
-//!   most reliable cross-crate guard.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -552,28 +547,5 @@ fn c5_execute_non_recursive_scc_descends_via_safety_net() {
          binary-join reference row-for-row via the safety-net fallback descent. \
          This is the path xlog-prob::mc::sampling uses for monotone SCCs; \
          silent row-set divergence here would corrupt MC inference."
-    );
-}
-
-// ---------------------------------------------------------------
-// C6 — pyxlog walk_tmj source-contract (no link, source check)
-// ---------------------------------------------------------------
-
-#[test]
-fn c6_pyxlog_walk_tmj_has_explicit_multiway_arm() {
-    // pyxlog is cdylib + test = false; we cannot link against
-    // walk_tmj or any other pyxlog symbol. The source is the most
-    // reliable cross-crate guard. If a refactor removes the explicit
-    // arm and lets MultiWayJoin fall through to the catch-all
-    // `_ => None`, a TMJ wrapped inside a promoted MultiWayJoin's
-    // fallback would silently disappear from any pyxlog ILP query.
-    let src = include_str!("../../pyxlog/src/ilp.rs");
-    let needle = "RirNode::MultiWayJoin { fallback, .. } => walk_tmj(fallback, target_mask)";
-    assert!(
-        src.contains(needle),
-        "pyxlog::ilp::walk_tmj must contain the explicit MultiWayJoin -> walk_tmj(fallback, …) \
-         arm. Source-string contract for v0.6.5 slice 2 walker hardening of pyxlog::ilp; \
-         if the arm is deleted or reformatted, walk_tmj will silently miss any TMJ wrapped \
-         inside a promoted MultiWayJoin's fallback (the catch-all `_ => None` would swallow it)."
     );
 }

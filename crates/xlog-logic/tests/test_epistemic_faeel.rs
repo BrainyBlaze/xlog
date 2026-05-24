@@ -43,3 +43,20 @@ fn faeel_reports_contradiction_as_no_model() {
         })
     );
 }
+
+#[test]
+fn faeel_rejects_global_candidate_contradiction_before_literal_walk() {
+    let program = parse_program("accepted() :- know fact().").unwrap();
+    let interpretation = EpistemicInterpretation::new()
+        .with_known("fact", 0)
+        .with_known("noise", 0)
+        .with_rejected("noise", 0);
+
+    assert_eq!(
+        evaluate_faeel_candidate(&program, &interpretation).unwrap(),
+        FaeelCandidateResult::NoModel(FaeelNoModelReason::Contradiction {
+            predicate: "noise".to_string(),
+            arity: 0,
+        })
+    );
+}

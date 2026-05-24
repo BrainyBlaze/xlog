@@ -57,10 +57,10 @@ const N_THREADS: usize = 8;
 const ITERS_PER_THREAD: usize = 128;
 const ROUNDS_PER_ITER: usize = 3;
 
-/// Synthetic friend-of-friend workload. Bidirectional cliques
-/// + cross-cluster bridges so the self-join produces dense
-/// matches on multiple key values (worst case for
-/// alloc-pressure on the build table side of the join).
+/// Synthetic friend-of-friend workload with bidirectional cliques
+/// and cross-cluster bridges. The self-join produces dense matches
+/// on multiple key values, which is the worst case for alloc pressure
+/// on the build table side of the join.
 fn make_friends() -> Vec<(u32, u32)> {
     let mut edges = Vec::new();
     const CLUSTERS: u32 = 8;

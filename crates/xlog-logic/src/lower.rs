@@ -3004,7 +3004,7 @@ mod tests {
         );
         assert_eq!(infer_term_type(&Term::Integer(42)), ScalarType::U32);
         assert_eq!(infer_term_type(&Term::Integer(i64::MAX)), ScalarType::I64);
-        assert_eq!(infer_term_type(&Term::Float(3.14)), ScalarType::F64);
+        assert_eq!(infer_term_type(&Term::Float(3.25)), ScalarType::F64);
         assert_eq!(
             infer_term_type(&Term::Symbol(symbol::intern("foo"))),
             ScalarType::Symbol

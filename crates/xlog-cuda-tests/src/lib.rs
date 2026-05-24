@@ -1,4 +1,21 @@
 //! xlog-cuda-tests: Comprehensive CUDA kernel certification suite
+#![allow(
+    clippy::collapsible_if,
+    clippy::doc_lazy_continuation,
+    clippy::items_after_test_module,
+    clippy::manual_clamp,
+    clippy::manual_contains,
+    clippy::manual_div_ceil,
+    clippy::manual_is_multiple_of,
+    clippy::manual_range_contains,
+    clippy::needless_borrow,
+    clippy::needless_range_loop,
+    clippy::same_item_push,
+    clippy::type_complexity,
+    clippy::unnecessary_mut_passed,
+    clippy::useless_conversion,
+    clippy::useless_vec
+)]
 //!
 //! # Usage
 //! ```bash

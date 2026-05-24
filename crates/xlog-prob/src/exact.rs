@@ -65,6 +65,29 @@ struct QuerySpec {
     var: Option<u32>,
 }
 
+fn neural_slot_count_u32(slot_count: usize) -> Result<u32> {
+    u32::try_from(slot_count).map_err(|_| {
+        XlogError::Compilation(
+            "Neural fast-path group slot count exceeds GPU u32 index space".to_string(),
+        )
+    })
+}
+
+fn checked_launch_grid_u32(context: &str, item_count: u32, block_size: u32) -> Result<u32> {
+    if block_size == 0 {
+        return Err(XlogError::Kernel(format!(
+            "{context} launch block size must be non-zero"
+        )));
+    }
+    if item_count == 0 {
+        return Ok(0);
+    }
+    item_count
+        .checked_add(block_size - 1)
+        .map(|rounded| rounded / block_size)
+        .ok_or_else(|| XlogError::Kernel(format!("{context} launch grid overflow")))
+}
+
 struct GpuExactState {
     provider: Arc<CudaKernelProvider>,
     cache: Mutex<GpuCircuitCache>,
@@ -175,9 +198,9 @@ impl GpuCountLiftState {
                 .dtoh_sync_copy_into(&out, &mut host)
                 .map_err(|e| XlogError::Kernel(format!("count-lift result dtoh failed: {}", e)))?;
             let mut prob = host[0];
-            if prob < 0.0 && prob >= -1e-12 {
+            if (-1e-12..0.0).contains(&prob) || prob == -1e-12 {
                 prob = 0.0;
-            } else if prob > 1.0 && prob <= 1.0 + 1e-12 {
+            } else if prob > 1.0 && (1.0..=1.0 + 1e-12).contains(&prob) {
                 prob = 1.0;
             }
             if !prob.is_finite() || !(0.0..=1.0).contains(&prob) {
@@ -213,31 +236,52 @@ pub struct ExactDdnnfProgram {
     #[cfg_attr(not(feature = "host-io"), allow(dead_code))]
     random_vars: Option<Arc<DeviceRandomVarList>>,
     max_var: u32,
+    #[cfg_attr(not(feature = "host-io"), allow(dead_code))]
+    origin: ExactProgramOrigin,
     #[allow(dead_code)] // retained: config is stored for future re-compilation paths
     gpu_config: GpuConfig,
     /// Latest circuit compilation profile (populated on cache miss when profiling).
     last_compile_profile: Option<CircuitCompileProfile>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExactProgramOrigin {
+    Source,
+    Program,
+}
+
 impl ExactDdnnfProgram {
     pub fn compile_source(source: &str) -> Result<Self> {
         let provenance = extract_from_source(source)?;
-        Self::compile_provenance_with_gpu(provenance, GpuConfig::default())
+        Self::compile_provenance_with_gpu(
+            provenance,
+            GpuConfig::default(),
+            ExactProgramOrigin::Source,
+        )
     }
 
     pub fn compile_source_with_gpu(source: &str, config: GpuConfig) -> Result<Self> {
         let provenance = extract_from_source(source)?;
-        Self::compile_provenance_with_gpu(provenance, config)
+        Self::compile_provenance_with_gpu(provenance, config, ExactProgramOrigin::Source)
     }
 
     pub fn compile_from_program(program: &Program, config: GpuConfig) -> Result<Self> {
         let provenance = extract_from_program(program)?;
-        Self::compile_provenance_with_gpu(provenance, config)
+        Self::compile_provenance_with_gpu(provenance, config, ExactProgramOrigin::Program)
     }
 
     #[allow(dead_code)] // retained: accessor for future re-compilation paths
     pub(crate) fn gpu_config(&self) -> GpuConfig {
         self.gpu_config
+    }
+
+    #[cfg(feature = "host-io")]
+    pub(crate) fn origin(&self) -> ExactProgramOrigin {
+        self.origin
+    }
+
+    pub fn uses_gpu_production_backend(&self) -> bool {
+        self.gpu.is_some()
     }
 
     /// Get the latest circuit compilation profile (populated when XLOG_WARMUP_PROFILE=1).
@@ -296,11 +340,7 @@ impl ExactDdnnfProgram {
                             "Exact inference error: NaN probability encountered".to_string(),
                         ));
                     }
-                    if prob < 0.0 {
-                        prob = 0.0;
-                    } else if prob > 1.0 {
-                        prob = 1.0;
-                    }
+                    prob = prob.clamp(0.0, 1.0);
                     (log_prob, prob)
                 }
             };
@@ -372,7 +412,7 @@ impl ExactDdnnfProgram {
     /// The output gradient buffers are updated in-place:
     /// - Base run: `out = dlogZ_base/dp`
     /// - Query-forced run: `out -= dlogZ_query/dp`
-    /// Result: `out = dL/dp` for `L = -log P(query | evidence)` (NLL).
+    ///   Result: `out = dL/dp` for `L = -log P(query | evidence)` (NLL).
     pub fn neural_backward_nll_buffers(
         &self,
         slots: &GpuWeightSlots,
@@ -573,10 +613,10 @@ impl ExactDdnnfProgram {
                     q
                 )));
             }
-            if probs_batch[q].len() as u32 != slots.num_groups() {
+            if probs_batch[q].len() != slots.num_groups_usize() {
                 return Err(XlogError::Compilation(format!(
                     "Neural fast-path batch error: expected {} groups, got {} for query {}",
-                    slots.num_groups(),
+                    slots.num_groups_usize(),
                     probs_batch[q].len(),
                     q
                 )));
@@ -618,7 +658,7 @@ impl ExactDdnnfProgram {
                 }
 
                 let slot_vars = slots.group_slot_cnf_var(g)?;
-                let labels = slot_vars.len() as u32;
+                let labels = neural_slot_count_u32(slot_vars.len())?;
                 if prob_buf.num_rows() != labels as u64 {
                     return Err(XlogError::Compilation(format!(
                         "Neural fast-path prob rows {} != labels {}",
@@ -694,7 +734,7 @@ impl ExactDdnnfProgram {
 
             for (g, prob_buf) in probs_batch[q].iter().enumerate() {
                 let slot_vars = slots.group_slot_cnf_var(g)?;
-                let labels = slot_vars.len() as u32;
+                let labels = neural_slot_count_u32(slot_vars.len())?;
                 let prob_col = prob_buf.column(0).ok_or_else(|| {
                     XlogError::Compilation("Neural fast-path missing prob column".to_string())
                 })?;
@@ -736,16 +776,13 @@ impl ExactDdnnfProgram {
             }
         }
 
-        device
-            .htod_sync_copy_into(&query_vars_host, &mut query_vars)
+        state
+            .provider
+            .htod_sync_copy_into_tracked(&query_vars_host, &mut query_vars)
             .map_err(|e| {
                 XlogError::Kernel(format!("Failed to upload batched query vars: {}", e))
             })?;
-        let force_grid = if batch_u32 == 0 {
-            0
-        } else {
-            (batch_u32 + 255) / 256
-        };
+        let force_grid = checked_launch_grid_u32("gpu exact batched query force", batch_u32, 256)?;
         if force_grid != 0 {
             if expected_true {
                 // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
@@ -818,11 +855,7 @@ impl ExactDdnnfProgram {
             batch_u32,
         )?;
 
-        let loss_grid = if batch_u32 == 0 {
-            0
-        } else {
-            (batch_u32 + 255) / 256
-        };
+        let loss_grid = checked_launch_grid_u32("gpu exact batched query loss", batch_u32, 256)?;
         if loss_grid != 0 {
             // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
@@ -849,7 +882,7 @@ impl ExactDdnnfProgram {
 
             for (g, prob_buf) in probs_batch[q].iter().enumerate() {
                 let slot_vars = slots.group_slot_cnf_var(g)?;
-                let labels = slot_vars.len() as u32;
+                let labels = neural_slot_count_u32(slot_vars.len())?;
                 let prob_col = prob_buf.column(0).ok_or_else(|| {
                     XlogError::Compilation("Neural fast-path missing prob column".to_string())
                 })?;
@@ -894,6 +927,7 @@ impl ExactDdnnfProgram {
         Ok(losses)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn neural_backward_nll_buffers_inner(
         &self,
         slots: &GpuWeightSlots,
@@ -924,10 +958,10 @@ impl ExactDdnnfProgram {
                 out_grads.len()
             )));
         }
-        if probs.len() as u32 != slots.num_groups() {
+        if probs.len() != slots.num_groups_usize() {
             return Err(XlogError::Compilation(format!(
                 "Neural fast-path error: expected {} groups, got {}",
-                slots.num_groups(),
+                slots.num_groups_usize(),
                 probs.len()
             )));
         }
@@ -986,7 +1020,7 @@ impl ExactDdnnfProgram {
             }
 
             let slot_vars = slots.group_slot_cnf_var(g)?;
-            let labels = slot_vars.len() as u32;
+            let labels = neural_slot_count_u32(slot_vars.len())?;
 
             if prob_buf.num_rows() != labels as u64 {
                 return Err(XlogError::Compilation(format!(
@@ -1034,7 +1068,7 @@ impl ExactDdnnfProgram {
         }
         for (g, prob_buf) in probs.iter().enumerate() {
             let slot_vars = slots.group_slot_cnf_var(g)?;
-            let labels = slot_vars.len() as u32;
+            let labels = neural_slot_count_u32(slot_vars.len())?;
 
             let out_buf = out_grads.get_mut(g).ok_or_else(|| {
                 XlogError::Compilation("Neural fast-path missing output grad buffer".to_string())
@@ -1144,7 +1178,7 @@ impl ExactDdnnfProgram {
         }
         for (g, prob_buf) in probs.iter().enumerate() {
             let slot_vars = slots.group_slot_cnf_var(g)?;
-            let labels = slot_vars.len() as u32;
+            let labels = neural_slot_count_u32(slot_vars.len())?;
 
             let prob_col = prob_buf.column(0).ok_or_else(|| {
                 XlogError::Compilation("Neural fast-path missing prob column".to_string())
@@ -1203,6 +1237,14 @@ impl ExactDdnnfProgram {
     #[cfg(feature = "host-io")]
     pub fn evaluate_gpu_with_grads(&self) -> Result<ExactResultWithGrads> {
         if self.gpu.is_none() {
+            if self.count_lift_gpu.is_some() {
+                return Err(XlogError::UnsupportedEpistemicConstruct {
+                    construct: "GPU exact gradient evaluation".to_string(),
+                    context: "GPU count-lift exact backend does not expose gradient evaluation; \
+                              gradient production paths require a compiled GPU D4 exact backend"
+                        .to_string(),
+                });
+            }
             return Ok(ExactResultWithGrads {
                 log_z_e: 0.0,
                 query_grads: Vec::new(),
@@ -1259,11 +1301,7 @@ impl ExactDdnnfProgram {
                     "Exact inference error: NaN probability encountered".to_string(),
                 ));
             }
-            if prob < 0.0 {
-                prob = 0.0;
-            } else if prob > 1.0 {
-                prob = 1.0;
-            }
+            prob = prob.clamp(0.0, 1.0);
 
             if grad_true_eq.len() != grad_true_e.len() || grad_false_eq.len() != grad_false_e.len()
             {
@@ -1294,7 +1332,11 @@ impl ExactDdnnfProgram {
         })
     }
 
-    fn compile_provenance_with_gpu(provenance: Provenance, config: GpuConfig) -> Result<Self> {
+    fn compile_provenance_with_gpu(
+        provenance: Provenance,
+        config: GpuConfig,
+        origin: ExactProgramOrigin,
+    ) -> Result<Self> {
         if config.memory_bytes == 0 {
             return Err(XlogError::Kernel(
                 "GPU memory budget must be non-zero".to_string(),
@@ -1375,6 +1417,7 @@ impl ExactDdnnfProgram {
                 queries,
                 random_vars: None,
                 max_var: 0,
+                origin,
                 gpu_config: config,
                 last_compile_profile: None,
             });
@@ -1388,6 +1431,7 @@ impl ExactDdnnfProgram {
                 queries,
                 random_vars: None,
                 max_var: 0,
+                origin,
                 gpu_config: config,
                 last_compile_profile: None,
             });
@@ -1524,6 +1568,7 @@ impl ExactDdnnfProgram {
             queries,
             random_vars: Some(Arc::new(random_vars)),
             max_var: encoding.vars.max_var,
+            origin,
             gpu_config: config,
             last_compile_profile: compile_profile,
         })
@@ -1908,9 +1953,21 @@ pub(crate) fn default_compile_config(
         .checked_add(1)
         .and_then(|v| v.checked_mul(std::mem::size_of::<i32>() as u64))
         .ok_or_else(|| XlogError::Compilation("trail size overflow".to_string()))?;
-    let denom = trail_bytes_per_item.saturating_mul(8).max(1);
+    let denom = trail_bytes_per_item
+        .checked_mul(8)
+        .ok_or_else(|| XlogError::Compilation("trail memory denominator overflow".to_string()))?;
+    if memory_bytes
+        < denom.checked_mul(8).ok_or_else(|| {
+            XlogError::Compilation("minimum frontier memory requirement overflow".to_string())
+        })?
+    {
+        return Err(XlogError::Compilation(format!(
+            "memory budget {} cannot hold the minimum GPU D4 frontier allocation",
+            memory_bytes
+        )));
+    }
     let max_items_by_trail = memory_bytes / denom;
-    let max_frontier_items = max_items_by_trail.clamp(8, 4096).min(u64::from(u32::MAX)) as u32;
+    let max_frontier_items = max_items_by_trail.min(4096).min(u64::from(u32::MAX)) as u32;
 
     // The Phase 1 D4 compiler emits one leaf circuit per frontier item; caps must scale with the
     // maximum frontier size (up to 2^frontier_depth, bounded by max_frontier_items).
@@ -1946,16 +2003,17 @@ pub(crate) fn default_compile_config(
         cdcl_learned_bytes = 4 * 1024 * 1024;
     }
 
-    let mut config = GpuCompileConfig::default();
-    config.frontier_depth = frontier_depth;
-    config.max_frontier_items = max_frontier_items;
-    config.max_depth = 128;
-    config.smooth_node_cap = smooth_node_cap;
-    config.smooth_edge_cap = smooth_edge_cap;
-    config.cdcl_restart_interval = 64;
-    config.cdcl_learned_bytes = cdcl_learned_bytes;
-    config.cdcl_conflict_budget = None;
-    config.incremental_verify = false;
+    let config = GpuCompileConfig {
+        frontier_depth,
+        max_frontier_items,
+        max_depth: 128,
+        smooth_node_cap,
+        smooth_edge_cap,
+        cdcl_restart_interval: 64,
+        cdcl_learned_bytes,
+        cdcl_conflict_budget: None,
+        incremental_verify: false,
+    };
     Ok(config)
 }
 
@@ -2039,9 +2097,7 @@ pub(crate) fn upload_u32(
     let memory = provider.memory();
     let mut buf = memory.alloc::<u32>(host.len())?;
     provider
-        .device()
-        .inner()
-        .htod_sync_copy_into(host, &mut buf)
+        .htod_sync_copy_into_tracked(host, &mut buf)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload u32 buffer: {}", e)))?;
     Ok(buf)
 }
@@ -2053,9 +2109,7 @@ pub(crate) fn upload_u8(
     let memory = provider.memory();
     let mut buf = memory.alloc::<u8>(host.len())?;
     provider
-        .device()
-        .inner()
-        .htod_sync_copy_into(host, &mut buf)
+        .htod_sync_copy_into_tracked(host, &mut buf)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload u8 buffer: {}", e)))?;
     Ok(buf)
 }
@@ -2067,9 +2121,7 @@ pub(crate) fn upload_f64(
     let memory = provider.memory();
     let mut buf = memory.alloc::<f64>(host.len())?;
     provider
-        .device()
-        .inner()
-        .htod_sync_copy_into(host, &mut buf)
+        .htod_sync_copy_into_tracked(host, &mut buf)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload f64 buffer: {}", e)))?;
     Ok(buf)
 }
@@ -2127,7 +2179,7 @@ pub(crate) fn collect_random_vars_device(
         .get_func(FILTER_MODULE, filter_kernels::FILL_U32_IOTA)
         .ok_or_else(|| XlogError::Kernel("fill_u32_iota kernel not found".to_string()))?;
     let block_size = 256u32;
-    let grid = (mask_len + block_size - 1) / block_size;
+    let grid = checked_launch_grid_u32("fill random-var iota", mask_len, block_size)?;
     // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         fill_iota.clone().launch(
@@ -2153,7 +2205,7 @@ pub(crate) fn collect_random_vars_device(
         .ok_or_else(|| XlogError::Kernel("mark_random_vars kernel not found".to_string()))?;
     let mark_n = leaf_len.max(choice_len);
     if mark_n > 0 {
-        let grid = (mark_n + block_size - 1) / block_size;
+        let grid = checked_launch_grid_u32("mark random vars", mark_n, block_size)?;
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             mark_kernel.clone().launch(

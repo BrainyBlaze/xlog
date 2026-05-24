@@ -175,7 +175,7 @@ impl DeviceMemoryResource for DirectCudaResource {
             let mut live = self.live.lock().expect("live map poisoned");
             live.remove(&block.ptr)
         };
-        let slice = removed.ok_or_else(|| ResourceError::UseAfterFree {
+        let slice = removed.ok_or(ResourceError::UseAfterFree {
             generation: block.generation,
         })?;
 

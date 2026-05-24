@@ -1,3 +1,9 @@
+#![allow(
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::needless_range_loop
+)]
+
 //! v0.6.2 WCOJ triangle benchmark baseline.
 //!
 //! Bench-only — no provider, kernel, or runtime changes. Compares

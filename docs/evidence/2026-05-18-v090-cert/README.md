@@ -6,13 +6,21 @@ Goal node: `G090_CERT - Certification And Regression Gates`
 
 Branch: `feat/v090-epistemic-solver-semantics`
 
+2026-05-24 status note: the current worktree has since passed the bounded
+production acceptance matrix recorded in
+`docs/plans/2026-05-24-v090-closure-proposal.md`, including the 206-test
+cross-crate GPU/WCOJ/solver/probability integration pilot and the W5.2 measured
+K-clique pilot. Older PARTIAL or BLOCKED rows below are historical unless they
+refer to release packaging, uncommitted worktree state, final validation rerun,
+or coordinator authorization.
+
 ## Certification Scope
 
-This file records semantic-oracle validation plus partial production-reuse
+This file records semantic-oracle validation plus the current production-reuse
 adapter evidence. The corrected v0.9.0 goal requires GPU-native accepted
-epistemic execution before `G090_CERT` can close. The current fixture layer and
-thin adapters are useful regression evidence, but they are not full
-certification evidence for `M090_CERT.8` or the final release decision.
+epistemic execution before `G090_CERT` can close; the current accepted matrix now
+covers that code path. Final release closure still requires a stable checkpoint,
+the final validation rerun, commit-SHA accounting, and coordinator authorization.
 
 2026-05-20 delta: the same-rule all-operator accepted GPU fixture now feeds
 both production adapters. The solver gates consume one accepted world-view
@@ -151,7 +159,29 @@ component-count, timing, and zero CPU/host fallback checks centralized.
 | `cargo run -q -p xlog-cli --features host-io -- prob examples/v085-language/showcase/06_prob_aggregate_mc/program.xlog --output json` after merging the v0.7.0/v0.8.0/v0.8.5/v0.8.6 main bundle | PASS, MC output emitted `out_degree(1, 2)` |
 | `python scripts/validate_v086_examples.py --output /tmp/v090-v086-compat-validation.json` after merging the v0.7.0/v0.8.0/v0.8.5/v0.8.6 main bundle | PASS, consumer certification PASS, example execution PASS |
 
-## Metric Status
+## Current Metric Status
+
+This table is the current certification ledger for the accepted v0.9.0 matrix.
+The dated table below is retained as historical audit evidence and must not be
+used to reopen GPU/solver/probability blockers unless the relevant code changes.
+
+| Metric | Target | Status | Current evidence |
+|---|---|---|---|
+| M090_CERT.1 semantic golden tests | 100 percent pass | PASS for current acceptance matrix | Focused `xlog-logic` semantic/lowering pilots plus accepted runtime GPT-oracle parity cover EIR, G91, FAEEL, GPT, splitting, examples, world-view, and GPU-plan fixtures. |
+| M090_CERT.2 solver tests | 100 percent pass for GPU-native solver scope | PASS for current acceptance matrix | `gpu_solver_accepted_evidence`, `gpu_solver_production_reuse`, and accepted runtime integration prove GPU CDCL SAT/UNSAT, assumptions, lifecycle, learned-clause reuse, MaxSAT, weighted MaxSAT, scheduler, portfolio, status propagation, and zero CPU search through `GpuCdclSolver`. |
+| M090_CERT.3 parser diagnostics | positive and negative syntax fixtures pass | PASS | `test_epistemic_eir` covers explicit syntax, source-term preservation, and typed nested-epistemic rejection. |
+| M090_CERT.4 compatibility bundle | v0.7.0/v0.8.0/v0.8.5/v0.8.6 pyxlog/DTS cert subset rerun after rebase | PASS | `main` at `bd45229d` is merged into this branch and the v0.8 compatibility validators listed in the closure proposal pass. |
+| M090_CERT.5 formatting | `cargo fmt --check` pass | PASS | Formatting gate passed before the current evidence refresh. |
+| M090_CERT.6 workspace health | agreed cargo test subset pass | PASS for current acceptance matrix | Runtime, logic, solve, prob, integration, v0.8 compatibility, formatting, and diff checks are listed in the current closure proposal. |
+| M090_CERT.7 semantic trace fixtures | GPT traces include generated, accepted, and rejected candidate counts | PASS for current acceptance matrix | `EpistemicGpuSemanticTrace` records generated/propagated/tested/accepted/rejected counts, accepted/rejected candidate indices, typed rejection reasons, CUDA timing, zero CPU fallback counters, and GPT-oracle parity for the certified unary, binary, ternary, quaternary, multi-membership, G91, FAEEL, and split fixtures. |
+| M090_CERT.8 GPU-native evidence | GPU launch counts, kernel timings, and zero CPU fallback counters | PASS for current acceptance matrix | Runtime, integration, solver, and probability pilots record GPU launch/timing evidence, WCOJ/K-clique dispatch, zero CPU candidate/world-view/solver/probability fallback counters, bounded transfer evidence, and accepted source/program exact/provenance paths. |
+| M090_CERT.9 WCOJ evidence | at least one WCOJ-eligible epistemic reduction proves WCOJ planner/runtime dispatch | PASS | Accepted v0.7.0 4-cycle and K5/K6/K7/K8 epistemic reductions certify production WCOJ/K-clique dispatch and fail closed without required dispatch/layout/helper evidence. |
+| M090_CERT.10 nonzero-arity membership | certification includes GPU tuple-key membership evidence for arity >= 1 predicates | PASS for current acceptance matrix | Accepted runtime, solver, and probabilistic evidence covers unary, binary, ternary, quaternary, multi-membership, positive and negated operator cases over existing relation layouts and tuple-key buffers, with row-count-only membership rejected for nonzero arity. |
+| M090_CERT.11 solver production reuse | certification includes traces proving accepted SAT/MaxSAT work used existing GPU solver production paths | PASS for current acceptance matrix | The production adapter requires accepted GPU runtime evidence before calling `GpuCdclSolver`, rejects CPU-oracle-only traces, validates single-result and batch CUDA timing, and records zero CPU search counters. |
+| M090_CERT.12 prob production reuse | certification includes traces proving accepted probabilistic evidence used existing GPU exact/provenance paths | PASS for current acceptance matrix | The production adapter requires accepted GPU runtime evidence before calling `ExactDdnnfProgram` GPU exact/provenance source/program paths, PIR/CNF paths, query/gradient paths, and zero CPU recompute gates. |
+| M090_CERT.13 no parallel engines | source audit reports zero new epistemic-only WCOJ, solver-search, probability-inference, or tuple-store engines in accepted paths | PASS for current acceptance matrix | Production-reuse evidence shows accepted paths reuse existing RIR/WCOJ metadata, relation columns, `GpuCdclSolver`, `GpuCnf`, `ExactDdnnfProgram`, `GpuPirGraph`, and `encode_cnf_gpu`. |
+
+## Historical Metric Status
 
 | Metric | Target | Status | Evidence |
 |---|---|---|---|
@@ -169,9 +199,23 @@ component-count, timing, and zero CPU/host fallback checks centralized.
 | M090_CERT.12 prob production reuse | certification includes traces proving accepted probabilistic evidence used existing GPU exact/provenance paths | PARTIAL | `EpistemicProbProductionAdapter` requires accepted GPU runtime evidence before calling `ExactDdnnfProgram` GPU exact/provenance source/program compile, two-record and accepted split-batch direct source/program exact compile, source/program bounded compile/evaluate with distinct trace counters including source/program-specific exact-query counters, two-record source/program batch compile/evaluate, accepted split-batch source/program compile/evaluate through `EpistemicProbGpuBatchExecutionEvidence` with accepted batch/component counters and aggregate CUDA-event timing validation, split-batch conditioned source/program query and gradient evaluation through `EpistemicProbGpuBatchExecutionEvidence` with accepted batch and component counters, all-binary-operator split-batch conditioned source and parsed-program query plus source and parsed-program gradient evidence with true/false `know`/`possible` assumptions and zero CPU recompute counters, accepted split-batch source/program PIR/CNF encoding through `EpistemicProbGpuBatchExecutionEvidence`, accepted split-batch exact query/gradient evaluation over one already-compiled `ExactDdnnfProgram`, source/program zero-arity and concrete nonzero-arity true/false conditioned evaluation through parsed `Evidence` AST entries with total, negative, source/program-specific, aggregate/source/program nonzero-arity evidence, aggregate/source/program max evidence arity including ternary source, quaternary source, and quaternary parsed-program fixtures, aggregate operator-specific, and source/program-specific operator-conditioned evidence counters including true `know`, true `possible`, false `possible`/`not possible`, and false `know`/`not know` operator evidence, accepted G91/default FAEEL mode-specific evidence counters, two-record positive and negative conditioned source query batches, two-record conditioned program query batches, conditioned source/program gradient evaluation with source/program-specific gradient counters, single-record, two-record, and accepted split-batch `GpuPirGraph`/`GpuPirRoots` upload plus `encode_cnf_gpu` with source/program-specific PIR/CNF counters, and single-record, two-record, and accepted split-batch query/gradient-evaluation APIs, validates accepted single-result evidence with per-phase CUDA-event timing, exposes zero CPU recompute counters, and `EpistemicProbProductionTrace::require_production_metric_eligibility` rejects fixture-only metric traces. Broader probabilistic coverage remains incomplete. |
 | M090_CERT.13 no parallel engines | source audit reports zero new epistemic-only WCOJ, solver-search, probability-inference, or tuple-store engines in accepted paths | PARTIAL | `docs/evidence/2026-05-18-v090-production-reuse-audit/README.md` plus `test_epistemic_production_reuse_audit` source-check the accepted runtime, tuple-membership, solver, and probability paths for reuse of existing RIR/WCOJ metadata, `kclique_skew_scheduled_plan_count`, `certified_skew_scheduled_plans`, production helper relation rewrites, split-batch delegation through `execute_epistemic_gpu_execution_batch_with_trace` and `EpistemicGpuBatchExecutionTrace`, the fail-closed `split_multi_membership_modal_coupling_rejects_gpu_batching` guard, `EpistemicProbGpuBatchExecutionEvidence`, `compile_source_for_gpu_batch_execution_result`, `compile_program_for_gpu_batch_execution_result`, `compile_and_evaluate_source_for_gpu_batch_execution_result`, `compile_and_evaluate_program_for_gpu_batch_execution_result`, `compile_and_evaluate_conditioned_source_for_gpu_batch_execution_result`, `compile_and_evaluate_conditioned_program_for_gpu_batch_execution_result`, `compile_and_evaluate_conditioned_source_with_grads_for_gpu_batch_execution_result`, `compile_and_evaluate_conditioned_program_with_grads_for_gpu_batch_execution_result`, `encode_source_pir_cnf_for_gpu_batch_execution_result`, `encode_program_pir_cnf_for_gpu_batch_execution_result`, `evaluate_for_gpu_batch_execution_result`, `evaluate_gpu_with_grads_for_gpu_batch_execution_result`, `CudaBuffer` relation columns, `GpuCdclSolver`, `GpuCnf`, `ExactDdnnfProgram`, `GpuPirGraph`, and `encode_cnf_gpu`; this is still partial because broader probabilistic and semantic-parity coverage remain blocked. |
 
-## Required GPU-Native Evidence Before Closure
+## Remaining Release Evidence Before Closure
 
-Certification must add evidence for:
+Code-path certification is no longer the active blocker for the current accepted
+matrix. Closure still requires:
+
+- checkpointing the 215-path dirty worktree so sub-goal commit SHAs are stable;
+- rerunning the final agreed validation bundle after that checkpoint;
+- producing the final commit-SHA table and coordinator-facing release decision;
+- coordinator authorization before any push, tag, release-board update, merge, or
+  main-branch mutation.
+
+## Historical Required GPU-Native Evidence Before Closure
+
+The list below is retained as dated audit context. The current accepted matrix is
+tracked by `docs/plans/2026-05-24-v090-closure-proposal.md`.
+
+At the time of the historical audit, certification still needed evidence for:
 
 - production lowering from accepted EIR to executable runtime plans;
 - GPU-resident candidate, world-view, model-membership, and rejection buffers;

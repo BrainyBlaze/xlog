@@ -152,7 +152,7 @@ fn download_n_cols(buf: &CudaBuffer, ncols: usize) -> Vec<Vec<u32>> {
         return cols;
     }
     assert_eq!(buf.arity(), ncols);
-    for c in 0..ncols {
+    for (c, col) in cols.iter_mut().enumerate().take(ncols) {
         let mut bytes = vec![0u8; n * 4];
         unsafe {
             sys::cuMemcpyDtoH_v2(
@@ -162,7 +162,7 @@ fn download_n_cols(buf: &CudaBuffer, ncols: usize) -> Vec<Vec<u32>> {
             );
         }
         for i in 0..n {
-            cols[c].push(u32::from_le_bytes(
+            col.push(u32::from_le_bytes(
                 bytes[i * 4..i * 4 + 4].try_into().unwrap(),
             ));
         }
@@ -239,7 +239,9 @@ fn three_relation_fixture() -> BTreeMap<&'static str, Vec<(u32, u32)>> {
 ///     and the binary path takes over).
 ///   * The output row set for `head_predicate` is identical
 ///     between the two paths (correctness under both).
+///
 /// `head_arity` selects how many output columns to download.
+#[allow(clippy::too_many_arguments)]
 fn assert_dispatch_policy(
     provider: Arc<CudaKernelProvider>,
     memory: &Arc<GpuMemoryManager>,

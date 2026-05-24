@@ -2,6 +2,8 @@
 
 use std::cell::RefCell;
 
+use xlog_core::{Result, XlogError};
+
 use crate::{Clause, Literal, Objective, SolveInstance};
 
 /// Status returned by the solver-service interface.
@@ -35,6 +37,27 @@ pub enum SolverServiceBudget {
 pub struct SolverServiceTrace {
     /// Number of learned clauses received from another service.
     pub learned_clause_transfers: usize,
+    /// CPU assignment candidates inspected by the semantic-oracle facade.
+    pub cpu_assignment_enumerations: u64,
+    /// CPU MaxSAT candidates inspected by the semantic-oracle facade.
+    pub cpu_maxsat_enumerations: u64,
+}
+
+impl SolverServiceTrace {
+    /// Reject attempts to use the CPU semantic-oracle facade as production metric evidence.
+    pub fn require_production_metric_eligibility(&self) -> Result<()> {
+        Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "CPU semantic-oracle solver service".to_string(),
+            context: format!(
+                "SolverService is fixture-only and cannot satisfy production solver metrics; \
+                 cpu_assignment_enumerations={} cpu_maxsat_enumerations={} \
+                 learned_clause_transfers={}",
+                self.cpu_assignment_enumerations,
+                self.cpu_maxsat_enumerations,
+                self.learned_clause_transfers
+            ),
+        })
+    }
 }
 
 /// Result returned by the solver service.
@@ -113,18 +136,14 @@ impl SolverService {
     /// Solve with a bounded search budget.
     pub fn solve_with_budget(&self, budget: SolverServiceBudget) -> SolverServiceResult {
         match budget {
-            SolverServiceBudget::NoSearch => {
-                return SolverServiceResult {
-                    status: SolverServiceStatus::Unknown,
-                    assignment: None,
-                }
-            }
-            SolverServiceBudget::AssignmentLimit(0) => {
-                return SolverServiceResult {
-                    status: SolverServiceStatus::Timeout,
-                    assignment: None,
-                }
-            }
+            SolverServiceBudget::NoSearch => SolverServiceResult {
+                status: SolverServiceStatus::Unknown,
+                assignment: None,
+            },
+            SolverServiceBudget::AssignmentLimit(0) => SolverServiceResult {
+                status: SolverServiceStatus::Timeout,
+                assignment: None,
+            },
             SolverServiceBudget::AssignmentLimit(limit) => self.solve_assignments(Some(limit)),
             SolverServiceBudget::Exhaustive => self.solve_assignments(None),
         }
@@ -160,7 +179,11 @@ impl SolverService {
         let hard_clauses = self.hard_clauses();
 
         if self.instance.objective == Objective::MaxSat {
-            return self.solve_maxsat(search_max, &hard_clauses);
+            return self.solve_maxsat(
+                search_max,
+                limit.is_some() && search_max < max,
+                &hard_clauses,
+            );
         }
 
         for mask in 0..search_max {
@@ -169,12 +192,14 @@ impl SolverService {
                 .iter()
                 .all(|clause| clause.is_satisfied(&assignment))
             {
+                self.record_cpu_assignment_enumerations(mask.saturating_add(1));
                 return SolverServiceResult {
                     status: SolverServiceStatus::Sat,
                     assignment: Some(assignment),
                 };
             }
         }
+        self.record_cpu_assignment_enumerations(search_max);
 
         if limit.is_some() && search_max < max {
             return SolverServiceResult {
@@ -190,7 +215,12 @@ impl SolverService {
         }
     }
 
-    fn solve_maxsat(&self, search_max: u64, hard_clauses: &[Clause]) -> SolverServiceResult {
+    fn solve_maxsat(
+        &self,
+        search_max: u64,
+        timed_out: bool,
+        hard_clauses: &[Clause],
+    ) -> SolverServiceResult {
         let mut best_assignment = None;
         let mut best_score = f64::NEG_INFINITY;
         for mask in 0..search_max {
@@ -206,6 +236,14 @@ impl SolverService {
                 best_score = score;
                 best_assignment = Some(assignment);
             }
+        }
+        self.record_cpu_maxsat_enumerations(search_max);
+
+        if timed_out {
+            return SolverServiceResult {
+                status: SolverServiceStatus::Timeout,
+                assignment: None,
+            };
         }
 
         match best_assignment {
@@ -251,6 +289,16 @@ impl SolverService {
                 assumption_scope: self.active_assumptions(),
             });
         }
+    }
+
+    fn record_cpu_assignment_enumerations(&self, count: u64) {
+        let mut trace = self.trace.borrow_mut();
+        trace.cpu_assignment_enumerations = trace.cpu_assignment_enumerations.saturating_add(count);
+    }
+
+    fn record_cpu_maxsat_enumerations(&self, count: u64) {
+        let mut trace = self.trace.borrow_mut();
+        trace.cpu_maxsat_enumerations = trace.cpu_maxsat_enumerations.saturating_add(count);
     }
 
     fn active_assumptions(&self) -> Vec<Literal> {

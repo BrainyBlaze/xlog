@@ -287,6 +287,63 @@ def test_compiled_relation_training_zero_d2h_gate():
         result.export_compat_result()
 
 
+def test_compiled_relation_training_strict_hot_loop_forbids_cuda_scalar_materialization(monkeypatch):
+    train_on_compiled_relations = getattr(ilp, "train_on_compiled_relations", None)
+    assert train_on_compiled_relations is not None, (
+        "pyxlog.ilp.train_on_compiled_relations must be exported for strict relation-native training"
+    )
+
+    original_int = torch.Tensor.__int__
+
+    def _forbid_cuda_int(self):
+        if self.is_cuda:
+            raise RuntimeError("cuda scalar __int__ forbidden in strict ILP hot loop")
+        return original_int(self)
+
+    monkeypatch.setattr(torch.Tensor, "__int__", _forbid_cuda_int, raising=True)
+
+    source = """
+        pred edge(u32, u32).
+        pred reach(u32, u32).
+        learnable(W_reach) :: reach(X, Y) :- b1(X, Z), b2(Z, Y).
+    """
+    prog = pyxlog.IlpProgramFactory.compile(source, device=0, memory_mb=64)
+    prog.put_relation(
+        "edge",
+        [
+            torch.tensor([1, 2, 3, 4, 5], device="cuda", dtype=torch.int32),
+            torch.tensor([2, 3, 4, 5, 6], device="cuda", dtype=torch.int32),
+        ],
+    )
+
+    config = TrainConfig(
+        step_budget_per_attempt=20,
+        max_attempts=1,
+        tau_start=2.0,
+        tau_floor=0.05,
+        seed=42,
+        strict_gpu_native=True,
+    )
+    result = train_on_compiled_relations(
+        prog,
+        "W_reach",
+        {
+            "reach": [
+                torch.tensor([1, 2, 3, 4], device="cuda", dtype=torch.int32),
+                torch.tensor([3, 4, 5, 6], device="cuda", dtype=torch.int32),
+            ],
+        },
+        {},
+        config,
+    )
+
+    strict_result_type = getattr(ilp, "StrictTrainResult", None)
+    assert strict_result_type is not None
+    assert isinstance(result, strict_result_type)
+    assert result.strict_gpu_native is True
+    assert result.compat_materialized is False
+
+
 def test_d2h_gate_with_negatives():
     """D2H gate holds even with negative examples."""
     source = """

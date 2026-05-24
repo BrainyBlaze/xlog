@@ -6,25 +6,35 @@ Goal node: `G090_CLOSE - Closure Proposal After v0.8.0 Rebase`
 
 Branch: `feat/v090-epistemic-solver-semantics`
 
-Audit scope: current semantic-oracle branch after the GPU-native correction.
+2026-05-24 status note: `docs/plans/2026-05-24-v090-closure-proposal.md`
+supersedes the older BLOCKED code-path assessment below for the current
+worktree. Current pilots now cover the bounded production GPU/WCOJ, solver, and
+probabilistic acceptance matrix, but the release decision remains
+`HOLD_FOR_FIXES` because the worktree still has uncommitted changes and cannot
+yet provide final sub-goal commit SHAs.
 
-## Objective Audit
+Audit scope: historical semantic-oracle branch after the GPU-native correction.
+For current worktree closure status, use
+`docs/plans/2026-05-24-v090-closure-proposal.md`.
+
+## Historical Objective Audit
 
 The corrected goal document makes v0.9.0 closeable only after accepted epistemic
 execution is fully GPU-native after parsing/planning. CPU-only or fixture-only
 execution is allowed as semantic-oracle scaffolding, but it is not an acceptable
 release path.
 
-The current branch still cannot produce a closure proposal. The
-v0.7.0/v0.8.0/v0.8.5/v0.8.6 bundle has now been merged into this feature branch and
-the v0.8.6 compatibility validator has passed, but closure remains blocked on
-the incomplete v0.9 GPU-native certification scope:
+At the time of this historical audit, the branch could not produce a closure
+proposal. The current worktree has since passed the bounded production
+GPU/WCOJ, solver, and probabilistic acceptance matrix recorded in
+`docs/plans/2026-05-24-v090-closure-proposal.md`. Current closure is blocked on
+release packaging, not on the previously missing GPU-native code paths:
 
-- `G090_GPU`: production GPU-native epistemic execution, WCOJ-backed reductions
-  where eligible, GPU-resident world-view/candidate/rejection buffers, and zero
-  CPU fallback counters.
-- `G090_CLOSE`: final closure still requires the remaining v0.9 certification
-  reruns and an approved closure proposal after the GPU-native blockers clear.
+- `G090_CERT`: code/runtime pilots are green for the accepted matrix, but the
+  final validation bundle still needs to be rerun after checkpointing.
+- `G090_CLOSE`: final closure still requires stable sub-goal commit SHAs, the
+  final commit-SHA table, a coordinator-facing release decision, and explicit
+  coordinator authorization before any release workflow mutation.
 
 2026-05-20 update: the same-rule all-operator accepted GPU fixture now gates
 solver lifecycle, learned-clause reuse, MaxSAT, portfolio, probabilistic
@@ -371,7 +381,28 @@ Post-merge compatibility validation:
 | `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution -- --nocapture` | PASS, 122 passed, 0 failed |
 | `python scripts/validate_v086_examples.py --output /tmp/v090-v086-compat-validation.json` | PASS, consumer certification PASS, examples PASS |
 
-## Corrected Gate Table
+## Current Gate Table
+
+This table is the current closure ledger. The dated gate table below is retained
+only as historical audit context and must not be used to reopen code-path
+blockers without a relevant code change.
+
+| Goal | Current Status | Evidence |
+|---|---|---|
+| G090_PRE | PASS | Baseline, ownership, and compatibility surfaces exist under `docs/evidence/2026-05-18-v090-pre/`. |
+| G090_EIR | PASS | EIR syntax, explicit modal operators, tuple-term preservation, typed unsupported lowering diagnostics, and executable-plan lowering are covered by focused pilots. |
+| G090_G91 | PASS | Explicit G91 mode and self-supported `possible` compatibility path are covered by semantic and accepted GPU runtime evidence. |
+| G090_FAEEL | PASS | Default foundedness fixtures reject unsupported circular support and allow independently founded support. |
+| G090_GPT | PASS | Generate/propagate/test traces include candidate counts, accepted/rejected counts, rejection reasons, and accepted GPU parity fixtures. |
+| G090_SPLIT | PASS | Valid split components execute through GPU runtime batch paths; invalid modal coupling rejects before unsafe batching. |
+| G090_GPU | PASS for current acceptance matrix | Runtime and integration pilots cover GPU buffers, kernel timing, bounded transfer evidence, WCOJ/K-clique dispatch, nonzero tuple-key membership, row-count guard, and zero CPU fallback gates. |
+| G090_SOLVER | PASS for current acceptance matrix | Accepted runtime evidence gates GPU CDCL SAT/UNSAT, assumptions, learned clauses, MaxSAT, scheduler, portfolio, status propagation, and zero CPU search through production APIs. |
+| G090_PROB | PASS for current acceptance matrix | Accepted world-view evidence gates GPU exact/provenance, PIR/CNF, conditioned query, gradient, and incremental circuit paths through production APIs with zero CPU recompute. |
+| G090_CERT | PASS for code/runtime pilots, HOLD for release packaging | Semantic, runtime, solver, probability, integration, compatibility, fmt, and diff checks pass; final release packaging cannot close while changes remain uncommitted. |
+| G090_DOC | PASS for current evidence set | The guide and evidence files now distinguish current accepted-path evidence from dated historical blockers. |
+| G090_CLOSE | HOLD_FOR_FIXES | Main is integrated, but the dirty worktree prevents final sub-goal commit SHA accounting and a merge-ready recommendation. |
+
+## Historical Gate Table
 
 | Goal | Current Status | Evidence |
 |---|---|---|
@@ -437,9 +468,9 @@ query/gradient evidence with one accepted `know`, `possible`, `not possible`,
 and `not know` counter, thirty-two aggregate CUDA-event pairs, and zero CPU
 probability recomputation; the
 single-result not-possible and possible/not-know evidence also now reaches
-source/program PIR/CNF plus already-compiled exact query/gradient adapters. These are
-bounded production-reuse additions only; the BLOCKED/PARTIAL statuses above are
-unchanged.
+source/program PIR/CNF plus already-compiled exact query/gradient adapters. These
+were bounded production-reuse additions in the historical audit; the current
+gate table above supersedes the dated BLOCKED/PARTIAL statuses.
 
 ## Current Semantic-Oracle Evidence
 
@@ -617,12 +648,28 @@ The branch contains useful scaffolding:
   GPU runtime execution path, with zero CPU recomposition counters, rather than
   a split-only WCOJ or tuple-store engine.
 
-This evidence should be retained as oracle coverage for the required GPU-native
-implementation, but it cannot be used as release-close evidence.
+This historical oracle evidence remains useful for regression coverage, but it
+has been superseded as release-close evidence by the current gate table above.
 
-## Missing GPU-Native Evidence
+## Remaining Release Evidence
 
-Closure remains blocked until certification includes all of the following:
+The current accepted matrix has GPU-native code-path evidence. Closure remains
+blocked until the release evidence is stable:
+
+- checkpoint the 215-path dirty worktree so every sub-goal can be tied to a
+  stable commit SHA;
+- rerun the final agreed validation bundle after that checkpoint;
+- produce the final commit-SHA table and coordinator-facing release decision;
+- obtain coordinator authorization before any push, tag, release-board update,
+  merge, or main-branch mutation.
+
+## Historical Missing GPU-Native Evidence
+
+The list below is retained as historical audit context. It was superseded by the
+current closure proposal and the current gate table above.
+
+At the time of the historical audit, closure remained blocked until
+certification included all of the following:
 
 - broader nonzero GPU launch counts and kernel timings for actual stable-model
   tuple membership population beyond the current unary/possible/not-possible/
@@ -660,8 +707,10 @@ change was performed.
 
 ## Decision
 
-Release decision: `HOLD_FOR_GPU_NATIVE_CERTIFICATION`.
+Current release decision: `HOLD_FOR_FIXES`.
 
-The current branch is still incomplete. The next closing work must complete the
-corrected `G090_GPU` production runtime/WCOJ/GPU path and then rerun the full
-v0.9 certification set before any closure proposal.
+Historical release decision: `HOLD_FOR_GPU_NATIVE_CERTIFICATION`.
+
+At the time of this historical audit, the branch was still incomplete. The
+current worktree status is tracked by
+`docs/plans/2026-05-24-v090-closure-proposal.md`.

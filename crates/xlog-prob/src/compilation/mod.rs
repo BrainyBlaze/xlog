@@ -14,7 +14,7 @@ use xlog_cuda::CudaKernelProvider;
 use xlog_solve::{GpuCdclConfig, GpuCnf};
 
 use crate::compilation::gpu_cache::{GpuCircuitCache, GpuCircuitCacheHandle};
-use crate::gpu::GpuXgcf;
+use crate::gpu::{GpuCircuitBuilder, GpuCircuitLayout, GpuXgcf};
 
 pub mod disk_cache;
 pub mod gpu_cache;
@@ -89,9 +89,7 @@ impl DeviceRandomVarList {
         let mut list = memory.alloc::<u32>(host.len())?;
         if !host.is_empty() {
             provider
-                .device()
-                .inner()
-                .htod_sync_copy_into(host, &mut list)
+                .htod_sync_copy_into_tracked(host, &mut list)
                 .map_err(|e| {
                     XlogError::Kernel(format!("DeviceRandomVarList upload failed: {}", e))
                 })?;
@@ -113,6 +111,48 @@ impl DeviceRandomVarList {
     pub fn list(&self) -> &TrackedCudaSlice<u32> {
         &self.list
     }
+}
+
+fn upload_disk_artifact_for_verification(
+    artifact: &disk_cache::CircuitArtifact,
+    provider: &Arc<CudaKernelProvider>,
+) -> Result<GpuXgcf> {
+    let memory = provider.memory().clone();
+
+    macro_rules! upload {
+        ($field:expr, $ty:ty, $name:literal) => {{
+            let mut device = memory.alloc::<$ty>($field.len())?;
+            provider
+                .htod_sync_copy_into_tracked($field, &mut device)
+                .map_err(|e| {
+                    XlogError::Kernel(format!("disk cache verify upload {} failed: {}", $name, e))
+                })?;
+            device
+        }};
+    }
+
+    let builder = GpuCircuitBuilder {
+        node_type: upload!(&artifact.node_type, u8, "node_type"),
+        child_offsets: upload!(&artifact.child_offsets, u32, "child_offsets"),
+        child_indices: upload!(&artifact.child_indices, u32, "child_indices"),
+        lit: upload!(&artifact.lit, i32, "lit"),
+        decision_var: upload!(&artifact.decision_var, u32, "decision_var"),
+        decision_child_false: upload!(&artifact.decision_child_false, u32, "decision_child_false"),
+        decision_child_true: upload!(&artifact.decision_child_true, u32, "decision_child_true"),
+    };
+    let layout = GpuCircuitLayout {
+        num_nodes: artifact.num_nodes,
+        num_edges: artifact.num_edges,
+        num_levels: artifact.num_levels,
+        level_offsets: upload!(&artifact.level_offsets, u32, "level_offsets"),
+        level_nodes: upload!(&artifact.level_nodes, u32, "level_nodes"),
+        root: artifact.root,
+        max_var: artifact.max_var,
+        num_nodes_device: None,
+        num_edges_device: None,
+    };
+
+    GpuXgcf::from_device(builder, layout, provider)
 }
 
 /// Compile CNF on GPU, then verify equivalence with GPU CDCL.
@@ -215,12 +255,14 @@ pub fn compile_gpu_d4_and_verify_cached(
     }
 
     // Build the disk cache key (we know compile_needed == 1 at this point).
-    // Uses the caller-supplied canonical PIR hash (process-independent) instead of the
-    // GPU CNF hash (which varies per process due to PirNodeId non-determinism).
+    // The canonical PIR hash keeps semantically stable cache identity, while the encoded CNF
+    // hash guards symmetric conditioned programs whose PIR shape is identical but whose CNF is not.
     let cache_key = if compile_needed == 1 {
-        if let Some(cnf_hash) = canonical_cnf_hash {
+        if let Some(canonical_hash) = canonical_cnf_hash {
             let config_hash = hash_compile_config(config);
             let random_vars_hash = hash_random_vars(random_vars, provider)?;
+            let gpu_cnf_hash = read_gpu_cnf_hash(&key, provider)?;
+            let cnf_hash = combine_disk_cnf_hash(canonical_hash, gpu_cnf_hash);
             let sm = detect_compute_capability(provider)?;
             Some(disk_cache::CircuitCacheKey {
                 cnf_hash,
@@ -242,6 +284,35 @@ pub fn compile_gpu_d4_and_verify_cached(
         if let Ok(Some(artifact)) = disk_cache::read_artifact(disk_key) {
             #[cfg(debug_assertions)]
             eprintln!("[xlog-prob] compile_gpu_d4_and_verify_cached: disk cache hit");
+            let circuit = upload_disk_artifact_for_verification(&artifact, provider)?;
+            let verifier_decision_var_limit = if random_vars.is_empty() {
+                &cnf.num_vars
+            } else {
+                decision_var_limit
+            };
+            let cdcl = cdcl_config_from_compile(config)?;
+            let t_verify = if profiling {
+                Some(Instant::now())
+            } else {
+                None
+            };
+            validate_equivalence_gpu_gated(
+                cnf,
+                verifier_decision_var_limit,
+                &circuit,
+                provider,
+                GpuEquivalenceConfig {
+                    cdcl,
+                    reuse_workspace: config.incremental_verify,
+                },
+                handle.compile_needed_device(),
+            )?;
+            if let Some(t0) = t_verify {
+                provider.device().synchronize().map_err(|e| {
+                    XlogError::Kernel(format!("sync after disk cache verify: {}", e))
+                })?;
+                profile.verify_sec = t0.elapsed().as_secs_f64();
+            }
             cache.restore_from_host_arrays(&mut handle, &artifact)?;
             provider
                 .device()
@@ -449,7 +520,7 @@ pub fn compile_gpu_d4_and_verify_cached(
         if has_free_vars { "DISABLED" } else { "ENABLED" },
     );
     if has_free_vars {
-        cache.store_free_var_mask(&mut handle, &free_var_mask)?;
+        cache.store_free_var_mask(&handle, &free_var_mask)?;
         #[cfg(debug_assertions)]
         {
             if !profiling {
@@ -589,6 +660,27 @@ fn fnv1a_u64(bytes: &[u8]) -> u64 {
         h = h.wrapping_mul(FNV_PRIME);
     }
     h
+}
+
+fn combine_disk_cnf_hash(canonical_hash: u64, gpu_cnf_hash: u64) -> u64 {
+    let mut buf = Vec::with_capacity(16);
+    buf.extend_from_slice(&canonical_hash.to_le_bytes());
+    buf.extend_from_slice(&gpu_cnf_hash.to_le_bytes());
+    fnv1a_u64(&buf)
+}
+
+fn read_gpu_cnf_hash(
+    hash: &TrackedCudaSlice<u64>,
+    provider: &Arc<CudaKernelProvider>,
+) -> Result<u64> {
+    let host: Vec<u64> = provider
+        .device()
+        .inner()
+        .dtoh_sync_copy(hash)
+        .map_err(|e| XlogError::Kernel(format!("dtoh GPU CNF hash for disk cache key: {}", e)))?;
+    host.first()
+        .copied()
+        .ok_or_else(|| XlogError::Kernel("empty GPU CNF hash for disk cache key".to_string()))
 }
 
 /// Hash the compile config fields that affect circuit topology output.

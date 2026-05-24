@@ -1,5 +1,11 @@
 //! Python bindings for XLOG via PyO3.
 #![allow(missing_docs)] // PyO3 #[pyclass] / #[pymethods] generate pub items without docs
+#![allow(
+    clippy::large_enum_variant,
+    clippy::needless_range_loop,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
 
 use std::collections::{HashMap, HashSet};
 use std::os::raw::{c_char, c_void};

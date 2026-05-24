@@ -305,6 +305,7 @@ fn test_groupby_multi_key_device_keys() {
     let result = provider
         .groupby_multi_agg(&buffer, &[0, 1], &[(2, AggOp::Sum)])
         .unwrap();
+    let stats = provider.host_transfer_stats();
 
     let k1 = provider.download_column::<u32>(&result, 0).unwrap();
     let k2 = provider.download_column::<u32>(&result, 1).unwrap();
@@ -314,7 +315,6 @@ fn test_groupby_multi_key_device_keys() {
     assert_eq!(k2, vec![10, 20]);
     assert_eq!(sums, vec![12, 24]);
 
-    let stats = provider.host_transfer_stats();
     assert!(
         stats.dtoh_bytes <= 8,
         "unexpected device-to-host transfers: {} bytes",

@@ -739,7 +739,7 @@ mod tests {
 
         // Assignments should be in [0.3, 0.7]
         for &val in &state.assignments {
-            assert!(val >= 0.3 && val <= 0.7);
+            assert!((0.3..=0.7).contains(&val));
         }
     }
 

@@ -185,7 +185,8 @@ fn demo_social_network_analysis() {
     let mut stats_mgr = StatsManager::new();
 
     // Register relations with realistic cardinalities
-    let rel_configs: Vec<(&str, u64, Vec<(usize, u64, i64, i64)>)> = vec![
+    type RelConfig = (&'static str, u64, Vec<(usize, u64, i64, i64)>);
+    let rel_configs: Vec<RelConfig> = vec![
         (
             "user",
             1_000_000,
@@ -272,13 +273,10 @@ fn demo_social_network_analysis() {
         display_cost_comparison("Predicate Pushdown", &before, &after);
 
         // Verify predicate was pushed down
-        match &optimized {
-            RirNode::Join { left, .. } => {
-                if matches!(left.as_ref(), RirNode::Filter { .. }) {
-                    println!("\n  SUCCESS: Filter predicate pushed into join's left child");
-                }
+        if let RirNode::Join { left, .. } = &optimized {
+            if matches!(left.as_ref(), RirNode::Filter { .. }) {
+                println!("\n  SUCCESS: Filter predicate pushed into join's left child");
             }
-            _ => {}
         }
     }
 }
@@ -904,9 +902,7 @@ fn demo_business_intelligence() {
             // Add distinct counts for join columns
             let distinct = if *name == "fact_sales" {
                 // Fact table FK columns have lower distinct than dimension PKs
-                match num_cols {
-                    _ => *cardinality / 100,
-                }
+                *cardinality / 100
             } else {
                 *cardinality // Dimension table PKs are fully distinct
             };
@@ -1241,7 +1237,7 @@ fn demo_recursive_patterns() {
                 .rules_by_scc
                 .iter()
                 .flatten()
-                .filter(|r| &r.head == *pred)
+                .filter(|r| r.head == *pred)
                 .collect();
 
             if !rules.is_empty() {

@@ -37,7 +37,7 @@ pub(crate) fn export_arrow_device(
 
     let tensors = match dlpack_columns.downcast::<PySequence>() {
         Ok(seq) => {
-            let mut out = Vec::with_capacity(seq.len()? as usize);
+            let mut out = Vec::with_capacity(seq.len()?);
             for item in seq.try_iter()? {
                 out.push(dlpack_from_py(&item?)?);
             }

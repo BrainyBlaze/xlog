@@ -322,7 +322,7 @@ impl LogicRelationSession {
                 "apply_relation_delta_batch expects a sequence of update dictionaries",
             )
         })?;
-        let mut batch: Vec<(String, RelationDelta)> = Vec::with_capacity(seq.len()? as usize);
+        let mut batch: Vec<(String, RelationDelta)> = Vec::with_capacity(seq.len()?);
         let mut relation_names: Vec<String> = Vec::new();
         for item in seq.try_iter()? {
             let item = item?;
@@ -677,7 +677,7 @@ fn collect_dlpack_columns(
         .downcast::<PySequence>()
         .map_err(|_| PyValueError::new_err(type_error_message.to_string()))?;
 
-    let mut tensors: Vec<DlpackManagedTensor> = Vec::with_capacity(seq.len()? as usize);
+    let mut tensors: Vec<DlpackManagedTensor> = Vec::with_capacity(seq.len()?);
     for item in seq.try_iter()? {
         let item = item?;
         tensors.push(dlpack_from_py(&item)?);

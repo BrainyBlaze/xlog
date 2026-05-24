@@ -59,7 +59,7 @@ fn setup_executor_with_facts(
         ("c0".to_string(), ScalarType::U32),
         ("c1".to_string(), ScalarType::U32),
     ]);
-    for (name, _rel_id) in compiler.rel_ids() {
+    for name in compiler.rel_ids().keys() {
         if executor.store().get(name).is_none() {
             let empty = provider
                 .create_empty_buffer(default_schema.clone())

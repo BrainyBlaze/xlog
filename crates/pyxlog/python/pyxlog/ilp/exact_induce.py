@@ -11,11 +11,20 @@ the same scoring in a single batched GPU pass with one D2H transfer.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 
 import torch
 
+try:
+    from pyxlog.ilp.exceptions import IlpConfigError
+except Exception:  # pragma: no cover - supports direct module loading in tests.
+    class IlpConfigError(ValueError):
+        pass
+
 logger = logging.getLogger(__name__)
+
+_ALLOW_PYTHON_REFERENCE_ENV = "XLOG_ALLOW_PYTHON_ILP_REFERENCE"
 
 # ── Topology definitions ─────────────────────────────────────────────────
 
@@ -77,7 +86,7 @@ def induce_exact(
     negative_arg1: torch.Tensor | None = None,
     k_per_topology: int = 2,
     deterministic: bool = True,
-    backend: str = "python",
+    backend: str = "native",
     strict_per_topology: bool = False,
 ) -> ExactInductionResult:
     """Exhaustively score all (left, right) pairs across 4 topologies.
@@ -97,10 +106,11 @@ def induce_exact(
         negative_arg0, negative_arg1: Optional 1-D device tensors of negative pairs.
         k_per_topology: How many top candidates to keep per topology.
         deterministic: Unused in Python prototype (determinism is inherent).
-        backend: ``"python"`` uses the reference prototype implementation (the
+        backend: ``"native"`` dispatches to the Phase 1 ``xlog-induce`` engine
+            and is the default production path. ``"python"`` is a gated
+            reference prototype implementation (the
             host-orchestrated ``set_rule_mask``/``evaluate``/``batch_fact_membership_device``
-            loop). ``"native"`` dispatches to the Phase 1 ``xlog-induce`` engine
-            when available; raises ``NotImplementedError`` until that engine lands.
+            loop).
         strict_per_topology: (``backend="python"`` only.) When ``True``, zero
             out the other topology masks before scoring each topology, so each
             ``(topology, L, R)`` pair's coverage is computed in isolation —
@@ -121,6 +131,12 @@ def induce_exact(
         ExactInductionResult with up to k_per_topology × 4 candidates.
     """
     if backend == "python":
+        if os.environ.get(_ALLOW_PYTHON_REFERENCE_ENV) != "1":
+            raise IlpConfigError(
+                "induce_exact backend='python' is a host-orchestrated reference "
+                "scorer; set XLOG_ALLOW_PYTHON_ILP_REFERENCE=1 only for explicit "
+                "parity or compatibility validation"
+            )
         pass  # fall through to the reference implementation below
     elif backend == "native":
         return _induce_exact_native(

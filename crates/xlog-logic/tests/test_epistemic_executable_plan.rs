@@ -2,9 +2,13 @@ use std::collections::BTreeMap;
 
 use xlog_core::{RelId, ScalarType};
 use xlog_ir::rir::MultiwayPlan;
-use xlog_ir::{EirEpistemicMode, ExecutionPlan, RirNode};
+use xlog_ir::{
+    EirEpistemicMode, EirEpistemicOp, EirTerm, EpistemicSolverCapability,
+    EpistemicSolverStatusKind, ExecutionPlan, RirNode,
+};
 use xlog_logic::epistemic::{
     compile_epistemic_gpu_execution, compile_epistemic_gpu_execution_with_stats_snapshot,
+    plan_epistemic_gpu_execution,
 };
 use xlog_logic::{parse_program, Compiler};
 use xlog_stats::{
@@ -27,6 +31,76 @@ fn epistemic_executable_plan_lowers_reduced_program_through_runtime_plan() {
     assert!(executable.gpu_plan.cpu_fallbacks.is_zero());
     assert_eq!(executable.gpu_plan.epistemic_literals.len(), 1);
     assert_eq!(compiled_rule_count(&executable.reduced_runtime_plan), 3);
+}
+
+#[test]
+fn epistemic_gpu_plan_exports_solver_service_contract_for_all_modal_assumptions() {
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = g91
+        pred seed(u32).
+        pred known_gate(u32).
+        pred possible_gate(u32).
+        pred not_known_gate(u32).
+        pred not_possible_gate(u32).
+        pred accepted(u32).
+
+        accepted(X) :-
+            seed(X),
+            know known_gate(X),
+            possible possible_gate(X),
+            not know not_known_gate(X),
+            not possible not_possible_gate(X).
+        "#,
+    )
+    .unwrap();
+
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("parsed all-operator program should lower into GPU execution plan");
+    let contract = &executable.gpu_plan.solver_contract;
+
+    executable
+        .gpu_plan
+        .validate_solver_contract()
+        .expect("parsed lowering must export a valid solver service contract");
+    assert_eq!(
+        contract.required_capabilities,
+        vec![
+            EpistemicSolverCapability::IncrementalSat,
+            EpistemicSolverCapability::AssumptionLifecycle,
+            EpistemicSolverCapability::LearnedClauseTransfer,
+            EpistemicSolverCapability::WeightedMaxSat,
+            EpistemicSolverCapability::PortfolioSatMaxSat,
+        ]
+    );
+    assert_eq!(
+        contract.required_statuses,
+        vec![
+            EpistemicSolverStatusKind::Sat,
+            EpistemicSolverStatusKind::Unsat,
+            EpistemicSolverStatusKind::Unknown,
+            EpistemicSolverStatusKind::Timeout,
+        ]
+    );
+
+    let bindings = &contract.assumption_bindings;
+    assert_eq!(bindings.len(), 4);
+    let expected = [
+        ("known_gate", EirEpistemicOp::Know, false),
+        ("possible_gate", EirEpistemicOp::Possible, false),
+        ("not_known_gate", EirEpistemicOp::Know, true),
+        ("not_possible_gate", EirEpistemicOp::Possible, true),
+    ];
+    for (index, (binding, (predicate, op, negated))) in bindings.iter().zip(expected).enumerate() {
+        assert_eq!(binding.literal_index, index);
+        assert_eq!(binding.reduction_index, 0);
+        assert_eq!(binding.predicate, predicate);
+        assert_eq!(binding.arity, 1);
+        assert_eq!(binding.terms, vec![EirTerm::Variable("X".to_string())]);
+        assert_eq!(binding.op, op);
+        assert_eq!(binding.negated, negated);
+    }
+    assert!(executable.gpu_plan.cpu_fallbacks.is_zero());
 }
 
 #[test]
@@ -113,6 +187,109 @@ fn faeel_gpu_execution_rejects_self_supported_possible_before_runtime_dispatch()
 }
 
 #[test]
+fn faeel_gpu_execution_rejects_mutual_possible_support_cycle_before_runtime_dispatch() {
+    let program = parse_program(
+        r#"
+        pred p().
+        pred q().
+        p() :- possible q().
+        q() :- possible p().
+        "#,
+    )
+    .unwrap();
+
+    let err = plan_epistemic_gpu_execution(&program)
+        .expect_err("default FAEEL planning must reject unfounded mutual modal support");
+
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
+            assert_eq!(construct, "FAEEL foundedness guard");
+            assert!(context.contains("modal support cycle"));
+            assert!(context.contains("possible"));
+        }
+        other => panic!("expected FAEEL modal-cycle foundedness rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn faeel_gpu_execution_rejects_longer_possible_support_cycle_before_runtime_dispatch() {
+    let program = parse_program(
+        r#"
+        pred p().
+        pred q().
+        pred r().
+        p() :- possible q().
+        q() :- possible r().
+        r() :- possible p().
+        "#,
+    )
+    .unwrap();
+
+    let err = plan_epistemic_gpu_execution(&program)
+        .expect_err("default FAEEL planning must reject longer unfounded modal support cycles");
+
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
+            assert_eq!(construct, "FAEEL foundedness guard");
+            assert!(context.contains("modal support cycle"));
+            assert!(context.contains("possible"));
+        }
+        other => panic!("expected FAEEL longer modal-cycle foundedness rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn faeel_gpu_execution_rejects_mixed_modal_support_cycle_before_runtime_dispatch() {
+    let program = parse_program(
+        r#"
+        pred p().
+        pred q().
+        p() :- know q().
+        q() :- possible p().
+        "#,
+    )
+    .unwrap();
+
+    let err = plan_epistemic_gpu_execution(&program)
+        .expect_err("default FAEEL planning must reject mixed modal support cycles");
+
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
+            assert_eq!(construct, "FAEEL foundedness guard");
+            assert!(context.contains("modal support cycle"));
+            assert!(context.contains("know") || context.contains("possible"));
+        }
+        other => panic!("expected FAEEL mixed modal-cycle foundedness rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn faeel_gpu_execution_allows_longer_possible_cycle_with_independent_support() {
+    let program = parse_program(
+        r#"
+        pred seed().
+        pred p().
+        pred q().
+        pred r().
+        seed().
+        p() :- seed().
+        q() :- seed().
+        r() :- seed().
+        p() :- possible q().
+        q() :- possible r().
+        r() :- possible p().
+        "#,
+    )
+    .unwrap();
+
+    let gpu_plan = plan_epistemic_gpu_execution(&program)
+        .expect("default FAEEL planning should allow independently founded modal cycles");
+
+    assert_eq!(gpu_plan.epistemic_literals.len(), 3);
+    assert!(gpu_plan.cpu_fallbacks.is_zero());
+}
+
+#[test]
 fn epistemic_constraint_reaches_typed_gpu_boundary() {
     let program = parse_program(
         r#"
@@ -136,6 +313,26 @@ fn epistemic_constraint_reaches_typed_gpu_boundary() {
 }
 
 #[test]
+fn epistemic_gpu_execution_rejects_unbound_variable_epistemic_only_output_before_rir_lowering() {
+    let program = parse_program(
+        r#"
+        pred p(u32).
+        pred q(u32).
+        p(X) :- possible q(X).
+        "#,
+    )
+    .unwrap();
+
+    let err = compile_epistemic_gpu_execution(&program)
+        .expect_err("variable-bound epistemic-only reductions must fail before RIR lowering");
+
+    match err {
+        xlog_core::XlogError::UnsafeVariable(variable) => assert_eq!(variable, "X"),
+        other => panic!("expected typed unsafe-variable rejection, got {other:?}"),
+    }
+}
+
+#[test]
 fn faeel_gpu_execution_allows_self_possible_with_independent_founded_support() {
     let program = parse_program(
         r#"
@@ -153,6 +350,72 @@ fn faeel_gpu_execution_allows_self_possible_with_independent_founded_support() {
 
     assert_eq!(executable.gpu_plan.mode, EirEpistemicMode::Faeel);
     assert_eq!(executable.gpu_plan.epistemic_literals.len(), 1);
+}
+
+#[test]
+fn faeel_gpu_execution_allows_nonzero_self_possible_with_tuple_founded_support() {
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred p(u32).
+        seed(7).
+        p(S) :- seed(S).
+        p(X) :- seed(X), possible p(X).
+        "#,
+    )
+    .unwrap();
+
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("tuple-founded FAEEL support should permit nonzero self possible");
+
+    assert_eq!(executable.gpu_plan.mode, EirEpistemicMode::Faeel);
+    assert_eq!(executable.gpu_plan.epistemic_literals.len(), 1);
+    assert_eq!(executable.gpu_plan.tuple_membership_bindings.len(), 1);
+    assert!(executable.gpu_plan.cpu_fallbacks.is_zero());
+}
+
+#[test]
+fn faeel_gpu_execution_allows_ground_nonzero_self_possible_with_tuple_founded_support() {
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred p(u32).
+        seed(7).
+        p(S) :- seed(S).
+        p(7) :- seed(7), possible p(7).
+        "#,
+    )
+    .unwrap();
+
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("ground tuple-founded FAEEL support should permit nonzero self possible");
+
+    assert_eq!(executable.gpu_plan.mode, EirEpistemicMode::Faeel);
+    assert_eq!(executable.gpu_plan.epistemic_literals.len(), 1);
+    assert_eq!(executable.gpu_plan.tuple_membership_bindings.len(), 1);
+    assert!(executable.gpu_plan.cpu_fallbacks.is_zero());
+}
+
+#[test]
+fn faeel_gpu_execution_allows_ground_possible_with_variable_headed_independent_support() {
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred p(u32).
+        seed(7).
+        p(X) :- seed(X).
+        p(7) :- possible p(7).
+        "#,
+    )
+    .unwrap();
+
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("ground FAEEL tuple should inherit independent support from p(X) :- seed(X)");
+
+    assert_eq!(executable.gpu_plan.mode, EirEpistemicMode::Faeel);
+    assert_eq!(executable.gpu_plan.epistemic_literals.len(), 1);
+    assert_eq!(executable.gpu_plan.tuple_membership_bindings.len(), 1);
+    assert!(executable.gpu_plan.cpu_fallbacks.is_zero());
 }
 
 #[test]

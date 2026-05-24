@@ -2,8 +2,8 @@ use xlog_logic::epistemic::{EpistemicWorld, EpistemicWorldView};
 use xlog_prob::epistemic::{
     conditional_probability_from_logs, AcceptedWorldViewEvidence, CircuitUpdateMode,
     CompilerAdapterKind, CompilerAdapterSupport, CompilerInputFormat, CompilerOutputFormat,
-    EpistemicAssumption, EpistemicCircuit, EpistemicProbabilisticRole, KnowledgeCompilerAdapter,
-    EPISTEMIC_PROBABILITY_TOLERANCE,
+    EpistemicAssumption, EpistemicCircuit, EpistemicEvidenceTerm, EpistemicProbabilisticRole,
+    KnowledgeCompilerAdapter, EPISTEMIC_PROBABILITY_TOLERANCE,
 };
 
 #[test]
@@ -107,6 +107,35 @@ fn changed_assumption_replaces_active_evidence_without_rebuilding_circuit() {
 }
 
 #[test]
+fn full_rebuild_fingerprint_distinguishes_nonzero_arity_evidence_terms() {
+    let gate_7 =
+        EpistemicAssumption::known_tuple("gate", vec![EpistemicEvidenceTerm::integer(7)], true);
+    let gate_9 =
+        EpistemicAssumption::known_tuple("gate", vec![EpistemicEvidenceTerm::integer(9)], true);
+    let conditioned = vec![(gate_7.clone(), 0.7), (gate_9.clone(), 0.9)];
+    let mut circuit_7 = EpistemicCircuit::compile(
+        0.25,
+        conditioned.clone(),
+        KnowledgeCompilerAdapter::external_c2d(),
+    )
+    .unwrap();
+    let mut circuit_9 =
+        EpistemicCircuit::compile(0.25, conditioned, KnowledgeCompilerAdapter::external_c2d())
+            .unwrap();
+
+    let update_7 = circuit_7.apply_assumption(gate_7).unwrap();
+    let update_9 = circuit_9.apply_assumption(gate_9).unwrap();
+
+    assert_eq!(update_7.mode, CircuitUpdateMode::FullRebuild);
+    assert_eq!(update_9.mode, CircuitUpdateMode::FullRebuild);
+    assert_eq!(update_7.compile_count, 2);
+    assert_eq!(update_9.compile_count, 2);
+    assert_ne!(update_7.circuit_fingerprint, update_9.circuit_fingerprint);
+    assert!(circuit_7.query_probability().within_tolerance(0.7));
+    assert!(circuit_9.query_probability().within_tolerance(0.9));
+}
+
+#[test]
 fn external_ddnnf_text_compiler_adapter_is_explicitly_represented() {
     let adapter = KnowledgeCompilerAdapter::external_ddnnf_text("d4-compatible-ddnnf");
 
@@ -190,4 +219,20 @@ fn evidence_conditioning_consumes_accepted_world_view() {
         vec!["know:rain/0=true"]
     );
     assert!(circuit.query_probability().within_tolerance(0.75));
+}
+
+#[test]
+fn accepted_world_view_evidence_rejects_unvalidated_assumption() {
+    let world_view =
+        EpistemicWorldView::from_worlds(vec![EpistemicWorld::new().with_fact("rain", 0)]).unwrap();
+
+    let err = AcceptedWorldViewEvidence::new(
+        &world_view,
+        vec![EpistemicAssumption::known("sun", 0, true)],
+    )
+    .expect_err(
+        "assumption absent from the accepted world view must not become probability evidence",
+    );
+
+    assert!(format!("{err}").contains("not accepted by world view"));
 }

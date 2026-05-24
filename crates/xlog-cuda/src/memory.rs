@@ -34,6 +34,7 @@ use crate::CudaDevice;
 ///     [`TrackedCudaSlice`] frees through the runtime on drop.
 ///   * [`GpuMemoryManager::alloc_raw`] is the explicit raw-bytes
 ///     entry point (no typed view), also runtime-routed.
+///
 /// Both budgets apply: the manager's local `MemoryBudget` AND any
 /// `GlobalDeviceBudget` stacked above the runtime's underlying
 /// resource.
@@ -153,6 +154,11 @@ impl<T: cudarc::driver::DeviceRepr> TrackedCudaSlice<T> {
         self.raw_ptr
     }
 
+    /// Stable address of the memory manager that owns this allocation.
+    pub fn memory_manager_ptr_value(&self) -> usize {
+        Arc::as_ptr(&self.manager) as usize
+    }
+
     /// Borrow the underlying [`DeviceBlock`] for runtime-backed
     /// allocations. Returns `None` for legacy cudarc-backed
     /// slices ([`Backing::Cudarc`]) — those are not tracked by
@@ -258,7 +264,7 @@ impl<'a, T: cudarc::driver::DeviceRepr> IntoKernelParamStorage for &'a TrackedCu
     }
 }
 
-impl<'a, T: cudarc::driver::DeviceRepr> IntoKernelParamStorage for &'a mut TrackedCudaSlice<T> {
+impl<T: cudarc::driver::DeviceRepr> IntoKernelParamStorage for &mut TrackedCudaSlice<T> {
     type Storage = DeviceParamStorage<'static>;
 
     fn into_kernel_param_storage(self) -> Self::Storage {

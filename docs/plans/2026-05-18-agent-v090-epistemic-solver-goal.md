@@ -5,7 +5,7 @@
 **Worktree:** `.worktrees/v090-epistemic`.
 **Base:** `main` at or after `656a8c62` (`docs(roadmap): focus v080 on dts ml python productization`).
 **Integration order:** v0.9.0 work may proceed in parallel, but it must not merge before v0.8.0. After v0.8.0 lands, rebase or merge `main` and rerun all compatibility gates.
-**Status:** Dispatch-ready goal document. Implementation begins only after the worktree is created and baseline status is recorded. CPU-only or fixture-only epistemic execution is not closeable for v0.9.0.
+**Status:** Dispatch-ready goal document with GPU-native production-path scope amendment. Implementation begins only after the worktree is created and baseline status is recorded. CPU-only or fixture-only epistemic execution is not closeable for v0.9.0.
 
 ## 0. Process Model
 
@@ -37,8 +37,10 @@ The release is successful only if:
 - self-supported epistemic conclusions are allowed only in the explicit G91 compatibility mode, not in the default founded mode;
 - accepted epistemic execution is fully GPU-native after parsing/planning;
 - epistemic programs route through production lowering/runtime dispatch and the WCOJ/GPU path where eligible;
-- solver services integrate through GPU-native interfaces for assumptions, learned clauses, MaxSAT, and portfolio execution;
-- probabilistic integration remains coherent on the existing GPU-native exact path;
+- nonzero-arity epistemic model-membership checks run on GPU over existing relation layouts and tuple buffers, not row-count-only or CPU tuple scans;
+- solver services integrate through existing GPU-native solver production paths for assumptions, learned clauses, MaxSAT, and portfolio execution;
+- probabilistic integration remains coherent on the existing GPU-native exact/provenance path;
+- v0.9.0 reuses the existing WCOJ, solver, and probabilistic engines instead of creating parallel epistemic-specific engines;
 - v0.8.0 pyxlog/DTS-DLM compatibility remains green after rebasing.
 
 ## 1.1 Semantic Contract
@@ -83,14 +85,26 @@ The accepted v0.9.0 target is:
 - Runtime dispatch launches GPU kernels for epistemic candidate generation, propagation, world-view validation, and accepted result materialization.
 - WCOJ planner eligibility, layout construction, scheduling, and helper-splitting decisions apply to epistemic reductions where the reduced ordinary program is WCOJ-eligible.
 - Candidate assumptions, world-view bitsets, model-membership checks, and rejection reasons are represented in GPU-resident buffers during the hot path.
-- SAT/MaxSAT assumptions, learned-clause transfer, and portfolio solving run through GPU-native solver services or documented GPU kernels/adapters.
+- Nonzero-arity model-membership checks compare stable-model tuple keys on GPU using the existing relation column/layout machinery, sorted labels, and device row buffers. Zero-arity row-count checks alone are not sufficient for closure.
+- SAT/MaxSAT assumptions, learned-clause transfer, and portfolio solving run through existing GPU-native solver services or documented adapters into those services.
 - Probabilistic evidence from accepted world views flows into the existing GPU-native exact/provenance path without CPU-only recomputation in the accepted execution path.
+- Solver and probabilistic fixture modules may remain only as semantic-oracle scaffolding. Accepted release paths must call the existing production solver/probability cores.
 
-Allowed CPU responsibilities are parsing, static planning, launch orchestration, diagnostics formatting, and final result transfer. CPU fallback for candidate enumeration, world-view validation, SAT/MaxSAT search, or probabilistic recomputation is a blocker unless the fallback is limited to a negative test or a semantic oracle that is not used by accepted release paths.
+Allowed CPU responsibilities are parsing, static planning, launch orchestration, diagnostics formatting, and final result transfer. CPU fallback for candidate enumeration, nonzero-arity tuple membership, world-view validation, SAT/MaxSAT search, or probabilistic recomputation is a blocker unless the fallback is limited to a negative test or a semantic oracle that is not used by accepted release paths.
 
 Existing non-epistemic programs must continue to use the normal parser, stratifier, RIR lowering, runtime, probabilistic, and WCOJ paths where eligible. Agent B must extend that production path for epistemic execution without weakening the non-epistemic path.
 
 Current-branch correction: an implementation that only has EIR, semantic fixtures, CPU-side solver enumeration, and probabilistic evidence fixtures is not complete. It may be preserved as semantic-oracle evidence, but it cannot close G090_GPU, G090_SOLVER, G090_PROB, G090_CERT, or G090_CLOSE until the GPU-native path is implemented and measured.
+
+### 1.3 Production-Path Reuse Locks
+
+The following reuse locks are part of the v0.9.0 acceptance contract:
+
+- **Runtime/WCOJ reuse.** Epistemic reductions must compile into existing RIR and dispatch through existing runtime, WCOJ, K-clique, helper-split, runtime-histogram, and cost-gated routing machinery where eligible. A separate epistemic WCOJ planner, relation store, or dispatch engine is out of scope.
+- **Solver reuse.** Accepted SAT, MaxSAT, assumptions, learned-clause, and portfolio execution must be implemented by wiring epistemic candidates into existing `xlog-solve` GPU CNF/CDCL/solver production paths or thin adapters over those paths. CPU exhaustive assignment enumeration is semantic-oracle evidence only.
+- **Probabilistic reuse.** Accepted world-view evidence must flow into existing `xlog-prob` GPU exact/provenance/PIR/knowledge-compilation production paths. A bounded epistemic probability circuit may be kept only as a fixture oracle and must not be the accepted execution path.
+- **Tuple-membership reuse.** Nonzero-arity stable-model membership must be checked on GPU against existing relation layouts, device columns, tuple-key encodings, sorted labels, and materialized row buffers. Row-count-only membership is valid only for zero-arity predicates or negative fixtures.
+- **Evidence reuse.** Certification must include counters or traces proving the above production paths executed, and a source audit proving no parallel epistemic-only solver, probability, WCOJ, or tuple-store engine was introduced.
 
 ## 2. Scope Boundaries
 
@@ -103,6 +117,7 @@ Current-branch correction: an implementation that only has EIR, semantic fixture
 - Epistemic splitting.
 - Full GPU-native epistemic runtime execution.
 - WCOJ-backed epistemic reductions where the reduced ordinary program is eligible.
+- GPU-native nonzero-arity stable-model tuple membership using existing relation layouts and device buffers.
 - GPU-resident world-view, candidate, and rejection buffers.
 - Integration of epistemic reasoning with probabilistic inference.
 - Solver-service integration with xlog-logic constraints.
@@ -118,7 +133,9 @@ Current-branch correction: an implementation that only has EIR, semantic fixture
 - pyxlog public API changes unless explicitly coordinated with Agent A.
 - relation delta session APIs, M37-A+B bridge helpers, native exact-induction consumer integration.
 - WCOJ kernel rewrites or CUDA Graph changes unless a v0.9 semantic test proves a correctness blocker.
+- Reimplementation of WCOJ/K-clique planning, helper splitting, runtime histograms, relation storage, tuple membership storage, solver search, or probabilistic inference as epistemic-only parallel engines.
 - CPU-only accepted execution for epistemic candidate generation, world-view validation, SAT/MaxSAT search, or probabilistic recomputation.
+- Row-count-only model-membership checks for nonzero-arity predicates in accepted execution.
 - Fixture-only epistemic semantics as a release substitute.
 - Any push, tag, release-board update, or merge to `main` without explicit coordinator authorization.
 
@@ -135,9 +152,9 @@ Current-branch correction: an implementation that only has EIR, semantic fixture
 | ROADMAP area | v0.9.0 goal node | Agent responsibility |
 |---|---|---|
 | xlog-logic | G090_EIR, G090_G91, G090_FAEEL, G090_GPT, G090_SPLIT | Parser/logic semantics and IR mapping |
-| Runtime/WCOJ/GPU | G090_GPU | production lowering, GPU-resident world-view execution, WCOJ-backed reductions |
-| Solver Services | G090_SOLVER | GPU-native SAT assumptions, incremental solving, learned clauses, MaxSAT, portfolio dispatch |
-| Probabilistic Reasoning | G090_PROB | accepted world-view evidence on GPU-native exact/provenance path |
+| Runtime/WCOJ/GPU | G090_GPU | production lowering, GPU-resident world-view execution, WCOJ-backed reductions, nonzero-arity tuple membership over existing layouts |
+| Solver Services | G090_SOLVER | GPU-native SAT assumptions, incremental solving, learned clauses, MaxSAT, portfolio dispatch through existing solver core |
+| Probabilistic Reasoning | G090_PROB | accepted world-view evidence on existing GPU-native exact/provenance path |
 | Documentation and Tests | G090_CERT, G090_DOC | Golden semantic-oracle fixtures, GPU certs, solver certs, guide |
 
 ## 4. Goal Hierarchy
@@ -313,6 +330,8 @@ BG090 - xlog v0.9.0 epistemic and solver semantics
 - Q090_GPU.4: Which kernels perform Generate-Propagate-Test, world-view validation, and materialization?
 - Q090_GPU.5: How are host transfers bounded to input loading, launch parameters, diagnostics, and final results?
 - Q090_GPU.6: How is GPU execution measured in tests and certification evidence?
+- Q090_GPU.7: How are nonzero-arity stable-model tuple keys matched on GPU using existing relation layouts and device columns?
+- Q090_GPU.8: Which evidence proves the implementation reused existing WCOJ/K-clique/helper-split/runtime-histogram paths instead of a parallel epistemic route?
 
 **Metrics.**
 
@@ -326,6 +345,9 @@ BG090 - xlog v0.9.0 epistemic and solver semantics
 | M090_GPU.6 launch evidence | certification logs include nonzero GPU launch counts and kernel timing for epistemic execution |
 | M090_GPU.7 parity | GPU output matches semantic oracle on all G91, FAEEL, GPT, and splitting fixtures |
 | M090_GPU.8 transfer budget | host-device transfers are bounded and reported; no per-candidate host round trip in hot path |
+| M090_GPU.9 nonzero-arity membership | at least two fixtures with arity >= 1 check stable-model tuple membership on GPU over existing relation layouts |
+| M090_GPU.10 row-count guard | nonzero-arity membership fails closed if only row-count metadata is available |
+| M090_GPU.11 production path reuse | source audit and runtime counters prove existing RIR/runtime/WCOJ/K-clique/helper-split paths executed where eligible |
 
 **Expected targets.**
 
@@ -337,7 +359,7 @@ BG090 - xlog v0.9.0 epistemic and solver semantics
 
 ### G090_SOLVER - Solver-Service Integration
 
-**Goal.** Integrate GPU-native solver services with xlog-logic constraints for the purpose of enabling incremental SAT, assumptions, learned-clause transfer, MaxSAT, and portfolio solving under a clear interface.
+**Goal.** Integrate GPU-native solver services with xlog-logic constraints for the purpose of enabling incremental SAT, assumptions, learned-clause transfer, MaxSAT, and portfolio solving under a clear interface, by reusing the existing solver production core rather than creating an epistemic-only search engine.
 
 **Questions.**
 
@@ -347,6 +369,8 @@ BG090 - xlog v0.9.0 epistemic and solver semantics
 - Q090_SOLVER.4: How are soft constraints represented for MaxSAT?
 - Q090_SOLVER.5: How does GPU portfolio solving execute candidate SAT/MaxSAT work without CPU search in the accepted path?
 - Q090_SOLVER.6: How are SAT, UNSAT, UNKNOWN, and TIMEOUT propagated to the epistemic candidate state machine?
+- Q090_SOLVER.7: Which existing `xlog-solve` GPU CNF/CDCL/solver paths are used for accepted epistemic candidates?
+- Q090_SOLVER.8: Which fixture-only CPU solver code remains, and how is it prevented from entering accepted release paths?
 
 **Metrics.**
 
@@ -360,6 +384,8 @@ BG090 - xlog v0.9.0 epistemic and solver semantics
 | M090_SOLVER.6 failure modes | UNSAT/UNKNOWN/TIMEOUT represented distinctly |
 | M090_SOLVER.7 assumption lifecycle | push, solve, retract, and reuse trace proves no assumption leak between candidates |
 | M090_SOLVER.8 CPU search ban | accepted solver path records zero CPU exhaustive assignment enumeration |
+| M090_SOLVER.9 production solver reuse | accepted SAT/MaxSAT fixtures execute through existing GPU CNF/CDCL/solver production APIs or thin adapters over them |
+| M090_SOLVER.10 fixture isolation | CPU semantic-oracle solver facade is gated so it cannot satisfy closure metrics |
 
 **Expected targets.**
 
@@ -370,7 +396,7 @@ BG090 - xlog v0.9.0 epistemic and solver semantics
 
 ### G090_PROB - Probabilistic And Circuit Integration
 
-**Goal.** Integrate epistemic reasoning with probabilistic inference for the purpose of preserving coherent query semantics across deterministic, epistemic, and probabilistic layers.
+**Goal.** Integrate epistemic reasoning with probabilistic inference for the purpose of preserving coherent query semantics across deterministic, epistemic, and probabilistic layers, by feeding accepted world-view evidence into the existing GPU-native exact/provenance production path.
 
 **Questions.**
 
@@ -378,6 +404,8 @@ BG090 - xlog v0.9.0 epistemic and solver semantics
 - Q090_PROB.2: Can circuits be updated incrementally when epistemic assumptions change?
 - Q090_PROB.3: Which external compiler adapters are necessary for v0.9.0?
 - Q090_PROB.4: How is probabilistic evidence conditioned on accepted world views without bypassing epistemic validation?
+- Q090_PROB.5: Which existing `xlog-prob` exact/provenance/PIR/knowledge-compilation APIs consume accepted world-view evidence?
+- Q090_PROB.6: How is fixture-only epistemic probability code prevented from replacing the production exact path?
 
 **Metrics.**
 
@@ -390,6 +418,8 @@ BG090 - xlog v0.9.0 epistemic and solver semantics
 | M090_PROB.5 evidence conditioning | probabilistic integration consumes accepted world views, not raw unvalidated guesses |
 | M090_PROB.6 GPU exact integration | accepted world-view evidence updates the GPU-native exact/provenance path |
 | M090_PROB.7 CPU recompute ban | accepted probabilistic epistemic path records zero CPU-only probability recomputation |
+| M090_PROB.8 production prob reuse | accepted probabilistic fixtures execute through existing GPU exact/provenance/PIR/knowledge-compilation APIs |
+| M090_PROB.9 fixture isolation | bounded epistemic probability fixtures are marked oracle-only and cannot satisfy closure metrics |
 
 ### G090_CERT - Certification And Regression Gates
 
@@ -408,6 +438,10 @@ BG090 - xlog v0.9.0 epistemic and solver semantics
 | M090_CERT.7 semantic trace fixtures | Generate-Propagate-Test traces include generated, accepted, and rejected candidate counts |
 | M090_CERT.8 GPU-native evidence | certification evidence includes GPU launch counts, kernel timings, and zero CPU fallback counters |
 | M090_CERT.9 WCOJ evidence | at least one WCOJ-eligible epistemic reduction proves WCOJ planner/runtime dispatch |
+| M090_CERT.10 nonzero-arity membership | certification includes GPU tuple-key membership evidence for arity >= 1 predicates |
+| M090_CERT.11 solver production reuse | certification includes traces proving accepted SAT/MaxSAT work used existing GPU solver production paths |
+| M090_CERT.12 prob production reuse | certification includes traces proving accepted probabilistic evidence used existing GPU exact/provenance paths |
+| M090_CERT.13 no parallel engines | source audit reports zero new epistemic-only WCOJ, solver-search, probability-inference, or tuple-store engines in accepted paths |
 
 ### G090_DOC - Documentation
 
@@ -453,6 +487,9 @@ BG090 - xlog v0.9.0 epistemic and solver semantics
 | KPI090.10 Probabilistic coherence | epistemic/probabilistic fixtures pass on GPU-native exact path within documented tolerance |
 | KPI090.11 v0.8 compatibility after rebase | v0.8 pyxlog/DTS compatibility subset remains green |
 | KPI090.12 Release hygiene | no unapproved merge, push, tag, or v0.8-owned API drift |
+| KPI090.13 Nonzero-arity membership | arity >= 1 epistemic membership fixtures pass on GPU over existing relation layouts |
+| KPI090.14 Production-path reuse | certification proves existing runtime/WCOJ, solver, and probabilistic production paths were reused |
+| KPI090.15 Fixture containment | semantic-oracle fixtures remain useful but cannot satisfy release closure metrics |
 
 ## 7. Worktree Setup
 
@@ -490,6 +527,9 @@ Halt and ask the coordinator if:
 - a semantic design requires changing pyxlog public APIs owned by v0.8.0;
 - a solver integration requires a new external dependency not already accepted by the project;
 - an implementation attempts to close with CPU-only or fixture-only epistemic execution;
+- an implementation introduces a parallel epistemic-only WCOJ, relation-store, solver-search, probability-inference, or tuple-membership engine instead of reusing existing production paths;
+- nonzero-arity tuple membership cannot be proven on GPU over existing relation layouts;
+- accepted solver or probabilistic execution cannot be traced through existing production APIs;
 - GPU-native execution cannot be proven with launch counters, kernel timings, and zero CPU fallback counters;
 - a correctness fixture conflicts with existing documented semantics;
 - a metric needs to be weakened or redefined;

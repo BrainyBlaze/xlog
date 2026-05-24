@@ -5,6 +5,7 @@ COMMENT = _{ "//" ~ (!"\n" ~ ANY)* }
 
 // Identifiers
 ident = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHANUMERIC | "_")* }
+ident_continue = _{ ASCII_ALPHANUMERIC | "_" }
 // Variables: uppercase letter followed by alphanumerics, OR anonymous wildcard "_"
 anonymous = @{ "_" }
 variable = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHANUMERIC | "_")* }
@@ -74,7 +75,7 @@ arith_expr = { arith_term ~ (arith_op_add ~ arith_term)* }
 is_expr = { variable ~ "is" ~ arith_expr }
 
 // Body literals
-epistemic_op = { "know" | "possible" }
+epistemic_op = @{ ("know" | "possible") ~ !ident_continue }
 unsupported_nested_epistemic_atom = { epistemic_op ~ epistemic_op ~ atom }
 negated_unsupported_nested_epistemic_atom = { "not" ~ unsupported_nested_epistemic_atom }
 epistemic_atom = { epistemic_op ~ atom }

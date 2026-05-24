@@ -127,8 +127,8 @@ where
             }
             // Check edge (j, depth) exists for all j < depth.
             let mut ok = true;
-            for j in 0..depth {
-                let vj = binding[j].unwrap();
+            for (j, maybe_vj) in binding.iter().enumerate().take(depth) {
+                let vj = maybe_vj.unwrap();
                 let e_idx = edge_idx(j, depth, K);
                 if !edge_sets[e_idx].contains(&(vj, v)) {
                     ok = false;
@@ -252,12 +252,12 @@ fn download_k6_u32(buf: &CudaBuffer) -> Vec<[u32; 6]> {
         return Vec::new();
     }
     let mut cols: Vec<Vec<u8>> = (0..6).map(|_| vec![0u8; n * 4]).collect();
-    for c in 0..6 {
+    for (c, col_bytes) in cols.iter_mut().enumerate().take(6) {
         unsafe {
             sys::cuMemcpyDtoH_v2(
-                cols[c].as_mut_ptr() as *mut _,
+                col_bytes.as_mut_ptr() as *mut _,
                 *buf.column(c).unwrap().device_ptr(),
-                cols[c].len(),
+                col_bytes.len(),
             );
         }
     }
@@ -295,12 +295,12 @@ fn download_k6_u64(buf: &CudaBuffer) -> Vec<[u64; 6]> {
         return Vec::new();
     }
     let mut cols: Vec<Vec<u8>> = (0..6).map(|_| vec![0u8; n * 8]).collect();
-    for c in 0..6 {
+    for (c, col_bytes) in cols.iter_mut().enumerate().take(6) {
         unsafe {
             sys::cuMemcpyDtoH_v2(
-                cols[c].as_mut_ptr() as *mut _,
+                col_bytes.as_mut_ptr() as *mut _,
                 *buf.column(c).unwrap().device_ptr(),
-                cols[c].len(),
+                col_bytes.len(),
             );
         }
     }

@@ -11,6 +11,7 @@ from pyxlog.ilp import (
     IlpCandidateError,
     IlpTrainingError,
 )
+from pyxlog.ilp import trainer as trainer_mod
 
 
 def test_train_config_frozen():
@@ -34,6 +35,16 @@ def test_train_config_defaults():
     assert cfg.max_numeric_failures == 3
     assert cfg.device == 0
     assert cfg.memory_mb == 512
+
+
+def test_strict_gpu_native_requires_torch_cuda(monkeypatch):
+    monkeypatch.setattr(trainer_mod.torch.cuda, "is_available", lambda: False)
+
+    try:
+        trainer_mod._validate_strict_config(TrainConfig(strict_gpu_native=True))
+        assert False, "strict GPU-native config must reject missing torch CUDA"
+    except IlpConfigError as err:
+        assert "strict_gpu_native requires torch CUDA" in str(err)
 
 
 def test_train_config_custom():
