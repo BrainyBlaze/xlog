@@ -17,7 +17,7 @@ xlog-runtime.workspace = true
 cudarc.workspace = true
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.8"
 xlog-ir.workspace = true
 xlog-logic.workspace = true
 

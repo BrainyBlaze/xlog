@@ -28,7 +28,7 @@ serde_json = "1"
 cudarc = { workspace = true }
 # Criterion drives the WCOJ triangle bench. Dev-dep only —
 # `cargo test --workspace` does not pull this in for tests.
-criterion = "0.5"
+criterion = "0.8"
 
 [[bench]]
 name = "wcoj_triangle_bench"

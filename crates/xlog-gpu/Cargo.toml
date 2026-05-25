@@ -18,7 +18,7 @@ xlog-logic.workspace = true
 xlog-runtime.workspace = true
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.8"
 serial_test = "3.0"
 
 [[bench]]
