@@ -348,6 +348,7 @@ impl super::CudaKernelProvider {
     ) -> Result<arrow::record_batch::RecordBatch> {
         use arrow::array::*;
         use arrow::datatypes::{Field, Schema as ArrowSchema};
+        use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 
         let num_rows = self.device_row_count(buffer)?;
 
@@ -457,7 +458,8 @@ impl super::CudaKernelProvider {
             arrays.push(array);
         }
 
-        arrow::record_batch::RecordBatch::try_new(arrow_schema, arrays)
+        let options = RecordBatchOptions::new().with_row_count(Some(num_rows));
+        RecordBatch::try_new_with_options(arrow_schema, arrays, &options)
             .map_err(|e| XlogError::Kernel(format!("Failed to create RecordBatch: {}", e)))
     }
 

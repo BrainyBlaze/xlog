@@ -2,4 +2,9 @@
 
 #pragma epistemic_mode = g91
 
+pred fact().
+pred accepted().
+
+fact().
+
 accepted() :- possible fact().

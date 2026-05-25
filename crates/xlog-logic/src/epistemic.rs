@@ -836,7 +836,7 @@ pub fn compile_epistemic_gpu_execution_with_stats_snapshot(
 ) -> Result<EpistemicExecutablePlan> {
     let gpu_plan = plan_epistemic_gpu_execution(program)?;
     require_single_epistemic_output_relation(&gpu_plan)?;
-    let reduced_program = reduced_ordinary_program(program);
+    let reduced_program = reduce_epistemic_program_to_ordinary(program);
     let mut compiler = Compiler::new();
     let reduced_runtime_plan =
         compiler.compile_program_with_stats_snapshot(&reduced_program, stats_snapshot)?;
@@ -980,7 +980,12 @@ fn final_output_columns_for_eir(eir: &EirProgram) -> Option<Vec<usize>> {
     }
 }
 
-fn reduced_ordinary_program(program: &Program) -> Program {
+/// Return the ordinary runtime program produced after epistemic GPU planning.
+///
+/// Epistemic literals are removed only for the reduced production runtime
+/// dispatch; callers must still plan and certify the explicit epistemic GPU
+/// contract before using this reduced program.
+pub fn reduce_epistemic_program_to_ordinary(program: &Program) -> Program {
     let mut reduced = program.clone();
 
     for rule in &mut reduced.rules {

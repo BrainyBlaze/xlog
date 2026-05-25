@@ -36,9 +36,15 @@ fn g91_compatibility_example_accepts_possible_support() {
         "../../../examples/epistemic/02-g91-compatibility.xlog"
     ))
     .unwrap();
-    let BodyLiteral::Epistemic(lit) = &program.rules[0].body[0] else {
-        panic!("expected epistemic body literal");
-    };
+    let lit = program
+        .rules
+        .iter()
+        .flat_map(|rule| rule.body.iter())
+        .find_map(|lit| match lit {
+            BodyLiteral::Epistemic(lit) => Some(lit),
+            _ => None,
+        })
+        .expect("expected epistemic body literal");
     let interpretation = EpistemicInterpretation::new().with_possible("fact", 0);
 
     assert_eq!(
@@ -93,6 +99,22 @@ fn splitting_example_recomposes_source_rule_order() {
 
     let split = split_epistemic_program(&program).unwrap();
 
-    assert_eq!(split.components.len(), 2);
-    assert_eq!(split.recomposed_rule_indices(), vec![0, 1]);
+    let epistemic_components = split
+        .components
+        .iter()
+        .filter(|component| {
+            component.rule_indices.iter().any(|idx| {
+                program.rules[*idx]
+                    .body
+                    .iter()
+                    .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
+            })
+        })
+        .count();
+
+    assert_eq!(epistemic_components, 2);
+    assert_eq!(
+        split.recomposed_rule_indices(),
+        (0..program.rules.len()).collect::<Vec<_>>()
+    );
 }

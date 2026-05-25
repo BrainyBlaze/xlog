@@ -97,13 +97,13 @@ Predecessor evidence:
 |---|---|---|---|
 | M090_DOC.1 epistemic guide | guide explains EIR, G91, FAEEL, GPT, splitting | PASS for oracle | `docs/epistemic-solver-semantics-guide.md`. |
 | M090_DOC.2 solver guide | guide explains GPU-native assumptions, incremental SAT, MaxSAT, portfolio dispatch, and failure states | PASS for current acceptance matrix | Guide documents the CPU oracle facade as non-production evidence, accepted GPU CDCL production adapter slices, accepted split-batch lifecycle, all-binary-operator split-batch lifecycle plus all-binary split-batch learned-clause reuse and MaxSAT, learned-clause reuse, MaxSAT, MaxSAT search pruning, weighted MaxSAT encoding/search, generalized MaxSAT scheduling, portfolio evidence with batch/component counters, quaternary solver nonzero-arity SAT evidence, accepted G91/default FAEEL mode-specific solver trace counters, and mixed unary and binary operator-result lifecycle evidence including `possible`, `not possible`, and binary `not know`. |
-| M090_DOC.3 examples | at least one runnable example per implemented major semantic mode | PASS for oracle | `examples/epistemic/` and `test_epistemic_examples`: 5/5 passed. |
+| M090_DOC.3 examples | at least one runnable example per implemented major semantic mode | PASS | `examples/epistemic/`, `test_epistemic_examples`, and `xlog run` pilot `test_xlog_run_epistemic_examples`: 5/5 examples execute through the production CLI route. |
 | M090_DOC.4 roadmap sync | ROADMAP v0.9.0 rows updated only at closure, not prematurely marked done | PASS | No `ROADMAP.md` or board edits in this slice. |
 | M090_DOC.5 GPU/WCOJ execution | guide documents the production GPU-native and WCOJ-backed epistemic execution path | PASS for current acceptance matrix | Guide documents the current bounded accepted GPU/WCOJ runtime path, v0.7.0 4-cycle and K5/K6/K7/K8 dispatch evidence, aggregate split-batch zero CPU recomposition, zero per-candidate host-round-trip trace evidence, split binary operator GPT parity, split all-binary-operator GPT parity, mixed same-rule `know`/`possible`, negated `not know`/`not possible`, all-operator membership GPU-vs-GPT parity, fail-closed split multi-membership modal-coupling rejection before GPU batching, GPU tuple-membership/final-materialization path, solver/probability production adapter slices, accepted G91/default FAEEL mode-specific solver/probability trace counters, source/program-specific PIR/CNF, source/program-specific exact-query, source/program-specific conditioned-gradient, source/program-specific conditioned-evidence, source/program-specific operator-conditioned evidence, source and parsed-program quaternary nonzero-arity evidence, and operator-specific probabilistic evidence counters. |
 
 ## Coordination Notes
 
-- Epistemic examples are run by the fixture harness, not production `xlog run`.
+- Epistemic examples are run by both the semantic fixture harness and production `xlog run`.
 - This documentation evidence is part of the final closure matrix through
   `docs/plans/2026-05-24-v090-closure-proposal.md`; it is not external
   release-operation authorization.

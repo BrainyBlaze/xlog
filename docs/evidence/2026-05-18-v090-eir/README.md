@@ -40,10 +40,10 @@ Predecessor evidence: `docs/evidence/2026-05-18-v090-pre/README.md`
 |---|---|---|---|
 | M090_EIR.1 AST/EIR nodes | explicit representation committed | PASS | AST and EIR files listed above, including preserved `EirTerm` metadata. |
 | M090_EIR.2 parser tests | positive and negative syntax fixtures pass | PASS | `test_parse_epistemic_*` and `test_epistemic_eir` positive/negative diagnostics. |
-| M090_EIR.3 lowering boundary | EIR-to-GPU-executable boundary documented | SUPERSEDED | Current docs identify the boundary and plan contract, but runtime GPU lowering is missing. |
+| M090_EIR.3 lowering boundary | EIR-to-GPU-executable boundary documented | PASS | Current docs identify the boundary and plan contract; accepted high-level programs route through the epistemic GPU runtime while direct raw RIR lowering remains a typed rejection boundary. |
 | M090_EIR.4 diagnostics | unsupported constructs return typed errors | PASS | `UnsupportedEpistemicConstruct` tests for nested literal, RIR boundary, and unsupported epistemic integrity constraints. |
 | M090_EIR.5 explicit operators | `know`, `possible`, and `not know` equivalents represented without ad hoc string rewrites | PASS | AST/EIR preserve operators and atom terms explicitly. |
-| M090_EIR.6 production route | accepted epistemic forms have a production lowering route; rejected forms are explicit | SUPERSEDED | `plan_epistemic_gpu_execution` builds a GPU-plan contract; direct RIR/runtime lowering still rejects epistemic literals. |
+| M090_EIR.6 production route | accepted epistemic forms have a production lowering route; rejected forms are explicit | PASS | `xlog-gpu::LogicProgram` routes accepted epistemic programs through `compile_epistemic_gpu_execution` / split execution and the production GPU runtime; direct raw RIR lowering still rejects epistemic literals. |
 | M090_EIR.7 no DTS regression | v0.8 pyxlog compatibility tests still pass or are not touched | PENDING_REBASE | `cargo check -p pyxlog` was a pre-rebase proxy; v0.8 compatibility rerun is still required. |
 
 ## Coordination Notes

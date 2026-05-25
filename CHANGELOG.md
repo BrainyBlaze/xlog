@@ -21,6 +21,9 @@ v0.8.9 UCR diagnostic surfaces.
   G91, FAEEL, Generate-Propagate-Test execution, epistemic splitting, GPU-native
   executable plans, solver-service integration, MaxSAT, GPU portfolio solving,
   and probabilistic epistemic evidence paths.
+- Added production `xlog run` pilots for `examples/epistemic/*.xlog`, covering
+  accepted EIR, G91, FAEEL, GPT, and split epistemic programs through the
+  high-level GPU runtime route.
 - Added the v0.8.7 Living-World Diagnostics architecture document covering
   induced-rule provenance, rule provenance, proof traces, delta debug,
   temporal relation metadata, and neural hot-loop diagnostics.
@@ -103,12 +106,18 @@ v0.8.9 UCR diagnostic surfaces.
   native-backed entry points still fail explicitly instead of pretending to run.
 - README, roadmap, dILP architecture, and Python binding docs now describe the
   unreleased integrated v0.8.9 BFO diagnostic surfaces and validation packages.
+- The high-level `xlog-gpu::LogicProgram` path now detects accepted epistemic
+  programs and dispatches them through the existing single/split epistemic GPU
+  runtime instead of treating production examples as fixture-only inputs.
 
 ### Fixed
 
 - Hardened `scripts/stage_pyxlog_kernels.sh` so pyxlog release kernel staging
   builds the release target before resolving the release `OUT_DIR`, preventing
   stale kernel artifacts from being selected after source changes.
+- Fixed zero-column Arrow/CLI output for nullary relations by preserving device
+  row count in exported `RecordBatch` values and printing `rows: N` in pretty
+  CLI output.
 
 ### Tests
 
@@ -127,6 +136,8 @@ v0.8.9 UCR diagnostic surfaces.
   `python/tests/test_transfer_metric_diagnostics.py`.
 - Extended `python/tests/test_kernel_packaging_layout.py` to verify pyxlog
   staging rebuild order before release `OUT_DIR` discovery.
+- Added `test_xlog_run_epistemic_examples` to execute every epistemic example
+  through the compiled CLI and assert production output values.
 
 ## [0.8.6] — 2026-05-19
 

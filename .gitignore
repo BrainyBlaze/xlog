@@ -61,6 +61,9 @@ fuzz/artifacts/
 
 docs/ref
 
+# Local research/reference PDFs
+docs/Helbig200-semantic-role-book.pdf
+
 # DeepProbLog baseline generated artifacts
 examples/neural/baseline/deepproblog/*/snapshot/
 examples/neural/baseline/deepproblog/HWF/models/

@@ -1319,6 +1319,14 @@ fn emit_logic_results(
     output_dir: Option<&Path>,
 ) -> Result<()> {
     for (i, q) in queries.iter().enumerate() {
+        if q.buffer.schema().arity() == 0 && matches!(format, OutputFormat::Pretty) {
+            println!(
+                "{}\nrows: {}",
+                q.relation_name,
+                provider.device_row_count(&q.buffer)?
+            );
+            continue;
+        }
         let batch = provider.to_arrow_record_batch(&q.buffer)?;
         match format {
             OutputFormat::Pretty => {

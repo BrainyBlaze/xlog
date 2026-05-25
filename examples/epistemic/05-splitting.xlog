@@ -1,4 +1,12 @@
 // Epistemic splitting: independent epistemic predicates form independent components.
 
+pred left_fact().
+pred right_fact().
+pred left().
+pred right().
+
+left_fact().
+right_fact().
+
 left() :- know left_fact().
 right() :- possible right_fact().

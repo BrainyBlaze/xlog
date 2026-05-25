@@ -275,19 +275,27 @@ multi-membership diagnostic assertion with the arity-qualified
 | G090_DOC | `d2d57cb2`; this release-surface reconciliation revision | PASS |
 | G090_CLOSE | `d2d57cb2`; `415343c8`; this release-surface reconciliation revision | PASS with `MERGE_READY` decision |
 
-## Remaining Release Actions Requiring Authorization
+## 2026-05-25 Post-Main Amendment
 
-No code or runtime fixes remain under the validated v0.9.0 closure scope. The
-following actions are still not performed and still require explicit
-coordinator authorization:
+Post-main release validation found one real release-surface blocker: the
+`examples/epistemic/` programs were fixture-only and failed through production
+`xlog run` at the direct RIR boundary. The local amendment routes high-level
+`xlog-gpu::LogicProgram` epistemic programs through the existing single/split
+epistemic GPU runtime, keeps the raw direct RIR rejection boundary, makes the
+examples concrete value-bearing pilots, and adds the production CLI pilot
+`test_xlog_run_epistemic_examples`.
 
-1. Push the feature branch.
-2. Mutate any external release board.
-3. Tag a release.
-4. Merge or mutate `main`.
+Focused post-amendment gates run locally:
 
-If any code changes after `415343c8`, rerun the relevant focused pilot plus the
-final integration and compatibility gates before preserving `MERGE_READY`.
+1. `cargo check -p xlog-logic -p xlog-cuda -p xlog-gpu -p xlog-cli`
+2. `cargo test -p xlog-logic --test test_epistemic_examples`
+3. `cargo test -p xlog-cli --test run_cli_tests`
+4. `cargo test -p xlog-gpu --lib`
+5. `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_components_execute_gpu_runtime_and_match_component_oracles`
+6. Real `target/debug/xlog run examples/epistemic/*.xlog --memory-mb 1024` pilots
+
+This amendment still requires normal commit/push/tag authorization before it can
+be treated as release-surface complete on the remote branch.
 
 ## Risk Summary
 

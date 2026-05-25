@@ -4,7 +4,9 @@
 
 pred node(u32).
 pred edge(u32).
+pred believed(u32).
 
 node(1).
+edge(1).
 
 believed(X) :- node(X), know edge(X).

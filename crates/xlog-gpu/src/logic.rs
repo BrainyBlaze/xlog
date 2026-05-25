@@ -3,11 +3,19 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use xlog_core::{symbol, Result, Schema, XlogError};
+use xlog_core::{symbol, RelId, Result, Schema, XlogError};
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
+use xlog_ir::{EpistemicExecutablePlan, ExecutionPlan};
+use xlog_logic::epistemic::{
+    compile_epistemic_gpu_execution, compile_epistemic_gpu_split_execution,
+    reduce_epistemic_program_to_ordinary, EpistemicSplitExecutablePlan,
+};
 use xlog_logic::{BodyLiteral, Compiler, Program, Query, Term};
 use xlog_runtime::executor::JoinIndexCacheStats;
-use xlog_runtime::{DeltaRecomputeStats, ExecutionStats, Executor, RelationDelta, RelationStore};
+use xlog_runtime::{
+    DeltaRecomputeStats, EpistemicGpuExecutionResult, EpistemicGpuWorkspaceCapacities,
+    ExecutionStats, Executor, RelationDelta, RelationStore,
+};
 
 /// Result of evaluating a single query in a Datalog program.
 pub struct LogicQueryResult {
@@ -172,34 +180,68 @@ struct PendingRelationDelta {
     delete: Option<CudaBuffer>,
 }
 
+#[derive(Clone)]
+enum LogicExecutionPlan {
+    Ordinary(ExecutionPlan),
+    EpistemicSingle(EpistemicExecutablePlan),
+    EpistemicSplit(EpistemicSplitExecutablePlan),
+}
+
 /// A compiled Datalog program ready for GPU evaluation.
 #[derive(Clone)]
 pub struct LogicProgram {
     program: Program,
-    plan: xlog_ir::ExecutionPlan,
+    plan: LogicExecutionPlan,
     schemas: HashMap<String, Schema>,
-    rel_ids: HashMap<String, xlog_core::RelId>,
+    rel_ids: HashMap<String, RelId>,
 }
 
 impl LogicProgram {
     /// Compile a Datalog source string into a GPU-executable program.
     pub fn compile(source: &str) -> Result<Self> {
         let program = xlog_logic::parse_program(source)?;
+        let normalized = normalize_program(program)?;
+        Self::compile_normalized_program(normalized)
+    }
 
-        // Expand user-defined function calls before compilation
-        let max_recursion = program.directives.max_recursion_depth.unwrap_or(100);
-        let expanded = xlog_logic::expand_program_functions(&program, max_recursion)
-            .map_err(|e| XlogError::Compilation(e.to_string()))?;
-        let normalized = xlog_logic::normalize_v085_meta(&expanded)?;
-        let normalized = xlog_logic::normalize_v085_lists(&normalized)?;
-
+    fn compile_normalized_program(normalized: Program) -> Result<Self> {
+        if program_has_epistemic_literals(&normalized) {
+            return Self::compile_epistemic_program(normalized);
+        }
         let mut compiler = Compiler::new();
         let plan = compiler.compile_program(&normalized)?;
         Ok(Self {
             program: normalized,
-            plan,
+            plan: LogicExecutionPlan::Ordinary(plan),
             schemas: compiler.schemas().clone(),
             rel_ids: compiler.rel_ids().clone(),
+        })
+    }
+
+    fn compile_epistemic_program(normalized: Program) -> Result<Self> {
+        let reduced = reduce_epistemic_program_to_ordinary(&normalized);
+        let mut schema_compiler = Compiler::new();
+        schema_compiler.compile_program(&reduced)?;
+        let schemas = schema_compiler.schemas().clone();
+
+        let plan = match compile_epistemic_gpu_execution(&normalized) {
+            Ok(executable) => LogicExecutionPlan::EpistemicSingle(executable),
+            Err(XlogError::UnsupportedEpistemicConstruct { construct, .. })
+                if construct == "epistemic GPU final output relation" =>
+            {
+                LogicExecutionPlan::EpistemicSplit(compile_epistemic_gpu_split_execution(
+                    &normalized,
+                )?)
+            }
+            Err(err) => return Err(err),
+        };
+        let rel_ids = epistemic_relation_ids(&plan)?;
+
+        Ok(Self {
+            program: normalized,
+            plan,
+            schemas,
+            rel_ids,
         })
     }
 
@@ -225,21 +267,8 @@ impl LogicProgram {
             .merge_imports(program)
             .map_err(|e| XlogError::Compilation(format!("Module resolution failed: {}", e)))?;
 
-        // Expand user-defined function calls before compilation
-        let max_recursion = merged.directives.max_recursion_depth.unwrap_or(100);
-        let expanded = xlog_logic::expand_program_functions(&merged, max_recursion)
-            .map_err(|e| XlogError::Compilation(e.to_string()))?;
-        let normalized = xlog_logic::normalize_v085_meta(&expanded)?;
-        let normalized = xlog_logic::normalize_v085_lists(&normalized)?;
-
-        let mut compiler = Compiler::new();
-        let plan = compiler.compile_program(&normalized)?;
-        Ok(Self {
-            program: normalized,
-            plan,
-            schemas: compiler.schemas().clone(),
-            rel_ids: compiler.rel_ids().clone(),
-        })
+        let normalized = normalize_program(merged)?;
+        Self::compile_normalized_program(normalized)
     }
 
     /// Look up the schema for a named relation.
@@ -303,7 +332,7 @@ impl LogicProgram {
     ) -> Result<(LogicEvalResult, RelationStore)> {
         let mut executor =
             self.executor_from_relation_store(provider.clone(), relation_store, profiling)?;
-        executor.execute_plan(&self.plan)?;
+        executor.execute_plan(self.ordinary_plan("relation-store evaluation")?)?;
         self.enforce_constraints(&provider, &executor)?;
 
         let total_output_rows = self.total_query_rows(executor.store())?;
@@ -325,6 +354,7 @@ impl LogicProgram {
         relation_store: &RelationStore,
         profiling: bool,
     ) -> Result<LogicSessionRuntime> {
+        self.ordinary_plan("persistent relation session")?;
         Ok(LogicSessionRuntime {
             executor: self.executor_from_relation_store(provider, relation_store, profiling)?,
             profiling,
@@ -338,7 +368,9 @@ impl LogicProgram {
         runtime: &mut LogicSessionRuntime,
     ) -> Result<(LogicEvalResult, RelationStore)> {
         runtime.executor.set_profiling(runtime.profiling);
-        runtime.executor.execute_plan(&self.plan)?;
+        runtime
+            .executor
+            .execute_plan(self.ordinary_plan("session runtime evaluation")?)?;
         self.enforce_constraints(&provider, &runtime.executor)?;
 
         let total_output_rows = self.total_query_rows(runtime.executor.store())?;
@@ -398,7 +430,8 @@ impl LogicProgram {
         })?;
         let mut executor =
             self.executor_from_relation_store(provider.clone(), store_before_delta, false)?;
-        let delta_stats = executor.apply_deltas_and_recompute(&self.plan, &deltas)?;
+        let delta_stats = executor
+            .apply_deltas_and_recompute(self.ordinary_plan("relation-delta recompute")?, &deltas)?;
         self.enforce_constraints(&provider, &executor)?;
 
         for name in deltas.keys() {
@@ -464,9 +497,10 @@ impl LogicProgram {
         let runtime = session_runtime.as_mut().ok_or_else(|| {
             XlogError::Execution("Missing session runtime for delta update".to_string())
         })?;
-        let delta_stats = runtime
-            .executor
-            .apply_deltas_and_recompute(&self.plan, &deltas)?;
+        let delta_stats = runtime.executor.apply_deltas_and_recompute(
+            self.ordinary_plan("session relation-delta recompute")?,
+            &deltas,
+        )?;
         self.enforce_constraints(&provider, &runtime.executor)?;
 
         for name in deltas.keys() {
@@ -629,7 +663,11 @@ impl LogicProgram {
 
         self.load_facts(&provider, &mut executor)?;
 
-        executor.execute_plan(&self.plan)?;
+        let LogicExecutionPlan::Ordinary(plan) = &self.plan else {
+            return self.evaluate_epistemic_with_executor(executor, profiling);
+        };
+
+        executor.execute_plan(plan)?;
 
         self.enforce_constraints(&provider, &executor)?;
 
@@ -848,6 +886,73 @@ impl LogicProgram {
         Ok(())
     }
 
+    fn ordinary_plan(&self, context: &str) -> Result<&ExecutionPlan> {
+        match &self.plan {
+            LogicExecutionPlan::Ordinary(plan) => Ok(plan),
+            LogicExecutionPlan::EpistemicSingle(_) | LogicExecutionPlan::EpistemicSplit(_) => {
+                Err(XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic high-level persistent execution".to_string(),
+                    context: format!(
+                        "{context} requires an ordinary RIR plan; use evaluate/evaluate_with_options \
+                         for production epistemic GPU dispatch"
+                    ),
+                })
+            }
+        }
+    }
+
+    fn evaluate_epistemic_with_executor(
+        &self,
+        mut executor: Executor,
+        profiling: bool,
+    ) -> Result<LogicEvalResult> {
+        let mut queries = Vec::new();
+        match &self.plan {
+            LogicExecutionPlan::EpistemicSingle(executable) => {
+                let result = executor.execute_epistemic_gpu_execution(
+                    executable,
+                    capacities_for_epistemic_executable(executable)?,
+                )?;
+                result.require_runtime_dispatch_certification()?;
+                queries.push(epistemic_result_to_query_result(
+                    epistemic_output_relation_name(executable)?,
+                    result,
+                ));
+            }
+            LogicExecutionPlan::EpistemicSplit(split) => {
+                let executables: Vec<_> = split
+                    .components
+                    .iter()
+                    .map(|component| &component.executable)
+                    .collect();
+                let batch = executor.execute_epistemic_gpu_execution_batch_with_trace(
+                    &executables,
+                    capacities_for_epistemic_split(split)?,
+                )?;
+                batch
+                    .require_trace_matches_components("xlog high-level epistemic GPU execution")?;
+                for result in &batch.results {
+                    result.require_runtime_dispatch_certification()?;
+                }
+                for (component, result) in split.components.iter().zip(batch.results) {
+                    queries.push(epistemic_result_to_query_result(
+                        epistemic_output_relation_name(&component.executable)?,
+                        result,
+                    ));
+                }
+            }
+            LogicExecutionPlan::Ordinary(_) => unreachable!("ordinary plans are handled earlier"),
+        }
+
+        let total_output_rows: u64 = queries.iter().map(|q| q.buffer.num_rows()).sum();
+        let stats = if profiling {
+            Some(executor.execution_stats(total_output_rows))
+        } else {
+            None
+        };
+        Ok(LogicEvalResult { queries, stats })
+    }
+
     fn enforce_constraints(
         &self,
         provider: &CudaKernelProvider,
@@ -879,6 +984,130 @@ impl LogicProgram {
         }
 
         Ok(())
+    }
+}
+
+const DEFAULT_EPISTEMIC_MAX_MODELS_PER_REDUCTION: usize = 1024;
+
+fn normalize_program(program: Program) -> Result<Program> {
+    let max_recursion = program.directives.max_recursion_depth.unwrap_or(100);
+    let expanded = xlog_logic::expand_program_functions(&program, max_recursion)
+        .map_err(|e| XlogError::Compilation(e.to_string()))?;
+    let normalized = xlog_logic::normalize_v085_meta(&expanded)?;
+    xlog_logic::normalize_v085_lists(&normalized)
+}
+
+fn program_has_epistemic_literals(program: &Program) -> bool {
+    program.rules.iter().any(|rule| {
+        rule.body
+            .iter()
+            .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
+    }) || program.constraints.iter().any(|constraint| {
+        constraint
+            .body
+            .iter()
+            .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
+    })
+}
+
+fn epistemic_relation_ids(plan: &LogicExecutionPlan) -> Result<HashMap<String, RelId>> {
+    let mut rel_ids = HashMap::new();
+    match plan {
+        LogicExecutionPlan::EpistemicSingle(executable) => {
+            for (name, rel_id) in &executable.relation_ids {
+                insert_epistemic_relation_id(&mut rel_ids, name, *rel_id)?;
+            }
+        }
+        LogicExecutionPlan::EpistemicSplit(split) => {
+            for component in &split.components {
+                for (name, rel_id) in &component.executable.relation_ids {
+                    insert_epistemic_relation_id(&mut rel_ids, name, *rel_id)?;
+                }
+            }
+        }
+        LogicExecutionPlan::Ordinary(_) => {}
+    }
+    Ok(rel_ids)
+}
+
+fn insert_epistemic_relation_id(
+    rel_ids: &mut HashMap<String, RelId>,
+    name: &str,
+    rel_id: RelId,
+) -> Result<()> {
+    if let Some(previous) = rel_ids.insert(name.to_string(), rel_id) {
+        if previous != rel_id {
+            return Err(XlogError::Compilation(format!(
+                "epistemic split components assigned conflicting relation ids for {name}: \
+                 {previous:?} vs {rel_id:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn capacities_for_epistemic_executable(
+    executable: &EpistemicExecutablePlan,
+) -> Result<EpistemicGpuWorkspaceCapacities> {
+    let literal_count = executable.gpu_plan.epistemic_literals.len();
+    let max_candidates = 1usize.checked_shl(literal_count as u32).ok_or_else(|| {
+        XlogError::UnsupportedEpistemicConstruct {
+            construct: "epistemic GPU execution candidate generation".to_string(),
+            context: format!("literal count {literal_count} exceeds target pointer width"),
+        }
+    })?;
+    Ok(EpistemicGpuWorkspaceCapacities {
+        max_candidates,
+        max_worlds: 1,
+        max_models_per_reduction: DEFAULT_EPISTEMIC_MAX_MODELS_PER_REDUCTION,
+    })
+}
+
+fn capacities_for_epistemic_split(
+    split: &EpistemicSplitExecutablePlan,
+) -> Result<EpistemicGpuWorkspaceCapacities> {
+    let mut capacities = EpistemicGpuWorkspaceCapacities {
+        max_candidates: 1,
+        max_worlds: 1,
+        max_models_per_reduction: DEFAULT_EPISTEMIC_MAX_MODELS_PER_REDUCTION,
+    };
+    for component in &split.components {
+        let component_capacities = capacities_for_epistemic_executable(&component.executable)?;
+        capacities.max_candidates = capacities
+            .max_candidates
+            .max(component_capacities.max_candidates);
+    }
+    Ok(capacities)
+}
+
+fn epistemic_output_relation_name(executable: &EpistemicExecutablePlan) -> Result<String> {
+    executable
+        .gpu_plan
+        .reductions
+        .last()
+        .map(|reduction| reduction.head_predicate.clone())
+        .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+            construct: "epistemic GPU reduced output".to_string(),
+            context: "executable plan has no epistemic reductions".to_string(),
+        })
+}
+
+fn epistemic_result_to_query_result(
+    relation_name: String,
+    result: EpistemicGpuExecutionResult,
+) -> LogicQueryResult {
+    let schema = result.final_output.schema();
+    let columns = schema
+        .columns
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
+    let sort_labels = schema.sort_labels().to_vec();
+    LogicQueryResult {
+        relation_name,
+        columns,
+        sort_labels,
+        buffer: result.final_output,
     }
 }
 

@@ -20,7 +20,7 @@
 > `docs/architecture/ucr-xlog-diagnostics.md`,
 > `docs/architecture/living-world-diagnostics-v087.md`,
 > `docs/architecture/lwm-diagnostics-provenance.md`,
-> `docs/architecture/python-bindings.md`,
+> `docs/architecture/python-bindings.md`, `examples/epistemic/`,
 > `examples/BFO/universal_case_reasoner/`, `examples/v086-runtime/`,
 > `examples/v085-language/`, and `examples/v080-dts/`.
 
@@ -76,7 +76,7 @@ XLOG is not a DSL bolted onto a tensor framework. It is a full typed logic progr
 | **v0.8.5 language** | Finite `list<T>` and `term` surfaces, safe `findall` / `maplist` / inspection predicates, deterministic NAF, magic sets, aggregate lifting, approximate-inference pragmas |
 | **v0.8.6 runtime** | Delta coalescing, relation callbacks, typed exact induction, chain shared-memory scoring, runtime CSE, adaptive re-optimization, persistent hash-index reuse, behavior-probe consumer certification |
 | **v0.8.9 BFO diagnostics** | Generated-rule row decisions, source/generated rule provenance, proof traces, native biomedical graph stream provenance, delta planner telemetry/equivalence probes, validation staging, temporal/general relation evidence, nn/4 lineage and hot-loop diagnostics, joint `nn/4`/symbolic training, rule inventories, CUDA host-transfer audits, module-boundary diagnostics, grouped transfer metrics |
-| **v0.9.0 epistemic solver** | EIR, G91, FAEEL, Generate-Propagate-Test execution, epistemic splitting, GPU-native executable plans, solver-service integration, MaxSAT, GPU portfolio solving, and probabilistic epistemic evidence paths |
+| **v0.9.0 epistemic solver** | EIR, G91, FAEEL, Generate-Propagate-Test execution, epistemic splitting, production `xlog run` pilots, GPU-native executable plans, solver-service integration, MaxSAT, GPU portfolio solving, and probabilistic epistemic evidence paths |
 | **Neural-symbolic** | Neural predicates (`nn/k`), PyTorch autograd integration, circuit caching, term embeddings |
 | **dILP training** | Sparse GPU mask, deterministic mode, promotion pipeline, holdout validation, artifact save/load |
 | **Bounded exact induction** | `xlog-induce` plus `ilp_exact` CUDA scoring with top-K per topology and fixed-size D2H summaries |
