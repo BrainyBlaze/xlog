@@ -2,10 +2,10 @@
 
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
 [![CUDA Tests](https://img.shields.io/badge/CUDA%20tests-207%2F207-brightgreen.svg)](docs/architecture/cuda-certification.md)
-[![Version](https://img.shields.io/badge/version-v0.9.0--rc-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.9.0-rc-blue.svg)](CHANGELOG.md)
 
-> **Release status:** tagged release `v0.8.6`; current workspace
-> `v0.9.0-rc` integrates the v0.8.7-v0.8.9 BFO-derived diagnostics from the
+> **Release status:** `v0.9.0-rc`; this release candidate integrates the
+> v0.8.7-v0.8.9 BFO-derived diagnostics from the
 > Autonomous Science Engine, Living World Model, and Universal Case Reasoner as
 > predecessor surfaces, and adds the v0.9.0 GPU-native epistemic, solver, and
 > probabilistic release-candidate surface. The integrated diagnostics include
