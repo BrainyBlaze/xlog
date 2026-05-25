@@ -95,6 +95,9 @@ v0.8.9 UCR diagnostic surfaces.
 - Integrated the v0.8.7-v0.8.9 diagnostics/provenance predecessor surfaces into
   the v0.9.0 release-candidate branch without retargeting them as v0.9.0-only
   features.
+- Updated the language reference to v0.9.0-rc and documented the accepted
+  epistemic literals, `epistemic_mode` pragma, grammar appendix, and production
+  `xlog run` pilots.
 - Updated architecture docs for Python bindings, CLI explain diagnostics,
   GPU execution, bounded exact-induction provenance, relation evidence, graph
   ingestion, delta planner telemetry, nn/4 lineage, validation staging, UCR

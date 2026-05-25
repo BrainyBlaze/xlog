@@ -261,6 +261,9 @@ For the full language reference and worked examples, see
 showcases covering finite lists, meta-predicates, magic sets, probabilistic
 aggregates, aggregate lifting, approximate inference, REPL/watch/explain, and
 incremental parsing, see [`examples/v085-language/`](examples/v085-language/).
+For v0.9.0 epistemic pilots covering EIR, G91, FAEEL, Generate-Propagate-Test,
+and splitting through `xlog run`, see
+[`examples/epistemic/`](examples/epistemic/).
 For DTS-DLM Python productization examples, see
 [`examples/v080-dts/`](examples/v080-dts/). For Rust and Python API usage, see
 [`examples/python/`](examples/python/) and
