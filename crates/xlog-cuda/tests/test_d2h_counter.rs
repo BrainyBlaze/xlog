@@ -30,6 +30,26 @@ fn d2h_counter_increments_on_download() {
 }
 
 #[test]
+fn d2h_counter_does_not_increment_for_zero_row_download() {
+    let Some(provider) = setup_provider() else {
+        return;
+    };
+    let schema = Schema::new(vec![("col".to_string(), ScalarType::U32)]);
+    let empty: &[u32] = &[];
+    let buf = provider
+        .create_buffer_from_u32_columns(&[empty], schema)
+        .unwrap();
+    provider.reset_d2h_transfer_count();
+    provider.reset_host_transfer_stats();
+
+    let values = provider.download_column::<u32>(&buf, 0).unwrap();
+
+    assert!(values.is_empty());
+    assert_eq!(provider.d2h_transfer_count(), 0);
+    assert_eq!(provider.host_transfer_stats().dtoh_calls, 0);
+}
+
+#[test]
 fn d2h_counter_resets() {
     let Some(provider) = setup_provider() else {
         return;

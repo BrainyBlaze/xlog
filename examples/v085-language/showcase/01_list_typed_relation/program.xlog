@@ -18,4 +18,3 @@ tail_len(Id, N) :- head_tail(Id, _, Tail), length(Tail, N).
 ?- bag_len(Id, N).
 ?- second_value(Id, X).
 ?- tail_len(Id, N).
-

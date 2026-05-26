@@ -242,7 +242,7 @@ impl PirBuilder {
 
     fn and(&mut self, mut children: Vec<PirNodeId>) -> PirNodeId {
         children.retain(|&c| c != self.const_true);
-        if children.iter().any(|&c| c == self.const_false) {
+        if children.contains(&self.const_false) {
             return self.const_false;
         }
         if children.is_empty() {
@@ -267,7 +267,7 @@ impl PirBuilder {
 
     fn or(&mut self, mut children: Vec<PirNodeId>) -> PirNodeId {
         children.retain(|&c| c != self.const_false);
-        if children.iter().any(|&c| c == self.const_true) {
+        if children.contains(&self.const_true) {
             return self.const_true;
         }
         if children.is_empty() {
@@ -389,7 +389,9 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
         validate_prob(pf.prob, "probabilistic fact")?;
         let key = atom_key_from_ground_atom(&pf.atom)?;
         let leaf = LeafId::new(next_leaf);
-        next_leaf = next_leaf.saturating_add(1);
+        next_leaf = next_leaf.checked_add(1).ok_or_else(|| {
+            XlogError::Compilation("probabilistic fact leaf id overflow".to_string())
+        })?;
         leaf_probs.insert(leaf, pf.prob);
         leaf_atoms.insert(leaf, key.clone());
 
@@ -416,7 +418,7 @@ pub fn extract_from_program(program: &Program) -> Result<Provenance> {
         )?;
         let _ = vars;
 
-        for (pf, formula) in ad.choices.iter().zip(outcome_formulas.into_iter()) {
+        for (pf, formula) in ad.choices.iter().zip(outcome_formulas) {
             let key = atom_key_from_ground_atom(&pf.atom)?;
             let rel = store
                 .entry(key.predicate.clone())
@@ -616,8 +618,7 @@ fn compile_annotated_disjunction(
 
     let mut vars: Vec<ChoiceVarId> = Vec::with_capacity(m.saturating_sub(1));
     let mut remaining = 1.0f64;
-    for i in 0..(m - 1) {
-        let p_i = probs[i];
+    for (i, &p_i) in probs.iter().enumerate().take(m - 1) {
         let cond_true = if remaining <= 0.0 {
             0.0
         } else {
@@ -626,7 +627,9 @@ fn compile_annotated_disjunction(
         validate_prob(cond_true, "annotated disjunction conditional")?;
         let cond_false = 1.0 - cond_true;
         let var = ChoiceVarId::new(*next_choice);
-        *next_choice = next_choice.saturating_add(1);
+        *next_choice = (*next_choice).checked_add(1).ok_or_else(|| {
+            XlogError::Compilation("annotated disjunction choice id overflow".to_string())
+        })?;
         vars.push(var);
         choice_probs.insert(var, (cond_true, cond_false));
         choice_sources.insert(
@@ -971,6 +974,12 @@ fn ground_rule_for_wfs(
                     }
                 }
             }
+            BodyLiteral::Epistemic(lit) => {
+                return Err(XlogError::UnsupportedEpistemicConstruct {
+                    construct: "probabilistic WFS grounding".to_string(),
+                    context: format!("{:?} {}({})", lit.op, lit.atom.predicate, lit.atom.arity()),
+                });
+            }
             BodyLiteral::Comparison(cmp) => {
                 let mut next_bindings: Vec<(HashMap<String, Value>, PirNodeId)> = Vec::new();
                 for (binding, prov) in bindings {
@@ -1136,8 +1145,8 @@ fn eval_rule(
     builder: &mut PirBuilder,
     aggregate_lifting: &mut Vec<AggregateLiftReport>,
 ) -> Result<BTreeMap<Vec<Value>, PirNodeId>> {
-    let mut states: Vec<(HashMap<String, Value>, PirNodeId)> = Vec::new();
-    states.push((HashMap::new(), builder.const_true()));
+    let mut states: Vec<(HashMap<String, Value>, PirNodeId)> =
+        vec![(HashMap::new(), builder.const_true())];
 
     for (idx, lit) in rule.body.iter().enumerate() {
         let mut next_states: Vec<(HashMap<String, Value>, PirNodeId)> = Vec::new();
@@ -1239,6 +1248,12 @@ fn eval_rule(
                         next_states.push((binding, new_prov));
                     }
                 }
+            }
+            BodyLiteral::Epistemic(lit) => {
+                return Err(XlogError::UnsupportedEpistemicConstruct {
+                    construct: "probabilistic provenance evaluation".to_string(),
+                    context: format!("{:?} {}({})", lit.op, lit.atom.predicate, lit.atom.arity()),
+                });
             }
             BodyLiteral::Univ(_) => {
                 return Err(XlogError::Compilation(
@@ -1618,10 +1633,12 @@ fn aggregate_head_plan(head: &Atom) -> Result<AggregatePlan> {
             }
             Term::Aggregate(agg) => {
                 let key = (agg.op, agg.variable.clone());
-                if !agg_to_pos.contains_key(&key) {
+                if let std::collections::hash_map::Entry::Vacant(entry) =
+                    agg_to_pos.entry(key.clone())
+                {
                     let pos = agg_specs.len();
-                    agg_specs.push(key.clone());
-                    agg_to_pos.insert(key, pos);
+                    agg_specs.push(key);
+                    entry.insert(pos);
                 }
             }
             Term::Integer(_) | Term::Float(_) | Term::String(_) | Term::Symbol(_) => {}

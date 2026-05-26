@@ -47,9 +47,7 @@ impl super::CudaKernelProvider {
         for col_data in columns {
             let bytes: Vec<u8> = col_data.iter().flat_map(|v| v.to_le_bytes()).collect();
             let mut col = self.memory.alloc::<u8>(bytes.len())?;
-            self.device
-                .inner()
-                .htod_sync_copy_into(&bytes, &mut col)
+            self.htod_sync_copy_into_tracked(&bytes, &mut col)
                 .map_err(|e| XlogError::Kernel(format!("Failed to upload column: {}", e)))?;
             cuda_columns.push(col.into());
         }
@@ -119,9 +117,7 @@ impl super::CudaKernelProvider {
 
         for (i, slice) in slices.iter().enumerate() {
             let mut col = self.memory.alloc::<u8>(slice.len())?;
-            self.device
-                .inner()
-                .htod_sync_copy_into(*slice, &mut col)
+            self.htod_sync_copy_into_tracked(slice, &mut col)
                 .map_err(|e| XlogError::Kernel(format!("Failed to upload column {}: {}", i, e)))?;
             columns.push(col.into());
         }
@@ -297,7 +293,7 @@ impl super::CudaKernelProvider {
 
             let (scalar_type, elem_size) = Self::scalar_type_from_arrow_field(field)?;
             let buffers = child.buffers();
-            let buf = buffers.get(0).ok_or_else(|| {
+            let buf = buffers.first().ok_or_else(|| {
                 XlogError::Kernel("Arrow device import missing value buffer".to_string())
             })?;
             let len_bytes = buf.len();
@@ -352,6 +348,7 @@ impl super::CudaKernelProvider {
     ) -> Result<arrow::record_batch::RecordBatch> {
         use arrow::array::*;
         use arrow::datatypes::{Field, Schema as ArrowSchema};
+        use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 
         let num_rows = self.device_row_count(buffer)?;
 
@@ -461,7 +458,8 @@ impl super::CudaKernelProvider {
             arrays.push(array);
         }
 
-        arrow::record_batch::RecordBatch::try_new(arrow_schema, arrays)
+        let options = RecordBatchOptions::new().with_row_count(Some(num_rows));
+        RecordBatch::try_new_with_options(arrow_schema, arrays, &options)
             .map_err(|e| XlogError::Kernel(format!("Failed to create RecordBatch: {}", e)))
     }
 
@@ -511,7 +509,7 @@ impl super::CudaKernelProvider {
         let mut extra = Vec::new();
         let (ptr, len) = match scalar_type {
             ScalarType::Bool => {
-                let packed_len = (num_rows + 7) / 8;
+                let packed_len = num_rows.div_ceil(8);
                 let mut packed = self.memory.alloc::<u8>(packed_len)?;
                 let pack_fn = self
                     .device
@@ -521,7 +519,7 @@ impl super::CudaKernelProvider {
                         XlogError::Kernel("pack_bools_to_bitmap kernel not found".to_string())
                     })?;
                 let block_size = 256u32;
-                let grid_size = (packed_len as u32 + block_size - 1) / block_size;
+                let grid_size = (packed_len as u32).div_ceil(block_size);
                 // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
                 unsafe {
                     pack_fn.clone().launch(
@@ -631,7 +629,6 @@ impl super::CudaKernelProvider {
             return self.create_empty_buffer(Schema::new(columns));
         }
 
-        let device = self.device.inner();
         let mut columns = Vec::with_capacity(record_batch.num_columns());
         let mut schema_cols = Vec::with_capacity(record_batch.num_columns());
 
@@ -681,8 +678,7 @@ impl super::CudaKernelProvider {
             };
 
             let mut d_col = self.memory.alloc::<u8>(bytes.len())?;
-            device
-                .htod_sync_copy_into(&bytes, &mut d_col)
+            self.htod_sync_copy_into_tracked(&bytes, &mut d_col)
                 .map_err(|e| XlogError::Kernel(format!("Failed to upload column: {}", e)))?;
 
             columns.push(d_col.into());

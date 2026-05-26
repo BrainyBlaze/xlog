@@ -1092,6 +1092,7 @@ extern "C" __global__ void sat_cdcl_solve(
     uint32_t max_proof_u32,
     uint32_t restart_base,        // e.g. 100
     uint32_t reduce_interval,     // e.g. 2000
+    const uint32_t* __restrict__ learned_import_count, // len = 1
     // Variable state
     int8_t* __restrict__ assign,      // len = num_vars+1
     uint32_t* __restrict__ level,     // len = num_vars+1
@@ -1143,6 +1144,7 @@ extern "C" __global__ void sat_cdcl_solve(
     __shared__ uint32_t sh_decision_base;
     __shared__ uint32_t sh_decision_extra_base;
     __shared__ uint32_t sh_decision_extra_end_excl;
+    __shared__ uint32_t sh_imported_learned_count;
     __shared__ uint32_t sh_done;
     __shared__ int32_t sh_final_status;
     __shared__ int32_t sh_final_error;
@@ -1157,6 +1159,7 @@ extern "C" __global__ void sat_cdcl_solve(
         uint32_t ee = eb + ec;
         sh_decision_extra_base = eb;
         sh_decision_extra_end_excl = ee;
+        sh_imported_learned_count = learned_import_count[0];
         sh_done = 0u;
         sh_final_status = SAT_STATUS_ERROR;
         sh_final_error = SAT_ERR_OK;
@@ -1182,6 +1185,15 @@ extern "C" __global__ void sat_cdcl_solve(
         // If decision_extra_count overflowed, ee < eb.
         if (decision_extra_end_excl < decision_extra_base_v) {
             ok = false;
+        }
+        if (sh_imported_learned_count > max_learned_clauses) {
+            ok = false;
+        }
+        if (sh_imported_learned_count > 0u) {
+            if (learned_offsets[sh_imported_learned_count] > max_learned_lits ||
+                proof_offsets[sh_imported_learned_count] > max_proof_u32) {
+                ok = false;
+            }
         }
         // If an extra decision range is configured, validate it is within 1..=nv.
         if (decision_extra_end_excl != decision_extra_base_v) {
@@ -1322,15 +1334,21 @@ extern "C" __global__ void sat_cdcl_solve(
     __syncthreads();
 
     // Initialize learned arena.
-    uint32_t learned_count = 0;
+    uint32_t learned_count = sh_imported_learned_count;
     uint32_t learned_lit_count = 0;
     uint32_t proof_len = 0;
 
     if (threadIdx.x == 0) {
-        learned_offsets[0] = 0;
-        proof_offsets[0] = 0;
+        if (learned_count == 0u) {
+            learned_offsets[0] = 0;
+            proof_offsets[0] = 0;
+        } else {
+            learned_lit_count = learned_offsets[learned_count];
+            proof_len = proof_offsets[learned_count];
+        }
     }
-    for (uint32_t i = static_cast<uint32_t>(threadIdx.x); i < max_learned_clauses; i += static_cast<uint32_t>(blockDim.x)) {
+    __syncthreads();
+    for (uint32_t i = sh_imported_learned_count + static_cast<uint32_t>(threadIdx.x); i < max_learned_clauses; i += static_cast<uint32_t>(blockDim.x)) {
         learned_deleted[i] = 0;
         learned_lbd[i] = 0;
         learned_activity[i] = 0;
@@ -1480,6 +1498,62 @@ extern "C" __global__ void sat_cdcl_solve(
                 }
             }
         }
+    }
+    if (!sh_done && threadIdx.x == 0 && sh_imported_learned_count > 0u) {
+        for (uint32_t lid = 0; lid < sh_imported_learned_count; lid++) {
+            if (learned_deleted[lid] != 0u) {
+                continue;
+            }
+            uint32_t c = nc + lid;
+            uint32_t s = learned_offsets[lid];
+            uint32_t e = learned_offsets[lid + 1u];
+            uint32_t len = e - s;
+            uint32_t w0 = 0;
+            uint32_t w1 = (len > 1u) ? 1u : 0u;
+            watch0_pos[c] = w0;
+            watch1_pos[c] = w1;
+
+            if (len == 0u) {
+                sh_done = 1u;
+                sh_final_status = SAT_STATUS_UNSAT;
+                sh_final_error = SAT_ERR_OK;
+                sh_final_learned_count = lid + 1u;
+                break;
+            }
+
+            int32_t lit0 = learned_lits[s + w0];
+            int32_t lit1 = learned_lits[s + w1];
+            uint32_t idx0 = sat_lit_index(lit0);
+            uint32_t idx1 = sat_lit_index(lit1);
+            int32_t node0 = static_cast<int32_t>(c * 2u);
+            int32_t node1 = static_cast<int32_t>(c * 2u + 1u);
+            sat_watch_insert_head(node0, watch_head, watch_next, watch_prev, idx0);
+            sat_watch_insert_head(node1, watch_head, watch_next, watch_prev, idx1);
+
+            if (len == 1u) {
+                if (!sat_enqueue(lit0, static_cast<int32_t>(c), 0, assign, level, reason, trail, &trail_len,
+                                 &assigned_count, var_phase,
+                                 decision_base,
+                                 decision_extra_base_v,
+                                 decision_extra_end_excl,
+                                 decision_heap, decision_heap_pos, &decision_heap_size, var_activity)) {
+                    sh_done = 1u;
+                    sh_final_status = SAT_STATUS_ERROR;
+                    sh_final_error = SAT_ERR_INVALID_PROOF;
+                    sh_final_learned_count = learned_count;
+                    break;
+                }
+            }
+        }
+    }
+    __syncthreads();
+    if (sh_done) {
+        if (threadIdx.x == 0) {
+            out_status[0] = sh_final_status;
+            out_error[0] = sh_final_error;
+            out_learned_count[0] = sh_final_learned_count;
+        }
+        return;
     }
     __syncthreads();
     if (sh_done) {

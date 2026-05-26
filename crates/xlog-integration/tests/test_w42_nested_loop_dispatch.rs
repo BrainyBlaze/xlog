@@ -1,4 +1,6 @@
 // crates/xlog-integration/tests/test_w42_nested_loop_dispatch.rs
+#![allow(clippy::doc_lazy_continuation)]
+
 //! W4.2 dispatch + parity certs.
 //!
 //! Cert A — small × small dispatch routes through the W4.2

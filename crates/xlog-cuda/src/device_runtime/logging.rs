@@ -122,7 +122,7 @@ fn truncate(mut s: String, cap: usize) -> String {
             end -= 1;
         }
         s.truncate(end);
-        s.push_str("…");
+        s.push('…');
     }
     s
 }

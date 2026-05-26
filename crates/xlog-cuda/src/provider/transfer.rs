@@ -34,8 +34,8 @@ impl super::CudaKernelProvider {
         let num_rows = self.device_row_count(buffer)?;
         if num_rows > 0 {
             self.gate_column_download::<T>("download_column", num_rows)?;
+            self.d2h_transfer_count.fetch_add(1, Ordering::Relaxed);
         }
-        self.d2h_transfer_count.fetch_add(1, Ordering::Relaxed);
         self.download_column_inner_with_rows::<T>(buffer, col_idx, num_rows)
     }
 
@@ -85,10 +85,9 @@ impl super::CudaKernelProvider {
     /// Shared implementation for tracked column downloads, with the row
     /// count threaded in by the caller so we do not look it up twice.
     ///
-    /// Uses `device.inner().dtoh_sync_copy_into()` directly (no stats
-    /// recording), which matches the existing `download_column_u32`
-    /// pattern. The caller is responsible for the strict
-    /// deterministic-D2H gate check and for incrementing
+    /// Uses the provider's tracked D2H chokepoint so transfer-budget traces
+    /// observe column downloads. The caller is responsible for the early
+    /// strict deterministic-D2H gate check and for incrementing
     /// `d2h_transfer_count`; this helper assumes both have already happened.
     fn download_column_inner_with_rows<T: GpuScalar>(
         &self,
@@ -109,9 +108,7 @@ impl super::CudaKernelProvider {
         })?;
         let col_view = self.column_bytes_view(col, num_bytes)?;
         let mut bytes = vec![0u8; num_bytes];
-        self.device
-            .inner()
-            .dtoh_sync_copy_into(&col_view, &mut bytes)
+        self.dtoh_sync_copy_into_tracked(&col_view, &mut bytes)
             .map_err(|e| XlogError::kernel_ctx("download_column", "dtoh copy failed", &e))?;
 
         Ok(bytes
@@ -146,9 +143,7 @@ impl super::CudaKernelProvider {
         }
 
         let mut col = self.memory.alloc::<u8>(bytes.len())?;
-        self.device
-            .inner()
-            .htod_sync_copy_into(&bytes, &mut col)
+        self.htod_sync_copy_into_tracked(&bytes, &mut col)
             .map_err(|e| {
                 XlogError::kernel_ctx("create_buffer_from_slice", "htod copy failed", &e)
             })?;

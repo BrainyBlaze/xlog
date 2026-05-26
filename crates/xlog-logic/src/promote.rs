@@ -388,9 +388,9 @@ fn infer_triangle_semantics(
 ///   * Left-deep:  `[inner_l.0, inner_l.1, inner_r.0, inner_r.1,
 ///     third.0, third.1]`
 ///   * Remap formula: `new_k = (old_k + 4) % 6`.
-/// The outer Join's `(left_keys, right_keys)` swap correspondingly
-/// (the side they reference switches). Inner Join's keys are
-/// unchanged.
+///     The outer Join's `(left_keys, right_keys)` swap correspondingly
+///     (the side they reference switches). Inner Join's keys are
+///     unchanged.
 fn normalize_triangle_to_left_deep(node: &RirNode) -> Option<RirNode> {
     let RirNode::Project {
         input: outer_input,
@@ -1112,6 +1112,7 @@ fn uf_union_clique(parent: &mut [usize], a: usize, b: usize) {
 ///
 /// `project_columns` is the outermost Project's column list,
 /// each entry's index translated to a global slot position.
+#[allow(clippy::type_complexity)]
 fn flatten_clique_body(body: &RirNode) -> Option<(Vec<RelId>, Vec<(usize, usize)>, Vec<usize>)> {
     let RirNode::Project { input, columns } = body else {
         return None;

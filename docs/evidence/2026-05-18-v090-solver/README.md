@@ -1,0 +1,373 @@
+# v0.9.0 G090_SOLVER Semantic And Production-Reuse Evidence
+
+Date: 2026-05-18
+
+Goal node: `G090_SOLVER - Solver-Service Integration`
+
+Branch: `feat/v090-epistemic-solver-semantics`
+
+Current closure status: `G090_SOLVER` is PASS for the v0.9.0 accepted
+GPU-production matrix at local closure commit `cf91091d` plus the subsequent
+release-surface reconciliation. The CPU `SolverService` remains oracle-only and
+cannot satisfy release metrics; closure evidence comes from accepted
+`GpuSolverProductionAdapter`, `gpu_solver_accepted_evidence`,
+`gpu_solver_production_reuse`, and cross-crate
+`test_epistemic_gpu_wcoj_execution` gates.
+
+## Implementation Summary
+
+The current branch contains two solver layers:
+
+- `SolverService`, a bounded CPU fixture facade for semantic-oracle tests. It is
+  useful for assumption lifecycle, learned-clause transfer, MaxSAT scoring, and
+  failure-mode oracle tests.
+- `GpuSolverProductionAdapter`, a thin production-path adapter over the existing
+  `GpuCdclSolver` SAT/UNSAT verifier. It provides source-level evidence that
+  epistemic-facing SAT/UNSAT, bounded MaxSAT candidate, and SAT/MaxSAT
+  portfolio work can route through existing GPU CDCL APIs without using the CPU
+  fixture service. Its accepted-runtime SAT/UNSAT and workspace-backed UNSAT
+  gates, bounded push/solve/retract lifecycle gate, single-result, two-record,
+  and accepted split-batch combined lifecycle-plus-MaxSAT gates, bounded MaxSAT candidate
+  gate, two-record multi-candidate MaxSAT gate, single-result, two-record, and accepted split-batch
+  MaxSAT search-pruning gates, single-result, two-record, and split-batch
+  weighted MaxSAT encoding/search gates, two-record and split-batch
+  heterogeneous MaxSAT scheduler gates, and bounded single-result, two-record,
+  and split-batch status-aware portfolio gates,
+  accepted G91/default FAEEL mode-specific solver trace counters,
+  accepted operator-family solver trace counters,
+  learned-clause arena publication gate, two-record multi-candidate
+  push/solve/retract lifecycle gate, accepted split-batch lifecycle gate through
+  `GpuSolverProductionBatchExecutionEvidence`, mixed unary and binary
+  `possible`/`not possible`
+  plus binary `not know` operator-result lifecycle gate, two-record multi-candidate learned-clause
+  reuse gate, accepted split-batch learned-clause reuse gate, same-device-CNF
+  learned-clause reuse gate, and distinct-CNF
+  learned-clause import rejection guard consume accepted
+  `EpistemicGpuExecutionResult` before dispatching to GPU CDCL or rejecting
+  unsafe reuse. The same-rule all-operator mixed-membership fixture now also
+  gates MaxSAT search pruning plus weighted MaxSAT encoding/scheduler through
+  the existing GPU CDCL path with zero CPU search. The split-batch lifecycle,
+  learned-clause reuse, and MaxSAT gates now also cover the four
+  binary-operator component batch with one
+  `know`, one `possible`, one `not possible`, and one `not know` component,
+  recording the corresponding accepted operator-family solver counters; the
+  same all-binary batch now also gates MaxSAT search pruning, weighted MaxSAT
+  encoding/scheduler, and SAT/MaxSAT portfolio dispatch with zero CPU search.
+  The split-batch lifecycle, learned-clause reuse, and MaxSAT gates also cover a
+  two-component quaternary batch with one `know fact4/4` component and one
+  `not possible fact4/4` component, recording accepted nonzero-arity tuple-key
+  reads plus zero CPU search and zero CPU learned-clause transfers; the same
+  batch now also gates MaxSAT search pruning, weighted MaxSAT
+  encoding/scheduler, and SAT/MaxSAT portfolio dispatch. A
+  two-component quaternary `possible fact4/4` plus `not know fact4/4` batch now
+  also gates the accepted split-batch lifecycle, learned-clause reuse, and
+  MaxSAT paths plus MaxSAT search pruning, weighted MaxSAT encoding/scheduler,
+  and SAT/MaxSAT portfolio dispatch with the same tuple-key, zero CPU search,
+  and zero CPU learned-clause transfer counters.
+- `production_capabilities`, a source-level capability report that marks GPU
+  CDCL SAT/UNSAT plus bounded GPU-backed MaxSAT and SAT/MaxSAT portfolio
+  adapters available while keeping the CPU oracle disallowed for production
+  metrics.
+
+This is accepted closure evidence for the current v0.9.0 matrix. The branch now
+proves same-device-CNF
+learned-clause import/reuse and records a distinct-CNF rejection reason without
+CPU learned-clause transfers, and it proves a two accepted-result lifecycle with
+balanced GPU push/retract counters plus bounded UNKNOWN/TIMEOUT lifecycle
+propagation plus two-record learned-clause publication/import reuse, a mixed
+operator-result lifecycle path covering unary and binary `possible`, unary and
+binary `not possible`, and binary `not know` accepted evidence while recording
+accepted `possible`/`not possible`/`not know` operator-family solver trace
+counters, negated generic arity-N `not possible fact4/4` accepted evidence at
+the SAT boundary and through learned-clause reuse, bounded MaxSAT, and
+MaxSAT search pruning, weighted MaxSAT encoding/scheduler, and status-aware
+portfolio dispatch, single-result quaternary `possible fact4/4` plus `not know
+fact4/4` accepted evidence at the SAT boundary and through learned-clause
+reuse, bounded MaxSAT, MaxSAT search pruning, weighted MaxSAT
+encoding/scheduler, and status-aware portfolio dispatch while recording
+quaternary tuple-key column reads,
+split-batch quaternary `know`/`not possible fact4/4` lifecycle,
+split-batch quaternary `possible`/`not know fact4/4` lifecycle,
+learned-clause reuse, MaxSAT, MaxSAT search pruning, weighted MaxSAT
+encoding/scheduler, and portfolio evidence with two accepted nonzero-arity
+component consumptions and eight tuple-key column reads, same-rule all-operator accepted evidence gates covering lifecycle,
+learned-clause reuse, MaxSAT, and status-aware portfolio paths for `know`,
+`possible`, `not know`, and `not possible` together with tuple-key column-read
+evidence and zero CPU search counters,
+accepted split-batch lifecycle, all-binary-operator split-batch lifecycle
+plus all-binary split-batch learned-clause reuse and MaxSAT,
+single-result, two-record, and split-batch combined lifecycle-plus-MaxSAT,
+learned-clause reuse, MaxSAT, MaxSAT search pruning,
+  weighted MaxSAT encoding/search, generalized MaxSAT scheduling with
+  fail-closed invalid encoded scheduler prevalidation, and portfolio
+  dispatch with batch/component evidence counters,
+two-record/two-CNF MaxSAT candidate-set
+execution, and GPU-CDCL UNSAT pruning inside a bounded MaxSAT search candidate
+set plus single-result, two-record, and split-batch
+weighted soft-clause selection encoding into GPU CNF candidates plus
+two-record and split-batch heterogeneous MaxSAT schedulers over candidate-set,
+search-prune, encoded-search, UNKNOWN, and TIMEOUT jobs plus two-record status-aware
+portfolio dispatch plus split-batch learned-clause reuse, MaxSAT, MaxSAT search pruning,
+weighted MaxSAT encoding/search, generalized scheduling, and portfolio dispatch over the existing GPU
+CDCL adapter. Accepted G91 and default
+FAEEL runtime evidence are now counted separately when they gate solver
+lifecycle work, and the final closure proposal records the post-v0.7.0/v0.8.0/v0.8.5/v0.8.6
+compatibility evidence that closes the current solver release surface.
+
+| Requirement | Evidence |
+|---|---|
+| Solver service interface | `SolverService` exposes bounded SAT/MaxSAT solves, assumptions, retraction, learned-clause transfer, trace, and GPU portfolio status. |
+| GPU production adapter | `GpuSolverProductionAdapter` exports SAT/UNSAT calls over `GpuCdclSolver`, including workspace-backed UNSAT reuse, learned-clause arena publication, bounded same-device-CNF learned-clause import/reuse, two-record multi-candidate learned-clause reuse, accepted split-batch learned-clause reuse, distinct-CNF learned-clause import rejection, single-result, two-record, and accepted split-batch combined lifecycle-plus-MaxSAT solving, bounded MaxSAT candidate solving, two-record multi-candidate MaxSAT solving, accepted split-batch MaxSAT candidate solving, single-result, two-record, and accepted split-batch MaxSAT search pruning of UNSAT candidates, fail-closed all-UNSAT MaxSAT search prevalidation before solver trace mutation, fail-closed all-UNSAT encoded MaxSAT prevalidation before accepted-evidence or GPU-CNF encode counters advance, fail-closed invalid encoded MaxSAT scheduler prevalidation before accepted-batch evidence, scheduler, encode, or solver counters advance, single-result, two-record, and accepted split-batch weighted soft-clause selection encoding into GPU CNF search candidates, two-record and accepted split-batch heterogeneous MaxSAT scheduling over candidate-set/search/encoded-search/status jobs, single-result, two-record, and accepted split-batch SAT/MaxSAT portfolio dispatch, and UNKNOWN/TIMEOUT portfolio status propagation. |
+| Accepted runtime SAT/UNSAT gates | `solve_expect_sat_with_gpu_execution_result`, `solve_expect_unsat_with_gpu_execution_result`, and `solve_expect_unsat_with_branch_limit_ws_with_gpu_execution_result` validate stable tuple-source membership, GPU kernel traces, zero hot-path transfers, and non-empty final device output before calling `GpuCdclSolver` SAT/UNSAT paths, including reusable workspace-backed UNSAT. `accepted_ternary_gpu_execution_result_records_solver_nonzero_arity_evidence_trace`, `accepted_quaternary_gpu_execution_result_records_solver_nonzero_arity_evidence_trace`, and `accepted_quaternary_not_possible_solver_nonzero_arity_evidence_trace` prove the SAT gate consumes ternary, quaternary, and negated quaternary accepted tuple-key evidence and records `accepted_nonzero_arity_gpu_candidate_evidence_consumed` plus `accepted_gpu_candidate_tuple_key_column_reads_consumed` without CPU search; the negated quaternary fixture also records `accepted_not_possible_gpu_candidate_evidence_consumed == 1`. `accepted_quaternary_not_possible_gates_solver_reuse_maxsat_and_portfolio_paths` carries the same single-result negated quaternary evidence through learned-clause reuse, bounded MaxSAT, and status-aware portfolio paths, recording three accepted `not possible` evidence consumptions, three nonzero-arity evidence consumptions, twelve tuple-key column reads, and zero CPU assignment/MaxSAT enumeration. `accepted_quaternary_possible_and_not_know_results_gate_solver_and_probabilistic_paths` proves two single-result arity-four `possible fact4/4` and `not know fact4/4` accepted results reach the same SAT gate, record two nonzero-arity evidence consumptions, eight tuple-key column reads, one accepted `possible` counter, one accepted `not know` counter, and zero CPU assignment/MaxSAT enumeration. |
+| Accepted runtime lifecycle gate | `solve_assumption_lifecycle_with_gpu_execution_result` validates accepted GPU runtime evidence, then records GPU assumption pushes/retractions while dispatching SAT and UNSAT lifecycle steps through existing GPU CDCL calls and the provided reusable workspace. It also propagates bounded UNKNOWN/TIMEOUT lifecycle statuses with diagnostic/budget checks and zero CPU search counters. |
+| Accepted runtime multi-candidate lifecycle gate | `solve_multi_candidate_assumption_lifecycle_with_gpu_execution_results` validates accepted GPU runtime evidence records, runs the same SAT/UNSAT lifecycle for each through existing GPU CDCL calls, records balanced push/retract counters, and reuses the provided GPU CDCL workspace for UNSAT steps. `accepted_operator_gpu_execution_results_gate_solver_lifecycle_path` proves the same lifecycle gate consumes five mixed accepted operator results, covering unary and binary `possible`, unary and binary `not possible`, and binary `not know` evidence with zero CPU search counters while recording accepted operator-family solver trace counters. `accepted_g91_and_faeel_modes_gate_solver_production_trace` proves the lifecycle gate records accepted G91 and default FAEEL evidence counters separately. |
+| Accepted split-batch lifecycle gate | `solve_assumption_lifecycle_with_gpu_batch_execution_result` consumes `GpuSolverProductionBatchExecutionEvidence` from `execute_epistemic_gpu_execution_batch_with_trace`, validates aggregate `EpistemicGpuBatchExecutionResult` counters for zero CPU recomposition, zero CPU candidate/world-view fallback, zero tracked D2H, zero per-candidate host round trips, and aggregate CUDA-event timing that fails closed on partial component timing, then routes each accepted component through the existing multi-candidate GPU CDCL lifecycle path while recording `accepted_gpu_batch_candidate_evidence_consumed` and `accepted_gpu_batch_candidate_component_evidence_consumed`. `accepted_split_all_binary_operator_batch_gates_solver_lifecycle_path` proves the same lifecycle gate consumes a four-component `know`/`possible`/`not possible`/`not know` split batch, records four component evidence consumptions, and advances all four accepted operator-family solver evidence counters with zero CPU search. `accepted_split_quaternary_not_possible_batch_gates_solver_lifecycle_path` proves the same lifecycle gate consumes a two-component arity-four `know fact4/4` plus `not possible fact4/4` split batch, records two nonzero-arity evidence consumptions, eight tuple-key column reads, one accepted `know` counter, one accepted `not possible` counter, and zero CPU search. `accepted_split_quaternary_possible_and_not_know_batch_gates_solver_and_probabilistic_paths` proves the lifecycle gate also consumes a two-component arity-four `possible fact4/4` plus `not know fact4/4` split batch, records two nonzero-arity evidence consumptions, eight tuple-key column reads, one accepted `possible` counter, one accepted `not know` counter, and zero CPU search. |
+| Accepted runtime learned-clause arena gate | `solve_unsat_and_publish_learned_clause_arena_with_gpu_execution_result` validates accepted GPU runtime evidence, then runs workspace-backed GPU CDCL UNSAT and publishes the existing device learned-clause/proof arena plus learned-count buffer with zero CPU learned-clause transfers. |
+| Accepted runtime learned-clause reuse gate | `solve_unsat_then_reuse_learned_clauses_with_gpu_execution_result` validates accepted GPU runtime evidence, publishes the existing GPU CDCL learned-clause/proof arena from one UNSAT solve, then imports the same device arena into a second workspace-backed UNSAT solve over the same GPU CNF with zero CPU learned-clause transfers; distinct candidate CNFs are rejected before import, incrementing `gpu_learned_clause_reuse_rejections` with zero CPU learned-clause transfers. `accepted_quaternary_not_possible_gates_solver_reuse_maxsat_and_portfolio_paths` proves the single-result `not possible fact4/4` evidence reaches this same-device reuse gate with one arena publication, one import, one reused solve, two workspace-backed UNSAT solves, and zero CPU learned-clause transfers. |
+| Accepted runtime multi-candidate learned-clause gate | `solve_multi_candidate_learned_clause_reuse_with_gpu_execution_results` validates two accepted GPU runtime evidence records up front, then performs same-device-CNF learned-clause publication/import once per accepted result through the existing GPU CDCL workspace, recording `candidate_evidence_records == 2`, four workspace-backed UNSAT solves, two arena publications, two imports, two reused solves, and zero CPU learned-clause transfers. `accepted_quaternary_possible_and_not_know_results_gate_solver_reuse_maxsat_and_portfolio_paths` proves the same gate consumes one accepted `possible fact4/4` result and one accepted `not know fact4/4` result, records four workspace-backed UNSAT solves, two arena publications/imports/reused solves, eight tuple-key column reads, one accepted `possible` counter, one accepted `not know` counter, and zero CPU learned-clause transfers. |
+| Accepted split-batch learned-clause gate | `solve_learned_clause_reuse_with_gpu_batch_execution_result` consumes accepted split-batch evidence, validates aggregate zero CPU recomposition/fallback/host-round-trip counters, and delegates each component to the same multi-candidate same-device-CNF learned-clause reuse path while recording split-batch/component counters, two accepted component evidence records, four workspace-backed UNSAT solves, two arena publications, two imports, two reused solves, and zero CPU learned-clause transfers. `accepted_split_all_binary_operator_batch_gates_solver_reuse_and_maxsat_paths` proves the same gate consumes the four-component `know`/`possible`/`not possible`/`not know` split batch, records four component evidence consumptions, eight workspace-backed UNSAT solves, four arena publications/imports/reused solves, all four accepted operator-family counters, and zero CPU learned-clause transfers. `accepted_split_quaternary_not_possible_batch_gates_solver_reuse_and_maxsat_paths` proves the same gate consumes the two-component `know fact4/4` plus `not possible fact4/4` split batch, records two nonzero-arity evidence consumptions, eight tuple-key column reads, four workspace-backed UNSAT solves, two arena publications/imports/reused solves, one accepted `know` counter, one accepted `not possible` counter, and zero CPU learned-clause transfers. `accepted_split_quaternary_possible_and_not_know_batch_gates_solver_reuse_and_maxsat_paths` proves the same gate consumes the two-component `possible fact4/4` plus `not know fact4/4` split batch, records two nonzero-arity evidence consumptions, eight tuple-key column reads, four workspace-backed UNSAT solves, two arena publications/imports/reused solves, one accepted `possible` counter, one accepted `not know` counter, and zero CPU learned-clause transfers. |
+| Accepted runtime MaxSAT lifecycle gate | `solve_maxsat_lifecycle_with_gpu_execution_result` validates one accepted GPU runtime evidence record once, runs balanced push/solve/retract lifecycle steps through the existing GPU CDCL SAT and workspace-backed UNSAT paths, then certifies bounded weighted MaxSAT candidate CNFs through `GpuCdclSolver::solve_expect_sat_with_branch_limit` while recording one accepted evidence consumption, lifecycle counters, MaxSAT counters, and zero CPU MaxSAT enumerations. `require_maxsat_lifecycle_inputs` rejects empty lifecycle steps or empty MaxSAT candidate sets before any lifecycle or MaxSAT trace counters advance. |
+| Accepted runtime multi-candidate MaxSAT lifecycle gate | `solve_multi_candidate_maxsat_lifecycle_with_gpu_execution_results` validates accepted GPU runtime evidence records up front, then repeats the same balanced lifecycle plus bounded weighted MaxSAT candidate solving through the existing GPU CDCL paths while recording per-record lifecycle counters, candidate evidence records, MaxSAT optima, and zero CPU MaxSAT enumerations. |
+| Accepted split-batch MaxSAT lifecycle gate | `solve_maxsat_lifecycle_with_gpu_batch_execution_result` consumes `GpuSolverProductionBatchExecutionEvidence`, validates aggregate zero CPU recomposition/fallback/host-round-trip counters, and delegates accepted split components to the same multi-candidate lifecycle-plus-MaxSAT path while recording split-batch/component counters, two accepted component evidence records, balanced pushes/retractions, workspace-backed UNSAT reuse, four GPU CDCL candidate solves, two optima, and zero CPU MaxSAT enumerations. |
+| Accepted runtime MaxSAT gate | `solve_weighted_maxsat_candidates_with_gpu_execution_result` validates accepted GPU runtime evidence, then certifies bounded weighted MaxSAT candidate CNFs through `GpuCdclSolver::solve_expect_sat_with_branch_limit` and records `candidate_evidence_records`, `gpu_maxsat_candidate_solves`, and `gpu_maxsat_optima` with zero CPU MaxSAT enumerations. `accepted_quaternary_not_possible_gates_solver_reuse_maxsat_and_portfolio_paths` proves a single-result `not possible fact4/4` accepted result reaches this gate with optimum score `13`, one direct GPU CDCL MaxSAT candidate solve, and zero CPU MaxSAT enumeration. |
+| Accepted runtime multi-candidate MaxSAT gate | `solve_multi_candidate_weighted_maxsat_with_gpu_execution_results` validates two accepted GPU runtime evidence records up front, then certifies a two-CNF weighted MaxSAT candidate set once per accepted result through the existing GPU CDCL path, recording `candidate_evidence_records == 2`, `candidates_checked == 4`, four GPU CDCL candidate solves, two optima, and zero CPU MaxSAT enumerations. `accepted_quaternary_possible_and_not_know_results_gate_solver_reuse_maxsat_and_portfolio_paths` proves the same gate consumes one accepted `possible fact4/4` result and one accepted `not know fact4/4` result, records four GPU CDCL candidate solves, two optima, eight tuple-key column reads, and zero CPU MaxSAT enumeration. |
+| Accepted split-batch MaxSAT gate | `solve_weighted_maxsat_candidates_with_gpu_batch_execution_result` consumes accepted split-batch evidence, validates aggregate zero CPU recomposition/fallback/host-round-trip counters, and delegates each component to the same multi-candidate weighted MaxSAT path while recording split-batch/component counters, `candidate_evidence_records == 2`, `candidates_checked == 4`, four GPU CDCL candidate solves, two optima, and zero CPU MaxSAT enumerations. `accepted_split_all_binary_operator_batch_gates_solver_reuse_and_maxsat_paths` proves the same gate consumes the four-component all-binary-operator split batch, records four component evidence consumptions, eight GPU CDCL candidate solves, four optima, all four accepted operator-family counters, and zero CPU MaxSAT enumerations. `accepted_split_quaternary_not_possible_batch_gates_solver_reuse_and_maxsat_paths` proves the same gate consumes the two-component arity-four `know`/`not possible` split batch, records two nonzero-arity evidence consumptions, eight tuple-key column reads, four GPU CDCL candidate solves, two optima, one accepted `know` counter, one accepted `not possible` counter, and zero CPU MaxSAT enumerations. `accepted_split_quaternary_possible_and_not_know_batch_gates_solver_reuse_and_maxsat_paths` proves the same gate consumes the two-component arity-four `possible`/`not know` split batch, records two nonzero-arity evidence consumptions, eight tuple-key column reads, four GPU CDCL candidate solves, two optima, one accepted `possible` counter, one accepted `not know` counter, and zero CPU MaxSAT enumerations. |
+| Accepted runtime MaxSAT search-pruning gate | `solve_weighted_maxsat_search_with_gpu_execution_result` prevalidates that the bounded candidate set contains at least one satisfiable GPU candidate before accepted-evidence accounting or GPU solver work, then scores satisfiable candidates through `GpuCdclSolver::solve_expect_sat_with_branch_limit` and prunes UNSAT candidates through workspace-backed `solve_expect_unsat_with_branch_limit_ws`, recording `satisfiable_candidates`, `unsat_candidates_pruned`, `gpu_maxsat_unsat_candidate_prunes`, and zero CPU MaxSAT enumerations. `accepted_all_operator_mixed_membership_gates_solver_search_and_scheduler_paths` proves the same search-pruning path consumes same-rule all-operator mixed-membership evidence, records one accepted `know`, `possible`, `not possible`, and `not know` counter, four tuple-key column reads, one UNSAT prune, and zero CPU MaxSAT enumerations. `accepted_quaternary_not_possible_gates_solver_search_and_scheduler_paths` proves the same path consumes single-result `not possible fact4/4` accepted evidence with one accepted `not possible` counter, four tuple-key column reads, one UNSAT prune, and zero CPU MaxSAT enumeration. |
+| Accepted runtime multi-candidate MaxSAT search-pruning gate | `solve_multi_candidate_weighted_maxsat_search_with_gpu_execution_results` validates two accepted GPU runtime evidence records up front, then repeats bounded MaxSAT search pruning once per accepted result through the existing GPU CDCL SAT and workspace-backed UNSAT paths, recording `candidate_evidence_records == 2`, four candidate solves, two UNSAT prunes, two optima, and zero CPU MaxSAT enumerations. `accepted_quaternary_possible_and_not_know_results_gate_solver_search_and_scheduler_paths` proves the same gate consumes one accepted `possible fact4/4` result and one accepted `not know fact4/4` result, records two UNSAT prunes, four GPU CDCL candidate solves, one accepted `possible` counter, one accepted `not know` counter, eight tuple-key column reads, and zero CPU MaxSAT enumeration. |
+| Accepted split-batch MaxSAT search-pruning gate | `solve_weighted_maxsat_search_with_gpu_batch_execution_result` consumes accepted split-batch evidence, validates aggregate zero CPU recomposition/fallback/host-round-trip counters, and delegates each component to the same multi-candidate MaxSAT search-pruning path while recording split-batch/component counters, `candidate_evidence_records == 2`, two satisfiable candidates, two UNSAT prunes, four GPU CDCL candidate solves, two optima, and zero CPU MaxSAT enumerations. `accepted_split_quaternary_not_possible_batch_gates_solver_search_scheduler_and_portfolio_paths` proves the same search-pruning path consumes the two-component arity-four `know`/`not possible` split batch, records two nonzero-arity evidence consumptions, eight tuple-key column reads, one accepted `know` counter, one accepted `not possible` counter, two UNSAT prunes, and zero CPU MaxSAT enumerations. `accepted_split_quaternary_possible_and_not_know_batch_gates_solver_search_scheduler_and_portfolio_paths` proves the same search-pruning path consumes the two-component arity-four `possible`/`not know` split batch, records two nonzero-arity evidence consumptions, eight tuple-key column reads, one accepted `possible` counter, one accepted `not know` counter, two UNSAT prunes, and zero CPU MaxSAT enumerations. |
+| Accepted runtime weighted MaxSAT encoding gate | `solve_weighted_maxsat_encoded_search_with_gpu_execution_result` prevalidates nonempty selections with at least one satisfiable candidate before accepted-evidence accounting or GPU CNF uploads, converts caller-declared weighted soft-clause selections into satisfaction CNFs, uploads them through the existing GPU CNF layout, then reuses bounded MaxSAT search pruning through GPU CDCL while recording `gpu_maxsat_candidate_encodes`, `gpu_cdcl_candidate_encodes`, candidate solves, UNSAT prunes, and zero CPU MaxSAT enumerations. `accepted_quaternary_not_possible_gates_solver_search_and_scheduler_paths` proves the encoded path consumes single-result `not possible fact4/4` evidence with two encoded candidates, one UNSAT prune, one optimum, and zero CPU MaxSAT enumeration. `accepted_quaternary_possible_and_not_know_results_gate_solver_search_and_scheduler_paths` proves the multi-candidate encoded path consumes one accepted `possible fact4/4` result and one accepted `not know fact4/4` result, records four encoded candidates, two UNSAT prunes, two optima, eight tuple-key column reads, and zero CPU MaxSAT enumeration. |
+| Accepted runtime multi-candidate weighted MaxSAT encoding gate | `solve_multi_candidate_weighted_maxsat_encoded_search_with_gpu_execution_results` validates two accepted GPU runtime evidence records up front, converts caller-declared weighted soft-clause selections into satisfaction CNFs once per accepted result through the existing GPU CNF layout, then reuses bounded MaxSAT search pruning through GPU CDCL while recording `candidate_evidence_records == 2`, four GPU CNF candidate encodes, four candidate solves, two UNSAT prunes, two optima, and zero CPU MaxSAT enumerations. |
+| Accepted runtime MaxSAT scheduler gate | `solve_maxsat_schedule_with_gpu_execution_results` prevalidates the full schedule before accepted-evidence accounting, validates accepted GPU runtime evidence records up front, then dispatches a heterogeneous schedule of candidate-set, search-pruning, weighted encoded-search, UNKNOWN, and TIMEOUT jobs through the existing GPU CNF/CDCL helpers, recording scheduled job counters, GPU CDCL candidate solves, GPU CNF candidate encodes, UNSAT prunes, optima, and zero CPU MaxSAT enumerations. `accepted_all_operator_mixed_membership_gates_solver_search_and_scheduler_paths` proves the same encoded-search and scheduler gates consume same-rule all-operator mixed-membership evidence, record one accepted `know`, `possible`, `not possible`, and `not know` counter, four tuple-key column reads, two encoded candidates, six scheduled GPU CDCL candidate solves, and zero CPU MaxSAT enumerations. `accepted_quaternary_not_possible_gates_solver_search_and_scheduler_paths` proves the scheduler gate consumes single-result `not possible fact4/4` evidence with one accepted `not possible` counter, four tuple-key column reads, two encoded candidates, six scheduled GPU CDCL candidate solves, two UNSAT prunes, UNKNOWN/TIMEOUT scheduler statuses, and zero CPU search. `accepted_quaternary_possible_and_not_know_results_gate_solver_search_and_scheduler_paths` proves the scheduler gate consumes one accepted `possible fact4/4` result and one accepted `not know fact4/4` result with one accepted `possible` counter, one accepted `not know` counter, eight tuple-key column reads, four encoded candidates, twelve scheduled GPU CDCL candidate solves, four scheduler UNSAT prunes, UNKNOWN/TIMEOUT scheduler statuses, and zero CPU search. |
+| Accepted split-batch weighted MaxSAT encoding and scheduler gates | `solve_weighted_maxsat_encoded_search_with_gpu_batch_execution_result` and `solve_maxsat_schedule_with_gpu_batch_execution_result` prevalidate bounded encoded selections and scheduled jobs before accepted-batch accounting, consume `GpuSolverProductionBatchExecutionEvidence`, validate aggregate zero CPU recomposition/fallback/host-round-trip counters, then delegate each component to the existing multi-candidate encoded MaxSAT and heterogeneous scheduler paths while recording split-batch/component counters, four GPU CNF candidate encodes for encoded search, twelve GPU CDCL candidate solves for the scheduled path, UNKNOWN/TIMEOUT scheduler statuses, and zero CPU MaxSAT enumerations. `accepted_split_quaternary_not_possible_batch_gates_solver_search_scheduler_and_portfolio_paths` proves those same encoded-search and scheduler gates consume the two-component arity-four `know`/`not possible` split batch, record two nonzero-arity evidence consumptions, eight tuple-key column reads, one accepted `know` counter, one accepted `not possible` counter, four encoded candidates, twelve scheduled GPU CDCL candidate solves, and zero CPU MaxSAT enumerations. `accepted_split_quaternary_possible_and_not_know_batch_gates_solver_search_scheduler_and_portfolio_paths` proves those same encoded-search and scheduler gates consume the two-component arity-four `possible`/`not know` split batch, record two nonzero-arity evidence consumptions, eight tuple-key column reads, one accepted `possible` counter, one accepted `not know` counter, four encoded candidates, twelve scheduled GPU CDCL candidate solves, and zero CPU MaxSAT enumerations. The invalid encoded scheduler fixture proves all-UNSAT and empty soft-clause scheduled jobs reject before accepted-batch evidence, scheduler, encode, solver, or CPU-search counters move. |
+| Accepted runtime portfolio gate | `solve_portfolio_with_gpu_execution_result` validates accepted GPU runtime evidence, then dispatches SAT jobs and bounded MaxSAT candidate jobs through the same GPU CDCL adapter while propagating UNKNOWN/TIMEOUT portfolio statuses without CPU search and recording `gpu_portfolio_*` counters. `accepted_quaternary_not_possible_gates_solver_reuse_maxsat_and_portfolio_paths` proves a single-result `not possible fact4/4` accepted result reaches this portfolio gate with one SAT job, one MaxSAT job, one UNKNOWN status, one TIMEOUT status, and zero CPU search. `solve_multi_candidate_portfolio_with_gpu_execution_results` validates two accepted GPU runtime evidence records up front, repeats the same status-aware portfolio once per record, reports `candidate_evidence_records == 2`, and records doubled GPU portfolio counters with zero CPU search. `accepted_quaternary_possible_and_not_know_results_gate_solver_reuse_maxsat_and_portfolio_paths` proves the multi-candidate portfolio gate consumes one accepted `possible fact4/4` result and one accepted `not know fact4/4` result, records two SAT jobs, two MaxSAT jobs, two UNKNOWN jobs, two TIMEOUT jobs, one accepted `possible` counter, one accepted `not know` counter, eight tuple-key column reads, and zero CPU search. `solve_portfolio_with_gpu_batch_execution_result` consumes accepted split-batch evidence, validates aggregate zero CPU recomposition/fallback/host-round-trip counters, and delegates each component to the same multi-candidate portfolio path while recording split-batch/component counters. `accepted_split_quaternary_not_possible_batch_gates_solver_search_scheduler_and_portfolio_paths` proves the portfolio gate consumes the two-component arity-four `know`/`not possible` split batch, records two SAT jobs, two MaxSAT jobs, two UNKNOWN jobs, two TIMEOUT jobs, one accepted `know` counter, one accepted `not possible` counter, and zero CPU search. `accepted_split_quaternary_possible_and_not_know_batch_gates_solver_search_scheduler_and_portfolio_paths` proves the portfolio gate consumes the two-component arity-four `possible`/`not know` split batch, records two SAT jobs, two MaxSAT jobs, two UNKNOWN jobs, two TIMEOUT jobs, one accepted `possible` counter, one accepted `not know` counter, and zero CPU search. |
+| Production capability report | `production_capabilities` reports GPU CDCL SAT/UNSAT, bounded MaxSAT, and bounded portfolio adapters available, with CPU oracle disallowed. |
+| CPU solver-search isolation | `GpuSolverProductionTrace` records zero CPU assignment, MaxSAT, and learned-clause transfer counters plus GPU learned-clause, rejection, MaxSAT, and portfolio counters; the production adapter source test rejects `SolverService` use. |
+| Incremental SAT assumptions | `solver_service_semantics.rs` verifies assumption add/retract changes SAT status without stale learned contradictions. |
+| Learned-clause transfer | `transfer_learned_clauses_to` transfers scoped learned clauses and increments `SolverServiceTrace::learned_clause_transfers`. |
+| MaxSAT soft constraints | `SolveInstance::with_weights` fixture returns `SolverServiceStatus::Optimal(5)`. |
+| GPU portfolio status | `gpu_portfolio_status` reports that GPU portfolio solving is not implemented in the semantic-oracle facade. |
+| Failure modes | Fixtures distinguish `Unsat`, `Unknown`, and `Timeout`. |
+
+## Validation
+
+| Command | Result |
+|---|---|
+| `cargo fmt --check` | PASS |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_gates_solver_cdcl_sat_path -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_gates_solver_cdcl_unsat_path -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_gates_solver_workspace_unsat_path -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_gates_solver_assumption_lifecycle_path -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_gates_solver_maxsat_lifecycle_path -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_rejects_empty_maxsat_lifecycle_before_lifecycle_work -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_rejects_all_unsat_maxsat_search_before_solver_work -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_rejects_all_unsat_encoded_maxsat_before_encoding_work -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_maxsat_lifecycle_path -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_gates_status_aware_solver_lifecycle_path -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_results_gate_multi_candidate_solver_lifecycle_path -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_lifecycle_path -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_all_binary_operator_batch_gates_solver_lifecycle_path -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution rejects_unrecorded_aggregate_kernel_timing -- --nocapture` | PASS, 2 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution rejects_unrecorded_candidate_generation_timing -- --nocapture` | PASS, 2 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution aggregate_timing_requires_every_component_phase_to_be_recorded -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_all_binary_operator_batch_gates_solver_reuse_and_maxsat_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_all_binary_operator_batch_gates_solver_search_scheduler_and_portfolio_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_operator_gpu_execution_results_gate_solver_lifecycle_path -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_all_operator_mixed_membership_gates_solver_lifecycle_path -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_all_operator_mixed_membership_gates_solver_reuse_maxsat_and_portfolio_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_all_operator_mixed_membership_gates_solver_search_and_scheduler_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_g91_and_faeel_modes_gate_solver_production_trace -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_ternary_gpu_execution_result_records_solver_nonzero_arity_evidence_trace -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_gpu_execution_result_records_solver_nonzero_arity_evidence_trace -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_gpu_execution_result_gates_solver_reuse_maxsat_and_portfolio_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_gpu_execution_result_gates_solver_search_and_scheduler_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_not_possible_solver_nonzero_arity_evidence_trace -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_not_possible_gates_solver_reuse_maxsat_and_portfolio_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_not_possible_gates_solver_search_and_scheduler_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_possible_and_not_know_results_gate_solver_and_probabilistic_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_possible_and_not_know_results_gate_solver_reuse_maxsat_and_portfolio_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_quaternary_possible_and_not_know_results_gate_solver_search_and_scheduler_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_not_possible_batch_gates_solver_lifecycle_path -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_possible_and_not_know_batch_gates_solver_and_probabilistic_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_not_possible_batch_gates_solver_reuse_and_maxsat_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_not_possible_batch_gates_solver_search_scheduler_and_portfolio_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_possible_and_not_know_batch_gates_solver_reuse_and_maxsat_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_quaternary_possible_and_not_know_batch_gates_solver_search_scheduler_and_portfolio_paths -- --exact --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_gates_solver_learned_clause_arena_publication -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_gates_solver_same_cnf_learned_clause_reuse -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_results_gate_multi_candidate_learned_clause_reuse -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_learned_clause_reuse_path -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_rejects_distinct_cnf_learned_clause_reuse -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_gates_solver_maxsat_and_portfolio_paths -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_results_gate_multi_candidate_maxsat_path -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_maxsat_path -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_maxsat_search_pruning -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_prunes_unsat_maxsat_search_candidates -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_results_gate_multi_candidate_maxsat_search_pruning -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_result_encodes_weighted_maxsat_search_candidates -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_results_gate_multi_candidate_weighted_maxsat_encoded_search -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_results_gate_generalized_maxsat_scheduler -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_encoded_maxsat_and_scheduler_paths -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_gpu_execution_results_gate_multi_candidate_portfolio_path -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution accepted_split_batch_gates_solver_portfolio_path -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-solve --test gpu_solver_production_reuse` | PASS, 4 passed, 0 failed |
+| `cargo test -p xlog-solve --test gpu_solver_production_reuse production_solver_batch_paths_use_single_gpu_batch_gate -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-solve --test gpu_solver_production_reuse production_solver_metric_gate_rejects_cpu_oracle_only_traces -- --nocapture` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-solve --test solver_service_semantics` | PASS, 5 passed, 0 failed |
+| `cargo test -p xlog-solve --test no_dtoh_in_gpu_cdcl` | PASS, 1 passed, 0 failed |
+| `cargo test -p xlog-solve --lib` | PASS, 111 passed, 0 failed |
+| `cargo check -p xlog-logic -p xlog-ir -p xlog-solve -p xlog-prob` | PASS |
+| `cargo check -p pyxlog` | PASS |
+
+## Metric Status
+
+| Metric | Target | Status | Evidence |
+|---|---|---|---|
+| M090_SOLVER.1 interface | trait/API documented and tested | PASS | CPU facade API exists, and `GpuSolverProductionAdapter` exposes GPU CDCL SAT/UNSAT, accepted-runtime SAT/UNSAT and workspace-backed UNSAT gates, bounded single-, multi-candidate, and split-batch accepted lifecycle APIs, single-result, two-record, and split-batch combined accepted MaxSAT lifecycle APIs, accepted split-batch learned-clause reuse APIs, accepted split-batch/component trace counters, accepted G91/default FAEEL mode-specific trace counters, accepted operator-family evidence counters, accepted nonzero-arity tuple-key evidence counters, bounded single-, multi-candidate, and split-batch MaxSAT candidate APIs, single-result, two-record, and accepted split-batch MaxSAT search-pruning APIs, single-result, two-record, and split-batch weighted MaxSAT encoding/search APIs, two-record and split-batch heterogeneous MaxSAT scheduler APIs, and single-result, two-record, plus split-batch SAT/MaxSAT/UNKNOWN/TIMEOUT portfolio APIs; additional solver expansion beyond the current closure matrix is out of scope. |
+| M090_SOLVER.2 incremental SAT | add/retract assumption fixtures pass on GPU-native path | PASS | CPU oracle fixture exists, and accepted GPU runtime evidence can gate single-, multi-record, and accepted split-batch SAT/UNSAT push/solve/retract sequences through `GpuCdclSolver`, including accepted split-batch/component counters, an all-binary-operator split-batch lifecycle with four component evidence records, accepted G91/default FAEEL mode-specific evidence counters, accepted operator-family evidence counters for mixed unary and binary `possible`/`not possible` plus binary `not know` accepted operator results, accepted ternary/quaternary positive, quaternary `not possible`, and single-result quaternary `possible`/`not know` nonzero-arity tuple-key evidence counters at the SAT boundary, split-batch quaternary `know`/`not possible fact4/4` and split-batch quaternary `possible`/`not know fact4/4` nonzero-arity tuple-key evidence at the lifecycle boundary, plus bounded UNKNOWN/TIMEOUT lifecycle propagation; broader incremental epistemic candidate assumptions are not fully wired. |
+| M090_SOLVER.3 learned clauses | transfer observable in GPU trace or test double | PASS | CPU test double observes transfer, and the accepted production adapter now publishes GPU CDCL learned-clause/proof arenas plus learned-count device buffers after accepted runtime evidence, imports the same device arena into a second same-GPU-CNF UNSAT solve with zero CPU learned-clause transfers, repeats that publication/import path for two accepted GPU evidence records, for accepted split-batch component evidence, for the four-component all-binary-operator split batch with all four accepted operator-family counters, for the two-component quaternary `know fact4/4` plus `not possible fact4/4` split batch, and for the two-component quaternary `possible fact4/4` plus `not know fact4/4` split batch with eight tuple-key column reads and zero CPU learned-clause transfers, and rejects distinct candidate CNF imports with `gpu_learned_clause_reuse_rejections`. Additional learned-clause expansion beyond the current closure matrix is out of scope. |
+| M090_SOLVER.4 MaxSAT | soft-constraint fixture returns expected optimum on GPU-native path | PASS | CPU oracle fixture exists; accepted GPU runtime evidence now gates bounded weighted MaxSAT candidate fixtures through `GpuCdclSolver::solve_expect_sat_with_branch_limit`, including single-result, two-record, and accepted split-batch combined lifecycle-plus-MaxSAT gates, returns optimum scores from single-result, two-record/two-CNF, accepted split-batch candidate-set paths, the four-component all-binary-operator split batch with all four accepted operator-family counters, the single-result quaternary `not possible fact4/4` path with one accepted `not possible` counter, the two single-result quaternary `possible fact4/4` plus `not know fact4/4` results with one accepted `possible` counter and one accepted `not know` counter, the two-component quaternary `know fact4/4` plus `not possible fact4/4` split batch, and the two-component quaternary `possible fact4/4` plus `not know fact4/4` split batch with eight tuple-key column reads, rejects an empty MaxSAT lifecycle candidate set before lifecycle work, rejects all-UNSAT MaxSAT search candidates before solver work, rejects all-UNSAT encoded MaxSAT selections before evidence or encoding work, rejects invalid encoded scheduler selections before accepted-batch evidence, scheduler, encode, or solver work, prunes UNSAT candidates through workspace-backed GPU CDCL UNSAT in the single-result, single-result quaternary not-possible, single-result quaternary possible/not-know, two-record, accepted split-batch, and split-batch quaternary possible/not-know bounded search paths, encodes weighted soft-clause selections into GPU CNF search candidates for one accepted result, one accepted quaternary not-possible result, two accepted quaternary possible/not-know results, two accepted generic results, accepted split-batch components, and split-batch quaternary possible/not-know components, and dispatches two-record plus accepted split-batch heterogeneous MaxSAT schedules including the single-result quaternary not-possible, single-result quaternary possible/not-know, and split-batch quaternary possible/not-know schedules with candidate-set, search-pruning, encoded-search, UNKNOWN, and TIMEOUT jobs while recording zero CPU MaxSAT enumerations. Additional MaxSAT expansion beyond the current closure matrix is out of scope. |
+| M090_SOLVER.5 GPU portfolio | portfolio dispatch executes on GPU or GPU-backed adapter with measured launch evidence | PASS | Accepted GPU runtime evidence now gates single-result, two-record, split-batch, and split-batch quaternary possible/not-know bounded SAT/MaxSAT/UNKNOWN/TIMEOUT portfolios through `GpuCdclSolver` plus status propagation, and lifecycle-level UNKNOWN/TIMEOUT propagation records dedicated counters while keeping CPU search counters at zero. Additional portfolio expansion beyond the current closure matrix is out of scope. |
+| M090_SOLVER.6 failure modes | UNSAT/UNKNOWN/TIMEOUT represented distinctly | PASS | CPU oracle fixtures distinguish the states. |
+| M090_SOLVER.7 assumption lifecycle | push, solve, retract, and reuse trace proves no assumption leak between candidates | PASS | CPU lifecycle fixture exists; accepted GPU candidate evidence now gates one-record, two-record, accepted split-batch, all-binary-operator accepted split-batch, split-batch quaternary `know`/`not possible fact4/4`, split-batch quaternary `possible`/`not know fact4/4`, and mixed five-record SAT/UNSAT push/solve/retract sequences, plus single-result, two-record, and accepted split-batch combined lifecycle-plus-MaxSAT sequences while preserving balanced pushes/retractions, workspace reuse, MaxSAT candidate solves, and zero CPU search counters. The trace records `candidate_evidence_records`, `accepted_gpu_batch_candidate_evidence_consumed`, `accepted_gpu_batch_candidate_component_evidence_consumed`, balanced pushes/retractions, workspace reuse, accepted G91/default FAEEL mode-specific evidence counters, accepted operator-family evidence counters for `know`, `possible`, `not possible`, and `not know`, `accepted_nonzero_arity_gpu_candidate_evidence_consumed`, `accepted_gpu_candidate_tuple_key_column_reads_consumed`, mixed unary and binary `possible`/`not possible` plus binary `not know` operator-result lifecycle evidence, bounded UNKNOWN/TIMEOUT lifecycle status counters, learned-clause arena publication, bounded same-device-CNF learned-clause import/reuse, two-record learned-clause reuse, accepted split-batch learned-clause reuse, distinct-CNF learned-clause import rejection, and two-record plus split-batch combined MaxSAT lifecycle solving. Additional lifecycle expansion beyond the current closure matrix is out of scope. |
+| M090_SOLVER.8 CPU search ban | accepted solver path records zero CPU exhaustive assignment enumeration | PASS | Accepted runtime SAT/UNSAT, workspace-backed UNSAT, single-, multi-candidate, split-batch, all-binary-operator split-batch, split-batch quaternary `know`/`not possible fact4/4`, split-batch quaternary `possible`/`not know fact4/4`, and combined MaxSAT bounded lifecycle, accepted split-batch aggregate zero CPU recomposition/fallback/host-round-trip plus CUDA-event timing validation for lifecycle, combined MaxSAT lifecycle, learned-clause reuse, MaxSAT, MaxSAT search pruning, weighted MaxSAT encoding/search, generalized scheduler, and portfolio dispatch, accepted G91/default FAEEL mode-specific evidence accounting, accepted operator-family evidence accounting for mixed unary and binary `possible`/`not possible` plus binary `not know` operator-result lifecycle and single-result quaternary `possible`/`not know` SAT, learned-clause, MaxSAT, portfolio, MaxSAT search, and scheduler evidence, all-binary split-batch lifecycle, learned-clause reuse, and MaxSAT, plus single-result quaternary not-possible learned-clause reuse, MaxSAT/search/scheduler/portfolio evidence and split-batch quaternary learned-clause reuse and MaxSAT/search/scheduler/portfolio evidence, accepted nonzero-arity tuple-key evidence accounting at the SAT boundary including negated quaternary `not possible fact4/4`, single-result quaternary `possible`/`not know fact4/4`, split-batch quaternary `possible`/`not know fact4/4`, and split-batch quaternary lifecycle/reuse/MaxSAT/search/scheduler/portfolio evidence, lifecycle UNKNOWN/TIMEOUT propagation, fail-closed empty MaxSAT lifecycle prevalidation with zero accepted-evidence, lifecycle, MaxSAT, and CPU counters, fail-closed all-UNSAT MaxSAT search prevalidation with zero accepted-evidence and solver counters, fail-closed all-UNSAT encoded MaxSAT prevalidation with zero accepted-evidence, encode, and solver counters, fail-closed invalid encoded MaxSAT scheduler prevalidation with zero accepted-batch evidence, scheduler, encode, solver, and CPU counters, learned-clause arena, same-device-CNF learned-clause reuse, two-record learned-clause reuse, accepted split-batch learned-clause reuse, distinct-CNF learned-clause rejection, bounded single-, multi-candidate, and accepted split-batch MaxSAT, single-result, two-record, and accepted split-batch MaxSAT search pruning, single-result, two-record, and accepted split-batch weighted MaxSAT encoding/search, two-record and accepted split-batch heterogeneous MaxSAT scheduling, and single-result, two-record, plus split-batch bounded portfolio gates route GPU evidence into GPU CDCL or a fail-closed/status propagation path and record zero CPU assignment/MaxSAT enumeration and learned-clause transfer counters; additional solver expansion beyond the current closure matrix is out of scope. |
+| M090_SOLVER.9 production solver reuse | accepted SAT/MaxSAT fixtures execute through existing GPU CNF/CDCL/solver production APIs or thin adapters over them | PASS | Accepted SAT/UNSAT/nonzero-arity-evidence/lifecycle/MaxSAT-lifecycle/empty-MaxSAT-lifecycle-rejection/all-UNSAT-MaxSAT-search-rejection/all-UNSAT-encoded-MaxSAT-rejection/invalid-encoded-scheduler-rejection/multi-candidate-MaxSAT-lifecycle/split-batch-MaxSAT-lifecycle/status-aware-lifecycle/multi-candidate-lifecycle/split-batch-lifecycle/all-binary-operator-split-batch-lifecycle/split-batch-quaternary-not-possible-lifecycle/all-binary-operator-split-batch-learned-reuse-and-MaxSAT/split-batch-quaternary-not-possible-learned-reuse-and-MaxSAT/single-result-quaternary-not-possible-search-scheduler/single-result-quaternary-possible-not-know-search-scheduler/split-batch-quaternary-possible-not-know-search-scheduler-portfolio/operator-result-lifecycle/operator-family-trace/G91-FAEEL-mode-trace/learned-arena/reuse/multi-candidate-learned-reuse/split-batch-learned-reuse/rejection/MaxSAT/multi-candidate-MaxSAT/split-batch-MaxSAT/MaxSAT-search-prune/multi-candidate-MaxSAT-search-prune/split-batch-MaxSAT-search-prune/weighted-MaxSAT-encoding/multi-candidate-weighted-MaxSAT-encoding/split-batch-weighted-MaxSAT-encoding/MaxSAT-scheduler/split-batch-MaxSAT-scheduler/single-result-portfolio/two-record-portfolio/split-batch-portfolio fixtures call `GpuCdclSolver::new`, `GpuCnf::from_host`, `solve_expect_sat`, `solve_expect_sat_with_branch_limit`, `solve_expect_unsat`, `solve_expect_unsat_with_branch_limit_ws`, and `solve_expect_unsat_with_branch_limit_ws_importing_learned`; accepted lifecycle, combined lifecycle-plus-MaxSAT, split-batch lifecycle, all-binary-operator split-batch lifecycle, split-batch quaternary `know`/`not possible fact4/4` lifecycle, split-batch quaternary `possible`/`not know fact4/4` lifecycle, all-binary-operator split-batch learned-clause reuse and MaxSAT, single-result quaternary not-possible MaxSAT search/scheduler, single-result quaternary possible/not-know MaxSAT search/scheduler, split-batch quaternary learned-clause reuse and MaxSAT/search/scheduler/portfolio, split-batch MaxSAT lifecycle, split-batch learned-clause reuse, split-batch MaxSAT, split-batch MaxSAT search pruning, split-batch weighted MaxSAT encoding, split-batch scheduler, and portfolio fixtures also propagate UNKNOWN/TIMEOUT or aggregate accepted batch evidence without CPU search and now reject stale split-batch evidence missing aggregate CUDA-event timing or carrying any untimed component phase plus stale single-result evidence missing candidate-generation CUDA-event timing, the nonzero-arity fixtures record ternary, quaternary, negated quaternary, single-result quaternary `possible`/`not know`, and split-batch quaternary tuple-key evidence reads before SAT solving, and the invalid MaxSAT rejection fixtures prove empty lifecycle/candidate inputs, all-UNSAT search candidates, all-UNSAT encoded selections, and invalid encoded scheduler jobs fail before lifecycle, evidence, encode, scheduler, or solver counters advance. Additional solver release expansion beyond the current closure matrix is out of scope. |
+| M090_SOLVER.10 fixture isolation | CPU semantic-oracle solver facade is gated so it cannot satisfy closure metrics | PASS | Evidence docs mark `SolverService` as oracle-only, the production adapter source test rejects `SolverService`, `production_capabilities` disallows the CPU oracle for production metrics, and `GpuSolverProductionTrace::require_production_metric_eligibility` rejects traces without accepted GPU candidate evidence, without an existing GPU CDCL/MaxSAT/scheduler/portfolio production-path counter, with lifecycle UNKNOWN/TIMEOUT status counters alone, or with CPU search counters. Distinct-CNF reuse rejection also records zero CPU learned-clause transfers. Additional solver expansion beyond the current closure matrix is out of scope. |
+
+2026-05-20 addendum: `accepted_quaternary_not_possible_gates_solver_reuse_maxsat_and_portfolio_paths`
+extends `M090_SOLVER.3`, `M090_SOLVER.4`, `M090_SOLVER.5`,
+`M090_SOLVER.8`, and `M090_SOLVER.9` with single-result quaternary
+`not possible fact4/4` evidence for same-device learned-clause reuse,
+bounded MaxSAT candidate solving, and status-aware SAT/MaxSAT portfolio
+dispatch. It records three accepted `not possible` evidence consumptions,
+three nonzero-arity evidence consumptions, twelve tuple-key column reads, one
+learned-clause arena publication/import/reused solve, one direct MaxSAT
+optimum, one SAT job, one MaxSAT job, one UNKNOWN job, one TIMEOUT job, and
+zero CPU search, MaxSAT enumeration, or learned-clause transfers.
+
+2026-05-20 addendum: `accepted_quaternary_possible_and_not_know_results_gate_solver_reuse_maxsat_and_portfolio_paths`
+extends `M090_SOLVER.3`, `M090_SOLVER.4`, `M090_SOLVER.5`,
+`M090_SOLVER.8`, and `M090_SOLVER.9` with two single-result quaternary
+`possible fact4/4` and `not know fact4/4` accepted evidences for
+same-device learned-clause reuse, bounded MaxSAT candidate solving, and
+status-aware SAT/MaxSAT portfolio dispatch. It records one accepted
+`possible` counter, one accepted `not know` counter, two nonzero-arity evidence
+consumptions, eight tuple-key column reads, two learned-clause arena
+publications/imports/reused solves, four workspace-backed UNSAT solves, four
+GPU CDCL MaxSAT candidate solves, two MaxSAT optima, two SAT jobs, two MaxSAT
+jobs, two UNKNOWN jobs, two TIMEOUT jobs, and zero CPU search, MaxSAT
+enumeration, or learned-clause transfers.
+
+2026-05-20 addendum: `accepted_quaternary_gpu_execution_result_gates_solver_reuse_maxsat_and_portfolio_paths`
+extends `M090_SOLVER.3`, `M090_SOLVER.4`, `M090_SOLVER.5`,
+`M090_SOLVER.8`, and `M090_SOLVER.9` with single-result positive quaternary
+`know fact4/4` accepted evidence for same-device learned-clause reuse,
+bounded MaxSAT candidate solving, and status-aware SAT/MaxSAT portfolio
+dispatch. It records three accepted `know` evidence consumptions, three
+nonzero-arity evidence consumptions, twelve tuple-key column reads, one
+learned-clause arena publication/import/reused solve, one direct MaxSAT
+optimum, one SAT job, one MaxSAT job, one UNKNOWN job, one TIMEOUT job, and
+zero CPU search, MaxSAT enumeration, or learned-clause transfers.
+
+2026-05-20 addendum: `accepted_quaternary_gpu_execution_result_gates_solver_search_and_scheduler_paths`
+extends `M090_SOLVER.4`, `M090_SOLVER.8`, and `M090_SOLVER.9` with
+single-result positive quaternary `know fact4/4` accepted evidence for MaxSAT
+search pruning, weighted MaxSAT encoding, and generalized MaxSAT scheduler
+dispatch. It records one accepted `know` counter, one nonzero-arity evidence
+consumption, four tuple-key column reads, one direct UNSAT prune, two encoded
+candidates, six scheduled GPU CDCL candidate solves, two scheduler UNSAT
+prunes, UNKNOWN/TIMEOUT scheduler statuses, and zero CPU search or MaxSAT
+enumeration.
+
+2026-05-20 addendum: `accepted_quaternary_possible_and_not_know_results_gate_solver_search_and_scheduler_paths`
+extends `M090_SOLVER.4`, `M090_SOLVER.8`, and `M090_SOLVER.9` with
+two single-result quaternary `possible fact4/4` and `not know fact4/4`
+accepted evidences for MaxSAT search pruning, weighted MaxSAT encoding, and
+generalized MaxSAT scheduler dispatch. It records one accepted `possible`
+counter, one accepted `not know` counter, two nonzero-arity evidence
+consumptions, eight tuple-key column reads, two direct UNSAT prunes, four
+encoded candidates, twelve scheduled GPU CDCL candidate solves, four scheduler
+UNSAT prunes, UNKNOWN/TIMEOUT scheduler statuses, and zero CPU search or
+MaxSAT enumeration.
+
+2026-05-20 addendum: `accepted_quaternary_not_possible_gates_solver_search_and_scheduler_paths`
+extends `M090_SOLVER.4`, `M090_SOLVER.8`, and `M090_SOLVER.9` with
+single-result quaternary `not possible fact4/4` evidence for MaxSAT search
+pruning, weighted MaxSAT encoding, and generalized MaxSAT scheduler dispatch.
+It records one accepted `not possible` counter, one nonzero-arity evidence
+consumption, four tuple-key column reads, one direct UNSAT prune, two encoded
+candidates, six scheduled GPU CDCL candidate solves, two scheduler UNSAT
+prunes, UNKNOWN/TIMEOUT scheduler statuses, and zero CPU search or MaxSAT
+enumeration.
+
+2026-05-20 addendum: `accepted_split_quaternary_not_possible_batch_gates_solver_search_scheduler_and_portfolio_paths`
+extends `M090_SOLVER.4`, `M090_SOLVER.5`, `M090_SOLVER.8`, and
+`M090_SOLVER.9` with split-batch quaternary `know fact4/4` plus
+`not possible fact4/4` evidence for MaxSAT search pruning, weighted MaxSAT
+encoding/scheduler, and SAT/MaxSAT portfolio dispatch. It records one accepted
+`know` counter, one accepted `not possible` counter, two UNSAT prunes, four
+encoded candidates, twelve scheduled GPU CDCL candidate solves, two SAT jobs,
+two MaxSAT jobs, eight tuple-key column reads, and zero CPU search.
+
+2026-05-20 addendum: `accepted_split_all_binary_operator_batch_gates_solver_search_scheduler_and_portfolio_paths`
+extends `M090_SOLVER.4`, `M090_SOLVER.5`, `M090_SOLVER.8`, and
+`M090_SOLVER.9` with four-component split-batch binary `know`/`possible`/`not
+possible`/`not know` evidence for MaxSAT search pruning, weighted MaxSAT
+encoding/scheduler, and SAT/MaxSAT portfolio dispatch. It records all four
+accepted operator-family counters, four nonzero-arity evidence consumptions,
+eight tuple-key column reads, four UNSAT prunes, eight encoded candidates,
+twenty-four scheduled GPU CDCL candidate solves, four SAT jobs, four MaxSAT
+jobs, and zero CPU search.
+
+2026-05-20 addendum: `accepted_all_operator_mixed_membership_gates_solver_search_and_scheduler_paths`
+extends `M090_SOLVER.4`, `M090_SOLVER.8`, and `M090_SOLVER.9` with
+same-rule all-operator mixed-membership evidence for MaxSAT search pruning,
+weighted MaxSAT encoding, and generalized MaxSAT scheduling. It records one
+accepted `know`, `possible`, `not possible`, and `not know` counter, four
+tuple-key column reads, one UNSAT prune in direct search, two encoded
+candidates, six scheduled GPU CDCL candidate solves, and zero CPU search.
+
+## Coordination Notes
+
+- This file is release-close evidence for `G090_SOLVER` when read with the final closure proposal and post-checkpoint gates.
+- The production adapter is accepted-runtime SAT, UNSAT,
+  workspace-backed UNSAT, bounded lifecycle, accepted split-batch lifecycle,
+  same-rule all-operator mixed-membership lifecycle plus learned-clause reuse,
+  MaxSAT, portfolio, MaxSAT search pruning, weighted MaxSAT encoding, and
+  scheduler,
+  all-binary-operator accepted split-batch lifecycle plus learned-clause reuse,
+  MaxSAT, search pruning, weighted MaxSAT encoding/scheduler, and portfolio,
+  single-result quaternary `know fact4/4` learned-clause reuse, MaxSAT,
+  portfolio, MaxSAT search pruning, weighted MaxSAT encoding/scheduler,
+  single-result quaternary `not possible fact4/4` learned-clause reuse,
+  MaxSAT, MaxSAT search pruning, weighted MaxSAT encoding/scheduler, and
+  portfolio,
+  single-result quaternary `possible`/`not know fact4/4` learned-clause reuse,
+  MaxSAT, MaxSAT search pruning, weighted MaxSAT encoding/scheduler, and
+  portfolio,
+  split-batch quaternary `know`/`not possible fact4/4` lifecycle plus
+  learned-clause reuse, MaxSAT, search pruning, weighted MaxSAT
+  encoding/scheduler, and portfolio,
+  split-batch quaternary `possible`/`not know fact4/4` lifecycle plus
+  learned-clause reuse, MaxSAT, search pruning, weighted MaxSAT
+  encoding/scheduler, and portfolio,
+  single-result quaternary `possible`/`not know fact4/4` SAT evidence,
+  mixed unary and binary operator-result
+  lifecycle including `possible`, `not possible`, and binary `not know`,
+  accepted G91/default FAEEL mode-specific solver trace counters,
+  accepted operator-family solver trace counters,
+  accepted split-batch/component solver trace counters,
+  single-result, two-record, and split-batch combined lifecycle-plus-MaxSAT gate,
+  learned-clause arena publication,
+  same-device-CNF learned-clause import/reuse, two-record learned-clause reuse,
+  accepted split-batch learned-clause reuse,
+  distinct-CNF learned-clause import rejection, bounded single-, split-batch, and
+  multi-candidate MaxSAT, single-result, two-record, and accepted split-batch MaxSAT search pruning,
+  single-result, two-record, and accepted split-batch weighted MaxSAT encoding/search,
+  two-record and accepted split-batch heterogeneous MaxSAT scheduling, and
+  single-result, two-record, plus split-batch status-aware portfolio
+  reuse evidence for the current closure matrix.
+- Additional solver expansion beyond the current matrix is future work; the
+  post-v0.7.0/v0.8.0/v0.8.5/v0.8.6 compatibility gate is recorded in the final
+  closure proposal.
+- No pyxlog public API signatures were changed.
+- No push, tag, release-board update, or merge was performed.

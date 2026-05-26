@@ -69,6 +69,201 @@ pub struct GpuXgcf {
     free_var_mask: Option<TrackedCudaSlice<u8>>,
 }
 
+fn checked_gpu_u32_len(context: &str, len: usize) -> Result<u32> {
+    u32::try_from(len)
+        .map_err(|_| XlogError::Compilation(format!("{context} exceeds u32::MAX: {len}")))
+}
+
+fn checked_gpu_len_add_one(context: &str, len: usize) -> Result<usize> {
+    len.checked_add(1)
+        .ok_or_else(|| XlogError::Compilation(format!("{context} length overflow")))
+}
+
+fn checked_gpu_launch_blocks(context: &str, item_count: usize, block_size: u32) -> Result<u32> {
+    let item_count = u32::try_from(item_count).map_err(|_| {
+        XlogError::Kernel(format!(
+            "{context} launch item count exceeds u32::MAX: {item_count}"
+        ))
+    })?;
+    item_count
+        .checked_add(block_size - 1)
+        .map(|rounded| rounded / block_size)
+        .ok_or_else(|| XlogError::Kernel(format!("{context} launch grid overflow")))
+}
+
+fn checked_host_level_width(level_offsets: &[u32], level: usize) -> Result<usize> {
+    let start = level_offsets[level];
+    let end = level_offsets[level + 1];
+    if end < start {
+        return Err(XlogError::Compilation(format!(
+            "XGCF invariant violation: level_offsets decrease at level {} ({} > {})",
+            level, start, end
+        )));
+    }
+    Ok((end - start) as usize)
+}
+
+fn validate_xgcf_for_gpu_upload(circuit: &Xgcf) -> Result<(u32, u32, u32)> {
+    let n = circuit.node_type.len();
+    if n == 0 {
+        return Err(XlogError::Compilation(
+            "GPU XGCF upload requires at least one node".to_string(),
+        ));
+    }
+    let node_count = checked_gpu_u32_len("GPU XGCF node count", n)?;
+    let child_offsets_len = checked_gpu_len_add_one("GPU XGCF child_offsets", n)?;
+    if circuit.child_offsets.len() != child_offsets_len {
+        return Err(XlogError::Compilation(format!(
+            "XGCF invariant violation: child_offsets len {} != num_nodes+1 ({})",
+            circuit.child_offsets.len(),
+            child_offsets_len
+        )));
+    }
+    if circuit.lit.len() != n
+        || circuit.decision_var.len() != n
+        || circuit.decision_child_false.len() != n
+        || circuit.decision_child_true.len() != n
+    {
+        return Err(XlogError::Compilation(
+            "XGCF invariant violation: per-node arrays length mismatch".to_string(),
+        ));
+    }
+
+    let edge_count = checked_gpu_u32_len("GPU XGCF edge count", circuit.child_indices.len())?;
+    let mut previous_offset = 0u32;
+    for (idx, &offset) in circuit.child_offsets.iter().enumerate() {
+        if offset < previous_offset {
+            return Err(XlogError::Compilation(format!(
+                "XGCF invariant violation: child_offsets decrease at index {} ({} > {})",
+                idx, previous_offset, offset
+            )));
+        }
+        if offset > edge_count {
+            return Err(XlogError::Compilation(format!(
+                "XGCF invariant violation: child_offsets[{}] {} exceeds child_indices len {}",
+                idx, offset, edge_count
+            )));
+        }
+        previous_offset = offset;
+    }
+    if previous_offset != edge_count {
+        return Err(XlogError::Compilation(format!(
+            "XGCF invariant violation: final child offset {} != child_indices len {}",
+            previous_offset, edge_count
+        )));
+    }
+    for (edge, &child) in circuit.child_indices.iter().enumerate() {
+        if child >= node_count {
+            return Err(XlogError::Compilation(format!(
+                "XGCF invariant violation: child_indices[{}] {} out of bounds (num_nodes={})",
+                edge, child, node_count
+            )));
+        }
+    }
+
+    for (idx, &ty) in circuit.node_type.iter().enumerate() {
+        match ty {
+            XgcfNodeType::Const0 | XgcfNodeType::Const1 => {}
+            XgcfNodeType::Lit => {
+                if circuit.lit[idx] == 0 {
+                    return Err(XlogError::Compilation(format!(
+                        "XGCF invariant violation: LIT node {} has lit=0",
+                        idx
+                    )));
+                }
+            }
+            XgcfNodeType::And | XgcfNodeType::Or => {
+                if circuit.child_offsets[idx] == circuit.child_offsets[idx + 1] {
+                    return Err(XlogError::Compilation(format!(
+                        "XGCF invariant violation: {:?} node {} has no children",
+                        ty, idx
+                    )));
+                }
+            }
+            XgcfNodeType::Decision => {
+                if circuit.decision_var[idx] == 0 {
+                    return Err(XlogError::Compilation(format!(
+                        "XGCF invariant violation: DECISION node {} has var=0",
+                        idx
+                    )));
+                }
+                if circuit.decision_child_false[idx] >= node_count {
+                    return Err(XlogError::Compilation(format!(
+                        "XGCF invariant violation: DECISION node {} false child {} out of bounds",
+                        idx, circuit.decision_child_false[idx]
+                    )));
+                }
+                if circuit.decision_child_true[idx] >= node_count {
+                    return Err(XlogError::Compilation(format!(
+                        "XGCF invariant violation: DECISION node {} true child {} out of bounds",
+                        idx, circuit.decision_child_true[idx]
+                    )));
+                }
+            }
+        }
+    }
+
+    if circuit.level_offsets.is_empty() || circuit.level_offsets[0] != 0 {
+        return Err(XlogError::Compilation(
+            "XGCF invariant violation: level_offsets must start at 0".to_string(),
+        ));
+    }
+    let level_nodes_len =
+        checked_gpu_u32_len("GPU XGCF level_nodes len", circuit.level_nodes.len())?;
+    let mut previous_level_offset = 0u32;
+    for (idx, &offset) in circuit.level_offsets.iter().enumerate() {
+        if offset < previous_level_offset {
+            return Err(XlogError::Compilation(format!(
+                "XGCF invariant violation: level_offsets decrease at index {} ({} > {})",
+                idx, previous_level_offset, offset
+            )));
+        }
+        if offset > level_nodes_len {
+            return Err(XlogError::Compilation(format!(
+                "XGCF invariant violation: level_offsets[{}] {} exceeds level_nodes len {}",
+                idx, offset, level_nodes_len
+            )));
+        }
+        previous_level_offset = offset;
+    }
+    if previous_level_offset != level_nodes_len {
+        return Err(XlogError::Compilation(format!(
+            "XGCF invariant violation: level_offsets last {} != level_nodes.len {}",
+            previous_level_offset, level_nodes_len
+        )));
+    }
+    for (idx, &node) in circuit.level_nodes.iter().enumerate() {
+        if node >= node_count {
+            return Err(XlogError::Compilation(format!(
+                "XGCF invariant violation: level_nodes[{}] {} out of bounds (num_nodes={})",
+                idx, node, node_count
+            )));
+        }
+    }
+    let num_levels_usize = circuit.level_offsets.len() - 1;
+    let num_levels = checked_gpu_u32_len("GPU XGCF level count", num_levels_usize)?;
+    if num_levels == 0 {
+        return Err(XlogError::Compilation(
+            "GPU XGCF upload requires at least one level".to_string(),
+        ));
+    }
+
+    if circuit.roots.len() != 1 {
+        return Err(XlogError::Compilation(format!(
+            "GPU XGCF eval expects exactly 1 root, got {}",
+            circuit.roots.len()
+        )));
+    }
+    if circuit.roots[0] >= node_count {
+        return Err(XlogError::Compilation(format!(
+            "XGCF invariant violation: root {} out of bounds (num_nodes={})",
+            circuit.roots[0], node_count
+        )));
+    }
+
+    Ok((node_count, edge_count, num_levels))
+}
+
 impl GpuXgcf {
     pub fn from_device(
         builder: GpuCircuitBuilder,
@@ -100,7 +295,9 @@ impl GpuXgcf {
                 "GpuXgcf::from_device: num_nodes out of bounds".to_string(),
             ));
         }
-        if builder.child_offsets.len() != node_cap + 1
+        let child_offsets_len =
+            checked_gpu_len_add_one("GpuXgcf::from_device child_offsets", node_cap)?;
+        if builder.child_offsets.len() != child_offsets_len
             || builder.lit.len() != node_cap
             || builder.decision_var.len() != node_cap
             || builder.decision_child_false.len() != node_cap
@@ -117,11 +314,13 @@ impl GpuXgcf {
         }
 
         let num_levels = layout.num_levels as usize;
-        if layout.level_offsets.len() != num_levels + 1 {
+        let level_offsets_len =
+            checked_gpu_len_add_one("GpuXgcf::from_device level_offsets", num_levels)?;
+        if layout.level_offsets.len() != level_offsets_len {
             return Err(XlogError::Compilation(format!(
                 "GpuXgcf::from_device: level_offsets len {} != num_levels+1 ({})",
                 layout.level_offsets.len(),
-                num_levels + 1
+                level_offsets_len
             )));
         }
         if layout.level_nodes.len() < num_nodes {
@@ -147,9 +346,7 @@ impl GpuXgcf {
             None => {
                 let mut meta = memory.alloc::<u32>(1)?;
                 provider
-                    .device()
-                    .inner()
-                    .htod_sync_copy_into(&[layout.num_nodes], &mut meta)
+                    .htod_launch_metadata_sync_copy_into(&[layout.num_nodes], &mut meta)
                     .map_err(|e| {
                         XlogError::Kernel(format!("Failed to upload num_nodes meta: {}", e))
                     })?;
@@ -161,9 +358,7 @@ impl GpuXgcf {
             None => {
                 let mut meta = memory.alloc::<u32>(1)?;
                 provider
-                    .device()
-                    .inner()
-                    .htod_sync_copy_into(&[layout.num_edges], &mut meta)
+                    .htod_launch_metadata_sync_copy_into(&[layout.num_edges], &mut meta)
                     .map_err(|e| {
                         XlogError::Kernel(format!("Failed to upload num_edges meta: {}", e))
                     })?;
@@ -261,7 +456,7 @@ impl GpuXgcf {
             )));
         }
 
-        let words_per_support = ((num_random_vars + 31) / 32).max(1);
+        let words_per_support = num_random_vars.div_ceil(32).max(1);
 
         let support_len = (num_nodes as u64)
             .checked_mul(words_per_support as u64)
@@ -295,7 +490,7 @@ impl GpuXgcf {
             let fill_const = device
                 .get_func(FILTER_MODULE, filter_kernels::FILL_U32_CONST)
                 .ok_or_else(|| XlogError::Kernel("fill_u32_const kernel not found".to_string()))?;
-            let grid = (map_len_u32 + block_size - 1) / block_size;
+            let grid = map_len_u32.div_ceil(block_size);
             // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 fill_const.clone().launch(
@@ -315,7 +510,7 @@ impl GpuXgcf {
                 .ok_or_else(|| {
                     XlogError::Kernel("random_var_to_bit_from_list kernel not found".to_string())
                 })?;
-            let grid = (num_random_vars + block_size - 1) / block_size;
+            let grid = num_random_vars.div_ceil(block_size);
             // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 map_kernel.clone().launch(
@@ -348,13 +543,14 @@ impl GpuXgcf {
         let random_map_len = map_len_u32;
         for level in 0..num_levels {
             let num_level_nodes: usize = match self.level_offsets_host.as_ref() {
-                Some(off) => (off[level + 1].saturating_sub(off[level])) as usize,
+                Some(off) => checked_host_level_width(off, level)?,
                 None => self.level_nodes.len(),
             };
             if num_level_nodes == 0 {
                 continue;
             }
-            let num_blocks = ((num_level_nodes as u32) + block_size - 1) / block_size;
+            let num_blocks =
+                checked_gpu_launch_blocks("d4_support_level", num_level_nodes, block_size)?;
             let config = LaunchConfig {
                 grid_dim: (num_blocks, 1, 1),
                 block_dim: (block_size, 1, 1),
@@ -375,7 +571,7 @@ impl GpuXgcf {
                 (&d_random_map).as_kernel_param(),
                 random_map_len.as_kernel_param(),
                 words_per_support.as_kernel_param(),
-                (&mut support).as_kernel_param(),
+                (&support).as_kernel_param(),
             ];
             // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe { support_kernel.clone().launch(config, &mut params) }
@@ -388,8 +584,8 @@ impl GpuXgcf {
                 .ok_or_else(|| {
                     XlogError::Kernel("d4_support_set_root_bits kernel not found".to_string())
                 })?;
-            let num_words = (num_random_vars + 31) / 32;
-            let grid = (num_words + block_size - 1) / block_size;
+            let num_words = num_random_vars.div_ceil(32);
+            let grid = num_words.div_ceil(block_size);
             // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 root_kernel.clone().launch(
@@ -430,7 +626,7 @@ impl GpuXgcf {
         let count_kernel = device
             .get_func(D4_MODULE, d4_kernels::D4_SMOOTH_COUNT)
             .ok_or_else(|| XlogError::Kernel("d4_smooth_count kernel not found".to_string()))?;
-        let num_blocks = (num_nodes + block_size - 1) / block_size;
+        let num_blocks = num_nodes.div_ceil(block_size);
         let mut params: Vec<*mut c_void> = vec![
             (&self.node_type).as_kernel_param(),
             (&self.child_offsets).as_kernel_param(),
@@ -443,11 +639,11 @@ impl GpuXgcf {
             words_per_support.as_kernel_param(),
             (&d_random_map).as_kernel_param(),
             random_map_len.as_kernel_param(),
-            (&mut wrap_prefix_or).as_kernel_param(),
-            (&mut wrap_missing_or).as_kernel_param(),
-            (&mut wrap_prefix_dec).as_kernel_param(),
-            (&mut wrap_missing_dec).as_kernel_param(),
-            (&mut out_edge_counts).as_kernel_param(),
+            (&wrap_prefix_or).as_kernel_param(),
+            (&wrap_missing_or).as_kernel_param(),
+            (&wrap_prefix_dec).as_kernel_param(),
+            (&wrap_missing_dec).as_kernel_param(),
+            (&out_edge_counts).as_kernel_param(),
             base_node.as_kernel_param(),
             smooth_node_cap.as_kernel_param(),
         ];
@@ -507,7 +703,7 @@ impl GpuXgcf {
                 XlogError::Kernel("d4_smooth_wrapper_edge_counts_or kernel not found".to_string())
             })?;
         if num_edges > 0 {
-            let num_blocks = (num_edges + block_size - 1) / block_size;
+            let num_blocks = num_edges.div_ceil(block_size);
             // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 wrap_or_kernel.clone().launch(
@@ -538,7 +734,7 @@ impl GpuXgcf {
                 XlogError::Kernel("d4_smooth_wrapper_edge_counts_dec kernel not found".to_string())
             })?;
         if dec_entries > 0 {
-            let num_blocks = (dec_entries_u32 + block_size - 1) / block_size;
+            let num_blocks = dec_entries_u32.div_ceil(block_size);
             // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 wrap_dec_kernel.clone().launch(
@@ -651,7 +847,11 @@ impl GpuXgcf {
             .ok_or_else(|| {
                 XlogError::Kernel("d4_smooth_init_nodes kernel not found".to_string())
             })?;
-        let init_blocks = ((num_random_vars.max(1)) + block_size - 1) / block_size;
+        let init_blocks = checked_gpu_launch_blocks(
+            "d4_smooth_init_nodes",
+            num_random_vars.max(1) as usize,
+            block_size,
+        )?;
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             init_kernel.clone().launch(
@@ -675,7 +875,16 @@ impl GpuXgcf {
         }
         .map_err(|e| XlogError::Kernel(format!("d4_smooth_init_nodes failed: {}", e)))?;
 
-        let num_levels_out = self.num_levels.saturating_mul(2).saturating_add(4);
+        let num_levels_out = self
+            .num_levels
+            .checked_mul(2)
+            .and_then(|levels| levels.checked_add(4))
+            .ok_or_else(|| {
+                XlogError::Compilation("GPU smoothing output level count overflow".to_string())
+            })?;
+        let num_levels_out_usize = num_levels_out as usize;
+        let level_offsets_len =
+            checked_gpu_len_add_one("GPU smoothing level offsets", num_levels_out_usize)?;
 
         let emit_kernel = device
             .get_func(D4_MODULE, d4_kernels::D4_SMOOTH_EMIT_LEVEL)
@@ -684,13 +893,14 @@ impl GpuXgcf {
             })?;
         for level in 0..num_levels {
             let num_level_nodes: usize = match self.level_offsets_host.as_ref() {
-                Some(off) => (off[level + 1].saturating_sub(off[level])) as usize,
+                Some(off) => checked_host_level_width(off, level)?,
                 None => self.level_nodes.len(),
             };
             if num_level_nodes == 0 {
                 continue;
             }
-            let num_blocks = ((num_level_nodes as u32) + block_size - 1) / block_size;
+            let num_blocks =
+                checked_gpu_launch_blocks("xgcf_smooth_forward", num_level_nodes, block_size)?;
             let level_u32 = level as u32;
             let mut params: Vec<*mut c_void> = vec![
                 (&self.node_type).as_kernel_param(),
@@ -714,14 +924,14 @@ impl GpuXgcf {
                 (&wrap_counts).as_kernel_param(),
                 num_random_vars.as_kernel_param(),
                 num_levels_out.as_kernel_param(),
-                (&mut out_node_type).as_kernel_param(),
+                (&out_node_type).as_kernel_param(),
                 (&out_child_offsets).as_kernel_param(),
-                (&mut out_child_indices).as_kernel_param(),
-                (&mut out_lit).as_kernel_param(),
-                (&mut out_decision_var).as_kernel_param(),
-                (&mut out_decision_child_false).as_kernel_param(),
-                (&mut out_decision_child_true).as_kernel_param(),
-                (&mut out_node_level).as_kernel_param(),
+                (&out_child_indices).as_kernel_param(),
+                (&out_lit).as_kernel_param(),
+                (&out_decision_var).as_kernel_param(),
+                (&out_decision_child_false).as_kernel_param(),
+                (&out_decision_child_true).as_kernel_param(),
+                (&out_node_level).as_kernel_param(),
             ];
             // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
@@ -737,9 +947,9 @@ impl GpuXgcf {
             .map_err(|e| XlogError::Kernel(format!("d4_smooth_emit_level failed: {}", e)))?;
         }
 
-        let mut level_counts = memory.alloc::<u32>(num_levels_out as usize)?;
-        let mut level_offsets = memory.alloc::<u32>((num_levels_out as usize) + 1)?;
-        let mut level_cursors = memory.alloc::<u32>(num_levels_out as usize)?;
+        let mut level_counts = memory.alloc::<u32>(num_levels_out_usize)?;
+        let mut level_offsets = memory.alloc::<u32>(level_offsets_len)?;
+        let mut level_cursors = memory.alloc::<u32>(num_levels_out_usize)?;
         let mut level_nodes = memory.alloc::<u32>(smooth_node_cap as usize)?;
 
         device
@@ -756,14 +966,15 @@ impl GpuXgcf {
             .map_err(|e| XlogError::Kernel(format!("Failed to zero level_nodes: {}", e)))?;
 
         let mut compile_needed = memory.alloc::<u32>(1)?;
-        device
-            .htod_sync_copy_into(&[1u32], &mut compile_needed)
+        provider
+            .htod_launch_metadata_sync_copy_into(&[1u32], &mut compile_needed)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload compile_needed: {}", e)))?;
 
         let levelize_counts = device
             .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_COUNTS)
             .ok_or_else(|| XlogError::Kernel("d4_levelize_counts kernel not found".to_string()))?;
-        let num_blocks = (smooth_node_cap + block_size - 1) / block_size;
+        let num_blocks =
+            checked_gpu_launch_blocks("d4_smooth_levelize", smooth_node_cap as usize, block_size)?;
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             levelize_counts.clone().launch(
@@ -786,7 +997,7 @@ impl GpuXgcf {
         device
             .dtod_copy(
                 &level_counts,
-                &mut level_offsets.slice_mut(0..num_levels_out as usize),
+                &mut level_offsets.slice_mut(0..num_levels_out_usize),
             )
             .map_err(|e| XlogError::Kernel(format!("Failed to copy level_counts: {}", e)))?;
         let level_scan_len = num_levels_out.checked_add(1).ok_or_else(|| {
@@ -844,15 +1055,9 @@ impl GpuXgcf {
     }
 
     pub fn upload(provider: &CudaKernelProvider, circuit: &Xgcf) -> Result<Self> {
-        if circuit.roots.len() != 1 {
-            return Err(XlogError::Compilation(format!(
-                "GPU XGCF eval expects exactly 1 root, got {}",
-                circuit.roots.len()
-            )));
-        }
+        let (node_cap, edge_cap, num_levels) = validate_xgcf_for_gpu_upload(circuit)?;
 
         let memory = provider.memory().clone();
-        let device = provider.device().inner();
 
         let n = circuit.node_type.len();
         let mut host_node_type: Vec<u8> = Vec::with_capacity(n);
@@ -871,39 +1076,39 @@ impl GpuXgcf {
         }
 
         let mut d_node_type = memory.alloc::<u8>(n)?;
-        device
-            .htod_sync_copy_into(&host_node_type, &mut d_node_type)
+        provider
+            .htod_sync_copy_into_tracked(&host_node_type, &mut d_node_type)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload circuit node_type: {}", e)))?;
 
         let mut d_child_offsets = memory.alloc::<u32>(circuit.child_offsets.len())?;
-        device
-            .htod_sync_copy_into(&circuit.child_offsets, &mut d_child_offsets)
+        provider
+            .htod_sync_copy_into_tracked(&circuit.child_offsets, &mut d_child_offsets)
             .map_err(|e| {
                 XlogError::Kernel(format!("Failed to upload circuit child_offsets: {}", e))
             })?;
 
         let mut d_child_indices = memory.alloc::<u32>(circuit.child_indices.len())?;
-        device
-            .htod_sync_copy_into(&circuit.child_indices, &mut d_child_indices)
+        provider
+            .htod_sync_copy_into_tracked(&circuit.child_indices, &mut d_child_indices)
             .map_err(|e| {
                 XlogError::Kernel(format!("Failed to upload circuit child_indices: {}", e))
             })?;
 
         let mut d_lit = memory.alloc::<i32>(circuit.lit.len())?;
-        device
-            .htod_sync_copy_into(&circuit.lit, &mut d_lit)
+        provider
+            .htod_sync_copy_into_tracked(&circuit.lit, &mut d_lit)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload circuit lit: {}", e)))?;
 
         let mut d_decision_var = memory.alloc::<u32>(circuit.decision_var.len())?;
-        device
-            .htod_sync_copy_into(&circuit.decision_var, &mut d_decision_var)
+        provider
+            .htod_sync_copy_into_tracked(&circuit.decision_var, &mut d_decision_var)
             .map_err(|e| {
                 XlogError::Kernel(format!("Failed to upload circuit decision_var: {}", e))
             })?;
 
         let mut d_decision_child_false = memory.alloc::<u32>(circuit.decision_child_false.len())?;
-        device
-            .htod_sync_copy_into(&circuit.decision_child_false, &mut d_decision_child_false)
+        provider
+            .htod_sync_copy_into_tracked(&circuit.decision_child_false, &mut d_decision_child_false)
             .map_err(|e| {
                 XlogError::Kernel(format!(
                     "Failed to upload circuit decision_child_false: {}",
@@ -912,8 +1117,8 @@ impl GpuXgcf {
             })?;
 
         let mut d_decision_child_true = memory.alloc::<u32>(circuit.decision_child_true.len())?;
-        device
-            .htod_sync_copy_into(&circuit.decision_child_true, &mut d_decision_child_true)
+        provider
+            .htod_sync_copy_into_tracked(&circuit.decision_child_true, &mut d_decision_child_true)
             .map_err(|e| {
                 XlogError::Kernel(format!(
                     "Failed to upload circuit decision_child_true: {}",
@@ -922,15 +1127,15 @@ impl GpuXgcf {
             })?;
 
         let mut d_level_nodes = memory.alloc::<u32>(circuit.level_nodes.len())?;
-        device
-            .htod_sync_copy_into(&circuit.level_nodes, &mut d_level_nodes)
+        provider
+            .htod_sync_copy_into_tracked(&circuit.level_nodes, &mut d_level_nodes)
             .map_err(|e| {
                 XlogError::Kernel(format!("Failed to upload circuit level_nodes: {}", e))
             })?;
 
         let mut d_level_offsets = memory.alloc::<u32>(circuit.level_offsets.len())?;
-        device
-            .htod_sync_copy_into(&circuit.level_offsets, &mut d_level_offsets)
+        provider
+            .htod_sync_copy_into_tracked(&circuit.level_offsets, &mut d_level_offsets)
             .map_err(|e| {
                 XlogError::Kernel(format!("Failed to upload circuit level_offsets: {}", e))
             })?;
@@ -943,12 +1148,12 @@ impl GpuXgcf {
         let grad_true = memory.alloc::<f64>(weights_len)?;
         let grad_false = memory.alloc::<f64>(weights_len)?;
         let mut meta_num_nodes = memory.alloc::<u32>(1)?;
-        device
-            .htod_sync_copy_into(&[n as u32], &mut meta_num_nodes)
+        provider
+            .htod_launch_metadata_sync_copy_into(&[node_cap], &mut meta_num_nodes)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload num_nodes meta: {}", e)))?;
         let mut meta_num_edges = memory.alloc::<u32>(1)?;
-        device
-            .htod_sync_copy_into(&[circuit.child_indices.len() as u32], &mut meta_num_edges)
+        provider
+            .htod_launch_metadata_sync_copy_into(&[edge_cap], &mut meta_num_edges)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload num_edges meta: {}", e)))?;
 
         Ok(Self {
@@ -962,9 +1167,9 @@ impl GpuXgcf {
             level_nodes: d_level_nodes,
             level_offsets: d_level_offsets,
             level_offsets_host: Some(circuit.level_offsets.clone()),
-            node_cap: n as u32,
-            edge_cap: circuit.child_indices.len() as u32,
-            num_levels: (circuit.level_offsets.len().saturating_sub(1)) as u32,
+            node_cap,
+            edge_cap,
+            num_levels,
             root: circuit.roots[0],
             max_var,
             meta_num_nodes,
@@ -1133,9 +1338,7 @@ impl GpuXgcf {
         let memory = provider.memory();
         let mut d_mask = memory.alloc::<u8>(mask.len())?;
         provider
-            .device()
-            .inner()
-            .htod_sync_copy_into(mask, &mut d_mask)
+            .htod_sync_copy_into_tracked(mask, &mut d_mask)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload free_var_mask: {}", e)))?;
         self.free_var_mask = Some(d_mask);
         Ok(())
@@ -1150,8 +1353,6 @@ impl GpuXgcf {
         provider: &CudaKernelProvider,
         var_log_weights: &[(f64, f64)],
     ) -> Result<()> {
-        let device = provider.device().inner();
-
         let weights_len = (self.max_var as usize) + 1;
         if var_log_weights.len() < weights_len {
             return Err(XlogError::Compilation(format!(
@@ -1168,11 +1369,11 @@ impl GpuXgcf {
             host_false.push(f);
         }
 
-        device
-            .htod_sync_copy_into(&host_true, &mut self.var_log_true)
+        provider
+            .htod_sync_copy_into_tracked(&host_true, &mut self.var_log_true)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload log_true weights: {}", e)))?;
-        device
-            .htod_sync_copy_into(&host_false, &mut self.var_log_false)
+        provider
+            .htod_sync_copy_into_tracked(&host_false, &mut self.var_log_false)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload log_false weights: {}", e)))?;
 
         Ok(())
@@ -1202,14 +1403,15 @@ impl GpuXgcf {
         let num_levels: usize = self.num_levels as usize;
         for level in 0..num_levels {
             let num_level_nodes: usize = match self.level_offsets_host.as_ref() {
-                Some(off) => (off[level + 1].saturating_sub(off[level])) as usize,
+                Some(off) => checked_host_level_width(off, level)?,
                 None => self.level_nodes.len(),
             };
             if num_level_nodes == 0 {
                 continue;
             }
 
-            let num_blocks = ((num_level_nodes as u32) + block_size - 1) / block_size;
+            let num_blocks =
+                checked_gpu_launch_blocks("xgcf_forward_level", num_level_nodes, block_size)?;
             let config = LaunchConfig {
                 grid_dim: (num_blocks, 1, 1),
                 block_dim: (block_size, 1, 1),
@@ -1230,7 +1432,7 @@ impl GpuXgcf {
                 level_u32.as_kernel_param(),
                 (&self.var_log_true).as_kernel_param(),
                 (&self.var_log_false).as_kernel_param(),
-                (&mut self.values).as_kernel_param(),
+                (&self.values).as_kernel_param(),
             ];
 
             // SAFETY: xgcf_forward_level(...) writes values for the provided level nodes.
@@ -1300,7 +1502,7 @@ impl GpuXgcf {
 
         let device = provider.device().inner();
         let block_dim = 256u32;
-        let grid_dim = (n + block_dim - 1) / block_dim;
+        let grid_dim = n.div_ceil(block_dim);
 
         if apply_grads {
             let apply_grad = device
@@ -1347,8 +1549,8 @@ impl GpuXgcf {
             let mut stage0 = true;
             let mut output_is_a = true;
             loop {
-                let out_len = (stage_n + 1) / 2;
-                let stage_grid = (out_len + block_dim - 1) / block_dim;
+                let out_len = stage_n.div_ceil(2);
+                let stage_grid = out_len.div_ceil(block_dim);
 
                 let (in_buf, out_buf): (&TrackedCudaSlice<f64>, &mut TrackedCudaSlice<f64>) =
                     if output_is_a {
@@ -1424,14 +1626,15 @@ impl GpuXgcf {
         let num_levels: usize = self.num_levels as usize;
         for level in 0..num_levels {
             let num_level_nodes: usize = match self.level_offsets_host.as_ref() {
-                Some(off) => (off[level + 1].saturating_sub(off[level])) as usize,
+                Some(off) => checked_host_level_width(off, level)?,
                 None => self.level_nodes.len(),
             };
             if num_level_nodes == 0 {
                 continue;
             }
 
-            let num_blocks = ((num_level_nodes as u32) + block_size - 1) / block_size;
+            let num_blocks =
+                checked_gpu_launch_blocks("xgcf_forward_level", num_level_nodes, block_size)?;
             let config = LaunchConfig {
                 grid_dim: (num_blocks, 1, 1),
                 block_dim: (block_size, 1, 1),
@@ -1452,7 +1655,7 @@ impl GpuXgcf {
                 level_u32.as_kernel_param(),
                 (&self.var_log_true).as_kernel_param(),
                 (&self.var_log_false).as_kernel_param(),
-                (&mut self.values).as_kernel_param(),
+                (&self.values).as_kernel_param(),
             ];
 
             // SAFETY: xgcf_forward_level(...) writes values for the provided level nodes.
@@ -1520,14 +1723,15 @@ impl GpuXgcf {
         let num_levels: usize = self.num_levels as usize;
         for level in (0..num_levels).rev() {
             let num_level_nodes: usize = match self.level_offsets_host.as_ref() {
-                Some(off) => (off[level + 1].saturating_sub(off[level])) as usize,
+                Some(off) => checked_host_level_width(off, level)?,
                 None => self.level_nodes.len(),
             };
             if num_level_nodes == 0 {
                 continue;
             }
 
-            let num_blocks = ((num_level_nodes as u32) + block_size - 1) / block_size;
+            let num_blocks =
+                checked_gpu_launch_blocks("xgcf_backward_level", num_level_nodes, block_size)?;
             let config = LaunchConfig {
                 grid_dim: (num_blocks, 1, 1),
                 block_dim: (block_size, 1, 1),
@@ -1548,7 +1752,7 @@ impl GpuXgcf {
                 (&self.var_log_true).as_kernel_param(),
                 (&self.var_log_false).as_kernel_param(),
                 (&self.values).as_kernel_param(),
-                (&mut self.adj).as_kernel_param(),
+                (&self.adj).as_kernel_param(),
             ];
 
             // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
@@ -1568,8 +1772,8 @@ impl GpuXgcf {
                 (&self.var_log_false).as_kernel_param(),
                 (&self.values).as_kernel_param(),
                 (&self.adj).as_kernel_param(),
-                (&mut self.grad_true).as_kernel_param(),
-                (&mut self.grad_false).as_kernel_param(),
+                (&self.grad_true).as_kernel_param(),
+                (&self.grad_false).as_kernel_param(),
             ];
 
             // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size

@@ -17,16 +17,18 @@ use super::{
 };
 use crate::gpu::{GpuCircuitBuilder, GpuCircuitLayout, GpuXgcf};
 
-fn alloc_component_scratch(
-    provider: &CudaKernelProvider,
-    max_items: u32,
-    var_cap: u32,
-) -> Result<(
+type ComponentScratch = (
     TrackedCudaSlice<u32>,
     TrackedCudaSlice<u32>,
     TrackedCudaSlice<u32>,
     u32,
-)> {
+);
+
+fn alloc_component_scratch(
+    provider: &CudaKernelProvider,
+    max_items: u32,
+    var_cap: u32,
+) -> Result<ComponentScratch> {
     let uf_stride = var_cap
         .checked_add(1)
         .ok_or_else(|| XlogError::Kernel("component scratch var_cap+1 overflow".to_string()))?;
@@ -116,7 +118,7 @@ pub(super) fn compile_gpu_d4_with_gate(
     device
         .memset_zeros(&mut scratch_trail)
         .map_err(|e| XlogError::Kernel(format!("Failed to zero scratch_trail: {}", e)))?;
-    let (mut uf_parent, mut uf_aux, mut comp_list, uf_stride) =
+    let (uf_parent, uf_aux, comp_list, uf_stride) =
         alloc_component_scratch(provider, max_items, cnf.var_cap)?;
 
     let mut node_counts = memory.alloc::<u32>(max_items as usize)?;
@@ -150,14 +152,14 @@ pub(super) fn compile_gpu_d4_with_gate(
         frontier.true_bits_device().as_kernel_param(),
         frontier.false_bits_device().as_kernel_param(),
         words_per_item_u32.as_kernel_param(),
-        (&mut scratch_trail).as_kernel_param(),
+        (&scratch_trail).as_kernel_param(),
         trail_stride_u32.as_kernel_param(),
-        (&mut uf_parent).as_kernel_param(),
-        (&mut uf_aux).as_kernel_param(),
-        (&mut comp_list).as_kernel_param(),
+        (&uf_parent).as_kernel_param(),
+        (&uf_aux).as_kernel_param(),
+        (&comp_list).as_kernel_param(),
         uf_stride_u32.as_kernel_param(),
-        (&mut node_counts).as_kernel_param(),
-        (&mut edge_counts).as_kernel_param(),
+        (&node_counts).as_kernel_param(),
+        (&edge_counts).as_kernel_param(),
     ];
 
     #[cfg(debug_assertions)]
@@ -272,24 +274,24 @@ pub(super) fn compile_gpu_d4_with_gate(
         frontier.true_bits_device().as_kernel_param(),
         frontier.false_bits_device().as_kernel_param(),
         words_per_item_u32.as_kernel_param(),
-        (&mut scratch_trail).as_kernel_param(),
+        (&scratch_trail).as_kernel_param(),
         trail_stride_u32.as_kernel_param(),
-        (&mut uf_parent).as_kernel_param(),
-        (&mut uf_aux).as_kernel_param(),
-        (&mut comp_list).as_kernel_param(),
+        (&uf_parent).as_kernel_param(),
+        (&uf_aux).as_kernel_param(),
+        (&comp_list).as_kernel_param(),
         uf_stride_u32.as_kernel_param(),
         (&node_counts).as_kernel_param(),
         (&edge_counts).as_kernel_param(),
         (&node_offsets).as_kernel_param(),
         (&edge_offsets).as_kernel_param(),
-        (&mut node_type).as_kernel_param(),
-        (&mut child_offsets).as_kernel_param(),
-        (&mut child_indices).as_kernel_param(),
-        (&mut lit).as_kernel_param(),
-        (&mut decision_var).as_kernel_param(),
-        (&mut decision_child_false).as_kernel_param(),
-        (&mut decision_child_true).as_kernel_param(),
-        (&mut node_level).as_kernel_param(),
+        (&node_type).as_kernel_param(),
+        (&child_offsets).as_kernel_param(),
+        (&child_indices).as_kernel_param(),
+        (&lit).as_kernel_param(),
+        (&decision_var).as_kernel_param(),
+        (&decision_child_false).as_kernel_param(),
+        (&decision_child_true).as_kernel_param(),
+        (&node_level).as_kernel_param(),
     ];
     #[cfg(debug_assertions)]
     eprintln!("[xlog-prob] gpu_d4: launch d4_compile_emit");
@@ -337,7 +339,7 @@ pub(super) fn compile_gpu_d4_with_gate(
     // No device synchronize after d4_capture_emit_meta: next ops are host-only
     // arithmetic and memory allocations (no device data reads).
 
-    let num_levels = (max_depth as u32)
+    let num_levels = max_depth
         .checked_mul(2)
         .and_then(|v| v.checked_add(8))
         .ok_or_else(|| XlogError::Compilation("num_levels overflow".to_string()))?;
@@ -362,7 +364,7 @@ pub(super) fn compile_gpu_d4_with_gate(
     let lvl_counts = device
         .get_func(D4_MODULE, d4_kernels::D4_LEVELIZE_COUNTS)
         .ok_or_else(|| XlogError::Kernel("d4_levelize_counts kernel not found".to_string()))?;
-    let mut grid = (node_cap_u32 + 255) / 256;
+    let mut grid = node_cap_u32.div_ceil(256);
     if grid == 0 {
         grid = 1;
     }
@@ -577,8 +579,8 @@ mod tests {
         let trail_len = (max_items as usize) * (trail_stride as usize);
         let mut scratch_trail = memory.alloc::<i32>(trail_len).unwrap();
         device.memset_zeros(&mut scratch_trail).unwrap();
-        let (mut uf_parent, mut uf_aux, mut comp_list, uf_stride) =
-            alloc_component_scratch(&provider, &memory, max_items, phi.var_cap);
+        let (uf_parent, uf_aux, comp_list, uf_stride) =
+            alloc_component_scratch(&provider, memory, max_items, phi.var_cap);
 
         let compile_count = device
             .get_func(D4_MODULE, "d4_compile_count")
@@ -595,14 +597,14 @@ mod tests {
             frontier.true_bits_device().as_kernel_param(),
             frontier.false_bits_device().as_kernel_param(),
             wpi.as_kernel_param(),
-            (&mut scratch_trail).as_kernel_param(),
+            (&scratch_trail).as_kernel_param(),
             trail_stride.as_kernel_param(),
-            (&mut uf_parent).as_kernel_param(),
-            (&mut uf_aux).as_kernel_param(),
-            (&mut comp_list).as_kernel_param(),
+            (&uf_parent).as_kernel_param(),
+            (&uf_aux).as_kernel_param(),
+            (&comp_list).as_kernel_param(),
             uf_stride.as_kernel_param(),
-            (&mut node_counts).as_kernel_param(),
-            (&mut edge_counts).as_kernel_param(),
+            (&node_counts).as_kernel_param(),
+            (&edge_counts).as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
@@ -648,24 +650,24 @@ mod tests {
             frontier.true_bits_device().as_kernel_param(),
             frontier.false_bits_device().as_kernel_param(),
             wpi.as_kernel_param(),
-            (&mut scratch_trail).as_kernel_param(),
+            (&scratch_trail).as_kernel_param(),
             trail_stride.as_kernel_param(),
-            (&mut uf_parent).as_kernel_param(),
-            (&mut uf_aux).as_kernel_param(),
-            (&mut comp_list).as_kernel_param(),
+            (&uf_parent).as_kernel_param(),
+            (&uf_aux).as_kernel_param(),
+            (&comp_list).as_kernel_param(),
             uf_stride.as_kernel_param(),
             (&node_counts).as_kernel_param(),
             (&edge_counts).as_kernel_param(),
             (&node_offsets).as_kernel_param(),
             (&edge_offsets).as_kernel_param(),
-            (&mut node_type).as_kernel_param(),
-            (&mut child_offsets).as_kernel_param(),
-            (&mut child_indices).as_kernel_param(),
-            (&mut lit).as_kernel_param(),
-            (&mut decision_var).as_kernel_param(),
-            (&mut decision_child_false).as_kernel_param(),
-            (&mut decision_child_true).as_kernel_param(),
-            (&mut node_level).as_kernel_param(),
+            (&node_type).as_kernel_param(),
+            (&child_offsets).as_kernel_param(),
+            (&child_indices).as_kernel_param(),
+            (&lit).as_kernel_param(),
+            (&decision_var).as_kernel_param(),
+            (&decision_child_false).as_kernel_param(),
+            (&decision_child_true).as_kernel_param(),
+            (&node_level).as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
@@ -705,7 +707,7 @@ mod tests {
                 .clone()
                 .launch(
                     LaunchConfig {
-                        grid_dim: ((node_cap + 255) / 256, 1, 1),
+                        grid_dim: (node_cap.div_ceil(256), 1, 1),
                         block_dim: (256, 1, 1),
                         shared_mem_bytes: 0,
                     },
@@ -737,7 +739,7 @@ mod tests {
                 .clone()
                 .launch(
                     LaunchConfig {
-                        grid_dim: ((node_cap + 255) / 256, 1, 1),
+                        grid_dim: (node_cap.div_ceil(256), 1, 1),
                         block_dim: (256, 1, 1),
                         shared_mem_bytes: 0,
                     },
@@ -864,8 +866,8 @@ mod tests {
         let trail_len = (max_items as usize) * (trail_stride as usize);
         let mut scratch_trail = memory.alloc::<i32>(trail_len).unwrap();
         device.memset_zeros(&mut scratch_trail).unwrap();
-        let (mut uf_parent, mut uf_aux, mut comp_list, uf_stride) =
-            alloc_component_scratch(&provider, &memory, max_items, phi.var_cap);
+        let (uf_parent, uf_aux, comp_list, uf_stride) =
+            alloc_component_scratch(&provider, memory, max_items, phi.var_cap);
 
         let compile_count = device
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_COUNT)
@@ -882,14 +884,14 @@ mod tests {
             frontier.true_bits_device().as_kernel_param(),
             frontier.false_bits_device().as_kernel_param(),
             wpi.as_kernel_param(),
-            (&mut scratch_trail).as_kernel_param(),
+            (&scratch_trail).as_kernel_param(),
             trail_stride.as_kernel_param(),
-            (&mut uf_parent).as_kernel_param(),
-            (&mut uf_aux).as_kernel_param(),
-            (&mut comp_list).as_kernel_param(),
+            (&uf_parent).as_kernel_param(),
+            (&uf_aux).as_kernel_param(),
+            (&comp_list).as_kernel_param(),
             uf_stride.as_kernel_param(),
-            (&mut node_counts).as_kernel_param(),
-            (&mut edge_counts).as_kernel_param(),
+            (&node_counts).as_kernel_param(),
+            (&edge_counts).as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
@@ -940,24 +942,24 @@ mod tests {
             frontier.true_bits_device().as_kernel_param(),
             frontier.false_bits_device().as_kernel_param(),
             wpi.as_kernel_param(),
-            (&mut scratch_trail).as_kernel_param(),
+            (&scratch_trail).as_kernel_param(),
             trail_stride.as_kernel_param(),
-            (&mut uf_parent).as_kernel_param(),
-            (&mut uf_aux).as_kernel_param(),
-            (&mut comp_list).as_kernel_param(),
+            (&uf_parent).as_kernel_param(),
+            (&uf_aux).as_kernel_param(),
+            (&comp_list).as_kernel_param(),
             uf_stride.as_kernel_param(),
             (&node_counts).as_kernel_param(),
             (&edge_counts).as_kernel_param(),
             (&node_offsets).as_kernel_param(),
             (&edge_offsets).as_kernel_param(),
-            (&mut node_type).as_kernel_param(),
-            (&mut child_offsets).as_kernel_param(),
-            (&mut child_indices).as_kernel_param(),
-            (&mut lit).as_kernel_param(),
-            (&mut decision_var).as_kernel_param(),
-            (&mut decision_child_false).as_kernel_param(),
-            (&mut decision_child_true).as_kernel_param(),
-            (&mut node_level).as_kernel_param(),
+            (&node_type).as_kernel_param(),
+            (&child_offsets).as_kernel_param(),
+            (&child_indices).as_kernel_param(),
+            (&lit).as_kernel_param(),
+            (&decision_var).as_kernel_param(),
+            (&decision_child_false).as_kernel_param(),
+            (&decision_child_true).as_kernel_param(),
+            (&node_level).as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
@@ -1001,7 +1003,7 @@ mod tests {
                 .clone()
                 .launch(
                     LaunchConfig {
-                        grid_dim: ((node_cap + 255) / 256, 1, 1),
+                        grid_dim: (node_cap.div_ceil(256), 1, 1),
                         block_dim: (256, 1, 1),
                         shared_mem_bytes: 0,
                     },
@@ -1034,7 +1036,7 @@ mod tests {
                 .clone()
                 .launch(
                     LaunchConfig {
-                        grid_dim: ((node_cap + 255) / 256, 1, 1),
+                        grid_dim: (node_cap.div_ceil(256), 1, 1),
                         block_dim: (256, 1, 1),
                         shared_mem_bytes: 0,
                     },
@@ -1156,8 +1158,8 @@ mod tests {
         let trail_len = (max_items as usize) * (trail_stride as usize);
         let mut scratch_trail = memory.alloc::<i32>(trail_len).unwrap();
         device.memset_zeros(&mut scratch_trail).unwrap();
-        let (mut uf_parent, mut uf_aux, mut comp_list, uf_stride) =
-            alloc_component_scratch(&provider, &memory, max_items, phi.var_cap);
+        let (uf_parent, uf_aux, comp_list, uf_stride) =
+            alloc_component_scratch(&provider, memory, max_items, phi.var_cap);
 
         let compile_count = device
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_COUNT)
@@ -1174,14 +1176,14 @@ mod tests {
             frontier.true_bits_device().as_kernel_param(),
             frontier.false_bits_device().as_kernel_param(),
             wpi.as_kernel_param(),
-            (&mut scratch_trail).as_kernel_param(),
+            (&scratch_trail).as_kernel_param(),
             trail_stride.as_kernel_param(),
-            (&mut uf_parent).as_kernel_param(),
-            (&mut uf_aux).as_kernel_param(),
-            (&mut comp_list).as_kernel_param(),
+            (&uf_parent).as_kernel_param(),
+            (&uf_aux).as_kernel_param(),
+            (&comp_list).as_kernel_param(),
             uf_stride.as_kernel_param(),
-            (&mut node_counts).as_kernel_param(),
-            (&mut edge_counts).as_kernel_param(),
+            (&node_counts).as_kernel_param(),
+            (&edge_counts).as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
@@ -1223,24 +1225,24 @@ mod tests {
             frontier.true_bits_device().as_kernel_param(),
             frontier.false_bits_device().as_kernel_param(),
             wpi.as_kernel_param(),
-            (&mut scratch_trail).as_kernel_param(),
+            (&scratch_trail).as_kernel_param(),
             trail_stride.as_kernel_param(),
-            (&mut uf_parent).as_kernel_param(),
-            (&mut uf_aux).as_kernel_param(),
-            (&mut comp_list).as_kernel_param(),
+            (&uf_parent).as_kernel_param(),
+            (&uf_aux).as_kernel_param(),
+            (&comp_list).as_kernel_param(),
             uf_stride.as_kernel_param(),
             (&node_counts).as_kernel_param(),
             (&edge_counts).as_kernel_param(),
             (&node_offsets).as_kernel_param(),
             (&edge_offsets).as_kernel_param(),
-            (&mut node_type).as_kernel_param(),
-            (&mut child_offsets).as_kernel_param(),
-            (&mut child_indices).as_kernel_param(),
-            (&mut lit).as_kernel_param(),
-            (&mut decision_var).as_kernel_param(),
-            (&mut decision_child_false).as_kernel_param(),
-            (&mut decision_child_true).as_kernel_param(),
-            (&mut node_level).as_kernel_param(),
+            (&node_type).as_kernel_param(),
+            (&child_offsets).as_kernel_param(),
+            (&child_indices).as_kernel_param(),
+            (&lit).as_kernel_param(),
+            (&decision_var).as_kernel_param(),
+            (&decision_child_false).as_kernel_param(),
+            (&decision_child_true).as_kernel_param(),
+            (&node_level).as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
@@ -1278,7 +1280,7 @@ mod tests {
                 .clone()
                 .launch(
                     LaunchConfig {
-                        grid_dim: ((node_cap + 255) / 256, 1, 1),
+                        grid_dim: (node_cap.div_ceil(256), 1, 1),
                         block_dim: (256, 1, 1),
                         shared_mem_bytes: 0,
                     },
@@ -1318,7 +1320,7 @@ mod tests {
                 .clone()
                 .launch(
                     LaunchConfig {
-                        grid_dim: ((node_cap + 255) / 256, 1, 1),
+                        grid_dim: (node_cap.div_ceil(256), 1, 1),
                         block_dim: (256, 1, 1),
                         shared_mem_bytes: 0,
                     },
@@ -1443,8 +1445,8 @@ mod tests {
         let trail_len = (max_items as usize) * (trail_stride as usize);
         let mut scratch_trail = memory.alloc::<i32>(trail_len).unwrap();
         device.memset_zeros(&mut scratch_trail).unwrap();
-        let (mut uf_parent, mut uf_aux, mut comp_list, uf_stride) =
-            alloc_component_scratch(&provider, &memory, max_items, phi.var_cap);
+        let (uf_parent, uf_aux, comp_list, uf_stride) =
+            alloc_component_scratch(&provider, memory, max_items, phi.var_cap);
 
         let compile_count = device
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_COUNT)
@@ -1461,14 +1463,14 @@ mod tests {
             frontier.true_bits_device().as_kernel_param(),
             frontier.false_bits_device().as_kernel_param(),
             wpi.as_kernel_param(),
-            (&mut scratch_trail).as_kernel_param(),
+            (&scratch_trail).as_kernel_param(),
             trail_stride.as_kernel_param(),
-            (&mut uf_parent).as_kernel_param(),
-            (&mut uf_aux).as_kernel_param(),
-            (&mut comp_list).as_kernel_param(),
+            (&uf_parent).as_kernel_param(),
+            (&uf_aux).as_kernel_param(),
+            (&comp_list).as_kernel_param(),
             uf_stride.as_kernel_param(),
-            (&mut node_counts).as_kernel_param(),
-            (&mut edge_counts).as_kernel_param(),
+            (&node_counts).as_kernel_param(),
+            (&edge_counts).as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
@@ -1510,24 +1512,24 @@ mod tests {
             frontier.true_bits_device().as_kernel_param(),
             frontier.false_bits_device().as_kernel_param(),
             wpi.as_kernel_param(),
-            (&mut scratch_trail).as_kernel_param(),
+            (&scratch_trail).as_kernel_param(),
             trail_stride.as_kernel_param(),
-            (&mut uf_parent).as_kernel_param(),
-            (&mut uf_aux).as_kernel_param(),
-            (&mut comp_list).as_kernel_param(),
+            (&uf_parent).as_kernel_param(),
+            (&uf_aux).as_kernel_param(),
+            (&comp_list).as_kernel_param(),
             uf_stride.as_kernel_param(),
             (&node_counts).as_kernel_param(),
             (&edge_counts).as_kernel_param(),
             (&node_offsets).as_kernel_param(),
             (&edge_offsets).as_kernel_param(),
-            (&mut node_type).as_kernel_param(),
-            (&mut child_offsets).as_kernel_param(),
-            (&mut child_indices).as_kernel_param(),
-            (&mut lit).as_kernel_param(),
-            (&mut decision_var).as_kernel_param(),
-            (&mut decision_child_false).as_kernel_param(),
-            (&mut decision_child_true).as_kernel_param(),
-            (&mut node_level).as_kernel_param(),
+            (&node_type).as_kernel_param(),
+            (&child_offsets).as_kernel_param(),
+            (&child_indices).as_kernel_param(),
+            (&lit).as_kernel_param(),
+            (&decision_var).as_kernel_param(),
+            (&decision_child_false).as_kernel_param(),
+            (&decision_child_true).as_kernel_param(),
+            (&node_level).as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
@@ -1566,7 +1568,7 @@ mod tests {
                 .clone()
                 .launch(
                     LaunchConfig {
-                        grid_dim: ((node_cap + 255) / 256, 1, 1),
+                        grid_dim: (node_cap.div_ceil(256), 1, 1),
                         block_dim: (256, 1, 1),
                         shared_mem_bytes: 0,
                     },
@@ -1598,7 +1600,7 @@ mod tests {
                 .clone()
                 .launch(
                     LaunchConfig {
-                        grid_dim: ((node_cap + 255) / 256, 1, 1),
+                        grid_dim: (node_cap.div_ceil(256), 1, 1),
                         block_dim: (256, 1, 1),
                         shared_mem_bytes: 0,
                     },
@@ -1730,8 +1732,8 @@ mod tests {
         let trail_len = (max_items as usize) * (trail_stride as usize);
         let mut scratch_trail = memory.alloc::<i32>(trail_len).unwrap();
         device.memset_zeros(&mut scratch_trail).unwrap();
-        let (mut uf_parent, mut uf_aux, mut comp_list, uf_stride) =
-            alloc_component_scratch(&provider, &memory, max_items, phi.var_cap);
+        let (uf_parent, uf_aux, comp_list, uf_stride) =
+            alloc_component_scratch(&provider, memory, max_items, phi.var_cap);
 
         let compile_count = device
             .get_func(D4_MODULE, d4_kernels::D4_COMPILE_COUNT)
@@ -1748,14 +1750,14 @@ mod tests {
             frontier.true_bits_device().as_kernel_param(),
             frontier.false_bits_device().as_kernel_param(),
             wpi.as_kernel_param(),
-            (&mut scratch_trail).as_kernel_param(),
+            (&scratch_trail).as_kernel_param(),
             trail_stride.as_kernel_param(),
-            (&mut uf_parent).as_kernel_param(),
-            (&mut uf_aux).as_kernel_param(),
-            (&mut comp_list).as_kernel_param(),
+            (&uf_parent).as_kernel_param(),
+            (&uf_aux).as_kernel_param(),
+            (&comp_list).as_kernel_param(),
             uf_stride.as_kernel_param(),
-            (&mut node_counts).as_kernel_param(),
-            (&mut edge_counts).as_kernel_param(),
+            (&node_counts).as_kernel_param(),
+            (&edge_counts).as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
@@ -1805,24 +1807,24 @@ mod tests {
             frontier.true_bits_device().as_kernel_param(),
             frontier.false_bits_device().as_kernel_param(),
             wpi.as_kernel_param(),
-            (&mut scratch_trail).as_kernel_param(),
+            (&scratch_trail).as_kernel_param(),
             trail_stride.as_kernel_param(),
-            (&mut uf_parent).as_kernel_param(),
-            (&mut uf_aux).as_kernel_param(),
-            (&mut comp_list).as_kernel_param(),
+            (&uf_parent).as_kernel_param(),
+            (&uf_aux).as_kernel_param(),
+            (&comp_list).as_kernel_param(),
             uf_stride.as_kernel_param(),
             (&node_counts).as_kernel_param(),
             (&edge_counts).as_kernel_param(),
             (&node_offsets).as_kernel_param(),
             (&edge_offsets).as_kernel_param(),
-            (&mut node_type).as_kernel_param(),
-            (&mut child_offsets).as_kernel_param(),
-            (&mut child_indices).as_kernel_param(),
-            (&mut lit).as_kernel_param(),
-            (&mut decision_var).as_kernel_param(),
-            (&mut decision_child_false).as_kernel_param(),
-            (&mut decision_child_true).as_kernel_param(),
-            (&mut node_level).as_kernel_param(),
+            (&node_type).as_kernel_param(),
+            (&child_offsets).as_kernel_param(),
+            (&child_indices).as_kernel_param(),
+            (&lit).as_kernel_param(),
+            (&decision_var).as_kernel_param(),
+            (&decision_child_false).as_kernel_param(),
+            (&decision_child_true).as_kernel_param(),
+            (&node_level).as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {

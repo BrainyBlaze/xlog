@@ -51,7 +51,7 @@ fn make_fixture() -> Option<Fixture> {
 fn upload_u32_keys(memory: &Arc<GpuMemoryManager>, keys: &[u32]) -> CudaBuffer {
     let n = keys.len() as u32;
     let mut col0 = memory
-        .alloc::<u8>(keys.len() * std::mem::size_of::<u32>())
+        .alloc::<u8>(std::mem::size_of_val(keys))
         .expect("alloc col0");
     let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc d_num_rows");
     let bytes: Vec<u8> = keys.iter().flat_map(|v| v.to_le_bytes()).collect();
@@ -69,7 +69,7 @@ fn upload_u32_keys(memory: &Arc<GpuMemoryManager>, keys: &[u32]) -> CudaBuffer {
 fn upload_u64_keys(memory: &Arc<GpuMemoryManager>, keys: &[u64]) -> CudaBuffer {
     let n = keys.len() as u32;
     let mut col0 = memory
-        .alloc::<u8>(keys.len() * std::mem::size_of::<u64>())
+        .alloc::<u8>(std::mem::size_of_val(keys))
         .expect("alloc col0");
     let mut d_num_rows = memory.alloc::<u32>(1).expect("alloc d_num_rows");
     let bytes: Vec<u8> = keys.iter().flat_map(|v| v.to_le_bytes()).collect();

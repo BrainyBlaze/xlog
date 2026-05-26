@@ -135,7 +135,6 @@ impl GpuPirGraph {
         }
 
         let memory = provider.memory();
-        let device = provider.device().inner();
 
         let mut d_node_type = memory.alloc::<u8>(node_type.len())?;
         let mut d_child_offsets = memory.alloc::<u32>(child_offsets.len())?;
@@ -145,28 +144,28 @@ impl GpuPirGraph {
         let mut d_decision_child_false = memory.alloc::<u32>(decision_child_false.len())?;
         let mut d_decision_child_true = memory.alloc::<u32>(decision_child_true.len())?;
 
-        device
-            .htod_sync_copy_into(&node_type, &mut d_node_type)
+        provider
+            .htod_sync_copy_into_tracked(&node_type, &mut d_node_type)
             .map_err(|e| XlogError::Kernel(format!("GpuPirGraph upload node_type: {}", e)))?;
-        device
-            .htod_sync_copy_into(&child_offsets, &mut d_child_offsets)
+        provider
+            .htod_sync_copy_into_tracked(&child_offsets, &mut d_child_offsets)
             .map_err(|e| XlogError::Kernel(format!("GpuPirGraph upload child_offsets: {}", e)))?;
-        device
-            .htod_sync_copy_into(&children, &mut d_children)
+        provider
+            .htod_sync_copy_into_tracked(&children, &mut d_children)
             .map_err(|e| XlogError::Kernel(format!("GpuPirGraph upload children: {}", e)))?;
-        device
-            .htod_sync_copy_into(&leaf_id, &mut d_leaf_id)
+        provider
+            .htod_sync_copy_into_tracked(&leaf_id, &mut d_leaf_id)
             .map_err(|e| XlogError::Kernel(format!("GpuPirGraph upload leaf_id: {}", e)))?;
-        device
-            .htod_sync_copy_into(&decision_var, &mut d_decision_var)
+        provider
+            .htod_sync_copy_into_tracked(&decision_var, &mut d_decision_var)
             .map_err(|e| XlogError::Kernel(format!("GpuPirGraph upload decision_var: {}", e)))?;
-        device
-            .htod_sync_copy_into(&decision_child_false, &mut d_decision_child_false)
+        provider
+            .htod_sync_copy_into_tracked(&decision_child_false, &mut d_decision_child_false)
             .map_err(|e| {
                 XlogError::Kernel(format!("GpuPirGraph upload decision_child_false: {}", e))
             })?;
-        device
-            .htod_sync_copy_into(&decision_child_true, &mut d_decision_child_true)
+        provider
+            .htod_sync_copy_into_tracked(&decision_child_true, &mut d_decision_child_true)
             .map_err(|e| {
                 XlogError::Kernel(format!("GpuPirGraph upload decision_child_true: {}", e))
             })?;
@@ -195,10 +194,9 @@ impl GpuPirRoots {
         }
 
         let memory = provider.memory();
-        let device = provider.device().inner();
         let mut d_roots = memory.alloc::<u32>(host.len())?;
-        device
-            .htod_sync_copy_into(&host, &mut d_roots)
+        provider
+            .htod_sync_copy_into_tracked(&host, &mut d_roots)
             .map_err(|e| XlogError::Kernel(format!("GpuPirRoots upload: {}", e)))?;
 
         Ok(Self { roots: d_roots })

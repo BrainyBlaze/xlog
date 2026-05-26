@@ -1,0 +1,10 @@
+// G91 compatibility: possible-only support is accepted by the bounded fixture.
+
+#pragma epistemic_mode = g91
+
+pred fact().
+pred accepted().
+
+fact().
+
+accepted() :- possible fact().

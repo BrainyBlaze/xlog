@@ -53,10 +53,33 @@ pub(super) fn upload_slice<T: cudarc::driver::DeviceRepr>(
         return Ok(());
     }
     provider
-        .device()
-        .inner()
-        .htod_sync_copy_into(src, dst)
+        .htod_sync_copy_into_tracked(src, dst)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload {}: {}", label, e)))
+}
+
+fn checked_mc_u32(value: usize, context: &str) -> Result<u32> {
+    u32::try_from(value)
+        .map_err(|_| XlogError::Execution(format!("{context} {} exceeds u32::MAX", value)))
+}
+
+fn checked_mc_usize(value: u64, context: &str) -> Result<usize> {
+    usize::try_from(value)
+        .map_err(|_| XlogError::Execution(format!("{context} {} exceeds usize::MAX", value)))
+}
+
+fn checked_mc_product(left: usize, right: usize, context: &str) -> Result<usize> {
+    left.checked_mul(right)
+        .ok_or_else(|| XlogError::Execution(format!("{context} size overflow: {left} * {right}")))
+}
+
+fn required_schema_column_type(
+    schema: &Schema,
+    col_idx: usize,
+    context: &str,
+) -> Result<ScalarType> {
+    schema.column_type(col_idx).ok_or_else(|| {
+        XlogError::Execution(format!("{context}: missing schema column type {col_idx}"))
+    })
 }
 
 pub(super) fn load_deterministic_facts(
@@ -130,7 +153,7 @@ pub(super) fn build_sample_reset_plan(
     }
 
     // Query temp relations.
-    for (name, _) in &gpu_plan.schemas {
+    for name in gpu_plan.schemas.keys() {
         if name.starts_with("__xlog_query_") {
             dynamic_preds.insert(name.clone());
         }
@@ -184,15 +207,22 @@ pub(super) fn clone_buffer_device(
 
     let mut result_columns = Vec::with_capacity(buffer.arity());
     for col_idx in 0..buffer.arity() {
-        let col_type_size = buffer
-            .schema()
-            .column_type(col_idx)
-            .map(|t| t.size_bytes())
-            .unwrap_or(4);
-        let bytes = (buffer.num_rows() as usize) * col_type_size;
+        let col_type_size =
+            required_schema_column_type(buffer.schema(), col_idx, "MC clone buffer")?.size_bytes();
+        let row_count = checked_mc_usize(buffer.num_rows(), "MC clone buffer rows")?;
+        let bytes = checked_mc_product(row_count, col_type_size, "MC clone buffer column")?;
         let Some(src_col) = buffer.column(col_idx) else {
-            continue;
+            return Err(XlogError::Execution(format!(
+                "MC clone buffer missing device column {col_idx}"
+            )));
         };
+        if src_col.len() < bytes {
+            return Err(XlogError::Execution(format!(
+                "MC clone buffer column {col_idx} has {} bytes, expected at least {}",
+                src_col.len(),
+                bytes
+            )));
+        }
         let mut dst_col = provider.memory().alloc::<u8>(bytes)?;
         if bytes > 0 {
             provider
@@ -227,9 +257,7 @@ fn build_zero_arity_buffer(
 ) -> Result<CudaBuffer> {
     let mut d_num_rows = provider.memory().alloc::<u32>(1)?;
     provider
-        .device()
-        .inner()
-        .htod_sync_copy_into(&[row_count], &mut d_num_rows)
+        .htod_launch_metadata_sync_copy_into(&[row_count], &mut d_num_rows)
         .map_err(|e| XlogError::Kernel(format!("Failed to set row count: {}", e)))?;
     Ok(CudaBuffer::from_columns(
         Vec::new(),
@@ -258,10 +286,11 @@ pub(super) fn build_prob_tables_device(
 ) -> Result<(Vec<ProbTableDevice>, Vec<AdTableDevice>, AdDecisionDevice)> {
     let mut prob_rows_by_pred: HashMap<String, Vec<(Vec<Value>, u32)>> = HashMap::new();
     for pf in &program.prob_facts {
+        let var_idx = checked_mc_u32(pf.var_idx, "MC probabilistic variable index")?;
         prob_rows_by_pred
             .entry(pf.atom.predicate.clone())
             .or_default()
-            .push((pf.atom.args.clone(), pf.var_idx as u32));
+            .push((pf.atom.args.clone(), var_idx));
     }
 
     let mut prob_tables: Vec<ProbTableDevice> = Vec::new();
@@ -301,18 +330,29 @@ pub(super) fn build_prob_tables_device(
     let mut ad_rows_by_pred: HashMap<String, Vec<AdRow>> = HashMap::new();
 
     for ad in &program.annotated_disjunctions {
-        let offset = decision_vars_flat.len() as u32;
-        let len = ad.decision_vars.len() as u32;
-        decision_vars_flat.extend(ad.decision_vars.iter().map(|v| *v as u32));
+        let offset = checked_mc_u32(
+            decision_vars_flat.len(),
+            "MC annotated-disjunction decision offset",
+        )?;
+        let len = checked_mc_u32(
+            ad.decision_vars.len(),
+            "MC annotated-disjunction decision length",
+        )?;
+        for &decision_var in &ad.decision_vars {
+            decision_vars_flat.push(checked_mc_u32(
+                decision_var,
+                "MC annotated-disjunction decision variable",
+            )?);
+        }
 
         let choices_len = ad.choices.len();
         for (idx, atom) in ad.choices.iter().enumerate() {
             let pos = if ad.has_none {
-                idx as u32
+                checked_mc_u32(idx, "MC annotated-disjunction choice position")?
             } else if idx + 1 == choices_len {
                 len
             } else {
-                idx as u32
+                checked_mc_u32(idx, "MC annotated-disjunction choice position")?
             };
             ad_rows_by_pred
                 .entry(atom.predicate.clone())
@@ -386,7 +426,8 @@ pub(super) fn build_sample_buffers(
     ad_tables: &[AdTableDevice],
     ad_decisions: &AdDecisionDevice,
 ) -> Result<Vec<(String, CudaBuffer)>> {
-    if sample_bits.len() == 0 && (!prob_tables.is_empty() || ad_decisions.decision_vars.len() > 0) {
+    if sample_bits.is_empty() && (!prob_tables.is_empty() || !ad_decisions.decision_vars.is_empty())
+    {
         return Err(XlogError::Execution(
             "MC sample bits empty but probabilistic variables exist".to_string(),
         ));
@@ -410,7 +451,7 @@ pub(super) fn build_sample_buffers(
         })?;
 
         let mut d_mask = provider.memory().alloc::<u8>(n as usize)?;
-        let num_blocks = (n + block_size - 1) / block_size;
+        let num_blocks = n.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (num_blocks, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -447,7 +488,7 @@ pub(super) fn build_sample_buffers(
         })?;
 
         let mut d_mask = provider.memory().alloc::<u8>(n as usize)?;
-        let num_blocks = (n + block_size - 1) / block_size;
+        let num_blocks = n.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (num_blocks, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -516,11 +557,9 @@ pub(super) fn build_buffer_from_rows(
 
     let mut columns: Vec<Vec<u8>> = Vec::with_capacity(schema.arity());
     for col_idx in 0..schema.arity() {
-        let col_size = schema
-            .column_type(col_idx)
-            .map(|t| t.size_bytes())
-            .unwrap_or(4);
-        columns.push(Vec::with_capacity(rows.len() * col_size));
+        let col_size = required_schema_column_type(schema, col_idx, "MC row buffer")?.size_bytes();
+        let capacity = checked_mc_product(rows.len(), col_size, "MC row buffer column")?;
+        columns.push(Vec::with_capacity(capacity));
     }
 
     for row in rows {
@@ -556,6 +595,9 @@ pub(super) fn augment_schemas_for_program(
             match lit {
                 BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
                     ensure_schema_for_atom(atom, schemas)?;
+                }
+                BodyLiteral::Epistemic(lit) => {
+                    ensure_schema_for_atom(&lit.atom, schemas)?;
                 }
                 BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {}
             }
@@ -670,6 +712,11 @@ fn record_rule_types(rule: &Rule, inferred: &mut HashMap<String, Vec<ScalarType>
                     bind_atom_variable_types(atom, types, &mut var_types)?;
                 }
             }
+            BodyLiteral::Epistemic(lit) => {
+                if let Some(types) = inferred.get(&lit.atom.predicate) {
+                    bind_atom_variable_types(&lit.atom, types, &mut var_types)?;
+                }
+            }
             BodyLiteral::IsExpr(is_expr) => {
                 var_types
                     .entry(is_expr.target.clone())
@@ -684,6 +731,10 @@ fn record_rule_types(rule: &Rule, inferred: &mut HashMap<String, Vec<ScalarType>
             BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
                 let types = infer_atom_types(atom, &var_types)?;
                 record_predicate_types(inferred, &atom.predicate, types)?;
+            }
+            BodyLiteral::Epistemic(lit) => {
+                let types = infer_atom_types(&lit.atom, &var_types)?;
+                record_predicate_types(inferred, &lit.atom.predicate, types)?;
             }
             BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {}
         }
@@ -1141,8 +1192,7 @@ pub(super) fn compile_sampling_plan(
         let mut decision_vars: Vec<usize> = Vec::new();
         if m > 1 {
             let mut remaining = 1.0f64;
-            for i in 0..(m - 1) {
-                let p_i = probs_full[i];
+            for &p_i in probs_full.iter().take(m - 1) {
                 let cond_true = if remaining <= 0.0 {
                     0.0
                 } else {

@@ -445,7 +445,7 @@ fn root_scores<S: StatsSource>(shape: &KCliqueShape, stats: &S) -> Option<Vec<(V
         scores.push((variable, score.max(f64::EPSILON)));
     }
 
-    scores.sort_by(|a, b| a.0.cmp(&b.0));
+    scores.sort_by_key(|entry| entry.0);
     Some(scores)
 }
 
@@ -619,7 +619,7 @@ fn share_allocation(root_scores: &[(VertexId, f64)]) -> Vec<VariableShare> {
             share: (1.0 / *score) / inverse_sum,
         })
         .collect();
-    shares.sort_by(|a, b| a.variable.cmp(&b.variable));
+    shares.sort_by_key(|share| share.variable);
     shares
 }
 

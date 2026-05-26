@@ -20,7 +20,7 @@
 //!   * **Off**:      force-off. Binary-join chain only.
 //!   * **Force**:    force-on. WCOJ pipeline; classifier bypassed.
 //!   * **Adaptive**: adaptive opt-in. Classifier dispatches when
-//!                   score ≥ 0.10. uniform → binary; superhub → WCOJ.
+//!     score ≥ 0.10. uniform → binary; superhub → WCOJ.
 //!
 //! Each cell pre-runs a correctness check outside the timed
 //! region: gate-off vs gate-on row sets must agree, and the
@@ -272,12 +272,12 @@ fn download_quads(buf: &CudaBuffer, width: Width) -> BTreeSet<(u64, u64, u64, u6
         vec![0u8; n * elem_bytes],
         vec![0u8; n * elem_bytes],
     ];
-    for c in 0..4 {
+    for (c, col_bytes) in bytes.iter_mut().enumerate() {
         unsafe {
             sys::cuMemcpyDtoH_v2(
-                bytes[c].as_mut_ptr() as *mut _,
+                col_bytes.as_mut_ptr() as *mut _,
                 *buf.column(c).unwrap().device_ptr(),
-                bytes[c].len(),
+                col_bytes.len(),
             );
         }
     }

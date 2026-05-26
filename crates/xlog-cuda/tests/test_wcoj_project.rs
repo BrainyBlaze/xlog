@@ -326,11 +326,11 @@ fn download_quads_u64(buf: &CudaBuffer) -> Vec<(u64, u64, u64, u64)> {
         vec![0u8; n * 8],
     ];
     unsafe {
-        for idx in 0..4 {
+        for (idx, col_bytes) in c.iter_mut().enumerate() {
             let res = sys::cuMemcpyDtoH_v2(
-                c[idx].as_mut_ptr() as *mut _,
+                col_bytes.as_mut_ptr() as *mut _,
                 *buf.column(idx).unwrap().device_ptr(),
-                c[idx].len(),
+                col_bytes.len(),
             );
             assert_eq!(res, sys::cudaError_enum::CUDA_SUCCESS);
         }

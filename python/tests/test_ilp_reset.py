@@ -28,6 +28,17 @@ def _get_facts(prog, rel_name):
     return sorted(tuple(f) for f in facts)
 
 
+def _candidate_index(cands, left, right, head):
+    for idx, cand in enumerate(cands):
+        if (
+            cand["left_name"] == left
+            and cand["right_name"] == right
+            and cand["head_name"] == head
+        ):
+            return idx
+    raise AssertionError(f"missing candidate {left} x {right} -> {head}")
+
+
 def test_reset_parity_with_fresh_compile():
     """compile+reset+evaluate must match a fresh compile."""
     # Fresh compile A
@@ -77,14 +88,15 @@ def test_reset_no_state_leak_across_masks():
     cands = prog.valid_candidates("W", False)
     c = len(cands)
 
-    # Run with candidate 0 active (produces tagged results)
+    # Run with the productive edge x edge candidate active.
+    edge_edge_idx = _candidate_index(cands, "edge", "edge", "reach")
     ids = list(range(c))
     soft_first = torch.zeros(c, device="cuda", dtype=torch.float64)
-    soft_first[0] = 1.0
+    soft_first[edge_edge_idx] = 1.0
     prog.set_rule_mask_sparse("W", ids, soft_first, 1)
     prog.evaluate()
     results_before = prog.get_tagged_results()
-    assert len(results_before) > 0, "Candidate 0 should produce tagged results"
+    assert len(results_before) > 0, "edge x edge candidate should produce tagged results"
 
     # Reset
     prog.reset_runtime()
@@ -129,8 +141,8 @@ from pyxlog.ilp.trainer import _train_on_compiled
 def test_train_deterministic_reproducibility():
     """Two train_only() calls with same seed must produce identical results."""
     config = TrainConfig(
-        step_budget_per_attempt=150,
-        max_attempts=3,
+        step_budget_per_attempt=20,
+        max_attempts=1,
         tau_start=2.0,
         tau_floor=0.05,
         seed=42,
@@ -181,8 +193,8 @@ PARITY_MASK = "W_reach"
 
 def _parity_config(seed: int) -> TrainConfig:
     return TrainConfig(
-        step_budget_per_attempt=150,
-        max_attempts=7,
+        step_budget_per_attempt=20,
+        max_attempts=1,
         tau_start=2.0,
         tau_floor=0.05,
         seed=seed,

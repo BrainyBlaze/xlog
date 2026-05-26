@@ -8,6 +8,21 @@ This document describes XLOG's GPU-resident execution model, where filters, grou
 2. **Preserve deterministic behavior** across all execution modes
 3. **Explicit error reporting** with actionable diagnostics
 
+## Streaming Graph Inputs And Delta Telemetry
+
+`xlog_gpu::biokg::StreamingGraphRelationLoader` is the native streaming ingress
+surface for large biomedical graph rows. It accepts JSONL, CSV, and N-Triples
+edge streams, emits typed `GraphEdgeRow` values through
+`load_path_with_sink(...)`, and returns relation histograms, split histograms,
+stable row hashes, and bounded-memory chunk telemetry without retaining the full
+graph in memory.
+
+Persistent relation delta execution also reports planner-grade telemetry through
+`DeltaPlannerTelemetry`: cache reuse, fallback decision, affected/recomputed
+SCC counts, estimated/measured delta speedup, and planner advice. pyxlog exposes
+the same payload under `delta_stats()["planner_telemetry"]` and relation delta
+debug results.
+
 ## GPU Predicate Engine
 
 The `Executor::execute_filter` implementation uses a GPU mask pipeline that supports the full `Expr` tree.

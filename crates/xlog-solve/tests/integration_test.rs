@@ -308,49 +308,21 @@ fn test_pigeonhole_unsat_2_1() {
 fn test_pigeonhole_unsat_3_2() {
     // Variables: p[i][j] = pigeon i is in hole j
     // p[0][0]=0, p[0][1]=1, p[1][0]=2, p[1][1]=3, p[2][0]=4, p[2][1]=5
-    let mut clauses = Vec::new();
-
     // Each pigeon must be in some hole
-    clauses.push(Clause::new(vec![
-        Literal::positive(0),
-        Literal::positive(1),
-    ])); // P0
-    clauses.push(Clause::new(vec![
-        Literal::positive(2),
-        Literal::positive(3),
-    ])); // P1
-    clauses.push(Clause::new(vec![
-        Literal::positive(4),
-        Literal::positive(5),
-    ])); // P2
-
-    // At most one pigeon per hole
-    // Hole 0: at most one of vars 0, 2, 4
-    clauses.push(Clause::new(vec![
-        Literal::negative(0),
-        Literal::negative(2),
-    ]));
-    clauses.push(Clause::new(vec![
-        Literal::negative(0),
-        Literal::negative(4),
-    ]));
-    clauses.push(Clause::new(vec![
-        Literal::negative(2),
-        Literal::negative(4),
-    ]));
-    // Hole 1: at most one of vars 1, 3, 5
-    clauses.push(Clause::new(vec![
-        Literal::negative(1),
-        Literal::negative(3),
-    ]));
-    clauses.push(Clause::new(vec![
-        Literal::negative(1),
-        Literal::negative(5),
-    ]));
-    clauses.push(Clause::new(vec![
-        Literal::negative(3),
-        Literal::negative(5),
-    ]));
+    let clauses = vec![
+        Clause::new(vec![Literal::positive(0), Literal::positive(1)]), // P0
+        Clause::new(vec![Literal::positive(2), Literal::positive(3)]), // P1
+        Clause::new(vec![Literal::positive(4), Literal::positive(5)]), // P2
+        // At most one pigeon per hole
+        // Hole 0: at most one of vars 0, 2, 4
+        Clause::new(vec![Literal::negative(0), Literal::negative(2)]),
+        Clause::new(vec![Literal::negative(0), Literal::negative(4)]),
+        Clause::new(vec![Literal::negative(2), Literal::negative(4)]),
+        // Hole 1: at most one of vars 1, 3, 5
+        Clause::new(vec![Literal::negative(1), Literal::negative(3)]),
+        Clause::new(vec![Literal::negative(1), Literal::negative(5)]),
+        Clause::new(vec![Literal::negative(3), Literal::negative(5)]),
+    ];
 
     let instance = SolveInstance::new(6, clauses);
     let solver = Solver::new_cpu();
@@ -472,28 +444,26 @@ fn test_graph_coloring_triangle_3colors() {
 fn test_graph_coloring_triangle_2colors_unsat() {
     // Variables: c[v][k] = vertex v has color k (k in {0,1})
     // v0: vars 0,1; v1: vars 2,3; v2: vars 4,5
-    let mut clauses = Vec::new();
-
     // Each vertex must have at least one color
-    clauses.push(Clause::binary(Literal::positive(0), Literal::positive(1)));
-    clauses.push(Clause::binary(Literal::positive(2), Literal::positive(3)));
-    clauses.push(Clause::binary(Literal::positive(4), Literal::positive(5)));
-
-    // Each vertex has at most one color
-    clauses.push(Clause::binary(Literal::negative(0), Literal::negative(1)));
-    clauses.push(Clause::binary(Literal::negative(2), Literal::negative(3)));
-    clauses.push(Clause::binary(Literal::negative(4), Literal::negative(5)));
-
-    // Adjacent vertices must have different colors
-    // Edge (0,1)
-    clauses.push(Clause::binary(Literal::negative(0), Literal::negative(2)));
-    clauses.push(Clause::binary(Literal::negative(1), Literal::negative(3)));
-    // Edge (1,2)
-    clauses.push(Clause::binary(Literal::negative(2), Literal::negative(4)));
-    clauses.push(Clause::binary(Literal::negative(3), Literal::negative(5)));
-    // Edge (0,2)
-    clauses.push(Clause::binary(Literal::negative(0), Literal::negative(4)));
-    clauses.push(Clause::binary(Literal::negative(1), Literal::negative(5)));
+    let clauses = vec![
+        Clause::binary(Literal::positive(0), Literal::positive(1)),
+        Clause::binary(Literal::positive(2), Literal::positive(3)),
+        Clause::binary(Literal::positive(4), Literal::positive(5)),
+        // Each vertex has at most one color
+        Clause::binary(Literal::negative(0), Literal::negative(1)),
+        Clause::binary(Literal::negative(2), Literal::negative(3)),
+        Clause::binary(Literal::negative(4), Literal::negative(5)),
+        // Adjacent vertices must have different colors
+        // Edge (0,1)
+        Clause::binary(Literal::negative(0), Literal::negative(2)),
+        Clause::binary(Literal::negative(1), Literal::negative(3)),
+        // Edge (1,2)
+        Clause::binary(Literal::negative(2), Literal::negative(4)),
+        Clause::binary(Literal::negative(3), Literal::negative(5)),
+        // Edge (0,2)
+        Clause::binary(Literal::negative(0), Literal::negative(4)),
+        Clause::binary(Literal::negative(1), Literal::negative(5)),
+    ];
 
     let instance = SolveInstance::new(6, clauses);
     let solver = Solver::new_cpu();
@@ -1206,12 +1176,8 @@ fn test_implication_chain() {
     assert!(result.is_sat(), "Implication chain should be SAT");
     if let Some(assignment) = result.assignment() {
         // All variables should be true
-        for i in 0..n {
-            assert!(
-                assignment[i],
-                "Variable {} should be true due to implications",
-                i
-            );
+        for (i, value) in assignment.iter().enumerate().take(n) {
+            assert!(*value, "Variable {} should be true due to implications", i);
         }
         assert!(instance.is_satisfied(assignment));
     }

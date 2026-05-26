@@ -97,7 +97,7 @@ mod tests {
             Some(ScalarType::I64)
         );
         assert_eq!(
-            ctx.infer_expr(&ArithExpr::Float(3.14)),
+            ctx.infer_expr(&ArithExpr::Float(3.25)),
             Some(ScalarType::F64)
         );
     }

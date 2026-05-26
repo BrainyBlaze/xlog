@@ -51,6 +51,39 @@ impl Default for GpuCircuitCacheConfig {
     }
 }
 
+fn cache_grid_dim_for_u32_count(context: &str, count: u32, block_dim: u32) -> Result<u32> {
+    if count == 0 {
+        return Ok(0);
+    }
+    if block_dim == 0 {
+        return Err(XlogError::Compilation(format!(
+            "{context}: GPU cache block size must be nonzero"
+        )));
+    }
+    let padded = count
+        .checked_add(block_dim - 1)
+        .ok_or_else(|| XlogError::Compilation(format!("{context}: GPU cache grid overflow")))?;
+    Ok(padded / block_dim)
+}
+
+fn cache_grid_dim_for_u64_count(context: &str, count: u64, block_dim: u32) -> Result<u32> {
+    if count == 0 {
+        return Ok(0);
+    }
+    if block_dim == 0 {
+        return Err(XlogError::Compilation(format!(
+            "{context}: GPU cache block size must be nonzero"
+        )));
+    }
+    let block = block_dim as u64;
+    let grid = count
+        .checked_add(block - 1)
+        .map(|padded| padded / block)
+        .ok_or_else(|| XlogError::Compilation(format!("{context}: GPU cache grid overflow")))?;
+    u32::try_from(grid)
+        .map_err(|_| XlogError::Compilation(format!("{context}: GPU cache grid exceeds u32")))
+}
+
 pub struct GpuCircuitCache {
     provider: Arc<CudaKernelProvider>,
     table_size: u32,
@@ -328,11 +361,8 @@ impl GpuCircuitCache {
             .ok_or_else(|| {
                 XlogError::Compilation("GpuCircuitCache batch copy overflow".to_string())
             })?;
-        let grid_dim = if total == 0 {
-            0
-        } else {
-            ((total + (block_dim as u64) - 1) / (block_dim as u64)) as u32
-        };
+        let grid_dim =
+            cache_grid_dim_for_u64_count("GpuCircuitCache batch weight copy", total, block_dim)?;
         if grid_dim == 0 {
             return Ok(());
         }
@@ -362,6 +392,7 @@ impl GpuCircuitCache {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn eval_grads_inplace_fused_batched(
         &mut self,
         handle: &GpuCircuitCacheHandle,
@@ -807,13 +838,13 @@ impl GpuCircuitCache {
         device.memset_zeros(&mut zero_f64).map_err(|e| {
             XlogError::Kernel(format!("GpuCircuitCache zero zero_f64 failed: {}", e))
         })?;
-        device
-            .htod_sync_copy_into(&[1u32], &mut always_on)
+        provider
+            .htod_launch_metadata_sync_copy_into(&[1u32], &mut always_on)
             .map_err(|e| {
                 XlogError::Kernel(format!("GpuCircuitCache init always_on failed: {}", e))
             })?;
-        device
-            .htod_sync_copy_into(&[1.0f64], &mut one_f64)
+        provider
+            .htod_launch_metadata_sync_copy_into(&[1.0f64], &mut one_f64)
             .map_err(|e| {
                 XlogError::Kernel(format!("GpuCircuitCache init one_f64 failed: {}", e))
             })?;
@@ -863,9 +894,7 @@ impl GpuCircuitCache {
         let memory = self.provider.memory();
         let mut key_device = memory.alloc::<u64>(1)?;
         self.provider
-            .device()
-            .inner()
-            .htod_sync_copy_into(&[key], &mut key_device)
+            .htod_launch_metadata_sync_copy_into(&[key], &mut key_device)
             .map_err(|e| XlogError::Kernel(format!("cache upload key failed: {}", e)))?;
         self.lookup_or_insert_device(&key_device)
     }
@@ -1036,13 +1065,6 @@ impl GpuCircuitCache {
             .ok_or_else(|| XlogError::Kernel("cache_store_meta kernel not found".to_string()))?;
 
         let block_dim = 256u32;
-        let grid_for = |count: u32| -> u32 {
-            if count == 0 {
-                0
-            } else {
-                (count + block_dim - 1) / block_dim
-            }
-        };
 
         let node_stride = self.node_cap;
         let offset_stride = self.node_cap.checked_add(1).ok_or_else(|| {
@@ -1065,7 +1087,8 @@ impl GpuCircuitCache {
             XlogError::Compilation("GpuCircuitCache store: max_var overflow".to_string())
         })?;
 
-        let grid_nodes = grid_for(num_nodes);
+        let grid_nodes =
+            cache_grid_dim_for_u32_count("GpuCircuitCache store node_type", num_nodes, block_dim)?;
         if grid_nodes != 0 {
             // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
@@ -1088,7 +1111,11 @@ impl GpuCircuitCache {
             .map_err(|e| XlogError::Kernel(format!("cache_store_u8 failed: {}", e)))?;
         }
 
-        let grid_offsets = grid_for(num_nodes_plus1);
+        let grid_offsets = cache_grid_dim_for_u32_count(
+            "GpuCircuitCache store child_offsets",
+            num_nodes_plus1,
+            block_dim,
+        )?;
         if grid_offsets != 0 {
             // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
@@ -1111,7 +1138,11 @@ impl GpuCircuitCache {
             .map_err(|e| XlogError::Kernel(format!("cache_store_child_offsets failed: {}", e)))?;
         }
 
-        let grid_edges = grid_for(num_edges);
+        let grid_edges = cache_grid_dim_for_u32_count(
+            "GpuCircuitCache store child_indices",
+            num_edges,
+            block_dim,
+        )?;
         if grid_edges != 0 {
             // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
@@ -1240,7 +1271,11 @@ impl GpuCircuitCache {
             .map_err(|e| XlogError::Kernel(format!("cache_store_level_nodes failed: {}", e)))?;
         }
 
-        let grid_levels = grid_for(num_levels_plus1);
+        let grid_levels = cache_grid_dim_for_u32_count(
+            "GpuCircuitCache store level_offsets",
+            num_levels_plus1,
+            block_dim,
+        )?;
         if grid_levels != 0 {
             // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
@@ -1263,7 +1298,11 @@ impl GpuCircuitCache {
             .map_err(|e| XlogError::Kernel(format!("cache_store_level_offsets failed: {}", e)))?;
         }
 
-        let grid_weights = grid_for(weights_len);
+        let grid_weights = cache_grid_dim_for_u32_count(
+            "GpuCircuitCache store free_var_mask",
+            weights_len,
+            block_dim,
+        )?;
         if grid_weights != 0 {
             // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
@@ -1366,7 +1405,7 @@ impl GpuCircuitCache {
         let grid_dim = if weights_len == 0 {
             0
         } else {
-            (weights_len + block_dim - 1) / block_dim
+            weights_len.div_ceil(block_dim)
         };
         if grid_dim != 0 {
             let var_stride = self.var_cap.checked_add(1).ok_or_else(|| {
@@ -1447,7 +1486,7 @@ impl GpuCircuitCache {
         let grid_dim = if weights_len == 0 {
             0
         } else {
-            (weights_len + block_dim - 1) / block_dim
+            weights_len.div_ceil(block_dim)
         };
         if grid_dim != 0 {
             let var_stride = self.var_cap.checked_add(1).ok_or_else(|| {
@@ -1537,7 +1576,7 @@ impl GpuCircuitCache {
             .ok_or_else(|| XlogError::Kernel("cache_store_u8 kernel not found".to_string()))?;
 
         let block_dim = 256u32;
-        let grid_dim = (mask_len + block_dim - 1) / block_dim;
+        let grid_dim = mask_len.div_ceil(block_dim);
         if grid_dim == 0 {
             return Ok(());
         }
@@ -1686,13 +1725,6 @@ impl GpuCircuitCache {
             .ok_or_else(|| XlogError::Kernel("cache_store_meta kernel not found".to_string()))?;
 
         let block_dim = 256u32;
-        let grid_for = |count: u32| -> u32 {
-            if count == 0 {
-                0
-            } else {
-                (count + block_dim - 1) / block_dim
-            }
-        };
 
         let node_stride = self.node_cap;
         let offset_stride = self.node_cap.checked_add(1).ok_or_else(|| {
@@ -1713,11 +1745,18 @@ impl GpuCircuitCache {
         })?;
 
         // -- Upload node_type (u8, num_nodes elements) --
-        let grid_nodes = grid_for(num_nodes);
+        let grid_nodes = cache_grid_dim_for_u32_count(
+            "GpuCircuitCache restore node_type",
+            num_nodes,
+            block_dim,
+        )?;
         if grid_nodes != 0 {
             let mut d_node_type = memory.alloc::<u8>(num_nodes as usize)?;
-            device
-                .htod_sync_copy_into(&artifact.node_type[..num_nodes as usize], &mut d_node_type)
+            self.provider
+                .htod_sync_copy_into_tracked(
+                    &artifact.node_type[..num_nodes as usize],
+                    &mut d_node_type,
+                )
                 .map_err(|e| XlogError::Kernel(format!("restore htod node_type failed: {}", e)))?;
             // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
@@ -1743,11 +1782,15 @@ impl GpuCircuitCache {
         }
 
         // -- Upload child_offsets (u32, num_nodes+1 elements) --
-        let grid_offsets = grid_for(num_nodes_plus1);
+        let grid_offsets = cache_grid_dim_for_u32_count(
+            "GpuCircuitCache restore child_offsets",
+            num_nodes_plus1,
+            block_dim,
+        )?;
         if grid_offsets != 0 {
             let mut d_child_offsets = memory.alloc::<u32>(num_nodes_plus1 as usize)?;
-            device
-                .htod_sync_copy_into(
+            self.provider
+                .htod_sync_copy_into_tracked(
                     &artifact.child_offsets[..num_nodes_plus1 as usize],
                     &mut d_child_offsets,
                 )
@@ -1778,11 +1821,15 @@ impl GpuCircuitCache {
         }
 
         // -- Upload child_indices (u32, num_edges elements) --
-        let grid_edges = grid_for(num_edges);
+        let grid_edges = cache_grid_dim_for_u32_count(
+            "GpuCircuitCache restore child_indices",
+            num_edges,
+            block_dim,
+        )?;
         if grid_edges != 0 {
             let mut d_child_indices = memory.alloc::<u32>(num_edges as usize)?;
-            device
-                .htod_sync_copy_into(
+            self.provider
+                .htod_sync_copy_into_tracked(
                     &artifact.child_indices[..num_edges as usize],
                     &mut d_child_indices,
                 )
@@ -1815,8 +1862,8 @@ impl GpuCircuitCache {
         // -- Upload lit (i32, num_nodes elements) --
         if grid_nodes != 0 {
             let mut d_lit = memory.alloc::<i32>(num_nodes as usize)?;
-            device
-                .htod_sync_copy_into(&artifact.lit[..num_nodes as usize], &mut d_lit)
+            self.provider
+                .htod_sync_copy_into_tracked(&artifact.lit[..num_nodes as usize], &mut d_lit)
                 .map_err(|e| XlogError::Kernel(format!("restore htod lit failed: {}", e)))?;
             // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
@@ -1840,8 +1887,8 @@ impl GpuCircuitCache {
 
             // -- Upload decision_var (u32, num_nodes elements) --
             let mut d_decision_var = memory.alloc::<u32>(num_nodes as usize)?;
-            device
-                .htod_sync_copy_into(
+            self.provider
+                .htod_sync_copy_into_tracked(
                     &artifact.decision_var[..num_nodes as usize],
                     &mut d_decision_var,
                 )
@@ -1872,8 +1919,8 @@ impl GpuCircuitCache {
 
             // -- Upload decision_child_false (u32, num_nodes elements) --
             let mut d_decision_child_false = memory.alloc::<u32>(num_nodes as usize)?;
-            device
-                .htod_sync_copy_into(
+            self.provider
+                .htod_sync_copy_into_tracked(
                     &artifact.decision_child_false[..num_nodes as usize],
                     &mut d_decision_child_false,
                 )
@@ -1907,8 +1954,8 @@ impl GpuCircuitCache {
 
             // -- Upload decision_child_true (u32, num_nodes elements) --
             let mut d_decision_child_true = memory.alloc::<u32>(num_nodes as usize)?;
-            device
-                .htod_sync_copy_into(
+            self.provider
+                .htod_sync_copy_into_tracked(
                     &artifact.decision_child_true[..num_nodes as usize],
                     &mut d_decision_child_true,
                 )
@@ -1942,8 +1989,8 @@ impl GpuCircuitCache {
 
             // -- Upload level_nodes (u32, num_nodes elements) --
             let mut d_level_nodes = memory.alloc::<u32>(num_nodes as usize)?;
-            device
-                .htod_sync_copy_into(
+            self.provider
+                .htod_sync_copy_into_tracked(
                     &artifact.level_nodes[..num_nodes as usize],
                     &mut d_level_nodes,
                 )
@@ -1974,11 +2021,15 @@ impl GpuCircuitCache {
         }
 
         // -- Upload level_offsets (u32, num_levels+1 elements) --
-        let grid_levels = grid_for(num_levels_plus1);
+        let grid_levels = cache_grid_dim_for_u32_count(
+            "GpuCircuitCache restore level_offsets",
+            num_levels_plus1,
+            block_dim,
+        )?;
         if grid_levels != 0 {
             let mut d_level_offsets = memory.alloc::<u32>(num_levels_plus1 as usize)?;
-            device
-                .htod_sync_copy_into(
+            self.provider
+                .htod_sync_copy_into_tracked(
                     &artifact.level_offsets[..num_levels_plus1 as usize],
                     &mut d_level_offsets,
                 )
@@ -2040,7 +2091,11 @@ impl GpuCircuitCache {
         // Zero the slot's mask region by uploading a zero buffer and storing it.
         // We always zero to ensure stale mask data from a previous occupant is cleared.
         let mask_cap = var_stride; // max_var+1 capacity per slot
-        let grid_mask_zero = grid_for(mask_cap);
+        let grid_mask_zero = cache_grid_dim_for_u32_count(
+            "GpuCircuitCache restore zero free_var_mask",
+            mask_cap,
+            block_dim,
+        )?;
         if grid_mask_zero != 0 {
             let mut d_zeros = memory.alloc::<u8>(mask_cap as usize)?;
             device.memset_zeros(&mut d_zeros).map_err(|e| {
@@ -2082,11 +2137,23 @@ impl GpuCircuitCache {
             })?;
             let actual_len = std::cmp::min(mask_len as usize, artifact.free_var_mask.len());
             if actual_len > 0 {
-                let grid_mask = grid_for(actual_len as u32);
+                let actual_len_u32 = u32::try_from(actual_len).map_err(|_| {
+                    XlogError::Compilation(
+                        "GpuCircuitCache restore free_var_mask len exceeds u32".to_string(),
+                    )
+                })?;
+                let grid_mask = cache_grid_dim_for_u32_count(
+                    "GpuCircuitCache restore free_var_mask",
+                    actual_len_u32,
+                    block_dim,
+                )?;
                 if grid_mask != 0 {
                     let mut d_mask = memory.alloc::<u8>(actual_len)?;
-                    device
-                        .htod_sync_copy_into(&artifact.free_var_mask[..actual_len], &mut d_mask)
+                    self.provider
+                        .htod_sync_copy_into_tracked(
+                            &artifact.free_var_mask[..actual_len],
+                            &mut d_mask,
+                        )
                         .map_err(|e| {
                             XlogError::Kernel(format!("restore htod free_var_mask failed: {}", e))
                         })?;
@@ -2104,7 +2171,7 @@ impl GpuCircuitCache {
                                 var_stride,
                                 &d_mask,
                                 &mut self.free_var_mask,
-                                actual_len as u32,
+                                actual_len_u32,
                             ),
                         )
                     }
@@ -2345,7 +2412,7 @@ impl GpuCircuitCache {
                 (&self.level_offsets).as_kernel_param(),
                 (&self.var_log_true).as_kernel_param(),
                 (&self.var_log_false).as_kernel_param(),
-                (&mut self.values).as_kernel_param(),
+                (&self.values).as_kernel_param(),
                 (&self.meta_num_levels).as_kernel_param(),
             ];
             // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
@@ -2425,7 +2492,7 @@ impl GpuCircuitCache {
             (&self.level_offsets).as_kernel_param(),
             (&self.var_log_true).as_kernel_param(),
             (&self.var_log_false).as_kernel_param(),
-            (&mut self.values).as_kernel_param(),
+            (&self.values).as_kernel_param(),
             (&self.meta_num_levels).as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
@@ -2446,13 +2513,6 @@ impl GpuCircuitCache {
             .get_func(CACHE_MODULE, cache_kernels::CACHE_STORE_F64)
             .ok_or_else(|| XlogError::Kernel("cache_store_f64 kernel not found".to_string()))?;
 
-        let grid_for = |count: u32| -> u32 {
-            if count == 0 {
-                0
-            } else {
-                (count + block_size - 1) / block_size
-            }
-        };
         let node_stride = self.node_cap;
         let var_stride = self.var_cap.checked_add(1).ok_or_else(|| {
             XlogError::Compilation("GPU cache eval_grads var_cap overflow".to_string())
@@ -2461,7 +2521,11 @@ impl GpuCircuitCache {
             XlogError::Compilation("GPU cache eval_grads var_cap overflow".to_string())
         })?;
 
-        let grid_nodes = grid_for(self.node_cap);
+        let grid_nodes = cache_grid_dim_for_u32_count(
+            "GpuCircuitCache eval_grads zero adj",
+            self.node_cap,
+            block_size,
+        )?;
         if grid_nodes != 0 {
             // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
@@ -2484,7 +2548,11 @@ impl GpuCircuitCache {
             .map_err(|e| XlogError::Kernel(format!("cache zero adj failed: {}", e)))?;
         }
 
-        let grid_weights = grid_for(weights_len);
+        let grid_weights = cache_grid_dim_for_u32_count(
+            "GpuCircuitCache eval_grads zero weights",
+            weights_len,
+            block_size,
+        )?;
         if grid_weights != 0 {
             // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
@@ -2585,7 +2653,7 @@ impl GpuCircuitCache {
                 )
             })?;
 
-        let num_blocks = (self.node_cap + block_size - 1) / block_size;
+        let num_blocks = self.node_cap.div_ceil(block_size);
         let num_levels = self.level_cap;
         for level in (0..num_levels).rev() {
             if num_blocks == 0 {
@@ -2610,7 +2678,7 @@ impl GpuCircuitCache {
                 (&self.var_log_true).as_kernel_param(),
                 (&self.var_log_false).as_kernel_param(),
                 (&self.values).as_kernel_param(),
-                (&mut self.adj).as_kernel_param(),
+                (&self.adj).as_kernel_param(),
                 (&self.meta_num_levels).as_kernel_param(),
             ];
 
@@ -2649,8 +2717,8 @@ impl GpuCircuitCache {
                 (&self.var_log_false).as_kernel_param(),
                 (&self.values).as_kernel_param(),
                 (&self.adj).as_kernel_param(),
-                (&mut self.grad_true).as_kernel_param(),
-                (&mut self.grad_false).as_kernel_param(),
+                (&self.grad_true).as_kernel_param(),
+                (&self.grad_false).as_kernel_param(),
                 (&self.meta_num_levels).as_kernel_param(),
             ];
 
@@ -2743,7 +2811,7 @@ impl GpuCircuitCache {
             (&self.level_offsets).as_kernel_param(),
             (&self.var_log_true).as_kernel_param(),
             (&self.var_log_false).as_kernel_param(),
-            (&mut self.values).as_kernel_param(),
+            (&self.values).as_kernel_param(),
             (&self.meta_num_levels).as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
@@ -2764,13 +2832,6 @@ impl GpuCircuitCache {
             .get_func(CACHE_MODULE, cache_kernels::CACHE_STORE_F64)
             .ok_or_else(|| XlogError::Kernel("cache_store_f64 kernel not found".to_string()))?;
 
-        let grid_for = |count: u32| -> u32 {
-            if count == 0 {
-                0
-            } else {
-                (count + block_size - 1) / block_size
-            }
-        };
         let node_stride = self.node_cap;
         let var_stride = self.var_cap.checked_add(1).ok_or_else(|| {
             XlogError::Compilation("GPU cache eval_grads var_cap overflow".to_string())
@@ -2779,7 +2840,11 @@ impl GpuCircuitCache {
             XlogError::Compilation("GPU cache eval_grads var_cap overflow".to_string())
         })?;
 
-        let grid_nodes = grid_for(self.node_cap);
+        let grid_nodes = cache_grid_dim_for_u32_count(
+            "GpuCircuitCache batched eval_grads zero adj",
+            self.node_cap,
+            block_size,
+        )?;
         if grid_nodes != 0 {
             // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
@@ -2802,7 +2867,11 @@ impl GpuCircuitCache {
             .map_err(|e| XlogError::Kernel(format!("cache zero adj failed: {}", e)))?;
         }
 
-        let grid_weights = grid_for(weights_len);
+        let grid_weights = cache_grid_dim_for_u32_count(
+            "GpuCircuitCache batched eval_grads zero weights",
+            weights_len,
+            block_size,
+        )?;
         if grid_weights != 0 {
             // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
@@ -2898,9 +2967,9 @@ impl GpuCircuitCache {
             (&self.var_log_true).as_kernel_param(),
             (&self.var_log_false).as_kernel_param(),
             (&self.values).as_kernel_param(),
-            (&mut self.adj).as_kernel_param(),
-            (&mut self.grad_true).as_kernel_param(),
-            (&mut self.grad_false).as_kernel_param(),
+            (&self.adj).as_kernel_param(),
+            (&self.grad_true).as_kernel_param(),
+            (&self.grad_false).as_kernel_param(),
             (&self.meta_num_levels).as_kernel_param(),
         ];
 
@@ -2940,7 +3009,7 @@ impl GpuCircuitCache {
 
         let device = self.provider.device().inner();
         let block_dim = 256u32;
-        let grid_dim = (n + block_dim - 1) / block_dim;
+        let grid_dim = n.div_ceil(block_dim);
 
         if apply_grads {
             let apply_grad = device
@@ -3006,8 +3075,8 @@ impl GpuCircuitCache {
             let mut stage0 = true;
             let mut output_is_a = true;
             loop {
-                let out_len = (stage_n + 1) / 2;
-                let stage_grid = (out_len + block_dim - 1) / block_dim;
+                let out_len = stage_n.div_ceil(2);
+                let stage_grid = out_len.div_ceil(block_dim);
 
                 let (in_buf, out_buf): (&TrackedCudaSlice<f64>, &mut TrackedCudaSlice<f64>) =
                     if output_is_a {

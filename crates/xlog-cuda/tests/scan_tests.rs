@@ -86,7 +86,7 @@ fn test_prefix_sum_mask_over_256() {
     let (prefix_sum, count) = result.unwrap();
     assert_eq!(count, 257);
     // Verify exclusive prefix sum: [0, 1, 2, ..., 256]
-    for i in 0..257 {
-        assert_eq!(prefix_sum[i], i as u32);
+    for (i, value) in prefix_sum.iter().enumerate().take(257) {
+        assert_eq!(*value, i as u32);
     }
 }

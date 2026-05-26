@@ -93,7 +93,6 @@ impl PirBatch {
         }
 
         let memory = provider.memory();
-        let device = provider.device().inner();
 
         let mut d_node_type = memory.alloc::<u8>(num_nodes)?;
         let mut d_leaf_id = memory.alloc::<u32>(num_nodes)?;
@@ -103,30 +102,30 @@ impl PirBatch {
         let mut d_child_offsets = memory.alloc::<u32>(self.child_offsets.len())?;
         let mut d_children = memory.alloc::<u32>(self.children.len())?;
 
-        device
-            .htod_sync_copy_into(&self.node_type, &mut d_node_type)
+        provider
+            .htod_sync_copy_into_tracked(&self.node_type, &mut d_node_type)
             .map_err(|e| XlogError::Kernel(format!("PirBatch upload node_type: {}", e)))?;
-        device
-            .htod_sync_copy_into(&self.leaf_id, &mut d_leaf_id)
+        provider
+            .htod_sync_copy_into_tracked(&self.leaf_id, &mut d_leaf_id)
             .map_err(|e| XlogError::Kernel(format!("PirBatch upload leaf_id: {}", e)))?;
-        device
-            .htod_sync_copy_into(&self.decision_var, &mut d_decision_var)
+        provider
+            .htod_sync_copy_into_tracked(&self.decision_var, &mut d_decision_var)
             .map_err(|e| XlogError::Kernel(format!("PirBatch upload decision_var: {}", e)))?;
-        device
-            .htod_sync_copy_into(&self.decision_child_false, &mut d_decision_child_false)
+        provider
+            .htod_sync_copy_into_tracked(&self.decision_child_false, &mut d_decision_child_false)
             .map_err(|e| {
                 XlogError::Kernel(format!("PirBatch upload decision_child_false: {}", e))
             })?;
-        device
-            .htod_sync_copy_into(&self.decision_child_true, &mut d_decision_child_true)
+        provider
+            .htod_sync_copy_into_tracked(&self.decision_child_true, &mut d_decision_child_true)
             .map_err(|e| {
                 XlogError::Kernel(format!("PirBatch upload decision_child_true: {}", e))
             })?;
-        device
-            .htod_sync_copy_into(&self.child_offsets, &mut d_child_offsets)
+        provider
+            .htod_sync_copy_into_tracked(&self.child_offsets, &mut d_child_offsets)
             .map_err(|e| XlogError::Kernel(format!("PirBatch upload child_offsets: {}", e)))?;
-        device
-            .htod_sync_copy_into(&self.children, &mut d_children)
+        provider
+            .htod_sync_copy_into_tracked(&self.children, &mut d_children)
             .map_err(|e| XlogError::Kernel(format!("PirBatch upload children: {}", e)))?;
 
         Ok(GpuPirBatch {
@@ -220,8 +219,8 @@ impl GpuPirInterner {
         if node_cap > 1 {
             leaf_id_host[1] = 1;
         }
-        device
-            .htod_sync_copy_into(&leaf_id_host, &mut leaf_id)
+        provider
+            .htod_launch_metadata_sync_copy_into(&leaf_id_host, &mut leaf_id)
             .map_err(|e| XlogError::Kernel(format!("GpuPirInterner init leaf_id: {}", e)))?;
 
         let hash_fn = device
@@ -229,7 +228,7 @@ impl GpuPirInterner {
             .ok_or_else(|| XlogError::Kernel("pir_hash_keys not found".to_string()))?;
         let num_const = 2u32;
         let block_size = 256u32;
-        let grid_const = (num_const + block_size - 1) / block_size;
+        let grid_const = num_const.div_ceil(block_size);
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             hash_fn.clone().launch(
@@ -255,11 +254,11 @@ impl GpuPirInterner {
 
         let mut num_nodes = memory.alloc::<u32>(1)?;
         let mut num_children = memory.alloc::<u32>(1)?;
-        device
-            .htod_sync_copy_into(&[2u32], &mut num_nodes)
+        provider
+            .htod_launch_metadata_sync_copy_into(&[2u32], &mut num_nodes)
             .map_err(|e| XlogError::Kernel(format!("GpuPirInterner init num_nodes: {}", e)))?;
-        device
-            .htod_sync_copy_into(&[0u32], &mut num_children)
+        provider
+            .htod_launch_metadata_sync_copy_into(&[0u32], &mut num_children)
             .map_err(|e| XlogError::Kernel(format!("GpuPirInterner init num_children: {}", e)))?;
 
         Ok(Self {
@@ -286,7 +285,7 @@ impl GpuPirInterner {
     }
 
     pub fn intern_batch(&mut self, batch: &PirBatch) -> Result<TrackedCudaSlice<u32>> {
-        if batch.node_type.iter().any(|&t| t == PIR_CONST) {
+        if batch.node_type.contains(&PIR_CONST) {
             return Err(XlogError::Compilation(
                 "GpuPirInterner does not accept PIR_CONST in batches".to_string(),
             ));
@@ -316,19 +315,19 @@ impl GpuPirInterner {
         let block_size = 256u32;
 
         // Canonicalize AND/OR children (sort + dedup) into new buffers.
-        let mut canon_child_offsets = memory.alloc::<u32>((num_nodes as usize) + 1)?;
-        let mut canon_children = memory.alloc::<u32>(num_children as usize)?;
+        let mut canon_child_offsets = memory.alloc::<u32>(num_nodes + 1)?;
+        let mut canon_children = memory.alloc::<u32>(num_children)?;
 
         if num_children_u32 == 0 {
             device.memset_zeros(&mut canon_child_offsets).map_err(|e| {
                 XlogError::Kernel(format!("GpuPirInterner zero child_offsets: {}", e))
             })?;
         } else {
-            let mut parent_ids = memory.alloc::<u32>(num_children as usize)?;
+            let mut parent_ids = memory.alloc::<u32>(num_children)?;
             let fill_fn = device
                 .get_func(PIR_MODULE, pir_kernels::PIR_FILL_CHILD_PARENTS)
                 .ok_or_else(|| XlogError::Kernel("pir_fill_child_parents not found".to_string()))?;
-            let grid_nodes = (num_nodes_u32 + block_size - 1) / block_size;
+            let grid_nodes = num_nodes_u32.div_ceil(block_size);
             // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 fill_fn.clone().launch(
@@ -356,11 +355,11 @@ impl GpuPirInterner {
                 &mut sort_scratch,
             )?;
 
-            let mut pair_unique_mask = memory.alloc::<u8>(num_children as usize)?;
+            let mut pair_unique_mask = memory.alloc::<u8>(num_children)?;
             let mark_pairs = device
                 .get_func(PIR_MODULE, pir_kernels::PIR_MARK_UNIQUE_PAIRS)
                 .ok_or_else(|| XlogError::Kernel("pir_mark_unique_pairs not found".to_string()))?;
-            let grid_pairs = (num_children_u32 + block_size - 1) / block_size;
+            let grid_pairs = num_children_u32.div_ceil(block_size);
             // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 mark_pairs.clone().launch(
@@ -403,7 +402,7 @@ impl GpuPirInterner {
             }
             .map_err(|e| XlogError::Kernel(format!("count_mask (pairs) failed: {}", e)))?;
 
-            let mut canon_parent = memory.alloc::<u32>(num_children as usize)?;
+            let mut canon_parent = memory.alloc::<u32>(num_children)?;
             let compact_pairs = device
                 .get_func(PIR_MODULE, pir_kernels::PIR_COMPACT_PAIRS)
                 .ok_or_else(|| XlogError::Kernel("pir_compact_pairs not found".to_string()))?;
@@ -428,7 +427,7 @@ impl GpuPirInterner {
             }
             .map_err(|e| XlogError::Kernel(format!("pir_compact_pairs failed: {}", e)))?;
 
-            let mut child_counts = memory.alloc::<u32>(num_nodes as usize)?;
+            let mut child_counts = memory.alloc::<u32>(num_nodes)?;
             device
                 .memset_zeros(&mut child_counts)
                 .map_err(|e| XlogError::Kernel(format!("zero child_counts: {}", e)))?;
@@ -461,7 +460,7 @@ impl GpuPirInterner {
                 .ok_or_else(|| {
                     XlogError::Kernel("pir_write_child_offsets not found".to_string())
                 })?;
-            let grid_nodes = (num_nodes_u32 + block_size - 1) / block_size;
+            let grid_nodes = num_nodes_u32.div_ceil(block_size);
             // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
             unsafe {
                 write_offsets.clone().launch(
@@ -482,11 +481,11 @@ impl GpuPirInterner {
         }
 
         // Hash and pack keys for nodes.
-        let mut hashes = memory.alloc::<u64>(num_nodes as usize)?;
+        let mut hashes = memory.alloc::<u64>(num_nodes)?;
         let hash_fn = device
             .get_func(PIR_MODULE, pir_kernels::PIR_HASH_KEYS)
             .ok_or_else(|| XlogError::Kernel("pir_hash_keys not found".to_string()))?;
-        let grid_nodes = (num_nodes_u32 + block_size - 1) / block_size;
+        let grid_nodes = num_nodes_u32.div_ceil(block_size);
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             hash_fn.clone().launch(
@@ -510,9 +509,9 @@ impl GpuPirInterner {
         }
         .map_err(|e| XlogError::Kernel(format!("pir_hash_keys failed: {}", e)))?;
 
-        let mut key_tag = memory.alloc::<u32>(num_nodes as usize)?;
-        let mut key_payload = memory.alloc::<u32>(num_nodes as usize)?;
-        let mut key_child_len = memory.alloc::<u32>(num_nodes as usize)?;
+        let mut key_tag = memory.alloc::<u32>(num_nodes)?;
+        let mut key_payload = memory.alloc::<u32>(num_nodes)?;
+        let mut key_child_len = memory.alloc::<u32>(num_nodes)?;
         let pack_fn = device
             .get_func(PIR_MODULE, pir_kernels::PIR_PACK_KEYS)
             .ok_or_else(|| XlogError::Kernel("pir_pack_keys not found".to_string()))?;
@@ -541,9 +540,9 @@ impl GpuPirInterner {
         .map_err(|e| XlogError::Kernel(format!("pir_pack_keys failed: {}", e)))?;
 
         // Sort indices by (hash, tag, payload, len).
-        let mut indices = memory.alloc::<u32>(num_nodes as usize)?;
+        let mut indices = memory.alloc::<u32>(num_nodes)?;
         self.provider.init_indices(&mut indices, num_nodes_u32)?;
-        let mut keys = memory.alloc::<u32>(num_nodes as usize)?;
+        let mut keys = memory.alloc::<u32>(num_nodes)?;
         let mut node_sort = RadixSortScratch::new(&self.provider, num_nodes_u32)?;
 
         self.provider
@@ -592,11 +591,11 @@ impl GpuPirInterner {
         )?;
 
         // Gather sorted node arrays.
-        let mut sorted_node_type = memory.alloc::<u8>(num_nodes as usize)?;
-        let mut sorted_leaf_id = memory.alloc::<u32>(num_nodes as usize)?;
-        let mut sorted_decision_var = memory.alloc::<u32>(num_nodes as usize)?;
-        let mut sorted_decision_child_false = memory.alloc::<u32>(num_nodes as usize)?;
-        let mut sorted_decision_child_true = memory.alloc::<u32>(num_nodes as usize)?;
+        let mut sorted_node_type = memory.alloc::<u8>(num_nodes)?;
+        let mut sorted_leaf_id = memory.alloc::<u32>(num_nodes)?;
+        let mut sorted_decision_var = memory.alloc::<u32>(num_nodes)?;
+        let mut sorted_decision_child_false = memory.alloc::<u32>(num_nodes)?;
+        let mut sorted_decision_child_true = memory.alloc::<u32>(num_nodes)?;
 
         self.provider.gather_u8_by_indices(
             &batch.node_type,
@@ -630,7 +629,7 @@ impl GpuPirInterner {
         )?;
 
         // Build sorted child offsets/children.
-        let mut sorted_child_len = memory.alloc::<u32>(num_nodes as usize)?;
+        let mut sorted_child_len = memory.alloc::<u32>(num_nodes)?;
         self.provider.gather_u32_by_indices(
             &key_child_len,
             &indices,
@@ -640,7 +639,7 @@ impl GpuPirInterner {
         self.provider
             .exclusive_scan_u32_inplace(&mut sorted_child_len, num_nodes_u32)?;
 
-        let mut sorted_child_offsets = memory.alloc::<u32>((num_nodes as usize) + 1)?;
+        let mut sorted_child_offsets = memory.alloc::<u32>(num_nodes + 1)?;
         let write_offsets = device
             .get_func(PIR_MODULE, pir_kernels::PIR_WRITE_CHILD_OFFSETS)
             .ok_or_else(|| XlogError::Kernel("pir_write_child_offsets not found".to_string()))?;
@@ -663,7 +662,7 @@ impl GpuPirInterner {
         }
         .map_err(|e| XlogError::Kernel(format!("pir_write_child_offsets(sorted) failed: {}", e)))?;
 
-        let mut sorted_children = memory.alloc::<u32>(num_children as usize)?;
+        let mut sorted_children = memory.alloc::<u32>(num_children)?;
         let gather_children = device
             .get_func(PIR_MODULE, pir_kernels::PIR_GATHER_CHILDREN)
             .ok_or_else(|| XlogError::Kernel("pir_gather_children not found".to_string()))?;
@@ -688,7 +687,7 @@ impl GpuPirInterner {
         .map_err(|e| XlogError::Kernel(format!("pir_gather_children failed: {}", e)))?;
 
         // Recompute hashes in sorted order for uniqueness checks.
-        let mut sorted_hashes = memory.alloc::<u64>(num_nodes as usize)?;
+        let mut sorted_hashes = memory.alloc::<u64>(num_nodes)?;
         let hash_fn = device
             .get_func(PIR_MODULE, pir_kernels::PIR_HASH_KEYS)
             .ok_or_else(|| XlogError::Kernel("pir_hash_keys not found".to_string()))?;
@@ -718,7 +717,7 @@ impl GpuPirInterner {
         let hash_table = self
             .provider
             .build_hash_table_u64(&self.graph_hashes, self.node_cap)?;
-        let mut existing_id = memory.alloc::<u32>(num_nodes as usize)?;
+        let existing_id = memory.alloc::<u32>(num_nodes)?;
         let find_existing = device
             .get_func(PIR_MODULE, pir_kernels::PIR_FIND_EXISTING)
             .ok_or_else(|| XlogError::Kernel("pir_find_existing not found".to_string()))?;
@@ -745,7 +744,7 @@ impl GpuPirInterner {
             (&hash_table.bucket_entries).as_kernel_param(),
             (&hash_table.bucket_entry_hashes).as_kernel_param(),
             hash_table.bucket_mask.as_kernel_param(),
-            (&mut existing_id).as_kernel_param(),
+            (&existing_id).as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
@@ -761,7 +760,7 @@ impl GpuPirInterner {
         .map_err(|e| XlogError::Kernel(format!("pir_find_existing failed: {}", e)))?;
 
         // Mark unique nodes in sorted order.
-        let mut unique_mask = memory.alloc::<u8>(num_nodes as usize)?;
+        let mut unique_mask = memory.alloc::<u8>(num_nodes)?;
         let mark_unique = device
             .get_func(PIR_MODULE, pir_kernels::PIR_MARK_UNIQUE)
             .ok_or_else(|| XlogError::Kernel("pir_mark_unique not found".to_string()))?;
@@ -789,7 +788,7 @@ impl GpuPirInterner {
         }
         .map_err(|e| XlogError::Kernel(format!("pir_mark_unique failed: {}", e)))?;
 
-        let mut new_mask = memory.alloc::<u8>(num_nodes as usize)?;
+        let mut new_mask = memory.alloc::<u8>(num_nodes)?;
         let mark_new = device
             .get_func(PIR_MODULE, pir_kernels::PIR_MARK_NEW_GROUPS)
             .ok_or_else(|| XlogError::Kernel("pir_mark_new_groups not found".to_string()))?;
@@ -834,7 +833,7 @@ impl GpuPirInterner {
         }
         .map_err(|e| XlogError::Kernel(format!("count_mask (new nodes) failed: {}", e)))?;
 
-        let mut group_node_id = memory.alloc::<u32>(num_nodes as usize)?;
+        let mut group_node_id = memory.alloc::<u32>(num_nodes)?;
         let build_group = device
             .get_func(PIR_MODULE, pir_kernels::PIR_BUILD_GROUP_IDS)
             .ok_or_else(|| XlogError::Kernel("pir_build_group_ids not found".to_string()))?;
@@ -859,7 +858,7 @@ impl GpuPirInterner {
         }
         .map_err(|e| XlogError::Kernel(format!("pir_build_group_ids failed: {}", e)))?;
 
-        let mut graph_child_counts = memory.alloc::<u32>(num_nodes as usize)?;
+        let mut graph_child_counts = memory.alloc::<u32>(num_nodes)?;
         let build_counts = device
             .get_func(PIR_MODULE, pir_kernels::PIR_BUILD_GRAPH_CHILD_COUNTS)
             .ok_or_else(|| {
@@ -911,7 +910,7 @@ impl GpuPirInterner {
         self.provider
             .exclusive_scan_u32_inplace(&mut graph_child_counts, num_nodes_u32)?;
 
-        let mut out_ids = memory.alloc::<u32>(num_nodes as usize)?;
+        let out_ids = memory.alloc::<u32>(num_nodes)?;
         let emit = device
             .get_func(PIR_MODULE, pir_kernels::PIR_EMIT_NODES_AND_IDS)
             .ok_or_else(|| XlogError::Kernel("pir_emit_nodes_and_ids not found".to_string()))?;
@@ -933,17 +932,17 @@ impl GpuPirInterner {
             (&self.num_children).as_kernel_param(),
             self.node_cap.as_kernel_param(),
             self.child_cap.as_kernel_param(),
-            (&mut self.graph.node_type).as_kernel_param(),
-            (&mut self.graph.child_offsets).as_kernel_param(),
-            (&mut self.graph.children).as_kernel_param(),
-            (&mut self.graph.leaf_id).as_kernel_param(),
-            (&mut self.graph.decision_var).as_kernel_param(),
-            (&mut self.graph.decision_child_false).as_kernel_param(),
-            (&mut self.graph.decision_child_true).as_kernel_param(),
+            (&self.graph.node_type).as_kernel_param(),
+            (&self.graph.child_offsets).as_kernel_param(),
+            (&self.graph.children).as_kernel_param(),
+            (&self.graph.leaf_id).as_kernel_param(),
+            (&self.graph.decision_var).as_kernel_param(),
+            (&self.graph.decision_child_false).as_kernel_param(),
+            (&self.graph.decision_child_true).as_kernel_param(),
             (&new_mask).as_kernel_param(),
             (&sorted_hashes).as_kernel_param(),
-            (&mut self.graph_hashes).as_kernel_param(),
-            (&mut out_ids).as_kernel_param(),
+            (&self.graph_hashes).as_kernel_param(),
+            (&out_ids).as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {

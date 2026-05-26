@@ -196,20 +196,19 @@ const SORTED_ELIGIBLE_MATRIX: &[(u32, u32)] = &[
     (2000, 2000), // 4M Cartesian (at threshold)
 ];
 
+type Row3 = (u32, u32, u32);
+
 /// Sorted-ascending 3-col U32 fixture. left covers keys
 /// `[0..num_left)`; right covers keys `[num_left/2..num_left/2 +
 /// num_right)`. Output has `min(num_left/2 + num_right, num_left)
 /// - num_left/2` matched rows. For symmetric `(N, N)` cells this
 /// gives `N/2` matches (50% match rate).
-fn fixture_3col_sorted(
-    num_left: u32,
-    num_right: u32,
-) -> (Vec<(u32, u32, u32)>, Vec<(u32, u32, u32)>) {
-    let left: Vec<(u32, u32, u32)> = (0..num_left)
+fn fixture_3col_sorted(num_left: u32, num_right: u32) -> (Vec<Row3>, Vec<Row3>) {
+    let left: Vec<Row3> = (0..num_left)
         .map(|i| (i, 1_000_000 + i, 2_000_000 + i))
         .collect();
     let offset = num_left / 2;
-    let right: Vec<(u32, u32, u32)> = (offset..offset.saturating_add(num_right))
+    let right: Vec<Row3> = (offset..offset.saturating_add(num_right))
         .map(|i| (i, 3_000_000 + i, 4_000_000 + i))
         .collect();
     (left, right)

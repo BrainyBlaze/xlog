@@ -52,6 +52,7 @@ struct CachedJoinIndex {
     last_used: u64,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum CachedJoinIndexPayload {
     Ready(JoinIndexV2),
     #[cfg(test)]

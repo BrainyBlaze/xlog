@@ -247,6 +247,7 @@ fn discover_body_adornments(
                 bind_atom_variables(atom, &mut bound);
             }
             BodyLiteral::Comparison(_)
+            | BodyLiteral::Epistemic(_)
             | BodyLiteral::IsExpr(_)
             | BodyLiteral::Negated(_)
             | BodyLiteral::Univ(_) => {}
@@ -395,7 +396,10 @@ fn unsupported_target_reasons(
                     }
                 }
                 BodyLiteral::Negated(_) => {}
-                BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {
+                BodyLiteral::Comparison(_)
+                | BodyLiteral::Epistemic(_)
+                | BodyLiteral::IsExpr(_)
+                | BodyLiteral::Univ(_) => {
                     reasons.insert(format!(
                         "non-positive literal in recursive rule for {} is outside the supported magic_sets subset",
                         rule.head.predicate
@@ -482,6 +486,7 @@ fn bind_atom_variables(atom: &Atom, bound: &mut HashSet<String>) {
 fn body_literal_has_aggregate(lit: &BodyLiteral) -> bool {
     match lit {
         BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => atom_has_aggregate(atom),
+        BodyLiteral::Epistemic(lit) => atom_has_aggregate(&lit.atom),
         BodyLiteral::Comparison(comparison) => {
             term_has_aggregate(&comparison.left) || term_has_aggregate(&comparison.right)
         }

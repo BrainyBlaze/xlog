@@ -3,11 +3,19 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use xlog_core::{symbol, Result, Schema, XlogError};
+use xlog_core::{symbol, RelId, Result, Schema, XlogError};
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
+use xlog_ir::{EpistemicExecutablePlan, ExecutionPlan};
+use xlog_logic::epistemic::{
+    compile_epistemic_gpu_execution, compile_epistemic_gpu_split_execution,
+    reduce_epistemic_program_to_ordinary, EpistemicSplitExecutablePlan,
+};
 use xlog_logic::{BodyLiteral, Compiler, Program, Query, Term};
 use xlog_runtime::executor::JoinIndexCacheStats;
-use xlog_runtime::{DeltaRecomputeStats, ExecutionStats, Executor, RelationDelta, RelationStore};
+use xlog_runtime::{
+    DeltaRecomputeStats, EpistemicGpuExecutionResult, EpistemicGpuWorkspaceCapacities,
+    ExecutionStats, Executor, RelationDelta, RelationStore,
+};
 
 /// Result of evaluating a single query in a Datalog program.
 pub struct LogicQueryResult {
@@ -42,12 +50,97 @@ impl LogicSessionRuntime {
     }
 }
 
+/// Planner-grade telemetry for a persistent-session relation delta update.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DeltaPlannerTelemetry {
+    /// True when the relation-delta path reused an existing session/cache.
+    pub cache_reused: bool,
+    /// Planner decision used for this delta update.
+    pub fallback_decision: String,
+    /// Number of SCCs affected by the delta dependency closure.
+    pub affected_sccs: usize,
+    /// Number of SCCs recomputed from scratch.
+    pub recomputed_sccs: usize,
+    /// Number of SCCs updated incrementally.
+    pub incremental_sccs: usize,
+    /// Estimated speedup of delta evaluation over full recompute when available.
+    pub estimated_delta_speedup: Option<f64>,
+    /// Measured speedup of delta evaluation over full recompute when both timings are available.
+    pub measured_delta_speedup: Option<f64>,
+    /// Human-readable planner guidance for downstream diagnostics.
+    pub planner_advice: Vec<String>,
+}
+
+impl DeltaPlannerTelemetry {
+    /// Build planner telemetry from a delta report and optional timing evidence.
+    pub fn from_delta_report(
+        report: &LogicDeltaReport,
+        cache_reused: bool,
+        measured_micros: Option<(u64, u64)>,
+    ) -> Self {
+        let fallback_decision = if report.affected_sccs == 0 {
+            "no_op"
+        } else if report.has_deletes || report.recomputed_sccs > 0 {
+            "full_recompute_fallback"
+        } else {
+            "incremental"
+        }
+        .to_string();
+        let estimated_delta_speedup = if report.affected_sccs > 0 {
+            Some((report.affected_sccs.max(1) as f64) / (report.incremental_sccs.max(1) as f64))
+        } else {
+            None
+        };
+        let measured_delta_speedup = measured_micros.and_then(|(delta_us, full_us)| {
+            if delta_us == 0 {
+                None
+            } else {
+                Some(full_us as f64 / delta_us as f64)
+            }
+        });
+
+        let mut planner_advice = Vec::new();
+        if fallback_decision == "full_recompute_fallback" {
+            planner_advice.push(
+                "full recompute fallback selected; inspect deletes or affected SCC fanout"
+                    .to_string(),
+            );
+        } else if let Some(speedup) = measured_delta_speedup {
+            if speedup >= 1.0 {
+                planner_advice.push(format!("delta path is faster by {speedup:.2}x"));
+            } else {
+                planner_advice.push(format!(
+                    "full recompute may be faster; delta measured {speedup:.2}x"
+                ));
+            }
+        } else if fallback_decision == "incremental" {
+            planner_advice.push(
+                "incremental delta path selected; run equivalence timing to measure speedup"
+                    .to_string(),
+            );
+        }
+
+        Self {
+            cache_reused,
+            fallback_decision,
+            affected_sccs: report.affected_sccs,
+            recomputed_sccs: report.recomputed_sccs,
+            incremental_sccs: report.incremental_sccs,
+            estimated_delta_speedup,
+            measured_delta_speedup,
+            planner_advice,
+        }
+    }
+}
+
 /// Summary for a persistent-session relation delta update.
 pub struct LogicDeltaReport {
     /// Number of relation delta entries supplied by the caller before coalescing.
     pub input_delta_count: usize,
     /// Number of changed relation names in the delta batch.
     pub changed_relations: usize,
+    /// Changed relation names after coalescing.
+    pub changed_relation_names: Vec<String>,
     /// Total inserted rows across all changed relations.
     pub insert_rows: u64,
     /// Total deleted rows across all changed relations.
@@ -66,6 +159,10 @@ pub struct LogicDeltaReport {
     pub coalesced_delete_rows: u64,
     /// Rows canceled because an insert and delete for the same relation matched in the batch.
     pub canceled_rows: u64,
+    /// Planner-grade cache, fallback, and speedup telemetry.
+    pub planner_telemetry: DeltaPlannerTelemetry,
+    /// Metadata-only debug trace for the delta recompute.
+    pub debug_trace: Vec<String>,
 }
 
 struct CoalescedRelationDeltaBatch {
@@ -83,34 +180,68 @@ struct PendingRelationDelta {
     delete: Option<CudaBuffer>,
 }
 
+#[derive(Clone)]
+enum LogicExecutionPlan {
+    Ordinary(ExecutionPlan),
+    EpistemicSingle(EpistemicExecutablePlan),
+    EpistemicSplit(EpistemicSplitExecutablePlan),
+}
+
 /// A compiled Datalog program ready for GPU evaluation.
 #[derive(Clone)]
 pub struct LogicProgram {
     program: Program,
-    plan: xlog_ir::ExecutionPlan,
+    plan: LogicExecutionPlan,
     schemas: HashMap<String, Schema>,
-    rel_ids: HashMap<String, xlog_core::RelId>,
+    rel_ids: HashMap<String, RelId>,
 }
 
 impl LogicProgram {
     /// Compile a Datalog source string into a GPU-executable program.
     pub fn compile(source: &str) -> Result<Self> {
         let program = xlog_logic::parse_program(source)?;
+        let normalized = normalize_program(program)?;
+        Self::compile_normalized_program(normalized)
+    }
 
-        // Expand user-defined function calls before compilation
-        let max_recursion = program.directives.max_recursion_depth.unwrap_or(100);
-        let expanded = xlog_logic::expand_program_functions(&program, max_recursion)
-            .map_err(|e| XlogError::Compilation(e.to_string()))?;
-        let normalized = xlog_logic::normalize_v085_meta(&expanded)?;
-        let normalized = xlog_logic::normalize_v085_lists(&normalized)?;
-
+    fn compile_normalized_program(normalized: Program) -> Result<Self> {
+        if program_has_epistemic_literals(&normalized) {
+            return Self::compile_epistemic_program(normalized);
+        }
         let mut compiler = Compiler::new();
         let plan = compiler.compile_program(&normalized)?;
         Ok(Self {
             program: normalized,
-            plan,
+            plan: LogicExecutionPlan::Ordinary(plan),
             schemas: compiler.schemas().clone(),
             rel_ids: compiler.rel_ids().clone(),
+        })
+    }
+
+    fn compile_epistemic_program(normalized: Program) -> Result<Self> {
+        let reduced = reduce_epistemic_program_to_ordinary(&normalized);
+        let mut schema_compiler = Compiler::new();
+        schema_compiler.compile_program(&reduced)?;
+        let schemas = schema_compiler.schemas().clone();
+
+        let plan = match compile_epistemic_gpu_execution(&normalized) {
+            Ok(executable) => LogicExecutionPlan::EpistemicSingle(executable),
+            Err(XlogError::UnsupportedEpistemicConstruct { construct, .. })
+                if construct == "epistemic GPU final output relation" =>
+            {
+                LogicExecutionPlan::EpistemicSplit(compile_epistemic_gpu_split_execution(
+                    &normalized,
+                )?)
+            }
+            Err(err) => return Err(err),
+        };
+        let rel_ids = epistemic_relation_ids(&plan)?;
+
+        Ok(Self {
+            program: normalized,
+            plan,
+            schemas,
+            rel_ids,
         })
     }
 
@@ -136,21 +267,8 @@ impl LogicProgram {
             .merge_imports(program)
             .map_err(|e| XlogError::Compilation(format!("Module resolution failed: {}", e)))?;
 
-        // Expand user-defined function calls before compilation
-        let max_recursion = merged.directives.max_recursion_depth.unwrap_or(100);
-        let expanded = xlog_logic::expand_program_functions(&merged, max_recursion)
-            .map_err(|e| XlogError::Compilation(e.to_string()))?;
-        let normalized = xlog_logic::normalize_v085_meta(&expanded)?;
-        let normalized = xlog_logic::normalize_v085_lists(&normalized)?;
-
-        let mut compiler = Compiler::new();
-        let plan = compiler.compile_program(&normalized)?;
-        Ok(Self {
-            program: normalized,
-            plan,
-            schemas: compiler.schemas().clone(),
-            rel_ids: compiler.rel_ids().clone(),
-        })
+        let normalized = normalize_program(merged)?;
+        Self::compile_normalized_program(normalized)
     }
 
     /// Look up the schema for a named relation.
@@ -161,6 +279,17 @@ impl LogicProgram {
     /// Return the full schema map (relation name to schema).
     pub fn schemas(&self) -> &HashMap<String, Schema> {
         &self.schemas
+    }
+
+    /// Return stable rule provenance for source-visible rules.
+    pub fn rule_provenance(&self) -> Vec<xlog_logic::RuleProvenance> {
+        xlog_logic::rule_provenance(&self.program, None)
+    }
+
+    /// Return direct proof traces for source queries.
+    pub fn proof_traces(&self) -> Vec<xlog_logic::QueryProofTrace> {
+        let provenance = self.rule_provenance();
+        xlog_logic::query_proof_traces(&self.program, &provenance)
     }
 
     /// Create a persistent user-visible relation store initialized with inline facts.
@@ -203,7 +332,7 @@ impl LogicProgram {
     ) -> Result<(LogicEvalResult, RelationStore)> {
         let mut executor =
             self.executor_from_relation_store(provider.clone(), relation_store, profiling)?;
-        executor.execute_plan(&self.plan)?;
+        executor.execute_plan(self.ordinary_plan("relation-store evaluation")?)?;
         self.enforce_constraints(&provider, &executor)?;
 
         let total_output_rows = self.total_query_rows(executor.store())?;
@@ -225,6 +354,7 @@ impl LogicProgram {
         relation_store: &RelationStore,
         profiling: bool,
     ) -> Result<LogicSessionRuntime> {
+        self.ordinary_plan("persistent relation session")?;
         Ok(LogicSessionRuntime {
             executor: self.executor_from_relation_store(provider, relation_store, profiling)?,
             profiling,
@@ -238,7 +368,9 @@ impl LogicProgram {
         runtime: &mut LogicSessionRuntime,
     ) -> Result<(LogicEvalResult, RelationStore)> {
         runtime.executor.set_profiling(runtime.profiling);
-        runtime.executor.execute_plan(&self.plan)?;
+        runtime
+            .executor
+            .execute_plan(self.ordinary_plan("session runtime evaluation")?)?;
         self.enforce_constraints(&provider, &runtime.executor)?;
 
         let total_output_rows = self.total_query_rows(runtime.executor.store())?;
@@ -280,6 +412,9 @@ impl LogicProgram {
             .filter_map(|d| d.delete.as_ref())
             .map(|b| b.num_rows())
             .sum();
+        let cache_reused = cached_store.is_some();
+        let mut changed_relation_names = deltas.keys().cloned().collect::<Vec<_>>();
+        changed_relation_names.sort();
 
         if cached_store.is_none() {
             let (_, store) = self.evaluate_with_relation_store_and_cache(
@@ -295,7 +430,8 @@ impl LogicProgram {
         })?;
         let mut executor =
             self.executor_from_relation_store(provider.clone(), store_before_delta, false)?;
-        let delta_stats = executor.apply_deltas_and_recompute(&self.plan, &deltas)?;
+        let delta_stats = executor
+            .apply_deltas_and_recompute(self.ordinary_plan("relation-delta recompute")?, &deltas)?;
         self.enforce_constraints(&provider, &executor)?;
 
         for name in deltas.keys() {
@@ -310,7 +446,12 @@ impl LogicProgram {
 
         *cached_store = Some(self.clone_relation_store(&provider, executor.store())?);
 
-        Ok(logic_delta_report(delta_stats, insert_rows, delete_rows))
+        let mut report = logic_delta_report(delta_stats, insert_rows, delete_rows);
+        report.changed_relation_names = changed_relation_names;
+        report.planner_telemetry =
+            DeltaPlannerTelemetry::from_delta_report(&report, cache_reused, None);
+        report.debug_trace = delta_debug_trace(&report);
+        Ok(report)
     }
 
     /// Apply relation deltas while preserving retained session runtime state.
@@ -332,6 +473,9 @@ impl LogicProgram {
             .filter_map(|d| d.delete.as_ref())
             .map(|b| b.num_rows())
             .sum();
+        let cache_reused = session_runtime.is_some() || cached_store.is_some();
+        let mut changed_relation_names = deltas.keys().cloned().collect::<Vec<_>>();
+        changed_relation_names.sort();
 
         if session_runtime.is_none() {
             let seed_store: &RelationStore = match cached_store.as_ref() {
@@ -353,9 +497,10 @@ impl LogicProgram {
         let runtime = session_runtime.as_mut().ok_or_else(|| {
             XlogError::Execution("Missing session runtime for delta update".to_string())
         })?;
-        let delta_stats = runtime
-            .executor
-            .apply_deltas_and_recompute(&self.plan, &deltas)?;
+        let delta_stats = runtime.executor.apply_deltas_and_recompute(
+            self.ordinary_plan("session relation-delta recompute")?,
+            &deltas,
+        )?;
         self.enforce_constraints(&provider, &runtime.executor)?;
 
         for name in deltas.keys() {
@@ -370,7 +515,12 @@ impl LogicProgram {
 
         *cached_store = Some(self.clone_relation_store(&provider, runtime.executor.store())?);
 
-        Ok(logic_delta_report(delta_stats, insert_rows, delete_rows))
+        let mut report = logic_delta_report(delta_stats, insert_rows, delete_rows);
+        report.changed_relation_names = changed_relation_names;
+        report.planner_telemetry =
+            DeltaPlannerTelemetry::from_delta_report(&report, cache_reused, None);
+        report.debug_trace = delta_debug_trace(&report);
+        Ok(report)
     }
 
     /// Apply an ordered batch of relation deltas after device-side coalescing.
@@ -386,6 +536,7 @@ impl LogicProgram {
             return Ok(LogicDeltaReport {
                 input_delta_count: coalesced.input_delta_count,
                 changed_relations: 0,
+                changed_relation_names: Vec::new(),
                 insert_rows: 0,
                 delete_rows: 0,
                 has_deletes: false,
@@ -395,6 +546,11 @@ impl LogicProgram {
                 coalesced_insert_rows: 0,
                 coalesced_delete_rows: 0,
                 canceled_rows: coalesced.canceled_rows,
+                planner_telemetry: DeltaPlannerTelemetry {
+                    fallback_decision: "no_op".to_string(),
+                    ..DeltaPlannerTelemetry::default()
+                },
+                debug_trace: vec![format!("canceled_rows={}", coalesced.canceled_rows)],
             });
         }
 
@@ -405,6 +561,8 @@ impl LogicProgram {
         report.coalesced_insert_rows = coalesced.coalesced_insert_rows;
         report.coalesced_delete_rows = coalesced.coalesced_delete_rows;
         report.canceled_rows = coalesced.canceled_rows;
+        report.planner_telemetry = DeltaPlannerTelemetry::from_delta_report(&report, true, None);
+        report.debug_trace = delta_debug_trace(&report);
         Ok(report)
     }
 
@@ -422,6 +580,7 @@ impl LogicProgram {
             return Ok(LogicDeltaReport {
                 input_delta_count: coalesced.input_delta_count,
                 changed_relations: 0,
+                changed_relation_names: Vec::new(),
                 insert_rows: 0,
                 delete_rows: 0,
                 has_deletes: false,
@@ -431,6 +590,11 @@ impl LogicProgram {
                 coalesced_insert_rows: 0,
                 coalesced_delete_rows: 0,
                 canceled_rows: coalesced.canceled_rows,
+                planner_telemetry: DeltaPlannerTelemetry {
+                    fallback_decision: "no_op".to_string(),
+                    ..DeltaPlannerTelemetry::default()
+                },
+                debug_trace: vec![format!("canceled_rows={}", coalesced.canceled_rows)],
             });
         }
 
@@ -446,6 +610,8 @@ impl LogicProgram {
         report.coalesced_insert_rows = coalesced.coalesced_insert_rows;
         report.coalesced_delete_rows = coalesced.coalesced_delete_rows;
         report.canceled_rows = coalesced.canceled_rows;
+        report.planner_telemetry = DeltaPlannerTelemetry::from_delta_report(&report, true, None);
+        report.debug_trace = delta_debug_trace(&report);
         Ok(report)
     }
 
@@ -497,7 +663,11 @@ impl LogicProgram {
 
         self.load_facts(&provider, &mut executor)?;
 
-        executor.execute_plan(&self.plan)?;
+        let LogicExecutionPlan::Ordinary(plan) = &self.plan else {
+            return self.evaluate_epistemic_with_executor(executor, profiling);
+        };
+
+        executor.execute_plan(plan)?;
 
         self.enforce_constraints(&provider, &executor)?;
 
@@ -529,6 +699,28 @@ impl LogicProgram {
         };
 
         Ok(LogicEvalResult { queries, stats })
+    }
+
+    /// Compare query result relations between two stores using GPU set difference.
+    pub fn relation_stores_query_equivalent(
+        &self,
+        provider: &CudaKernelProvider,
+        left: &RelationStore,
+        right: &RelationStore,
+    ) -> Result<bool> {
+        for idx in 0..self.program.queries.len() {
+            let name = format!("__xlog_query_{}", idx);
+            let Some(left_buffer) = left.get(&name) else {
+                return Ok(false);
+            };
+            let Some(right_buffer) = right.get(&name) else {
+                return Ok(false);
+            };
+            if !buffers_gpu_set_equivalent(provider, left_buffer, right_buffer)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn executor_from_relation_store(
@@ -694,6 +886,73 @@ impl LogicProgram {
         Ok(())
     }
 
+    fn ordinary_plan(&self, context: &str) -> Result<&ExecutionPlan> {
+        match &self.plan {
+            LogicExecutionPlan::Ordinary(plan) => Ok(plan),
+            LogicExecutionPlan::EpistemicSingle(_) | LogicExecutionPlan::EpistemicSplit(_) => {
+                Err(XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic high-level persistent execution".to_string(),
+                    context: format!(
+                        "{context} requires an ordinary RIR plan; use evaluate/evaluate_with_options \
+                         for production epistemic GPU dispatch"
+                    ),
+                })
+            }
+        }
+    }
+
+    fn evaluate_epistemic_with_executor(
+        &self,
+        mut executor: Executor,
+        profiling: bool,
+    ) -> Result<LogicEvalResult> {
+        let mut queries = Vec::new();
+        match &self.plan {
+            LogicExecutionPlan::EpistemicSingle(executable) => {
+                let result = executor.execute_epistemic_gpu_execution(
+                    executable,
+                    capacities_for_epistemic_executable(executable)?,
+                )?;
+                result.require_runtime_dispatch_certification()?;
+                queries.push(epistemic_result_to_query_result(
+                    epistemic_output_relation_name(executable)?,
+                    result,
+                ));
+            }
+            LogicExecutionPlan::EpistemicSplit(split) => {
+                let executables: Vec<_> = split
+                    .components
+                    .iter()
+                    .map(|component| &component.executable)
+                    .collect();
+                let batch = executor.execute_epistemic_gpu_execution_batch_with_trace(
+                    &executables,
+                    capacities_for_epistemic_split(split)?,
+                )?;
+                batch
+                    .require_trace_matches_components("xlog high-level epistemic GPU execution")?;
+                for result in &batch.results {
+                    result.require_runtime_dispatch_certification()?;
+                }
+                for (component, result) in split.components.iter().zip(batch.results) {
+                    queries.push(epistemic_result_to_query_result(
+                        epistemic_output_relation_name(&component.executable)?,
+                        result,
+                    ));
+                }
+            }
+            LogicExecutionPlan::Ordinary(_) => unreachable!("ordinary plans are handled earlier"),
+        }
+
+        let total_output_rows: u64 = queries.iter().map(|q| q.buffer.num_rows()).sum();
+        let stats = if profiling {
+            Some(executor.execution_stats(total_output_rows))
+        } else {
+            None
+        };
+        Ok(LogicEvalResult { queries, stats })
+    }
+
     fn enforce_constraints(
         &self,
         provider: &CudaKernelProvider,
@@ -728,6 +987,130 @@ impl LogicProgram {
     }
 }
 
+const DEFAULT_EPISTEMIC_MAX_MODELS_PER_REDUCTION: usize = 1024;
+
+fn normalize_program(program: Program) -> Result<Program> {
+    let max_recursion = program.directives.max_recursion_depth.unwrap_or(100);
+    let expanded = xlog_logic::expand_program_functions(&program, max_recursion)
+        .map_err(|e| XlogError::Compilation(e.to_string()))?;
+    let normalized = xlog_logic::normalize_v085_meta(&expanded)?;
+    xlog_logic::normalize_v085_lists(&normalized)
+}
+
+fn program_has_epistemic_literals(program: &Program) -> bool {
+    program.rules.iter().any(|rule| {
+        rule.body
+            .iter()
+            .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
+    }) || program.constraints.iter().any(|constraint| {
+        constraint
+            .body
+            .iter()
+            .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
+    })
+}
+
+fn epistemic_relation_ids(plan: &LogicExecutionPlan) -> Result<HashMap<String, RelId>> {
+    let mut rel_ids = HashMap::new();
+    match plan {
+        LogicExecutionPlan::EpistemicSingle(executable) => {
+            for (name, rel_id) in &executable.relation_ids {
+                insert_epistemic_relation_id(&mut rel_ids, name, *rel_id)?;
+            }
+        }
+        LogicExecutionPlan::EpistemicSplit(split) => {
+            for component in &split.components {
+                for (name, rel_id) in &component.executable.relation_ids {
+                    insert_epistemic_relation_id(&mut rel_ids, name, *rel_id)?;
+                }
+            }
+        }
+        LogicExecutionPlan::Ordinary(_) => {}
+    }
+    Ok(rel_ids)
+}
+
+fn insert_epistemic_relation_id(
+    rel_ids: &mut HashMap<String, RelId>,
+    name: &str,
+    rel_id: RelId,
+) -> Result<()> {
+    if let Some(previous) = rel_ids.insert(name.to_string(), rel_id) {
+        if previous != rel_id {
+            return Err(XlogError::Compilation(format!(
+                "epistemic split components assigned conflicting relation ids for {name}: \
+                 {previous:?} vs {rel_id:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn capacities_for_epistemic_executable(
+    executable: &EpistemicExecutablePlan,
+) -> Result<EpistemicGpuWorkspaceCapacities> {
+    let literal_count = executable.gpu_plan.epistemic_literals.len();
+    let max_candidates = 1usize.checked_shl(literal_count as u32).ok_or_else(|| {
+        XlogError::UnsupportedEpistemicConstruct {
+            construct: "epistemic GPU execution candidate generation".to_string(),
+            context: format!("literal count {literal_count} exceeds target pointer width"),
+        }
+    })?;
+    Ok(EpistemicGpuWorkspaceCapacities {
+        max_candidates,
+        max_worlds: 1,
+        max_models_per_reduction: DEFAULT_EPISTEMIC_MAX_MODELS_PER_REDUCTION,
+    })
+}
+
+fn capacities_for_epistemic_split(
+    split: &EpistemicSplitExecutablePlan,
+) -> Result<EpistemicGpuWorkspaceCapacities> {
+    let mut capacities = EpistemicGpuWorkspaceCapacities {
+        max_candidates: 1,
+        max_worlds: 1,
+        max_models_per_reduction: DEFAULT_EPISTEMIC_MAX_MODELS_PER_REDUCTION,
+    };
+    for component in &split.components {
+        let component_capacities = capacities_for_epistemic_executable(&component.executable)?;
+        capacities.max_candidates = capacities
+            .max_candidates
+            .max(component_capacities.max_candidates);
+    }
+    Ok(capacities)
+}
+
+fn epistemic_output_relation_name(executable: &EpistemicExecutablePlan) -> Result<String> {
+    executable
+        .gpu_plan
+        .reductions
+        .last()
+        .map(|reduction| reduction.head_predicate.clone())
+        .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+            construct: "epistemic GPU reduced output".to_string(),
+            context: "executable plan has no epistemic reductions".to_string(),
+        })
+}
+
+fn epistemic_result_to_query_result(
+    relation_name: String,
+    result: EpistemicGpuExecutionResult,
+) -> LogicQueryResult {
+    let schema = result.final_output.schema();
+    let columns = schema
+        .columns
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
+    let sort_labels = schema.sort_labels().to_vec();
+    LogicQueryResult {
+        relation_name,
+        columns,
+        sort_labels,
+        buffer: result.final_output,
+    }
+}
+
 fn is_user_visible_relation(name: &str) -> bool {
     !name.starts_with("__")
 }
@@ -744,6 +1127,7 @@ fn logic_delta_report(
     LogicDeltaReport {
         input_delta_count: stats.changed_relations,
         changed_relations: stats.changed_relations,
+        changed_relation_names: Vec::new(),
         insert_rows,
         delete_rows,
         has_deletes: stats.has_deletes,
@@ -753,7 +1137,50 @@ fn logic_delta_report(
         coalesced_insert_rows: insert_rows,
         coalesced_delete_rows: delete_rows,
         canceled_rows: 0,
+        planner_telemetry: DeltaPlannerTelemetry::default(),
+        debug_trace: Vec::new(),
     }
+}
+
+fn delta_debug_trace(report: &LogicDeltaReport) -> Vec<String> {
+    vec![
+        format!("changed_relation_names={:?}", report.changed_relation_names),
+        format!("affected_sccs={}", report.affected_sccs),
+        format!("recomputed_sccs={}", report.recomputed_sccs),
+        format!("incremental_sccs={}", report.incremental_sccs),
+        format!("insert_rows={}", report.insert_rows),
+        format!("delete_rows={}", report.delete_rows),
+        format!(
+            "planner_fallback_decision={}",
+            report.planner_telemetry.fallback_decision
+        ),
+        format!(
+            "estimated_delta_speedup={:?}",
+            report.planner_telemetry.estimated_delta_speedup
+        ),
+    ]
+}
+
+fn buffers_gpu_set_equivalent(
+    provider: &CudaKernelProvider,
+    left: &CudaBuffer,
+    right: &CudaBuffer,
+) -> Result<bool> {
+    if left.schema() != right.schema() {
+        return Ok(false);
+    }
+    let left_rows = provider.device_row_count(left)?;
+    let right_rows = provider.device_row_count(right)?;
+    if left_rows != right_rows {
+        return Ok(false);
+    }
+
+    let left_minus_right = provider.diff_full_row(left, right)?;
+    if provider.device_row_count(&left_minus_right)? != 0 {
+        return Ok(false);
+    }
+    let right_minus_left = provider.diff_full_row(right, left)?;
+    Ok(provider.device_row_count(&right_minus_left)? == 0)
 }
 
 fn coalesce_relation_delta_batch(
@@ -1043,6 +1470,21 @@ fn format_constraint(body: &[BodyLiteral]) -> String {
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("not {}({})", a.predicate, args)
+            }
+            BodyLiteral::Epistemic(lit) => {
+                let args = lit
+                    .atom
+                    .terms
+                    .iter()
+                    .map(format_term)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let op = match lit.op {
+                    xlog_logic::EpistemicOp::Know => "know",
+                    xlog_logic::EpistemicOp::Possible => "possible",
+                };
+                let prefix = if lit.negated { "not " } else { "" };
+                format!("{prefix}{op} {}({})", lit.atom.predicate, args)
             }
             BodyLiteral::Comparison(c) => format!("{:?} {:?} {:?}", c.left, c.op, c.right),
             BodyLiteral::IsExpr(is) => format!("{} is {:?}", is.target, is.expr),

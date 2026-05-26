@@ -115,7 +115,7 @@ pub fn scan_topology_u32(mut n: u32) -> ScanTopology {
     let mut scratch_lengths = Vec::new();
     let mut kernel_node_count = if n == 0 { 0 } else { 1 };
     while n > block_size {
-        let num_blocks = (n + block_size - 1) / block_size;
+        let num_blocks = n.div_ceil(block_size);
         scratch_lengths.push(num_blocks);
         kernel_node_count += 2;
         n = num_blocks;

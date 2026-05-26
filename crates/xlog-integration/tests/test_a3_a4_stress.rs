@@ -1,3 +1,5 @@
+#![allow(clippy::ptr_arg)]
+
 //! A3 / A4 cross-stream lifetime stress harness.
 //!
 //! Closes v0.6.0 release blocker #2: the recorded launch
@@ -563,7 +565,7 @@ impl StressFailure {
 
 /// Per-thread schedule: fixed prefix then seeded random tail.
 fn schedule_for_worker(base_seed: u64, worker_id: usize, iters: usize) -> Vec<GraphParams> {
-    let mut sched: Vec<GraphParams> = FIXED_SCHEDULE.iter().copied().collect();
+    let mut sched: Vec<GraphParams> = FIXED_SCHEDULE.to_vec();
     let want_random = iters.saturating_sub(sched.len());
     if want_random > 0 {
         let worker_seed = base_seed

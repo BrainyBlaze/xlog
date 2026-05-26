@@ -510,6 +510,7 @@ fn validate_body_naf_safety(body: &[BodyLiteral], context: &str) -> Result<()> {
             BodyLiteral::IsExpr(is_expr) => {
                 bound.insert(is_expr.target.clone());
             }
+            BodyLiteral::Epistemic(_) => {}
             BodyLiteral::Comparison(_) | BodyLiteral::Univ(_) => {}
         }
     }

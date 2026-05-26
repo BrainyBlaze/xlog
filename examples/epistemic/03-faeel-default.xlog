@@ -1,0 +1,8 @@
+// FAEEL default: founded knowledge supports the candidate.
+
+pred fact().
+pred accepted().
+
+fact().
+
+accepted() :- know fact().

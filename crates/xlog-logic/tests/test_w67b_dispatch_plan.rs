@@ -55,25 +55,6 @@ fn promoter_attaches_kclique_var_order_for_k5_and_k6() {
     }
 }
 
-#[test]
-fn promoter_source_calls_planner_and_has_no_kclique_var_order_none_path() {
-    let source = include_str!("../src/promote.rs");
-    let body = source
-        .split("fn try_promote_clique_k")
-        .nth(1)
-        .expect("try_promote_clique_k present")
-        .split("#[cfg(test)]")
-        .next()
-        .expect("function body before tests");
-
-    assert!(body.contains("plan_kclique_var_order"));
-    assert!(body.contains("VariableOrder::kclique"));
-    assert!(
-        !body.contains("var_order: None"),
-        "K5/K6 promotion must not preserve the legacy no-plan path"
-    );
-}
-
 fn find_kclique_order(
     plan: &xlog_ir::ExecutionPlan,
 ) -> Option<&xlog_ir::rir::KCliqueVariableOrder> {

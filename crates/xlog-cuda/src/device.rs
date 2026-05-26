@@ -342,6 +342,12 @@ impl CudaDeviceInner {
         self.insert_module(module_name, cu_module, kernels)
     }
 
+    /// Allocate an uninitialized device slice on this device stream.
+    ///
+    /// # Safety
+    ///
+    /// The caller must initialize the returned allocation before any device or
+    /// host read observes its contents.
     pub unsafe fn alloc<T: DeviceRepr>(
         &self,
         len: usize,
@@ -409,6 +415,13 @@ impl CudaDeviceInner {
         self.stream.synchronize()
     }
 
+    /// Wrap an existing CUDA device pointer in a typed cudarc slice.
+    ///
+    /// # Safety
+    ///
+    /// `cu_device_ptr` must point to a live allocation containing at least
+    /// `len * size_of::<T>()` bytes, and the resulting wrapper must not outlive
+    /// the allocation or alias another owner that will free it independently.
     pub unsafe fn upgrade_device_ptr<T>(
         &self,
         cu_device_ptr: sys::CUdeviceptr,

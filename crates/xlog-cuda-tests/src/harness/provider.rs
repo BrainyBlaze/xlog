@@ -54,6 +54,7 @@ fn gpu_test_lock_file() -> Result<std::fs::File> {
     let path = Path::new(GPU_TEST_LOCK_PATH);
     let file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(path)

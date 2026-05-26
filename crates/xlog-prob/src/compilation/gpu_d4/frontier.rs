@@ -177,11 +177,11 @@ pub(crate) fn build_frontier_bitset(
             assignment_offset: off,
         });
     }
-    device
-        .htod_sync_copy_into(&host_items, &mut cur_items)
+    provider
+        .htod_launch_metadata_sync_copy_into(&host_items, &mut cur_items)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload frontier items: {}", e)))?;
-    device
-        .htod_sync_copy_into(&[1u32], &mut cur_size)
+    provider
+        .htod_launch_metadata_sync_copy_into(&[1u32], &mut cur_size)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload frontier size: {}", e)))?;
     device
         .memset_zeros(&mut next_size)
@@ -211,17 +211,17 @@ pub(crate) fn build_frontier_bitset(
             (&cnf.num_clauses).as_kernel_param(),
             (&cur_items).as_kernel_param(),
             (&cur_size).as_kernel_param(),
-            (&mut cur_true).as_kernel_param(),
-            (&mut cur_false).as_kernel_param(),
+            (&cur_true).as_kernel_param(),
+            (&cur_false).as_kernel_param(),
             words_per_item_u32.as_kernel_param(),
-            (&mut counts).as_kernel_param(),
-            (&mut pick_var).as_kernel_param(),
+            (&counts).as_kernel_param(),
+            (&pick_var).as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             prep.clone().launch(
                 LaunchConfig {
-                    grid_dim: ((max_frontier_items_u32 + 127) / 128, 1, 1),
+                    grid_dim: (max_frontier_items_u32.div_ceil(128), 1, 1),
                     block_dim: (128, 1, 1),
                     shared_mem_bytes: 0,
                 },
@@ -246,17 +246,17 @@ pub(crate) fn build_frontier_bitset(
             (&cur_true).as_kernel_param(),
             (&cur_false).as_kernel_param(),
             words_per_item_u32.as_kernel_param(),
-            (&mut next_items).as_kernel_param(),
-            (&mut next_size).as_kernel_param(),
-            (&mut next_true).as_kernel_param(),
-            (&mut next_false).as_kernel_param(),
+            (&next_items).as_kernel_param(),
+            (&next_size).as_kernel_param(),
+            (&next_true).as_kernel_param(),
+            (&next_false).as_kernel_param(),
             max_frontier_items_u32.as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             expand.clone().launch(
                 LaunchConfig {
-                    grid_dim: ((max_frontier_items_u32 + 127) / 128, 1, 1),
+                    grid_dim: (max_frontier_items_u32.div_ceil(128), 1, 1),
                     block_dim: (128, 1, 1),
                     shared_mem_bytes: 0,
                 },
@@ -348,11 +348,11 @@ pub(crate) fn build_frontier_dense(
             assignment_offset: off,
         });
     }
-    device
-        .htod_sync_copy_into(&host_items, &mut cur_items)
+    provider
+        .htod_launch_metadata_sync_copy_into(&host_items, &mut cur_items)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload frontier items: {}", e)))?;
-    device
-        .htod_sync_copy_into(&[1u32], &mut cur_size)
+    provider
+        .htod_launch_metadata_sync_copy_into(&[1u32], &mut cur_size)
         .map_err(|e| XlogError::Kernel(format!("Failed to upload frontier size: {}", e)))?;
     device
         .memset_zeros(&mut next_size)
@@ -385,16 +385,16 @@ pub(crate) fn build_frontier_dense(
             (&cnf.num_clauses).as_kernel_param(),
             (&cur_items).as_kernel_param(),
             (&cur_size).as_kernel_param(),
-            (&mut cur_assign).as_kernel_param(),
+            (&cur_assign).as_kernel_param(),
             stride_u32.as_kernel_param(),
-            (&mut counts).as_kernel_param(),
-            (&mut pick_var).as_kernel_param(),
+            (&counts).as_kernel_param(),
+            (&pick_var).as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             prep.clone().launch(
                 LaunchConfig {
-                    grid_dim: ((max_frontier_items_u32 + 127) / 128, 1, 1),
+                    grid_dim: (max_frontier_items_u32.div_ceil(128), 1, 1),
                     block_dim: (128, 1, 1),
                     shared_mem_bytes: 0,
                 },
@@ -417,16 +417,16 @@ pub(crate) fn build_frontier_dense(
             (&pick_var).as_kernel_param(),
             (&cur_assign).as_kernel_param(),
             stride_u32.as_kernel_param(),
-            (&mut next_items).as_kernel_param(),
-            (&mut next_size).as_kernel_param(),
-            (&mut next_assign).as_kernel_param(),
+            (&next_items).as_kernel_param(),
+            (&next_size).as_kernel_param(),
+            (&next_assign).as_kernel_param(),
             max_frontier_items_u32.as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             expand.clone().launch(
                 LaunchConfig {
-                    grid_dim: ((max_frontier_items_u32 + 127) / 128, 1, 1),
+                    grid_dim: (max_frontier_items_u32.div_ceil(128), 1, 1),
                     block_dim: (128, 1, 1),
                     shared_mem_bytes: 0,
                 },
@@ -487,7 +487,7 @@ mod tests {
     fn words_per_item(var_cap: u32) -> u32 {
         // Bit 0 is unused (DIMACS vars are 1-based), so we allocate var_cap+1 bits.
         let bits = var_cap.checked_add(1).expect("var_cap+1 overflow in test");
-        (bits + 31) / 32
+        bits.div_ceil(32)
     }
 
     #[test]
@@ -509,7 +509,7 @@ mod tests {
         let mut cur_items = memory
             .alloc::<D4WorkItem>(max_frontier_items as usize)
             .unwrap();
-        let mut next_items = memory
+        let next_items = memory
             .alloc::<D4WorkItem>(max_frontier_items as usize)
             .unwrap();
         let mut cur_size = memory.alloc::<u32>(1).unwrap();
@@ -565,11 +565,11 @@ mod tests {
             (&cnf.num_clauses).as_kernel_param(),
             (&cur_items).as_kernel_param(),
             (&cur_size).as_kernel_param(),
-            (&mut cur_true).as_kernel_param(),
-            (&mut cur_false).as_kernel_param(),
+            (&cur_true).as_kernel_param(),
+            (&cur_false).as_kernel_param(),
             wpi_u32.as_kernel_param(),
-            (&mut counts).as_kernel_param(),
-            (&mut pick_var).as_kernel_param(),
+            (&counts).as_kernel_param(),
+            (&pick_var).as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
@@ -621,10 +621,10 @@ mod tests {
             (&cur_true).as_kernel_param(),
             (&cur_false).as_kernel_param(),
             wpi_u32.as_kernel_param(),
-            (&mut next_items).as_kernel_param(),
-            (&mut next_size).as_kernel_param(),
-            (&mut next_true).as_kernel_param(),
-            (&mut next_false).as_kernel_param(),
+            (&next_items).as_kernel_param(),
+            (&next_size).as_kernel_param(),
+            (&next_true).as_kernel_param(),
+            (&next_false).as_kernel_param(),
             max_frontier_items_u32.as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
@@ -713,7 +713,7 @@ mod tests {
         let mut cur_items = memory
             .alloc::<D4WorkItem>(max_frontier_items as usize)
             .unwrap();
-        let mut next_items = memory
+        let next_items = memory
             .alloc::<D4WorkItem>(max_frontier_items as usize)
             .unwrap();
         let mut cur_size = memory.alloc::<u32>(1).unwrap();
@@ -766,11 +766,11 @@ mod tests {
             (&cnf.num_clauses).as_kernel_param(),
             (&cur_items).as_kernel_param(),
             (&cur_size).as_kernel_param(),
-            (&mut cur_true).as_kernel_param(),
-            (&mut cur_false).as_kernel_param(),
+            (&cur_true).as_kernel_param(),
+            (&cur_false).as_kernel_param(),
             wpi_u32.as_kernel_param(),
-            (&mut counts).as_kernel_param(),
-            (&mut pick_var).as_kernel_param(),
+            (&counts).as_kernel_param(),
+            (&pick_var).as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
@@ -821,10 +821,10 @@ mod tests {
             (&cur_true).as_kernel_param(),
             (&cur_false).as_kernel_param(),
             wpi_u32.as_kernel_param(),
-            (&mut next_items).as_kernel_param(),
-            (&mut next_size).as_kernel_param(),
-            (&mut next_true).as_kernel_param(),
-            (&mut next_false).as_kernel_param(),
+            (&next_items).as_kernel_param(),
+            (&next_size).as_kernel_param(),
+            (&next_true).as_kernel_param(),
+            (&next_false).as_kernel_param(),
             max_frontier_items_u32.as_kernel_param(),
         ];
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size

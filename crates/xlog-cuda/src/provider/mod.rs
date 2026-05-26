@@ -249,7 +249,7 @@ impl RadixSortScratch {
         let values_b = memory.alloc::<u32>(len as usize)?;
         let ranks = memory.alloc::<u32>(len as usize)?;
         let block_size = CudaKernelProvider::SORT_BLOCK_SIZE;
-        let grid_size = ((len + block_size - 1) / block_size).max(1);
+        let grid_size = len.div_ceil(block_size).max(1);
         let hist = memory.alloc::<u32>((grid_size as usize) * 16)?;
         let prefix = memory.alloc::<u32>(16)?;
         Ok(Self {
@@ -294,10 +294,11 @@ pub const WEIGHTS_MODULE: &str = "xlog_weights";
 pub const ILP_MODULE: &str = "xlog_ilp";
 pub const ILP_CREDIT_MODULE: &str = "xlog_ilp_credit";
 pub const ILP_EXACT_MODULE: &str = "xlog_ilp_exact";
+pub const EPISTEMIC_MODULE: &str = "xlog_epistemic";
 pub const WCOJ_MODULE: &str = "xlog_wcoj";
 
-// Compile-time check: kernel manifest lists exactly 23 modules.
-const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 23);
+// Compile-time check: kernel manifest lists exactly 24 modules.
+const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 24);
 
 /// Kernel function names in the GPU WCOJ module.
 pub mod wcoj_kernels {
@@ -390,6 +391,53 @@ pub mod arith_kernels {
     pub const ARITH_SELECT_F32: &str = "arith_select_f32";
 }
 
+/// Kernel function names in the epistemic module.
+pub mod epistemic_kernels {
+    /// Device-side epistemic candidate-assumption generator.
+    pub const EPISTEMIC_GENERATE_CANDIDATE_ASSUMPTIONS_U8: &str =
+        "epistemic_generate_candidate_assumptions_u8";
+    /// Device-side epistemic candidate propagation staging kernel.
+    pub const EPISTEMIC_PROPAGATE_CANDIDATES_U8: &str = "epistemic_propagate_candidates_u8";
+    /// Device-side epistemic candidate bit validation kernel.
+    pub const EPISTEMIC_VALIDATE_CANDIDATE_BITS_U8: &str = "epistemic_validate_candidate_bits_u8";
+    /// Device-side model-membership staging kernel.
+    pub const EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_U8: &str =
+        "epistemic_populate_model_membership_u8";
+    /// Device-side tuple-source-backed model-membership kernel.
+    pub const EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_FROM_TUPLE_SOURCE_U8: &str =
+        "epistemic_populate_model_membership_from_tuple_source_u8";
+    /// Device-side arity-one tuple-key-backed model-membership kernel.
+    pub const EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_FROM_TUPLE_SOURCE_ARITY1_U8: &str =
+        "epistemic_populate_model_membership_from_tuple_source_arity1_u8";
+    /// Device-side arity-two tuple-key-backed model-membership kernel.
+    pub const EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_FROM_TUPLE_SOURCE_ARITY2_U8: &str =
+        "epistemic_populate_model_membership_from_tuple_source_arity2_u8";
+    /// Device-side arity-three tuple-key-backed model-membership kernel.
+    pub const EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_FROM_TUPLE_SOURCE_ARITY3_U8: &str =
+        "epistemic_populate_model_membership_from_tuple_source_arity3_u8";
+    /// Device-side generic-arity tuple-key-backed model-membership kernel.
+    pub const EPISTEMIC_POPULATE_MODEL_MEMBERSHIP_FROM_TUPLE_SOURCE_ARITY_N_U8: &str =
+        "epistemic_populate_model_membership_from_tuple_source_arity_n_u8";
+    /// Device-side world-view validation kernel.
+    pub const EPISTEMIC_VALIDATE_WORLD_VIEWS_U8: &str = "epistemic_validate_world_views_u8";
+    /// Device-side accepted-candidate materialization staging kernel.
+    pub const EPISTEMIC_MATERIALIZE_ACCEPTED_CANDIDATES_U8: &str =
+        "epistemic_materialize_accepted_candidates_u8";
+
+    /// Device-side final-result flag materialization staging kernel.
+    pub const EPISTEMIC_MATERIALIZE_FINAL_RESULT_FLAGS_U8: &str =
+        "epistemic_materialize_final_result_flags_u8";
+    /// Device-side final tuple materialization kernel.
+    pub const EPISTEMIC_MATERIALIZE_FINAL_TUPLE_COLUMN_U8: &str =
+        "epistemic_materialize_final_tuple_column_u8";
+    /// Device-side final tuple row-map kernel.
+    pub const EPISTEMIC_BUILD_FINAL_TUPLE_ROW_MAP_U8: &str =
+        "epistemic_build_final_tuple_row_map_u8";
+    /// Device-side final tuple rejection-close kernel.
+    pub const EPISTEMIC_CLOSE_FINAL_TUPLE_REJECTIONS_U8: &str =
+        "epistemic_close_final_tuple_rejections_u8";
+}
+
 /// Kernel function names in the neural fast-path module.
 pub mod neural_kernels {
     pub const NEURAL_FILL_AD_CHAIN_F32: &str = "neural_fill_ad_chain_f32";
@@ -429,6 +477,7 @@ pub mod ilp_exact_kernels {
     pub const ILP_EXACT_SCORE_U32: &str = "ilp_exact_score_u32";
     pub const ILP_EXACT_SCORE_CHAIN_SMEM: &str = "ilp_exact_score_chain_smem";
     pub const ILP_EXACT_SCORE_CHAIN_SMEM_U32: &str = "ilp_exact_score_chain_smem_u32";
+    pub const ILP_EXACT_SELECT_TOPK: &str = "ilp_exact_select_topk";
 }
 
 /// Kernel function names in the PIR interning module.
@@ -987,6 +1036,8 @@ struct HostTransferTracker {
     htod_bytes: AtomicU64,
     dtoh_calls: AtomicU64,
     htod_calls: AtomicU64,
+    launch_metadata_htod_bytes: AtomicU64,
+    launch_metadata_htod_calls: AtomicU64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -994,6 +1045,12 @@ pub struct HostTransferStats {
     pub dtoh_bytes: u64,
     pub htod_bytes: u64,
     pub dtoh_calls: u64,
+    pub htod_calls: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HostLaunchMetadataTransferStats {
+    pub htod_bytes: u64,
     pub htod_calls: u64,
 }
 
@@ -1008,6 +1065,13 @@ impl HostTransferTracker {
         self.htod_bytes.fetch_add(bytes, Ordering::Relaxed);
     }
 
+    fn record_htod_launch_metadata(&self, bytes: u64) {
+        self.launch_metadata_htod_calls
+            .fetch_add(1, Ordering::Relaxed);
+        self.launch_metadata_htod_bytes
+            .fetch_add(bytes, Ordering::Relaxed);
+    }
+
     fn snapshot(&self) -> HostTransferStats {
         HostTransferStats {
             dtoh_bytes: self.dtoh_bytes.load(Ordering::Relaxed),
@@ -1017,11 +1081,20 @@ impl HostTransferTracker {
         }
     }
 
+    fn launch_metadata_snapshot(&self) -> HostLaunchMetadataTransferStats {
+        HostLaunchMetadataTransferStats {
+            htod_bytes: self.launch_metadata_htod_bytes.load(Ordering::Relaxed),
+            htod_calls: self.launch_metadata_htod_calls.load(Ordering::Relaxed),
+        }
+    }
+
     fn reset(&self) {
         self.dtoh_bytes.store(0, Ordering::Relaxed);
         self.htod_bytes.store(0, Ordering::Relaxed);
         self.dtoh_calls.store(0, Ordering::Relaxed);
         self.htod_calls.store(0, Ordering::Relaxed);
+        self.launch_metadata_htod_bytes.store(0, Ordering::Relaxed);
+        self.launch_metadata_htod_calls.store(0, Ordering::Relaxed);
     }
 }
 
@@ -1432,6 +1505,12 @@ impl CudaKernelProvider {
         self.transfer_tracker.snapshot()
     }
 
+    /// Snapshot launch-parameter H2D uploads tracked separately from
+    /// `host_transfer_stats`.
+    pub fn host_launch_metadata_transfer_stats(&self) -> HostLaunchMetadataTransferStats {
+        self.transfer_tracker.launch_metadata_snapshot()
+    }
+
     /// Read the column-level D2H transfer counter.
     ///
     /// This counter increments once per `download_column_*` call, enabling
@@ -1624,7 +1703,8 @@ impl CudaKernelProvider {
         Ok(buf[0])
     }
 
-    fn htod_sync_copy_into_tracked<T: DeviceRepr, Dst: cudarc::driver::DevicePtrMut<T>>(
+    /// Upload host data to device while recording data-plane H2D transfer stats.
+    pub fn htod_sync_copy_into_tracked<T: DeviceRepr, Dst: cudarc::driver::DevicePtrMut<T>>(
         &self,
         src: &[T],
         dst: &mut Dst,
@@ -1637,6 +1717,73 @@ impl CudaKernelProvider {
             .inner()
             .htod_sync_copy_into(src, dst)
             .map_err(|e| XlogError::Kernel(format!("Failed to copy to device: {}", e)))
+    }
+
+    /// Allocate a CUDA slice from host data while recording data-plane H2D
+    /// transfer stats.
+    pub fn htod_sync_copy_tracked<T: DeviceRepr>(
+        &self,
+        src: &[T],
+    ) -> Result<cudarc::driver::CudaSlice<T>> {
+        let bytes = std::mem::size_of::<T>()
+            .checked_mul(src.len())
+            .ok_or_else(|| XlogError::Kernel("htod size overflow".to_string()))?;
+        self.transfer_tracker.record_htod(bytes as u64);
+        self.device
+            .inner()
+            .htod_sync_copy(src)
+            .map_err(|e| XlogError::Kernel(format!("Failed to copy to device: {}", e)))
+    }
+
+    /// Upload bounded launch metadata from host to device while recording it in
+    /// the launch-metadata subcounter.
+    pub fn htod_launch_metadata_sync_copy_into<
+        T: DeviceRepr,
+        Dst: cudarc::driver::DevicePtrMut<T>,
+    >(
+        &self,
+        src: &[T],
+        dst: &mut Dst,
+    ) -> Result<()> {
+        let bytes = std::mem::size_of::<T>()
+            .checked_mul(src.len())
+            .ok_or_else(|| XlogError::Kernel("launch metadata htod size overflow".to_string()))?;
+        self.transfer_tracker
+            .record_htod_launch_metadata(bytes as u64);
+        self.device
+            .inner()
+            .htod_sync_copy_into(src, dst)
+            .map_err(|e| {
+                XlogError::Kernel(format!("Failed to copy launch metadata to device: {}", e))
+            })
+    }
+
+    /// Upload one launch-metadata scalar to device on a caller-owned stream
+    /// while recording the transfer in the launch-metadata H2D counters.
+    pub(crate) fn htod_launch_metadata_async_copy_one<T: DeviceRepr>(
+        &self,
+        src: &T,
+        dst: &TrackedCudaSlice<T>,
+        stream: &CudaStream,
+        context: &str,
+    ) -> Result<()> {
+        let bytes = std::mem::size_of::<T>();
+        self.transfer_tracker
+            .record_htod_launch_metadata(bytes as u64);
+        unsafe {
+            let res = cudarc::driver::sys::cuMemcpyHtoDAsync_v2(
+                *dst.device_ptr(),
+                src as *const T as *const c_void,
+                bytes,
+                stream.cu_stream(),
+            );
+            if res != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
+                return Err(XlogError::Kernel(format!(
+                    "{context}: launch metadata H2D failed: {res:?}"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Compute exclusive prefix sum of u8 mask, returns (prefix_sum_vec, total_count)
@@ -1718,7 +1865,7 @@ impl CudaKernelProvider {
             return Ok(());
         }
 
-        let num_blocks = (n + block_size - 1) / block_size;
+        let num_blocks = n.div_ceil(block_size);
         let mut block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
 
         let phase1_u32_fn = device
@@ -1820,7 +1967,7 @@ impl CudaKernelProvider {
             return Ok(());
         }
 
-        let num_blocks = (n + block_size - 1) / block_size;
+        let num_blocks = n.div_ceil(block_size);
         let mut block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
         // Fence alloc-ready → launch_stream for block_sums
         // before phase1 kernel writes it. The alloc was queued
@@ -1934,7 +2081,7 @@ impl CudaKernelProvider {
         let block_size = 256u32;
         let mut levels = Vec::new();
         while n > block_size {
-            let num_blocks = (n + block_size - 1) / block_size;
+            let num_blocks = n.div_ceil(block_size);
             levels.push(self.memory.alloc::<u32>(num_blocks as usize)?);
             n = num_blocks;
         }
@@ -2002,7 +2149,7 @@ impl CudaKernelProvider {
             return Ok(());
         }
 
-        let num_blocks = (n + block_size - 1) / block_size;
+        let num_blocks = n.div_ceil(block_size);
         let (block_sums, rest) = scratch_levels.split_first_mut().ok_or_else(|| {
             XlogError::Kernel(format!(
                 "multiblock_scan_u32_inplace_on_stream_with_scratch: missing scratch level \
@@ -2122,7 +2269,7 @@ impl CudaKernelProvider {
             return Ok(());
         }
 
-        let num_blocks = (n + block_size - 1) / block_size;
+        let num_blocks = n.div_ceil(block_size);
         let mut block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
         // Fence alloc-ready → launch_stream for block_sums
         // before phase1 kernel writes it. See the inplace
@@ -2259,7 +2406,7 @@ impl CudaKernelProvider {
             return Ok(());
         }
 
-        let num_blocks = (n + block_size - 1) / block_size;
+        let num_blocks = n.div_ceil(block_size);
         let mut block_sums = self.memory.alloc::<u32>(num_blocks as usize)?;
 
         let phase1_u32_fn = device
@@ -2346,9 +2493,7 @@ impl CudaKernelProvider {
 
     fn upload_device_row_count(&self, row_count: u32) -> Result<TrackedCudaSlice<u32>> {
         let mut d_num_rows = self.memory.alloc::<u32>(1)?;
-        self.device
-            .inner()
-            .htod_sync_copy_into(&[row_count], &mut d_num_rows)
+        self.htod_launch_metadata_sync_copy_into(&[row_count], &mut d_num_rows)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload row count: {}", e)))?;
         Ok(d_num_rows)
     }
@@ -2403,7 +2548,7 @@ impl CudaKernelProvider {
             )));
         }
         let ptr = *bytes.device_ptr();
-        if (ptr as usize) % std::mem::align_of::<u32>() != 0 {
+        if !(ptr as usize).is_multiple_of(std::mem::align_of::<u32>()) {
             return Err(XlogError::Kernel(
                 "Packed keys device pointer is not u32-aligned".to_string(),
             ));
@@ -2433,7 +2578,7 @@ impl CudaKernelProvider {
             )));
         }
         let ptr = *col.device_ptr();
-        if (ptr as usize) % std::mem::align_of::<u32>() != 0 {
+        if !(ptr as usize).is_multiple_of(std::mem::align_of::<u32>()) {
             return Err(XlogError::Kernel(
                 "Column device pointer is not u32-aligned".to_string(),
             ));
@@ -2462,7 +2607,7 @@ impl CudaKernelProvider {
             )));
         }
         let ptr = *col.device_ptr();
-        if (ptr as usize) % std::mem::align_of::<u64>() != 0 {
+        if !(ptr as usize).is_multiple_of(std::mem::align_of::<u64>()) {
             return Err(XlogError::Kernel(
                 "Column device pointer is not u64-aligned".to_string(),
             ));
@@ -2492,7 +2637,7 @@ impl CudaKernelProvider {
             )));
         }
         let ptr = *col.device_ptr();
-        if (ptr as usize) % std::mem::align_of::<f64>() != 0 {
+        if !(ptr as usize).is_multiple_of(std::mem::align_of::<f64>()) {
             return Err(XlogError::Kernel(
                 "Column device pointer is not f64-aligned".to_string(),
             ));
@@ -2534,9 +2679,7 @@ impl CudaKernelProvider {
         let row_u32 = u32::try_from(row_cap)
             .map_err(|_| XlogError::Kernel(format!("Row capacity {} exceeds u32::MAX", row_cap)))?;
         let mut d_num_rows = self.memory.alloc::<u32>(1)?;
-        self.device
-            .inner()
-            .htod_sync_copy_into(&[row_u32], &mut d_num_rows)
+        self.htod_launch_metadata_sync_copy_into(&[row_u32], &mut d_num_rows)
             .map_err(|e| XlogError::Kernel(format!("Failed to set row count: {}", e)))?;
         Ok(CudaBuffer::from_columns_with_host_count(
             columns, row_cap, d_num_rows, schema, row_u32,

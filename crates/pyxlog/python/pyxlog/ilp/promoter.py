@@ -8,6 +8,7 @@ from __future__ import annotations
 import pyxlog
 import re
 from pyxlog.ilp.exceptions import IlpConfigError
+from pyxlog.ilp.inventory import build_rule_inventory
 from pyxlog.ilp.trainer import train_only
 from pyxlog.ilp.types import (
     GateResult,
@@ -26,6 +27,10 @@ def train_and_promote(
     config: TrainConfig = TrainConfig(),
     holdout_positives: list[tuple[str, list[int]]] | None = None,
     holdout_negatives: list[tuple[str, list[int]]] | None = None,
+    training_fold: str | None = None,
+    held_out_domains: tuple[str, ...] = (),
+    base_kernel_checksum_before: str | None = None,
+    base_kernel_checksum_after: str | None = None,
 ) -> PromotionResult:
     """Train and optionally promote a learned rule.
 
@@ -167,6 +172,15 @@ def train_and_promote(
 
     # Holdout gates
     if not holdout_positives and not holdout_negatives:
+        rule_inventory = build_rule_inventory(
+            train_result.artifact,
+            training_fold=training_fold,
+            held_out_domains=held_out_domains,
+            base_kernel_checksum_before=base_kernel_checksum_before,
+            base_kernel_checksum_after=base_kernel_checksum_after,
+            promotion_status=PromotionStatus.MANUAL_REVIEW_REQUIRED.value,
+            gates=gates,
+        )
         return PromotionResult(
             status=PromotionStatus.MANUAL_REVIEW_REQUIRED,
             gates=gates,
@@ -175,6 +189,7 @@ def train_and_promote(
             novel_examples=[str(f) for f in novel[:10]],
             ambiguous_alternatives=ambiguous_alts,
             artifact=train_result.artifact,
+            rule_inventory=rule_inventory,
         )
 
     hp = holdout_positives or []
@@ -199,6 +214,15 @@ def train_and_promote(
 
     all_pass = all(g.passed for g in gates)
     status = PromotionStatus.PROMOTED if all_pass else PromotionStatus.MANUAL_REVIEW_REQUIRED
+    rule_inventory = build_rule_inventory(
+        train_result.artifact,
+        training_fold=training_fold,
+        held_out_domains=held_out_domains,
+        base_kernel_checksum_before=base_kernel_checksum_before,
+        base_kernel_checksum_after=base_kernel_checksum_after,
+        promotion_status=status.value,
+        gates=gates,
+    )
 
     return PromotionResult(
         status=status,
@@ -209,6 +233,7 @@ def train_and_promote(
         committed_source=trial_source if all_pass else None,
         ambiguous_alternatives=ambiguous_alts,
         artifact=train_result.artifact,
+        rule_inventory=rule_inventory,
     )
 
 

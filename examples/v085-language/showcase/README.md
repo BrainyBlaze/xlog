@@ -7,4 +7,3 @@ has a `program.xlog`, an `expected.json` contract consumed by
 The older sibling directories under `examples/v085-language/` remain focused
 fixtures for the individual sub-goal tests. The showcase examples collect those
 features into validator-owned programs with explicit expected diagnostics.
-

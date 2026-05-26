@@ -202,12 +202,12 @@ fn download_quads(buf: &CudaBuffer) -> Vec<(u32, u32, u32, u32)> {
         vec![0u8; n * 4],
         vec![0u8; n * 4],
     ];
-    for c in 0..4 {
+    for (c, col) in cols.iter_mut().enumerate() {
         unsafe {
             sys::cuMemcpyDtoH_v2(
-                cols[c].as_mut_ptr() as *mut _,
+                col.as_mut_ptr() as *mut _,
                 *buf.column(c).unwrap().device_ptr(),
-                cols[c].len(),
+                col.len(),
             );
         }
     }
@@ -503,9 +503,9 @@ fn recursive_4cycle_e1_full_card_grows_across_iterations() {
 /// With `e2.cardinality = 52`:
 /// * `delta_e1 = 0`: estimate = `(0 * 52 * 0.1).max(1) = 1`.
 /// * `delta_e1 = 1`: estimate = `(1 * 52 * 0.1).max(1) = 5`.
-/// The slice-4-shape chain produces `delta_e1 ∈ {1, 0}` across
-/// fixpoint iterations (pre-convergence + convergence), so
-/// `binary_est_for_variant` evolves through `{5, 1}`.
+///   The slice-4-shape chain produces `delta_e1 ∈ {1, 0}` across
+///   fixpoint iterations (pre-convergence + convergence), so
+///   `binary_est_for_variant` evolves through `{5, 1}`.
 fn assert_phase2_binary_est_distinct_across_iterations(
     trace: &xlog_runtime::executor::RecursiveStatsTrace,
     pred: &str,

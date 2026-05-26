@@ -273,19 +273,12 @@ impl CudaKernelProvider {
         rec.preflight(runtime)
             .map_err(|e| XlogError::Kernel(format!("{ctx}: preflight failed: {e}")))?;
 
-        unsafe {
-            let res = sys::cuMemcpyHtoDAsync_v2(
-                *d_num_rows.device_ptr(),
-                &grid as *const u32 as *const c_void,
-                std::mem::size_of::<u32>(),
-                cu_stream.cu_stream(),
-            );
-            if res != sys::cudaError_enum::CUDA_SUCCESS {
-                return Err(XlogError::Kernel(format!(
-                    "{ctx}: H2D d_num_rows failed: {res:?}"
-                )));
-            }
-        }
+        self.htod_launch_metadata_async_copy_one(
+            &grid,
+            &d_num_rows,
+            &cu_stream,
+            &format!("{ctx}: d_num_rows"),
+        )?;
 
         let kernel = self
             .device()
@@ -521,15 +514,15 @@ impl CudaKernelProvider {
         let out_schema = Schema::new(vec![
             (
                 "x".to_string(),
-                e_xy.schema().column_type(0).expect("xy.col0 type").clone(),
+                e_xy.schema().column_type(0).expect("xy.col0 type"),
             ),
             (
                 "y".to_string(),
-                e_xy.schema().column_type(1).expect("xy.col1 type").clone(),
+                e_xy.schema().column_type(1).expect("xy.col1 type"),
             ),
             (
                 "z".to_string(),
-                e_yz.schema().column_type(1).expect("yz.col1 type").clone(),
+                e_yz.schema().column_type(1).expect("yz.col1 type"),
             ),
         ]);
         if count.total_rows == 0 {
@@ -666,15 +659,15 @@ impl CudaKernelProvider {
         let out_schema = Schema::new(vec![
             (
                 "x".to_string(),
-                e_xy.schema().column_type(0).expect("xy.col0 type").clone(),
+                e_xy.schema().column_type(0).expect("xy.col0 type"),
             ),
             (
                 "y".to_string(),
-                e_xy.schema().column_type(1).expect("xy.col1 type").clone(),
+                e_xy.schema().column_type(1).expect("xy.col1 type"),
             ),
             (
                 "z".to_string(),
-                e_yz.schema().column_type(1).expect("yz.col1 type").clone(),
+                e_yz.schema().column_type(1).expect("yz.col1 type"),
             ),
         ]);
         if plan.total_work == 0 {
@@ -1686,19 +1679,19 @@ impl CudaKernelProvider {
         let out_schema = Schema::new(vec![
             (
                 "col0".to_string(),
-                e1.schema().column_type(0).expect("e1.col0 type").clone(),
+                e1.schema().column_type(0).expect("e1.col0 type"),
             ),
             (
                 "col1".to_string(),
-                e1.schema().column_type(1).expect("e1.col1 type").clone(),
+                e1.schema().column_type(1).expect("e1.col1 type"),
             ),
             (
                 "col2".to_string(),
-                e2.schema().column_type(1).expect("e2.col1 type").clone(),
+                e2.schema().column_type(1).expect("e2.col1 type"),
             ),
             (
                 "col3".to_string(),
-                e3.schema().column_type(1).expect("e3.col1 type").clone(),
+                e3.schema().column_type(1).expect("e3.col1 type"),
             ),
         ]);
         if plan.total_work == 0 {
@@ -2712,6 +2705,7 @@ impl CudaKernelProvider {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn mark_metadata_boundaries_u32(
         &self,
         input: &CudaBuffer,
@@ -2760,7 +2754,7 @@ impl CudaKernelProvider {
                     "wcoj_build_metadata_mark_boundaries_u32 kernel not found".to_string(),
                 )
             })?;
-        let grid = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        let grid = n.div_ceil(BLOCK_SIZE);
         unsafe {
             kernel
                 .clone()
@@ -2799,6 +2793,7 @@ impl CudaKernelProvider {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn mark_metadata_boundaries_u64(
         &self,
         input: &CudaBuffer,
@@ -2847,7 +2842,7 @@ impl CudaKernelProvider {
                     "wcoj_build_metadata_mark_boundaries_u64 kernel not found".to_string(),
                 )
             })?;
-        let grid = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        let grid = n.div_ceil(BLOCK_SIZE);
         unsafe {
             kernel
                 .clone()
@@ -2936,7 +2931,7 @@ impl CudaKernelProvider {
             .ok_or_else(|| {
                 XlogError::Kernel("wcoj_build_metadata_scatter_u32 kernel not found".to_string())
             })?;
-        let grid = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        let grid = n.div_ceil(BLOCK_SIZE);
         unsafe {
             kernel
                 .clone()
@@ -3033,7 +3028,7 @@ impl CudaKernelProvider {
             .ok_or_else(|| {
                 XlogError::Kernel("wcoj_build_metadata_scatter_u64 kernel not found".to_string())
             })?;
-        let grid = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        let grid = n.div_ceil(BLOCK_SIZE);
         unsafe {
             kernel
                 .clone()
@@ -3121,10 +3116,7 @@ enum MetadataWidth {
     U64,
 }
 
-fn metadata_column_u32<'a>(
-    input: &'a CudaBuffer,
-    key_col_idx: usize,
-) -> Result<&'a TrackedCudaSlice<u32>> {
+fn metadata_column_u32(input: &CudaBuffer, key_col_idx: usize) -> Result<&TrackedCudaSlice<u32>> {
     let col = input.column(key_col_idx).ok_or_else(|| {
         XlogError::Kernel(format!(
             "wcoj_build_metadata_u32_recorded: column {} not found",
@@ -3141,10 +3133,7 @@ fn metadata_column_u32<'a>(
     }
 }
 
-fn metadata_column_u64<'a>(
-    input: &'a CudaBuffer,
-    key_col_idx: usize,
-) -> Result<&'a TrackedCudaSlice<u64>> {
+fn metadata_column_u64(input: &CudaBuffer, key_col_idx: usize) -> Result<&TrackedCudaSlice<u64>> {
     let col = input.column(key_col_idx).ok_or_else(|| {
         XlogError::Kernel(format!(
             "wcoj_build_metadata_u64_recorded: column {} not found",

@@ -40,3 +40,62 @@ fn test_xlog_run_basic() {
     ]);
     cmd.assert().success();
 }
+
+#[test]
+fn test_xlog_run_epistemic_examples() {
+    let _device = match CudaDevice::new(0) {
+        Ok(d) => d,
+        Err(_) => {
+            println!("SKIPPED: CUDA runtime unavailable (no GPU or driver not loaded)");
+            return;
+        }
+    };
+
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("workspace root");
+    let examples = [
+        ("01-eir-boundary.xlog", "believed", "| 1  |"),
+        ("02-g91-compatibility.xlog", "accepted", "rows: 1"),
+        ("03-faeel-default.xlog", "accepted", "rows: 1"),
+        ("04-gpt-candidate-filter.xlog", "accepted", "rows: 1"),
+        ("05-splitting.xlog", "left", "rows: 1"),
+        ("05-splitting.xlog", "right", "rows: 1"),
+    ];
+
+    for (example, expected_relation, expected_value) in examples {
+        let program = repo_root.join("examples/epistemic").join(example);
+        let output = cargo_bin_cmd!("xlog")
+            .args([
+                "run",
+                program.to_str().expect("valid path"),
+                "--memory-mb",
+                "1024",
+            ])
+            .output()
+            .expect("run xlog binary");
+        assert!(
+            output.status.success(),
+            "{} failed:\nstdout:\n{}\nstderr:\n{}",
+            example,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(expected_relation),
+            "{} did not emit relation {}:\n{}",
+            example,
+            expected_relation,
+            stdout
+        );
+        assert!(
+            stdout.contains(expected_value),
+            "{} did not emit expected value marker {}:\n{}",
+            example,
+            expected_value,
+            stdout
+        );
+    }
+}

@@ -123,7 +123,7 @@ impl QueryStatistics {
             }
         }
 
-        relations.sort_by(|a, b| b.1.cmp(&a.1));
+        relations.sort_by_key(|relation| std::cmp::Reverse(relation.1));
         relations.dedup_by(|a, b| a.0 == b.0);
         relations
     }

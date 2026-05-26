@@ -204,7 +204,7 @@ impl super::CudaKernelProvider {
 
         // Launch boundary detection
         let block_size = 256u32;
-        let grid_size = (num_rows + block_size - 1) / block_size;
+        let grid_size = num_rows.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -780,7 +780,7 @@ impl super::CudaKernelProvider {
             let col = buffer
                 .column(col_idx)
                 .ok_or_else(|| XlogError::Kernel(format!("Key column {} not found", col_idx)))?;
-            col_ptrs[i] = *col.device_ptr() as u64;
+            col_ptrs[i] = *col.device_ptr();
         }
         let mut packed_col_sizes = 0u64;
         for (i, size) in col_sizes_host.iter().copied().enumerate() {
@@ -822,7 +822,7 @@ impl super::CudaKernelProvider {
             .get_func(PACK_MODULE, pack_kernels::PACK_AND_HASH_KEYS)
             .ok_or_else(|| XlogError::Kernel("pack_and_hash_keys kernel not found".to_string()))?;
         let block_size = 256u32;
-        let grid_size = (num_rows + block_size - 1) / block_size;
+        let grid_size = num_rows.div_ceil(block_size);
         let cfg = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -901,9 +901,9 @@ impl super::CudaKernelProvider {
     ///
     /// Sort + pack + boundary detect + scan + capture-num-groups
     /// + group-id derivation + per-aggregation kernels + key
-    /// gather/unpack — every kernel runs on the caller-supplied
-    /// `launch_stream` via `launch_on_stream`. Composition with
-    /// existing recorded primitives:
+    ///   gather/unpack — every kernel runs on the caller-supplied
+    ///   `launch_stream` via `launch_on_stream`. Composition with
+    ///   existing recorded primitives:
     ///   * `sort_recorded` (slice #5) does the typed multi-column
     ///     sort and commits its own LaunchRecorder.
     ///   * `pack_keys_gpu_on_stream` (this slice) runs the fused
@@ -1069,7 +1069,7 @@ impl super::CudaKernelProvider {
         // holds via post_preflight_fresh).
         let boundaries = self.memory.alloc::<u8>(row_cap_usize)?;
         let block_size = 256u32;
-        let num_blocks = (num_rows + block_size - 1) / block_size;
+        let num_blocks = num_rows.div_ceil(block_size);
         let cfg = LaunchConfig {
             grid_dim: (num_blocks, 1, 1),
             block_dim: (block_size, 1, 1),

@@ -48,9 +48,9 @@ fn build_left_deep_clique(k: usize, rel_ids: &[RelId]) -> RirNode {
     var_pos.insert(j0, 1);
     let mut acc: RirNode = RirNode::Scan { rel: rel_ids[0] };
     let mut acc_width: usize = 2;
-    for a in 1..rel_ids.len() {
+    for (a, &rel) in rel_ids.iter().enumerate().skip(1) {
         let (vi, vj) = edge_for_idx(a);
-        let new_atom = RirNode::Scan { rel: rel_ids[a] };
+        let new_atom = RirNode::Scan { rel };
         // Find shared vars between atom (vi, vj) and acc.
         // For canonical lex order, both vi and vj may already be
         // in var_pos (depending on a). Build join keys from
@@ -73,12 +73,8 @@ fn build_left_deep_clique(k: usize, rel_ids: &[RelId]) -> RirNode {
             join_type: JoinType::Inner,
         };
         // Update var_pos for new vars (first occurrence in acc).
-        if !var_pos.contains_key(&vi) {
-            var_pos.insert(vi, acc_width);
-        }
-        if !var_pos.contains_key(&vj) {
-            var_pos.insert(vj, acc_width + 1);
-        }
+        var_pos.entry(vi).or_insert(acc_width);
+        var_pos.entry(vj).or_insert(acc_width + 1);
         acc_width += 2;
     }
     // Project K head columns from var_pos.
@@ -135,7 +131,7 @@ fn promote_and_check(body: RirNode) -> Option<RirNode> {
         &StatsManager::new(),
         &CompilerConfig::default(),
     );
-    let scc0_rules = plan.rules_by_scc.get(0)?;
+    let scc0_rules = plan.rules_by_scc.first()?;
     let promoted = scc0_rules.first()?.body.clone();
     if matches!(promoted, RirNode::MultiWayJoin { .. }) {
         Some(promoted)
@@ -455,10 +451,10 @@ fn clique5_with_reversed_atom_rejected() {
     // Then continue building the rest of the clique on this broken
     // base. The mismatch propagates.
     let mut acc = bad;
-    for i in 2..rels.len() {
+    for &rel in rels.iter().skip(2) {
         acc = RirNode::Join {
             left: Box::new(acc),
-            right: Box::new(RirNode::Scan { rel: rels[i] }),
+            right: Box::new(RirNode::Scan { rel }),
             left_keys: vec![0],
             right_keys: vec![0],
             join_type: JoinType::Inner,

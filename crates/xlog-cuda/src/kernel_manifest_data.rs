@@ -7,7 +7,7 @@
 // include!() in build.rs would interpret //! as documenting the wrong item.
 
 /// Module names matching the .cu filenames (without extension).
-/// Order matches provider/mod.rs load order. All 23 modules listed.
+/// Order matches provider/mod.rs load order. All 24 modules listed.
 pub const KERNEL_CU_NAMES: &[&str] = &[
     "join",
     "dedup",
@@ -31,6 +31,7 @@ pub const KERNEL_CU_NAMES: &[&str] = &[
     "ilp",
     "ilp_credit",
     "ilp_exact",
+    "epistemic",
     "wcoj",
 ];
 
@@ -455,6 +456,28 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "ilp_exact_score_u32",
             "ilp_exact_score_chain_smem",
             "ilp_exact_score_chain_smem_u32",
+            "ilp_exact_select_topk",
+        ],
+    },
+    KernelModuleSpec {
+        cu_name: "epistemic",
+        module_name: "xlog_epistemic",
+        kernels: &[
+            "epistemic_generate_candidate_assumptions_u8",
+            "epistemic_propagate_candidates_u8",
+            "epistemic_validate_candidate_bits_u8",
+            "epistemic_populate_model_membership_u8",
+            "epistemic_populate_model_membership_from_tuple_source_u8",
+            "epistemic_populate_model_membership_from_tuple_source_arity1_u8",
+            "epistemic_populate_model_membership_from_tuple_source_arity2_u8",
+            "epistemic_populate_model_membership_from_tuple_source_arity3_u8",
+            "epistemic_populate_model_membership_from_tuple_source_arity_n_u8",
+            "epistemic_validate_world_views_u8",
+            "epistemic_materialize_accepted_candidates_u8",
+            "epistemic_materialize_final_result_flags_u8",
+            "epistemic_build_final_tuple_row_map_u8",
+            "epistemic_close_final_tuple_rejections_u8",
+            "epistemic_materialize_final_tuple_column_u8",
         ],
     },
     KernelModuleSpec {
@@ -531,8 +554,8 @@ mod tests {
     }
 
     #[test]
-    fn kernel_modules_count_is_23() {
-        assert_eq!(KERNEL_MODULES.len(), 23);
+    fn kernel_modules_count_is_24() {
+        assert_eq!(KERNEL_MODULES.len(), 24);
     }
 
     #[test]

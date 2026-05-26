@@ -127,10 +127,10 @@ mod sudoku {
         }
 
         // Fixed values
-        for row in 0..9 {
-            for col in 0..9 {
-                if grid[row][col] != 0 {
-                    let val = (grid[row][col] - 1) as usize;
+        for (row, row_values) in grid.iter().enumerate() {
+            for (col, &cell) in row_values.iter().enumerate() {
+                if cell != 0 {
+                    let val = (cell - 1) as usize;
                     clauses.push(Clause::unit(Literal::positive(var_index(row, col, val))));
                 }
             }
@@ -155,18 +155,18 @@ mod sudoku {
     }
 
     pub fn verify(grid: &[[u8; 9]; 9]) -> bool {
-        for row in 0..9 {
-            for col in 0..9 {
-                if grid[row][col] < 1 || grid[row][col] > 9 {
+        for row_values in grid.iter().take(9) {
+            for &cell in row_values.iter().take(9) {
+                if !(1..=9).contains(&cell) {
                     return false;
                 }
             }
         }
 
-        for row in 0..9 {
+        for row_values in grid.iter().take(9) {
             let mut seen = [false; 9];
-            for col in 0..9 {
-                let val = (grid[row][col] - 1) as usize;
+            for &cell in row_values.iter().take(9) {
+                let val = (cell - 1) as usize;
                 if seen[val] {
                     return false;
                 }
@@ -176,8 +176,8 @@ mod sudoku {
 
         for col in 0..9 {
             let mut seen = [false; 9];
-            for row in 0..9 {
-                let val = (grid[row][col] - 1) as usize;
+            for row_values in grid.iter().take(9) {
+                let val = (row_values[col] - 1) as usize;
                 if seen[val] {
                     return false;
                 }

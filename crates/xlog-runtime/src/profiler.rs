@@ -160,7 +160,7 @@ impl ExecutionStats {
             // Aggregate operations by name
             let op_summary = stratum.op_summary();
             let mut ops: Vec<_> = op_summary.into_iter().collect();
-            ops.sort_by(|a, b| b.1 .1.cmp(&a.1 .1)); // Sort by duration descending
+            ops.sort_by_key(|op| std::cmp::Reverse(op.1 .1)); // Sort by duration descending
 
             for (op_name, (count, duration_us)) in ops {
                 let op_secs = duration_us as f64 / 1_000_000.0;

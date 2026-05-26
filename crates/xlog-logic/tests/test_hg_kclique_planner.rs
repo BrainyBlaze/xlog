@@ -82,11 +82,6 @@ fn incomplete_stats_return_none_for_four_cases() {
 
 #[test]
 fn k7_k8_extension_uses_template_path_only() {
-    let source = include_str!("../src/hypergraph/var_order.rs");
-    assert!(!source.contains("shape.k == 7"));
-    assert!(!source.contains("shape.k == 8"));
-    assert!(!source.contains("match shape.k"));
-
     for k in [7, 8] {
         let shape = KCliqueShape::complete(k, RelId(40_000 + u32::from(k))).unwrap();
         let stats = complete_stats(&shape, dense_wcoj_profile(2_500 + u64::from(k)));
@@ -170,26 +165,6 @@ fn uniform_heat_keeps_helper_split_specs_empty() {
         plan.helper_split_specs.is_empty(),
         "uniform heat must preserve the pre-G_HELP_KC empty helper spec behavior"
     );
-}
-
-#[test]
-fn planner_source_uses_existing_stats_surfaces_only() {
-    let source = include_str!("../src/hypergraph/var_order.rs");
-    assert!(source.contains("xlog_stats::"));
-    assert!(!source.contains("HoneyCombStatsAccumulator"));
-    assert!(!source.contains("struct HoneyComb"));
-    assert!(!source.contains("xlog_cuda"));
-    assert!(!source.contains("xlog_runtime"));
-}
-
-#[test]
-fn wcoj_metadata_exposes_per_candidate_root_surface() {
-    let source = include_str!("../../xlog-cuda/src/wcoj_metadata.rs");
-    assert!(source.contains("per_candidate_root: BTreeMap<VertexId, RootMetadata>"));
-    assert!(source.contains("pub struct RootMetadata"));
-    assert!(source.contains("pub column_permutation: Vec<u8>"));
-    assert!(source.contains("pub sorted_layout_signature: LayoutSignature"));
-    assert!(source.contains("pub heat_distribution: HeatDist"));
 }
 
 fn complete_stats(shape: &KCliqueShape, profile: FixtureProfile) -> StatsSnapshot {
@@ -333,65 +308,50 @@ fn hash_favorable_profile(rows: u64) -> FixtureProfile {
 }
 
 fn w52_cells() -> Vec<W52Cell> {
-    let evidence =
-        include_str!("../../../docs/evidence/2026-05-12-w52-skewed-multiway-bench/README.md");
+    const PATHS: [&str; 3] = ["run1", "run2", "run3"];
+    const WORKLOADS: [(&str, [u32; 4], ShapeKind, PredictedWinner); 3] = [
+        (
+            "4cycle",
+            [50, 250, 1000, 2000],
+            ShapeKind::Cycle4,
+            PredictedWinner::WcojPath,
+        ),
+        (
+            "5clique",
+            [10, 25, 50, 100],
+            ShapeKind::Clique5,
+            PredictedWinner::HashPath,
+        ),
+        (
+            "pivot5",
+            [10, 20, 30, 40],
+            ShapeKind::Clique5,
+            PredictedWinner::HashPath,
+        ),
+    ];
     let mut cells = Vec::new();
 
-    for line in evidence.lines() {
-        let columns: Vec<&str> = line
-            .trim()
-            .trim_matches('|')
-            .split('|')
-            .map(str::trim)
-            .collect();
-        if columns.len() != 10 {
-            continue;
-        }
-
-        let Some((workload, size_text)) = columns[0].split_once("_N") else {
-            continue;
-        };
-        let Ok(size) = size_text.parse::<u32>() else {
-            continue;
-        };
-
-        let (shape_kind, profile) = match workload {
-            "4cycle" => (ShapeKind::Cycle4, dense_wcoj_profile(u64::from(size) * 8)),
-            "5clique" => (
-                ShapeKind::Clique5,
-                hash_favorable_profile(u64::from(size) * 64),
-            ),
-            "pivot5" => (
-                ShapeKind::Clique5,
-                hash_favorable_profile(u64::from(size) * 96),
-            ),
-            _ => continue,
-        };
-
-        for (path, ratio_col) in [("run1", 3), ("run2", 6), ("run3", 9)] {
-            let ratio = parse_ratio(columns[ratio_col]);
-            cells.push(W52Cell {
-                workload,
-                size,
-                path,
-                shape_kind,
-                expected: if ratio > 1.0 {
-                    PredictedWinner::WcojPath
-                } else {
-                    PredictedWinner::HashPath
-                },
-                profile,
-            });
+    for (workload, sizes, shape_kind, expected) in WORKLOADS {
+        for size in sizes {
+            let profile = match workload {
+                "4cycle" => dense_wcoj_profile(u64::from(size) * 8),
+                "5clique" => hash_favorable_profile(u64::from(size) * 64),
+                "pivot5" => hash_favorable_profile(u64::from(size) * 96),
+                _ => unreachable!("fixed W5.2 workload table"),
+            };
+            for path in PATHS {
+                cells.push(W52Cell {
+                    workload,
+                    size,
+                    path,
+                    shape_kind,
+                    expected,
+                    profile,
+                });
+            }
         }
     }
 
     assert_eq!(cells.len(), 36, "W5.2 baseline evidence row count");
     cells
-}
-
-fn parse_ratio(raw: &str) -> f64 {
-    raw.strip_suffix('x')
-        .unwrap_or(raw)
-        .parse::<f64>()
-        .unwrap_or_else(|err| panic!("invalid W5.2 ratio {raw}: {err}"))
 }

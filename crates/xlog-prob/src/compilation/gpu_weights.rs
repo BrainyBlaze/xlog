@@ -15,12 +15,56 @@ pub struct GpuWeights {
     pub log_false: TrackedCudaSlice<f64>,
 }
 
-fn grid_for(count: u32, block: u32) -> u32 {
+fn kernel_count_u32(context: &str, count: usize) -> Result<u32> {
+    u32::try_from(count)
+        .map_err(|_| XlogError::Compilation(format!("{context} exceeds GPU u32 index space")))
+}
+
+fn grid_for(count: u32, block: u32) -> Result<u32> {
     if count == 0 {
-        0
-    } else {
-        (count + block - 1) / block
+        return Ok(0);
     }
+    if block == 0 {
+        return Err(XlogError::Compilation(
+            "GPU weight kernel block size must be nonzero".to_string(),
+        ));
+    }
+    let grid = (count as u64).div_ceil(block as u64);
+    let step = grid
+        .checked_mul(block as u64)
+        .ok_or_else(|| XlogError::Compilation("GPU weight grid-stride overflow".to_string()))?;
+    if step > u32::MAX as u64 {
+        return Err(XlogError::Compilation(
+            "GPU weight grid-stride step exceeds u32 index space".to_string(),
+        ));
+    }
+    u32::try_from(grid).map_err(|_| {
+        XlogError::Compilation("GPU weight kernel grid exceeds u32 index space".to_string())
+    })
+}
+
+fn checked_var_table_count(var_cap: u32) -> Result<u32> {
+    var_cap.checked_add(1).ok_or_else(|| {
+        XlogError::Compilation("GPU weight var_cap exceeds u32 table index space".to_string())
+    })
+}
+
+fn weights_len_for_var_cap(var_cap: u32) -> Result<usize> {
+    (var_cap as usize)
+        .checked_add(1)
+        .ok_or_else(|| XlogError::Compilation("weight table size overflow".to_string()))
+}
+
+fn query_weights_len_for_var_cap(var_cap: u32) -> Result<usize> {
+    (var_cap as usize)
+        .checked_add(1)
+        .ok_or_else(|| XlogError::Compilation("query var_cap overflow".to_string()))
+}
+
+fn evidence_len_for_var_cap(var_cap: u32) -> Result<usize> {
+    (var_cap as usize)
+        .checked_add(1)
+        .ok_or_else(|| XlogError::Compilation("evidence var_cap overflow".to_string()))
 }
 
 pub fn build_evidence_by_var_gpu(
@@ -37,9 +81,7 @@ pub fn build_evidence_by_var_gpu(
             evidence_vals.len()
         )));
     }
-    let len = (var_cap as usize)
-        .checked_add(1)
-        .ok_or_else(|| XlogError::Compilation("evidence var_cap overflow".to_string()))?;
+    let len = evidence_len_for_var_cap(var_cap)?;
 
     let memory = provider.memory();
     let device = provider.device().inner();
@@ -52,6 +94,7 @@ pub fn build_evidence_by_var_gpu(
     if count == 0 {
         return Ok(evidence_by_var);
     }
+    let count_u32 = kernel_count_u32("GPU evidence node count", count)?;
 
     let func = device
         .get_func(
@@ -62,7 +105,7 @@ pub fn build_evidence_by_var_gpu(
             XlogError::Kernel("weights_set_evidence_from_nodes kernel not found".to_string())
         })?;
     let block = 256u32;
-    let grid = grid_for(count as u32, block);
+    let grid = grid_for(count_u32, block)?;
     // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         func.clone().launch(
@@ -75,7 +118,7 @@ pub fn build_evidence_by_var_gpu(
                 node_var,
                 evidence_nodes,
                 evidence_vals,
-                count as u32,
+                count_u32,
                 var_cap,
                 &mut evidence_by_var,
             ),
@@ -99,6 +142,7 @@ pub fn map_nodes_to_vars_gpu(
     if count == 0 {
         return Ok(out);
     }
+    let count_u32 = kernel_count_u32("GPU node-to-var map count", count)?;
 
     let func = device
         .get_func(WEIGHTS_MODULE, weights_kernels::WEIGHTS_MAP_NODES_TO_VARS)
@@ -107,7 +151,7 @@ pub fn map_nodes_to_vars_gpu(
         })?;
 
     let block = 256u32;
-    let grid = grid_for(count as u32, block);
+    let grid = grid_for(count_u32, block)?;
     // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         func.clone().launch(
@@ -116,7 +160,7 @@ pub fn map_nodes_to_vars_gpu(
                 block_dim: (block, 1, 1),
                 shared_mem_bytes: 0,
             },
-            (node_var, node_ids, count as u32, var_cap, &mut out),
+            (node_var, node_ids, count_u32, var_cap, &mut out),
         )
     }
     .map_err(|e| XlogError::Kernel(format!("weights_map_nodes_to_vars failed: {}", e)))?;
@@ -139,9 +183,7 @@ pub fn apply_query_vars_device(
             count
         )));
     }
-    let weights_len = (var_cap as usize)
-        .checked_add(1)
-        .ok_or_else(|| XlogError::Compilation("query var_cap overflow".to_string()))?;
+    let weights_len = query_weights_len_for_var_cap(var_cap)?;
     if log_false.len() < weights_len {
         return Err(XlogError::Compilation(format!(
             "log_false len {} < var_cap+1 {}",
@@ -152,6 +194,7 @@ pub fn apply_query_vars_device(
     if count == 0 {
         return Ok(());
     }
+    let count_u32 = kernel_count_u32("GPU query apply count", count)?;
 
     let device = provider.device().inner();
     let func = device
@@ -161,7 +204,7 @@ pub fn apply_query_vars_device(
         })?;
 
     let block = 256u32;
-    let grid = grid_for(count as u32, block);
+    let grid = grid_for(count_u32, block)?;
     // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         func.clone().launch(
@@ -170,7 +213,7 @@ pub fn apply_query_vars_device(
                 block_dim: (block, 1, 1),
                 shared_mem_bytes: 0,
             },
-            (query_vars, count as u32, var_cap, log_false, saved),
+            (query_vars, count_u32, var_cap, log_false, saved),
         )
     }
     .map_err(|e| XlogError::Kernel(format!("weights_apply_query_vars failed: {}", e)))?;
@@ -193,9 +236,7 @@ pub fn restore_query_vars_device(
             count
         )));
     }
-    let weights_len = (var_cap as usize)
-        .checked_add(1)
-        .ok_or_else(|| XlogError::Compilation("query var_cap overflow".to_string()))?;
+    let weights_len = query_weights_len_for_var_cap(var_cap)?;
     if log_false.len() < weights_len {
         return Err(XlogError::Compilation(format!(
             "log_false len {} < var_cap+1 {}",
@@ -206,6 +247,7 @@ pub fn restore_query_vars_device(
     if count == 0 {
         return Ok(());
     }
+    let count_u32 = kernel_count_u32("GPU query restore count", count)?;
 
     let device = provider.device().inner();
     let func = device
@@ -215,7 +257,7 @@ pub fn restore_query_vars_device(
         })?;
 
     let block = 256u32;
-    let grid = grid_for(count as u32, block);
+    let grid = grid_for(count_u32, block)?;
     // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
     unsafe {
         func.clone().launch(
@@ -224,7 +266,7 @@ pub fn restore_query_vars_device(
                 block_dim: (block, 1, 1),
                 shared_mem_bytes: 0,
             },
-            (query_vars, count as u32, var_cap, log_false, saved),
+            (query_vars, count_u32, var_cap, log_false, saved),
         )
     }
     .map_err(|e| XlogError::Kernel(format!("weights_restore_query_vars failed: {}", e)))?;
@@ -241,9 +283,7 @@ pub fn build_weights_gpu(
     provider: &Arc<CudaKernelProvider>,
 ) -> Result<GpuWeights> {
     let var_cap = vars.max_var;
-    let weights_len = (var_cap as usize)
-        .checked_add(1)
-        .ok_or_else(|| XlogError::Compilation("weight table size overflow".to_string()))?;
+    let weights_len = weights_len_for_var_cap(var_cap)?;
 
     if vars.leaf_var.len() < leaf_probs.len() {
         return Err(XlogError::Compilation(format!(
@@ -289,11 +329,12 @@ pub fn build_weights_gpu(
 
     let block = 256u32;
 
-    if leaf_probs.len() > 0 {
+    if !leaf_probs.is_empty() {
+        let leaf_count = kernel_count_u32("GPU leaf probability count", leaf_probs.len())?;
         let func = device
             .get_func(WEIGHTS_MODULE, weights_kernels::WEIGHTS_FILL_LEAF)
             .ok_or_else(|| XlogError::Kernel("weights_fill_leaf kernel not found".to_string()))?;
-        let grid = grid_for(leaf_probs.len() as u32, block);
+        let grid = grid_for(leaf_count, block)?;
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
@@ -305,7 +346,7 @@ pub fn build_weights_gpu(
                 (
                     &vars.leaf_var,
                     leaf_probs,
-                    leaf_probs.len() as u32,
+                    leaf_count,
                     var_cap,
                     &mut log_true,
                     &mut log_false,
@@ -315,11 +356,12 @@ pub fn build_weights_gpu(
         .map_err(|e| XlogError::Kernel(format!("weights_fill_leaf failed: {}", e)))?;
     }
 
-    if choice_true.len() > 0 {
+    if !choice_true.is_empty() {
+        let choice_count = kernel_count_u32("GPU choice probability count", choice_true.len())?;
         let func = device
             .get_func(WEIGHTS_MODULE, weights_kernels::WEIGHTS_FILL_CHOICE)
             .ok_or_else(|| XlogError::Kernel("weights_fill_choice kernel not found".to_string()))?;
-        let grid = grid_for(choice_true.len() as u32, block);
+        let grid = grid_for(choice_count, block)?;
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
@@ -332,7 +374,7 @@ pub fn build_weights_gpu(
                     &vars.choice_var,
                     choice_true,
                     choice_false,
-                    choice_true.len() as u32,
+                    choice_count,
                     var_cap,
                     &mut log_true,
                     &mut log_false,
@@ -342,13 +384,14 @@ pub fn build_weights_gpu(
         .map_err(|e| XlogError::Kernel(format!("weights_fill_choice failed: {}", e)))?;
     }
 
-    if evidence_by_var.len() > 0 {
+    if !evidence_by_var.is_empty() {
+        let var_table_count = checked_var_table_count(var_cap)?;
         let func = device
             .get_func(WEIGHTS_MODULE, weights_kernels::WEIGHTS_APPLY_EVIDENCE)
             .ok_or_else(|| {
                 XlogError::Kernel("weights_apply_evidence kernel not found".to_string())
             })?;
-        let grid = grid_for(var_cap + 1, block);
+        let grid = grid_for(var_table_count, block)?;
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
@@ -383,14 +426,13 @@ pub(crate) fn upload_weights_from_host(
     }
 
     let memory = provider.memory();
-    let device = provider.device().inner();
     let mut log_true = memory.alloc::<f64>(weights_len)?;
     let mut log_false = memory.alloc::<f64>(weights_len)?;
-    device
-        .htod_sync_copy_into(&host_true, &mut log_true)
+    provider
+        .htod_sync_copy_into_tracked(&host_true, &mut log_true)
         .map_err(|e| XlogError::Kernel(format!("Upload log_true weights failed: {}", e)))?;
-    device
-        .htod_sync_copy_into(&host_false, &mut log_false)
+    provider
+        .htod_sync_copy_into_tracked(&host_false, &mut log_false)
         .map_err(|e| XlogError::Kernel(format!("Upload log_false weights failed: {}", e)))?;
 
     Ok(GpuWeights {

@@ -31,6 +31,9 @@
 pub mod ast;
 pub mod compile;
 pub mod compiler_config;
+pub mod diagnostics;
+pub mod eir;
+pub mod epistemic;
 pub mod expand;
 pub mod function;
 pub mod hypergraph;
@@ -40,9 +43,11 @@ pub mod lower;
 pub mod magic_sets;
 pub mod meta_normalize;
 pub mod module;
+pub mod module_diagnostics;
 pub mod optimizer;
 pub mod parser;
 pub mod promote;
+pub mod proof_trace;
 pub mod resolver;
 pub mod stratify;
 #[allow(dead_code)] // reserved API: type inference not yet wired to main pipeline
@@ -51,10 +56,16 @@ pub mod wcoj_var_ordering;
 
 // Re-export main types
 pub use ast::{
-    AnnotatedDisjunction, Atom, BodyLiteral, Constraint, Directives, Evidence, MagicSetsMode,
-    ProbCache, ProbEngine, ProbFact, ProbMethod, ProbQuery, Program, Query, Rule, Term, Univ,
+    AnnotatedDisjunction, Atom, BodyLiteral, Constraint, Directives, EpistemicLiteral,
+    EpistemicMode, EpistemicOp, Evidence, MagicSetsMode, ProbCache, ProbEngine, ProbFact,
+    ProbMethod, ProbQuery, Program, Query, Rule, Term, Univ,
 };
 pub use compile::{compile, Compiler};
+pub use diagnostics::{
+    build_query_proof_traces, build_rule_provenance, format_atom, query_proof_traces,
+    rule_provenance, QueryProofTrace, RuleProvenance, RuleSourceKind,
+};
+pub use eir::build_eir;
 pub use expand::expand_program_functions;
 pub use incremental_parse::{
     IncrementalParseResult, ParseCacheStats, ParserSession, StatementSpan, StatementUnit,
@@ -63,6 +74,12 @@ pub use list_normalize::normalize_v085_lists;
 pub use lower::Lowerer;
 pub use magic_sets::{rewrite_v085_magic_sets, MagicSetReport, MagicSetRewrite, MagicSetStatus};
 pub use meta_normalize::normalize_v085_meta;
+pub use module_diagnostics::{
+    diagnose_module_boundaries, CandidateSourceKind, ModuleBoundaryInput, ModuleBoundaryReport,
+    ModuleDeclaration, ModuleDeclarationKind, ModuleManifest, ModuleRole, ModuleViolation,
+    ModuleViolationKind,
+};
 pub use optimizer::{Optimizer, OptimizerConfig, PlanCost};
 pub use parser::{parse_program, parse_statement};
+pub use proof_trace::{DifferentiableProofTraceMap, ProofTrace, ProofTraceSpec};
 pub use stratify::{find_sccs_for_lowering, stratify, DependencyGraph, Stratum};

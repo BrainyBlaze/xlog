@@ -43,8 +43,7 @@ impl super::CudaKernelProvider {
         let device = self.device.inner();
 
         let mut d_probs = self.memory.alloc::<f32>(probs.len())?;
-        device
-            .htod_sync_copy_into(probs, &mut d_probs)
+        self.htod_sync_copy_into_tracked(probs, &mut d_probs)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload Bernoulli probs: {}", e)))?;
 
         let mut d_out = self.memory.alloc::<u8>(total)?;
@@ -56,7 +55,7 @@ impl super::CudaKernelProvider {
                 total
             ))
         })?;
-        let num_blocks = (total_u32 + block_size - 1) / block_size;
+        let num_blocks = total_u32.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (num_blocks, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -126,8 +125,7 @@ impl super::CudaKernelProvider {
         let device = self.device.inner();
 
         let mut d_probs = self.memory.alloc::<f32>(probs.len())?;
-        device
-            .htod_sync_copy_into(probs, &mut d_probs)
+        self.htod_sync_copy_into_tracked(probs, &mut d_probs)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload Bernoulli probs: {}", e)))?;
 
         let mut d_out = self.memory.alloc::<u8>(total)?;
@@ -139,7 +137,7 @@ impl super::CudaKernelProvider {
                 total
             ))
         })?;
-        let num_blocks = (total_u32 + block_size - 1) / block_size;
+        let num_blocks = total_u32.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (num_blocks, 1, 1),
             block_dim: (block_size, 1, 1),

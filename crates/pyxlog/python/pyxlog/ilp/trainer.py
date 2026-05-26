@@ -253,6 +253,11 @@ def _validate_relation_inputs(
 
 
 def _validate_strict_config(config: TrainConfig) -> None:
+    if config.strict_gpu_native and not torch.cuda.is_available():
+        raise IlpConfigError(
+            "strict_gpu_native requires torch CUDA; "
+            "disable strict_gpu_native for CPU compatibility validation"
+        )
     if config.strict_gpu_native and config.max_mined_negatives > 0:
         raise IlpConfigError(
             "host negative mining is incompatible with strict_gpu_native; "
@@ -647,7 +652,7 @@ def _run_single_attempt_strict_relations(
 
         prog.set_candidate_map([(c["i"], c["j"], c["k"]) for c in candidates])
 
-        device = f"cuda:{config.device}" if torch.cuda.is_available() else "cpu"
+        device = f"cuda:{config.device}"
         W = SparseMaskBackend().init_weights(len(candidates), n, device)
         optimizer = torch.optim.Adam([W], lr=0.1, capturable=True)
         result = _AttemptResult()
@@ -655,10 +660,7 @@ def _run_single_attempt_strict_relations(
         last_cand_probs: torch.Tensor | None = None
         last_logits: torch.Tensor | None = None
         last_loss: torch.Tensor | None = None
-        _prev_argmax_id: int = -1
-        _stable_count: int = 0
         _steps_used: int = step_budget
-        _EARLY_STOP_STABLE: int = 5
 
         for step in range(step_budget):
             try:
@@ -710,20 +712,6 @@ def _run_single_attempt_strict_relations(
 
                 cand_probs.backward(credit_grad)
                 optimizer.step()
-
-                # Early stopping: if argmax candidate is stable for N steps
-                # in the second half of training, stop. The first half is
-                # warmup for Gumbel-softmax exploration.
-                _cur_argmax = int(W.argmax())
-                if _cur_argmax == _prev_argmax_id:
-                    _stable_count += 1
-                else:
-                    _stable_count = 0
-                    _prev_argmax_id = _cur_argmax
-                if _stable_count >= _EARLY_STOP_STABLE and step >= step_budget // 2:
-                    _steps_used = step + 1
-                    last_logits = W.detach().clone()
-                    break
 
                 d2h_count = prog.d2h_transfer_count()
                 if d2h_count > 0:
@@ -1218,7 +1206,7 @@ def _run_single_attempt_strict(
         prog.set_candidate_map([(c["i"], c["j"], c["k"]) for c in candidates])
 
         backend = SparseMaskBackend()
-        device = f"cuda:{config.device}" if torch.cuda.is_available() else "cpu"
+        device = f"cuda:{config.device}"
         W = backend.init_weights(len(candidates), n, device)
         optimizer = torch.optim.Adam([W], lr=0.1, capturable=True)
         result = _AttemptResult()

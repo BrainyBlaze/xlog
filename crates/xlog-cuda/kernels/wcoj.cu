@@ -1598,10 +1598,8 @@ extern "C" __global__ void wcoj_layout_check_sorted_unique_u64(
 // ===============================================================
 // W3.2 — General-arity WCOJ clique kernel (K = 5, 6).
 // Single C++ template instantiated at K=5 and K=6 from the same
-// source. The 8 ABI wrappers (k=5/k=6 x count/materialize x
-// u32/u64) are all template-call-only; no hand-written K-specific
-// algorithm body. Tier-2 source-audit (test_w32_kernel_source_audit)
-// enforces this contract.
+// source. The ABI wrappers are template-call-only; no hand-written
+// K-specific algorithm body lives behind any wrapper.
 //
 // Paper §5: each thread fixes one plan-selected leader-edge row.
 // The first two binding positions are read from the selected row.
@@ -1945,16 +1943,8 @@ __device__ __forceinline__ void wcoj_clique_template_materialize_hg_grid_t(
 }
 
 // ---------------------------------------------------------------
-// ABI wrappers — TEMPLATE CALL ONLY. Each body is exactly ONE
-// statement that calls the grid-level template — no thread-idx
-// computation, no conditionals, no loops in the wrapper itself.
-// Tier-1 source-audit (test_w32_kernel_source_audit) enforces
-// the 1-statement contract literally.
-//
-// Tier-2 source-audit: NO `template <>` specialization for K=6..8,
-// NO `if constexpr (K == N)` branch, NO `cliqueN` helper body
-// outside these wrappers, NO hardcoded `5` / `6` / `7` / `8` literal in the
-// shared template body (K=5..8 come from instantiation only).
+// ABI wrappers — template calls only. Each wrapper delegates to the
+// grid-level template without local control flow.
 // ---------------------------------------------------------------
 
 extern "C" __global__ void wcoj_clique5_count_hg_u32(

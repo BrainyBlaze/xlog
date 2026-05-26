@@ -1,339 +1,342 @@
-use std::path::PathBuf;
+use std::sync::Arc;
 
-const M37A_EVIDENCE_RELATIVE_PATH: &str =
-    "docs/evidence/2026-05-14-g39-m37a-surface-preservation/report.md";
+use xlog_core::{MemoryBudget, Result, RuntimeConfig, ScalarType, Schema};
+use xlog_cuda::device_runtime::{
+    AsyncCudaResource, DeviceMemoryResource, GlobalDeviceBudget, LogRecord, LoggingResource,
+    LoggingSink, SinkError, StreamPool, XlogDeviceRuntime,
+};
+use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
+use xlog_gpu::logic::{LogicEvalResult, LogicProgram};
+use xlog_logic::Compiler;
+use xlog_runtime::{Executor, RelationDelta};
 
-const M37A_GROUP_B_SMOKE_SOURCE: &str = r#"
-nn(bridge_net, [X], Y, [yes, no]) :: bridge_fact(X, Y).
-program.register_network("bridge_net", torch.nn.Linear(8, 2), torch.optim.Adam(params, lr=1e-3))
-loss_tensor = program.forward_backward_tensor("bridge_fact(0, yes)")
-stats = program.train_epoch(["bridge_fact(0, yes)"], batch_size=8)
-xgcf_gradient = program.evaluate(return_grads=True).grad_true
-cache_ratio = repeat_query_second_call_speedup_at_least_50x(program, "bridge_fact(0, yes)")
-probability_with_evidence = program.evaluate(return_grads=True).grad_false
-program.register_embedding("entity_embed", torch.nn.Embedding(16, 8))
-pyxlog.train_model(
-    program,
-    ["bridge_fact(0, yes)"],
-    batch_size=8,
-    max_grad_norm=1.0,
-    val_queries=["bridge_fact(1, no)"],
-    patience=1,
-)
-program.scheduler_step()
-program.set_lr("bridge_net", 1e-4)
-bounded_exact_induce(program, examples, budget)
-induce_exact(program, examples=examples, k_per_topology=budget)
-"#;
+#[allow(dead_code)]
+#[path = "../benches/fixtures/paper_class.rs"]
+mod paper_class;
 
-fn assert_contains(haystack: &str, needle: &str, context: &str) {
-    assert!(
-        haystack.contains(needle),
-        "expected {context} to contain {needle:?}"
+struct DiscardSink;
+
+impl LoggingSink for DiscardSink {
+    fn emit(&self, _record: LogRecord) -> std::result::Result<(), SinkError> {
+        Ok(())
+    }
+}
+
+fn test_provider() -> Option<Arc<CudaKernelProvider>> {
+    let device = Arc::new(CudaDevice::new(0).ok()?);
+    let budget = MemoryBudget::with_limit(1024 * 1024 * 1024);
+    let memory = Arc::new(GpuMemoryManager::new(device.clone(), budget));
+    Some(Arc::new(CudaKernelProvider::new(device, memory).ok()?))
+}
+
+fn test_runtime_provider() -> Option<Arc<CudaKernelProvider>> {
+    let device = Arc::new(CudaDevice::new(0).ok()?);
+    let pool = Arc::new(StreamPool::with_defaults(device.clone()));
+    let async_resource: Box<dyn DeviceMemoryResource + Send + Sync> =
+        Box::new(AsyncCudaResource::new(device.clone(), 0, pool.clone()));
+    let logging: Box<dyn DeviceMemoryResource + Send + Sync> = Box::new(LoggingResource::new(
+        async_resource,
+        Arc::new(DiscardSink) as Arc<dyn LoggingSink>,
+    ));
+    let budget: Box<dyn DeviceMemoryResource + Send + Sync> =
+        Box::new(GlobalDeviceBudget::new(logging, 256 * 1024 * 1024));
+    let runtime = Arc::new(XlogDeviceRuntime::with_resource(
+        device.clone(),
+        0,
+        pool,
+        budget,
+    ));
+    let memory = Arc::new(GpuMemoryManager::with_runtime(
+        device.clone(),
+        MemoryBudget::with_limit(256 * 1024 * 1024),
+        runtime,
+    ));
+    Some(Arc::new(
+        CudaKernelProvider::with_runtime(device, memory).ok()?,
+    ))
+}
+
+fn u32_buffer(provider: &CudaKernelProvider, rows: &[u32]) -> CudaBuffer {
+    let schema = Schema::new(vec![("id".to_string(), ScalarType::U32)]);
+    let bytes: Vec<u8> = rows.iter().flat_map(|value| value.to_le_bytes()).collect();
+    let mut column = provider
+        .memory()
+        .alloc::<u8>(bytes.len())
+        .expect("alloc column");
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&bytes, &mut column)
+        .expect("upload rows");
+
+    let mut row_count_device = provider.memory().alloc::<u32>(1).expect("alloc rows");
+    let row_count = rows.len() as u32;
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&[row_count], &mut row_count_device)
+        .expect("upload row count");
+
+    CudaBuffer::from_columns(
+        vec![column.into()],
+        rows.len() as u64,
+        row_count_device,
+        schema,
+    )
+}
+
+fn u32_pair_buffer(provider: &CudaKernelProvider, rows: &[(u32, u32)]) -> CudaBuffer {
+    let row_count = rows.len() as u32;
+    let bytes_per_col = rows.len() * std::mem::size_of::<u32>();
+    let mut col0 = provider
+        .memory()
+        .alloc::<u8>(bytes_per_col)
+        .expect("alloc col0");
+    let mut col1 = provider
+        .memory()
+        .alloc::<u8>(bytes_per_col)
+        .expect("alloc col1");
+    let mut row_count_device = provider.memory().alloc::<u32>(1).expect("alloc rows");
+
+    if !rows.is_empty() {
+        let col0_bytes: Vec<u8> = rows.iter().flat_map(|(x, _)| x.to_le_bytes()).collect();
+        let col1_bytes: Vec<u8> = rows.iter().flat_map(|(_, y)| y.to_le_bytes()).collect();
+        provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&col0_bytes, &mut col0)
+            .expect("upload col0");
+        provider
+            .device()
+            .inner()
+            .htod_sync_copy_into(&col1_bytes, &mut col1)
+            .expect("upload col1");
+    }
+    provider
+        .device()
+        .inner()
+        .htod_sync_copy_into(&[row_count], &mut row_count_device)
+        .expect("upload row count");
+
+    let schema = Schema::new(vec![
+        ("x".to_string(), ScalarType::U32),
+        ("y".to_string(), ScalarType::U32),
+    ]);
+    CudaBuffer::from_columns_with_host_count(
+        vec![col0.into(), col1.into()],
+        row_count as u64,
+        row_count_device,
+        schema,
+        row_count,
+    )
+}
+
+fn sorted_query_rows(provider: &CudaKernelProvider, result: &LogicEvalResult) -> Vec<u32> {
+    let mut rows = provider
+        .download_column::<u32>(&result.queries[0].buffer, 0)
+        .expect("download query rows");
+    rows.sort_unstable();
+    rows
+}
+
+fn sorted_triples(provider: &CudaKernelProvider, buffer: &CudaBuffer) -> Vec<(u32, u32, u32)> {
+    assert_eq!(buffer.arity(), 3);
+    let col0 = provider.download_column::<u32>(buffer, 0).expect("col0");
+    let col1 = provider.download_column::<u32>(buffer, 1).expect("col1");
+    let col2 = provider.download_column::<u32>(buffer, 2).expect("col2");
+    assert_eq!(col0.len(), col1.len());
+    assert_eq!(col0.len(), col2.len());
+
+    let mut rows: Vec<(u32, u32, u32)> = col0
+        .into_iter()
+        .zip(col1)
+        .zip(col2)
+        .map(|((x, y), z)| (x, y, z))
+        .collect();
+    rows.sort_unstable();
+    rows.dedup();
+    rows
+}
+
+struct DtsTriangleExecution {
+    rows: Vec<(u32, u32, u32)>,
+    wcoj_dispatches: u64,
+    dtoh_calls_before_result_download: u64,
+    dtoh_bytes_before_result_download: u64,
+    d2h_count_before_result_download: u64,
+}
+
+fn run_dts_triangle_fixture(
+    provider: Arc<CudaKernelProvider>,
+    fixture: &paper_class::TriangleFixture,
+    config: RuntimeConfig,
+) -> Result<DtsTriangleExecution> {
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile(
+        r#"
+        pred e_xy(u32, u32).
+        pred e_yz(u32, u32).
+        pred e_xz(u32, u32).
+        pred tri(u32, u32, u32).
+
+        tri(X, Y, Z) :- e_xy(X, Y), e_yz(Y, Z), e_xz(X, Z).
+        "#,
+    )?;
+    let mut executor = Executor::new_with_config(provider.clone(), config);
+    for (name, rel_id) in compiler.rel_ids() {
+        executor.register_relation(*rel_id, name);
+    }
+    executor.put_relation("e_xy", u32_pair_buffer(&provider, &fixture.e_xy));
+    executor.put_relation("e_yz", u32_pair_buffer(&provider, &fixture.e_yz));
+    executor.put_relation("e_xz", u32_pair_buffer(&provider, &fixture.e_xz));
+
+    provider.reset_host_transfer_stats();
+    provider.reset_d2h_transfer_count();
+    executor.execute_plan(&plan)?;
+    let transfer_stats = provider.host_transfer_stats();
+    let d2h_count = provider.d2h_transfer_count();
+    let wcoj_dispatches = executor.wcoj_triangle_dispatch_count();
+    let rows = sorted_triples(
+        &provider,
+        executor.store().get("tri").expect("tri relation"),
     );
-}
 
-fn repo_root() -> PathBuf {
-    let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    root.push("../..");
-    root
-}
-
-#[test]
-fn m37a_group_b_smoke_source_enumerates_all_required_symbol_families() {
-    let required = [
-        "nn(bridge_net, [X], Y, [yes, no]) :: bridge_fact(X, Y).",
-        "program.register_network",
-        "torch.nn.Linear",
-        "torch.optim.Adam",
-        "program.forward_backward_tensor",
-        "program.train_epoch",
-        "batch_size=8",
-        "xgcf_gradient",
-        "repeat_query_second_call_speedup_at_least_50x",
-        "program.evaluate(return_grads=True)",
-        "grad_true",
-        "grad_false",
-        "program.register_embedding",
-        "torch.nn.Embedding",
-        "max_grad_norm",
-        "val_queries",
-        "patience",
-        "program.scheduler_step",
-        "program.set_lr",
-        "bounded_exact_induce(program, examples, budget)",
-        "induce_exact(program, examples=examples, k_per_topology=budget)",
-    ];
-
-    for needle in required {
-        assert_contains(
-            M37A_GROUP_B_SMOKE_SOURCE,
-            needle,
-            "M37A Group B smoke source",
-        );
-    }
+    Ok(DtsTriangleExecution {
+        rows,
+        wcoj_dispatches,
+        dtoh_calls_before_result_download: transfer_stats.dtoh_calls,
+        dtoh_bytes_before_result_download: transfer_stats.dtoh_bytes,
+        d2h_count_before_result_download: d2h_count,
+    })
 }
 
 #[test]
-fn m37a_group_b_python_binding_surface_remains_exposed() {
-    let native_stub = include_str!("../../pyxlog/python/pyxlog/_native.pyi");
-    let neural_src = include_str!("../../pyxlog/src/neural.rs");
-    let training_src = include_str!("../../pyxlog/src/training.rs");
-    let program_src = include_str!("../../pyxlog/src/program.rs");
-    let pyxlog_lib_src = include_str!("../../pyxlog/src/lib.rs");
-    let ilp_init = include_str!("../../pyxlog/python/pyxlog/ilp/__init__.py");
-    let ilp_exact = include_str!("../../pyxlog/python/pyxlog/ilp/exact_induce.py");
-    let induce_src = include_str!("../../xlog-induce/src/lib.rs");
+fn m37a_logic_session_delta_runtime_preserves_dts_surface_values() -> Result<()> {
+    let Some(provider) = test_provider() else {
+        eprintln!("Skipping M37A DTS surface preservation: CUDA unavailable");
+        return Ok(());
+    };
 
-    for needle in [
-        "def register_network(",
-        "def register_embedding(",
-        "def forward_backward_tensor(",
-        "def train_epoch(",
-        "def train_model(",
-        "def train_model_tensor(",
-        "def template_cache_size(",
-        "def template_compile_count(",
-        "def scheduler_step(",
-        "def get_lr(",
-        "def set_lr(",
-        "max_grad_norm",
-        "patience",
-        "grad_true",
-        "grad_false",
-    ] {
-        assert_contains(native_stub, needle, "pyxlog native type stub");
-    }
+    let source = r#"
+        pred wmir_committed(u32).
+        pred tensor_support(u32).
 
-    for (source, label, needles) in [
-        (
-            neural_src,
-            "pyxlog neural bindings",
-            &[
-                "#[pyo3(signature = (name, module, optimizer, scheduler=None",
-                "fn register_embedding",
-                "fn forward_backward_tensor",
-                "fn template_cache_size",
-                "fn template_compile_count",
-                "max_grad_norm",
-            ][..],
-        ),
-        (
-            training_src,
-            "pyxlog training bindings",
-            &[
-                "pub fn train_model",
-                "pub fn train_model_tensor",
-                "max_grad_norm",
-                "val_queries",
-                "patience",
-            ][..],
-        ),
-        (
-            program_src,
-            "pyxlog program bindings",
-            &[
-                "fn scheduler_step",
-                "fn get_lr",
-                "fn set_lr",
-                "grad_true",
-                "grad_false",
-            ][..],
-        ),
-        (
-            pyxlog_lib_src,
-            "pyxlog module exports",
-            &[
-                "wrap_pyfunction!(training::train_model",
-                "wrap_pyfunction!(training::train_model_tensor",
-            ][..],
-        ),
-        (
-            ilp_init,
-            "pyxlog ILP package exports",
-            &["induce_exact", "train_and_promote"][..],
-        ),
-        (
-            ilp_exact,
-            "pyxlog bounded exact induction frontend",
-            &[
-                "def induce_exact(",
-                "k_per_topology",
-                "ExactInductionResult",
-            ][..],
-        ),
-        (
-            induce_src,
-            "xlog-induce bounded exact induction crate",
-            &[
-                "pub fn induce_exact",
-                "ExactInductionConfig",
-                "ExactInductionResult",
-            ][..],
-        ),
-    ] {
-        for needle in needles {
-            assert_contains(source, needle, label);
-        }
-    }
+        tensor_support(X) :- wmir_committed(X).
+
+        ?- tensor_support(X).
+    "#;
+    let program = LogicProgram::compile(source)?;
+    let mut session_store = program.create_relation_store(provider.clone())?;
+    let mut session_cache = None;
+
+    provider.reset_host_transfer_stats();
+    provider.reset_d2h_transfer_count();
+
+    let report = program.apply_relation_delta_batch(
+        provider.clone(),
+        &mut session_store,
+        &mut session_cache,
+        vec![
+            (
+                "wmir_committed".to_string(),
+                RelationDelta::new(Some(u32_buffer(&provider, &[1, 2, 3])), None),
+            ),
+            (
+                "wmir_committed".to_string(),
+                RelationDelta::new(None, Some(u32_buffer(&provider, &[2]))),
+            ),
+            (
+                "wmir_committed".to_string(),
+                RelationDelta::new(Some(u32_buffer(&provider, &[4])), None),
+            ),
+        ],
+    )?;
+
+    let transfer_stats = provider.host_transfer_stats();
+    assert_eq!(report.input_delta_count, 3);
+    assert_eq!(report.changed_relations, 1);
+    assert_eq!(report.insert_rows, 3);
+    assert_eq!(report.delete_rows, 0);
+    assert_eq!(report.coalesced_insert_rows, 3);
+    assert_eq!(report.coalesced_delete_rows, 0);
+    assert_eq!(report.canceled_rows, 1);
+    assert_eq!(transfer_stats.dtoh_calls, 0);
+    assert_eq!(transfer_stats.dtoh_bytes, 0);
+    assert_eq!(provider.d2h_transfer_count(), 0);
+
+    let session_result = program.evaluate_cached_relation_store(
+        provider.clone(),
+        session_cache
+            .as_ref()
+            .expect("cached store after DTS-style delta batch"),
+    )?;
+    let session_rows = sorted_query_rows(&provider, &session_result);
+
+    let mut replacement_store = program.create_relation_store(provider.clone())?;
+    replacement_store.put("wmir_committed", u32_buffer(&provider, &[1, 3, 4]));
+    let replacement_result =
+        program.evaluate_with_relation_store(provider.clone(), &replacement_store, false)?;
+    let replacement_rows = sorted_query_rows(&provider, &replacement_result);
+
+    let mut retained_runtime =
+        program.create_session_runtime(provider.clone(), &session_store, true)?;
+    let (retained_result, _) =
+        program.evaluate_with_session_runtime(provider.clone(), &mut retained_runtime)?;
+    let retained_rows = sorted_query_rows(&provider, &retained_result);
+    let cache_stats = retained_runtime.join_index_cache_stats();
+
+    assert_eq!(session_rows, vec![1, 3, 4]);
+    assert_eq!(session_rows, replacement_rows);
+    assert_eq!(session_rows, retained_rows);
+    assert!(cache_stats.lookups >= cache_stats.hits);
+    Ok(())
 }
 
 #[test]
-fn m37a_group_b_runtime_regressions_are_covered_by_existing_tests() {
-    let parse_neural = include_str!("../../xlog-logic/tests/parse_neural.rs");
-    let no_dtoh_neural = include_str!("../../xlog-prob/tests/no_dtoh_in_neural_backward_nll.rs");
-    let xgcf_test = include_str!("../../xlog-prob/tests/gpu_xgcf.rs");
-    let prob_grad_test = include_str!("../../xlog-prob/tests/exact_ddnnf_gpu_grads.rs");
-    let tensor_loss_test =
-        include_str!("../../../python/tests/test_gpu_native_forward_backward_returns_tensor.py");
-    let cache_test = include_str!("../../../python/tests/test_circuit_cache.py");
-    let embedding_test = include_str!("../../../python/tests/test_embeddings.py");
-    let network_test = include_str!("../../../python/tests/test_network_registry.py");
-    let training_test = include_str!("../../../python/tests/test_training.py");
-    let tensor_training_test = include_str!("../../../python/tests/test_train_model_tensor.py");
-    let negation_test = include_str!("../../../python/tests/test_negation.py");
-    let exact_induce_test = include_str!("../../../python/tests/test_ilp_exact_induce.py");
-    let promoter_test = include_str!("../../../python/tests/test_ilp_promoter.py");
+fn m37a_dts_dlm_analog_fixture_runs_through_wcoj_runtime_path() -> Result<()> {
+    let Some(provider) = test_runtime_provider() else {
+        eprintln!("Skipping M37A DTS WCOJ surface preservation: CUDA unavailable");
+        return Ok(());
+    };
 
-    for (source, label, needles) in [
-        (
-            parse_neural,
-            "nn/4 parser tests",
-            &["nn(mnist_net", ":: digit", "parse_program"][..],
-        ),
-        (
-            no_dtoh_neural,
-            "zero device-to-host neural backward audit",
-            &[
-                "neural_backward_nll_buffers_inner",
-                "!body.contains(\"dtoh\")",
-            ][..],
-        ),
-        (
-            tensor_loss_test,
-            "forward_backward_tensor Python regression",
-            &[
-                "program.forward_backward_tensor",
-                "torch.Tensor, \"tolist\"",
-                "torch.Tensor, \"item\"",
-                "loss.is_cuda",
-            ][..],
-        ),
-        (
-            cache_test,
-            "circuit cache Python regression",
-            &[
-                "template_compile_count",
-                "template_cache_size",
-                "test_cache_hit_same_structure",
-            ][..],
-        ),
-        (
-            xgcf_test,
-            "XGCF GPU gradient regression",
-            &["eval_log_wmc_and_grads", "gpu_grad_true", "gpu_grad_false"][..],
-        ),
-        (
-            prob_grad_test,
-            "probabilistic query gradient regression",
-            &["grad_true", "grad_false", "dry"][..],
-        ),
-        (
-            embedding_test,
-            "embedding registration regression",
-            &[
-                "register_embedding",
-                "torch.nn.Embedding",
-                "forward_embedding",
-            ][..],
-        ),
-        (
-            network_test,
-            "network registration regression",
-            &[
-                "register_network",
-                "network_names",
-                "declared_network_names",
-            ][..],
-        ),
-        (
-            training_test,
-            "training controls regression",
-            &[
-                "max_grad_norm",
-                "patience",
-                "scheduler_step",
-                "set_lr",
-                "train_epoch",
-                "train_model",
-            ][..],
-        ),
-        (
-            tensor_training_test,
-            "tensor training regression",
-            &["train_model_tensor", "train_epoch_tensor", "batch_losses"][..],
-        ),
-        (
-            negation_test,
-            "probabilistic query API regression",
-            &["return_grads=True", "grad_true", "grad_false"][..],
-        ),
-        (
-            exact_induce_test,
-            "bounded exact induction regression",
-            &["induce_exact", "backend=\"native\"", "candidates"][..],
-        ),
-        (
-            promoter_test,
-            "M37-F train_and_promote regression",
-            &["train_and_promote", "PromotionResult", "holdout"][..],
-        ),
-    ] {
-        for needle in needles {
-            assert_contains(source, needle, label);
-        }
-    }
-}
+    let fixtures = paper_class::paper_class_fixtures(64);
+    assert_eq!(
+        fixtures.len(),
+        paper_class::paper_class_expected_fixture_count()
+    );
+    let dts = fixtures
+        .iter()
+        .find(|fixture| fixture.name == "dts_dlm_analog")
+        .expect("dts_dlm_analog fixture is registered");
 
-#[test]
-fn m37a_surface_evidence_records_all_goal_039_metrics() {
-    let evidence_path = repo_root().join(M37A_EVIDENCE_RELATIVE_PATH);
-    let report = std::fs::read_to_string(&evidence_path).unwrap_or_else(|err| {
-        panic!(
-            "read M37A surface preservation evidence at {}: {err}",
-            evidence_path.display()
-        )
-    });
+    assert!(dts.recursive);
+    assert!(dts.total_rows() > 0);
+    assert!(!dts.e_xy.is_empty());
+    assert!(!dts.e_yz.is_empty());
+    assert!(!dts.e_xz.is_empty());
+    assert!(dts.e_yz.len() >= dts.e_xy.len());
 
-    for metric in [
-        "M_M37A.1",
-        "M_M37A.2",
-        "M_M37A.3",
-        "M_M37A.4",
-        "M_M37A.5",
-        "M_M37A.6",
-        "M_M37A.7",
-        "M_M37A.8",
-        "M_M37A.9",
-        "M_M37A.10",
-    ] {
-        assert_contains(&report, metric, "M37A surface preservation evidence");
-    }
+    let binary = run_dts_triangle_fixture(
+        provider.clone(),
+        dts,
+        RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(false)),
+    )?;
+    assert_eq!(binary.wcoj_dispatches, 0);
+    assert!(!binary.rows.is_empty());
 
-    for marker in [
-        "xlog_alpha_source",
-        "0.3965599479565052",
-        "0.3871022178294078",
-        "0.46316616571549835",
-        "99.8%",
-        "forward_backward_tensor",
-        "cache",
-        "MNIST-Add",
-        "nn/4",
-        "register_network",
-        "train_epoch",
-        "Bounded Exact Induction",
-    ] {
-        assert_contains(&report, marker, "M37A surface preservation evidence");
-    }
+    let wcoj = run_dts_triangle_fixture(
+        provider,
+        dts,
+        RuntimeConfig::default().with_wcoj_triangle_dispatch(Some(true)),
+    )?;
+    assert!(
+        wcoj.wcoj_dispatches > 0,
+        "forced WCOJ run must dispatch through the production runtime path"
+    );
+    assert_eq!(wcoj.rows, binary.rows);
+    assert_eq!(wcoj.dtoh_calls_before_result_download, 0);
+    assert_eq!(wcoj.dtoh_bytes_before_result_download, 0);
+    assert_eq!(wcoj.d2h_count_before_result_download, 0);
+
+    Ok(())
 }

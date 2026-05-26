@@ -113,6 +113,72 @@ The SAT PTX module also includes verifier helper kernels used by `xlog-solve` an
 - Equivalence query construction: `sat_cnf_copy_into`, `sat_xgcf_write_root_unit_clause`, `sat_not_phi_counts`,
   `sat_emit_not_phi`
 
+## Production Adapter For Epistemic Callers
+
+`xlog_solve::GpuSolverProductionAdapter` is the v0.9-facing thin adapter over
+the existing `GpuCdclSolver`. It exists to make solver production-path reuse
+auditable before accepted epistemic candidates are fully wired into the runtime.
+
+The adapter:
+
+- constructs and owns `GpuCdclSolver::new`;
+- dispatches SAT through `solve_expect_sat`;
+- dispatches UNSAT through `solve_expect_unsat`;
+- dispatches workspace-backed UNSAT through
+  `solve_expect_unsat_with_branch_limit_ws`;
+- dispatches bounded single-result and multi-candidate MaxSAT and SAT/MaxSAT
+  portfolio jobs through the same GPU CNF/CDCL adapter;
+- exposes `GpuSolverProductionTrace` counters for GPU CDCL SAT/UNSAT calls;
+- exposes `production_capabilities`, where GPU CDCL SAT/UNSAT, bounded
+  MaxSAT, and bounded SAT/MaxSAT portfolio adapters are `Available` while the
+  CPU oracle remains disallowed for production metrics;
+- exposes hard-zero CPU search counters:
+  `cpu_assignment_enumerations` and `cpu_maxsat_enumerations`.
+
+This is not a separate solver engine. It does not call `SolverService`, does not
+enumerate assignments on CPU, and does not introduce an epistemic-only search
+path. It is also not full `G090_SOLVER` closure: MaxSAT, portfolio solving,
+epistemic candidate assumption lifecycle, and accepted-world-view integration
+now have bounded GPU-backed adapter evidence, but broader solver semantic
+integration and post-v0.8 compatibility certification remain required.
+
+The capability report is intentionally fail-closed. The CPU semantic-oracle
+service and CPU CLS solver cannot satisfy production closure metrics; accepted
+solver work must route through the GPU-backed adapter and report zero CPU search
+counters.
+
+## v0.9 Semantic-Oracle Solver Service Semantics
+
+The current v0.9 epistemic branch adds a CPU-side service facade for bounded
+semantic fixtures. It is not the production verifier, it is not GPU-native
+epistemic solving, and it does not dispatch epistemic solving to a GPU
+portfolio. Under the corrected v0.9.0 goal, this facade is scaffolding evidence
+only and cannot close `G090_SOLVER`, `G090_CERT`, or `G090_CLOSE`.
+
+`SolverService` owns a `SolveInstance` and exposes:
+
+- incremental SAT assumptions through `assume` and `retract_assumption`
+- learned-clause transfer observability through `transfer_learned_clauses_to` and `SolverServiceTrace`
+- exact fixture-scale MaxSAT scoring for `SolveInstance::with_weights`
+- explicit service statuses: `Sat`, `Unsat`, `Unknown`, `Timeout`, and `Optimal`
+- an explicit GPU portfolio unimplemented status through `gpu_portfolio_status`
+
+Incremental assumptions are scoped. Clauses learned while temporary assumptions are active are only applied while those same assumption literals remain active, so retracting an assumption cannot leave behind an unconditional contradiction. Transfer records the number of learned clauses delivered to another service and preserves their scope.
+
+MaxSAT support is deliberately fixture-scale: `SolverService` enumerates assignments for bounded tests, treats weighted clauses as soft constraints, and returns the best integer score as `Optimal(score)`. The service separates non-search (`Unknown`) from exhausted UNSAT (`Unsat`) and zero-budget bounded search (`Timeout`) so callers can test failure-mode routing without relying on GPU availability.
+
+GPU portfolio solving is not implemented in this facade. `gpu_portfolio_status`
+returns a `Deferred` status with this rationale:
+
+```text
+GPU portfolio solving is not implemented in the semantic-oracle facade and blocks G090_SOLVER closure
+```
+
+Release certification must replace this CPU assignment enumeration path for
+accepted epistemic execution with GPU-native SAT/MaxSAT/portfolio services or a
+documented GPU-backed adapter such as `GpuSolverProductionAdapter`, and must
+report zero CPU solver-search fallback counters.
+
 ## Continuous Local Search (Optional, Non-Verifying)
 
 `xlog-solve` also contains a Continuous Local Search (CLS) solver (FastFourierSAT-inspired) for:

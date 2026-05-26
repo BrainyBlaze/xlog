@@ -114,7 +114,7 @@ impl WidthClass {
             WidthClass::U64 => ScalarType::U64,
             WidthClass::Symbol => ScalarType::Symbol,
             WidthClass::Mixed4 => {
-                if col_idx % 2 == 0 {
+                if col_idx.is_multiple_of(2) {
                     ScalarType::U32
                 } else {
                     ScalarType::Symbol
@@ -314,12 +314,12 @@ fn download_4byte(buf: &CudaBuffer, arity: usize) -> Vec<Vec<u32>> {
         return Vec::new();
     }
     let mut col_bytes: Vec<Vec<u8>> = (0..arity).map(|_| vec![0u8; n * 4]).collect();
-    for col_idx in 0..arity {
+    for (col_idx, bytes) in col_bytes.iter_mut().enumerate().take(arity) {
         unsafe {
             let res = sys::cuMemcpyDtoH_v2(
-                col_bytes[col_idx].as_mut_ptr() as *mut _,
+                bytes.as_mut_ptr() as *mut _,
                 *buf.column(col_idx).unwrap().device_ptr(),
-                col_bytes[col_idx].len(),
+                bytes.len(),
             );
             assert_eq!(res, sys::cudaError_enum::CUDA_SUCCESS);
         }
@@ -348,12 +348,12 @@ fn download_u64(buf: &CudaBuffer, arity: usize) -> Vec<Vec<u64>> {
         return Vec::new();
     }
     let mut col_bytes: Vec<Vec<u8>> = (0..arity).map(|_| vec![0u8; n * 8]).collect();
-    for col_idx in 0..arity {
+    for (col_idx, bytes) in col_bytes.iter_mut().enumerate().take(arity) {
         unsafe {
             let res = sys::cuMemcpyDtoH_v2(
-                col_bytes[col_idx].as_mut_ptr() as *mut _,
+                bytes.as_mut_ptr() as *mut _,
                 *buf.column(col_idx).unwrap().device_ptr(),
-                col_bytes[col_idx].len(),
+                bytes.len(),
             );
             assert_eq!(res, sys::cudaError_enum::CUDA_SUCCESS);
         }

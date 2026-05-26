@@ -17,8 +17,8 @@
 //!      a structured `UnsupportedKeyType` boundary; the GPU path
 //!      is never invoked.
 //!   3. >4 distinct join-key variables plans as `BinaryFallback`
-//!      with `JoinKeysExceedBinaryFallbackLimit`; the GPU path is
-//!      never invoked.
+//!      > with `JoinKeysExceedBinaryFallbackLimit`; the GPU path is
+//!      > never invoked.
 //!
 //! Hard boundaries (per slice spec):
 //!   * No automatic dispatch from planner to GPU — the test

@@ -10,4 +10,3 @@
 out_degree(X, count(Y)) :- edge(X, Y).
 
 query(out_degree(1, 2)).
-

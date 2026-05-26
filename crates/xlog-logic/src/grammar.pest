@@ -5,6 +5,7 @@ COMMENT = _{ "//" ~ (!"\n" ~ ANY)* }
 
 // Identifiers
 ident = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHANUMERIC | "_")* }
+ident_continue = _{ ASCII_ALPHANUMERIC | "_" }
 // Variables: uppercase letter followed by alphanumerics, OR anonymous wildcard "_"
 anonymous = @{ "_" }
 variable = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHANUMERIC | "_")* }
@@ -74,9 +75,24 @@ arith_expr = { arith_term ~ (arith_op_add ~ arith_term)* }
 is_expr = { variable ~ "is" ~ arith_expr }
 
 // Body literals
+epistemic_op = @{ ("know" | "possible") ~ !ident_continue }
+unsupported_nested_epistemic_atom = { epistemic_op ~ epistemic_op ~ atom }
+negated_unsupported_nested_epistemic_atom = { "not" ~ unsupported_nested_epistemic_atom }
+epistemic_atom = { epistemic_op ~ atom }
+negated_epistemic_atom = { "not" ~ epistemic_atom }
 negated_atom = { "not" ~ atom }
 univ = { term ~ "=.." ~ term }
-body_literal = { negated_atom | univ | atom | comparison | is_expr }
+body_literal = {
+    negated_unsupported_nested_epistemic_atom
+    | unsupported_nested_epistemic_atom
+    | negated_epistemic_atom
+    | epistemic_atom
+    | negated_atom
+    | univ
+    | atom
+    | comparison
+    | is_expr
+}
 body = { body_literal ~ ("," ~ body_literal)* }
 
 // Head with optional aggregate
@@ -113,10 +129,12 @@ evidence_stmt = { "evidence" ~ "(" ~ atom ~ "," ~ bool_lit ~ ")" ~ "." }
 // Pragmas / directives
 prob_engine_value = { "exact_ddnnf" | "mc" }
 prob_cache_value = { "on" | "off" }
+epistemic_mode_value = { "g91" | "faeel" }
 magic_sets_value = { "auto" | "on" | "off" }
 prob_method_value = { "rejection" | "evidence_clamping" }
 pragma_prob_engine = { "#pragma" ~ "prob_engine" ~ "=" ~ prob_engine_value }
 pragma_prob_cache = { "#pragma" ~ "prob_cache" ~ "=" ~ prob_cache_value }
+pragma_epistemic_mode = { "#pragma" ~ "epistemic_mode" ~ "=" ~ epistemic_mode_value }
 pragma_prob_samples = { "#pragma" ~ "prob_samples" ~ "=" ~ integer }
 pragma_prob_seed = { "#pragma" ~ "prob_seed" ~ "=" ~ integer }
 pragma_prob_confidence = { "#pragma" ~ "prob_confidence" ~ "=" ~ float_num }
@@ -127,6 +145,7 @@ pragma_magic_sets = { "#pragma" ~ "magic_sets" ~ "=" ~ magic_sets_value }
 pragma = {
     pragma_prob_engine
     | pragma_prob_cache
+    | pragma_epistemic_mode
     | pragma_prob_samples
     | pragma_prob_seed
     | pragma_prob_confidence

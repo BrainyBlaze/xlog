@@ -704,7 +704,7 @@ impl<'a> XgcfSmoothBuilder<'a> {
     }
 
     fn push_and(&mut self, mut children: Vec<u32>) -> Result<u32> {
-        if children.iter().any(|&c| c == self.const0) {
+        if children.contains(&self.const0) {
             return Ok(self.const0);
         }
         children.retain(|&c| c != self.const1);
@@ -1010,7 +1010,7 @@ impl<'a> XgcfBuilder<'a> {
     }
 
     fn push_and(&mut self, mut children: Vec<u32>) -> Result<u32> {
-        if children.iter().any(|&c| c == self.const0) {
+        if children.contains(&self.const0) {
             return Ok(self.const0);
         }
         children.retain(|&c| c != self.const1);
@@ -1198,6 +1198,7 @@ impl<'a> XgcfBuilder<'a> {
         let mut levels: Vec<Option<u32>> = vec![None; n];
         let mut visiting: Vec<bool> = vec![false; n];
 
+        #[allow(clippy::too_many_arguments)]
         fn level_of(
             idx: usize,
             node_type: &[XgcfNodeType],
@@ -1284,11 +1285,11 @@ impl<'a> XgcfBuilder<'a> {
 
         let max_level = levels.iter().flatten().copied().max().unwrap_or(0);
         let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); (max_level as usize) + 1];
-        for i in 0..n {
-            let Some(lvl) = levels[i] else {
+        for (i, lvl) in levels.iter().enumerate().take(n) {
+            let Some(lvl) = lvl else {
                 continue;
             };
-            buckets[lvl as usize].push(i as u32);
+            buckets[*lvl as usize].push(i as u32);
         }
 
         let mut level_offsets: Vec<u32> = Vec::with_capacity(buckets.len() + 1);

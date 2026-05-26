@@ -10,8 +10,8 @@
 //! a hard cap (default 16, see `DEFAULT_MAX_STREAMS`); after
 //! 16 successful acquisitions, every subsequent acquire returns
 //! a `Capacity` error which the dispatch hook silently swallowed.
-//! Long-lived runtimes (benchmarks, soak tests, programs with
-//! >16 matching triangle rules) would route the rest of their
+//! Long-lived runtimes (benchmarks, soak tests, programs with more
+//! than 16 matching triangle rules) would route the rest of their
 //! work through the binary-join fallback while the dispatch
 //! counter stopped incrementing — invalidating the gate-on
 //! certification path AND any benchmark numbers built on it.

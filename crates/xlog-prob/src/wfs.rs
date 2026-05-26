@@ -15,12 +15,12 @@
 //!       - An atom is unfounded if every rule that derives it either:
 //!         - Has a body literal that is known false, or
 //!         - Depends positively on an unfounded atom
-//!    b. **Mark unfounded atoms as false**
-//!    c. **Consequence derivation**: Find atoms that must be true
+//!           b. **Mark unfounded atoms as false**
+//!           c. **Consequence derivation**: Find atoms that must be true
 //!       - An atom is a consequence if some rule has:
 //!         - All positive body literals true
 //!         - All negative body literals false
-//!    d. **Mark consequences as true**
+//!           d. **Mark consequences as true**
 //! 3. **Remaining atoms stay undefined**
 //!
 //! # Gradient Treatment

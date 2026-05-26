@@ -13,12 +13,34 @@ use crate::{LaunchAsync, LaunchConfig};
 use xlog_core::{Result, ScalarType, XlogError};
 
 use super::{ilp_exact_kernels, RawCudaView, ILP_EXACT_MODULE};
-use crate::memory::CudaBuffer;
+use crate::memory::{CudaBuffer, TrackedCudaSlice};
 
 const ILP_EXACT_BLOCK_SIZE: u32 = 256;
+const ILP_EXACT_TOPK_FIELDS: usize = 9;
 const ENV_ILP_EXACT_CHAIN_SMEM: &str = "XLOG_ILP_EXACT_CHAIN_SMEM";
 const ENV_ILP_EXACT_CHAIN_SMEM_MIN_ROWS: &str = "XLOG_ILP_EXACT_CHAIN_SMEM_MIN_ROWS";
 const DEFAULT_ILP_EXACT_CHAIN_SMEM_MIN_ROWS: u32 = 256;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IlpExactTopkCandidate {
+    pub topology_idx: u32,
+    pub left_idx: u32,
+    pub right_idx: u32,
+    pub positives_covered: u32,
+    pub negatives_covered: u32,
+    pub local_rank: u32,
+    pub next_positives_covered: u32,
+    pub next_negatives_covered: u32,
+    pub tie_class_size: u32,
+}
+
+struct IlpExactDeviceScores {
+    candidate_count: usize,
+    #[cfg(test)]
+    slot_count: usize,
+    pos_covered: TrackedCudaSlice<u32>,
+    neg_covered: TrackedCudaSlice<u32>,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExactPairLayout {
@@ -60,7 +82,7 @@ fn ilp_exact_chain_smem_min_rows() -> u32 {
 }
 
 impl super::CudaKernelProvider {
-    /// Score every `(topology, L, R)` triple for one `induce_exact` call.
+    /// Test-only full-score export for validating the scoring kernels.
     ///
     /// Returns `(pos_covered, neg_covered)`, each of length `4 * C * C`
     /// where `C = candidate_buffers.len()`. Slot ordering:
@@ -78,12 +100,116 @@ impl super::CudaKernelProvider {
     ///
     /// D2H budget: **2** counter-tracked transfers (one per count array).
     /// Setup H2D / D2D copies are not D2H-counted.
-    pub fn ilp_exact_score(
+    #[cfg(test)]
+    fn ilp_exact_score(
         &self,
         candidate_buffers: &[&CudaBuffer],
         positives: &CudaBuffer,
         negatives: &CudaBuffer,
     ) -> Result<(Vec<u32>, Vec<u32>)> {
+        let scores = self.ilp_exact_score_device(candidate_buffers, positives, negatives)?;
+        let device = self.device.inner();
+        self.device.synchronize()?;
+
+        let mut pos_covered = vec![0u32; scores.slot_count];
+        self.d2h_transfer_count.fetch_add(1, Ordering::Relaxed);
+        device
+            .dtoh_sync_copy_into(&scores.pos_covered, &mut pos_covered)
+            .map_err(|e| XlogError::Kernel(format!("ilp_exact_score: dtoh pos_covered: {}", e)))?;
+
+        let mut neg_covered = vec![0u32; scores.slot_count];
+        self.d2h_transfer_count.fetch_add(1, Ordering::Relaxed);
+        device
+            .dtoh_sync_copy_into(&scores.neg_covered, &mut neg_covered)
+            .map_err(|e| XlogError::Kernel(format!("ilp_exact_score: dtoh neg_covered: {}", e)))?;
+
+        Ok((pos_covered, neg_covered))
+    }
+
+    /// Score on GPU, reduce per-topology top-K on GPU, and transfer only the
+    /// compact selected rows back to host.
+    pub fn ilp_exact_score_topk(
+        &self,
+        candidate_buffers: &[&CudaBuffer],
+        positives: &CudaBuffer,
+        negatives: &CudaBuffer,
+        k_per_topology: u32,
+    ) -> Result<Vec<IlpExactTopkCandidate>> {
+        if k_per_topology == 0 {
+            return Ok(Vec::new());
+        }
+
+        let scores = self.ilp_exact_score_device(candidate_buffers, positives, negatives)?;
+        let out_rows = 4usize
+            .checked_mul(k_per_topology as usize)
+            .ok_or_else(|| XlogError::Kernel("ilp_exact_score_topk: output row overflow".into()))?;
+        let out_words = out_rows.checked_mul(ILP_EXACT_TOPK_FIELDS).ok_or_else(|| {
+            XlogError::Kernel("ilp_exact_score_topk: output word overflow".into())
+        })?;
+        let mut selected_buf = self.memory.alloc::<u32>(out_words)?;
+        let device = self.device.inner();
+        let func = device
+            .get_func(ILP_EXACT_MODULE, ilp_exact_kernels::ILP_EXACT_SELECT_TOPK)
+            .ok_or_else(|| {
+                XlogError::Kernel(format!(
+                    "{} kernel not loaded",
+                    ilp_exact_kernels::ILP_EXACT_SELECT_TOPK
+                ))
+            })?;
+
+        unsafe {
+            func.clone().launch(
+                LaunchConfig {
+                    grid_dim: (4, 1, 1),
+                    block_dim: (1, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                (
+                    &scores.pos_covered,
+                    &scores.neg_covered,
+                    scores.candidate_count as u32,
+                    k_per_topology,
+                    &mut selected_buf,
+                ),
+            )
+        }
+        .map_err(|e| XlogError::Kernel(format!("ilp_exact_select_topk launch: {}", e)))?;
+
+        self.device.synchronize()?;
+        let mut words = vec![0u32; out_words];
+        self.d2h_transfer_count.fetch_add(1, Ordering::Relaxed);
+        device
+            .dtoh_sync_copy_into(&selected_buf, &mut words)
+            .map_err(|e| {
+                XlogError::Kernel(format!("ilp_exact_score_topk: dtoh selected: {}", e))
+            })?;
+
+        let mut selected = Vec::new();
+        for chunk in words.chunks_exact(ILP_EXACT_TOPK_FIELDS) {
+            if chunk[3] == 0 {
+                continue;
+            }
+            selected.push(IlpExactTopkCandidate {
+                topology_idx: chunk[0],
+                left_idx: chunk[1],
+                right_idx: chunk[2],
+                positives_covered: chunk[3],
+                negatives_covered: chunk[4],
+                local_rank: chunk[5],
+                next_positives_covered: chunk[6],
+                next_negatives_covered: chunk[7],
+                tie_class_size: chunk[8],
+            });
+        }
+        Ok(selected)
+    }
+
+    fn ilp_exact_score_device(
+        &self,
+        candidate_buffers: &[&CudaBuffer],
+        positives: &CudaBuffer,
+        negatives: &CudaBuffer,
+    ) -> Result<IlpExactDeviceScores> {
         let c = candidate_buffers.len();
         if c == 0 {
             return Err(XlogError::Kernel(
@@ -168,8 +294,7 @@ impl super::CudaKernelProvider {
 
         // ── Upload cand_offsets (H→D, not D2H-counted) ────────────────────
         let mut cand_offsets_buf = self.memory.alloc::<u32>(c + 1)?;
-        device
-            .htod_sync_copy_into(&cand_offsets_host, &mut cand_offsets_buf)
+        self.htod_sync_copy_into_tracked(&cand_offsets_host, &mut cand_offsets_buf)
             .map_err(|e| XlogError::Kernel(format!("ilp_exact_score: h2d cand_offsets: {}", e)))?;
 
         // ── Alloc output count arrays ─────────────────────────────────────
@@ -316,25 +441,13 @@ impl super::CudaKernelProvider {
             }
         }
 
-        self.device.synchronize()?;
-
-        // ── Download outputs ──────────────────────────────────────────────
-        // Two D→H transfers, counted in the D2H gate. Each increments by 1;
-        // total 2 regardless of candidate count — well within the test's
-        // `large ≤ small + 2` slack.
-        let mut pos_covered = vec![0u32; n_slots];
-        self.d2h_transfer_count.fetch_add(1, Ordering::Relaxed);
-        device
-            .dtoh_sync_copy_into(&pos_covered_buf, &mut pos_covered)
-            .map_err(|e| XlogError::Kernel(format!("ilp_exact_score: dtoh pos_covered: {}", e)))?;
-
-        let mut neg_covered = vec![0u32; n_slots];
-        self.d2h_transfer_count.fetch_add(1, Ordering::Relaxed);
-        device
-            .dtoh_sync_copy_into(&neg_covered_buf, &mut neg_covered)
-            .map_err(|e| XlogError::Kernel(format!("ilp_exact_score: dtoh neg_covered: {}", e)))?;
-
-        Ok((pos_covered, neg_covered))
+        Ok(IlpExactDeviceScores {
+            candidate_count: c,
+            #[cfg(test)]
+            slot_count: n_slots,
+            pos_covered: pos_covered_buf,
+            neg_covered: neg_covered_buf,
+        })
     }
 }
 
@@ -587,6 +700,85 @@ mod tests {
             "negatives coverage mismatch: expected {:?}, got {:?}",
             expected_neg, neg,
         );
+    }
+
+    #[test]
+    fn ilp_exact_score_topk_reduces_on_device_to_compact_result() {
+        let provider = match make_provider() {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+
+        let p_b = pair_buffer(&provider, &[1, 2], &[2, 3]);
+        let p_c = pair_buffer(&provider, &[2, 3, 4], &[4, 5, 6]);
+        let positives = pair_buffer(&provider, &[1, 2], &[4, 5]);
+        let negatives = pair_buffer(&provider, &[7], &[8]);
+
+        provider.reset_d2h_transfer_count();
+        let selected = provider
+            .ilp_exact_score_topk(&[&p_b, &p_c], &positives, &negatives, 2)
+            .expect("ilp_exact_score_topk launch");
+
+        assert_eq!(provider.d2h_transfer_count(), 1);
+        assert_eq!(selected.len(), 1);
+        let winner = selected[0];
+        assert_eq!(winner.topology_idx, 0);
+        assert_eq!(winner.left_idx, 0);
+        assert_eq!(winner.right_idx, 1);
+        assert_eq!(winner.positives_covered, 2);
+        assert_eq!(winner.negatives_covered, 0);
+        assert_eq!(winner.local_rank, 0);
+        assert_eq!(winner.next_positives_covered, 0);
+        assert_eq!(winner.next_negatives_covered, 0);
+        assert_eq!(winner.tie_class_size, 1);
+    }
+
+    #[test]
+    fn ilp_exact_score_topk_preserves_rank_next_and_tie_diagnostics() {
+        let provider = match make_provider() {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping test: no CUDA device available");
+                return;
+            }
+        };
+
+        let p_all = pair_buffer(&provider, &[1, 2], &[1, 2]);
+        let p_one = pair_buffer(&provider, &[1], &[1]);
+        let p_two = pair_buffer(&provider, &[2], &[2]);
+        let positives = pair_buffer(&provider, &[1, 2], &[1, 2]);
+        let negatives = pair_buffer(&provider, &[9], &[9]);
+
+        let selected = provider
+            .ilp_exact_score_topk(&[&p_all, &p_one, &p_two], &positives, &negatives, 2)
+            .expect("ilp_exact_score_topk launch");
+
+        let star_rank0 = selected
+            .iter()
+            .find(|row| row.topology_idx == 1 && row.local_rank == 0)
+            .expect("star rank 0");
+        assert_eq!(star_rank0.left_idx, 0);
+        assert_eq!(star_rank0.right_idx, 0);
+        assert_eq!(star_rank0.positives_covered, 2);
+        assert_eq!(star_rank0.negatives_covered, 0);
+        assert_eq!(star_rank0.next_positives_covered, 1);
+        assert_eq!(star_rank0.next_negatives_covered, 0);
+        assert_eq!(star_rank0.tie_class_size, 1);
+
+        let star_rank1 = selected
+            .iter()
+            .find(|row| row.topology_idx == 1 && row.local_rank == 1)
+            .expect("star rank 1");
+        assert_eq!(star_rank1.left_idx, 0);
+        assert_eq!(star_rank1.right_idx, 1);
+        assert_eq!(star_rank1.positives_covered, 1);
+        assert_eq!(star_rank1.negatives_covered, 0);
+        assert_eq!(star_rank1.next_positives_covered, 1);
+        assert_eq!(star_rank1.next_negatives_covered, 0);
+        assert_eq!(star_rank1.tie_class_size, 6);
     }
 
     /// Determinism: the same inputs produce identical outputs on repeat runs.

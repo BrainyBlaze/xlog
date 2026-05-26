@@ -102,4 +102,3 @@ rg -n "TODO|FIXME|TBD|PLACEHOLDER|placeholder|stub|unimplemented" \
 - `M085_INT.8`: v0.8.0 and v0.8.5 example source guards passed.
 - `M085_INT.9`: JSON validation, placeholder scan, and diff whitespace checks
   passed.
-

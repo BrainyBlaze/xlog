@@ -105,7 +105,7 @@ def _run_and_collect_transfer_stats(prog, kwargs):
 
 # ── Parity contract ────────────────────────────────────────────────────
 
-def test_induce_exact_native_matches_python_reference():
+def test_induce_exact_native_matches_python_reference(monkeypatch):
     """Native backend returns the same ordered ExactInductionResult as python reference.
 
     Python reference uses ``strict_per_topology=True`` so each topology's
@@ -115,6 +115,7 @@ def test_induce_exact_native_matches_python_reference():
     kernel (see exact_induce.py:strict_per_topology for details).
     """
     prog, kwargs = _build_bounded_request(n_candidates=3)
+    monkeypatch.setenv("XLOG_ALLOW_PYTHON_ILP_REFERENCE", "1")
 
     py_result = induce_exact(
         prog, backend="python", strict_per_topology=True, **kwargs

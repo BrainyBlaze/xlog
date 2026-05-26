@@ -12,4 +12,3 @@ reach(X, Y) :- edge(X, Y).
 reach(X, Z) :- reach(X, Y), edge(Y, Z).
 
 ?- reach(1, Y).
-

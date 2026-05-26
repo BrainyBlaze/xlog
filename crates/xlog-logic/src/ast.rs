@@ -245,6 +245,26 @@ impl Atom {
     }
 }
 
+/// Epistemic operator on an atom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EpistemicOp {
+    /// Known/believed true in the selected epistemic mode.
+    Know,
+    /// Possible/consistent in the selected epistemic mode.
+    Possible,
+}
+
+/// Epistemic atom literal in a rule body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EpistemicLiteral {
+    /// Epistemic operator.
+    pub op: EpistemicOp,
+    /// Whether this epistemic literal is explicitly negated.
+    pub negated: bool,
+    /// Atom under the epistemic operator.
+    pub atom: Atom,
+}
+
 /// Comparison operator
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompOp {
@@ -289,6 +309,8 @@ pub enum BodyLiteral {
     Positive(Atom),
     /// Negated atom (`not p(...)`).
     Negated(Atom),
+    /// Epistemic atom (`know p(...)`, `possible p(...)`, or negated form).
+    Epistemic(EpistemicLiteral),
     /// Arithmetic comparison (e.g. `X < Y`).
     Comparison(Comparison),
     /// Is-expression binding (e.g. `Z is X + Y`).
@@ -312,6 +334,7 @@ impl BodyLiteral {
     pub fn atom(&self) -> Option<&Atom> {
         match self {
             BodyLiteral::Positive(a) | BodyLiteral::Negated(a) => Some(a),
+            BodyLiteral::Epistemic(lit) => Some(&lit.atom),
             BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => None,
         }
     }
@@ -320,6 +343,7 @@ impl BodyLiteral {
     pub fn variables(&self) -> Vec<&str> {
         match self {
             BodyLiteral::Positive(a) | BodyLiteral::Negated(a) => a.variables(),
+            BodyLiteral::Epistemic(lit) => lit.atom.variables(),
             BodyLiteral::Comparison(c) => {
                 let mut vars = vec![];
                 vars.extend(c.left.variables());
@@ -419,6 +443,15 @@ pub enum ProbCache {
     Off,
 }
 
+/// Epistemic semantics mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EpistemicMode {
+    /// G91 compatibility semantics.
+    G91,
+    /// Founded Autoepistemic Equilibrium Logic.
+    Faeel,
+}
+
 /// Monte Carlo sampling method selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbMethod {
@@ -458,6 +491,8 @@ pub struct Directives {
     pub prob_max_nonmonotone_iterations: Option<usize>,
     /// Maximum UDF recursion depth.
     pub max_recursion_depth: Option<u32>,
+    /// Override for epistemic semantics.
+    pub epistemic_mode: Option<EpistemicMode>,
     /// Magic-set rewrite mode.
     pub magic_sets: Option<MagicSetsMode>,
 }
@@ -471,6 +506,11 @@ impl Directives {
     /// Return the configured max recursion depth, defaulting to 1000.
     pub fn max_recursion_depth_or_default(&self) -> u32 {
         self.max_recursion_depth.unwrap_or(1000)
+    }
+
+    /// Return the configured epistemic mode, defaulting to FAEEL.
+    pub fn epistemic_mode_or_default(&self) -> EpistemicMode {
+        self.epistemic_mode.unwrap_or(EpistemicMode::Faeel)
     }
 
     /// Return the configured MC sample count, defaulting to 10000.

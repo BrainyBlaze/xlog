@@ -53,7 +53,7 @@ fn collect_dlpack_columns(
     let seq = dlpack_columns
         .downcast::<PySequence>()
         .map_err(|_| PyValueError::new_err(err_msg.to_string()))?;
-    let mut tensors = Vec::with_capacity(seq.len()? as usize);
+    let mut tensors = Vec::with_capacity(seq.len()?);
     for item in seq.try_iter()? {
         tensors.push(dlpack_from_py(&item?)?);
     }

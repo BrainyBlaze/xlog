@@ -11,23 +11,26 @@
 //! M8 Phase 1 Task 3 Stage B is landing incrementally:
 //!   * Task 2 (done):  crate scaffolding, types, public entrypoint stub.
 //!   * Stage A (done): deterministic reduction + 16 unit tests locking the
-//!                     comparator and diagnostics bit-for-bit against Python.
+//!     comparator and diagnostics bit-for-bit against Python.
 //!   * Stage B 3B.1 (done): native request validation + trivial-dead-end
-//!                     early returns.
-//!   * Stage B 3B.4 (this change): engine calls the batched scoring kernel
-//!                     via `CudaKernelProvider::ilp_exact_score`, builds
-//!                     the `ScoredPair` list, hands to `reduce_per_topology`,
-//!                     and returns the full result. Parity test should now
-//!                     go green with real candidates.
+//!     early returns.
+//!   * Stage B 3B.4 (done): engine calls the batched scoring kernel.
+//!   * Stage B 3B.5 (this change): native production dispatch uses
+//!     device-side top-K selection and only transfers compact selected rows.
 
 pub mod index;
+pub mod provenance;
 pub mod reduce;
 pub mod score;
 pub mod types;
 mod validate;
 
+pub use provenance::InductionProvenanceRegistry;
 pub use reduce::{reduce_per_topology, ScoredPair};
-pub use types::{ExactInductionConfig, ExactInductionResult, ScoredCandidate, Topology};
+pub use types::{
+    ExactInductionConfig, ExactInductionResult, InducedRuleProvenance, InducedRuleRegistry,
+    InductionAlternative, InductionSupportRow, RuleSourceKind, ScoredCandidate, Topology,
+};
 
 use xlog_core::{RelId, Result, ScalarType, XlogError};
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
@@ -131,53 +134,71 @@ fn score_and_reduce(
             .expect("holder populated in the None branch above"),
     };
 
-    // ── Drive the batched scoring kernel.
+    // ── Drive the batched scoring kernel and device-side top-K selector.
     let candidate_buffers: Vec<&CudaBuffer> = request.candidates.iter().map(|(_, b)| *b).collect();
-    let (pos_covered, neg_covered) =
-        provider.ilp_exact_score(&candidate_buffers, request.positives, negatives)?;
-
-    // ── Unpack flat coverage arrays into `ScoredPair`s.
-    // Slot layout matches the kernel: topology * C² + L * C + R.
-    let c = request.candidates.len();
-    let n_slots = 4 * c * c;
-    if pos_covered.len() != n_slots || neg_covered.len() != n_slots {
-        return Err(XlogError::Execution(format!(
-            "induce_exact: coverage array length mismatch (expected {}, got pos={}, neg={})",
-            n_slots,
-            pos_covered.len(),
-            neg_covered.len(),
-        )));
-    }
-
-    let mut scored_pairs: Vec<ScoredPair> = Vec::with_capacity(n_slots);
-    for (topology_idx, topology) in Topology::ALL.iter().enumerate() {
-        for l in 0..c {
-            for r in 0..c {
-                let slot = topology_idx * c * c + l * c + r;
-                scored_pairs.push(ScoredPair {
-                    topology: *topology,
-                    left_rel_idx: request.candidates[l].0,
-                    right_rel_idx: request.candidates[r].0,
-                    positives_covered: pos_covered[slot],
-                    negatives_covered: neg_covered[slot],
-                });
-            }
-        }
-    }
-
-    let candidates = reduce_per_topology(
-        &scored_pairs,
-        request.head_rel_idx,
+    let selected = provider.ilp_exact_score_topk(
+        &candidate_buffers,
+        request.positives,
+        negatives,
         request.config.k_per_topology,
-    );
+    )?;
+    let mut candidates = Vec::with_capacity(selected.len());
+    for row in selected {
+        let topology = topology_from_kernel_idx(row.topology_idx)?;
+        let left_idx = row.left_idx as usize;
+        let right_idx = row.right_idx as usize;
+        let (left_rel_idx, _) = request.candidates.get(left_idx).ok_or_else(|| {
+            XlogError::Execution(format!(
+                "induce_exact: device selector returned left index {} for {} candidates",
+                left_idx,
+                request.candidates.len()
+            ))
+        })?;
+        let (right_rel_idx, _) = request.candidates.get(right_idx).ok_or_else(|| {
+            XlogError::Execution(format!(
+                "induce_exact: device selector returned right index {} for {} candidates",
+                right_idx,
+                request.candidates.len()
+            ))
+        })?;
+        candidates.push(ScoredCandidate {
+            topology,
+            head_rel_idx: request.head_rel_idx,
+            left_rel_idx: *left_rel_idx,
+            right_rel_idx: *right_rel_idx,
+            positives_covered: row.positives_covered,
+            negatives_covered: row.negatives_covered,
+            local_rank: row.local_rank,
+            next_positives_covered: row.next_positives_covered,
+            next_negatives_covered: row.next_negatives_covered,
+            tie_class_size: row.tie_class_size,
+        });
+    }
+    let total_scored = 4u32
+        .checked_mul(meta.candidate_count)
+        .and_then(|v| v.checked_mul(meta.candidate_count))
+        .ok_or_else(|| XlogError::Execution("induce_exact: total_scored overflow".into()))?;
 
     Ok(ExactInductionResult {
         candidates,
-        total_scored: scored_pairs.len() as u32,
+        total_scored,
         candidate_count: meta.candidate_count,
         positive_count: meta.positive_count,
         negative_count: meta.negative_count,
     })
+}
+
+fn topology_from_kernel_idx(idx: u32) -> Result<Topology> {
+    match idx {
+        0 => Ok(Topology::Chain),
+        1 => Ok(Topology::Star),
+        2 => Ok(Topology::Fanout),
+        3 => Ok(Topology::Fanin),
+        _ => Err(XlogError::Execution(format!(
+            "induce_exact: device selector returned topology index {}",
+            idx
+        ))),
+    }
 }
 
 fn validate_pair_buffer(buf: &CudaBuffer, label: &str) -> Result<ExactPairType> {

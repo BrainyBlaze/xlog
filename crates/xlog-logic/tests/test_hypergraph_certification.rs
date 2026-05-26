@@ -163,7 +163,7 @@ fn triangle_certification() {
     let store = store_with_one("e", edges);
 
     // Layer 1: plan_rules dispatch
-    let plans = plan_rules(&[r.clone()], &store).expect("triangle plans");
+    let plans = plan_rules(std::slice::from_ref(&r), &store).expect("triangle plans");
     assert_eq!(plans.len(), 1);
     match &plans[0] {
         RulePlan::MultiwayCandidate {
@@ -473,7 +473,7 @@ fn skewed_multiway_certification() {
     store.insert("small_b".into(), small_b);
 
     // Layer 1: plan dispatch — must be multiway.
-    let plans = plan_rules(&[r.clone()], &store).expect("skewed plans");
+    let plans = plan_rules(std::slice::from_ref(&r), &store).expect("skewed plans");
     match &plans[0] {
         RulePlan::MultiwayCandidate { hypergraph, .. } => {
             assert_eq!(hypergraph.hyperedge_count(), 3);

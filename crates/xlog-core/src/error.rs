@@ -41,6 +41,15 @@ pub enum XlogError {
     #[error("Compilation error: {0}")]
     Compilation(String),
 
+    /// Epistemic construct is known to the frontend but unsupported in this context.
+    #[error("Unsupported epistemic construct: {construct} ({context})")]
+    UnsupportedEpistemicConstruct {
+        /// Construct that was rejected.
+        construct: String,
+        /// Context where the construct was rejected.
+        context: String,
+    },
+
     /// Runtime execution error.
     #[error("Execution error: {0}")]
     Execution(String),

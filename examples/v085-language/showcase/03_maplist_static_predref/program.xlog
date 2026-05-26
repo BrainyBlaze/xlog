@@ -19,4 +19,3 @@ todo_size(Id, N) :- todo(Id, Values), length(Values, N).
 ?- all_good(1).
 ?- mapped_len(N).
 ?- todo_size(Id, N).
-

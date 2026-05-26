@@ -1,0 +1,16 @@
+{
+  "cuda_device": "NVIDIA RTX PRO 3000 Blackwell Generation Laptop GPU",
+  "flipped_top_label": "low",
+  "gradient_finite": true,
+  "initial_top_label": "high",
+  "loss": 1.0000000505039327e-07,
+  "loss_is_cuda": true,
+  "program": "programs/neural_ranker.xlog",
+  "program_declares_nn4": true,
+  "pyxlog_version": "0.8.6",
+  "ranking_changed": true,
+  "registered_network": "case_net",
+  "status": "PASS",
+  "tensor_source": "case_features",
+  "torch_version": "2.10.0+cu128"
+}

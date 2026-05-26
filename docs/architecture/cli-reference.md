@@ -4,8 +4,8 @@ This document describes the `xlog` command-line interface for running determinis
 
 ## Overview
 
-The `xlog` CLI is implemented in the `xlog-cli` crate. The current v0.8.6
-source exposes two execution subcommands:
+The `xlog` CLI is implemented in the `xlog-cli` crate. The current workspace
+exposes two execution subcommands:
 
 - `xlog run` — Deterministic program execution
 - `xlog prob` — Probabilistic program execution
@@ -13,13 +13,14 @@ source exposes two execution subcommands:
 The v0.8.5 language contract added developer-experience commands, which ship as
 of v0.8.5:
 
-- `xlog explain` — Inspect parse, strata, RIR, optimizer, magic-set, WCOJ, and
-  probabilistic plans
+- `xlog explain` — Inspect parse, strata, RIR, optimizer, magic-set, WCOJ,
+  probabilistic plans, rule provenance, and proof traces
 - `xlog repl` — Interactive multiline source/query session
 - `xlog watch` — Debounced file-change rerun with typed diagnostics
 
 Unsupported subcommands fail explicitly rather than silently falling back to
-another mode.
+another mode. Published artifacts follow tagged releases and may lag the current
+workspace surface.
 
 ## Installation
 
@@ -127,6 +128,52 @@ xlog prob program.xlog --prob-engine mc --samples 10000 --seed 42
 # Custom confidence interval
 xlog prob program.xlog --prob-engine mc --samples 10000 --confidence 0.99
 ```
+
+### xlog explain
+
+Inspect compilation and diagnostic state for a deterministic source file.
+
+```bash
+xlog explain [OPTIONS] <SOURCE>
+```
+
+**Arguments:**
+- `<SOURCE>` — Path to the `.xlog` source file
+
+**Options:**
+- `--format <FORMAT>` — Output format: `text` (default), `json`, or `dot`
+
+Text output prints compact sections for parse stats, magic-set rewrites,
+aggregate lifting, rule provenance, proof traces, stratification, RIR, and
+optimizer status. JSON output includes full `rule_provenance`, `proof_traces`,
+and `generated_rule_diagnostics` arrays. The rule provenance records contain
+`rule_id`, `head`, `source_kind`, `source_span`, `generation_trace_hash`,
+`support_relation_ids`, and `counterexample_relation_ids`. Proof trace records
+contain `query_id`, `query`, `answer_relation`, `rule_ids`, `source_facts`, and
+`rejected_alternatives`. Generated-rule diagnostics contain `row_decisions`
+with `row_key`, `accepted`, `failed_predicates`, `threshold_comparisons`, and
+`aggregate_inputs` so accepted and rejected generated rows can be audited from
+the CLI JSON report.
+
+When a generated-rule program uses an external candidate input relation instead
+of inline facts, `xlog explain --format json` also looks for a colocated
+execution manifest (`xlog_hypothesis_execution.json`) and relation JSON file.
+The manifest's `relation_input_columns` and `relation_input_path` let the CLI
+bind external rows to rule variables and compute the same row-level threshold
+decisions in `generated_rule_diagnostics`.
+
+`--format dot` prints the magic-set dependency graph.
+
+**Examples:**
+
+```bash
+xlog explain program.xlog
+xlog explain --format json program.xlog
+xlog explain --format dot program.xlog
+```
+
+For the shared v0.8.7 diagnostics model, see
+[`living-world-diagnostics-v087.md`](living-world-diagnostics-v087.md).
 
 ## Input Formats
 

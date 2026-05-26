@@ -260,10 +260,7 @@ def test_train_on_compiled_relations_matches_inline_fact_candidate_surface():
     assert inline_result.strict_gpu_native is True
     assert len(relation_result.artifact.candidate_map) == len(inline_result.artifact.candidate_map)
     assert relation_result.attempt_count == inline_result.attempt_count
-    # With early stopping in the strict relations path, total_steps may differ
-    # (relation path stops early when argmax stabilizes). Both should still
-    # discover the same rule and converge.
-    assert relation_result.total_steps <= inline_result.total_steps
+    assert relation_result.total_steps == inline_result.total_steps
     assert relation_result.discovered_rule == inline_result.discovered_rule
 
 
@@ -331,7 +328,7 @@ def test_train_on_compiled_relations_winner_metadata_is_deterministic_under_fixe
 
 def test_train_only_converges_on_reach():
     config = TrainConfig(
-        step_budget_per_attempt=100, max_attempts=5,
+        step_budget_per_attempt=20, max_attempts=1,
         tau_start=2.0, tau_floor=0.05, seed=42,
         strict_gpu_native=False,
     )
@@ -349,7 +346,7 @@ def test_train_only_converges_on_reach():
 
 def test_train_only_returns_telemetry_level_1():
     config = TrainConfig(
-        step_budget_per_attempt=50, max_attempts=3,
+        step_budget_per_attempt=20, max_attempts=1,
         tau_start=2.0, tau_floor=0.05, seed=42,
         telemetry_level=1,
         strict_gpu_native=False,
@@ -394,7 +391,7 @@ def test_train_only_forward_p95_telemetry_populated():
 def test_train_only_telemetry_step_timings_population():
     """Telemetry step summary should include forward and memory stats."""
     config = TrainConfig(
-        step_budget_per_attempt=40, max_attempts=2,
+        step_budget_per_attempt=20, max_attempts=1,
         tau_start=2.0, tau_floor=0.05, seed=13,
         telemetry_level=1,
         strict_gpu_native=False,
@@ -433,7 +430,7 @@ def test_train_only_contradictory_examples_raises():
 
 def test_train_only_precision_recall():
     config = TrainConfig(
-        step_budget_per_attempt=100, max_attempts=5,
+        step_budget_per_attempt=20, max_attempts=1,
         tau_start=2.0, tau_floor=0.05, seed=42,
         strict_gpu_native=False,
     )
@@ -448,7 +445,7 @@ def test_train_only_precision_recall():
 
 def test_train_only_confidence_metrics():
     config = TrainConfig(
-        step_budget_per_attempt=100, max_attempts=3,
+        step_budget_per_attempt=20, max_attempts=1,
         tau_start=2.0, tau_floor=0.05, seed=42,
         strict_gpu_native=False,
     )
@@ -464,14 +461,14 @@ def test_train_only_confidence_metrics():
 
 def test_train_only_global_step_limit():
     config = TrainConfig(
-        global_step_limit=50, step_budget_per_attempt=30,
-        max_attempts=10, tau_start=2.0, tau_floor=0.05, seed=42,
+        global_step_limit=20, step_budget_per_attempt=10,
+        max_attempts=3, tau_start=2.0, tau_floor=0.05, seed=42,
     )
     result = train_only(
         source=REACH_SOURCE, mask_name="W_reach",
         positives=REACH_POS, negatives=REACH_NEG, config=config,
     )
-    assert result.total_steps <= 50
+    assert result.total_steps <= 20
 
 
 def test_train_only_nonconverged_has_partial_recall():
@@ -495,8 +492,8 @@ def test_train_only_nonconverged_has_partial_recall():
 def test_train_only_reproducibility_selected_hard_and_probs():
     """Deterministic mode stabilizes learned artifacts across runs."""
     config = TrainConfig(
-        step_budget_per_attempt=120,
-        max_attempts=4,
+        step_budget_per_attempt=20,
+        max_attempts=1,
         tau_start=2.0,
         tau_floor=0.05,
         seed=123,
@@ -575,7 +572,7 @@ def test_train_only_phase_timing_keys():
 def test_train_only_rule_frequency_multi_attempt():
     """rule_frequency reflects how many attempts found the winning rule."""
     config = TrainConfig(
-        step_budget_per_attempt=100, max_attempts=3,
+        step_budget_per_attempt=20, max_attempts=1,
         tau_start=2.0, tau_floor=0.05, seed=42,
         strict_gpu_native=False,
     )
@@ -887,7 +884,7 @@ def test_train_only_strict_gpu_native_passes_with_host_sync_traps(monkeypatch):
         positives=REACH_POS,
         negatives=REACH_NEG,
         config=TrainConfig(
-            step_budget_per_attempt=40,
+            step_budget_per_attempt=20,
             max_attempts=1,
             seed=42,
             strict_gpu_native=True,
@@ -905,8 +902,8 @@ def test_train_only_strict_gpu_native_compat_export_materializes_host_shapes():
         positives=REACH_POS,
         negatives=REACH_NEG,
         config=TrainConfig(
-            step_budget_per_attempt=60,
-            max_attempts=2,
+            step_budget_per_attempt=20,
+            max_attempts=1,
             seed=42,
             strict_gpu_native=True,
         ),

@@ -131,9 +131,7 @@ impl Executor {
                 // Materialize the relational "unit" ({()}) as a 0-arity buffer with one row.
                 let mut d_num_rows = self.provider.memory().alloc::<u32>(1)?;
                 self.provider
-                    .device()
-                    .inner()
-                    .htod_sync_copy_into(&[1u32], &mut d_num_rows)
+                    .htod_launch_metadata_sync_copy_into(&[1u32], &mut d_num_rows)
                     .map_err(|e| {
                         XlogError::Kernel(format!("Failed to create unit row count: {}", e))
                     })?;
@@ -327,6 +325,7 @@ impl Executor {
     /// Execute a Join node
     ///
     /// Delegates to the kernel provider's hash_join_v2 which supports all join types natively.
+    #[allow(clippy::too_many_arguments)]
     fn execute_join(
         &mut self,
         left: &CudaBuffer,
@@ -581,6 +580,7 @@ impl Executor {
         self.provider.diff_gpu(left, right)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_tensor_masked_join(
         &mut self,
         mask_name: &str,
@@ -619,6 +619,16 @@ impl Executor {
 
         let start = self.profiler.start_op();
 
+        let head_k = rel_index
+            .iter()
+            .position(|(_, name)| name == head_rel_name)
+            .ok_or_else(|| {
+                XlogError::Execution(format!(
+                    "TensorMaskedJoin: head relation '{}' not found in rel_index",
+                    head_rel_name
+                ))
+            })? as u32;
+
         let mut tag_entries: Vec<IlpTagEntry> = Vec::new();
         let mut process_rule = |i: u32,
                                 j: u32,
@@ -626,6 +636,10 @@ impl Executor {
                                 strict_candidate_idx: Option<usize>,
                                 strict_flags: Option<&CudaBuffer>|
          -> Result<()> {
+            if k != head_k {
+                return Ok(());
+            }
+
             let (_, left_name) = &rel_index[i as usize];
             let (_, right_name) = &rel_index[j as usize];
 

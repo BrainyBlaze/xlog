@@ -11,8 +11,8 @@ skip_unless_pyxlog_cuda()
 def _compile_reach():
     """Compile a minimal ILP program with an edge relation and learnable reach rule.
 
-    Schema: ['edge'(0), 'reach'(1), 'bL'(2), 'bR'(3)]  (N=4).
-    The correct candidate for bL=edge, bR=edge → reach is (0, 0, 1).
+    The correct candidate for bL=edge, bR=edge -> reach is derived from
+    ilp_relation_names() because meta relations may be inserted ahead of reach.
     Must set a rule mask + re-evaluate to populate tagged results.
     """
     prog = pyxlog.IlpProgramFactory.compile("""
@@ -22,14 +22,22 @@ def _compile_reach():
     """, device=0, memory_mb=64)
     prog.evaluate()
 
-    # Activate candidate (0,0,1) = bL=edge, bR=edge → reach via rule mask
+    # Activate bL=edge, bR=edge -> reach via the current relation index map.
     N = prog.ilp_schema_size()
     device = torch.device("cuda:0")
+    edge_idx, reach_idx = _edge_edge_reach_candidate(prog)
     mask = torch.zeros(N ** 3, device=device, dtype=torch.float32)
-    mask[0 * N * N + 0 * N + 1] = 1.0  # (i=0, j=0, k=1) = edge,edge→reach
+    mask[edge_idx * N * N + edge_idx * N + reach_idx] = 1.0
     prog.set_rule_mask("W", mask, mask, N)
     prog.evaluate()
     return prog
+
+
+def _edge_edge_reach_candidate(prog):
+    names = prog.ilp_relation_names()
+    edge_idx = names.index("edge")
+    reach_idx = names.index("reach")
+    return edge_idx, reach_idx
 
 
 def _compile_reach_with_uploaded_relation():
@@ -79,8 +87,8 @@ def test_set_candidate_map_length():
 def test_compute_ilp_loss_grad_gpu_basic():
     """GPU loss/grad returns correct shapes, dtypes, and device."""
     prog = _compile_reach()
-    # (0,0,1) = bL=edge(0), bR=edge(0) → reach(1)
-    candidates = [(0, 0, 1)]
+    edge_idx, reach_idx = _edge_edge_reach_candidate(prog)
+    candidates = [(edge_idx, edge_idx, reach_idx)]
     prog.set_candidate_map(candidates)
 
     device = torch.device("cuda:0")
@@ -156,7 +164,8 @@ def test_compute_ilp_loss_grad_gpu_relations_matches_host_fact_path():
 def test_compute_ilp_loss_grad_gpu_empty_facts():
     """Empty positive + negative lists should return zero loss and zero grad."""
     prog = _compile_reach()
-    prog.set_candidate_map([(0, 0, 1)])
+    edge_idx, reach_idx = _edge_edge_reach_candidate(prog)
+    prog.set_candidate_map([(edge_idx, edge_idx, reach_idx)])
 
     device = torch.device("cuda:0")
     cand_probs = torch.tensor([0.5], device=device, dtype=torch.float32)
@@ -182,7 +191,8 @@ def test_compute_ilp_loss_grad_gpu_no_candidate_map_error():
 def test_compute_ilp_loss_grad_gpu_loss_positive():
     """Positive loss should be > 0 and grad should be non-zero for derivable facts."""
     prog = _compile_reach()
-    prog.set_candidate_map([(0, 0, 1)])
+    edge_idx, reach_idx = _edge_edge_reach_candidate(prog)
+    prog.set_candidate_map([(edge_idx, edge_idx, reach_idx)])
 
     device = torch.device("cuda:0")
     cand_probs = torch.tensor([0.3], device=device, dtype=torch.float32)
@@ -208,7 +218,8 @@ def test_compute_ilp_loss_grad_gpu_loss_positive():
 def test_compute_ilp_loss_grad_gpu_f64():
     """F64 dtype is correctly handled for cand_probs."""
     prog = _compile_reach()
-    prog.set_candidate_map([(0, 0, 1)])
+    edge_idx, reach_idx = _edge_edge_reach_candidate(prog)
+    prog.set_candidate_map([(edge_idx, edge_idx, reach_idx)])
 
     device = torch.device("cuda:0")
     cand_probs = torch.tensor([0.5], device=device, dtype=torch.float64)
@@ -231,7 +242,11 @@ def test_compute_ilp_loss_grad_gpu_f64():
 def test_compute_ilp_loss_grad_gpu_cand_size_mismatch_error():
     """Should error if cand_probs length != candidate_map length."""
     prog = _compile_reach()
-    prog.set_candidate_map([(0, 0, 1), (1, 0, 1)])  # 2 candidates
+    edge_idx, reach_idx = _edge_edge_reach_candidate(prog)
+    prog.set_candidate_map([
+        (edge_idx, edge_idx, reach_idx),
+        (reach_idx, edge_idx, reach_idx),
+    ])  # 2 candidates
 
     device = torch.device("cuda:0")
     cand_probs = torch.tensor([0.5], device=device, dtype=torch.float32)  # 1 element
@@ -243,7 +258,8 @@ def test_compute_ilp_loss_grad_gpu_cand_size_mismatch_error():
 def test_compute_ilp_loss_grad_gpu_negative_facts():
     """Negative facts should contribute loss = -log(1 - credit)."""
     prog = _compile_reach()
-    prog.set_candidate_map([(0, 0, 1)])
+    edge_idx, reach_idx = _edge_edge_reach_candidate(prog)
+    prog.set_candidate_map([(edge_idx, edge_idx, reach_idx)])
 
     device = torch.device("cuda:0")
     cand_probs = torch.tensor([0.8], device=device, dtype=torch.float32)
@@ -309,8 +325,9 @@ def _reference_loss_grad(prog, cand_probs, ijk_to_cidx, positives, negatives):
 def test_loss_parity_f32_reach():
     """GPU loss/grad matches Python reference (f32, single candidate, pos+neg)."""
     prog = _compile_reach()
-    candidates = [(0, 0, 1)]
-    ijk_to_cidx = {(0, 0, 1): 0}
+    edge_idx, reach_idx = _edge_edge_reach_candidate(prog)
+    candidates = [(edge_idx, edge_idx, reach_idx)]
+    ijk_to_cidx = {candidates[0]: 0}
     prog.set_candidate_map(candidates)
 
     device = torch.device("cuda:0")
@@ -342,8 +359,9 @@ def test_loss_parity_f32_reach():
 def test_loss_parity_f64_reach():
     """GPU loss/grad matches Python reference (f64, tighter tolerance)."""
     prog = _compile_reach()
-    candidates = [(0, 0, 1)]
-    ijk_to_cidx = {(0, 0, 1): 0}
+    edge_idx, reach_idx = _edge_edge_reach_candidate(prog)
+    candidates = [(edge_idx, edge_idx, reach_idx)]
+    ijk_to_cidx = {candidates[0]: 0}
     prog.set_candidate_map(candidates)
 
     device = torch.device("cuda:0")
@@ -438,7 +456,8 @@ def test_loss_parity_multi_candidate():
 def test_zero_dtoh_transfers():
     """compute_ilp_loss_grad_gpu must not cause additional D2H column transfers."""
     prog = _compile_reach()
-    prog.set_candidate_map([(0, 0, 1)])
+    edge_idx, reach_idx = _edge_edge_reach_candidate(prog)
+    prog.set_candidate_map([(edge_idx, edge_idx, reach_idx)])
 
     device = torch.device("cuda:0")
     cand_probs = torch.tensor([0.7], device=device, dtype=torch.float32)
@@ -470,7 +489,8 @@ def test_zero_dtoh_transfers():
 def test_zero_dtoh_strict():
     """compute_ilp_loss_grad_gpu must cause zero D2H transfers (strict accounting)."""
     prog = _compile_reach()
-    prog.set_candidate_map([(0, 0, 1)])
+    edge_idx, reach_idx = _edge_edge_reach_candidate(prog)
+    prog.set_candidate_map([(edge_idx, edge_idx, reach_idx)])
 
     device = torch.device("cuda:0")
     cand_probs = torch.tensor([0.7], device=device, dtype=torch.float32)

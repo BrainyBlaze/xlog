@@ -83,6 +83,43 @@ If a program uses aggregation, use `prob_engine=mc`.
 
 **Non-monotone SCC semantics:** `xlog_prob::mc::NONMONOTONE_SEMANTICS` (also surfaced to Python results).
 
+## v0.9 Epistemic Integration Contract
+
+The v0.9 epistemic work treats accepted world views as the only valid source of
+epistemic probabilistic evidence. Raw generated guesses must not bypass
+world-view validation and enter the PIR or circuit layers as hidden rewrites. The
+bounded fixture API lives in `xlog_prob::epistemic` and documents the current
+contract:
+
+- `EpistemicAssumption` maps epistemic choices to compiler-facing evidence literals such as `know:rain/0=true`.
+- `AcceptedWorldViewEvidence` couples evidence assumptions to a non-empty accepted
+  `EpistemicWorldView`; callers use it after semantic validation has already
+  accepted the world view.
+- `EpistemicCircuit` keeps a compiled circuit fingerprint, active epistemic evidence, and deterministic query probability for fixture-scale integration tests.
+- `KnowledgeCompilerAdapter::gpu_d4()` represents the existing GPU-D4/XGCF path and supports incremental evidence updates.
+- `KnowledgeCompilerAdapter::external_ddnnf_text(...)` records an alternative external Decision-DNNF text adapter design. It consumes DIMACS CNF and emits Decision-DNNF text, but is explicitly `DesignOnly` in this slice.
+- `conditional_probability_from_logs` normalizes `log P(Q and E)` and `log P(E)` with `EPISTEMIC_PROBABILITY_TOLERANCE = 1e-12`, clamping only values within that documented tolerance.
+
+When an adapter supports incremental evidence, changing an epistemic assumption
+updates active evidence without changing the circuit fingerprint or incrementing
+the compile count. Adapters that do not support incremental evidence must report
+a full rebuild. This preserves coherent query semantics for the semantic oracle.
+
+The production-facing bridge is
+`xlog_prob::epistemic_production::EpistemicProbProductionAdapter`. It is a thin
+adapter over `ExactDdnnfProgram`: callers must provide accepted world-view
+evidence before source or parsed programs are compiled through the existing
+GPU-native exact/provenance path. Its trace reports GPU exact compiles,
+accepted-evidence consumption, optional GPU gradient evaluations, and hard-zero
+CPU-only probability recomputation and fixture-circuit counters.
+
+The corrected v0.9.0 release gate is stricter: accepted world-view evidence must
+flow into the existing GPU-native exact/provenance path without CPU-only
+probability recomputation in the accepted execution path. The current
+`xlog_prob::epistemic` fixtures do not by themselves close that gate, and the
+production adapter is partial reuse evidence until accepted runtime world views
+are wired through it end to end.
+
 ---
 
 ## Exact Path (`ExactDdnnfProgram`)

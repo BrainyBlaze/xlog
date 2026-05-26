@@ -1,7 +1,7 @@
 mod common;
 use common::setup_provider;
 
-use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
+use arrow::ffi::FFI_ArrowArray;
 use cudarc::driver::SyncOnDrop;
 use std::sync::Arc;
 use xlog_core::{ScalarType, Schema};
@@ -74,8 +74,8 @@ fn test_arrow_device_export_no_dtoh() {
     unsafe {
         let ptr = device_rb.as_ptr();
         assert!(!ptr.is_null());
-        let arr = (*ptr).array as *mut FFI_ArrowArray;
-        let schema = (*ptr).schema as *mut FFI_ArrowSchema;
+        let arr = (*ptr).array;
+        let schema = (*ptr).schema;
         assert!(!arr.is_null());
         assert!(!schema.is_null());
     }
@@ -149,7 +149,7 @@ fn test_arrow_device_export_bool_bitpacked() {
         let values_ptr = buffers[1] as *const u8;
         assert!(!values_ptr.is_null());
 
-        let packed_len = (flags.len() + 7) / 8;
+        let packed_len = flags.len().div_ceil(8);
         let mut host = vec![0u8; packed_len];
         let device = provider.device().inner();
         let dev_slice = RawDeviceSlice {

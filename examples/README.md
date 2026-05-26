@@ -53,6 +53,10 @@ Phase 4 examples live under:
 - `examples/prob/`: probabilistic `.xlog` programs (prob facts, AD, evidence/query, and `prob_engine=mc`)
 - `examples/python/`: Python scripts exercising `pyxlog` via DLPack (Torch optional)
 
+v0.9.0 semantic fixtures live under:
+- `examples/epistemic/`: epistemic `.xlog` examples for EIR, G91, FAEEL, Generate-Propagate-Test, and splitting.
+  These are run through `cargo test -p xlog-logic --test test_epistemic_examples`, not the production CLI.
+
 Neural-symbolic examples, introduced during the `v0.4.0-alpha` milestone and carried
 forward in the current `v0.5.x` release line, live under:
 - `examples/neural/`: Neural-symbolic training examples
@@ -120,6 +124,13 @@ v0.8.0 DTS-DLM productization examples live under:
 - `examples/xlog/90-negative-tests/02_stratification_negation_cycle.xlog`: unstratifiable negation cycle (compile-time)
 - `examples/xlog/90-negative-tests/03_arithmetic_type_mismatch.xlog`: missing `cast()` type mismatch (compile-time)
 - `examples/xlog/90-negative-tests/04_is_target_already_bound.xlog`: invalid `is` target (compile-time)
+
+**epistemic/** (v0.9.0 semantic fixtures)
+- `examples/epistemic/01-eir-boundary.xlog`: explicit EIR epistemic literal
+- `examples/epistemic/02-g91-compatibility.xlog`: G91 possible-only support
+- `examples/epistemic/03-faeel-default.xlog`: FAEEL founded knowledge candidate
+- `examples/epistemic/04-gpt-candidate-filter.xlog`: bounded Generate-Propagate-Test trace
+- `examples/epistemic/05-splitting.xlog`: deterministic split/recompose fixture
 
 ## Neural-Symbolic Examples (Introduced In `v0.4.0-alpha`, Available In Current `v0.5.x` Releases)
 

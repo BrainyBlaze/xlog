@@ -241,6 +241,7 @@ impl MetaNormalizer {
                     left: self.normalize_untyped_value(&cmp.left)?,
                     right: self.normalize_untyped_value(&cmp.right)?,
                 })),
+                BodyLiteral::Epistemic(lit) => out.push(BodyLiteral::Epistemic(lit.clone())),
                 BodyLiteral::IsExpr(is_expr) => out.push(BodyLiteral::IsExpr(is_expr.clone())),
                 BodyLiteral::Univ(univ) => {
                     let lit = self.expand_univ(univ, bound)?;

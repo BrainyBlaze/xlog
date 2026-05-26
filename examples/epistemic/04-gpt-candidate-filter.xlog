@@ -1,0 +1,8 @@
+// Generate-Propagate-Test fixture: candidates are generated externally.
+
+pred fact().
+pred accepted().
+
+fact().
+
+accepted() :- know fact().

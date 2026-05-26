@@ -11,10 +11,10 @@ use xlog_core::{symbol, Result, ScalarType, XlogError};
 
 use crate::ast::{
     AggExpr, AggOp, AnnotatedDisjunction, ArithExpr, Atom, BodyLiteral, CompOp, Comparison,
-    CondExpr, Constraint, DomainDecl, Evidence, FuncBody, FuncDef, FuncParam, IsExpr,
-    LearnableRule, MagicSetsMode, NeuralLabel, NeuralPredDecl, PredColumn, PredDecl, ProbCache,
-    ProbEngine, ProbFact, ProbMethod, ProbQuery, Program, Query, Rule as AstRule, Term, TypeRef,
-    Univ, UseDecl,
+    CondExpr, Constraint, DomainDecl, EpistemicLiteral, EpistemicMode, EpistemicOp, Evidence,
+    FuncBody, FuncDef, FuncParam, IsExpr, LearnableRule, MagicSetsMode, NeuralLabel,
+    NeuralPredDecl, PredColumn, PredDecl, ProbCache, ProbEngine, ProbFact, ProbMethod, ProbQuery,
+    Program, Query, Rule as AstRule, Term, TypeRef, Univ, UseDecl,
 };
 
 /// Pest-based parser for XLOG Datalog syntax.
@@ -167,6 +167,23 @@ fn apply_pragma(pair: Pair<'_, Rule>, program: &mut Program) -> Result<()> {
                 }
             };
             program.directives.prob_cache = Some(cache);
+        }
+        Rule::pragma_epistemic_mode => {
+            let value = pragma
+                .into_inner()
+                .next()
+                .ok_or_else(|| XlogError::Parse("Missing epistemic_mode value".to_string()))?;
+            let mode = match value.as_str() {
+                "g91" => EpistemicMode::G91,
+                "faeel" => EpistemicMode::Faeel,
+                other => {
+                    return Err(XlogError::Parse(format!(
+                        "Unknown epistemic_mode value: {}",
+                        other
+                    )))
+                }
+            };
+            program.directives.epistemic_mode = Some(mode);
         }
         Rule::pragma_prob_samples => {
             let value = pragma
@@ -962,6 +979,15 @@ fn build_body_literal(pair: Pair<'_, Rule>) -> Result<BodyLiteral> {
         .ok_or_else(|| XlogError::Parse("Empty body literal".to_string()))?;
 
     match inner.as_rule() {
+        Rule::negated_unsupported_nested_epistemic_atom
+        | Rule::unsupported_nested_epistemic_atom => {
+            Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "nested epistemic literal".to_string(),
+                context: inner.as_str().to_string(),
+            })
+        }
+        Rule::negated_epistemic_atom => build_epistemic_literal(inner, true),
+        Rule::epistemic_atom => build_epistemic_literal(inner, false),
         Rule::negated_atom => {
             let atom_pair = inner
                 .into_inner()
@@ -978,6 +1004,40 @@ fn build_body_literal(pair: Pair<'_, Rule>) -> Result<BodyLiteral> {
             inner.as_rule()
         ))),
     }
+}
+
+fn build_epistemic_literal(pair: Pair<'_, Rule>, negated: bool) -> Result<BodyLiteral> {
+    let epistemic_pair = if pair.as_rule() == Rule::negated_epistemic_atom {
+        pair.into_inner()
+            .next()
+            .ok_or_else(|| XlogError::Parse("Missing negated epistemic literal".to_string()))?
+    } else {
+        pair
+    };
+
+    let mut inner = epistemic_pair.into_inner();
+    let op_pair = inner
+        .next()
+        .ok_or_else(|| XlogError::Parse("Missing epistemic operator".to_string()))?;
+    let op = match op_pair.as_str() {
+        "know" => EpistemicOp::Know,
+        "possible" => EpistemicOp::Possible,
+        other => {
+            return Err(XlogError::Parse(format!(
+                "Unknown epistemic operator: {}",
+                other
+            )))
+        }
+    };
+    let atom_pair = inner
+        .next()
+        .ok_or_else(|| XlogError::Parse("Missing epistemic atom".to_string()))?;
+
+    Ok(BodyLiteral::Epistemic(EpistemicLiteral {
+        op,
+        negated,
+        atom: build_atom(atom_pair)?,
+    }))
 }
 
 /// Build a finite univ literal.
@@ -1390,6 +1450,36 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_epistemic_literal_syntax() {
+        let input = "believed(X) :- node(X), know edge(X).";
+        let result = parse_program(input);
+        assert!(
+            result.is_ok(),
+            "Failed to parse epistemic literal: {:?}",
+            result.err()
+        );
+
+        let program = result.unwrap();
+        assert_eq!(program.rules.len(), 1);
+        assert_eq!(program.rules[0].body.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_predicate_with_epistemic_keyword_prefix_as_atom() {
+        let input = "friend_of_friend(A, C) :- knows(A, B), knows(B, C), A != C.";
+        let program = parse_program(input).expect("parse ordinary predicate named knows");
+
+        assert_eq!(program.rules.len(), 1);
+        assert_eq!(program.rules[0].body.len(), 3);
+        assert!(
+            matches!(&program.rules[0].body[0], BodyLiteral::Positive(atom) if atom.predicate == "knows")
+        );
+        assert!(
+            matches!(&program.rules[0].body[1], BodyLiteral::Positive(atom) if atom.predicate == "knows")
+        );
+    }
+
+    #[test]
     fn test_parse_aggregate() {
         let input = "out_degree(X, count(Y)) :- edge(X, Y).";
         let result = parse_program(input);
@@ -1650,6 +1740,17 @@ mod tests {
         assert!(
             result.is_ok(),
             "Failed to parse prob_engine pragma: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_parse_epistemic_mode_pragma_syntax() {
+        let input = "#pragma epistemic_mode = faeel";
+        let result = parse_program(input);
+        assert!(
+            result.is_ok(),
+            "Failed to parse epistemic_mode pragma: {:?}",
             result.err()
         );
     }

@@ -515,12 +515,13 @@ fn test_mc_sample_reset_plan_preserves_base_and_clears_sampled_relations() {
 
 #[test]
 fn test_mc_timing_breakdown_totals_sum() {
-    let mut t = xlog_prob::mc::McTimingBreakdown::default();
-    t.sampler_us = 10;
-    t.sample_reset_us = 20;
-    t.sample_build_us = 30;
-    t.eval_us = 40;
-    t.count_us = 50;
+    let t = xlog_prob::mc::McTimingBreakdown {
+        sampler_us: 10,
+        sample_reset_us: 20,
+        sample_build_us: 30,
+        eval_us: 40,
+        count_us: 50,
+    };
     assert_eq!(t.total_us(), 150);
 }
 

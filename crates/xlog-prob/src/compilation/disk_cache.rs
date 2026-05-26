@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 
 use xlog_core::{Result, XlogError};
 
+use crate::xgcf::XgcfNodeType;
+
 const MAGIC: u32 = 0x584C4743; // "XLGC"
 const FORMAT_VERSION: u32 = 1;
 
@@ -115,6 +117,117 @@ fn read_i32_vec(data: &[u8], offset: usize, count: usize) -> Vec<i32> {
             i32::from_le_bytes([data[s], data[s + 1], data[s + 2], data[s + 3]])
         })
         .collect()
+}
+
+fn checked_bytes(elems: usize, bytes_per_elem: usize) -> Option<usize> {
+    elems.checked_mul(bytes_per_elem)
+}
+
+fn checked_sum(parts: &[usize]) -> Option<usize> {
+    parts
+        .iter()
+        .try_fold(0usize, |acc, part| acc.checked_add(*part))
+}
+
+fn valid_node_type(ty: u8) -> bool {
+    ty <= XgcfNodeType::Decision as u8
+}
+
+fn artifact_topology_is_valid(artifact: &CircuitArtifact) -> bool {
+    if artifact.num_nodes == 0 || artifact.num_levels == 0 || artifact.root >= artifact.num_nodes {
+        return false;
+    }
+
+    let num_nodes = artifact.num_nodes as usize;
+    let num_edges = artifact.num_edges as usize;
+    let num_levels = artifact.num_levels as usize;
+    let Ok(max_var) = usize::try_from(artifact.max_var) else {
+        return false;
+    };
+    let Some(free_var_mask_len) = max_var.checked_add(1) else {
+        return false;
+    };
+
+    if artifact.node_type.len() != num_nodes
+        || artifact.child_offsets.len() != num_nodes + 1
+        || artifact.child_indices.len() != num_edges
+        || artifact.lit.len() != num_nodes
+        || artifact.decision_var.len() != num_nodes
+        || artifact.decision_child_false.len() != num_nodes
+        || artifact.decision_child_true.len() != num_nodes
+        || artifact.level_nodes.len() != num_nodes
+        || artifact.level_offsets.len() != num_levels + 1
+        || artifact.free_var_mask.len() != free_var_mask_len
+    {
+        return false;
+    }
+
+    if artifact.child_offsets.first().copied() != Some(0)
+        || artifact.child_offsets.last().copied() != Some(artifact.num_edges)
+    {
+        return false;
+    }
+    let mut prev = 0u32;
+    for &offset in &artifact.child_offsets {
+        if offset < prev || offset > artifact.num_edges {
+            return false;
+        }
+        prev = offset;
+    }
+    if artifact
+        .child_indices
+        .iter()
+        .any(|&child| child >= artifact.num_nodes)
+    {
+        return false;
+    }
+
+    if artifact.level_offsets.first().copied() != Some(0)
+        || artifact.level_offsets.last().copied() != Some(artifact.num_nodes)
+    {
+        return false;
+    }
+    let mut prev = 0u32;
+    for &offset in &artifact.level_offsets {
+        if offset < prev || offset > artifact.num_nodes {
+            return false;
+        }
+        prev = offset;
+    }
+    if artifact
+        .level_nodes
+        .iter()
+        .any(|&node| node >= artifact.num_nodes)
+    {
+        return false;
+    }
+
+    for idx in 0..num_nodes {
+        let ty = artifact.node_type[idx];
+        if !valid_node_type(ty) {
+            return false;
+        }
+        match ty {
+            t if t == XgcfNodeType::Lit as u8
+                && artifact.lit[idx].unsigned_abs() > artifact.max_var =>
+            {
+                return false;
+            }
+            t if t == XgcfNodeType::Decision as u8 => {
+                if artifact.decision_var[idx] > artifact.max_var {
+                    return false;
+                }
+                if artifact.decision_child_false[idx] >= artifact.num_nodes
+                    || artifact.decision_child_true[idx] >= artifact.num_nodes
+                {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    true
 }
 
 fn write_artifact_to(dir: &Path, key: &CircuitCacheKey, artifact: &CircuitArtifact) -> Result<()> {
@@ -267,31 +380,76 @@ fn parse_artifact(data: &[u8], key: &CircuitCacheKey) -> Result<Option<CircuitAr
 
     debug_assert_eq!(cursor, HEADER_SIZE);
 
-    // 6. Calculate expected array sizes
-    let node_type_bytes = num_nodes as usize;
-    let child_offsets_elems = (num_nodes as usize) + 1;
-    let child_offsets_bytes = child_offsets_elems * 4;
-    let child_indices_bytes = (num_edges as usize) * 4;
-    let lit_bytes = (num_nodes as usize) * 4;
-    let decision_var_bytes = (num_nodes as usize) * 4;
-    let decision_child_false_bytes = (num_nodes as usize) * 4;
-    let decision_child_true_bytes = (num_nodes as usize) * 4;
-    let level_nodes_bytes = (num_nodes as usize) * 4;
-    let level_offsets_elems = (num_levels as usize) + 1;
-    let level_offsets_bytes = level_offsets_elems * 4;
-    let free_var_mask_bytes = (max_var as usize) + 1;
+    if num_nodes == 0 || num_levels == 0 || root >= num_nodes {
+        return Ok(None);
+    }
 
-    let expected_total = HEADER_SIZE
-        + node_type_bytes
-        + child_offsets_bytes
-        + child_indices_bytes
-        + lit_bytes
-        + decision_var_bytes
-        + decision_child_false_bytes
-        + decision_child_true_bytes
-        + level_nodes_bytes
-        + level_offsets_bytes
-        + free_var_mask_bytes;
+    // 6. Calculate expected array sizes with checked arithmetic. The disk cache is
+    // untrusted process state; malformed metadata must be treated as a stale entry.
+    let Ok(num_nodes_usize) = usize::try_from(num_nodes) else {
+        return Ok(None);
+    };
+    let Ok(num_edges_usize) = usize::try_from(num_edges) else {
+        return Ok(None);
+    };
+    let Ok(num_levels_usize) = usize::try_from(num_levels) else {
+        return Ok(None);
+    };
+    let Ok(max_var_usize) = usize::try_from(max_var) else {
+        return Ok(None);
+    };
+
+    let Some(child_offsets_elems) = num_nodes_usize.checked_add(1) else {
+        return Ok(None);
+    };
+    let Some(level_offsets_elems) = num_levels_usize.checked_add(1) else {
+        return Ok(None);
+    };
+    let Some(free_var_mask_bytes) = max_var_usize.checked_add(1) else {
+        return Ok(None);
+    };
+
+    let node_type_bytes = num_nodes_usize;
+    let Some(child_offsets_bytes) = checked_bytes(child_offsets_elems, 4) else {
+        return Ok(None);
+    };
+    let Some(child_indices_bytes) = checked_bytes(num_edges_usize, 4) else {
+        return Ok(None);
+    };
+    let Some(lit_bytes) = checked_bytes(num_nodes_usize, 4) else {
+        return Ok(None);
+    };
+    let Some(decision_var_bytes) = checked_bytes(num_nodes_usize, 4) else {
+        return Ok(None);
+    };
+    let Some(decision_child_false_bytes) = checked_bytes(num_nodes_usize, 4) else {
+        return Ok(None);
+    };
+    let Some(decision_child_true_bytes) = checked_bytes(num_nodes_usize, 4) else {
+        return Ok(None);
+    };
+    let Some(level_nodes_bytes) = checked_bytes(num_nodes_usize, 4) else {
+        return Ok(None);
+    };
+    let Some(level_offsets_bytes) = checked_bytes(level_offsets_elems, 4) else {
+        return Ok(None);
+    };
+
+    let Some(expected_total) = checked_sum(&[
+        HEADER_SIZE,
+        node_type_bytes,
+        child_offsets_bytes,
+        child_indices_bytes,
+        lit_bytes,
+        decision_var_bytes,
+        decision_child_false_bytes,
+        decision_child_true_bytes,
+        level_nodes_bytes,
+        level_offsets_bytes,
+        free_var_mask_bytes,
+    ]) else {
+        return Ok(None);
+    };
 
     if data.len() < expected_total {
         return Ok(None);
@@ -308,22 +466,22 @@ fn parse_artifact(data: &[u8], key: &CircuitCacheKey) -> Result<Option<CircuitAr
     let child_offsets = read_u32_vec(data, cursor, child_offsets_elems);
     cursor += child_offsets_bytes;
 
-    let child_indices = read_u32_vec(data, cursor, num_edges as usize);
+    let child_indices = read_u32_vec(data, cursor, num_edges_usize);
     cursor += child_indices_bytes;
 
-    let lit = read_i32_vec(data, cursor, num_nodes as usize);
+    let lit = read_i32_vec(data, cursor, num_nodes_usize);
     cursor += lit_bytes;
 
-    let decision_var = read_u32_vec(data, cursor, num_nodes as usize);
+    let decision_var = read_u32_vec(data, cursor, num_nodes_usize);
     cursor += decision_var_bytes;
 
-    let decision_child_false = read_u32_vec(data, cursor, num_nodes as usize);
+    let decision_child_false = read_u32_vec(data, cursor, num_nodes_usize);
     cursor += decision_child_false_bytes;
 
-    let decision_child_true = read_u32_vec(data, cursor, num_nodes as usize);
+    let decision_child_true = read_u32_vec(data, cursor, num_nodes_usize);
     cursor += decision_child_true_bytes;
 
-    let level_nodes = read_u32_vec(data, cursor, num_nodes as usize);
+    let level_nodes = read_u32_vec(data, cursor, num_nodes_usize);
     cursor += level_nodes_bytes;
 
     let level_offsets = read_u32_vec(data, cursor, level_offsets_elems);
@@ -332,7 +490,7 @@ fn parse_artifact(data: &[u8], key: &CircuitCacheKey) -> Result<Option<CircuitAr
     let free_var_mask = data[cursor..cursor + free_var_mask_bytes].to_vec();
     // cursor += free_var_mask_bytes; // not needed after last read
 
-    Ok(Some(CircuitArtifact {
+    let artifact = CircuitArtifact {
         num_nodes,
         num_edges,
         num_levels,
@@ -349,7 +507,13 @@ fn parse_artifact(data: &[u8], key: &CircuitCacheKey) -> Result<Option<CircuitAr
         level_nodes,
         level_offsets,
         free_var_mask,
-    }))
+    };
+
+    if !artifact_topology_is_valid(&artifact) {
+        return Ok(None);
+    }
+
+    Ok(Some(artifact))
 }
 
 /// Evict oldest cache entries when total cache size exceeds the limit.

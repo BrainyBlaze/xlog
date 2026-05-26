@@ -18,7 +18,10 @@ fn body_predicates(program: &xlog_logic::Program) -> Vec<String> {
                 BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
                     Some(atom.predicate.clone())
                 }
-                BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => None,
+                BodyLiteral::Comparison(_)
+                | BodyLiteral::Epistemic(_)
+                | BodyLiteral::IsExpr(_)
+                | BodyLiteral::Univ(_) => None,
             })
         })
         .collect()

@@ -194,6 +194,7 @@ impl ListNormalizer {
                         right: self.normalize_value_term(&cmp.right, None)?,
                     }));
                 }
+                BodyLiteral::Epistemic(lit) => out.push(BodyLiteral::Epistemic(lit.clone())),
                 BodyLiteral::IsExpr(is_expr) => out.push(BodyLiteral::IsExpr(is_expr.clone())),
                 BodyLiteral::Univ(_) => {
                     return Err(list_error(

@@ -135,7 +135,7 @@ query(pred(0, 2)).
         .collect();
 
     // Analytic: L = -log((1-eps)*p1) => dL/dp1 = -1/p1; others 0.
-    let expected = vec![0.0f32, (-1.0f32 / p[1]), 0.0f32];
+    let expected = [0.0f32, (-1.0f32 / p[1]), 0.0f32];
     for i in 0..3 {
         let err = (out[i] - expected[i]).abs();
         assert!(

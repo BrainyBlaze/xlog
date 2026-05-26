@@ -24,7 +24,7 @@ impl super::CudaKernelProvider {
             )));
         }
         let ptr = *col.device_ptr();
-        if (ptr as usize) % std::mem::align_of::<i32>() != 0 {
+        if !(ptr as usize).is_multiple_of(std::mem::align_of::<i32>()) {
             return Err(XlogError::Kernel(
                 "Column device pointer is not i32-aligned".to_string(),
             ));
@@ -53,7 +53,7 @@ impl super::CudaKernelProvider {
             )));
         }
         let ptr = *col.device_ptr();
-        if (ptr as usize) % std::mem::align_of::<i64>() != 0 {
+        if !(ptr as usize).is_multiple_of(std::mem::align_of::<i64>()) {
             return Err(XlogError::Kernel(
                 "Column device pointer is not i64-aligned".to_string(),
             ));
@@ -97,7 +97,7 @@ impl super::CudaKernelProvider {
                 ))
             })?;
             let block_size = 256u32;
-            let grid_size = (selected_len_u32 + block_size - 1) / block_size;
+            let grid_size = selected_len_u32.div_ceil(block_size);
             let ids_col = ids_buf
                 .column(0)
                 .ok_or_else(|| XlogError::Kernel("selected id buffer has no column".to_string()))?;
@@ -288,7 +288,7 @@ impl super::CudaKernelProvider {
             ))
         })?;
         let block_size = 256u32;
-        let grid_size = (selected_len_u32 + block_size - 1) / block_size;
+        let grid_size = selected_len_u32.div_ceil(block_size);
         let ids_col = ids_buf
             .column(0)
             .ok_or_else(|| XlogError::Kernel("selected id buffer has no column".to_string()))?;
@@ -539,7 +539,7 @@ impl super::CudaKernelProvider {
                 XlogError::Kernel("ilp_broadcast_candidate_flag kernel not found".to_string())
             })?;
         let block_size = 256u32;
-        let grid_size = (row_count + block_size - 1) / block_size;
+        let grid_size = row_count.div_ceil(block_size);
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
@@ -578,7 +578,7 @@ impl super::CudaKernelProvider {
             .get_func(ILP_CREDIT_MODULE, ilp_credit_kernels::ILP_COO_FILL)
             .ok_or_else(|| XlogError::Kernel("ilp_coo_fill kernel not found".to_string()))?;
         let block_size = 256u32;
-        let grid_size = (count + block_size - 1) / block_size;
+        let grid_size = count.div_ceil(block_size);
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
@@ -629,7 +629,7 @@ impl super::CudaKernelProvider {
                 XlogError::Kernel("ilp_credit_forward_f32 kernel not found".to_string())
             })?;
         let block_size = 256u32;
-        let grid_size = (num_facts + block_size - 1) / block_size;
+        let grid_size = num_facts.div_ceil(block_size);
         // reinterpret the u8 byte column as f32 for the kernel
         let cand_view = RawCudaView::<f32> {
             ptr: *cand_probs.device_ptr(),
@@ -690,7 +690,7 @@ impl super::CudaKernelProvider {
                 XlogError::Kernel("ilp_credit_forward_f64 kernel not found".to_string())
             })?;
         let block_size = 256u32;
-        let grid_size = (num_facts + block_size - 1) / block_size;
+        let grid_size = num_facts.div_ceil(block_size);
         let cand_view = RawCudaView::<f64> {
             ptr: *cand_probs.device_ptr(),
             len: cudarc::driver::DeviceSlice::len(cand_probs) / 8,
@@ -753,7 +753,7 @@ impl super::CudaKernelProvider {
                 XlogError::Kernel("ilp_credit_backward_f32 kernel not found".to_string())
             })?;
         let block_size = 256u32;
-        let grid_size = (num_facts + block_size - 1) / block_size;
+        let grid_size = num_facts.div_ceil(block_size);
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
@@ -807,7 +807,7 @@ impl super::CudaKernelProvider {
                 XlogError::Kernel("ilp_credit_backward_f64 kernel not found".to_string())
             })?;
         let block_size = 256u32;
-        let grid_size = (num_facts + block_size - 1) / block_size;
+        let grid_size = num_facts.div_ceil(block_size);
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
@@ -844,7 +844,7 @@ impl super::CudaKernelProvider {
         let mut d_result = self.memory.alloc::<f32>(1)?;
         self.device
             .inner()
-            .htod_sync_copy_into(&[0.0f32], &mut d_result)
+            .memset_zeros(&mut d_result)
             .map_err(|e| XlogError::Kernel(format!("ilp_reduce_sum_f32 zero result: {}", e)))?;
 
         if n == 0 {
@@ -857,7 +857,7 @@ impl super::CudaKernelProvider {
             .get_func(ILP_MODULE, ilp_kernels::ILP_REDUCE_SUM_F32)
             .ok_or_else(|| XlogError::Kernel("ilp_reduce_sum_f32 not found".to_string()))?;
         let block_size = 256u32;
-        let grid_size = (n + block_size - 1) / block_size;
+        let grid_size = n.div_ceil(block_size);
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
@@ -887,7 +887,7 @@ impl super::CudaKernelProvider {
         let mut d_result = self.memory.alloc::<f64>(1)?;
         self.device
             .inner()
-            .htod_sync_copy_into(&[0.0f64], &mut d_result)
+            .memset_zeros(&mut d_result)
             .map_err(|e| XlogError::Kernel(format!("ilp_reduce_sum_f64 zero result: {}", e)))?;
 
         if n == 0 {
@@ -900,7 +900,7 @@ impl super::CudaKernelProvider {
             .get_func(ILP_MODULE, ilp_kernels::ILP_REDUCE_SUM_F64)
             .ok_or_else(|| XlogError::Kernel("ilp_reduce_sum_f64 not found".to_string()))?;
         let block_size = 256u32;
-        let grid_size = (n + block_size - 1) / block_size;
+        let grid_size = n.div_ceil(block_size);
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
@@ -928,6 +928,7 @@ impl super::CudaKernelProvider {
     /// - `cand_value`: actual candidate index to write into `coo_cand`
     ///
     /// This keeps COO assembly fully on device, eliminating the mask D2H transfer.
+    #[allow(clippy::too_many_arguments)]
     pub fn ilp_coo_fill_from_mask_launch(
         &self,
         mask: &TrackedCudaSlice<u8>,
@@ -949,7 +950,7 @@ impl super::CudaKernelProvider {
             .get_func(ILP_MODULE, ilp_kernels::ILP_COO_FILL_FROM_MASK)
             .ok_or_else(|| XlogError::Kernel("ilp_coo_fill_from_mask not found".to_string()))?;
         let block_size = 256u32;
-        let grid_size = (num_query + block_size - 1) / block_size;
+        let grid_size = num_query.div_ceil(block_size);
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {
             func.clone().launch(
@@ -995,11 +996,9 @@ impl super::CudaKernelProvider {
         num_facts: u32,
     ) -> Result<TrackedCudaSlice<u32>> {
         let mut d_hist = self.memory().alloc::<u32>(num_facts as usize)?;
-        // Zero the histogram
-        let zeros = vec![0u32; num_facts as usize];
         self.device()
             .inner()
-            .htod_sync_copy_into(&zeros, &mut d_hist)
+            .memset_zeros(&mut d_hist)
             .map_err(|e| XlogError::Kernel(format!("ilp_csr_histogram zero hist: {}", e)))?;
 
         if nnz == 0 {
@@ -1013,7 +1012,7 @@ impl super::CudaKernelProvider {
             .ok_or_else(|| XlogError::Kernel("ilp_csr_histogram kernel not found".to_string()))?;
 
         let block_size = 256u32;
-        let grid_size = (nnz + block_size - 1) / block_size;
+        let grid_size = nnz.div_ceil(block_size);
 
         // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
         unsafe {

@@ -14,6 +14,7 @@ confidence; DTS does not own a duplicate parity implementation.
 """
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import asdict
 
@@ -123,6 +124,7 @@ def main() -> int:
     prog, kwargs = _build_request()
 
     print("Running python-reference backend...")
+    os.environ.setdefault("XLOG_ALLOW_PYTHON_ILP_REFERENCE", "1")
     py_res = induce_exact(prog, backend="python", **kwargs)
     _summarize_result("python", py_res)
 

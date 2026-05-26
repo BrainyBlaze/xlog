@@ -1,5 +1,11 @@
 //! Python bindings for XLOG via PyO3.
 #![allow(missing_docs)] // PyO3 #[pyclass] / #[pymethods] generate pub items without docs
+#![allow(
+    clippy::large_enum_variant,
+    clippy::needless_range_loop,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
 
 use std::collections::{HashMap, HashSet};
 use std::os::raw::{c_char, c_void};
@@ -7,7 +13,7 @@ use std::sync::Arc;
 
 use pyo3::exceptions::{PyMemoryError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 
 use xlog_core::{MemoryBudget, Schema};
 use xlog_cuda::{
@@ -262,6 +268,54 @@ pub(crate) fn provider_memory_stats(
     Ok(dict.into())
 }
 
+#[allow(dead_code)]
+pub(crate) fn pack_rule_provenance(
+    py: Python<'_>,
+    entries: &[xlog_logic::RuleProvenance],
+) -> PyResult<PyObject> {
+    let list = PyList::empty(py);
+    for entry in entries {
+        let dict = PyDict::new(py);
+        dict.set_item("rule_id", &entry.rule_id)?;
+        dict.set_item("source_kind", entry.source_kind.as_str())?;
+        dict.set_item("head", &entry.head)?;
+        match &entry.source_span {
+            Some(source_span) => dict.set_item("source_span", source_span)?,
+            None => dict.set_item("source_span", py.None())?,
+        }
+        match &entry.generation_trace_hash {
+            Some(hash) => dict.set_item("generation_trace_hash", hash)?,
+            None => dict.set_item("generation_trace_hash", py.None())?,
+        }
+        dict.set_item("support_relation_ids", &entry.support_relation_ids)?;
+        dict.set_item(
+            "counterexample_relation_ids",
+            &entry.counterexample_relation_ids,
+        )?;
+        list.append(dict)?;
+    }
+    Ok(list.into())
+}
+
+#[allow(dead_code)]
+pub(crate) fn pack_query_proof_traces(
+    py: Python<'_>,
+    entries: &[xlog_logic::QueryProofTrace],
+) -> PyResult<PyObject> {
+    let list = PyList::empty(py);
+    for entry in entries {
+        let dict = PyDict::new(py);
+        dict.set_item("query_id", &entry.query_id)?;
+        dict.set_item("query", &entry.query)?;
+        dict.set_item("answer_relation", &entry.answer_relation)?;
+        dict.set_item("rule_ids", &entry.rule_ids)?;
+        dict.set_item("source_facts", &entry.source_facts)?;
+        dict.set_item("rejected_alternatives", &entry.rejected_alternatives)?;
+        list.append(dict)?;
+    }
+    Ok(list.into())
+}
+
 pub(crate) fn parse_prob_engine_override(s: &str) -> PyResult<ProbEngine> {
     let v = s.trim().to_ascii_lowercase();
     match v.as_str() {
@@ -411,6 +465,7 @@ pub(crate) struct RelationChangeCallback {
 pub(crate) struct LogicDeltaStats {
     pub input_delta_count: usize,
     pub changed_relations: usize,
+    pub changed_relation_names: Vec<String>,
     pub insert_rows: u64,
     pub delete_rows: u64,
     pub has_deletes: bool,
@@ -420,6 +475,9 @@ pub(crate) struct LogicDeltaStats {
     pub coalesced_insert_rows: u64,
     pub coalesced_delete_rows: u64,
     pub canceled_rows: u64,
+    pub equivalent_to_full_recompute: Option<bool>,
+    pub planner_telemetry: gpu_logic::DeltaPlannerTelemetry,
+    pub debug_trace: Vec<String>,
 }
 
 #[pyclass]

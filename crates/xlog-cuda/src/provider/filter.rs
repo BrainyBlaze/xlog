@@ -778,7 +778,7 @@ impl super::CudaKernelProvider {
         }
 
         if input.is_empty() {
-            return Ok(self.memory.alloc::<u8>(0)?);
+            return self.memory.alloc::<u8>(0);
         }
 
         let left_type = input
@@ -823,7 +823,7 @@ impl super::CudaKernelProvider {
         }
 
         let block_size = 256u32;
-        let num_blocks = (num_rows + block_size - 1) / block_size;
+        let num_blocks = num_rows.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (num_blocks, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -1080,7 +1080,7 @@ impl super::CudaKernelProvider {
         let col_view = Self::column_as_typed_view::<T>(col_data, n)?;
 
         let block_size = 256u32;
-        let num_blocks = (num_rows + block_size - 1) / block_size;
+        let num_blocks = num_rows.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (num_blocks, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -1167,7 +1167,7 @@ impl super::CudaKernelProvider {
             )));
         }
         let ptr = *col.device_ptr();
-        if T::BYTE_WIDTH > 1 && (ptr as usize) % T::BYTE_WIDTH != 0 {
+        if T::BYTE_WIDTH > 1 && !(ptr as usize).is_multiple_of(T::BYTE_WIDTH) {
             return Err(XlogError::Kernel(format!(
                 "Column device pointer is not {}-byte aligned",
                 T::BYTE_WIDTH,
@@ -1229,11 +1229,11 @@ impl super::CudaKernelProvider {
         let n = mask.len();
         let device = self.device.inner();
         let block_size = 256u32;
-        let num_blocks = ((n as u32) + block_size - 1) / block_size;
+        let num_blocks = (n as u32).div_ceil(block_size);
 
         // Upload mask to GPU
-        let d_mask = device
-            .htod_sync_copy(mask)
+        let d_mask = self
+            .htod_sync_copy_tracked(mask)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload mask: {}", e)))?;
 
         // Allocate output for prefix sum (using memory manager for budget enforcement)
@@ -1349,14 +1349,12 @@ impl super::CudaKernelProvider {
         prefix_sum: &[u32],
         output_count: u64,
     ) -> Result<CudaBuffer> {
-        let device = self.device.inner();
-
         // Upload mask and prefix sum to GPU
-        let d_mask = device
-            .htod_sync_copy(mask)
+        let d_mask = self
+            .htod_sync_copy_tracked(mask)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload mask: {}", e)))?;
-        let d_prefix_sum = device
-            .htod_sync_copy(prefix_sum)
+        let d_prefix_sum = self
+            .htod_sync_copy_tracked(prefix_sum)
             .map_err(|e| XlogError::Kernel(format!("Failed to upload prefix_sum: {}", e)))?;
 
         self.compact_buffer_by_device_mask(input, &d_mask, &d_prefix_sum, output_count)
@@ -1723,7 +1721,7 @@ impl super::CudaKernelProvider {
 
         let device = self.device.inner();
         let block_size = 256u32;
-        let num_blocks = (n + block_size - 1) / block_size;
+        let num_blocks = n.div_ceil(block_size);
 
         let mut d_mask_clamped = self.memory.alloc::<u8>(n as usize)?;
         let clamp_fn = device
@@ -1866,7 +1864,7 @@ impl super::CudaKernelProvider {
             })?;
 
         let block_size = 256u32;
-        let grid_size = (n + block_size - 1) / block_size;
+        let grid_size = n.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -1959,7 +1957,7 @@ impl super::CudaKernelProvider {
             })?;
 
         let block_size = 256u32;
-        let grid_size = (n + block_size - 1) / block_size;
+        let grid_size = n.div_ceil(block_size);
         let config = LaunchConfig {
             grid_dim: (grid_size, 1, 1),
             block_dim: (block_size, 1, 1),
@@ -2022,7 +2020,7 @@ impl super::CudaKernelProvider {
         let device = self.device.inner();
 
         let block_size = 256u32;
-        let num_blocks = (n + block_size - 1) / block_size;
+        let num_blocks = n.div_ceil(block_size);
 
         let mut d_mask_clamped = self.memory.alloc::<u8>(n as usize)?;
         let clamp_fn = device

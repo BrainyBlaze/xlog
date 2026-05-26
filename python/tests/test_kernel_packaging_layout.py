@@ -84,6 +84,16 @@ def test_install_pyxlog_for_python_dry_run_targets_explicit_interpreter() -> Non
     assert "maturin develop" not in result.stdout
 
 
+def test_stage_pyxlog_kernels_rebuilds_before_resolving_release_out_dir() -> None:
+    script = (ROOT / "scripts" / "stage_pyxlog_kernels.sh").read_text(encoding="utf-8")
+    main_body = script.split('cd "$repo_root"', maxsplit=1)[1]
+
+    assert main_body.index("build_pyxlog_release") < main_body.index("target_dir=")
+    assert main_body.index("build_pyxlog_release") < main_body.index(
+        'resolve_kernel_out_dir_from_dep_info "$target_dir"'
+    )
+
+
 def test_public_docs_use_explicit_pyxlog_python_install() -> None:
     docs = {
         "README.md": (ROOT / "README.md").read_text(encoding="utf-8"),
@@ -189,6 +199,37 @@ def test_pyxlog_kernel_path_helper_prefers_packaged_kernels() -> None:
             configured = module.configure_kernel_search_path(package_root)
             assert configured == str(override_dir)
             assert os.environ["XLOG_CUBIN_DIR"] == str(override_dir)
+        finally:
+            if original is None:
+                os.environ.pop("XLOG_CUBIN_DIR", None)
+            else:
+                os.environ["XLOG_CUBIN_DIR"] = original
+
+
+def test_pyxlog_kernel_path_helper_uses_symlinked_package_layout() -> None:
+    helper_path = PYXLOG_PACKAGE_ROOT / "_kernel_paths.py"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        package_root = Path(tmp) / "pyxlog"
+        kernels_dir = package_root / "kernels"
+        kernels_dir.mkdir(parents=True)
+        (kernels_dir / "ilp_exact.portable.ptx").write_text("ptx")
+        symlinked_helper = package_root / "_kernel_paths.py"
+        symlinked_helper.symlink_to(helper_path)
+
+        spec = importlib.util.spec_from_file_location(
+            "pyxlog_kernel_paths_symlink_test", symlinked_helper
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        original = os.environ.get("XLOG_CUBIN_DIR")
+        try:
+            os.environ.pop("XLOG_CUBIN_DIR", None)
+            configured = module.configure_kernel_search_path()
+            assert configured == str(kernels_dir)
+            assert os.environ["XLOG_CUBIN_DIR"] == str(kernels_dir)
         finally:
             if original is None:
                 os.environ.pop("XLOG_CUBIN_DIR", None)

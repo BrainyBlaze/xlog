@@ -24,8 +24,8 @@
 //!    produces non-empty rows freezes the schema.
 //! 3. Loop up to `max_iterations` times:
 //!    a. For each rule, run [`super::evaluate_rule`] against
-//!       `base_relations ∪ {target → derived}`. Union new rows
-//!       into a per-iteration scratch buffer.
+//!    `base_relations ∪ {target → derived}`. Union new rows
+//!    into a per-iteration scratch buffer.
 //!    b. Merge scratch into `derived`, sort+dedupe.
 //!    c. If `derived` is unchanged this iteration, return.
 //!    d. Otherwise increment the iteration counter and continue.

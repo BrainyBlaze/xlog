@@ -1,0 +1,5 @@
+nn(ablation_net, [X], Y, [account_drift, credential_exposure]) :: neural_root_signal(X, Y).
+
+neural_ranked_root(X, Y) :- neural_root_signal(X, Y).
+
+?- neural_ranked_root(X, Y).

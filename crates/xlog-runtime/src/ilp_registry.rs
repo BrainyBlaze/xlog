@@ -18,6 +18,7 @@ pub struct IlpRegistry {
 }
 
 /// A registered ILP mask — Dense (imported via DLPack) or Sparse (candidate entries only).
+#[allow(clippy::large_enum_variant)]
 pub enum IlpMask {
     /// Dense mask with hard and soft weight buffers.
     Dense {
@@ -132,8 +133,10 @@ impl IlpRegistry {
             )));
         }
 
-        // Deterministic top-k: descending soft value, then ascending index for ties
+        // Deterministic top-k over positive-probability candidates: descending
+        // soft value, then ascending index for ties.
         let mut ranked: Vec<(usize, f32)> = active_soft.iter().copied().enumerate().collect();
+        ranked.retain(|(_, soft)| *soft > 0.0);
         ranked.sort_by(|a, b| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
@@ -200,5 +203,11 @@ impl IlpRegistry {
         self.masks
             .values()
             .any(|mask| matches!(mask, IlpMask::SparseDevice { .. }))
+    }
+}
+
+impl Default for IlpRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }

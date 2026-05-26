@@ -435,3 +435,127 @@ extern "C" __global__ void ilp_exact_score_chain_smem_u32(
         neg_covered[slot] = neg_scratch[0];
     }
 }
+
+#define ILP_EXACT_TOPK_FIELDS 9u
+
+struct IlpExactRankedCandidate {
+    uint32_t valid;
+    uint32_t left;
+    uint32_t right;
+    uint32_t pos;
+    uint32_t neg;
+};
+
+__device__ inline uint32_t ilp_exact_key_before(
+    uint32_t a_pos,
+    uint32_t a_neg,
+    uint32_t a_left,
+    uint32_t a_right,
+    uint32_t b_pos,
+    uint32_t b_neg,
+    uint32_t b_left,
+    uint32_t b_right
+) {
+    if (a_pos != b_pos) return a_pos > b_pos;
+    if (a_neg != b_neg) return a_neg < b_neg;
+    if (a_left != b_left) return a_left < b_left;
+    return a_right < b_right;
+}
+
+__device__ inline IlpExactRankedCandidate ilp_exact_find_ranked_candidate(
+    const uint32_t* pos_covered,
+    const uint32_t* neg_covered,
+    uint32_t C,
+    uint32_t topology,
+    uint32_t target_rank
+) {
+    IlpExactRankedCandidate previous;
+    previous.valid = 0u;
+    previous.left = 0u;
+    previous.right = 0u;
+    previous.pos = 0u;
+    previous.neg = 0u;
+
+    IlpExactRankedCandidate best;
+    best.valid = 0u;
+    best.left = 0u;
+    best.right = 0u;
+    best.pos = 0u;
+    best.neg = 0u;
+
+    for (uint32_t rank = 0u; rank <= target_rank; rank++) {
+        best.valid = 0u;
+        for (uint32_t left = 0u; left < C; left++) {
+            for (uint32_t right = 0u; right < C; right++) {
+                uint32_t slot = topology * (C * C) + left * C + right;
+                uint32_t pos = pos_covered[slot];
+                uint32_t neg = neg_covered[slot];
+                if (pos == 0u) continue;
+                if (previous.valid &&
+                    !ilp_exact_key_before(
+                        previous.pos, previous.neg, previous.left, previous.right,
+                        pos, neg, left, right)) {
+                    continue;
+                }
+                if (!best.valid ||
+                    ilp_exact_key_before(
+                        pos, neg, left, right,
+                        best.pos, best.neg, best.left, best.right)) {
+                    best.valid = 1u;
+                    best.left = left;
+                    best.right = right;
+                    best.pos = pos;
+                    best.neg = neg;
+                }
+            }
+        }
+        if (!best.valid) return best;
+        previous = best;
+    }
+
+    return best;
+}
+
+extern "C" __global__ void ilp_exact_select_topk(
+    const uint32_t* pos_covered,
+    const uint32_t* neg_covered,
+    uint32_t C,
+    uint32_t k_per_topology,
+    uint32_t* selected
+) {
+    uint32_t topology = blockIdx.x;
+    if (topology >= 4u) return;
+
+    for (uint32_t rank = 0u; rank < k_per_topology; rank++) {
+        uint32_t out = (topology * k_per_topology + rank) * ILP_EXACT_TOPK_FIELDS;
+        for (uint32_t field = 0u; field < ILP_EXACT_TOPK_FIELDS; field++) {
+            selected[out + field] = 0u;
+        }
+
+        IlpExactRankedCandidate current =
+            ilp_exact_find_ranked_candidate(pos_covered, neg_covered, C, topology, rank);
+        if (!current.valid) continue;
+
+        IlpExactRankedCandidate next =
+            ilp_exact_find_ranked_candidate(pos_covered, neg_covered, C, topology, rank + 1u);
+        uint32_t tie_count = 0u;
+        for (uint32_t left = 0u; left < C; left++) {
+            for (uint32_t right = 0u; right < C; right++) {
+                uint32_t slot = topology * (C * C) + left * C + right;
+                if (pos_covered[slot] == current.pos && neg_covered[slot] == current.neg) {
+                    tie_count++;
+                }
+            }
+        }
+
+        selected[out + 0u] = topology;
+        selected[out + 1u] = current.left;
+        selected[out + 2u] = current.right;
+        selected[out + 3u] = current.pos;
+        selected[out + 4u] = current.neg;
+        selected[out + 5u] = rank;
+        selected[out + 6u] = next.valid ? next.pos : 0u;
+        selected[out + 7u] = next.valid ? next.neg : 0u;
+        selected[out + 8u] = tie_count;
+    }
+}

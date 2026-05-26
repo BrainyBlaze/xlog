@@ -98,8 +98,8 @@ fn test_prefix_sum_all_ones_large() {
     assert_eq!(count, n as u32);
 
     // Exclusive prefix sum of all 1s should be [0, 1, 2, 3, ...]
-    for i in 0..n {
-        assert_eq!(prefix_sum[i], i as u32, "prefix_sum[{}] wrong", i);
+    for (i, value) in prefix_sum.iter().enumerate().take(n) {
+        assert_eq!(*value, i as u32, "prefix_sum[{}] wrong", i);
     }
 }
 
@@ -160,7 +160,7 @@ fn test_prefix_sum_exact_block_boundary() {
     let (prefix_sum, count) = result.unwrap();
     assert_eq!(count, n as u32);
 
-    for i in 0..n {
-        assert_eq!(prefix_sum[i], i as u32, "prefix_sum[{}] wrong", i);
+    for (i, value) in prefix_sum.iter().enumerate().take(n) {
+        assert_eq!(*value, i as u32, "prefix_sum[{}] wrong", i);
     }
 }
