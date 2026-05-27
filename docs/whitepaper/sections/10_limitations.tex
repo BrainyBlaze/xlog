@@ -8,15 +8,15 @@
 
 \textbf{Python batch-query helpers are typed but not float-complete.} The Python helper APIs---\texttt{batch\_fact\_membership}, \texttt{batch\_fact\_membership\_device}, \texttt{batch\_tagged\_credit}, and \texttt{batch\_tagged\_credit\_device}---now perform schema-aware uploads for \texttt{u32}, \texttt{u64}, \texttt{i32}, \texttt{i64}, and \texttt{bool} columns, so wide integer IDs no longer truncate silently. However, these helper paths still reject floating-point batch uploads (\texttt{f32}/\texttt{f64}) at the binding layer. The underlying engine and DLPack relation-import paths remain typed; this is a convenience-API gap rather than a core execution limit.
 
-\textbf{Differentiable ILP is beta.} The dILP subsystem---structure learning via gradient-based rule search---shipped in v0.4.0 and received significant reliability and performance work from v0.5.0 through v0.8.6. It remains beta: the search space is restricted to definite programs, convergence is sensitive to learning-rate schedules, and the API surface may change in minor releases.
+\textbf{Differentiable ILP is beta.} The dILP subsystem---structure learning via gradient-based rule search---shipped in v0.4.0 and received significant reliability and performance work from v0.5.0 through v0.9.0-rc. It remains beta: the search space is restricted to definite programs, convergence is sensitive to learning-rate schedules, and the API surface may change in minor releases.
+
+\textbf{Epistemic and solver maturity (release candidate).} The epistemic runtime (\Cref{sec:epistemic}) executes accepted programs GPU-natively, but the v0.9.0 release candidate is not yet a stable release: the MaxSAT/portfolio solver services and the end-to-end probabilistic--epistemic evidence path are only partially implemented, and nested modal operators, epistemic integrity constraints, and rules coupling multiple epistemic predicates across components are rejected with typed diagnostics rather than supported. The accepted surface is deliberately minimal (\Cref{sec:epistemic}).
 
 \textbf{No formal head-to-head benchmarks.} xlog's probabilistic inference pipeline occupies similar territory to DeepProbLog, but no controlled comparison on identical programs and datasets exists. The baseline experiments in \Cref{sec:eval} use different dataset sizes and evaluation protocols. Claims of speedup relative to CPU-based probabilistic logic systems remain informal until such benchmarks are published.
 
 \subsection{Future Work}
 
 The following directions are planned but \textbf{not yet implemented} in any released version of xlog.
-
-\textbf{Epistemic logic programming (xlog-elp).} The EIR (Epistemic Intermediate Representation) slot is reserved in the IR stack (\Cref{sec:arch}), but no runtime code has been written. The planned design supports world views under FAEEL (Founded Autoepistemic Equilibrium Logic) semantics with modal operators K (known in all belief sets) and M (possible in some belief set), evaluated via a Generate--Propagate--Test algorithm on GPU. This is targeted for v0.9.0 (\texttt{ROADMAP.md}), the epistemic/solver-semantics release train, which builds on the runtime substrate completed through v0.8.6.
 
 \textbf{Out-of-core execution.} For programs whose materialized relations exceed GPU memory, a streaming execution mode would partition relations across host and device, paging tiles through GPU memory in fixpoint-iteration order. This would remove the single-GPU-memory ceiling described above, at the cost of added host-device transfer overhead. The v0.8.6 persistent hash-index manager reduces repeated-session build cost but does not spill to host; out-of-core execution is targeted for v0.10.0 alongside multi-GPU partitioning (\texttt{ROADMAP.md}).
 

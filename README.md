@@ -35,7 +35,7 @@ XLOG caches compiled circuits across training iterations, yielding a measured **
 speedup** (95% CI `[2.29, 3.18]`) on the MNIST addition benchmark, and exposes GPU-resident
 results via DLPack and Arrow for zero-copy interop with PyTorch, JAX, and cuDF.
 
-See [`docs/whitepaper/main.pdf`](docs/whitepaper/main.pdf) for the v0.5.0 technical whitepaper.
+See [`docs/whitepaper/main.pdf`](docs/whitepaper/main.pdf) for the v0.9.0-rc technical whitepaper.
 The whitepaper is a stable research reference; the installation, packaging, and release contract
 below tracks the current public release process on `main`.
 

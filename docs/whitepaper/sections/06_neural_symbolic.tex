@@ -137,12 +137,12 @@ The Python API provides two methods on \texttt{CompiledProgram}:
   \item \textbf{\texttt{forward\_embedding(name, ids)}} looks up embedding vectors by integer IDs, returning a batched \texttt{torch.Tensor} with shape $[\text{len(ids)}, \text{dim}]$. For trainable \texttt{nn.Embedding} modules, the returned tensor carries autograd history, so gradients flow through the embedding lookup. For frozen tensors, the result has \texttt{requires\_grad=False}. Internally, the method determines the device from the embedding weight tensor and creates the ID tensor on the same device to avoid CPU/CUDA mismatches.
 \end{itemize}
 
-This API enables entity representation learning within the logic framework. For example, a knowledge graph completion task can attach learned embeddings to entity symbols, combine them with relational predicates in xlog rules, and jointly train the embeddings alongside neural perception networks. The embeddings are the only gradient-carrying embedding API as of v0.8.6; future releases may integrate embedding lookups directly into the circuit evaluation path.
+This API enables entity representation learning within the logic framework. For example, a knowledge graph completion task can attach learned embeddings to entity symbols, combine them with relational predicates in xlog rules, and jointly train the embeddings alongside neural perception networks. The embeddings are the only gradient-carrying embedding API as of v0.9.0-rc; future releases may integrate embedding lookups directly into the circuit evaluation path.
 
 \subsection{Differentiable ILP (Beta)}
 
 \begin{quote}\small
-\textbf{Note:} The differentiable ILP subsystem is in \textbf{beta} as of v0.8.6. The API surface, promotion pipeline, and artifact format may change in future releases. The schema version is \texttt{beta-v2}.
+\textbf{Note:} The differentiable ILP subsystem is in \textbf{beta} as of v0.9.0-rc. The API surface, promotion pipeline, and artifact format may change in future releases. The schema version is \texttt{beta-v2}.
 \end{quote}
 
 xlog includes a differentiable inductive logic programming (dILP) trainer~\cite{dilp} that learns first-order rules from examples. Unlike the neural predicate path (which trains network parameters given fixed rules), dILP searches the space of candidate rules, using gradient-based optimization to assign soft probabilities to candidates and hard selection to commit the best rule.

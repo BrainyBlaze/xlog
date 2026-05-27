@@ -1,7 +1,7 @@
 # XLOG Development Roadmap
 
-Last updated: May 21, 2026
-Current tagged release: v0.8.6. v0.6.0 shipped the stream-safe runtime
+Last updated: May 27, 2026
+Current tagged release: v0.8.6; v0.9.0-rc is the current epistemic/solver release candidate. v0.6.0 shipped the stream-safe runtime
 and recorded launch discipline. v0.6.1 shipped recorded CSM hash-join
 dispatch and explicit CSM cert-mode labeling. v0.6.2 shipped the first
 productized WCOJ slice: hypergraph planner / oracle foundations plus
