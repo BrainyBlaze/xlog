@@ -3244,6 +3244,8 @@ enum TupleSourceLaunch<'a> {
 
 const TUPLE_KEY_MATCH_MODE_GROUND: u8 = 0;
 const TUPLE_KEY_MATCH_MODE_BOUND_OUTPUT: u8 = 1;
+/// Anonymous wildcard tuple-key position: matches any stable-model value.
+const TUPLE_KEY_MATCH_MODE_WILDCARD: u8 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TupleKeyExpectation {
@@ -3963,6 +3965,14 @@ impl Executor {
                 .key_terms
                 .iter()
                 .any(|term| matches!(term, EirTerm::Variable(_)));
+            // Anonymous wildcards are value-level matches handled only by the
+            // general arm; route any binding carrying a variable or an anonymous
+            // term there. The specialized arity arms remain a fast path for
+            // all-ground tuple keys.
+            let has_value_level_keys = binding
+                .key_terms
+                .iter()
+                .any(|term| matches!(term, EirTerm::Variable(_) | EirTerm::Anonymous));
             match binding.key_columns.as_slice() {
                 [] => tuple_sources.push(TupleSourceLaunch::ArityZero {
                     literal_index: binding.literal_index as u32,
@@ -3970,7 +3980,7 @@ impl Executor {
                     negated: binding.negated as u8,
                     row_count: source_relation.num_rows_device(),
                 }),
-                &[key_col] if !has_bound_value_keys => {
+                &[key_col] if !has_value_level_keys => {
                     let key_col0 = source_relation.column(key_col).ok_or_else(|| {
                         XlogError::UnsupportedEpistemicConstruct {
                             construct: "epistemic GPU stable-model tuple membership".to_string(),
@@ -4013,7 +4023,7 @@ impl Executor {
                         expected_key_col0_type_code: key_col0_expectation.type_code,
                     });
                 }
-                &[key_col0, key_col1] if !has_bound_value_keys => {
+                &[key_col0, key_col1] if !has_value_level_keys => {
                     let key_col0_ref = source_relation.column(key_col0).ok_or_else(|| {
                         XlogError::UnsupportedEpistemicConstruct {
                             construct: "epistemic GPU stable-model tuple membership".to_string(),
@@ -4085,7 +4095,7 @@ impl Executor {
                         expected_key_col1_type_code: key_col1_expectation.type_code,
                     });
                 }
-                &[key_col0, key_col1, key_col2] if !has_bound_value_keys => {
+                &[key_col0, key_col1, key_col2] if !has_value_level_keys => {
                     let key_col0_ref = source_relation.column(key_col0).ok_or_else(|| {
                         XlogError::UnsupportedEpistemicConstruct {
                             construct: "epistemic GPU stable-model tuple membership".to_string(),
@@ -4294,6 +4304,17 @@ impl Executor {
                                 tuple_key_match_modes_host.push(TUPLE_KEY_MATCH_MODE_BOUND_OUTPUT);
                                 bound_value_col_ptrs_host.push(*bound_col.device_ptr());
                                 bound_value_col_widths_host.push(bound_col_width as u32);
+                            }
+                            EirTerm::Anonymous => {
+                                // Wildcard: no equality requirement on this
+                                // tuple-key column. The device still reads the
+                                // column pointer/width, but the kernel matches
+                                // every stable-model value in this position.
+                                expected_key_bits_host.push(0);
+                                expected_key_type_codes_host.push(key_col_type.to_code());
+                                tuple_key_match_modes_host.push(TUPLE_KEY_MATCH_MODE_WILDCARD);
+                                bound_value_col_ptrs_host.push(0);
+                                bound_value_col_widths_host.push(0);
                             }
                             term => {
                                 let expectation =
@@ -5360,6 +5381,15 @@ impl Executor {
                             bound_value_col_ptrs_host.push(*bound_col.device_ptr());
                             bound_value_col_widths_host.push(bound_col_width as u32);
                         }
+                        EirTerm::Anonymous => {
+                            // Wildcard: this tuple-key column imposes no
+                            // equality requirement when filtering output rows.
+                            expected_key_bits_host.push(0);
+                            expected_key_type_codes_host.push(key_col_type.to_code());
+                            tuple_key_match_modes_host.push(TUPLE_KEY_MATCH_MODE_WILDCARD);
+                            bound_value_col_ptrs_host.push(0);
+                            bound_value_col_widths_host.push(0);
+                        }
                         term => {
                             let expectation = TupleKeyExpectation::from_term(term, key_col_type)?;
                             expected_key_bits_host.push(expectation.bits);
@@ -5530,6 +5560,55 @@ impl Executor {
                 })?;
         }
 
+        // Global-gate literal mask: a literal that does not bind any reduced
+        // output column (pure-ground, pure-anonymous, or arity-0) is checked by
+        // the global membership gate rather than a per-row filter. For those
+        // literals the body literal must actually hold in the accepted
+        // candidate's world view; per-row (bound-variable) literals are already
+        // enforced by the row-filter loop above. The accepted candidate's
+        // assumption bit already folds in `know`/`possible` modality and
+        // negation (the validation kernel guarantees assumption == observed for
+        // accepted candidates), so the gate requires the assumption bit to be
+        // set for every global-gate literal.
+        let mut gate_literal_required_host = vec![0u8; literal_count.max(1)];
+        for binding in &gpu_plan.tuple_membership_bindings {
+            if !binding.bound_output_columns.iter().any(Option::is_some)
+                && binding.literal_index < literal_count
+            {
+                gate_literal_required_host[binding.literal_index] = 1u8;
+            }
+        }
+        // A rule mixing a per-row (bound-variable) modal literal with a global
+        // gate (pure-ground/anonymous/arity-0) literal cannot be soundly
+        // materialized by the current row-map kernel: output rows below the
+        // per-reduction model count take the per-row path, which does not
+        // re-check the global-gate literals. Fail closed with a typed
+        // diagnostic rather than emit rows that ignore the global gate.
+        let has_row_filter = !row_filter_bindings.is_empty();
+        let has_global_gate_literal = gate_literal_required_host.iter().any(|&flag| flag != 0u8);
+        if has_row_filter && has_global_gate_literal {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU mixed per-row and global modal membership".to_string(),
+                context: "a rule combines a bound-variable modal literal with a ground, \
+                          anonymous, or nullary modal literal; mixed per-row and global tuple \
+                          membership is not yet supported in one rule"
+                    .to_string(),
+            });
+        }
+        let mut gate_literal_required = memory.alloc::<u8>(literal_count.max(1))?;
+        self.provider
+            .htod_launch_metadata_sync_copy_into(
+                &gate_literal_required_host,
+                &mut gate_literal_required,
+            )
+            .map_err(|e| {
+                XlogError::execution_ctx(
+                    "epistemic GPU final tuple gate metadata",
+                    "upload global-gate literal mask",
+                    &e,
+                )
+            })?;
+
         let row_map_func = self
             .provider
             .device()
@@ -5602,6 +5681,8 @@ impl Executor {
                     row_filter_count.as_kernel_param(),
                     (&row_map).as_kernel_param(),
                     (&final_row_count).as_kernel_param(),
+                    (&workspace.candidate_assumptions).as_kernel_param(),
+                    (&gate_literal_required).as_kernel_param(),
                 ];
                 row_map_func.clone().launch(
                     LaunchConfig::for_num_elems(output_row_capacity_u32.max(1)),

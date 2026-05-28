@@ -5408,3 +5408,748 @@ fn kclique_order_without_edge_permutation() -> KCliqueVariableOrder {
         StreamGroupId(0),
     )
 }
+
+// =====================================================================
+// EGB-02: tuple-key / bound-value modal membership KPI pilots.
+//
+// Each pilot parses a real epistemic program, compiles it through the
+// production lowering boundary, and executes it on the GPU device path.
+// They assert (a) the exact founded result rows, (b) device-backed
+// tuple-key column reads, and (c) zero forbidden CPU fallback counters.
+// =====================================================================
+
+#[cfg(feature = "epistemic-logic-tests")]
+fn egb02_run_unary_result(
+    fixture: &RuntimeFixture,
+    source: &str,
+    unary_inputs: &[(&str, &[u32])],
+    binary_inputs: &[(&str, &[(u32, u32)])],
+    ternary_inputs: &[(&str, &[(u32, u32, u32)])],
+    expected_key_column_reads: u32,
+) -> Vec<u32> {
+    let program = parse_program(source).expect("parse EGB-02 pilot program");
+    let executable =
+        compile_epistemic_gpu_execution(&program).expect("compile EGB-02 pilot plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    for &(name, rows) in unary_inputs {
+        executor.put_relation(name, upload_unary_u32(&fixture.memory, rows, "x"));
+    }
+    for &(name, rows) in binary_inputs {
+        executor.put_relation(name, upload_binary_u32(&fixture.memory, rows, "x", "y"));
+    }
+    for &(name, rows) in ternary_inputs {
+        executor.put_relation(
+            name,
+            upload_ternary_u32(&fixture.memory, rows, "x", "y", "z"),
+        );
+    }
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 2,
+                max_models_per_reduction: 4,
+            },
+        )
+        .expect("EGB-02 pilot should execute through GPU runtime path");
+
+    // K3/K4 lock evidence: device-backed tuple-key reads, zero CPU fallback.
+    assert_eq!(
+        result.model_membership.tuple_source_key_column_device_reads,
+        expected_key_column_reads,
+        "tuple-key column reads must be device-backed for {source:?}"
+    );
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    result
+        .require_runtime_dispatch_certification()
+        .expect("EGB-02 pilot runtime evidence must remain certified");
+
+    let mut rows = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download EGB-02 pilot output column 0");
+    rows.sort_unstable();
+    rows
+}
+
+/// K1: ground arity-1 tuple key gates candidates on a present ground tuple.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_ground_arity_one_tuple_key_through_gpu_membership() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // know flag(7) holds (flag has row 7), so every node row is founded.
+    let present = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred flag(u32).
+        pred gated(u32).
+
+        gated(X) :- node(X), know flag(7).
+        "#,
+        &[("node", &[1, 2, 3][..]), ("flag", &[7][..])],
+        &[],
+        &[],
+        1,
+    );
+    assert_eq!(present, vec![1, 2, 3]);
+
+    // know flag(7) fails (flag lacks row 7), so no node row is founded.
+    let absent = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred flag(u32).
+        pred gated(u32).
+
+        gated(X) :- node(X), know flag(7).
+        "#,
+        &[("node", &[1, 2, 3][..]), ("flag", &[9][..])],
+        &[],
+        &[],
+        1,
+    );
+    assert!(absent.is_empty(), "absent ground key must found no rows");
+}
+
+/// K1: ground arity-2 tuple key matches a specific stable-model edge tuple.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_ground_arity_two_tuple_key_through_gpu_membership() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let present = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred edge(u32, u32).
+        pred gated(u32).
+
+        gated(X) :- node(X), know edge(1, 10).
+        "#,
+        &[("node", &[1, 2, 3][..])],
+        &[("edge", &[(1, 10), (2, 20)][..])],
+        &[],
+        2,
+    );
+    assert_eq!(present, vec![1, 2, 3]);
+
+    let absent = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred edge(u32, u32).
+        pred gated(u32).
+
+        gated(X) :- node(X), know edge(1, 99).
+        "#,
+        &[("node", &[1, 2, 3][..])],
+        &[("edge", &[(1, 10), (2, 20)][..])],
+        &[],
+        2,
+    );
+    assert!(absent.is_empty(), "absent ground edge must found no rows");
+}
+
+/// K1: ground arity-3 tuple key matches a specific stable-model triple.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_ground_arity_three_tuple_key_through_gpu_membership() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let present = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred triple(u32, u32, u32).
+        pred gated(u32).
+
+        gated(X) :- node(X), know triple(1, 10, 100).
+        "#,
+        &[("node", &[5, 6][..])],
+        &[],
+        &[("triple", &[(1, 10, 100), (2, 20, 200)][..])],
+        3,
+    );
+    assert_eq!(present, vec![5, 6]);
+
+    let absent = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred triple(u32, u32, u32).
+        pred gated(u32).
+
+        gated(X) :- node(X), know triple(1, 10, 999).
+        "#,
+        &[("node", &[5, 6][..])],
+        &[],
+        &[("triple", &[(1, 10, 100), (2, 20, 200)][..])],
+        3,
+    );
+    assert!(absent.is_empty(), "absent ground triple must found no rows");
+}
+
+/// K2: a single bound variable yields exactly the founded rows, deterministic.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_single_bound_variable_tuple_key_through_gpu_membership() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let source = r#"
+        pred node(u32).
+        pred child(u32).
+        pred known_child(u32).
+
+        known_child(X) :- node(X), know child(X).
+        "#;
+    let inputs_unary = &[("node", &[1, 2, 3, 4][..]), ("child", &[2, 4][..])];
+    let first = egb02_run_unary_result(&fixture, source, inputs_unary, &[], &[], 1);
+    assert_eq!(first, vec![2, 4]);
+    // Determinism across reruns (K2).
+    let second = egb02_run_unary_result(&fixture, source, inputs_unary, &[], &[], 1);
+    assert_eq!(first, second);
+}
+
+/// K2: multiple bound variables type-correct on both columns and match by value.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_multiple_bound_variables_tuple_key_through_gpu_membership() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // out(X,Y) :- pair(X,Y), know edge(X,Y). Only pairs that are also edges
+    // are founded.
+    let program = parse_program(
+        r#"
+        pred pair(u32, u32).
+        pred edge(u32, u32).
+        pred out(u32, u32).
+
+        out(X, Y) :- pair(X, Y), know edge(X, Y).
+        "#,
+    )
+    .expect("parse multi-bound-variable pilot program");
+    let executable =
+        compile_epistemic_gpu_execution(&program).expect("compile multi-bound pilot plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation(
+        "pair",
+        upload_binary_u32(&fixture.memory, &[(1, 10), (2, 20), (3, 30)], "x", "y"),
+    );
+    executor.put_relation(
+        "edge",
+        upload_binary_u32(&fixture.memory, &[(1, 10), (3, 30), (4, 40)], "x", "y"),
+    );
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 2,
+                max_models_per_reduction: 4,
+            },
+        )
+        .expect("multi-bound pilot should execute through GPU runtime path");
+    assert_eq!(
+        result.model_membership.tuple_source_key_column_device_reads,
+        2,
+        "two bound columns must read two device key columns"
+    );
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    result
+        .require_runtime_dispatch_certification()
+        .expect("multi-bound pilot runtime evidence must remain certified");
+    let mut xs = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download multi-bound X column");
+    let mut ys = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 1)
+        .expect("download multi-bound Y column");
+    xs.sort_unstable();
+    ys.sort_unstable();
+    assert_eq!(xs, vec![1, 3]);
+    assert_eq!(ys, vec![10, 30]);
+}
+
+/// K2: a repeated variable enforces value equality across both key columns.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_repeated_variable_tuple_key_enforces_equality_through_gpu_membership() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // X is bound by node(X). know loop(X, X) only matches stable-model tuples
+    // where both columns equal X, so loop rows like (3, 7) must NOT found X=3.
+    let founded = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred loop(u32, u32).
+        pred reflexive(u32).
+
+        reflexive(X) :- node(X), know loop(X, X).
+        "#,
+        &[("node", &[1, 2, 3, 4][..])],
+        &[("loop", &[(1, 1), (2, 5), (4, 4), (3, 7)][..])],
+        &[],
+        2,
+    );
+    // Only loop(1,1) and loop(4,4) satisfy the repeated-variable equality.
+    assert_eq!(founded, vec![1, 4]);
+}
+
+/// K1/K3: an anonymous position acts as a wildcard (no equality requirement).
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_anonymous_position_tuple_key_is_wildcard_through_gpu_membership() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // out(X) :- node(X), know edge(X, _). X is founded iff edge has ANY row
+    // whose first column equals X, regardless of the second column.
+    let founded = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred edge(u32, u32).
+        pred reachable(u32).
+
+        reachable(X) :- node(X), know edge(X, _).
+        "#,
+        &[("node", &[1, 2, 3, 4][..])],
+        &[("edge", &[(1, 10), (3, 30), (3, 99)][..])],
+        &[],
+        2,
+    );
+    // X=1 (edge 1,10) and X=3 (edge 3,30 / 3,99) match; X=2,4 have no edge.
+    assert_eq!(founded, vec![1, 3]);
+}
+
+/// K1/K3: a pure-anonymous modal atom (no bound variable) is a global gate that
+/// holds iff the tuple source is non-empty.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_pure_anonymous_global_gate_through_gpu_membership() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // know flag(_): holds iff flag has any row.
+    let nonempty = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred flag(u32).
+        pred out(u32).
+
+        out(X) :- node(X), know flag(_).
+        "#,
+        &[("node", &[1, 2, 3][..]), ("flag", &[9][..])],
+        &[],
+        &[],
+        1,
+    );
+    assert_eq!(nonempty, vec![1, 2, 3], "anonymous gate holds when non-empty");
+
+    let empty = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred flag(u32).
+        pred out(u32).
+
+        out(X) :- node(X), know flag(_).
+        "#,
+        &[("node", &[1, 2, 3][..]), ("flag", &[][..])],
+        &[],
+        &[],
+        1,
+    );
+    assert!(empty.is_empty(), "anonymous gate fails when empty");
+
+    // know edge(_, _): arity-2 pure-anonymous global gate.
+    let edge_nonempty = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred edge(u32, u32).
+        pred out(u32).
+
+        out(X) :- node(X), know edge(_, _).
+        "#,
+        &[("node", &[5, 6][..])],
+        &[("edge", &[(1, 10)][..])],
+        &[],
+        2,
+    );
+    assert_eq!(edge_nonempty, vec![5, 6]);
+}
+
+/// K1: an arity-0 (nullary) modal atom is a global gate on a fact relation.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_arity_zero_tuple_key_through_gpu_membership() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // know ready(): holds iff ready has a (zero-arity) fact row.
+    let run = |ready_rows: u32| -> Vec<u32> {
+        let program = parse_program(
+            r#"
+            pred node(u32).
+            pred ready().
+            pred out(u32).
+
+            out(X) :- node(X), know ready().
+            "#,
+        )
+        .expect("parse arity-zero modal program");
+        let executable =
+            compile_epistemic_gpu_execution(&program).expect("compile arity-zero modal plan");
+        let mut executor = Executor::new(Arc::clone(&fixture.provider));
+        for (name, rel) in &executable.relation_ids {
+            executor.register_relation(*rel, name);
+        }
+        executor.put_relation("node", upload_unary_u32(&fixture.memory, &[1, 2, 3], "x"));
+        executor.put_relation("ready", upload_zero_arity(&fixture.memory, ready_rows));
+        let result = executor
+            .execute_epistemic_gpu_execution(
+                &executable,
+                EpistemicGpuWorkspaceCapacities {
+                    max_candidates: 8,
+                    max_worlds: 2,
+                    max_models_per_reduction: 4,
+                },
+            )
+            .expect("arity-zero modal pilot should execute through GPU runtime path");
+        assert_eq!(
+            result.model_membership.tuple_source_key_column_device_reads,
+            0,
+            "arity-zero tuple sources read no key columns"
+        );
+        result
+            .require_runtime_dispatch_certification()
+            .expect("arity-zero pilot runtime evidence must remain certified");
+        let mut rows = fixture
+            .provider
+            .download_column::<u32>(&result.final_output, 0)
+            .expect("download arity-zero output column 0");
+        rows.sort_unstable();
+        rows
+    };
+    assert_eq!(run(1), vec![1, 2, 3], "nullary gate holds when fact present");
+    assert!(run(0).is_empty(), "nullary gate fails when fact absent");
+}
+
+/// K3: a rule mixing a per-row (bound-variable) modal literal with a global
+/// gate (ground) modal literal fails closed with a typed diagnostic rather than
+/// emitting rows that ignore the global gate.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_mixed_per_row_and_global_modal_is_fail_closed() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred child(u32).
+        pred flag(u32).
+        pred out(u32).
+
+        out(X) :- node(X), know child(X), know flag(7).
+        "#,
+    )
+    .expect("parse mixed per-row + global modal program");
+    let executable = match compile_epistemic_gpu_execution(&program) {
+        Ok(executable) => executable,
+        Err(xlog_core::XlogError::UnsupportedEpistemicConstruct { .. })
+        | Err(xlog_core::XlogError::UnsafeVariable(_))
+        | Err(xlog_core::XlogError::Type(_))
+        | Err(xlog_core::XlogError::Compilation(_)) => return,
+        Err(other) => panic!("unexpected compile error: {other:?}"),
+    };
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("node", upload_unary_u32(&fixture.memory, &[1, 2, 3], "x"));
+    executor.put_relation("child", upload_unary_u32(&fixture.memory, &[1], "x"));
+    executor.put_relation("flag", upload_unary_u32(&fixture.memory, &[9], "x"));
+    let err = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 2,
+                max_models_per_reduction: 4,
+            },
+        )
+        .err()
+        .expect("mixed per-row + global modal membership must fail closed");
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, .. } => {
+            assert!(
+                construct.contains("mixed per-row and global modal membership"),
+                "unexpected construct: {construct}"
+            );
+        }
+        other => panic!("expected mixed-membership diagnostic, got {other:?}"),
+    }
+}
+
+/// K2/K3: an empty `possible` tuple source founds nothing; `not possible`
+/// founds everything (the negated empty membership).
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_empty_possible_tuple_source_through_gpu_membership() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let possible_rows = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred maybe(u32).
+        pred out(u32).
+
+        out(X) :- node(X), possible maybe(X).
+        "#,
+        &[("node", &[1, 2, 3][..]), ("maybe", &[][..])],
+        &[],
+        &[],
+        1,
+    );
+    assert!(
+        possible_rows.is_empty(),
+        "empty possible source must found no rows"
+    );
+
+    let not_possible_rows = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred maybe(u32).
+        pred out(u32).
+
+        out(X) :- node(X), not possible maybe(X).
+        "#,
+        &[("node", &[1, 2, 3][..]), ("maybe", &[][..])],
+        &[],
+        &[],
+        1,
+    );
+    assert_eq!(not_possible_rows, vec![1, 2, 3]);
+}
+
+/// K3: an unbound variable in a modal atom is rejected with a typed diagnostic
+/// before any result materialization.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_unbound_modal_variable_is_fail_closed() {
+    // Y appears only inside the modal atom; it is not bound by any relational
+    // body atom or head term, so the program is out of fragment.
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32, u32).
+        pred out(u32).
+
+        out(X) :- node(X), know edge(X, Y).
+        "#,
+    )
+    .expect("parse unbound-modal-variable program");
+    let err = compile_epistemic_gpu_execution(&program)
+        .err()
+        .expect("unbound modal variable must be rejected before execution");
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { .. }
+        | xlog_core::XlogError::UnsafeVariable(_)
+        | xlog_core::XlogError::Type(_)
+        | xlog_core::XlogError::Compilation(_) => {}
+        other => panic!("expected typed fail-closed diagnostic, got {other:?}"),
+    }
+}
+
+/// K3: a type mismatch between a bound variable and the tuple-key column is
+/// rejected with a typed diagnostic before result materialization.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_type_mismatch_bound_variable_is_fail_closed() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // node carries a Symbol column; child carries a U32 column. Binding X
+    // (Symbol) against child's U32 key column is a type error.
+    let program = parse_program(
+        r#"
+        pred node(symbol).
+        pred child(u32).
+        pred out(symbol).
+
+        out(X) :- node(X), know child(X).
+        "#,
+    )
+    .expect("parse type-mismatch program");
+    let executable = match compile_epistemic_gpu_execution(&program) {
+        Ok(executable) => executable,
+        Err(xlog_core::XlogError::UnsupportedEpistemicConstruct { .. })
+        | Err(xlog_core::XlogError::UnsafeVariable(_))
+        | Err(xlog_core::XlogError::Type(_))
+        | Err(xlog_core::XlogError::Compilation(_)) => return,
+        Err(other) => panic!("unexpected compile error: {other:?}"),
+    };
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation(
+        "node",
+        upload_unary_typed_u32(&fixture.memory, &[1, 2], "x", ScalarType::Symbol),
+    );
+    executor.put_relation("child", upload_unary_u32(&fixture.memory, &[1], "x"));
+    let err = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 2,
+                max_models_per_reduction: 4,
+            },
+        )
+        .err()
+        .expect("type mismatch must be rejected before result materialization");
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { .. }
+        | xlog_core::XlogError::UnsafeVariable(_)
+        | xlog_core::XlogError::Type(_)
+        | xlog_core::XlogError::Compilation(_) => {}
+        other => panic!("expected typed type-mismatch diagnostic, got {other:?}"),
+    }
+}
+
+/// K1/K3: pure-ground `not know` / `possible` / `not possible` global gates.
+/// These ride the global membership gate (no bound output column), which must
+/// honor body-literal semantics including negation.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_ground_global_gate_honors_negation_and_modality() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+
+    // not know flag(7): holds iff flag(7) is absent.
+    let not_know_absent = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred flag(u32).
+        pred out(u32).
+
+        out(X) :- node(X), not know flag(7).
+        "#,
+        &[("node", &[1, 2, 3][..]), ("flag", &[9][..])],
+        &[],
+        &[],
+        1,
+    );
+    assert_eq!(not_know_absent, vec![1, 2, 3], "not know of absent holds");
+
+    let not_know_present = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred flag(u32).
+        pred out(u32).
+
+        out(X) :- node(X), not know flag(7).
+        "#,
+        &[("node", &[1, 2, 3][..]), ("flag", &[7][..])],
+        &[],
+        &[],
+        1,
+    );
+    assert!(
+        not_know_present.is_empty(),
+        "not know of present must found no rows"
+    );
+
+    // possible flag(7): holds iff flag(7) is present (single-world FAEEL).
+    let possible_present = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred flag(u32).
+        pred out(u32).
+
+        out(X) :- node(X), possible flag(7).
+        "#,
+        &[("node", &[1, 2, 3][..]), ("flag", &[7][..])],
+        &[],
+        &[],
+        1,
+    );
+    assert_eq!(possible_present, vec![1, 2, 3], "possible present holds");
+
+    let possible_absent = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred flag(u32).
+        pred out(u32).
+
+        out(X) :- node(X), possible flag(7).
+        "#,
+        &[("node", &[1, 2, 3][..]), ("flag", &[9][..])],
+        &[],
+        &[],
+        1,
+    );
+    assert!(
+        possible_absent.is_empty(),
+        "possible absent must found no rows"
+    );
+}
+
+/// K1/K2: a modal atom mixing a bound variable and a ground value matches by
+/// value on both positions.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb02_mixed_bound_and_ground_tuple_key_through_gpu_membership() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // out(X) :- node(X), know edge(X, 10). X founded iff edge(X, 10) holds.
+    let founded = egb02_run_unary_result(
+        &fixture,
+        r#"
+        pred node(u32).
+        pred edge(u32, u32).
+        pred out(u32).
+
+        out(X) :- node(X), know edge(X, 10).
+        "#,
+        &[("node", &[1, 2, 3][..])],
+        &[("edge", &[(1, 10), (2, 20)][..])],
+        &[],
+        2,
+    );
+    assert_eq!(founded, vec![1]);
+}
