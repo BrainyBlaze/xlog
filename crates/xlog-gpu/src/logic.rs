@@ -869,8 +869,17 @@ impl LogicProgram {
                 }
             }
 
-            let slices: Vec<&[u8]> = columns.iter().map(|c| c.as_slice()).collect();
-            let fact_buf = provider.create_buffer_from_slices(&slices, schema.clone())?;
+            let fact_buf = if schema.arity() == 0 {
+                // Nullary predicate: every `pred().` assertion denotes the same unit
+                // tuple `()`, so presence is a single row. `create_buffer_from_slices`
+                // with no column slices yields a 0-row (absent) relation, which would
+                // make an asserted nullary fact read as false everywhere downstream
+                // (ordinary joins and epistemic modal membership alike).
+                provider.create_zero_arity_buffer(schema.clone(), 1)?
+            } else {
+                let slices: Vec<&[u8]> = columns.iter().map(|c| c.as_slice()).collect();
+                provider.create_buffer_from_slices(&slices, schema.clone())?
+            };
 
             let existing = store.get(pred).ok_or_else(|| {
                 XlogError::Execution(format!(

@@ -2672,6 +2672,18 @@ impl CudaKernelProvider {
         self.buffer_from_columns(columns, 0, schema)
     }
 
+    /// Create a zero-arity (nullary) relation buffer carrying `rows` unit tuples.
+    ///
+    /// A nullary relation holds exactly when it has at least one row; its single
+    /// possible tuple is the empty tuple `()`. `create_buffer_from_slices` with no
+    /// column slices routes to `create_empty_buffer` (0 rows), which represents the
+    /// relation as *absent* — wrong for an asserted nullary fact. Nullary facts must
+    /// use this path so presence is materialized as one row.
+    pub fn create_zero_arity_buffer(&self, schema: Schema, rows: u32) -> Result<CudaBuffer> {
+        debug_assert_eq!(schema.arity(), 0, "create_zero_arity_buffer requires arity 0");
+        self.buffer_from_columns(Vec::new(), u64::from(rows), schema)
+    }
+
     pub(crate) fn buffer_from_columns(
         &self,
         columns: Vec<CudaColumn>,
