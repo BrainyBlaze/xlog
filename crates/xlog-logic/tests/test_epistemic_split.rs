@@ -2,7 +2,7 @@ use xlog_core::XlogError;
 use xlog_ir::ExecutionPlan;
 use xlog_logic::epistemic::{
     build_epistemic_dependency_graph, compile_epistemic_gpu_split_execution,
-    split_epistemic_program,
+    split_epistemic_program, EpistemicComponentMergeReason,
 };
 use xlog_logic::parse_program;
 
@@ -289,6 +289,235 @@ fn invalid_cross_arity_modal_coupling_returns_typed_rejection() {
         }
         other => panic!("expected typed split rejection, got {other:?}"),
     }
+}
+
+// --- EGB-05 K2 coverage / K3 diagnostics / source-order stability pilots ---
+
+#[test]
+fn independent_split_components_carry_no_merge_reasons() {
+    let program = parse_program(
+        r#"
+        a() :- know p().
+        b() :- know q().
+        "#,
+    )
+    .unwrap();
+    let split = split_epistemic_program(&program).unwrap();
+    assert_eq!(split.components.len(), 2);
+    for component in &split.components {
+        assert!(
+            component.merge_reasons.is_empty(),
+            "independent split-out component {:?} must record no coalesce reason",
+            component.predicates
+        );
+    }
+}
+
+#[test]
+fn derived_dependency_coalesce_explains_why_in_merge_reasons() {
+    let program = parse_program(
+        r#"
+        a() :- know p().
+        b() :- a(), know q().
+        "#,
+    )
+    .unwrap();
+    let split = split_epistemic_program(&program).unwrap();
+    assert_eq!(split.components.len(), 1);
+    assert_eq!(
+        split.components[0].merge_reasons,
+        vec![EpistemicComponentMergeReason::DerivedPredicate {
+            predicate: "a".to_string(),
+        }],
+        "the b<-a derived dependency must be the explained coalesce reason"
+    );
+}
+
+#[test]
+fn shared_modal_coalesce_explains_modal_predicate_with_arity() {
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred color(u32).
+        pred q(u32).
+        pred a(u32).
+        pred b(u32).
+        a(X) :- node(X), know q(X).
+        b(X) :- color(X), possible q(X).
+        "#,
+    )
+    .unwrap();
+    let split = split_epistemic_program(&program).unwrap();
+    assert_eq!(split.components.len(), 1);
+    assert_eq!(
+        split.components[0].merge_reasons,
+        vec![EpistemicComponentMergeReason::SharedModalPredicate {
+            predicate: "q/1".to_string(),
+        }],
+        "shared modal predicate q/1 must be the explained coalesce reason"
+    );
+}
+
+#[test]
+fn constraint_coalesce_explains_named_heads() {
+    let program = parse_program(
+        r#"
+        a() :- know p().
+        b() :- know q().
+        :- a(), b().
+        "#,
+    )
+    .unwrap();
+    let split = split_epistemic_program(&program).unwrap();
+    assert_eq!(split.components.len(), 1);
+    let reasons = &split.components[0].merge_reasons;
+    let constraint_reason = reasons
+        .iter()
+        .find_map(|reason| match reason {
+            EpistemicComponentMergeReason::Constraint { predicates } => Some(predicates.clone()),
+            _ => None,
+        })
+        .expect("constraint coalesce must be explained");
+    assert!(constraint_reason.contains(&"a".to_string()));
+    assert!(constraint_reason.contains(&"b".to_string()));
+}
+
+#[test]
+fn recomposition_covers_each_relevant_rule_exactly_once() {
+    let program = parse_program(
+        r#"
+        pred x_seed(u32).
+        pred x_gate(u32).
+        pred x_out(u32).
+        pred y_seed(u32).
+        pred y_gate(u32).
+        pred y_out(u32).
+        pred z_seed(u32).
+        pred z_gate(u32).
+        pred z_out(u32).
+        x_out(N) :- x_seed(N), know x_gate(N).
+        y_out(N) :- y_seed(N), know y_gate(N).
+        z_out(N) :- z_seed(N), know z_gate(N).
+        "#,
+    )
+    .unwrap();
+    let split = split_epistemic_program(&program).unwrap();
+    assert_eq!(split.components.len(), 3);
+
+    let mut flat: Vec<usize> = split
+        .components
+        .iter()
+        .flat_map(|component| component.rule_indices.iter().copied())
+        .collect();
+    flat.sort_unstable();
+    // No omissions and (by union-find construction) no duplicates: the
+    // recomposition is an exact permutation of every source rule index.
+    assert_eq!(flat, vec![0, 1, 2]);
+    assert_eq!(flat.len(), program.rules.len());
+    let mut deduped = flat.clone();
+    deduped.dedup();
+    assert_eq!(deduped, flat, "each source rule must appear exactly once");
+    assert_eq!(split.recomposed_rule_indices(), vec![0, 1, 2]);
+}
+
+#[test]
+fn split_components_are_stable_under_source_rule_permutation() {
+    // Same three independent epistemic rules, declared in a permuted source
+    // order. Components and recomposition must be identical regardless of the
+    // accidental source order (deterministic split, no order-dependence).
+    let canonical = parse_program(
+        r#"
+        pred a_seed(u32).
+        pred a_gate(u32).
+        pred a_out(u32).
+        pred b_seed(u32).
+        pred b_gate(u32).
+        pred b_out(u32).
+        pred c_seed(u32).
+        pred c_gate(u32).
+        pred c_out(u32).
+        a_out(N) :- a_seed(N), know a_gate(N).
+        b_out(N) :- b_seed(N), know b_gate(N).
+        c_out(N) :- c_seed(N), know c_gate(N).
+        "#,
+    )
+    .unwrap();
+    let permuted = parse_program(
+        r#"
+        pred a_seed(u32).
+        pred a_gate(u32).
+        pred a_out(u32).
+        pred b_seed(u32).
+        pred b_gate(u32).
+        pred b_out(u32).
+        pred c_seed(u32).
+        pred c_gate(u32).
+        pred c_out(u32).
+        c_out(N) :- c_seed(N), know c_gate(N).
+        a_out(N) :- a_seed(N), know a_gate(N).
+        b_out(N) :- b_seed(N), know b_gate(N).
+        "#,
+    )
+    .unwrap();
+
+    let canonical_split = split_epistemic_program(&canonical).unwrap();
+    let permuted_split = split_epistemic_program(&permuted).unwrap();
+
+    // Components are sorted by predicate set, so the predicate-keyed view is
+    // order-stable even though the underlying rule indices differ per source.
+    let canonical_predicates: Vec<Vec<String>> = canonical_split
+        .components
+        .iter()
+        .map(|component| component.predicates.clone())
+        .collect();
+    let permuted_predicates: Vec<Vec<String>> = permuted_split
+        .components
+        .iter()
+        .map(|component| component.predicates.clone())
+        .collect();
+    assert_eq!(canonical_predicates, permuted_predicates);
+    assert_eq!(canonical_split.components.len(), 3);
+    assert_eq!(permuted_split.components.len(), 3);
+    // Recomposition recovers the full rule set in both source orders.
+    assert_eq!(canonical_split.recomposed_rule_indices(), vec![0, 1, 2]);
+    assert_eq!(permuted_split.recomposed_rule_indices(), vec![0, 1, 2]);
+}
+
+#[test]
+fn executable_recomposition_covers_only_executed_epistemic_components() {
+    // A pure-ordinary independent component and an independent epistemic
+    // component. The epistemic split executable materializes one output buffer
+    // per epistemic component, so the ordinary component (rule 0) is NOT part of
+    // the epistemic execution surface and must be excluded from the executable
+    // recomposition view -- otherwise coverage would silently over-report a rule
+    // the executable never runs.
+    let program = parse_program(
+        r#"
+        pred base(u32).
+        pred ordinary(u32).
+        pred seed(u32).
+        pred gate(u32).
+        pred epi(u32).
+        ordinary(X) :- base(X).
+        epi(X) :- seed(X), know gate(X).
+        "#,
+    )
+    .unwrap();
+
+    // Planning view: the full dependency graph keeps both independent components.
+    let split_plan = split_epistemic_program(&program).unwrap();
+    assert_eq!(split_plan.components.len(), 2);
+    assert_eq!(split_plan.recomposed_rule_indices(), vec![0, 1]);
+
+    // Executable view: only the epistemic-bearing component (rule 1) is run.
+    let exec = compile_epistemic_gpu_split_execution(&program).unwrap();
+    assert_eq!(exec.components.len(), 1);
+    assert_eq!(exec.components[0].component.rule_indices, vec![1]);
+    // Executable recomposition reflects what is executed -- exactly the epistemic
+    // rule, no silent over-reporting of the unexecuted ordinary rule.
+    assert_eq!(exec.recomposed_rule_indices(), vec![1]);
+    // The full planning recomposition view remains available and unchanged.
+    assert_eq!(exec.planned_recomposed_rule_indices(), vec![0, 1]);
 }
 
 fn compiled_rule_count(plan: &ExecutionPlan) -> usize {

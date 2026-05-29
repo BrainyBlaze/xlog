@@ -927,6 +927,207 @@ fn parsed_split_components_execute_through_gpu_runtime_batch() {
     }
 }
 
+/// EGB-05 K1 equivalence: a split component's GPU output must be *row-identical*
+/// to running that component's isolated subprogram through the UNSPLIT
+/// single-execution path.
+///
+/// The unsplit engine rejects multi-output programs
+/// (`require_single_epistemic_output_relation`), so whole-program "split vs
+/// unsplit" cannot be expressed directly for an independent 2-component program.
+/// Per-component identity here, combined with exactly-once recomposition
+/// coverage (logic-side `recomposition_covers_each_relevant_rule_exactly_once`),
+/// establishes whole-program equivalence. Both sides are real device runs;
+/// neither output is hardcoded.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn split_component_outputs_match_unsplit_single_execution_outputs() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        pred left_edge(u32, u32).
+        pred left_gate(u32).
+        pred left_out(u32).
+        pred right_edge(u32, u32).
+        pred right_gate(u32).
+        pred right_out(u32).
+
+        left_out(Y) :- left_edge(X, Y), know left_gate(X).
+        right_out(Y) :- right_edge(X, Y), know right_gate(X).
+        "#,
+    )
+    .expect("parse independent two-component equivalence program");
+    let split =
+        compile_epistemic_gpu_split_execution(&program).expect("compile split components");
+    assert_eq!(split.components.len(), 2);
+    assert_eq!(split.recomposed_rule_indices(), vec![0, 1]);
+
+    let left_edge_rows = [(1u32, 10u32), (2, 20), (3, 30), (4, 10)];
+    let left_gate_rows = [1u32, 3, 4];
+    let right_edge_rows = [(5u32, 40u32), (6, 50), (7, 60), (8, 40)];
+    let right_gate_rows = [5u32, 7];
+
+    // --- SPLIT side: run the whole program through the batch adapter. ---
+    let mut split_executor = Executor::new(Arc::clone(&fixture.provider));
+    for component in split.recomposed_components() {
+        for (name, rel) in &component.executable.relation_ids {
+            split_executor.register_relation(*rel, name);
+        }
+    }
+    split_executor.put_relation(
+        "left_edge",
+        upload_binary_u32(&fixture.memory, &left_edge_rows, "x", "y"),
+    );
+    split_executor.put_relation(
+        "left_gate",
+        upload_unary_u32(&fixture.memory, &left_gate_rows, "x"),
+    );
+    split_executor.put_relation(
+        "right_edge",
+        upload_binary_u32(&fixture.memory, &right_edge_rows, "x", "y"),
+    );
+    split_executor.put_relation(
+        "right_gate",
+        upload_unary_u32(&fixture.memory, &right_gate_rows, "x"),
+    );
+    let recomposed = split.recomposed_components();
+    let executables: Vec<_> = recomposed
+        .iter()
+        .map(|component| &component.executable)
+        .collect();
+    let batch = split_executor
+        .execute_epistemic_gpu_execution_batch_with_trace(
+            &executables,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 2,
+                max_models_per_reduction: 2,
+            },
+        )
+        .expect("split components should execute through GPU runtime batch adapter");
+    assert_eq!(batch.results.len(), 2);
+    // K4 fallback safety: split orchestration must keep CPU fallbacks at zero.
+    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
+    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
+    assert_eq!(batch.trace.cpu_world_view_validations, 0);
+    assert_eq!(batch.trace.cpu_solver_search_fallbacks, 0);
+    assert_eq!(batch.trace.cpu_probability_recomputations, 0);
+
+    let mut split_left = fixture
+        .provider
+        .download_column::<u32>(&batch.results[0].final_output, 0)
+        .expect("download split left output");
+    let mut split_right = fixture
+        .provider
+        .download_column::<u32>(&batch.results[1].final_output, 0)
+        .expect("download split right output");
+    split_left.sort_unstable();
+    split_right.sort_unstable();
+
+    // --- UNSPLIT side: run each component's isolated subprogram through the
+    // single-execution path and compare row-for-row. ---
+    let unsplit_left = run_unsplit_single_component_output(
+        &fixture,
+        r#"
+        pred left_edge(u32, u32).
+        pred left_gate(u32).
+        pred left_out(u32).
+        left_out(Y) :- left_edge(X, Y), know left_gate(X).
+        "#,
+        &[("left_edge", &binary(&left_edge_rows)), ("left_gate", &unary(&left_gate_rows))],
+    );
+    let unsplit_right = run_unsplit_single_component_output(
+        &fixture,
+        r#"
+        pred right_edge(u32, u32).
+        pred right_gate(u32).
+        pred right_out(u32).
+        right_out(Y) :- right_edge(X, Y), know right_gate(X).
+        "#,
+        &[("right_edge", &binary(&right_edge_rows)), ("right_gate", &unary(&right_gate_rows))],
+    );
+
+    assert_eq!(
+        split_left, unsplit_left,
+        "split left component must equal unsplit single-execution output"
+    );
+    assert_eq!(
+        split_right, unsplit_right,
+        "split right component must equal unsplit single-execution output"
+    );
+    // Sanity: outputs are non-empty derived rows (not a vacuous match).
+    assert!(!split_left.is_empty());
+    assert!(!split_right.is_empty());
+
+    for result in &batch.results {
+        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+        result
+            .require_runtime_dispatch_certification()
+            .expect("split equivalence component evidence must remain certified");
+    }
+}
+
+/// Compile a single-output epistemic subprogram through the UNSPLIT path, run it
+/// on the device, and return its sorted output column. Used as the equivalence
+/// reference for split-component outputs.
+#[cfg(feature = "epistemic-logic-tests")]
+fn run_unsplit_single_component_output(
+    fixture: &RuntimeFixture,
+    source: &str,
+    relations: &[(&str, &[Vec<u32>])],
+) -> Vec<u32> {
+    let program = parse_program(source).expect("parse unsplit component subprogram");
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("unsplit single-component compile must succeed");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    for (name, rows) in relations {
+        let buffer = if rows.iter().all(|row| row.len() == 1) {
+            let flat: Vec<u32> = rows.iter().map(|row| row[0]).collect();
+            upload_unary_u32(&fixture.memory, &flat, "x")
+        } else {
+            let pairs: Vec<(u32, u32)> = rows.iter().map(|row| (row[0], row[1])).collect();
+            upload_binary_u32(&fixture.memory, &pairs, "x", "y")
+        };
+        executor.put_relation(name, buffer);
+    }
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 2,
+                max_models_per_reduction: 2,
+            },
+        )
+        .expect("unsplit single-component execution must succeed");
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    result
+        .require_runtime_dispatch_certification()
+        .expect("unsplit reference evidence must remain certified");
+    let mut output = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download unsplit component output");
+    output.sort_unstable();
+    output
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+fn unary(rows: &[u32]) -> Vec<Vec<u32>> {
+    rows.iter().map(|value| vec![*value]).collect()
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+fn binary(rows: &[(u32, u32)]) -> Vec<Vec<u32>> {
+    rows.iter().map(|(a, b)| vec![*a, *b]).collect()
+}
+
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
 fn parsed_split_components_project_body_local_tuple_keys_in_gpu_batch() {

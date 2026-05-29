@@ -1160,6 +1160,40 @@ pub struct GeneratePropagateTestOutcome {
     pub rejected_candidate_indices: Vec<usize>,
 }
 
+/// Reason that two source rules were coalesced into the same dependency component.
+///
+/// These reasons make the split planner's structural decisions explainable: a
+/// caller can read, for every component, *why* its rules could not be solved
+/// independently of one another (K3 split diagnostics).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EpistemicComponentMergeReason {
+    /// Two rules share the same head predicate, so they jointly define one
+    /// derived relation and must be solved together.
+    SharedHeadPredicate {
+        /// Head predicate defined by both rules.
+        predicate: String,
+    },
+    /// One rule's body consumes a predicate that another rule derives in its
+    /// head (an ordinary/negated derived dependency).
+    DerivedPredicate {
+        /// Head predicate produced by the producer rule and consumed by the
+        /// consumer rule body.
+        predicate: String,
+    },
+    /// Two rules reference the same epistemic (modal) predicate, so their
+    /// world-view acceptance is mutually dependent.
+    SharedModalPredicate {
+        /// Epistemic predicate referenced by both rules, with arity.
+        predicate: String,
+    },
+    /// An integrity constraint mentions head predicates owned by both rules, so
+    /// the constraint coalesces exactly those components.
+    Constraint {
+        /// Constraint-mentioned head predicates that forced the coalesce.
+        predicates: Vec<String>,
+    },
+}
+
 /// One deterministic dependency component for epistemic splitting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EpistemicDependencyComponent {
@@ -1167,6 +1201,11 @@ pub struct EpistemicDependencyComponent {
     pub predicates: Vec<String>,
     /// Source rule indices owned by the component.
     pub rule_indices: Vec<usize>,
+    /// Sorted, deduplicated reasons the component's rules were coalesced.
+    ///
+    /// Empty when the component is a single independent rule that no
+    /// dependency forced together (it was split out on its own).
+    pub merge_reasons: Vec<EpistemicComponentMergeReason>,
 }
 
 /// Deterministic dependency graph used by bounded epistemic splitting.
@@ -1215,8 +1254,28 @@ pub struct EpistemicSplitExecutablePlan {
 }
 
 impl EpistemicSplitExecutablePlan {
-    /// Return the original rule order recovered from the split certificate.
+    /// Return the source rule indices actually recomposed by GPU split execution.
+    ///
+    /// This reflects the rules the *executable* plan runs: epistemic-bearing
+    /// components only. Pure-ordinary independent components carry no epistemic
+    /// output buffer and are not part of the epistemic execution surface, so
+    /// they are intentionally excluded here. The full dependency-graph view
+    /// (including non-executed ordinary components) lives on
+    /// [`EpistemicSplitPlan::recomposed_rule_indices`]; the two coincide exactly
+    /// when every component is epistemic-bearing.
     pub fn recomposed_rule_indices(&self) -> Vec<usize> {
+        let mut indices: Vec<usize> = self
+            .components
+            .iter()
+            .flat_map(|component| component.component.rule_indices.iter().copied())
+            .collect();
+        indices.sort_unstable();
+        indices
+    }
+
+    /// Return the full dependency-graph recomposition view, including
+    /// independent non-epistemic components that the executable plan does not run.
+    pub fn planned_recomposed_rule_indices(&self) -> Vec<usize> {
         self.split_plan.recomposed_rule_indices()
     }
 
@@ -1408,10 +1467,20 @@ pub fn build_epistemic_dependency_graph(program: &Program) -> Result<EpistemicDe
     let mut parents: Vec<usize> = (0..program.rules.len()).collect();
     let mut rule_predicates = Vec::with_capacity(program.rules.len());
     let mut head_owner: BTreeMap<String, usize> = BTreeMap::new();
+    // Each merge records (one source rule index touched by the merge, reason).
+    // After roots collapse, reasons are attributed to the surviving root so the
+    // emitted component carries an explainable account of why it was coalesced.
+    let mut merge_log: Vec<(usize, EpistemicComponentMergeReason)> = Vec::new();
 
     for (idx, rule) in program.rules.iter().enumerate() {
         if let Some(owner) = head_owner.get(&rule.head.predicate).copied() {
             union_components(&mut parents, owner, idx);
+            merge_log.push((
+                idx,
+                EpistemicComponentMergeReason::SharedHeadPredicate {
+                    predicate: rule.head.predicate.clone(),
+                },
+            ));
         } else {
             head_owner.insert(rule.head.predicate.clone(), idx);
         }
@@ -1427,13 +1496,27 @@ pub fn build_epistemic_dependency_graph(program: &Program) -> Result<EpistemicDe
                     EpistemicAtomKey::from_arity(lit.atom.predicate.clone(), lit.atom.arity());
                 if let Some(owner) = modal_owner.get(&key).copied() {
                     union_components(&mut parents, owner, idx);
+                    merge_log.push((
+                        idx,
+                        EpistemicComponentMergeReason::SharedModalPredicate {
+                            predicate: format!("{}/{}", lit.atom.predicate, lit.atom.arity()),
+                        },
+                    ));
                 } else {
                     modal_owner.insert(key, idx);
                 }
             }
             if let Some(atom) = lit.atom() {
                 if let Some(owner) = head_owner.get(&atom.predicate).copied() {
-                    union_components(&mut parents, owner, idx);
+                    if owner != idx {
+                        union_components(&mut parents, owner, idx);
+                        merge_log.push((
+                            idx,
+                            EpistemicComponentMergeReason::DerivedPredicate {
+                                predicate: atom.predicate.clone(),
+                            },
+                        ));
+                    }
                 }
                 predicates.insert(atom.predicate.clone());
             }
@@ -1449,8 +1532,27 @@ pub fn build_epistemic_dependency_graph(program: &Program) -> Result<EpistemicDe
             .iter()
             .filter_map(|predicate| head_owner.get(predicate).copied());
         if let Some(first_owner) = owners.next() {
+            let mut coalesced_any = false;
             for owner in owners {
+                if find_component(&mut parents, first_owner)
+                    != find_component(&mut parents, owner)
+                {
+                    coalesced_any = true;
+                }
                 union_components(&mut parents, first_owner, owner);
+            }
+            if coalesced_any {
+                let constraint_heads: Vec<String> = predicates
+                    .iter()
+                    .filter(|predicate| head_owner.contains_key(*predicate))
+                    .cloned()
+                    .collect();
+                merge_log.push((
+                    first_owner,
+                    EpistemicComponentMergeReason::Constraint {
+                        predicates: constraint_heads,
+                    },
+                ));
             }
         }
         constraint_predicates.push(predicates);
@@ -1481,13 +1583,26 @@ pub fn build_epistemic_dependency_graph(program: &Program) -> Result<EpistemicDe
             .extend(predicates);
     }
 
+    // Attribute every recorded merge reason to its surviving component root.
+    let mut reasons_by_root: BTreeMap<usize, BTreeSet<EpistemicComponentMergeReason>> =
+        BTreeMap::new();
+    for (touched_idx, reason) in merge_log {
+        let root = find_component(&mut parents, touched_idx);
+        reasons_by_root.entry(root).or_default().insert(reason);
+    }
+
     let mut components: Vec<EpistemicDependencyComponent> = grouped
-        .into_values()
-        .map(|(predicates, mut rule_indices)| {
+        .into_iter()
+        .map(|(root, (predicates, mut rule_indices))| {
             rule_indices.sort_unstable();
+            let merge_reasons = reasons_by_root
+                .remove(&root)
+                .map(|reasons| reasons.into_iter().collect())
+                .unwrap_or_default();
             EpistemicDependencyComponent {
                 predicates: predicates.into_iter().collect(),
                 rule_indices,
+                merge_reasons,
             }
         })
         .collect();
