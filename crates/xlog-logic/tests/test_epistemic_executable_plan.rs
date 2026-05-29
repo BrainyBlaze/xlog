@@ -291,6 +291,12 @@ fn faeel_gpu_execution_allows_longer_possible_cycle_with_independent_support() {
 
 #[test]
 fn epistemic_constraint_reaches_typed_gpu_boundary() {
+    // EGB-04: an epistemic integrity constraint is no longer rejected at the GPU
+    // boundary. It is lowered first-class as a world-view constraint whose body
+    // literal is an `EpistemicGpuPlan::epistemic_literals` entry, and the
+    // constraint plan records which literal forms the body conjunction. It must
+    // NOT be rewritten into an ordinary RIR constraint (no `__xlog_constraint_*`
+    // relation), and it must not be silently erased.
     let program = parse_program(
         r#"
         accepted() :- know fact().
@@ -299,17 +305,35 @@ fn epistemic_constraint_reaches_typed_gpu_boundary() {
     )
     .unwrap();
 
-    let err = compile_epistemic_gpu_execution(&program)
-        .expect_err("epistemic constraints must not be silently erased during GPU lowering");
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("epistemic constraints reach the typed GPU boundary as world-view constraints");
+    let gpu_plan = &executable.gpu_plan;
 
-    match err {
-        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
-            assert_eq!(construct, "epistemic GPU constraint");
-            assert!(context.contains("constraint[0]"));
-            assert!(context.contains("possible blocked/0"));
-        }
-        other => panic!("expected epistemic GPU constraint boundary, got {other:?}"),
-    }
+    // The constraint's `possible blocked()` literal is preserved first-class.
+    assert_eq!(gpu_plan.constraints.len(), 1);
+    let constraint = &gpu_plan.constraints[0];
+    assert_eq!(constraint.constraint_index, 0);
+    assert_eq!(constraint.literal_indices.len(), 1);
+    let body_literal = &gpu_plan.epistemic_literals[constraint.literal_indices[0]];
+    assert_eq!(body_literal.atom.predicate, "blocked");
+    assert_eq!(body_literal.op, xlog_ir::EirEpistemicOp::Possible);
+    assert!(!body_literal.negated);
+    gpu_plan
+        .validate_constraints()
+        .expect("lowered world-view constraint references in-range literals");
+
+    // No ordinary-RIR constraint rewrite: the reduced runtime plan must not
+    // contain a compiler-generated `__xlog_constraint_*` relation for the
+    // epistemic constraint (lock #2/#3, EGB04.K3).
+    assert!(
+        !executable
+            .relation_ids
+            .keys()
+            .any(|name| name.starts_with("__xlog_constraint")),
+        "epistemic constraint must not be rewritten into an ordinary RIR constraint relation: {:?}",
+        executable.relation_ids.keys().collect::<Vec<_>>()
+    );
+    assert!(gpu_plan.cpu_fallbacks.is_zero());
 }
 
 #[test]

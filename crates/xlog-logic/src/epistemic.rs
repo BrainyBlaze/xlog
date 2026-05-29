@@ -4,9 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use xlog_core::{Result, XlogError};
 use xlog_ir::{
-    EirBodyLiteral, EirEpistemicMode, EirEpistemicOp, EirProgram, EirTerm, EpistemicExecutablePlan,
-    EpistemicGpuPlan, EpistemicReductionPlan, EpistemicSolverAssumptionBinding,
-    EpistemicSolverServiceContract, EpistemicTupleMembershipBinding, EpistemicWcojReductionStatus,
+    EirBodyLiteral, EirEpistemicLiteral, EirEpistemicMode, EirEpistemicOp, EirProgram, EirTerm,
+    EpistemicConstraintPlan, EpistemicExecutablePlan, EpistemicGpuPlan, EpistemicReductionPlan,
+    EpistemicSolverAssumptionBinding, EpistemicSolverServiceContract,
+    EpistemicTupleMembershipBinding, EpistemicWcojReductionStatus,
 };
 use xlog_stats::StatsSnapshot;
 
@@ -323,7 +324,6 @@ impl EpistemicWorldView {
 /// required device buffers, WCOJ planning obligations, and zero CPU fallback
 /// counters.
 pub fn plan_epistemic_gpu_execution(program: &Program) -> Result<EpistemicGpuPlan> {
-    reject_epistemic_constraints(program)?;
     let eir = build_eir(program)?;
     reject_faeel_self_supported_possible(&eir)?;
     let mut epistemic_literals = Vec::new();
@@ -403,16 +403,152 @@ pub fn plan_epistemic_gpu_execution(program: &Program) -> Result<EpistemicGpuPla
         });
     }
 
+    // World-view integrity constraints constrain accepted candidate world views.
+    // Each in-fragment constraint epistemic literal becomes a first-class
+    // epistemic literal sharing an existing reduction's active-model context, so
+    // its modal value is evaluated by the same GPU world-view validation path as
+    // rule-body modal literals. Out-of-fragment constraint shapes fail closed.
+    let constraints = lower_epistemic_constraints(
+        &eir,
+        &mut epistemic_literals,
+        &reductions,
+        &mut tuple_membership_bindings,
+        &mut solver_assumption_bindings,
+    )?;
+
     let final_output_columns = final_output_columns_for_eir(&eir);
     let gpu_plan = EpistemicGpuPlan::new(eir.mode, epistemic_literals, reductions)
         .with_tuple_membership_bindings(tuple_membership_bindings)
+        .with_constraints(constraints)
         .with_final_output_columns(final_output_columns)
         .with_solver_contract(EpistemicSolverServiceContract::production_default(
             solver_assumption_bindings,
         ));
     gpu_plan.validate_tuple_membership_bindings()?;
     gpu_plan.validate_solver_contract()?;
+    gpu_plan.validate_constraints()?;
     Ok(gpu_plan)
+}
+
+/// Lower in-fragment epistemic integrity constraints into first-class epistemic
+/// literals and return the per-constraint world-view constraint plans.
+///
+/// Each constraint epistemic literal is appended to `epistemic_literals` and
+/// given a tuple-membership binding plus solver assumption binding attached to
+/// the final rule reduction's active-model context. The constraint body's
+/// conjunction (over the appended literal indices) is what the device kernel
+/// rejects when it holds in an accepted world view.
+///
+/// Fail-closed (typed, with source context) when:
+/// - no rule reduction exists to host the constraint's modal evaluation;
+/// - a constraint body mixes relational/comparison/binding literals with the
+///   epistemic literals (only pure-modal constraint bodies are in fragment);
+/// - a constraint epistemic atom carries a non-ground tuple key (headless
+///   constraints have no reduced output column to bind variables against).
+fn lower_epistemic_constraints(
+    eir: &EirProgram,
+    epistemic_literals: &mut Vec<EirEpistemicLiteral>,
+    reductions: &[EpistemicReductionPlan],
+    tuple_membership_bindings: &mut Vec<EpistemicTupleMembershipBinding>,
+    solver_assumption_bindings: &mut Vec<EpistemicSolverAssumptionBinding>,
+) -> Result<Vec<EpistemicConstraintPlan>> {
+    let mut constraint_plans = Vec::new();
+    for (constraint_index, constraint) in eir.constraints.iter().enumerate() {
+        let has_epistemic = constraint
+            .body
+            .iter()
+            .any(|lit| matches!(lit, EirBodyLiteral::Epistemic(_)));
+        if !has_epistemic {
+            // Purely relational constraints are handled by the reduced ordinary
+            // runtime plan; they are not world-view constraints.
+            continue;
+        }
+
+        if reductions.is_empty() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "epistemic GPU world-view constraint".to_string(),
+                context: format!(
+                    "constraint[{constraint_index}] is an epistemic integrity constraint but the \
+                     program has no epistemic rule to host its world-view evaluation; add an \
+                     epistemic rule whose reduced model provides the accepted world view, or \
+                     express the constraint over an existing epistemic rule"
+                ),
+            });
+        }
+        // Attach constraint modal evaluation to the final rule reduction's
+        // active-model context. The reduction's reduced output drives the
+        // `has_reduced_output` active-model gate used by world-view validation.
+        let reduction_index = reductions.len() - 1;
+
+        let mut literal_indices = Vec::new();
+        for lit in &constraint.body {
+            match lit {
+                EirBodyLiteral::Epistemic(lit) => {
+                    if lit
+                        .atom
+                        .terms
+                        .iter()
+                        .any(|term| !matches!(term, EirTerm::Integer(_) | EirTerm::Symbol(_)))
+                    {
+                        return Err(XlogError::UnsupportedEpistemicConstruct {
+                            construct: "epistemic GPU world-view constraint".to_string(),
+                            context: format!(
+                                "constraint[{constraint_index}] uses {} {}/{} with a non-ground \
+                                 tuple key; headless world-view constraints currently support only \
+                                 ground (integer/symbol) modal atoms because there is no reduced \
+                                 head column to bind constraint variables against",
+                                eir_epistemic_literal_label(lit),
+                                lit.atom.predicate,
+                                lit.atom.arity
+                            ),
+                        });
+                    }
+                    let literal_index = epistemic_literals.len();
+                    tuple_membership_bindings.push(EpistemicTupleMembershipBinding {
+                        literal_index,
+                        reduction_index,
+                        predicate: lit.atom.predicate.clone(),
+                        arity: lit.atom.arity,
+                        key_columns: (0..lit.atom.arity).collect(),
+                        key_terms: lit.atom.terms.clone(),
+                        bound_output_columns: vec![None; lit.atom.arity],
+                        op: lit.op,
+                        negated: lit.negated,
+                    });
+                    solver_assumption_bindings.push(EpistemicSolverAssumptionBinding {
+                        literal_index,
+                        reduction_index,
+                        predicate: lit.atom.predicate.clone(),
+                        arity: lit.atom.arity,
+                        terms: lit.atom.terms.clone(),
+                        op: lit.op,
+                        negated: lit.negated,
+                    });
+                    epistemic_literals.push(lit.clone());
+                    literal_indices.push(literal_index);
+                }
+                EirBodyLiteral::Relational { .. }
+                | EirBodyLiteral::Constraint
+                | EirBodyLiteral::Binding => {
+                    return Err(XlogError::UnsupportedEpistemicConstruct {
+                        construct: "epistemic GPU world-view constraint".to_string(),
+                        context: format!(
+                            "constraint[{constraint_index}] mixes non-epistemic body literals with \
+                             modal literals; world-view integrity constraints currently support \
+                             pure know/possible conjunctions so the constraint can be evaluated \
+                             against accepted world views without an ordinary-RIR rewrite"
+                        ),
+                    });
+                }
+            }
+        }
+
+        constraint_plans.push(EpistemicConstraintPlan {
+            constraint_index,
+            literal_indices,
+        });
+    }
+    Ok(constraint_plans)
 }
 
 fn reject_faeel_self_supported_possible(eir: &EirProgram) -> Result<()> {
@@ -1034,11 +1170,18 @@ pub fn reduce_epistemic_program_to_ordinary(program: &Program) -> Program {
             }));
         }
     }
-    for constraint in &mut reduced.constraints {
-        constraint
+    // Constraints that contain epistemic literals are world-view integrity
+    // constraints: they constrain accepted candidate world views and are
+    // evaluated by the GPU world-view constraint kernel, NOT by the reduced
+    // ordinary runtime. Stripping their epistemic literals would leave an
+    // always-true ordinary constraint, so drop them from the reduced program
+    // entirely. Purely relational constraints stay as ordinary constraints.
+    reduced.constraints.retain(|constraint| {
+        !constraint
             .body
-            .retain(|lit| !matches!(lit, BodyLiteral::Epistemic(_)));
-    }
+            .iter()
+            .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
+    });
 
     reduced
 }

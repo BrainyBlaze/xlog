@@ -109,6 +109,18 @@ pub struct EirRule {
     pub body: Vec<EirBodyLiteral>,
 }
 
+/// Integrity constraint represented at the EIR boundary.
+///
+/// A constraint has no head: the conjunction of its body literals must never
+/// be satisfiable. Epistemic body literals are preserved first-class so that
+/// `know`/`possible` integrity constraints constrain accepted world views,
+/// rather than being silently rewritten into ordinary relational constraints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EirConstraint {
+    /// Constraint body whose conjunction must never hold in an accepted world view.
+    pub body: Vec<EirBodyLiteral>,
+}
+
 /// Program represented at the EIR boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EirProgram {
@@ -116,4 +128,6 @@ pub struct EirProgram {
     pub mode: EirEpistemicMode,
     /// Rules in source order.
     pub rules: Vec<EirRule>,
+    /// Integrity constraints in source order.
+    pub constraints: Vec<EirConstraint>,
 }

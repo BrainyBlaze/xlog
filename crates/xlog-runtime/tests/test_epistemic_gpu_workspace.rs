@@ -3194,6 +3194,391 @@ fn parsed_bound_quaternary_know_filters_final_gpu_tuple_values() {
         .expect("bound quaternary know row-filter path should retain GPU semantic certification");
 }
 
+// =====================================================================
+// EGB-04 epistemic integrity constraint world-view pilots.
+//
+// `:- know unsafe().` must prune candidate world views in which the
+// constraint body holds, leaving valid world views untouched. The
+// constraint literal is lowered as a first-class epistemic literal sharing
+// the rule reduction's active-model context, and a device kernel rejects
+// surviving candidates whose accepted world view satisfies the constraint
+// body. No ordinary-RIR constraint rewrite is involved.
+// =====================================================================
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn parsed_know_constraint_does_not_prune_when_constraint_body_false() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // `unsafe(7)` has no extension, so `know unsafe(7)` is false in every
+    // accepted model: the integrity constraint never fires and the gated
+    // world view is accepted normally.
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred gate(u32).
+        pred unsafe(u32).
+        pred out(u32).
+
+        out(X) :- seed(X), know gate(X).
+        :- know unsafe(7).
+        "#,
+    )
+    .expect("parse know-constraint program (constraint body false)");
+    let executable =
+        compile_epistemic_gpu_execution(&program).expect("compile know-constraint GPU plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[7], "x"));
+    executor.put_relation("gate", upload_unary_u32(&fixture.memory, &[7], "x"));
+    executor.put_relation("unsafe", upload_unary_u32(&fixture.memory, &[], "x"));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 4,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("know-constraint program with false body should execute on GPU");
+
+    assert_eq!(result.constraint_world_view_validation.constraint_count, 1);
+    assert_eq!(result.constraint_world_view_validation.kernel_launches, 1);
+    assert_eq!(result.constraint_world_view_validation.host_write_ops, 0);
+    assert!(result.semantic_trace.accepted_candidates >= 1);
+    assert_eq!(result.final_result_transfer.final_output_rows, 1);
+    // No candidate carries the world-view constraint-violation reason code.
+    assert!(!result
+        .semantic_trace
+        .rejection_reasons
+        .iter()
+        .any(|&code| code == EpistemicGpuRejectionReason::WorldViewConstraintViolation.code()));
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    result
+        .require_runtime_dispatch_certification()
+        .expect("know-constraint accepted path should retain GPU semantic certification");
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn parsed_know_constraint_prunes_world_view_when_constraint_body_true() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // `unsafe(7)` holds in every accepted model, so `know unsafe(7)` is true
+    // and the integrity constraint prunes every candidate world view. The
+    // pipeline returns Ok with an empty accepted result, NOT a runtime error,
+    // and every rejected candidate carries the constraint-violation reason.
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred gate(u32).
+        pred unsafe(u32).
+        pred out(u32).
+
+        out(X) :- seed(X), know gate(X).
+        :- know unsafe(7).
+        "#,
+    )
+    .expect("parse know-constraint program (constraint body true)");
+    let executable =
+        compile_epistemic_gpu_execution(&program).expect("compile know-constraint GPU plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[7], "x"));
+    executor.put_relation("gate", upload_unary_u32(&fixture.memory, &[7], "x"));
+    executor.put_relation("unsafe", upload_unary_u32(&fixture.memory, &[7], "x"));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 4,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("know-constraint program with true body should return Ok with empty accepted set");
+
+    assert_eq!(result.constraint_world_view_validation.constraint_count, 1);
+    assert_eq!(result.constraint_world_view_validation.kernel_launches, 1);
+    assert_eq!(result.constraint_world_view_validation.host_write_ops, 0);
+    assert_eq!(result.semantic_trace.accepted_candidates, 0);
+    assert_eq!(result.final_result_transfer.final_output_rows, 0);
+    // At least one candidate is pruned by the world-view integrity constraint.
+    let constraint_code = EpistemicGpuRejectionReason::WorldViewConstraintViolation.code();
+    assert!(
+        result
+            .semantic_trace
+            .rejection_reasons
+            .iter()
+            .any(|&code| code == constraint_code),
+        "expected a constraint-violation rejection reason, got {:?}",
+        result.semantic_trace.rejection_reasons
+    );
+    // Every nonzero rejection code decodes to a typed reason (no crash codes).
+    let typed = result
+        .semantic_trace
+        .typed_rejection_reasons()
+        .expect("rejection reasons decode to typed reasons");
+    assert!(typed.contains(&EpistemicGpuRejectionReason::WorldViewConstraintViolation));
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    result.require_runtime_dispatch_certification().expect(
+        "all-pruned know-constraint path should retain GPU semantic certification",
+    );
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn parsed_possible_constraint_does_not_prune_when_contradiction_absent() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // Keep direction for `:- possible contradiction().`: with `contradiction`
+    // absent, `possible contradiction` is false in every accepted model, so the
+    // constraint never fires and the gated world view is accepted.
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred gate(u32).
+        pred contradiction().
+        pred out(u32).
+
+        out(X) :- seed(X), know gate(X).
+        :- possible contradiction().
+        "#,
+    )
+    .expect("parse possible-constraint keep-direction program");
+    let executable =
+        compile_epistemic_gpu_execution(&program).expect("compile possible-constraint GPU plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[7], "x"));
+    executor.put_relation("gate", upload_unary_u32(&fixture.memory, &[7], "x"));
+    executor.put_relation("contradiction", upload_zero_arity(&fixture.memory, 0));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 4,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("possible-constraint program with false body should accept the world view");
+
+    assert!(result.semantic_trace.accepted_candidates >= 1);
+    assert_eq!(result.final_result_transfer.final_output_rows, 1);
+    assert!(!result
+        .semantic_trace
+        .rejection_reasons
+        .iter()
+        .any(|&code| code == EpistemicGpuRejectionReason::WorldViewConstraintViolation.code()));
+    result
+        .require_runtime_dispatch_certification()
+        .expect("possible-constraint accepted path should retain GPU semantic certification");
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn parsed_possible_constraint_prunes_when_contradiction_possible() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // `:- possible contradiction().` prunes a candidate world view whose
+    // accepted model makes `contradiction` possible. With the fact present,
+    // `possible contradiction` holds and the candidate is pruned.
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred gate(u32).
+        pred contradiction().
+        pred out(u32).
+
+        out(X) :- seed(X), know gate(X).
+        :- possible contradiction().
+        "#,
+    )
+    .expect("parse possible-constraint program");
+    let executable =
+        compile_epistemic_gpu_execution(&program).expect("compile possible-constraint GPU plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[7], "x"));
+    executor.put_relation("gate", upload_unary_u32(&fixture.memory, &[7], "x"));
+    executor.put_relation("contradiction", upload_zero_arity(&fixture.memory, 1));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 4,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("possible-constraint program should return Ok with empty accepted set");
+
+    assert_eq!(result.constraint_world_view_validation.constraint_count, 1);
+    assert_eq!(result.semantic_trace.accepted_candidates, 0);
+    assert_eq!(result.final_result_transfer.final_output_rows, 0);
+    let constraint_code = EpistemicGpuRejectionReason::WorldViewConstraintViolation.code();
+    assert!(result
+        .semantic_trace
+        .rejection_reasons
+        .iter()
+        .any(|&code| code == constraint_code));
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    result.require_runtime_dispatch_certification().expect(
+        "all-pruned possible-constraint path should retain GPU semantic certification",
+    );
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn parsed_not_possible_constraint_prunes_when_required_absent() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // `:- not possible required().` prunes a candidate world view in which
+    // `required` is possible in no accepted model. With `required` absent,
+    // `not possible required` holds and the candidate is pruned.
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred gate(u32).
+        pred required().
+        pred out(u32).
+
+        out(X) :- seed(X), know gate(X).
+        :- not possible required().
+        "#,
+    )
+    .expect("parse not-possible-constraint program");
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("compile not-possible-constraint GPU plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[7], "x"));
+    executor.put_relation("gate", upload_unary_u32(&fixture.memory, &[7], "x"));
+    executor.put_relation("required", upload_zero_arity(&fixture.memory, 0));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 4,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("not-possible-constraint program should return Ok with empty accepted set");
+
+    assert_eq!(result.constraint_world_view_validation.constraint_count, 1);
+    assert_eq!(result.semantic_trace.accepted_candidates, 0);
+    assert_eq!(result.final_result_transfer.final_output_rows, 0);
+    let constraint_code = EpistemicGpuRejectionReason::WorldViewConstraintViolation.code();
+    assert!(result
+        .semantic_trace
+        .rejection_reasons
+        .iter()
+        .any(|&code| code == constraint_code));
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    result.require_runtime_dispatch_certification().expect(
+        "all-pruned not-possible-constraint path should retain GPU semantic certification",
+    );
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn parsed_constraint_with_relational_body_fails_closed() {
+    // A constraint that mixes a relational atom with a modal literal is out of
+    // the world-view constraint fragment and must fail closed with typed source
+    // context, not be silently rewritten into an ordinary RIR constraint.
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred gate(u32).
+        pred unsafe(u32).
+        pred out(u32).
+
+        out(X) :- seed(X), know gate(X).
+        :- seed(7), know unsafe(7).
+        "#,
+    )
+    .expect("parse mixed-body constraint program");
+    let err = compile_epistemic_gpu_execution(&program)
+        .expect_err("mixed relational+modal constraint body must fail closed");
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
+            assert_eq!(construct, "epistemic GPU world-view constraint");
+            assert!(
+                context.contains("non-epistemic body literals"),
+                "unexpected fail-closed context: {context}"
+            );
+        }
+        other => panic!("expected typed UnsupportedEpistemicConstruct, got {other:?}"),
+    }
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn parsed_constraint_without_epistemic_rule_fails_closed() {
+    // An epistemic integrity constraint needs an epistemic rule reduction to
+    // host its world-view evaluation. Without one, lowering fails closed with a
+    // typed reason instead of silently accepting an unsound world view.
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred unsafe(u32).
+        pred out(u32).
+
+        out(X) :- seed(X).
+        :- know unsafe(7).
+        "#,
+    )
+    .expect("parse constraint-only program without epistemic rule");
+    let err = compile_epistemic_gpu_execution(&program)
+        .expect_err("epistemic constraint without epistemic rule must fail closed");
+    match err {
+        // Either the generic "no epistemic literal" guard (a program with only
+        // an ordinary rule plus a modal constraint has no rule-derived modal
+        // literal) or the constraint-specific "no reduction to host" guard is an
+        // acceptable typed fail-closed boundary.
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, .. } => {
+            assert!(
+                construct == "epistemic GPU world-view constraint"
+                    || construct == "epistemic GPU execution plan",
+                "unexpected fail-closed construct: {construct}"
+            );
+        }
+        other => panic!("expected typed UnsupportedEpistemicConstruct, got {other:?}"),
+    }
+}
+
 #[test]
 fn runtime_preflight_rejects_nonzero_cpu_fallback_counters() {
     let cases: [(&str, fn(&mut EpistemicCpuFallbackCounters)); 4] = [
