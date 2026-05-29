@@ -127,6 +127,61 @@ fn negated_possible_nested_epistemic_literal_returns_typed_error() {
     }
 }
 
+/// K4 stability: nested modal forms with `not` interspersed between/around the
+/// epistemic operators MUST fail closed with the SAME typed diagnostic and the
+/// SAME `construct` string as the adjacent-operator forms — not a generic
+/// `XlogError::Parse`. Each case also carries the verbatim source as context.
+#[test]
+fn nested_epistemic_with_inner_negation_is_stable_typed_error() {
+    let cases = [
+        "bad(X) :- know not possible edge(X).",
+        "bad(X) :- possible not know edge(X).",
+        "bad(X) :- know possible not edge(X).",
+        "bad(X) :- not know not possible edge(X).",
+        "bad(X) :- know know edge(X).",
+        "bad(X) :- possible possible edge(X).",
+    ];
+    for src in cases {
+        let err = parse_program(src).unwrap_err();
+        match err {
+            XlogError::UnsupportedEpistemicConstruct { construct, context } => {
+                assert_eq!(
+                    construct, "nested epistemic literal",
+                    "construct string must be stable for {src:?}"
+                );
+                // Source context anchors the diagnostic to the offending literal.
+                let literal = src
+                    .trim_start_matches("bad(X) :- ")
+                    .trim_end_matches('.');
+                assert!(
+                    context.contains(literal),
+                    "context {context:?} must contain source literal {literal:?} for {src:?}"
+                );
+            }
+            other => panic!("expected stable typed nested diagnostic for {src:?}, got {other:?}"),
+        }
+    }
+}
+
+/// Single-level epistemic forms (including single-operator negated forms) MUST
+/// continue to parse — the broadened nested rule must not swallow them.
+#[test]
+fn single_level_epistemic_forms_still_parse() {
+    let cases = [
+        "good(X) :- node(X), know edge(X).",
+        "good(X) :- node(X), possible edge(X).",
+        "good(X) :- node(X), not know edge(X).",
+        "good(X) :- node(X), not possible edge(X).",
+        "good(X) :- a(X), know b(X), not possible c(X).",
+    ];
+    for src in cases {
+        assert!(
+            parse_program(src).is_ok(),
+            "single-level epistemic form must still parse: {src:?}"
+        );
+    }
+}
+
 #[test]
 fn rir_lowering_rejects_epistemic_literal_with_typed_error() {
     let err = Compiler::new()
