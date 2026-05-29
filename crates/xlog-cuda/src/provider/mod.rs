@@ -420,6 +420,8 @@ pub mod epistemic_kernels {
         "epistemic_populate_model_membership_from_tuple_source_arity_n_u8";
     /// Device-side world-view validation kernel.
     pub const EPISTEMIC_VALIDATE_WORLD_VIEWS_U8: &str = "epistemic_validate_world_views_u8";
+    /// Device-side world-view integrity-constraint validation kernel.
+    pub const EPISTEMIC_VALIDATE_CONSTRAINTS_U8: &str = "epistemic_validate_constraints_u8";
     /// Device-side accepted-candidate materialization staging kernel.
     pub const EPISTEMIC_MATERIALIZE_ACCEPTED_CANDIDATES_U8: &str =
         "epistemic_materialize_accepted_candidates_u8";

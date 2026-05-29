@@ -8,12 +8,12 @@ pub mod plan;
 pub mod rir;
 
 pub use eir::{
-    EirAtom, EirBodyLiteral, EirEpistemicLiteral, EirEpistemicMode, EirEpistemicOp, EirProgram,
-    EirRule, EirTerm,
+    EirAtom, EirBodyLiteral, EirConstraint, EirEpistemicLiteral, EirEpistemicMode, EirEpistemicOp,
+    EirProgram, EirRule, EirTerm,
 };
 pub use epistemic_plan::{
-    EpistemicCpuFallbackCounters, EpistemicExecutablePlan, EpistemicGpuBufferKind,
-    EpistemicGpuHotPathPhase, EpistemicGpuPlan, EpistemicReductionPlan,
+    EpistemicConstraintPlan, EpistemicCpuFallbackCounters, EpistemicExecutablePlan,
+    EpistemicGpuBufferKind, EpistemicGpuHotPathPhase, EpistemicGpuPlan, EpistemicReductionPlan,
     EpistemicSolverAssumptionBinding, EpistemicSolverCapability, EpistemicSolverServiceContract,
     EpistemicSolverStatusKind, EpistemicTupleMembershipBinding, EpistemicWcojReductionStatus,
 };

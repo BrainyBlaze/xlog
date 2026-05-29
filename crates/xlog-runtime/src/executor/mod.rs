@@ -34,7 +34,8 @@ pub mod wcoj_phase_timing;
 pub use epistemic_workspace::{
     EpistemicGpuBatchExecutionResult, EpistemicGpuBatchExecutionTrace,
     EpistemicGpuCandidateGenerationTrace, EpistemicGpuCandidateValidationTrace,
-    EpistemicGpuConstraintValidationTrace, EpistemicGpuExecutionResult,
+    EpistemicGpuConstraintValidationTrace, EpistemicGpuConstraintWorldViewValidationTrace,
+    EpistemicGpuExecutionResult,
     EpistemicGpuFinalResultMaterializationTrace, EpistemicGpuFinalResultTransferTrace,
     EpistemicGpuFinalTupleMaterializationTrace, EpistemicGpuKernelTimingTrace,
     EpistemicGpuMaterializationTrace, EpistemicGpuModelMembershipSource,

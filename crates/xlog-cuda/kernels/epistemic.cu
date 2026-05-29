@@ -757,6 +757,54 @@ extern "C" __global__ void epistemic_validate_world_views_u8(
     }
 }
 
+extern "C" __global__ void epistemic_validate_constraints_u8(
+    uint32_t literal_count,
+    uint32_t candidate_count,
+    uint32_t constraint_count,
+    const uint32_t* __restrict__ constraint_literal_offsets,
+    const uint32_t* __restrict__ constraint_literal_counts,
+    const uint32_t* __restrict__ constraint_literal_indices,
+    const uint8_t* __restrict__ candidate_assumptions,
+    uint32_t* __restrict__ rejection_reasons
+) {
+    uint32_t candidate = blockIdx.x * blockDim.x + threadIdx.x;
+    if (candidate >= candidate_count) return;
+
+    // Only world views still accepted after modal world-view validation can be
+    // pruned by an integrity constraint. World-view validation has pinned each
+    // surviving candidate's assumption bit to the negation-folded observed modal
+    // value of its literal, so a constraint body holds in this accepted world
+    // view exactly when every referenced literal's assumption bit is set.
+    if (rejection_reasons[candidate] != 0u) return;
+
+    uint32_t assumption_base = candidate * literal_count;
+    for (uint32_t constraint = 0u; constraint < constraint_count; ++constraint) {
+        uint32_t offset = constraint_literal_offsets[constraint];
+        uint32_t count = constraint_literal_counts[constraint];
+        if (count == 0u) continue;
+
+        uint8_t body_holds = 1u;
+        for (uint32_t entry = 0u; entry < count; ++entry) {
+            uint32_t literal = constraint_literal_indices[offset + entry];
+            if (literal >= literal_count) {
+                body_holds = 0u;
+                break;
+            }
+            if (candidate_assumptions[assumption_base + literal] == 0u) {
+                body_holds = 0u;
+                break;
+            }
+        }
+
+        if (body_holds != 0u) {
+            // Integrity-constraint violation: this accepted world view satisfies
+            // a `:- know/possible ...` constraint body and must be pruned.
+            rejection_reasons[candidate] = 6u;
+            return;
+        }
+    }
+}
+
 extern "C" __global__ void epistemic_materialize_accepted_candidates_u8(
     uint32_t candidate_count,
     uint32_t world_stride,

@@ -388,6 +388,8 @@ pub enum EpistemicGpuRejectionReason {
     MissingReducedModel,
     /// Candidate assumptions were not supported by model-membership evidence.
     UnsatisfiedMembership,
+    /// Accepted world view satisfied an epistemic integrity constraint body.
+    WorldViewConstraintViolation,
 }
 
 impl EpistemicGpuRejectionReason {
@@ -398,6 +400,7 @@ impl EpistemicGpuRejectionReason {
             Self::InvalidCandidateBit => 3,
             Self::MissingReducedModel => 4,
             Self::UnsatisfiedMembership => 5,
+            Self::WorldViewConstraintViolation => 6,
         }
     }
 
@@ -408,6 +411,7 @@ impl EpistemicGpuRejectionReason {
             3 => Ok(Self::InvalidCandidateBit),
             4 => Ok(Self::MissingReducedModel),
             5 => Ok(Self::UnsatisfiedMembership),
+            6 => Ok(Self::WorldViewConstraintViolation),
             other => Err(XlogError::UnsupportedEpistemicConstruct {
                 construct: "epistemic GPU rejection reason".to_string(),
                 context: format!("unknown device rejection code {other}"),
@@ -513,6 +517,31 @@ pub struct EpistemicGpuWorldViewValidationTrace {
     /// World-view validation kernel launches.
     pub kernel_launches: u32,
     /// Host writes used by world-view validation. Accepted execution requires zero.
+    pub host_write_ops: u32,
+    /// CUDA-event timing for the launched kernel.
+    pub kernel_timing: EpistemicGpuKernelTimingTrace,
+}
+
+/// Trace proving epistemic integrity constraints were evaluated against world
+/// views on GPU.
+///
+/// World-view integrity constraints (`:- know unsafe().`) prune accepted
+/// candidate world views on device after modal world-view validation. The
+/// device kernel never reads accepted worlds back to the host, so accepted
+/// execution keeps `host_write_ops` at zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EpistemicGpuConstraintWorldViewValidationTrace {
+    /// Number of epistemic integrity constraints checked on device.
+    pub constraint_count: usize,
+    /// Number of constraint-body literal references checked on device.
+    pub constraint_literal_refs: usize,
+    /// Number of candidate world views checked by the constraint kernel.
+    pub candidates_checked: usize,
+    /// Rejection-reason slots written by the kernel.
+    pub rejection_reason_slots_written: usize,
+    /// Constraint world-view validation kernel launches.
+    pub kernel_launches: u32,
+    /// Host writes used by constraint validation. Accepted execution requires zero.
     pub host_write_ops: u32,
     /// CUDA-event timing for the launched kernel.
     pub kernel_timing: EpistemicGpuKernelTimingTrace,
@@ -2573,6 +2602,8 @@ pub struct EpistemicGpuExecutionResult {
     pub model_membership: EpistemicGpuModelMembershipTrace,
     /// World-view validation trace captured after model-membership staging.
     pub world_view_validation: EpistemicGpuWorldViewValidationTrace,
+    /// World-view integrity-constraint validation trace captured after world-view validation.
+    pub constraint_world_view_validation: EpistemicGpuConstraintWorldViewValidationTrace,
     /// Accepted-candidate materialization trace captured after world-view validation.
     pub materialization: EpistemicGpuMaterializationTrace,
     /// Final result materialization trace captured from reduced output metadata.
@@ -4910,6 +4941,159 @@ impl Executor {
         Ok(trace.with_kernel_timing(kernel_timing))
     }
 
+    /// Prune accepted candidate world views that satisfy an epistemic integrity
+    /// constraint body.
+    ///
+    /// Runs after [`Self::validate_epistemic_gpu_world_views`]: each surviving
+    /// candidate's assumption bit equals the negation-folded observed modal
+    /// value of its literal, so a constraint body holds in this accepted world
+    /// view exactly when every referenced literal's assumption bit is set. Such
+    /// candidates are pruned on device with the world-view constraint-violation
+    /// rejection code; no accepted world is read back to the host.
+    pub fn validate_epistemic_gpu_world_view_constraints(
+        &self,
+        workspace: &mut EpistemicGpuWorkspace,
+        gpu_plan: &EpistemicGpuPlan,
+        candidate_count: usize,
+    ) -> Result<EpistemicGpuConstraintWorldViewValidationTrace> {
+        gpu_plan.validate_constraints()?;
+        let literal_count = gpu_plan.epistemic_literals.len();
+        let constraint_count = gpu_plan.constraints.len();
+
+        // Flatten constraint -> literal index references into CSR-style buffers.
+        let mut offsets_host = Vec::with_capacity(constraint_count);
+        let mut counts_host = Vec::with_capacity(constraint_count);
+        let mut indices_host: Vec<u32> = Vec::new();
+        for constraint in &gpu_plan.constraints {
+            offsets_host.push(indices_host.len() as u32);
+            counts_host.push(constraint.literal_indices.len() as u32);
+            for &literal_index in &constraint.literal_indices {
+                indices_host.push(literal_index as u32);
+            }
+        }
+        let constraint_literal_refs = indices_host.len();
+
+        let trace = EpistemicGpuConstraintWorldViewValidationTrace {
+            constraint_count,
+            constraint_literal_refs,
+            candidates_checked: candidate_count,
+            rejection_reason_slots_written: candidate_count,
+            kernel_launches: 0,
+            host_write_ops: 0,
+            kernel_timing: EpistemicGpuKernelTimingTrace::unrecorded(),
+        };
+
+        if constraint_count == 0 {
+            // No world-view constraints to evaluate; leave the rejection buffer
+            // untouched so accepted candidates flow through unchanged.
+            return Ok(trace);
+        }
+
+        if candidate_count > workspace.layout.rejection_reason_slots {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU world-view constraint rejection workspace".to_string(),
+                estimated_bytes: candidate_count as u64,
+                budget_bytes: workspace.layout.rejection_reason_slots as u64,
+            });
+        }
+        if candidate_count > u32::MAX as usize
+            || literal_count > u32::MAX as usize
+            || constraint_count > u32::MAX as usize
+            || constraint_literal_refs > u32::MAX as usize
+        {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU world-view constraint dimensions".to_string(),
+                estimated_bytes: candidate_count
+                    .max(literal_count)
+                    .max(constraint_count)
+                    .max(constraint_literal_refs) as u64,
+                budget_bytes: u32::MAX as u64,
+            });
+        }
+
+        let memory = self.provider.memory();
+        let mut constraint_literal_offsets = memory.alloc::<u32>(constraint_count)?;
+        let mut constraint_literal_counts = memory.alloc::<u32>(constraint_count)?;
+        let mut constraint_literal_indices = memory.alloc::<u32>(constraint_literal_refs.max(1))?;
+        self.provider
+            .htod_launch_metadata_sync_copy_into(&offsets_host, &mut constraint_literal_offsets)
+            .map_err(|e| {
+                XlogError::execution_ctx(
+                    "epistemic GPU world-view constraint metadata",
+                    "upload constraint literal offsets",
+                    &e,
+                )
+            })?;
+        self.provider
+            .htod_launch_metadata_sync_copy_into(&counts_host, &mut constraint_literal_counts)
+            .map_err(|e| {
+                XlogError::execution_ctx(
+                    "epistemic GPU world-view constraint metadata",
+                    "upload constraint literal counts",
+                    &e,
+                )
+            })?;
+        if !indices_host.is_empty() {
+            self.provider
+                .htod_launch_metadata_sync_copy_into(
+                    &indices_host,
+                    &mut constraint_literal_indices,
+                )
+                .map_err(|e| {
+                    XlogError::execution_ctx(
+                        "epistemic GPU world-view constraint metadata",
+                        "upload constraint literal indices",
+                        &e,
+                    )
+                })?;
+        }
+
+        let literal_count_u32 = literal_count as u32;
+        let candidate_count_u32 = candidate_count as u32;
+        let constraint_count_u32 = constraint_count as u32;
+        let func = self
+            .provider
+            .device()
+            .inner()
+            .get_func(
+                EPISTEMIC_MODULE,
+                epistemic_kernels::EPISTEMIC_VALIDATE_CONSTRAINTS_U8,
+            )
+            .ok_or_else(|| {
+                XlogError::Execution(
+                    "epistemic world-view constraint validation kernel not found".to_string(),
+                )
+            })?;
+        let config = LaunchConfig::for_num_elems(candidate_count_u32);
+
+        let kernel_timing = self.time_epistemic_gpu_kernel_launch(
+            "epistemic GPU world-view constraint validation",
+            || unsafe {
+                // SAFETY: kernel arguments match the PTX signature; the capacity
+                // check above proves the rejection buffer covers every candidate,
+                // and CSR offset/count/index buffers are sized to the constraint
+                // literal references uploaded above.
+                let mut params: Vec<*mut c_void> = vec![
+                    literal_count_u32.as_kernel_param(),
+                    candidate_count_u32.as_kernel_param(),
+                    constraint_count_u32.as_kernel_param(),
+                    (&constraint_literal_offsets).as_kernel_param(),
+                    (&constraint_literal_counts).as_kernel_param(),
+                    (&constraint_literal_indices).as_kernel_param(),
+                    (&workspace.candidate_assumptions).as_kernel_param(),
+                    (&mut workspace.rejection_reasons).as_kernel_param(),
+                ];
+                func.clone().launch(config, &mut params)
+            },
+        )?;
+
+        Ok(EpistemicGpuConstraintWorldViewValidationTrace {
+            kernel_launches: 1,
+            kernel_timing,
+            ..trace
+        })
+    }
+
     /// Materialize accepted candidate flags into the GPU world-view buffer.
     pub fn materialize_epistemic_gpu_candidates(
         &self,
@@ -5570,10 +5754,26 @@ impl Executor {
         // negation (the validation kernel guarantees assumption == observed for
         // accepted candidates), so the gate requires the assumption bit to be
         // set for every global-gate literal.
+        // Constraint literals participate in modal world-view evaluation (model
+        // membership + assumption-bit pinning) but must NOT gate output rows:
+        // their pruning is enforced by the separate world-view constraint kernel,
+        // which rejects candidates whose accepted world view satisfies the
+        // constraint body. Treating them as required gates would invert the
+        // semantics (emit rows only when the forbidden body holds), so exclude
+        // them from the output-gating mask.
+        let mut is_constraint_literal = vec![false; literal_count.max(1)];
+        for constraint in &gpu_plan.constraints {
+            for &literal_index in &constraint.literal_indices {
+                if literal_index < literal_count {
+                    is_constraint_literal[literal_index] = true;
+                }
+            }
+        }
         let mut gate_literal_required_host = vec![0u8; literal_count.max(1)];
         for binding in &gpu_plan.tuple_membership_bindings {
             if !binding.bound_output_columns.iter().any(Option::is_some)
                 && binding.literal_index < literal_count
+                && !is_constraint_literal[binding.literal_index]
             {
                 gate_literal_required_host[binding.literal_index] = 1u8;
             }
@@ -5917,6 +6117,12 @@ impl Executor {
             candidate_count,
             capacities.max_models_per_reduction,
         )?;
+        let constraint_world_view_validation = self
+            .validate_epistemic_gpu_world_view_constraints(
+                &mut prepared.workspace,
+                &executable.gpu_plan,
+                candidate_count,
+            )?;
         let materialization =
             self.materialize_epistemic_gpu_candidates(&mut prepared.workspace, candidate_count)?;
         let final_result_materialization = self.materialize_epistemic_gpu_final_results(
@@ -5984,6 +6190,7 @@ impl Executor {
             candidate_validation,
             model_membership,
             world_view_validation,
+            constraint_world_view_validation,
             materialization,
             final_result_materialization,
             final_tuple_materialization,
