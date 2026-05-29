@@ -1078,6 +1078,25 @@ fn run_unsplit_single_component_output(
     source: &str,
     relations: &[(&str, &[Vec<u32>])],
 ) -> Vec<u32> {
+    run_unsplit_single_component_output_with_caps(
+        fixture,
+        source,
+        relations,
+        EpistemicGpuWorkspaceCapacities {
+            max_candidates: 2,
+            max_worlds: 2,
+            max_models_per_reduction: 2,
+        },
+    )
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+fn run_unsplit_single_component_output_with_caps(
+    fixture: &RuntimeFixture,
+    source: &str,
+    relations: &[(&str, &[Vec<u32>])],
+    capacities: EpistemicGpuWorkspaceCapacities,
+) -> Vec<u32> {
     let program = parse_program(source).expect("parse unsplit component subprogram");
     let executable = compile_epistemic_gpu_execution(&program)
         .expect("unsplit single-component compile must succeed");
@@ -1096,14 +1115,7 @@ fn run_unsplit_single_component_output(
         executor.put_relation(name, buffer);
     }
     let result = executor
-        .execute_epistemic_gpu_execution(
-            &executable,
-            EpistemicGpuWorkspaceCapacities {
-                max_candidates: 2,
-                max_worlds: 2,
-                max_models_per_reduction: 2,
-            },
-        )
+        .execute_epistemic_gpu_execution(&executable, capacities)
         .expect("unsplit single-component execution must succeed");
     assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
     assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
@@ -6997,4 +7009,404 @@ fn egb01_repeated_runs_are_deterministic() {
     // Candidate set was genuinely enumerated (not empty), so determinism is meaningful.
     assert_eq!(first.0, vec![7], "accepted candidate index is the all-true assignment");
     assert_eq!(first.3, vec![7, 8], "accepted world view materializes both seed rows");
+}
+
+// ============================================================================
+// EGB-06: joint multi-epistemic-predicate solving.
+//
+// A rule coupling more than one DISTINCT epistemic body predicate is solved as a
+// JOINT modal conjunction over the candidate world view. Because such a rule has
+// a single output relation, the WHOLE program is expressible on both the split
+// path (`compile_epistemic_gpu_split_execution`) and the unsplit joint path
+// (`compile_epistemic_gpu_execution`); EGB-06 requires the two to be
+// row-identical. Both sides are real device runs; neither output is hardcoded.
+// ============================================================================
+
+/// Run a single-output epistemic program through the SPLIT path and return its
+/// sorted output column-0 plus the joint-handling preflight from the (single)
+/// component result.
+#[cfg(feature = "epistemic-logic-tests")]
+fn run_split_single_output(
+    fixture: &RuntimeFixture,
+    source: &str,
+    relations: &[(&str, &[Vec<u32>])],
+    capacities: EpistemicGpuWorkspaceCapacities,
+) -> (Vec<u32>, EpistemicGpuRuntimePreflight, usize) {
+    let program = parse_program(source).expect("parse split single-output program");
+    let split =
+        compile_epistemic_gpu_split_execution(&program).expect("split single-output compile");
+    assert_eq!(
+        split.components.len(),
+        1,
+        "a single-output multi-epistemic rule must form exactly one joint component"
+    );
+    let recomposed = split.recomposed_components();
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for component in &recomposed {
+        for (name, rel) in &component.executable.relation_ids {
+            executor.register_relation(*rel, name);
+        }
+    }
+    for (name, rows) in relations {
+        let buffer = if rows.iter().all(|row| row.len() == 1) {
+            let flat: Vec<u32> = rows.iter().map(|row| row[0]).collect();
+            upload_unary_u32(&fixture.memory, &flat, "x")
+        } else {
+            let pairs: Vec<(u32, u32)> = rows.iter().map(|row| (row[0], row[1])).collect();
+            upload_binary_u32(&fixture.memory, &pairs, "x", "y")
+        };
+        executor.put_relation(name, buffer);
+    }
+    let executables: Vec<_> = recomposed
+        .iter()
+        .map(|component| &component.executable)
+        .collect();
+    let batch = executor
+        .execute_epistemic_gpu_execution_batch_with_trace(&executables, capacities)
+        .expect("split single-output component executes through GPU runtime batch");
+    assert_eq!(batch.results.len(), 1);
+    // K4 / LOCK 1: split orchestration keeps every CPU fallback counter at zero.
+    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
+    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
+    assert_eq!(batch.trace.cpu_world_view_validations, 0);
+    assert_eq!(batch.trace.cpu_solver_search_fallbacks, 0);
+    assert_eq!(batch.trace.cpu_probability_recomputations, 0);
+    let result = &batch.results[0];
+    result
+        .require_runtime_dispatch_certification()
+        .expect("joint split component evidence must remain certified");
+    let mut output = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download joint split output");
+    output.sort_unstable();
+    (
+        output,
+        result.prepared.preflight,
+        result.final_result_transfer.final_output_rows,
+    )
+}
+
+/// EGB-06 K1/K2/K3: distinct-predicate modal conjunction (`know p(X), possible q(X)`)
+/// with mixed operators. Joint split execution must equal unsplit single execution
+/// row-for-row, and the joint-handling preflight must show ONE reduction binding
+/// BOTH modal predicates (not two independent split pieces).
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb06_distinct_predicate_conjunction_joint_matches_unsplit() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let source = r#"
+        pred seed(u32).
+        pred p(u32).
+        pred q(u32).
+        pred a(u32).
+        a(X) :- seed(X), know p(X), possible q(X).
+    "#;
+    // seed = {1,2,3}; p = {1,2,3}; q = {1,3}. Joint conjunction holds for X in {1,3}.
+    let relations: &[(&str, &[Vec<u32>])] = &[
+        ("seed", &unary(&[1, 2, 3])),
+        ("p", &unary(&[1, 2, 3])),
+        ("q", &unary(&[1, 3])),
+    ];
+    let caps = EpistemicGpuWorkspaceCapacities {
+        max_candidates: 8,
+        max_worlds: 4,
+        max_models_per_reduction: 2,
+    };
+
+    let (split_out, preflight, split_rows) =
+        run_split_single_output(&fixture, source, relations, caps);
+    let unsplit_out =
+        run_unsplit_single_component_output_with_caps(&fixture, source, relations, caps);
+
+    // K2 unsplit parity: row-identical output.
+    assert_eq!(
+        split_out, unsplit_out,
+        "joint split output must equal unsplit single-execution output"
+    );
+    // K1 modal-conjunction correctness: exactly the rows where BOTH modal atoms hold.
+    assert_eq!(split_out, vec![1, 3], "head derived iff full modal conjunction holds");
+    assert_eq!(split_rows, 2);
+    assert!(!split_out.is_empty(), "non-vacuous joint derivation");
+
+    // K3 joint-handling trace: ONE reduction binds BOTH distinct modal predicates,
+    // with operator-specific semantics preserved (one know + one possible). This is
+    // the structural proof the rule was solved JOINTLY, not split into independent
+    // unsound pieces.
+    assert_eq!(
+        preflight.reduced_runtime_rule_count, 1,
+        "joint rule must compile to a single reduced reduction"
+    );
+    assert_eq!(
+        preflight.tuple_membership_binding_count, 2,
+        "both modal predicates are jointly bound under one reduction"
+    );
+    assert_eq!(preflight.know_operator_count, 1);
+    assert_eq!(preflight.possible_operator_count, 1);
+    assert_eq!(preflight.not_know_operator_count, 0);
+    assert_eq!(preflight.not_possible_operator_count, 0);
+    assert_eq!(preflight.cpu_fallbacks.candidate_enumeration, 0);
+    assert_eq!(preflight.cpu_fallbacks.world_view_validation, 0);
+}
+
+/// EGB-06 K1/K2/K3: all-operator joint conjunction including negated modals
+/// (`not know`, `not possible`) over four distinct modal predicates. Joint split
+/// execution equals unsplit, and negated modal literals participate in the same
+/// candidate test.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb06_mixed_operator_conjunction_joint_matches_unsplit() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let source = r#"
+        pred seed(u32).
+        pred known_gate(u32).
+        pred possible_gate(u32).
+        pred not_known_gate(u32).
+        pred not_possible_gate(u32).
+        pred out(u32).
+        out(X) :- seed(X), know known_gate(X), possible possible_gate(X),
+                  not know not_known_gate(X), not possible not_possible_gate(X).
+    "#;
+    // seed/known/possible = {7,8,9}; not_known = {7}; not_possible = {8}.
+    // Joint conjunction holds only for X = 9 (7 blocked by not-know, 8 by not-possible).
+    let relations: &[(&str, &[Vec<u32>])] = &[
+        ("seed", &unary(&[7, 8, 9])),
+        ("known_gate", &unary(&[7, 8, 9])),
+        ("possible_gate", &unary(&[7, 8, 9])),
+        ("not_known_gate", &unary(&[7])),
+        ("not_possible_gate", &unary(&[8])),
+    ];
+    let caps = EpistemicGpuWorkspaceCapacities {
+        max_candidates: 16,
+        max_worlds: 4,
+        max_models_per_reduction: 1,
+    };
+
+    let (split_out, preflight, _rows) = run_split_single_output(&fixture, source, relations, caps);
+    let unsplit_out =
+        run_unsplit_single_component_output_with_caps(&fixture, source, relations, caps);
+
+    assert_eq!(
+        split_out, unsplit_out,
+        "joint mixed-operator split output must equal unsplit single-execution output"
+    );
+    assert_eq!(
+        split_out,
+        vec![9],
+        "head derived iff full mixed-operator modal conjunction holds"
+    );
+    // K3: one reduction binds all four distinct modal predicates with their
+    // operator-specific semantics.
+    assert_eq!(preflight.reduced_runtime_rule_count, 1);
+    assert_eq!(preflight.tuple_membership_binding_count, 4);
+    assert_eq!(preflight.know_operator_count, 1);
+    assert_eq!(preflight.possible_operator_count, 1);
+    assert_eq!(preflight.not_know_operator_count, 1);
+    assert_eq!(preflight.not_possible_operator_count, 1);
+}
+
+/// EGB-06 K2/K4: cross-arity SAME-NAME predicate coupling (`know p(X), possible p(X,Y)`)
+/// is a FAIL-CLOSED class with parity-preserving semantics. The relation store and
+/// the executable's `relation_ids` map are keyed by predicate NAME only, so `p/1`
+/// and `p/2` cannot both resolve — a pre-existing engine-wide property, not an
+/// EGB-06 regression. Both the SPLIT and UNSPLIT paths must reach the SAME typed
+/// `UnsupportedEpistemicConstruct` tuple-membership diagnostic at execution, with
+/// no partial output. (Removing the blanket coupling rejection must not let this
+/// be silently accepted, and "identical to unsplit" must hold even when it fails.)
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb06_cross_arity_same_name_fails_closed_identically_split_and_unsplit() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let source = r#"
+        pred seed(u32, u32).
+        pred p(u32).
+        pred p(u32, u32).
+        pred a(u32, u32).
+        a(X, Y) :- seed(X, Y), know p(X), possible p(X, Y).
+    "#;
+    // p/1 and p/2 collide on the name-keyed relation store; the binding-arity check
+    // fires during tuple-source resolution before any output materializes.
+    let caps = EpistemicGpuWorkspaceCapacities {
+        max_candidates: 8,
+        max_worlds: 4,
+        max_models_per_reduction: 2,
+    };
+
+    let assert_tuple_membership_fail = |err: xlog_core::XlogError, side: &str| match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
+            assert_eq!(
+                construct, "epistemic GPU stable-model tuple membership",
+                "{side} must fail on the tuple-membership boundary"
+            );
+            assert!(
+                context.contains("does not match binding arity"),
+                "{side} diagnostic must cite the cross-arity binding mismatch, got: {context}"
+            );
+        }
+        other => panic!("{side}: expected typed tuple-membership diagnostic, got {other:?}"),
+    };
+
+    // --- SPLIT path ---
+    let split_program = parse_program(source).expect("parse cross-arity program");
+    let split = compile_epistemic_gpu_split_execution(&split_program)
+        .expect("cross-arity program compiles (resolution is a runtime concern)");
+    assert_eq!(split.components.len(), 1);
+    let recomposed = split.recomposed_components();
+    let mut split_executor = Executor::new(Arc::clone(&fixture.provider));
+    for component in &recomposed {
+        for (name, rel) in &component.executable.relation_ids {
+            split_executor.register_relation(*rel, name);
+        }
+    }
+    split_executor.put_relation("seed", upload_binary_u32(&fixture.memory, &[(1, 10), (2, 20), (3, 30)], "x", "y"));
+    split_executor.put_relation("p", upload_binary_u32(&fixture.memory, &[(1, 10), (2, 99)], "x", "y"));
+    let split_executables: Vec<_> = recomposed.iter().map(|c| &c.executable).collect();
+    let split_err = match split_executor
+        .execute_epistemic_gpu_execution_batch_with_trace(&split_executables, caps)
+    {
+        Ok(_) => panic!("split cross-arity coupling must fail closed at tuple resolution"),
+        Err(err) => err,
+    };
+    assert_tuple_membership_fail(split_err, "split");
+
+    // --- UNSPLIT path: must fail closed identically ---
+    let unsplit_program = parse_program(source).expect("parse cross-arity program");
+    let unsplit = compile_epistemic_gpu_execution(&unsplit_program)
+        .expect("cross-arity program compiles on unsplit path too");
+    let mut unsplit_executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &unsplit.relation_ids {
+        unsplit_executor.register_relation(*rel, name);
+    }
+    unsplit_executor.put_relation("seed", upload_binary_u32(&fixture.memory, &[(1, 10), (2, 20), (3, 30)], "x", "y"));
+    unsplit_executor.put_relation("p", upload_binary_u32(&fixture.memory, &[(1, 10), (2, 99)], "x", "y"));
+    let unsplit_err = match unsplit_executor.execute_epistemic_gpu_execution(&unsplit, caps) {
+        Ok(_) => panic!("unsplit cross-arity coupling must fail closed at tuple resolution"),
+        Err(err) => err,
+    };
+    assert_tuple_membership_fail(unsplit_err, "unsplit");
+}
+
+/// EGB-06 K1: empty/contradictory candidate evidence yields an accepted but EMPTY
+/// result (no crash). Here `possible q` never holds, so the joint conjunction is
+/// false for every seed row.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb06_contradictory_joint_conjunction_yields_empty_accepted() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let source = r#"
+        pred seed(u32).
+        pred p(u32).
+        pred q(u32).
+        pred a(u32).
+        a(X) :- seed(X), know p(X), possible q(X).
+    "#;
+    let relations: &[(&str, &[Vec<u32>])] = &[
+        ("seed", &unary(&[1, 2])),
+        ("p", &unary(&[1, 2])),
+        ("q", &unary(&[])), // q empty: possible q(X) never holds.
+    ];
+    let caps = EpistemicGpuWorkspaceCapacities {
+        max_candidates: 8,
+        max_worlds: 4,
+        max_models_per_reduction: 2,
+    };
+    let (split_out, _preflight, rows) = run_split_single_output(&fixture, source, relations, caps);
+    assert!(split_out.is_empty(), "no row satisfies the joint conjunction");
+    assert_eq!(rows, 0, "empty accepted result, not a crash");
+}
+
+/// EGB-06 K4: over-budget joint solving fails with a resource diagnostic BEFORE
+/// partial execution, surfaced through the SPLIT entry. Candidate capacity below
+/// the 2^N guess space for the joint reduction (here N=3 → 8 guesses) is rejected.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb06_over_budget_joint_fails_closed_before_execution() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred p(u32).
+        pred q(u32).
+        pred r(u32).
+        pred a(u32).
+        a(X) :- seed(X), know p(X), possible q(X), not possible r(X).
+        "#,
+    )
+    .expect("parse over-budget joint program");
+    let split = compile_epistemic_gpu_split_execution(&program)
+        .expect("over-budget joint program compiles (resource guard is a runtime concern)");
+    assert_eq!(split.components.len(), 1);
+    let recomposed = split.recomposed_components();
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for component in &recomposed {
+        for (name, rel) in &component.executable.relation_ids {
+            executor.register_relation(*rel, name);
+        }
+    }
+    for (name, rows) in [("seed", &[1][..]), ("p", &[1][..]), ("q", &[1][..]), ("r", &[][..])] {
+        executor.put_relation(name, upload_unary_u32(&fixture.memory, rows, "x"));
+    }
+    let executables: Vec<_> = recomposed
+        .iter()
+        .map(|component| &component.executable)
+        .collect();
+    let err = match executor.execute_epistemic_gpu_execution_batch_with_trace(
+        &executables,
+        EpistemicGpuWorkspaceCapacities {
+            max_candidates: 4, // below 2^3 = 8 joint guess space
+            max_worlds: 2,
+            max_models_per_reduction: 1,
+        },
+    ) {
+        Ok(_) => panic!("over-budget joint solving must fail closed before execution"),
+        Err(err) => err,
+    };
+    match err {
+        xlog_core::XlogError::ResourceExhausted {
+            context,
+            estimated_bytes,
+            budget_bytes,
+        } => {
+            assert_eq!(context, "epistemic GPU execution candidate capacity");
+            assert_eq!(estimated_bytes, 8);
+            assert_eq!(budget_bytes, 4);
+        }
+        other => panic!("expected joint resource-capacity diagnostic, got {other:?}"),
+    }
+}
+
+/// EGB-06 K4: a joint rule whose coupling depends on unsupported semantics
+/// (here an unsafe shared modal variable) fails with the relevant typed diagnostic
+/// through the split entry, rather than being silently accepted by removing the
+/// blanket coupling rejection.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb06_unsupported_joint_coupling_fails_closed_through_split() {
+    let program = parse_program(
+        r#"
+        pred a(u32, u32).
+        pred p(u32).
+        pred p(u32, u32).
+        a(X, Y) :- know p(X), possible p(X, Y).
+        "#,
+    )
+    .expect("parse unsafe joint coupling program");
+    // Split layer accepts (coupling no longer blanket-rejected); the unsafe modal
+    // variable is caught by the joint-compile safety analysis.
+    let err = compile_epistemic_gpu_split_execution(&program)
+        .expect_err("unsupported joint coupling must fail closed at joint compile");
+    match err {
+        xlog_core::XlogError::UnsafeVariable(var) => assert_eq!(var, "X"),
+        other => panic!("expected relocated typed diagnostic, got {other:?}"),
+    }
 }

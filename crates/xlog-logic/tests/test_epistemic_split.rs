@@ -254,20 +254,53 @@ fn shared_modal_inputs_coalesce_epistemic_split_components() {
 }
 
 #[test]
-fn invalid_cross_component_split_returns_typed_rejection() {
+fn cross_component_modal_coupling_is_solved_jointly_in_one_component() {
+    // EGB-06: a rule coupling more than one DISTINCT epistemic body predicate is
+    // no longer rejected by the split layer. The dependency graph unions all such
+    // modal predicates into a single component that the unsplit joint path solves
+    // as a full modal conjunction over the candidate world view.
     let program = parse_program("a() :- know p(), possible q().").unwrap();
-    let err = split_epistemic_program(&program).unwrap_err();
+    let split = split_epistemic_program(&program).expect("multi-predicate rule splits jointly");
 
-    match err {
-        XlogError::UnsupportedEpistemicConstruct { construct, .. } => {
-            assert_eq!(construct, "epistemic splitting");
-        }
-        other => panic!("expected typed split rejection, got {other:?}"),
-    }
+    assert_eq!(split.components.len(), 1);
+    assert_eq!(split.recomposed_rule_indices(), vec![0]);
+    assert_eq!(
+        split.components[0].predicates,
+        vec!["a".to_string(), "p".to_string(), "q".to_string()]
+    );
 }
 
 #[test]
-fn invalid_cross_arity_modal_coupling_returns_typed_rejection() {
+fn safe_cross_arity_modal_coupling_splits_into_one_joint_component() {
+    // EGB-06: cross-arity coupling of the same predicate (p/1 + p/2) is a valid
+    // joint condition when the shared variable is safely bound by a relational
+    // body atom; the two arities materialize as distinct relations and the rule
+    // is jointly solved in a single component.
+    let program = parse_program(
+        r#"
+        pred a(u32, u32).
+        pred seed(u32, u32).
+        pred p(u32).
+        pred p(u32, u32).
+        a(X, Y) :- seed(X, Y), know p(X), possible p(X, Y).
+        "#,
+    )
+    .unwrap();
+    let split = split_epistemic_program(&program).expect("safe cross-arity rule splits jointly");
+
+    assert_eq!(split.components.len(), 1);
+    assert_eq!(split.recomposed_rule_indices(), vec![0]);
+    assert!(split.components[0].predicates.contains(&"a".to_string()));
+    assert!(split.components[0].predicates.contains(&"p".to_string()));
+    assert!(split.components[0].predicates.contains(&"seed".to_string()));
+}
+
+#[test]
+fn unsafe_cross_arity_modal_coupling_fails_closed_at_joint_compile() {
+    // EGB-06: removing the blanket coupling rejection must NOT make unsound rules
+    // pass. An unsafe shared variable (X appears only in modal literals, needs to
+    // bind the head) is now caught by the joint-compile layer's safety analysis
+    // (relocated diagnostic), not silently accepted.
     let program = parse_program(
         r#"
         pred a(u32, u32).
@@ -277,17 +310,33 @@ fn invalid_cross_arity_modal_coupling_returns_typed_rejection() {
         "#,
     )
     .unwrap();
-    let err = split_epistemic_program(&program).unwrap_err();
 
+    // The split layer itself accepts (no coupling rejection); the unsafe variable
+    // surfaces from the joint-compile path that each component is recompiled
+    // through.
+    split_epistemic_program(&program).expect("split layer no longer rejects coupling");
+
+    let err = compile_epistemic_gpu_split_execution(&program)
+        .expect_err("unsafe cross-arity coupling must fail closed at joint compile");
     match err {
-        XlogError::UnsupportedEpistemicConstruct {
-            construct, context, ..
-        } => {
-            assert_eq!(construct, "epistemic splitting");
-            assert!(context.contains("p/1"));
-            assert!(context.contains("p/2"));
+        XlogError::UnsafeVariable(var) => assert_eq!(var, "X"),
+        other => panic!("expected relocated unsafe-variable diagnostic, got {other:?}"),
+    }
+}
+
+#[test]
+fn nested_modal_in_joint_coupling_rule_fails_closed_upstream_of_split() {
+    // EGB-06 K4: removing the blanket coupling rejection must NOT let a nested-modal
+    // construct inside a multi-epistemic-predicate rule slip through. Nested modals
+    // are rejected at PARSE time (EGB-03), upstream of the coupling gate, so the
+    // joint-coupling rule never reaches `split_epistemic_program`. This confirms the
+    // nested-modal boundary is unaffected by the coupling-gate removal.
+    let err = parse_program("h(X) :- know p(X), possible know q(X).").unwrap_err();
+    match err {
+        XlogError::UnsupportedEpistemicConstruct { construct, .. } => {
+            assert_eq!(construct, "nested epistemic literal");
         }
-        other => panic!("expected typed split rejection, got {other:?}"),
+        other => panic!("expected nested-modal parse diagnostic, got {other:?}"),
     }
 }
 
