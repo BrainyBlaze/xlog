@@ -1931,11 +1931,12 @@ engines, typed fail-closed, real runtime/device pilots). Status summary:
       prune candidate world views via a GPU constraint kernel (rejection reason
       6), constraints dropped from the reduced ordinary program (no RIR rewrite).
       Evidence: `egb04_*` device pilots.
-- [ ] **EGB-04.K2 constraint-specific rejection reasons (PARTIAL — not met).** KPI
-      EGB04.K2 requires rejected candidates to carry constraint-specific reasons;
-      the kernel currently writes a single class-level reason (6) and does not
-      record which constraint fired. Follow-up: record the violating constraint
-      index per candidate and surface it.
+- [x] EGB-04.K2 constraint-specific rejection reasons: a parallel
+      `constraint_violation_index` device buffer records which constraint fired
+      per candidate (reason code 6 unchanged), surfaced as
+      `result.semantic_trace.constraint_violation_indices`. Evidence:
+      `egb04_constraint_specific_reason_identifies_firing_constraint` (asserts the
+      specific firing index).
 - [x] EGB-05 safe split dependency and coupling: split/coalesce/reject decisions
       explained via typed `EpistemicComponentMergeReason`; paired split-vs-unsplit
       equivalence; recomposition covers each source rule exactly once. Evidence:
@@ -1954,9 +1955,10 @@ engines, typed fail-closed, real runtime/device pilots). Status summary:
       `CudaKernelProvider::create_zero_arity_buffer`; arity-0 facts now
       materialize one unit tuple. Evidence: `examples/epistemic/*` via
       `cargo test -p xlog-cli --test run_cli_tests test_xlog_run_epistemic_examples`.
-- [x] Full-surface verification: device epistemic 116/116, 206-cert suite,
-      epistemic logic 74/74, all 5 `xlog run` examples, `xlog-cuda` set ops
-      35/35, and `xlog-integration` 206/206.
+- [x] Full-surface verification: device epistemic 117/117 (incl. EGB-04.K2
+      specific-constraint test), 206-cert suite, epistemic logic 74/74, all 5
+      `xlog run` examples, `xlog-cuda` set ops 35/35, and `xlog-integration`
+      206/206.
 
 ### In-spec typed fail-closed (REQUIRED by the goal — rejection-by-design, not debt)
 
@@ -1975,7 +1977,7 @@ fallback locks.
 
 ### Genuine follow-up (NOT goal-mandated; tracked, not claimed done)
 
-- [ ] EGB-04.K2 constraint-specific rejection reasons (see above — PARTIAL).
+- [x] EGB-04.K2 constraint-specific rejection reasons — CLOSED (commit `e39bcd33`).
 - [ ] Mixed per-row (bound-variable) + global (ground/anonymous/nullary) modal
       literals in a single rule: introduced as sound fail-closed by EGB-02 to
       replace a silently-wrong path; implement the mixed path or keep fail-closed

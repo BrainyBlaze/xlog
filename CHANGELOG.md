@@ -28,12 +28,13 @@ recorded in `docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`
 - Added per-tuple-key FAEEL founded self-support: unfounded `p() :- possible p().`
   is rejected, self-reference is accepted only with independent founded support
   for the same tuple key, and G91 compatibility self-support stays separate.
-- Added GPU epistemic integrity constraints (core): `:- know g().`,
+- Added GPU epistemic integrity constraints: `:- know g().`,
   `:- possible g().`, and `:- not possible g().` prune candidate world views via
   a new constraint kernel (rejection reason `WorldViewConstraintViolation`);
   epistemic constraints are dropped from the reduced ordinary program with no
-  ordinary-RIR rewrite. NOTE: the reason is class-level; KPI EGB04.K2
-  (constraint-specific reasons) is **not yet met** — see Known gaps below.
+  ordinary-RIR rewrite. Rejected candidates carry the specific firing constraint
+  index (KPI EGB04.K2) via a parallel `constraint_violation_index` buffer,
+  surfaced as `result.semantic_trace.constraint_violation_indices`.
 - Added explainable safe-split semantics: split, coalesce, and reject decisions
   carry typed `EpistemicComponentMergeReason`s, valid splits are equivalence-
   checked against unsplit execution, and recomposition covers each source rule
@@ -67,9 +68,6 @@ recorded in `docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`
 
 ### Known gaps (v0.9.1, tracked — NOT claimed complete)
 
-- **EGB-04.K2 (partial):** rejected candidates carry a class-level constraint
-  reason, not the constraint-specific reason the KPI requires; the firing
-  constraint index is not yet recorded. Tracked in ROADMAP "Genuine follow-up".
 - **EGB-02 mixed per-row + global modal literal in one rule:** a sound
   fail-closed boundary introduced to replace a silently-wrong path; not a
   goal-mandated accepted case. Implement the mixed path or keep fail-closed by
