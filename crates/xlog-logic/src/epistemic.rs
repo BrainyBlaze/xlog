@@ -1779,28 +1779,19 @@ fn union_components(parents: &mut [usize], left: usize, right: usize) {
 
 /// Split an epistemic program into independently solvable bounded components.
 pub fn split_epistemic_program(program: &Program) -> Result<EpistemicSplitPlan> {
-    for (idx, rule) in program.rules.iter().enumerate() {
-        let epistemic_atoms: BTreeSet<String> = rule
-            .body
-            .iter()
-            .filter_map(|lit| match lit {
-                BodyLiteral::Epistemic(lit) => {
-                    Some(format!("{}/{}", lit.atom.predicate, lit.atom.arity()))
-                }
-                _ => None,
-            })
-            .collect();
-        if epistemic_atoms.len() > 1 {
-            return Err(xlog_core::XlogError::UnsupportedEpistemicConstruct {
-                construct: "epistemic splitting".to_string(),
-                context: format!(
-                    "rule[{idx}] couples epistemic predicates {:?}",
-                    epistemic_atoms
-                ),
-            });
-        }
-    }
-
+    // EGB-06: rules that couple more than one distinct epistemic body predicate
+    // are NOT rejected here. The dependency graph already unions every such rule
+    // into a single component (each epistemic predicate occurrence routes through
+    // `modal_owner` in `build_epistemic_dependency_graph`), and that component is
+    // recompiled through the unsplit joint path
+    // (`compile_epistemic_gpu_execution`), which enumerates the full candidate
+    // lattice and validates the FULL modal conjunction jointly on device. Any
+    // genuinely out-of-fragment coupling (unsafe variables, unsupported
+    // tuple-key/nested-modal semantics) stays fail-closed via the downstream
+    // joint-path guards (`build_eir` safety analysis,
+    // `validate_tuple_membership_bindings`, `validate_solver_contract`) with their
+    // own typed source-contextualized diagnostics, so no blanket coupling
+    // rejection is needed at the split boundary.
     Ok(EpistemicSplitPlan {
         components: build_epistemic_dependency_graph(program)?.components,
     })
