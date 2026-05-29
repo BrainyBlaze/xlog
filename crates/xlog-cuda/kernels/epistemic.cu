@@ -521,7 +521,11 @@ static __device__ uint8_t epistemic_tuple_key_row_matches_arity_n(
 
         uint8_t match_mode = tuple_key_match_modes[key];
         uint8_t matches = 0u;
-        if (match_mode == 1u) {
+        if (match_mode == 2u) {
+            // Anonymous wildcard: this key column imposes no equality
+            // requirement, so it matches every stable-model tuple row.
+            matches = 1u;
+        } else if (match_mode == 1u) {
             const uint8_t* bound_value_col =
                 reinterpret_cast<const uint8_t*>(bound_value_col_ptrs[key]);
             matches = epistemic_tuple_key_bound_cell_matches(
@@ -789,13 +793,34 @@ static __device__ uint8_t epistemic_final_tuple_has_accepted_membership(
     uint32_t world_stride,
     const uint32_t* __restrict__ rejection_reasons,
     const uint8_t* __restrict__ model_membership,
-    const uint8_t* __restrict__ world_views
+    const uint8_t* __restrict__ world_views,
+    const uint8_t* __restrict__ candidate_assumptions,
+    const uint8_t* __restrict__ gate_literal_required
 ) {
     if (literal_count == 0u || reduction_count == 0u || models_per_reduction == 0u) return 0u;
 
     for (uint32_t candidate = 0u; candidate < candidate_count; ++candidate) {
         if (rejection_reasons[candidate] != 0u) continue;
         if (world_views[candidate * world_stride] == 0u) continue;
+
+        // Global-gate literals (pure-ground, pure-anonymous, arity-0) must
+        // actually hold in this accepted candidate's world view. The accepted
+        // candidate's assumption bit equals the observed body literal value
+        // (validation guarantees assumption == observed, with `know`/`possible`
+        // modality and negation already folded in), so the body literal holds
+        // iff the assumption bit is set.
+        uint8_t gate_holds = 1u;
+        for (uint32_t literal = 0u; literal < literal_count; ++literal) {
+            if (gate_literal_required[literal] == 0u) continue;
+            uint8_t assumed =
+                candidate_assumptions[candidate * literal_count + literal] != 0u ? 1u : 0u;
+            if (assumed == 0u) {
+                gate_holds = 0u;
+                break;
+            }
+        }
+        if (gate_holds == 0u) continue;
+
         uint8_t active_membership = 0u;
         for (uint32_t reduction = 0u;
              reduction < reduction_count && active_membership == 0u;
@@ -877,7 +902,9 @@ extern "C" __global__ void epistemic_build_final_tuple_row_map_u8(
     const uint32_t* __restrict__ bound_value_col_widths,
     uint32_t row_filter_count,
     uint32_t* __restrict__ row_map,
-    uint32_t* __restrict__ final_row_count
+    uint32_t* __restrict__ final_row_count,
+    const uint8_t* __restrict__ candidate_assumptions,
+    const uint8_t* __restrict__ gate_literal_required
 ) {
     uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t rows = output_row_count[0];
@@ -892,7 +919,9 @@ extern "C" __global__ void epistemic_build_final_tuple_row_map_u8(
             world_stride,
             rejection_reasons,
             model_membership,
-            world_views
+            world_views,
+            candidate_assumptions,
+            gate_literal_required
         )
         : epistemic_final_tuple_has_accepted_membership_for_row(
             literal_count,
