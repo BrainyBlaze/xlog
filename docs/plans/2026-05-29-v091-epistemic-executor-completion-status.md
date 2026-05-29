@@ -18,7 +18,7 @@ runtime pilots) held for every accepted item.
 | EGB-02 tuple-key/bound-value membership | DONE | ground / single-bound / multi-bound / repeated-variable / anonymous-wildcard / arity-0 membership on the GPU device path; fixed a global-gate soundness bug (ground/anon/nullary modal literals were ungated) | 15 device pilots; `tuple_source_key_column_device_reads>0`; zero CPU-fallback counters |
 | EGB-01 EIR candidate enumeration | DONE | candidate worlds derived from EIR (full `2^N` lattice on device), generated/propagated/tested/accepted/rejected/reason trace counts; empty-accepted-world-view distinguished from failure; resource fail-closed before partial exec | 3 device pilots; determinism reruns; pre-existing 4-literal enumeration pilot |
 | EGB-07 FAEEL founded self-support | DONE | per-tuple-key foundedness; FAEEL rejects unfounded self-support; G91 self-support kept separate; precise missing-foundation diagnostics | 9 production-path pilots + G91 separation pilots |
-| EGB-04 epistemic integrity constraints | DONE | `:- know g().` / `:- possible g().` / `:- not possible g().` prune candidate world views via a new GPU constraint kernel (reason code 6); constraints dropped from the reduced ordinary program (no RIR rewrite) | 7 device pilots; zero CPU-fallback; no `__xlog_constraint_*` relation |
+| EGB-04 epistemic integrity constraints | **PARTIAL** (core DONE, K2 not met) | `:- know g().` / `:- possible g().` / `:- not possible g().` prune candidate world views via a new GPU constraint kernel; constraints dropped from the reduced ordinary program (no RIR rewrite). **K2 GAP:** the kernel writes a single class-level reason code (6) for any constraint violation — it does NOT record *which* constraint fired, so KPI EGB04.K2 ("rejected candidates include constraint-specific reasons") is **not met**. See follow-up B1 below. | 7 device pilots; zero CPU-fallback; no `__xlog_constraint_*` relation |
 | EGB-05 safe split semantics | DONE | split/coalesce/reject decisions explained via typed `EpistemicComponentMergeReason`; paired split-vs-unsplit equivalence; recomposition covers each source rule exactly once | 18 split pilots + device equivalence pilot |
 | EGB-06 joint multi-epistemic solving | DONE | rules coupling ≥2 distinct-name epistemic predicates (any operator mix incl. negated modal) solved jointly over the candidate world view; matches unsplit | 6 device pilots + operator-combination matrix |
 | EGB-03 nested modal operators | DONE (milestone scope) | nested modal forms (`know possible p()`, `not`-interspersed) recognized explicitly and rejected with a **stable typed diagnostic**; no parser-precedence accident; no fake flattening | negative pilots; stable `UnsupportedEpistemicConstruct` across all probed forms |
@@ -31,23 +31,40 @@ runtime pilots) held for every accepted item.
 once EGB-02 stopped the old no-op gate from leaking the output row. Fixed at the
 materialization layer (`create_zero_arity_buffer`); no epistemic-only special casing.
 
-## Scoped-out fragments (remain typed fail-closed)
+## Category A — In-spec typed fail-closed (REQUIRED by the goal, NOT debt)
 
-These are deliberate, sound over-approximations — they fail closed with typed
-diagnostics, never produce unsound results:
+These are mandated by the goal's own "Expected Rejected Behavior" sections and by
+cross-cutting lock #5 ("Typed fail-closed behavior remains required ... not silent
+partial execution"). They are correct rejection-by-design, verified by negative
+pilots — accepting them would violate the no-fake / no-CPU-fallback locks.
 
-- **Mixed per-row + global modal literal in one rule** (EGB-02): e.g. a bound-variable
-  modal literal combined with a ground/anonymous/nullary one — `UnsupportedEpistemicConstruct`.
-- **Nested modal semantics** (EGB-03 K1/K3): nested forms are not executable; truth
-  tables and FAEEL-vs-G91 nested behavior are out of scope for this milestone.
-- **Epistemic constraints beyond ground modal atoms** (EGB-04): variable-keyed
-  constraints, constraints mixing relational/comparison literals with modal literals,
-  constraint-only programs, and epistemic constraints in the split/GPT paths. Per-constraint
-  rejection attribution is class-level (reason code 6), not per-constraint index.
-- **Same-name multi-arity modal coupling** (EGB-06): `p/1` + `p/2` is unrepresentable
-  in the name-keyed relation store; fails closed identically on split and unsplit paths.
-- **Cross-component epistemic coupling beyond single-rule joint solving** (EGB-05/06).
-- **Aggregate / compound / list / predref tuple keys** in modal atoms (EGB-02).
+- **Nested modal semantics** — EGB-03 Expected Rejected: *"If the accepted fragment
+  remains single-level for a milestone, nested forms must continue to fail closed
+  with typed diagnostics"*; Bundle Ordering: EGB-03 lands only after single-level is
+  complete. Truth tables / FAEEL-vs-G91 nested behavior are out of scope by design.
+- **Aggregate / compound / list / predref modal tuple keys** — EGB-02 Expected
+  Rejected lists these verbatim as fail-closed.
+- **Epistemic constraints with variable tuple keys, nested-modal bodies, or
+  CPU-only world-view scans** — EGB-04 Expected Rejected lists these verbatim.
+- **Unsafe same-name multi-arity modal coupling** (`p/1` + `p/2` unsafely bound) —
+  EGB-06 Expected Rejected: unsupported-tuple-key joint conditions fail closed.
+  Safe (bound) cross-arity coupling IS accepted (EGB-05/06).
+
+## Category B — Genuine follow-up (NOT goal-mandated; tracked, not "done")
+
+- **B1 — EGB-04.K2 constraint-specific reasons (PARTIAL).** KPI EGB04.K2 requires
+  *"rejected candidates include constraint-specific reasons."* Delivered: a single
+  class-level reason code (6) for all constraint violations; the firing constraint
+  index is not recorded. **This KPI is not met.** Fix: record the violating
+  constraint index in the kernel and surface it per candidate. Bounded change
+  (kernel + workspace buffer + result accessor + test).
+- **B2 — Mixed per-row + global modal literal in one rule (EGB-02).** NOT in EGB-02's
+  Expected Rejected list — introduced by the EGB-02 implementation to replace a
+  *silently wrong* result (the global-gate bug) with sound fail-closed, as lock #1
+  forced. Sound, but a new boundary the goal did not explicitly require; either
+  implement the mixed path or keep fail-closed by explicit decision.
+- **B3 — Cross-component epistemic coupling beyond single-rule joint solving**
+  (EGB-05/06): tracked as future work, currently fail-closed.
 
 ## Verification (feat HEAD `9f6eee45`)
 

@@ -1927,10 +1927,15 @@ engines, typed fail-closed, real runtime/device pilots). Status summary:
       `p() :- possible p().` rejected; G91 self-support kept separate. Evidence:
       `cargo test -p xlog-logic --test test_epistemic_faeel_foundedness` and
       `--test test_epistemic_g91`.
-- [x] EGB-04 epistemic integrity constraints: `:- know/possible/not possible g().`
+- [x] EGB-04 epistemic integrity constraints (core): `:- know/possible/not possible g().`
       prune candidate world views via a GPU constraint kernel (rejection reason
       6), constraints dropped from the reduced ordinary program (no RIR rewrite).
       Evidence: `egb04_*` device pilots.
+- [ ] **EGB-04.K2 constraint-specific rejection reasons (PARTIAL — not met).** KPI
+      EGB04.K2 requires rejected candidates to carry constraint-specific reasons;
+      the kernel currently writes a single class-level reason (6) and does not
+      record which constraint fired. Follow-up: record the violating constraint
+      index per candidate and surface it.
 - [x] EGB-05 safe split dependency and coupling: split/coalesce/reject decisions
       explained via typed `EpistemicComponentMergeReason`; paired split-vs-unsplit
       equivalence; recomposition covers each source rule exactly once. Evidence:
@@ -1953,18 +1958,29 @@ engines, typed fail-closed, real runtime/device pilots). Status summary:
       epistemic logic 74/74, all 5 `xlog run` examples, `xlog-cuda` set ops
       35/35, and `xlog-integration` 206/206.
 
-### Scoped out of v0.9.1 (remain typed fail-closed)
+### In-spec typed fail-closed (REQUIRED by the goal — rejection-by-design, not debt)
 
-- [ ] Nested modal **semantics** (truth tables, FAEEL-vs-G91 nested behavior):
-      nested forms stay rejected; EGB-03 milestone is representation +
-      diagnostics only.
-- [ ] Mixed per-row (bound-variable) and global (ground/anonymous/nullary)
-      modal literals in a single rule.
-- [ ] Epistemic constraints with variable tuple keys, constraints mixing
-      relational/comparison literals with modal literals, constraint-only
-      programs, and per-constraint (vs class-level) rejection attribution.
-- [ ] Unsafe same-name multi-arity modal coupling (name-keyed relation store).
-- [ ] Aggregate / compound / list / predref modal tuple keys.
+Mandated by each bundle's "Expected Rejected Behavior" and cross-cutting lock #5;
+verified by negative pilots. Accepting these would violate the no-fake / no-CPU-
+fallback locks.
+
+- [x] Nested modal **semantics** stay rejected with stable typed diagnostics
+      (EGB-03 Expected Rejected + Bundle Ordering: lands after single-level).
+- [x] Aggregate / compound / list / predref modal tuple keys fail closed
+      (EGB-02 Expected Rejected).
+- [x] Epistemic constraints with variable tuple keys, nested-modal bodies, or
+      CPU-only world-view scans fail closed (EGB-04 Expected Rejected).
+- [x] Unsafe same-name multi-arity modal coupling fails closed; safe (bound)
+      cross-arity coupling is accepted (EGB-06 Expected Rejected).
+
+### Genuine follow-up (NOT goal-mandated; tracked, not claimed done)
+
+- [ ] EGB-04.K2 constraint-specific rejection reasons (see above — PARTIAL).
+- [ ] Mixed per-row (bound-variable) + global (ground/anonymous/nullary) modal
+      literals in a single rule: introduced as sound fail-closed by EGB-02 to
+      replace a silently-wrong path; implement the mixed path or keep fail-closed
+      by explicit decision.
+- [ ] Cross-component epistemic coupling beyond single-rule joint solving.
 
 ## v0.10.0 - Multi-GPU and Out-of-Core Execution
 

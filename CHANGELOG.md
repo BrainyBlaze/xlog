@@ -28,11 +28,12 @@ recorded in `docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`
 - Added per-tuple-key FAEEL founded self-support: unfounded `p() :- possible p().`
   is rejected, self-reference is accepted only with independent founded support
   for the same tuple key, and G91 compatibility self-support stays separate.
-- Added GPU epistemic integrity constraints: `:- know g().`,
+- Added GPU epistemic integrity constraints (core): `:- know g().`,
   `:- possible g().`, and `:- not possible g().` prune candidate world views via
   a new constraint kernel (rejection reason `WorldViewConstraintViolation`);
   epistemic constraints are dropped from the reduced ordinary program with no
-  ordinary-RIR rewrite.
+  ordinary-RIR rewrite. NOTE: the reason is class-level; KPI EGB04.K2
+  (constraint-specific reasons) is **not yet met** — see Known gaps below.
 - Added explainable safe-split semantics: split, coalesce, and reject decisions
   carry typed `EpistemicComponentMergeReason`s, valid splits are equivalence-
   checked against unsplit execution, and recomposition covers each source rule
@@ -63,6 +64,22 @@ recorded in `docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`
   distinct epistemic predicates; such rules are routed to joint solving. The
   `xlog-integration` split-coupling test was updated to the new accepted
   contract.
+
+### Known gaps (v0.9.1, tracked — NOT claimed complete)
+
+- **EGB-04.K2 (partial):** rejected candidates carry a class-level constraint
+  reason, not the constraint-specific reason the KPI requires; the firing
+  constraint index is not yet recorded. Tracked in ROADMAP "Genuine follow-up".
+- **EGB-02 mixed per-row + global modal literal in one rule:** a sound
+  fail-closed boundary introduced to replace a silently-wrong path; not a
+  goal-mandated accepted case. Implement the mixed path or keep fail-closed by
+  explicit decision.
+
+Goal-mandated typed fail-closed fragments (nested modal semantics, aggregate/
+compound/list/predref modal keys, variable-keyed/nested/CPU-scan epistemic
+constraints, unsafe same-name multi-arity coupling) are rejection-by-design per
+the bundle spec and lock #5 — verified by negative pilots, not debt. Full list:
+`docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`.
 
 v0.9.0 Epistemic Solver Release Candidate. This branch layers the v0.8.7-v0.8.9
 BFO diagnostics and provenance pack into the v0.9.0 GPU-native epistemic,
