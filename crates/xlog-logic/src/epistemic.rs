@@ -432,11 +432,12 @@ fn reject_faeel_self_supported_possible(eir: &EirProgram) -> Result<()> {
                     continue;
                 }
                 let label = eir_epistemic_literal_label(lit);
+                let missing = format_missing_foundation(&lit.atom);
                 if lit.atom.arity > 0 {
                     return Err(XlogError::UnsupportedEpistemicConstruct {
                         construct: "FAEEL foundedness guard".to_string(),
                         context: format!(
-                            "rule[{rule_index}] has nonzero-arity self-supported {label} {}/{} in default FAEEL mode; accepted GPU lowering requires tuple-level foundedness proof or explicit g91 compatibility mode",
+                            "rule[{rule_index}] has nonzero-arity self-supported {label} {}/{} in default FAEEL mode; no independent founded support proves the tuple key {missing}; accepted GPU lowering requires a tuple-level foundedness proof (a non-circular support rule whose body subsumes this rule's tuple-key domain) or explicit g91 compatibility mode",
                             lit.atom.predicate, lit.atom.arity
                         ),
                     });
@@ -444,7 +445,7 @@ fn reject_faeel_self_supported_possible(eir: &EirProgram) -> Result<()> {
                 return Err(XlogError::UnsupportedEpistemicConstruct {
                     construct: "FAEEL foundedness guard".to_string(),
                     context: format!(
-                        "rule[{rule_index}] has self-supported {label} {}/{} in default FAEEL mode; use explicit g91 compatibility mode or provide independent founded support",
+                        "rule[{rule_index}] has self-supported {label} {}/{} in default FAEEL mode; no independent founded support proves {missing}; use explicit g91 compatibility mode or provide a non-circular founded support rule",
                         lit.atom.predicate, lit.atom.arity
                     ),
                 });
@@ -571,6 +572,34 @@ fn eir_epistemic_literal_label(lit: &xlog_ir::EirEpistemicLiteral) -> &'static s
         (false, EirEpistemicOp::Possible) => "possible",
         (true, EirEpistemicOp::Know) => "not know",
         (true, EirEpistemicOp::Possible) => "not possible",
+    }
+}
+
+/// Render the predicate/tuple-key whose independent foundation is missing.
+///
+/// Used to make FAEEL foundedness rejections name the exact tuple key that
+/// lacks non-circular support (KPI: precise missing-foundation diagnostic).
+fn format_missing_foundation(atom: &xlog_ir::EirAtom) -> String {
+    if atom.arity == 0 {
+        return format!("{}()", atom.predicate);
+    }
+    let key = atom
+        .terms
+        .iter()
+        .map(format_eir_term_key)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{}({key})", atom.predicate)
+}
+
+fn format_eir_term_key(term: &EirTerm) -> String {
+    match term {
+        EirTerm::Variable(name) => name.clone(),
+        EirTerm::Anonymous => "_".to_string(),
+        EirTerm::Integer(value) => value.to_string(),
+        EirTerm::String(value) => format!("{value:?}"),
+        EirTerm::Symbol(value) => format!("sym#{value}"),
+        other => format!("{other:?}"),
     }
 }
 
