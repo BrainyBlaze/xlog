@@ -6153,3 +6153,262 @@ fn egb02_mixed_bound_and_ground_tuple_key_through_gpu_membership() {
     );
     assert_eq!(founded, vec![1]);
 }
+
+// ---------------------------------------------------------------------------
+// EGB-01: arbitrary-EIR candidate-world enumeration.
+//
+// These pilots prove the production device path
+// (compile_epistemic_gpu_execution -> execute_epistemic_gpu_execution) derives
+// the candidate assumption space FROM the program's EIR epistemic literals --
+// no hand-supplied EpistemicInterpretation candidate lists -- generates the
+// full 2^literal_count lattice on device, evaluates each candidate against the
+// reduced stable-model semantics through the production runtime path, and emits
+// the K2 trace counts. They route through the same single-plan GPU runtime path
+// as every other accepted epistemic execution; nothing here touches the CPU
+// fixture layer (run_generate_propagate_test).
+// ---------------------------------------------------------------------------
+
+/// EGB-01 K1/K2: a program with MULTIPLE epistemic literals derives its full
+/// candidate space (2^literal_count) FROM the EIR program -- no fixture list --
+/// and emits every required trace count (generated, propagated, tested,
+/// accepted, rejected, rejection reasons) from device-derived semantics.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb01_multi_literal_program_enumerates_candidate_space_from_eir() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // Three epistemic literals across distinct predicates -> 2^3 = 8 candidates,
+    // each a distinct assumption assignment derived purely from the EIR program.
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred a(u32).
+        pred b(u32).
+        pred c(u32).
+        pred out(u32).
+
+        out(X) :- seed(X), know a(X), possible b(X), not possible c(X).
+        "#,
+    )
+    .expect("parse EGB-01 multi-literal program");
+    let executable =
+        compile_epistemic_gpu_execution(&program).expect("compile EGB-01 multi-literal plan");
+    // The candidate space is derived from the program's epistemic literals,
+    // not supplied by the caller.
+    assert_eq!(
+        executable.gpu_plan.epistemic_literals.len(),
+        3,
+        "candidate space must be derived from the three EIR epistemic literals"
+    );
+
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    // a(7) and b(7) present, c(7) absent => exactly the all-assumptions-satisfied
+    // candidate (index 7) is accepted; every other candidate is rejected.
+    for (name, rows) in [
+        ("seed", &[7][..]),
+        ("a", &[7][..]),
+        ("b", &[7][..]),
+        ("c", &[][..]),
+    ] {
+        executor.put_relation(name, upload_unary_u32(&fixture.memory, rows, "x"));
+    }
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 4,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("EGB-01 multi-literal program should enumerate and evaluate on device");
+
+    // K2: every required trace count is emitted from device-derived semantics.
+    let trace = &result.semantic_trace;
+    assert_eq!(trace.generated_candidates, 8, "generated = 2^3");
+    assert_eq!(trace.guesses, 24, "guesses = 8 candidates * 3 literals");
+    assert_eq!(trace.propagated_candidates, 8, "propagated");
+    assert_eq!(trace.tested_candidates, 8, "tested");
+    assert_eq!(trace.accepted_candidates, 1, "accepted");
+    assert_eq!(trace.rejected_candidates, 7, "rejected");
+    assert_eq!(trace.accepted_candidate_indices, vec![7]);
+    assert_eq!(
+        trace.rejected_candidate_indices,
+        vec![0, 1, 2, 3, 4, 5, 6]
+    );
+    assert_eq!(
+        trace.rejection_reasons.len(),
+        7,
+        "a rejection reason is emitted for each rejected candidate"
+    );
+    assert!(
+        trace
+            .typed_rejection_reasons()
+            .expect("decode typed rejection reasons")
+            .iter()
+            .all(|reason| *reason == EpistemicGpuRejectionReason::UnsatisfiedMembership),
+        "rejected candidates fail membership against the EIR-derived assumptions"
+    );
+    // K4: no CPU fallback in candidate enumeration / world-view validation.
+    assert_eq!(trace.cpu_candidate_enumerations, 0);
+    assert_eq!(trace.cpu_world_view_validations, 0);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+    assert_eq!(result.transfer_budget.per_candidate_host_round_trips, 0);
+
+    let rows = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download EGB-01 multi-literal output");
+    assert_eq!(rows, vec![7]);
+    result
+        .require_runtime_dispatch_certification()
+        .expect("EGB-01 multi-literal result must retain dispatch + semantic certification");
+}
+
+/// EGB-01 K3: an EIR-derived candidate space where EVERY candidate is rejected
+/// returns Ok cleanly with an empty accepted world-view set -- distinguishable
+/// from execution failure (which returns Err) -- and still emits a full
+/// rejection trace.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb01_empty_accepted_world_view_is_distinct_from_failure() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // know a(X) can never hold: a has no rows, so no candidate that assumes a
+    // is founded, and the candidate that does not assume a fails the literal.
+    // Every candidate in the 2^2 space is therefore rejected.
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred a(u32).
+        pred b(u32).
+        pred out(u32).
+
+        out(X) :- seed(X), know a(X), possible b(X).
+        "#,
+    )
+    .expect("parse EGB-01 empty-world-view program");
+    let executable =
+        compile_epistemic_gpu_execution(&program).expect("compile EGB-01 empty-world-view plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    for (name, rows) in [("seed", &[7][..]), ("a", &[][..]), ("b", &[7][..])] {
+        executor.put_relation(name, upload_unary_u32(&fixture.memory, rows, "x"));
+    }
+
+    // Execution SUCCEEDS (Ok) even though zero candidates are accepted -- this is
+    // the empty-accepted-world-view vs execution-failure distinction.
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 4,
+                max_worlds: 4,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("empty accepted world view must be Ok, not an execution failure");
+
+    let trace = &result.semantic_trace;
+    assert_eq!(trace.generated_candidates, 4, "generated = 2^2");
+    assert_eq!(trace.tested_candidates, 4, "tested");
+    assert_eq!(trace.accepted_candidates, 0, "no candidate is accepted");
+    assert!(
+        trace.accepted_candidate_indices.is_empty(),
+        "accepted world-view set is empty"
+    );
+    assert_eq!(trace.accepted_world_views, 0);
+    assert_eq!(trace.rejected_candidates, 4, "every candidate is rejected");
+    assert_eq!(
+        trace.rejection_reasons.len(),
+        4,
+        "a rejection reason is emitted for each rejected candidate"
+    );
+    assert_eq!(trace.cpu_candidate_enumerations, 0);
+    assert_eq!(trace.cpu_world_view_validations, 0);
+
+    // Empty accepted set => empty final output, not an error.
+    assert_eq!(result.final_result_transfer.final_output_rows, 0);
+    let rows = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download empty EGB-01 output column");
+    assert!(rows.is_empty(), "empty accepted world view yields no rows");
+    result
+        .require_runtime_dispatch_certification()
+        .expect("empty-world-view result must still be a certified runtime dispatch");
+}
+
+/// EGB-01 K3: repeated deterministic runs of the same EIR-derived enumeration
+/// produce identical candidate AND result sets.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb01_repeated_runs_are_deterministic() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let source = r#"
+        pred seed(u32).
+        pred a(u32).
+        pred b(u32).
+        pred c(u32).
+        pred out(u32).
+
+        out(X) :- seed(X), know a(X), possible b(X), not possible c(X).
+        "#;
+    let capacities = EpistemicGpuWorkspaceCapacities {
+        max_candidates: 8,
+        max_worlds: 4,
+        max_models_per_reduction: 1,
+    };
+
+    let run_once = || {
+        let program = parse_program(source).expect("parse EGB-01 determinism program");
+        let executable =
+            compile_epistemic_gpu_execution(&program).expect("compile EGB-01 determinism plan");
+        let mut executor = Executor::new(Arc::clone(&fixture.provider));
+        for (name, rel) in &executable.relation_ids {
+            executor.register_relation(*rel, name);
+        }
+        for (name, rows) in [
+            ("seed", &[7, 8][..]),
+            ("a", &[7, 8][..]),
+            ("b", &[7, 8][..]),
+            ("c", &[][..]),
+        ] {
+            executor.put_relation(name, upload_unary_u32(&fixture.memory, rows, "x"));
+        }
+        let result = executor
+            .execute_epistemic_gpu_execution(&executable, capacities)
+            .expect("EGB-01 determinism run should execute on device");
+        let mut rows = fixture
+            .provider
+            .download_column::<u32>(&result.final_output, 0)
+            .expect("download EGB-01 determinism output");
+        rows.sort_unstable();
+        (
+            result.semantic_trace.accepted_candidate_indices.clone(),
+            result.semantic_trace.rejected_candidate_indices.clone(),
+            result.semantic_trace.rejection_reasons.clone(),
+            rows,
+        )
+    };
+
+    let first = run_once();
+    let second = run_once();
+    assert_eq!(
+        first, second,
+        "repeated deterministic runs must produce identical candidate and result sets"
+    );
+    // Candidate set was genuinely enumerated (not empty), so determinism is meaningful.
+    assert_eq!(first.0, vec![7], "accepted candidate index is the all-true assignment");
+    assert_eq!(first.3, vec![7, 8], "accepted world view materializes both seed rows");
+}
