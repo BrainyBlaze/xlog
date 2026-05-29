@@ -765,7 +765,8 @@ extern "C" __global__ void epistemic_validate_constraints_u8(
     const uint32_t* __restrict__ constraint_literal_counts,
     const uint32_t* __restrict__ constraint_literal_indices,
     const uint8_t* __restrict__ candidate_assumptions,
-    uint32_t* __restrict__ rejection_reasons
+    uint32_t* __restrict__ rejection_reasons,
+    uint32_t* __restrict__ constraint_violation_index
 ) {
     uint32_t candidate = blockIdx.x * blockDim.x + threadIdx.x;
     if (candidate >= candidate_count) return;
@@ -799,7 +800,12 @@ extern "C" __global__ void epistemic_validate_constraints_u8(
         if (body_holds != 0u) {
             // Integrity-constraint violation: this accepted world view satisfies
             // a `:- know/possible ...` constraint body and must be pruned.
+            // Record WHICH constraint fired (declaration order index) alongside
+            // the unchanged class-level reason code so rejected candidates carry
+            // a constraint-specific reason. The reason code stays 6u so existing
+            // assertions and `trace_constraint_violations` counters are intact.
             rejection_reasons[candidate] = 6u;
+            constraint_violation_index[candidate] = constraint;
             return;
         }
     }
