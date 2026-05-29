@@ -125,6 +125,13 @@ pub struct EpistemicGpuWorkspace {
     pub model_membership: TrackedCudaSlice<u8>,
     /// Structured rejection-reason code buffer.
     pub rejection_reasons: TrackedCudaSlice<u32>,
+    /// Per-candidate firing integrity-constraint index buffer. Parallel to
+    /// `rejection_reasons`, sized `layout.rejection_reason_slots`. Holds the
+    /// declaration-order index of the constraint that rejected a candidate, or
+    /// the sentinel `u32::MAX` when no integrity constraint rejected it. The
+    /// reason code in `rejection_reasons` is left at 6 for constraint
+    /// violations; this buffer adds the constraint-specific detail.
+    pub constraint_violation_index: TrackedCudaSlice<u32>,
 }
 
 impl EpistemicGpuWorkspace {
@@ -134,13 +141,14 @@ impl EpistemicGpuWorkspace {
             || self.world_views.len() != self.layout.world_view_bytes
             || self.model_membership.len() != self.layout.model_membership_bytes
             || self.rejection_reasons.len() != self.layout.rejection_reason_slots
+            || self.constraint_violation_index.len() != self.layout.rejection_reason_slots
         {
             return Err(XlogError::UnsupportedEpistemicConstruct {
                 construct: construct.to_string(),
                 context: format!(
                     "prepared GPU workspace buffer lengths do not match layout: \
                      candidate_bytes={}/{} world_view_bytes={}/{} model_membership_bytes={}/{} \
-                     rejection_reason_slots={}/{}",
+                     rejection_reason_slots={}/{} constraint_violation_index_slots={}/{}",
                     self.candidate_assumptions.len(),
                     self.layout.candidate_assumption_bytes,
                     self.world_views.len(),
@@ -148,6 +156,8 @@ impl EpistemicGpuWorkspace {
                     self.model_membership.len(),
                     self.layout.model_membership_bytes,
                     self.rejection_reasons.len(),
+                    self.layout.rejection_reason_slots,
+                    self.constraint_violation_index.len(),
                     self.layout.rejection_reason_slots
                 ),
             });
@@ -447,6 +457,12 @@ pub struct EpistemicGpuSemanticTrace {
     pub rejected_candidate_indices: Vec<usize>,
     /// Nonzero rejection reason codes copied from the device rejection buffer.
     pub rejection_reasons: Vec<u32>,
+    /// Constraint-specific reason per rejected candidate, aligned 1:1 with
+    /// `rejected_candidate_indices`. `Some(idx)` when an integrity constraint
+    /// (reason code 6) rejected the candidate, where `idx` is the firing
+    /// constraint's declaration-order index; `None` for every other rejection
+    /// reason. Surfaces EGB-04.K2 constraint-specific rejection detail.
+    pub constraint_violation_indices: Vec<Option<u32>>,
     /// Bounded metadata reads from the device rejection buffer after the hot path.
     pub rejection_reason_device_reads: u32,
     /// Bytes read as bounded rejection-reason metadata after the hot path.
@@ -1497,9 +1513,18 @@ impl EpistemicGpuSemanticTrace {
 
         let raw_rejection_reasons = provider
             .dtoh_small_metadata_untracked(&workspace.rejection_reasons, candidate_count)?;
+        // Bounded metadata read of the parallel constraint-violation index buffer.
+        // Like `rejection_reasons`, this is an untracked post-hot-path metadata
+        // read, not a data-plane transfer.
+        let raw_constraint_violation_index = provider.dtoh_small_metadata_untracked(
+            &workspace.constraint_violation_index,
+            candidate_count,
+        )?;
+        let constraint_violation_code = EpistemicGpuRejectionReason::WorldViewConstraintViolation.code();
         let mut accepted_candidate_indices = Vec::new();
         let mut rejected_candidate_indices = Vec::new();
         let mut rejection_reasons = Vec::new();
+        let mut constraint_violation_indices: Vec<Option<u32>> = Vec::new();
         for (candidate_index, reason) in raw_rejection_reasons.into_iter().enumerate() {
             if reason == 0 {
                 accepted_candidate_indices.push(candidate_index);
@@ -1507,6 +1532,21 @@ impl EpistemicGpuSemanticTrace {
                 EpistemicGpuRejectionReason::from_code(reason)?;
                 rejected_candidate_indices.push(candidate_index);
                 rejection_reasons.push(reason);
+                // Gate the constraint-specific index on the integrity-constraint
+                // reason code: the kernel writes `rejection_reasons[c] = 6` and
+                // `constraint_violation_index[c] = constraint` together, so the
+                // index is trustworthy exactly when the reason is 6. Any other
+                // reason -> None, independent of buffer contents (also defends
+                // the zero-constraint path where the sentinel is never written).
+                let firing = raw_constraint_violation_index
+                    .get(candidate_index)
+                    .copied()
+                    .unwrap_or(u32::MAX);
+                if reason == constraint_violation_code && firing != u32::MAX {
+                    constraint_violation_indices.push(Some(firing));
+                } else {
+                    constraint_violation_indices.push(None);
+                }
             }
         }
         let accepted_candidates = accepted_candidate_indices.len();
@@ -1534,6 +1574,12 @@ impl EpistemicGpuSemanticTrace {
             rejected_candidates,
             rejected_candidate_indices,
             rejection_reasons,
+            constraint_violation_indices,
+            // Counts the bounded metadata read of the rejection-reason code buffer
+            // specifically (the certification invariant scopes to that buffer's
+            // bytes). The parallel constraint-violation index buffer is a
+            // separate bounded metadata read tracked alongside it, not folded
+            // into this rejection-reason-specific counter.
             rejection_reason_device_reads: 1,
             rejection_reason_metadata_bytes,
             cpu_candidate_enumerations: 0,
@@ -3421,6 +3467,7 @@ impl Executor {
             world_views: memory.alloc::<u8>(layout.world_view_bytes)?,
             model_membership: memory.alloc::<u8>(layout.model_membership_bytes)?,
             rejection_reasons: memory.alloc::<u32>(layout.rejection_reason_slots)?,
+            constraint_violation_index: memory.alloc::<u32>(layout.rejection_reason_slots)?,
         })
     }
 
@@ -4960,6 +5007,38 @@ impl Executor {
         let literal_count = gpu_plan.epistemic_literals.len();
         let constraint_count = gpu_plan.constraints.len();
 
+        // Initialize the parallel constraint-violation index buffer to the
+        // sentinel `u32::MAX` ("not rejected by a constraint") for every
+        // candidate, BEFORE the zero-constraint early return below. Zero is a
+        // valid constraint index, so the buffer cannot be left zeroed: any
+        // candidate rejected by reason codes 1-5 (or accepted) must read back as
+        // the sentinel, never a spurious `Some(0)`. The upload rides the
+        // launch-metadata channel (like the CSR buffers below), so it adds no
+        // tracked data-plane HTOD and keeps `host_write_ops` at zero.
+        if candidate_count > workspace.layout.rejection_reason_slots {
+            return Err(XlogError::ResourceExhausted {
+                context: "epistemic GPU constraint-violation index workspace".to_string(),
+                estimated_bytes: candidate_count as u64,
+                budget_bytes: workspace.layout.rejection_reason_slots as u64,
+            });
+        }
+        if candidate_count > 0 {
+            let sentinel_host = vec![u32::MAX; candidate_count];
+            let fill_len = candidate_count;
+            let mut sentinel_view = workspace
+                .constraint_violation_index
+                .slice_mut(0..fill_len);
+            self.provider
+                .htod_launch_metadata_sync_copy_into(&sentinel_host, &mut sentinel_view)
+                .map_err(|e| {
+                    XlogError::execution_ctx(
+                        "epistemic GPU world-view constraint metadata",
+                        "initialize constraint-violation index sentinel",
+                        &e,
+                    )
+                })?;
+        }
+
         // Flatten constraint -> literal index references into CSR-style buffers.
         let mut offsets_host = Vec::with_capacity(constraint_count);
         let mut counts_host = Vec::with_capacity(constraint_count);
@@ -5082,6 +5161,7 @@ impl Executor {
                     (&constraint_literal_indices).as_kernel_param(),
                     (&workspace.candidate_assumptions).as_kernel_param(),
                     (&mut workspace.rejection_reasons).as_kernel_param(),
+                    (&mut workspace.constraint_violation_index).as_kernel_param(),
                 ];
                 func.clone().launch(config, &mut params)
             },

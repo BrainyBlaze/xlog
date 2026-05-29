@@ -3552,6 +3552,134 @@ fn parsed_know_constraint_prunes_world_view_when_constraint_body_true() {
     );
 }
 
+// EGB-04.K2: rejected candidates must carry constraint-SPECIFIC reasons.
+// With two integrity constraints, the surviving rejected world view must
+// identify WHICH constraint (by source-declaration index) actually fired,
+// not merely that "some" constraint did. The kernel evaluates constraints in
+// declaration order and returns on the first whose body holds, so designing
+// inputs so that exactly one of the two bodies holds pins the firing index.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb04_constraint_specific_reason_identifies_firing_constraint() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+
+    // Helper: run a two-constraint program and return the per-rejected-candidate
+    // constraint indices aligned with `rejected_candidate_indices`.
+    fn run_two_constraints(
+        fixture: &RuntimeFixture,
+        unsafe_a_present: bool,
+        unsafe_b_present: bool,
+    ) -> (Vec<usize>, Vec<Option<u32>>, Vec<u32>) {
+        // Constraint index 0 is `:- know unsafe_a(7).`
+        // Constraint index 1 is `:- know unsafe_b(7).`
+        let program = parse_program(
+            r#"
+            pred seed(u32).
+            pred gate(u32).
+            pred unsafe_a(u32).
+            pred unsafe_b(u32).
+            pred out(u32).
+
+            out(X) :- seed(X), know gate(X).
+            :- know unsafe_a(7).
+            :- know unsafe_b(7).
+            "#,
+        )
+        .expect("parse two-constraint program");
+        let executable = compile_epistemic_gpu_execution(&program)
+            .expect("compile two-constraint GPU plan");
+        let mut executor = Executor::new(Arc::clone(&fixture.provider));
+
+        for (name, rel) in &executable.relation_ids {
+            executor.register_relation(*rel, name);
+        }
+        executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[7], "x"));
+        executor.put_relation("gate", upload_unary_u32(&fixture.memory, &[7], "x"));
+        // Present => `know unsafe_x(7)` true => that constraint body holds.
+        let unsafe_a = if unsafe_a_present { vec![7] } else { vec![] };
+        let unsafe_b = if unsafe_b_present { vec![7] } else { vec![] };
+        executor.put_relation(
+            "unsafe_a",
+            upload_unary_u32(&fixture.memory, &unsafe_a, "x"),
+        );
+        executor.put_relation(
+            "unsafe_b",
+            upload_unary_u32(&fixture.memory, &unsafe_b, "x"),
+        );
+
+        let result = executor
+            .execute_epistemic_gpu_execution(
+                &executable,
+                EpistemicGpuWorkspaceCapacities {
+                    max_candidates: 8,
+                    max_worlds: 4,
+                    max_models_per_reduction: 1,
+                },
+            )
+            .expect("two-constraint program should return Ok");
+        assert_eq!(result.constraint_world_view_validation.constraint_count, 2);
+        assert_eq!(result.constraint_world_view_validation.kernel_launches, 1);
+        assert_eq!(result.constraint_world_view_validation.host_write_ops, 0);
+        result
+            .require_runtime_dispatch_certification()
+            .expect("two-constraint path should retain GPU semantic certification");
+        (
+            result.semantic_trace.rejected_candidate_indices.clone(),
+            result.semantic_trace.constraint_violation_indices.clone(),
+            result.semantic_trace.rejection_reasons.clone(),
+        )
+    }
+
+    // Case A: only constraint index 1 (`:- know unsafe_b(7).`) fires.
+    let (rejected_a, indices_a, reasons_a) = run_two_constraints(&fixture, false, true);
+    assert!(
+        !rejected_a.is_empty(),
+        "constraint index 1 should prune at least one candidate"
+    );
+    // Reason code 6 must be unchanged for the rejected candidate(s).
+    let constraint_code = EpistemicGpuRejectionReason::WorldViewConstraintViolation.code();
+    assert!(
+        reasons_a.iter().any(|&code| code == constraint_code),
+        "expected reason code 6 (constraint violation), got {:?}",
+        reasons_a
+    );
+    // The firing constraint index must be SPECIFICALLY 1, not merely "some".
+    assert!(
+        indices_a.iter().any(|idx| *idx == Some(1)),
+        "expected constraint-specific index Some(1) for a `unsafe_b` violation, got {:?}",
+        indices_a
+    );
+    assert!(
+        !indices_a.iter().any(|idx| *idx == Some(0)),
+        "constraint index 0 (`unsafe_a`) must NOT be reported when only `unsafe_b` is present, got {:?}",
+        indices_a
+    );
+    assert_eq!(
+        indices_a.len(),
+        rejected_a.len(),
+        "constraint_violation_indices must be aligned 1:1 with rejected_candidate_indices"
+    );
+
+    // Case B: only constraint index 0 (`:- know unsafe_a(7).`) fires.
+    let (rejected_b, indices_b, reasons_b) = run_two_constraints(&fixture, true, false);
+    assert!(
+        !rejected_b.is_empty(),
+        "constraint index 0 should prune at least one candidate"
+    );
+    assert!(
+        reasons_b.iter().any(|&code| code == constraint_code),
+        "expected reason code 6 (constraint violation), got {:?}",
+        reasons_b
+    );
+    assert!(
+        indices_b.iter().any(|idx| *idx == Some(0)),
+        "expected constraint-specific index Some(0) for an `unsafe_a` violation, got {:?}",
+        indices_b
+    );
+}
+
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
 fn parsed_possible_constraint_does_not_prune_when_contradiction_absent() {
