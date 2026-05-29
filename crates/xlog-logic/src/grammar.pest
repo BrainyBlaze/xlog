@@ -76,15 +76,23 @@ is_expr = { variable ~ "is" ~ arith_expr }
 
 // Body literals
 epistemic_op = @{ ("know" | "possible") ~ !ident_continue }
-unsupported_nested_epistemic_atom = { epistemic_op ~ epistemic_op ~ atom }
-negated_unsupported_nested_epistemic_atom = { "not" ~ unsupported_nested_epistemic_atom }
+// A modal prefix is an epistemic operator optionally guarded by `not`. Nested
+// modal forms are out of fragment for the single-level milestone: any literal
+// containing TWO OR MORE modal prefixes (with `not` allowed anywhere between or
+// before the atom) is recognised here so it can fail closed with one stable
+// typed diagnostic instead of an accidental generic parse error. This rule never
+// flattens a nested form into an ordinary predicate; it only marks it for
+// rejection in the parser builder.
+modal_prefix = { ("not")? ~ epistemic_op }
+unsupported_nested_epistemic_atom = {
+    modal_prefix ~ ("not")? ~ modal_prefix ~ (("not")? ~ modal_prefix)* ~ ("not")? ~ atom
+}
 epistemic_atom = { epistemic_op ~ atom }
 negated_epistemic_atom = { "not" ~ epistemic_atom }
 negated_atom = { "not" ~ atom }
 univ = { term ~ "=.." ~ term }
 body_literal = {
-    negated_unsupported_nested_epistemic_atom
-    | unsupported_nested_epistemic_atom
+    unsupported_nested_epistemic_atom
     | negated_epistemic_atom
     | epistemic_atom
     | negated_atom
