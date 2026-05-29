@@ -37,8 +37,11 @@ After the tagged v0.8.0 feature pack, v0.8.5 completed the Language
 Completeness and Developer Experience train. v0.8.6 closed the deferred
 DTS-DLM runtime / GPU-native optimizer completion backlog that v0.9.0 needs as
 runtime substrate. v0.8.7-v0.8.9 are integrated predecessor diagnostics
-surfaces in the v0.9.0 Epistemic/Solver Semantics train, and v0.10.0 is the
-Multi-GPU / Out-of-Core train.
+surfaces in the v0.9.0 Epistemic/Solver Semantics train. v0.9.1 completes the
+bounded epistemic executor into a load-bearing surface (EIR-derived candidate
+enumeration, value-level modal membership, per-tuple-key FAEEL foundedness,
+epistemic constraints, safe split equivalence, and joint multi-epistemic
+solving), and v0.10.0 is the Multi-GPU / Out-of-Core train.
 
 ## v0.0.1 - Workspace Foundation
 
@@ -1895,6 +1898,73 @@ validator.
       KPI surface and is not claimed by the v0.9.0 closure proposal;
       it remains a runtime-concurrency backlog item for the next
       runtime hardening train.
+
+## v0.9.1 - Epistemic Executor Completion
+
+Turns the v0.9.0 bounded epistemic executor into a load-bearing execution
+surface: candidate worlds are derived from EIR, modal membership is value-level
+on the device, FAEEL foundedness is per tuple key, epistemic constraints prune
+world views, splits are equivalence-checked, and multi-epistemic-predicate rules
+are solved jointly. EIR remains the semantic boundary and direct raw RIR
+lowering stays a rejection boundary. All accepted work holds the cross-cutting
+locks (no hidden CPU fallback, no fake predicate rewriting, no parallel side
+engines, typed fail-closed, real runtime/device pilots). Status summary:
+`docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`.
+
+### xlog-logic / xlog-runtime / xlog-cuda (epistemic executor)
+
+- [x] EGB-02 tuple-key and bound-value modal membership: ground, single/multi
+      bound variable, repeated-variable equality, anonymous wildcard, and
+      arity-0 keys on the GPU device path; fixed a global-gate soundness bug
+      where ground/anonymous/nullary modal literals were left ungated. Evidence:
+      `XLOG_USE_DEVICE_RUNTIME=1 cargo test -p xlog-runtime --test test_epistemic_gpu_workspace --release --features epistemic-logic-tests` (`egb02_*`).
+- [x] EGB-01 EIR-derived candidate-world enumeration: candidate space derived
+      from the program (full device lattice), with generated/propagated/tested/
+      accepted/rejected/reason trace counts, deterministic results, empty
+      accepted-world-view distinguished from failure, and resource fail-closed
+      before partial execution. Evidence: `egb01_*` device pilots.
+- [x] EGB-07 FAEEL founded self-support: per-tuple-key foundedness; unfounded
+      `p() :- possible p().` rejected; G91 self-support kept separate. Evidence:
+      `cargo test -p xlog-logic --test test_epistemic_faeel_foundedness` and
+      `--test test_epistemic_g91`.
+- [x] EGB-04 epistemic integrity constraints: `:- know/possible/not possible g().`
+      prune candidate world views via a GPU constraint kernel (rejection reason
+      6), constraints dropped from the reduced ordinary program (no RIR rewrite).
+      Evidence: `egb04_*` device pilots.
+- [x] EGB-05 safe split dependency and coupling: split/coalesce/reject decisions
+      explained via typed `EpistemicComponentMergeReason`; paired split-vs-unsplit
+      equivalence; recomposition covers each source rule exactly once. Evidence:
+      `cargo test -p xlog-logic --test test_epistemic_split`.
+- [x] EGB-06 joint multi-epistemic-predicate solving: rules coupling more than
+      one distinct-name epistemic predicate (any operator mix incl. negated
+      modal) solved jointly over the candidate world view, matching unsplit.
+      Evidence: `egb06_*` device pilots and the integration coupling test.
+- [x] EGB-03 nested modal operators (milestone scope): nested forms recognized
+      explicitly and rejected with stable typed diagnostics, no parser-precedence
+      accident, no fake flattening. Evidence:
+      `cargo test -p xlog-logic --test test_epistemic_eir`.
+- [x] Fixed nullary EDB fact materialization (pre-existing): `pred().` was
+      materialized as 0 rows (read as absent), breaking ordinary nullary queries
+      and ground/nullary modal membership. Added
+      `CudaKernelProvider::create_zero_arity_buffer`; arity-0 facts now
+      materialize one unit tuple. Evidence: `examples/epistemic/*` via
+      `cargo test -p xlog-cli --test run_cli_tests test_xlog_run_epistemic_examples`.
+- [x] Full-surface verification: device epistemic 116/116, 206-cert suite,
+      epistemic logic 74/74, all 5 `xlog run` examples, `xlog-cuda` set ops
+      35/35, and `xlog-integration` 206/206.
+
+### Scoped out of v0.9.1 (remain typed fail-closed)
+
+- [ ] Nested modal **semantics** (truth tables, FAEEL-vs-G91 nested behavior):
+      nested forms stay rejected; EGB-03 milestone is representation +
+      diagnostics only.
+- [ ] Mixed per-row (bound-variable) and global (ground/anonymous/nullary)
+      modal literals in a single rule.
+- [ ] Epistemic constraints with variable tuple keys, constraints mixing
+      relational/comparison literals with modal literals, constraint-only
+      programs, and per-constraint (vs class-level) rejection attribution.
+- [ ] Unsafe same-name multi-arity modal coupling (name-keyed relation store).
+- [ ] Aggregate / compound / list / predref modal tuple keys.
 
 ## v0.10.0 - Multi-GPU and Out-of-Core Execution
 

@@ -4,6 +4,66 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+v0.9.1 Epistemic Executor Completion. Turns the v0.9.0 bounded epistemic
+executor into a load-bearing execution surface while preserving the existing
+fail-closed boundaries. Candidate worlds are derived from EIR, modal membership
+is value-level on the device, FAEEL foundedness is checked per tuple key,
+epistemic integrity constraints prune candidate world views, splits are
+equivalence-checked, and rules coupling multiple distinct epistemic predicates
+are solved jointly. EIR remains the semantic boundary and direct raw RIR
+lowering stays a rejection boundary. Completed-vs-scoped-out semantics are
+recorded in `docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`.
+
+### Added (v0.9.1)
+
+- Added EIR-derived candidate-world enumeration: the candidate epistemic
+  assumption space is derived from the program (full device lattice) with
+  deterministic generated/propagated/tested/accepted/rejected/reason trace
+  counts; empty accepted-world-view results are distinguished from execution
+  failure and over-budget candidate spaces fail closed before partial execution.
+- Added value-level tuple-key modal membership on the GPU device path: ground,
+  single and multiple bound variables, repeated-variable equality, anonymous
+  wildcard positions, and arity-0 keys; unsupported term classes remain typed
+  fail-closed.
+- Added per-tuple-key FAEEL founded self-support: unfounded `p() :- possible p().`
+  is rejected, self-reference is accepted only with independent founded support
+  for the same tuple key, and G91 compatibility self-support stays separate.
+- Added GPU epistemic integrity constraints: `:- know g().`,
+  `:- possible g().`, and `:- not possible g().` prune candidate world views via
+  a new constraint kernel (rejection reason `WorldViewConstraintViolation`);
+  epistemic constraints are dropped from the reduced ordinary program with no
+  ordinary-RIR rewrite.
+- Added explainable safe-split semantics: split, coalesce, and reject decisions
+  carry typed `EpistemicComponentMergeReason`s, valid splits are equivalence-
+  checked against unsplit execution, and recomposition covers each source rule
+  exactly once.
+- Added joint multi-epistemic-predicate solving: rules coupling more than one
+  distinct-name epistemic predicate (any operator mix, including negated modal
+  literals) are solved as a joint modal conjunction over the candidate world
+  view, matching unsplit execution.
+- Added `CudaKernelProvider::create_zero_arity_buffer` for materializing nullary
+  relations with a presence row.
+
+### Fixed (v0.9.1)
+
+- Fixed nullary EDB facts (`pred().`) being materialized as zero rows (read as
+  absent), which broke ordinary nullary queries and ground/nullary modal
+  membership; arity-0 facts now materialize one unit tuple, restoring `xlog run`
+  on `examples/epistemic/02-05`.
+- Fixed a global-membership-gate soundness bug where pure-ground, anonymous, or
+  nullary modal literals were left ungated, so `know flag(...)` could emit rows
+  regardless of whether the literal held.
+- Fixed unstable typed diagnostics for nested modal forms with interspersed
+  `not` (e.g. `know not possible p()`), which previously fell through to a
+  generic parse error instead of a stable `UnsupportedEpistemicConstruct`.
+
+### Changed (v0.9.1)
+
+- The epistemic split layer no longer blanket-rejects rules coupling multiple
+  distinct epistemic predicates; such rules are routed to joint solving. The
+  `xlog-integration` split-coupling test was updated to the new accepted
+  contract.
+
 v0.9.0 Epistemic Solver Release Candidate. This branch layers the v0.8.7-v0.8.9
 BFO diagnostics and provenance pack into the v0.9.0 GPU-native epistemic,
 solver, and probabilistic release candidate.
