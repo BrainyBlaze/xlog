@@ -1677,8 +1677,7 @@ pub fn build_epistemic_dependency_graph(program: &Program) -> Result<EpistemicDe
         if let Some(first_owner) = owners.next() {
             let mut coalesced_any = false;
             for owner in owners {
-                if find_component(&mut parents, first_owner)
-                    != find_component(&mut parents, owner)
+                if find_component(&mut parents, first_owner) != find_component(&mut parents, owner)
                 {
                     coalesced_any = true;
                 }

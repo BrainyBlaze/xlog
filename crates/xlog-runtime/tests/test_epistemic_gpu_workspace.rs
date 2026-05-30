@@ -958,8 +958,7 @@ fn split_component_outputs_match_unsplit_single_execution_outputs() {
         "#,
     )
     .expect("parse independent two-component equivalence program");
-    let split =
-        compile_epistemic_gpu_split_execution(&program).expect("compile split components");
+    let split = compile_epistemic_gpu_split_execution(&program).expect("compile split components");
     assert_eq!(split.components.len(), 2);
     assert_eq!(split.recomposed_rule_indices(), vec![0, 1]);
 
@@ -1035,7 +1034,10 @@ fn split_component_outputs_match_unsplit_single_execution_outputs() {
         pred left_out(u32).
         left_out(Y) :- left_edge(X, Y), know left_gate(X).
         "#,
-        &[("left_edge", &binary(&left_edge_rows)), ("left_gate", &unary(&left_gate_rows))],
+        &[
+            ("left_edge", &binary(&left_edge_rows)),
+            ("left_gate", &unary(&left_gate_rows)),
+        ],
     );
     let unsplit_right = run_unsplit_single_component_output(
         &fixture,
@@ -1045,7 +1047,10 @@ fn split_component_outputs_match_unsplit_single_execution_outputs() {
         pred right_out(u32).
         right_out(Y) :- right_edge(X, Y), know right_gate(X).
         "#,
-        &[("right_edge", &binary(&right_edge_rows)), ("right_gate", &unary(&right_gate_rows))],
+        &[
+            ("right_edge", &binary(&right_edge_rows)),
+            ("right_gate", &unary(&right_gate_rows)),
+        ],
     );
 
     assert_eq!(
@@ -3547,9 +3552,9 @@ fn parsed_know_constraint_prunes_world_view_when_constraint_body_true() {
     assert!(typed.contains(&EpistemicGpuRejectionReason::WorldViewConstraintViolation));
     assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
     assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
-    result.require_runtime_dispatch_certification().expect(
-        "all-pruned know-constraint path should retain GPU semantic certification",
-    );
+    result
+        .require_runtime_dispatch_certification()
+        .expect("all-pruned know-constraint path should retain GPU semantic certification");
 }
 
 // EGB-04.K2: rejected candidates must carry constraint-SPECIFIC reasons.
@@ -3588,8 +3593,8 @@ fn egb04_constraint_specific_reason_identifies_firing_constraint() {
             "#,
         )
         .expect("parse two-constraint program");
-        let executable = compile_epistemic_gpu_execution(&program)
-            .expect("compile two-constraint GPU plan");
+        let executable =
+            compile_epistemic_gpu_execution(&program).expect("compile two-constraint GPU plan");
         let mut executor = Executor::new(Arc::clone(&fixture.provider));
 
         for (name, rel) in &executable.relation_ids {
@@ -3789,9 +3794,9 @@ fn parsed_possible_constraint_prunes_when_contradiction_possible() {
         .any(|&code| code == constraint_code));
     assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
     assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
-    result.require_runtime_dispatch_certification().expect(
-        "all-pruned possible-constraint path should retain GPU semantic certification",
-    );
+    result
+        .require_runtime_dispatch_certification()
+        .expect("all-pruned possible-constraint path should retain GPU semantic certification");
 }
 
 #[cfg(feature = "epistemic-logic-tests")]
@@ -3848,9 +3853,9 @@ fn parsed_not_possible_constraint_prunes_when_required_absent() {
         .any(|&code| code == constraint_code));
     assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
     assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
-    result.require_runtime_dispatch_certification().expect(
-        "all-pruned not-possible-constraint path should retain GPU semantic certification",
-    );
+    result
+        .require_runtime_dispatch_certification()
+        .expect("all-pruned not-possible-constraint path should retain GPU semantic certification");
 }
 
 #[cfg(feature = "epistemic-logic-tests")]
@@ -6154,8 +6159,7 @@ fn egb02_run_unary_result(
     expected_key_column_reads: u32,
 ) -> Vec<u32> {
     let program = parse_program(source).expect("parse EGB-02 pilot program");
-    let executable =
-        compile_epistemic_gpu_execution(&program).expect("compile EGB-02 pilot plan");
+    let executable = compile_epistemic_gpu_execution(&program).expect("compile EGB-02 pilot plan");
     let mut executor = Executor::new(Arc::clone(&fixture.provider));
     for (name, rel) in &executable.relation_ids {
         executor.register_relation(*rel, name);
@@ -6186,8 +6190,7 @@ fn egb02_run_unary_result(
 
     // K3/K4 lock evidence: device-backed tuple-key reads, zero CPU fallback.
     assert_eq!(
-        result.model_membership.tuple_source_key_column_device_reads,
-        expected_key_column_reads,
+        result.model_membership.tuple_source_key_column_device_reads, expected_key_column_reads,
         "tuple-key column reads must be device-backed for {source:?}"
     );
     assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
@@ -6392,8 +6395,7 @@ fn egb02_multiple_bound_variables_tuple_key_through_gpu_membership() {
         )
         .expect("multi-bound pilot should execute through GPU runtime path");
     assert_eq!(
-        result.model_membership.tuple_source_key_column_device_reads,
-        2,
+        result.model_membership.tuple_source_key_column_device_reads, 2,
         "two bound columns must read two device key columns"
     );
     assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
@@ -6492,7 +6494,11 @@ fn egb02_pure_anonymous_global_gate_through_gpu_membership() {
         &[],
         1,
     );
-    assert_eq!(nonempty, vec![1, 2, 3], "anonymous gate holds when non-empty");
+    assert_eq!(
+        nonempty,
+        vec![1, 2, 3],
+        "anonymous gate holds when non-empty"
+    );
 
     let empty = egb02_run_unary_result(
         &fixture,
@@ -6566,8 +6572,7 @@ fn egb02_arity_zero_tuple_key_through_gpu_membership() {
             )
             .expect("arity-zero modal pilot should execute through GPU runtime path");
         assert_eq!(
-            result.model_membership.tuple_source_key_column_device_reads,
-            0,
+            result.model_membership.tuple_source_key_column_device_reads, 0,
             "arity-zero tuple sources read no key columns"
         );
         result
@@ -6580,7 +6585,11 @@ fn egb02_arity_zero_tuple_key_through_gpu_membership() {
         rows.sort_unstable();
         rows
     };
-    assert_eq!(run(1), vec![1, 2, 3], "nullary gate holds when fact present");
+    assert_eq!(
+        run(1),
+        vec![1, 2, 3],
+        "nullary gate holds when fact present"
+    );
     assert!(run(0).is_empty(), "nullary gate fails when fact absent");
 }
 
@@ -6963,10 +6972,7 @@ fn egb01_multi_literal_program_enumerates_candidate_space_from_eir() {
     assert_eq!(trace.accepted_candidates, 1, "accepted");
     assert_eq!(trace.rejected_candidates, 7, "rejected");
     assert_eq!(trace.accepted_candidate_indices, vec![7]);
-    assert_eq!(
-        trace.rejected_candidate_indices,
-        vec![0, 1, 2, 3, 4, 5, 6]
-    );
+    assert_eq!(trace.rejected_candidate_indices, vec![0, 1, 2, 3, 4, 5, 6]);
     assert_eq!(
         trace.rejection_reasons.len(),
         7,
@@ -7135,8 +7141,16 @@ fn egb01_repeated_runs_are_deterministic() {
         "repeated deterministic runs must produce identical candidate and result sets"
     );
     // Candidate set was genuinely enumerated (not empty), so determinism is meaningful.
-    assert_eq!(first.0, vec![7], "accepted candidate index is the all-true assignment");
-    assert_eq!(first.3, vec![7, 8], "accepted world view materializes both seed rows");
+    assert_eq!(
+        first.0,
+        vec![7],
+        "accepted candidate index is the all-true assignment"
+    );
+    assert_eq!(
+        first.3,
+        vec![7, 8],
+        "accepted world view materializes both seed rows"
+    );
 }
 
 // ============================================================================
@@ -7255,7 +7269,11 @@ fn egb06_distinct_predicate_conjunction_joint_matches_unsplit() {
         "joint split output must equal unsplit single-execution output"
     );
     // K1 modal-conjunction correctness: exactly the rows where BOTH modal atoms hold.
-    assert_eq!(split_out, vec![1, 3], "head derived iff full modal conjunction holds");
+    assert_eq!(
+        split_out,
+        vec![1, 3],
+        "head derived iff full modal conjunction holds"
+    );
     assert_eq!(split_rows, 2);
     assert!(!split_out.is_empty(), "non-vacuous joint derivation");
 
@@ -7392,8 +7410,14 @@ fn egb06_cross_arity_same_name_fails_closed_identically_split_and_unsplit() {
             split_executor.register_relation(*rel, name);
         }
     }
-    split_executor.put_relation("seed", upload_binary_u32(&fixture.memory, &[(1, 10), (2, 20), (3, 30)], "x", "y"));
-    split_executor.put_relation("p", upload_binary_u32(&fixture.memory, &[(1, 10), (2, 99)], "x", "y"));
+    split_executor.put_relation(
+        "seed",
+        upload_binary_u32(&fixture.memory, &[(1, 10), (2, 20), (3, 30)], "x", "y"),
+    );
+    split_executor.put_relation(
+        "p",
+        upload_binary_u32(&fixture.memory, &[(1, 10), (2, 99)], "x", "y"),
+    );
     let split_executables: Vec<_> = recomposed.iter().map(|c| &c.executable).collect();
     let split_err = match split_executor
         .execute_epistemic_gpu_execution_batch_with_trace(&split_executables, caps)
@@ -7411,8 +7435,14 @@ fn egb06_cross_arity_same_name_fails_closed_identically_split_and_unsplit() {
     for (name, rel) in &unsplit.relation_ids {
         unsplit_executor.register_relation(*rel, name);
     }
-    unsplit_executor.put_relation("seed", upload_binary_u32(&fixture.memory, &[(1, 10), (2, 20), (3, 30)], "x", "y"));
-    unsplit_executor.put_relation("p", upload_binary_u32(&fixture.memory, &[(1, 10), (2, 99)], "x", "y"));
+    unsplit_executor.put_relation(
+        "seed",
+        upload_binary_u32(&fixture.memory, &[(1, 10), (2, 20), (3, 30)], "x", "y"),
+    );
+    unsplit_executor.put_relation(
+        "p",
+        upload_binary_u32(&fixture.memory, &[(1, 10), (2, 99)], "x", "y"),
+    );
     let unsplit_err = match unsplit_executor.execute_epistemic_gpu_execution(&unsplit, caps) {
         Ok(_) => panic!("unsplit cross-arity coupling must fail closed at tuple resolution"),
         Err(err) => err,
@@ -7447,7 +7477,10 @@ fn egb06_contradictory_joint_conjunction_yields_empty_accepted() {
         max_models_per_reduction: 2,
     };
     let (split_out, _preflight, rows) = run_split_single_output(&fixture, source, relations, caps);
-    assert!(split_out.is_empty(), "no row satisfies the joint conjunction");
+    assert!(
+        split_out.is_empty(),
+        "no row satisfies the joint conjunction"
+    );
     assert_eq!(rows, 0, "empty accepted result, not a crash");
 }
 
@@ -7481,7 +7514,12 @@ fn egb06_over_budget_joint_fails_closed_before_execution() {
             executor.register_relation(*rel, name);
         }
     }
-    for (name, rows) in [("seed", &[1][..]), ("p", &[1][..]), ("q", &[1][..]), ("r", &[][..])] {
+    for (name, rows) in [
+        ("seed", &[1][..]),
+        ("p", &[1][..]),
+        ("q", &[1][..]),
+        ("r", &[][..]),
+    ] {
         executor.put_relation(name, upload_unary_u32(&fixture.memory, rows, "x"));
     }
     let executables: Vec<_> = recomposed

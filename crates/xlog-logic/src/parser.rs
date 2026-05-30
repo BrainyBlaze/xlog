@@ -979,12 +979,10 @@ fn build_body_literal(pair: Pair<'_, Rule>) -> Result<BodyLiteral> {
         .ok_or_else(|| XlogError::Parse("Empty body literal".to_string()))?;
 
     match inner.as_rule() {
-        Rule::unsupported_nested_epistemic_atom => {
-            Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "nested epistemic literal".to_string(),
-                context: inner.as_str().to_string(),
-            })
-        }
+        Rule::unsupported_nested_epistemic_atom => Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "nested epistemic literal".to_string(),
+            context: inner.as_str().to_string(),
+        }),
         Rule::negated_epistemic_atom => build_epistemic_literal(inner, true),
         Rule::epistemic_atom => build_epistemic_literal(inner, false),
         Rule::negated_atom => {

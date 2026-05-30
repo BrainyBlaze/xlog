@@ -150,9 +150,7 @@ fn nested_epistemic_with_inner_negation_is_stable_typed_error() {
                     "construct string must be stable for {src:?}"
                 );
                 // Source context anchors the diagnostic to the offending literal.
-                let literal = src
-                    .trim_start_matches("bad(X) :- ")
-                    .trim_end_matches('.');
+                let literal = src.trim_start_matches("bad(X) :- ").trim_end_matches('.');
                 assert!(
                     context.contains(literal),
                     "context {context:?} must contain source literal {literal:?} for {src:?}"

@@ -1520,7 +1520,8 @@ impl EpistemicGpuSemanticTrace {
             &workspace.constraint_violation_index,
             candidate_count,
         )?;
-        let constraint_violation_code = EpistemicGpuRejectionReason::WorldViewConstraintViolation.code();
+        let constraint_violation_code =
+            EpistemicGpuRejectionReason::WorldViewConstraintViolation.code();
         let mut accepted_candidate_indices = Vec::new();
         let mut rejected_candidate_indices = Vec::new();
         let mut rejection_reasons = Vec::new();
@@ -5025,9 +5026,7 @@ impl Executor {
         if candidate_count > 0 {
             let sentinel_host = vec![u32::MAX; candidate_count];
             let fill_len = candidate_count;
-            let mut sentinel_view = workspace
-                .constraint_violation_index
-                .slice_mut(0..fill_len);
+            let mut sentinel_view = workspace.constraint_violation_index.slice_mut(0..fill_len);
             self.provider
                 .htod_launch_metadata_sync_copy_into(&sentinel_host, &mut sentinel_view)
                 .map_err(|e| {
@@ -5114,10 +5113,7 @@ impl Executor {
             })?;
         if !indices_host.is_empty() {
             self.provider
-                .htod_launch_metadata_sync_copy_into(
-                    &indices_host,
-                    &mut constraint_literal_indices,
-                )
+                .htod_launch_metadata_sync_copy_into(&indices_host, &mut constraint_literal_indices)
                 .map_err(|e| {
                     XlogError::execution_ctx(
                         "epistemic GPU world-view constraint metadata",
@@ -6197,12 +6193,11 @@ impl Executor {
             candidate_count,
             capacities.max_models_per_reduction,
         )?;
-        let constraint_world_view_validation = self
-            .validate_epistemic_gpu_world_view_constraints(
-                &mut prepared.workspace,
-                &executable.gpu_plan,
-                candidate_count,
-            )?;
+        let constraint_world_view_validation = self.validate_epistemic_gpu_world_view_constraints(
+            &mut prepared.workspace,
+            &executable.gpu_plan,
+            candidate_count,
+        )?;
         let materialization =
             self.materialize_epistemic_gpu_candidates(&mut prepared.workspace, candidate_count)?;
         let final_result_materialization = self.materialize_epistemic_gpu_final_results(

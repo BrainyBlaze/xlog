@@ -76,7 +76,8 @@ fn k2_faeel_rejects_support_more_restrictive_than_modal_domain() {
     // modal body { dom(X) }: modal can conclude p(X) for dom(X) tuples that
     // have no independent foundation (base(X) false). Statically unprovable, so
     // fail closed by design.
-    let err = plan_err("p(X) :- dom(X), possible p(X).\np(X) :- dom(X), base(X).\ndom(1).\nbase(1).");
+    let err =
+        plan_err("p(X) :- dom(X), possible p(X).\np(X) :- dom(X), base(X).\ndom(1).\nbase(1).");
     assert!(err.contains("FAEEL foundedness guard"), "got: {err}");
 }
 
