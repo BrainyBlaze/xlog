@@ -5,10 +5,10 @@ high-level GPU runner detects accepted epistemic programs and routes them throug
 the epistemic GPU runtime; the lower-level direct RIR lowering boundary still
 rejects raw epistemic literals with `UnsupportedEpistemicConstruct`.
 
-`01-05` are the v0.9.0 epistemic-surface pilots. `06-11` are the v0.9.1 epistemic
+`01-05` are the v0.9.0 epistemic-surface pilots. `06-13` are the v0.9.1 epistemic
 executor showcase: each demonstrates one completed bundle end-to-end through
 `xlog run` and is validated with a deterministic output marker by
-`test_xlog_run_epistemic_examples`.
+`test_xlog_run_epistemic_examples` or a typed negative diagnostic test.
 
 Run the examples:
 
@@ -19,6 +19,7 @@ cargo run -q -p xlog-cli -- run examples/epistemic/05-splitting.xlog
 # v0.9.1 executor showcase
 cargo run -q -p xlog-cli -- run examples/epistemic/06-eir-candidate-enumeration.xlog
 cargo run -q -p xlog-cli -- run examples/epistemic/09-joint-multi-epistemic.xlog
+cargo run -q -p xlog-cli -- run examples/epistemic/12-bound-variable-splitting.xlog
 # validate all of them through xlog run (requires CUDA):
 XLOG_USE_DEVICE_RUNTIME=1 cargo test -p xlog-cli --test run_cli_tests test_xlog_run_epistemic_examples
 ```
@@ -36,10 +37,11 @@ XLOG_USE_DEVICE_RUNTIME=1 cargo test -p xlog-cli --test run_cli_tests test_xlog_
 | Joint multi-epistemic | `09-joint-multi-epistemic.xlog` | v0.9.1 EGB-06 joint modal conjunction → `both_known={1}` |
 | Epistemic constraint | `10-epistemic-constraint.xlog` | v0.9.1 EGB-04 constraint prunes world view → `accepted` empty (Ok, not failure) |
 | FAEEL foundedness | `11-faeel-foundedness.xlog` | v0.9.1 EGB-07 founded self-support → `founded={()}`|
+| Bound-variable splitting | `12-bound-variable-splitting.xlog` | v0.9.1 EGB-05/EGB-06 split routing with bound modal membership → `both_known={1}`, `safe_alt={2}` |
+| Nested modal rejection | `13-nested-modal-rejected.xlog` | v0.9.1 EGB-03 typed fail-closed diagnostic for `know possible p()` |
 
-Notes: each `06-11` file has a single query head — the single-plan path
-materializes one output relation, so the showcase keeps one head per file.
-Nested modal operators and the other goal-mandated fail-closed fragments
-(see `docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`) are
-intentionally rejected and therefore are not `xlog run` success pilots; they are
-covered by negative pilots in the test suites.
+Notes: examples with one epistemic output head use the single-plan path; examples
+with independent epistemic output heads route through split GPU execution from
+`xlog run`. Nested modal operators and the other goal-mandated fail-closed
+fragments (see `docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`)
+are intentionally rejected and covered by negative pilots.

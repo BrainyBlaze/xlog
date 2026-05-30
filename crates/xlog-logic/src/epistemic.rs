@@ -1616,6 +1616,9 @@ pub fn build_epistemic_dependency_graph(program: &Program) -> Result<EpistemicDe
     let mut merge_log: Vec<(usize, EpistemicComponentMergeReason)> = Vec::new();
 
     for (idx, rule) in program.rules.iter().enumerate() {
+        if rule.body.is_empty() {
+            continue;
+        }
         if let Some(owner) = head_owner.get(&rule.head.predicate).copied() {
             union_components(&mut parents, owner, idx);
             merge_log.push((
@@ -1868,22 +1871,23 @@ fn split_component_program(
     let mut component_program = program.clone();
     let component_predicates: BTreeSet<&str> =
         component.predicates.iter().map(String::as_str).collect();
+    let component_rule_indices: BTreeSet<usize> = component.rule_indices.iter().copied().collect();
     let head_predicates: BTreeSet<&str> = program
         .rules
         .iter()
         .map(|rule| rule.head.predicate.as_str())
         .collect();
-    component_program.rules = component
-        .rule_indices
+    component_program.rules = program
+        .rules
         .iter()
-        .map(|idx| {
-            program.rules.get(*idx).cloned().ok_or_else(|| {
-                XlogError::Compilation(format!(
-                    "epistemic split component references missing rule[{idx}]"
-                ))
-            })
+        .enumerate()
+        .filter_map(|(idx, rule)| {
+            (component_rule_indices.contains(&idx)
+                || (rule.body.is_empty()
+                    && component_predicates.contains(rule.head.predicate.as_str())))
+            .then_some(rule.clone())
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect();
     component_program.constraints = program
         .constraints
         .iter()

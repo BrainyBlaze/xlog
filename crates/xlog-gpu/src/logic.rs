@@ -1,6 +1,6 @@
 //! GPU-accelerated evaluation of compiled Datalog programs.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use xlog_core::{symbol, RelId, Result, Schema, XlogError};
@@ -224,16 +224,20 @@ impl LogicProgram {
         schema_compiler.compile_program(&reduced)?;
         let schemas = schema_compiler.schemas().clone();
 
-        let plan = match compile_epistemic_gpu_execution(&normalized) {
-            Ok(executable) => LogicExecutionPlan::EpistemicSingle(executable),
-            Err(XlogError::UnsupportedEpistemicConstruct { construct, .. })
-                if construct == "epistemic GPU final output relation" =>
-            {
-                LogicExecutionPlan::EpistemicSplit(compile_epistemic_gpu_split_execution(
-                    &normalized,
-                )?)
+        let plan = if epistemic_output_head_predicate_count(&normalized) > 1 {
+            LogicExecutionPlan::EpistemicSplit(compile_epistemic_gpu_split_execution(&normalized)?)
+        } else {
+            match compile_epistemic_gpu_execution(&normalized) {
+                Ok(executable) => LogicExecutionPlan::EpistemicSingle(executable),
+                Err(XlogError::UnsupportedEpistemicConstruct { construct, .. })
+                    if construct == "epistemic GPU final output relation" =>
+                {
+                    LogicExecutionPlan::EpistemicSplit(compile_epistemic_gpu_split_execution(
+                        &normalized,
+                    )?)
+                }
+                Err(err) => return Err(err),
             }
-            Err(err) => return Err(err),
         };
         let rel_ids = epistemic_relation_ids(&plan)?;
 
@@ -1017,6 +1021,20 @@ fn program_has_epistemic_literals(program: &Program) -> bool {
             .iter()
             .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
     })
+}
+
+fn epistemic_output_head_predicate_count(program: &Program) -> usize {
+    program
+        .rules
+        .iter()
+        .filter(|rule| {
+            rule.body
+                .iter()
+                .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
+        })
+        .map(|rule| rule.head.predicate.as_str())
+        .collect::<BTreeSet<_>>()
+        .len()
 }
 
 fn epistemic_relation_ids(plan: &LogicExecutionPlan) -> Result<HashMap<String, RelId>> {

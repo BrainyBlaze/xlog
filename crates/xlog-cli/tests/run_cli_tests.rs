@@ -62,7 +62,7 @@ fn test_xlog_run_epistemic_examples() {
         ("04-gpt-candidate-filter.xlog", "accepted", "rows: 1"),
         ("05-splitting.xlog", "left", "rows: 1"),
         ("05-splitting.xlog", "right", "rows: 1"),
-        // v0.9.1 epistemic executor showcase (EGB-01/02/04/06/07), each validated
+        // v0.9.1 epistemic executor showcase (EGB-01/02/04/05/06/07), each validated
         // through the production `xlog run` path with a deterministic output marker.
         ("06-eir-candidate-enumeration.xlog", "believed", "| 3  |"),
         ("07-tuple-key-membership.xlog", "matched", "| 3  | 3  |"),
@@ -70,6 +70,8 @@ fn test_xlog_run_epistemic_examples() {
         ("09-joint-multi-epistemic.xlog", "both_known", "| 1  |"),
         ("10-epistemic-constraint.xlog", "accepted", "rows: 0"),
         ("11-faeel-foundedness.xlog", "founded", "rows: 1"),
+        ("12-bound-variable-splitting.xlog", "both_known", "| 1  |"),
+        ("12-bound-variable-splitting.xlog", "safe_alt", "| 2  |"),
     ];
 
     for (example, expected_relation, expected_value) in examples {
@@ -106,4 +108,42 @@ fn test_xlog_run_epistemic_examples() {
             stdout
         );
     }
+}
+
+#[test]
+fn test_xlog_run_nested_modal_reports_typed_epistemic_diagnostic() {
+    let _device = match CudaDevice::new(0) {
+        Ok(d) => d,
+        Err(_) => {
+            println!("SKIPPED: CUDA runtime unavailable (no GPU or driver not loaded)");
+            return;
+        }
+    };
+
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("workspace root");
+    let program = repo_root
+        .join("examples/epistemic")
+        .join("13-nested-modal-rejected.xlog");
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid path"),
+            "--memory-mb",
+            "1024",
+        ])
+        .output()
+        .expect("run xlog binary");
+    assert!(
+        !output.status.success(),
+        "nested modal example must fail closed, stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("UnsupportedEpistemicConstruct"), "{stderr}");
+    assert!(stderr.contains("nested epistemic literal"), "{stderr}");
+    assert!(stderr.contains("know possible p()"), "{stderr}");
 }

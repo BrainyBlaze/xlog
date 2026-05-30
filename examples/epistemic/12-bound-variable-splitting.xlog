@@ -1,0 +1,26 @@
+// v0.9.1 EGB-05 + EGB-06: multi-output epistemic programs with value-level
+// bound-variable modal membership route through split GPU execution from
+// `xlog run`.
+// Expect: both_known={1}, safe_alt={2}.
+
+#pragma epistemic_mode = faeel
+
+pred node(u32).
+pred edge(u32).
+pred color(u32).
+pred alt(u32).
+pred blocked(u32).
+pred both_known(u32).
+pred safe_alt(u32).
+
+node(1). node(2). node(3).
+edge(1). edge(2).
+color(1).
+alt(2).
+blocked(3).
+
+both_known(X) :- node(X), know edge(X), know color(X).
+safe_alt(X) :- node(X), possible alt(X), not possible blocked(X).
+
+?- both_known(X).
+?- safe_alt(X).

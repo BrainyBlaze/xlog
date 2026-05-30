@@ -1,0 +1,11 @@
+// v0.9.1 EGB-03: nested modal forms are recognized and rejected with a typed
+// unsupported-epistemic diagnostic. This is a negative pilot, not a success
+// example.
+
+pred p().
+pred q().
+
+p().
+q() :- know possible p().
+
+?- q().

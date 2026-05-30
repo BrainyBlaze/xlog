@@ -191,6 +191,46 @@ fn shared_extensional_inputs_do_not_coalesce_epistemic_split_components() {
 }
 
 #[test]
+fn source_facts_do_not_coalesce_bound_membership_split_components() {
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred color(u32).
+        pred alt(u32).
+        pred blocked(u32).
+        pred both_known(u32).
+        pred safe_alt(u32).
+
+        node(1). node(2). node(3).
+        edge(1). edge(2).
+        color(1).
+        alt(2).
+        blocked(3).
+
+        both_known(X) :- node(X), know edge(X), know color(X).
+        safe_alt(X) :- node(X), possible alt(X), not possible blocked(X).
+        "#,
+    )
+    .unwrap();
+
+    let split = compile_epistemic_gpu_split_execution(&program).unwrap();
+    let recomposed_components = split.recomposed_components();
+    let component_rule_indices: Vec<Vec<usize>> = recomposed_components
+        .iter()
+        .map(|component| component.component.rule_indices.clone())
+        .collect();
+    let literal_counts: Vec<usize> = recomposed_components
+        .iter()
+        .map(|component| component.executable.gpu_plan.epistemic_literals.len())
+        .collect();
+
+    assert_eq!(split.components.len(), 2);
+    assert_eq!(component_rule_indices, vec![vec![8], vec![9]]);
+    assert_eq!(literal_counts, vec![2, 2]);
+}
+
+#[test]
 fn split_executable_components_recompose_in_source_rule_order() {
     let program = parse_program(
         r#"
