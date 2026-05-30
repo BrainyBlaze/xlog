@@ -324,6 +324,7 @@ impl EpistemicWorldView {
 /// required device buffers, WCOJ planning obligations, and zero CPU fallback
 /// counters.
 pub fn plan_epistemic_gpu_execution(program: &Program) -> Result<EpistemicGpuPlan> {
+    reject_recursive_epistemic_program(program)?;
     let eir = build_eir(program)?;
     reject_faeel_self_supported_possible(&eir)?;
     let mut epistemic_literals = Vec::new();
@@ -549,6 +550,79 @@ fn lower_epistemic_constraints(
         });
     }
     Ok(constraint_plans)
+}
+
+/// Reject epistemic programs that contain ordinary (non-modal) recursion.
+///
+/// The epistemic executor evaluates each candidate world view in a single pass and
+/// does not iterate a recursive fixpoint. A program that combines epistemic literals
+/// with recursion through ORDINARY body literals (positive/negated atoms) therefore
+/// cannot be evaluated soundly — it either errors on a recursive-join schema mismatch
+/// or silently drops the recursive derivations. Such programs fail closed here with a
+/// typed diagnostic instead.
+///
+/// Self-support THROUGH a modal literal (e.g. `p() :- possible p().`) is NOT ordinary
+/// recursion: the modal edge is excluded from the dependency walk, so FAEEL/G91
+/// foundedness still governs those cases (see [`reject_faeel_self_supported_possible`]).
+fn reject_recursive_epistemic_program(program: &Program) -> Result<()> {
+    let has_epistemic = program.rules.iter().any(|rule| {
+        rule.body
+            .iter()
+            .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
+    });
+    if !has_epistemic {
+        // No epistemic literals: the ordinary recursive engine handles this program.
+        return Ok(());
+    }
+
+    // Dependency edges from ORDINARY (positive/negated) body literals only; modal,
+    // comparison, and arithmetic literals do not contribute recursion edges here.
+    let mut deps: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for rule in &program.rules {
+        let entry = deps.entry(rule.head.predicate.as_str()).or_default();
+        for lit in &rule.body {
+            if let BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) = lit {
+                entry.insert(atom.predicate.as_str());
+            }
+        }
+    }
+
+    fn reaches<'a>(
+        start: &'a str,
+        target: &str,
+        deps: &BTreeMap<&'a str, BTreeSet<&'a str>>,
+        seen: &mut BTreeSet<&'a str>,
+    ) -> bool {
+        let Some(next) = deps.get(start) else {
+            return false;
+        };
+        for &pred in next {
+            if pred == target {
+                return true;
+            }
+            if seen.insert(pred) && reaches(pred, target, deps, seen) {
+                return true;
+            }
+        }
+        false
+    }
+
+    if let Some(pred) = deps
+        .keys()
+        .find(|pred| reaches(pred, pred, &deps, &mut BTreeSet::new()))
+    {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "recursive epistemic program".to_string(),
+            context: format!(
+                "predicate `{pred}` is defined by ordinary recursion in a program that uses \
+                 epistemic literals; the epistemic executor evaluates each candidate world view \
+                 in a single pass and does not yet iterate a recursive fixpoint. Remove the \
+                 recursion or compute the recursive relation in a non-epistemic stratum."
+            ),
+        });
+    }
+
+    Ok(())
 }
 
 fn reject_faeel_self_supported_possible(eir: &EirProgram) -> Result<()> {

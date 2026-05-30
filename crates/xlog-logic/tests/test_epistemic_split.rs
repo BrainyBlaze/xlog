@@ -2,9 +2,54 @@ use xlog_core::XlogError;
 use xlog_ir::ExecutionPlan;
 use xlog_logic::epistemic::{
     build_epistemic_dependency_graph, compile_epistemic_gpu_split_execution,
-    split_epistemic_program, EpistemicComponentMergeReason,
+    plan_epistemic_gpu_execution, split_epistemic_program, EpistemicComponentMergeReason,
 };
 use xlog_logic::parse_program;
+
+#[test]
+fn ordinary_recursive_epistemic_program_fails_closed() {
+    // The epistemic executor evaluates each candidate world view in a single pass and
+    // does not iterate a recursive fixpoint, so a program that combines epistemic
+    // literals with ORDINARY recursion (recursion through positive/negated body
+    // literals) must fail closed with a typed diagnostic rather than silently drop
+    // recursive derivations.
+    let program = parse_program(
+        r#"
+        pred vertex(u32).
+        pred edge(u32, u32).
+        pred reach(u32, u32).
+        vertex(1). vertex(2). edge(1, 2).
+        reach(X, Y) :- vertex(X), vertex(Y), know edge(X, Y).
+        reach(X, Z) :- reach(X, Y), vertex(Z), know edge(Y, Z).
+        "#,
+    )
+    .unwrap();
+    match plan_epistemic_gpu_execution(&program) {
+        Err(XlogError::UnsupportedEpistemicConstruct { construct, .. }) => {
+            assert_eq!(construct, "recursive epistemic program");
+        }
+        other => panic!("expected typed recursive-epistemic rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn modal_self_support_is_not_treated_as_ordinary_recursion() {
+    // EGB-07: self-support THROUGH a modal literal (`founded() :- possible founded().`)
+    // is not ordinary recursion and is handled by FAEEL foundedness; with an
+    // independent founded support it must NOT be rejected by the recursion guard.
+    let program = parse_program(
+        r#"
+        pred base().
+        pred founded().
+        base().
+        founded() :- base().
+        founded() :- possible founded().
+        "#,
+    )
+    .unwrap();
+    plan_epistemic_gpu_execution(&program)
+        .expect("modal self-support with independent foundation must not be rejected as recursion");
+}
 
 #[test]
 fn split_graph_builds_deterministic_independent_components() {
