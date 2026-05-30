@@ -1,0 +1,16 @@
+// v0.9.1 EGB-01 + EGB-02: candidate worlds are enumerated from EIR (not a fixture),
+// and the `know edge(X)` modal literal is matched at value level against the bound X.
+// believed(X) holds for each node X whose edge(X) is known. Expect: {1, 3}.
+
+#pragma epistemic_mode = faeel
+
+pred node(u32).
+pred edge(u32).
+pred believed(u32).
+
+node(1). node(2). node(3).
+edge(1). edge(3).
+
+believed(X) :- node(X), know edge(X).
+
+?- believed(X).

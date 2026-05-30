@@ -1,0 +1,16 @@
+// v0.9.1 EGB-02: multi-column bound-variable tuple-key membership.
+// matched(X, Y) holds when the ground pair (X, Y) is a known link, matching both
+// bound columns at value level. Expect: {(1, 2), (3, 3)}.
+
+#pragma epistemic_mode = faeel
+
+pred pair(u32, u32).
+pred link(u32, u32).
+pred matched(u32, u32).
+
+pair(1, 2). pair(3, 3). pair(2, 9).
+link(1, 2). link(3, 3).
+
+matched(X, Y) :- pair(X, Y), know link(X, Y).
+
+?- matched(X, Y).

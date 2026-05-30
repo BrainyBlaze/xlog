@@ -62,6 +62,14 @@ fn test_xlog_run_epistemic_examples() {
         ("04-gpt-candidate-filter.xlog", "accepted", "rows: 1"),
         ("05-splitting.xlog", "left", "rows: 1"),
         ("05-splitting.xlog", "right", "rows: 1"),
+        // v0.9.1 epistemic executor showcase (EGB-01/02/04/06/07), each validated
+        // through the production `xlog run` path with a deterministic output marker.
+        ("06-eir-candidate-enumeration.xlog", "believed", "| 3  |"),
+        ("07-tuple-key-membership.xlog", "matched", "| 3  | 3  |"),
+        ("08-repeated-variable.xlog", "reflexive", "| 3  |"),
+        ("09-joint-multi-epistemic.xlog", "both_known", "| 1  |"),
+        ("10-epistemic-constraint.xlog", "accepted", "rows: 0"),
+        ("11-faeel-foundedness.xlog", "founded", "rows: 1"),
     ];
 
     for (example, expected_relation, expected_value) in examples {

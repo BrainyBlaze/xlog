@@ -1,0 +1,16 @@
+// v0.9.1 EGB-02: repeated-variable equality in a modal tuple key.
+// reflexive(X) requires know self(X, X) — the repeated variable forces both
+// columns to the same value, so self(4, 5) does NOT qualify. Expect: {3}.
+
+#pragma epistemic_mode = faeel
+
+pred node(u32).
+pred self(u32, u32).
+pred reflexive(u32).
+
+node(3). node(4).
+self(3, 3). self(4, 5).
+
+reflexive(X) :- node(X), know self(X, X).
+
+?- reflexive(X).
