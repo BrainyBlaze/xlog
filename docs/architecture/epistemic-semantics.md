@@ -358,9 +358,13 @@ accepted-world-view, rejected, and rejection-reason counts. If the generate
 phase exceeds the configured candidate budget, it returns
 `XlogError::ResourceExhausted` with context `epistemic GPT candidate guard`.
 
-This fixture makes the phase boundary auditable. It does not yet enumerate
-candidate worlds from arbitrary EIR programs; later solver and splitting work can
-replace the explicit candidate input while preserving the trace contract.
+This CPU fixture makes the phase boundary auditable and serves as a bounded
+oracle that takes explicit candidate input. As of v0.9.1 (EGB-01), the accepted
+production device path (`compile_epistemic_gpu_execution` →
+`execute_epistemic_gpu_execution`) derives the candidate epistemic-assumption
+space from the EIR program itself — enumerating the full candidate lattice on the
+device — rather than from explicit candidate input, while preserving the same
+generated/propagated/tested/accepted/rejected/reason trace contract.
 
 The accepted runtime pilots run these Generate-Propagate-Test phases on
 GPU-resident buffers with launch counters, kernel timings, and zero CPU fallback
@@ -391,16 +395,24 @@ By contrast, fixtures such as `a(X) :- node(X), know edge(X).` and
 shared extensional input rather than a derived component head.
 
 Epistemic integrity constraints are not silently lowered through the reduced
-ordinary program. Until they have an explicit GPU semantic representation,
-`compile_epistemic_gpu_execution` and split executable lowering fail closed with
-`XlogError::UnsupportedEpistemicConstruct { construct: "epistemic GPU constraint",
-... }`.
+ordinary program (no ordinary-RIR constraint rewrite). As of v0.9.1 (EGB-04),
+ground modal integrity constraints (`:- know g().`, `:- possible g().`,
+`:- not possible g().`) have an explicit GPU semantic representation: a
+constraint kernel prunes candidate world views whose body holds, recording the
+firing constraint index per candidate (surfaced as
+`result.semantic_trace.constraint_violation_indices`). Constraint forms outside
+this fragment — variable tuple keys, bodies mixing relational/comparison literals
+with modal literals, constraint-only programs, and epistemic constraints on the
+split/GPT paths — still fail closed with a typed `UnsupportedEpistemicConstruct`.
 
-`split_epistemic_program` rejects a rule that couples more than one distinct
-epistemic body predicate. In this bounded split layer, such a rule would require
-cross-component solving and is rejected with
-`XlogError::UnsupportedEpistemicConstruct { construct: "epistemic splitting",
-... }`.
+As of v0.9.1 (EGB-06), `split_epistemic_program` no longer blanket-rejects a rule
+that couples more than one distinct epistemic body predicate. Such a rule's modal
+predicates are unioned into a single component that the joint path solves as a
+full modal conjunction over the candidate world view (matching unsplit
+execution); independent heads remain independent components. Unsafe same-name
+multi-arity coupling and joint conditions depending on unsupported tuple-key or
+nested-modal semantics still fail closed with a typed
+`UnsupportedEpistemicConstruct`.
 
 For valid split fixtures, `EpistemicSplitPlan::recomposed_rule_indices` sorts the
 component rule indices and must equal the unsplit source rule order. This gives a

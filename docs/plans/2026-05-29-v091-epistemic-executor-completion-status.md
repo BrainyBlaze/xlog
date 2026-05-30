@@ -65,7 +65,7 @@ pilots — accepting them would violate the no-fake / no-CPU-fallback locks.
 - **B3 — Cross-component epistemic coupling beyond single-rule joint solving**
   (EGB-05/06): tracked as future work, currently fail-closed.
 
-## Verification (feat HEAD `e1c9cb07`)
+## Verification (v0.9.1 merged code state at `e1c9cb07`; later `cargo fmt` and docs commits are behavior-preserving)
 
 - `XLOG_USE_DEVICE_RUNTIME=1 cargo test -p xlog-runtime --test test_epistemic_gpu_workspace --release --features epistemic-logic-tests` → **117 passed** (incl. EGB-04.K2 specific-constraint test)
 - `cargo test -p xlog-cli --test run_cli_tests --release test_xlog_run_epistemic_examples` → **green** (all 5 `examples/epistemic/*.xlog` through `xlog run`)

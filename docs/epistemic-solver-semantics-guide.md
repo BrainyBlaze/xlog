@@ -367,14 +367,18 @@ G91/FAEEL/GPT/splitting case.
 
 ## Epistemic Splitting
 
-`split_epistemic_program` builds deterministic components from source rules and
-rejects a rule that couples more than one distinct epistemic body predicate. For
-accepted split fixtures, `recomposed_rule_indices()` must recover the original
+`split_epistemic_program` builds deterministic components from source rules. As
+of v0.9.1 (EGB-06) it no longer rejects a rule that couples more than one distinct
+epistemic body predicate: such a rule's modal predicates are unioned into a single
+component solved jointly as a full modal conjunction over the candidate world view.
+For accepted split fixtures, `recomposed_rule_indices()` must recover the original
 source rule order.
-Integration coverage now pins the GPU split-lowering boundary with
-`split_multi_membership_modal_coupling_rejects_gpu_batching`, which rejects the
-multi-membership `know edge(X)`/`know color(X)` fixture in a mixed program with
-`possible alt(X)`/`not possible blocked(X)` before component batching can run.
+Integration coverage pins the joint-solving contract with
+`split_multi_membership_modal_coupling_solves_jointly_per_component`, which takes
+the multi-membership `know edge(X)`/`know color(X)` fixture in a mixed program with
+`possible alt(X)`/`not possible blocked(X)` and accepts it as two independent joint
+components (per-rule joint semantics verified on device: `both_known={1}`,
+`safe_alt={2}`). Unsafe same-name multi-arity coupling still fails closed.
 
 `compile_epistemic_gpu_split_execution` lowers valid epistemic split components
 through `compile_epistemic_gpu_execution_with_stats_snapshot`, producing one
