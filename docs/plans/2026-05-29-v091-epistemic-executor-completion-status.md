@@ -19,7 +19,7 @@ runtime pilots) held for every accepted item.
 | EGB-01 EIR candidate enumeration | DONE | candidate worlds derived from EIR (full `2^N` lattice on device), generated/propagated/tested/accepted/rejected/reason trace counts; empty-accepted-world-view distinguished from failure; resource fail-closed before partial exec | 3 device pilots; determinism reruns; pre-existing 4-literal enumeration pilot |
 | EGB-07 FAEEL founded self-support | DONE | per-tuple-key foundedness; FAEEL rejects unfounded self-support; G91 self-support kept separate; precise missing-foundation diagnostics | 9 production-path pilots + G91 separation pilots |
 | EGB-04 epistemic integrity constraints | DONE | `:- know g().` / `:- possible g().` / `:- not possible g().` prune candidate world views via a GPU constraint kernel; constraints dropped from the reduced ordinary program (no RIR rewrite). **K2 met:** a parallel `constraint_violation_index` device buffer records *which* constraint fired per candidate (reason code 6 unchanged), surfaced as `result.semantic_trace.constraint_violation_indices`. | 8 device pilots incl. `egb04_constraint_specific_reason_identifies_firing_constraint` (asserts the specific firing index); zero CPU-fallback |
-| EGB-05 safe split semantics | DONE | split/coalesce/reject decisions explained via typed `EpistemicComponentMergeReason`; paired split-vs-unsplit equivalence; recomposition covers each source rule exactly once | 18 split pilots + device equivalence pilot |
+| EGB-05 safe split semantics | DONE | split/coalesce/reject decisions explained via typed `EpistemicComponentMergeReason`; paired split-vs-unsplit equivalence; recomposition covers each source rule exactly once; shared source facts stay extensional and no longer coalesce independent bound-variable output heads into one single-plan multi-output execution | split pilots + device equivalence pilot + `12-bound-variable-splitting.xlog` through `xlog run` |
 | EGB-06 joint multi-epistemic solving | DONE | rules coupling ≥2 distinct-name epistemic predicates (any operator mix incl. negated modal) solved jointly over the candidate world view; matches unsplit | 6 device pilots + operator-combination matrix |
 | EGB-03 nested modal operators | DONE (milestone scope) | nested modal forms (`know possible p()`, `not`-interspersed) recognized explicitly and rejected with a **stable typed diagnostic**; no parser-precedence accident; no fake flattening | negative pilots; stable `UnsupportedEpistemicConstruct` across all probed forms |
 
@@ -30,6 +30,14 @@ runtime pilots) held for every accepted item.
 `38ea1a34`. This broke ordinary nullary queries and ground/nullary modal membership
 once EGB-02 stopped the old no-op gate from leaking the output row. Fixed at the
 materialization layer (`create_zero_arity_buffer`); no epistemic-only special casing.
+
+`fix(v091): route bound-variable multi-head epistemic programs through split` —
+programs with multiple epistemic output heads and value-level bound membership
+compiled far enough to hit the single-plan final-output guard at execution time,
+leaking a diagnostic that told CLI users to use split execution even though `xlog run`
+is the public route. Shared source facts are now treated as extensional component
+inputs, so `examples/epistemic/12-bound-variable-splitting.xlog` routes through
+split GPU execution and emits `both_known={1}` and `safe_alt={2}`.
 
 ## Category A — In-spec typed fail-closed (REQUIRED by the goal, NOT debt)
 
@@ -49,6 +57,12 @@ pilots — accepting them would violate the no-fake / no-CPU-fallback locks.
 - **Unsafe same-name multi-arity modal coupling** (`p/1` + `p/2` unsafely bound) —
   EGB-06 Expected Rejected: unsupported-tuple-key joint conditions fail closed.
   Safe (bound) cross-arity coupling IS accepted (EGB-05/06).
+- **Ordinary recursion inside epistemic programs** — the bounded executor evaluates
+  each candidate world view in a single pass and does not yet iterate a recursive
+  fixpoint. Programs combining epistemic literals with ordinary recursive predicates
+  now fail closed with `UnsupportedEpistemicConstruct { construct: "recursive epistemic program" }`.
+  Modal self-support remains governed by FAEEL/G91 foundedness and is not rejected
+  by this ordinary-recursion guard.
 
 ## Category B — Genuine follow-up (NOT goal-mandated; tracked, not "done")
 
@@ -64,11 +78,13 @@ pilots — accepting them would violate the no-fake / no-CPU-fallback locks.
   implement the mixed path or keep fail-closed by explicit decision.
 - **B3 — Cross-component epistemic coupling beyond single-rule joint solving**
   (EGB-05/06): tracked as future work, currently fail-closed.
+- **B4 — Accepted recursive epistemic fixpoints.** Current behavior is typed
+  fail-closed; implementing recursive epistemic fixpoint execution is future work.
 
-## Verification (v0.9.1 merged code state at `e1c9cb07`; later `cargo fmt` and docs commits are behavior-preserving)
+## Verification Matrix
 
 - `XLOG_USE_DEVICE_RUNTIME=1 cargo test -p xlog-runtime --test test_epistemic_gpu_workspace --release --features epistemic-logic-tests` → **117 passed** (incl. EGB-04.K2 specific-constraint test)
-- `cargo test -p xlog-cli --test run_cli_tests --release test_xlog_run_epistemic_examples` → **green** (all 5 `examples/epistemic/*.xlog` through `xlog run`)
+- `cargo test -p xlog-cli --test run_cli_tests --release test_xlog_run_epistemic_examples` → **green** (12 successful `examples/epistemic/*.xlog` through `xlog run`, plus the nested-modal negative CLI pilot)
 - epistemic logic suites (split / faeel / g91 / eir / world_view / gpt / examples / executable_plan) → **74 passed, 0 failed**
 - `cargo test -p xlog-cuda --test set_ops_tests --release` → **35 passed** (incl. zero-arity union/diff)
 - `cargo test -p xlog-cuda-tests --test certification_suite --release` → **206-cert suite passed**

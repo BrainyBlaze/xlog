@@ -1939,8 +1939,10 @@ engines, typed fail-closed, real runtime/device pilots). Status summary:
       specific firing index).
 - [x] EGB-05 safe split dependency and coupling: split/coalesce/reject decisions
       explained via typed `EpistemicComponentMergeReason`; paired split-vs-unsplit
-      equivalence; recomposition covers each source rule exactly once. Evidence:
-      `cargo test -p xlog-logic --test test_epistemic_split`.
+      equivalence; recomposition covers each source rule exactly once; shared
+      source facts remain extensional inputs and no longer force independent
+      bound-variable output heads into one single-plan multi-output execution.
+      Evidence: `cargo test -p xlog-logic --test test_epistemic_split`.
 - [x] EGB-06 joint multi-epistemic-predicate solving: rules coupling more than
       one distinct-name epistemic predicate (any operator mix incl. negated
       modal) solved jointly over the candidate world view, matching unsplit.
@@ -1948,7 +1950,8 @@ engines, typed fail-closed, real runtime/device pilots). Status summary:
 - [x] EGB-03 nested modal operators (milestone scope): nested forms recognized
       explicitly and rejected with stable typed diagnostics, no parser-precedence
       accident, no fake flattening. Evidence:
-      `cargo test -p xlog-logic --test test_epistemic_eir`.
+      `cargo test -p xlog-logic --test test_epistemic_eir` and the
+      `examples/epistemic/13-nested-modal-rejected.xlog` CLI negative pilot.
 - [x] Fixed nullary EDB fact materialization (pre-existing): `pred().` was
       materialized as 0 rows (read as absent), breaking ordinary nullary queries
       and ground/nullary modal membership. Added
@@ -1956,9 +1959,9 @@ engines, typed fail-closed, real runtime/device pilots). Status summary:
       materialize one unit tuple. Evidence: `examples/epistemic/*` via
       `cargo test -p xlog-cli --test run_cli_tests test_xlog_run_epistemic_examples`.
 - [x] Full-surface verification: device epistemic 117/117 (incl. EGB-04.K2
-      specific-constraint test), 206-cert suite, epistemic logic 74/74, all 5
-      `xlog run` examples, `xlog-cuda` set ops 35/35, and `xlog-integration`
-      206/206.
+      specific-constraint test), 206-cert suite, epistemic logic suites,
+      12 successful `xlog run` epistemic examples plus the nested-modal negative
+      CLI pilot, `xlog-cuda` set ops 35/35, and `xlog-integration` 206/206.
 
 ### In-spec typed fail-closed (REQUIRED by the goal — rejection-by-design, not debt)
 
@@ -1974,6 +1977,9 @@ fallback locks.
       CPU-only world-view scans fail closed (EGB-04 Expected Rejected).
 - [x] Unsafe same-name multi-arity modal coupling fails closed; safe (bound)
       cross-arity coupling is accepted (EGB-06 Expected Rejected).
+- [x] Ordinary recursive predicates inside an epistemic program fail closed with
+      typed `recursive epistemic program` diagnostics; modal self-support remains
+      governed by FAEEL/G91 foundedness rather than this ordinary-recursion guard.
 
 ### Genuine follow-up (NOT goal-mandated; tracked, not claimed done)
 
@@ -1983,6 +1989,8 @@ fallback locks.
       replace a silently-wrong path; implement the mixed path or keep fail-closed
       by explicit decision.
 - [ ] Cross-component epistemic coupling beyond single-rule joint solving.
+- [ ] Accepted recursive epistemic fixpoint execution. Current behavior is
+      intentionally typed fail-closed, not silently single-pass.
 
 ## v0.10.0 - Multi-GPU and Out-of-Core Execution
 

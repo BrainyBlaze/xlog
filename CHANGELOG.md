@@ -58,6 +58,14 @@ recorded in `docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`
 - Fixed unstable typed diagnostics for nested modal forms with interspersed
   `not` (e.g. `know not possible p()`), which previously fell through to a
   generic parse error instead of a stable `UnsupportedEpistemicConstruct`.
+- Fixed `xlog run` routing for multi-output epistemic programs that combine
+  bound-variable modal membership with multiple output heads; shared source
+  facts such as `node(X)` no longer force otherwise independent split
+  components into one single-plan multi-output execution.
+- Fixed recursive epistemic programs to fail closed with
+  `UnsupportedEpistemicConstruct { construct: "recursive epistemic program" }`
+  instead of entering the bounded single-pass executor, which does not yet
+  iterate recursive epistemic fixpoints.
 
 ### Changed (v0.9.1)
 
@@ -65,6 +73,9 @@ recorded in `docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`
   distinct epistemic predicates; such rules are routed to joint solving. The
   `xlog-integration` split-coupling test was updated to the new accepted
   contract.
+- Source facts are treated as reusable extensional inputs for split planning,
+  not as derived component producers. Components still coalesce on ordinary
+  derived dependencies and integrity constraints.
 
 ### Known gaps (v0.9.1, tracked — NOT claimed complete)
 
@@ -72,6 +83,9 @@ recorded in `docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`
   fail-closed boundary introduced to replace a silently-wrong path; not a
   goal-mandated accepted case. Implement the mixed path or keep fail-closed by
   explicit decision.
+- **Recursive epistemic fixpoints:** ordinary recursion inside epistemic
+  programs is now typed fail-closed; accepted recursive epistemic fixpoint
+  execution remains future work.
 
 Goal-mandated typed fail-closed fragments (nested modal semantics, aggregate/
 compound/list/predref modal keys, variable-keyed/nested/CPU-scan epistemic
