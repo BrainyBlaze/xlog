@@ -53,10 +53,12 @@ XLOG_USE_DEVICE_RUNTIME=1 cargo test -p xlog-cli --test run_cli_tests test_xlog_
 
 Notes: examples with one epistemic output head use the single-plan path; examples
 with independent epistemic output heads route through split GPU execution from
-`xlog run`. A coalesced component that nonetheless carries more than one epistemic
-output head (cross-component modal coupling) is unsound to split and cannot be
-jointly materialized, so it fails closed with a typed `cross-component epistemic
-coupling` diagnostic naming the coupled heads and the merge reason. Nested modal
-operators and the other goal-mandated fail-closed fragments (see
-`docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`) are
-intentionally rejected and covered by negative pilots.
+`xlog run`. A coalesced component with more than one epistemic output head sharing
+a base modal predicate is JOINT-SOLVED with multi-output materialization — each
+head materialized against one shared accepted world view (examples 18, 21). Coupling
+over an epistemic-derived head (nested/stratified) and augmented-projection coupling
+currently fail closed with a typed `cross-component epistemic coupling` diagnostic
+(see the v0.9.2 status doc). Genuinely-undefined or out-of-scope forms — circular
+modality (a modal over the relation being recursively computed), FAEEL-unfounded
+self-support (the defined rejection; G91 accepts it), and syntactic nested modal
+operators — are covered by negative pilots.
