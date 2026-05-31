@@ -6168,6 +6168,35 @@ impl Executor {
         })
     }
 
+    /// Materialize a stratum's GATED epistemic head output into the relation store
+    /// as a base relation, for stratified epistemic execution.
+    ///
+    /// After a lower stratum computes its modal-gated head extension (the
+    /// `final_output`/additional-head buffer), the higher stratum's `know`/
+    /// `possible` over that head must read the GATED extension — not the ungated
+    /// reduced relation the reduced runtime plan leaves in the store. This OVERWRITES
+    /// the store relation under `name` with a device-side clone of the gated buffer,
+    /// so the existing EGB-02 tuple-membership filter (which reads the source
+    /// relation from the store by predicate name) gates the higher stratum against
+    /// the correct extension. No resolve-into-body is performed, so there is no
+    /// double-gating against the GPU world-view filter.
+    pub fn materialize_epistemic_head_relation(
+        &mut self,
+        name: &str,
+        gated_output: &CudaBuffer,
+    ) -> Result<()> {
+        let cloned = self.clone_buffer(gated_output)?;
+        self.put_relation(name, cloned);
+        Ok(())
+    }
+
+    /// Device-side clone of a store-resident relation buffer, for surfacing a
+    /// stratified ordinary stratum's output as a query result without moving it out
+    /// of the store.
+    pub fn clone_store_relation(&self, buffer: &CudaBuffer) -> Result<CudaBuffer> {
+        self.clone_buffer(buffer)
+    }
+
     /// Execute the reduced production runtime plan and capture epistemic GPU evidence.
     pub fn execute_epistemic_gpu_execution(
         &mut self,

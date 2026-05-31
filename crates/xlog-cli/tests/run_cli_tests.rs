@@ -114,6 +114,21 @@ fn test_xlog_run_epistemic_examples() {
         // gated `trusted = {1, 3}` exactly (node 2 is not vetted, so not known).
         ("16-cross-component-coupling.xlog", "trusted", "| 1  |"),
         ("16-cross-component-coupling.xlog", "trusted", "| 3  |"),
+        // v0.9.2 STRATIFIED epistemic execution: chained coupling over a DETERMINED
+        // epistemic-derived head. `trusted` (gated by `know vetted` over EDB) is a
+        // strictly-lower stratum materialized into the store; `flagged :- know
+        // trusted` then gates against the materialized `trusted = {1, 3}` via the
+        // existing EGB-02 membership filter. flagged = {1, 3}; node 2 is gated out.
+        (
+            "17-cross-component-chained-stratified.xlog",
+            "flagged",
+            "| 1  |",
+        ),
+        (
+            "17-cross-component-chained-stratified.xlog",
+            "flagged",
+            "| 3  |",
+        ),
         // v0.9.2 Bundle 3 COMPLETION: cross-component epistemic JOINT-SOLVING
         // (multi-output). Two epistemic heads share ONE base modal predicate `q`
         // (SharedModalPredicate coalesce) but neither feeds the other, so the
@@ -178,6 +193,38 @@ fn test_xlog_run_epistemic_examples() {
         ("21-incident-triage-joint-modal.xlog", "watch", "| 2  |"),
         ("21-incident-triage-joint-modal.xlog", "clear", "| 3  |"),
         ("21-incident-triage-joint-modal.xlog", "clear", "| 5  |"),
+        // v0.9.2 STRATIFIED recursion over a DETERMINED epistemic-derived head:
+        // `a` (gated by `know certified` over EDB) is materialized as a lower
+        // stratum, then `reach` recurses via `know a` over the now-base relation.
+        // reach = {(1,2),(2,3),(1,3)}; the derived (1,3) proves multi-hop fixpoint.
+        (
+            "25-recursion-over-determined-modal.xlog",
+            "reach",
+            "| 1  | 2  |",
+        ),
+        (
+            "25-recursion-over-determined-modal.xlog",
+            "reach",
+            "| 2  | 3  |",
+        ),
+        (
+            "25-recursion-over-determined-modal.xlog",
+            "reach",
+            "| 1  | 3  |",
+        ),
+        // v0.9.2 NEGATED modal over an INVARIANT relation in a recursive context:
+        // `not know blocked(Y)` == ordinary `not blocked(Y)` anti-join. blocked
+        // node 3 severs the chain -> reach = {(1,2),(3,4)}.
+        (
+            "26-negated-modal-over-invariant-recursive.xlog",
+            "__xlog_query_0",
+            "| 1  | 2  |",
+        ),
+        (
+            "26-negated-modal-over-invariant-recursive.xlog",
+            "__xlog_query_0",
+            "| 3  | 4  |",
+        ),
     ];
 
     for (example, expected_relation, expected_value) in examples {
@@ -256,10 +303,15 @@ fn test_xlog_run_nested_modal_reports_typed_epistemic_diagnostic() {
 
 #[test]
 fn test_xlog_run_cross_component_coupling_reports_typed_epistemic_diagnostic() {
-    // v0.9.2 Bundle 3 K4: an unsafe cross-component modal coupling (one epistemic
-    // head feeds another component's MODAL literal) must FAIL CLOSED through the
-    // production `xlog run` path with a typed diagnostic naming the merge reason
-    // AND the coupled epistemic output predicates -- not partial/silent execution.
+    // v0.9.2 K4 boundary: a modal literal over a TRANSITIVELY epistemic-derived
+    // ORDINARY predicate (`b :- know r`, `r :- a`, `a :- know p`) is OUT OF SCOPE
+    // for stratification (the modal target `r` is an ordinary head, not an
+    // epistemic head), so stratification declines and the component fails closed
+    // through the production `xlog run` path with a typed diagnostic naming the
+    // merge reason AND the coupled epistemic output predicates -- not partial or
+    // silent execution. (The direct chained case `b :- know a` over a DETERMINED
+    // epistemic head is now ACCEPTED via stratification: see
+    // 17-cross-component-chained-stratified.xlog.)
     let _device = match CudaDevice::new(0) {
         Ok(d) => d,
         Err(_) => {
@@ -274,7 +326,7 @@ fn test_xlog_run_cross_component_coupling_reports_typed_epistemic_diagnostic() {
         .expect("workspace root");
     let program = repo_root
         .join("examples/epistemic")
-        .join("17-cross-component-coupling-rejected.xlog");
+        .join("24-transitive-modal-out-of-scope.xlog");
     let output = cargo_bin_cmd!("xlog")
         .args([
             "run",
@@ -296,10 +348,21 @@ fn test_xlog_run_cross_component_coupling_reports_typed_epistemic_diagnostic() {
         stderr.contains("cross-component epistemic coupling"),
         "{stderr}"
     );
-    // Names the coupled epistemic output predicates.
+    // Names the coupled epistemic output predicates (the diagnostic renders the
+    // head list as `epistemic output heads ["a", "b"]`; match the prefix and both
+    // names robustly across Debug escaping).
     assert!(
-        stderr.contains("trusted") && stderr.contains("flagged"),
-        "diagnostic must name coupled epistemic heads trusted and flagged:\n{stderr}"
+        stderr.contains("epistemic output heads"),
+        "diagnostic must list the coupled epistemic output heads:\n{stderr}"
+    );
+    assert!(
+        stderr.contains('a') && stderr.contains('b'),
+        "diagnostic must name coupled epistemic heads a and b:\n{stderr}"
+    );
+    // Names the transitively-tainted nested modal predicate `r/1`.
+    assert!(
+        stderr.contains("r/1"),
+        "diagnostic must name the nested modal predicate r/1:\n{stderr}"
     );
     // Names the merge reason (the derived dependency that coalesced them).
     assert!(
@@ -395,6 +458,44 @@ fn test_xlog_run_v092_examples_modal_gating_filters() {
     assert!(
         !watch_block.contains("| 3  |"),
         "21 watch must GATE OUT monitored(3) (not compromised):\n{stdout}"
+    );
+
+    // 17 stratified chained coupling: flagged = {1, 3}. node 2 is not vetted, so
+    // not trusted (lower stratum gates it out), so not flagged -- proves the
+    // higher stratum gates against the GATED (materialized) `trusted`, not the
+    // ungated `node`.
+    let (ok, stdout, stderr) = run_epistemic_example("17-cross-component-chained-stratified.xlog");
+    assert!(ok, "17 must succeed:\n{stdout}\n{stderr}");
+    assert!(stdout.contains("flagged"), "17 emits flagged:\n{stdout}");
+    assert!(
+        stdout.contains("| 1  |") && stdout.contains("| 3  |"),
+        "17 keeps 1,3:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("| 2  |"),
+        "17 must GATE OUT node 2 (not vetted -> not trusted -> not flagged):\n{stdout}"
+    );
+
+    // 26 negated-modal-over-invariant recursion: reach = {(1,2),(3,4)}. The gate
+    // `not know blocked(Y)` drops every tuple whose TARGET (second column) is the
+    // blocked node 3, so (2,3) is absent and the chain through 3 never extends.
+    // The ungated edge closure would be {(1,2),(2,3),(3,4),(1,3),(2,4),(1,4)}; the
+    // gated result strictly OMITS all tuples ending in 3 AND all multi-hop tuples
+    // that must pass through 3, proving the negated modal actually filters.
+    let (ok, stdout, stderr) =
+        run_epistemic_example("26-negated-modal-over-invariant-recursive.xlog");
+    assert!(ok, "26 must succeed:\n{stdout}\n{stderr}");
+    assert!(
+        stdout.contains("| 1  | 2  |") && stdout.contains("| 3  | 4  |"),
+        "26 keeps (1,2),(3,4):\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("| 2  | 3  |"),
+        "26 must GATE OUT (2,3): target node 3 is blocked:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("| 1  | 3  |") && !stdout.contains("| 1  | 4  |"),
+        "26 must OMIT multi-hop tuples that pass through blocked node 3:\n{stdout}"
     );
 }
 

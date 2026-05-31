@@ -46,9 +46,13 @@ fn non_case_a_recursive_epistemic_program_fails_closed() {
 }
 
 #[test]
-fn negated_modal_recursive_epistemic_program_fails_closed() {
-    // A negated modal literal in a recursion-participating rule is not Case A (the
-    // gated complement is not invariant) and must fail closed.
+fn negated_modal_over_invariant_in_recursion_is_accepted_case_a() {
+    // K3: a NEGATED modal `not know edge(...)` over the INVARIANT EDB relation
+    // `edge` in a recursion-participating rule equals ordinary `not edge(...)` (the
+    // accepted world view agrees with `edge` on an invariant relation, so the gated
+    // complement IS `not edge`). This is cleanly reducible to ordinary negation
+    // (an anti-join, NO modal gating), so it is ADMISSIBLE Case A — it must NOT
+    // fail closed.
     let program = parse_program(
         r#"
         pred vertex(u32).
@@ -60,12 +64,59 @@ fn negated_modal_recursive_epistemic_program_fails_closed() {
         "#,
     )
     .unwrap();
+    assert_eq!(
+        classify_recursive_epistemic_program(&program).unwrap(),
+        RecursiveEpistemicClass::CaseA,
+        "negated modal over an invariant relation is admissible Case A"
+    );
+    // The Case-A reduction resolves `not know edge` to an ordinary NEGATED atom
+    // (anti-join), with no residual modal literal.
+    let reduced = try_reduce_case_a_recursive_epistemic_program(&program)
+        .unwrap()
+        .expect("admissible Case-A program reduces");
+    let recursive_rule = &reduced.rules[reduced.rules.len() - 1];
+    assert!(
+        recursive_rule
+            .body
+            .iter()
+            .any(|lit| matches!(lit, BodyLiteral::Negated(atom) if atom.predicate == "edge")),
+        "negated modal must resolve to an ordinary negated `edge` atom"
+    );
+    assert!(
+        !recursive_rule
+            .body
+            .iter()
+            .any(|lit| matches!(lit, BodyLiteral::Epistemic(_))),
+        "no residual modal literal after Case-A reduction"
+    );
+}
+
+#[test]
+fn negated_modal_over_non_invariant_in_recursion_fails_closed() {
+    // The complement: a NEGATED modal over a NON-invariant (epistemic-derived)
+    // relation in a recursion-participating program is doubly outside the Case-A
+    // fragment and must still fail closed. `choice` is epistemic-defined, so
+    // `not know choice` has no invariant complement.
+    let program = parse_program(
+        r#"
+        pred vertex(u32).
+        pred edge(u32, u32).
+        pred reach(u32, u32).
+        pred seed(u32, u32).
+        pred choice(u32, u32).
+        vertex(1). vertex(2). edge(1, 2). seed(1, 2).
+        choice(X, Y) :- seed(X, Y), know edge(X, Y).
+        reach(X, Y) :- vertex(X), vertex(Y), know edge(X, Y).
+        reach(X, Z) :- reach(X, Y), vertex(Z), not know choice(Y, Z).
+        "#,
+    )
+    .unwrap();
     match classify_recursive_epistemic_program(&program) {
         Err(XlogError::UnsupportedEpistemicConstruct { construct, context }) => {
             assert_eq!(construct, "recursive epistemic program");
             assert!(
-                context.contains("NEGATED modal"),
-                "expected negated-modal diagnostic, got: {context}"
+                context.contains("NEGATED modal") && context.contains("not invariant"),
+                "expected negated-non-invariant diagnostic, got: {context}"
             );
         }
         other => panic!("expected typed negated-modal rejection, got {other:?}"),
@@ -1098,4 +1149,96 @@ fn shared_extensional_inputs_do_not_force_false_cross_component_coalesce() {
 
 fn compiled_rule_count(plan: &ExecutionPlan) -> usize {
     plan.rules_by_scc.iter().map(Vec::len).sum()
+}
+
+// --- v0.9.2 stratified epistemic execution: chained coupling over a
+// DETERMINED epistemic-derived head ---
+
+#[test]
+fn chained_modal_over_determined_epistemic_head_plans_stratified() {
+    // K1: `b :- know a` where `a :- know p` and `p` is an EDB/invariant relation.
+    // `a` is epistemically DETERMINED (its modal gates only over invariant `p`),
+    // so its gated extension IS its truth and can be materialized as a base
+    // relation. `b`'s modal `know a` then gates against that materialized relation.
+    // This must PLAN STRATIFIED (2 strata, `a` strictly below `b`), NOT fail closed.
+    let program = parse_program(
+        r#"
+        pred p(u32).
+        pred node(u32).
+        pred a(u32).
+        pred b(u32).
+        p(1). p(3). node(1). node(2). node(3).
+        a(X) :- node(X), know p(X).
+        b(X) :- node(X), know a(X).
+        ?- b(X).
+        "#,
+    )
+    .unwrap();
+
+    let plan = xlog_logic::epistemic::try_plan_stratified_epistemic_program(&program)
+        .expect("stratified planning must not error")
+        .expect("chained modal over a determined epistemic head must plan stratified");
+    assert_eq!(
+        plan.strata.len(),
+        2,
+        "expected exactly two strata (a below b)"
+    );
+    // Lower stratum materializes `a`; higher stratum materializes `b`.
+    assert_eq!(plan.strata[0].head_predicates, vec!["a".to_string()]);
+    assert_eq!(plan.strata[1].head_predicates, vec!["b".to_string()]);
+    // The lower stratum's sub-program must NOT contain any rule that redefines a
+    // lower-stratum head other than its own (it owns `a`).
+    // The higher stratum's sub-program must NOT redefine `a` (it is materialized).
+    let higher_redefines_a = plan.strata[1]
+        .program
+        .rules
+        .iter()
+        .any(|rule| !rule.body.is_empty() && rule.head.predicate == "a");
+    assert!(
+        !higher_redefines_a,
+        "higher stratum must not redefine the lower-stratum head `a`"
+    );
+}
+
+#[test]
+fn shared_base_modal_does_not_trigger_stratification() {
+    // K4 non-regression: example-18 shape. Two heads share a BASE modal `q` (EDB).
+    // `q` is NOT an epistemic-derived head, so NO modal ranges over a determined
+    // epistemic head -> stratified planning returns None and the existing joint
+    // path keeps ownership (-> known={1,2}, maybe={2}).
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred color(u32).
+        pred q(u32).
+        pred known(u32).
+        pred maybe(u32).
+        node(1). node(2). node(3).
+        color(2). color(3).
+        q(1). q(2).
+        known(X) :- node(X), know q(X).
+        maybe(X) :- color(X), possible q(X).
+        "#,
+    )
+    .unwrap();
+    let plan = xlog_logic::epistemic::try_plan_stratified_epistemic_program(&program)
+        .expect("must not error");
+    assert!(
+        plan.is_none(),
+        "shared base modal must NOT trigger stratification (joint path owns it)"
+    );
+}
+
+#[test]
+fn circular_modality_does_not_plan_stratified() {
+    // Genuinely undefined: `p() :- possible p()` (self-support through a modal).
+    // `p` is NOT epistemically determined (self-reference), so stratification must
+    // decline (None), handing the case back to the FAEEL/G91 foundedness guard.
+    let program = parse_program("p() :- possible p().").unwrap();
+    let plan = xlog_logic::epistemic::try_plan_stratified_epistemic_program(&program)
+        .expect("must not error");
+    assert!(
+        plan.is_none(),
+        "circular modality must not stratify; FAEEL/G91 owns it"
+    );
 }
