@@ -76,6 +76,37 @@ fn test_xlog_run_epistemic_examples() {
         // (`know global_flag()`) modal membership composed conjunctively.
         ("14-mixed-literal-membership.xlog", "reachable", "| 1  |"),
         ("14-mixed-literal-membership.xlog", "reachable", "| 3  |"),
+        // v0.9.2 Case-A recursive epistemic fixpoint: ordinary recursion gated by a
+        // modal literal over an INVARIANT relation, delegated to the existing
+        // recursive/semi-naive engine. The derived multi-hop tuples prove the
+        // fixpoint is NOT single-pass.
+        // 3-vertex closure: base (1,2),(2,3) plus DERIVED (1,3).
+        (
+            "15-recursive-epistemic-closure.xlog",
+            "__xlog_query_0",
+            "| 1  | 2  |",
+        ),
+        (
+            "15-recursive-epistemic-closure.xlog",
+            "__xlog_query_0",
+            "| 2  | 3  |",
+        ),
+        (
+            "15-recursive-epistemic-closure.xlog",
+            "__xlog_query_0",
+            "| 1  | 3  |",
+        ),
+        // 4-chain: base hops plus 2-hop (1,3),(2,4) and the 3-hop DERIVED (1,4).
+        (
+            "15-recursive-epistemic-chain.xlog",
+            "__xlog_query_0",
+            "| 1  | 4  |",
+        ),
+        (
+            "15-recursive-epistemic-chain.xlog",
+            "__xlog_query_0",
+            "| 2  | 4  |",
+        ),
     ];
 
     for (example, expected_relation, expected_value) in examples {

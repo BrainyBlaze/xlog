@@ -1,18 +1,54 @@
 use xlog_core::XlogError;
 use xlog_ir::ExecutionPlan;
 use xlog_logic::epistemic::{
-    build_epistemic_dependency_graph, compile_epistemic_gpu_split_execution,
-    plan_epistemic_gpu_execution, split_epistemic_program, EpistemicComponentMergeReason,
+    build_epistemic_dependency_graph, classify_recursive_epistemic_program,
+    compile_epistemic_gpu_split_execution, plan_epistemic_gpu_execution, split_epistemic_program,
+    try_reduce_case_a_recursive_epistemic_program, EpistemicComponentMergeReason,
+    RecursiveEpistemicClass,
 };
-use xlog_logic::parse_program;
+use xlog_logic::{parse_program, BodyLiteral};
 
 #[test]
-fn ordinary_recursive_epistemic_program_fails_closed() {
-    // The epistemic executor evaluates each candidate world view in a single pass and
-    // does not iterate a recursive fixpoint, so a program that combines epistemic
-    // literals with ORDINARY recursion (recursion through positive/negated body
-    // literals) must fail closed with a typed diagnostic rather than silently drop
-    // recursive derivations.
+fn non_case_a_recursive_epistemic_program_fails_closed() {
+    // Recursion whose modal literal ranges over a NON-INVARIANT relation (here the
+    // modal atom `know derived_edge(...)` references a relation that itself depends on
+    // the recursive `reach`) is outside the admissible Case-A fragment: its gated
+    // extension changes as the recursion iterates, so it must fail closed with a typed
+    // diagnostic rather than be silently mis-evaluated.
+    let program = parse_program(
+        r#"
+        pred vertex(u32).
+        pred edge(u32, u32).
+        pred reach(u32, u32).
+        pred derived_edge(u32, u32).
+        vertex(1). vertex(2). edge(1, 2).
+        derived_edge(X, Y) :- reach(X, Y).
+        reach(X, Y) :- vertex(X), vertex(Y), know edge(X, Y).
+        reach(X, Z) :- reach(X, Y), vertex(Z), know derived_edge(Y, Z).
+        "#,
+    )
+    .unwrap();
+    match classify_recursive_epistemic_program(&program) {
+        Err(XlogError::UnsupportedEpistemicConstruct { construct, context }) => {
+            assert_eq!(construct, "recursive epistemic program");
+            assert!(
+                context.contains("not invariant"),
+                "expected non-invariant modal diagnostic, got: {context}"
+            );
+        }
+        other => panic!("expected typed non-Case-A recursive rejection, got {other:?}"),
+    }
+    // The single-pass GPU planner must also reject any ordinary recursion.
+    assert!(matches!(
+        plan_epistemic_gpu_execution(&program),
+        Err(XlogError::UnsupportedEpistemicConstruct { .. })
+    ));
+}
+
+#[test]
+fn negated_modal_recursive_epistemic_program_fails_closed() {
+    // A negated modal literal in a recursion-participating rule is not Case A (the
+    // gated complement is not invariant) and must fail closed.
     let program = parse_program(
         r#"
         pred vertex(u32).
@@ -20,15 +56,128 @@ fn ordinary_recursive_epistemic_program_fails_closed() {
         pred reach(u32, u32).
         vertex(1). vertex(2). edge(1, 2).
         reach(X, Y) :- vertex(X), vertex(Y), know edge(X, Y).
-        reach(X, Z) :- reach(X, Y), vertex(Z), know edge(Y, Z).
+        reach(X, Z) :- reach(X, Y), vertex(Z), not know edge(Y, Z).
         "#,
     )
     .unwrap();
-    match plan_epistemic_gpu_execution(&program) {
-        Err(XlogError::UnsupportedEpistemicConstruct { construct, .. }) => {
+    match classify_recursive_epistemic_program(&program) {
+        Err(XlogError::UnsupportedEpistemicConstruct { construct, context }) => {
             assert_eq!(construct, "recursive epistemic program");
+            assert!(
+                context.contains("NEGATED modal"),
+                "expected negated-modal diagnostic, got: {context}"
+            );
         }
-        other => panic!("expected typed recursive-epistemic rejection, got {other:?}"),
+        other => panic!("expected typed negated-modal rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn recursion_with_non_invariant_modal_in_unrelated_rule_fails_closed() {
+    // Soundness guard: the Case-A reduction rewrites EVERY modal literal in the
+    // program to a positive atom over its gated relation, so a modal literal in a
+    // rule that does NOT itself participate in the recursion must still be invariant.
+    // Here `maybe(X) :- node(X), possible choice(X)` ranges over `choice`, which is
+    // epistemic-defined (non-invariant), so blanket-rewriting `possible choice(X)`
+    // would be unsound. The whole program must therefore fail closed even though the
+    // recursive `reach` rules are themselves Case A.
+    let program = parse_program(
+        r#"
+        pred vertex(u32).
+        pred edge(u32, u32).
+        pred reach(u32, u32).
+        pred node(u32).
+        pred choice(u32).
+        pred maybe(u32).
+        pred seed(u32).
+        vertex(1). vertex(2). edge(1, 2).
+        node(1). seed(1).
+        choice(X) :- seed(X), know edge(X, X).
+        reach(X, Y) :- vertex(X), vertex(Y), know edge(X, Y).
+        reach(X, Z) :- reach(X, Y), vertex(Z), know edge(Y, Z).
+        maybe(X) :- node(X), possible choice(X).
+        "#,
+    )
+    .unwrap();
+    match classify_recursive_epistemic_program(&program) {
+        Err(XlogError::UnsupportedEpistemicConstruct { construct, context }) => {
+            assert_eq!(construct, "recursive epistemic program");
+            assert!(
+                context.contains("not invariant"),
+                "expected non-invariant modal diagnostic, got: {context}"
+            );
+            assert!(
+                context.contains("choice"),
+                "diagnostic should name the offending modal relation, got: {context}"
+            );
+        }
+        other => panic!("expected typed fail-closed for non-invariant modal, got {other:?}"),
+    }
+}
+
+#[test]
+fn case_a_recursive_epistemic_program_is_accepted_and_reduced() {
+    // Case A: ordinary recursion in `reach`, with every recursion-participating modal
+    // atom (`know edge(...)`) over the INVARIANT EDB relation `edge`. The program is
+    // classified Case A and reduced to an ordinary recursive program whose modal
+    // literals are resolved to positive atoms over their gated relation, so the
+    // existing recursive/semi-naive engine derives the transitive closure (including
+    // multi-hop tuples), NOT a single pass.
+    let program = parse_program(
+        r#"
+        pred vertex(u32).
+        pred edge(u32, u32).
+        pred reach(u32, u32).
+        vertex(1). vertex(2). vertex(3).
+        edge(1, 2). edge(2, 3).
+        reach(X, Y) :- vertex(X), vertex(Y), know edge(X, Y).
+        reach(X, Z) :- reach(X, Y), vertex(Z), know edge(Y, Z).
+        ?- reach(X, Y).
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        classify_recursive_epistemic_program(&program).unwrap(),
+        RecursiveEpistemicClass::CaseA
+    );
+
+    let reduced = try_reduce_case_a_recursive_epistemic_program(&program)
+        .unwrap()
+        .expect("Case-A program must reduce to an ordinary recursive program");
+
+    // No epistemic literals survive: each `know edge(...)` is resolved to a positive
+    // ordinary atom over the invariant `edge` relation.
+    let modal_literals = reduced
+        .rules
+        .iter()
+        .flat_map(|rule| rule.body.iter())
+        .filter(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
+        .count();
+    assert_eq!(
+        modal_literals, 0,
+        "Case-A reduce must remove all modal literals"
+    );
+
+    // The recursive rule now joins `reach` against the gated `edge` relation in-loop
+    // (positive atom), preserving head arity 2 across both rules — the fix for the
+    // single-pass arity mismatch.
+    let recursive_rule = reduced
+        .rules
+        .iter()
+        .find(|rule| {
+            rule.head.predicate == "reach"
+                && rule.body.iter().any(
+                    |lit| matches!(lit, BodyLiteral::Positive(atom) if atom.predicate == "reach"),
+                )
+        })
+        .expect("recursive reach rule must survive reduction");
+    assert!(recursive_rule
+        .body
+        .iter()
+        .any(|lit| matches!(lit, BodyLiteral::Positive(atom) if atom.predicate == "edge")));
+    for rule in reduced.rules.iter().filter(|r| r.head.predicate == "reach") {
+        assert_eq!(rule.head.terms.len(), 2, "reach head arity must stay 2");
     }
 }
 

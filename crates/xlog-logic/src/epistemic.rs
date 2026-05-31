@@ -552,19 +552,64 @@ fn lower_epistemic_constraints(
     Ok(constraint_plans)
 }
 
-/// Reject epistemic programs that contain ordinary (non-modal) recursion.
+/// Structural classification of an epistemic program with respect to ordinary
+/// (non-modal) recursion.
 ///
-/// The epistemic executor evaluates each candidate world view in a single pass and
-/// does not iterate a recursive fixpoint. A program that combines epistemic literals
-/// with recursion through ORDINARY body literals (positive/negated atoms) therefore
-/// cannot be evaluated soundly — it either errors on a recursive-join schema mismatch
-/// or silently drops the recursive derivations. Such programs fail closed here with a
-/// typed diagnostic instead.
+/// Recursion through positive/negated body literals normally fails closed in an
+/// epistemic program because the single-pass world-view executor cannot iterate a
+/// fixpoint. The well-defined sub-fragment "Case A" — recursion lives in the
+/// ordinary predicate while every modal atom in a recursion-participating rule is a
+/// positive `know`/`possible` over an *invariant* relation (an EDB or a lower
+/// non-recursive, non-epistemic stratum) — is admitted instead: the modal atom's
+/// extension is fixed independent of the recursion, so it can be resolved to its
+/// gated relation and the reduced ordinary program iterated by the existing
+/// recursive/semi-naive engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecursiveEpistemicClass {
+    /// The program has no ordinary recursion among epistemic rules; the existing
+    /// single-pass epistemic world-view executor handles it.
+    NonRecursive,
+    /// Case A: ordinary recursion with every recursion-participating modal atom over
+    /// an invariant relation. Routed to the ordinary recursive engine after a
+    /// Case-A reduction (see [`reduce_case_a_epistemic_program_to_ordinary`]).
+    CaseA,
+}
+
+/// Reject epistemic programs that contain ordinary (non-modal) recursion before the
+/// SINGLE-PASS GPU world-view planner.
+///
+/// [`plan_epistemic_gpu_execution`] builds a single-pass plan that evaluates each
+/// candidate world view exactly once; it cannot iterate a recursive fixpoint, so ANY
+/// ordinary recursion fails closed here — including the admissible Case-A fragment,
+/// which is handled by a SEPARATE path
+/// ([`try_reduce_case_a_recursive_epistemic_program`]) that delegates to the ordinary
+/// recursive engine and intercepts Case-A programs before this planner is reached. In
+/// production this guard therefore only ever sees non-recursive programs; it remains
+/// defense-in-depth for direct callers of the single-pass planner.
 ///
 /// Self-support THROUGH a modal literal (e.g. `p() :- possible p().`) is NOT ordinary
 /// recursion: the modal edge is excluded from the dependency walk, so FAEEL/G91
 /// foundedness still governs those cases (see [`reject_faeel_self_supported_possible`]).
 fn reject_recursive_epistemic_program(program: &Program) -> Result<()> {
+    match classify_recursive_epistemic_program(program) {
+        Ok(RecursiveEpistemicClass::NonRecursive) => Ok(()),
+        Ok(RecursiveEpistemicClass::CaseA) => Err(recursive_epistemic_rejection(
+            "an epistemic program contains ordinary recursion; the single-pass epistemic GPU \
+             planner cannot iterate a recursive fixpoint. Case-A recursive epistemic programs \
+             are executed through the ordinary recursive engine via \
+             `try_reduce_case_a_recursive_epistemic_program`, not this planner.",
+        )),
+        // Non-Case-A recursive shapes already carry a specific typed diagnostic.
+        Err(err) => Err(err),
+    }
+}
+
+/// Classify an epistemic program's ordinary recursion as non-recursive or Case A.
+///
+/// Returns a typed [`XlogError::UnsupportedEpistemicConstruct`] for any recursive
+/// shape outside Case A (recursion through a derived/recursive or epistemic relation,
+/// a negated modal literal in a recursion-participating rule, etc.).
+pub fn classify_recursive_epistemic_program(program: &Program) -> Result<RecursiveEpistemicClass> {
     let has_epistemic = program.rules.iter().any(|rule| {
         rule.body
             .iter()
@@ -572,7 +617,7 @@ fn reject_recursive_epistemic_program(program: &Program) -> Result<()> {
     });
     if !has_epistemic {
         // No epistemic literals: the ordinary recursive engine handles this program.
-        return Ok(());
+        return Ok(RecursiveEpistemicClass::NonRecursive);
     }
 
     // Dependency edges from ORDINARY (positive/negated) body literals only; modal,
@@ -607,22 +652,145 @@ fn reject_recursive_epistemic_program(program: &Program) -> Result<()> {
         false
     }
 
-    if let Some(pred) = deps
+    // Collect the set of ordinary-recursive predicates (predicates that ordinarily
+    // depend on themselves through positive/negated body literals).
+    let recursive_predicates: BTreeSet<&str> = deps
         .keys()
-        .find(|pred| reaches(pred, pred, &deps, &mut BTreeSet::new()))
-    {
-        return Err(XlogError::UnsupportedEpistemicConstruct {
-            construct: "recursive epistemic program".to_string(),
-            context: format!(
-                "predicate `{pred}` is defined by ordinary recursion in a program that uses \
-                 epistemic literals; the epistemic executor evaluates each candidate world view \
-                 in a single pass and does not yet iterate a recursive fixpoint. Remove the \
-                 recursion or compute the recursive relation in a non-epistemic stratum."
-            ),
-        });
+        .copied()
+        .filter(|pred| reaches(pred, pred, &deps, &mut BTreeSet::new()))
+        .collect();
+
+    if recursive_predicates.is_empty() {
+        return Ok(RecursiveEpistemicClass::NonRecursive);
     }
 
-    Ok(())
+    // Recursion is present. Admit it only as Case A: every modal atom that appears in
+    // a recursion-participating rule must be a POSITIVE `know`/`possible` over an
+    // INVARIANT relation (its extension is fixed independent of the recursion). Any
+    // other recursive shape fails closed.
+    //
+    // The Case-A reduction blanket-rewrites EVERY modal literal in the program to a
+    // positive ordinary atom over its gated relation, so the invariance contract must
+    // hold for EVERY modal literal in the whole program — not only those in
+    // recursion-participating rules. A non-recursive rule whose modal ranges over a
+    // non-invariant (e.g. epistemic-defined) relation would otherwise be silently
+    // rewritten into an unsound join; it must instead fail closed, preserving the
+    // pre-existing "reject all but Case A" guarantee.
+    let invariant = InvariantRelations::analyze(program);
+    for rule in &program.rules {
+        for lit in &rule.body {
+            let BodyLiteral::Epistemic(modal) = lit else {
+                continue;
+            };
+            if modal.negated {
+                return Err(recursive_epistemic_rejection(&format!(
+                    "rule for `{}` uses a NEGATED modal literal `{}` in a program with ordinary \
+                     recursion; negated modal literals are not part of the admissible Case-A \
+                     fixpoint fragment (the gated complement is not invariant). Remove the \
+                     recursion or the negated modal literal.",
+                    rule.head.predicate,
+                    epistemic_literal_label(modal),
+                )));
+            }
+            if !invariant.is_invariant(&modal.atom.predicate) {
+                return Err(recursive_epistemic_rejection(&format!(
+                    "rule for `{}` uses the modal literal `{} {}` over a relation that is not \
+                     invariant with respect to the program's ordinary recursion (it is recursive, \
+                     epistemic, or transitively depends on the recursion). Case-A recursive \
+                     epistemic execution requires every modal atom to range over an EDB or lower \
+                     non-recursive, non-epistemic stratum. Remove the recursion or compute the \
+                     recursive relation in a non-epistemic stratum.",
+                    rule.head.predicate,
+                    epistemic_literal_label(modal),
+                    modal.atom.predicate,
+                )));
+            }
+        }
+    }
+
+    Ok(RecursiveEpistemicClass::CaseA)
+}
+
+fn recursive_epistemic_rejection(context: &str) -> XlogError {
+    XlogError::UnsupportedEpistemicConstruct {
+        construct: "recursive epistemic program".to_string(),
+        context: context.to_string(),
+    }
+}
+
+/// Predicates whose extension is fixed independent of any ordinary recursion or
+/// epistemic literal in the program.
+///
+/// A predicate is invariant when it is EDB (defined only by ground facts) or its
+/// entire transitive ordinary-definition closure is free of epistemic literals and of
+/// ordinary recursion. Such a relation is computed once in a lower stratum, so a
+/// positive `know`/`possible` over it has a fixed gated extension that a recursive
+/// fixpoint can join against.
+struct InvariantRelations<'a> {
+    /// Ordinary (positive/negated) body-predicate edges per head predicate.
+    ordinary_deps: BTreeMap<&'a str, BTreeSet<&'a str>>,
+    /// Predicates whose definition (any defining non-fact rule) contains an epistemic
+    /// body literal.
+    epistemic_heads: BTreeSet<&'a str>,
+    /// Predicates defined by at least one non-fact rule (i.e. not pure EDB).
+    derived_heads: BTreeSet<&'a str>,
+}
+
+impl<'a> InvariantRelations<'a> {
+    fn analyze(program: &'a Program) -> Self {
+        let mut ordinary_deps: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        let mut epistemic_heads: BTreeSet<&str> = BTreeSet::new();
+        let mut derived_heads: BTreeSet<&str> = BTreeSet::new();
+        for rule in &program.rules {
+            if rule.body.is_empty() {
+                continue;
+            }
+            let head = rule.head.predicate.as_str();
+            derived_heads.insert(head);
+            let entry = ordinary_deps.entry(head).or_default();
+            for lit in &rule.body {
+                match lit {
+                    BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
+                        entry.insert(atom.predicate.as_str());
+                    }
+                    BodyLiteral::Epistemic(_) => {
+                        epistemic_heads.insert(head);
+                    }
+                    BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {}
+                }
+            }
+        }
+        Self {
+            ordinary_deps,
+            epistemic_heads,
+            derived_heads,
+        }
+    }
+
+    /// Whether `predicate`'s extension is fixed independent of the recursion.
+    fn is_invariant(&self, predicate: &str) -> bool {
+        let mut seen = BTreeSet::new();
+        self.is_invariant_inner(predicate, &mut seen)
+    }
+
+    fn is_invariant_inner<'b>(&'b self, predicate: &'b str, seen: &mut BTreeSet<&'b str>) -> bool {
+        if !seen.insert(predicate) {
+            // A cycle reaching `predicate` means recursion: not invariant.
+            return false;
+        }
+        if !self.derived_heads.contains(predicate) {
+            // Pure EDB relation: invariant by construction.
+            return true;
+        }
+        if self.epistemic_heads.contains(predicate) {
+            // Definition itself uses a modal literal: not a fixed lower stratum.
+            return false;
+        }
+        match self.ordinary_deps.get(predicate) {
+            None => true,
+            Some(deps) => deps.iter().all(|dep| self.is_invariant_inner(dep, seen)),
+        }
+    }
 }
 
 fn reject_faeel_self_supported_possible(eir: &EirProgram) -> Result<()> {
@@ -1092,6 +1260,34 @@ pub fn compile_epistemic_gpu_execution_with_stats_snapshot(
     })
 }
 
+/// Validate a Case-A recursive epistemic program and return its ordinary reduction.
+///
+/// This is the Case-A counterpart to [`compile_epistemic_gpu_execution`]: instead of
+/// building a single-pass GPU world-view plan, it proves the program is admissible
+/// Case A and resolves it to an ordinary recursive program for the existing fixpoint
+/// engine. Validation still flows through the EIR boundary ([`build_eir`]) and the
+/// FAEEL self-support guard ([`reject_faeel_self_supported_possible`]) on the ORIGINAL
+/// program, so modal self-support (Case B) remains governed by FAEEL/G91 foundedness
+/// and is NOT silently admitted here. Only EXECUTION routes through the ordinary
+/// engine.
+///
+/// Returns `Ok(Some(reduced))` when the program is admissible Case A, `Ok(None)` when
+/// the program has no ordinary recursion (the caller should use the single-pass
+/// epistemic path), and a typed error for any non-Case-A recursive shape.
+pub fn try_reduce_case_a_recursive_epistemic_program(program: &Program) -> Result<Option<Program>> {
+    match classify_recursive_epistemic_program(program)? {
+        RecursiveEpistemicClass::NonRecursive => Ok(None),
+        RecursiveEpistemicClass::CaseA => {
+            // Preserve the EIR boundary and FAEEL/G91 foundedness contract: a Case-A
+            // recursion that ALSO contains unfounded modal self-support must still
+            // fail closed through the same guards the single-pass path uses.
+            let eir = build_eir(program)?;
+            reject_faeel_self_supported_possible(&eir)?;
+            Ok(Some(reduce_case_a_epistemic_program_to_ordinary(program)))
+        }
+    }
+}
+
 fn require_single_epistemic_output_relation(gpu_plan: &EpistemicGpuPlan) -> Result<()> {
     let output_relations: BTreeSet<&str> = gpu_plan
         .reductions
@@ -1257,6 +1453,47 @@ pub fn reduce_epistemic_program_to_ordinary(program: &Program) -> Program {
             .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
     });
 
+    reduced
+}
+
+/// Reduce a Case-A recursive epistemic program to an equivalent ordinary recursive
+/// program for the existing fixpoint engine.
+///
+/// Unlike [`reduce_epistemic_program_to_ordinary`] (which strips modal literals and
+/// gates the single-pass result post hoc), this RESOLVES each positive `know`/
+/// `possible` literal to its gated relation by rewriting it into an ordinary positive
+/// body atom over the same predicate. Because the modal relation is invariant (EDB or
+/// a lower non-recursive, non-epistemic stratum — proved by
+/// [`classify_recursive_epistemic_program`]), its extension is the accepted world
+/// view's extension, so the rewrite preserves modal semantics while letting the
+/// recursive/semi-naive engine join the recursion against the gated relation at every
+/// iteration. The modal atom's variables become ordinary join variables (no hidden
+/// head columns are appended), which fixes both the missing in-loop gate and the
+/// arity mismatch that make the post-hoc reduction single-pass-only.
+///
+/// Callers MUST first prove the program is Case A via
+/// [`classify_recursive_epistemic_program`]; this function assumes that contract.
+pub fn reduce_case_a_epistemic_program_to_ordinary(program: &Program) -> Program {
+    let mut reduced = program.clone();
+    for rule in &mut reduced.rules {
+        for lit in &mut rule.body {
+            if let BodyLiteral::Epistemic(modal) = lit {
+                // Case A admits only positive modal literals over invariant relations;
+                // resolve each to a positive ordinary atom over its (invariant) gated
+                // relation.
+                *lit = BodyLiteral::Positive(modal.atom.clone());
+            }
+        }
+    }
+    // World-view integrity constraints have no place in a Case-A ordinary program: the
+    // recursion already joins against the gated relations. Drop any constraint that
+    // still references a modal literal (purely relational constraints are retained).
+    reduced.constraints.retain(|constraint| {
+        !constraint
+            .body
+            .iter()
+            .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
+    });
     reduced
 }
 

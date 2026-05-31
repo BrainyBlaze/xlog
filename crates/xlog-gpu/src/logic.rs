@@ -8,7 +8,8 @@ use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 use xlog_ir::{EpistemicExecutablePlan, ExecutionPlan};
 use xlog_logic::epistemic::{
     compile_epistemic_gpu_execution, compile_epistemic_gpu_split_execution,
-    reduce_epistemic_program_to_ordinary, EpistemicSplitExecutablePlan,
+    reduce_epistemic_program_to_ordinary, try_reduce_case_a_recursive_epistemic_program,
+    EpistemicSplitExecutablePlan,
 };
 use xlog_logic::{BodyLiteral, Compiler, Program, Query, Term};
 use xlog_runtime::executor::JoinIndexCacheStats;
@@ -219,6 +220,24 @@ impl LogicProgram {
     }
 
     fn compile_epistemic_program(normalized: Program) -> Result<Self> {
+        // Case A: ordinary recursion gated by modal literals over invariant relations.
+        // Resolve each modal literal to its (invariant) gated relation and route the
+        // resulting ordinary recursive program through the EXISTING recursive/
+        // semi-naive engine via an Ordinary plan. Validation still flows through the
+        // EIR boundary + FAEEL foundedness guard inside
+        // `try_reduce_case_a_recursive_epistemic_program`, so modal self-support
+        // (Case B) and every non-Case-A recursive shape still fail closed.
+        if let Some(case_a_reduced) = try_reduce_case_a_recursive_epistemic_program(&normalized)? {
+            let mut compiler = Compiler::new();
+            let plan = compiler.compile_program(&case_a_reduced)?;
+            return Ok(Self {
+                program: case_a_reduced,
+                plan: LogicExecutionPlan::Ordinary(plan),
+                schemas: compiler.schemas().clone(),
+                rel_ids: compiler.rel_ids().clone(),
+            });
+        }
+
         let reduced = reduce_epistemic_program_to_ordinary(&normalized);
         let mut schema_compiler = Compiler::new();
         schema_compiler.compile_program(&reduced)?;
