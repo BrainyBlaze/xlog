@@ -15,7 +15,6 @@ mod buffers;
 mod evidence;
 mod resident;
 mod results;
-mod sampling;
 
 pub use evidence::{EvidenceForcing, ForceabilityReason};
 pub use resident::{
@@ -28,17 +27,12 @@ use std::sync::Arc;
 
 #[cfg(feature = "host-io")]
 use cudarc::driver::DeviceSlice;
-use cudarc::driver::LaunchConfig;
-use xlog_core::{MemoryBudget, RelId, Result, Schema, XlogError};
+use xlog_core::{MemoryBudget, Result, XlogError};
 use xlog_cuda::memory::TrackedCudaSlice;
-use xlog_cuda::provider::{mc_eval_kernels, MC_EVAL_MODULE};
-use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager, LaunchAsync};
+use xlog_cuda::{CudaDevice, CudaKernelProvider, GpuMemoryManager};
 #[cfg(feature = "host-io")]
 use xlog_logic::ast::{BodyLiteral, Rule};
 use xlog_logic::ast::{Directives, Evidence, ProbMethod, ProbQuery, Program};
-use xlog_logic::compile::Compiler;
-use xlog_logic::stratify::analyze_stratification;
-use xlog_runtime::Executor;
 
 use crate::exact::GpuConfig;
 #[cfg(feature = "host-io")]
@@ -282,34 +276,6 @@ pub(super) struct AdSpec {
     pub(super) has_none: bool,
 }
 
-pub(super) struct GpuMcPlan {
-    pub(super) program: Program,
-    pub(super) plan: xlog_ir::ExecutionPlan,
-    pub(super) schemas: HashMap<String, Schema>,
-    pub(super) rel_ids: HashMap<String, RelId>,
-    pub(super) query_rel_names: Vec<String>,
-    pub(super) evidence_rel_specs: Vec<(String, bool)>,
-    pub(super) nonmonotone_sccs: HashSet<usize>,
-}
-
-pub(super) struct ProbTableDevice {
-    pub(super) predicate: String,
-    pub(super) buffer: CudaBuffer,
-    pub(super) var_idx: TrackedCudaSlice<u32>,
-}
-
-pub(super) struct AdDecisionDevice {
-    pub(super) decision_vars: TrackedCudaSlice<u32>,
-}
-
-pub(super) struct AdTableDevice {
-    pub(super) predicate: String,
-    pub(super) buffer: CudaBuffer,
-    pub(super) decision_offsets: TrackedCudaSlice<u32>,
-    pub(super) decision_lengths: TrackedCudaSlice<u32>,
-    pub(super) choice_positions: TrackedCudaSlice<u32>,
-}
-
 #[cfg(feature = "host-io")]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct Relation {
@@ -352,8 +318,6 @@ pub(super) struct EvalStats {
     pub(super) nonmonotone_sccs: usize,
     pub(super) nonmonotone_cycles: usize,
     pub(super) nonmonotone_iteration_limit_hits: usize,
-    /// Tracked host/device transfer delta measured across the hot loop.
-    pub(super) hot_loop_transfers: McHotLoopTransfers,
 }
 
 #[derive(Clone)]
@@ -696,285 +660,6 @@ impl McProgram {
                 dtoh_bytes: 0,
             },
         })
-    }
-
-    fn build_gpu_plan(&self) -> Result<GpuMcPlan> {
-        let mut plan_program = self.program.clone();
-        plan_program.queries.clear();
-
-        for ProbQuery { atom } in &plan_program.prob_queries {
-            plan_program
-                .queries
-                .push(xlog_logic::ast::Query { atom: atom.clone() });
-        }
-
-        let evidence_offset = plan_program.queries.len();
-        for Evidence { atom, .. } in &plan_program.evidence {
-            plan_program
-                .queries
-                .push(xlog_logic::ast::Query { atom: atom.clone() });
-        }
-
-        buffers::ensure_predicate_decls(&mut plan_program)?;
-
-        let max_recursion = plan_program.directives.max_recursion_depth.unwrap_or(100);
-        let expanded = xlog_logic::expand_program_functions(&plan_program, max_recursion)
-            .map_err(|e| XlogError::Compilation(e.to_string()))?;
-
-        let mut compiler = Compiler::new();
-        let plan = compiler.compile_program(&expanded)?;
-        let mut schemas = compiler.schemas().clone();
-        buffers::augment_schemas_for_program(&expanded, &mut schemas)?;
-        let rel_ids = compiler.rel_ids().clone();
-
-        let strat = analyze_stratification(&expanded);
-        let nonmonotone_sccs = strat.non_monotone_sccs;
-
-        let mut query_rel_names: Vec<String> = Vec::new();
-        for i in 0..expanded.queries.len() {
-            query_rel_names.push(format!("__xlog_query_{}", i));
-        }
-
-        let mut evidence_rel_specs: Vec<(String, bool)> = Vec::new();
-        for (idx, Evidence { value, .. }) in expanded.evidence.iter().enumerate() {
-            let rel_idx = evidence_offset + idx;
-            evidence_rel_specs.push((format!("__xlog_query_{}", rel_idx), *value));
-        }
-
-        Ok(GpuMcPlan {
-            program: expanded,
-            plan,
-            schemas,
-            rel_ids,
-            query_rel_names,
-            evidence_rel_specs,
-            nonmonotone_sccs,
-        })
-    }
-
-    fn evaluate_gpu_counts_with<F>(
-        &self,
-        cfg: &McEvalConfig,
-        forcing: &EvidenceForcing,
-        method: McSamplingMethod,
-        provider: Arc<CudaKernelProvider>,
-        mut on_sample: F,
-    ) -> Result<EvalStats>
-    where
-        F: FnMut(&Executor, &GpuMcPlan, usize) -> Result<()>,
-    {
-        if cfg.samples == 0 {
-            return Err(XlogError::Execution(
-                "MC inference requires samples > 0".to_string(),
-            ));
-        }
-        if !(0.0 < cfg.confidence && cfg.confidence < 1.0) || cfg.confidence.is_nan() {
-            return Err(XlogError::Execution(format!(
-                "MC inference requires 0 < confidence < 1, got {}",
-                cfg.confidence
-            )));
-        }
-        if cfg.max_nonmonotone_iterations == 0 {
-            return Err(XlogError::Execution(
-                "MC inference requires max_nonmonotone_iterations > 0".to_string(),
-            ));
-        }
-        if cfg.samples > (u32::MAX as usize) {
-            return Err(XlogError::Execution(format!(
-                "MC inference requires samples <= u32::MAX (got {})",
-                cfg.samples
-            )));
-        }
-
-        let gpu_plan = self.build_gpu_plan()?;
-        let prob_query_count = self.queries.len();
-
-        let mut executor = Executor::new(provider.clone());
-        executor.set_profiling(false);
-
-        for (name, rel_id) in &gpu_plan.rel_ids {
-            executor.register_relation(*rel_id, name);
-        }
-
-        for (name, schema) in &gpu_plan.schemas {
-            executor.put_relation(name, provider.create_empty_buffer(schema.clone())?);
-        }
-
-        buffers::load_deterministic_facts(
-            &gpu_plan.program,
-            &gpu_plan.schemas,
-            &provider,
-            &mut executor,
-        )?;
-
-        let (prob_tables, ad_tables, ad_decisions) =
-            buffers::build_prob_tables_device(self, &provider, &gpu_plan.schemas)?;
-
-        // Build the targeted reset plan: preserve pure deterministic base
-        // relations, clear everything else, and snapshot base facts for
-        // predicates that are both deterministic and dynamic.
-        let reset_plan = buffers::build_sample_reset_plan(&gpu_plan, self, &provider, &executor)?;
-
-        let num_vars = self.bernoulli_probs.len();
-
-        // Allocate force arrays: upload actual forcing data in clamped mode, zero-fill otherwise
-        let mut d_force_mask = provider.memory().alloc::<u8>(num_vars.max(1))?;
-        let mut d_forced_value = provider.memory().alloc::<u8>(num_vars.max(1))?;
-        if method == McSamplingMethod::EvidenceClamping && num_vars > 0 {
-            provider
-                .htod_sync_copy_into_tracked(&forcing.force_mask, &mut d_force_mask)
-                .map_err(|e| XlogError::Kernel(format!("Failed to upload force_mask: {}", e)))?;
-            provider
-                .htod_sync_copy_into_tracked(&forcing.forced_value, &mut d_forced_value)
-                .map_err(|e| XlogError::Kernel(format!("Failed to upload forced_value: {}", e)))?;
-        } else {
-            provider
-                .device()
-                .inner()
-                .memset_zeros(&mut d_force_mask)
-                .map_err(|e| XlogError::Kernel(format!("Failed to zero force_mask: {}", e)))?;
-            provider
-                .device()
-                .inner()
-                .memset_zeros(&mut d_forced_value)
-                .map_err(|e| XlogError::Kernel(format!("Failed to zero forced_value: {}", e)))?;
-        }
-
-        let mc_profile = std::env::var("XLOG_MC_PROFILE")
-            .ok()
-            .map(|v| v == "1")
-            .unwrap_or(false);
-        let mut timing = McTimingBreakdown::default();
-
-        let t0 = std::time::Instant::now();
-        let samples_device = if self.bernoulli_probs.is_empty() || cfg.samples == 0 {
-            provider.memory().alloc::<u8>(0)?
-        } else {
-            provider.sample_bernoulli_matrix_device(
-                &self.bernoulli_probs,
-                cfg.samples,
-                cfg.seed,
-                &d_force_mask.slice(..),
-                &d_forced_value.slice(..),
-            )?
-        };
-        if mc_profile {
-            timing.sampler_us = t0.elapsed().as_micros() as u64;
-        }
-
-        let mut stats = EvalStats::default();
-
-        // Pre-compute reference slices for the reset plan (avoids per-sample allocation).
-        let preserve_refs: Vec<&str> = reset_plan.preserve.iter().map(|s| s.as_str()).collect();
-        let clear_refs: Vec<(&str, Schema)> = reset_plan
-            .clear
-            .iter()
-            .map(|(s, sc)| (s.as_str(), sc.clone()))
-            .collect();
-
-        // K1 boundary: snapshot tracked host<->device transfers immediately before
-        // the sample/evaluate/count hot loop. Everything above (sampler upload, force
-        // arrays, deterministic facts, prob/AD tables, reset plan) is static setup and
-        // is allowed to transfer. From here until the loop ends, a GPU-native run must
-        // perform *zero* tracked HtoD/DtoH transfers.
-        let transfers_pre = provider.host_transfer_stats();
-
-        for sample_idx in 0..cfg.samples {
-            let t_reset = std::time::Instant::now();
-            executor.reset_for_mc_relations(&preserve_refs, &clear_refs)?;
-            // Re-load deterministic base facts for predicates that are both
-            // deterministic and dynamic (e.g., `a(1). 0.5::a(2).`).
-            for (pred, base_buf) in &reset_plan.reload_base {
-                let cloned = if base_buf.is_empty() {
-                    provider.create_empty_buffer(base_buf.schema().clone())?
-                } else {
-                    buffers::clone_buffer_device(&provider, base_buf)?
-                };
-                executor.put_relation(pred, cloned);
-            }
-            if mc_profile {
-                timing.sample_reset_us += t_reset.elapsed().as_micros() as u64;
-            }
-
-            let start = sample_idx * num_vars;
-            let end = start + num_vars;
-            let sample_bits = samples_device.slice(start..end);
-
-            let t_build = std::time::Instant::now();
-            let sample_buffers = buffers::build_sample_buffers(
-                &provider,
-                &sample_bits,
-                &prob_tables,
-                &ad_tables,
-                &ad_decisions,
-            )?;
-
-            for (pred, buf) in sample_buffers {
-                if buf.is_empty() {
-                    continue;
-                }
-                let merged = match executor.store().get(&pred) {
-                    Some(existing) if !existing.is_empty() => provider.union_gpu(existing, &buf)?,
-                    _ => buffers::dedup_relation(&provider, &buf)?,
-                };
-                executor.put_relation(&pred, merged);
-            }
-            if mc_profile {
-                timing.sample_build_us += t_build.elapsed().as_micros() as u64;
-            }
-
-            let t_eval = std::time::Instant::now();
-            let sample_stats = sampling::evaluate_program_gpu(
-                &provider,
-                &mut executor,
-                &gpu_plan.plan,
-                &gpu_plan.nonmonotone_sccs,
-                cfg.max_nonmonotone_iterations,
-            )?;
-            if mc_profile {
-                timing.eval_us += t_eval.elapsed().as_micros() as u64;
-            }
-            stats.nonmonotone_sccs += sample_stats.nonmonotone_sccs;
-            stats.nonmonotone_cycles += sample_stats.nonmonotone_cycles;
-            stats.nonmonotone_iteration_limit_hits += sample_stats.nonmonotone_iteration_limit_hits;
-
-            let t_count = std::time::Instant::now();
-            on_sample(&executor, &gpu_plan, prob_query_count)?;
-            if mc_profile {
-                timing.count_us += t_count.elapsed().as_micros() as u64;
-            }
-        }
-
-        // K1 boundary: sync so all hot-loop kernels and any (disallowed) transfers
-        // have been issued, then read the post-loop transfer snapshot. The tracked
-        // counters are incremented synchronously at each Rust transfer call site, so
-        // the delta is exact regardless of kernel-launch asynchrony.
-        provider.device().synchronize()?;
-        let transfers_post = provider.host_transfer_stats();
-        stats.hot_loop_transfers = McHotLoopTransfers {
-            htod_calls: transfers_post
-                .htod_calls
-                .saturating_sub(transfers_pre.htod_calls),
-            dtoh_calls: transfers_post
-                .dtoh_calls
-                .saturating_sub(transfers_pre.dtoh_calls),
-            htod_bytes: transfers_post
-                .htod_bytes
-                .saturating_sub(transfers_pre.htod_bytes),
-            dtoh_bytes: transfers_post
-                .dtoh_bytes
-                .saturating_sub(transfers_pre.dtoh_bytes),
-        };
-
-        if mc_profile {
-            eprintln!(
-                "[MC Profile] samples={} sampler={}us reset={}us build={}us eval={}us count={}us total={}us",
-                cfg.samples, timing.sampler_us, timing.sample_reset_us, timing.sample_build_us,
-                timing.eval_us, timing.count_us, timing.total_us()
-            );
-        }
-
-        Ok(stats)
     }
 
     fn compile_program(program: &Program) -> Result<Self> {
