@@ -102,6 +102,8 @@ query(coin()).
         engine_launches: 1,
         host_loop_iterations: 0,
         per_sample_host_launches: 0,
+        host_fixpoint_iterations: 0,
+        per_operator_host_allocations: 0,
     };
     assert_eq!(r128.no_host, expected, "N=128 in-region stats");
     assert_eq!(r1024.no_host, expected, "N=1024 in-region stats");

@@ -191,19 +191,30 @@ pub struct McNoHostStats {
     /// Number of per-sample host launches inside the measured region
     /// (structurally zero: one global launch covers all worlds).
     pub per_sample_host_launches: u64,
+    /// Number of host-side fixpoint-loop iterations inside the measured region
+    /// (structurally zero: recursion converges device-side). Required by the
+    /// WCOJ world-batched acceptance contract.
+    pub host_fixpoint_iterations: u64,
+    /// Number of device allocations issued inside the measured region (must be
+    /// zero: every arena is pre-allocated before the region). Backed by the
+    /// memory manager's `alloc_count` snapshot.
+    pub per_operator_host_allocations: u64,
 }
 
 impl McNoHostStats {
     /// True iff the measured region had **no host interaction**: no tracked
     /// transfers, no untracked metadata reads, no host sample loop, no
-    /// per-sample host launches. (A single global engine launch is permitted
-    /// and is *not* per-sample; see [`Self::engine_launches`].)
+    /// per-sample host launches, no host fixpoint loop, no in-region device
+    /// allocations. (A single global engine launch is permitted and is *not*
+    /// per-sample; see [`Self::engine_launches`].)
     pub fn is_no_host(&self) -> bool {
         self.tracked_htod_calls == 0
             && self.tracked_dtoh_calls == 0
             && self.untracked_metadata_reads == 0
             && self.host_loop_iterations == 0
             && self.per_sample_host_launches == 0
+            && self.host_fixpoint_iterations == 0
+            && self.per_operator_host_allocations == 0
     }
 }
 
@@ -842,6 +853,7 @@ fn run_resident(
     // ---------------- Measured region (ZERO host interaction) ----------------
     let pre = provider.host_transfer_stats();
     let pre_untracked = provider.untracked_metadata_dtoh_count();
+    let pre_allocs = provider.memory().alloc_count();
     let mut engine_launches = 0u64;
 
     let block_dim = 128u32;
@@ -874,6 +886,7 @@ fn run_resident(
 
     let post = provider.host_transfer_stats();
     let post_untracked = provider.untracked_metadata_dtoh_count();
+    let post_allocs = provider.memory().alloc_count();
     // ---------------- End measured region ----------------
 
     let no_host = McNoHostStats {
@@ -882,6 +895,10 @@ fn run_resident(
         untracked_metadata_reads: post_untracked.saturating_sub(pre_untracked),
         engine_launches,
         host_loop_iterations: 0,
+        // The dense engine has no host fixpoint loop (convergence is device-side
+        // inside the megakernel) and allocates every arena before the region.
+        host_fixpoint_iterations: 0,
+        per_operator_host_allocations: post_allocs.saturating_sub(pre_allocs),
         per_sample_host_launches: 0,
     };
 
