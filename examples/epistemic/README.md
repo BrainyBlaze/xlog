@@ -39,6 +39,9 @@ XLOG_USE_DEVICE_RUNTIME=1 cargo test -p xlog-cli --test run_cli_tests test_xlog_
 | FAEEL foundedness | `11-faeel-foundedness.xlog` | v0.9.1 EGB-07 founded self-support → `founded={()}`|
 | Bound-variable splitting | `12-bound-variable-splitting.xlog` | v0.9.1 EGB-05/EGB-06 split routing with bound modal membership → `both_known={1}`, `safe_alt={2}` |
 | Nested modal rejection | `13-nested-modal-rejected.xlog` | v0.9.1 EGB-03 typed fail-closed diagnostic for `know possible p()` |
+| Mixed-literal membership | `14-mixed-literal-membership.xlog` | v0.9.2 Bundle 1 EGB-02B global modal gate + per-row bound membership compose conjunctively → `reachable={1,3}` |
+| Recursive epistemic closure | `15-recursive-epistemic-closure.xlog` | v0.9.2 Bundle 2 Case-A recursive fixpoint: `reach(X,Z):-reach(X,Y),know edge(Y,Z)` → `{(1,2),(2,3)}` plus derived `(1,3)` |
+| Recursive epistemic chain | `15-recursive-epistemic-chain.xlog` | v0.9.2 Bundle 2 Case-A multi-hop: 4-chain → full closure incl. 3-hop `(1,4)` (proves not single-pass) |
 | Cross-component coupling (accepted) | `16-cross-component-coupling.xlog` | v0.9.2 Bundle 3 safe coupling: ordinary `report` consumes epistemic-derived `trusted`, coalesced single-output → `trusted={1,3}` |
 | Cross-component coupling (rejected) | `17-cross-component-coupling-rejected.xlog` | v0.9.2 Bundle 3 typed fail-closed diagnostic: a modal literal over an epistemic-derived head couples two epistemic outputs (`cross-component epistemic coupling`, names `trusted`/`flagged` + `DerivedPredicate`) |
 

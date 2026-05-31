@@ -39,6 +39,13 @@ is the public route. Shared source facts are now treated as extensional componen
 inputs, so `examples/epistemic/12-bound-variable-splitting.xlog` routes through
 split GPU execution and emits `both_known={1}` and `safe_alt={2}`.
 
+> **v0.9.2 UPDATE:** the Category-B follow-ups B2 (mixed per-row + global modal) and
+> B4 (recursive epistemic fixpoint, Case-A) below are now CLOSED in v0.9.2, and B3
+> (cross-component coupling) gained a precise fail-closed diagnostic + single-head
+> acceptance. The "Ordinary recursion inside epistemic programs" Category-A bullet
+> below is superseded for the Case-A invariant-modal fragment. See
+> `docs/plans/2026-05-31-v092-epistemic-semantic-completion-status.md`.
+
 ## Category A — In-spec typed fail-closed (REQUIRED by the goal, NOT debt)
 
 These are mandated by the goal's own "Expected Rejected Behavior" sections and by

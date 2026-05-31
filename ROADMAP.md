@@ -1977,20 +1977,49 @@ fallback locks.
       CPU-only world-view scans fail closed (EGB-04 Expected Rejected).
 - [x] Unsafe same-name multi-arity modal coupling fails closed; safe (bound)
       cross-arity coupling is accepted (EGB-06 Expected Rejected).
-- [x] Ordinary recursive predicates inside an epistemic program fail closed with
-      typed `recursive epistemic program` diagnostics; modal self-support remains
-      governed by FAEEL/G91 foundedness rather than this ordinary-recursion guard.
+- [x] Recursion through the modal predicate (Case B), negated modals in recursive
+      programs, and modals over non-invariant relations fail closed with typed
+      `recursive epistemic program` diagnostics; modal self-support remains governed
+      by FAEEL/G91 foundedness. (Case-A invariant-modal recursion is now ACCEPTED —
+      see v0.9.2.)
 
-### Genuine follow-up (NOT goal-mandated; tracked, not claimed done)
+### Genuine follow-up (NOT goal-mandated; tracked)
 
 - [x] EGB-04.K2 constraint-specific rejection reasons — CLOSED (commit `e39bcd33`).
-- [ ] Mixed per-row (bound-variable) + global (ground/anonymous/nullary) modal
-      literals in a single rule: introduced as sound fail-closed by EGB-02 to
-      replace a silently-wrong path; implement the mixed path or keep fail-closed
-      by explicit decision.
-- [ ] Cross-component epistemic coupling beyond single-rule joint solving.
-- [ ] Accepted recursive epistemic fixpoint execution. Current behavior is
-      intentionally typed fail-closed, not silently single-pass.
+- [x] Mixed per-row + global modal literals in a single rule — CLOSED in v0.9.2
+      (EGB-02B): the two gate classes compose conjunctively on the GPU path.
+- [x] Case-A recursive epistemic fixpoint execution — CLOSED in v0.9.2 (invariant
+      modal atoms reduce to gated relations, reduced ordinary recursion runs through
+      the GPU recursive engine).
+- [ ] Multi-epistemic-output-head cross-component joint solving — still typed
+      fail-closed (v0.9.2 added a precise merge-reason diagnostic; joint
+      multi-output materialization needs a multi-output GPU kernel).
+
+## v0.9.2 - Epistemic Executor Semantic Completion
+
+Closes the three honest Category-B semantic gaps from v0.9.1, all validated on the
+production `xlog run` path. Status:
+`docs/plans/2026-05-31-v092-epistemic-semantic-completion-status.md`.
+
+- [x] EGB-02B mixed-literal modal membership: global modal gate + per-row bound
+      tuple-key gate compose conjunctively on the GPU device path. Evidence: 8
+      value-level pilots (exact tuples) + mutation proof + `examples/epistemic/14-mixed-literal-membership.xlog`.
+- [x] Case-A recursive epistemic fixpoint: recursive ordinary predicates whose modal
+      atoms range over invariant relations evaluate to fixpoint via the existing GPU
+      recursive engine. Evidence: `examples/epistemic/15-recursive-epistemic-closure.xlog`
+      ({(1,2),(2,3),(1,3)}) and `15-recursive-epistemic-chain.xlog` (3-hop (1,4)).
+- [x] Cross-component epistemic coupling: a coalesced component with >1 epistemic
+      output head fails closed with a precise `cross-component epistemic coupling`
+      diagnostic naming the coupled heads + merge reason; single-epistemic-head
+      coupling is accepted and split-vs-unsplit equivalent. Evidence:
+      `examples/epistemic/16-cross-component-coupling.xlog` + `17-…-rejected.xlog`.
+
+### Scoped out of v0.9.2 (typed fail-closed)
+
+- [ ] Multi-epistemic-output-head cross-component joint solving (needs a multi-output
+      GPU materialization kernel).
+- [ ] Case-B recursion (recursion through the modal predicate) — FAEEL/G91 foundedness
+      territory; unfounded modal cycles fail closed.
 
 ## v0.10.0 - Multi-GPU and Out-of-Core Execution
 

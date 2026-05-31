@@ -4,6 +4,49 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+v0.9.2 Epistemic Executor Semantic Completion. Closes the three honest
+Category-B semantic gaps tracked after v0.9.1, all validated on the production
+`xlog run` path.
+
+### Added (v0.9.2)
+
+- EGB-02B: a rule combining a global modal gate (ground/anonymous/nullary modal)
+  with a per-row bound-variable modal gate now composes both gate classes
+  conjunctively on the GPU device path (the row-map kernel's per-row path applies
+  the global-gate check); the prior fail-closed guard is removed. Example
+  `14-mixed-literal-membership.xlog`.
+- Case-A recursive epistemic fixpoint: recursive ordinary predicates inside
+  epistemic programs now evaluate to fixpoint when every modal atom ranges over an
+  invariant relation (EDB / lower non-recursive non-epistemic stratum) — the modal
+  literal reduces to its gated relation and the reduced ordinary recursive program
+  runs through the existing GPU recursive fixpoint engine. Examples
+  `15-recursive-epistemic-closure.xlog` / `15-recursive-epistemic-chain.xlog`
+  (transitive closure incl. derived multi-hop tuples).
+- Cross-component epistemic coupling: a coalesced component carrying more than one
+  epistemic output head now fails closed with a precise typed
+  `cross-component epistemic coupling` diagnostic naming the coupled heads and the
+  merge reason (replacing a misleading "independent outputs, use split" message).
+  Single-epistemic-head coupling is accepted and split-vs-unsplit equivalent.
+  Examples `16-cross-component-coupling.xlog` / `17-…-rejected.xlog`.
+
+### Changed (v0.9.2)
+
+- Recursive epistemic programs are no longer uniformly fail-closed: the Case-A
+  invariant-modal fragment is now supported (see above). Recursion through the
+  modal predicate (Case B), negated modals in recursive programs, and modals over
+  non-invariant relations remain typed fail-closed.
+
+### Known gaps (v0.9.2, tracked — NOT claimed complete)
+
+- Multi-epistemic-output-head cross-component joint solving (needs a multi-output
+  GPU materialization kernel) — currently typed fail-closed, not joint-solved.
+- Case-B recursion (recursion through the modal predicate) remains FAEEL/G91
+  foundedness territory.
+
+Full v0.9.2 status: `docs/plans/2026-05-31-v092-epistemic-semantic-completion-status.md`.
+
+---
+
 v0.9.1 Epistemic Executor Completion. Turns the v0.9.0 bounded epistemic
 executor into a load-bearing execution surface while preserving the existing
 fail-closed boundaries. Candidate worlds are derived from EIR, modal membership
@@ -79,13 +122,13 @@ recorded in `docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`
 
 ### Known gaps (v0.9.1, tracked — NOT claimed complete)
 
-- **EGB-02 mixed per-row + global modal literal in one rule:** a sound
-  fail-closed boundary introduced to replace a silently-wrong path; not a
-  goal-mandated accepted case. Implement the mixed path or keep fail-closed by
-  explicit decision.
-- **Recursive epistemic fixpoints:** ordinary recursion inside epistemic
-  programs is now typed fail-closed; accepted recursive epistemic fixpoint
-  execution remains future work.
+- **EGB-02 mixed per-row + global modal literal in one rule:** _CLOSED in v0.9.2
+  (EGB-02B)_ — the two gate classes now compose conjunctively on the GPU path.
+- **Recursive epistemic fixpoints:** _Case-A CLOSED in v0.9.2_ — recursion where
+  every modal atom is over an invariant relation now evaluates to fixpoint via the
+  recursive engine. Case-B (recursion through the modal predicate), negated modals
+  in recursive programs, and modals over non-invariant relations remain typed
+  fail-closed.
 
 Goal-mandated typed fail-closed fragments (nested modal semantics, aggregate/
 compound/list/predref modal keys, variable-keyed/nested/CPU-scan epistemic
