@@ -1408,6 +1408,7 @@ fn gpu_tuple_membership_matches_key_terms_by_binding_position_for_permuted_colum
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "out".to_string(),
+            public_head_arity: 1,
             relational_body_atoms: 1,
             wcoj_status: EpistemicWcojReductionStatus::NotWcojCandidate,
         }],
@@ -1502,6 +1503,7 @@ fn gpu_final_tuple_row_filter_matches_key_terms_by_binding_position_for_permuted
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "out".to_string(),
+            public_head_arity: 1,
             relational_body_atoms: 1,
             wcoj_status: EpistemicWcojReductionStatus::NotWcojCandidate,
         }],
@@ -1602,6 +1604,7 @@ fn gpu_final_tuple_row_filter_matches_mixed_ground_and_bound_keys_for_permuted_c
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "out".to_string(),
+            public_head_arity: 1,
             relational_body_atoms: 1,
             wcoj_status: EpistemicWcojReductionStatus::NotWcojCandidate,
         }],
@@ -1704,6 +1707,7 @@ fn gpu_final_tuple_row_filter_matches_ternary_mixed_keys_for_permuted_columns() 
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "out".to_string(),
+            public_head_arity: 1,
             relational_body_atoms: 1,
             wcoj_status: EpistemicWcojReductionStatus::NotWcojCandidate,
         }],
@@ -1811,6 +1815,7 @@ fn gpu_final_tuple_row_filter_matches_quaternary_mixed_keys_for_permuted_columns
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "out".to_string(),
+            public_head_arity: 1,
             relational_body_atoms: 1,
             wcoj_status: EpistemicWcojReductionStatus::NotWcojCandidate,
         }],

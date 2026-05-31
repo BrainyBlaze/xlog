@@ -225,6 +225,37 @@ fn test_xlog_run_epistemic_examples() {
             "__xlog_query_0",
             "| 3  | 4  |",
         ),
+        // v0.9.2 SCOPE-LIMIT CLOSED: AUGMENTED multi-head coupling with PER-HEAD
+        // output projection at DIFFERING arity. Two epistemic heads share the base
+        // modal `edge/2` (SharedModalPredicate coalesce -> ONE joint component) but
+        // have DIFFERING public arity and BOTH need projection:
+        //   one_hop(X)    :- node(X),  know edge(X, Y).      -> {1, 2}  (arity 1)
+        //   pair(X, Y)    :- color(X), possible edge(X, Y).  -> {(2,20),(2,21),(3,30)}
+        // Each head materializes from its OWN reduced buffer with its OWN row-filter,
+        // projecting its OWN `public_head_arity` columns. one_hop drops the edge
+        // target (projection load-bearing); pair is filtered by `color` (gate
+        // load-bearing). Previously fail-closed with a cross-component coupling
+        // diagnostic; now joint-solved.
+        (
+            "27-augmented-multi-head-differing-arity.xlog",
+            "one_hop",
+            "| 1  |",
+        ),
+        (
+            "27-augmented-multi-head-differing-arity.xlog",
+            "one_hop",
+            "| 2  |",
+        ),
+        (
+            "27-augmented-multi-head-differing-arity.xlog",
+            "pair",
+            "| 2  | 20 |",
+        ),
+        (
+            "27-augmented-multi-head-differing-arity.xlog",
+            "pair",
+            "| 3  | 30 |",
+        ),
     ];
 
     for (example, expected_relation, expected_value) in examples {

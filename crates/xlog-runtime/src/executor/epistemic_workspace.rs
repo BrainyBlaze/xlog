@@ -5418,7 +5418,8 @@ impl Executor {
             })?;
         let output_row_capacity_u32 =
             checked_u32_dimension(output_row_capacity, "epistemic GPU final-tuple output rows")?;
-        let final_output_columns = final_output_columns_for_materialization(output, gpu_plan)?;
+        let final_output_columns =
+            final_output_columns_for_materialization(output, gpu_plan, head_reduction_filter)?;
         let mut tuple_bytes_capacity = 0usize;
         let mut source_columns: Vec<(&CudaColumn, u32, u32)> =
             Vec::with_capacity(final_output_columns.len());
@@ -6684,7 +6685,41 @@ fn epistemic_head_reduction_indices(
 fn final_output_columns_for_materialization(
     output: &CudaBuffer,
     gpu_plan: &EpistemicGpuPlan,
+    head_reduction_filter: Option<&BTreeSet<usize>>,
 ) -> Result<Vec<usize>> {
+    // PER-HEAD augmented projection: in a JOINT-SOLVED multi-head component each head
+    // is materialized from its OWN reduced relation buffer with its OWN reduction
+    // filter. The plan-global `final_output_columns` is derived from the first
+    // epistemic rule's head and would mis-project coupled heads of DIFFERING arity.
+    // When a head filter is supplied, project the first `public_head_arity` columns of
+    // THAT head (the augmented modal-literal columns are appended after the public head
+    // terms), so heads of differing arity/projection each materialize their own public
+    // tuple shape. This reads only the store/world-view boundary (the reduced relation
+    // buffer's arity + the plan's recorded public arity) — never a resolved body.
+    if let Some(filter) = head_reduction_filter {
+        if let Some(public_head_arity) = gpu_plan
+            .reductions
+            .iter()
+            .enumerate()
+            .filter(|(reduction_index, _)| filter.contains(reduction_index))
+            .map(|(_, reduction)| reduction.public_head_arity)
+            .max()
+        {
+            if public_head_arity > output.arity() {
+                return Err(XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic GPU final output projection".to_string(),
+                    context: format!(
+                        "per-head public arity {} exceeds reduced output arity {} for the \
+                         joint multi-head materialization",
+                        public_head_arity,
+                        output.arity()
+                    ),
+                });
+            }
+            return Ok((0..public_head_arity).collect());
+        }
+    }
+
     let Some(final_output_columns) = &gpu_plan.final_output_columns else {
         return Ok((0..output.arity()).collect());
     };
