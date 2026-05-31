@@ -1861,6 +1861,23 @@ validator.
 - [x] Add alternative knowledge compilers such as c2d and miniC2D. Evidence:
       `c2d_and_minic2d_compiler_adapters_are_explicitly_represented` in
       `cargo test -p xlog-prob --test epistemic_prob`.
+- [x] Make the Monte Carlo GPU-native hot loop zero **tracked** (data-plane)
+      host transfer: per-sample query/evidence count-pointer arrays are built
+      once (into engine-owned stable row-count buffers) and refreshed each sample
+      via device-to-device copies, removing the prior per-sample HtoD upload.
+      Bounded control-plane metadata reads (`num_rows` scalars via
+      `dtoh_scalar_untracked`) remain, exempted by the engine-wide
+      data-plane contract. The boundary is measured via
+      `McDeviceResult::hot_loop_transfers` and asserted across the
+      clamped and rejection strategies plus fact-marginal, evidence,
+      annotated-disjunction, and recursive pilots. Host-facing
+      `evaluate`/`evaluate_gpu` are documented as host-result materialization
+      (final-count download after the loop); `evaluate_cpu` is a CPU oracle only.
+      Zero-host MC acceptance is `tests/mc_gpu_native.rs` and
+      `tests/gpu_mc_device_counts.rs`, **not** a full `cargo test -p xlog-prob`
+      run (which includes CPU-oracle `tests/mc.rs` / `tests/gpu_mc_vs_cpu.rs`).
+      Evidence: `cargo test -p xlog-prob --release --features host-io --test
+      mc_gpu_native -- --test-threads=1`.
 
 ### Documentation and Tests
 

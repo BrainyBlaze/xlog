@@ -1,4 +1,11 @@
-//! Result aggregation, statistics, and CPU evaluation path.
+//! Result aggregation, statistics, and the **CPU oracle/debug** evaluation path.
+//!
+//! The statistics helpers (`binomial_estimate`, `normal_quantile`, …) are used by
+//! both the GPU-native and host paths. The host relation-store evaluation
+//! (`evaluate_program_inplace`, `evidence_satisfied`, `atom_holds`, …) backs only
+//! [`crate::mc::McProgram::evaluate_cpu`] — a seed-matched CPU oracle for
+//! validating GPU device counts. It is never part of the GPU-native hot loop and
+//! never zero-host/GPU-native release evidence.
 
 #[cfg(feature = "host-io")]
 use std::collections::{HashMap, HashSet};

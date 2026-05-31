@@ -1,6 +1,10 @@
 #![cfg(feature = "host-io")]
 //! Performance benchmarks for XLOG probabilistic inference.
 //!
+//! CLASSIFICATION: performance benchmarks only — NOT correctness or zero-host
+//! acceptance evidence. These exercise host-facing MC/exact entry points for
+//! timing and must not be cited in the GPU-native acceptance matrix.
+//!
 //! Run with: `cargo bench -p xlog-prob`
 //!
 //! These benchmarks measure the performance of:

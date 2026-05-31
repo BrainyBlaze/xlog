@@ -1,4 +1,12 @@
 #![cfg(feature = "host-io")]
+//! CLASSIFICATION: CPU **oracle-only** MC tests — NOT GPU-native acceptance.
+//!
+//! These tests call `McProgram::evaluate_cpu`, which downloads the sampled-bit
+//! matrix to the host and evaluates worlds on the CPU. They validate that the
+//! GPU device counts agree with a deterministic, seed-matched CPU oracle. They
+//! are excluded from the zero-host / GPU-native acceptance matrix; the
+//! authoritative GPU-native gates live in `tests/mc_gpu_native.rs` and
+//! `tests/gpu_mc_device_counts.rs`.
 
 use xlog_cuda::CudaDevice;
 use xlog_prob::mc::{McEvalConfig, McProgram};

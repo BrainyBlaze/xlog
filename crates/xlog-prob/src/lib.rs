@@ -42,8 +42,8 @@ pub use compilation::{
 };
 pub use exact::{ExactDdnnfProgram, ExactResult, GpuConfig};
 pub use mc::{
-    EvidenceForcing, ForceabilityReason, McCountStrategy, McDeviceResult, McEvalConfig, McProgram,
-    McResult, McSamplingMethod,
+    EvidenceForcing, ForceabilityReason, McCountStrategy, McDeviceResult, McEvalConfig,
+    McHotLoopTransfers, McProgram, McResult, McSamplingMethod,
 };
 pub use wfs::{
     evaluate_wfs_rules, evaluate_wfs_with_rules, TruthValue, WfsAtom, WfsConfig, WfsLiteral,

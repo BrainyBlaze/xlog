@@ -209,6 +209,45 @@ pub struct McResult {
     pub sampling_method: McSamplingMethod,
 }
 
+/// **Tracked** (data-plane) host<->device transfers observed *inside* the MC
+/// sample/evaluate/count hot loop (i.e. between the static setup uploads and the
+/// final-count downloads).
+///
+/// "Tracked" means transfers recorded by the provider's `HostTransferTracker`
+/// (`record_htod`/`record_dtoh`) — the data-plane bytes that define GPU-native
+/// execution. Consistent with the rest of the XLOG engine, **bounded
+/// control-plane metadata** reads (e.g. reading a relation's `num_rows` scalar
+/// via `dtoh_scalar_untracked` after a GPU operator sizes its output) are
+/// *intentionally not counted*: they are O(4 bytes) scalars, not data-plane
+/// downloads, and they are exempted by the same metadata-vs-data-plane contract
+/// the deterministic-D2H gate enforces elsewhere. Such metadata reads still
+/// occur per sample (e.g. inside dedup / relational operators).
+///
+/// For a GPU-native MC run every field here must be zero: static *data-plane*
+/// setup uploads happen before the loop and final-count downloads happen after
+/// it. This struct is the always-on regression guard for that boundary (K1) —
+/// the transfer-budget test asserts `is_zero()`, and any future code that
+/// smuggles a *tracked* HtoD/DtoH (a real data-plane transfer) into the loop
+/// will trip it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct McHotLoopTransfers {
+    /// Tracked host-to-device calls during the hot loop.
+    pub htod_calls: u64,
+    /// Tracked device-to-host calls during the hot loop.
+    pub dtoh_calls: u64,
+    /// Tracked host-to-device bytes during the hot loop.
+    pub htod_bytes: u64,
+    /// Tracked device-to-host bytes during the hot loop.
+    pub dtoh_bytes: u64,
+}
+
+impl McHotLoopTransfers {
+    /// True when no tracked host/device transfer occurred inside the hot loop.
+    pub fn is_zero(&self) -> bool {
+        self.htod_calls == 0 && self.dtoh_calls == 0
+    }
+}
+
 /// Device-resident Monte Carlo result counts.
 pub struct McDeviceResult {
     pub query_counts: TrackedCudaSlice<u32>,
@@ -220,6 +259,9 @@ pub struct McDeviceResult {
     pub nonmonotone_cycles: usize,
     pub nonmonotone_iteration_limit_hits: usize,
     pub sampling_method: McSamplingMethod,
+    /// Tracked host/device transfers observed inside the sample/evaluate/count
+    /// hot loop. Zero for a GPU-native run (K1).
+    pub hot_loop_transfers: McHotLoopTransfers,
 }
 
 #[derive(Debug, Clone)]
@@ -305,6 +347,8 @@ pub(super) struct EvalStats {
     pub(super) nonmonotone_sccs: usize,
     pub(super) nonmonotone_cycles: usize,
     pub(super) nonmonotone_iteration_limit_hits: usize,
+    /// Tracked host/device transfer delta measured across the hot loop.
+    pub(super) hot_loop_transfers: McHotLoopTransfers,
 }
 
 #[derive(Clone)]
@@ -338,6 +382,14 @@ impl McProgram {
         self.bernoulli_probs.len()
     }
 
+    /// Host-facing MC evaluation: runs the GPU-native device loop
+    /// ([`Self::evaluate_gpu_device_with_provider`]) and then **materializes the
+    /// result on the host** by downloading the final query/evidence counts
+    /// *after* the hot loop. The download is a host-result materialization, not a
+    /// hot-loop transfer — the GPU-native zero-transfer property (K1) belongs to
+    /// the device loop, not to this convenience wrapper. Use
+    /// [`Self::evaluate_gpu_device`] when you want device-resident counts with no
+    /// host download at all.
     #[cfg(feature = "host-io")]
     pub fn evaluate(&self, cfg: McEvalConfig) -> Result<McResult> {
         let provider = Arc::new(self.provider()?);
@@ -410,6 +462,16 @@ impl McProgram {
         })
     }
 
+    /// CPU **oracle / debug** MC path. Downloads the full sampled-bit matrix to
+    /// the host and evaluates every sampled world on a host relation store.
+    ///
+    /// This is intentionally *not* GPU-native: it performs a large DtoH of the
+    /// sample matrix and runs the deterministic core on the CPU. It exists solely
+    /// as a deterministic, seed-matched oracle for validating the GPU-native
+    /// device counts (the GPU sampler is shared, so for the same program/seed the
+    /// two paths see identical samples). It must **never** be used as zero-host /
+    /// GPU-native release evidence, and the acceptance matrix excludes it and the
+    /// tests that call it (`tests/gpu_mc_vs_cpu.rs`, `tests/mc.rs`).
     #[cfg(feature = "host-io")]
     pub fn evaluate_cpu(&self, cfg: McEvalConfig) -> Result<McResult> {
         if cfg.samples == 0 {
@@ -573,16 +635,31 @@ impl McProgram {
         })
     }
 
+    /// Alias for [`Self::evaluate`]: GPU device evaluation followed by host-result
+    /// materialization (final-count download after the hot loop). The `_gpu`
+    /// suffix denotes that the *compute* runs on the GPU — it does **not** imply a
+    /// zero-host result, since it returns a host [`McResult`]. For the
+    /// device-resident, no-host-download API use [`Self::evaluate_gpu_device`].
     #[cfg(feature = "host-io")]
     pub fn evaluate_gpu(&self, cfg: McEvalConfig) -> Result<McResult> {
         self.evaluate(cfg)
     }
 
+    /// GPU-native device-resident MC evaluation. Returns [`McDeviceResult`] with
+    /// counts left on the device (no host download) and the measured
+    /// [`McHotLoopTransfers`]. This is the API whose sample/evaluate/count hot
+    /// loop is zero-transfer (K1).
     pub fn evaluate_gpu_device(&self, cfg: McEvalConfig) -> Result<McDeviceResult> {
         let provider = Arc::new(self.provider()?);
         self.evaluate_gpu_device_with_provider(cfg, provider)
     }
 
+    /// GPU-native device-resident MC evaluation using a caller-supplied provider
+    /// (enables provider/buffer reuse across calls). Static setup uploads happen
+    /// before the sample/evaluate/count hot loop; the hot loop performs zero
+    /// tracked HtoD/DtoH transfers (verified by `McDeviceResult::hot_loop_transfers`,
+    /// gated by `tests/mc_gpu_native.rs`). Counts remain device-resident; the
+    /// caller decides whether/when to download them.
     pub fn evaluate_gpu_device_with_provider(
         &self,
         cfg: McEvalConfig,
@@ -634,13 +711,6 @@ impl McProgram {
 
         let mut d_query_flags = provider.memory().alloc::<u8>(prob_query_count)?;
         let mut d_evidence_ok = provider.memory().alloc::<u8>(1)?;
-        let mut d_query_ptrs = provider.memory().alloc::<u64>(prob_query_count)?;
-        let mut d_zero_count = provider.memory().alloc::<u32>(1)?;
-        provider
-            .device()
-            .inner()
-            .memset_zeros(&mut d_zero_count)
-            .map_err(|e| XlogError::Kernel(format!("Failed to zero MC zero-count: {}", e)))?;
 
         // In QueriesOnly mode, skip evidence-side buffer allocations.
         // We still need 1-element sentinel slices for the truth kernel args.
@@ -648,7 +718,6 @@ impl McProgram {
             McCountStrategy::QueriesOnly => 1,
             McCountStrategy::QueriesAndEvidence => evidence_count.max(1),
         };
-        let mut d_evidence_ptrs = provider.memory().alloc::<u64>(evidence_alloc_count)?;
         let mut d_evidence_expected = provider.memory().alloc::<u8>(evidence_alloc_count)?;
 
         if evidence_count > 0 && strategy == McCountStrategy::QueriesAndEvidence {
@@ -688,13 +757,51 @@ impl McProgram {
             shared_mem_bytes: 0,
         };
 
-        // Pre-allocate host-side pointer vectors outside the per-sample closure
-        // to avoid repeated heap allocation.  Query/evidence relations are dynamic
-        // (re-created each sample), so the device pointers themselves are NOT
-        // stable -- we still upload every sample -- but the host Vec storage is
-        // reused across iterations.
-        let mut query_ptrs_buf: Vec<u64> = vec![0u64; prob_query_count];
-        let mut evidence_ptrs_buf: Vec<u64> = vec![0u64; evidence_count];
+        // Zero-host hot loop (K1): stable row-count buffers.
+        //
+        // The truth kernel dereferences arrays of u64 pointers, one per query /
+        // evidence relation, each pointing at a u32 row count. The query/evidence
+        // relations are re-created every sample, so *their own* row-count device
+        // pointers are NOT stable -- the previous implementation re-uploaded the
+        // pointer arrays on every sample, which is a tracked HtoD transfer inside
+        // the hot loop.
+        //
+        // Instead we allocate our OWN stable row-count buffers here, build the
+        // pointer arrays ONCE (pointing into these stable buffers), and upload the
+        // pointer arrays a single time before the loop (static setup). Each sample
+        // the on_sample closure refreshes the stable buffers with device-to-device
+        // copies of the current relation row counts -- a DtoD copy crosses no host
+        // boundary and is not a tracked HtoD/DtoH transfer.
+        let mut d_query_rowcounts = provider.memory().alloc::<u32>(prob_query_count.max(1))?;
+        let mut d_evidence_rowcounts = provider.memory().alloc::<u32>(evidence_alloc_count)?;
+        let mut d_query_ptrs = provider.memory().alloc::<u64>(prob_query_count.max(1))?;
+        let mut d_evidence_ptrs = provider.memory().alloc::<u64>(evidence_alloc_count)?;
+
+        let elem_size = std::mem::size_of::<u32>() as u64;
+        if prob_query_count > 0 {
+            let base = d_query_rowcounts.device_ptr_value();
+            let query_ptrs: Vec<u64> = (0..prob_query_count as u64)
+                .map(|i| base + i * elem_size)
+                .collect();
+            buffers::upload_slice(
+                &provider,
+                &query_ptrs,
+                &mut d_query_ptrs,
+                "MC query count ptrs",
+            )?;
+        }
+        if strategy == McCountStrategy::QueriesAndEvidence && evidence_count > 0 {
+            let base = d_evidence_rowcounts.device_ptr_value();
+            let evidence_ptrs: Vec<u64> = (0..evidence_count as u64)
+                .map(|i| base + i * elem_size)
+                .collect();
+            buffers::upload_slice(
+                &provider,
+                &evidence_ptrs,
+                &mut d_evidence_ptrs,
+                "MC evidence count ptrs",
+            )?;
+        }
 
         let stats = self.evaluate_gpu_counts_with(
             &cfg,
@@ -702,40 +809,51 @@ impl McProgram {
             method,
             provider.clone(),
             |executor, plan, count| {
-                let zero_ptr = *d_zero_count.device_ptr();
+                let device = provider.device().inner();
 
-                query_ptrs_buf.clear();
-                for rel_name in plan.query_rel_names.iter().take(count) {
-                    let ptr = executor
-                        .store()
-                        .get(rel_name)
-                        .map(|buf| *buf.num_rows_device().device_ptr())
-                        .unwrap_or(zero_ptr);
-                    query_ptrs_buf.push(ptr);
-                }
-                buffers::upload_slice(
-                    &provider,
-                    &query_ptrs_buf,
-                    &mut d_query_ptrs,
-                    "MC query count ptrs",
-                )?;
-
-                if strategy == McCountStrategy::QueriesAndEvidence {
-                    evidence_ptrs_buf.clear();
-                    for (rel_name, _) in plan.evidence_rel_specs.iter() {
-                        let ptr = executor
-                            .store()
-                            .get(rel_name)
-                            .map(|buf| *buf.num_rows_device().device_ptr())
-                            .unwrap_or(zero_ptr);
-                        evidence_ptrs_buf.push(ptr);
+                // Refresh the stable query row-count buffer for this sample via
+                // device-to-device copies (no host transfer). A per-sample memset
+                // leaves the slot of any missing relation at 0, which the truth
+                // kernel reads as "0 rows" -- identical to the old zero-ptr fallback.
+                if prob_query_count > 0 {
+                    device.memset_zeros(&mut d_query_rowcounts).map_err(|e| {
+                        XlogError::Kernel(format!("Failed to zero MC query rowcounts: {}", e))
+                    })?;
+                    for (i, rel_name) in plan.query_rel_names.iter().take(count).enumerate() {
+                        if let Some(buf) = executor.store().get(rel_name) {
+                            let src = buf.num_rows_device();
+                            let mut dst = d_query_rowcounts.slice_mut(i..i + 1);
+                            device.dtod_copy(src, &mut dst).map_err(|e| {
+                                XlogError::Kernel(format!(
+                                    "Failed to copy MC query rowcount: {}",
+                                    e
+                                ))
+                            })?;
+                        }
                     }
-                    buffers::upload_slice(
-                        &provider,
-                        &evidence_ptrs_buf,
-                        &mut d_evidence_ptrs,
-                        "MC evidence count ptrs",
-                    )?;
+                }
+
+                if strategy == McCountStrategy::QueriesAndEvidence && evidence_count > 0 {
+                    device
+                        .memset_zeros(&mut d_evidence_rowcounts)
+                        .map_err(|e| {
+                            XlogError::Kernel(format!(
+                                "Failed to zero MC evidence rowcounts: {}",
+                                e
+                            ))
+                        })?;
+                    for (i, (rel_name, _)) in plan.evidence_rel_specs.iter().enumerate() {
+                        if let Some(buf) = executor.store().get(rel_name) {
+                            let src = buf.num_rows_device();
+                            let mut dst = d_evidence_rowcounts.slice_mut(i..i + 1);
+                            device.dtod_copy(src, &mut dst).map_err(|e| {
+                                XlogError::Kernel(format!(
+                                    "Failed to copy MC evidence rowcount: {}",
+                                    e
+                                ))
+                            })?;
+                        }
+                    }
                 }
 
                 let block_dim = 128u32;
@@ -799,6 +917,7 @@ impl McProgram {
             nonmonotone_cycles: stats.nonmonotone_cycles,
             nonmonotone_iteration_limit_hits: stats.nonmonotone_iteration_limit_hits,
             sampling_method: method,
+            hot_loop_transfers: stats.hot_loop_transfers,
         })
     }
 
@@ -976,6 +1095,13 @@ impl McProgram {
             .map(|(s, sc)| (s.as_str(), sc.clone()))
             .collect();
 
+        // K1 boundary: snapshot tracked host<->device transfers immediately before
+        // the sample/evaluate/count hot loop. Everything above (sampler upload, force
+        // arrays, deterministic facts, prob/AD tables, reset plan) is static setup and
+        // is allowed to transfer. From here until the loop ends, a GPU-native run must
+        // perform *zero* tracked HtoD/DtoH transfers.
+        let transfers_pre = provider.host_transfer_stats();
+
         for sample_idx in 0..cfg.samples {
             let t_reset = std::time::Instant::now();
             executor.reset_for_mc_relations(&preserve_refs, &clear_refs)?;
@@ -1041,6 +1167,27 @@ impl McProgram {
                 timing.count_us += t_count.elapsed().as_micros() as u64;
             }
         }
+
+        // K1 boundary: sync so all hot-loop kernels and any (disallowed) transfers
+        // have been issued, then read the post-loop transfer snapshot. The tracked
+        // counters are incremented synchronously at each Rust transfer call site, so
+        // the delta is exact regardless of kernel-launch asynchrony.
+        provider.device().synchronize()?;
+        let transfers_post = provider.host_transfer_stats();
+        stats.hot_loop_transfers = McHotLoopTransfers {
+            htod_calls: transfers_post
+                .htod_calls
+                .saturating_sub(transfers_pre.htod_calls),
+            dtoh_calls: transfers_post
+                .dtoh_calls
+                .saturating_sub(transfers_pre.dtoh_calls),
+            htod_bytes: transfers_post
+                .htod_bytes
+                .saturating_sub(transfers_pre.htod_bytes),
+            dtoh_bytes: transfers_post
+                .dtoh_bytes
+                .saturating_sub(transfers_pre.dtoh_bytes),
+        };
 
         if mc_profile {
             eprintln!(

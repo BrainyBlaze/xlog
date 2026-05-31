@@ -220,17 +220,59 @@ Sampling uses `CudaKernelProvider::sample_bernoulli_matrix_device(...)`, which c
 The primary GPU-native API is:
 
 - `McProgram::evaluate_gpu_device(...) -> McDeviceResult`
+- `McProgram::evaluate_gpu_device_with_provider(...) -> McDeviceResult` (caller-supplied provider for buffer reuse)
 
 It evaluates each sampled world on the GPU (host control-plane launches only) and returns device-resident count buffers:
 
 - `query_counts: DeviceSlice<u32>` (one per query atom)
 - `evidence_count: DeviceSlice<u32>` (samples satisfying all evidence)
 
-Internally (`crates/xlog-prob/src/mc.rs`), MC evaluation:
+Internally (`crates/xlog-prob/src/mc/mod.rs`), MC evaluation:
 
 1. Keeps the sample matrix on device and builds per-sample probabilistic fact buffers on the GPU.
 2. Evaluates the deterministic core using `xlog-runtime::Executor` (GPU relation store + GPU operators).
 3. Computes query/evidence truth flags and accumulates counts on-device (`kernels/mc_eval.cu`).
+
+#### Zero-host hot-loop boundary (K1)
+
+The sample → evaluate → count **hot loop performs zero tracked host↔device
+transfers**. Static setup *before* the loop is allowed to transfer (the seeded
+Bernoulli sample matrix, evidence-force arrays, deterministic facts, prob/AD
+tables, the per-sample reset plan, and the count-pointer arrays). The final
+query/evidence counts are downloaded only by host-facing wrappers *after* the
+loop.
+
+Each sample, the truth kernel reads relation row counts through stable pointer
+arrays that are uploaded **once** before the loop and point at engine-owned
+row-count buffers; those buffers are refreshed per sample with device-to-device
+copies of the current relation `num_rows` (a DtoD copy crosses no host
+boundary). This replaced an earlier implementation that re-uploaded the pointer
+arrays every sample (one tracked HtoD per sample).
+
+The boundary is measured, not asserted: `evaluate_gpu_device_with_provider`
+snapshots the provider's `HostTransferStats` immediately before the loop and
+after a post-loop `synchronize()`, and surfaces the delta as
+`McDeviceResult::hot_loop_transfers` (`McHotLoopTransfers`). For a GPU-native run
+`hot_loop_transfers.is_zero()` holds.
+
+"Zero" here means zero **tracked data-plane** transfers (`record_htod` /
+`record_dtoh`). As elsewhere in XLOG, **bounded control-plane metadata** reads —
+e.g. reading a relation's `num_rows` scalar via `dtoh_scalar_untracked` after a
+GPU operator sizes its output, inside dedup/relational ops — are O(4 bytes)
+scalars, are exempted by the engine-wide metadata-vs-data-plane contract (the
+same one the deterministic-D2H gate enforces), and still occur per sample. The
+MC hot-loop guarantee is therefore the same data-plane zero-host guarantee the
+exact and neural paths make, not an absolute "no CUDA memcpy of any size". The transfer-budget gate
+`tests/mc_gpu_native.rs::mc_hot_loop_is_zero_transfer_both_strategies` asserts
+this across both the clamped (`QueriesOnly`) and rejection (`QueriesAndEvidence`)
+count strategies, and the GPU-native pilots assert it additionally for
+fact-marginal, evidence-conditioning, annotated-disjunction, and recursive
+(transitive-closure) workloads.
+
+**Acceptance scope.** Zero-host / GPU-native evidence is the dedicated gates
+`tests/mc_gpu_native.rs` and `tests/gpu_mc_device_counts.rs` only. A full
+`cargo test -p xlog-prob` run includes CPU-oracle and host-output tests
+(`tests/mc.rs`, `tests/gpu_mc_vs_cpu.rs`) and is **not** zero-host evidence.
 
 ### Evidence conditioning and uncertainty reporting
 
@@ -251,9 +293,14 @@ For each query, `mc` estimates `P(Q|E)` as a binomial proportion and reports:
 
 Host-readable probability outputs are behind `--features host-io`:
 
-- `McProgram::evaluate(...) -> McResult` downloads the device counts and computes probabilities + confidence intervals.
-- `McProgram::evaluate_cpu(...) -> McResult` is a validation/debug path that downloads the sample matrix and evaluates via
-  a CPU relation store.
+- `McProgram::evaluate(...) -> McResult` (and its alias `evaluate_gpu(...)`) run the
+  GPU-native device loop and then **materialize the result on the host** by
+  downloading the final query/evidence counts *after* the hot loop. This is
+  host-result materialization, not a hot-loop transfer — the `_gpu` suffix marks
+  GPU compute, it does not imply a zero-host result.
+- `McProgram::evaluate_cpu(...) -> McResult` is a CPU **oracle/debug** path that
+  downloads the full sample matrix and evaluates worlds on the host. It is never
+  GPU-native and never release evidence; it exists only as a seed-matched oracle.
 
 ---
 
