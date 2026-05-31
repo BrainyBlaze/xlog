@@ -16,6 +16,12 @@
 //!   * all terms are variables or ground constants (no lists/compounds/functors);
 //!   * bounded Herbrand universe: `domain^arity` slots, with the total universe
 //!     and per-predicate domain capped so one world fits one CUDA block.
+//!   * positive joins are lowered to device rule records and evaluated from a
+//!     world-segmented sparse column arena (`slot`, `arg0`, `arg1`) with
+//!     device row counters and static device offsets; the dense bitset is only
+//!     a device-side membership/dedup index.
+//!   * worst-case sparse/WCOJ arena bounds are checked before device allocation
+//!     when `XLOG_MC_RESIDENT_MEMORY_BUDGET_BYTES` is set.
 //!
 //! Anything outside the fragment is rejected **before execution** with a typed
 //! [`ResidentRejection`] (fail-closed; no CPU fallback).
@@ -34,22 +40,24 @@ use super::{McEvalConfig, McProgram, McSamplingMethod};
 use crate::provenance::{GroundAtom, Value};
 
 /// Maximum supported predicate arity.
-pub const MAX_ARITY: usize = 2;
+pub const MAX_ARITY: usize = 3;
 /// Maximum supported rule body length (positive literals).
-pub const MAX_BODY: usize = 2;
+pub const MAX_BODY: usize = 3;
 /// Maximum supported distinct variables per rule.
-pub const MAX_VARS: usize = 3;
+pub const MAX_VARS: usize = 8;
 /// Maximum supported bounded-universe slot count (one world must fit one block's
 /// working set comfortably).
 pub const MAX_UNIVERSE: usize = 1 << 16;
 /// Maximum supported domain size (distinct constants).
 pub const MAX_DOMAIN: usize = 256;
-/// u32 width of one device atom record: base, arity, arg0, arg1, stride0.
-const ATOM_REC: usize = 5;
-/// u32 width of one device rule record: n_body, n_vars, domain, head, body0, body1.
-const RULE_REC: usize = 3 + 3 * ATOM_REC;
+/// u32 width of one device atom record: base, arity, arg0, arg1, arg2, stride0.
+const ATOM_REC: usize = 6;
+/// u32 width of one device rule record: n_body, n_vars, domain, head, body0..body2.
+const RULE_REC: usize = 3 + 4 * ATOM_REC;
 /// Device encoding flag marking an arg spec as a bound constant.
 const CONST_FLAG: u32 = 0x8000_0000;
+const RESIDENT_BUDGET_ENV: &str = "XLOG_MC_RESIDENT_MEMORY_BUDGET_BYTES";
+const RESIDENT_BLOCKS_PER_WORLD_ENV: &str = "XLOG_MC_RESIDENT_BLOCKS_PER_WORLD";
 
 /// Kind of a fail-closed rejection of an MC program by the resident engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,6 +233,14 @@ pub struct McResidentResult {
     pub evidence_count: TrackedCudaSlice<u32>,
     /// Per-world fixpoint iteration count (device-resident).
     pub iter_trace: TrackedCudaSlice<u32>,
+    /// Final sparse row count per world (device-resident).
+    pub sparse_final_row_counts: TrackedCudaSlice<u32>,
+    /// World-segment offsets for the sparse arena, populated by the resident
+    /// kernel (device-resident).
+    pub sparse_offsets: TrackedCudaSlice<u32>,
+    /// Per-world resident status flags, populated by the resident kernel:
+    /// `[converged_flags; sparse_overflow_flags; block_participation; scratch...]`.
+    pub resident_status_flags: TrackedCudaSlice<u32>,
     pub total_samples: usize,
     pub seed: u64,
     pub confidence: f64,
@@ -254,6 +270,104 @@ pub struct ResidentPlan {
     bernoulli_probs: Vec<f32>,
 }
 
+fn resident_memory_budget_bytes() -> Result<Option<u64>> {
+    match std::env::var(RESIDENT_BUDGET_ENV) {
+        Ok(raw) => raw.parse::<u64>().map(Some).map_err(|e| {
+            XlogError::Execution(format!("invalid {RESIDENT_BUDGET_ENV} value `{raw}`: {e}"))
+        }),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(e) => Err(XlogError::Execution(format!(
+            "invalid {RESIDENT_BUDGET_ENV}: {e}"
+        ))),
+    }
+}
+
+fn resident_blocks_per_world() -> Result<u32> {
+    match std::env::var(RESIDENT_BLOCKS_PER_WORLD_ENV) {
+        Ok(raw) => {
+            let blocks = raw.parse::<u32>().map_err(|e| {
+                XlogError::Execution(format!(
+                    "invalid {RESIDENT_BLOCKS_PER_WORLD_ENV} value `{raw}`: {e}"
+                ))
+            })?;
+            if blocks == 0 {
+                return Err(XlogError::Execution(format!(
+                    "invalid {RESIDENT_BLOCKS_PER_WORLD_ENV} value `{raw}`: must be >= 1"
+                )));
+            }
+            Ok(blocks)
+        }
+        Err(std::env::VarError::NotPresent) => Ok(1),
+        Err(e) => Err(XlogError::Execution(format!(
+            "invalid {RESIDENT_BLOCKS_PER_WORLD_ENV}: {e}"
+        ))),
+    }
+}
+
+fn sat_mul(a: u64, b: u64) -> u64 {
+    a.saturating_mul(b)
+}
+
+fn sat_pow(mut base: u64, mut exp: u32) -> u64 {
+    let mut acc = 1u64;
+    while exp > 0 {
+        if exp & 1 == 1 {
+            acc = sat_mul(acc, base);
+        }
+        exp >>= 1;
+        if exp > 0 {
+            base = sat_mul(base, base);
+        }
+    }
+    acc
+}
+
+fn estimate_resident_bound_bytes(plan: &ResidentPlan, num_worlds: u32) -> u64 {
+    let worlds = num_worlds.max(1) as u64;
+    let vars = plan.num_vars.max(1) as u64;
+    let universe = plan.universe_size.max(1) as u64;
+    let meta_words = plan
+        .edb_slots
+        .len()
+        .saturating_add(plan.pf_slot.len())
+        .saturating_add(plan.pf_var.len())
+        .saturating_add(plan.rule_data.len())
+        .saturating_add(plan.q_slot.len())
+        .saturating_add(plan.ev_slot.len())
+        .saturating_add(plan.ev_expected.len())
+        .saturating_add(plan.ad_data.len())
+        .saturating_add(18);
+
+    let sparse_cap = universe;
+    let setup_bytes = sat_mul(2, vars)
+        .saturating_add(sat_mul(worlds, vars))
+        .saturating_add(sat_mul(sat_mul(sat_mul(worlds, 2), universe), 4))
+        .saturating_add(sat_mul(sat_mul(sat_mul(worlds, 2), sparse_cap), 16))
+        .saturating_add(sat_mul(sat_mul(worlds, 2), 4))
+        .saturating_add(sat_mul(worlds, 4))
+        .saturating_add(sat_mul(worlds.saturating_add(1), 4))
+        .saturating_add(sat_mul(worlds.saturating_mul(4).saturating_add(1), 4))
+        .saturating_add(sat_mul(meta_words as u64, 4))
+        .saturating_add(sat_mul(plan.q_slot.len().max(1) as u64, 4))
+        .saturating_add(4)
+        .saturating_add(sat_mul(worlds, 4));
+
+    let mut sparse_join_bytes = 0u64;
+    for rule in plan.rule_data.chunks_exact(RULE_REC) {
+        let n_body = rule[0];
+        if n_body < 2 {
+            continue;
+        }
+        let n_vars = rule[1];
+        let assignments = sat_pow(plan.domain_size.max(1) as u64, n_vars);
+        let row_words = (n_body as u64).saturating_add(1);
+        sparse_join_bytes =
+            sparse_join_bytes.max(sat_mul(sat_mul(worlds, assignments), row_words * 4));
+    }
+
+    setup_bytes.saturating_add(sparse_join_bytes)
+}
+
 struct PredInfo {
     arity: usize,
     base: u32,
@@ -268,9 +382,17 @@ struct Universe {
 impl Universe {
     fn stride0(&self, arity: usize) -> u32 {
         if arity >= 2 {
-            self.domain_size
+            self.domain_size.pow((arity - 1) as u32)
         } else {
             1
+        }
+    }
+
+    fn arg_stride(&self, arity: usize, arg_idx: usize) -> u32 {
+        if arity <= arg_idx + 1 {
+            1
+        } else {
+            self.domain_size.pow((arity - arg_idx - 1) as u32)
         }
     }
 
@@ -291,7 +413,6 @@ impl Universe {
             ));
         }
         let mut slot = info.base;
-        let stride0 = self.stride0(info.arity);
         for (i, v) in atom.args.iter().enumerate() {
             let key = ConstKey::from_value(v);
             let idx = *self.domain.get(&key).ok_or_else(|| {
@@ -301,7 +422,7 @@ impl Universe {
                     "ground constant absent from bounded domain",
                 )
             })?;
-            slot += idx * if i == 0 { stride0 } else { 1 };
+            slot += idx * self.arg_stride(info.arity, i);
         }
         Ok(slot)
     }
@@ -643,7 +764,7 @@ fn lower_rule(
         let mut rec = [0u32; ATOM_REC];
         rec[0] = info.base;
         rec[1] = arity;
-        rec[4] = universe.stride0(info.arity);
+        rec[5] = universe.stride0(info.arity);
         for (i, t) in atom.terms.iter().enumerate() {
             let spec = match ConstKey::from_term(t)? {
                 TermClass::Var(name) => *var_ids.get(&name).expect("var assigned above"),
@@ -732,7 +853,21 @@ fn run_resident(
     let (method, forcing) = mc.resolve_sampling_method(cfg.sampling_method)?;
     let num_worlds = u32::try_from(cfg.samples)
         .map_err(|_| XlogError::Execution("MC samples exceed u32::MAX".to_string()))?;
+    let blocks_per_world = resident_blocks_per_world()?;
     let num_vars = plan.num_vars;
+
+    if let Some(budget_bytes) = resident_memory_budget_bytes()? {
+        let bound_bytes = estimate_resident_bound_bytes(plan, num_worlds);
+        if bound_bytes > budget_bytes {
+            return Err(XlogError::ResourceExhausted {
+                context: format!(
+                    "resident_resource_budget operator=sparse_wcoj bound_bytes={bound_bytes} budget_bytes={budget_bytes}"
+                ),
+                estimated_bytes: bound_bytes,
+                budget_bytes,
+            });
+        }
+    }
 
     // ---------------- Static setup (BEFORE the measured region) ----------------
     // All device allocations, the seeded sample matrix, force arrays, and every
@@ -766,18 +901,60 @@ fn run_resident(
         )?
     };
 
-    // Working relation buffer [num_worlds * 2 * U], pre-zeroed. The kernel always
-    // strides worlds by 2*U (double buffer A|B per world) regardless of rule
-    // count, so the host must allocate 2*U per world unconditionally.
+    // Working dense membership index [num_worlds * 2 * U], pre-zeroed. This is a
+    // device-side dedup/index sidecar for the sparse columnar relation arena.
     let u = plan.universe_size.max(1) as usize;
     let rel_len = (num_worlds as usize)
         .saturating_mul(u)
         .saturating_mul(2)
         .max(1);
-    let mut d_rel = provider.memory().alloc::<u8>(rel_len)?;
+    let mut d_rel = provider.memory().alloc::<u32>(rel_len)?;
     dev.inner()
         .memset_zeros(&mut d_rel)
         .map_err(|e| XlogError::Kernel(format!("zero rel: {e}")))?;
+
+    // Sparse world-segmented columnar relation arena. Capacity is the static
+    // universe bound per world/buffer; row counts and offsets remain device
+    // resident and are populated by the resident kernel.
+    let sparse_cap = u.max(1);
+    let sparse_len = (num_worlds as usize)
+        .saturating_mul(2)
+        .saturating_mul(sparse_cap)
+        .max(1);
+    // Four contiguous u32 columns: slot | arg0 | arg1 | arg2.
+    let mut d_sparse_columns = provider
+        .memory()
+        .alloc::<u32>(sparse_len.saturating_mul(4).max(1))?;
+    let mut d_sparse_counts = provider
+        .memory()
+        .alloc::<u32>((num_worlds as usize).saturating_mul(2).max(1))?;
+    let mut d_sparse_final_counts = provider
+        .memory()
+        .alloc::<u32>((num_worlds as usize).max(1))?;
+    let mut d_sparse_offsets = provider
+        .memory()
+        .alloc::<u32>((num_worlds as usize).saturating_add(1).max(1))?;
+    let mut d_resident_status_flags = provider.memory().alloc::<u32>(
+        (num_worlds as usize)
+            .saturating_mul(4)
+            .saturating_add(1)
+            .max(1),
+    )?;
+    dev.inner()
+        .memset_zeros(&mut d_sparse_columns)
+        .map_err(|e| XlogError::Kernel(format!("zero sparse_columns: {e}")))?;
+    dev.inner()
+        .memset_zeros(&mut d_sparse_counts)
+        .map_err(|e| XlogError::Kernel(format!("zero sparse_counts: {e}")))?;
+    dev.inner()
+        .memset_zeros(&mut d_sparse_final_counts)
+        .map_err(|e| XlogError::Kernel(format!("zero sparse_final_counts: {e}")))?;
+    dev.inner()
+        .memset_zeros(&mut d_sparse_offsets)
+        .map_err(|e| XlogError::Kernel(format!("zero sparse_offsets: {e}")))?;
+    dev.inner()
+        .memset_zeros(&mut d_resident_status_flags)
+        .map_err(|e| XlogError::Kernel(format!("zero resident_status_flags: {e}")))?;
 
     // Pack every read-only plan array into one contiguous `meta` u32 buffer and
     // record offsets in the `cfg` header. This keeps the kernel under the launch
@@ -801,7 +978,7 @@ fn run_resident(
     let ad_off = push_meta(&plan.ad_data, &mut meta);
 
     // cfg header, indices mirror the `CFG_*` defines in mc_resident.cu.
-    let cfg_host: [u32; 18] = [
+    let cfg_host: [u32; 19] = [
         num_worlds,
         plan.universe_size,
         num_vars as u32,
@@ -820,6 +997,7 @@ fn run_resident(
         plan.ev_slot.len() as u32,
         ad_off,
         plan.num_ads,
+        blocks_per_world,
     ];
 
     let mut d_cfg = provider.memory().alloc::<u32>(cfg_host.len())?;
@@ -857,7 +1035,14 @@ fn run_resident(
     let mut engine_launches = 0u64;
 
     let block_dim = 128u32;
-    let grid_dim = num_worlds.max(1);
+    let grid_dim = num_worlds
+        .max(1)
+        .checked_mul(blocks_per_world)
+        .ok_or_else(|| {
+            XlogError::Execution(format!(
+                "resident grid overflow: worlds={num_worlds} blocks_per_world={blocks_per_world}"
+            ))
+        })?;
     let launch_cfg = LaunchConfig {
         grid_dim: (grid_dim, 1, 1),
         block_dim: (block_dim, 1, 1),
@@ -866,20 +1051,32 @@ fn run_resident(
     // SAFETY: argument list matches the `mc_resident_engine` PTX signature; every
     // device buffer was allocated with sufficient length above.
     unsafe {
-        engine_fn
-            .launch(
-                launch_cfg,
-                (
-                    &d_cfg,
-                    &d_meta,
-                    &mut d_rel,
-                    &samples_device,
-                    &mut d_query_counts,
-                    &mut d_evidence_count,
-                    &mut d_iter_trace,
-                ),
-            )
-            .map_err(|e| XlogError::Kernel(format!("mc_resident_engine launch failed: {e}")))?;
+        let args = (
+            &d_cfg,
+            &d_meta,
+            &mut d_rel,
+            &samples_device,
+            &mut d_query_counts,
+            &mut d_evidence_count,
+            &mut d_iter_trace,
+            &mut d_sparse_columns,
+            &mut d_sparse_counts,
+            &mut d_sparse_final_counts,
+            &mut d_sparse_offsets,
+            &mut d_resident_status_flags,
+            sparse_cap as u32,
+        );
+        if blocks_per_world == 1 {
+            engine_fn
+                .launch(launch_cfg, args)
+                .map_err(|e| XlogError::Kernel(format!("mc_resident_engine launch failed: {e}")))?;
+        } else {
+            engine_fn
+                .launch_cooperative(launch_cfg, args)
+                .map_err(|e| {
+                    XlogError::Kernel(format!("mc_resident_engine cooperative launch failed: {e}"))
+                })?;
+        }
     }
     engine_launches += 1;
     dev.synchronize()?;
@@ -906,6 +1103,9 @@ fn run_resident(
         query_counts: d_query_counts,
         evidence_count: d_evidence_count,
         iter_trace: d_iter_trace,
+        sparse_final_row_counts: d_sparse_final_counts,
+        sparse_offsets: d_sparse_offsets,
+        resident_status_flags: d_resident_status_flags,
         total_samples: cfg.samples,
         seed: cfg.seed,
         confidence: cfg.confidence,

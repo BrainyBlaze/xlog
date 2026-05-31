@@ -227,11 +227,31 @@ exposed via:
 
 It evaluates **all** sampled worlds in a single megakernel launch and returns
 device-resident count buffers (`query_counts`, `evidence_count`) plus a per-world
-`iter_trace`. The sample/world id is the CUDA grid dimension; sampled facts,
-derived relations, evidence flags, query counts, and fixpoint state are all
-device-resident (bounded-Herbrand dense boolean). Recursive programs converge via
-a device-side double-buffered naive fixpoint with a shared change flag; no host
-read drives control flow.
+`iter_trace`. The sample/world id is the CUDA grid dimension. Sampled facts,
+derived relations, evidence flags, query counts, sparse row counts, sparse
+world offsets, and fixpoint state are all device-resident.
+
+The current sparse/WCOJ resident engine stores each world in a preallocated
+columnar arena (`slot`, `arg0`, `arg1`, `arg2`) with kernel-populated device row
+counters, device world offsets, convergence flags, and sparse-arena overflow
+flags. A dense bounded bitset remains only as a device-side membership
+index for duplicate suppression and query/evidence membership checks; it is no
+longer the only execution proof. Generic positive joins are evaluated from the
+sparse row arena by binding variables from matching body rows and appending
+derived heads with device atomic cursors. Recursive programs converge in the
+same megakernel through a device-side double-buffered fixpoint. The default path
+uses one CUDA block per world; setting `XLOG_MC_RESIDENT_BLOCKS_PER_WORLD>1`
+before setup switches the same kernel to a cooperative multi-block-per-world
+launch with grid synchronization, explicit device fences around cooperative
+barriers, atomic reads of device change/continue flags, and device-written block
+participation counters. The final per-world convergence state is written to
+device memory, and no host read drives control flow.
+
+The supported production fragment remains bounded (arity <= 3, body <= 3,
+<= 8 variables). Programs that would exceed a configured deterministic resident
+arena budget fail closed before device allocation with
+`XlogError::ResourceExhausted` (`resident_resource_budget`, `bound_bytes`,
+`budget_bytes`); there is no CPU or host-sizing fallback.
 
 #### No host interaction in the measured region (K1) — distinct from `a894aab4`
 
@@ -251,15 +271,18 @@ seeded sample matrix, force arrays, plan upload, buffer allocation) happens
 before the region; final aggregates are read only after it.
 
 There is **no host-orchestrated fallback**: programs outside the supported
-fragment (bounded-domain positive Datalog — arity ≤ 2, body ≤ 2, ≤ 3 vars,
+fragment (bounded-domain positive Datalog — arity ≤ 3, body ≤ 3, ≤ 8 vars,
 bounded universe) **fail closed** before execution with a typed
 `ResidentRejection` (kind + construct + context). The CPU path
 (`evaluate_cpu`, `tests/mc.rs`, `tests/gpu_mc_vs_cpu.rs`) is a seed-matched test
 oracle only — never accepted execution.
 
 **Acceptance scope.** GPU-native no-host evidence is `tests/mc_resident.rs`
-(7 exact-value pilots incl. recursion with a non-base derived tuple and >1
-fixpoint iteration, + 4 fail-closed negative tests) and the device-count gates
+(seven exact sparse resident pilots, including ternary-relation input, with
+device sparse row-count evidence plus device-written offsets/convergence/overflow
+diagnostics and a cooperative two-block-per-world recursion pilot,
+recursion with a non-base derived tuple and >1 fixpoint iteration, plus
+fail-closed negative tests) and the device-count gates
 `tests/mc_gpu_native.rs` / `tests/gpu_mc_device_counts.rs`. A full
 `cargo test -p xlog-prob` run includes CPU-oracle/host-output tests and is **not**
 no-host evidence.

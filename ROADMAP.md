@@ -30,6 +30,18 @@ rule-weight training, differentiable proof traces, learned-rule inventories,
 CUDA host-transfer audits, module-boundary diagnostics, grouped transfer
 metrics, and the BFO UCR validation package.
 
+Branch checkpoint (May 31, 2026): the MC resident engine now includes a bounded
+sparse/WCOJ production slice for generic positive joins. `evaluate_gpu_device*`
+continues to route through the resident no-host engine; exact resident pilots
+cover single joins, multiway joins, arity-3 relation input, rule chaining,
+recursive device-side fixpoint traces, device sparse row counts/offsets,
+kernel-written convergence/overflow diagnostics, cooperative multi-block-per-world
+recursion with fenced cooperative barriers and atomic device change/continue
+reads, constant no-host counters, and fail-closed preallocation budget
+diagnostics. The dense bitset remains a
+bounded device-side membership index, not the final unbounded out-of-core
+sparse columnar engine.
+
 This roadmap is version-oriented so planned work is not hidden inside subsystem
 sections. Historical and current-main work uses checked boxes. Future work uses
 unchecked boxes and is assigned to a concrete future version.
@@ -1893,7 +1905,8 @@ validator.
       `ResidentRejection`. The legacy host-loop Rust (`evaluate_gpu_counts_with`,
       `build_gpu_plan`, `sampling.rs`, dead `buffers.rs`) is deleted.
       Evidence: `cargo test -p xlog-prob --release --features host-io --test
-      mc_resident -- --test-threads=1` (7 exact-value pilots + 4 fail-closed
+      mc_resident -- --test-threads=1` (exact-value resident pilots, including
+      sparse arity-3 WCOJ input, plus fail-closed
       negatives).
 
 ### Documentation and Tests

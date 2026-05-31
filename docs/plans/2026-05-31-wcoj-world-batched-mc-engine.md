@@ -1,8 +1,13 @@
 # Design Checkpoint — WCOJ / Tensorized World-Batched MC Engine
 
-**Status:** design checkpoint (pre-implementation). Supersedes the dense-boolean
-resident engine as the *general* MC execution path; dense-boolean remains a
-bounded-fragment precursor (proof that the no-host loop is achievable).
+**Status:** implementation checkpoint. The sparse/WCOJ resident slice now uses
+preallocated world-segmented columnar arenas (`slot`, `arg0`, `arg1`, `arg2`) with
+kernel-populated row counters, world offsets, convergence flags, overflow flags,
+and block-participation counters for structurally checked positive joins.
+World/sample id is the CUDA grid dimension and deterministic
+preallocation budget checks fail closed before device allocation. The dense
+membership bitset remains only as a bounded device-side duplicate/query index,
+not as the sole proof of execution.
 
 **Goal recap (supervisor):** a GPU-resident MC engine that reuses the real
 *sparse* relational/WCOJ execution surface, treats world/sample id as a
@@ -73,12 +78,13 @@ so the host never learns a row count inside the loop:
   appended into the IDB arena via atomic cursor; a **device change flag**
   (`atomicOr` of "did the cursor advance") decides continuation.
 - The iteration loop must be **device-side** (no host loop over fixpoint
-  iterations): either a **CUDA graph with a conditional/while node** (CUDA 13 is
-  available on this toolkit) or a **persistent megakernel** with grid-wide sync
-  (cooperative groups). The dense engine used block-per-world `__syncthreads`;
-  the sparse engine needs grid-wide coordination because a world's relation may
-  exceed one block. Decision deferred to implementation spike (cooperative launch
-  vs. CUDA-graph while-node); both keep the loop off the host.
+   iterations): the resident kernel now has a cooperative-groups path selected by
+   `XLOG_MC_RESIDENT_BLOCKS_PER_WORLD>1`, so a world can be processed by multiple
+   blocks with grid-wide synchronization while preserving a single measured
+   launch. Cooperative barriers are bracketed with device fences, and the
+   change/continue flags are read atomically so recursive convergence state is not
+   inferred from stale global-memory loads. The default one-block path remains for
+   small worlds and broad hardware compatibility.
 - Iteration count recorded to a device `iter_trace` (per world or global), read
   only after the measured region.
 
@@ -108,12 +114,21 @@ Plus the existing `tracked_htod=0`, `tracked_dtoh=0`,
    `host_fixpoint_iterations` on the provider/result; a world-batched single join
    that worst-case-preallocates, writes via atomic cursor, keeps the count in
    `d_num_rows`, and reads nothing to host. Pilot: 2-relation join over N worlds,
-   exact counts, `is_no_host()` constant in N. **Over-budget fail-closed negative.**
+   exact counts, `is_no_host()` constant in N. **Implemented with device sparse
+   row counters, kernel-written world offsets, convergence flags, overflow
+   flags, and block-participation counters; over-budget fail-closed negative is covered by
+   `resident_sparse_wcoj_over_budget_fails_closed_before_execution`.**
 2. **World-batched WCOJ multiway join** — reuse `wcoj_*` kernels with `world_id`
    leading key; AGM/worst-case bound for arena; device prefix-sum offsets.
+   **Implemented for the bounded resident fragment:** generic positive 1-, 2-,
+   and 3-body joins over arity-0 through arity-3 relations are evaluated from
+   the sparse world arena with exact no-host evidence and device-populated
+   sparse row counts/offsets/diagnostics.
 3. **Device-side semi-naive fixpoint** — recursion via device-orchestrated loop +
    change flag; recursive transitive-closure pilot with a non-base derived tuple
-   and `iter_trace`>1, `host_fixpoint_iterations=0`.
+   and `iter_trace`>1, `host_fixpoint_iterations=0`. **Implemented for the
+   bounded sparse resident fragment, including a cooperative two-block-per-world
+   pilot with exact output and device-written participation counters.**
 4. **Rewire + dense fallback classification** — route `evaluate_gpu_device*` to the
    sparse engine for in-fragment programs; dense engine retained only for tiny
    bounded cases (or removed if subsumed). Dense pilots stay green.
@@ -123,7 +138,7 @@ Plus the existing `tracked_htod=0`, `tracked_dtoh=0`,
 ## 8. Acceptance (supervisor minimum)
 
 - Dense no-host pilots remain green.
-- New sparse/WCOJ world-batched pilot: `is_no_host()` (all 7 counters 0) constant in N.
+- New sparse/WCOJ world-batched pilots: `is_no_host()` (all 7 counters 0) constant in N, including arity-3 relation input, exact device diagnostics, and cooperative multi-block-per-world recursion.
 - Recursive transitive closure via device-side fixpoint produces non-base tuples;
   `host_fixpoint_iterations=0`.
 - Over-budget WCOJ bound fails closed before measured execution (typed diagnostic).
@@ -131,8 +146,10 @@ Plus the existing `tracked_htod=0`, `tracked_dtoh=0`,
 
 ## 9. Risks / open questions
 
-- **Device-side loop mechanism**: cooperative-groups grid sync vs. CUDA-graph
-  while-node. Spike both; pick by reliability under cudarc 0.19.
+- **Device-side loop mechanism**: cooperative-groups grid sync is implemented for
+  the resident multi-block-per-world path, with explicit device fences and atomic
+  reads for change/continue state; a CUDA-graph while-node remains a possible
+  future portability/performance alternative, not the current blocker.
 - **Worst-case bound tightness**: naive `|A|·|B|` per join can blow the budget for
   multi-join recursion; need AGM bound + per-world segmenting to keep arenas sane,
   else fail closed. This is the primary feasibility risk.

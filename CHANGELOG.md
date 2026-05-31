@@ -78,6 +78,14 @@ v0.8.9 UCR diagnostic surfaces.
 - Added `xlog_logic::diagnose_module_boundaries(...)` for frozen kernel
   predicates, adapter-only fact modules, held-out module declarations, and
   held-out-label candidate provenance.
+- Added the sparse/WCOJ resident MC slice: structurally checked generic positive
+  joins now run from a preallocated world-segmented sparse column arena with
+  device row counters/offsets, arity-3 relation columns, exact no-host
+  instrumentation, recursive sparse fixpoint evidence, kernel-written
+  convergence/overflow diagnostics, an opt-in cooperative multi-block-per-world
+  execution path with fenced cooperative barriers and atomic device
+  change/continue reads, and deterministic `resident_resource_budget` fail-closed
+  diagnostics before device allocation.
 - Added `pyxlog.transfer_diagnostics.compute_transfer_diagnostics(...)` for
   grouped macro F1, minimum group F1, bootstrap confidence intervals, baseline
   uplift, paired sign tests, and missing-domain or missing-variant failures.
@@ -133,11 +141,11 @@ v0.8.9 UCR diagnostic surfaces.
     `untracked_metadata_dtoh_count` provider counter).
   - `evaluate_gpu_device*` now routes solely through this engine (no
     host-orchestrated fallback). Programs outside the supported fragment
-    (bounded-domain positive Datalog; arity ≤ 2, body ≤ 2, ≤ 3 vars, bounded
+    (bounded-domain positive Datalog; arity ≤ 3, body ≤ 3, ≤ 8 vars, bounded
     universe) **fail closed** before execution with a typed `ResidentRejection`
     (kind + construct + context). The CPU path survives only as a seed-matched
     test oracle, never accepted execution.
-  - Acceptance (`tests/mc_resident.rs`): 7 exact-value GPU-resident pilots (fact
+  - Acceptance (`tests/mc_resident.rs`): exact-value GPU-resident pilots (fact
     marginal, probabilistic marginal, evidence conditioning, multi-evidence,
     annotated-disjunction/exclusive choice, recursive transitive closure with a
     non-base derived tuple, ≥3-hop recursion proving >1 fixpoint iteration) + 4
