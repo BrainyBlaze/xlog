@@ -3059,6 +3059,177 @@ fn parsed_faeel_tuple_founded_possible_executes_on_gpu_runtime_values() {
         .expect("tuple-founded FAEEL runtime path should retain GPU semantic certification");
 }
 
+// === v0.9.2 ITEM B: FAEEL unfounded self-support -> EXACT empty founded extension ===
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn parsed_faeel_unfounded_zero_arity_self_support_materializes_empty_on_gpu() {
+    // MANDATE HEADLINE: `p() :- possible p()` is supported ONLY by circular modal
+    // self-support, with no independent founded derivation. Under default FAEEL it is
+    // UNFOUNDED, so the founded model is EMPTY. The program EXECUTES to that empty
+    // extension on the GPU runtime (rows: 0) — it is NOT rejected. The empty result is
+    // computed by the existing GPU world-view validation over the reduced base (which
+    // dropped the circular self-support rule); ZERO CPU fallback / candidate enumeration.
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        pred p().
+        p() :- possible p().
+        "#,
+    )
+    .expect("parse unfounded zero-arity FAEEL self-support program");
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("compile unfounded zero-arity FAEEL self-support GPU plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    // The circular self-support rule for `p` is dropped from the reduced base, so the
+    // reduced runtime plan never materializes `p`. Mirror the production execution
+    // harness (`LogicProgram::evaluate_with_options`, which pre-creates an empty buffer
+    // for every declared schema): pre-register the declared head `p` as an EMPTY
+    // relation. This IS the founded model for an unfounded head (p false / absent).
+    executor.put_relation("p", upload_zero_arity(&fixture.memory, 0));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 2,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("FAEEL unfounded self-support must EXECUTE to its empty founded extension");
+
+    assert!(result.prepared.preflight.is_faeel_mode());
+    // EXACT empty founded extension.
+    assert_eq!(result.final_result_transfer.final_output_rows, 0);
+    // Computed on the GPU path: no CPU fallback / candidate enumeration.
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+    result
+        .require_runtime_dispatch_certification()
+        .expect("empty FAEEL founded-extension path must retain GPU semantic certification");
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn parsed_faeel_unfounded_nonzero_self_support_materializes_empty_on_gpu() {
+    // `p(X) :- dom(X), possible p(X)` with `dom(1)`: X is bound by dom (safe), but p
+    // has NO independent founding rule — every p(X) is supported only by circular
+    // self-support. The founded model is EMPTY (rows: 0), executed on the GPU runtime.
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        pred dom(u32).
+        pred p(u32).
+        dom(1).
+        p(X) :- dom(X), possible p(X).
+        "#,
+    )
+    .expect("parse unfounded nonzero FAEEL self-support program");
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("compile unfounded nonzero FAEEL self-support GPU plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("dom", upload_unary_u32(&fixture.memory, &[1], "x"));
+    // Unfounded self-support rule for `p` is dropped, so the reduced plan never
+    // materializes `p`; pre-register the declared head as an EMPTY relation (the
+    // founded model), mirroring the production execution harness.
+    executor.put_relation("p", upload_unary_u32(&fixture.memory, &[], "x"));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 2,
+                max_worlds: 2,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("FAEEL unfounded nonzero self-support must EXECUTE to its empty founded extension");
+
+    assert!(result.prepared.preflight.is_faeel_mode());
+    assert_eq!(result.final_result_transfer.final_output_rows, 0);
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+    result.require_runtime_dispatch_certification().expect(
+        "empty nonzero FAEEL founded-extension path must retain GPU semantic certification",
+    );
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn parsed_faeel_partial_tuple_split_materializes_founded_subset_on_gpu() {
+    // PARTIAL FOUNDED/UNFOUNDED SPLIT: p(X) has an independent founding rule
+    // `p(X) :- seed(X)` (founds p(1)) AND a circular self-support rule over the wider
+    // `node` domain {1,2}. p(2) is supported ONLY by self-support → UNFOUNDED →
+    // excluded; p(1) is founded via seed → present. The founded model is EXACTLY {1}.
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred node(u32).
+        pred p(u32).
+        seed(1).
+        node(1).
+        node(2).
+        p(X) :- seed(X).
+        p(X) :- node(X), possible p(X).
+        "#,
+    )
+    .expect("parse partial-founded FAEEL self-support program");
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("compile partial-founded FAEEL self-support GPU plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[1], "x"));
+    executor.put_relation("node", upload_unary_u32(&fixture.memory, &[1, 2], "x"));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 4,
+                max_worlds: 4,
+                max_models_per_reduction: 2,
+            },
+        )
+        .expect("partial-founded FAEEL self-support must EXECUTE to its founded subset");
+
+    assert!(result.prepared.preflight.is_faeel_mode());
+    // EXACT founded subset: only the seed-founded tuple p(1); the self-supported p(2)
+    // is excluded from the founded model.
+    assert_eq!(result.final_result_transfer.final_output_rows, 1);
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+    let rows = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download partial-founded FAEEL output values");
+    assert_eq!(rows, vec![1]);
+    result
+        .require_runtime_dispatch_certification()
+        .expect("partial-founded FAEEL path must retain GPU semantic certification");
+}
+
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
 fn parsed_faeel_ground_tuple_founded_possible_executes_on_gpu_runtime_values() {
