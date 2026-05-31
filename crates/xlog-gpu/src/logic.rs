@@ -8,8 +8,10 @@ use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 use xlog_ir::{EpistemicExecutablePlan, ExecutionPlan};
 use xlog_logic::epistemic::{
     compile_epistemic_gpu_execution, compile_epistemic_gpu_split_execution,
-    reduce_epistemic_program_to_ordinary, try_plan_stratified_epistemic_program,
-    try_reduce_case_a_recursive_epistemic_program, EpistemicSplitExecutablePlan,
+    reduce_epistemic_program_to_ordinary,
+    reduce_epistemic_program_to_ordinary_for_stratified_schema,
+    try_plan_stratified_epistemic_program, try_reduce_case_a_recursive_epistemic_program,
+    EpistemicSplitExecutablePlan,
 };
 use xlog_logic::{BodyLiteral, Compiler, Program, Query, Term};
 use xlog_runtime::executor::JoinIndexCacheStats;
@@ -269,7 +271,17 @@ impl LogicProgram {
         // the joint path UNCHANGED; plain Case-A recursion over an EDB modal
         // (`know edge`) also returns `None` and falls through to Case-A below.
         if let Some(stratified) = try_plan_stratified_epistemic_program(&normalized)? {
-            let reduced = reduce_epistemic_program_to_ordinary(&normalized);
+            // SCHEMA-ONLY reduction: resolve augmenting positive modals over INVARIANT
+            // *or* epistemically-DETERMINED targets into positive ordinary atoms, so an
+            // augmented head whose extra output column is bound by a modal over a
+            // multi-column determined head (`out(X) :- node(X), know r(X, Y)`, `r`
+            // determined) types its appended `Y` column from `r`'s declaration instead
+            // of failing closed as `UnsafeVariable`. This drives ONLY plan schema
+            // inference; per-stratum EXECUTION compiles below over sub-programs where
+            // the determined head is already a materialized base relation (strict
+            // invariant resolve), so no modal is ever resolved over an un-gated
+            // candidate at runtime.
+            let reduced = reduce_epistemic_program_to_ordinary_for_stratified_schema(&normalized);
             let mut schema_compiler = Compiler::new();
             schema_compiler.compile_program(&reduced)?;
             let schemas = schema_compiler.schemas().clone();

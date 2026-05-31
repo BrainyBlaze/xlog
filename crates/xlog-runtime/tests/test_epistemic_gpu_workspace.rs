@@ -519,6 +519,89 @@ fn single_head_modal_only_bound_over_invariant_materializes_q_extension_on_devic
 
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
+fn determined_multicol_binding_modal_materializes_higher_stratum_on_device() {
+    // v0.9.2 DETERMINED-EPISTEMIC MULTI-COLUMN BINDING (example 28), POST-MATERIALIZATION
+    // higher stratum in isolation. The full program is
+    //   r(X, Y) :- edge(X, Y), know flag(X).   -- DETERMINED multi-column epistemic head
+    //   out(X)  :- node(X), know r(X, Y).        -- modal BINDS the extra output column Y
+    // and is executed by the stratified driver (logic.rs), which materializes the GATED
+    // `r` into the store as a base relation BEFORE running the `out` stratum (the theorem
+    // applied ONCE at the store boundary). Stratification orchestration sits ABOVE this
+    // workspace harness, so this test exercises the HIGHER stratum directly: `r` is
+    // present as a materialized base relation `{(1,2),(1,3)}` and `out`'s augmenting
+    // `know r(X, Y)` binds `Y` via the existing EGB-02 membership/join over that base
+    // (the strict invariant resolve — `r` is invariant once materialized). This is the
+    // exact GPU mechanism the schema fix unblocks end-to-end.
+    //
+    //   node = {1, 2, 3}, r = {(1,2),(1,3)}  ->  out = {X in node : exists Y r(X,Y)} = {1}
+    // ANTI-GAMING: out STRICTLY OMITS nodes 2 and 3 (the `know r` gate is load-bearing —
+    // dropping the literal would give out = node = {1,2,3}); the binding `Y` column is
+    // projected away so out's tuples differ from the raw `r` base.
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = faeel
+        pred node(u32).
+        pred r(u32, u32).
+        pred out(u32).
+        node(1). node(2). node(3).
+        r(1, 2). r(1, 3).
+        out(X) :- node(X), know r(X, Y).
+        "#,
+    )
+    .expect("parse determined-multicol higher-stratum program");
+
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("augmenting modal binding output over a (materialized) base relation must compile");
+    // The augmenting modal binds Y, so the plan carries a public projection that drops
+    // the binding column down to out's public arity 1.
+    assert!(executable.gpu_plan.final_output_columns.is_some());
+
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("node", upload_unary_u32(&fixture.memory, &[1, 2, 3], "x"));
+    executor.put_relation(
+        "r",
+        upload_binary_u32(&fixture.memory, &[(1, 2), (1, 3)], "x", "y"),
+    );
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 2,
+                max_models_per_reduction: 8,
+            },
+        )
+        .expect("determined-multicol binding higher stratum must execute on device");
+
+    result
+        .require_runtime_dispatch_certification()
+        .expect("runtime result must retain dispatch certification");
+    // ANTI-GAMING: zero CPU fallback / zero CPU candidate enumeration for the binding join.
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+
+    let mut rows = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download out column");
+    rows.sort_unstable();
+    assert_eq!(
+        rows,
+        vec![1u32],
+        "out = {{X in node : exists Y r(X,Y)}} = {{1}} (gate omits nodes 2 and 3)"
+    );
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
 fn augmented_multi_head_per_head_projection_materializes_differing_arity_on_device() {
     // PER-HEAD AUGMENTED PROJECTION: two coupled heads share the base modal predicate
     // `edge/2` but have DIFFERING public arity, so their augmented reduced relations
