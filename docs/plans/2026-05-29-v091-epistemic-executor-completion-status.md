@@ -83,9 +83,25 @@ pilots — accepting them would violate the no-fake / no-CPU-fallback locks.
 
 ## Verification Matrix
 
+### Admissible GPU-native acceptance evidence
+
+These gates exercise the accepted GPU/runtime production path with no forbidden
+host transfers and are valid v0.9.1 acceptance evidence:
+
 - `XLOG_USE_DEVICE_RUNTIME=1 cargo test -p xlog-runtime --test test_epistemic_gpu_workspace --release --features epistemic-logic-tests` → **117 passed** (incl. EGB-04.K2 specific-constraint test)
 - `cargo test -p xlog-cli --test run_cli_tests --release test_xlog_run_epistemic_examples` → **green** (12 successful `examples/epistemic/*.xlog` through `xlog run`, plus the nested-modal negative CLI pilot)
 - epistemic logic suites (split / faeel / g91 / eir / world_view / gpt / examples / executable_plan) → **74 passed, 0 failed**
+- `cargo test -p xlog-prob --features host-io --test epistemic_prob_gpu_accepted_evidence --release -- --test-threads=1` → **31 passed** (accepted GPU epistemic evidence path). NOTE: run **serially** — under parallel test threads these GPU tests exhibit device-contention flakiness on this WSL box (16/31 spuriously fail in parallel, all pass `--test-threads=1`); the serial result is authoritative.
+- `cargo test -p xlog-prob --test epistemic_prob_production_reuse --release` → **7 passed** (production-reuse, no new side engines)
 - `cargo test -p xlog-cuda --test set_ops_tests --release` → **35 passed** (incl. zero-arity union/diff)
 - `cargo test -p xlog-cuda-tests --test certification_suite --release` → **206-cert suite passed**
-- `xlog-gpu`, `xlog-cli` full suites → green
+- `xlog-gpu` full suite, `xlog-cli` full suite → green
+
+### Regression-only — NOT admissible as GPU-native acceptance evidence
+
+- The **full** `cargo test -p xlog-prob --release --features host-io` suite is a
+  regression check only. It includes MC CPU/oracle/host-heavy surfaces
+  (`crates/xlog-prob/tests/mc.rs`, the direct CPU-parity `gpu_mc_vs_cpu.rs`) that
+  perform host transfers by design, so it MUST NOT be cited as a no-host-transfer
+  / GPU-native acceptance gate. Use the targeted `epistemic_prob_gpu_accepted_evidence`
+  and `epistemic_prob_production_reuse` gates above for acceptance instead.
