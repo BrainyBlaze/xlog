@@ -8,8 +8,8 @@ use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 use xlog_ir::{EpistemicExecutablePlan, ExecutionPlan};
 use xlog_logic::epistemic::{
     compile_epistemic_gpu_execution, compile_epistemic_gpu_split_execution,
-    reduce_epistemic_program_to_ordinary, try_reduce_case_a_recursive_epistemic_program,
-    EpistemicSplitExecutablePlan,
+    reduce_epistemic_program_to_ordinary, try_plan_stratified_epistemic_program,
+    try_reduce_case_a_recursive_epistemic_program, EpistemicSplitExecutablePlan,
 };
 use xlog_logic::{BodyLiteral, Compiler, Program, Query, Term};
 use xlog_runtime::executor::JoinIndexCacheStats;
@@ -181,11 +181,34 @@ struct PendingRelationDelta {
     delete: Option<CudaBuffer>,
 }
 
+/// One stratum of a stratified epistemic plan: the epistemic head(s) it
+/// materializes plus the GPU executable plan that computes them.
+///
+/// Lower strata are executed first; their GATED head outputs are written into the
+/// relation store as base relations BEFORE higher strata run, so a higher
+/// stratum's `know`/`possible` over a lower head gates against the materialized
+/// (now-base) relation through the existing EGB-02 membership filter.
+#[derive(Clone)]
+struct StratumExecutable {
+    /// The stratum's GPU plan: single-head or joint multi-head split. The gated
+    /// head relation name(s) are recovered from the plan's reductions at runtime.
+    plan: StratumPlanKind,
+}
+
+#[derive(Clone)]
+enum StratumPlanKind {
+    Single(EpistemicExecutablePlan),
+    Split(EpistemicSplitExecutablePlan),
+}
+
 #[derive(Clone)]
 enum LogicExecutionPlan {
     Ordinary(ExecutionPlan),
     EpistemicSingle(EpistemicExecutablePlan),
     EpistemicSplit(EpistemicSplitExecutablePlan),
+    /// Stratified epistemic execution: ordered strata, each materializing its
+    /// gated head(s) into the store before the next stratum runs.
+    EpistemicStratified(Vec<StratumExecutable>),
 }
 
 /// A compiled Datalog program ready for GPU evaluation.
@@ -235,6 +258,42 @@ impl LogicProgram {
                 plan: LogicExecutionPlan::Ordinary(plan),
                 schemas: compiler.schemas().clone(),
                 rel_ids: compiler.rel_ids().clone(),
+            });
+        }
+
+        // Stratified epistemic execution: a modal literal ranges over an
+        // epistemically-DETERMINED derived head (`b :- know a` where `a :- know p`,
+        // `p` invariant). Partition into strata; each is compiled through the
+        // EXISTING single/joint epistemic path, and at runtime each lower stratum's
+        // GATED head is materialized into the store as a base relation before the
+        // higher stratum gates against it (via the existing EGB-02 membership
+        // filter — never via resolve-into-body, so no double-gating). Example 18's
+        // shared BASE modal `q` (EDB, not a determined derived head) returns `None`
+        // here and falls through to the joint path UNCHANGED.
+        if let Some(stratified) = try_plan_stratified_epistemic_program(&normalized)? {
+            let reduced = reduce_epistemic_program_to_ordinary(&normalized);
+            let mut schema_compiler = Compiler::new();
+            schema_compiler.compile_program(&reduced)?;
+            let schemas = schema_compiler.schemas().clone();
+
+            let mut strata = Vec::with_capacity(stratified.strata.len());
+            for stratum in &stratified.strata {
+                let plan = if epistemic_output_head_predicate_count(&stratum.program) > 1 {
+                    StratumPlanKind::Split(compile_epistemic_gpu_split_execution(
+                        &stratum.program,
+                    )?)
+                } else {
+                    StratumPlanKind::Single(compile_epistemic_gpu_execution(&stratum.program)?)
+                };
+                strata.push(StratumExecutable { plan });
+            }
+            let plan = LogicExecutionPlan::EpistemicStratified(strata);
+            let rel_ids = epistemic_relation_ids(&plan)?;
+            return Ok(Self {
+                program: normalized,
+                plan,
+                schemas,
+                rel_ids,
             });
         }
 
@@ -921,7 +980,9 @@ impl LogicProgram {
     fn ordinary_plan(&self, context: &str) -> Result<&ExecutionPlan> {
         match &self.plan {
             LogicExecutionPlan::Ordinary(plan) => Ok(plan),
-            LogicExecutionPlan::EpistemicSingle(_) | LogicExecutionPlan::EpistemicSplit(_) => {
+            LogicExecutionPlan::EpistemicSingle(_)
+            | LogicExecutionPlan::EpistemicSplit(_)
+            | LogicExecutionPlan::EpistemicStratified(_) => {
                 Err(XlogError::UnsupportedEpistemicConstruct {
                     construct: "epistemic high-level persistent execution".to_string(),
                     context: format!(
@@ -975,6 +1036,81 @@ impl LogicProgram {
                         epistemic_output_relation_name(&component.executable)?,
                         result,
                     ));
+                }
+            }
+            LogicExecutionPlan::EpistemicStratified(strata) => {
+                // Execute strata in topological order on the SAME executor. After
+                // each stratum, write its GATED head output(s) into the store as
+                // base relations so the NEXT stratum's `know`/`possible` over a
+                // lower head reads the gated extension through the existing EGB-02
+                // membership filter (no resolve-into-body, no double-gating).
+                let stratum_count = strata.len();
+                for (stratum_index, stratum) in strata.iter().enumerate() {
+                    let is_last = stratum_index + 1 == stratum_count;
+                    let stratum_results: Vec<(String, EpistemicGpuExecutionResult)> =
+                        match &stratum.plan {
+                            StratumPlanKind::Single(executable) => {
+                                let result = executor.execute_epistemic_gpu_execution(
+                                    executable,
+                                    capacities_for_epistemic_executable(executable)?,
+                                )?;
+                                result.require_runtime_dispatch_certification()?;
+                                vec![(epistemic_output_relation_name(executable)?, result)]
+                            }
+                            StratumPlanKind::Split(split) => {
+                                let executables: Vec<_> = split
+                                    .components
+                                    .iter()
+                                    .map(|component| &component.executable)
+                                    .collect();
+                                let batch = executor
+                                    .execute_epistemic_gpu_execution_batch_with_trace(
+                                        &executables,
+                                        capacities_for_epistemic_split(split)?,
+                                    )?;
+                                batch.require_trace_matches_components(
+                                    "xlog high-level stratified epistemic GPU execution",
+                                )?;
+                                for result in &batch.results {
+                                    result.require_runtime_dispatch_certification()?;
+                                }
+                                split
+                                    .components
+                                    .iter()
+                                    .zip(batch.results)
+                                    .map(|(component, result)| {
+                                        Ok((
+                                            epistemic_output_relation_name(&component.executable)?,
+                                            result,
+                                        ))
+                                    })
+                                    .collect::<Result<Vec<_>>>()?
+                            }
+                        };
+
+                    for (primary_head, result) in stratum_results {
+                        // Materialize every GATED head produced by this stratum into
+                        // the store as a base relation (primary head from
+                        // `final_output`, plus any joint additional heads).
+                        executor.materialize_epistemic_head_relation(
+                            &primary_head,
+                            &result.final_output,
+                        )?;
+                        for (head, buffer) in &result.additional_head_outputs {
+                            executor.materialize_epistemic_head_relation(head, buffer)?;
+                        }
+
+                        // The TOP stratum's heads are the user-visible epistemic
+                        // outputs; surface them as query results. Lower-stratum
+                        // heads are intermediate (materialized for gating only),
+                        // unless the source program explicitly queries them.
+                        if is_last {
+                            queries.extend(epistemic_result_to_query_results(
+                                primary_head,
+                                result,
+                            ));
+                        }
+                    }
                 }
             }
             LogicExecutionPlan::Ordinary(_) => unreachable!("ordinary plans are handled earlier"),
@@ -1072,6 +1208,27 @@ fn epistemic_relation_ids(plan: &LogicExecutionPlan) -> Result<HashMap<String, R
             for component in &split.components {
                 for (name, rel_id) in &component.executable.relation_ids {
                     insert_epistemic_relation_id(&mut rel_ids, name, *rel_id)?;
+                }
+            }
+        }
+        LogicExecutionPlan::EpistemicStratified(strata) => {
+            for stratum in strata {
+                match &stratum.plan {
+                    StratumPlanKind::Single(executable) => {
+                        for (name, rel_id) in &executable.relation_ids {
+                            // Each stratum is a distinct sub-program compiled with a
+                            // fresh compiler, so relation ids legitimately differ
+                            // across strata; keep the last writer per name.
+                            rel_ids.insert(name.clone(), *rel_id);
+                        }
+                    }
+                    StratumPlanKind::Split(split) => {
+                        for component in &split.components {
+                            for (name, rel_id) in &component.executable.relation_ids {
+                                rel_ids.insert(name.clone(), *rel_id);
+                            }
+                        }
+                    }
                 }
             }
         }
