@@ -2027,7 +2027,13 @@ impl EpistemicGpuRuntimePreflight {
         }
         executable.gpu_plan.validate_tuple_membership_bindings()?;
         executable.gpu_plan.validate_solver_contract()?;
-        require_single_epistemic_output_relation(&executable.gpu_plan)?;
+        // A plan may carry MULTIPLE epistemic output heads: a JOINT-SOLVED
+        // coalesced multi-head component shares ONE candidate enumeration +
+        // world-view validation and materializes each head against the shared
+        // accepted world view (see `execute_epistemic_gpu_execution`). Soundness of
+        // the coupling is gated in the logic lowering
+        // (`classify_cross_component_modal_coupling`); the runtime executes the
+        // resulting well-formed plan and is no longer restricted to one head.
         require_epistemic_gpu_kernel_phases(&executable.gpu_plan)?;
         require_epistemic_gpu_buffer_contract(&executable.gpu_plan)?;
 
@@ -2668,7 +2674,19 @@ pub struct EpistemicGpuExecutionResult {
     /// Tuple-membership bindings that were validated and executed for this result.
     pub tuple_membership_bindings: Vec<EpistemicTupleMembershipBinding>,
     /// Device-resident final query output buffer.
+    ///
+    /// For a single epistemic output head this is the only materialized relation.
+    /// For a JOINT-SOLVED coalesced multi-head component this is the PRIMARY head's
+    /// output (the last reduction's head); the remaining coupled heads, each
+    /// materialized against the SAME accepted world view, are in
+    /// [`Self::additional_head_outputs`].
     pub final_output: CudaBuffer,
+    /// Additional coupled-head outputs for a JOINT-SOLVED multi-head component.
+    ///
+    /// Empty for single-head execution. Each entry is `(head_predicate, buffer)`
+    /// for a distinct epistemic output head OTHER than the primary head, filtered
+    /// against the shared accepted world view via that head's row-filter bindings.
+    pub additional_head_outputs: Vec<(String, CudaBuffer)>,
     /// Device-resident final tuple evidence buffer before public projection.
     pub tuple_evidence_output: Option<CudaBuffer>,
     /// Output buffer returned by the reduced production execution plan.
@@ -5338,6 +5356,42 @@ impl Executor {
         reduction_count: usize,
         models_per_reduction: usize,
     ) -> Result<(CudaBuffer, EpistemicGpuFinalTupleMaterializationTrace)> {
+        self.materialize_epistemic_gpu_final_tuples_scoped(
+            workspace,
+            output,
+            gpu_plan,
+            literal_count,
+            candidate_count,
+            reduction_count,
+            models_per_reduction,
+            None,
+        )
+    }
+
+    /// Materialize final query tuples, optionally scoping the modal row-filter to a
+    /// single coalesced head's reductions.
+    ///
+    /// `head_reduction_filter` is the JOINT-SOLVING multi-output seam: the joint
+    /// candidate enumeration + world-view validation runs ONCE over the combined
+    /// modal literals (so the accepted world view in `workspace` is shared by every
+    /// head), then this method is called once per distinct head with that head's
+    /// reduction indices. Only the row-filter bindings whose `reduction_index` is
+    /// in the filter drive that head's output filtering; the full joint plan
+    /// (`gpu_plan`) is still validated and the joint workspace dimensions are
+    /// preserved, so each head is materialized against the SAME accepted world
+    /// view. `None` materializes against every binding (the single-head path).
+    #[allow(clippy::too_many_arguments)]
+    fn materialize_epistemic_gpu_final_tuples_scoped(
+        &self,
+        workspace: &mut EpistemicGpuWorkspace,
+        output: &CudaBuffer,
+        gpu_plan: &EpistemicGpuPlan,
+        literal_count: usize,
+        candidate_count: usize,
+        reduction_count: usize,
+        models_per_reduction: usize,
+        head_reduction_filter: Option<&BTreeSet<usize>>,
+    ) -> Result<(CudaBuffer, EpistemicGpuFinalTupleMaterializationTrace)> {
         gpu_plan.validate_tuple_membership_bindings()?;
         if candidate_count > workspace.layout.rejection_reason_slots {
             return Err(XlogError::ResourceExhausted {
@@ -5421,6 +5475,11 @@ impl Executor {
             .tuple_membership_bindings
             .iter()
             .filter(|binding| binding.bound_output_columns.iter().any(Option::is_some))
+            .filter(|binding| {
+                head_reduction_filter
+                    .map(|reductions| reductions.contains(&binding.reduction_index))
+                    .unwrap_or(true)
+            })
             .collect();
         if row_filter_bindings.len() > u32::MAX as usize {
             return Err(XlogError::ResourceExhausted {
@@ -6195,8 +6254,19 @@ impl Executor {
             &output,
             candidate_count,
         )?;
+        // Distinct epistemic output heads and the reduction indices that feed each.
+        // A single-head plan keeps the unscoped (None) row filter. A JOINT-SOLVED
+        // coalesced multi-head plan materializes EACH head against the SAME accepted
+        // world view by scoping the modal row-filter to that head's reductions.
+        let head_reductions = epistemic_head_reduction_indices(&executable.gpu_plan);
+        let is_multi_head = head_reductions.len() > 1;
+        let primary_head_filter = if is_multi_head {
+            head_reductions.get(output_relation).cloned()
+        } else {
+            None
+        };
         let (final_output, final_tuple_materialization) = self
-            .materialize_epistemic_gpu_final_tuples(
+            .materialize_epistemic_gpu_final_tuples_scoped(
                 &mut prepared.workspace,
                 &output,
                 &executable.gpu_plan,
@@ -6204,7 +6274,44 @@ impl Executor {
                 candidate_count,
                 executable.gpu_plan.reductions.len(),
                 capacities.max_models_per_reduction,
+                primary_head_filter.as_ref(),
             )?;
+        // Materialize every OTHER coupled head against the shared accepted world
+        // view. Each head's reduced relation (already computed jointly by the single
+        // reduced-program dispatch above) is the materialization source; only that
+        // head's modal row-filter bindings apply.
+        let mut additional_head_outputs: Vec<(String, CudaBuffer)> = Vec::new();
+        if is_multi_head {
+            for (head, reductions) in &head_reductions {
+                if head.as_str() == output_relation {
+                    continue;
+                }
+                let head_output = {
+                    let reduced_head = self.store().get(head.as_str()).ok_or_else(|| {
+                        XlogError::UnsupportedEpistemicConstruct {
+                            construct: "epistemic GPU reduced output".to_string(),
+                            context: format!(
+                                "missing reduced output relation {head} after production runtime \
+                                 dispatch for joint multi-head materialization"
+                            ),
+                        }
+                    })?;
+                    self.clone_buffer(reduced_head)?
+                };
+                let (head_final_output, _head_trace) = self
+                    .materialize_epistemic_gpu_final_tuples_scoped(
+                        &mut prepared.workspace,
+                        &head_output,
+                        &executable.gpu_plan,
+                        literal_count,
+                        candidate_count,
+                        executable.gpu_plan.reductions.len(),
+                        capacities.max_models_per_reduction,
+                        Some(reductions),
+                    )?;
+                additional_head_outputs.push((head.clone(), head_final_output));
+            }
+        }
         let tuple_evidence_output = if executable.gpu_plan.final_output_columns.is_some() {
             let mut evidence_plan = executable.gpu_plan.clone();
             evidence_plan.final_output_columns = None;
@@ -6265,6 +6372,7 @@ impl Executor {
             semantic_trace,
             tuple_membership_bindings: executable.gpu_plan.tuple_membership_bindings.clone(),
             final_output,
+            additional_head_outputs,
             tuple_evidence_output,
             output,
             trace,
@@ -6525,6 +6633,25 @@ fn checked_u32_dimension(value: usize, context: &str) -> Result<u32> {
     })
 }
 
+/// Map each distinct epistemic output head to the reduction indices feeding it.
+///
+/// Reduction index = position in `gpu_plan.reductions`, which is exactly the
+/// `reduction_index` carried by every tuple-membership binding, so the returned
+/// sets scope each head's modal row-filter for joint multi-head materialization.
+fn epistemic_head_reduction_indices(
+    gpu_plan: &EpistemicGpuPlan,
+) -> std::collections::BTreeMap<String, BTreeSet<usize>> {
+    let mut heads: std::collections::BTreeMap<String, BTreeSet<usize>> =
+        std::collections::BTreeMap::new();
+    for (reduction_index, reduction) in gpu_plan.reductions.iter().enumerate() {
+        heads
+            .entry(reduction.head_predicate.clone())
+            .or_default()
+            .insert(reduction_index);
+    }
+    heads
+}
+
 fn final_output_columns_for_materialization(
     output: &CudaBuffer,
     gpu_plan: &EpistemicGpuPlan,
@@ -6629,26 +6756,6 @@ fn require_epistemic_gpu_buffer_contract(gpu_plan: &EpistemicGpuPlan) -> Result<
         }
     }
 
-    Ok(())
-}
-
-fn require_single_epistemic_output_relation(gpu_plan: &EpistemicGpuPlan) -> Result<()> {
-    let output_relations: BTreeSet<&str> = gpu_plan
-        .reductions
-        .iter()
-        .map(|reduction| reduction.head_predicate.as_str())
-        .collect();
-    if output_relations.len() > 1 {
-        return Err(XlogError::UnsupportedEpistemicConstruct {
-            construct: "epistemic GPU final output relation".to_string(),
-            context: format!(
-                "single-plan GPU execution materializes one final output buffer, but reductions \
-                 target multiple head predicates {:?}; use split GPU execution for independent \
-                 epistemic outputs",
-                output_relations
-            ),
-        });
-    }
     Ok(())
 }
 

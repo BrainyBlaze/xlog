@@ -1241,8 +1241,55 @@ pub fn compile_epistemic_gpu_execution_with_stats_snapshot(
     program: &Program,
     stats_snapshot: Option<&StatsSnapshot>,
 ) -> Result<EpistemicExecutablePlan> {
+    compile_epistemic_gpu_execution_inner(program, stats_snapshot, false)
+}
+
+/// Lower an epistemic program to its GPU contract and reduced runtime plan.
+///
+/// When `allow_multiple_output_heads` is false (the default monolithic and
+/// single-head split path) the single-output-buffer contract
+/// ([`require_single_epistemic_output_relation`]) is enforced. When true, the
+/// caller has proven the component is a JOINT-SOLVABLE coalesced multi-head
+/// component (see [`classify_cross_component_modal_coupling`]): one candidate
+/// enumeration + world-view validation over the combined modal literals, with
+/// each head materialized against the shared accepted world view at runtime.
+fn compile_epistemic_gpu_execution_inner(
+    program: &Program,
+    stats_snapshot: Option<&StatsSnapshot>,
+    allow_multiple_output_heads: bool,
+) -> Result<EpistemicExecutablePlan> {
     let gpu_plan = plan_epistemic_gpu_execution(program)?;
-    require_single_epistemic_output_relation(&gpu_plan)?;
+    if !allow_multiple_output_heads {
+        require_single_epistemic_output_relation(&gpu_plan)?;
+    } else {
+        // JOINT-SOLVING multi-head materialization shares the plan-global output
+        // projection (`final_output_columns`) across heads. That projection is
+        // derived from the first epistemic rule's head, so a multi-head plan that
+        // needs output PROJECTION (a modal-literal variable not in the head, i.e.
+        // augmentation) would mis-project the other coupled heads. Per-head
+        // projection of an augmented multi-head component is beyond the canonical
+        // SharedModalPredicate target, so fail closed with a precise diagnostic
+        // rather than silently mis-evaluate. (Single-head plans are unaffected:
+        // their projection always matches their one head.)
+        let distinct_output_heads: BTreeSet<&str> = gpu_plan
+            .reductions
+            .iter()
+            .map(|reduction| reduction.head_predicate.as_str())
+            .collect();
+        if distinct_output_heads.len() > 1 && gpu_plan.final_output_columns.is_some() {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "cross-component epistemic coupling".to_string(),
+                context: format!(
+                    "coupled epistemic output heads {:?} require output projection \
+                     (an augmented modal-literal variable absent from the head); the \
+                     joint multi-head path shares one output projection across heads \
+                     and cannot soundly project each augmented head independently, so \
+                     this fails closed",
+                    distinct_output_heads
+                ),
+            });
+        }
+    }
     let reduced_program = reduce_epistemic_program_to_ordinary(program);
     let mut compiler = Compiler::new();
     let reduced_runtime_plan =
@@ -2136,12 +2183,21 @@ pub fn compile_epistemic_gpu_split_execution_with_stats_snapshot(
             continue;
         }
 
-        reject_cross_component_modal_coupling(program, component)?;
+        // Cross-component coupling carrying >1 epistemic output head is either
+        // JOINT-SOLVED (a coalesced component whose modal literals all range over
+        // base/invariant predicates -- a shared accepted world view materializes
+        // every head) or fails closed with a precise typed diagnostic (a modal
+        // literal ranges over an epistemic-derived head of the same component, so
+        // the heads' world-view acceptance is genuinely interdependent and the
+        // independent split would be unsound). A single epistemic head is always
+        // the existing single-output joint path.
+        let coupling = classify_cross_component_modal_coupling(program, component)?;
 
         let component_program = split_component_program(program, component)?;
-        let executable = compile_epistemic_gpu_execution_with_stats_snapshot(
+        let executable = compile_epistemic_gpu_execution_inner(
             &component_program,
             stats_snapshot,
+            coupling.allows_multiple_output_heads(),
         )?;
         components.push(EpistemicSplitExecutableComponent {
             component: component.clone(),
@@ -2237,42 +2293,160 @@ fn format_component_merge_reasons(component: &EpistemicDependencyComponent) -> S
         .join(", ")
 }
 
-/// Fail closed when a coalesced component couples more than one epistemic output
-/// head across component boundaries.
+/// Classification of a coalesced epistemic component's cross-component coupling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CrossComponentCoupling {
+    /// At most one epistemic output head, or a multi-head component whose modal
+    /// literals all range over base/invariant predicates. The shared accepted
+    /// world view materializes every head, so the component is JOINT-SOLVED.
+    JointSolvable,
+}
+
+impl CrossComponentCoupling {
+    /// True when the component's GPU plan is permitted to carry more than one
+    /// epistemic output head (joint multi-head materialization).
+    fn allows_multiple_output_heads(self) -> bool {
+        match self {
+            CrossComponentCoupling::JointSolvable => true,
+        }
+    }
+}
+
+/// Classify a coalesced component's cross-component modal coupling, JOINT-SOLVING
+/// the canonical shared-base-modal case and failing closed (with a precise typed
+/// diagnostic) on genuinely interdependent nested-epistemic coupling.
 ///
-/// This is the cross-component modal-coupling guard. Local splittability analysis
-/// can split two epistemic-derived heads into separate components, but the
-/// dependency graph coalesces them whenever one head feeds another through a
-/// MODAL literal (`know a()`/`possible a()` over an epistemic-derived `a`) or a
-/// SHARED modal predicate — cases where the heads' world-view acceptance is
-/// genuinely interdependent. Such a coalesced component carries more than one
-/// epistemic output head, which the single-output-buffer joint GPU path cannot
-/// materialize, and which is NOT equivalent to any independent split.
+/// A coalesced component carrying more than one epistemic output head is either:
 ///
-/// SAFE coupling is unaffected: an ordinary body consuming an epistemic head
-/// (`b() :- a()` over `a() :- know p()`) coalesces but adds NO second epistemic
-/// output head (`b` has no modal body), so it stays accepted. Components sharing
-/// only an EDB input never coalesce, so they never reach this guard.
-fn reject_cross_component_modal_coupling(
+/// - **Joint-solvable** — every modal literal in the component ranges over a
+///   predicate that is NOT an epistemic-derived head of the component (a
+///   base/invariant relation or an ordinary-derived relation). The accepted
+///   world-view set is then determined independently of which head is being
+///   materialized, so one joint candidate enumeration + world-view validation
+///   over the combined modal literals yields a single accepted world view, and
+///   each head materialized against THAT world view equals its per-head
+///   reduced-program evaluation. This is the canonical `SharedModalPredicate`
+///   joint-solving target (`a(X):-know q(X). b(X):-possible q(X).` over base `q`).
+///
+/// - **Genuinely interdependent (fail closed)** — some modal literal ranges over
+///   an EPISTEMIC-DERIVED head of the same component (`flagged():-know trusted()`
+///   where `trusted` is itself `know`-derived). The modal truth of that predicate
+///   depends on a DIFFERENT head's accepted world view, so the heads' acceptance
+///   is mutually entangled (nested/stratified epistemic dependency). Solving it
+///   would require stratified world-view nesting that the single joint enumeration
+///   does not provide, so it stays FAIL-CLOSED with a typed diagnostic naming the
+///   coupled heads, the modal predicate, and the merge reason -- never silently
+///   mis-evaluated.
+///
+/// SAFE single-epistemic-head coupling (an ordinary body consuming an epistemic
+/// head, `b():-a()` over `a():-know p()`) and EDB-only sharing are both
+/// `JointSolvable` (one or zero coupled heads), so they stay accepted.
+/// Compute the predicates whose extension depends, directly or transitively
+/// through ordinary rules in the component, on an epistemic-derived head.
+///
+/// Seeded with the component's epistemic output heads (each is "tainted" because
+/// its extension is gated by a modal literal), then closed under the rule
+/// dependency relation: a head becomes tainted when ANY rule defining it (within
+/// the component) references an already-tainted predicate in its body. A modal
+/// literal over a tainted predicate is a nested/stratified epistemic dependency.
+fn epistemic_tainted_predicates<'a>(
+    program: &'a Program,
+    component: &EpistemicDependencyComponent,
+    epistemic_heads: &'a [String],
+) -> BTreeSet<&'a str> {
+    let mut tainted: BTreeSet<&str> = epistemic_heads.iter().map(String::as_str).collect();
+    // Iterate the component's rules to a least fixpoint: a rule's head is tainted
+    // if any body atom references a tainted predicate.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for idx in &component.rule_indices {
+            let Some(rule) = program.rules.get(*idx) else {
+                continue;
+            };
+            if tainted.contains(rule.head.predicate.as_str()) {
+                continue;
+            }
+            // `BodyLiteral::atom()` covers relational AND epistemic literals
+            // (the modal predicate), so this taints a head whether it depends on a
+            // tainted predicate ordinarily or through a modal literal.
+            let body_touches_tainted = rule.body.iter().any(|lit| {
+                lit.atom()
+                    .map(|atom| tainted.contains(atom.predicate.as_str()))
+                    .unwrap_or(false)
+            });
+            if body_touches_tainted {
+                tainted.insert(rule.head.predicate.as_str());
+                changed = true;
+            }
+        }
+    }
+    tainted
+}
+
+fn classify_cross_component_modal_coupling(
     program: &Program,
     component: &EpistemicDependencyComponent,
-) -> Result<()> {
+) -> Result<CrossComponentCoupling> {
     let epistemic_heads = component_epistemic_output_heads(program, component);
-    if epistemic_heads.len() > 1 {
-        return Err(XlogError::UnsupportedEpistemicConstruct {
-            construct: "cross-component epistemic coupling".to_string(),
-            context: format!(
-                "epistemic output heads {:?} are coupled into a single dependency \
-                 component (reasons: {}), so their world views are not independent; \
-                 the single-output-buffer joint path cannot materialize multiple \
-                 coupled epistemic outputs and an independent split would be unsound, \
-                 so this fails closed",
-                epistemic_heads,
-                format_component_merge_reasons(component)
-            ),
-        });
+    if epistemic_heads.len() <= 1 {
+        return Ok(CrossComponentCoupling::JointSolvable);
     }
-    Ok(())
+
+    // A modal literal ranging over a predicate whose extension DEPENDS (directly
+    // OR TRANSITIVELY, through ordinary rules in this component) on an
+    // epistemic-derived head is a nested/stratified epistemic dependency that the
+    // single joint enumeration cannot solve soundly: that modal's truth would have
+    // to be re-evaluated under EACH candidate world view chosen for the head it
+    // depends on, which one shared world-view enumeration does not provide.
+    //
+    // "Epistemic-tainted" predicates = epistemic-derived heads, closed under the
+    // ordinary rule dependency relation within the component (least fixpoint). A
+    // modal over any tainted predicate fails closed. A modal over a purely
+    // base/invariant or epistemic-INDEPENDENT predicate is joint-solvable.
+    let tainted = epistemic_tainted_predicates(program, component, &epistemic_heads);
+
+    let mut nested_modal_predicates: BTreeSet<String> = BTreeSet::new();
+    for idx in &component.rule_indices {
+        let Some(rule) = program.rules.get(*idx) else {
+            continue;
+        };
+        for lit in &rule.body {
+            if let BodyLiteral::Epistemic(modal) = lit {
+                if tainted.contains(modal.atom.predicate.as_str()) {
+                    nested_modal_predicates.insert(format!(
+                        "{}/{}",
+                        modal.atom.predicate,
+                        modal.atom.arity()
+                    ));
+                }
+            }
+        }
+    }
+
+    if nested_modal_predicates.is_empty() {
+        // Every modal literal ranges over a predicate that is independent of every
+        // epistemic-derived head, so the accepted world view is determined solely
+        // by base/invariant relations and the component is joint-solvable over one
+        // shared accepted world view.
+        return Ok(CrossComponentCoupling::JointSolvable);
+    }
+
+    Err(XlogError::UnsupportedEpistemicConstruct {
+        construct: "cross-component epistemic coupling".to_string(),
+        context: format!(
+            "epistemic output heads {:?} are coupled into a single dependency \
+             component (reasons: {}) through nested modal literals over \
+             epistemic-derived predicates {:?}; the modal truth of an \
+             epistemic-derived head depends on another head's accepted world view, \
+             so a single joint world-view enumeration would mis-evaluate the \
+             nested modality and an independent split would be unsound, so this \
+             fails closed",
+            epistemic_heads,
+            format_component_merge_reasons(component),
+            nested_modal_predicates.into_iter().collect::<Vec<_>>(),
+        ),
+    })
 }
 
 fn split_component_program(

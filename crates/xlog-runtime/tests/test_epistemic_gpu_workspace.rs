@@ -453,6 +453,282 @@ fn parsed_epistemic_kclique_reduction_dispatches_wcoj_runtime_path() {
         .expect("parsed K5 runtime result should retain dispatch and semantic certification");
 }
 
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn shared_modal_two_head_coupling_joint_solves_multi_output_on_device() {
+    // v0.9.2 Bundle 3 COMPLETION (K1/K2): two epistemic heads share ONE base modal
+    // predicate `q` (SharedModalPredicate coalesce). The coalesced component is
+    // JOINT-SOLVED: ONE candidate enumeration + world-view validation over the
+    // combined modal literals (`know q`, `possible q`), then EACH head relation is
+    // materialized against the SAME accepted world view. `known` and `maybe` must
+    // both yield their exact tuples, with zero CPU fallback.
+    //
+    //   node = {1, 2, 3}, color = {2, 3}, q = {1, 2}.
+    //   known(X) :- node(X),  know q(X).      -> {1, 2}
+    //   maybe(X) :- color(X), possible q(X).  -> {2}
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = faeel
+        pred node(u32).
+        pred color(u32).
+        pred q(u32).
+        pred known(u32).
+        pred maybe(u32).
+        node(1). node(2). node(3).
+        color(2). color(3).
+        q(1). q(2).
+        known(X) :- node(X), know q(X).
+        maybe(X) :- color(X), possible q(X).
+        "#,
+    )
+    .expect("parse shared-modal two-head joint-solving program");
+
+    let split = compile_epistemic_gpu_split_execution(&program)
+        .expect("shared-modal two-head coupling must joint-solve through split compile");
+    assert_eq!(
+        split.components.len(),
+        1,
+        "coupled heads must share ONE jointly-enumerated component"
+    );
+    let executable = &split.components[0].executable;
+    // The single joint plan carries BOTH output heads.
+    let plan_heads: std::collections::BTreeSet<&str> = executable
+        .gpu_plan
+        .reductions
+        .iter()
+        .map(|reduction| reduction.head_predicate.as_str())
+        .collect();
+    assert_eq!(
+        plan_heads,
+        ["known", "maybe"].into_iter().collect(),
+        "joint plan must enumerate both coupled heads"
+    );
+
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("node", upload_unary_u32(&fixture.memory, &[1, 2, 3], "x"));
+    executor.put_relation("color", upload_unary_u32(&fixture.memory, &[2, 3], "x"));
+    executor.put_relation("q", upload_unary_u32(&fixture.memory, &[1, 2], "x"));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 4,
+                max_worlds: 2,
+                max_models_per_reduction: 4,
+            },
+        )
+        .expect("joint multi-head component must execute on device");
+
+    result
+        .require_runtime_dispatch_certification()
+        .expect("joint multi-head runtime result must retain dispatch certification");
+    // ANTI-GAMING: zero CPU fallback for the joint enumeration / validation.
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+    assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
+
+    // Exactly one ADDITIONAL coupled head besides the primary.
+    assert_eq!(
+        result.additional_head_outputs.len(),
+        1,
+        "joint multi-head result must materialize the second coupled head"
+    );
+
+    // Gather (head -> sorted tuples) from primary `final_output` + additional head.
+    let primary_head = executable
+        .gpu_plan
+        .reductions
+        .last()
+        .unwrap()
+        .head_predicate
+        .clone();
+    let mut by_head: std::collections::BTreeMap<String, Vec<u32>> =
+        std::collections::BTreeMap::new();
+    let mut primary_rows = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download primary head column");
+    primary_rows.sort_unstable();
+    by_head.insert(primary_head, primary_rows);
+    for (head, buffer) in &result.additional_head_outputs {
+        let mut rows = fixture
+            .provider
+            .download_column::<u32>(buffer, 0)
+            .expect("download additional head column");
+        rows.sort_unstable();
+        by_head.insert(head.clone(), rows);
+    }
+
+    // K1: EXACT tuples for EVERY coupled head, materialized against the shared
+    // accepted world view.
+    assert_eq!(
+        by_head.get("known").map(Vec::as_slice),
+        Some([1u32, 2u32].as_slice()),
+        "known = node ∩ know q = {{1,2}}; got {:?}",
+        by_head.get("known")
+    );
+    assert_eq!(
+        by_head.get("maybe").map(Vec::as_slice),
+        Some([2u32].as_slice()),
+        "maybe = color ∩ possible q = {{2}}; got {:?}",
+        by_head.get("maybe")
+    );
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn joint_multi_head_output_equals_per_head_split_reference_on_device() {
+    // v0.9.2 Bundle 3 COMPLETION (K2): split-vs-unsplit OUTPUT equivalence.
+    //
+    // REFERENCE = the per-head SPLIT evaluation: each coupled head solved as its
+    // OWN single-head epistemic program (the semantically-correct independent
+    // result against the shared base modal predicate `q`). This reference is kept
+    // OUT of the production path -- production JOINT-SOLVES one component.
+    //
+    // The joint multi-head result (one enumeration, per-head materialization) must
+    // equal the per-head reference EXACTLY for EVERY head. Because the modal
+    // predicate `q` is a base/invariant relation, the accepted world view is
+    // identical across the joint and per-head evaluations, so equivalence holds.
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+
+    let node = [1u32, 2, 3];
+    let color = [2u32, 3];
+    let q = [1u32, 2];
+
+    // --- JOINT (production) path: one coalesced multi-head component. ---
+    let joint_program = parse_program(
+        r#"
+        #pragma epistemic_mode = faeel
+        pred node(u32).
+        pred color(u32).
+        pred q(u32).
+        pred known(u32).
+        pred maybe(u32).
+        node(1). node(2). node(3).
+        color(2). color(3).
+        q(1). q(2).
+        known(X) :- node(X), know q(X).
+        maybe(X) :- color(X), possible q(X).
+        "#,
+    )
+    .expect("parse joint program");
+    let joint = compile_epistemic_gpu_split_execution(&joint_program)
+        .expect("joint program must compile through joint-solving split path");
+    let joint_exec = &joint.components[0].executable;
+    let mut joint_executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &joint_exec.relation_ids {
+        joint_executor.register_relation(*rel, name);
+    }
+    joint_executor.put_relation("node", upload_unary_u32(&fixture.memory, &node, "x"));
+    joint_executor.put_relation("color", upload_unary_u32(&fixture.memory, &color, "x"));
+    joint_executor.put_relation("q", upload_unary_u32(&fixture.memory, &q, "x"));
+    let joint_result = joint_executor
+        .execute_epistemic_gpu_execution(
+            joint_exec,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 4,
+                max_worlds: 2,
+                max_models_per_reduction: 4,
+            },
+        )
+        .expect("joint multi-head execution");
+
+    let mut joint_by_head: std::collections::BTreeMap<String, Vec<u32>> =
+        std::collections::BTreeMap::new();
+    let primary_head = joint_exec
+        .gpu_plan
+        .reductions
+        .last()
+        .unwrap()
+        .head_predicate
+        .clone();
+    let mut primary = fixture
+        .provider
+        .download_column::<u32>(&joint_result.final_output, 0)
+        .expect("download joint primary head");
+    primary.sort_unstable();
+    joint_by_head.insert(primary_head, primary);
+    for (head, buffer) in &joint_result.additional_head_outputs {
+        let mut rows = fixture
+            .provider
+            .download_column::<u32>(buffer, 0)
+            .expect("download joint additional head");
+        rows.sort_unstable();
+        joint_by_head.insert(head.clone(), rows);
+    }
+
+    // --- REFERENCE: each head as its OWN single-head epistemic program. ---
+    let mut reference_by_head: std::collections::BTreeMap<String, Vec<u32>> =
+        std::collections::BTreeMap::new();
+    let head_programs = [
+        (
+            "known",
+            r#"
+            #pragma epistemic_mode = faeel
+            pred node(u32). pred q(u32). pred known(u32).
+            node(1). node(2). node(3). q(1). q(2).
+            known(X) :- node(X), know q(X).
+            "#,
+        ),
+        (
+            "maybe",
+            r#"
+            #pragma epistemic_mode = faeel
+            pred color(u32). pred q(u32). pred maybe(u32).
+            color(2). color(3). q(1). q(2).
+            maybe(X) :- color(X), possible q(X).
+            "#,
+        ),
+    ];
+    for (head, src) in head_programs {
+        let program = parse_program(src).expect("parse per-head reference program");
+        let executable =
+            compile_epistemic_gpu_execution(&program).expect("compile per-head reference");
+        let mut executor = Executor::new(Arc::clone(&fixture.provider));
+        for (name, rel) in &executable.relation_ids {
+            executor.register_relation(*rel, name);
+        }
+        executor.put_relation("node", upload_unary_u32(&fixture.memory, &node, "x"));
+        executor.put_relation("color", upload_unary_u32(&fixture.memory, &color, "x"));
+        executor.put_relation("q", upload_unary_u32(&fixture.memory, &q, "x"));
+        let result = executor
+            .execute_epistemic_gpu_execution(
+                &executable,
+                EpistemicGpuWorkspaceCapacities {
+                    max_candidates: 4,
+                    max_worlds: 2,
+                    max_models_per_reduction: 4,
+                },
+            )
+            .expect("per-head reference execution");
+        let mut rows = fixture
+            .provider
+            .download_column::<u32>(&result.final_output, 0)
+            .expect("download reference head");
+        rows.sort_unstable();
+        reference_by_head.insert(head.to_string(), rows);
+    }
+
+    // K2: joint multi-head output == per-head split reference, EXACT rows per head.
+    assert_eq!(
+        joint_by_head, reference_by_head,
+        "joint multi-head output must equal per-head split reference exactly"
+    );
+    // Sanity: the reference is non-trivial and the modalities genuinely differ.
+    assert_eq!(reference_by_head["known"], vec![1, 2]);
+    assert_eq!(reference_by_head["maybe"], vec![2]);
+}
+
 #[test]
 fn accepted_gpu_execution_dispatches_triangle_wcoj_reduction_through_runtime_path() {
     let Some(fixture) = runtime_fixture() else {
