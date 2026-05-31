@@ -33,6 +33,7 @@ pub const KERNEL_CU_NAMES: &[&str] = &[
     "ilp_exact",
     "epistemic",
     "wcoj",
+    "mc_resident",
 ];
 
 /// Describes a single CUDA module: the .cu file name, the runtime module name
@@ -529,6 +530,11 @@ pub const KERNEL_MODULES: &[KernelModuleSpec] = &[
             "wcoj_clique8_materialize_hg_u64",
         ],
     },
+    KernelModuleSpec {
+        cu_name: "mc_resident",
+        module_name: "xlog_mc_resident",
+        kernels: &["mc_resident_engine"],
+    },
 ];
 
 #[cfg(test)]
@@ -554,8 +560,8 @@ mod tests {
     }
 
     #[test]
-    fn kernel_modules_count_is_24() {
-        assert_eq!(KERNEL_MODULES.len(), 24);
+    fn kernel_modules_count_is_25() {
+        assert_eq!(KERNEL_MODULES.len(), 25);
     }
 
     #[test]

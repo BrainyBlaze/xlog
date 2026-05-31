@@ -13,10 +13,15 @@
 
 mod buffers;
 mod evidence;
+mod resident;
 mod results;
 mod sampling;
 
 pub use evidence::{EvidenceForcing, ForceabilityReason};
+pub use resident::{
+    compile_resident_plan, McNoHostStats, McResidentResult, ResidentPlan, ResidentRejectKind,
+    ResidentRejection,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
