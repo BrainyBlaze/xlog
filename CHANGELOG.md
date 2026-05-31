@@ -239,6 +239,14 @@ v0.8.9 UCR diagnostic surfaces.
 - Added `xlog_logic::diagnose_module_boundaries(...)` for frozen kernel
   predicates, adapter-only fact modules, held-out module declarations, and
   held-out-label candidate provenance.
+- Added the sparse/WCOJ resident MC slice: structurally checked generic positive
+  joins now run from a preallocated world-segmented sparse column arena with
+  device row counters/offsets, arity-3 relation columns, exact no-host
+  instrumentation, recursive sparse fixpoint evidence, kernel-written
+  convergence/overflow diagnostics, an opt-in cooperative multi-block-per-world
+  execution path with fenced cooperative barriers and atomic device
+  change/continue reads, and deterministic `resident_resource_budget` fail-closed
+  diagnostics before device allocation.
 - Added `pyxlog.transfer_diagnostics.compute_transfer_diagnostics(...)` for
   grouped macro F1, minimum group F1, bootstrap confidence intervals, baseline
   uplift, paired sign tests, and missing-domain or missing-variant failures.
@@ -274,8 +282,50 @@ v0.8.9 UCR diagnostic surfaces.
   programs and dispatches them through the existing single/split epistemic GPU
   runtime instead of treating production examples as fixture-only inputs.
 
+### Added
+
+- **GPU-resident Datalog/MC execution engine** (`crates/xlog-prob/src/mc/resident.rs`
+  + `crates/xlog-cuda/kernels/mc_resident.cu`). Replaces the host-sequenced
+  per-sample Monte Carlo loop with a single device megakernel that evaluates ALL
+  worlds in one launch. The sample/world id is the CUDA grid dimension; sampled
+  facts, derived relations, evidence flags, query counts, and fixpoint state are
+  device-resident (bounded-Herbrand dense-boolean). Recursive programs converge
+  via a device-side double-buffered naive fixpoint with a shared change flag and a
+  per-world iteration trace; no host reads drive control flow.
+  - **Distinct from the predecessor `a894aab4`**: that commit only removed
+    *tracked data-plane* HtoD/DtoH from the host loop but kept host orchestration
+    (a Rust per-sample loop, per-sample kernel launches, and per-sample untracked
+    `dtoh_scalar_untracked` row-count reads). The resident engine has **zero host
+    interaction in the measured region**: 0 tracked HtoD, 0 tracked DtoH, 0
+    untracked metadata reads, 0 host loop iterations, 0 per-sample host launches —
+    proven CONSTANT across N=128 and N=1024 (`McNoHostStats`, new
+    `untracked_metadata_dtoh_count` provider counter).
+  - `evaluate_gpu_device*` now routes solely through this engine (no
+    host-orchestrated fallback). Programs outside the supported fragment
+    (bounded-domain positive Datalog; arity ≤ 3, body ≤ 3, ≤ 8 vars, bounded
+    universe) **fail closed** before execution with a typed `ResidentRejection`
+    (kind + construct + context). The CPU path survives only as a seed-matched
+    test oracle, never accepted execution.
+  - Acceptance (`tests/mc_resident.rs`): exact-value GPU-resident pilots (fact
+    marginal, probabilistic marginal, evidence conditioning, multi-evidence,
+    annotated-disjunction/exclusive choice, recursive transitive closure with a
+    non-base derived tuple, ≥3-hop recursion proving >1 fixpoint iteration) + 4
+    fail-closed negative tests.
+
 ### Fixed
 
+- Made the Monte Carlo GPU-native hot loop zero **tracked** (data-plane)
+  host/device transfer: the per-sample query/evidence count-pointer arrays are
+  now built once before the loop (into engine-owned stable row-count buffers) and
+  refreshed each sample with device-to-device copies, eliminating the prior
+  one-tracked-HtoD-per-sample pointer upload. `McDeviceResult` now carries an
+  always-on `hot_loop_transfers` (`McHotLoopTransfers`) measured around the
+  sample/evaluate/count loop. As elsewhere in the engine, bounded control-plane
+  metadata reads (relation `num_rows` scalars via `dtoh_scalar_untracked`) remain
+  and are intentionally not counted by the data-plane transfer contract.
+  `evaluate`/`evaluate_gpu` are clarified as host-result materialization (final
+  count download *after* the loop) and `evaluate_cpu` as a CPU oracle/debug path,
+  never zero-host/GPU-native release evidence.
 - Hardened `scripts/stage_pyxlog_kernels.sh` so pyxlog release kernel staging
   builds the release target before resolving the release `OUT_DIR`, preventing
   stale kernel artifacts from being selected after source changes.
@@ -302,6 +352,14 @@ v0.8.9 UCR diagnostic surfaces.
   staging rebuild order before release `OUT_DIR` discovery.
 - Added `test_xlog_run_epistemic_examples` to execute every epistemic example
   through the compiled CLI and assert production output values.
+- Added the MC transfer-budget gate
+  `tests/mc_gpu_native.rs::mc_hot_loop_is_zero_transfer_both_strategies`
+  (asserts zero hot-loop HtoD/DtoH across the clamped and rejection count
+  strategies) plus GPU-native exact-count pilots for fact-marginal,
+  evidence-conditioning (vs seeded CPU oracle), annotated-disjunction
+  exclusive-choice, and recursive transitive-closure workloads. Classified
+  `tests/mc.rs` and `tests/gpu_mc_vs_cpu.rs` as CPU-oracle/host-output tests,
+  excluded from the zero-host acceptance matrix.
 
 ## [0.8.6] — 2026-05-19
 

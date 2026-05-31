@@ -1,0 +1,18 @@
+# GPU-resident Monte Carlo over a RECURSIVE program.
+#
+# The `mc` engine is the GPU-resident Datalog megakernel: it evaluates every
+# sampled world in a single device launch with a device-side bounded fixpoint
+# (no host loop over samples, no per-sample host reads). Transitive closure is
+# the canonical recursive case — `reach(1,3)` is a NON-base derived tuple that
+# only appears after a second fixpoint iteration (reach(1,2) ⋈ edge(2,3)).
+#
+# Supported fragment: bounded-domain positive Datalog (arity <= 2, body <= 2).
+# Non-monotone / unsupported programs fail closed before execution with a typed
+# diagnostic (there is no host-orchestrated fallback).
+#pragma prob_engine = mc
+0.5::edge(1, 2).
+0.5::edge(2, 3).
+reach(X, Y) :- edge(X, Y).
+reach(X, Z) :- reach(X, Y), edge(Y, Z).
+query(reach(1, 2)).
+query(reach(1, 3)).

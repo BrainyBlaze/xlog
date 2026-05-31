@@ -30,6 +30,18 @@ rule-weight training, differentiable proof traces, learned-rule inventories,
 CUDA host-transfer audits, module-boundary diagnostics, grouped transfer
 metrics, and the BFO UCR validation package.
 
+Branch checkpoint (May 31, 2026): the MC resident engine now includes a bounded
+sparse/WCOJ production slice for generic positive joins. `evaluate_gpu_device*`
+continues to route through the resident no-host engine; exact resident pilots
+cover single joins, multiway joins, arity-3 relation input, rule chaining,
+recursive device-side fixpoint traces, device sparse row counts/offsets,
+kernel-written convergence/overflow diagnostics, cooperative multi-block-per-world
+recursion with fenced cooperative barriers and atomic device change/continue
+reads, constant no-host counters, and fail-closed preallocation budget
+diagnostics. The dense bitset remains a
+bounded device-side membership index, not the final unbounded out-of-core
+sparse columnar engine.
+
 This roadmap is version-oriented so planned work is not hidden inside subsystem
 sections. Historical and current-main work uses checked boxes. Future work uses
 unchecked boxes and is assigned to a concrete future version.
@@ -1864,6 +1876,41 @@ validator.
 - [x] Add alternative knowledge compilers such as c2d and miniC2D. Evidence:
       `c2d_and_minic2d_compiler_adapters_are_explicitly_represented` in
       `cargo test -p xlog-prob --test epistemic_prob`.
+- [x] Make the Monte Carlo GPU-native hot loop zero **tracked** (data-plane)
+      host transfer: per-sample query/evidence count-pointer arrays are built
+      once (into engine-owned stable row-count buffers) and refreshed each sample
+      via device-to-device copies, removing the prior per-sample HtoD upload.
+      Bounded control-plane metadata reads (`num_rows` scalars via
+      `dtoh_scalar_untracked`) remain, exempted by the engine-wide
+      data-plane contract. The boundary is measured via
+      `McDeviceResult::hot_loop_transfers` and asserted across the
+      clamped and rejection strategies plus fact-marginal, evidence,
+      annotated-disjunction, and recursive pilots. Host-facing
+      `evaluate`/`evaluate_gpu` are documented as host-result materialization
+      (final-count download after the loop); `evaluate_cpu` is a CPU oracle only.
+      Zero-host MC acceptance is `tests/mc_gpu_native.rs` and
+      `tests/gpu_mc_device_counts.rs`, **not** a full `cargo test -p xlog-prob`
+      run (which includes CPU-oracle `tests/mc.rs` / `tests/gpu_mc_vs_cpu.rs`).
+      Evidence: `cargo test -p xlog-prob --release --features host-io --test
+      mc_gpu_native -- --test-threads=1`.
+- [x] **GPU-resident Datalog/MC execution engine** — supersede the above
+      (`a894aab4`) host-orchestrated loop entirely. A single megakernel
+      (`mc_resident.cu` + `mc/resident.rs`) evaluates ALL worlds in one launch
+      with the sample/world id as the CUDA grid dimension; recursive programs use
+      a device-side double-buffered naive fixpoint with a shared change flag.
+      The measured region has **zero host interaction** (0 tracked HtoD/DtoH,
+      **0 untracked metadata reads**, 0 host loop iterations, 0 per-sample host
+      launches), proven constant across N=128/1024 via `McNoHostStats`. Whereas
+      `a894aab4` only removed *tracked* transfers but kept per-sample host
+      orchestration + untracked `dtoh_scalar_untracked` reads, this engine removes
+      host orchestration entirely. `evaluate_gpu_device*` route solely through it
+      (no fallback); unsupported programs fail closed with typed
+      `ResidentRejection`. The legacy host-loop Rust (`evaluate_gpu_counts_with`,
+      `build_gpu_plan`, `sampling.rs`, dead `buffers.rs`) is deleted.
+      Evidence: `cargo test -p xlog-prob --release --features host-io --test
+      mc_resident -- --test-threads=1` (exact-value resident pilots, including
+      sparse arity-3 WCOJ input, plus fail-closed
+      negatives).
 
 ### Documentation and Tests
 

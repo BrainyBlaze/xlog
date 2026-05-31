@@ -1273,6 +1273,13 @@ fn run_probabilistic(args: ProbArgs) -> Result<()> {
                 let prog = McProgram::compile_source_with_gpu(&source, config)?;
                 let mut cfg = McEvalConfig::from_directives(&parsed_program.directives)?;
                 apply_mc_cli_overrides(&args, &mut cfg)?;
+                // `evaluate` runs the GPU-native device hot loop and then
+                // materializes the result on the host (downloads the final
+                // query/evidence counts after the loop) so the CLI can print
+                // probabilities and confidence intervals. The hot loop itself is
+                // zero-host; this final download is host-result materialization,
+                // not a hot-loop transfer. Device-resident consumers that want to
+                // keep counts on the GPU use `McProgram::evaluate_gpu_device`.
                 let result = prog.evaluate(cfg)?;
                 emit_prob_mc(result, args.output, args.output_dir.as_deref())
             }

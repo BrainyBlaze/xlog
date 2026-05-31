@@ -283,6 +283,7 @@ pub const PACK_MODULE: &str = "xlog_pack";
 pub const CIRCUIT_MODULE: &str = "xlog_circuit";
 pub const MC_SAMPLE_MODULE: &str = "xlog_mc_sample";
 pub const MC_EVAL_MODULE: &str = "xlog_mc_eval";
+pub const MC_RESIDENT_MODULE: &str = "xlog_mc_resident";
 pub const ARITH_MODULE: &str = "xlog_arith";
 pub const SAT_MODULE: &str = "xlog_sat";
 pub const D4_MODULE: &str = "xlog_d4";
@@ -297,8 +298,8 @@ pub const ILP_EXACT_MODULE: &str = "xlog_ilp_exact";
 pub const EPISTEMIC_MODULE: &str = "xlog_epistemic";
 pub const WCOJ_MODULE: &str = "xlog_wcoj";
 
-// Compile-time check: kernel manifest lists exactly 24 modules.
-const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 24);
+// Compile-time check: kernel manifest lists exactly 25 modules.
+const _: () = assert!(crate::kernel_manifest_data::KERNEL_CU_NAMES.len() == 25);
 
 /// Kernel function names in the GPU WCOJ module.
 pub mod wcoj_kernels {
@@ -359,6 +360,13 @@ pub mod mc_eval_kernels {
     pub const MC_EVAL_MASK_AD: &str = "mc_eval_mask_ad_choice";
     pub const MC_EVAL_QUERY_EVIDENCE_TRUTH: &str = "mc_eval_query_evidence_truth";
     pub const MC_EVAL_ACCUMULATE_COUNTS: &str = "mc_accumulate_counts";
+}
+
+/// Kernel function names in the GPU-resident Datalog/MC engine module.
+pub mod mc_resident_kernels {
+    /// Single megakernel: evaluates all MC worlds to fixpoint and counts
+    /// query/evidence satisfaction with zero host interaction in-region.
+    pub const MC_RESIDENT_ENGINE: &str = "mc_resident_engine";
 }
 
 /// Kernel function names in the arithmetic module
@@ -958,6 +966,13 @@ pub struct CudaKernelProvider {
     ptx_load_profile: Option<PtxLoadProfile>,
     /// Column-level D2H transfer counter (incremented by each download_column_* call)
     d2h_transfer_count: AtomicU64,
+    /// Untracked control-plane metadata D2H read counter. Incremented by every
+    /// `dtoh_scalar_untracked` / `dtoh_small_metadata_untracked` call. These are
+    /// bounded metadata reads (row counts, scan totals) exempt from the
+    /// data-plane transfer contract, but the GPU-resident MC engine's no-host
+    /// gate must prove they are *also* zero inside the measured region — hence an
+    /// explicit, resettable counter.
+    untracked_metadata_dtoh_count: AtomicU64,
     /// Strict deterministic-Datalog D2H gate. When `true`, any data-plane D2H
     /// transfer (column downloads or `dtoh_sync_copy_into_tracked`) increments
     /// the violation counter and returns `XlogError::Execution` from the
@@ -1129,6 +1144,7 @@ impl CudaKernelProvider {
             transfer_tracker: HostTransferTracker::default(),
             ptx_load_profile,
             d2h_transfer_count: AtomicU64::new(0),
+            untracked_metadata_dtoh_count: AtomicU64::new(0),
             strict_deterministic_d2h: AtomicBool::new(false),
             deterministic_d2h_violations: AtomicU64::new(0),
             recorded_op_stream: OnceLock::new(),
@@ -1527,6 +1543,18 @@ impl CudaKernelProvider {
         self.d2h_transfer_count.store(0, Ordering::Relaxed);
     }
 
+    /// Count of untracked control-plane metadata D2H reads
+    /// (`dtoh_scalar_untracked` + `dtoh_small_metadata_untracked`).
+    pub fn untracked_metadata_dtoh_count(&self) -> u64 {
+        self.untracked_metadata_dtoh_count.load(Ordering::Relaxed)
+    }
+
+    /// Reset the untracked metadata D2H read counter to zero.
+    pub fn reset_untracked_metadata_dtoh_count(&self) {
+        self.untracked_metadata_dtoh_count
+            .store(0, Ordering::Relaxed);
+    }
+
     /// Enable the strict deterministic-Datalog D2H gate.
     ///
     /// While enabled, any data-plane device-to-host transfer (column downloads
@@ -1663,6 +1691,8 @@ impl CudaKernelProvider {
             ))
         })?;
         let mut buf: Vec<T> = vec![T::default(); count];
+        self.untracked_metadata_dtoh_count
+            .fetch_add(1, Ordering::Relaxed);
         self.device
             .inner()
             .dtoh_sync_copy_into(&slice, &mut buf)
@@ -1698,6 +1728,8 @@ impl CudaKernelProvider {
             ))
         })?;
         let mut buf = [T::default()];
+        self.untracked_metadata_dtoh_count
+            .fetch_add(1, Ordering::Relaxed);
         self.device
             .inner()
             .dtoh_sync_copy_into(&slice, &mut buf)

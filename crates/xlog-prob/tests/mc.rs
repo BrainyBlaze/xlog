@@ -1,4 +1,14 @@
 #![cfg(feature = "host-io")]
+//! CLASSIFICATION: host-output / CPU-oracle MC test binary — NOT GPU-native
+//! zero-host acceptance.
+//!
+//! This binary exercises MC through the host-facing `evaluate`/`evaluate_gpu`
+//! (which download the final McResult after the hot loop) and the
+//! `evaluate_cpu` oracle. It validates probability/CI semantics, evidence and
+//! annotated-disjunction behavior, and forceability — it is slow and host-heavy
+//! and deliberately does NOT measure the hot-loop transfer budget. It must not
+//! count as zero-host / GPU-native evidence; the authoritative GPU-native gates
+//! are `tests/mc_gpu_native.rs` and `tests/gpu_mc_device_counts.rs`.
 
 use xlog_cuda::CudaDevice;
 use xlog_prob::mc::{ForceabilityReason, McEvalConfig, McProgram, McSamplingMethod};

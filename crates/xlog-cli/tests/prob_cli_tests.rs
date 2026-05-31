@@ -17,7 +17,10 @@ fn test_xlog_prob_exact_and_mc() {
         .nth(2)
         .expect("workspace root");
     let exact_program = repo_root.join("examples/prob/01-wet-conditioning.xlog");
-    let mc_program = repo_root.join("examples/prob/04-nonmonotone-mc.xlog");
+    // GPU-resident MC over a recursive program (supported fragment). The prior
+    // `04-nonmonotone-mc.xlog` used negation, which the resident engine now
+    // rejects fail-closed (no host-orchestrated fallback).
+    let mc_program = repo_root.join("examples/prob/04-recursive-mc.xlog");
 
     // Use Command::cargo_bin which resolves via CARGO_BIN_EXE_xlog,
     // inheriting the same feature flags (including host-io) from the test build.

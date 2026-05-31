@@ -215,22 +215,77 @@ This compilation is implemented in `crates/xlog-prob/src/mc.rs` (`compile_sampli
 
 Sampling uses `CudaKernelProvider::sample_bernoulli_matrix_device(...)`, which calls `kernels/mc_sample.ptx` to generate a row-major `[samples][num_vars]` matrix of 0/1 bytes on the GPU. Sampling is deterministic given `seed`.
 
-### Device-only evaluation (GPU-native counts)
+### GPU-resident execution engine (device-only counts)
 
-The primary GPU-native API is:
+The MC execution path is the **GPU-resident Datalog engine**
+(`crates/xlog-prob/src/mc/resident.rs` + `crates/xlog-cuda/kernels/mc_resident.cu`),
+exposed via:
 
 - `McProgram::evaluate_gpu_device(...) -> McDeviceResult`
+- `McProgram::evaluate_gpu_device_with_provider(...) -> McDeviceResult` (caller-supplied provider)
+- `McProgram::evaluate_resident_with_provider(...) -> McResidentResult` (raw device result + no-host stats)
 
-It evaluates each sampled world on the GPU (host control-plane launches only) and returns device-resident count buffers:
+It evaluates **all** sampled worlds in a single megakernel launch and returns
+device-resident count buffers (`query_counts`, `evidence_count`) plus a per-world
+`iter_trace`. The sample/world id is the CUDA grid dimension. Sampled facts,
+derived relations, evidence flags, query counts, sparse row counts, sparse
+world offsets, and fixpoint state are all device-resident.
 
-- `query_counts: DeviceSlice<u32>` (one per query atom)
-- `evidence_count: DeviceSlice<u32>` (samples satisfying all evidence)
+The current sparse/WCOJ resident engine stores each world in a preallocated
+columnar arena (`slot`, `arg0`, `arg1`, `arg2`) with kernel-populated device row
+counters, device world offsets, convergence flags, and sparse-arena overflow
+flags. A dense bounded bitset remains only as a device-side membership
+index for duplicate suppression and query/evidence membership checks; it is no
+longer the only execution proof. Generic positive joins are evaluated from the
+sparse row arena by binding variables from matching body rows and appending
+derived heads with device atomic cursors. Recursive programs converge in the
+same megakernel through a device-side double-buffered fixpoint. The default path
+uses one CUDA block per world; setting `XLOG_MC_RESIDENT_BLOCKS_PER_WORLD>1`
+before setup switches the same kernel to a cooperative multi-block-per-world
+launch with grid synchronization, explicit device fences around cooperative
+barriers, atomic reads of device change/continue flags, and device-written block
+participation counters. The final per-world convergence state is written to
+device memory, and no host read drives control flow.
 
-Internally (`crates/xlog-prob/src/mc.rs`), MC evaluation:
+The supported production fragment remains bounded (arity <= 3, body <= 3,
+<= 8 variables). Programs that would exceed a configured deterministic resident
+arena budget fail closed before device allocation with
+`XlogError::ResourceExhausted` (`resident_resource_budget`, `bound_bytes`,
+`budget_bytes`); there is no CPU or host-sizing fallback.
 
-1. Keeps the sample matrix on device and builds per-sample probabilistic fact buffers on the GPU.
-2. Evaluates the deterministic core using `xlog-runtime::Executor` (GPU relation store + GPU operators).
-3. Computes query/evidence truth flags and accumulates counts on-device (`kernels/mc_eval.cu`).
+#### No host interaction in the measured region (K1) — distinct from `a894aab4`
+
+The predecessor commit `a894aab4` ("zero tracked hot loop") only removed *tracked
+data-plane* HtoD/DtoH from a host loop that **still orchestrated per sample**: a
+Rust `for sample_idx` loop, per-sample kernel launches, and per-sample untracked
+`dtoh_scalar_untracked` row-count reads. That is **not** the guarantee here.
+
+The resident engine's measured region is a single megakernel launch (+ one
+post-launch sync). It has **zero host interaction**: 0 tracked HtoD, 0 tracked
+DtoH, **0 untracked metadata reads** (`dtoh_scalar_untracked` is never called
+in-region — a dedicated `untracked_metadata_dtoh_count` provider counter proves
+it), 0 host loop iterations, 0 per-sample host launches. This is measured via
+`McNoHostStats` (snapshots around the launch) and proven **constant across
+N=128 and N=1024** (nothing scales per-sample on the host). Static setup (the
+seeded sample matrix, force arrays, plan upload, buffer allocation) happens
+before the region; final aggregates are read only after it.
+
+There is **no host-orchestrated fallback**: programs outside the supported
+fragment (bounded-domain positive Datalog — arity ≤ 3, body ≤ 3, ≤ 8 vars,
+bounded universe) **fail closed** before execution with a typed
+`ResidentRejection` (kind + construct + context). The CPU path
+(`evaluate_cpu`, `tests/mc.rs`, `tests/gpu_mc_vs_cpu.rs`) is a seed-matched test
+oracle only — never accepted execution.
+
+**Acceptance scope.** GPU-native no-host evidence is `tests/mc_resident.rs`
+(seven exact sparse resident pilots, including ternary-relation input, with
+device sparse row-count evidence plus device-written offsets/convergence/overflow
+diagnostics and a cooperative two-block-per-world recursion pilot,
+recursion with a non-base derived tuple and >1 fixpoint iteration, plus
+fail-closed negative tests) and the device-count gates
+`tests/mc_gpu_native.rs` / `tests/gpu_mc_device_counts.rs`. A full
+`cargo test -p xlog-prob` run includes CPU-oracle/host-output tests and is **not**
+no-host evidence.
 
 ### Evidence conditioning and uncertainty reporting
 
@@ -251,9 +306,14 @@ For each query, `mc` estimates `P(Q|E)` as a binomial proportion and reports:
 
 Host-readable probability outputs are behind `--features host-io`:
 
-- `McProgram::evaluate(...) -> McResult` downloads the device counts and computes probabilities + confidence intervals.
-- `McProgram::evaluate_cpu(...) -> McResult` is a validation/debug path that downloads the sample matrix and evaluates via
-  a CPU relation store.
+- `McProgram::evaluate(...) -> McResult` (and its alias `evaluate_gpu(...)`) run the
+  GPU-native device loop and then **materialize the result on the host** by
+  downloading the final query/evidence counts *after* the hot loop. This is
+  host-result materialization, not a hot-loop transfer — the `_gpu` suffix marks
+  GPU compute, it does not imply a zero-host result.
+- `McProgram::evaluate_cpu(...) -> McResult` is a CPU **oracle/debug** path that
+  downloads the full sample matrix and evaluates worlds on the host. It is never
+  GPU-native and never release evidence; it exists only as a seed-matched oracle.
 
 ---
 
