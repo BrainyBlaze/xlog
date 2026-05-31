@@ -208,40 +208,31 @@ pub struct McResult {
     pub sampling_method: McSamplingMethod,
 }
 
-/// **Tracked** (data-plane) host<->device transfers observed *inside* the MC
-/// sample/evaluate/count hot loop (i.e. between the static setup uploads and the
-/// final-count downloads).
+/// **Legacy back-compat surface** — tracked (data-plane) host<->device transfer
+/// deltas measured around the MC measured region.
 ///
-/// "Tracked" means transfers recorded by the provider's `HostTransferTracker`
-/// (`record_htod`/`record_dtoh`) — the data-plane bytes that define GPU-native
-/// execution. Consistent with the rest of the XLOG engine, **bounded
-/// control-plane metadata** reads (e.g. reading a relation's `num_rows` scalar
-/// via `dtoh_scalar_untracked` after a GPU operator sizes its output) are
-/// *intentionally not counted*: they are O(4 bytes) scalars, not data-plane
-/// downloads, and they are exempted by the same metadata-vs-data-plane contract
-/// the deterministic-D2H gate enforces elsewhere. Such metadata reads still
-/// occur per sample (e.g. inside dedup / relational operators).
-///
-/// For a GPU-native MC run every field here must be zero: static *data-plane*
-/// setup uploads happen before the loop and final-count downloads happen after
-/// it. This struct is the always-on regression guard for that boundary (K1) —
-/// the transfer-budget test asserts `is_zero()`, and any future code that
-/// smuggles a *tracked* HtoD/DtoH (a real data-plane transfer) into the loop
-/// will trip it.
+/// This struct dates from the predecessor `a894aab4` engine, which removed only
+/// *tracked* data-plane transfers from a still-host-orchestrated loop. The
+/// current resident megakernel engine has a *stronger* property — **no host
+/// interaction at all** in the measured region — so the authoritative contract
+/// now lives in [`McNoHostStats`] (`McResidentResult::no_host`), which also
+/// counts untracked metadata reads, host fixpoint iterations, and in-region
+/// device allocations. `McDeviceResult` retains this field for API
+/// back-compatibility; for the resident engine its tracked-call fields are zero.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct McHotLoopTransfers {
-    /// Tracked host-to-device calls during the hot loop.
+    /// Tracked host-to-device calls in the measured region.
     pub htod_calls: u64,
-    /// Tracked device-to-host calls during the hot loop.
+    /// Tracked device-to-host calls in the measured region.
     pub dtoh_calls: u64,
-    /// Tracked host-to-device bytes during the hot loop.
+    /// Tracked host-to-device bytes in the measured region.
     pub htod_bytes: u64,
-    /// Tracked device-to-host bytes during the hot loop.
+    /// Tracked device-to-host bytes in the measured region.
     pub dtoh_bytes: u64,
 }
 
 impl McHotLoopTransfers {
-    /// True when no tracked host/device transfer occurred inside the hot loop.
+    /// True when no tracked host/device transfer occurred in the measured region.
     pub fn is_zero(&self) -> bool {
         self.htod_calls == 0 && self.dtoh_calls == 0
     }
@@ -258,8 +249,9 @@ pub struct McDeviceResult {
     pub nonmonotone_cycles: usize,
     pub nonmonotone_iteration_limit_hits: usize,
     pub sampling_method: McSamplingMethod,
-    /// Tracked host/device transfers observed inside the sample/evaluate/count
-    /// hot loop. Zero for a GPU-native run (K1).
+    /// Legacy back-compat field: tracked transfers measured around the resident
+    /// engine's measured region (zero). The authoritative no-host contract is
+    /// [`McNoHostStats`] on [`McResidentResult`]; see [`McHotLoopTransfers`].
     pub hot_loop_transfers: McHotLoopTransfers,
 }
 
@@ -351,12 +343,12 @@ impl McProgram {
         self.bernoulli_probs.len()
     }
 
-    /// Host-facing MC evaluation: runs the GPU-native device loop
+    /// Host-facing MC evaluation: runs the resident megakernel engine
     /// ([`Self::evaluate_gpu_device_with_provider`]) and then **materializes the
     /// result on the host** by downloading the final query/evidence counts
-    /// *after* the hot loop. The download is a host-result materialization, not a
-    /// hot-loop transfer — the GPU-native zero-transfer property (K1) belongs to
-    /// the device loop, not to this convenience wrapper. Use
+    /// *after* the measured region. The download is a host-result
+    /// materialization, not part of the measured region — the no-host property
+    /// belongs to the resident engine, not to this convenience wrapper. Use
     /// [`Self::evaluate_gpu_device`] when you want device-resident counts with no
     /// host download at all.
     #[cfg(feature = "host-io")]
@@ -605,30 +597,38 @@ impl McProgram {
     }
 
     /// Alias for [`Self::evaluate`]: GPU device evaluation followed by host-result
-    /// materialization (final-count download after the hot loop). The `_gpu`
-    /// suffix denotes that the *compute* runs on the GPU — it does **not** imply a
-    /// zero-host result, since it returns a host [`McResult`]. For the
+    /// materialization (final-count download after the measured region). The
+    /// `_gpu` suffix denotes that the *compute* runs on the GPU — it does **not**
+    /// imply a zero-host result, since it returns a host [`McResult`]. For the
     /// device-resident, no-host-download API use [`Self::evaluate_gpu_device`].
     #[cfg(feature = "host-io")]
     pub fn evaluate_gpu(&self, cfg: McEvalConfig) -> Result<McResult> {
         self.evaluate(cfg)
     }
 
-    /// GPU-native device-resident MC evaluation. Returns [`McDeviceResult`] with
-    /// counts left on the device (no host download) and the measured
-    /// [`McHotLoopTransfers`]. This is the API whose sample/evaluate/count hot
-    /// loop is zero-transfer (K1).
+    /// GPU-native device-resident MC evaluation via the resident megakernel
+    /// engine ([`resident`]). Returns [`McDeviceResult`] with counts left on the
+    /// device (no host download). The engine evaluates all worlds in a single
+    /// launch with **no host interaction in the measured region** (no host
+    /// sample loop, no per-sample/per-operator host launches or allocations, no
+    /// tracked transfers, and no untracked metadata reads); see
+    /// [`McResidentResult::no_host`] / [`McNoHostStats::is_no_host`] for the full
+    /// measured contract.
     pub fn evaluate_gpu_device(&self, cfg: McEvalConfig) -> Result<McDeviceResult> {
         let provider = Arc::new(self.provider()?);
         self.evaluate_gpu_device_with_provider(cfg, provider)
     }
 
     /// GPU-native device-resident MC evaluation using a caller-supplied provider
-    /// (enables provider/buffer reuse across calls). Static setup uploads happen
-    /// before the sample/evaluate/count hot loop; the hot loop performs zero
-    /// tracked HtoD/DtoH transfers (verified by `McDeviceResult::hot_loop_transfers`,
-    /// gated by `tests/mc_gpu_native.rs`). Counts remain device-resident; the
-    /// caller decides whether/when to download them.
+    /// (enables provider/buffer reuse across calls). Static setup (arena
+    /// allocation, plan upload, sampling) happens before the measured region;
+    /// the measured region is a single resident-engine launch with **zero host
+    /// interaction** — no host loop over samples or fixpoint iterations, no
+    /// per-sample/per-operator host launches or device allocations, no tracked
+    /// HtoD/DtoH transfers, and no untracked metadata reads. The full contract is
+    /// measured by [`McNoHostStats`] (`McResidentResult::no_host`) and gated by
+    /// `tests/mc_resident.rs`. Counts remain device-resident; the caller decides
+    /// whether/when to download them.
     pub fn evaluate_gpu_device_with_provider(
         &self,
         cfg: McEvalConfig,
@@ -646,13 +646,16 @@ impl McProgram {
             total_samples: r.total_samples,
             seed: r.seed,
             confidence: r.confidence,
-            // The bounded-domain dense engine evaluates non-monotone fixpoints on
-            // device only when accepted; nonmonotone SCC bookkeeping is not part of
-            // this engine's reported state.
+            // The resident engine accepts only bounded positive Datalog and
+            // device-evaluates its fixpoint; legacy non-monotone SCC bookkeeping
+            // is not part of this engine's reported state.
             nonmonotone_sccs: 0,
             nonmonotone_cycles: 0,
             nonmonotone_iteration_limit_hits: 0,
             sampling_method: r.sampling_method,
+            // Back-compat surface: `hot_loop_transfers` reports the resident
+            // engine's tracked transfers (zero). Richer no-host evidence (untracked
+            // reads, fixpoint/alloc counts) lives in `McResidentResult::no_host`.
             hot_loop_transfers: McHotLoopTransfers {
                 htod_calls: r.no_host.tracked_htod_calls,
                 dtoh_calls: r.no_host.tracked_dtoh_calls,
