@@ -670,259 +670,31 @@ impl McProgram {
         cfg: McEvalConfig,
         provider: Arc<CudaKernelProvider>,
     ) -> Result<McDeviceResult> {
-        let (method, forcing) = self.resolve_sampling_method(cfg.sampling_method)?;
-        let strategy = McCountStrategy::from_method(method);
-
-        let prob_query_count = self.queries.len();
-        let evidence_count = self.evidence.len();
-        let prob_query_count_u32 = u32::try_from(prob_query_count).map_err(|_| {
-            XlogError::Execution(format!(
-                "MC inference requires queries <= u32::MAX (got {})",
-                prob_query_count
-            ))
-        })?;
-        let evidence_count_u32 = u32::try_from(evidence_count).map_err(|_| {
-            XlogError::Execution(format!(
-                "MC inference requires evidence <= u32::MAX (got {})",
-                evidence_count
-            ))
-        })?;
-        // In QueriesOnly mode, pass 0 evidence to the truth kernel so it sets evidence_ok = 1
-        let effective_evidence_count_u32 = match strategy {
-            McCountStrategy::QueriesOnly => 0u32,
-            McCountStrategy::QueriesAndEvidence => evidence_count_u32,
-        };
-
-        let mut d_query_counts = provider.memory().alloc::<u32>(prob_query_count)?;
-        if prob_query_count > 0 {
-            provider
-                .device()
-                .inner()
-                .memset_zeros(&mut d_query_counts)
-                .map_err(|e| XlogError::Kernel(format!("Failed to zero MC query counts: {}", e)))?;
-        }
-        let mut d_evidence_count = provider.memory().alloc::<u32>(1)?;
-        // Design note (QueriesOnly mode): The spec requires evidence_count ==
-        // cfg.samples at the end of inference.  We achieve this without a
-        // separate HtoD upload: the truth kernel always sets evidence_ok = 1
-        // (because effective_evidence_count = 0 ⇒ all evidence trivially
-        // satisfied), so the accumulate kernel atomicAdd's evidence_count once
-        // per sample, arriving at exactly cfg.samples after the loop.
-        provider
-            .device()
-            .inner()
-            .memset_zeros(&mut d_evidence_count)
-            .map_err(|e| XlogError::Kernel(format!("Failed to zero MC evidence count: {}", e)))?;
-
-        let mut d_query_flags = provider.memory().alloc::<u8>(prob_query_count)?;
-        let mut d_evidence_ok = provider.memory().alloc::<u8>(1)?;
-
-        // In QueriesOnly mode, skip evidence-side buffer allocations.
-        // We still need 1-element sentinel slices for the truth kernel args.
-        let evidence_alloc_count = match strategy {
-            McCountStrategy::QueriesOnly => 1,
-            McCountStrategy::QueriesAndEvidence => evidence_count.max(1),
-        };
-        let mut d_evidence_expected = provider.memory().alloc::<u8>(evidence_alloc_count)?;
-
-        if evidence_count > 0 && strategy == McCountStrategy::QueriesAndEvidence {
-            let expected: Vec<u8> = self
-                .evidence
-                .iter()
-                .map(|(_, v)| if *v { 1u8 } else { 0u8 })
-                .collect();
-            buffers::upload_slice(
-                &provider,
-                &expected,
-                &mut d_evidence_expected,
-                "MC evidence expected",
-            )?;
-        }
-
-        let truth_fn = provider
-            .device()
-            .inner()
-            .get_func(
-                MC_EVAL_MODULE,
-                mc_eval_kernels::MC_EVAL_QUERY_EVIDENCE_TRUTH,
-            )
-            .ok_or_else(|| {
-                XlogError::Kernel("mc_eval_query_evidence_truth kernel not found".to_string())
-            })?;
-        let accum_fn = provider
-            .device()
-            .inner()
-            .get_func(MC_EVAL_MODULE, mc_eval_kernels::MC_EVAL_ACCUMULATE_COUNTS)
-            .ok_or_else(|| {
-                XlogError::Kernel("mc_accumulate_counts kernel not found".to_string())
-            })?;
-        let accum_config = LaunchConfig {
-            grid_dim: (1, 1, 1),
-            block_dim: (1, 1, 1),
-            shared_mem_bytes: 0,
-        };
-
-        // Zero-host hot loop (K1): stable row-count buffers.
-        //
-        // The truth kernel dereferences arrays of u64 pointers, one per query /
-        // evidence relation, each pointing at a u32 row count. The query/evidence
-        // relations are re-created every sample, so *their own* row-count device
-        // pointers are NOT stable -- the previous implementation re-uploaded the
-        // pointer arrays on every sample, which is a tracked HtoD transfer inside
-        // the hot loop.
-        //
-        // Instead we allocate our OWN stable row-count buffers here, build the
-        // pointer arrays ONCE (pointing into these stable buffers), and upload the
-        // pointer arrays a single time before the loop (static setup). Each sample
-        // the on_sample closure refreshes the stable buffers with device-to-device
-        // copies of the current relation row counts -- a DtoD copy crosses no host
-        // boundary and is not a tracked HtoD/DtoH transfer.
-        let mut d_query_rowcounts = provider.memory().alloc::<u32>(prob_query_count.max(1))?;
-        let mut d_evidence_rowcounts = provider.memory().alloc::<u32>(evidence_alloc_count)?;
-        let mut d_query_ptrs = provider.memory().alloc::<u64>(prob_query_count.max(1))?;
-        let mut d_evidence_ptrs = provider.memory().alloc::<u64>(evidence_alloc_count)?;
-
-        let elem_size = std::mem::size_of::<u32>() as u64;
-        if prob_query_count > 0 {
-            let base = d_query_rowcounts.device_ptr_value();
-            let query_ptrs: Vec<u64> = (0..prob_query_count as u64)
-                .map(|i| base + i * elem_size)
-                .collect();
-            buffers::upload_slice(
-                &provider,
-                &query_ptrs,
-                &mut d_query_ptrs,
-                "MC query count ptrs",
-            )?;
-        }
-        if strategy == McCountStrategy::QueriesAndEvidence && evidence_count > 0 {
-            let base = d_evidence_rowcounts.device_ptr_value();
-            let evidence_ptrs: Vec<u64> = (0..evidence_count as u64)
-                .map(|i| base + i * elem_size)
-                .collect();
-            buffers::upload_slice(
-                &provider,
-                &evidence_ptrs,
-                &mut d_evidence_ptrs,
-                "MC evidence count ptrs",
-            )?;
-        }
-
-        let stats = self.evaluate_gpu_counts_with(
-            &cfg,
-            &forcing,
-            method,
-            provider.clone(),
-            |executor, plan, count| {
-                let device = provider.device().inner();
-
-                // Refresh the stable query row-count buffer for this sample via
-                // device-to-device copies (no host transfer). A per-sample memset
-                // leaves the slot of any missing relation at 0, which the truth
-                // kernel reads as "0 rows" -- identical to the old zero-ptr fallback.
-                if prob_query_count > 0 {
-                    device.memset_zeros(&mut d_query_rowcounts).map_err(|e| {
-                        XlogError::Kernel(format!("Failed to zero MC query rowcounts: {}", e))
-                    })?;
-                    for (i, rel_name) in plan.query_rel_names.iter().take(count).enumerate() {
-                        if let Some(buf) = executor.store().get(rel_name) {
-                            let src = buf.num_rows_device();
-                            let mut dst = d_query_rowcounts.slice_mut(i..i + 1);
-                            device.dtod_copy(src, &mut dst).map_err(|e| {
-                                XlogError::Kernel(format!(
-                                    "Failed to copy MC query rowcount: {}",
-                                    e
-                                ))
-                            })?;
-                        }
-                    }
-                }
-
-                if strategy == McCountStrategy::QueriesAndEvidence && evidence_count > 0 {
-                    device
-                        .memset_zeros(&mut d_evidence_rowcounts)
-                        .map_err(|e| {
-                            XlogError::Kernel(format!(
-                                "Failed to zero MC evidence rowcounts: {}",
-                                e
-                            ))
-                        })?;
-                    for (i, (rel_name, _)) in plan.evidence_rel_specs.iter().enumerate() {
-                        if let Some(buf) = executor.store().get(rel_name) {
-                            let src = buf.num_rows_device();
-                            let mut dst = d_evidence_rowcounts.slice_mut(i..i + 1);
-                            device.dtod_copy(src, &mut dst).map_err(|e| {
-                                XlogError::Kernel(format!(
-                                    "Failed to copy MC evidence rowcount: {}",
-                                    e
-                                ))
-                            })?;
-                        }
-                    }
-                }
-
-                let block_dim = 128u32;
-                let threads = if count == 0 { 1 } else { count as u32 };
-                let grid_dim = threads.div_ceil(block_dim);
-                // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
-                unsafe {
-                    truth_fn
-                        .clone()
-                        .launch(
-                            LaunchConfig {
-                                grid_dim: (grid_dim, 1, 1),
-                                block_dim: (block_dim, 1, 1),
-                                shared_mem_bytes: 0,
-                            },
-                            (
-                                &d_query_ptrs,
-                                prob_query_count_u32,
-                                &d_evidence_ptrs,
-                                &d_evidence_expected,
-                                effective_evidence_count_u32,
-                                &mut d_query_flags,
-                                &mut d_evidence_ok,
-                            ),
-                        )
-                        .map_err(|e| {
-                            XlogError::Kernel(format!("mc_eval_query_evidence_truth failed: {}", e))
-                        })?;
-                }
-                // SAFETY: kernel arguments match the PTX signature; device buffers were allocated with sufficient size
-                unsafe {
-                    accum_fn
-                        .clone()
-                        .launch(
-                            accum_config,
-                            (
-                                &d_query_flags,
-                                prob_query_count_u32,
-                                &d_evidence_ok,
-                                &mut d_query_counts,
-                                &mut d_evidence_count,
-                            ),
-                        )
-                        .map_err(|e| {
-                            XlogError::Kernel(format!("mc_accumulate_counts failed: {}", e))
-                        })?;
-                }
-                Ok(())
-            },
-        )?;
-
-        provider.device().synchronize()?;
-
+        // The GPU-resident megakernel engine is the sole MC execution path: there
+        // is no host-orchestrated per-sample fallback. It evaluates ALL worlds in
+        // a single launch with zero host interaction in the measured region, then
+        // returns device-resident counts. Programs outside the supported bounded
+        // fragment fail closed (typed `ResidentRejection`).
+        let r = self.evaluate_resident_with_provider(cfg, provider)?;
         Ok(McDeviceResult {
-            query_counts: d_query_counts,
-            evidence_count: d_evidence_count,
-            total_samples: cfg.samples,
-            seed: cfg.seed,
-            confidence: cfg.confidence,
-            nonmonotone_sccs: stats.nonmonotone_sccs,
-            nonmonotone_cycles: stats.nonmonotone_cycles,
-            nonmonotone_iteration_limit_hits: stats.nonmonotone_iteration_limit_hits,
-            sampling_method: method,
-            hot_loop_transfers: stats.hot_loop_transfers,
+            query_counts: r.query_counts,
+            evidence_count: r.evidence_count,
+            total_samples: r.total_samples,
+            seed: r.seed,
+            confidence: r.confidence,
+            // The bounded-domain dense engine evaluates non-monotone fixpoints on
+            // device only when accepted; nonmonotone SCC bookkeeping is not part of
+            // this engine's reported state.
+            nonmonotone_sccs: 0,
+            nonmonotone_cycles: 0,
+            nonmonotone_iteration_limit_hits: 0,
+            sampling_method: r.sampling_method,
+            hot_loop_transfers: McHotLoopTransfers {
+                htod_calls: r.no_host.tracked_htod_calls,
+                dtoh_calls: r.no_host.tracked_dtoh_calls,
+                htod_bytes: 0,
+                dtoh_bytes: 0,
+            },
         })
     }
 

@@ -755,9 +755,9 @@ fn run_resident(
         )?
     };
 
-    // Working relation buffer [num_worlds * 2 * U] (double buffer A|B per world),
-    // pre-zeroed. The kernel re-zeros buffer A per world before init, so the
-    // memset here is belt-and-suspenders for the unused tail.
+    // Working relation buffer [num_worlds * 2 * U], pre-zeroed. The kernel always
+    // strides worlds by 2*U (double buffer A|B per world) regardless of rule
+    // count, so the host must allocate 2*U per world unconditionally.
     let u = plan.universe_size.max(1) as usize;
     let rel_len = (num_worlds as usize)
         .saturating_mul(u)
