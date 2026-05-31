@@ -1457,7 +1457,56 @@ fn final_output_columns_for_eir(eir: &EirProgram) -> Option<Vec<usize>> {
 /// Epistemic literals are removed only for the reduced production runtime
 /// dispatch; callers must still plan and certify the explicit epistemic GPU
 /// contract before using this reduced program.
+///
+/// The augmenting positive-modal resolve is gated on INVARIANT targets only (see the
+/// body comment): for an invariant `R`, `know R`/`possible R` ranges exactly over
+/// `R`'s extension, so resolving the modal into an ordinary join binds the augmented
+/// output column WITHOUT leaking — and the GPU EGB-02 membership filter re-gates
+/// post hoc. A determined-but-not-invariant target (an epistemic-derived head like a
+/// multi-column `r`) is NOT resolved here, so its augmenting output variable stays
+/// unbound and the reduced program fails closed at this strict (execution) entry
+/// point. See [`reduce_epistemic_program_to_ordinary_for_stratified_schema`] for the
+/// schema-only relaxation used by the stratified driver.
 pub fn reduce_epistemic_program_to_ordinary(program: &Program) -> Program {
+    reduce_epistemic_program_to_ordinary_inner(program, &BTreeSet::new())
+}
+
+/// Schema-only reduction for the stratified epistemic driver.
+///
+/// Identical to [`reduce_epistemic_program_to_ordinary`] EXCEPT it also resolves an
+/// augmenting positive modal whose target is epistemically DETERMINED (per
+/// [`EpistemicallyDeterminedPredicates::analyze`]) but not invariant — e.g. a
+/// multi-column determined head `r` in `out(X) :- node(X), know r(X, Y)`, where the
+/// modal binds the augmented output column `Y`. This is used SOLELY to compute the
+/// plan-wide relation SCHEMAS (column types/arities) for an
+/// [`crate::EpistemicStratifiedPlan`]; the resolved positive atom over `r` supplies
+/// `Y`'s declared column type so the schema compiler does not reject the augmented
+/// `out(X, Y)` head as unsafe.
+///
+/// SOUNDNESS / NON-LEAK: a determined `r` IS gated into the store as a materialized
+/// base relation by the LOWER stratum before the higher stratum runs (the stratified
+/// executor's `materialize_epistemic_head_relation` at the STORE boundary), and the
+/// higher stratum is compiled by `compile_stratum_plan` over a sub-program where
+/// `r`'s defining rule is DROPPED — so there `r` is invariant and the EXISTING strict
+/// resolve binds `Y` against the GATED `r` for execution. The determined-relaxed
+/// resolve here therefore NEVER drives runtime data: it only types columns. It is not
+/// used by the single/joint or Case-A EXECUTION reduce, so it cannot resolve a modal
+/// into a join over an UN-gated candidate relation.
+pub fn reduce_epistemic_program_to_ordinary_for_stratified_schema(program: &Program) -> Program {
+    let determined = EpistemicallyDeterminedPredicates::analyze(program);
+    reduce_epistemic_program_to_ordinary_inner(program, &determined.determined)
+}
+
+/// Shared body of the epistemic-to-ordinary reduction.
+///
+/// `schema_only_determined_resolve` names predicates that are epistemically
+/// DETERMINED and whose augmenting positive modal may additionally be resolved into a
+/// positive ordinary atom for SCHEMA inference only (empty for the strict execution
+/// reduce). The INVARIANT-target resolve is always active for both entry points.
+fn reduce_epistemic_program_to_ordinary_inner(
+    program: &Program,
+    schema_only_determined_resolve: &BTreeSet<String>,
+) -> Program {
     let mut reduced = program.clone();
 
     // AUGMENTING positive modals over INVARIANT relations are resolved into positive
@@ -1522,8 +1571,15 @@ pub fn reduce_epistemic_program_to_ordinary(program: &Program) -> Program {
         let mut resolved_here = false;
         for lit in &mut rule.body {
             if let BodyLiteral::Epistemic(modal) = lit {
+                // The target is resolvable when it is INVARIANT (always — proven-sound
+                // for both schema and execution), OR — for SCHEMA inference only — when
+                // it is epistemically DETERMINED. The determined relaxation is empty for
+                // the strict execution reduce, so an execution-path reduce never
+                // resolves a modal over a still-derived (un-gated) relation.
+                let resolvable_target = invariant.is_invariant(&modal.atom.predicate)
+                    || schema_only_determined_resolve.contains(&modal.atom.predicate);
                 if !modal.negated
-                    && invariant.is_invariant(&modal.atom.predicate)
+                    && resolvable_target
                     && modal_atom_binds_output_variable(modal, &modal_only_output_variables)
                 {
                     *lit = BodyLiteral::Positive(modal.atom.clone());

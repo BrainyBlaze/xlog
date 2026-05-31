@@ -266,6 +266,12 @@ fn test_xlog_run_epistemic_examples() {
             "b",
             "| 1  |",
         ),
+        // v0.9.2 SCOPE-LIMIT CLOSED: a modal BINDING an output variable over a DETERMINED
+        // MULTI-COLUMN epistemic head. `r(X,Y) :- edge(X,Y), know flag(X)` is determined;
+        // `out(X) :- node(X), know r(X,Y)` binds the extra column Y. The lower stratum
+        // materializes gated `r = {(1,2),(1,3)}`; the higher stratum gates `know r`
+        // against that base, projecting away Y. out = {X in node : exists Y r(X,Y)} = {1}.
+        ("28-determined-multicol-binding-modal.xlog", "out", "| 1  |"),
     ];
 
     for (example, expected_relation, expected_value) in examples {
@@ -379,6 +385,50 @@ fn test_xlog_run_transitive_determined_modal_stratifies_accepted() {
     assert!(
         !stdout.contains("| 2  |"),
         "b must NOT contain node 2 (the `know r` gate is load-bearing):\n{stdout}"
+    );
+}
+
+#[test]
+fn test_xlog_run_determined_multicol_binding_modal_stratifies_accepted() {
+    // v0.9.2 SCOPE-LIMIT CLOSED: a modal that BINDS an output variable over a DETERMINED
+    // MULTI-COLUMN epistemic head is now ACCEPTED via stratification. The full program:
+    //   r(X, Y) :- edge(X, Y), know flag(X).   -- determined multi-column epistemic head
+    //   out(X)  :- node(X), know r(X, Y).        -- modal binds the extra output column Y
+    // Previously failed closed with `UnsafeVariable("Y")`. The lower stratum materializes
+    // the gated `r = {(1,2),(1,3)}`; the higher stratum gates `know r` against that base
+    // and projects away the binding column. EXACT: with node={1,2,3}, flag={1},
+    // out = {X in node : exists Y r(X,Y)} = {1}. The gate is load-bearing: dropping the
+    // modal literal gives out = node = {1,2,3}; the gate restricts out to {1}.
+    let _device = match CudaDevice::new(0) {
+        Ok(d) => d,
+        Err(_) => {
+            println!("SKIPPED: CUDA runtime unavailable (no GPU or driver not loaded)");
+            return;
+        }
+    };
+
+    let (success, stdout, stderr) =
+        run_epistemic_example("28-determined-multicol-binding-modal.xlog");
+    assert!(
+        success,
+        "determined-multicol binding modal example must succeed, stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("out"),
+        "must surface the queried head `out`:\n{stdout}"
+    );
+    // out = {1} exactly: node 1 present (r(1,_) exists), nodes 2 and 3 absent (no r rows).
+    assert!(
+        stdout.contains("| 1  |"),
+        "out must contain the gated node 1:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("| 2  |"),
+        "out must NOT contain node 2 (the `know r(X,Y)` gate is load-bearing):\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("| 3  |"),
+        "out must NOT contain node 3 (the `know r(X,Y)` gate is load-bearing):\n{stdout}"
     );
 }
 
