@@ -1384,14 +1384,15 @@ fn shared_base_modal_does_not_trigger_stratification() {
 
 #[test]
 fn circular_modality_does_not_plan_stratified() {
-    // Genuinely undefined: `p() :- possible p()` (self-support through a modal).
-    // `p` is NOT epistemically determined (self-reference), so stratification must
-    // decline (None), handing the case back to the FAEEL/G91 foundedness guard.
+    // `p() :- possible p()` (self-support through a modal). `p` is NOT epistemically
+    // determined (self-reference), so stratification must decline (None), handing the
+    // case to the single-pass FAEEL/G91 path. Under FAEEL the unfounded head is then
+    // excluded from the founded model (empty extension); under G91 it is accepted.
     let program = parse_program("p() :- possible p().").unwrap();
     let plan = xlog_logic::epistemic::try_plan_stratified_epistemic_program(&program)
         .expect("must not error");
     assert!(
         plan.is_none(),
-        "circular modality must not stratify; FAEEL/G91 owns it"
+        "circular modality must not stratify; the single-pass FAEEL/G91 path owns it"
     );
 }
