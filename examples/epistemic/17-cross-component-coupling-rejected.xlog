@@ -1,0 +1,27 @@
+// v0.9.2 Bundle 3: cross-component epistemic coupling (REJECTED unsafe case).
+//
+// `trusted(X)` is an epistemic-derived head (`know vetted(X)`). `flagged(X)`
+// uses a MODAL literal `know trusted(X)` whose truth depends on the FIRST
+// component's accepted world view -- so the two epistemic outputs are genuinely
+// coupled across what local analysis would split. The dependency graph coalesces
+// them (derived dependency on `trusted`), producing a single component with TWO
+// epistemic output heads (`trusted`, `flagged`). The single-output-buffer joint
+// GPU path cannot materialize two coupled epistemic outputs and an independent
+// split would be unsound, so this is a NEGATIVE pilot: it must FAIL CLOSED with a
+// typed `cross-component epistemic coupling` diagnostic naming the coupled heads
+// and the merge reason.
+
+#pragma epistemic_mode = faeel
+
+pred node(u32).
+pred vetted(u32).
+pred trusted(u32).
+pred flagged(u32).
+
+node(1). node(2). node(3).
+vetted(1). vetted(3).
+
+trusted(X) :- node(X), know vetted(X).
+flagged(X) :- node(X), know trusted(X).
+
+?- flagged(X).

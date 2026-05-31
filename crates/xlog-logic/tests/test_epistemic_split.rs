@@ -803,6 +803,178 @@ fn executable_recomposition_covers_only_executed_epistemic_components() {
     assert_eq!(exec.planned_recomposed_rule_indices(), vec![0, 1]);
 }
 
+// --- v0.9.2 Bundle 3: cross-component epistemic coupling ---
+
+#[test]
+fn modal_over_epistemic_derived_head_coalesces_then_fails_closed_at_joint_compile() {
+    // CROSS-COMPONENT modal coupling: component B's MODAL literal (`know a()`)
+    // references predicate `a`, which is component A's epistemic-DERIVED head
+    // (`a() :- know p()`). Local analysis would split `a` and `b` into two
+    // independent components, but the modal truth of `a` depends on A's accepted
+    // world view, so the split is unsound. The dependency graph correctly
+    // coalesces the two rules into ONE component (via the derived dependency on
+    // `a`), but that single component now carries TWO epistemic output heads
+    // (`a` and `b`). The single-output-buffer joint GPU path cannot materialize
+    // two coupled epistemic outputs, so this must FAIL CLOSED with a coupling-
+    // specific diagnostic that names the coupled predicates AND the merge reason
+    // -- NOT the misleading "independent epistemic outputs" message.
+    let program = parse_program("a() :- know p(). b() :- know a().").unwrap();
+
+    // Coalescing is correct: one component, derived dependency on `a`.
+    let split = split_epistemic_program(&program).unwrap();
+    assert_eq!(split.components.len(), 1);
+    assert_eq!(
+        split.components[0].predicates,
+        vec!["a".to_string(), "b".to_string(), "p".to_string()]
+    );
+    assert!(split.components[0].merge_reasons.contains(
+        &EpistemicComponentMergeReason::DerivedPredicate {
+            predicate: "a".to_string(),
+        }
+    ));
+
+    // The coupled component must fail closed at joint compile with a precise,
+    // coupling-named diagnostic.
+    let err = compile_epistemic_gpu_split_execution(&program)
+        .expect_err("coupled multi-epistemic-head component must fail closed");
+    match err {
+        XlogError::UnsupportedEpistemicConstruct { construct, context } => {
+            assert_eq!(construct, "cross-component epistemic coupling");
+            // Names the coupled epistemic output heads.
+            assert!(
+                context.contains("a") && context.contains("b"),
+                "diagnostic must name coupled epistemic heads a and b, got: {context}"
+            );
+            // Names the merge reason (the derived dependency on `a`).
+            assert!(
+                context.contains("DerivedPredicate") || context.contains("derived"),
+                "diagnostic must name the merge reason, got: {context}"
+            );
+            // Must NOT use the misleading "independent" wording.
+            assert!(
+                !context.contains("independent epistemic outputs"),
+                "coupled components must not be reported as independent: {context}"
+            );
+        }
+        other => panic!("expected cross-component coupling diagnostic, got {other:?}"),
+    }
+}
+
+#[test]
+fn shared_modal_two_head_coupling_fails_closed_at_joint_compile() {
+    // The same structural rule covers shared-modal coupling: two rules that share
+    // a modal predicate (`q/1`) coalesce into one component carrying two epistemic
+    // output heads (`a`, `b`). This is genuine coupling (their world-view
+    // acceptance is mutually dependent through `q`), so the single-output joint
+    // path must fail closed naming the SharedModalPredicate reason -- proving the
+    // >1-epistemic-head detection is STRUCTURAL, not specific to derived coupling.
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred color(u32).
+        pred q(u32).
+        pred a(u32).
+        pred b(u32).
+        a(X) :- node(X), know q(X).
+        b(X) :- color(X), possible q(X).
+        "#,
+    )
+    .unwrap();
+
+    let split = split_epistemic_program(&program).unwrap();
+    assert_eq!(split.components.len(), 1);
+    assert!(split.components[0].merge_reasons.contains(
+        &EpistemicComponentMergeReason::SharedModalPredicate {
+            predicate: "q/1".to_string(),
+        }
+    ));
+
+    let err = compile_epistemic_gpu_split_execution(&program)
+        .expect_err("shared-modal two-head coupling must fail closed");
+    match err {
+        XlogError::UnsupportedEpistemicConstruct { construct, context } => {
+            assert_eq!(construct, "cross-component epistemic coupling");
+            assert!(
+                context.contains("a") && context.contains("b"),
+                "diagnostic must name coupled heads a and b, got: {context}"
+            );
+            assert!(
+                context.contains("SharedModalPredicate") || context.contains("q/1"),
+                "diagnostic must name the shared-modal merge reason, got: {context}"
+            );
+            assert!(!context.contains("independent epistemic outputs"));
+        }
+        other => panic!("expected cross-component coupling diagnostic, got {other:?}"),
+    }
+}
+
+#[test]
+fn ordinary_consumer_of_epistemic_head_is_accepted_safe_coupling() {
+    // SAFE coupling (the task's named EGB-05 case): component B's ORDINARY body
+    // consumes component A's epistemic head (`b() :- a()` where `a() :- know p()`).
+    // This is a real derived dependency that must coalesce, but it has exactly ONE
+    // epistemic output head (`a`), so it is NOT cross-component modal coupling: the
+    // joint single-output path materializes the one epistemic relation and the
+    // ordinary consumer rides the reduced ordinary pipeline. It must be ACCEPTED.
+    let program = parse_program("a() :- know p(). b() :- a().").unwrap();
+
+    let split = split_epistemic_program(&program).unwrap();
+    assert_eq!(split.components.len(), 1);
+    assert_eq!(
+        split.components[0].merge_reasons,
+        vec![EpistemicComponentMergeReason::DerivedPredicate {
+            predicate: "a".to_string(),
+        }]
+    );
+
+    // Accepted: compiles through both the split executable path AND the monolithic
+    // single-execution path (one epistemic output head exists for both).
+    let exec = compile_epistemic_gpu_split_execution(&program)
+        .expect("safe single-epistemic-head coupling must compile through split path");
+    assert_eq!(exec.components.len(), 1);
+    assert_eq!(exec.recomposed_rule_indices(), vec![0, 1]);
+}
+
+#[test]
+fn shared_extensional_inputs_do_not_force_false_cross_component_coalesce() {
+    // K5: two epistemic components that share ONLY an EDB input (`node`) must stay
+    // independent -- the shared extensional input must not force a false coalesce.
+    // Each component keeps exactly one epistemic output head, so both compile
+    // through the split path as independent components.
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred edge(u32).
+        pred color(u32).
+        pred a(u32).
+        pred b(u32).
+        a(X) :- node(X), know edge(X).
+        b(X) :- node(X), know color(X).
+        "#,
+    )
+    .unwrap();
+
+    let split = split_epistemic_program(&program).unwrap();
+    assert_eq!(
+        split.components.len(),
+        2,
+        "shared EDB input must not coalesce the two epistemic components"
+    );
+    for component in &split.components {
+        assert!(
+            component.merge_reasons.is_empty(),
+            "EDB-only-sharing component {:?} must record no coalesce reason",
+            component.predicates
+        );
+    }
+
+    // Both stay independent through the split executable path (no false coupling
+    // failure): two components, each a single epistemic output head.
+    let exec = compile_epistemic_gpu_split_execution(&program)
+        .expect("EDB-only-sharing components must compile as two independent components");
+    assert_eq!(exec.components.len(), 2);
+}
+
 fn compiled_rule_count(plan: &ExecutionPlan) -> usize {
     plan.rules_by_scc.iter().map(Vec::len).sum()
 }

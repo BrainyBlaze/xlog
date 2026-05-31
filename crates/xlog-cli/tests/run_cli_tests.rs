@@ -107,6 +107,13 @@ fn test_xlog_run_epistemic_examples() {
             "__xlog_query_0",
             "| 2  | 4  |",
         ),
+        // v0.9.2 Bundle 3: cross-component epistemic coupling (ACCEPTED safe case).
+        // The ordinary head `report` consumes the epistemic-derived head `trusted`,
+        // coupling two locally-splittable components through a derived dependency.
+        // Single epistemic output head -> joint single-output path materializes the
+        // gated `trusted = {1, 3}` exactly (node 2 is not vetted, so not known).
+        ("16-cross-component-coupling.xlog", "trusted", "| 1  |"),
+        ("16-cross-component-coupling.xlog", "trusted", "| 3  |"),
     ];
 
     for (example, expected_relation, expected_value) in examples {
@@ -181,4 +188,58 @@ fn test_xlog_run_nested_modal_reports_typed_epistemic_diagnostic() {
     assert!(stderr.contains("UnsupportedEpistemicConstruct"), "{stderr}");
     assert!(stderr.contains("nested epistemic literal"), "{stderr}");
     assert!(stderr.contains("know possible p()"), "{stderr}");
+}
+
+#[test]
+fn test_xlog_run_cross_component_coupling_reports_typed_epistemic_diagnostic() {
+    // v0.9.2 Bundle 3 K4: an unsafe cross-component modal coupling (one epistemic
+    // head feeds another component's MODAL literal) must FAIL CLOSED through the
+    // production `xlog run` path with a typed diagnostic naming the merge reason
+    // AND the coupled epistemic output predicates -- not partial/silent execution.
+    let _device = match CudaDevice::new(0) {
+        Ok(d) => d,
+        Err(_) => {
+            println!("SKIPPED: CUDA runtime unavailable (no GPU or driver not loaded)");
+            return;
+        }
+    };
+
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("workspace root");
+    let program = repo_root
+        .join("examples/epistemic")
+        .join("17-cross-component-coupling-rejected.xlog");
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid path"),
+            "--memory-mb",
+            "1024",
+        ])
+        .output()
+        .expect("run xlog binary");
+    assert!(
+        !output.status.success(),
+        "cross-component coupling example must fail closed, stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("UnsupportedEpistemicConstruct"), "{stderr}");
+    assert!(
+        stderr.contains("cross-component epistemic coupling"),
+        "{stderr}"
+    );
+    // Names the coupled epistemic output predicates.
+    assert!(
+        stderr.contains("trusted") && stderr.contains("flagged"),
+        "diagnostic must name coupled epistemic heads trusted and flagged:\n{stderr}"
+    );
+    // Names the merge reason (the derived dependency that coalesced them).
+    assert!(
+        stderr.contains("DerivedPredicate"),
+        "diagnostic must name the merge reason:\n{stderr}"
+    );
 }

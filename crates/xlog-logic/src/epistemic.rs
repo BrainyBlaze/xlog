@@ -2136,6 +2136,8 @@ pub fn compile_epistemic_gpu_split_execution_with_stats_snapshot(
             continue;
         }
 
+        reject_cross_component_modal_coupling(program, component)?;
+
         let component_program = split_component_program(program, component)?;
         let executable = compile_epistemic_gpu_execution_with_stats_snapshot(
             &component_program,
@@ -2173,6 +2175,104 @@ fn component_has_epistemic_rule(
                 .iter()
                 .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
         })
+}
+
+/// Distinct head predicates of the component's epistemic-bearing rules, sorted.
+///
+/// Each such head is a final epistemic output relation the joint single-pass GPU
+/// path would have to materialize. The single-output-buffer contract
+/// ([`require_single_epistemic_output_relation`]) admits exactly one, so a count
+/// above one means the component is genuinely *coupled* across what local
+/// analysis would otherwise split — its epistemic outputs cannot be solved
+/// independently AND cannot be jointly materialized into one buffer.
+fn component_epistemic_output_heads(
+    program: &Program,
+    component: &EpistemicDependencyComponent,
+) -> Vec<String> {
+    let mut heads: BTreeSet<String> = BTreeSet::new();
+    for idx in &component.rule_indices {
+        let Some(rule) = program.rules.get(*idx) else {
+            continue;
+        };
+        let has_epistemic_body = rule
+            .body
+            .iter()
+            .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)));
+        if has_epistemic_body {
+            heads.insert(rule.head.predicate.clone());
+        }
+    }
+    heads.into_iter().collect()
+}
+
+/// Render a coalesced component's merge reasons into a stable, human-readable list
+/// for the cross-component coupling diagnostic.
+///
+/// These reasons (`DerivedPredicate`, `SharedModalPredicate`, `SharedHeadPredicate`,
+/// `Constraint`) are exactly *why* the dependency graph could not split the
+/// component's epistemic outputs, so naming them tells the caller which structural
+/// coupling forced the fail-closed.
+fn format_component_merge_reasons(component: &EpistemicDependencyComponent) -> String {
+    if component.merge_reasons.is_empty() {
+        return "no recorded coalesce reason".to_string();
+    }
+    component
+        .merge_reasons
+        .iter()
+        .map(|reason| match reason {
+            EpistemicComponentMergeReason::SharedHeadPredicate { predicate } => {
+                format!("SharedHeadPredicate({predicate})")
+            }
+            EpistemicComponentMergeReason::DerivedPredicate { predicate } => {
+                format!("DerivedPredicate({predicate})")
+            }
+            EpistemicComponentMergeReason::SharedModalPredicate { predicate } => {
+                format!("SharedModalPredicate({predicate})")
+            }
+            EpistemicComponentMergeReason::Constraint { predicates } => {
+                format!("Constraint({})", predicates.join(", "))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Fail closed when a coalesced component couples more than one epistemic output
+/// head across component boundaries.
+///
+/// This is the cross-component modal-coupling guard. Local splittability analysis
+/// can split two epistemic-derived heads into separate components, but the
+/// dependency graph coalesces them whenever one head feeds another through a
+/// MODAL literal (`know a()`/`possible a()` over an epistemic-derived `a`) or a
+/// SHARED modal predicate — cases where the heads' world-view acceptance is
+/// genuinely interdependent. Such a coalesced component carries more than one
+/// epistemic output head, which the single-output-buffer joint GPU path cannot
+/// materialize, and which is NOT equivalent to any independent split.
+///
+/// SAFE coupling is unaffected: an ordinary body consuming an epistemic head
+/// (`b() :- a()` over `a() :- know p()`) coalesces but adds NO second epistemic
+/// output head (`b` has no modal body), so it stays accepted. Components sharing
+/// only an EDB input never coalesce, so they never reach this guard.
+fn reject_cross_component_modal_coupling(
+    program: &Program,
+    component: &EpistemicDependencyComponent,
+) -> Result<()> {
+    let epistemic_heads = component_epistemic_output_heads(program, component);
+    if epistemic_heads.len() > 1 {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "cross-component epistemic coupling".to_string(),
+            context: format!(
+                "epistemic output heads {:?} are coupled into a single dependency \
+                 component (reasons: {}), so their world views are not independent; \
+                 the single-output-buffer joint path cannot materialize multiple \
+                 coupled epistemic outputs and an independent split would be unsound, \
+                 so this fails closed",
+                epistemic_heads,
+                format_component_merge_reasons(component)
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn split_component_program(
