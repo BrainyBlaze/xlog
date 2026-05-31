@@ -1878,6 +1878,23 @@ validator.
       run (which includes CPU-oracle `tests/mc.rs` / `tests/gpu_mc_vs_cpu.rs`).
       Evidence: `cargo test -p xlog-prob --release --features host-io --test
       mc_gpu_native -- --test-threads=1`.
+- [x] **GPU-resident Datalog/MC execution engine** — supersede the above
+      (`a894aab4`) host-orchestrated loop entirely. A single megakernel
+      (`mc_resident.cu` + `mc/resident.rs`) evaluates ALL worlds in one launch
+      with the sample/world id as the CUDA grid dimension; recursive programs use
+      a device-side double-buffered naive fixpoint with a shared change flag.
+      The measured region has **zero host interaction** (0 tracked HtoD/DtoH,
+      **0 untracked metadata reads**, 0 host loop iterations, 0 per-sample host
+      launches), proven constant across N=128/1024 via `McNoHostStats`. Whereas
+      `a894aab4` only removed *tracked* transfers but kept per-sample host
+      orchestration + untracked `dtoh_scalar_untracked` reads, this engine removes
+      host orchestration entirely. `evaluate_gpu_device*` route solely through it
+      (no fallback); unsupported programs fail closed with typed
+      `ResidentRejection`. The legacy host-loop Rust (`evaluate_gpu_counts_with`,
+      `build_gpu_plan`, `sampling.rs`, dead `buffers.rs`) is deleted.
+      Evidence: `cargo test -p xlog-prob --release --features host-io --test
+      mc_resident -- --test-threads=1` (7 exact-value pilots + 4 fail-closed
+      negatives).
 
 ### Documentation and Tests
 

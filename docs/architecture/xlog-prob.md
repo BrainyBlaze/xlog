@@ -215,64 +215,54 @@ This compilation is implemented in `crates/xlog-prob/src/mc.rs` (`compile_sampli
 
 Sampling uses `CudaKernelProvider::sample_bernoulli_matrix_device(...)`, which calls `kernels/mc_sample.ptx` to generate a row-major `[samples][num_vars]` matrix of 0/1 bytes on the GPU. Sampling is deterministic given `seed`.
 
-### Device-only evaluation (GPU-native counts)
+### GPU-resident execution engine (device-only counts)
 
-The primary GPU-native API is:
+The MC execution path is the **GPU-resident Datalog engine**
+(`crates/xlog-prob/src/mc/resident.rs` + `crates/xlog-cuda/kernels/mc_resident.cu`),
+exposed via:
 
 - `McProgram::evaluate_gpu_device(...) -> McDeviceResult`
-- `McProgram::evaluate_gpu_device_with_provider(...) -> McDeviceResult` (caller-supplied provider for buffer reuse)
+- `McProgram::evaluate_gpu_device_with_provider(...) -> McDeviceResult` (caller-supplied provider)
+- `McProgram::evaluate_resident_with_provider(...) -> McResidentResult` (raw device result + no-host stats)
 
-It evaluates each sampled world on the GPU (host control-plane launches only) and returns device-resident count buffers:
+It evaluates **all** sampled worlds in a single megakernel launch and returns
+device-resident count buffers (`query_counts`, `evidence_count`) plus a per-world
+`iter_trace`. The sample/world id is the CUDA grid dimension; sampled facts,
+derived relations, evidence flags, query counts, and fixpoint state are all
+device-resident (bounded-Herbrand dense boolean). Recursive programs converge via
+a device-side double-buffered naive fixpoint with a shared change flag; no host
+read drives control flow.
 
-- `query_counts: DeviceSlice<u32>` (one per query atom)
-- `evidence_count: DeviceSlice<u32>` (samples satisfying all evidence)
+#### No host interaction in the measured region (K1) — distinct from `a894aab4`
 
-Internally (`crates/xlog-prob/src/mc/mod.rs`), MC evaluation:
+The predecessor commit `a894aab4` ("zero tracked hot loop") only removed *tracked
+data-plane* HtoD/DtoH from a host loop that **still orchestrated per sample**: a
+Rust `for sample_idx` loop, per-sample kernel launches, and per-sample untracked
+`dtoh_scalar_untracked` row-count reads. That is **not** the guarantee here.
 
-1. Keeps the sample matrix on device and builds per-sample probabilistic fact buffers on the GPU.
-2. Evaluates the deterministic core using `xlog-runtime::Executor` (GPU relation store + GPU operators).
-3. Computes query/evidence truth flags and accumulates counts on-device (`kernels/mc_eval.cu`).
+The resident engine's measured region is a single megakernel launch (+ one
+post-launch sync). It has **zero host interaction**: 0 tracked HtoD, 0 tracked
+DtoH, **0 untracked metadata reads** (`dtoh_scalar_untracked` is never called
+in-region — a dedicated `untracked_metadata_dtoh_count` provider counter proves
+it), 0 host loop iterations, 0 per-sample host launches. This is measured via
+`McNoHostStats` (snapshots around the launch) and proven **constant across
+N=128 and N=1024** (nothing scales per-sample on the host). Static setup (the
+seeded sample matrix, force arrays, plan upload, buffer allocation) happens
+before the region; final aggregates are read only after it.
 
-#### Zero-host hot-loop boundary (K1)
+There is **no host-orchestrated fallback**: programs outside the supported
+fragment (bounded-domain positive Datalog — arity ≤ 2, body ≤ 2, ≤ 3 vars,
+bounded universe) **fail closed** before execution with a typed
+`ResidentRejection` (kind + construct + context). The CPU path
+(`evaluate_cpu`, `tests/mc.rs`, `tests/gpu_mc_vs_cpu.rs`) is a seed-matched test
+oracle only — never accepted execution.
 
-The sample → evaluate → count **hot loop performs zero tracked host↔device
-transfers**. Static setup *before* the loop is allowed to transfer (the seeded
-Bernoulli sample matrix, evidence-force arrays, deterministic facts, prob/AD
-tables, the per-sample reset plan, and the count-pointer arrays). The final
-query/evidence counts are downloaded only by host-facing wrappers *after* the
-loop.
-
-Each sample, the truth kernel reads relation row counts through stable pointer
-arrays that are uploaded **once** before the loop and point at engine-owned
-row-count buffers; those buffers are refreshed per sample with device-to-device
-copies of the current relation `num_rows` (a DtoD copy crosses no host
-boundary). This replaced an earlier implementation that re-uploaded the pointer
-arrays every sample (one tracked HtoD per sample).
-
-The boundary is measured, not asserted: `evaluate_gpu_device_with_provider`
-snapshots the provider's `HostTransferStats` immediately before the loop and
-after a post-loop `synchronize()`, and surfaces the delta as
-`McDeviceResult::hot_loop_transfers` (`McHotLoopTransfers`). For a GPU-native run
-`hot_loop_transfers.is_zero()` holds.
-
-"Zero" here means zero **tracked data-plane** transfers (`record_htod` /
-`record_dtoh`). As elsewhere in XLOG, **bounded control-plane metadata** reads —
-e.g. reading a relation's `num_rows` scalar via `dtoh_scalar_untracked` after a
-GPU operator sizes its output, inside dedup/relational ops — are O(4 bytes)
-scalars, are exempted by the engine-wide metadata-vs-data-plane contract (the
-same one the deterministic-D2H gate enforces), and still occur per sample. The
-MC hot-loop guarantee is therefore the same data-plane zero-host guarantee the
-exact and neural paths make, not an absolute "no CUDA memcpy of any size". The transfer-budget gate
-`tests/mc_gpu_native.rs::mc_hot_loop_is_zero_transfer_both_strategies` asserts
-this across both the clamped (`QueriesOnly`) and rejection (`QueriesAndEvidence`)
-count strategies, and the GPU-native pilots assert it additionally for
-fact-marginal, evidence-conditioning, annotated-disjunction, and recursive
-(transitive-closure) workloads.
-
-**Acceptance scope.** Zero-host / GPU-native evidence is the dedicated gates
-`tests/mc_gpu_native.rs` and `tests/gpu_mc_device_counts.rs` only. A full
-`cargo test -p xlog-prob` run includes CPU-oracle and host-output tests
-(`tests/mc.rs`, `tests/gpu_mc_vs_cpu.rs`) and is **not** zero-host evidence.
+**Acceptance scope.** GPU-native no-host evidence is `tests/mc_resident.rs`
+(7 exact-value pilots incl. recursion with a non-base derived tuple and >1
+fixpoint iteration, + 4 fail-closed negative tests) and the device-count gates
+`tests/mc_gpu_native.rs` / `tests/gpu_mc_device_counts.rs`. A full
+`cargo test -p xlog-prob` run includes CPU-oracle/host-output tests and is **not**
+no-host evidence.
 
 ### Evidence conditioning and uncertainty reporting
 
