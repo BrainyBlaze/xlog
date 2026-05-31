@@ -1,0 +1,28 @@
+// v0.9.2 BOUNDARY (NEGATIVE): compound/list modal key -- fail closed.
+//
+// A modal literal's tuple key must be GPU-materializable: a flat tuple of
+// scalar terms. Here the modal atom `know watched([H])` uses a LIST term `[H]`
+// as a modal key column. The epistemic GPU tuple-key builder cannot encode a
+// compound/list term as a tuple-key column, so the program MUST FAIL CLOSED
+// with a typed `UnsupportedEpistemicConstruct` "epistemic GPU tuple-key
+// expectation" diagnostic naming the offending term -- NOT a silent fallback.
+//
+// (Aggregate and other compound modal keys fail closed through the same guard.)
+//
+// Expected (exit 1):
+//   Error: UnsupportedEpistemicConstruct { construct: "epistemic GPU tuple-key
+//   expectation", context: "term List([Variable(\"H\")]) cannot be used for GPU
+//   tuple-key matching" }
+
+#pragma epistemic_mode = faeel
+
+pred host(u32).
+pred watched(u32).
+pred alert(u32).
+
+host(1). host(2).
+watched(1).
+
+alert(H) :- host(H), know watched([H]).
+
+?- alert(H).

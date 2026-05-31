@@ -139,6 +139,45 @@ fn test_xlog_run_epistemic_examples() {
             "maybe",
             "| 2  |",
         ),
+        // v0.9.2 EGB-02B (FULL): access-control mixed modal gating. ONE accepted
+        // rule combines a GLOBAL `know gateway_online()` gate, a PER-ROW
+        // `possible cleared(P)`, and a PER-ROW negated `not possible revoked(P)`,
+        // composed conjunctively. granted = {1, 2}; carol(3) and dave(4) are
+        // gated out (absence checked below).
+        ("19-access-control-mixed-modal.xlog", "granted", "| 1  |"),
+        ("19-access-control-mixed-modal.xlog", "granted", "| 2  |"),
+        // v0.9.2 Case-A recursive epistemic fixpoint (FULL): supply-chain
+        // provenance. Ordinary recursion in `sources_from` gated by `know
+        // certified` over the INVARIANT EDB. 10 tuples incl. 4-hop derived
+        // (1,5); supplier 6 is reachable only via an uncertified link and is
+        // fully gated out (no `| 6  |` row; absence checked below).
+        (
+            "20-supply-chain-recursive-reach.xlog",
+            "__xlog_query_0",
+            "| 1  | 5  |",
+        ),
+        (
+            "20-supply-chain-recursive-reach.xlog",
+            "__xlog_query_0",
+            "| 2  | 5  |",
+        ),
+        // v0.9.2 Bundle 3 JOINT-SOLVING (FULL): incident triage. THREE epistemic
+        // heads share the base modal `compromised`; all three modalities used and
+        // all three heads materialized against the SAME accepted world view.
+        //   quarantine = {1,2}, watch = {2}, clear = {3,4,5}.
+        (
+            "21-incident-triage-joint-modal.xlog",
+            "quarantine",
+            "| 1  |",
+        ),
+        (
+            "21-incident-triage-joint-modal.xlog",
+            "quarantine",
+            "| 2  |",
+        ),
+        ("21-incident-triage-joint-modal.xlog", "watch", "| 2  |"),
+        ("21-incident-triage-joint-modal.xlog", "clear", "| 3  |"),
+        ("21-incident-triage-joint-modal.xlog", "clear", "| 5  |"),
     ];
 
     for (example, expected_relation, expected_value) in examples {
@@ -266,5 +305,151 @@ fn test_xlog_run_cross_component_coupling_reports_typed_epistemic_diagnostic() {
     assert!(
         stderr.contains("DerivedPredicate"),
         "diagnostic must name the merge reason:\n{stderr}"
+    );
+}
+
+/// Helper: run an epistemic example through the production `xlog run` path and
+/// return (success, stdout, stderr).
+fn run_epistemic_example(example: &str) -> (bool, String, String) {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("workspace root");
+    let program = repo_root.join("examples/epistemic").join(example);
+    let output = cargo_bin_cmd!("xlog")
+        .args([
+            "run",
+            program.to_str().expect("valid path"),
+            "--memory-mb",
+            "1024",
+        ])
+        .output()
+        .expect("run xlog binary");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn test_xlog_run_v092_examples_modal_gating_filters() {
+    // v0.9.2 anti-gaming: prove the accepted examples are REAL modal filtering,
+    // not store extraction -- the gated output must strictly OMIT the rows that
+    // fail the modal gate (so the result DIFFERS from the ungated relation).
+    let _device = match CudaDevice::new(0) {
+        Ok(d) => d,
+        Err(_) => {
+            println!("SKIPPED: CUDA runtime unavailable (no GPU or driver not loaded)");
+            return;
+        }
+    };
+
+    // 19 access-control mixed modal: granted = {1,2}. carol(3) fails
+    // `possible cleared`; dave(4) fails `not possible revoked`. Both gated out.
+    let (ok, stdout, stderr) = run_epistemic_example("19-access-control-mixed-modal.xlog");
+    assert!(ok, "19 must succeed:\n{stdout}\n{stderr}");
+    assert!(stdout.contains("granted"), "19 emits granted:\n{stdout}");
+    assert!(
+        stdout.contains("| 1  |") && stdout.contains("| 2  |"),
+        "19 keeps 1,2:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("| 3  |"),
+        "19 must GATE OUT carol(3) (not cleared):\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("| 4  |"),
+        "19 must GATE OUT dave(4) (revoked):\n{stdout}"
+    );
+
+    // 20 supply-chain recursive reach: certified closure OMITS every tuple
+    // ending in supplier 6 (reachable only via an uncertified link).
+    let (ok, stdout, stderr) = run_epistemic_example("20-supply-chain-recursive-reach.xlog");
+    assert!(ok, "20 must succeed:\n{stdout}\n{stderr}");
+    assert!(
+        stdout.contains("| 1  | 5  |"),
+        "20 derives 4-hop (1,5):\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("| 6  |"),
+        "20 must GATE OUT supplier 6 (uncertified link):\n{stdout}"
+    );
+
+    // 21 incident triage joint-solving: watch = {2} only; monitored(3) is gated
+    // out because compromised(3) is false (proves `possible` filters per-row).
+    let (ok, stdout, stderr) = run_epistemic_example("21-incident-triage-joint-modal.xlog");
+    assert!(ok, "21 must succeed:\n{stdout}\n{stderr}");
+    assert!(stdout.contains("quarantine") && stdout.contains("watch") && stdout.contains("clear"));
+    // watch keeps 2 but drops monitored(3). The `clear` head separately prints
+    // a `| 3  |` row, so scope the absence check to the `watch` block.
+    let watch_block = stdout
+        .split("watch")
+        .nth(1)
+        .and_then(|s| s.split("clear").next())
+        .expect("watch block present before clear block");
+    assert!(
+        watch_block.contains("| 2  |"),
+        "21 watch keeps 2:\n{stdout}"
+    );
+    assert!(
+        !watch_block.contains("| 3  |"),
+        "21 watch must GATE OUT monitored(3) (not compromised):\n{stdout}"
+    );
+}
+
+#[test]
+fn test_xlog_run_recursion_through_modal_reports_typed_epistemic_diagnostic() {
+    // v0.9.2 BOUNDARY: a modal literal over a relation entangled in the program's
+    // recursive SCC (NOT invariant) must FAIL CLOSED with a typed diagnostic.
+    let _device = match CudaDevice::new(0) {
+        Ok(d) => d,
+        Err(_) => {
+            println!("SKIPPED: CUDA runtime unavailable (no GPU or driver not loaded)");
+            return;
+        }
+    };
+
+    let (ok, stdout, stderr) = run_epistemic_example("22-recursion-through-modal-rejected.xlog");
+    assert!(
+        !ok,
+        "recursion-through-modal example must fail closed, stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(stderr.contains("UnsupportedEpistemicConstruct"), "{stderr}");
+    assert!(stderr.contains("recursive epistemic program"), "{stderr}");
+    // Names the offending modal predicate and the invariance requirement.
+    assert!(stderr.contains("know reach"), "{stderr}");
+    assert!(stderr.contains("not invariant"), "{stderr}");
+}
+
+#[test]
+fn test_xlog_run_compound_modal_key_reports_typed_epistemic_diagnostic() {
+    // v0.9.2 BOUNDARY: a list/compound modal key cannot be encoded as a GPU
+    // tuple-key column and must FAIL CLOSED with a typed diagnostic naming the
+    // offending term.
+    let _device = match CudaDevice::new(0) {
+        Ok(d) => d,
+        Err(_) => {
+            println!("SKIPPED: CUDA runtime unavailable (no GPU or driver not loaded)");
+            return;
+        }
+    };
+
+    let (ok, stdout, stderr) = run_epistemic_example("23-compound-modal-key-rejected.xlog");
+    assert!(
+        !ok,
+        "compound-modal-key example must fail closed, stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(stderr.contains("UnsupportedEpistemicConstruct"), "{stderr}");
+    assert!(
+        stderr.contains("epistemic GPU tuple-key expectation"),
+        "{stderr}"
+    );
+    // Names the offending compound term. The diagnostic context is itself a
+    // Debug-escaped string, so the inner quotes appear as literal backslashes;
+    // match them with a raw string literal.
+    assert!(
+        stderr.contains(r#"List([Variable(\"H\")])"#),
+        "diagnostic must name the offending list term:\n{stderr}"
     );
 }

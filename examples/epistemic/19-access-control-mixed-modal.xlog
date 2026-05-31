@@ -1,0 +1,49 @@
+// v0.9.2 EGB-02B (FULL): mixed global + per-row modal gating, access control.
+//
+// Domain: a request gateway grants a principal access to a resource only when
+//   (a) a GLOBAL modal gate holds once for the whole evaluation
+//       (`know gateway_online()`, a nullary/ground modal literal), AND
+//   (b) a PER-ROW bound modal literal holds for that principal's row, AND
+//   (c) a PER-ROW NEGATED modal literal holds (the principal is NOT possibly
+//       revoked).
+//
+// The three modal classes compose CONJUNCTIVELY on the GPU row-map kernel:
+//   know gateway_online()        -- global gate, evaluated once
+//   possible cleared(P)          -- per-row positive membership
+//   not possible revoked(P)      -- per-row negated membership
+//
+// This proves all three v0.9.2 EGB-02B modalities (`know`, `possible`,
+// `not possible`) in ONE accepted rule, and that the gating genuinely FILTERS:
+// the granted set is a strict subset of the candidate `principal` set.
+//
+// Data:
+//   principal = {alice=1, bob=2, carol=3, dave=4}
+//   gateway_online present (global gate holds)
+//   cleared   = {1, 2, 4}        (carol=3 is NOT cleared -> dropped by (b))
+//   revoked   = {4}              (dave=4 IS revoked       -> dropped by (c))
+//
+// Ungated `principal` = {1,2,3,4}. Gated `granted` MUST differ:
+//   granted = {1, 2}   (alice, bob)
+//     - carol(3) fails `possible cleared`        (not cleared)
+//     - dave(4)  fails `not possible revoked`    (is revoked)
+// The global gate holds, so it does not suppress the surviving rows; flip it
+// off and `granted` would be empty -- proving the global gate is live.
+//
+// Expect: granted = {1, 2}.
+
+#pragma epistemic_mode = faeel
+
+pred principal(u32).
+pred gateway_online().
+pred cleared(u32).
+pred revoked(u32).
+pred granted(u32).
+
+principal(1). principal(2). principal(3). principal(4).
+gateway_online().
+cleared(1). cleared(2). cleared(4).
+revoked(4).
+
+granted(P) :- principal(P), know gateway_online(), possible cleared(P), not possible revoked(P).
+
+?- granted(P).
