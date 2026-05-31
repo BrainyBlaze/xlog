@@ -2138,6 +2138,420 @@ fn union_components(parents: &mut [usize], left: usize, right: usize) {
 }
 
 /// Split an epistemic program into independently solvable bounded components.
+/// One stratum of a stratified epistemic program: a self-contained sub-program
+/// whose epistemic heads gate only over EDB/invariant relations OR over the
+/// materialized (now-base) outputs of strictly-lower strata.
+#[derive(Debug, Clone)]
+pub struct EpistemicStratum {
+    /// The epistemic output head predicate(s) this stratum materializes.
+    pub head_predicates: Vec<String>,
+    /// Source-rule indices owned by this stratum.
+    pub rule_indices: Vec<usize>,
+    /// The self-contained sub-program for this stratum (its own defining rules
+    /// plus the facts/EDB it needs). Lower-stratum heads are NOT redefined here;
+    /// at execution they are present in the store as materialized base relations.
+    pub program: Program,
+}
+
+/// A stratified epistemic execution plan: an ordered sequence of strata.
+///
+/// Stratum `i`'s epistemic heads are materialized (gated) into the relation store
+/// BEFORE stratum `i+1` runs, so a higher stratum's `know`/`possible` over a
+/// lower stratum's head reads the GATED extension through the EXISTING EGB-02
+/// membership filter (no resolve-into-body, no double-gating).
+#[derive(Debug, Clone)]
+pub struct EpistemicStratifiedPlan {
+    /// Strata in execution (topological) order.
+    pub strata: Vec<EpistemicStratum>,
+}
+
+/// Predicates whose epistemic extension is DETERMINED once lower strata are fixed.
+///
+/// A predicate is *epistemically determined* when every defining rule uses only
+/// (a) positive `know`/`possible` modals and ordinary positive/negated literals,
+/// (b) all ranging over predicates that are themselves invariant (EDB/lower
+/// non-epistemic stratum) OR already epistemically determined, and (c) the
+/// dependency is acyclic through BOTH modal and ordinary edges. Such a head's
+/// materialized (gated) extension IS its truth, so it can be materialized into the
+/// store as a base relation and a higher stratum can gate against it.
+///
+/// This is a STANDALONE analysis: it never feeds
+/// [`reduce_case_a_epistemic_program_to_ordinary`] / `is_invariant`, so it cannot
+/// trigger the resolve-into-body double-gating that the single-pass GPU filter
+/// already performs.
+struct EpistemicallyDeterminedPredicates {
+    determined: BTreeSet<String>,
+}
+
+impl EpistemicallyDeterminedPredicates {
+    fn analyze(program: &Program) -> Self {
+        let invariant = InvariantRelations::analyze(program);
+
+        // Heads defined by at least one rule.
+        let mut derived_heads: BTreeSet<&str> = BTreeSet::new();
+        for rule in &program.rules {
+            if !rule.body.is_empty() {
+                derived_heads.insert(rule.head.predicate.as_str());
+            }
+        }
+
+        // A head is a STRATIFICATION candidate only if it is epistemic-derived
+        // (some defining rule carries a modal literal). Pure-ordinary heads are
+        // handled by invariance, not stratification.
+        let mut epistemic_heads: BTreeSet<&str> = BTreeSet::new();
+        for rule in &program.rules {
+            if rule
+                .body
+                .iter()
+                .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
+            {
+                epistemic_heads.insert(rule.head.predicate.as_str());
+            }
+        }
+
+        // Least-fixpoint closure: a predicate becomes determined when EVERY rule
+        // defining it ranges (modal + ordinary) only over invariant or
+        // already-determined predicates, with no self-reference (acyclic).
+        let mut determined: BTreeSet<String> = BTreeSet::new();
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for head in &epistemic_heads {
+                if determined.contains(*head) {
+                    continue;
+                }
+                if Self::head_is_determined(program, head, &invariant, &derived_heads, &determined)
+                {
+                    determined.insert((*head).to_string());
+                    changed = true;
+                }
+            }
+        }
+
+        Self { determined }
+    }
+
+    /// Whether `head`'s every defining rule ranges only over invariant or
+    /// already-determined predicates (acyclic — no reference to `head` itself).
+    fn head_is_determined(
+        program: &Program,
+        head: &str,
+        invariant: &InvariantRelations,
+        derived_heads: &BTreeSet<&str>,
+        determined: &BTreeSet<String>,
+    ) -> bool {
+        let mut defined = false;
+        for rule in &program.rules {
+            if rule.head.predicate != head || rule.body.is_empty() {
+                continue;
+            }
+            defined = true;
+            for lit in &rule.body {
+                let referenced = match lit {
+                    BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
+                        atom.predicate.as_str()
+                    }
+                    BodyLiteral::Epistemic(modal) => modal.atom.predicate.as_str(),
+                    BodyLiteral::Comparison(_)
+                    | BodyLiteral::IsExpr(_)
+                    | BodyLiteral::Univ(_) => continue,
+                };
+                if referenced == head {
+                    // Self-reference: not acyclically determined (recursion /
+                    // circular modality). Hand back to the recursive/FAEEL paths.
+                    return false;
+                }
+                let ok = invariant.is_invariant(referenced)
+                    || determined.contains(referenced)
+                    // A pure-EDB predicate not seen by `derived_heads` is invariant.
+                    || !derived_heads.contains(referenced);
+                if !ok {
+                    return false;
+                }
+            }
+        }
+        defined
+    }
+
+    fn contains(&self, predicate: &str) -> bool {
+        self.determined.contains(predicate)
+    }
+}
+
+/// Plan a STRATIFIED epistemic execution when the program contains a modal literal
+/// over an epistemic-derived head that is itself epistemically DETERMINED.
+///
+/// This intercepts exactly the chained/nested-epistemic coupling that the joint
+/// single-enumeration path fails closed on (`b :- know a` where `a :- know p`, `p`
+/// invariant). It partitions the program's epistemic heads into strata by modal
+/// dependency, where a head whose modal ranges over a lower DETERMINED head sits in
+/// a strictly-higher stratum. Each stratum is a self-contained sub-program compiled
+/// through the EXISTING single/joint epistemic path; at runtime the executor
+/// materializes each stratum's GATED head into the store before the next stratum
+/// runs, so the higher stratum gates against the materialized (now-base) relation
+/// via the existing EGB-02 membership filter — never via resolve-into-body.
+///
+/// Returns:
+/// - `Ok(Some(plan))` when the program genuinely needs (and admits) stratification:
+///   at least one modal literal ranges over an epistemically-determined derived
+///   head, and a sound stratification exists.
+/// - `Ok(None)` when no modal ranges over a determined derived head (the existing
+///   joint/split/single paths own the program — e.g. example 18's shared base
+///   modal, where the modal target `q` is EDB, not a determined derived head), OR
+///   when the nested target is NOT determined (circular modality / recursion /
+///   unfounded self-support is handed back to the recursive + FAEEL/G91 guards,
+///   which keep ownership and fail closed there).
+pub fn try_plan_stratified_epistemic_program(
+    program: &Program,
+) -> Result<Option<EpistemicStratifiedPlan>> {
+    let determined = EpistemicallyDeterminedPredicates::analyze(program);
+
+    // A stratification is needed only when some modal literal ranges over a
+    // DETERMINED epistemic-derived head. (A modal over a base/EDB predicate is the
+    // ordinary single/joint path — example 18 — and must NOT be intercepted.)
+    let mut needs_stratification = false;
+    for rule in &program.rules {
+        for lit in &rule.body {
+            if let BodyLiteral::Epistemic(modal) = lit {
+                if determined.contains(modal.atom.predicate.as_str())
+                    && modal.atom.predicate != rule.head.predicate
+                {
+                    needs_stratification = true;
+                }
+            }
+        }
+    }
+    if !needs_stratification {
+        return Ok(None);
+    }
+
+    // Assign each epistemic-derived head a stratum level = longest modal-dependency
+    // chain to a determined head it gates over. Heads not determined cannot be
+    // stratified soundly here; if any modal ranges over a non-determined derived
+    // epistemic head, hand back to the joint path's fail-closed diagnostic.
+    let stratum_level = assign_epistemic_strata(program, &determined)?;
+    let Some(stratum_level) = stratum_level else {
+        return Ok(None);
+    };
+
+    // Group epistemic-bearing rules by their head's stratum level.
+    let mut levels: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (idx, rule) in program.rules.iter().enumerate() {
+        let has_epistemic = rule
+            .body
+            .iter()
+            .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)));
+        if !has_epistemic {
+            continue;
+        }
+        let Some(level) = stratum_level.get(rule.head.predicate.as_str()) else {
+            // An epistemic head with no assigned level means the analysis could not
+            // place it soundly; hand back.
+            return Ok(None);
+        };
+        levels.entry(*level).or_default().push(idx);
+    }
+
+    if levels.len() < 2 {
+        // Only one stratum: there is no lower stratum to materialize, so this is
+        // not a genuine stratification (the existing paths own it).
+        return Ok(None);
+    }
+
+    let mut strata = Vec::with_capacity(levels.len());
+    for (_level, rule_indices) in levels {
+        let head_predicates: Vec<String> = rule_indices
+            .iter()
+            .filter_map(|idx| program.rules.get(*idx))
+            .map(|rule| rule.head.predicate.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let stratum_program =
+            build_stratum_subprogram(program, &rule_indices, &head_predicates, &stratum_level)?;
+        strata.push(EpistemicStratum {
+            head_predicates,
+            rule_indices,
+            program: stratum_program,
+        });
+    }
+
+    Ok(Some(EpistemicStratifiedPlan { strata }))
+}
+
+/// Assign each epistemic-derived head an integer stratum level.
+///
+/// Level 0 heads gate only over invariant/EDB relations. A head whose modal ranges
+/// over a determined head at level `k` is at level `>= k + 1`. Returns `Ok(None)`
+/// if any modal ranges over a derived-epistemic head that is NOT determined (those
+/// genuinely-undefined / fail-closed shapes are owned by the joint/recursive
+/// guards, which already produce typed diagnostics).
+fn assign_epistemic_strata(
+    program: &Program,
+    determined: &EpistemicallyDeterminedPredicates,
+) -> Result<Option<BTreeMap<String, usize>>> {
+    // Epistemic-derived heads.
+    let mut epistemic_heads: BTreeSet<&str> = BTreeSet::new();
+    for rule in &program.rules {
+        if rule
+            .body
+            .iter()
+            .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
+        {
+            epistemic_heads.insert(rule.head.predicate.as_str());
+        }
+    }
+
+    // Modal-over-derived-epistemic-head edges: head -> set of derived-epistemic
+    // predicates its modals range over.
+    let mut modal_edges: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for rule in &program.rules {
+        let head = rule.head.predicate.as_str();
+        for lit in &rule.body {
+            if let BodyLiteral::Epistemic(modal) = lit {
+                let target = modal.atom.predicate.as_str();
+                if epistemic_heads.contains(target) {
+                    if !determined.contains(target) {
+                        // Modal over a non-determined epistemic head: not soundly
+                        // stratifiable here. Hand back to the joint/recursive guard.
+                        return Ok(None);
+                    }
+                    modal_edges.entry(head).or_default().insert(target);
+                }
+            }
+        }
+    }
+
+    // Longest-path level via memoized DFS over modal_edges (acyclicity guaranteed
+    // by `EpistemicallyDeterminedPredicates`, which rejects self-reference).
+    let mut level: BTreeMap<String, usize> = BTreeMap::new();
+    fn visit<'a>(
+        head: &'a str,
+        modal_edges: &BTreeMap<&'a str, BTreeSet<&'a str>>,
+        level: &mut BTreeMap<String, usize>,
+        active: &mut BTreeSet<&'a str>,
+    ) -> Result<usize> {
+        if let Some(l) = level.get(head) {
+            return Ok(*l);
+        }
+        if !active.insert(head) {
+            // A cycle through modal edges should have been excluded upstream; be
+            // defensive and refuse to stratify.
+            return Err(recursive_epistemic_rejection(
+                "stratified epistemic planning encountered a modal dependency cycle",
+            ));
+        }
+        let mut l = 0;
+        if let Some(targets) = modal_edges.get(head) {
+            for target in targets {
+                let tl = visit(target, modal_edges, level, active)?;
+                l = l.max(tl + 1);
+            }
+        }
+        active.remove(head);
+        level.insert(head.to_string(), l);
+        Ok(l)
+    }
+
+    for head in &epistemic_heads {
+        visit(head, &modal_edges, &mut level, &mut BTreeSet::new())?;
+    }
+
+    Ok(Some(level))
+}
+
+/// Build a self-contained sub-program for one stratum.
+///
+/// Includes this stratum's epistemic-defining rules plus every fact and every
+/// ordinary (non-epistemic) supporting rule whose head is NOT a lower-stratum
+/// epistemic head. Lower-stratum epistemic heads are intentionally OMITTED: at
+/// execution they are present in the store as materialized base relations, and
+/// including their (modal-stripped, ungated) defining rules would overwrite the
+/// gated extension. Their `pred` declarations are retained so the reduced compiler
+/// sees a schema for the materialized base relation.
+fn build_stratum_subprogram(
+    program: &Program,
+    rule_indices: &[usize],
+    head_predicates: &[String],
+    stratum_level: &BTreeMap<String, usize>,
+) -> Result<Program> {
+    let this_level = head_predicates
+        .iter()
+        .filter_map(|h| stratum_level.get(h))
+        .copied()
+        .max()
+        .unwrap_or(0);
+
+    // Lower-stratum epistemic heads: present as materialized base relations at
+    // runtime; their defining rules must NOT appear in this sub-program.
+    let lower_epistemic_heads: BTreeSet<&str> = stratum_level
+        .iter()
+        .filter(|(_, level)| **level < this_level)
+        .map(|(head, _)| head.as_str())
+        .collect();
+
+    let own_rule_indices: BTreeSet<usize> = rule_indices.iter().copied().collect();
+
+    let mut stratum = program.clone();
+    stratum.rules = program
+        .rules
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, rule)| {
+            if own_rule_indices.contains(&idx) {
+                return Some(rule.clone());
+            }
+            // Drop any rule that (re)defines a lower-stratum epistemic head.
+            if lower_epistemic_heads.contains(rule.head.predicate.as_str()) {
+                return None;
+            }
+            // Keep facts and ordinary supporting rules (EDB + non-epistemic
+            // derivations the stratum's bodies may reference).
+            let has_epistemic = rule
+                .body
+                .iter()
+                .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)));
+            if has_epistemic && !own_rule_indices.contains(&idx) {
+                // Another stratum's epistemic rule: exclude.
+                return None;
+            }
+            Some(rule.clone())
+        })
+        .collect();
+
+    // Keep only the queries whose predicate this stratum materializes, so each
+    // stratum's executable surfaces its own head(s).
+    let head_set: BTreeSet<&str> = head_predicates.iter().map(String::as_str).collect();
+    stratum.queries = program
+        .queries
+        .iter()
+        .filter(|query| head_set.contains(query.atom.predicate.as_str()))
+        .cloned()
+        .collect();
+
+    // Drop constraints that reference predicates this stratum does not own, to keep
+    // the sub-program self-contained.
+    stratum.constraints = program
+        .constraints
+        .iter()
+        .filter(|constraint| {
+            constraint_predicate_set(constraint)
+                .iter()
+                .all(|p| head_set.contains(p.as_str()) || !is_program_head(program, p))
+        })
+        .cloned()
+        .collect();
+
+    Ok(stratum)
+}
+
+fn is_program_head(program: &Program, predicate: &str) -> bool {
+    program
+        .rules
+        .iter()
+        .any(|rule| !rule.body.is_empty() && rule.head.predicate == predicate)
+}
+
 pub fn split_epistemic_program(program: &Program) -> Result<EpistemicSplitPlan> {
     // EGB-06: rules that couple more than one distinct epistemic body predicate
     // are NOT rejected here. The dependency graph already unions every such rule
