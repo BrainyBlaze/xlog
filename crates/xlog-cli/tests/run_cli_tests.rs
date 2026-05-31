@@ -272,6 +272,27 @@ fn test_xlog_run_epistemic_examples() {
         // materializes gated `r = {(1,2),(1,3)}`; the higher stratum gates `know r`
         // against that base, projecting away Y. out = {X in node : exists Y r(X,Y)} = {1}.
         ("28-determined-multicol-binding-modal.xlog", "out", "| 1  |"),
+        // v0.9.2 COMPLETENESS CELL: a NEGATED modal (`not know` / `not possible`) over
+        // a DETERMINED epistemic-DERIVED head. `a` (gated by `know p` over EDB `p`) is
+        // determined, so `not know a == not possible a == not a` (ordinary stratified
+        // negation over the materialized base `a = {1,2}`). Both heads = {3} (node 3 is
+        // the only node not in `a`); the equal results prove the modal equivalence.
+        (
+            "29-negated-modal-over-determined-derived.xlog",
+            "q_know",
+            "| 3  |",
+        ),
+        (
+            "29-negated-modal-over-determined-derived.xlog",
+            "q_poss",
+            "| 3  |",
+        ),
+        // v0.9.2 COMPLETENESS CELL: the `possible` twin of example 28 -- a BINDING
+        // `possible r(X, Y)` over a DETERMINED multi-column epistemic head. Proves the
+        // modal operator is irrelevant for a determined target (`possible r == know r ==
+        // r`); stratifies identically to 28. out = {1} (gate load-bearing: ungated node
+        // = {1,2,3}).
+        ("30-possible-binding-over-determined.xlog", "out", "| 1  |"),
     ];
 
     for (example, expected_relation, expected_value) in examples {
@@ -613,5 +634,35 @@ fn test_xlog_run_compound_modal_key_reports_typed_epistemic_diagnostic() {
     assert!(
         stderr.contains(r#"List([Variable(\"H\")])"#),
         "diagnostic must name the offending list term:\n{stderr}"
+    );
+}
+
+#[test]
+fn test_xlog_run_faeel_unfounded_self_support_reports_typed_epistemic_diagnostic() {
+    // v0.9.2 GENUINELY-UNDEFINED BOUNDARY (over-broadening gate): a self-supported
+    // possible rule (`p() :- possible p().`) with no independent founded support is
+    // UNFOUNDED under default FAEEL and must FAIL CLOSED with a typed diagnostic. This
+    // is the NON-determined cell of the partition -- the determined-modal family's
+    // permissive acceptance check must NOT leak a non-empty answer for it.
+    let _device = match CudaDevice::new(0) {
+        Ok(d) => d,
+        Err(_) => {
+            println!("SKIPPED: CUDA runtime unavailable (no GPU or driver not loaded)");
+            return;
+        }
+    };
+
+    let (ok, stdout, stderr) =
+        run_epistemic_example("31-faeel-unfounded-self-support-rejected.xlog");
+    assert!(
+        !ok,
+        "FAEEL-unfounded self-support example must fail closed, stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(stderr.contains("UnsupportedEpistemicConstruct"), "{stderr}");
+    assert!(stderr.contains("FAEEL foundedness guard"), "{stderr}");
+    // Names the offending self-supported modal atom.
+    assert!(
+        stderr.contains("self-supported possible p/0"),
+        "diagnostic must name the unfounded self-supported modal:\n{stderr}"
     );
 }

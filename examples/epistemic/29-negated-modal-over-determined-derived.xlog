@@ -1,0 +1,47 @@
+// v0.9.2 COMPLETENESS CELL: a NEGATED modal (`not know` / `not possible`) over an
+// epistemic-DERIVED head that is itself DETERMINED -- ACCEPTED via stratification.
+//
+//   a(X)      :- know p(X).                  -- DETERMINED epistemic head (p is EDB)
+//   q_know(X) :- node(X), not know a(X).      -- negated modal over the DERIVED `a`
+//   q_poss(X) :- node(X), not possible a(X).  -- same, with `possible`
+//
+// Example 26 already accepts `not know R == not R` for an INVARIANT (EDB) `R`. This
+// example pushes the SAME theorem one level up: `a` is not EDB, it is an
+// epistemic-DERIVED head, but it is DETERMINED (its modal `know p(X)` bottoms out in
+// the invariant EDB `p`, acyclically), so `a`'s gated extension IS its truth and
+//   know a == possible a == a   (hence   not know a == not possible a == not a).
+//
+// EXECUTION stratifies: the lower stratum materializes the GATED `a` into the store as
+// a base relation (the `know R == R` theorem applied ONCE at the STORE boundary), and
+// the higher strata read that materialized base `a` -- where `not know a` / `not
+// possible a` become ordinary stratified negation (anti-join) over `a`. No modal is
+// resolved into a body against a still-modal relation; no double-gating.
+//
+// GATE LOAD-BEARING (gated != ungated):
+//   a      = { X : know p(X) } = {1, 2}        (p = {1,2})
+//   q_know = { X in node : not a(X) } = {3}     (node = {1,2,3}; strictly omits 1,2)
+//   q_poss = { X in node : not a(X) } = {3}     (identical -- proves the modal equivalence)
+// Dropping the negated literal entirely gives q = node = {1,2,3}; treating it as
+// always-false gives q = {} . Only the SOUND `not a` reading yields {3}.
+//
+// This is the negated-over-determined-DERIVED cell of the determined-modal family:
+// together with the positive cells (17/24/25/28) it closes the family -- every modal
+// target is either DETERMINED (resolved) or NON-DETERMINED (correctly fail-closed).
+
+#pragma epistemic_mode = faeel
+
+pred node(u32).
+pred p(u32).
+pred a(u32).
+pred q_know(u32).
+pred q_poss(u32).
+
+node(1). node(2). node(3).
+p(1). p(2).
+
+a(X) :- know p(X).
+q_know(X) :- node(X), not know a(X).
+q_poss(X) :- node(X), not possible a(X).
+
+?- q_know(X).
+?- q_poss(X).
