@@ -1993,7 +1993,16 @@ fallback locks.
       the GPU recursive engine).
 - [x] Multi-epistemic-output-head cross-component joint solving — CLOSED in v0.9.2
       (SharedModalPredicate-over-base fragment joint-solved with multi-output
-      materialization; nested/epistemic-derived coupling remains fail-closed).
+      materialization, incl. heads of differing arity via per-head projection).
+- [x] Coupling/recursion over an epistemic-DERIVED head — CLOSED in v0.9.2 by
+      STRATIFIED epistemic execution: a modal over a DETERMINED derived head (its
+      modals bottom out in invariant/EDB relations, acyclically; transitive,
+      multi-column, binding) is gated once and materialized into the store as a lower
+      stratum, and the higher stratum gates against it via the existing filter — the
+      `know R ≡ R` theorem applied at the store boundary (no resolve-into-body, no
+      double-gating). The determined-modal family is now complete: every modal target
+      is either determined (resolved) or non-determined (correctly fail-closed —
+      circular/Case-B recursion, FAEEL-unfounded self-support, syntactic nested).
 
 ## v0.9.2 - Epistemic Executor Semantic Completion
 
@@ -2011,17 +2020,31 @@ production `xlog run` path. Status:
 - [x] Cross-component epistemic coupling: a coalesced component with >1 epistemic
       output head sharing a base modal predicate is JOINT-SOLVED with multi-output
       materialization (each head materialized against one shared accepted world
-      view); coupling over an epistemic-derived head (nested/stratified) and
-      augmented-projection coupling fail closed with precise diagnostics. Evidence:
+      view), including heads of differing arity via per-head projection. Evidence:
       `examples/epistemic/18-cross-component-joint-shared-modal.xlog` (both heads
-      `known={1,2}`, `maybe={2}`) + K2 split-vs-unsplit equivalence; `16`/`17`.
+      `known={1,2}`, `maybe={2}`), `21` (three heads), `27` (augmented differing-arity)
+      + K2 split-vs-unsplit equivalence.
+- [x] Stratified epistemic execution (coupling/recursion over a DETERMINED derived
+      head): the determined head is gated once and materialized into the store as a
+      lower stratum; the higher stratum gates against it via the existing filter
+      (`know R ≡ R` at the store boundary). Transitive, multi-column, binding; negated
+      modal over an invariant relation reduces to ordinary negation. Evidence:
+      `17` (chained), `24` (transitive determined-ordinary), `25` (recursion over a
+      determined head), `26` (negated-modal-over-invariant), `28` (determined-epistemic
+      multi-column binding). The determined-modal family is COMPLETE.
 
-### Scoped out of v0.9.2 (typed fail-closed)
+### Genuinely-undefined (correctly fail-closed by design — NOT deferral)
 
-- [ ] Cross-component coupling over an epistemic-derived head (nested/stratified
-      modal) — true stratified epistemic evaluation is future work.
-- [ ] Case-B recursion (recursion through the modal predicate) — FAEEL/G91 foundedness
-      territory; unfounded modal cycles fail closed.
+Every modal target is either DETERMINED (resolved above) or NON-DETERMINED (no fixed
+extension → fail-closed is the correct semantics). The non-determined cases are
+CI-enforced over-broadening gates (so the permissive determined-closure cannot leak a
+wrong-but-non-empty answer):
+
+- [x] Circular modality / Case-B recursion THROUGH the modal predicate (modal over a
+      relation in/transitively-on the recursive SCC) → typed `recursive epistemic
+      program` / "not invariant"; FAEEL/G91 govern founded self-support. (`22`)
+- [x] FAEEL-unfounded self-support (`p() :- possible p()`) → FAEEL-defined rejection.
+- [x] Syntactic nested modal operators (`know possible p()`) → EGB-03 typed diagnostic. (`13`)
 
 ## v0.10.0 - Multi-GPU and Out-of-Core Execution
 

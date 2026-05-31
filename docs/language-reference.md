@@ -1,7 +1,7 @@
 # XLOG Language Reference
 
 > **Release context:** XLOG `v0.9.0-rc` + v0.9.1 / v0.9.2 epistemic executor completion (unreleased)
-> **Language coverage:** Core v0.8.0 language, the v0.8.5 language-completeness contract, the v0.9.0 epistemic solver surface, the v0.9.1 epistemic executor completion (EIR-derived candidate enumeration, value-level modal membership, per-tuple-key FAEEL foundedness, ground epistemic constraints, safe split, and joint multi-epistemic solving), and the v0.9.2 semantic completion (mixed global+per-row modal gates compose conjunctively; Case-A recursive epistemic fixpoints over invariant modal relations; precise cross-component coupling diagnostics)
+> **Language coverage:** Core v0.8.0 language, the v0.8.5 language-completeness contract, the v0.9.0 epistemic solver surface, the v0.9.1 epistemic executor completion (EIR-derived candidate enumeration, value-level modal membership, per-tuple-key FAEEL foundedness, ground epistemic constraints, safe split, and joint multi-epistemic solving), and the v0.9.2 semantic completion (mixed global+per-row modal gates compose conjunctively; Case-A recursive epistemic fixpoints over invariant modal relations; multi-output cross-component coupling joint-solved against one shared world view incl. differing-arity heads; and stratified epistemic execution for coupling/recursion over a DETERMINED derived head — the determined-modal family is complete, with only genuinely-undefined cases, circular/Case-B recursion and FAEEL-unfounded self-support and syntactic nested modals, correctly fail-closed)
 > **Last Updated:** May 2026
 
 This document provides a comprehensive reference for the XLOG language,

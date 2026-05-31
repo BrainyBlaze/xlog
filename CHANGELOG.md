@@ -23,31 +23,54 @@ Category-B semantic gaps tracked after v0.9.1, all validated on the production
   `15-recursive-epistemic-closure.xlog` / `15-recursive-epistemic-chain.xlog`
   (transitive closure incl. derived multi-hop tuples).
 - Cross-component epistemic coupling: a coalesced component with more than one
-  epistemic output head sharing a base modal predicate is now JOINT-SOLVED with
+  epistemic output head sharing a base modal predicate is JOINT-SOLVED with
   multi-output materialization — one candidate enumeration + world-view validation
   over the combined modals, then each head materialized against the same accepted
-  world view (extending `materialize_epistemic_gpu_final_tuples` with a per-head
-  scoped row-filter, reusing the WCOJ-promoted reduced runtime plan and EGB-01
-  enumeration). Example `18-cross-component-joint-shared-modal.xlog` materializes
-  both heads (`known={1,2}`, `maybe={2}`). Coupling over an epistemic-derived head
-  (nested/stratified, incl. transitive taint through negation) and
-  augmented-projection coupling fail closed with precise typed
-  `cross-component epistemic coupling` diagnostics naming the coupled heads + merge
-  reason. Single-head coupling stays accepted. Examples `16`/`17`.
+  world view (per-head scoped row-filter + per-head output projection via
+  `public_head_arity`, reusing the WCOJ-promoted reduced runtime plan and EGB-01
+  enumeration). Heads of DIFFERING arity sharing a base modal are supported.
+  Examples `18-cross-component-joint-shared-modal.xlog` (`known={1,2}`,
+  `maybe={2}`), `21` (three heads), `27` (augmented differing-arity).
+- Stratified epistemic execution: a modal over an epistemic-DERIVED head that is
+  itself DETERMINED (its modals bottom out in invariant/EDB relations, acyclically)
+  is resolved by stratified execution — the determined head is gated once and
+  materialized into the relation store as a lower stratum
+  (`LogicExecutionPlan::EpistemicStratified`), and the higher stratum reads it as a
+  plain base relation through the existing membership/join filter. The theorem
+  `know R ≡ R` (for determined `R`) is applied at the STORE boundary, not the rule
+  body — no resolve-into-body, no double-gating. Determined-closure is transitive
+  (ordinary predicates over determined heads), supports multi-column binding modals,
+  and a negated modal over an invariant relation reduces to ordinary negation.
+  Examples `17` (chained `b:-know a`), `24` (transitive determined-ordinary), `25`
+  (recursion over a determined head), `26` (negated-modal-over-invariant in
+  recursion), `28` (determined-epistemic multi-column binding).
 
 ### Changed (v0.9.2)
 
 - Recursive epistemic programs are no longer uniformly fail-closed: the Case-A
-  invariant-modal fragment is now supported (see above). Recursion through the
-  modal predicate (Case B), negated modals in recursive programs, and modals over
-  non-invariant relations remain typed fail-closed.
+  invariant-modal fragment AND recursion/coupling over any DETERMINED head (via
+  stratified execution, see above) are now supported. A negated modal over an
+  invariant relation reduces to ordinary negation.
 
-### Known gaps (v0.9.2, tracked — NOT claimed complete)
+### Determined-modal family complete; only genuinely-undefined cases fail closed
 
-- Cross-component coupling over an epistemic-derived head (nested/stratified modal)
-  — fails closed; true stratified epistemic evaluation is future work.
-- Case-B recursion (recursion through the modal predicate) remains FAEEL/G91
-  foundedness territory.
+The determined/non-determined boundary is closed under composition. Every modal
+target is either DETERMINED (fixed extension → `know R ≡ R` → resolved, via
+joint-solving or stratified execution; any arity, filtering or binding, coupling or
+recursion) or NON-DETERMINED (no fixed extension → correctly fail-closed, this is
+the right answer rather than deferral):
+
+- Circular modality / Case-B recursion THROUGH the modal predicate (a modal over a
+  relation in/transitively-on the recursive SCC) → typed `recursive epistemic
+  program` / "not invariant" (FAEEL/G91 govern founded self-support).
+- FAEEL-unfounded self-support (`p() :- possible p()`) → FAEEL-defined rejection
+  (G91 accepts).
+- Syntactic nested modal operators (`know possible p()`) → EGB-03 typed diagnostic.
+
+These genuinely-undefined cases are CI-enforced as over-broadening gates (examples
+`22`/`13`/`23` + the FAEEL self-support pilot): because determined-closure
+acceptance is permissive, they assert no undefined program leaks a wrong-but-non-empty
+answer.
 
 Full v0.9.2 status: `docs/plans/2026-05-31-v092-epistemic-semantic-completion-status.md`.
 
