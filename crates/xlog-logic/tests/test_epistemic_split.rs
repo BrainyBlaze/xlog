@@ -861,13 +861,16 @@ fn modal_over_epistemic_derived_head_coalesces_then_fails_closed_at_joint_compil
 }
 
 #[test]
-fn shared_modal_two_head_coupling_fails_closed_at_joint_compile() {
-    // The same structural rule covers shared-modal coupling: two rules that share
-    // a modal predicate (`q/1`) coalesce into one component carrying two epistemic
-    // output heads (`a`, `b`). This is genuine coupling (their world-view
-    // acceptance is mutually dependent through `q`), so the single-output joint
-    // path must fail closed naming the SharedModalPredicate reason -- proving the
-    // >1-epistemic-head detection is STRUCTURAL, not specific to derived coupling.
+fn shared_modal_two_head_coupling_is_joint_solved_multi_output() {
+    // K1/K2/K3: two rules that share a BASE modal predicate (`q/1`) coalesce into
+    // one component carrying two epistemic output heads (`a`, `b`). Because `q` is
+    // a base/invariant relation (NOT an epistemic-derived head of the component),
+    // the accepted world-view set over `q` is determined independently of which
+    // head is being materialized. The component is therefore JOINT-SOLVED: ONE
+    // candidate enumeration + world-view validation over the COMBINED modal
+    // literals (`know q`, `possible q`), then EACH head relation is materialized
+    // against the SAME accepted world view. This is the canonical SharedModalPredicate
+    // joint-solving target -- it must COMPILE through the split path, not fail closed.
     let program = parse_program(
         r#"
         pred node(u32).
@@ -889,22 +892,140 @@ fn shared_modal_two_head_coupling_fails_closed_at_joint_compile() {
         }
     ));
 
+    // Joint-solvable: compiles through the split path as ONE coalesced multi-head
+    // component whose joint plan carries both output heads.
+    let exec = compile_epistemic_gpu_split_execution(&program)
+        .expect("shared-modal two-head coupling over a base predicate must joint-solve");
+    assert_eq!(
+        exec.components.len(),
+        1,
+        "coupled heads must share ONE jointly-enumerated component"
+    );
+    // The single joint component's plan carries BOTH epistemic output heads.
+    let heads: std::collections::BTreeSet<&str> = exec.components[0]
+        .executable
+        .gpu_plan
+        .reductions
+        .iter()
+        .map(|reduction| reduction.head_predicate.as_str())
+        .collect();
+    assert_eq!(
+        heads,
+        ["a", "b"].into_iter().collect(),
+        "joint component must materialize both coupled heads, got {heads:?}"
+    );
+    // K3: recomposition covers each source rule exactly once.
+    assert_eq!(exec.recomposed_rule_indices(), vec![0, 1]);
+}
+
+#[test]
+fn augmented_multi_head_shared_modal_coupling_fails_closed_at_joint_compile() {
+    // K4: a coalesced multi-head component whose epistemic rules need OUTPUT
+    // PROJECTION (a modal-literal variable not in the head, e.g. `know edge(X, Y)`
+    // with head `a(X)`) is NOT joint-solvable: the joint plan's `final_output_columns`
+    // projection is derived from the FIRST epistemic rule's head and would
+    // mis-project the OTHER coupled head's per-head materialization. Per-head
+    // projection of an augmented multi-head component is beyond the canonical
+    // SharedModalPredicate target, so it must FAIL CLOSED with a precise typed
+    // diagnostic rather than silently mis-evaluate.
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred color(u32).
+        pred edge(u32, u32).
+        pred a(u32).
+        pred b(u32).
+        a(X) :- node(X), know edge(X, Y).
+        b(X) :- color(X), possible edge(X, Y).
+        "#,
+    )
+    .unwrap();
+
+    // Coalesces via the shared modal predicate `edge/2` into one multi-head component.
+    let split = split_epistemic_program(&program).unwrap();
+    assert_eq!(split.components.len(), 1);
+    assert!(split.components[0].merge_reasons.contains(
+        &EpistemicComponentMergeReason::SharedModalPredicate {
+            predicate: "edge/2".to_string(),
+        }
+    ));
+
     let err = compile_epistemic_gpu_split_execution(&program)
-        .expect_err("shared-modal two-head coupling must fail closed");
+        .expect_err("augmented multi-head coupling must fail closed");
     match err {
         XlogError::UnsupportedEpistemicConstruct { construct, context } => {
             assert_eq!(construct, "cross-component epistemic coupling");
             assert!(
                 context.contains("a") && context.contains("b"),
-                "diagnostic must name coupled heads a and b, got: {context}"
+                "diagnostic must name the coupled heads a and b, got: {context}"
             );
             assert!(
-                context.contains("SharedModalPredicate") || context.contains("q/1"),
-                "diagnostic must name the shared-modal merge reason, got: {context}"
+                context.contains("projection") || context.contains("augment"),
+                "diagnostic must name the projected/augmented multi-head limitation, got: {context}"
             );
-            assert!(!context.contains("independent epistemic outputs"));
         }
-        other => panic!("expected cross-component coupling diagnostic, got {other:?}"),
+        other => panic!("expected augmented multi-head coupling diagnostic, got {other:?}"),
+    }
+}
+
+#[test]
+fn modal_over_transitively_epistemic_derived_predicate_fails_closed() {
+    // K4: a modal literal ranging over an ORDINARY-derived predicate `r` that
+    // TRANSITIVELY depends on an epistemic-derived head (`r :- a`, `a :- know p`)
+    // is a nested/stratified epistemic dependency. `know r` cannot be evaluated by
+    // one shared accepted world view because `r`'s extension depends on the world
+    // view chosen for `a`. The joint single enumeration would mis-evaluate it
+    // (admitting nodes whose `r` membership requires a DIFFERENT accepted world
+    // view), so it must FAIL CLOSED -- not be admitted as if `r` were a base
+    // predicate. This guards the transitive case the direct-head check misses.
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred p(u32).
+        pred a(u32).
+        pred r(u32).
+        pred b(u32).
+        node(1). node(2). p(1).
+        a(X) :- node(X), know p(X).
+        r(X) :- a(X).
+        b(X) :- node(X), know r(X).
+        "#,
+    )
+    .unwrap();
+
+    // The three epistemic-bearing rules coalesce into ONE component (derived
+    // dependency on `a`, then on `r`), carrying two epistemic output heads (`a`,
+    // `b`); base facts stay in their own independent components.
+    let split = split_epistemic_program(&program).unwrap();
+    let coupled = split
+        .components
+        .iter()
+        .find(|c| {
+            c.predicates.contains(&"a".to_string()) && c.predicates.contains(&"b".to_string())
+        })
+        .expect("a and b must coalesce into one component");
+    assert!(coupled
+        .merge_reasons
+        .contains(&EpistemicComponentMergeReason::DerivedPredicate {
+            predicate: "r".to_string(),
+        }));
+
+    let err = compile_epistemic_gpu_split_execution(&program)
+        .expect_err("modal over transitively epistemic-derived predicate must fail closed");
+    match err {
+        XlogError::UnsupportedEpistemicConstruct { construct, context } => {
+            assert_eq!(construct, "cross-component epistemic coupling");
+            // Names the transitively-tainted modal predicate `r`.
+            assert!(
+                context.contains("r/1"),
+                "diagnostic must name the nested modal predicate r/1, got: {context}"
+            );
+            assert!(
+                context.contains("nested") || context.contains("epistemic-derived"),
+                "diagnostic must name the nested/stratified reason, got: {context}"
+            );
+        }
+        other => panic!("expected nested-modal coupling diagnostic, got {other:?}"),
     }
 }
 

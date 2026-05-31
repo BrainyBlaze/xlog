@@ -114,6 +114,31 @@ fn test_xlog_run_epistemic_examples() {
         // gated `trusted = {1, 3}` exactly (node 2 is not vetted, so not known).
         ("16-cross-component-coupling.xlog", "trusted", "| 1  |"),
         ("16-cross-component-coupling.xlog", "trusted", "| 3  |"),
+        // v0.9.2 Bundle 3 COMPLETION: cross-component epistemic JOINT-SOLVING
+        // (multi-output). Two epistemic heads share ONE base modal predicate `q`
+        // (SharedModalPredicate coalesce) but neither feeds the other, so the
+        // coalesced multi-head component is JOINT-SOLVED: one candidate enumeration
+        // + world-view validation over the COMBINED modals (`know q`, `possible q`),
+        // then BOTH heads materialized against the SAME accepted world view. Unlike
+        // example 16 (single producer head), this pilot materializes and DISPLAYS
+        // MULTIPLE coupled epistemic heads through `xlog run`:
+        //   known(X) :- node(X),  know q(X).      -> {1, 2}
+        //   maybe(X) :- color(X), possible q(X).  -> {2}
+        (
+            "18-cross-component-joint-shared-modal.xlog",
+            "known",
+            "| 1  |",
+        ),
+        (
+            "18-cross-component-joint-shared-modal.xlog",
+            "known",
+            "| 2  |",
+        ),
+        (
+            "18-cross-component-joint-shared-modal.xlog",
+            "maybe",
+            "| 2  |",
+        ),
     ];
 
     for (example, expected_relation, expected_value) in examples {

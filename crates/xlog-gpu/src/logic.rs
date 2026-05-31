@@ -946,7 +946,7 @@ impl LogicProgram {
                     capacities_for_epistemic_executable(executable)?,
                 )?;
                 result.require_runtime_dispatch_certification()?;
-                queries.push(epistemic_result_to_query_result(
+                queries.extend(epistemic_result_to_query_results(
                     epistemic_output_relation_name(executable)?,
                     result,
                 ));
@@ -967,7 +967,11 @@ impl LogicProgram {
                     result.require_runtime_dispatch_certification()?;
                 }
                 for (component, result) in split.components.iter().zip(batch.results) {
-                    queries.push(epistemic_result_to_query_result(
+                    // A JOINT-SOLVED coalesced multi-head component yields one query
+                    // per coupled head: the primary head from `final_output` plus
+                    // each additional head materialized against the SAME accepted
+                    // world view. Single-head components yield exactly one query.
+                    queries.extend(epistemic_result_to_query_results(
                         epistemic_output_relation_name(&component.executable)?,
                         result,
                     ));
@@ -1138,11 +1142,8 @@ fn epistemic_output_relation_name(executable: &EpistemicExecutablePlan) -> Resul
         })
 }
 
-fn epistemic_result_to_query_result(
-    relation_name: String,
-    result: EpistemicGpuExecutionResult,
-) -> LogicQueryResult {
-    let schema = result.final_output.schema();
+fn epistemic_buffer_to_query_result(relation_name: String, buffer: CudaBuffer) -> LogicQueryResult {
+    let schema = buffer.schema();
     let columns = schema
         .columns
         .iter()
@@ -1153,8 +1154,30 @@ fn epistemic_result_to_query_result(
         relation_name,
         columns,
         sort_labels,
-        buffer: result.final_output,
+        buffer,
     }
+}
+
+/// Convert an epistemic GPU execution result into one query result per output head.
+///
+/// `primary_relation_name` is the primary head (from `final_output`). A
+/// JOINT-SOLVED coalesced multi-head component also carries
+/// `additional_head_outputs`, each materialized against the SAME accepted world
+/// view; every coupled head becomes its own query result so `xlog run` displays
+/// all coupled epistemic outputs.
+fn epistemic_result_to_query_results(
+    primary_relation_name: String,
+    result: EpistemicGpuExecutionResult,
+) -> Vec<LogicQueryResult> {
+    let mut results = Vec::with_capacity(1 + result.additional_head_outputs.len());
+    for (head, buffer) in result.additional_head_outputs {
+        results.push(epistemic_buffer_to_query_result(head, buffer));
+    }
+    results.push(epistemic_buffer_to_query_result(
+        primary_relation_name,
+        result.final_output,
+    ));
+    results
 }
 
 fn is_user_visible_relation(name: &str) -> bool {
