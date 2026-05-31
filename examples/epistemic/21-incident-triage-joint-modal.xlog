@@ -1,0 +1,66 @@
+// v0.9.2 Bundle 3 (FULL): cross-component epistemic JOINT-SOLVING, multi-output.
+//
+// Domain: incident triage. Three epistemic output heads share ONE base modal
+// predicate `compromised` (a SharedModalPredicate coalesce). None feeds another
+// -- `compromised` is a base/invariant relation, NOT an epistemic-derived head.
+// Local splittability would place the three heads in different components, yet
+// they share the modal predicate, so the dependency graph coalesces them into
+// ONE component carrying THREE epistemic output heads. This is the canonical
+// joint-solving target: ONE candidate enumeration + world-view validation over
+// the component's COMBINED modal literals, then EACH head materialized against
+// the SAME accepted world view.
+//
+// The three heads exercise all three v0.9.2 modalities over the shared base, and
+// each ranges over a DIFFERENT ordinary domain relation so the heads genuinely
+// differ from each other AND from their domains (proving real modal gating):
+//   quarantine(H) :- host(H),    know compromised(H).      -- certainly bad
+//   watch(H)      :- monitored(H), possible compromised(H).-- possibly bad
+//   clear(H)      :- service(H), not possible compromised(H). -- certainly fine
+//
+// Data:
+//   host       = {1,2,3,4}
+//   monitored  = {2,3}
+//   service    = {3,4,5}
+//   compromised (invariant base) = {1, 2}
+//
+// With `compromised` an invariant base fact set, know/possible resolve over the
+// same accepted set; results:
+//   quarantine = {1, 2}    (hosts known compromised; 3,4 are hosts but not)
+//   watch      = {2}       (2 is monitored AND possibly compromised; 3 monitored
+//                           but compromised(3) false -> dropped)
+//   clear      = {3, 4, 5} (services NOT possibly compromised; 1,2 are not
+//                           services anyway, and none of 3,4,5 is compromised)
+//
+// Each head DIFFERS from its ungated domain (filtering is live):
+//   quarantine {1,2}  != host {1,2,3,4}      (3,4 gated out)
+//   watch      {2}    != monitored {2,3}     (3 gated out)
+//   clear      {3,4,5}!= service {3,4,5}     (none compromised, so equal here;
+//                       the gate is still LIVE -- add compromised(3) and clear
+//                       would drop 3. quarantine/watch already prove filtering.)
+//
+// ALL THREE coupled heads must be materialized and DISPLAYED by `xlog run`.
+//
+// Expect: quarantine = {1,2}, watch = {2}, clear = {3,4,5}.
+
+#pragma epistemic_mode = faeel
+
+pred host(u32).
+pred monitored(u32).
+pred service(u32).
+pred compromised(u32).
+pred quarantine(u32).
+pred watch(u32).
+pred clear(u32).
+
+host(1). host(2). host(3). host(4).
+monitored(2). monitored(3).
+service(3). service(4). service(5).
+compromised(1). compromised(2).
+
+quarantine(H) :- host(H), know compromised(H).
+watch(H) :- monitored(H), possible compromised(H).
+clear(H) :- service(H), not possible compromised(H).
+
+?- quarantine(H).
+?- watch(H).
+?- clear(H).
