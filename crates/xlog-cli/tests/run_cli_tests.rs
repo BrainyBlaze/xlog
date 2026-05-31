@@ -72,6 +72,10 @@ fn test_xlog_run_epistemic_examples() {
         ("11-faeel-foundedness.xlog", "founded", "rows: 1"),
         ("12-bound-variable-splitting.xlog", "both_known", "| 1  |"),
         ("12-bound-variable-splitting.xlog", "safe_alt", "| 2  |"),
+        // v0.9.2 EGB-02B: mixed per-row (`possible edge(X)`) + global
+        // (`know global_flag()`) modal membership composed conjunctively.
+        ("14-mixed-literal-membership.xlog", "reachable", "| 1  |"),
+        ("14-mixed-literal-membership.xlog", "reachable", "| 3  |"),
     ];
 
     for (example, expected_relation, expected_value) in examples {
