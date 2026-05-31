@@ -5078,6 +5078,347 @@ fn cycle4_epistemic_literal() -> EirEpistemicLiteral {
     }
 }
 
+// =====================================================================
+// EGB-02B: mixed per-row + global modal membership value-level pilots.
+//
+// Each pilot compiles a single rule that combines a GLOBAL modal gate
+// (nullary `know flag()` / `possible flag()` / `not possible block()`)
+// with a PER-ROW bound-variable modal literal (`possible edge(X)` etc.).
+// The two gate classes must compose CONJUNCTIVELY on the GPU row-map
+// kernel:
+//   * global gate true  + per-row tuple true  -> exact rows emitted
+//   * global gate true  + per-row tuple false -> those rows rejected
+//   * global gate false + per-row tuple true  -> ALL rows rejected
+// Pilots assert EXACT output tuples (never non-empty) and 0 CPU fallback.
+// =====================================================================
+
+#[cfg(feature = "epistemic-logic-tests")]
+struct MixedModalPilotInputs<'a> {
+    seed: &'a [u32],
+    /// Per-row bound-variable membership source (`possible edge(X)`).
+    edge: &'a [u32],
+    /// Nullary global gate fact (`flag()` non-empty -> gate holds).
+    flag_rows: u32,
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+fn run_mixed_modal_pilot(
+    fixture: &RuntimeFixture,
+    source: &str,
+    inputs: MixedModalPilotInputs<'_>,
+) -> xlog_runtime::EpistemicGpuExecutionResult {
+    let program = parse_program(source).expect("parse mixed modal pilot program");
+    let executable =
+        compile_epistemic_gpu_execution(&program).expect("compile mixed modal pilot GPU plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, inputs.seed, "x"));
+    executor.put_relation("edge", upload_unary_u32(&fixture.memory, inputs.edge, "x"));
+    // Nullary global-gate fact: a 0-arity relation modelled by a single
+    // row-count-only buffer when present, empty otherwise.
+    executor.put_relation("flag", upload_zero_arity(&fixture.memory, inputs.flag_rows));
+    executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 16,
+                max_worlds: 4,
+                max_models_per_reduction: 4,
+            },
+        )
+        .expect("mixed per-row + global modal rule should execute on GPU")
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+fn assert_no_cpu_fallback(result: &xlog_runtime::EpistemicGpuExecutionResult) {
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    // K3: membership is device-backed. The single per-row `possible edge(X)`
+    // literal drives exactly one tuple-source key column read on the GPU; the
+    // nullary global gate (`flag()` / `block()`) drives zero. This is NOT
+    // subsumed by `require_runtime_dispatch_certification()`.
+    assert_eq!(
+        result.model_membership.tuple_source_key_column_device_reads, 1,
+        "per-row modal membership must read exactly one device key column"
+    );
+    result
+        .require_runtime_dispatch_certification()
+        .expect("mixed modal runtime path must remain GPU-certified");
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+fn sorted_output_rows(
+    fixture: &RuntimeFixture,
+    result: &xlog_runtime::EpistemicGpuExecutionResult,
+) -> Vec<u32> {
+    let mut rows = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download mixed modal pilot output values");
+    rows.sort_unstable();
+    rows
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+const MIXED_KNOW_FLAG_POSSIBLE_EDGE: &str = r#"
+    pred seed(u32).
+    pred flag().
+    pred edge(u32).
+    pred out(u32).
+
+    out(X) :- seed(X), know flag(), possible edge(X).
+"#;
+
+// Pilot 1: global gate TRUE + per-row tuple TRUE -> exact rows emitted.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn mixed_modal_global_true_row_true_emits_exact_rows() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let result = run_mixed_modal_pilot(
+        &fixture,
+        MIXED_KNOW_FLAG_POSSIBLE_EDGE,
+        MixedModalPilotInputs {
+            seed: &[1, 2, 3],
+            edge: &[1, 2, 3],
+            flag_rows: 1,
+        },
+    );
+    assert_eq!(sorted_output_rows(&fixture, &result), vec![1, 2, 3]);
+    assert_no_cpu_fallback(&result);
+}
+
+// Pilot 2: global gate TRUE + per-row tuple PARTIAL -> only matching rows.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn mixed_modal_global_true_row_partial_filters_rows() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let result = run_mixed_modal_pilot(
+        &fixture,
+        MIXED_KNOW_FLAG_POSSIBLE_EDGE,
+        MixedModalPilotInputs {
+            seed: &[1, 2, 3],
+            edge: &[1, 3],
+            flag_rows: 1,
+        },
+    );
+    // edge(2) absent -> seed 2's per-row tuple gate fails -> rejected.
+    assert_eq!(sorted_output_rows(&fixture, &result), vec![1, 3]);
+    assert_no_cpu_fallback(&result);
+}
+
+// Pilot 3: global gate TRUE + per-row tuple FALSE (no edges) -> all rejected.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn mixed_modal_global_true_row_false_rejects_all_rows() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let result = run_mixed_modal_pilot(
+        &fixture,
+        MIXED_KNOW_FLAG_POSSIBLE_EDGE,
+        MixedModalPilotInputs {
+            seed: &[1, 2, 3],
+            edge: &[],
+            flag_rows: 1,
+        },
+    );
+    assert_eq!(sorted_output_rows(&fixture, &result), Vec::<u32>::new());
+    assert_no_cpu_fallback(&result);
+}
+
+// Pilot 4: global gate FALSE + per-row tuple TRUE -> ALL rows rejected,
+// because the global gate fails once per accepted candidate.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn mixed_modal_global_false_row_true_rejects_all_rows() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let result = run_mixed_modal_pilot(
+        &fixture,
+        MIXED_KNOW_FLAG_POSSIBLE_EDGE,
+        MixedModalPilotInputs {
+            seed: &[1, 2, 3],
+            edge: &[1, 2, 3],
+            flag_rows: 0,
+        },
+    );
+    assert_eq!(sorted_output_rows(&fixture, &result), Vec::<u32>::new());
+    assert_no_cpu_fallback(&result);
+}
+
+// Pilot 5: global `possible` gate TRUE + per-row `possible` tuple -> exact.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn mixed_modal_possible_global_and_row_emits_exact_rows() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let result = run_mixed_modal_pilot(
+        &fixture,
+        r#"
+        pred seed(u32).
+        pred flag().
+        pred edge(u32).
+        pred out(u32).
+
+        out(X) :- seed(X), possible flag(), possible edge(X).
+        "#,
+        MixedModalPilotInputs {
+            seed: &[4, 5, 6],
+            edge: &[4, 6],
+            flag_rows: 1,
+        },
+    );
+    assert_eq!(sorted_output_rows(&fixture, &result), vec![4, 6]);
+    assert_no_cpu_fallback(&result);
+}
+
+// Pilot 6: global `know` gate TRUE + `not possible` global block + per-row
+// `possible` tuple -> mixed know + possible + not-possible conjunction.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn mixed_modal_know_notpossible_and_row_emits_exact_rows() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred flag().
+        pred block().
+        pred edge(u32).
+        pred out(u32).
+
+        out(X) :- seed(X), know flag(), not possible block(), possible edge(X).
+        "#,
+    )
+    .expect("parse know+not-possible mixed pilot");
+    let executable =
+        compile_epistemic_gpu_execution(&program).expect("compile know+not-possible mixed pilot");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[7, 8, 9], "x"));
+    executor.put_relation("edge", upload_unary_u32(&fixture.memory, &[7, 9], "x"));
+    executor.put_relation("flag", upload_zero_arity(&fixture.memory, 1));
+    // block() is empty -> `not possible block()` global gate holds.
+    executor.put_relation("block", upload_zero_arity(&fixture.memory, 0));
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 16,
+                max_worlds: 4,
+                max_models_per_reduction: 4,
+            },
+        )
+        .expect("know + not-possible + per-row mixed rule should execute on GPU");
+    assert_eq!(sorted_output_rows(&fixture, &result), vec![7, 9]);
+    assert_no_cpu_fallback(&result);
+}
+
+// Pilot 7: global `know` gate TRUE but `not possible block()` FALSE (block
+// non-empty) + per-row tuple TRUE -> ALL rows rejected (global gate fails).
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn mixed_modal_know_notpossible_global_false_rejects_all_rows() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred flag().
+        pred block().
+        pred edge(u32).
+        pred out(u32).
+
+        out(X) :- seed(X), know flag(), not possible block(), possible edge(X).
+        "#,
+    )
+    .expect("parse know+not-possible global-false mixed pilot");
+    let executable =
+        compile_epistemic_gpu_execution(&program).expect("compile global-false mixed pilot");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[7, 8, 9], "x"));
+    executor.put_relation("edge", upload_unary_u32(&fixture.memory, &[7, 8, 9], "x"));
+    executor.put_relation("flag", upload_zero_arity(&fixture.memory, 1));
+    // block() non-empty -> `not possible block()` FAILS -> global gate false.
+    executor.put_relation("block", upload_zero_arity(&fixture.memory, 1));
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 16,
+                max_worlds: 4,
+                max_models_per_reduction: 4,
+            },
+        )
+        .expect("global-false mixed rule should execute (and reject) on GPU");
+    assert_eq!(sorted_output_rows(&fixture, &result), Vec::<u32>::new());
+    assert_no_cpu_fallback(&result);
+}
+
+// K4 negative pilot: a MIXED rule whose per-row tuple key is an unsupported
+// class (a list term) must still fail closed with a typed
+// `UnsupportedEpistemicConstruct` via an INDEPENDENT guard (the tuple-key
+// expectation guard), proving removal of the mixed guard opened no hole.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn mixed_modal_unsupported_tuple_key_still_fails_closed() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred flag().
+        pred edge(u32).
+        pred out(u32).
+
+        out(X) :- seed(X), know flag(), possible edge([X]).
+        "#,
+    )
+    .expect("parse mixed rule with unsupported list tuple key");
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("compile mixed rule with unsupported list tuple key");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[1, 2], "x"));
+    executor.put_relation("edge", upload_unary_u32(&fixture.memory, &[1, 2], "x"));
+    executor.put_relation("flag", upload_zero_arity(&fixture.memory, 1));
+    let err = match executor.execute_epistemic_gpu_execution(
+        &executable,
+        EpistemicGpuWorkspaceCapacities {
+            max_candidates: 16,
+            max_worlds: 4,
+            max_models_per_reduction: 4,
+        },
+    ) {
+        Ok(_) => panic!("unsupported tuple-key class in a mixed rule must fail closed"),
+        Err(err) => err,
+    };
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, .. } => {
+            assert_eq!(construct, "epistemic GPU tuple-key expectation");
+        }
+        other => panic!("expected typed tuple-key expectation error, got {other:?}"),
+    }
+}
+
 fn complete_k5_edge_rows() -> Vec<(u32, u32)> {
     let mut rows = Vec::new();
     for left in 1..=5 {
@@ -6593,61 +6934,67 @@ fn egb02_arity_zero_tuple_key_through_gpu_membership() {
     assert!(run(0).is_empty(), "nullary gate fails when fact absent");
 }
 
-/// K3: a rule mixing a per-row (bound-variable) modal literal with a global
-/// gate (ground) modal literal fails closed with a typed diagnostic rather than
-/// emitting rows that ignore the global gate.
+/// EGB-02B: a rule mixing a per-row (bound-variable) modal literal with a
+/// global gate (ground/nullary) modal literal now executes SOUNDLY. The global
+/// gate and the per-row bound tuple-key gate compose conjunctively on the GPU
+/// row-map kernel: a row is emitted iff its per-row tuple holds AND every
+/// global-gate literal holds in the accepted candidate. Here `know flag(7)` is
+/// the global gate (bound to the constant 7, no output column) and
+/// `know child(X)` is the per-row bound-variable filter.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb02_mixed_per_row_and_global_modal_is_fail_closed() {
+fn egb02_mixed_per_row_and_global_modal_executes_conjunctively() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
-    let program = parse_program(
-        r#"
+    let src = r#"
         pred node(u32).
         pred child(u32).
         pred flag(u32).
         pred out(u32).
 
         out(X) :- node(X), know child(X), know flag(7).
-        "#,
-    )
-    .expect("parse mixed per-row + global modal program");
-    let executable = match compile_epistemic_gpu_execution(&program) {
-        Ok(executable) => executable,
-        Err(xlog_core::XlogError::UnsupportedEpistemicConstruct { .. })
-        | Err(xlog_core::XlogError::UnsafeVariable(_))
-        | Err(xlog_core::XlogError::Type(_))
-        | Err(xlog_core::XlogError::Compilation(_)) => return,
-        Err(other) => panic!("unexpected compile error: {other:?}"),
-    };
-    let mut executor = Executor::new(Arc::clone(&fixture.provider));
-    for (name, rel) in &executable.relation_ids {
-        executor.register_relation(*rel, name);
-    }
-    executor.put_relation("node", upload_unary_u32(&fixture.memory, &[1, 2, 3], "x"));
-    executor.put_relation("child", upload_unary_u32(&fixture.memory, &[1], "x"));
-    executor.put_relation("flag", upload_unary_u32(&fixture.memory, &[9], "x"));
-    let err = executor
-        .execute_epistemic_gpu_execution(
-            &executable,
-            EpistemicGpuWorkspaceCapacities {
-                max_candidates: 8,
-                max_worlds: 2,
-                max_models_per_reduction: 4,
-            },
-        )
-        .err()
-        .expect("mixed per-row + global modal membership must fail closed");
-    match err {
-        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, .. } => {
-            assert!(
-                construct.contains("mixed per-row and global modal membership"),
-                "unexpected construct: {construct}"
-            );
+        "#;
+    let run = |flag_rows: &[u32], child_rows: &[u32]| -> Vec<u32> {
+        let program = parse_program(src).expect("parse mixed per-row + global modal program");
+        let executable = compile_epistemic_gpu_execution(&program)
+            .expect("compile mixed per-row + global modal program");
+        let mut executor = Executor::new(Arc::clone(&fixture.provider));
+        for (name, rel) in &executable.relation_ids {
+            executor.register_relation(*rel, name);
         }
-        other => panic!("expected mixed-membership diagnostic, got {other:?}"),
-    }
+        executor.put_relation("node", upload_unary_u32(&fixture.memory, &[1, 2, 3], "x"));
+        executor.put_relation("child", upload_unary_u32(&fixture.memory, child_rows, "x"));
+        executor.put_relation("flag", upload_unary_u32(&fixture.memory, flag_rows, "x"));
+        let result = executor
+            .execute_epistemic_gpu_execution(
+                &executable,
+                EpistemicGpuWorkspaceCapacities {
+                    max_candidates: 16,
+                    max_worlds: 4,
+                    max_models_per_reduction: 4,
+                },
+            )
+            .expect("mixed per-row + global modal rule should execute on GPU");
+        assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+        assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+        result
+            .require_runtime_dispatch_certification()
+            .expect("mixed per-row + global runtime evidence must remain certified");
+        let mut rows = fixture
+            .provider
+            .download_column::<u32>(&result.final_output, 0)
+            .expect("download mixed per-row + global output column 0");
+        rows.sort_unstable();
+        rows
+    };
+    // global gate flag(7) TRUE + per-row child {1,2} TRUE -> exact {1,2}.
+    assert_eq!(run(&[7], &[1, 2]), vec![1, 2]);
+    // global gate TRUE + per-row child {1} -> only row 1 (2,3 filtered).
+    assert_eq!(run(&[7], &[1]), vec![1]);
+    // global gate flag(7) FALSE (flag holds only 9) + per-row TRUE ->
+    // ALL rows rejected once per accepted candidate.
+    assert_eq!(run(&[9], &[1, 2, 3]), Vec::<u32>::new());
 }
 
 /// K2/K3: an empty `possible` tuple source founds nothing; `not possible`

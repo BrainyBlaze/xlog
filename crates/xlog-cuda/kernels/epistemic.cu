@@ -909,13 +909,36 @@ static __device__ uint8_t epistemic_final_tuple_has_accepted_membership_for_row(
     uint32_t output_row,
     const uint32_t* __restrict__ rejection_reasons,
     const uint8_t* __restrict__ model_membership,
-    const uint8_t* __restrict__ world_views
+    const uint8_t* __restrict__ world_views,
+    const uint8_t* __restrict__ candidate_assumptions,
+    const uint8_t* __restrict__ gate_literal_required
 ) {
     if (output_row >= models_per_reduction) return 0u;
 
     for (uint32_t candidate = 0u; candidate < candidate_count; ++candidate) {
         if (rejection_reasons[candidate] != 0u) continue;
         if (world_views[candidate * world_stride] == 0u) continue;
+
+        // Global-gate literals (pure-ground, pure-anonymous, arity-0) must hold
+        // in this accepted candidate's world view even on the per-row path. The
+        // accepted candidate's assumption bit equals the observed body literal
+        // value (validation guarantees assumption == observed, with
+        // `know`/`possible` modality and negation already folded in), so the
+        // body literal holds iff the assumption bit is set. Composing this with
+        // the per-row membership check below enforces the global gate and the
+        // per-row bound tuple-key gate conjunctively for mixed rules.
+        uint8_t gate_holds = 1u;
+        for (uint32_t literal = 0u; literal < literal_count; ++literal) {
+            if (gate_literal_required[literal] == 0u) continue;
+            uint8_t assumed =
+                candidate_assumptions[candidate * literal_count + literal] != 0u ? 1u : 0u;
+            if (assumed == 0u) {
+                gate_holds = 0u;
+                break;
+            }
+        }
+        if (gate_holds == 0u) continue;
+
         for (uint32_t reduction = 0u; reduction < reduction_count; ++reduction) {
             for (uint32_t literal = 0u; literal < literal_count; ++literal) {
                 uint32_t literal_offset =
@@ -986,7 +1009,9 @@ extern "C" __global__ void epistemic_build_final_tuple_row_map_u8(
             row,
             rejection_reasons,
             model_membership,
-            world_views
+            world_views,
+            candidate_assumptions,
+            gate_literal_required
         );
     if (accepted_membership == 0u) return;
 

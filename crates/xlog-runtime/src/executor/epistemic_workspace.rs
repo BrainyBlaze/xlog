@@ -5855,22 +5855,12 @@ impl Executor {
             }
         }
         // A rule mixing a per-row (bound-variable) modal literal with a global
-        // gate (pure-ground/anonymous/arity-0) literal cannot be soundly
-        // materialized by the current row-map kernel: output rows below the
-        // per-reduction model count take the per-row path, which does not
-        // re-check the global-gate literals. Fail closed with a typed
-        // diagnostic rather than emit rows that ignore the global gate.
-        let has_row_filter = !row_filter_bindings.is_empty();
-        let has_global_gate_literal = gate_literal_required_host.iter().any(|&flag| flag != 0u8);
-        if has_row_filter && has_global_gate_literal {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "epistemic GPU mixed per-row and global modal membership".to_string(),
-                context: "a rule combines a bound-variable modal literal with a ground, \
-                          anonymous, or nullary modal literal; mixed per-row and global tuple \
-                          membership is not yet supported in one rule"
-                    .to_string(),
-            });
-        }
+        // gate (pure-ground/anonymous/arity-0) literal is materialized soundly:
+        // the row-map kernel applies the global-gate `gate_literal_required`
+        // mask on BOTH the global membership path and the per-row membership
+        // path, so global-gate literals and per-row bound tuple-key gates
+        // compose conjunctively. The two gate buffers below are passed to the
+        // row-map kernel for both paths.
         let mut gate_literal_required = memory.alloc::<u8>(literal_count.max(1))?;
         self.provider
             .htod_launch_metadata_sync_copy_into(
