@@ -22,12 +22,18 @@ Category-B semantic gaps tracked after v0.9.1, all validated on the production
   runs through the existing GPU recursive fixpoint engine. Examples
   `15-recursive-epistemic-closure.xlog` / `15-recursive-epistemic-chain.xlog`
   (transitive closure incl. derived multi-hop tuples).
-- Cross-component epistemic coupling: a coalesced component carrying more than one
-  epistemic output head now fails closed with a precise typed
-  `cross-component epistemic coupling` diagnostic naming the coupled heads and the
-  merge reason (replacing a misleading "independent outputs, use split" message).
-  Single-epistemic-head coupling is accepted and split-vs-unsplit equivalent.
-  Examples `16-cross-component-coupling.xlog` / `17-…-rejected.xlog`.
+- Cross-component epistemic coupling: a coalesced component with more than one
+  epistemic output head sharing a base modal predicate is now JOINT-SOLVED with
+  multi-output materialization — one candidate enumeration + world-view validation
+  over the combined modals, then each head materialized against the same accepted
+  world view (extending `materialize_epistemic_gpu_final_tuples` with a per-head
+  scoped row-filter, reusing the WCOJ-promoted reduced runtime plan and EGB-01
+  enumeration). Example `18-cross-component-joint-shared-modal.xlog` materializes
+  both heads (`known={1,2}`, `maybe={2}`). Coupling over an epistemic-derived head
+  (nested/stratified, incl. transitive taint through negation) and
+  augmented-projection coupling fail closed with precise typed
+  `cross-component epistemic coupling` diagnostics naming the coupled heads + merge
+  reason. Single-head coupling stays accepted. Examples `16`/`17`.
 
 ### Changed (v0.9.2)
 
@@ -38,8 +44,8 @@ Category-B semantic gaps tracked after v0.9.1, all validated on the production
 
 ### Known gaps (v0.9.2, tracked — NOT claimed complete)
 
-- Multi-epistemic-output-head cross-component joint solving (needs a multi-output
-  GPU materialization kernel) — currently typed fail-closed, not joint-solved.
+- Cross-component coupling over an epistemic-derived head (nested/stratified modal)
+  — fails closed; true stratified epistemic evaluation is future work.
 - Case-B recursion (recursion through the modal predicate) remains FAEEL/G91
   foundedness territory.
 

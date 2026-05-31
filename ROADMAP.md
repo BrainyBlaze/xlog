@@ -1991,9 +1991,9 @@ fallback locks.
 - [x] Case-A recursive epistemic fixpoint execution — CLOSED in v0.9.2 (invariant
       modal atoms reduce to gated relations, reduced ordinary recursion runs through
       the GPU recursive engine).
-- [ ] Multi-epistemic-output-head cross-component joint solving — still typed
-      fail-closed (v0.9.2 added a precise merge-reason diagnostic; joint
-      multi-output materialization needs a multi-output GPU kernel).
+- [x] Multi-epistemic-output-head cross-component joint solving — CLOSED in v0.9.2
+      (SharedModalPredicate-over-base fragment joint-solved with multi-output
+      materialization; nested/epistemic-derived coupling remains fail-closed).
 
 ## v0.9.2 - Epistemic Executor Semantic Completion
 
@@ -2009,15 +2009,17 @@ production `xlog run` path. Status:
       recursive engine. Evidence: `examples/epistemic/15-recursive-epistemic-closure.xlog`
       ({(1,2),(2,3),(1,3)}) and `15-recursive-epistemic-chain.xlog` (3-hop (1,4)).
 - [x] Cross-component epistemic coupling: a coalesced component with >1 epistemic
-      output head fails closed with a precise `cross-component epistemic coupling`
-      diagnostic naming the coupled heads + merge reason; single-epistemic-head
-      coupling is accepted and split-vs-unsplit equivalent. Evidence:
-      `examples/epistemic/16-cross-component-coupling.xlog` + `17-…-rejected.xlog`.
+      output head sharing a base modal predicate is JOINT-SOLVED with multi-output
+      materialization (each head materialized against one shared accepted world
+      view); coupling over an epistemic-derived head (nested/stratified) and
+      augmented-projection coupling fail closed with precise diagnostics. Evidence:
+      `examples/epistemic/18-cross-component-joint-shared-modal.xlog` (both heads
+      `known={1,2}`, `maybe={2}`) + K2 split-vs-unsplit equivalence; `16`/`17`.
 
 ### Scoped out of v0.9.2 (typed fail-closed)
 
-- [ ] Multi-epistemic-output-head cross-component joint solving (needs a multi-output
-      GPU materialization kernel).
+- [ ] Cross-component coupling over an epistemic-derived head (nested/stratified
+      modal) — true stratified epistemic evaluation is future work.
 - [ ] Case-B recursion (recursion through the modal predicate) — FAEEL/G91 foundedness
       territory; unfounded modal cycles fail closed.
 

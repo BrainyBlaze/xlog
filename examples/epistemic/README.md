@@ -44,6 +44,7 @@ XLOG_USE_DEVICE_RUNTIME=1 cargo test -p xlog-cli --test run_cli_tests test_xlog_
 | Recursive epistemic chain | `15-recursive-epistemic-chain.xlog` | v0.9.2 Bundle 2 Case-A multi-hop: 4-chain → full closure incl. 3-hop `(1,4)` (proves not single-pass) |
 | Cross-component coupling (accepted) | `16-cross-component-coupling.xlog` | v0.9.2 Bundle 3 safe coupling: ordinary `report` consumes epistemic-derived `trusted`, coalesced single-output → `trusted={1,3}` |
 | Cross-component coupling (rejected) | `17-cross-component-coupling-rejected.xlog` | v0.9.2 Bundle 3 typed fail-closed diagnostic: a modal literal over an epistemic-derived head couples two epistemic outputs (`cross-component epistemic coupling`, names `trusted`/`flagged` + `DerivedPredicate`) |
+| Cross-component JOINT-solving | `18-cross-component-joint-shared-modal.xlog` | v0.9.2 Bundle 3 multi-output joint-solving: two heads sharing base modal `q` materialize against one shared world view → `known={1,2}`, `maybe={2}` (both heads displayed) |
 
 Notes: examples with one epistemic output head use the single-plan path; examples
 with independent epistemic output heads route through split GPU execution from
