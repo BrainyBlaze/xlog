@@ -999,6 +999,17 @@ impl EpistemicGpuFinalTupleMaterializationTrace {
             return Ok(());
         }
 
+        // EMPTY FOUNDED EXTENSION: a row-filtered reduction whose reduced base is
+        // empty (e.g. an unfounded FAEEL self-support rule excluded from the founded
+        // model) legitimately materializes zero output rows. With no candidate output
+        // rows there is no row-specific membership window to cover, so the
+        // coverage-equality invariant below (which requires a positive output capacity)
+        // does not apply. This mirrors the `row_filter_count == 0` early-Ok above: an
+        // all-empty result is sound, not under-coverage.
+        if final_output_rows == 0 && self.output_row_capacity == 0 {
+            return Ok(());
+        }
+
         let covered_row_capacity = checked_sum(
             self.row_specific_membership_row_capacity,
             self.row_filter_row_capacity_outside_model_slot_window,
