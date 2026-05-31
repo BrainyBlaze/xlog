@@ -61,7 +61,7 @@ targets.
 - `cargo test -p xlog-logic --test test_epistemic_executable_plan` → **17 passed**
 - `cargo test -p xlog-logic --test test_epistemic_faeel` → **4 passed**; `--test test_epistemic_g91` → **5 passed**
 - `XLOG_USE_DEVICE_RUNTIME=1 cargo test -p xlog-runtime --test test_epistemic_gpu_workspace --release --features epistemic-logic-tests` → **131 passed**
-- `cargo test -p xlog-cli --test run_cli_tests --release` → **8 passed** (the `xlog run` example markers incl. 14–28 + the nested-modal / recursion-through-modal / compound-key negative CLI pilots)
+- `cargo test -p xlog-cli --test run_cli_tests --release` → **9 passed** (the `xlog run` example markers incl. 14–30 + the nested-modal / recursion-through-modal / compound-key / FAEEL-unfounded negative CLI pilots)
 - `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution --release` → **206 passed** (in-suite `cpu_*==0` assertions)
 - `cargo test -p xlog-prob --release --features host-io --test epistemic_prob_gpu_accepted_evidence` → **31 passed** (serial; parallel shows device-contention flakiness — serial authoritative)
 - `cargo test -p xlog-prob --release --features host-io --test epistemic_prob_production_reuse` → **7 passed**
@@ -72,9 +72,21 @@ targets.
 - Resolved: `14`→`{1,3}`, `15`→closure incl. `(1,3)`/`(1,4)`, `16`→`{1,3}`, `17`→`flagged={1,3}`,
   `18`→`known={1,2}`/`maybe={2}`, `19`→`{1,2}`, `20`→10-tuple closure, `21`→`quarantine={1,2}`/`watch={2}`/`clear={3,4,5}`,
   `24`→`b={1}`, `25`→`reach={(1,2),(2,3),(1,3)}`, `26`→`reach={(1,2),(3,4)}`,
-  `27`→`one_hop={1,2}`/`pair={(2,20),(2,21),(3,30)}`, `28`→`out={1}`.
+  `27`→`one_hop={1,2}`/`pair={(2,20),(2,21),(3,30)}`, `28`→`out={1}`,
+  `29`→`q_know={3}`/`q_poss={3}` (negated modal over determined-derived),
+  `30`→`out={1}` (`possible`-binding over determined, the `know`-twin of 28).
 - Fail-closed (genuinely-undefined, typed `UnsupportedEpistemicConstruct`): `13` (nested),
-  `22` (recursion through modal / not invariant), `23` (compound list key).
+  `22` (recursion through modal / not invariant), `23` (compound list key),
+  `31` (FAEEL-unfounded self-support → `FAEEL foundedness guard`).
+
+### Determined-modal-family completeness cells (examples cover every cell)
+
+The completeness partition {know, possible, not know, not possible} × {filter, bind} ×
+{determined-EDB, determined-ordinary-derived, determined-epistemic-derived} is exercised:
+positive `know`/`possible` filter+bind over EDB (06/07/14/18/19/21) and over determined
+derived heads (16/17/24/25/27/28/30); negated `not know`/`not possible` over EDB (19/21/26)
+and over a determined derived head (29). Every NON-determined target fails closed
+(22/13/23/31), CI-enforced as over-broadening gates.
 
 ### Inadmissible as GPU-native acceptance evidence
 
