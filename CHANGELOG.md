@@ -113,6 +113,36 @@ v0.8.9 UCR diagnostic surfaces.
   programs and dispatches them through the existing single/split epistemic GPU
   runtime instead of treating production examples as fixture-only inputs.
 
+### Added
+
+- **GPU-resident Datalog/MC execution engine** (`crates/xlog-prob/src/mc/resident.rs`
+  + `crates/xlog-cuda/kernels/mc_resident.cu`). Replaces the host-sequenced
+  per-sample Monte Carlo loop with a single device megakernel that evaluates ALL
+  worlds in one launch. The sample/world id is the CUDA grid dimension; sampled
+  facts, derived relations, evidence flags, query counts, and fixpoint state are
+  device-resident (bounded-Herbrand dense-boolean). Recursive programs converge
+  via a device-side double-buffered naive fixpoint with a shared change flag and a
+  per-world iteration trace; no host reads drive control flow.
+  - **Distinct from the predecessor `a894aab4`**: that commit only removed
+    *tracked data-plane* HtoD/DtoH from the host loop but kept host orchestration
+    (a Rust per-sample loop, per-sample kernel launches, and per-sample untracked
+    `dtoh_scalar_untracked` row-count reads). The resident engine has **zero host
+    interaction in the measured region**: 0 tracked HtoD, 0 tracked DtoH, 0
+    untracked metadata reads, 0 host loop iterations, 0 per-sample host launches —
+    proven CONSTANT across N=128 and N=1024 (`McNoHostStats`, new
+    `untracked_metadata_dtoh_count` provider counter).
+  - `evaluate_gpu_device*` now routes solely through this engine (no
+    host-orchestrated fallback). Programs outside the supported fragment
+    (bounded-domain positive Datalog; arity ≤ 2, body ≤ 2, ≤ 3 vars, bounded
+    universe) **fail closed** before execution with a typed `ResidentRejection`
+    (kind + construct + context). The CPU path survives only as a seed-matched
+    test oracle, never accepted execution.
+  - Acceptance (`tests/mc_resident.rs`): 7 exact-value GPU-resident pilots (fact
+    marginal, probabilistic marginal, evidence conditioning, multi-evidence,
+    annotated-disjunction/exclusive choice, recursive transitive closure with a
+    non-base derived tuple, ≥3-hop recursion proving >1 fixpoint iteration) + 4
+    fail-closed negative tests.
+
 ### Fixed
 
 - Made the Monte Carlo GPU-native hot loop zero **tracked** (data-plane)
