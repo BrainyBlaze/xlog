@@ -2453,28 +2453,26 @@ impl EpistemicallyDeterminedPredicates {
             }
         }
 
-        // A head is a STRATIFICATION candidate only if it is epistemic-derived
-        // (some defining rule carries a modal literal). Pure-ordinary heads are
-        // handled by invariance, not stratification.
-        let mut epistemic_heads: BTreeSet<&str> = BTreeSet::new();
-        for rule in &program.rules {
-            if rule
-                .body
-                .iter()
-                .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
-            {
-                epistemic_heads.insert(rule.head.predicate.as_str());
-            }
-        }
-
-        // Least-fixpoint closure: a predicate becomes determined when EVERY rule
-        // defining it ranges (modal + ordinary) only over invariant or
-        // already-determined predicates, with no self-reference (acyclic).
+        // Least-fixpoint closure over ALL derived heads (epistemic AND ordinary): a
+        // predicate becomes determined when EVERY rule defining it ranges (modal +
+        // ordinary) only over invariant or already-determined predicates, with no
+        // self-reference (acyclic).
+        //
+        // An ORDINARY head is determined transitively when every defining rule ranges
+        // only over determined/invariant relations (e.g. `r :- a` with `a` a
+        // determined epistemic head). Such an `r` is determined-in-principle: its
+        // extension is fixed once the determined heads it derives from are fixed, so a
+        // higher modal `know r`/`possible r` can stratify against the materialized
+        // base `r` via the existing EGB-02 membership filter. The acyclicity guard in
+        // `head_is_determined` (self-reference returns false) plus the fixpoint's
+        // monotonicity keep every recursive predicate OUT of `determined`, so a
+        // circular `know reach` in a recursive SCC (example 22) is never determined
+        // and stays fail-closed.
         let mut determined: BTreeSet<String> = BTreeSet::new();
         let mut changed = true;
         while changed {
             changed = false;
-            for head in &epistemic_heads {
+            for head in &derived_heads {
                 if determined.contains(*head) {
                     continue;
                 }
@@ -2662,6 +2660,15 @@ fn assign_epistemic_strata(
 
     // Modal-over-derived-epistemic-head edges: head -> set of derived-epistemic
     // predicates its modals range over.
+    //
+    // A modal can target either a determined EPISTEMIC head directly (`b :- know a`),
+    // or an ORDINARY predicate transitively derived from determined epistemic heads
+    // (`b :- know r` with `r :- a`, `a` epistemic-determined). For the ordinary case,
+    // the modal's head must sit strictly ABOVE the epistemic head(s) in the ordinary
+    // target's transitive determined support, so those epistemic heads are materialized
+    // (gated) into the store first and the ordinary `r :- a` is then computed over the
+    // materialized base (making `r` locally invariant). We therefore route an edge from
+    // the modal's head to EACH epistemic determined head in the target's support.
     let mut modal_edges: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for rule in &program.rules {
         let head = rule.head.predicate.as_str();
@@ -2675,6 +2682,22 @@ fn assign_epistemic_strata(
                         return Ok(None);
                     }
                     modal_edges.entry(head).or_default().insert(target);
+                } else if determined.contains(target) {
+                    // Modal over an ORDINARY determined predicate: route edges to the
+                    // epistemic determined heads in its transitive support so the
+                    // modal's head sits above them.
+                    let support =
+                        epistemic_support_of_determined_ordinary(program, target, &epistemic_heads);
+                    if support.is_empty() {
+                        // No epistemic head in the support means the target is fully
+                        // invariant (pure-ordinary over EDB) — that is the ordinary
+                        // single/joint path, not a stratification. Hand back.
+                        return Ok(None);
+                    }
+                    let entry = modal_edges.entry(head).or_default();
+                    for support_head in support {
+                        entry.insert(support_head);
+                    }
                 }
             }
         }
@@ -2718,6 +2741,57 @@ fn assign_epistemic_strata(
     Ok(Some(level))
 }
 
+/// The epistemic determined heads in the transitive ordinary support of a determined
+/// ORDINARY predicate.
+///
+/// For `r :- a` with `a` an epistemic-determined head, `support_of("r") = {"a"}`. The
+/// search follows positive/negated ordinary body atoms (the ordinary derivation), and
+/// collects any referenced predicate that is itself an epistemic head. Bounded by the
+/// (acyclic) determined-closure, so a simple visited-set DFS terminates.
+fn epistemic_support_of_determined_ordinary<'a>(
+    program: &'a Program,
+    predicate: &'a str,
+    epistemic_heads: &BTreeSet<&'a str>,
+) -> BTreeSet<&'a str> {
+    let mut support: BTreeSet<&'a str> = BTreeSet::new();
+    let mut seen: BTreeSet<&'a str> = BTreeSet::new();
+    let mut stack: Vec<&'a str> = vec![predicate];
+    while let Some(current) = stack.pop() {
+        if !seen.insert(current) {
+            continue;
+        }
+        for rule in &program.rules {
+            if rule.head.predicate != current || rule.body.is_empty() {
+                continue;
+            }
+            for lit in &rule.body {
+                let referenced = match lit {
+                    BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
+                        atom.predicate.as_str()
+                    }
+                    // An epistemic literal in the support means `current` is itself an
+                    // epistemic head; record it and do not descend through the modal.
+                    BodyLiteral::Epistemic(_)
+                    | BodyLiteral::Comparison(_)
+                    | BodyLiteral::IsExpr(_)
+                    | BodyLiteral::Univ(_) => continue,
+                };
+                if epistemic_heads.contains(referenced) {
+                    support.insert(referenced);
+                } else {
+                    // Descend through ordinary derivations toward their epistemic roots.
+                    stack.push(referenced);
+                }
+            }
+        }
+        // If `current` itself is an epistemic head, it is its own support root.
+        if epistemic_heads.contains(current) && current != predicate {
+            support.insert(current);
+        }
+    }
+    support
+}
+
 /// Build a self-contained sub-program for one stratum.
 ///
 /// Includes this stratum's epistemic-defining rules plus every fact and every
@@ -2748,6 +2822,19 @@ fn build_stratum_subprogram(
         .map(|(head, _)| head.as_str())
         .collect();
 
+    // All epistemic-derived heads (used to compute an ordinary rule's epistemic
+    // support for deferral of determined-ordinary supporting rules).
+    let all_epistemic_heads: BTreeSet<&str> = program
+        .rules
+        .iter()
+        .filter(|rule| {
+            rule.body
+                .iter()
+                .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
+        })
+        .map(|rule| rule.head.predicate.as_str())
+        .collect();
+
     let own_rule_indices: BTreeSet<usize> = rule_indices.iter().copied().collect();
 
     let mut stratum = program.clone();
@@ -2771,6 +2858,27 @@ fn build_stratum_subprogram(
                 .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)));
             if has_epistemic && !own_rule_indices.contains(&idx) {
                 // Another stratum's epistemic rule: exclude.
+                return None;
+            }
+            // An ORDINARY supporting rule whose transitive epistemic support includes a
+            // head NOT yet materialized (gated) at this level must NOT run here — it
+            // would compute over the UNGATED candidate extension of that head and leak
+            // the wrong tuples into the store (which the higher stratum then gates
+            // against). Defer it to the lowest stratum where ALL its epistemic support
+            // is already a materialized gated base relation. E.g. `r :- a` (a an
+            // epistemic-determined head) is dropped from `a`'s own stratum (level 0) and
+            // kept only in the strictly-higher stratum where `a` is materialized base,
+            // so `r` is computed once from the gated `a`. Pure-ordinary rules over EDB
+            // (empty epistemic support) are never deferred.
+            let support = epistemic_support_of_determined_ordinary(
+                program,
+                rule.head.predicate.as_str(),
+                &all_epistemic_heads,
+            );
+            if support
+                .iter()
+                .any(|h| stratum_level.get(*h).copied().unwrap_or(0) >= this_level)
+            {
                 return None;
             }
             Some(rule.clone())

@@ -1093,15 +1093,24 @@ fn augmented_multi_head_shared_modal_coupling_joint_solves_with_per_head_project
 }
 
 #[test]
-fn modal_over_transitively_epistemic_derived_predicate_fails_closed() {
+fn modal_over_transitively_epistemic_derived_predicate_fails_closed_at_split_layer() {
     // K4: a modal literal ranging over an ORDINARY-derived predicate `r` that
     // TRANSITIVELY depends on an epistemic-derived head (`r :- a`, `a :- know p`)
     // is a nested/stratified epistemic dependency. `know r` cannot be evaluated by
     // one shared accepted world view because `r`'s extension depends on the world
-    // view chosen for `a`. The joint single enumeration would mis-evaluate it
-    // (admitting nodes whose `r` membership requires a DIFFERENT accepted world
-    // view), so it must FAIL CLOSED -- not be admitted as if `r` were a base
-    // predicate. This guards the transitive case the direct-head check misses.
+    // view chosen for `a`. The JOINT SPLIT path (single shared world-view enumeration)
+    // would mis-evaluate it, so the SPLIT LAYER must FAIL CLOSED -- not admit it as if
+    // `r` were a base predicate. This guards the transitive case the direct-head check
+    // misses.
+    //
+    // NOTE: the full `xlog run` path does NOT route this shape through the split layer:
+    // v0.9.2 STRATIFIED execution intercepts it first (the transitive determined-closure
+    // marks the ordinary `r` determined, materializes gated `a` as a lower stratum,
+    // computes `r :- a` over the materialized base, and gates `know r` against the base
+    // `r`). See example 24 (`24-transitive-determined-modal-stratified.xlog`) and the
+    // CLI test `test_xlog_run_transitive_determined_modal_stratifies_accepted`. This test
+    // pins the SPLIT-LAYER fail-closed contract that the stratified path relies on as its
+    // sound fallback for any shape stratification declines.
     let program = parse_program(
         r#"
         pred node(u32).
@@ -1267,6 +1276,77 @@ fn chained_modal_over_determined_epistemic_head_plans_stratified() {
         .rules
         .iter()
         .any(|rule| !rule.body.is_empty() && rule.head.predicate == "a");
+    assert!(
+        !higher_redefines_a,
+        "higher stratum must not redefine the lower-stratum head `a`"
+    );
+}
+
+#[test]
+fn modal_over_transitively_determined_ordinary_head_plans_stratified() {
+    // v0.9.2 Task 2: `b :- know r` where `r :- a` (ordinary) and `a :- know p` (`p`
+    // EDB). The transitive determined-closure marks the ORDINARY `r` determined (its
+    // sole rule ranges only over the determined `a`), so `know r` stratifies: `a` is a
+    // lower stratum, and `b`'s stratum sits ABOVE `a` (routed through `r`'s epistemic
+    // support `a`). The ordinary `r :- a` is DEFERRED to `b`'s stratum (where `a` is a
+    // materialized gated base relation), so it is computed once from the gated `a`.
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred p(u32).
+        pred a(u32).
+        pred r(u32).
+        pred b(u32).
+        node(1). node(2). p(1).
+        a(X) :- node(X), know p(X).
+        r(X) :- a(X).
+        b(X) :- node(X), know r(X).
+        ?- b(X).
+        "#,
+    )
+    .unwrap();
+
+    let plan = xlog_logic::epistemic::try_plan_stratified_epistemic_program(&program)
+        .expect("stratified planning must not error")
+        .expect("modal over a transitively-determined ordinary head must plan stratified");
+    assert_eq!(
+        plan.strata.len(),
+        2,
+        "expected exactly two strata (a below b)"
+    );
+    assert_eq!(plan.strata[0].head_predicates, vec!["a".to_string()]);
+    assert_eq!(plan.strata[1].head_predicates, vec!["b".to_string()]);
+
+    // The LOWER stratum (a) must NOT contain the ordinary `r :- a` supporting rule:
+    // computing `r` there would derive it from the UNGATED candidate `a` and leak the
+    // wrong tuples into the store.
+    let lower_defines_r = plan.strata[0]
+        .program
+        .rules
+        .iter()
+        .any(|rule| !rule.body.is_empty() && rule.head.predicate == "r");
+    assert!(
+        !lower_defines_r,
+        "the determined-ordinary `r :- a` must be DEFERRED out of `a`'s stratum (no \
+         double-materialization from ungated `a`)"
+    );
+
+    // The HIGHER stratum (b) DOES carry `r :- a` (computed over the materialized base
+    // `a`), and must NOT redefine `a`.
+    let higher_defines_r = plan.strata[1]
+        .program
+        .rules
+        .iter()
+        .any(|rule| !rule.body.is_empty() && rule.head.predicate == "r");
+    let higher_redefines_a = plan.strata[1]
+        .program
+        .rules
+        .iter()
+        .any(|rule| !rule.body.is_empty() && rule.head.predicate == "a");
+    assert!(
+        higher_defines_r,
+        "`b`'s stratum must compute `r :- a` over the materialized gated base `a`"
+    );
     assert!(
         !higher_redefines_a,
         "higher stratum must not redefine the lower-stratum head `a`"
