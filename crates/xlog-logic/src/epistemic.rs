@@ -2974,6 +2974,13 @@ fn is_program_head(program: &Program, predicate: &str) -> bool {
         .any(|rule| !rule.body.is_empty() && rule.head.predicate == predicate)
 }
 
+/// Partition an epistemic program into independently-evaluable components.
+///
+/// Builds the epistemic dependency graph (coalescing rules that couple distinct
+/// epistemic body predicates into one component) and returns an
+/// [`EpistemicSplitPlan`] describing which output heads evaluate together versus
+/// in isolation. This is the entry point for the safe-split / joint-solving and
+/// stratified-execution routing decisions in the GPU driver.
 pub fn split_epistemic_program(program: &Program) -> Result<EpistemicSplitPlan> {
     // EGB-06: rules that couple more than one distinct epistemic body predicate
     // are NOT rejected here. The dependency graph already unions every such rule
