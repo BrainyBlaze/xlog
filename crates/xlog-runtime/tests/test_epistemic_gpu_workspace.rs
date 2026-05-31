@@ -1074,6 +1074,103 @@ fn split_component_outputs_match_unsplit_single_execution_outputs() {
     }
 }
 
+/// v0.9.2 Bundle 3 K2: split-vs-unsplit OUTPUT equivalence for the ACCEPTED
+/// cross-component coupling case.
+///
+/// The accepted coupling (`trusted(X) :- node(X), know vetted(X). report(X) :-
+/// trusted(X).`) coalesces the epistemic-derived head `trusted` and its ordinary
+/// consumer `report` into ONE dependency component, but it has exactly ONE
+/// epistemic output head, so the WHOLE program compiles through BOTH the
+/// monolithic single-execution path (`compile_epistemic_gpu_execution`) and the
+/// split path (`compile_epistemic_gpu_split_execution`). This test runs both on
+/// the device and asserts the epistemic output relation is row-identical -- the
+/// coalesced split is recomposition-equivalent to the unsplit program, not a
+/// behavioral change. Both sides are real device runs; neither is hardcoded.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn accepted_cross_component_coupling_split_matches_unsplit_output() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let source = r#"
+        pred node(u32).
+        pred vetted(u32).
+        pred trusted(u32).
+        pred report(u32).
+        trusted(X) :- node(X), know vetted(X).
+        report(X) :- trusted(X).
+    "#;
+    let node_rows = [1u32, 2, 3];
+    let vetted_rows = [1u32, 3];
+    let caps = EpistemicGpuWorkspaceCapacities {
+        max_candidates: 2,
+        max_worlds: 2,
+        max_models_per_reduction: 2,
+    };
+
+    // --- UNSPLIT side: whole program through the monolithic single-execution path. ---
+    let unsplit_output = run_unsplit_single_component_output_with_caps(
+        &fixture,
+        source,
+        &[
+            ("node", &unary(&node_rows)),
+            ("vetted", &unary(&vetted_rows)),
+        ],
+        caps,
+    );
+
+    // --- SPLIT side: whole program through the split path's coalesced component. ---
+    let program = parse_program(source).expect("parse accepted coupling program");
+    let split =
+        compile_epistemic_gpu_split_execution(&program).expect("accepted coupling must compile");
+    // The coupling coalesces into a single epistemic component (recomposition
+    // covers both source rules exactly once).
+    assert_eq!(split.components.len(), 1);
+    assert_eq!(split.recomposed_rule_indices(), vec![0, 1]);
+    let mut split_executor = Executor::new(Arc::clone(&fixture.provider));
+    for component in split.recomposed_components() {
+        for (name, rel) in &component.executable.relation_ids {
+            split_executor.register_relation(*rel, name);
+        }
+    }
+    split_executor.put_relation("node", upload_unary_u32(&fixture.memory, &node_rows, "x"));
+    split_executor.put_relation(
+        "vetted",
+        upload_unary_u32(&fixture.memory, &vetted_rows, "x"),
+    );
+    let recomposed = split.recomposed_components();
+    let executables: Vec<_> = recomposed
+        .iter()
+        .map(|component| &component.executable)
+        .collect();
+    let batch = split_executor
+        .execute_epistemic_gpu_execution_batch_with_trace(&executables, caps)
+        .expect("accepted coupling split component must execute on device");
+    assert_eq!(batch.results.len(), 1);
+    // No CPU fallbacks anywhere in the coupled split orchestration.
+    assert_eq!(batch.trace.cpu_recomposition_steps, 0);
+    assert_eq!(batch.trace.cpu_candidate_enumerations, 0);
+    assert_eq!(batch.trace.cpu_world_view_validations, 0);
+    assert_eq!(batch.trace.cpu_solver_search_fallbacks, 0);
+    assert_eq!(batch.trace.cpu_probability_recomputations, 0);
+    let mut split_output = fixture
+        .provider
+        .download_column::<u32>(&batch.results[0].final_output, 0)
+        .expect("download accepted coupling split output");
+    split_output.sort_unstable();
+
+    // K2: identical rows, and the exact gated tuples {1, 3} (node 2 is not vetted).
+    assert_eq!(
+        split_output, unsplit_output,
+        "split coupled output must equal unsplit single-execution output"
+    );
+    assert_eq!(
+        split_output,
+        vec![1, 3],
+        "accepted coupling must materialize the exact gated tuples"
+    );
+}
+
 /// Compile a single-output epistemic subprogram through the UNSPLIT path, run it
 /// on the device, and return its sorted output column. Used as the equivalence
 /// reference for split-component outputs.

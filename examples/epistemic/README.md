@@ -39,9 +39,15 @@ XLOG_USE_DEVICE_RUNTIME=1 cargo test -p xlog-cli --test run_cli_tests test_xlog_
 | FAEEL foundedness | `11-faeel-foundedness.xlog` | v0.9.1 EGB-07 founded self-support → `founded={()}`|
 | Bound-variable splitting | `12-bound-variable-splitting.xlog` | v0.9.1 EGB-05/EGB-06 split routing with bound modal membership → `both_known={1}`, `safe_alt={2}` |
 | Nested modal rejection | `13-nested-modal-rejected.xlog` | v0.9.1 EGB-03 typed fail-closed diagnostic for `know possible p()` |
+| Cross-component coupling (accepted) | `16-cross-component-coupling.xlog` | v0.9.2 Bundle 3 safe coupling: ordinary `report` consumes epistemic-derived `trusted`, coalesced single-output → `trusted={1,3}` |
+| Cross-component coupling (rejected) | `17-cross-component-coupling-rejected.xlog` | v0.9.2 Bundle 3 typed fail-closed diagnostic: a modal literal over an epistemic-derived head couples two epistemic outputs (`cross-component epistemic coupling`, names `trusted`/`flagged` + `DerivedPredicate`) |
 
 Notes: examples with one epistemic output head use the single-plan path; examples
 with independent epistemic output heads route through split GPU execution from
-`xlog run`. Nested modal operators and the other goal-mandated fail-closed
-fragments (see `docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`)
-are intentionally rejected and covered by negative pilots.
+`xlog run`. A coalesced component that nonetheless carries more than one epistemic
+output head (cross-component modal coupling) is unsound to split and cannot be
+jointly materialized, so it fails closed with a typed `cross-component epistemic
+coupling` diagnostic naming the coupled heads and the merge reason. Nested modal
+operators and the other goal-mandated fail-closed fragments (see
+`docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`) are
+intentionally rejected and covered by negative pilots.
