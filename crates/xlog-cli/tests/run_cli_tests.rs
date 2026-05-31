@@ -193,6 +193,38 @@ fn test_xlog_run_epistemic_examples() {
         ("21-incident-triage-joint-modal.xlog", "watch", "| 2  |"),
         ("21-incident-triage-joint-modal.xlog", "clear", "| 3  |"),
         ("21-incident-triage-joint-modal.xlog", "clear", "| 5  |"),
+        // v0.9.2 STRATIFIED recursion over a DETERMINED epistemic-derived head:
+        // `a` (gated by `know certified` over EDB) is materialized as a lower
+        // stratum, then `reach` recurses via `know a` over the now-base relation.
+        // reach = {(1,2),(2,3),(1,3)}; the derived (1,3) proves multi-hop fixpoint.
+        (
+            "25-recursion-over-determined-modal.xlog",
+            "reach",
+            "| 1  | 2  |",
+        ),
+        (
+            "25-recursion-over-determined-modal.xlog",
+            "reach",
+            "| 2  | 3  |",
+        ),
+        (
+            "25-recursion-over-determined-modal.xlog",
+            "reach",
+            "| 1  | 3  |",
+        ),
+        // v0.9.2 NEGATED modal over an INVARIANT relation in a recursive context:
+        // `not know blocked(Y)` == ordinary `not blocked(Y)` anti-join. blocked
+        // node 3 severs the chain -> reach = {(1,2),(3,4)}.
+        (
+            "26-negated-modal-over-invariant-recursive.xlog",
+            "__xlog_query_0",
+            "| 1  | 2  |",
+        ),
+        (
+            "26-negated-modal-over-invariant-recursive.xlog",
+            "__xlog_query_0",
+            "| 3  | 4  |",
+        ),
     ];
 
     for (example, expected_relation, expected_value) in examples {
@@ -442,6 +474,28 @@ fn test_xlog_run_v092_examples_modal_gating_filters() {
     assert!(
         !stdout.contains("| 2  |"),
         "17 must GATE OUT node 2 (not vetted -> not trusted -> not flagged):\n{stdout}"
+    );
+
+    // 26 negated-modal-over-invariant recursion: reach = {(1,2),(3,4)}. The gate
+    // `not know blocked(Y)` drops every tuple whose TARGET (second column) is the
+    // blocked node 3, so (2,3) is absent and the chain through 3 never extends.
+    // The ungated edge closure would be {(1,2),(2,3),(3,4),(1,3),(2,4),(1,4)}; the
+    // gated result strictly OMITS all tuples ending in 3 AND all multi-hop tuples
+    // that must pass through 3, proving the negated modal actually filters.
+    let (ok, stdout, stderr) =
+        run_epistemic_example("26-negated-modal-over-invariant-recursive.xlog");
+    assert!(ok, "26 must succeed:\n{stdout}\n{stderr}");
+    assert!(
+        stdout.contains("| 1  | 2  |") && stdout.contains("| 3  | 4  |"),
+        "26 keeps (1,2),(3,4):\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("| 2  | 3  |"),
+        "26 must GATE OUT (2,3): target node 3 is blocked:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("| 1  | 3  |") && !stdout.contains("| 1  | 4  |"),
+        "26 must OMIT multi-hop tuples that pass through blocked node 3:\n{stdout}"
     );
 }
 
