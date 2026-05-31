@@ -225,6 +225,47 @@ fn test_xlog_run_epistemic_examples() {
             "__xlog_query_0",
             "| 3  | 4  |",
         ),
+        // v0.9.2 SCOPE-LIMIT CLOSED: AUGMENTED multi-head coupling with PER-HEAD
+        // output projection at DIFFERING arity. Two epistemic heads share the base
+        // modal `edge/2` (SharedModalPredicate coalesce -> ONE joint component) but
+        // have DIFFERING public arity and BOTH need projection:
+        //   one_hop(X)    :- node(X),  know edge(X, Y).      -> {1, 2}  (arity 1)
+        //   pair(X, Y)    :- color(X), possible edge(X, Y).  -> {(2,20),(2,21),(3,30)}
+        // Each head materializes from its OWN reduced buffer with its OWN row-filter,
+        // projecting its OWN `public_head_arity` columns. one_hop drops the edge
+        // target (projection load-bearing); pair is filtered by `color` (gate
+        // load-bearing). Previously fail-closed with a cross-component coupling
+        // diagnostic; now joint-solved.
+        (
+            "27-augmented-multi-head-differing-arity.xlog",
+            "one_hop",
+            "| 1  |",
+        ),
+        (
+            "27-augmented-multi-head-differing-arity.xlog",
+            "one_hop",
+            "| 2  |",
+        ),
+        (
+            "27-augmented-multi-head-differing-arity.xlog",
+            "pair",
+            "| 2  | 20 |",
+        ),
+        (
+            "27-augmented-multi-head-differing-arity.xlog",
+            "pair",
+            "| 3  | 30 |",
+        ),
+        // v0.9.2 SCOPE-LIMIT CLOSED: modal over an ORDINARY predicate transitively
+        // derived from a DETERMINED epistemic head, stratified. `r :- a` (a determined
+        // via `know p` over EDB) makes `r` determined; the lower stratum materializes
+        // gated `a`, `r :- a` is computed over the base, and `know r` gates against the
+        // materialized base `r`. b = node intersect r = {1} (node 2 has no `know p`).
+        (
+            "24-transitive-determined-modal-stratified.xlog",
+            "b",
+            "| 1  |",
+        ),
     ];
 
     for (example, expected_relation, expected_value) in examples {
@@ -302,16 +343,16 @@ fn test_xlog_run_nested_modal_reports_typed_epistemic_diagnostic() {
 }
 
 #[test]
-fn test_xlog_run_cross_component_coupling_reports_typed_epistemic_diagnostic() {
-    // v0.9.2 K4 boundary: a modal literal over a TRANSITIVELY epistemic-derived
-    // ORDINARY predicate (`b :- know r`, `r :- a`, `a :- know p`) is OUT OF SCOPE
-    // for stratification (the modal target `r` is an ordinary head, not an
-    // epistemic head), so stratification declines and the component fails closed
-    // through the production `xlog run` path with a typed diagnostic naming the
-    // merge reason AND the coupled epistemic output predicates -- not partial or
-    // silent execution. (The direct chained case `b :- know a` over a DETERMINED
-    // epistemic head is now ACCEPTED via stratification: see
-    // 17-cross-component-chained-stratified.xlog.)
+fn test_xlog_run_transitive_determined_modal_stratifies_accepted() {
+    // v0.9.2 SCOPE-LIMIT CLOSED: a modal over an ORDINARY predicate transitively
+    // derived from a DETERMINED epistemic head (`b :- know r`, `r :- a`, `a :- know p`)
+    // is now ACCEPTED via stratification. `r` is determined-in-principle (ordinary over
+    // the determined `a`), so the lower stratum materializes the gated `a`, the
+    // ordinary `r :- a` is computed over the materialized base (making `r` locally
+    // invariant), and the higher stratum gates `know r` against the materialized base
+    // `r` via the existing EGB-02 filter. EXACT tuples: with node={1,2}, p={1},
+    // a=r={1}, b = node intersect r = {1}. The gate is load-bearing: dropping `know r`
+    // would give b = node = {1,2}; the gate restricts b to {1}.
     let _device = match CudaDevice::new(0) {
         Ok(d) => d,
         Err(_) => {
@@ -320,54 +361,24 @@ fn test_xlog_run_cross_component_coupling_reports_typed_epistemic_diagnostic() {
         }
     };
 
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("workspace root");
-    let program = repo_root
-        .join("examples/epistemic")
-        .join("24-transitive-modal-out-of-scope.xlog");
-    let output = cargo_bin_cmd!("xlog")
-        .args([
-            "run",
-            program.to_str().expect("valid path"),
-            "--memory-mb",
-            "1024",
-        ])
-        .output()
-        .expect("run xlog binary");
+    let (success, stdout, stderr) =
+        run_epistemic_example("24-transitive-determined-modal-stratified.xlog");
     assert!(
-        !output.status.success(),
-        "cross-component coupling example must fail closed, stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("UnsupportedEpistemicConstruct"), "{stderr}");
-    assert!(
-        stderr.contains("cross-component epistemic coupling"),
-        "{stderr}"
-    );
-    // Names the coupled epistemic output predicates (the diagnostic renders the
-    // head list as `epistemic output heads ["a", "b"]`; match the prefix and both
-    // names robustly across Debug escaping).
-    assert!(
-        stderr.contains("epistemic output heads"),
-        "diagnostic must list the coupled epistemic output heads:\n{stderr}"
+        success,
+        "transitive-determined stratified example must succeed, stdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
-        stderr.contains('a') && stderr.contains('b'),
-        "diagnostic must name coupled epistemic heads a and b:\n{stderr}"
+        stdout.contains('b'),
+        "must surface the queried head `b`:\n{stdout}"
     );
-    // Names the transitively-tainted nested modal predicate `r/1`.
+    // b = {1} exactly: node 1 present (gate satisfied), node 2 absent (r empty there).
     assert!(
-        stderr.contains("r/1"),
-        "diagnostic must name the nested modal predicate r/1:\n{stderr}"
+        stdout.contains("| 1  |"),
+        "b must contain the gated node 1:\n{stdout}"
     );
-    // Names the merge reason (the derived dependency that coalesced them).
     assert!(
-        stderr.contains("DerivedPredicate"),
-        "diagnostic must name the merge reason:\n{stderr}"
+        !stdout.contains("| 2  |"),
+        "b must NOT contain node 2 (the `know r` gate is load-bearing):\n{stdout}"
     );
 }
 

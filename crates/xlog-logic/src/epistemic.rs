@@ -389,6 +389,7 @@ pub fn plan_epistemic_gpu_execution(program: &Program) -> Result<EpistemicGpuPla
         reductions.push(EpistemicReductionPlan {
             rule_index,
             head_predicate: rule.head.predicate.clone(),
+            public_head_arity: rule.head.terms.len(),
             relational_body_atoms,
             wcoj_status: wcoj_status_for_reduction(
                 relational_body_atoms,
@@ -1270,35 +1271,15 @@ fn compile_epistemic_gpu_execution_inner(
     let gpu_plan = plan_epistemic_gpu_execution(program)?;
     if !allow_multiple_output_heads {
         require_single_epistemic_output_relation(&gpu_plan)?;
-    } else {
-        // JOINT-SOLVING multi-head materialization shares the plan-global output
-        // projection (`final_output_columns`) across heads. That projection is
-        // derived from the first epistemic rule's head, so a multi-head plan that
-        // needs output PROJECTION (a modal-literal variable not in the head, i.e.
-        // augmentation) would mis-project the other coupled heads. Per-head
-        // projection of an augmented multi-head component is beyond the canonical
-        // SharedModalPredicate target, so fail closed with a precise diagnostic
-        // rather than silently mis-evaluate. (Single-head plans are unaffected:
-        // their projection always matches their one head.)
-        let distinct_output_heads: BTreeSet<&str> = gpu_plan
-            .reductions
-            .iter()
-            .map(|reduction| reduction.head_predicate.as_str())
-            .collect();
-        if distinct_output_heads.len() > 1 && gpu_plan.final_output_columns.is_some() {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "cross-component epistemic coupling".to_string(),
-                context: format!(
-                    "coupled epistemic output heads {:?} require output projection \
-                     (an augmented modal-literal variable absent from the head); the \
-                     joint multi-head path shares one output projection across heads \
-                     and cannot soundly project each augmented head independently, so \
-                     this fails closed",
-                    distinct_output_heads
-                ),
-            });
-        }
     }
+    // JOINT-SOLVING multi-head materialization now projects each coupled head by ITS
+    // OWN `public_head_arity` (see `final_output_columns_for_materialization`): each
+    // head is materialized from its own reduced relation buffer with its own
+    // reduction row-filter, reading only the store/world-view boundary. An augmented
+    // multi-head component (a modal-literal variable absent from a head) therefore
+    // projects every head's public tuple shape soundly, including coupled heads of
+    // DIFFERING arity. The former blanket fail-closed guard on
+    // `final_output_columns.is_some()` over multiple heads is no longer needed.
     let reduced_program = reduce_epistemic_program_to_ordinary(program);
     let mut compiler = Compiler::new();
     let reduced_runtime_plan =
@@ -1479,13 +1460,80 @@ fn final_output_columns_for_eir(eir: &EirProgram) -> Option<Vec<usize>> {
 pub fn reduce_epistemic_program_to_ordinary(program: &Program) -> Program {
     let mut reduced = program.clone();
 
+    // AUGMENTING positive modals over INVARIANT relations are resolved into positive
+    // ordinary join atoms (instead of being stripped) so the augmented head columns
+    // they introduce are range-restricted in the reduced ordinary candidate program.
+    //
+    // An AUGMENTING modal carries a variable that is appended to the head by
+    // `append_body_local_tuple_key_variables_to_head` (a modal-local variable absent
+    // from the user-visible head, e.g. `Y` in `one_hop(X) :- node(X), know edge(X,
+    // Y)`). After the modal is stripped, that augmented `Y` column has no binding, so
+    // the reduced rule would be unsafe (`UnsafeVariable`). Resolving the positive
+    // modal over its (invariant) gated relation into a positive ordinary atom binds
+    // the column. This mirrors the proven-sound Case-A invariant resolution
+    // (`reduce_case_a_epistemic_program_to_ordinary`): for an INVARIANT relation `R`,
+    // `know R`/`possible R` ranges exactly over `R`'s extension, so the reduced
+    // candidate join over `R` enumerates the correct augmented tuples and the GPU
+    // EGB-02 membership filter then re-gates them against the accepted world view.
+    //
+    // STRICTLY SCOPED to keep the prohibition on resolving over still-modal relations
+    // machine-checked: only POSITIVE modals (negated `not know`/`not possible` is an
+    // anti-join that does NOT range-restrict, so it is never resolved) over INVARIANT
+    // targets (a still-modal / epistemic-derived target is NOT invariant, so it is
+    // never resolved — its augmenting variable stays unbound and the reduced program
+    // fails closed). Non-augmenting modals keep the original strip-and-gate path, so
+    // every existing single/joint pilot (16/18/09/19/21) is untouched.
+    let invariant = InvariantRelations::analyze(program);
+
+    // Heads where a positive-invariant modal was ACTUALLY resolved into a positive
+    // ordinary atom (i.e. a modal-only-bound output variable was genuinely augmented).
+    // ONLY these heads' declarations/queries are reconciled to the augmented arity.
+    // `append_body_local_tuple_key_variables_to_head` may spuriously append a
+    // modal-local variable that is ALSO positively bound (e.g. `Y` in the recursive
+    // `reach(X,Z) :- reach(X,Y), vertex(Z), know a(Y,Z)`), which must NOT trigger a
+    // declaration bump — that head is materialized at its original arity by the
+    // (Case-A) recursive engine, so bumping its declaration would corrupt the schema.
+    let mut resolved_augmented_heads: BTreeSet<String> = BTreeSet::new();
+
     for rule in &mut reduced.rules {
+        // Head variables that NO non-epistemic positive body literal binds. After the
+        // modal is stripped, an output (head) variable bound ONLY by the modal would
+        // be unsafe in the reduced ordinary program. Computed BEFORE the head is
+        // mutated by augmentation. (`append_body_local_tuple_key_variables_to_head`
+        // appends modal-local variables to the head, so both already-present head
+        // variables like `Y` in `pair(X,Y) :- ..possible edge(X,Y)` AND augmented
+        // variables like `Y` in `one_hop(X) :- ..know edge(X,Y)` are covered here.)
+        let modal_only_output_variables = modal_only_bound_output_variables(rule);
         append_body_local_tuple_key_variables_to_head(rule);
         let was_fact = rule.body.is_empty();
         let had_epistemic_body = rule
             .body
             .iter()
             .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)));
+        // Resolve a POSITIVE modal over an INVARIANT relation into a positive ordinary
+        // join atom WHEN it is the sole binder of some output variable (so that output
+        // variable is range-restricted in the reduced candidate program); strip every
+        // other modal. For an invariant relation `R`, `know R`/`possible R` ranges
+        // exactly over `R`'s extension, so the reduced join enumerates the correct
+        // candidate tuples and the GPU EGB-02 filter re-gates against the accepted
+        // world view. A NEGATED modal (anti-join) never binds and is never resolved; a
+        // still-modal / epistemic-derived target is NOT invariant and is never
+        // resolved, so its unbound output variable correctly fails closed downstream.
+        let mut resolved_here = false;
+        for lit in &mut rule.body {
+            if let BodyLiteral::Epistemic(modal) = lit {
+                if !modal.negated
+                    && invariant.is_invariant(&modal.atom.predicate)
+                    && modal_atom_binds_output_variable(modal, &modal_only_output_variables)
+                {
+                    *lit = BodyLiteral::Positive(modal.atom.clone());
+                    resolved_here = true;
+                }
+            }
+        }
+        if resolved_here {
+            resolved_augmented_heads.insert(rule.head.predicate.clone());
+        }
         rule.body
             .retain(|lit| !matches!(lit, BodyLiteral::Epistemic(_)));
         if !was_fact && had_epistemic_body && rule.body.is_empty() {
@@ -1496,6 +1544,32 @@ pub fn reduce_epistemic_program_to_ordinary(program: &Program) -> Program {
             }));
         }
     }
+    // Head augmentation appends modal-local columns to a genuinely-augmented rule head
+    // (e.g. `one_hop(X)` becomes `one_hop(X, Y)`), so the reduced relation carries the
+    // augmented columns needed for the GPU tuple-key membership gate. The predicate
+    // DECLARATION must be widened to the augmented arity, or the runtime would union
+    // the augmented rule output against the narrow declared (empty) stub and fail with
+    // a schema mismatch. SCOPED to heads where the resolve actually fired (so a
+    // spuriously-appended-but-positively-bound recursive head like `reach` is NOT
+    // bumped). Infer each appended column's type from the resolved body atom.
+    let augmented_heads =
+        reconcile_augmented_head_declarations(&mut reduced, &resolved_augmented_heads);
+
+    // Drop reduced-program queries that reference an AUGMENTED head: the reduced
+    // relation is now arity-bumped, so an original arity-N query over it would union
+    // the arity-N query projection against the augmented relation and fail with a
+    // schema mismatch. The user-visible query results for epistemic heads are
+    // surfaced separately from the GPU gated buffers (`epistemic_result_to_query_
+    // results`, projected to public arity), and the surfacing gate
+    // (`queried_predicates`) reads the ORIGINAL program's queries, so dropping the
+    // redundant reduced query here is inert for display and only removes the crash.
+    // Non-augmented epistemic heads keep their arity-matched reduced queries untouched.
+    if !augmented_heads.is_empty() {
+        reduced
+            .queries
+            .retain(|query| !augmented_heads.contains(&query.atom.predicate));
+    }
+
     // Constraints that contain epistemic literals are world-view integrity
     // constraints: they constrain accepted candidate world views and are
     // evaluated by the GPU world-view constraint kernel, NOT by the reduced
@@ -1557,6 +1631,175 @@ pub fn reduce_case_a_epistemic_program_to_ordinary(program: &Program) -> Program
             .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
     });
     reduced
+}
+
+/// Output (head) variables of `rule` that are bound ONLY by epistemic literals, i.e.
+/// no positive non-epistemic body literal binds them.
+///
+/// Includes BOTH variables already in the user-visible head (e.g. `Y` in
+/// `pair(X,Y) :- color(X), possible edge(X,Y)`) AND modal-local variables that
+/// augmentation will append to the head (e.g. `Y` in
+/// `one_hop(X) :- node(X), know edge(X,Y)`). After the modal is stripped, each such
+/// variable would be an unsafe head column unless a positive-invariant modal carrying
+/// it is resolved into a positive ordinary atom. Computed from the ORIGINAL rule,
+/// before the head is mutated by augmentation.
+fn modal_only_bound_output_variables(rule: &crate::ast::Rule) -> BTreeSet<String> {
+    // Variables bound by a positive non-epistemic body literal (positive atoms,
+    // `is`-expressions, and univ all introduce bindings; comparisons and negated atoms
+    // do not range-restrict).
+    let mut positively_bound: BTreeSet<&str> = BTreeSet::new();
+    for lit in &rule.body {
+        if let BodyLiteral::Positive(atom) = lit {
+            for term in &atom.terms {
+                if let Term::Variable(name) = term {
+                    positively_bound.insert(name.as_str());
+                }
+            }
+        }
+    }
+
+    // Candidate output variables: every variable occurring in the user-visible head
+    // plus every modal-local variable (which augmentation will append to the head).
+    let mut modal_only = BTreeSet::new();
+    let mut consider = |name: &str| {
+        if name != "_" && !positively_bound.contains(name) {
+            modal_only.insert(name.to_string());
+        }
+    };
+    for term in &rule.head.terms {
+        if let Term::Variable(name) = term {
+            consider(name);
+        }
+    }
+    for lit in &rule.body {
+        if let BodyLiteral::Epistemic(lit) = lit {
+            for term in &lit.atom.terms {
+                if let Term::Variable(name) = term {
+                    consider(name);
+                }
+            }
+        }
+    }
+    modal_only
+}
+
+/// Whether `modal`'s atom carries at least one output variable that no positive
+/// non-epistemic body literal binds (so resolving this positive-invariant modal into a
+/// positive ordinary atom range-restricts an otherwise-unbound head column).
+fn modal_atom_binds_output_variable(
+    modal: &EpistemicLiteral,
+    modal_only_output_variables: &BTreeSet<String>,
+) -> bool {
+    modal.atom.terms.iter().any(
+        |term| matches!(term, Term::Variable(name) if modal_only_output_variables.contains(name)),
+    )
+}
+
+/// Widen each predicate's declaration to the maximum arity of its (now possibly
+/// augmented) defining rule heads, inferring appended column types from the positive
+/// body atoms that bind the augmented head variables.
+///
+/// Augmentation appends modal-local columns to a rule head; without widening the
+/// matching `PredDecl`, the runtime would union the augmented rule output against the
+/// narrow declared (empty) relation stub and fail with a schema mismatch.
+///
+/// Only heads in `resolved_augmented_heads` (where a positive-invariant modal was
+/// genuinely resolved into a positive atom, range-restricting a modal-only-bound
+/// output variable) are reconciled; a head that merely had a positively-bound
+/// modal-local variable spuriously appended is NOT widened.
+///
+/// Returns the set of head predicates whose declaration was widened (i.e. whose rule
+/// heads were augmented beyond the original declared arity).
+fn reconcile_augmented_head_declarations(
+    reduced: &mut Program,
+    resolved_augmented_heads: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    use crate::ast::{PredColumn, TypeRef};
+
+    let mut augmented_heads = BTreeSet::new();
+
+    // Per head predicate: the maximum rule-head arity and, per column position, an
+    // inferred type from a positive body atom (the resolved modal or any binder).
+    let mut max_arity: BTreeMap<String, usize> = BTreeMap::new();
+    let mut inferred_types: BTreeMap<String, Vec<Option<TypeRef>>> = BTreeMap::new();
+
+    // Map predicate -> declared column types (for type inference of body atom columns).
+    let declared_types: BTreeMap<String, Vec<TypeRef>> = reduced
+        .predicates
+        .iter()
+        .map(|decl| (decl.name.clone(), decl.types.clone()))
+        .collect();
+
+    for rule in &reduced.rules {
+        if rule.body.is_empty() {
+            continue;
+        }
+        // Only heads where the invariant-resolve genuinely fired are reconciled.
+        if !resolved_augmented_heads.contains(&rule.head.predicate) {
+            continue;
+        }
+        let head = rule.head.predicate.as_str();
+        let arity = rule.head.terms.len();
+        let entry = max_arity.entry(head.to_string()).or_insert(0);
+        if arity > *entry {
+            *entry = arity;
+        }
+        let types = inferred_types
+            .entry(head.to_string())
+            .or_insert_with(|| vec![None; arity]);
+        if types.len() < arity {
+            types.resize(arity, None);
+        }
+        // Infer each head variable's type from a positive body atom that binds it.
+        for (col, term) in rule.head.terms.iter().enumerate() {
+            if types[col].is_some() {
+                continue;
+            }
+            let Term::Variable(head_var) = term else {
+                continue;
+            };
+            for lit in &rule.body {
+                let BodyLiteral::Positive(atom) = lit else {
+                    continue;
+                };
+                let Some(pos) = atom
+                    .terms
+                    .iter()
+                    .position(|t| matches!(t, Term::Variable(name) if name == head_var))
+                else {
+                    continue;
+                };
+                if let Some(decl_types) = declared_types.get(&atom.predicate) {
+                    if let Some(typ) = decl_types.get(pos) {
+                        types[col] = Some(typ.clone());
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    for decl in &mut reduced.predicates {
+        let Some(&target_arity) = max_arity.get(&decl.name) else {
+            continue;
+        };
+        if target_arity <= decl.types.len() {
+            continue;
+        }
+        let inferred = inferred_types.get(&decl.name);
+        for col in decl.types.len()..target_arity {
+            let typ = inferred
+                .and_then(|types| types.get(col))
+                .and_then(|t| t.clone())
+                // Default appended columns to U32 (the modal relation key column type).
+                .unwrap_or(TypeRef::Scalar(xlog_core::ScalarType::U32));
+            decl.types.push(typ.clone());
+            decl.columns.push(PredColumn { name: None, typ });
+        }
+        augmented_heads.insert(decl.name.clone());
+    }
+
+    augmented_heads
 }
 
 fn append_body_local_tuple_key_variables_to_head(rule: &mut crate::ast::Rule) {
@@ -2210,28 +2453,26 @@ impl EpistemicallyDeterminedPredicates {
             }
         }
 
-        // A head is a STRATIFICATION candidate only if it is epistemic-derived
-        // (some defining rule carries a modal literal). Pure-ordinary heads are
-        // handled by invariance, not stratification.
-        let mut epistemic_heads: BTreeSet<&str> = BTreeSet::new();
-        for rule in &program.rules {
-            if rule
-                .body
-                .iter()
-                .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
-            {
-                epistemic_heads.insert(rule.head.predicate.as_str());
-            }
-        }
-
-        // Least-fixpoint closure: a predicate becomes determined when EVERY rule
-        // defining it ranges (modal + ordinary) only over invariant or
-        // already-determined predicates, with no self-reference (acyclic).
+        // Least-fixpoint closure over ALL derived heads (epistemic AND ordinary): a
+        // predicate becomes determined when EVERY rule defining it ranges (modal +
+        // ordinary) only over invariant or already-determined predicates, with no
+        // self-reference (acyclic).
+        //
+        // An ORDINARY head is determined transitively when every defining rule ranges
+        // only over determined/invariant relations (e.g. `r :- a` with `a` a
+        // determined epistemic head). Such an `r` is determined-in-principle: its
+        // extension is fixed once the determined heads it derives from are fixed, so a
+        // higher modal `know r`/`possible r` can stratify against the materialized
+        // base `r` via the existing EGB-02 membership filter. The acyclicity guard in
+        // `head_is_determined` (self-reference returns false) plus the fixpoint's
+        // monotonicity keep every recursive predicate OUT of `determined`, so a
+        // circular `know reach` in a recursive SCC (example 22) is never determined
+        // and stays fail-closed.
         let mut determined: BTreeSet<String> = BTreeSet::new();
         let mut changed = true;
         while changed {
             changed = false;
-            for head in &epistemic_heads {
+            for head in &derived_heads {
                 if determined.contains(*head) {
                     continue;
                 }
@@ -2419,6 +2660,15 @@ fn assign_epistemic_strata(
 
     // Modal-over-derived-epistemic-head edges: head -> set of derived-epistemic
     // predicates its modals range over.
+    //
+    // A modal can target either a determined EPISTEMIC head directly (`b :- know a`),
+    // or an ORDINARY predicate transitively derived from determined epistemic heads
+    // (`b :- know r` with `r :- a`, `a` epistemic-determined). For the ordinary case,
+    // the modal's head must sit strictly ABOVE the epistemic head(s) in the ordinary
+    // target's transitive determined support, so those epistemic heads are materialized
+    // (gated) into the store first and the ordinary `r :- a` is then computed over the
+    // materialized base (making `r` locally invariant). We therefore route an edge from
+    // the modal's head to EACH epistemic determined head in the target's support.
     let mut modal_edges: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for rule in &program.rules {
         let head = rule.head.predicate.as_str();
@@ -2432,6 +2682,22 @@ fn assign_epistemic_strata(
                         return Ok(None);
                     }
                     modal_edges.entry(head).or_default().insert(target);
+                } else if determined.contains(target) {
+                    // Modal over an ORDINARY determined predicate: route edges to the
+                    // epistemic determined heads in its transitive support so the
+                    // modal's head sits above them.
+                    let support =
+                        epistemic_support_of_determined_ordinary(program, target, &epistemic_heads);
+                    if support.is_empty() {
+                        // No epistemic head in the support means the target is fully
+                        // invariant (pure-ordinary over EDB) — that is the ordinary
+                        // single/joint path, not a stratification. Hand back.
+                        return Ok(None);
+                    }
+                    let entry = modal_edges.entry(head).or_default();
+                    for support_head in support {
+                        entry.insert(support_head);
+                    }
                 }
             }
         }
@@ -2475,6 +2741,57 @@ fn assign_epistemic_strata(
     Ok(Some(level))
 }
 
+/// The epistemic determined heads in the transitive ordinary support of a determined
+/// ORDINARY predicate.
+///
+/// For `r :- a` with `a` an epistemic-determined head, `support_of("r") = {"a"}`. The
+/// search follows positive/negated ordinary body atoms (the ordinary derivation), and
+/// collects any referenced predicate that is itself an epistemic head. Bounded by the
+/// (acyclic) determined-closure, so a simple visited-set DFS terminates.
+fn epistemic_support_of_determined_ordinary<'a>(
+    program: &'a Program,
+    predicate: &'a str,
+    epistemic_heads: &BTreeSet<&'a str>,
+) -> BTreeSet<&'a str> {
+    let mut support: BTreeSet<&'a str> = BTreeSet::new();
+    let mut seen: BTreeSet<&'a str> = BTreeSet::new();
+    let mut stack: Vec<&'a str> = vec![predicate];
+    while let Some(current) = stack.pop() {
+        if !seen.insert(current) {
+            continue;
+        }
+        for rule in &program.rules {
+            if rule.head.predicate != current || rule.body.is_empty() {
+                continue;
+            }
+            for lit in &rule.body {
+                let referenced = match lit {
+                    BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
+                        atom.predicate.as_str()
+                    }
+                    // An epistemic literal in the support means `current` is itself an
+                    // epistemic head; record it and do not descend through the modal.
+                    BodyLiteral::Epistemic(_)
+                    | BodyLiteral::Comparison(_)
+                    | BodyLiteral::IsExpr(_)
+                    | BodyLiteral::Univ(_) => continue,
+                };
+                if epistemic_heads.contains(referenced) {
+                    support.insert(referenced);
+                } else {
+                    // Descend through ordinary derivations toward their epistemic roots.
+                    stack.push(referenced);
+                }
+            }
+        }
+        // If `current` itself is an epistemic head, it is its own support root.
+        if epistemic_heads.contains(current) && current != predicate {
+            support.insert(current);
+        }
+    }
+    support
+}
+
 /// Build a self-contained sub-program for one stratum.
 ///
 /// Includes this stratum's epistemic-defining rules plus every fact and every
@@ -2505,6 +2822,19 @@ fn build_stratum_subprogram(
         .map(|(head, _)| head.as_str())
         .collect();
 
+    // All epistemic-derived heads (used to compute an ordinary rule's epistemic
+    // support for deferral of determined-ordinary supporting rules).
+    let all_epistemic_heads: BTreeSet<&str> = program
+        .rules
+        .iter()
+        .filter(|rule| {
+            rule.body
+                .iter()
+                .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
+        })
+        .map(|rule| rule.head.predicate.as_str())
+        .collect();
+
     let own_rule_indices: BTreeSet<usize> = rule_indices.iter().copied().collect();
 
     let mut stratum = program.clone();
@@ -2528,6 +2858,27 @@ fn build_stratum_subprogram(
                 .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)));
             if has_epistemic && !own_rule_indices.contains(&idx) {
                 // Another stratum's epistemic rule: exclude.
+                return None;
+            }
+            // An ORDINARY supporting rule whose transitive epistemic support includes a
+            // head NOT yet materialized (gated) at this level must NOT run here — it
+            // would compute over the UNGATED candidate extension of that head and leak
+            // the wrong tuples into the store (which the higher stratum then gates
+            // against). Defer it to the lowest stratum where ALL its epistemic support
+            // is already a materialized gated base relation. E.g. `r :- a` (a an
+            // epistemic-determined head) is dropped from `a`'s own stratum (level 0) and
+            // kept only in the strictly-higher stratum where `a` is materialized base,
+            // so `r` is computed once from the gated `a`. Pure-ordinary rules over EDB
+            // (empty epistemic support) are never deferred.
+            let support = epistemic_support_of_determined_ordinary(
+                program,
+                rule.head.predicate.as_str(),
+                &all_epistemic_heads,
+            );
+            if support
+                .iter()
+                .any(|h| stratum_level.get(*h).copied().unwrap_or(0) >= this_level)
+            {
                 return None;
             }
             Some(rule.clone())

@@ -137,6 +137,7 @@ fn workspace_layout_sizes_all_required_epistemic_gpu_buffers() {
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "out".to_string(),
+            public_head_arity: 1,
             relational_body_atoms: 3,
             wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
         }],
@@ -167,6 +168,7 @@ fn workspace_layout_rejects_zero_candidate_capacity() {
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "out".to_string(),
+            public_head_arity: 1,
             relational_body_atoms: 1,
             wcoj_status: EpistemicWcojReductionStatus::NotWcojCandidate,
         }],
@@ -451,6 +453,218 @@ fn parsed_epistemic_kclique_reduction_dispatches_wcoj_runtime_path() {
     result
         .require_runtime_dispatch_certification()
         .expect("parsed K5 runtime result should retain dispatch and semantic certification");
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn single_head_modal_only_bound_over_invariant_materializes_q_extension_on_device() {
+    // v0.9.2 sound consequence of the invariant-resolve: a single epistemic head whose
+    // ONLY binder of its output variable is a POSITIVE modal over an INVARIANT relation
+    // is accepted and materializes the gated extension. For invariant `q`,
+    // `possible q(X) == know q(X) == q(X)`, so `p(X) :- possible q(X)` yields p = q.
+    // EXACT tuples (non-tautological: p mirrors q's full extension via the gate).
+    //   q = {1, 2, 3}  ->  p = {1, 2, 3}
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = faeel
+        pred p(u32).
+        pred q(u32).
+        q(1). q(2). q(3).
+        p(X) :- possible q(X).
+        "#,
+    )
+    .expect("parse single-head modal-only-bound-over-invariant program");
+
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("modal-only-bound output over an invariant relation must compile");
+
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("q", upload_unary_u32(&fixture.memory, &[1, 2, 3], "x"));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 2,
+                max_models_per_reduction: 8,
+            },
+        )
+        .expect("single-head invariant-resolve component must execute on device");
+
+    result
+        .require_runtime_dispatch_certification()
+        .expect("runtime result must retain dispatch certification");
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+
+    let mut rows = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download p column");
+    rows.sort_unstable();
+    assert_eq!(
+        rows,
+        vec![1u32, 2u32, 3u32],
+        "p = possible q = q's full extension {{1,2,3}}"
+    );
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn augmented_multi_head_per_head_projection_materializes_differing_arity_on_device() {
+    // PER-HEAD AUGMENTED PROJECTION: two coupled heads share the base modal predicate
+    // `edge/2` but have DIFFERING public arity, so their augmented reduced relations
+    // need DIFFERENT output projections:
+    //   one_hop(X)    :- node(X),  know edge(X, Y).      -- public arity 1 -> project [0]
+    //   pair(X, Y)    :- color(X), possible edge(X, Y).  -- public arity 2 -> project [0,1]
+    // The plan-global `final_output_columns` (derived from the first head) cannot
+    // project both; the per-head materialization projects each head by its OWN
+    // `public_head_arity`. This is the genuine differing-arity proof (the shared-modal
+    // split-test case has coincident projections and cannot distinguish the bug).
+    //
+    //   node = {1, 2}, color = {2, 3}, edge = {(1,10),(2,20),(2,21),(3,30)}.
+    //   one_hop = {X in node : exists Y edge(X,Y)}        -> {1, 2}
+    //   pair    = {(X,Y) : X in color, edge(X,Y)}         -> {(2,20),(2,21),(3,30)}
+    // ANTI-GAMING: each head's tuples differ from the raw EDB input (one_hop drops the
+    // edge target column; pair keeps both columns but is filtered by `color`).
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = faeel
+        pred node(u32).
+        pred color(u32).
+        pred edge(u32, u32).
+        pred one_hop(u32).
+        pred pair(u32, u32).
+        node(1). node(2).
+        color(2). color(3).
+        edge(1, 10). edge(2, 20). edge(2, 21). edge(3, 30).
+        one_hop(X) :- node(X), know edge(X, Y).
+        pair(X, Y) :- color(X), possible edge(X, Y).
+        "#,
+    )
+    .expect("parse augmented differing-arity two-head program");
+
+    let split = compile_epistemic_gpu_split_execution(&program)
+        .expect("augmented multi-head coupling must joint-solve with per-head projection");
+    assert_eq!(
+        split.components.len(),
+        1,
+        "coupled heads share ONE component"
+    );
+    let executable = &split.components[0].executable;
+    // Plan carries a public projection (augmentation present) and records each head's
+    // own public arity (1 for one_hop, 2 for pair).
+    assert!(executable.gpu_plan.final_output_columns.is_some());
+    let arity_by_head: std::collections::BTreeMap<&str, usize> = executable
+        .gpu_plan
+        .reductions
+        .iter()
+        .map(|r| (r.head_predicate.as_str(), r.public_head_arity))
+        .collect();
+    assert_eq!(arity_by_head.get("one_hop"), Some(&1));
+    assert_eq!(arity_by_head.get("pair"), Some(&2));
+
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("node", upload_unary_u32(&fixture.memory, &[1, 2], "x"));
+    executor.put_relation("color", upload_unary_u32(&fixture.memory, &[2, 3], "x"));
+    executor.put_relation(
+        "edge",
+        upload_binary_u32(
+            &fixture.memory,
+            &[(1, 10), (2, 20), (2, 21), (3, 30)],
+            "x",
+            "y",
+        ),
+    );
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 2,
+                max_models_per_reduction: 8,
+            },
+        )
+        .expect("augmented multi-head component must execute on device");
+
+    result
+        .require_runtime_dispatch_certification()
+        .expect("per-head projection runtime result must retain dispatch certification");
+    // ANTI-GAMING: zero CPU fallback for the joint enumeration / validation.
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+    assert_eq!(result.transfer_budget.tracked_dtoh_calls, 0);
+    assert_eq!(result.additional_head_outputs.len(), 1);
+
+    // Primary head is the LAST reduction; collect its tuples by arity.
+    let primary_head = executable
+        .gpu_plan
+        .reductions
+        .last()
+        .unwrap()
+        .head_predicate
+        .clone();
+
+    // Helper: download `arity` columns from a buffer as sorted tuples.
+    let download_unary = |buffer: &CudaBuffer| -> Vec<u32> {
+        let mut rows = fixture
+            .provider
+            .download_column::<u32>(buffer, 0)
+            .expect("download col0");
+        rows.sort_unstable();
+        rows
+    };
+    let download_pairs = |buffer: &CudaBuffer| -> Vec<(u32, u32)> {
+        let c0 = fixture
+            .provider
+            .download_column::<u32>(buffer, 0)
+            .expect("download col0");
+        let c1 = fixture
+            .provider
+            .download_column::<u32>(buffer, 1)
+            .expect("download col1");
+        let mut pairs: Vec<(u32, u32)> = c0.into_iter().zip(c1).collect();
+        pairs.sort_unstable();
+        pairs
+    };
+
+    // Locate each head's buffer (primary in final_output, the other in additionals).
+    let (one_hop_buf, pair_buf): (&CudaBuffer, &CudaBuffer) = if primary_head == "pair" {
+        assert_eq!(result.additional_head_outputs[0].0, "one_hop");
+        (&result.additional_head_outputs[0].1, &result.final_output)
+    } else {
+        assert_eq!(primary_head, "one_hop");
+        assert_eq!(result.additional_head_outputs[0].0, "pair");
+        (&result.final_output, &result.additional_head_outputs[0].1)
+    };
+
+    // EXACT per-head tuples with DIFFERING arity, each projected by its own public arity.
+    assert_eq!(
+        download_unary(one_hop_buf),
+        vec![1u32, 2u32],
+        "one_hop projects public arity 1 -> {{1,2}}"
+    );
+    assert_eq!(
+        download_pairs(pair_buf),
+        vec![(2u32, 20u32), (2u32, 21u32), (3u32, 30u32)],
+        "pair projects public arity 2 -> {{(2,20),(2,21),(3,30)}}"
+    );
 }
 
 #[cfg(feature = "epistemic-logic-tests")]
@@ -4784,6 +4998,7 @@ fn workspace_reset_trace_records_device_zeroing_for_all_buffers() {
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "out".to_string(),
+            public_head_arity: 1,
             relational_body_atoms: 3,
             wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
         }],
@@ -6162,6 +6377,7 @@ fn executable_with_operator_mix() -> EpistemicExecutablePlan {
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "out".to_string(),
+            public_head_arity: 1,
             relational_body_atoms: 1,
             wcoj_status: EpistemicWcojReductionStatus::NotWcojCandidate,
         }],
@@ -6189,6 +6405,7 @@ fn nonzero_arity_row_count_only_membership_executable() -> EpistemicExecutablePl
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "out".to_string(),
+            public_head_arity: 1,
             relational_body_atoms: 1,
             wcoj_status: EpistemicWcojReductionStatus::NotWcojCandidate,
         }],
@@ -6222,6 +6439,7 @@ fn accepted_ground_literal_component_executable(
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: output_predicate.to_string(),
+            public_head_arity: 1,
             relational_body_atoms: 1,
             wcoj_status: EpistemicWcojReductionStatus::NotWcojCandidate,
         }],
@@ -6241,6 +6459,7 @@ fn executable_with_kclique_wcoj_plan() -> EpistemicExecutablePlan {
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "clique5".to_string(),
+            public_head_arity: 5,
             relational_body_atoms: 10,
             wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
         }],
@@ -6263,6 +6482,7 @@ fn executable_with_planned_hash_route() -> EpistemicExecutablePlan {
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "clique5".to_string(),
+            public_head_arity: 5,
             relational_body_atoms: 10,
             wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
         }],
@@ -6282,6 +6502,7 @@ fn executable_with_live_kclique_wcoj_literal() -> EpistemicExecutablePlan {
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "clique5".to_string(),
+            public_head_arity: 5,
             relational_body_atoms: 10,
             wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
         }],
@@ -6311,6 +6532,7 @@ fn executable_with_kclique_helper_metadata_only_plan() -> EpistemicExecutablePla
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "clique5".to_string(),
+            public_head_arity: 5,
             relational_body_atoms: 10,
             wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
         }],
@@ -6330,6 +6552,7 @@ fn executable_with_kclique_helper_scan_outside_wcoj_plan() -> EpistemicExecutabl
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "clique5".to_string(),
+            public_head_arity: 5,
             relational_body_atoms: 10,
             wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
         }],
@@ -6352,6 +6575,7 @@ fn executable_with_kclique_empty_edge_permutation_plan() -> EpistemicExecutableP
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "clique5".to_string(),
+            public_head_arity: 5,
             relational_body_atoms: 10,
             wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
         }],
@@ -6374,6 +6598,7 @@ fn executable_with_v070_4cycle_wcoj_plan() -> EpistemicExecutablePlan {
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "cycle4".to_string(),
+            public_head_arity: 4,
             relational_body_atoms: 4,
             wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
         }],
@@ -6397,6 +6622,7 @@ fn executable_with_live_triangle_wcoj_literal() -> EpistemicExecutablePlan {
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "tri".to_string(),
+            public_head_arity: 3,
             relational_body_atoms: 3,
             wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
         }],
@@ -6433,6 +6659,7 @@ fn executable_with_live_v070_4cycle_wcoj_literal_with_plan(
         vec![EpistemicReductionPlan {
             rule_index: 0,
             head_predicate: "cycle4".to_string(),
+            public_head_arity: 4,
             relational_body_atoms: 4,
             wcoj_status: EpistemicWcojReductionStatus::RequiresPlannerEligibility,
         }],
@@ -7414,33 +7641,78 @@ fn egb02_empty_possible_tuple_source_through_gpu_membership() {
     assert_eq!(not_possible_rows, vec![1, 2, 3]);
 }
 
-/// K3: an unbound variable in a modal atom is rejected with a typed diagnostic
-/// before any result materialization.
+/// v0.9.2 SCOPE-LIMIT CLOSED: a modal-local variable (`Y`) absent from the head over
+/// an INVARIANT relation is now resolved by augmented projection, not fail-closed.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb02_unbound_modal_variable_is_fail_closed() {
-    // Y appears only inside the modal atom; it is not bound by any relational
-    // body atom or head term, so the program is out of fragment.
+fn egb02_augmenting_modal_variable_over_invariant_resolves_with_projection() {
+    // `Y` appears only inside the positive modal atom `know edge(X, Y)` over the
+    // INVARIANT EDB `edge`. The augmented-projection reduction resolves it into a
+    // positive `edge(X, Y)` join (binding `Y`), augments the reduced head to carry
+    // `Y`, and the per-head projection emits the PUBLIC arity-1 `out`. So
+    //   out(X) :- node(X), know edge(X, Y)   ==>   out = {X in node : exists Y edge(X,Y)}
+    // EXACT tuples (non-tautological: out drops the edge target column and is filtered
+    // by node).
+    //   node = {1, 2, 3}, edge = {(1,10),(2,20),(2,21)}  ->  out = {1, 2}
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
     let program = parse_program(
         r#"
+        #pragma epistemic_mode = faeel
         pred node(u32).
         pred edge(u32, u32).
         pred out(u32).
-
+        node(1). node(2). node(3).
+        edge(1, 10). edge(2, 20). edge(2, 21).
         out(X) :- node(X), know edge(X, Y).
         "#,
     )
-    .expect("parse unbound-modal-variable program");
-    let err = compile_epistemic_gpu_execution(&program)
-        .err()
-        .expect("unbound modal variable must be rejected before execution");
-    match err {
-        xlog_core::XlogError::UnsupportedEpistemicConstruct { .. }
-        | xlog_core::XlogError::UnsafeVariable(_)
-        | xlog_core::XlogError::Type(_)
-        | xlog_core::XlogError::Compilation(_) => {}
-        other => panic!("expected typed fail-closed diagnostic, got {other:?}"),
+    .expect("parse augmenting-modal-variable program");
+
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("augmenting modal over an invariant relation must compile via projection");
+    assert!(executable.gpu_plan.final_output_columns.is_some());
+    assert_eq!(
+        executable.gpu_plan.reductions[0].public_head_arity, 1,
+        "out has public arity 1 (Y is an augmented internal column)"
+    );
+
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
     }
+    executor.put_relation("node", upload_unary_u32(&fixture.memory, &[1, 2, 3], "x"));
+    executor.put_relation(
+        "edge",
+        upload_binary_u32(&fixture.memory, &[(1, 10), (2, 20), (2, 21)], "x", "y"),
+    );
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 2,
+                max_models_per_reduction: 8,
+            },
+        )
+        .expect("augmenting-modal component must execute on device");
+    result
+        .require_runtime_dispatch_certification()
+        .expect("runtime result must retain dispatch certification");
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+
+    let mut rows = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download out column");
+    rows.sort_unstable();
+    assert_eq!(
+        rows,
+        vec![1u32, 2u32],
+        "out = {{X in node : exists Y edge(X,Y)}} = {{1,2}} (node 3 has no edge)"
+    );
 }
 
 /// K3: a type mismatch between a bound variable and the tuple-key column is
@@ -8277,22 +8549,77 @@ fn egb06_over_budget_joint_fails_closed_before_execution() {
 /// blanket coupling rejection.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb06_unsupported_joint_coupling_fails_closed_through_split() {
+fn egb06_cross_arity_joint_coupling_over_invariant_resolves_on_device() {
+    // v0.9.2 sound consequence of the invariant-resolve: a head variable bound ONLY by
+    // positive modal literals over INVARIANT relations is range-restricted by resolving
+    // those modals into positive join atoms. `a(X, Y) :- know p(X), possible link(X, Y)`
+    // reduces to `a(X, Y) :- p(X), link(X, Y)` (both invariant), which is safe and
+    // materializes the gated intersection. EXACT tuples (the `know p(X)` gate is
+    // load-bearing: node 3 has a link but no `p`, so it is excluded).
+    //   p = {1, 2}, link = {(1,10),(2,20),(3,30)}  ->  a = {(1,10),(2,20)}
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
     let program = parse_program(
         r#"
+        #pragma epistemic_mode = faeel
         pred a(u32, u32).
         pred p(u32).
-        pred p(u32, u32).
-        a(X, Y) :- know p(X), possible p(X, Y).
+        pred link(u32, u32).
+        p(1). p(2).
+        link(1, 10). link(2, 20). link(3, 30).
+        a(X, Y) :- know p(X), possible link(X, Y).
         "#,
     )
-    .expect("parse unsafe joint coupling program");
-    // Split layer accepts (coupling no longer blanket-rejected); the unsafe modal
-    // variable is caught by the joint-compile safety analysis.
-    let err = compile_epistemic_gpu_split_execution(&program)
-        .expect_err("unsupported joint coupling must fail closed at joint compile");
-    match err {
-        xlog_core::XlogError::UnsafeVariable(var) => assert_eq!(var, "X"),
-        other => panic!("expected relocated typed diagnostic, got {other:?}"),
+    .expect("parse cross-arity joint coupling program");
+
+    let split = compile_epistemic_gpu_split_execution(&program)
+        .expect("cross-arity coupling over invariant relations must resolve and compile");
+    assert_eq!(
+        split.components.len(),
+        1,
+        "coupled modals share ONE component"
+    );
+    let executable = &split.components[0].executable;
+
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
     }
+    executor.put_relation("p", upload_unary_u32(&fixture.memory, &[1, 2], "x"));
+    executor.put_relation(
+        "link",
+        upload_binary_u32(&fixture.memory, &[(1, 10), (2, 20), (3, 30)], "x", "y"),
+    );
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 2,
+                max_models_per_reduction: 8,
+            },
+        )
+        .expect("cross-arity invariant-resolve component must execute on device");
+    result
+        .require_runtime_dispatch_certification()
+        .expect("runtime result must retain dispatch certification");
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+
+    let c0 = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download a col0");
+    let c1 = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 1)
+        .expect("download a col1");
+    let mut pairs: Vec<(u32, u32)> = c0.into_iter().zip(c1).collect();
+    pairs.sort_unstable();
+    assert_eq!(
+        pairs,
+        vec![(1u32, 10u32), (2u32, 20u32)],
+        "a = {{(X,Y): p(X), link(X,Y)}} = {{(1,10),(2,20)}} (node 3 lacks p)"
+    );
 }

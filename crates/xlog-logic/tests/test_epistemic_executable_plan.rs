@@ -8,7 +8,7 @@ use xlog_ir::{
 };
 use xlog_logic::epistemic::{
     compile_epistemic_gpu_execution, compile_epistemic_gpu_execution_with_stats_snapshot,
-    plan_epistemic_gpu_execution,
+    plan_epistemic_gpu_execution, reduce_epistemic_program_to_ordinary,
 };
 use xlog_logic::{parse_program, Compiler};
 use xlog_stats::{
@@ -337,23 +337,62 @@ fn epistemic_constraint_reaches_typed_gpu_boundary() {
 }
 
 #[test]
-fn epistemic_gpu_execution_rejects_unbound_variable_epistemic_only_output_before_rir_lowering() {
+fn epistemic_gpu_execution_resolves_modal_only_bound_output_over_invariant_relation() {
+    // v0.9.2 SCOPE-LIMIT CLOSED (a sound consequence of the augmented-projection
+    // invariant-resolve): a single epistemic head whose ONLY binder of an output
+    // variable is a POSITIVE modal over an INVARIANT relation is now ACCEPTED, not
+    // fail-closed. For an invariant relation `q`, `possible q(X)` ranges exactly over
+    // `q`'s extension (`possible q == know q == q`), so `p(X) :- possible q(X)` is the
+    // well-defined `p = q`. The reduction resolves the positive-invariant modal into a
+    // positive ordinary atom that range-restricts `X`, and the GPU EGB-02 filter
+    // re-gates against the accepted world view. (Contrast the self-supported
+    // `p() :- possible p()` case, where the target is NOT invariant, so the resolve
+    // never fires and the FAEEL foundedness guard keeps it fail-closed.)
     let program = parse_program(
         r#"
         pred p(u32).
         pred q(u32).
+        q(1). q(2). q(3).
         p(X) :- possible q(X).
+        ?- p(X).
         "#,
     )
     .unwrap();
 
-    let err = compile_epistemic_gpu_execution(&program)
-        .expect_err("variable-bound epistemic-only reductions must fail before RIR lowering");
+    // The reduced ordinary program resolves `possible q(X)` into a POSITIVE `q(X)`
+    // atom, so `X` is range-restricted (no longer an unsafe head variable).
+    let reduced = reduce_epistemic_program_to_ordinary(&program);
+    let p_rule = reduced
+        .rules
+        .iter()
+        .find(|rule| rule.head.predicate == "p" && !rule.body.is_empty())
+        .expect("reduced program retains the p rule");
+    assert!(
+        p_rule.body.iter().any(|lit| matches!(
+            lit,
+            xlog_logic::ast::BodyLiteral::Positive(atom) if atom.predicate == "q"
+        )),
+        "positive-invariant modal `possible q(X)` must resolve into a positive `q` join \
+         atom that binds X, got body: {:?}",
+        p_rule.body
+    );
+    assert!(
+        !p_rule
+            .body
+            .iter()
+            .any(|lit| matches!(lit, xlog_logic::ast::BodyLiteral::Epistemic(_))),
+        "the resolved modal must not remain an epistemic literal"
+    );
 
-    match err {
-        xlog_core::XlogError::UnsafeVariable(variable) => assert_eq!(variable, "X"),
-        other => panic!("expected typed unsafe-variable rejection, got {other:?}"),
-    }
+    // The full epistemic plan now compiles (no UnsafeVariable), with `p` carrying its
+    // single tuple-membership gate over `q` and zero CPU fallbacks. Exact accepted
+    // tuples (`p = q = {1,2,3}`) are asserted on device in
+    // `single_head_modal_only_bound_over_invariant_materializes_q_extension_on_device`.
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("modal-only-bound output over an invariant relation must now compile");
+    assert_eq!(executable.gpu_plan.epistemic_literals.len(), 1);
+    assert_eq!(executable.gpu_plan.tuple_membership_bindings.len(), 1);
+    assert!(executable.gpu_plan.cpu_fallbacks.is_zero());
 }
 
 #[test]

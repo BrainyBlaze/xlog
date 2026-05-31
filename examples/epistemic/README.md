@@ -50,9 +50,10 @@ XLOG_USE_DEVICE_RUNTIME=1 cargo test -p xlog-cli --test run_cli_tests test_xlog_
 | Incident triage joint-solving (FULL) | `21-incident-triage-joint-modal.xlog` | v0.9.2 Bundle 3 robust JOINT-solving: THREE epistemic heads share base modal `compromised`, exercising all three modalities → `quarantine={1,2}` (`know`), `watch={2}` (`possible`; monitored/3 gated out), `clear={3,4,5}` (`not possible`); all three heads displayed |
 | Recursion through modal (rejected) | `22-recursion-through-modal-rejected.xlog` | v0.9.2 boundary: a modal literal `know reach` over a relation entangled in the recursive SCC (not invariant) fails closed → typed `UnsupportedEpistemicConstruct` `recursive epistemic program` (names `know reach`, "not invariant") |
 | Compound modal key (rejected) | `23-compound-modal-key-rejected.xlog` | v0.9.2 boundary: a list/compound modal tuple-key `know watched([H])` fails closed → typed `UnsupportedEpistemicConstruct` `epistemic GPU tuple-key expectation` (names `List([Variable("H")])`) |
-| Transitive modal (out of scope) | `24-transitive-modal-out-of-scope.xlog` | v0.9.2 boundary: a modal over an ORDINARY relation that transitively derives from an epistemic head (`b :- know r`, `r :- a`, `a :- know p`) is a SCOPE LIMIT (not yet stratified) and fails closed → typed `cross-component epistemic coupling` (names `a`/`b`, `r/1`, `DerivedPredicate`) |
+| Transitive determined modal (stratified) | `24-transitive-determined-modal-stratified.xlog` | v0.9.2 STRATIFIED: a modal over an ORDINARY relation transitively derived from a DETERMINED epistemic head (`b :- know r`, `r :- a`, `a :- know p`). `r` is determined-in-principle (ordinary over the determined `a`); the lower stratum materializes gated `a`, `r :- a` is computed over the materialized base (locally invariant), the higher stratum gates `know r` against the base `r` → `b={1}` (gate load-bearing: ungated `b=node={1,2}`) |
 | Recursion over determined modal | `25-recursion-over-determined-modal.xlog` | v0.9.2 STRATIFIED recursion: `reach :- reach, know a` over the DETERMINED epistemic head `a :- know certified` (EDB). `a` is materialized as a lower stratum; the recursive stratum gates over the now-base `a` → `reach={(1,2),(2,3),(1,3)}` (derived `(1,3)` proves multi-hop fixpoint) |
 | Negated modal over invariant (recursive) | `26-negated-modal-over-invariant-recursive.xlog` | v0.9.2 Case-A: `not know blocked(Y)` over EDB `blocked` ≡ ordinary `not blocked(Y)` (anti-join, no modal gating) in a recursive program → `reach={(1,2),(3,4)}` (blocked node 3 severs the chain; differs from ungated closure) |
+| Augmented multi-head (differing arity) | `27-augmented-multi-head-differing-arity.xlog` | v0.9.2 PER-HEAD augmented projection: two heads share base modal `edge/2` but differ in public arity and both need projection (`one_hop(X) :- node(X), know edge(X,Y)` arity 1; `pair(X,Y) :- color(X), possible edge(X,Y)` arity 2). Each head materializes from its own reduced buffer projected by its own public arity → `one_hop={1,2}`, `pair={(2,20),(2,21),(3,30)}` |
 
 Notes: examples with one epistemic output head use the single-plan path; examples
 with independent epistemic output heads route through split GPU execution from
@@ -60,20 +61,32 @@ with independent epistemic output heads route through split GPU execution from
 a base modal predicate is JOINT-SOLVED with multi-output materialization — each
 head materialized against one shared accepted world view (examples 18, 21).
 
-A modal literal over an epistemic-DERIVED head that is itself DETERMINED (its
-modals bottom out in invariant/EDB relations, acyclically) is now resolved by
+A modal literal over a DETERMINED head — one whose every defining rule ranges only
+over invariant/EDB or already-determined relations, acyclically — is resolved by
 v0.9.2 STRATIFIED execution: the determined head is materialized (gated) into the
 relation store as a lower stratum and the higher stratum gates against the
 materialized base relation through the existing membership filter — no
-resolve-into-body, no double-gating. This covers chained coupling (example 17)
-and recursion whose modal ranges over a determined head (example 25). A NEGATED
-modal over an invariant relation reduces cleanly to ordinary negation, so it
-executes in recursive/coupling contexts (example 26).
+resolve-into-body, no double-gating. The determined-closure is TRANSITIVE across
+ordinary derivations: an ORDINARY predicate is determined when every rule defining
+it ranges only over determined/invariant relations (e.g. `r :- a` with `a` a
+determined epistemic head), so a modal `know r` over such an `r` also stratifies
+(example 24 — the ordinary `r :- a` is deferred to the stratum where `a` is gated
+base, computed once from the gated extension). This covers chained coupling
+(example 17), recursion whose modal ranges over a determined head (example 25), and
+transitive determined-ordinary coupling (example 24). A NEGATED modal over an
+invariant relation reduces cleanly to ordinary negation, so it executes in
+recursive/coupling contexts (example 26).
 
-Augmented-projection coupling and a modal over an ORDINARY relation that merely
-transitively derives from an epistemic head (example 24) remain SCOPE LIMITS that
-fail closed with a typed `cross-component epistemic coupling` diagnostic — distinct
-from the GENUINELY-UNDEFINED forms, which are covered by negative pilots: circular
-modality (a modal over the relation being recursively computed, example 22),
-FAEEL-unfounded self-support (the defined rejection; G91 accepts it), and syntactic
-nested modal operators (example 13).
+Augmented-projection multi-head coupling (heads of differing arity sharing a base
+modal) is resolved by PER-HEAD output projection (example 27): each coupled head
+materializes from its own reduced relation buffer projected by its own public arity,
+reading only the store/world-view boundary. A positive modal over an INVARIANT
+relation that is the sole binder of an output variable is resolved into a positive
+ordinary join atom (a sound, machine-checked-invariant consequence), which also
+makes single-head augmented modals over invariant relations executable.
+
+The remaining fail-closed cases are the GENUINELY-UNDEFINED forms, covered by
+negative pilots: circular modality (a modal over the relation being recursively
+computed, example 22), FAEEL-unfounded self-support (the defined rejection; G91
+accepts it), syntactic nested modal operators (example 13), and compound/list modal
+tuple-keys (example 23).

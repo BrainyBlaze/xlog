@@ -2,7 +2,8 @@ use xlog_core::XlogError;
 use xlog_ir::ExecutionPlan;
 use xlog_logic::epistemic::{
     build_epistemic_dependency_graph, classify_recursive_epistemic_program,
-    compile_epistemic_gpu_split_execution, plan_epistemic_gpu_execution, split_epistemic_program,
+    compile_epistemic_gpu_split_execution, plan_epistemic_gpu_execution,
+    reduce_epistemic_program_to_ordinary, split_epistemic_program,
     try_reduce_case_a_recursive_epistemic_program, EpistemicComponentMergeReason,
     RecursiveEpistemicClass,
 };
@@ -581,32 +582,88 @@ fn safe_cross_arity_modal_coupling_splits_into_one_joint_component() {
 }
 
 #[test]
-fn unsafe_cross_arity_modal_coupling_fails_closed_at_joint_compile() {
-    // EGB-06: removing the blanket coupling rejection must NOT make unsound rules
-    // pass. An unsafe shared variable (X appears only in modal literals, needs to
-    // bind the head) is now caught by the joint-compile layer's safety analysis
-    // (relocated diagnostic), not silently accepted.
+fn cross_arity_modal_coupling_over_invariant_relations_resolves_soundly() {
+    // v0.9.2 sound consequence of the invariant-resolve: a head variable bound ONLY by
+    // positive modal literals (`X` appears only in `know p(X)` / `possible link(X,Y)`)
+    // is now SAFELY range-restricted when those modals range over INVARIANT relations,
+    // because for an invariant relation `R` the modal `know R`/`possible R` ranges
+    // exactly over `R`'s extension and resolves to a positive ordinary join atom. So
+    // `a(X,Y) :- know p(X), possible link(X,Y)` reduces to `a(X,Y) :- p(X), link(X,Y)`,
+    // which is safe. (A non-invariant / still-modal target is NOT resolved -- its
+    // unbound variable correctly fails closed; see the companion assertion below.)
     let program = parse_program(
         r#"
         pred a(u32, u32).
         pred p(u32).
-        pred p(u32, u32).
-        a(X, Y) :- know p(X), possible p(X, Y).
+        pred link(u32, u32).
+        a(X, Y) :- know p(X), possible link(X, Y).
         "#,
     )
     .unwrap();
 
-    // The split layer itself accepts (no coupling rejection); the unsafe variable
-    // surfaces from the joint-compile path that each component is recompiled
-    // through.
-    split_epistemic_program(&program).expect("split layer no longer rejects coupling");
+    // The reduced program resolves BOTH positive-invariant modals into positive atoms
+    // that range-restrict X (and Y), so no unsafe head variable remains.
+    let reduced = reduce_epistemic_program_to_ordinary(&program);
+    let a_rule = reduced
+        .rules
+        .iter()
+        .find(|rule| rule.head.predicate == "a" && !rule.body.is_empty())
+        .expect("reduced program retains the a rule");
+    let positive_preds: std::collections::BTreeSet<&str> = a_rule
+        .body
+        .iter()
+        .filter_map(|lit| match lit {
+            BodyLiteral::Positive(atom) => Some(atom.predicate.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        positive_preds.contains("p") && positive_preds.contains("link"),
+        "both invariant modals must resolve into positive join atoms, got body: {:?}",
+        a_rule.body
+    );
 
-    let err = compile_epistemic_gpu_split_execution(&program)
-        .expect_err("unsafe cross-arity coupling must fail closed at joint compile");
-    match err {
-        XlogError::UnsafeVariable(var) => assert_eq!(var, "X"),
-        other => panic!("expected relocated unsafe-variable diagnostic, got {other:?}"),
-    }
+    // The split layer accepts the coupling, and joint compilation now SUCCEEDS (the
+    // formerly-unsafe X is range-restricted by the resolved invariant joins).
+    split_epistemic_program(&program).expect("split layer accepts the coupling");
+    let exec = compile_epistemic_gpu_split_execution(&program)
+        .expect("cross-arity coupling over invariant relations must resolve and compile");
+    assert_eq!(exec.components.len(), 1);
+
+    // COMPANION fail-closed gate: if the shared modal-only variable's binder ranges
+    // over a NON-invariant (epistemic-derived) relation, it is NOT resolved, so the
+    // variable stays unbound and the program fails closed.
+    let unsound = parse_program(
+        r#"
+        pred a(u32).
+        pred q(u32).
+        pred r(u32).
+        r(X) :- know q(X).
+        a(X) :- possible r(X).
+        "#,
+    )
+    .unwrap();
+    // `r` is epistemic-derived (defined by `know q`), so it is NOT invariant; the modal
+    // `possible r(X)` does not resolve and `a` would be unsafe -- BUT this is a chained
+    // modal-over-determined-head shape, which the STRATIFIED path owns (Task 2). The
+    // split path here is exercised only to confirm the unsound *unstratified* compile
+    // does not silently accept: a non-invariant modal target never becomes a positive
+    // binding atom in the reduced program.
+    let unsound_reduced = reduce_epistemic_program_to_ordinary(&unsound);
+    let a_unsound_rule = unsound_reduced
+        .rules
+        .iter()
+        .find(|rule| rule.head.predicate == "a" && !rule.body.is_empty())
+        .expect("reduced program retains the unsound a rule");
+    assert!(
+        !a_unsound_rule.body.iter().any(|lit| matches!(
+            lit,
+            BodyLiteral::Positive(atom) if atom.predicate == "r"
+        )),
+        "a modal over a NON-invariant (epistemic-derived) relation must NOT resolve into \
+         a positive binding atom, got body: {:?}",
+        a_unsound_rule.body
+    );
 }
 
 #[test]
@@ -970,15 +1027,17 @@ fn shared_modal_two_head_coupling_is_joint_solved_multi_output() {
 }
 
 #[test]
-fn augmented_multi_head_shared_modal_coupling_fails_closed_at_joint_compile() {
-    // K4: a coalesced multi-head component whose epistemic rules need OUTPUT
-    // PROJECTION (a modal-literal variable not in the head, e.g. `know edge(X, Y)`
-    // with head `a(X)`) is NOT joint-solvable: the joint plan's `final_output_columns`
-    // projection is derived from the FIRST epistemic rule's head and would
-    // mis-project the OTHER coupled head's per-head materialization. Per-head
-    // projection of an augmented multi-head component is beyond the canonical
-    // SharedModalPredicate target, so it must FAIL CLOSED with a precise typed
-    // diagnostic rather than silently mis-evaluate.
+fn augmented_multi_head_shared_modal_coupling_joint_solves_with_per_head_projection() {
+    // K4 (v0.9.2 SCOPE-LIMIT CLOSED): a coalesced multi-head component whose
+    // epistemic rules need OUTPUT PROJECTION (a modal-literal variable not in the
+    // head, e.g. `know edge(X, Y)` with head `a(X)`) is now JOINT-SOLVED via per-head
+    // augmented projection. Each head is materialized from ITS OWN reduced relation
+    // buffer with ITS OWN reduction row-filter, projecting the first
+    // `public_head_arity` columns -- so the augmented modal-literal columns appended
+    // after the public head terms are dropped per head, and coupled heads (even of
+    // differing arity) each materialize their own public tuple shape. This reads only
+    // the store/world-view boundary, never a resolved body. It must COMPILE through
+    // the split path, not fail closed.
     let program = parse_program(
         r#"
         pred node(u32).
@@ -1001,34 +1060,57 @@ fn augmented_multi_head_shared_modal_coupling_fails_closed_at_joint_compile() {
         }
     ));
 
-    let err = compile_epistemic_gpu_split_execution(&program)
-        .expect_err("augmented multi-head coupling must fail closed");
-    match err {
-        XlogError::UnsupportedEpistemicConstruct { construct, context } => {
-            assert_eq!(construct, "cross-component epistemic coupling");
-            assert!(
-                context.contains("a") && context.contains("b"),
-                "diagnostic must name the coupled heads a and b, got: {context}"
-            );
-            assert!(
-                context.contains("projection") || context.contains("augment"),
-                "diagnostic must name the projected/augmented multi-head limitation, got: {context}"
-            );
-        }
-        other => panic!("expected augmented multi-head coupling diagnostic, got {other:?}"),
-    }
+    let exec = compile_epistemic_gpu_split_execution(&program)
+        .expect("augmented multi-head coupling must joint-solve via per-head projection");
+    assert_eq!(
+        exec.components.len(),
+        1,
+        "coupled augmented heads must share ONE jointly-enumerated component"
+    );
+    let plan = &exec.components[0].executable.gpu_plan;
+    // Augmentation is present: the joint plan carries a public output projection.
+    assert!(
+        plan.final_output_columns.is_some(),
+        "augmented multi-head plan must record a public output projection"
+    );
+    // Each coupled head records its OWN public arity (here both `a` and `b` are
+    // unary; the differing-arity proof lives in the runtime device test
+    // `augmented_multi_head_per_head_projection_materializes_differing_arity_on_device`).
+    let arity_by_head: std::collections::BTreeMap<&str, usize> = plan
+        .reductions
+        .iter()
+        .map(|reduction| {
+            (
+                reduction.head_predicate.as_str(),
+                reduction.public_head_arity,
+            )
+        })
+        .collect();
+    assert_eq!(arity_by_head.get("a"), Some(&1));
+    assert_eq!(arity_by_head.get("b"), Some(&1));
+    // K3: recomposition covers each source rule exactly once.
+    assert_eq!(exec.recomposed_rule_indices(), vec![0, 1]);
 }
 
 #[test]
-fn modal_over_transitively_epistemic_derived_predicate_fails_closed() {
+fn modal_over_transitively_epistemic_derived_predicate_fails_closed_at_split_layer() {
     // K4: a modal literal ranging over an ORDINARY-derived predicate `r` that
     // TRANSITIVELY depends on an epistemic-derived head (`r :- a`, `a :- know p`)
     // is a nested/stratified epistemic dependency. `know r` cannot be evaluated by
     // one shared accepted world view because `r`'s extension depends on the world
-    // view chosen for `a`. The joint single enumeration would mis-evaluate it
-    // (admitting nodes whose `r` membership requires a DIFFERENT accepted world
-    // view), so it must FAIL CLOSED -- not be admitted as if `r` were a base
-    // predicate. This guards the transitive case the direct-head check misses.
+    // view chosen for `a`. The JOINT SPLIT path (single shared world-view enumeration)
+    // would mis-evaluate it, so the SPLIT LAYER must FAIL CLOSED -- not admit it as if
+    // `r` were a base predicate. This guards the transitive case the direct-head check
+    // misses.
+    //
+    // NOTE: the full `xlog run` path does NOT route this shape through the split layer:
+    // v0.9.2 STRATIFIED execution intercepts it first (the transitive determined-closure
+    // marks the ordinary `r` determined, materializes gated `a` as a lower stratum,
+    // computes `r :- a` over the materialized base, and gates `know r` against the base
+    // `r`). See example 24 (`24-transitive-determined-modal-stratified.xlog`) and the
+    // CLI test `test_xlog_run_transitive_determined_modal_stratifies_accepted`. This test
+    // pins the SPLIT-LAYER fail-closed contract that the stratified path relies on as its
+    // sound fallback for any shape stratification declines.
     let program = parse_program(
         r#"
         pred node(u32).
@@ -1194,6 +1276,77 @@ fn chained_modal_over_determined_epistemic_head_plans_stratified() {
         .rules
         .iter()
         .any(|rule| !rule.body.is_empty() && rule.head.predicate == "a");
+    assert!(
+        !higher_redefines_a,
+        "higher stratum must not redefine the lower-stratum head `a`"
+    );
+}
+
+#[test]
+fn modal_over_transitively_determined_ordinary_head_plans_stratified() {
+    // v0.9.2 Task 2: `b :- know r` where `r :- a` (ordinary) and `a :- know p` (`p`
+    // EDB). The transitive determined-closure marks the ORDINARY `r` determined (its
+    // sole rule ranges only over the determined `a`), so `know r` stratifies: `a` is a
+    // lower stratum, and `b`'s stratum sits ABOVE `a` (routed through `r`'s epistemic
+    // support `a`). The ordinary `r :- a` is DEFERRED to `b`'s stratum (where `a` is a
+    // materialized gated base relation), so it is computed once from the gated `a`.
+    let program = parse_program(
+        r#"
+        pred node(u32).
+        pred p(u32).
+        pred a(u32).
+        pred r(u32).
+        pred b(u32).
+        node(1). node(2). p(1).
+        a(X) :- node(X), know p(X).
+        r(X) :- a(X).
+        b(X) :- node(X), know r(X).
+        ?- b(X).
+        "#,
+    )
+    .unwrap();
+
+    let plan = xlog_logic::epistemic::try_plan_stratified_epistemic_program(&program)
+        .expect("stratified planning must not error")
+        .expect("modal over a transitively-determined ordinary head must plan stratified");
+    assert_eq!(
+        plan.strata.len(),
+        2,
+        "expected exactly two strata (a below b)"
+    );
+    assert_eq!(plan.strata[0].head_predicates, vec!["a".to_string()]);
+    assert_eq!(plan.strata[1].head_predicates, vec!["b".to_string()]);
+
+    // The LOWER stratum (a) must NOT contain the ordinary `r :- a` supporting rule:
+    // computing `r` there would derive it from the UNGATED candidate `a` and leak the
+    // wrong tuples into the store.
+    let lower_defines_r = plan.strata[0]
+        .program
+        .rules
+        .iter()
+        .any(|rule| !rule.body.is_empty() && rule.head.predicate == "r");
+    assert!(
+        !lower_defines_r,
+        "the determined-ordinary `r :- a` must be DEFERRED out of `a`'s stratum (no \
+         double-materialization from ungated `a`)"
+    );
+
+    // The HIGHER stratum (b) DOES carry `r :- a` (computed over the materialized base
+    // `a`), and must NOT redefine `a`.
+    let higher_defines_r = plan.strata[1]
+        .program
+        .rules
+        .iter()
+        .any(|rule| !rule.body.is_empty() && rule.head.predicate == "r");
+    let higher_redefines_a = plan.strata[1]
+        .program
+        .rules
+        .iter()
+        .any(|rule| !rule.body.is_empty() && rule.head.predicate == "a");
+    assert!(
+        higher_defines_r,
+        "`b`'s stratum must compute `r :- a` over the materialized gated base `a`"
+    );
     assert!(
         !higher_redefines_a,
         "higher stratum must not redefine the lower-stratum head `a`"

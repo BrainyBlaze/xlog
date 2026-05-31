@@ -80,6 +80,12 @@ pub struct EpistemicReductionPlan {
     pub rule_index: usize,
     /// Head predicate materialized by the reduced production runtime plan.
     pub head_predicate: String,
+    /// PUBLIC head arity (the user-visible head term count, before any augmentation
+    /// with modal-literal variables). The reduced relation buffer may carry extra
+    /// augmented columns appended after these; per-head materialization projects the
+    /// first `public_head_arity` columns so each coupled head keeps ITS OWN projection
+    /// (coupled heads of differing arity all materialize their own public tuple shape).
+    pub public_head_arity: usize,
     /// Positive relational body atom count after removing epistemic literals.
     pub relational_body_atoms: usize,
     /// WCOJ planner status for the reduced ordinary body.
