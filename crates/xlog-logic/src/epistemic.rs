@@ -682,17 +682,21 @@ pub fn classify_recursive_epistemic_program(program: &Program) -> Result<Recursi
             let BodyLiteral::Epistemic(modal) = lit else {
                 continue;
             };
-            if modal.negated {
-                return Err(recursive_epistemic_rejection(&format!(
-                    "rule for `{}` uses a NEGATED modal literal `{}` in a program with ordinary \
-                     recursion; negated modal literals are not part of the admissible Case-A \
-                     fixpoint fragment (the gated complement is not invariant). Remove the \
-                     recursion or the negated modal literal.",
-                    rule.head.predicate,
-                    epistemic_literal_label(modal),
-                )));
-            }
             if !invariant.is_invariant(&modal.atom.predicate) {
+                // A NEGATED modal over a NON-invariant relation is doubly outside the
+                // fragment (the gated complement is not invariant); keep its specific
+                // diagnostic. A POSITIVE modal over a non-invariant relation is the
+                // general non-Case-A rejection.
+                if modal.negated {
+                    return Err(recursive_epistemic_rejection(&format!(
+                        "rule for `{}` uses a NEGATED modal literal `{}` over a relation that is \
+                         not invariant in a program with ordinary recursion; the gated complement \
+                         is not invariant, so it is not part of the admissible Case-A fixpoint \
+                         fragment. Remove the recursion or the negated modal literal.",
+                        rule.head.predicate,
+                        epistemic_literal_label(modal),
+                    )));
+                }
                 return Err(recursive_epistemic_rejection(&format!(
                     "rule for `{}` uses the modal literal `{} {}` over a relation that is not \
                      invariant with respect to the program's ordinary recursion (it is recursive, \
@@ -705,6 +709,11 @@ pub fn classify_recursive_epistemic_program(program: &Program) -> Result<Recursi
                     modal.atom.predicate,
                 )));
             }
+            // Modal over an INVARIANT relation: admissible Case-A. A positive
+            // `know`/`possible` resolves to a positive ordinary join over the gated
+            // relation; a NEGATED `not know`/`not possible` over an invariant
+            // relation equals ordinary `not R` (the world view agrees with R on an
+            // invariant relation), an anti-join with NO modal gating.
         }
     }
 
@@ -1525,10 +1534,16 @@ pub fn reduce_case_a_epistemic_program_to_ordinary(program: &Program) -> Program
     for rule in &mut reduced.rules {
         for lit in &mut rule.body {
             if let BodyLiteral::Epistemic(modal) = lit {
-                // Case A admits only positive modal literals over invariant relations;
-                // resolve each to a positive ordinary atom over its (invariant) gated
-                // relation.
-                *lit = BodyLiteral::Positive(modal.atom.clone());
+                // Case A admits modal literals over invariant relations. A positive
+                // `know`/`possible` resolves to a positive ordinary atom over its
+                // (invariant) gated relation; a NEGATED `not know`/`not possible`
+                // over an invariant relation equals ordinary `not R` (an anti-join,
+                // no modal gating), so resolve it to a negated ordinary atom.
+                *lit = if modal.negated {
+                    BodyLiteral::Negated(modal.atom.clone())
+                } else {
+                    BodyLiteral::Positive(modal.atom.clone())
+                };
             }
         }
     }
@@ -2252,9 +2267,9 @@ impl EpistemicallyDeterminedPredicates {
                         atom.predicate.as_str()
                     }
                     BodyLiteral::Epistemic(modal) => modal.atom.predicate.as_str(),
-                    BodyLiteral::Comparison(_)
-                    | BodyLiteral::IsExpr(_)
-                    | BodyLiteral::Univ(_) => continue,
+                    BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {
+                        continue
+                    }
                 };
                 if referenced == head {
                     // Self-reference: not acyclically determined (recursion /

@@ -199,6 +199,18 @@ struct StratumExecutable {
 enum StratumPlanKind {
     Single(EpistemicExecutablePlan),
     Split(EpistemicSplitExecutablePlan),
+    /// A higher stratum that RECURSES over a lower stratum's materialized
+    /// (now-base) determined head. Once the determined head is a base relation in
+    /// the store, its `know`/`possible` modal is over an invariant relation, so the
+    /// stratum is admissible Case-A: the modal resolves to an ordinary join (no
+    /// second gate) and the recursive semi-naive engine iterates the fixpoint. The
+    /// reduced ordinary program drives an ordinary RIR plan whose head IS this
+    /// stratum's user-visible output relation.
+    Ordinary {
+        plan: ExecutionPlan,
+        /// User-visible output head predicate(s) this stratum computes.
+        head_predicates: Vec<String>,
+    },
 }
 
 #[derive(Clone)]
@@ -243,6 +255,41 @@ impl LogicProgram {
     }
 
     fn compile_epistemic_program(normalized: Program) -> Result<Self> {
+        // Stratified epistemic execution FIRST: a modal literal ranges over an
+        // epistemically-DETERMINED derived head (`b :- know a` where `a :- know p`,
+        // `p` invariant — possibly with the higher stratum RECURSING over the
+        // determined head, e.g. `reach :- reach, know a`). Partition into strata;
+        // each is compiled through the existing epistemic OR Case-A ordinary path,
+        // and at runtime each lower stratum's GATED head is materialized into the
+        // store as a base relation before the higher stratum gates against it (via
+        // the existing EGB-02 membership filter or — once the head is a materialized
+        // base relation — Case-A resolve-into-body; either way NO double-gating
+        // against a still-modal relation). Example 18's shared BASE modal `q` (EDB,
+        // not a determined derived head) returns `None` here and falls through to
+        // the joint path UNCHANGED; plain Case-A recursion over an EDB modal
+        // (`know edge`) also returns `None` and falls through to Case-A below.
+        if let Some(stratified) = try_plan_stratified_epistemic_program(&normalized)? {
+            let reduced = reduce_epistemic_program_to_ordinary(&normalized);
+            let mut schema_compiler = Compiler::new();
+            schema_compiler.compile_program(&reduced)?;
+            let schemas = schema_compiler.schemas().clone();
+
+            let mut strata = Vec::with_capacity(stratified.strata.len());
+            for stratum in &stratified.strata {
+                strata.push(StratumExecutable {
+                    plan: Self::compile_stratum_plan(&stratum.program)?,
+                });
+            }
+            let plan = LogicExecutionPlan::EpistemicStratified(strata);
+            let rel_ids = epistemic_relation_ids(&plan)?;
+            return Ok(Self {
+                program: normalized,
+                plan,
+                schemas,
+                rel_ids,
+            });
+        }
+
         // Case A: ordinary recursion gated by modal literals over invariant relations.
         // Resolve each modal literal to its (invariant) gated relation and route the
         // resulting ordinary recursive program through the EXISTING recursive/
@@ -258,42 +305,6 @@ impl LogicProgram {
                 plan: LogicExecutionPlan::Ordinary(plan),
                 schemas: compiler.schemas().clone(),
                 rel_ids: compiler.rel_ids().clone(),
-            });
-        }
-
-        // Stratified epistemic execution: a modal literal ranges over an
-        // epistemically-DETERMINED derived head (`b :- know a` where `a :- know p`,
-        // `p` invariant). Partition into strata; each is compiled through the
-        // EXISTING single/joint epistemic path, and at runtime each lower stratum's
-        // GATED head is materialized into the store as a base relation before the
-        // higher stratum gates against it (via the existing EGB-02 membership
-        // filter — never via resolve-into-body, so no double-gating). Example 18's
-        // shared BASE modal `q` (EDB, not a determined derived head) returns `None`
-        // here and falls through to the joint path UNCHANGED.
-        if let Some(stratified) = try_plan_stratified_epistemic_program(&normalized)? {
-            let reduced = reduce_epistemic_program_to_ordinary(&normalized);
-            let mut schema_compiler = Compiler::new();
-            schema_compiler.compile_program(&reduced)?;
-            let schemas = schema_compiler.schemas().clone();
-
-            let mut strata = Vec::with_capacity(stratified.strata.len());
-            for stratum in &stratified.strata {
-                let plan = if epistemic_output_head_predicate_count(&stratum.program) > 1 {
-                    StratumPlanKind::Split(compile_epistemic_gpu_split_execution(
-                        &stratum.program,
-                    )?)
-                } else {
-                    StratumPlanKind::Single(compile_epistemic_gpu_execution(&stratum.program)?)
-                };
-                strata.push(StratumExecutable { plan });
-            }
-            let plan = LogicExecutionPlan::EpistemicStratified(strata);
-            let rel_ids = epistemic_relation_ids(&plan)?;
-            return Ok(Self {
-                program: normalized,
-                plan,
-                schemas,
-                rel_ids,
             });
         }
 
@@ -325,6 +336,37 @@ impl LogicProgram {
             schemas,
             rel_ids,
         })
+    }
+
+    /// Compile one stratum sub-program into its plan kind.
+    ///
+    /// A stratum whose epistemic heads gate only over invariant or
+    /// already-materialized lower-stratum relations is either an admissible Case-A
+    /// recursion (the modal resolves to an ordinary join over the now-base relation)
+    /// or a plain single/joint epistemic plan. Case-A is tried first so a recursive
+    /// higher stratum (`reach :- reach, know a`, `a` materialized base) routes
+    /// through the ordinary semi-naive engine.
+    fn compile_stratum_plan(stratum_program: &Program) -> Result<StratumPlanKind> {
+        if let Some(case_a_reduced) =
+            try_reduce_case_a_recursive_epistemic_program(stratum_program)?
+        {
+            let mut compiler = Compiler::new();
+            let plan = compiler.compile_program(&case_a_reduced)?;
+            let head_predicates = epistemic_stratum_output_heads(stratum_program);
+            return Ok(StratumPlanKind::Ordinary {
+                plan,
+                head_predicates,
+            });
+        }
+        if epistemic_output_head_predicate_count(stratum_program) > 1 {
+            Ok(StratumPlanKind::Split(
+                compile_epistemic_gpu_split_execution(stratum_program)?,
+            ))
+        } else {
+            Ok(StratumPlanKind::Single(compile_epistemic_gpu_execution(
+                stratum_program,
+            )?))
+        }
     }
 
     /// Compile a program with module resolution.
@@ -1043,72 +1085,99 @@ impl LogicProgram {
                 // each stratum, write its GATED head output(s) into the store as
                 // base relations so the NEXT stratum's `know`/`possible` over a
                 // lower head reads the gated extension through the existing EGB-02
-                // membership filter (no resolve-into-body, no double-gating).
+                // membership filter (or, once the head is a materialized base
+                // relation, Case-A resolve-into-body) — never double-gating against
+                // a still-modal relation.
+                //
+                // A head is surfaced as a user-visible query result when the source
+                // program explicitly queries it (`?- head(...)`), regardless of
+                // which stratum produced it; otherwise only the TOP stratum's heads
+                // are surfaced (lower-stratum heads are intermediate, materialized
+                // for gating only).
+                let queried_predicates: BTreeSet<&str> = self
+                    .program
+                    .queries
+                    .iter()
+                    .map(|query| query.atom.predicate.as_str())
+                    .collect();
                 let stratum_count = strata.len();
                 for (stratum_index, stratum) in strata.iter().enumerate() {
                     let is_last = stratum_index + 1 == stratum_count;
-                    let stratum_results: Vec<(String, EpistemicGpuExecutionResult)> =
-                        match &stratum.plan {
-                            StratumPlanKind::Single(executable) => {
-                                let result = executor.execute_epistemic_gpu_execution(
-                                    executable,
-                                    capacities_for_epistemic_executable(executable)?,
-                                )?;
-                                result.require_runtime_dispatch_certification()?;
-                                vec![(epistemic_output_relation_name(executable)?, result)]
-                            }
-                            StratumPlanKind::Split(split) => {
-                                let executables: Vec<_> = split
-                                    .components
-                                    .iter()
-                                    .map(|component| &component.executable)
-                                    .collect();
-                                let batch = executor
-                                    .execute_epistemic_gpu_execution_batch_with_trace(
-                                        &executables,
-                                        capacities_for_epistemic_split(split)?,
-                                    )?;
-                                batch.require_trace_matches_components(
-                                    "xlog high-level stratified epistemic GPU execution",
-                                )?;
-                                for result in &batch.results {
-                                    result.require_runtime_dispatch_certification()?;
-                                }
-                                split
-                                    .components
-                                    .iter()
-                                    .zip(batch.results)
-                                    .map(|(component, result)| {
-                                        Ok((
-                                            epistemic_output_relation_name(&component.executable)?,
-                                            result,
-                                        ))
-                                    })
-                                    .collect::<Result<Vec<_>>>()?
-                            }
-                        };
-
-                    for (primary_head, result) in stratum_results {
-                        // Materialize every GATED head produced by this stratum into
-                        // the store as a base relation (primary head from
-                        // `final_output`, plus any joint additional heads).
-                        executor.materialize_epistemic_head_relation(
-                            &primary_head,
-                            &result.final_output,
-                        )?;
-                        for (head, buffer) in &result.additional_head_outputs {
-                            executor.materialize_epistemic_head_relation(head, buffer)?;
-                        }
-
-                        // The TOP stratum's heads are the user-visible epistemic
-                        // outputs; surface them as query results. Lower-stratum
-                        // heads are intermediate (materialized for gating only),
-                        // unless the source program explicitly queries them.
-                        if is_last {
-                            queries.extend(epistemic_result_to_query_results(
+                    match &stratum.plan {
+                        StratumPlanKind::Single(executable) => {
+                            let result = executor.execute_epistemic_gpu_execution(
+                                executable,
+                                capacities_for_epistemic_executable(executable)?,
+                            )?;
+                            result.require_runtime_dispatch_certification()?;
+                            let primary_head = epistemic_output_relation_name(executable)?;
+                            Self::materialize_and_surface_epistemic_stratum_result(
+                                &mut executor,
                                 primary_head,
                                 result,
-                            ));
+                                is_last,
+                                &queried_predicates,
+                                &mut queries,
+                            )?;
+                        }
+                        StratumPlanKind::Split(split) => {
+                            let executables: Vec<_> = split
+                                .components
+                                .iter()
+                                .map(|component| &component.executable)
+                                .collect();
+                            let batch = executor.execute_epistemic_gpu_execution_batch_with_trace(
+                                &executables,
+                                capacities_for_epistemic_split(split)?,
+                            )?;
+                            batch.require_trace_matches_components(
+                                "xlog high-level stratified epistemic GPU execution",
+                            )?;
+                            for result in &batch.results {
+                                result.require_runtime_dispatch_certification()?;
+                            }
+                            let primaries: Vec<String> = split
+                                .components
+                                .iter()
+                                .map(|component| {
+                                    epistemic_output_relation_name(&component.executable)
+                                })
+                                .collect::<Result<Vec<_>>>()?;
+                            for (primary_head, result) in primaries.into_iter().zip(batch.results) {
+                                Self::materialize_and_surface_epistemic_stratum_result(
+                                    &mut executor,
+                                    primary_head,
+                                    result,
+                                    is_last,
+                                    &queried_predicates,
+                                    &mut queries,
+                                )?;
+                            }
+                        }
+                        StratumPlanKind::Ordinary {
+                            plan,
+                            head_predicates,
+                        } => {
+                            // Case-A recursive stratum over the materialized base
+                            // determined head: the ordinary semi-naive engine writes
+                            // the (correctly gated) head relation into the store.
+                            executor.execute_plan(plan)?;
+                            for head in head_predicates {
+                                if is_last || queried_predicates.contains(head.as_str()) {
+                                    let buffer =
+                                        executor.store().get(head.as_str()).ok_or_else(|| {
+                                            XlogError::Execution(format!(
+                                                "missing stratified ordinary stratum output \
+                                                 relation {head}"
+                                            ))
+                                        })?;
+                                    let cloned = executor.clone_store_relation(buffer)?;
+                                    queries.push(epistemic_buffer_to_query_result(
+                                        head.clone(),
+                                        cloned,
+                                    ));
+                                }
+                            }
                         }
                     }
                 }
@@ -1123,6 +1192,49 @@ impl LogicProgram {
             None
         };
         Ok(LogicEvalResult { queries, stats })
+    }
+
+    /// Materialize one epistemic stratum result's GATED head(s) into the store and
+    /// surface them as query results when appropriate.
+    ///
+    /// Every gated head (primary `final_output` plus joint additional heads) is
+    /// written to the store so higher strata can gate against it. A head is added
+    /// to `queries` when its stratum is the TOP stratum OR the source program
+    /// explicitly queries it.
+    fn materialize_and_surface_epistemic_stratum_result(
+        executor: &mut Executor,
+        primary_head: String,
+        result: EpistemicGpuExecutionResult,
+        is_last: bool,
+        queried_predicates: &BTreeSet<&str>,
+        queries: &mut Vec<LogicQueryResult>,
+    ) -> Result<()> {
+        executor.materialize_epistemic_head_relation(&primary_head, &result.final_output)?;
+        for (head, buffer) in &result.additional_head_outputs {
+            executor.materialize_epistemic_head_relation(head, buffer)?;
+        }
+
+        // Collect the heads to surface: primary + additional, filtered by
+        // top-stratum-or-explicitly-queried.
+        let surface_primary = is_last || queried_predicates.contains(primary_head.as_str());
+        let additional_heads: Vec<String> = result
+            .additional_head_outputs
+            .iter()
+            .map(|(head, _)| head.clone())
+            .collect();
+
+        let mut all_results = epistemic_result_to_query_results(primary_head.clone(), result);
+        all_results.retain(|query_result| {
+            if query_result.relation_name == primary_head {
+                surface_primary
+            } else {
+                is_last
+                    || (additional_heads.contains(&query_result.relation_name)
+                        && queried_predicates.contains(query_result.relation_name.as_str()))
+            }
+        });
+        queries.extend(all_results);
+        Ok(())
     }
 
     fn enforce_constraints(
@@ -1196,6 +1308,24 @@ fn epistemic_output_head_predicate_count(program: &Program) -> usize {
         .len()
 }
 
+/// The user-visible output head predicate(s) of a stratum's epistemic-bearing
+/// rules. For a recursive stratum (`reach :- reach, know a`) this is the recursive
+/// head whose materialized relation is the stratum's output.
+fn epistemic_stratum_output_heads(program: &Program) -> Vec<String> {
+    program
+        .rules
+        .iter()
+        .filter(|rule| {
+            rule.body
+                .iter()
+                .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
+        })
+        .map(|rule| rule.head.predicate.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 fn epistemic_relation_ids(plan: &LogicExecutionPlan) -> Result<HashMap<String, RelId>> {
     let mut rel_ids = HashMap::new();
     match plan {
@@ -1229,6 +1359,10 @@ fn epistemic_relation_ids(plan: &LogicExecutionPlan) -> Result<HashMap<String, R
                             }
                         }
                     }
+                    // An ordinary (Case-A recursive) stratum carries no epistemic
+                    // relation-id map; its relations are owned by its own ordinary
+                    // RIR plan and surfaced from the store after execution.
+                    StratumPlanKind::Ordinary { .. } => {}
                 }
             }
         }

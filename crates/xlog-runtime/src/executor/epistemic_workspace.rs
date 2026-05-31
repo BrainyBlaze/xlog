@@ -6190,6 +6190,13 @@ impl Executor {
         Ok(())
     }
 
+    /// Device-side clone of a store-resident relation buffer, for surfacing a
+    /// stratified ordinary stratum's output as a query result without moving it out
+    /// of the store.
+    pub fn clone_store_relation(&self, buffer: &CudaBuffer) -> Result<CudaBuffer> {
+        self.clone_buffer(buffer)
+    }
+
     /// Execute the reduced production runtime plan and capture epistemic GPU evidence.
     pub fn execute_epistemic_gpu_execution(
         &mut self,

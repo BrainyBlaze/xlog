@@ -46,9 +46,13 @@ fn non_case_a_recursive_epistemic_program_fails_closed() {
 }
 
 #[test]
-fn negated_modal_recursive_epistemic_program_fails_closed() {
-    // A negated modal literal in a recursion-participating rule is not Case A (the
-    // gated complement is not invariant) and must fail closed.
+fn negated_modal_over_invariant_in_recursion_is_accepted_case_a() {
+    // K3: a NEGATED modal `not know edge(...)` over the INVARIANT EDB relation
+    // `edge` in a recursion-participating rule equals ordinary `not edge(...)` (the
+    // accepted world view agrees with `edge` on an invariant relation, so the gated
+    // complement IS `not edge`). This is cleanly reducible to ordinary negation
+    // (an anti-join, NO modal gating), so it is ADMISSIBLE Case A — it must NOT
+    // fail closed.
     let program = parse_program(
         r#"
         pred vertex(u32).
@@ -60,12 +64,59 @@ fn negated_modal_recursive_epistemic_program_fails_closed() {
         "#,
     )
     .unwrap();
+    assert_eq!(
+        classify_recursive_epistemic_program(&program).unwrap(),
+        RecursiveEpistemicClass::CaseA,
+        "negated modal over an invariant relation is admissible Case A"
+    );
+    // The Case-A reduction resolves `not know edge` to an ordinary NEGATED atom
+    // (anti-join), with no residual modal literal.
+    let reduced = try_reduce_case_a_recursive_epistemic_program(&program)
+        .unwrap()
+        .expect("admissible Case-A program reduces");
+    let recursive_rule = &reduced.rules[reduced.rules.len() - 1];
+    assert!(
+        recursive_rule
+            .body
+            .iter()
+            .any(|lit| matches!(lit, BodyLiteral::Negated(atom) if atom.predicate == "edge")),
+        "negated modal must resolve to an ordinary negated `edge` atom"
+    );
+    assert!(
+        !recursive_rule
+            .body
+            .iter()
+            .any(|lit| matches!(lit, BodyLiteral::Epistemic(_))),
+        "no residual modal literal after Case-A reduction"
+    );
+}
+
+#[test]
+fn negated_modal_over_non_invariant_in_recursion_fails_closed() {
+    // The complement: a NEGATED modal over a NON-invariant (epistemic-derived)
+    // relation in a recursion-participating program is doubly outside the Case-A
+    // fragment and must still fail closed. `choice` is epistemic-defined, so
+    // `not know choice` has no invariant complement.
+    let program = parse_program(
+        r#"
+        pred vertex(u32).
+        pred edge(u32, u32).
+        pred reach(u32, u32).
+        pred seed(u32, u32).
+        pred choice(u32, u32).
+        vertex(1). vertex(2). edge(1, 2). seed(1, 2).
+        choice(X, Y) :- seed(X, Y), know edge(X, Y).
+        reach(X, Y) :- vertex(X), vertex(Y), know edge(X, Y).
+        reach(X, Z) :- reach(X, Y), vertex(Z), not know choice(Y, Z).
+        "#,
+    )
+    .unwrap();
     match classify_recursive_epistemic_program(&program) {
         Err(XlogError::UnsupportedEpistemicConstruct { construct, context }) => {
             assert_eq!(construct, "recursive epistemic program");
             assert!(
-                context.contains("NEGATED modal"),
-                "expected negated-modal diagnostic, got: {context}"
+                context.contains("NEGATED modal") && context.contains("not invariant"),
+                "expected negated-non-invariant diagnostic, got: {context}"
             );
         }
         other => panic!("expected typed negated-modal rejection, got {other:?}"),
@@ -1127,7 +1178,11 @@ fn chained_modal_over_determined_epistemic_head_plans_stratified() {
     let plan = xlog_logic::epistemic::try_plan_stratified_epistemic_program(&program)
         .expect("stratified planning must not error")
         .expect("chained modal over a determined epistemic head must plan stratified");
-    assert_eq!(plan.strata.len(), 2, "expected exactly two strata (a below b)");
+    assert_eq!(
+        plan.strata.len(),
+        2,
+        "expected exactly two strata (a below b)"
+    );
     // Lower stratum materializes `a`; higher stratum materializes `b`.
     assert_eq!(plan.strata[0].head_predicates, vec!["a".to_string()]);
     assert_eq!(plan.strata[1].head_predicates, vec!["b".to_string()]);
