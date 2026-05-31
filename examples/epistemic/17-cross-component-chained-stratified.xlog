@@ -1,0 +1,44 @@
+// v0.9.2 STRATIFIED epistemic execution: chained coupling over a DETERMINED
+// epistemic-derived head (ACCEPTED, joint-executed).
+//
+// `trusted(X)` is an epistemic-derived head whose modal `know vetted(X)` ranges
+// over the INVARIANT EDB relation `vetted`. Its gated extension is therefore
+// DETERMINED: `trusted = {1, 3}` IS its truth, independent of any other head's
+// world view. `flagged(X)` uses a MODAL literal `know trusted(X)` over that
+// determined head.
+//
+// Local analysis coalesces `trusted` and `flagged` into ONE component carrying
+// TWO epistemic output heads, which the single-pass joint enumeration cannot
+// solve (the modal truth of `trusted` is not a base relation). v0.9.2 STRATIFIED
+// execution resolves this: `trusted` is a strictly-LOWER stratum that is executed
+// first and MATERIALIZED (gated) into the relation store as a base relation
+// `trusted = {1, 3}`. The higher stratum `flagged` then gates `know trusted`
+// against that materialized relation through the EXISTING EGB-02 membership
+// filter -- NO resolve-into-body, NO double-gating against the GPU world-view
+// filter. This yields the exact correct result instead of failing closed.
+//
+// node = {1, 2, 3}, vetted = {1, 3}.
+//   trusted(X) :- node(X), know vetted(X).   -> trusted = {1, 3}  (stratum 0)
+//   flagged(X) :- node(X), know trusted(X).  -> flagged = {1, 3}  (stratum 1)
+// node 2 is not vetted -> not trusted -> not flagged: the gate genuinely FILTERS
+// (the result strictly OMITS node 2, differing from the ungated `node` relation).
+//
+// Contrast with example 22 (recursion through a modal over a relation entangled
+// in the recursive SCC): that has NO lower stratum to materialize and stays
+// FAIL-CLOSED. Stratification admits ONLY chains that bottom out in invariant
+// relations.
+
+#pragma epistemic_mode = faeel
+
+pred node(u32).
+pred vetted(u32).
+pred trusted(u32).
+pred flagged(u32).
+
+node(1). node(2). node(3).
+vetted(1). vetted(3).
+
+trusted(X) :- node(X), know vetted(X).
+flagged(X) :- node(X), know trusted(X).
+
+?- flagged(X).
