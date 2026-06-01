@@ -3440,6 +3440,31 @@ fn tuple_key_expectation_error(context: String) -> XlogError {
 }
 
 impl Executor {
+    /// Resolve a modal tuple-source relation, disambiguating same-name multi-arity
+    /// modal predicates by arity.
+    ///
+    /// The relation store is keyed by name, so a program using the SAME predicate
+    /// name at two different arities in modal literals (`know p(X)` over `p/1` AND
+    /// `possible p(X,Y)` over `p/2`) could not resolve both sources under the bare
+    /// name. Distinct arities ARE distinct relations, so this resolves the
+    /// ARITY-QUALIFIED store key (`"p/1"`, `"p/2"`) FIRST, falling back to the bare
+    /// predicate name when no qualified entry exists. Single-arity epistemic
+    /// programs keep uploading under the bare name and hit the fallback unchanged
+    /// (no regression); a multi-arity program uploads each arity under its own
+    /// qualified key and both resolve distinctly.
+    ///
+    /// The `"/"` separator is collision-safe: parser predicate names cannot contain
+    /// `"/"`, so a qualified key can never shadow a real bare-name relation.
+    ///
+    /// Resolution is structural (driven by `arity`, never by a specific arity VALUE
+    /// or predicate NAME), so it introduces no special-casing.
+    fn resolve_modal_tuple_source(&self, predicate: &str, arity: usize) -> Option<&CudaBuffer> {
+        let qualified = format!("{predicate}/{arity}");
+        self.store()
+            .get(qualified.as_str())
+            .or_else(|| self.store().get(predicate))
+    }
+
     /// Snapshot runtime counters used by epistemic GPU certification.
     pub fn epistemic_gpu_runtime_counters(&self) -> EpistemicGpuRuntimeCounters {
         EpistemicGpuRuntimeCounters {
@@ -4048,16 +4073,15 @@ impl Executor {
 
         let mut tuple_sources = Vec::with_capacity(gpu_plan.tuple_membership_bindings.len());
         for binding in &gpu_plan.tuple_membership_bindings {
-            let source_relation =
-                self.store()
-                    .get(binding.predicate.as_str())
-                    .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
-                        construct: "epistemic GPU stable-model tuple membership".to_string(),
-                        context: format!(
-                            "missing reduced stable-model tuple source relation {}",
-                            binding.predicate
-                        ),
-                    })?;
+            let source_relation = self
+                .resolve_modal_tuple_source(binding.predicate.as_str(), binding.arity)
+                .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                    construct: "epistemic GPU stable-model tuple membership".to_string(),
+                    context: format!(
+                        "missing reduced stable-model tuple source relation {} (arity {})",
+                        binding.predicate, binding.arity
+                    ),
+                })?;
             if source_relation.arity() != binding.arity {
                 return Err(XlogError::UnsupportedEpistemicConstruct {
                     construct: "epistemic GPU stable-model tuple membership".to_string(),
@@ -5607,16 +5631,15 @@ impl Executor {
                 row_filter_key_counts_host.push(row_filter_key_count);
                 row_filter_negated_host.push(binding.negated as u8);
 
-                let source_relation =
-                    self.store()
-                        .get(binding.predicate.as_str())
-                        .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
-                            construct: "epistemic GPU final tuple row filtering".to_string(),
-                            context: format!(
-                                "missing tuple source relation {} for final row filter",
-                                binding.predicate
-                            ),
-                        })?;
+                let source_relation = self
+                    .resolve_modal_tuple_source(binding.predicate.as_str(), binding.arity)
+                    .ok_or_else(|| XlogError::UnsupportedEpistemicConstruct {
+                        construct: "epistemic GPU final tuple row filtering".to_string(),
+                        context: format!(
+                            "missing tuple source relation {} (arity {}) for final row filter",
+                            binding.predicate, binding.arity
+                        ),
+                    })?;
                 let tuple_source_row_count = self.clone_device_row_count(source_relation)?;
                 tuple_source_row_count_ptrs_host.push(*tuple_source_row_count.device_ptr());
                 tuple_source_row_counts.push(tuple_source_row_count);
