@@ -13,7 +13,7 @@ use xlog_logic::epistemic::{
     try_plan_stratified_epistemic_program, try_reduce_case_a_recursive_epistemic_program,
     EpistemicSplitExecutablePlan,
 };
-use xlog_logic::{BodyLiteral, Compiler, Program, Query, Term};
+use xlog_logic::{Atom, BodyLiteral, Compiler, Program, Query, Rule, Term};
 use xlog_runtime::executor::JoinIndexCacheStats;
 use xlog_runtime::{
     DeltaRecomputeStats, EpistemicGpuExecutionResult, EpistemicGpuWorkspaceCapacities,
@@ -1395,7 +1395,74 @@ fn normalize_program(program: Program) -> Result<Program> {
     let expanded = xlog_logic::expand_program_functions(&program, max_recursion)
         .map_err(|e| XlogError::Compilation(e.to_string()))?;
     let normalized = xlog_logic::normalize_v085_meta(&expanded)?;
-    xlog_logic::normalize_v085_lists(&normalized)
+    let listed = xlog_logic::normalize_v085_lists(&normalized)?;
+    Ok(desugar_diagonal_epistemic_constraints(listed))
+}
+
+/// E1 (diagonal): desugar a DIAGONAL epistemic constraint literal (`:- know p(X, X)` — a
+/// single modal literal repeating a variable across its OWN key columns) into an ordinary
+/// diagonal-extraction rule (`__epi_diag_N(X) :- p(X, X).`) plus a single-occurrence modal
+/// over the extracted relation (`:- know __epi_diag_N(X)`). The single-occurrence form
+/// routes through the existing variable-keyed world-view constraint path, which prunes the
+/// world view to empty exactly as `:- know flagged(X)` does — so the diagonal is evaluated
+/// soundly with NO new kernel. Applied at the program-normalization choke point so BOTH the
+/// reduced ordinary materialization and the epistemic planner observe the helper relation
+/// (an EIR-only rewrite is accepted at planning but the helper is never materialized).
+/// No-op unless a constraint carries a pure-variable diagonal modal literal; sound when the
+/// modal target's diagonal is determined by the ordinary extraction (EDB / determined
+/// relation), the case for base tuple-key targets.
+fn desugar_diagonal_epistemic_constraints(mut program: Program) -> Program {
+    let mut extraction_rules: Vec<Rule> = Vec::new();
+    let mut counter = 0usize;
+    for constraint in &mut program.constraints {
+        for lit in &mut constraint.body {
+            let BodyLiteral::Epistemic(elit) = lit else {
+                continue;
+            };
+            let Some(distinct) = diagonal_distinct_vars(&elit.atom) else {
+                continue;
+            };
+            let helper = format!("__epi_diag_{counter}");
+            counter += 1;
+            let helper_terms: Vec<Term> =
+                distinct.iter().map(|v| Term::Variable(v.clone())).collect();
+            // Extraction rule: __epi_diag_N(distinct...) :- <pred>(original diagonal terms...).
+            extraction_rules.push(Rule {
+                head: Atom {
+                    predicate: helper.clone(),
+                    terms: helper_terms.clone(),
+                },
+                body: vec![BodyLiteral::Positive(elit.atom.clone())],
+            });
+            // Range the modal over the (now single-occurrence) extracted relation.
+            elit.atom = Atom {
+                predicate: helper,
+                terms: helper_terms,
+            };
+        }
+    }
+    program.rules.extend(extraction_rules);
+    program
+}
+
+/// Ordered DISTINCT variable names of a pure-variable atom that repeats a variable across
+/// positions (a diagonal, e.g. `p(X, X)` or `p(X, Y, X)`); `None` otherwise. Restricted to
+/// pure-variable key atoms so the extraction rule is a clean projection of the diagonal.
+fn diagonal_distinct_vars(atom: &Atom) -> Option<Vec<String>> {
+    let mut seen = BTreeSet::new();
+    let mut distinct = Vec::new();
+    let mut repeated = false;
+    for term in &atom.terms {
+        let Term::Variable(name) = term else {
+            return None;
+        };
+        if seen.insert(name.clone()) {
+            distinct.push(name.clone());
+        } else {
+            repeated = true;
+        }
+    }
+    repeated.then_some(distinct)
 }
 
 fn program_has_epistemic_literals(program: &Program) -> bool {

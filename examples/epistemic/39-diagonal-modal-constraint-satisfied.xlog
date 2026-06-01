@@ -1,0 +1,19 @@
+// v0.9.2 E1 (diagonal modal constraint), SATISFIED companion to example 38. Same diagonal
+// constraint `:- know route(X, X).`, but `route` has NO self-loop `route(v, v)`, so the
+// constraint is satisfied, the world view survives, and `safe = {5}`. The 38-vs-39 flip
+// (only the presence of a diagonal tuple differs) is the load-bearing demonstration that
+// the diagonal constraint actually prunes -- it is not vacuous.
+
+#pragma epistemic_mode = faeel
+
+pred route(u32, u32).
+pred node(u32).
+pred safe(u32).
+
+route(1, 2). route(2, 3).
+node(5).
+
+safe(X) :- node(X), know node(X).
+:- know route(X, X).
+
+?- safe(X).

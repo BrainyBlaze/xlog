@@ -1,0 +1,36 @@
+// v0.9.2 E1 (diagonal modal constraint): a DIAGONAL epistemic constraint literal
+// `:- know route(X, X).` -- a single modal literal repeating the variable X across its OWN
+// key columns -- forbids any world view in which the modal relation `route` has a self-loop
+// `route(v, v)`.
+//
+// This was previously rejected as an unimplemented "shared-variable epistemic constraint
+// join". It is now resolved by a sound PROGRAM-level desugaring applied at normalization:
+//
+//   :- know route(X, X).
+//     becomes
+//   __epi_diag_0(X) :- route(X, X).      -- ordinary diagonal extraction
+//   :- know __epi_diag_0(X).             -- single-occurrence variable-keyed constraint
+//
+// The single-occurrence form `:- know __epi_diag_0(X)` routes through the EXISTING
+// variable-keyed world-view constraint path (the same one that handles `:- know flagged(X)`),
+// which ranges X existentially over the (gated) extracted relation and PRUNES the world view
+// to empty -- with NO new kernel. The extraction is sound because the diagonal of a base
+// (EDB / determined) modal target is itself determined.
+//
+// Here `route(1, 1)` is a self-loop, so `:- know route(X, X)` fires and the only world view
+// is pruned -> every output (`safe`) is EMPTY. Removing `route(1, 1)` would leave the
+// constraint satisfied and `safe = {5}` (see 39).
+
+#pragma epistemic_mode = faeel
+
+pred route(u32, u32).
+pred node(u32).
+pred safe(u32).
+
+route(1, 1). route(1, 2). route(2, 3).
+node(5).
+
+safe(X) :- node(X), know node(X).
+:- know route(X, X).
+
+?- safe(X).

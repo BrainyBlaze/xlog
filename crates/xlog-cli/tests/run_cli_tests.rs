@@ -810,6 +810,44 @@ fn test_xlog_run_compound_modal_key_reports_typed_epistemic_diagnostic() {
 }
 
 #[test]
+fn test_xlog_run_diagonal_modal_constraint_prunes() {
+    // v0.9.2 E1 (diagonal): `:- know route(X, X).` -- a single modal literal repeating X
+    // across its OWN key columns -- was rejected as an unimplemented shared-variable join.
+    // It is now resolved by a sound PROGRAM-level desugaring (ordinary diagonal extraction
+    // `__epi_diag_0(X) :- route(X, X)` + single-occurrence `:- know __epi_diag_0(X)`), which
+    // routes through the existing variable-keyed world-view constraint path and PRUNES the
+    // world view to empty when a self-loop exists -- no new kernel. 38 has a self-loop
+    // `route(1, 1)` -> `safe` pruned empty; 39 has none -> `safe = {5}`. The flip is
+    // load-bearing (only the diagonal tuple differs between the two programs).
+    let _device = match CudaDevice::new(0) {
+        Ok(d) => d,
+        Err(_) => {
+            println!("SKIPPED: CUDA runtime unavailable (no GPU or driver not loaded)");
+            return;
+        }
+    };
+
+    let (ok, stdout, stderr) = run_epistemic_example("38-diagonal-modal-constraint.xlog");
+    assert!(
+        ok,
+        "38 must succeed (Ok with a pruned-empty world view, NOT an error):\n{stdout}\n{stderr}"
+    );
+    assert!(stdout.contains("safe"), "38 emits the safe relation:\n{stdout}");
+    assert!(
+        !stdout.contains("| 5  |"),
+        "38 must PRUNE safe to empty -- the self-loop route(1,1) fires `:- know route(X,X)`:\n{stdout}"
+    );
+
+    let (ok, stdout, stderr) =
+        run_epistemic_example("39-diagonal-modal-constraint-satisfied.xlog");
+    assert!(ok, "39 must succeed:\n{stdout}\n{stderr}");
+    assert!(
+        stdout.contains("| 5  |"),
+        "39 keeps safe = {{5}} (no self-loop -> the diagonal constraint is satisfied):\n{stdout}"
+    );
+}
+
+#[test]
 fn test_xlog_run_faeel_unfounded_self_support_executes_to_empty_extension() {
     // v0.9.2 ITEM B (mandate headline): a self-supported possible rule
     // (`p() :- possible p().`) with no independent founded support is UNFOUNDED under
