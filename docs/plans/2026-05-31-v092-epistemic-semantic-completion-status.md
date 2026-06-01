@@ -104,3 +104,60 @@ and over a determined derived head (29). Every NON-determined target fails close
 - The full `cargo test -p xlog-prob --release --features host-io` suite (MC
   CPU/oracle/`gpu_mc_vs_cpu.rs` host-heavy surfaces) is a regression check only,
   not a no-host-transfer / GPU-native acceptance gate.
+
+---
+
+## Post-integration status (2026-06-01, branch `integration/v092-main-mc-resident`)
+
+Main HEAD `96d1530d` (MC GPU-resident engine) was union-merged into this branch (merge
+`dde60b87`); both surfaces coexist (`cargo check --workspace --all-targets` green). On top
+of the determined-modal family above, the following landed and are verified by me serially
+through the production path (device suite grew **131 → 144**):
+
+- **Item D** structured modal tuple-keys (list/compound/anonymous flatten into the existing
+  N-column matcher; unbounded forms reject with a `ResourceExhausted` finiteness bound).
+- **Item E** variable-keyed + nested epistemic constraints (single-occurrence positive
+  variable → wildcard existential; multi-literal distinct-variable conjunction).
+- **Item F** unsafe split/coupling — same-name multi-arity (arity-qualified store resolution)
+  + derived-head coupling with split-vs-unsplit equivalence; genuine cyclic coupling rejected.
+- **Item A1** stratified negated-modal recursion executes on GPU (example 37
+  `unreachable = node² − reach`); genuine negation cycles bounded (see below).
+- **Item E2** `:- not know p(X)` now returns the **NAF safety error** (unbound variable),
+  identical to ordinary `:- not r(X)` — the sound answer for an ill-formed program, not a
+  "missing feature" diagnostic (commit `e0e7d2a9`).
+
+### Remaining items — classified by their REAL nature (no relabeling)
+
+1. **Recursion negation-cycle (ex33) + G91 `possible`-recursion → WHOLE-ENGINE
+   ARCHITECTURAL BOUND.** These need non-stratified (well-founded / stable-model) semantics.
+   **Proven not epistemic-specific:** ordinary `a :- not b. b :- not a.` and ordinary
+   recursion-through-negation BOTH error on this engine — XLOG is a *stratified-negation*
+   engine with no WFS/stable-model evaluation for ANY program. `wfs.rs` exists but is
+   host-only (pure `HashSet`/`HashMap`, used only by the CPU prob-provenance path), and the
+   no-host-solver lock forbids routing accepted programs through it. Finishing these means
+   building well-founded semantics for the entire engine — a separate project, the same wall
+   ordinary Datalog hits here.
+
+2. **E1 shared-variable join / diagonal (`:- know p(X), possible q(X)`, `:- know p(X,X)`,
+   `:- q(X), not know p(X)`) → reduces to working features, blocked by RUNTIME bugs, not an
+   epistemic-layer gap.** All three forms execute correctly as RULE bodies
+   (`both(X) :- know p(X), possible q(X)` → exact `{2}`; diagonal → `{1}`; negated-difference
+   → `{2}`). The clean reduction "rewrite `:- Body(X)` to a helper rule + a constraint on the
+   helper" hits two real runtime issues: (a) a nullary-head + negated-modal **schema-union
+   bug** (`Union requires compatible schemas: [] vs [(c0,U32)]`); (b) the non-nullary form
+   routes through a path that surfaces a violated constraint as an **`Execution` error**
+   instead of pruning the world view to empty (the way item E's `:- know flagged(X)` does).
+   Sound completion requires fixing those runtime paths (or extending the GPU world-view
+   constraint kernel to evaluate the join), done test-first — not a quick rewrite.
+
+3. **Same-name multi-arity coupling via `xlog run` → PRE-EXISTING engine-wide
+   name-keyed-schema limitation.** The coupling semantics work at the device/runtime layer
+   (item F, exact tuples per arity); the full `xlog run` path is blocked because
+   `Compiler::schemas` is `HashMap<String, Schema>` and `load_facts_into_store` groups facts
+   by bare predicate name, so `pred p(u32)` + `pred p(u32, u32)` collapse. Arity-keying the
+   global schema/relation identity is an ordinary-compiler refactor, orthogonal to epistemic
+   semantics.
+
+Honest boundary: items B/A/C/D/E/F + A1 + E2 are done and verified (device 144); class (1)
+is a real architectural wall (not fakeable without a new engine); classes (2)/(3) are
+finishable but are runtime/compiler-layer work, not epistemic-layer patches.
