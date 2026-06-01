@@ -225,6 +225,19 @@ enum LogicExecutionPlan {
     EpistemicStratified(Vec<StratumExecutable>),
 }
 
+/// Compile-time epistemic provenance, retained even when the executable plan is
+/// `Ordinary` (e.g. a Case-A recursive epistemic fixpoint whose modal literals were
+/// resolved into invariant joins). This carries the source's epistemic literals so
+/// the C7 plan dump can emit a stable id for a recursive epistemic fixpoint that no
+/// longer carries an epistemic GPU plan.
+#[derive(Clone)]
+struct EpistemicProvenance {
+    /// How the epistemic source was reduced for execution.
+    reduction: &'static str,
+    /// Epistemic `know`/`possible` literals (with negation) seen in the source EIR.
+    literals: Vec<xlog_ir::EirEpistemicLiteral>,
+}
+
 /// A compiled Datalog program ready for GPU evaluation.
 #[derive(Clone)]
 pub struct LogicProgram {
@@ -232,6 +245,9 @@ pub struct LogicProgram {
     plan: LogicExecutionPlan,
     schemas: HashMap<String, Schema>,
     rel_ids: HashMap<String, RelId>,
+    /// `Some` iff the source program contained epistemic literals (regardless of
+    /// whether the executable plan ended up epistemic or ordinary).
+    epistemic_provenance: Option<EpistemicProvenance>,
 }
 
 impl LogicProgram {
@@ -253,10 +269,16 @@ impl LogicProgram {
             plan: LogicExecutionPlan::Ordinary(plan),
             schemas: compiler.schemas().clone(),
             rel_ids: compiler.rel_ids().clone(),
+            epistemic_provenance: None,
         })
     }
 
     fn compile_epistemic_program(normalized: Program) -> Result<Self> {
+        // Capture epistemic provenance up front: the source-EIR modal literals are
+        // retained even when a Case-A recursive reduction lowers the program to an
+        // Ordinary executable plan, so the C7 plan dump can still emit a stable id
+        // for a recursive epistemic fixpoint.
+        let provenance_literals = collect_eir_epistemic_literals(&normalized);
         // Stratified epistemic execution FIRST: a modal literal ranges over an
         // epistemically-DETERMINED derived head (`b :- know a` where `a :- know p`,
         // `p` invariant — possibly with the higher stratum RECURSING over the
@@ -299,6 +321,10 @@ impl LogicProgram {
                 plan,
                 schemas,
                 rel_ids,
+                epistemic_provenance: Some(EpistemicProvenance {
+                    reduction: "stratified",
+                    literals: provenance_literals,
+                }),
             });
         }
 
@@ -317,6 +343,10 @@ impl LogicProgram {
                 plan: LogicExecutionPlan::Ordinary(plan),
                 schemas: compiler.schemas().clone(),
                 rel_ids: compiler.rel_ids().clone(),
+                epistemic_provenance: Some(EpistemicProvenance {
+                    reduction: "case_a_recursive",
+                    literals: provenance_literals,
+                }),
             });
         }
 
@@ -347,6 +377,10 @@ impl LogicProgram {
             plan,
             schemas,
             rel_ids,
+            epistemic_provenance: Some(EpistemicProvenance {
+                reduction: "epistemic_executable",
+                literals: provenance_literals,
+            }),
         })
     }
 
@@ -405,6 +439,77 @@ impl LogicProgram {
 
         let normalized = normalize_program(merged)?;
         Self::compile_normalized_program(normalized)
+    }
+
+    /// Serialize the compiled epistemic execution plan to a JSON summary.
+    ///
+    /// Returns `None` for ordinary (non-epistemic) programs. For epistemic
+    /// programs this dumps the EIR-derived GPU plan(s): selected mode, the
+    /// epistemic `know`/`possible` literals (with negation), required GPU hot-path
+    /// phases/kernels, world-view integrity constraints, reduced-program head
+    /// summaries, the forbidden CPU-fallback counters (which must all be zero on
+    /// the accepted GPU hot path), and a deterministic plan id (a stable hash of
+    /// the canonical summary). This is the C7 epistemic-plan/EIR dump surface:
+    /// it lets an external caller (pyxlog or CLI consumer) read the accepted
+    /// world-view structure and assert `cpu_fallback == 0` off a real run.
+    pub fn epistemic_plan_json(&self) -> Option<String> {
+        let gpu_plans: Vec<(String, &xlog_ir::EpistemicGpuPlan)> = match &self.plan {
+            // A program whose source was epistemic but whose executable plan is
+            // ordinary: this is a Case-A recursive epistemic fixpoint (modal literals
+            // resolved into invariant joins). It carries no epistemic GPU plan, but it
+            // IS GPU-clean by construction (the recursion runs on the ordinary
+            // semi-naive engine with no epistemic CPU fallback). Emit a provenance
+            // summary with a stable id so the recursive-fixpoint fixture is auditable.
+            LogicExecutionPlan::Ordinary(_) => {
+                let prov = self.epistemic_provenance.as_ref()?;
+                return Some(epistemic_provenance_summary_json(prov));
+            }
+            LogicExecutionPlan::EpistemicSingle(plan) => {
+                vec![("single".to_string(), &plan.gpu_plan)]
+            }
+            LogicExecutionPlan::EpistemicSplit(split) => split
+                .components
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (format!("split[{i}]"), &c.executable.gpu_plan))
+                .collect(),
+            LogicExecutionPlan::EpistemicStratified(strata) => {
+                let mut plans = Vec::new();
+                for (i, stratum) in strata.iter().enumerate() {
+                    match &stratum.plan {
+                        StratumPlanKind::Single(plan) => {
+                            plans.push((format!("stratum[{i}]"), &plan.gpu_plan));
+                        }
+                        StratumPlanKind::Split(split) => {
+                            for (j, c) in split.components.iter().enumerate() {
+                                plans.push((
+                                    format!("stratum[{i}].split[{j}]"),
+                                    &c.executable.gpu_plan,
+                                ));
+                            }
+                        }
+                        // Recursive/ordinary higher strata carry no epistemic GPU
+                        // plan (the modal already resolved to an ordinary join over
+                        // a materialized base); they contribute no fallback counters.
+                        StratumPlanKind::Ordinary { .. } => {}
+                    }
+                }
+                plans
+            }
+        };
+        Some(epistemic_plan_summary_json(
+            self.plan_kind_label(),
+            &gpu_plans,
+        ))
+    }
+
+    fn plan_kind_label(&self) -> &'static str {
+        match &self.plan {
+            LogicExecutionPlan::Ordinary(_) => "ordinary",
+            LogicExecutionPlan::EpistemicSingle(_) => "epistemic_single",
+            LogicExecutionPlan::EpistemicSplit(_) => "epistemic_split",
+            LogicExecutionPlan::EpistemicStratified(_) => "epistemic_stratified",
+        }
     }
 
     /// Look up the schema for a named relation.
@@ -1871,6 +1976,206 @@ fn format_constraint(body: &[BodyLiteral]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(":- {}.", lits)
+}
+
+// --------------------------------------------------------------------------- //
+// C7 epistemic-plan / EIR JSON dump
+// --------------------------------------------------------------------------- //
+
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Deterministic 64-bit FNV-1a hash of a string (stable across runs/processes,
+/// unlike `std::hash::DefaultHasher` which is randomized). Used as the stable
+/// epistemic plan id so two dumps of the same plan compare equal.
+fn fnv1a_64(s: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// Extract every `know`/`possible` literal (with negation) from a program's EIR.
+/// Used to retain epistemic provenance when a Case-A recursive reduction lowers the
+/// program to an ordinary executable plan.
+fn collect_eir_epistemic_literals(program: &Program) -> Vec<xlog_ir::EirEpistemicLiteral> {
+    let mut lits = Vec::new();
+    if let Ok(eir) = xlog_logic::build_eir(program) {
+        for rule in &eir.rules {
+            for lit in &rule.body {
+                if let xlog_ir::EirBodyLiteral::Epistemic(e) = lit {
+                    lits.push(e.clone());
+                }
+            }
+        }
+    }
+    lits
+}
+
+/// JSON summary for an epistemic source that reduced to an ordinary executable plan
+/// (a Case-A recursive epistemic fixpoint). No GPU epistemic plan exists, but the
+/// modal literals are recorded and CPU fallback is zero by construction (the
+/// reduced recursion runs on the ordinary semi-naive engine).
+fn epistemic_provenance_summary_json(prov: &EpistemicProvenance) -> String {
+    let literals = prov
+        .literals
+        .iter()
+        .map(epistemic_literal_json)
+        .collect::<Vec<_>>()
+        .join(",");
+    let body = format!(
+        "{{\"plan_kind\":\"epistemic_reduced_ordinary\",\"reduction\":\"{}\",\
+\"epistemic_literals\":[{}],\"cpu_fallback_total_zero\":true}}",
+        json_escape(prov.reduction),
+        literals
+    );
+    let plan_id = fnv1a_64(&body);
+    format!(
+        "{{\"plan_id\":\"epi-{:016x}\",\"plan_kind\":\"epistemic_reduced_ordinary\",\
+\"reduction\":\"{}\",\"epistemic_literals\":[{}],\"units\":[],\
+\"cpu_fallback_total_zero\":true}}",
+        plan_id,
+        json_escape(prov.reduction),
+        literals
+    )
+}
+
+fn epistemic_literal_json(lit: &xlog_ir::EirEpistemicLiteral) -> String {
+    let op = match lit.op {
+        xlog_ir::EirEpistemicOp::Know => "know",
+        xlog_ir::EirEpistemicOp::Possible => "possible",
+    };
+    format!(
+        "{{\"op\":\"{}\",\"negated\":{},\"predicate\":\"{}\",\"arity\":{}}}",
+        op,
+        lit.negated,
+        json_escape(&lit.atom.predicate),
+        lit.atom.arity
+    )
+}
+
+fn epistemic_gpu_plan_json(plan: &xlog_ir::EpistemicGpuPlan) -> String {
+    let mode = match plan.mode {
+        xlog_ir::EirEpistemicMode::G91 => "g91",
+        xlog_ir::EirEpistemicMode::Faeel => "faeel",
+    };
+    let literals = plan
+        .epistemic_literals
+        .iter()
+        .map(epistemic_literal_json)
+        .collect::<Vec<_>>()
+        .join(",");
+    let phases = plan
+        .required_phases
+        .iter()
+        .map(|p| format!("\"{:?}\"", p))
+        .collect::<Vec<_>>()
+        .join(",");
+    let kernels = plan
+        .required_kernel_phases
+        .iter()
+        .map(|p| format!("\"{:?}\"", p))
+        .collect::<Vec<_>>()
+        .join(",");
+    let constraints = plan
+        .constraints
+        .iter()
+        .map(|c| {
+            let idx = c
+                .literal_indices
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "{{\"constraint_index\":{},\"literal_indices\":[{}]}}",
+                c.constraint_index, idx
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let reductions = plan
+        .reductions
+        .iter()
+        .map(|r| {
+            format!(
+                "{{\"rule_index\":{},\"head\":\"{}\",\"public_head_arity\":{},\"relational_body_atoms\":{}}}",
+                r.rule_index,
+                json_escape(&r.head_predicate),
+                r.public_head_arity,
+                r.relational_body_atoms
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let f = &plan.cpu_fallbacks;
+    format!(
+        "{{\"mode\":\"{}\",\"epistemic_literals\":[{}],\"required_phases\":[{}],\
+\"required_kernel_phases\":[{}],\"constraints\":[{}],\"reductions\":[{}],\
+\"cpu_fallbacks\":{{\"candidate_enumeration\":{},\"world_view_validation\":{},\
+\"solver_search\":{},\"probabilistic_recompute\":{}}},\"cpu_fallback_is_zero\":{}}}",
+        mode,
+        literals,
+        phases,
+        kernels,
+        constraints,
+        reductions,
+        f.candidate_enumeration,
+        f.world_view_validation,
+        f.solver_search,
+        f.probabilistic_recompute,
+        f.is_zero()
+    )
+}
+
+fn epistemic_plan_summary_json(
+    plan_kind: &str,
+    gpu_plans: &[(String, &xlog_ir::EpistemicGpuPlan)],
+) -> String {
+    let units = gpu_plans
+        .iter()
+        .map(|(label, plan)| {
+            format!(
+                "{{\"unit\":\"{}\",\"plan\":{}}}",
+                json_escape(label),
+                epistemic_gpu_plan_json(plan)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let all_zero = gpu_plans
+        .iter()
+        .all(|(_, plan)| plan.cpu_fallbacks.is_zero());
+    // Canonical body (without the id) hashed for the stable plan id.
+    let body = format!(
+        "{{\"plan_kind\":\"{}\",\"units\":[{}],\"cpu_fallback_total_zero\":{}}}",
+        json_escape(plan_kind),
+        units,
+        all_zero
+    );
+    let plan_id = fnv1a_64(&body);
+    format!(
+        "{{\"plan_id\":\"epi-{:016x}\",\"plan_kind\":\"{}\",\"units\":[{}],\"cpu_fallback_total_zero\":{}}}",
+        plan_id,
+        json_escape(plan_kind),
+        units,
+        all_zero
+    )
 }
 
 #[cfg(test)]

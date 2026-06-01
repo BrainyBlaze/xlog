@@ -63,6 +63,13 @@ struct RunArgs {
     /// Additional directories to search for modules (colon-separated)
     #[arg(long, value_delimiter = ':')]
     module_path: Vec<PathBuf>,
+    /// Dump the compiled epistemic execution plan (EIR-derived GPU plan, world-view
+    /// integrity constraints, and CPU-fallback counters) as JSON to this path.
+    /// No-op for ordinary (non-epistemic) programs. This is the C7 epistemic-plan
+    /// dump surface: it exposes accepted `know`/`possible` literals and lets a
+    /// caller assert `cpu_fallback == 0` off a real GPU run.
+    #[arg(long)]
+    epistemic_plan_json: Option<PathBuf>,
 }
 
 #[derive(Copy, Clone, ValueEnum, Default)]
@@ -1208,6 +1215,28 @@ fn run_deterministic(args: RunArgs) -> Result<()> {
     }
 
     let result = program.evaluate_with_options(provider.clone(), inputs, args.stats)?;
+
+    // C7: dump the compiled epistemic execution plan (after a successful GPU run, so
+    // the dump corresponds to a real accepted hot-path execution).
+    if let Some(plan_path) = &args.epistemic_plan_json {
+        match program.epistemic_plan_json() {
+            Some(json) => {
+                std::fs::write(plan_path, json).map_err(|e| {
+                    XlogError::Execution(format!(
+                        "Failed to write epistemic plan JSON {}: {}",
+                        plan_path.display(),
+                        e
+                    ))
+                })?;
+                eprintln!("epistemic plan dumped to {}", plan_path.display());
+            }
+            None => {
+                eprintln!(
+                    "note: --epistemic-plan-json given but program has no epistemic literals; no plan dumped"
+                );
+            }
+        }
+    }
 
     // Emit query results
     emit_logic_results(
