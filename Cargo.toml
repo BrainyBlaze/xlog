@@ -28,7 +28,7 @@ keywords = ["xlog", "datalog", "gpu", "cuda"]
 
 [workspace.dependencies]
 thiserror = "1.0"
-cudarc = { version = "0.19.4", features = ["cuda-13010"] }
+cudarc = { version = "0.19.4", features = ["cuda-12040"] }
 pest = "2.7"
 pest_derive = "2.7"
 pyo3 = { version = "0.24.1" }
