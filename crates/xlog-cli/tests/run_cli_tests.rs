@@ -374,6 +374,23 @@ fn test_xlog_run_epistemic_examples() {
         // rows: 1. 13d (FAEEL rows:0) vs 13e (G91 rows:1) is the exact per-mode
         // divergence of the collapsed chain (mirrors 31 vs 32 with a chain).
         ("13e-nested-modal-chain-g91-accepted.xlog", "p", "rows: 1"),
+        // v0.9.2 WALL A1 (ACCEPTED): a NEGATED modal `not know reach` over a GENUINELY
+        // RECURSIVE relation in a strictly LOWER stratum than the negating head
+        // EXECUTES on the GPU production path as ordinary stratified negation. reach =
+        // transitive closure of link {(1,2),(2,3)} = {(1,2),(2,3),(1,3)}; unreachable =
+        // node x node MINUS reach = 6 pairs. (1,1) is a self-pair excluded from reach
+        // (modal gate load-bearing); (3,1) confirms the anti-join against the recursive
+        // closure. Contrast example 33 (the cyclic twin) which stays WFS-bounded.
+        (
+            "37-negated-modal-over-recursive-stratified.xlog",
+            "__xlog_query_0",
+            "| 1  | 1  |",
+        ),
+        (
+            "37-negated-modal-over-recursive-stratified.xlog",
+            "__xlog_query_0",
+            "| 3  | 1  |",
+        ),
     ];
 
     for (example, expected_relation, expected_value) in examples {
@@ -716,10 +733,14 @@ fn test_xlog_run_recursion_through_modal_computes_founded_fixpoint() {
 
 #[test]
 fn test_xlog_run_negated_modal_through_recursion_reports_typed_epistemic_diagnostic() {
-    // v0.9.2 ITEM A SOUNDNESS FLOOR: a NEGATED modal over a relation entangled in the
-    // program's recursive SCC is NON-MONOTONE through the recursion and must FAIL
-    // CLOSED with a typed diagnostic (positive co-evolving modals are accepted as
-    // Case-B fixpoints; the negated one is the genuine remaining wall).
+    // v0.9.2 WALL A1 FORMAL BOUND (the genuinely NON-stratified remainder): a NEGATED
+    // modal whose target CYCLES through the recursion via the negation (`reach -> linked
+    // -> not reach`) is non-stratified and must FAIL CLOSED. Its sound semantics is the
+    // 3-valued well-founded model, which requires the host-only WFS / stable-model
+    // solver -- precluded by the no-host-solver architectural lock. The diagnostic is
+    // worded as the FORMAL ARCHITECTURAL REASON, not "the executor can't". (The
+    // STRATIFIED sub-case -- example 37 -- EXECUTES on the GPU production path; only the
+    // negation cycle stays bounded.)
     let _device = match CudaDevice::new(0) {
         Ok(d) => d,
         Err(_) => {
@@ -736,9 +757,15 @@ fn test_xlog_run_negated_modal_through_recursion_reports_typed_epistemic_diagnos
     );
     assert!(stderr.contains("UnsupportedEpistemicConstruct"), "{stderr}");
     assert!(stderr.contains("recursive epistemic program"), "{stderr}");
-    // Names the offending NEGATED modal and the non-monotone reason.
-    assert!(stderr.contains("not know"), "{stderr}");
-    assert!(stderr.contains("non-monotone"), "{stderr}");
+    // The diagnostic names the formal architectural bound (cycle through negation =>
+    // 3-valued well-founded model => host-only solver precluded by the lock), NOT an
+    // "executor can't" or feature-gap wording.
+    assert!(stderr.contains("cycle through negation"), "{stderr}");
+    assert!(stderr.contains("well-founded"), "{stderr}");
+    assert!(
+        stderr.contains("no-host-solver") || stderr.contains("host-side semantic solver"),
+        "diagnostic must cite the no-host-solver architectural constraint:\n{stderr}"
+    );
 }
 
 #[test]

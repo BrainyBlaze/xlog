@@ -237,6 +237,149 @@ fn test_case_b_ungated_mutation_flips_founded_result() -> Result<()> {
     Ok(())
 }
 
+/// v0.9.2 WALL A1: a NEGATED modal `not know reach` over a GENUINELY RECURSIVE
+/// relation that sits in a strictly LOWER stratum than the negating head EXECUTES on
+/// the GPU production path as ordinary stratified negation -- with EXACT tuples and
+/// ZERO CPU fallback.
+///
+/// This is the canonical "negated modal literal in a recursive epistemic program"
+/// the WALL names. It is admissible because the negation is STRATIFIED: `reach`
+/// (recursive transitive closure of `know link`) never depends on the negating
+/// `unreachable`, so the reduced ordinary program (`not know reach` -> `not reach`,
+/// `know link` -> `link`) has NO cycle through negation. The semi-naive engine
+/// completes the recursive `reach` fixpoint, THEN anti-joins it.
+///
+/// NON-VACUOUS dispatch + zero-CPU-fallback proof (same convention as the Case-B
+/// test above): the program routes through the ORDINARY recursive reduction
+/// ("case_a_recursive" / "epistemic_reduced_ordinary"), which has NO epistemic CPU
+/// code surface at all -- the epistemic CPU-fallback counters
+/// (cpu_candidate_enumerations, cpu_world_view_validations, cpu_fallbacks) exist
+/// ONLY on the single-pass epistemic path, so the ordinary engine is
+/// CPU-fallback-free BY CONSTRUCTION. The "units":[] assertion proves no epistemic
+/// GPU candidate-enumeration units (the CPU-fallback-bearing surface) were emitted.
+/// A regression that rerouted this through the single-pass planner OR misclassified
+/// the cycle case as stratified would change the tag and FAIL here.
+///
+/// EXACT founded answer: link = {(1,2),(2,3)} -> reach (transitive closure) =
+/// {(1,2),(2,3),(1,3)}; unreachable = node x node MINUS reach =
+/// {(1,1),(2,1),(2,2),(3,1),(3,2),(3,3)} (6 pairs).
+#[test]
+fn test_wall_a1_negated_modal_over_recursive_stratified_executes_exact() -> Result<()> {
+    let Some(provider) = create_test_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return Ok(());
+    };
+
+    let source = r#"
+        #pragma epistemic_mode = faeel
+        pred node(u32).
+        pred link(u32, u32).
+        pred reach(u32, u32).
+        pred unreachable(u32, u32).
+
+        node(1). node(2). node(3).
+        link(1, 2). link(2, 3).
+
+        reach(X, Y) :- know link(X, Y).
+        reach(X, Z) :- reach(X, Y), know link(Y, Z).
+        unreachable(X, Y) :- node(X), node(Y), not know reach(X, Y).
+
+        ?- unreachable(X, Y).
+    "#;
+
+    let program = xlog_gpu::logic::LogicProgram::compile(source)?;
+
+    let plan_json = program
+        .epistemic_plan_json()
+        .expect("stratified negated-modal recursion must carry a provenance summary");
+    assert!(
+        plan_json.contains("\"reduction\":\"case_a_recursive\""),
+        "stratified negated-modal recursion must route through the ORDINARY recursive \
+         reduction (no single-pass epistemic CPU-fallback surface), got: {plan_json}"
+    );
+    assert!(
+        plan_json.contains("\"plan_kind\":\"epistemic_reduced_ordinary\""),
+        "stratified negated-modal plan kind must be the reduced-ordinary engine, got: {plan_json}"
+    );
+    assert!(
+        plan_json.contains("\"units\":[]"),
+        "reduced-ordinary plan carries NO epistemic candidate-enumeration units (the \
+         CPU-fallback-bearing surface): {plan_json}"
+    );
+
+    let result = program.evaluate(provider.clone(), std::collections::HashMap::new())?;
+    let query0 = &result.queries[0];
+    let mut got = read_pairs(&provider, &query0.buffer);
+    got.sort_unstable();
+    got.dedup();
+
+    assert_eq!(
+        got,
+        vec![(1, 1), (2, 1), (2, 2), (3, 1), (3, 2), (3, 3)],
+        "unreachable must be exactly node x node MINUS the recursive closure reach = \
+         {{(1,2),(2,3),(1,3)}}"
+    );
+
+    Ok(())
+}
+
+/// v0.9.2 WALL A1 MUTATION PROBE: dropping the RECURSIVE second `reach` rule (so the
+/// modal target is base-only, NOT a transitive closure) FLIPS the anti-join result,
+/// proving the recursion INSIDE the negated modal gate is load-bearing.
+///
+/// The accepted program's `reach` is the transitive closure {(1,2),(2,3),(1,3)}; the
+/// transitive pair (1,3) is reachable, so `unreachable` EXCLUDES (1,3). Here the
+/// recursive rule is removed, so `reach` is base-only {(1,2),(2,3)} and (1,3) is NO
+/// longer reachable -> `unreachable` now INCLUDES (1,3). The presence of (1,3) is the
+/// FLIP the recursive closure (computed before the anti-join) prevents.
+#[test]
+fn test_wall_a1_drop_recursion_flips_anti_join_result() -> Result<()> {
+    let Some(provider) = create_test_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return Ok(());
+    };
+
+    // MUTATION: remove the recursive `reach(X,Z) :- reach(X,Y), know link(Y,Z)` rule.
+    // `reach` becomes the single-hop base relation, NOT the transitive closure.
+    let base_only = r#"
+        #pragma epistemic_mode = faeel
+        pred node(u32).
+        pred link(u32, u32).
+        pred reach(u32, u32).
+        pred unreachable(u32, u32).
+
+        node(1). node(2). node(3).
+        link(1, 2). link(2, 3).
+
+        reach(X, Y) :- know link(X, Y).
+        unreachable(X, Y) :- node(X), node(Y), not know reach(X, Y).
+
+        ?- unreachable(X, Y).
+    "#;
+
+    let program = xlog_gpu::logic::LogicProgram::compile(base_only)?;
+    let result = program.evaluate(provider.clone(), std::collections::HashMap::new())?;
+    let query0 = &result.queries[0];
+    let mut got = read_pairs(&provider, &query0.buffer);
+    got.sort_unstable();
+    got.dedup();
+
+    // reach = base {(1,2),(2,3)} only; unreachable = 9 - 2 = 7 pairs, INCLUDING the
+    // transitive (1,3) that the recursive closure would have removed.
+    assert!(
+        got.contains(&(1, 3)),
+        "dropping the recursion must FLIP (1,3) into `unreachable` (base-only reach no \
+         longer covers the transitive pair): {got:?}"
+    );
+    assert_eq!(
+        got,
+        vec![(1, 1), (1, 3), (2, 1), (2, 2), (3, 1), (3, 2), (3, 3)],
+        "base-only `unreachable` must be node x node MINUS only the two base `link` pairs"
+    );
+
+    Ok(())
+}
+
 /// v0.9.2 ITEM F (derived-head coupling — SPLIT-VS-UNSPLIT EQUIVALENCE): a
 /// cross-component modal coupling over an epistemically-DETERMINED derived head is
 /// SOLVED in production by STRATIFICATION, and the stratified joint result equals

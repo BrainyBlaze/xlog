@@ -112,11 +112,18 @@ fn negated_modal_over_invariant_in_recursion_is_accepted_case_a() {
 }
 
 #[test]
-fn negated_modal_over_non_invariant_in_recursion_fails_closed() {
-    // The complement: a NEGATED modal over a NON-invariant (epistemic-derived)
-    // relation in a recursion-participating program is doubly outside the Case-A
-    // fragment and must still fail closed. `choice` is epistemic-defined, so
-    // `not know choice` has no invariant complement.
+fn negated_modal_over_stratified_non_invariant_in_recursion_is_accepted_case_b() {
+    // v0.9.2 WALL A1: a NEGATED modal over a NON-invariant (epistemic-derived)
+    // relation in a recursion-participating program is ADMISSIBLE when the negation is
+    // STRATIFIED -- i.e. the reduced ordinary program (`not know choice` -> `not
+    // choice`) has NO cycle through negation. `choice` is epistemic-defined (hence
+    // non-invariant) but sits in a strictly LOWER stratum than `reach` (choice depends
+    // only on EDB `seed`/`edge`, never on `reach`). The negation `reach :- ..., not
+    // choice` therefore stratifies: the lower stratum materializes `choice` to a TOTAL
+    // 2-valued relation, so under FAEEL `not know choice == not choice` over that
+    // materialized base. The reduced program is an ordinary stratified-negation
+    // recursive program, which the existing GPU semi-naive engine executes (anti-join
+    // against the recursive lower stratum), so it is NOT rejected.
     let program = parse_program(
         r#"
         pred vertex(u32).
@@ -131,15 +138,120 @@ fn negated_modal_over_non_invariant_in_recursion_fails_closed() {
         "#,
     )
     .unwrap();
+    assert_eq!(
+        classify_recursive_epistemic_program(&program).unwrap(),
+        RecursiveEpistemicClass::CaseB,
+        "stratified negated modal over a non-invariant target is admissible Case B"
+    );
+    // The reduction resolves `not know choice` -> ordinary NEGATED `not choice`
+    // (anti-join, no modal gating) and `know edge` -> positive `edge`, leaving a
+    // stratified ordinary recursive program with no residual modal literal.
+    let reduced = try_reduce_case_a_recursive_epistemic_program(&program)
+        .unwrap()
+        .expect("admissible stratified negated-modal Case-B program reduces");
+    assert_eq!(
+        reduced
+            .rules
+            .iter()
+            .flat_map(|rule| rule.body.iter())
+            .filter(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
+            .count(),
+        0,
+        "stratified Case-B reduce removes all modal literals"
+    );
+    assert!(
+        reduced
+            .rules
+            .iter()
+            .any(|rule| rule.body.iter().any(
+                |lit| matches!(lit, BodyLiteral::Negated(atom) if atom.predicate == "choice")
+            )),
+        "the negated modal must resolve to an ordinary negated `choice` anti-join atom"
+    );
+}
+
+#[test]
+fn negated_modal_through_recursion_cycle_fails_closed_wfs_bound() {
+    // v0.9.2 WALL A1 SOUNDNESS FLOOR (the genuinely NON-stratified remainder): a
+    // NEGATED modal whose target CYCLES through the recursion via the negation is
+    // non-stratified and must FAIL CLOSED. Here `reach` depends (positively) on
+    // `linked`, and `linked` depends (negatively) on `not know reach`, so the reduced
+    // ordinary program has a cycle through negation `reach -> linked -> not reach`.
+    // That program has no stratification; its sound semantics is the 3-valued
+    // well-founded model (reach/linked partly UNDEFINED), which requires the host-side
+    // WFS / stable-model solver. The GPU production path provides no such solver (the
+    // no-host-solver lock), so this case is bounded by the architectural constraint,
+    // not by an unimplemented feature -- it must reject rather than return a
+    // silently-wrong (base-only or 2-valued) result.
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = faeel
+        pred vertex(u32).
+        pred seed(u32, u32).
+        pred linked(u32, u32).
+        pred reach(u32, u32).
+        vertex(1). vertex(2). vertex(3).
+        seed(1, 2).
+        reach(X, Y) :- linked(X, Y).
+        reach(X, Z) :- reach(X, Y), linked(Y, Z).
+        linked(X, Y) :- vertex(X), vertex(Y), not know reach(X, Y).
+        linked(X, Y) :- seed(X, Y).
+        "#,
+    )
+    .unwrap();
     match classify_recursive_epistemic_program(&program) {
         Err(XlogError::UnsupportedEpistemicConstruct { construct, context }) => {
             assert_eq!(construct, "recursive epistemic program");
             assert!(
-                context.contains("NEGATED modal") && context.contains("not invariant"),
-                "expected negated-non-invariant diagnostic, got: {context}"
+                context.contains("cycle through negation") && context.contains("well-founded"),
+                "expected non-stratified WFS-bound diagnostic, got: {context}"
             );
         }
-        other => panic!("expected typed negated-modal rejection, got {other:?}"),
+        other => panic!("expected typed non-stratified WFS-bound rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn recursive_epistemic_program_with_epistemic_constraint_fails_closed() {
+    // v0.9.2 WALL A1 SOUNDNESS GUARD: a recursive epistemic program that ALSO carries an
+    // epistemic integrity constraint (`:- know flagged(X)`) must FAIL CLOSED. Recursive
+    // epistemic programs route through the PURE ordinary semi-naive engine, which does
+    // NOT run the world-view constraint kernel, and the recursive reduction DROPS modal
+    // constraints. Silently dropping the constraint would return rows a valid world view
+    // forbids -- an UNSOUND admission, worse than a rejection. The otherwise-admissible
+    // stratified negated-modal recursion (accepted in
+    // `negated_modal_over_recursive_lower_stratum_is_accepted_case_b`) must NOT be
+    // admitted once an epistemic constraint co-occurs. (Non-recursive epistemic-constraint
+    // programs -- examples 10/34/35/36 -- classify NonRecursive and are unaffected.)
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = faeel
+        pred node(u32).
+        pred link(u32, u32).
+        pred reach(u32, u32).
+        pred unreachable(u32, u32).
+        pred flagged(u32).
+        node(1). node(2). node(3).
+        link(1, 2). link(2, 3).
+        flagged(2).
+        reach(X, Y) :- know link(X, Y).
+        reach(X, Z) :- reach(X, Y), know link(Y, Z).
+        unreachable(X, Y) :- node(X), node(Y), not know reach(X, Y).
+        :- know flagged(X).
+        ?- unreachable(X, Y).
+        "#,
+    )
+    .unwrap();
+    match classify_recursive_epistemic_program(&program) {
+        Err(XlogError::UnsupportedEpistemicConstruct { construct, context }) => {
+            assert_eq!(construct, "recursive epistemic program");
+            assert!(
+                context.contains("epistemic integrity constraint")
+                    && context.contains("constraint kernel"),
+                "expected the epistemic-constraint soundness-guard diagnostic, got: {context}"
+            );
+        }
+        other => panic!("expected epistemic-constraint soundness-guard rejection, got {other:?}"),
     }
 }
 
@@ -187,6 +299,96 @@ fn recursion_with_positive_non_invariant_modal_in_unrelated_rule_is_accepted_cas
         0,
         "Case-B reduce removes all modal literals"
     );
+}
+
+#[test]
+fn negated_modal_over_recursive_lower_stratum_is_accepted_case_b() {
+    // v0.9.2 WALL A1 (the canonical recursive witness): `not know reach` where `reach`
+    // is a genuinely RECURSIVE transitive closure that sits in a strictly LOWER stratum
+    // than the negating head `unreachable`. `reach` is non-invariant (recursive), so the
+    // pre-A1 classifier rejected it; but the negation is STRATIFIED (`reach` never
+    // depends on `unreachable`). The reduced program -- `reach :- edge`, `reach :- reach,
+    // edge`, `unreachable :- node, node, not reach` -- is an ordinary stratified-negation
+    // recursive program: the semi-naive engine completes the recursive `reach` fixpoint,
+    // THEN anti-joins it. This is the genuine "negated modal in a recursive epistemic
+    // program" the WALL names, and it EXECUTES.
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = faeel
+        pred node(u32).
+        pred edge(u32, u32).
+        pred reach(u32, u32).
+        pred unreachable(u32, u32).
+        node(1). node(2). node(3).
+        edge(1, 2). edge(2, 3).
+        reach(X, Y) :- know edge(X, Y).
+        reach(X, Z) :- reach(X, Y), know edge(Y, Z).
+        unreachable(X, Y) :- node(X), node(Y), not know reach(X, Y).
+        ?- unreachable(X, Y).
+        "#,
+    )
+    .unwrap();
+    assert_eq!(
+        classify_recursive_epistemic_program(&program).unwrap(),
+        RecursiveEpistemicClass::CaseB,
+        "negated modal over a recursive but stratified lower stratum is admissible Case B"
+    );
+    let reduced = try_reduce_case_a_recursive_epistemic_program(&program)
+        .unwrap()
+        .expect("admissible recursive-stratified negated-modal program reduces");
+    assert_eq!(
+        reduced
+            .rules
+            .iter()
+            .flat_map(|rule| rule.body.iter())
+            .filter(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
+            .count(),
+        0,
+        "recursive-stratified Case-B reduce removes all modal literals"
+    );
+    assert!(
+        reduced.rules.iter().any(|rule| rule.body.iter().any(
+            |lit| matches!(lit, BodyLiteral::Negated(atom) if atom.predicate == "reach")
+        )),
+        "`not know reach` must resolve to an ordinary `not reach` anti-join against the recursive lower stratum"
+    );
+}
+
+#[test]
+fn negated_stratified_modal_with_g91_possible_cycle_still_rejects() {
+    // v0.9.2 WALL A1 ORDERING GUARD: a program that contains BOTH a stratified negated
+    // modal (admissible in isolation) AND a G91 `possible` over a co-evolving target
+    // (the G91 self-fulfilling wall) must STILL reject on the G91 branch. The A1
+    // stratification discriminator runs only AFTER all other rejection reasons are ruled
+    // out, so the pre-existing G91 wall is not weakened.
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = g91
+        pred vertex(u32).
+        pred edge(u32, u32).
+        pred gate(u32, u32).
+        pred linked(u32, u32).
+        pred reach(u32, u32).
+        pred safe(u32, u32).
+        vertex(1). vertex(2). vertex(3). edge(1, 2).
+        gate(X, Y) :- vertex(X), vertex(Y), know edge(X, Y).
+        reach(X, Y) :- linked(X, Y).
+        reach(X, Z) :- reach(X, Y), linked(Y, Z).
+        linked(X, Y) :- vertex(X), vertex(Y), possible reach(X, Y).
+        safe(X, Y) :- vertex(X), vertex(Y), not know gate(X, Y).
+        "#,
+    )
+    .unwrap();
+    match classify_recursive_epistemic_program(&program) {
+        Err(XlogError::UnsupportedEpistemicConstruct { construct, context }) => {
+            assert_eq!(construct, "recursive epistemic program");
+            assert!(
+                context.contains("G91") && context.contains("self-fulfilling"),
+                "expected the G91 wall to win over the admissible negated modal, got: {context}"
+            );
+        }
+        other => panic!("expected G91 self-fulfilling rejection, got {other:?}"),
+    }
 }
 
 #[test]
