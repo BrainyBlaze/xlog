@@ -1,0 +1,29 @@
+// v0.9.2 ITEM E: a VARIABLE-KEYED epistemic integrity constraint prunes the
+// world view. `:- know flagged(X).` ranges X EXISTENTIALLY over the modal
+// relation's tuple-key domain: the world view is pruned iff there EXISTS a
+// binding of X for which `know flagged(X)` holds (flagged is non-empty in the
+// accepted model). Here `flagged` carries MULTIPLE tuples {7, 9, 11}, so a
+// ground `know flagged(c)` could not express "some flagged value exists"; the
+// existential range is load-bearing. The constraint fires, pruning the only
+// world view -> accepted result empty (rows: 0, exit 0), NOT a runtime error.
+//
+// Load-bearing: WITHOUT the constraint, `report` holds (rows: 1). WITH the
+// variable-keyed constraint, the world view is pruned and `report` is absent
+// (rows: 0). The companion example 35 keeps `flagged` EMPTY and `report`
+// survives (rows: 1): same program shape, only the modal relation's extension
+// differs. The existential pruning runs entirely on the GPU world-view path.
+
+#pragma epistemic_mode = faeel
+
+pred gate().
+pred flagged(u32).
+pred report().
+
+gate().
+flagged(7). flagged(9). flagged(11).
+
+report() :- know gate().
+
+:- know flagged(X).
+
+?- report().

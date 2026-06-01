@@ -495,59 +495,16 @@ fn lower_epistemic_constraints(
         // `has_reduced_output` active-model gate used by world-view validation.
         let reduction_index = reductions.len() - 1;
 
-        let mut literal_indices = Vec::new();
+        // First pass: flatten every epistemic literal (structured finite+typed
+        // keys reduce element-wise to scalar GPU key columns) and reject any
+        // non-epistemic body literal up front, so variable-multiplicity counting
+        // below sees the final flattened key shape. A non-epistemic literal makes
+        // the whole constraint out of fragment.
+        let mut flattened_literals = Vec::new();
         for lit in &constraint.body {
             match lit {
                 EirBodyLiteral::Epistemic(lit) => {
-                    // Flatten any structured finite+typed key term first, so a
-                    // ground structured key (`know p([1, 2])`) reduces to ground
-                    // scalar columns the headless constraint path can encode. The
-                    // flattened literal is what we store, keeping its atom shape
-                    // consistent with its tuple/solver bindings.
-                    let lit = flatten_epistemic_literal(lit)?;
-                    if lit
-                        .atom
-                        .terms
-                        .iter()
-                        .any(|term| !matches!(term, EirTerm::Integer(_) | EirTerm::Symbol(_)))
-                    {
-                        return Err(XlogError::UnsupportedEpistemicConstruct {
-                            construct: "epistemic GPU world-view constraint".to_string(),
-                            context: format!(
-                                "constraint[{constraint_index}] uses {} {}/{} with a non-ground \
-                                 tuple key; headless world-view constraints currently support only \
-                                 ground (integer/symbol) modal atoms because there is no reduced \
-                                 head column to bind constraint variables against",
-                                eir_epistemic_literal_label(&lit),
-                                lit.atom.predicate,
-                                lit.atom.arity
-                            ),
-                        });
-                    }
-                    let literal_index = epistemic_literals.len();
-                    let bound_output_columns = vec![None; lit.atom.arity];
-                    tuple_membership_bindings.push(EpistemicTupleMembershipBinding {
-                        literal_index,
-                        reduction_index,
-                        predicate: lit.atom.predicate.clone(),
-                        arity: lit.atom.arity,
-                        key_columns: (0..lit.atom.arity).collect(),
-                        key_terms: lit.atom.terms.clone(),
-                        bound_output_columns,
-                        op: lit.op,
-                        negated: lit.negated,
-                    });
-                    solver_assumption_bindings.push(EpistemicSolverAssumptionBinding {
-                        literal_index,
-                        reduction_index,
-                        predicate: lit.atom.predicate.clone(),
-                        arity: lit.atom.arity,
-                        terms: lit.atom.terms.clone(),
-                        op: lit.op,
-                        negated: lit.negated,
-                    });
-                    epistemic_literals.push(lit.clone());
-                    literal_indices.push(literal_index);
+                    flattened_literals.push(flatten_epistemic_literal(lit)?);
                 }
                 EirBodyLiteral::Relational { .. }
                 | EirBodyLiteral::Constraint
@@ -563,6 +520,138 @@ fn lower_epistemic_constraints(
                     });
                 }
             }
+        }
+
+        // Variable-keyed world-view constraints (`:- know p(X).`) range the key
+        // variable EXISTENTIALLY over the modal relation's tuple-key domain: the
+        // world view is pruned iff there EXISTS a binding for which the body
+        // holds. A constraint-local variable that occurs EXACTLY ONCE across the
+        // whole constraint body carries no join obligation, so it lowers to an
+        // ANONYMOUS wildcard key column — the existing GPU wildcard tuple-key
+        // matcher then ranges it over every accepted tuple, giving exact
+        // existential semantics with no host scan and no reduced head column.
+        //
+        // A variable that occurs MORE THAN ONCE (shared across literals as a join
+        // key `:- know p(X), possible q(X).`, or repeated within one literal as a
+        // diagonal `:- know p(X, X).`) cannot collapse to independent wildcards
+        // without weakening the constraint, so it fails closed here as unimplemented
+        // scope. This is finite+typed, NOT a finiteness/resource bound: the
+        // diagnostic stays a plain UnsupportedEpistemicConstruct, never a
+        // ResourceExhausted, so it is not mistaken for an unbounded-domain wall.
+        let mut variable_occurrences: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for lit in &flattened_literals {
+            for term in &lit.atom.terms {
+                if let EirTerm::Variable(name) = term {
+                    *variable_occurrences.entry(name.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+
+        let mut literal_indices = Vec::new();
+        for lit in flattened_literals {
+            // Anonymize single-occurrence constraint-local variables into wildcard
+            // key columns; reject shared/repeated variables (multiplicity > 1).
+            let mut anonymized_terms = Vec::with_capacity(lit.atom.terms.len());
+            for term in &lit.atom.terms {
+                match term {
+                    EirTerm::Integer(_) | EirTerm::Symbol(_) | EirTerm::Anonymous => {
+                        anonymized_terms.push(term.clone());
+                    }
+                    EirTerm::Variable(name) => {
+                        if variable_occurrences.get(name).copied().unwrap_or(0) > 1 {
+                            return Err(XlogError::UnsupportedEpistemicConstruct {
+                                construct: "epistemic GPU world-view constraint".to_string(),
+                                context: format!(
+                                    "constraint[{constraint_index}] reuses tuple-key variable \
+                                     {name} across literals/positions; shared-variable epistemic \
+                                     constraint joins (`:- know p(X), q(X).` / diagonal \
+                                     `:- know p(X, X).`) are not yet implemented for GPU world-view \
+                                     pruning. Single-occurrence variable keys (`:- know p(X).`) are \
+                                     supported and range existentially over the modal relation"
+                                ),
+                            });
+                        }
+                        // A NEGATED variable-keyed literal cannot collapse to a
+                        // wildcard: the wildcard computes `not (EXISTS X: know p(X))`
+                        // = `forall X: not know p(X)`, but a constraint variable is
+                        // EXISTENTIAL, so the body should fire on `EXISTS X: not
+                        // know p(X)`. forall-not != exists-not, so the wildcard would
+                        // mis-prune (it would prune iff p is EMPTY). Fail closed —
+                        // finite+typed UNIMPLEMENTED scope, NOT a finiteness bound, so
+                        // a plain UnsupportedEpistemicConstruct (never ResourceExhausted).
+                        // Negated ALL-GROUND constraint literals are unaffected (they
+                        // bind no variable, no quantifier flip — the EGB-04 path).
+                        if lit.negated {
+                            return Err(XlogError::UnsupportedEpistemicConstruct {
+                                construct: "epistemic GPU world-view constraint".to_string(),
+                                context: format!(
+                                    "constraint[{constraint_index}] uses NEGATED variable-keyed \
+                                     modal {} {}/{}; a wildcard existential cannot express \
+                                     `EXISTS {name}: not know/possible ...` (the negation flips \
+                                     the quantifier to forall-not), so negated variable-keyed \
+                                     world-view constraints are not yet implemented. Single-\
+                                     occurrence POSITIVE variable keys and negated GROUND keys \
+                                     are supported",
+                                    eir_epistemic_literal_label(&lit),
+                                    lit.atom.predicate,
+                                    lit.atom.arity
+                                ),
+                            });
+                        }
+                        // Single occurrence, POSITIVE: existential over the relation
+                        // domain == wildcard. Drop the variable identity (no join, no
+                        // head column to bind), routing this column through the GPU
+                        // wildcard tuple-key matcher.
+                        anonymized_terms.push(EirTerm::Anonymous);
+                    }
+                    other => {
+                        return Err(XlogError::UnsupportedEpistemicConstruct {
+                            construct: "epistemic GPU world-view constraint".to_string(),
+                            context: format!(
+                                "constraint[{constraint_index}] uses {} {}/{} with an unsupported \
+                                 tuple-key term {other:?}; headless world-view constraints support \
+                                 ground (integer/symbol) and single-occurrence variable/anonymous \
+                                 modal atoms",
+                                eir_epistemic_literal_label(&lit),
+                                lit.atom.predicate,
+                                lit.atom.arity
+                            ),
+                        });
+                    }
+                }
+            }
+            // Rebuild the literal with anonymized terms so the stored literal, its
+            // tuple-membership binding key_terms, and its solver assumption binding
+            // terms all carry the SAME shape (the plan validator requires
+            // binding.key_terms == literal.atom.terms).
+            let mut lit = lit;
+            lit.atom.terms = anonymized_terms;
+
+            let literal_index = epistemic_literals.len();
+            let bound_output_columns = vec![None; lit.atom.arity];
+            tuple_membership_bindings.push(EpistemicTupleMembershipBinding {
+                literal_index,
+                reduction_index,
+                predicate: lit.atom.predicate.clone(),
+                arity: lit.atom.arity,
+                key_columns: (0..lit.atom.arity).collect(),
+                key_terms: lit.atom.terms.clone(),
+                bound_output_columns,
+                op: lit.op,
+                negated: lit.negated,
+            });
+            solver_assumption_bindings.push(EpistemicSolverAssumptionBinding {
+                literal_index,
+                reduction_index,
+                predicate: lit.atom.predicate.clone(),
+                arity: lit.atom.arity,
+                terms: lit.atom.terms.clone(),
+                op: lit.op,
+                negated: lit.negated,
+            });
+            epistemic_literals.push(lit);
+            literal_indices.push(literal_index);
         }
 
         constraint_plans.push(EpistemicConstraintPlan {

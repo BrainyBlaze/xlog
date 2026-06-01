@@ -4640,6 +4640,403 @@ fn parsed_possible_constraint_prunes_when_contradiction_possible() {
         .expect("all-pruned possible-constraint path should retain GPU semantic certification");
 }
 
+// =====================================================================
+// v0.9.2 ITEM E: VARIABLE-KEYED epistemic integrity constraints.
+//
+// `:- know flagged(X).` ranges X EXISTENTIALLY over the modal relation's
+// tuple-key domain: a world view is pruned iff there EXISTS a binding of X for
+// which `know flagged(X)` holds (flagged is non-empty in the accepted model).
+// The single-occurrence key variable lowers to an Anonymous wildcard column and
+// the existing GPU wildcard tuple-key matcher evaluates the existential entirely
+// on device. `flagged` carries MULTIPLE tuples so a ground `know flagged(c)`
+// could not express "some flagged value exists": the range is load-bearing.
+// =====================================================================
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb_e_variable_keyed_constraint_prunes_when_relation_non_empty() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // `flagged` carries multiple tuples {7, 9, 11}, so `know flagged(X)` holds
+    // existentially and the integrity constraint prunes the world view. The
+    // pipeline returns Ok with an empty accepted result (NOT an error) and the
+    // rejected candidate carries constraint-violation reason code 6 / index 0.
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred gate(u32).
+        pred flagged(u32).
+        pred report(u32).
+
+        report(X) :- seed(X), know gate(X).
+        :- know flagged(X).
+        "#,
+    )
+    .expect("parse variable-keyed-constraint program (relation non-empty)");
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("compile variable-keyed-constraint GPU plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[1], "x"));
+    executor.put_relation("gate", upload_unary_u32(&fixture.memory, &[1], "x"));
+    executor.put_relation(
+        "flagged",
+        upload_unary_u32(&fixture.memory, &[7, 9, 11], "x"),
+    );
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 4,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect(
+            "variable-keyed-constraint non-empty relation should return Ok with empty accepted set",
+        );
+
+    assert_eq!(result.constraint_world_view_validation.constraint_count, 1);
+    assert_eq!(result.constraint_world_view_validation.kernel_launches, 1);
+    assert_eq!(result.constraint_world_view_validation.host_write_ops, 0);
+    // EXACT pruning: zero accepted candidates, zero surviving output rows.
+    assert_eq!(result.semantic_trace.accepted_candidates, 0);
+    assert_eq!(result.final_result_transfer.final_output_rows, 0);
+    let constraint_code = EpistemicGpuRejectionReason::WorldViewConstraintViolation.code();
+    assert!(
+        result
+            .semantic_trace
+            .rejection_reasons
+            .iter()
+            .any(|&code| code == constraint_code),
+        "expected constraint-violation reason code 6, got {:?}",
+        result.semantic_trace.rejection_reasons
+    );
+    // The firing constraint is SPECIFICALLY declaration-index 0.
+    assert!(
+        result
+            .semantic_trace
+            .constraint_violation_indices
+            .iter()
+            .any(|idx| *idx == Some(0)),
+        "expected firing constraint index Some(0), got {:?}",
+        result.semantic_trace.constraint_violation_indices
+    );
+    // REAL counters: no CPU fallback, no CPU candidate enumeration / world-view
+    // validation in the accepted path.
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    result
+        .require_runtime_dispatch_certification()
+        .expect("variable-keyed-constraint prune path should retain GPU semantic certification");
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb_e_variable_keyed_constraint_survives_when_relation_empty() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // SAME program shape as the prune test, but `flagged` is EMPTY: no binding of
+    // X satisfies `know flagged(X)`, so the existential body is false in the
+    // accepted model and the world view SURVIVES. report = {1} EXACTLY. The
+    // mode difference (empty -> survives {1} vs non-empty -> pruned {}) is the
+    // load-bearing existential effect; without the wildcard range the constraint
+    // could not range over the relation's domain at all.
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred gate(u32).
+        pred flagged(u32).
+        pred report(u32).
+
+        report(X) :- seed(X), know gate(X).
+        :- know flagged(X).
+        "#,
+    )
+    .expect("parse variable-keyed-constraint program (relation empty)");
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("compile variable-keyed-constraint GPU plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[1], "x"));
+    executor.put_relation("gate", upload_unary_u32(&fixture.memory, &[1], "x"));
+    executor.put_relation("flagged", upload_unary_u32(&fixture.memory, &[], "x"));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 4,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("variable-keyed-constraint empty relation should accept the world view");
+
+    assert_eq!(result.constraint_world_view_validation.constraint_count, 1);
+    assert!(result.semantic_trace.accepted_candidates >= 1);
+    assert_eq!(result.final_result_transfer.final_output_rows, 1);
+    // No candidate carries the constraint-violation reason.
+    assert!(!result
+        .semantic_trace
+        .rejection_reasons
+        .iter()
+        .any(|&code| code == EpistemicGpuRejectionReason::WorldViewConstraintViolation.code()));
+    // EXACT surviving tuple: report = {1}.
+    let report = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download report column for surviving world view");
+    assert_eq!(report, vec![1]);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    result
+        .require_runtime_dispatch_certification()
+        .expect("variable-keyed-constraint survive path should retain GPU semantic certification");
+}
+
+// ITEM E multi-literal (DISTINCT variables): `:- know p(X), know q(Y).` with
+// INDEPENDENT single-occurrence X, Y factors to (∃X: know p(X)) AND
+// (∃Y: know q(Y)) = "p non-empty AND q non-empty in the accepted model". Each
+// literal lowers to an independent Anonymous wildcard, and the constraint kernel
+// ANDs the two assumption bits across its multi-entry literal loop. The body
+// holds (and prunes) iff BOTH relations are non-empty; if EITHER is empty the
+// conjunction fails and the world view SURVIVES. This is the independent-
+// existential conjunction, NOT the shared-variable JOIN (see the scope-boundary
+// test below). The empty-q companion proves the SECOND literal is load-bearing.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb_e_distinct_variable_multi_literal_constraint_prunes_when_both_non_empty() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred gate(u32).
+        pred p(u32).
+        pred q(u32).
+        pred report(u32).
+
+        report(X) :- seed(X), know gate(X).
+        :- know p(X), know q(Y).
+        "#,
+    )
+    .expect("parse distinct-variable multi-literal constraint program");
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("compile distinct-variable multi-literal constraint GPU plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[1], "x"));
+    executor.put_relation("gate", upload_unary_u32(&fixture.memory, &[1], "x"));
+    // BOTH non-empty: the conjunctive body holds and prunes the world view.
+    executor.put_relation("p", upload_unary_u32(&fixture.memory, &[7, 9], "x"));
+    executor.put_relation("q", upload_unary_u32(&fixture.memory, &[3], "x"));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 4,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("distinct-variable multi-literal (both non-empty) should return Ok empty");
+
+    assert_eq!(result.constraint_world_view_validation.constraint_count, 1);
+    // TWO constraint-body literal references checked on device.
+    assert_eq!(
+        result
+            .constraint_world_view_validation
+            .constraint_literal_refs,
+        2
+    );
+    assert_eq!(result.semantic_trace.accepted_candidates, 0);
+    assert_eq!(result.final_result_transfer.final_output_rows, 0);
+    assert!(result
+        .semantic_trace
+        .rejection_reasons
+        .iter()
+        .any(|&code| code == EpistemicGpuRejectionReason::WorldViewConstraintViolation.code()));
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    result
+        .require_runtime_dispatch_certification()
+        .expect("distinct-variable multi-literal prune path retains GPU semantic certification");
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb_e_distinct_variable_multi_literal_constraint_survives_when_one_empty() {
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    // SAME program; `p` non-empty but `q` EMPTY -> `know q(Y)` false -> conjunction
+    // fails -> world view SURVIVES (report = {1}). This flip vs the both-non-empty
+    // case proves the SECOND literal is load-bearing: a single-literal constraint
+    // could not express "AND q non-empty".
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred gate(u32).
+        pred p(u32).
+        pred q(u32).
+        pred report(u32).
+
+        report(X) :- seed(X), know gate(X).
+        :- know p(X), know q(Y).
+        "#,
+    )
+    .expect("parse distinct-variable multi-literal constraint program (q empty)");
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("compile distinct-variable multi-literal constraint GPU plan");
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[1], "x"));
+    executor.put_relation("gate", upload_unary_u32(&fixture.memory, &[1], "x"));
+    executor.put_relation("p", upload_unary_u32(&fixture.memory, &[7, 9], "x"));
+    executor.put_relation("q", upload_unary_u32(&fixture.memory, &[], "x"));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 4,
+                max_models_per_reduction: 1,
+            },
+        )
+        .expect("distinct-variable multi-literal (q empty) should accept the world view");
+
+    assert_eq!(
+        result
+            .constraint_world_view_validation
+            .constraint_literal_refs,
+        2
+    );
+    assert!(result.semantic_trace.accepted_candidates >= 1);
+    assert_eq!(result.final_result_transfer.final_output_rows, 1);
+    assert!(!result
+        .semantic_trace
+        .rejection_reasons
+        .iter()
+        .any(|&code| code == EpistemicGpuRejectionReason::WorldViewConstraintViolation.code()));
+    let report = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download report column for surviving world view");
+    assert_eq!(report, vec![1]);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    result
+        .require_runtime_dispatch_certification()
+        .expect("distinct-variable multi-literal survive path retains GPU semantic certification");
+}
+
+// ITEM E scope boundary: a SHARED tuple-key variable across constraint literals
+// (`:- know p(X), q(X).`) needs an existential JOIN over the shared key, which
+// independent wildcards cannot express. This is finite+typed, NOT an unbounded
+// domain, so it fails closed as UNIMPLEMENTED scope with a plain
+// UnsupportedEpistemicConstruct — explicitly NOT a ResourceExhausted/finiteness
+// diagnostic.
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb_e_shared_variable_constraint_rejected_as_unimplemented_scope() {
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred gate(u32).
+        pred p(u32).
+        pred q(u32).
+        pred report(u32).
+
+        report(X) :- seed(X), know gate(X).
+        :- know p(X), possible q(X).
+        "#,
+    )
+    .expect("parse shared-variable constraint program");
+    let err = compile_epistemic_gpu_execution(&program)
+        .expect_err("shared-variable epistemic constraint join must fail closed");
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { context, .. } => {
+            assert!(
+                context.contains("shared-variable")
+                    || context.contains("reuses tuple-key variable"),
+                "expected unimplemented-join diagnostic, got: {context}"
+            );
+        }
+        xlog_core::XlogError::ResourceExhausted { .. } => {
+            panic!(
+                "shared-variable constraint is finite+typed unimplemented scope, NOT a \
+                 finiteness/resource bound; must not surface as ResourceExhausted"
+            );
+        }
+        other => panic!("unexpected error for shared-variable constraint: {other:?}"),
+    }
+}
+
+// ITEM E scope boundary: a NEGATED variable-keyed constraint literal
+// (`:- not know p(X).`) cannot collapse to a wildcard — the wildcard computes
+// `forall X: not know p(X)` but the constraint variable is EXISTENTIAL
+// (`EXISTS X: not know p(X)`), and forall-not != exists-not. Routing it through
+// the wildcard would mis-prune (prune iff p empty), so it fails closed. This is
+// finite+typed UNIMPLEMENTED scope, NOT a finiteness bound: plain
+// UnsupportedEpistemicConstruct, NEVER ResourceExhausted. (Negated ALL-GROUND
+// constraint literals stay supported via the EGB-04 ground path.)
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb_e_negated_variable_keyed_constraint_rejected_as_unimplemented_scope() {
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred gate(u32).
+        pred flagged(u32).
+        pred report(u32).
+
+        report(X) :- seed(X), know gate(X).
+        :- not know flagged(X).
+        "#,
+    )
+    .expect("parse negated variable-keyed constraint program");
+    let err = compile_epistemic_gpu_execution(&program)
+        .expect_err("negated variable-keyed constraint must fail closed (quantifier flip)");
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { context, .. } => {
+            assert!(
+                context.contains("NEGATED variable-keyed") || context.contains("forall-not"),
+                "expected negated-variable-keyed diagnostic, got: {context}"
+            );
+        }
+        xlog_core::XlogError::ResourceExhausted { .. } => {
+            panic!(
+                "negated variable-keyed constraint is finite+typed unimplemented scope, NOT a \
+                 finiteness/resource bound; must not surface as ResourceExhausted"
+            );
+        }
+        other => panic!("unexpected error for negated variable-keyed constraint: {other:?}"),
+    }
+}
+
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
 fn parsed_not_possible_constraint_prunes_when_required_absent() {

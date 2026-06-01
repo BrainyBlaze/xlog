@@ -312,6 +312,41 @@ fn test_xlog_run_epistemic_examples() {
         // (gated != ungated): only watched hosts survive -> alert = {1} (node 2 is
         // dropped). The structured-key flattening runs entirely on the GPU.
         ("23-compound-modal-key-membership.xlog", "alert", "| 1  |"),
+        // v0.9.2 ITEM E: a VARIABLE-KEYED epistemic integrity constraint
+        // `:- know flagged(X).` ranges X EXISTENTIALLY over the modal relation's
+        // tuple-key domain on the GPU world-view path. In ex34 `flagged` carries
+        // MULTIPLE tuples {7, 9, 11}, so the existential body holds and the world
+        // view is pruned -> report = {} (rows: 0). A ground `know flagged(c)`
+        // could not express "some flagged value exists", so the variable range is
+        // load-bearing.
+        (
+            "34-variable-keyed-constraint-prunes.xlog",
+            "report",
+            "rows: 0",
+        ),
+        // ex35 is the COMPANION: the SAME variable-keyed constraint does NOT prune
+        // when `flagged` is EMPTY (no binding satisfies `know flagged(X)`), so the
+        // world view survives -> report holds (rows: 1). ex34 rows:0 vs ex35 rows:1
+        // is the EXACT load-bearing effect of the variable-keyed existential
+        // constraint (same program shape, only the modal extension differs).
+        (
+            "35-variable-keyed-constraint-survives.xlog",
+            "report",
+            "rows: 1",
+        ),
+        // v0.9.2 ITEM E multi-literal (DISTINCT independent variables):
+        // `:- know watch(X), know hot(Y).` factors to "watch non-empty AND hot
+        // non-empty". Both relations are non-empty, so the conjunctive existential
+        // body holds and the world view is pruned -> report absent (rows: 0). This
+        // is the independent-existential conjunction (NOT a shared-variable join,
+        // which fails closed as unimplemented scope by design). The empty-hot
+        // survive flip (second literal load-bearing) is asserted in the device
+        // suite (egb_e_distinct_variable_multi_literal_constraint_survives_*).
+        (
+            "36-multi-literal-distinct-var-constraint.xlog",
+            "report",
+            "rows: 0",
+        ),
     ];
 
     for (example, expected_relation, expected_value) in examples {
