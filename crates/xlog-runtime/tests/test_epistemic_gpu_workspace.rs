@@ -6212,10 +6212,15 @@ fn mixed_modal_know_notpossible_global_false_rejects_all_rows() {
     assert_no_cpu_fallback(&result);
 }
 
-// K4 negative pilot: a MIXED rule whose per-row tuple key is an unsupported
-// class (a list term) must still fail closed with a typed
-// `UnsupportedEpistemicConstruct` via an INDEPENDENT guard (the tuple-key
-// expectation guard), proving removal of the mixed guard opened no hole.
+// K4 negative pilot (v0.9.2 ITEM D): a MIXED rule whose per-row tuple key is a
+// genuinely UNBOUNDED structured class (a `cons` `[X | T]` with a
+// statically-unknown tail) must still fail closed via an INDEPENDENT guard --
+// now the structured-key FINITENESS guard -- proving removal of the mixed guard
+// opened no hole. Note the contract shift: a FINITE+TYPED 1-element list `[X]`
+// is now ACCEPTED and flattened onto the GPU (see the structured-key device
+// tests); only unbounded/untyped forms stay rejected, and they reject with a
+// precise resource/finiteness diagnostic rather than a blanket "unsupported
+// construct".
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
 fn mixed_modal_unsupported_tuple_key_still_fails_closed() {
@@ -6229,35 +6234,28 @@ fn mixed_modal_unsupported_tuple_key_still_fails_closed() {
         pred edge(u32).
         pred out(u32).
 
-        out(X) :- seed(X), know flag(), possible edge([X]).
+        out(X) :- seed(X), know flag(), possible edge([X | T]).
         "#,
     )
-    .expect("parse mixed rule with unsupported list tuple key");
-    let executable = compile_epistemic_gpu_execution(&program)
-        .expect("compile mixed rule with unsupported list tuple key");
-    let mut executor = Executor::new(Arc::clone(&fixture.provider));
-    for (name, rel) in &executable.relation_ids {
-        executor.register_relation(*rel, name);
-    }
-    executor.put_relation("seed", upload_unary_u32(&fixture.memory, &[1, 2], "x"));
-    executor.put_relation("edge", upload_unary_u32(&fixture.memory, &[1, 2], "x"));
-    executor.put_relation("flag", upload_zero_arity(&fixture.memory, 1));
-    let err = match executor.execute_epistemic_gpu_execution(
-        &executable,
-        EpistemicGpuWorkspaceCapacities {
-            max_candidates: 16,
-            max_worlds: 4,
-            max_models_per_reduction: 4,
-        },
-    ) {
-        Ok(_) => panic!("unsupported tuple-key class in a mixed rule must fail closed"),
+    .expect("parse mixed rule with unbounded cons tuple key");
+    // The unbounded-cons key has no finite, typed GPU key-column set, so the plan
+    // fails closed at COMPILE time with a precise finiteness/resource diagnostic.
+    let err = match compile_epistemic_gpu_execution(&program) {
+        Ok(_) => panic!("unbounded structured tuple-key in a mixed rule must fail closed"),
         Err(err) => err,
     };
     match err {
-        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, .. } => {
-            assert_eq!(construct, "epistemic GPU tuple-key expectation");
+        xlog_core::XlogError::ResourceExhausted { context, .. } => {
+            assert!(
+                context.contains("cons") && context.contains("tail length is not statically fixed"),
+                "finiteness diagnostic must name the unbounded cons tail: {context}"
+            );
+            assert!(
+                context.contains("fixed-arity list literal"),
+                "finiteness diagnostic must point at the finite-typed alternative: {context}"
+            );
         }
-        other => panic!("expected typed tuple-key expectation error, got {other:?}"),
+        other => panic!("expected precise finiteness/resource error, got {other:?}"),
     }
 }
 
