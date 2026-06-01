@@ -376,10 +376,21 @@ fn test_xlog_run_epistemic_examples() {
         ("13e-nested-modal-chain-g91-accepted.xlog", "p", "rows: 1"),
         // 13f: `know not possible p()` dualizes to `not possible p()`. Because p()
         // is present, q is absent, but the program succeeds through `xlog run`.
+        ("13f-nested-modal-interior-negation.xlog", "q", "rows: 0"),
         (
-            "13f-nested-modal-interior-negation-rejected.xlog",
+            "13f-nested-modal-interior-negation-absent.xlog",
+            "q",
+            "rows: 1",
+        ),
+        (
+            "13fw-nested-modal-interior-negation-g91-present.xlog",
             "q",
             "rows: 0",
+        ),
+        (
+            "13fw-nested-modal-interior-negation-g91-absent.xlog",
+            "q",
+            "rows: 1",
         ),
         // 13g-13v exhaust every two-operator modal chain over `{know, possible}` with
         // leading/interior/atom-adjacent negation placements, split by operator
@@ -827,29 +838,78 @@ fn run_epistemic_example(example: &str) -> (bool, String, String) {
     )
 }
 
-fn same_name_modal_truth(form: &str, tuple_present: bool) -> bool {
+fn deterministic_modal_truth(form: &str, tuple_present: bool) -> bool {
     match form {
         "know" | "possible" => tuple_present,
         "not-know" | "not-possible" => !tuple_present,
-        other => panic!("unknown same-name modal form {other}"),
+        other => panic!("unknown modal form {other}"),
     }
 }
 
-fn assert_same_name_matrix_example(example: &str, should_hold: bool) {
+fn same_name_modal_truth(form: &str, tuple_present: bool) -> bool {
+    deterministic_modal_truth(form, tuple_present)
+}
+
+fn assert_holds_row_example(example: &str, should_hold: bool, label: &str) {
     let (ok, stdout, stderr) = run_epistemic_example(example);
     assert!(
         ok,
-        "same-name matrix example {example} must succeed:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        "{label} example {example} must succeed:\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
         stdout.contains("holds"),
-        "same-name matrix example {example} must emit holds relation:\n{stdout}"
+        "{label} example {example} must emit holds relation:\n{stdout}"
     );
     let has_row = stdout.contains("| 1  |");
     assert_eq!(
         has_row, should_hold,
-        "same-name matrix example {example} expected holds row presence {should_hold}:\n{stdout}"
+        "{label} example {example} expected holds row presence {should_hold}:\n{stdout}"
     );
+}
+
+fn assert_same_name_matrix_example(example: &str, should_hold: bool) {
+    assert_holds_row_example(example, should_hold, "same-name matrix");
+}
+
+fn assert_wfs_reach_shape(example: &str, label: &str, seed_present: bool) {
+    let (ok, stdout, stderr) = run_epistemic_example(example);
+    assert!(
+        ok,
+        "{label} must execute, stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let row_present = |x: u32, y: u32| {
+        let compact = format!("| {x} | {y} |");
+        let padded = format!("| {x}  | {y}  |");
+        stdout.contains(&compact) || stdout.contains(&padded)
+    };
+
+    if seed_present {
+        assert!(
+            row_present(1, 2),
+            "{label}: WFS true seed reach tuple must be present:\n{stdout}"
+        );
+    }
+
+    for (x, y) in [
+        (1, 1),
+        (1, 2),
+        (1, 3),
+        (2, 1),
+        (2, 2),
+        (2, 3),
+        (3, 1),
+        (3, 2),
+        (3, 3),
+    ] {
+        if seed_present && x == 1 && y == 2 {
+            continue;
+        }
+        assert!(
+            !row_present(x, y),
+            "{label}: WFS undefined tuple ({x},{y}) must be absent:\n{stdout}"
+        );
+    }
 }
 
 #[test]
@@ -913,6 +973,129 @@ fn test_xlog_run_same_name_multi_arity_exhaustive_matrix() {
         }
     }
     assert_eq!(cell_index, 64);
+}
+
+#[test]
+fn test_xlog_run_single_modal_truth_table_exhaustive_matrix() {
+    // v0.9.2 exhaustive base truth table for one modal literal over a determined EDB target.
+    //
+    // Covers:
+    //   mode {FAEEL,G91} x modal form {K,M,not K,not M} x queried tuple {present,absent}.
+    //
+    // Both modes should agree for a determined target; the mode axis is still explicit so
+    // future regressions cannot silently make only one mode work. Each committed example has
+    // a nonmatching p(2) distractor, so "absent" means p(1) is absent, not that p/1 or its
+    // schema vanished.
+    let _device = match CudaDevice::new(0) {
+        Ok(d) => d,
+        Err(_) => {
+            println!("SKIPPED: CUDA runtime unavailable (no GPU or driver not loaded)");
+            return;
+        }
+    };
+
+    let forms = ["know", "possible", "not-know", "not-possible"];
+    let states = [("present", true), ("absent", false)];
+
+    for mode in ["faeel", "g91"] {
+        for form in forms.iter().copied() {
+            for (state, tuple_present) in states.iter().copied() {
+                let example = format!("44a-single-modal-truth-table-{mode}-{form}-{state}.xlog");
+                assert_holds_row_example(
+                    example.as_str(),
+                    deterministic_modal_truth(form, tuple_present),
+                    "single-modal truth-table matrix",
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_xlog_run_nested_modal_negation_matrix_g91_companion() {
+    // v0.9.2 ITEM C2 both-mode guard: 13g-13v exhaust the finite two-operator
+    // negation matrix under default FAEEL. These 13w* companions replay the same
+    // source forms under explicit G91 so the chain-collapse/duality rewrite is not
+    // accidentally mode-specific.
+    let _device = match CudaDevice::new(0) {
+        Ok(d) => d,
+        Err(_) => {
+            println!("SKIPPED: CUDA runtime unavailable (no GPU or driver not loaded)");
+            return;
+        }
+    };
+
+    for (example, expected_rows) in [
+        (
+            "13w-nested-modal-negation-matrix-g91-know-know-present.xlog",
+            ["| 100", "| 103", "| 105", "| 106"],
+        ),
+        (
+            "13w-nested-modal-negation-matrix-g91-know-know-absent.xlog",
+            ["| 1101", "| 1102", "| 1104", "| 1107"],
+        ),
+        (
+            "13w-nested-modal-negation-matrix-g91-know-possible-present.xlog",
+            ["| 200", "| 203", "| 205", "| 206"],
+        ),
+        (
+            "13w-nested-modal-negation-matrix-g91-know-possible-absent.xlog",
+            ["| 1201", "| 1202", "| 1204", "| 1207"],
+        ),
+        (
+            "13w-nested-modal-negation-matrix-g91-possible-know-present.xlog",
+            ["| 300", "| 303", "| 305", "| 306"],
+        ),
+        (
+            "13w-nested-modal-negation-matrix-g91-possible-know-absent.xlog",
+            ["| 1301", "| 1302", "| 1304", "| 1307"],
+        ),
+        (
+            "13w-nested-modal-negation-matrix-g91-possible-possible-present.xlog",
+            ["| 400", "| 403", "| 405", "| 406"],
+        ),
+        (
+            "13w-nested-modal-negation-matrix-g91-possible-possible-absent.xlog",
+            ["| 1401", "| 1402", "| 1404", "| 1407"],
+        ),
+    ] {
+        let (ok, stdout, stderr) = run_epistemic_example(example);
+        assert!(
+            ok,
+            "{example} must execute:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stdout.contains("holds"),
+            "{example} must emit holds relation:\n{stdout}"
+        );
+        for expected in expected_rows {
+            assert!(
+                stdout.contains(expected),
+                "{example} must emit expected G91 matrix row {expected}:\n{stdout}"
+            );
+        }
+    }
+
+    for example in [
+        "13w-nested-modal-negation-matrix-g91-know-know-present-nonderived.xlog",
+        "13w-nested-modal-negation-matrix-g91-know-know-absent-nonderived.xlog",
+        "13w-nested-modal-negation-matrix-g91-know-possible-present-nonderived.xlog",
+        "13w-nested-modal-negation-matrix-g91-know-possible-absent-nonderived.xlog",
+        "13w-nested-modal-negation-matrix-g91-possible-know-present-nonderived.xlog",
+        "13w-nested-modal-negation-matrix-g91-possible-know-absent-nonderived.xlog",
+        "13w-nested-modal-negation-matrix-g91-possible-possible-present-nonderived.xlog",
+        "13w-nested-modal-negation-matrix-g91-possible-possible-absent-nonderived.xlog",
+    ] {
+        let (ok, stdout, stderr) = run_epistemic_example(example);
+        assert!(
+            ok,
+            "{example} must execute:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            stdout.contains("+----+\n| c0 |\n+----+\n+----+"),
+            "{example} must keep the complementary G91 matrix cell empty:\n{stdout}"
+        );
+    }
 }
 
 #[test]
@@ -1064,10 +1247,17 @@ fn test_xlog_run_recursion_through_modal_computes_founded_fixpoint() {
 }
 
 #[test]
-fn test_xlog_run_negated_modal_through_recursion_uses_wfs_engine() {
+fn test_xlog_run_negated_modal_through_recursion_uses_gpu_wfs_engine() {
     // v0.9.2 A1 closure: a NEGATED modal whose target CYCLES through recursion via
-    // negation now executes through the explicit WFS engine. True atoms are emitted;
-    // undefined atoms are absent.
+    // negation now executes through the GPU-native WFS alternating-fixpoint path.
+    //
+    // Covers every cyclic-negated WFS modal cell across:
+    //   mode {FAEEL,G91}
+    //   x modal form {not K,not M}
+    //   x seed state {present,absent}
+    //   x ordinary EDB negation {absent,present-in-SCC}.
+    //
+    // True atoms are emitted; false/undefined atoms are absent.
     let _device = match CudaDevice::new(0) {
         Ok(d) => d,
         Err(_) => {
@@ -1076,31 +1266,46 @@ fn test_xlog_run_negated_modal_through_recursion_uses_wfs_engine() {
         }
     };
 
-    let (ok, stdout, stderr) = run_epistemic_example("33-negated-modal-through-recursion-wfs.xlog");
-    assert!(
-        ok,
-        "negated-modal-through-recursion WFS example must execute, stdout:\n{stdout}\nstderr:\n{stderr}"
+    assert_wfs_reach_shape(
+        "33-negated-modal-through-recursion-wfs.xlog",
+        "canonical FAEEL not-know WFS fixture",
+        true,
     );
-    assert!(
-        stdout.contains("| 1 | 2 |") || stdout.contains("| 1  | 2  |"),
-        "WFS true seed reach tuple must be present:\n{stdout}"
+    assert_wfs_reach_shape(
+        "33b-negated-modal-through-recursion-wfs-with-edb-negation.xlog",
+        "canonical FAEEL WFS with ordinary EDB negation",
+        true,
     );
-    for (x, y) in [
-        (1, 1),
-        (1, 3),
-        (2, 1),
-        (2, 2),
-        (2, 3),
-        (3, 1),
-        (3, 2),
-        (3, 3),
-    ] {
-        let compact = format!("| {x} | {y} |");
-        let padded = format!("| {x}  | {y}  |");
-        assert!(
-            !stdout.contains(&compact) && !stdout.contains(&padded),
-            "WFS undefined tuple ({x},{y}) must be absent:\n{stdout}"
-        );
+
+    for mode in ["faeel", "g91"] {
+        for form in ["not-know", "not-possible"] {
+            for (state, seed_present) in [("seed-present", true), ("seed-absent", false)] {
+                let plain = format!(
+                    "33c-negated-modal-through-recursion-wfs-matrix-{mode}-{form}-{state}.xlog"
+                );
+                let plain_label = format!("{mode} {form} {state} plain cyclic WFS matrix cell");
+                assert_wfs_reach_shape(&plain, &plain_label, seed_present);
+
+                let edb = format!(
+                    "33d-negated-modal-through-recursion-wfs-edb-negation-matrix-{mode}-{form}-{state}.xlog"
+                );
+                let edb_label = format!("{mode} {form} {state} WFS plus EDB-negation matrix cell");
+                assert_wfs_reach_shape(&edb, &edb_label, seed_present);
+            }
+        }
+    }
+
+    for mode in ["faeel", "g91"] {
+        for form in ["not-know", "not-possible"] {
+            for (state, should_keep_seed) in [("allowed", true), ("banned", false)] {
+                let example = format!(
+                    "33e-negated-modal-through-recursion-wfs-edb-negation-load-bearing-{mode}-{form}-{state}.xlog"
+                );
+                let label =
+                    format!("{mode} {form} {state} WFS plus load-bearing EDB-negation cell");
+                assert_wfs_reach_shape(&example, &label, should_keep_seed);
+            }
+        }
     }
 }
 

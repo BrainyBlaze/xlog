@@ -375,6 +375,12 @@ Tier 4:         pyxlog ────────────> 9 crates (integrati
 **Wave 1 changes** (2026-03-10): removed `xlog-logic → xlog-runtime` (moved to dev-deps),
 removed `xlog-stats → xlog-cuda` (was unused), added `xlog-neural → xlog-core`.
 
+**v0.9.2 epistemic WFS boundary:** `xlog-gpu` intentionally has no `xlog-prob`
+dependency. Accepted cyclic negated-modal WFS execution must route through the
+GPU-native WFS plan in `xlog-gpu`; the host `HashMap`/`HashSet` WFS implementation
+in `xlog-prob` remains a probabilistic/provenance subsystem and is not an accepted
+fallback for production epistemic execution.
+
 ### Crate Responsibilities
 
 | Crate | Purpose |

@@ -1,5 +1,5 @@
 #![allow(clippy::arc_with_non_send_sync)]
-use std::sync::Arc;
+use std::{fs, sync::Arc};
 
 use xlog_core::{MemoryBudget, Result, ScalarType, Schema};
 use xlog_cuda::{CudaBuffer, CudaDevice, CudaKernelProvider, GpuMemoryManager};
@@ -50,6 +50,43 @@ fn run_unary_query(provider: &Arc<CudaKernelProvider>, source: &str) -> Result<V
     let program = xlog_gpu::logic::LogicProgram::compile(source)?;
     let result = program.evaluate(provider.clone(), std::collections::HashMap::new())?;
     Ok(read_unary(provider, &result.queries[0].buffer))
+}
+
+#[test]
+fn test_xlog_gpu_manifest_does_not_depend_on_xlog_prob_host_wfs() -> Result<()> {
+    let manifest = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
+        .map_err(|err| xlog_core::XlogError::Execution(err.to_string()))?;
+    assert!(
+        !manifest.contains("xlog-prob"),
+        "xlog-gpu must not depend on xlog-prob; accepted GPU WFS execution must not link the host HashMap/HashSet WFS path"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_xlog_gpu_logic_source_does_not_reintroduce_host_wfs_solver() -> Result<()> {
+    let source = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/logic.rs"))
+        .map_err(|err| xlog_core::XlogError::Execution(err.to_string()))?;
+
+    for forbidden in [
+        "use xlog_prob",
+        "xlog_prob::",
+        "evaluate_wfs_rules",
+        "evaluate_wfs_program",
+        "ground_wfs_program",
+        "LogicExecutionPlan::EpistemicWfs(",
+        "WfsRule",
+        "WfsLiteral",
+        "WfsConfig",
+        "PirGraph",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "xlog-gpu accepted WFS execution must stay GPU-native; forbidden host-WFS token `{forbidden}` appeared in src/logic.rs"
+        );
+    }
+
+    Ok(())
 }
 
 #[test]
@@ -318,6 +355,470 @@ fn test_wall_a1_negated_modal_over_recursive_stratified_executes_exact() -> Resu
         vec![(1, 1), (2, 1), (2, 2), (3, 1), (3, 2), (3, 3)],
         "unreachable must be exactly node x node MINUS the recursive closure reach = \
          {{(1,2),(2,3),(1,3)}}"
+    );
+
+    Ok(())
+}
+
+/// v0.9.2 WALL A1 WFS: a NEGATED modal over a co-evolving recursive target whose
+/// reduced ordinary program has a cycle through negation must route to the GPU-native
+/// WFS alternating-fixpoint plan, not host WFS or the ordinary stratified path.
+///
+/// Matrix coverage:
+///   mode {FAEEL,G91}
+///   x modal form {not know,not possible}
+///   x seed state {present,absent}
+///   x ordinary EDB negation {absent,present-in-SCC}.
+///
+/// EXACT WFS answer for seed-present cells: reach = {(1,2)}. Seed-absent cells
+/// emit no true reach rows. Every other vertex x vertex reach tuple is false or
+/// WFS-undefined and therefore absent from `xlog run` output.
+fn wfs_cycle_source(
+    mode: &str,
+    modal: &str,
+    seed_present: bool,
+    include_edb_negation: bool,
+) -> String {
+    let seed_fact = if seed_present { "seed(1, 2)." } else { "" };
+    let banned_decl = if include_edb_negation {
+        "pred banned(u32)."
+    } else {
+        ""
+    };
+    let banned_fact = if include_edb_negation {
+        "banned(3)."
+    } else {
+        ""
+    };
+    let edb_guard = if include_edb_negation {
+        ", not banned(Y)"
+    } else {
+        ""
+    };
+
+    format!(
+        r#"
+        #pragma epistemic_mode = {mode}
+        pred vertex(u32).
+        pred seed(u32, u32).
+        {banned_decl}
+        pred linked(u32, u32).
+        pred reach(u32, u32).
+
+        vertex(1). vertex(2). vertex(3).
+        {seed_fact}
+        {banned_fact}
+
+        reach(X, Y) :- linked(X, Y).
+        reach(X, Z) :- reach(X, Y), linked(Y, Z).
+        linked(X, Y) :- vertex(X), vertex(Y), {modal} reach(X, Y){edb_guard}.
+        linked(X, Y) :- seed(X, Y).
+
+        ?- reach(X, Y).
+        "#
+    )
+}
+
+#[test]
+fn test_wall_a1_wfs_plan_kind_matrix_compiles_without_cuda() -> Result<()> {
+    for (mode, modal, seed_present, include_edb_negation) in [
+        ("faeel", "not know", true, false),
+        ("faeel", "not know", false, false),
+        ("faeel", "not know", true, true),
+        ("faeel", "not know", false, true),
+        ("faeel", "not possible", true, false),
+        ("faeel", "not possible", false, false),
+        ("faeel", "not possible", true, true),
+        ("faeel", "not possible", false, true),
+        ("g91", "not know", true, false),
+        ("g91", "not know", false, false),
+        ("g91", "not know", true, true),
+        ("g91", "not know", false, true),
+        ("g91", "not possible", true, false),
+        ("g91", "not possible", false, false),
+        ("g91", "not possible", true, true),
+        ("g91", "not possible", false, true),
+    ] {
+        let source = wfs_cycle_source(mode, modal, seed_present, include_edb_negation);
+        let program = xlog_gpu::logic::LogicProgram::compile(source.as_str())?;
+        let plan_json = program
+            .epistemic_plan_json()
+            .expect("cyclic negated-modal recursion must carry a WFS provenance summary");
+        assert!(
+            plan_json.contains("\"reduction\":\"wfs_gpu_recursive\""),
+            "{mode}/{modal}: cyclic negated-modal recursion must use GPU WFS reduction, got: {plan_json}"
+        );
+        assert!(
+            plan_json.contains("\"plan_kind\":\"epistemic_wfs_gpu\""),
+            "{mode}/{modal}: plan kind must be GPU-native WFS, got: {plan_json}"
+        );
+        assert!(
+            plan_json.contains("\"units\":[]"),
+            "{mode}/{modal}: GPU WFS reduction must not emit single-pass epistemic candidate units: {plan_json}"
+        );
+        assert!(
+            plan_json.contains("\"reach\":{\"upper\":\"__wfs_upper_reach\",\"lower\":\"__wfs_lower_reach\"}"),
+            "{mode}/{modal}: WFS plan JSON must expose deterministic fixed relation rewrites, got: {plan_json}"
+        );
+        if include_edb_negation {
+            assert!(
+                plan_json.contains(
+                    "\"banned\":{\"upper\":\"__wfs_upper_banned\",\"lower\":\"__wfs_lower_banned\"}"
+                ),
+                "{mode}/{modal}: WFS plan JSON must expose ordinary EDB negation fixed relation rewrites, got: {plan_json}"
+            );
+        }
+        assert!(
+            plan_json.contains("\"wfs_convergence_predicates\":[\"linked\",\"reach\"]"),
+            "{mode}/{modal}: WFS plan JSON must expose the convergence predicate set, got: {plan_json}"
+        );
+        assert!(
+            plan_json.contains("\"wfs_gpu_passes\":[\"overapprox\",\"lower\",\"upper\"]"),
+            "{mode}/{modal}: WFS plan JSON must expose the alternating GPU pass structure, got: {plan_json}"
+        );
+        assert!(
+            plan_json.contains("\"host_wfs_fallback_allowed\":false"),
+            "{mode}/{modal}: WFS plan JSON must explicitly forbid host WFS fallback, got: {plan_json}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_wall_a1_wfs_plan_clamps_zero_iteration_bound_without_cuda() -> Result<()> {
+    let source = r#"
+        #pragma epistemic_mode = faeel
+        #pragma max_recursion_depth = 0
+        pred vertex(u32).
+        pred seed(u32, u32).
+        pred linked(u32, u32).
+        pred reach(u32, u32).
+
+        vertex(1). vertex(2). vertex(3).
+        seed(1, 2).
+
+        reach(X, Y) :- linked(X, Y).
+        reach(X, Z) :- reach(X, Y), linked(Y, Z).
+        linked(X, Y) :- vertex(X), vertex(Y), not know reach(X, Y).
+        linked(X, Y) :- seed(X, Y).
+
+        ?- reach(X, Y).
+    "#;
+
+    let program = xlog_gpu::logic::LogicProgram::compile(source)?;
+    let plan_json = program
+        .epistemic_plan_json()
+        .expect("cyclic negated-modal recursion must carry a WFS provenance summary");
+    assert!(
+        plan_json.contains("\"plan_kind\":\"epistemic_wfs_gpu\""),
+        "zero-depth WFS fixture must still route to GPU WFS, got: {plan_json}"
+    );
+    assert!(
+        plan_json.contains("\"max_iterations\":1"),
+        "zero max_recursion_depth must clamp to one WFS alternating pass, got: {plan_json}"
+    );
+    assert!(
+        plan_json.contains("\"wfs_fixed_relations\":{\"reach\":"),
+        "zero-depth WFS fixture must still expose its fixed relation map, got: {plan_json}"
+    );
+    assert!(
+        plan_json.contains("\"wfs_convergence_predicates\":[\"linked\",\"reach\"]"),
+        "zero-depth WFS fixture must expose the convergence predicate set, got: {plan_json}"
+    );
+    assert!(
+        plan_json.contains("\"wfs_gpu_passes\":[\"overapprox\",\"lower\",\"upper\"]"),
+        "zero-depth WFS fixture must expose the alternating GPU pass structure, got: {plan_json}"
+    );
+    assert!(
+        plan_json.contains("\"host_wfs_fallback_allowed\":false"),
+        "zero-depth WFS fixture must explicitly forbid host WFS fallback, got: {plan_json}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_wall_a1_wfs_plan_exposes_multiple_fixed_relation_maps_without_cuda() -> Result<()> {
+    let source = r#"
+        #pragma epistemic_mode = faeel
+        pred vertex(u32).
+        pred seed(u32, u32).
+        pred linked(u32, u32).
+        pred blocked(u32, u32).
+        pred reach(u32, u32).
+        pred avoid(u32, u32).
+
+        vertex(1). vertex(2). vertex(3).
+        seed(1, 2).
+
+        reach(X, Y) :- linked(X, Y).
+        reach(X, Z) :- reach(X, Y), linked(Y, Z).
+        avoid(X, Y) :- blocked(X, Y).
+
+        linked(X, Y) :- vertex(X), vertex(Y), not know reach(X, Y), not possible avoid(X, Y).
+        linked(X, Y) :- seed(X, Y).
+        blocked(X, Y) :- vertex(X), vertex(Y), not know reach(Y, X).
+
+        ?- reach(X, Y).
+    "#;
+
+    let program = xlog_gpu::logic::LogicProgram::compile(source)?;
+    let plan_json = program
+        .epistemic_plan_json()
+        .expect("multi-negated cyclic WFS program must carry a WFS provenance summary");
+    assert!(
+        plan_json.contains("\"plan_kind\":\"epistemic_wfs_gpu\""),
+        "multi-negated WFS fixture must route to GPU WFS, got: {plan_json}"
+    );
+    assert!(
+        plan_json.contains(
+            "\"avoid\":{\"upper\":\"__wfs_upper_avoid\",\"lower\":\"__wfs_lower_avoid\"}"
+        ),
+        "WFS plan JSON must expose private fixed relations for avoid/2, got: {plan_json}"
+    );
+    assert!(
+        plan_json.contains(
+            "\"reach\":{\"upper\":\"__wfs_upper_reach\",\"lower\":\"__wfs_lower_reach\"}"
+        ),
+        "WFS plan JSON must expose private fixed relations for reach/2, got: {plan_json}"
+    );
+    assert!(
+        plan_json.contains(
+            "\"wfs_convergence_predicates\":[\"avoid\",\"blocked\",\"linked\",\"reach\"]"
+        ),
+        "multi-negated WFS fixture must expose every intensional convergence predicate, got: {plan_json}"
+    );
+    assert!(
+        plan_json.contains("\"wfs_gpu_passes\":[\"overapprox\",\"lower\",\"upper\"]"),
+        "multi-negated WFS fixture must expose the alternating GPU pass structure, got: {plan_json}"
+    );
+    assert!(
+        plan_json.contains("\"host_wfs_fallback_allowed\":false"),
+        "multi-negated WFS fixture must explicitly forbid host WFS fallback, got: {plan_json}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_wall_a1_wfs_plan_exposes_fixed_relation_for_ordinary_edb_negation_without_cuda(
+) -> Result<()> {
+    let source = r#"
+        #pragma epistemic_mode = faeel
+        pred vertex(u32).
+        pred seed(u32, u32).
+        pred banned(u32).
+        pred linked(u32, u32).
+        pred reach(u32, u32).
+
+        vertex(1). vertex(2). vertex(3).
+        seed(1, 2).
+        banned(3).
+
+        reach(X, Y) :- linked(X, Y).
+        reach(X, Z) :- reach(X, Y), linked(Y, Z).
+        linked(X, Y) :- vertex(X), vertex(Y), not know reach(X, Y), not banned(Y).
+        linked(X, Y) :- seed(X, Y).
+
+        ?- reach(X, Y).
+    "#;
+
+    let program = xlog_gpu::logic::LogicProgram::compile(source)?;
+    let plan_json = program
+        .epistemic_plan_json()
+        .expect("mixed modal/ordinary-negation WFS program must carry a WFS provenance summary");
+    assert!(
+        plan_json.contains("\"plan_kind\":\"epistemic_wfs_gpu\""),
+        "mixed modal/ordinary-negation WFS fixture must route to GPU WFS, got: {plan_json}"
+    );
+    assert!(
+        plan_json.contains("\"banned\":{\"upper\":\"__wfs_upper_banned\",\"lower\":\"__wfs_lower_banned\"}"),
+        "WFS plan JSON must expose private fixed relations for ordinary EDB negation banned/1, got: {plan_json}"
+    );
+    assert!(
+        plan_json.contains("\"reach\":{\"upper\":\"__wfs_upper_reach\",\"lower\":\"__wfs_lower_reach\"}"),
+        "WFS plan JSON must expose private fixed relations for recursive modal target reach/2, got: {plan_json}"
+    );
+    assert!(
+        plan_json.contains("\"wfs_convergence_predicates\":[\"linked\",\"reach\"]"),
+        "mixed modal/ordinary-negation WFS fixture must expose convergence predicates, got: {plan_json}"
+    );
+    assert!(
+        plan_json.contains("\"wfs_gpu_passes\":[\"overapprox\",\"lower\",\"upper\"]"),
+        "mixed modal/ordinary-negation WFS fixture must expose the alternating GPU pass structure, got: {plan_json}"
+    );
+    assert!(
+        plan_json.contains("\"host_wfs_fallback_allowed\":false"),
+        "mixed modal/ordinary-negation WFS fixture must explicitly forbid host WFS fallback, got: {plan_json}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_wall_a1_negated_modal_cycle_routes_to_gpu_wfs_matrix() -> Result<()> {
+    let Some(provider) = create_test_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return Ok(());
+    };
+
+    for (mode, modal, seed_present, include_edb_negation) in [
+        ("faeel", "not know", true, false),
+        ("faeel", "not know", false, false),
+        ("faeel", "not know", true, true),
+        ("faeel", "not know", false, true),
+        ("faeel", "not possible", true, false),
+        ("faeel", "not possible", false, false),
+        ("faeel", "not possible", true, true),
+        ("faeel", "not possible", false, true),
+        ("g91", "not know", true, false),
+        ("g91", "not know", false, false),
+        ("g91", "not know", true, true),
+        ("g91", "not know", false, true),
+        ("g91", "not possible", true, false),
+        ("g91", "not possible", false, false),
+        ("g91", "not possible", true, true),
+        ("g91", "not possible", false, true),
+    ] {
+        let source = wfs_cycle_source(mode, modal, seed_present, include_edb_negation);
+
+        let program = xlog_gpu::logic::LogicProgram::compile(source.as_str())?;
+        let plan_json = program
+            .epistemic_plan_json()
+            .expect("cyclic negated-modal recursion must carry a WFS provenance summary");
+        assert!(
+            plan_json.contains("\"reduction\":\"wfs_gpu_recursive\""),
+            "{mode}/{modal}: cyclic negated-modal recursion must use GPU WFS reduction, got: {plan_json}"
+        );
+        assert!(
+            plan_json.contains("\"plan_kind\":\"epistemic_wfs_gpu\""),
+            "{mode}/{modal}: plan kind must be GPU-native WFS, got: {plan_json}"
+        );
+        assert!(
+            plan_json.contains("\"units\":[]"),
+            "{mode}/{modal}: GPU WFS reduction must not emit single-pass epistemic candidate units: {plan_json}"
+        );
+        assert!(
+            plan_json.contains("\"reach\":{\"upper\":\"__wfs_upper_reach\",\"lower\":\"__wfs_lower_reach\"}"),
+            "{mode}/{modal}: runtime WFS plan JSON must expose deterministic fixed relation rewrites, got: {plan_json}"
+        );
+        if include_edb_negation {
+            assert!(
+                plan_json.contains(
+                    "\"banned\":{\"upper\":\"__wfs_upper_banned\",\"lower\":\"__wfs_lower_banned\"}"
+                ),
+                "{mode}/{modal}: runtime WFS plan JSON must expose ordinary EDB negation fixed relation rewrites, got: {plan_json}"
+            );
+        }
+        assert!(
+            plan_json.contains("\"wfs_convergence_predicates\":[\"linked\",\"reach\"]"),
+            "{mode}/{modal}: runtime WFS plan JSON must expose convergence predicates, got: {plan_json}"
+        );
+        assert!(
+            plan_json.contains("\"wfs_gpu_passes\":[\"overapprox\",\"lower\",\"upper\"]"),
+            "{mode}/{modal}: runtime WFS plan JSON must expose the alternating GPU pass structure, got: {plan_json}"
+        );
+        assert!(
+            plan_json.contains("\"host_wfs_fallback_allowed\":false"),
+            "{mode}/{modal}: runtime WFS plan JSON must explicitly forbid host WFS fallback, got: {plan_json}"
+        );
+
+        let result = program.evaluate(provider.clone(), std::collections::HashMap::new())?;
+        let query0 = &result.queries[0];
+        let mut got = read_pairs(&provider, &query0.buffer);
+        got.sort_unstable();
+        got.dedup();
+
+        let expected = if seed_present { vec![(1, 2)] } else { vec![] };
+        assert_eq!(
+            got, expected,
+            "{mode}/{modal}: WFS true extension must match the seed-state matrix cell; \
+             false/undefined reach tuples must be absent"
+        );
+    }
+
+    Ok(())
+}
+
+/// v0.9.2 WALL A1 WFS anti-collision guard: user predicates may legally have names
+/// near the internal WFS fixed relations. Source-level predicates cannot start with
+/// `__` under the language grammar, so this fixture uses legal near-collision names
+/// and verifies the compiler keeps its private fixed names in the internal namespace
+/// instead of reading user-owned relations.
+///
+/// The user-owned `wfs_upper_reach` / `wfs_lower_reach` predicates below derive
+/// every vertex pair. If the WFS transform accidentally reused those names as its
+/// fixed upper/lower approximation buffers, the negated modal gate would see the
+/// wrong relation and the WFS result would change. The correct GPU WFS answer remains
+/// exactly reach = {(1,2)}.
+#[test]
+fn test_wall_a1_wfs_fixed_relation_names_avoid_user_collisions() -> Result<()> {
+    let Some(provider) = create_test_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return Ok(());
+    };
+
+    let source = r#"
+        #pragma epistemic_mode = faeel
+        pred vertex(u32).
+        pred seed(u32, u32).
+        pred linked(u32, u32).
+        pred reach(u32, u32).
+        pred wfs_upper_reach(u32, u32).
+        pred wfs_lower_reach(u32, u32).
+
+        vertex(1). vertex(2). vertex(3).
+        seed(1, 2).
+
+        wfs_upper_reach(X, Y) :- vertex(X), vertex(Y).
+        wfs_lower_reach(X, Y) :- vertex(X), vertex(Y).
+
+        reach(X, Y) :- linked(X, Y).
+        reach(X, Z) :- reach(X, Y), linked(Y, Z).
+        linked(X, Y) :- vertex(X), vertex(Y), not know reach(X, Y).
+        linked(X, Y) :- seed(X, Y).
+
+        ?- reach(X, Y).
+    "#;
+
+    let program = xlog_gpu::logic::LogicProgram::compile(source)?;
+    let plan_json = program
+        .epistemic_plan_json()
+        .expect("cyclic negated-modal recursion must carry a WFS provenance summary");
+    assert!(
+        plan_json.contains("\"reduction\":\"wfs_gpu_recursive\""),
+        "collision fixture must still route to GPU WFS, got: {plan_json}"
+    );
+    assert!(
+        plan_json.contains("\"plan_kind\":\"epistemic_wfs_gpu\""),
+        "collision fixture must keep the GPU WFS plan kind, got: {plan_json}"
+    );
+    assert!(
+        !plan_json.contains("\"upper\":\"wfs_upper_reach\"")
+            && !plan_json.contains("\"lower\":\"wfs_lower_reach\""),
+        "collision fixture must not reuse user-owned wfs_* predicates as private fixed relations: {plan_json}"
+    );
+    assert!(
+        plan_json.contains("\"upper\":\"__wfs_upper_reach\"")
+            && plan_json.contains("\"lower\":\"__wfs_lower_reach\""),
+        "collision fixture must expose private internal WFS fixed names: {plan_json}"
+    );
+    assert!(
+        plan_json.contains("\"host_wfs_fallback_allowed\":false"),
+        "collision fixture must explicitly forbid host WFS fallback, got: {plan_json}"
+    );
+
+    let result = program.evaluate(provider.clone(), std::collections::HashMap::new())?;
+    let query0 = &result.queries[0];
+    let mut got = read_pairs(&provider, &query0.buffer);
+    got.sort_unstable();
+    got.dedup();
+
+    assert_eq!(
+        got,
+        vec![(1, 2)],
+        "user-owned __wfs_* predicates must not pollute private WFS fixed relations"
     );
 
     Ok(())

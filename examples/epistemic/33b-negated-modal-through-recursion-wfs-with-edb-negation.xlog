@@ -1,0 +1,31 @@
+// v0.9.2 A1 WFS + ordinary EDB negation: cyclic negated-modal recursion can
+// include a normal anti-join over an extensional relation without routing to host WFS.
+//
+// The reduced ordinary program has:
+//   linked(X,Y) :- vertex(X), vertex(Y), not reach(X,Y), not banned(Y).
+//
+// WFS still emits true tuples only. The seed proves reach(1,2); non-banned
+// unseeded pairs are undefined through the reach/linked negation cycle; banned
+// target-column pairs are false because `not banned(3)` fails.
+//
+// Expected query output:
+//   TRUE: reach(1,2)
+//   ABSENT: every other vertex x vertex reach tuple
+#pragma epistemic_mode = faeel
+
+pred vertex(u32).
+pred seed(u32, u32).
+pred banned(u32).
+pred linked(u32, u32).
+pred reach(u32, u32).
+
+vertex(1). vertex(2). vertex(3).
+seed(1, 2).
+banned(3).
+
+reach(X, Y) :- linked(X, Y).
+reach(X, Z) :- reach(X, Y), linked(Y, Z).
+linked(X, Y) :- vertex(X), vertex(Y), not know reach(X, Y), not banned(Y).
+linked(X, Y) :- seed(X, Y).
+
+?- reach(X, Y).

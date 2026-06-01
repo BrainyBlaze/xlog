@@ -1,0 +1,19 @@
+// WFS + EDB-negation exhaustive matrix cell: mode g91, cyclic recursion through not know, seed-absent.
+// v0.9.2 A1: the same GPU-native WFS plan must handle ordinary anti-joins
+// inside the reduced non-monotone SCC.
+// Seed support is absent in this matrix cell.
+// Expected WFS true tuples: none; every vertex x vertex reach tuple is undefined/absent.
+#pragma epistemic_mode = g91
+pred vertex(u32).
+pred seed(u32, u32).
+pred banned(u32).
+pred linked(u32, u32).
+pred reach(u32, u32).
+vertex(1). vertex(2). vertex(3).
+banned(3).
+
+reach(X, Y) :- linked(X, Y).
+reach(X, Z) :- reach(X, Y), linked(Y, Z).
+linked(X, Y) :- vertex(X), vertex(Y), not know reach(X, Y), not banned(Y).
+linked(X, Y) :- seed(X, Y).
+?- reach(X, Y).

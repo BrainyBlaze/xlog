@@ -1,0 +1,18 @@
+// single-modal truth table: mode g91, not-know, target present
+// v0.9.2 epistemic exhaustive base matrix cell.
+// The queried tuple is p(1); p(2) is a nonmatching distractor so
+// absent means the queried tuple is absent, not that p/1 or its schema vanished.
+#pragma epistemic_mode = g91
+
+pred p(u32).
+pred case_id(u32).
+pred holds(u32).
+
+p(1).
+p(2).
+case_id(1).
+
+// Expected holds rows: 0.
+holds(ID) :- case_id(ID), not know p(1).
+
+?- holds(ID).

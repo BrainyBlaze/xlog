@@ -171,10 +171,10 @@ fn negated_modal_over_stratified_non_invariant_in_recursion_is_accepted_case_b()
 }
 
 #[test]
-fn negated_modal_through_recursion_cycle_classifies_as_wfs_case_b() {
+fn negated_modal_through_recursion_cycle_classifies_as_gpu_wfs_case_b() {
     // v0.9.2 A1: a NEGATED modal whose target CYCLES through recursion via negation
     // is admitted as Case B. The high-level runtime detects the non-monotone reduced
-    // SCC and routes it to the explicit WFS plan.
+    // SCC and delegates it to GPU-native WFS instead of host WFS.
     let program = parse_program(
         r#"
         #pragma epistemic_mode = faeel
@@ -199,7 +199,7 @@ fn negated_modal_through_recursion_cycle_classifies_as_wfs_case_b() {
     let strat = xlog_logic::stratify::analyze_stratification(&reduced);
     assert!(
         !strat.non_monotone_sccs.is_empty(),
-        "reduced recursion-through-negation must be routed to WFS"
+        "reduced recursion-through-negation must reach the GPU-native WFS path"
     );
 }
 

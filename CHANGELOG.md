@@ -87,19 +87,22 @@ Category-B semantic gaps tracked after v0.9.1, all validated on the production
   negated-modal recursion through WFS are now supported. A negated modal over an
   invariant or materialized determined relation reduces to ordinary negation.
 
-### Determined, recursive, and WFS modal families completed
+### Determined and recursive modal families tightened
 
 The determined/non-determined boundary is closed under composition. Every modal
 target is either DETERMINED (fixed extension → `know R ≡ R` → resolved, via
 joint-solving or stratified execution; any arity, filtering or binding, coupling or
-recursion) or NON-DETERMINED and handled by the appropriate recursive semantics:
+recursion) or NON-DETERMINED and handled by the appropriate recursive semantics or
+typed boundary:
 
 - Positive Case-B `know` recursion computes the FAEEL founded least fixpoint.
 - Positive G91 `possible` recursion applies the G91 compatibility self-support
   assumption.
 - Negated-modal recursion that is stratified reduces to ordinary anti-join after
-  the lower fixpoint materializes; cyclic negated-modal recursion executes through
-  explicit WFS and emits only true tuples.
+  the lower fixpoint materializes; cyclic negated-modal recursion routes through
+  GPU-native WFS alternating fixpoint rather than host WFS, with committed
+  examples covering mode `{FAEEL,G91}` x modal `{not know,not possible}` x seed
+  `{present,absent}` for both plain WFS and WFS plus ordinary EDB negation.
 - Genuinely cyclic modal coupling with no founded/WFS order remains typed
   fail-closed.
 
@@ -192,10 +195,15 @@ recorded in `docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`
 
 - **EGB-02 mixed per-row + global modal literal in one rule:** _CLOSED in v0.9.2
   (EGB-02B)_ — the two gate classes now compose conjunctively on the GPU path.
-- **Recursive epistemic fixpoints:** _CLOSED in v0.9.2_ — Case-A invariant-modal
-  recursion, determined-head stratification, positive Case-B founded recursion,
-  G91 positive `possible` recursion, stratified negated-modal recursion, and cyclic
-  negated-modal recursion through explicit WFS execute through `xlog run`.
+- **Recursive epistemic fixpoints:** _CANDIDATE CLOSED in v0.9.2; fresh gates
+  required before merge evidence_ — Case-A invariant-modal recursion,
+  determined-head stratification, positive Case-B founded recursion, G91 positive
+  `possible` recursion, stratified negated-modal recursion, and cyclic
+  negated-modal recursion through GPU-native WFS execute through `xlog run`.
+  The focused WFS example set covers mode, negated-modal operator,
+  seed-present/seed-absent, ordinary EDB-negation-in-SCC axes, and a load-bearing
+  EDB target-state axis where `not banned(2)` flips the seed-founded reach tuple.
+  Host WFS is not an accepted production fallback.
 
 - **Same-name multi-arity modal coupling:** _SOLVED in v0.9.2 (ITEM F)_ — a
   program using the same predicate name at two arities in modal literals
@@ -209,11 +217,15 @@ recorded in `docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`
   (`a:-know b. b:-know a.`) has no founded order and stays typed fail-closed
   end-to-end with a precise diagnostic naming both coupled heads.
 
-Goal-mandated typed fail-closed fragments (nested modal semantics, aggregate/
-compound/list/predref modal keys, variable-keyed/nested/CPU-scan epistemic
-constraints, genuinely-cyclic modal coupling with no founded order) are
-rejection-by-design per the bundle spec and lock #5 — verified by negative
-pilots, not debt. Full list:
+Goal-mandated typed fail-closed fragments (aggregate/compound/list/predref modal
+keys, unsafe variable-keyed or CPU-scan epistemic constraints, genuinely-cyclic
+modal coupling with no founded order) remain rejection-by-design per the bundle
+spec and lock #5 — verified by negative pilots, not debt. Finite nested modal
+semantics are no longer in this rejection bucket in v0.9.2: examples 13/13b/13c
+execute, 13f plus its companions prove the interior-negation duality in both target states and
+both modes, 13g-13v cover all 64
+two-operator negation cells under FAEEL, and 13w* replays those cells under explicit G91.
+Historical v0.9.1 rejection list:
 `docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`.
 
 v0.9.0 Epistemic Solver Release Candidate. This branch layers the v0.8.7-v0.8.9

@@ -2001,7 +2001,7 @@ engines, typed fail-closed, real runtime/device pilots). Status summary:
       single-level epistemic literal and execute through `xlog run`; no
       parser-precedence accident and no world-of-worlds shortcut. Evidence:
       `cargo test -p xlog-logic --test test_epistemic_eir` and examples
-      `13`/`13b`-`13v`.
+      `13`/`13b`-`13v` plus the explicit-G91 `13w*` companion matrix.
 - [x] Fixed nullary EDB fact materialization (pre-existing): `pred().` was
       materialized as 0 rows (read as absent), breaking ordinary nullary queries
       and ground/nullary modal membership. Added
@@ -2022,7 +2022,8 @@ fallback locks.
 
 - [x] Nested modal **semantics** are solved for finite two-operator chains:
       leading/interior/atom-adjacent negation normalizes by parity/duality and the
-      64-cell `13g`-`13v` example matrix executes through `xlog run`.
+      64-cell `13g`-`13v` FAEEL example matrix plus the explicit-G91 `13w*`
+      companion matrix execute through `xlog run`.
 - [x] Finite typed compound/list modal tuple keys execute by flattening; genuinely
       unbounded, untyped, predref, or aggregate modal tuple keys fail closed.
 - [x] Variable-keyed, diagonal, shared-variable join, and range-restricted negated
@@ -2037,11 +2038,15 @@ fallback locks.
       through production `xlog run`. Genuinely-cyclic modal coupling
       (`a:-know b. b:-know a.`, no founded order) stays typed fail-closed
       end-to-end.
-- [x] Recursive epistemic execution covers Case-A/invariant and determined-head
-      stratification, positive Case-B founded recursion, G91 positive `possible`
-      recursion, stratified negated-modal recursion, and cyclic negated-modal
-      recursion through explicit WFS; unsupported modal cycles without a founded or
-      WFS order remain typed fail-closed.
+- [ ] Recursive epistemic execution candidate covers Case-A/invariant and
+      determined-head stratification, positive Case-B founded recursion, G91
+      positive `possible` recursion, stratified negated-modal recursion, and
+      cyclic negated-modal recursion through GPU-native WFS. Fresh focused and
+      full gates are still required before marking this roadmap cell complete.
+      The WFS example surface covers the finite mode x negated-modal operator x
+      seed-state matrix, both with and without ordinary EDB negation in the same
+      reduced SCC, plus a load-bearing EDB target-state matrix. Host WFS is not an accepted production fallback. Unsupported
+      modal cycles without a founded order remain typed fail-closed.
 
 ### Genuine follow-up (NOT goal-mandated; tracked)
 

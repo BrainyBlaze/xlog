@@ -6,7 +6,7 @@ use std::sync::Arc;
 use xlog_core::{symbol, RelId, Result, ScalarType, Schema, XlogError};
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 use xlog_ir::{EpistemicExecutablePlan, ExecutionPlan};
-use xlog_logic::ast::{AggOp, CompOp, PredColumn, TypeRef};
+use xlog_logic::ast::{AggOp, PredColumn, TypeRef};
 use xlog_logic::epistemic::{
     compile_epistemic_gpu_execution, compile_epistemic_gpu_split_execution,
     reduce_epistemic_program_to_ordinary,
@@ -17,7 +17,6 @@ use xlog_logic::epistemic::{
 use xlog_logic::{
     Atom, BodyLiteral, Compiler, EpistemicLiteral, EpistemicOp, Program, Query, Rule, Term,
 };
-use xlog_prob::{evaluate_wfs_rules, PirGraph, Value, WfsAtom, WfsConfig, WfsLiteral, WfsRule};
 use xlog_runtime::executor::JoinIndexCacheStats;
 use xlog_runtime::{
     DeltaRecomputeStats, EpistemicGpuExecutionResult, EpistemicGpuWorkspaceCapacities,
@@ -222,12 +221,30 @@ enum StratumPlanKind {
 #[derive(Clone)]
 enum LogicExecutionPlan {
     Ordinary(ExecutionPlan),
-    EpistemicWfs(Program),
+    EpistemicWfsGpu(EpistemicWfsGpuPlan),
     EpistemicSingle(EpistemicExecutablePlan),
     EpistemicSplit(EpistemicSplitExecutablePlan),
     /// Stratified epistemic execution: ordered strata, each materializing its
     /// gated head(s) into the store before the next stratum runs.
     EpistemicStratified(Vec<StratumExecutable>),
+}
+
+#[derive(Clone)]
+struct EpistemicWfsGpuPlan {
+    overapprox: WfsGpuOrdinaryPlan,
+    lower: WfsGpuOrdinaryPlan,
+    upper: WfsGpuOrdinaryPlan,
+    intensional_predicates: Vec<String>,
+    upper_fixed_names: HashMap<String, String>,
+    lower_fixed_names: HashMap<String, String>,
+    max_iterations: usize,
+}
+
+#[derive(Clone)]
+struct WfsGpuOrdinaryPlan {
+    plan: ExecutionPlan,
+    schemas: HashMap<String, Schema>,
+    rel_ids: HashMap<String, RelId>,
 }
 
 /// Compile-time epistemic provenance, retained even when the executable plan is
@@ -334,25 +351,24 @@ impl LogicProgram {
             });
         }
 
-        // Case A: ordinary recursion gated by modal literals over invariant relations.
-        // Resolve each modal literal to its (invariant) gated relation and route the
-        // resulting ordinary recursive program through the EXISTING recursive/
-        // semi-naive engine via an Ordinary plan. Validation still flows through the
-        // EIR boundary + FAEEL foundedness guard inside
-        // `try_reduce_case_a_recursive_epistemic_program`, so modal self-support
-        // (Case B) and every non-Case-A recursive shape still fail closed.
+        // Case A/B: reduce admissible recursive epistemic programs to ordinary
+        // recursion. Stratified reduced programs route through the existing ordinary
+        // semi-naive engine; non-monotone reduced SCCs route through the GPU-native
+        // WFS alternating-fixpoint plan below. Recursive shapes outside the admissible
+        // fragment still fail closed in `try_reduce_case_a_recursive_epistemic_program`.
         if let Some(case_a_reduced) = try_reduce_case_a_recursive_epistemic_program(&normalized)? {
             let strat = xlog_logic::stratify::analyze_stratification(&case_a_reduced);
             if !strat.non_monotone_sccs.is_empty() {
-                let mut schemas = infer_wfs_schemas(&case_a_reduced)?;
-                augment_same_name_multi_arity_schemas(&case_a_reduced, &mut schemas)?;
+                let wfs_plan = compile_epistemic_wfs_gpu_plan(&case_a_reduced)?;
+                let schemas = wfs_plan_combined_schemas(&wfs_plan);
+                let rel_ids = wfs_plan_combined_rel_ids(&wfs_plan)?;
                 return Ok(Self {
-                    program: case_a_reduced.clone(),
-                    plan: LogicExecutionPlan::EpistemicWfs(case_a_reduced),
+                    program: case_a_reduced,
+                    plan: LogicExecutionPlan::EpistemicWfsGpu(wfs_plan),
                     schemas,
-                    rel_ids: HashMap::new(),
+                    rel_ids,
                     epistemic_provenance: Some(EpistemicProvenance {
-                        reduction: "wfs_recursive",
+                        reduction: "wfs_gpu_recursive",
                         literals: provenance_literals,
                     }),
                 });
@@ -482,9 +498,23 @@ impl LogicProgram {
             // IS GPU-clean by construction (the recursion runs on the ordinary
             // semi-naive engine with no epistemic CPU fallback). Emit a provenance
             // summary with a stable id so the recursive-fixpoint fixture is auditable.
-            LogicExecutionPlan::Ordinary(_) | LogicExecutionPlan::EpistemicWfs(_) => {
+            LogicExecutionPlan::Ordinary(_) => {
                 let prov = self.epistemic_provenance.as_ref()?;
-                return Some(epistemic_provenance_summary_json(prov));
+                return Some(epistemic_provenance_summary_json(
+                    "epistemic_reduced_ordinary",
+                    prov,
+                    None,
+                    None,
+                ));
+            }
+            LogicExecutionPlan::EpistemicWfsGpu(wfs) => {
+                let prov = self.epistemic_provenance.as_ref()?;
+                return Some(epistemic_provenance_summary_json(
+                    self.plan_kind_label(),
+                    prov,
+                    Some(wfs.max_iterations),
+                    Some(wfs),
+                ));
             }
             LogicExecutionPlan::EpistemicSingle(plan) => {
                 vec![("single".to_string(), &plan.gpu_plan)]
@@ -528,7 +558,7 @@ impl LogicProgram {
     fn plan_kind_label(&self) -> &'static str {
         match &self.plan {
             LogicExecutionPlan::Ordinary(_) => "ordinary",
-            LogicExecutionPlan::EpistemicWfs(_) => "epistemic_wfs",
+            LogicExecutionPlan::EpistemicWfsGpu(_) => "epistemic_wfs_gpu",
             LogicExecutionPlan::EpistemicSingle(_) => "epistemic_single",
             LogicExecutionPlan::EpistemicSplit(_) => "epistemic_split",
             LogicExecutionPlan::EpistemicStratified(_) => "epistemic_stratified",
@@ -927,8 +957,8 @@ impl LogicProgram {
 
         self.load_facts(&provider, &mut executor)?;
 
-        if let LogicExecutionPlan::EpistemicWfs(wfs_program) = &self.plan {
-            return self.evaluate_wfs_program(provider.as_ref(), wfs_program, profiling);
+        if let LogicExecutionPlan::EpistemicWfsGpu(wfs_plan) = &self.plan {
+            return self.evaluate_wfs_gpu_program(provider, executor, wfs_plan, profiling);
         }
 
         let LogicExecutionPlan::Ordinary(plan) = &self.plan else {
@@ -1164,49 +1194,132 @@ impl LogicProgram {
         Ok(())
     }
 
-    fn evaluate_wfs_program(
+    fn evaluate_wfs_gpu_program(
         &self,
-        provider: &CudaKernelProvider,
-        program: &Program,
-        _profiling: bool,
+        provider: Arc<CudaKernelProvider>,
+        base_executor: Executor,
+        wfs: &EpistemicWfsGpuPlan,
+        profiling: bool,
     ) -> Result<LogicEvalResult> {
-        let rules = ground_wfs_program(program)?;
-        let mut pir = PirGraph::new();
-        let wfs = evaluate_wfs_rules(&rules, &mut pir, &WfsConfig::default())?;
-        let mut queries = Vec::with_capacity(program.queries.len());
+        let base_store = self.clone_relation_store(&provider, base_executor.store())?;
+        let upper_executor =
+            self.run_wfs_gpu_pass(&provider, &wfs.overapprox, &base_store, &[], profiling)?;
+        let mut upper_store = self.clone_relation_store(&provider, upper_executor.store())?;
+        let mut lower_store = self.clone_relation_store(&provider, &base_store)?;
 
-        for (i, query) in program.queries.iter().enumerate() {
-            let columns = query_output_vars(query);
-            let schema = query_result_schema(&self.schemas, query, &columns)?;
-            let mut rows = Vec::new();
-            for atom in wfs.true_set.keys() {
-                if atom.predicate == query.atom.predicate {
-                    if let Some(row) = project_query_row(&query.atom, atom, &columns)? {
-                        rows.push(row);
-                    }
-                }
+        for _ in 0..wfs.max_iterations {
+            let upper_fixed: Vec<_> = wfs
+                .upper_fixed_names
+                .iter()
+                .map(|(source, fixed)| (source.as_str(), fixed.as_str(), &upper_store))
+                .collect();
+            let lower_executor =
+                self.run_wfs_gpu_pass(&provider, &wfs.lower, &base_store, &upper_fixed, profiling)?;
+            let next_lower = self.clone_relation_store(&provider, lower_executor.store())?;
+
+            let lower_fixed: Vec<_> = wfs
+                .lower_fixed_names
+                .iter()
+                .map(|(source, fixed)| (source.as_str(), fixed.as_str(), &next_lower))
+                .collect();
+            let next_upper_executor =
+                self.run_wfs_gpu_pass(&provider, &wfs.upper, &base_store, &lower_fixed, profiling)?;
+            let next_upper = self.clone_relation_store(&provider, next_upper_executor.store())?;
+
+            let lower_converged =
+                self.wfs_gpu_stores_equivalent(&provider, wfs, &lower_store, &next_lower)?;
+            let upper_converged =
+                self.wfs_gpu_stores_equivalent(&provider, wfs, &upper_store, &next_upper)?;
+            lower_store = next_lower;
+            upper_store = next_upper;
+            if lower_converged && upper_converged {
+                return self.logic_result_from_store(provider.as_ref(), &lower_store, None);
             }
-            rows.sort();
-            rows.dedup();
-            let buffer = values_to_buffer(provider, schema.clone(), &rows)?;
-            queries.push(LogicQueryResult {
-                relation_name: format!("__xlog_query_{i}"),
-                sort_labels: columns.clone(),
-                columns,
-                buffer,
-            });
         }
 
-        Ok(LogicEvalResult {
-            queries,
-            stats: None,
+        Err(XlogError::ResourceExhausted {
+            context: "GPU-native WFS alternating fixpoint iterations".to_string(),
+            estimated_bytes: wfs.max_iterations as u64,
+            budget_bytes: wfs.max_iterations as u64,
         })
+    }
+
+    fn run_wfs_gpu_pass(
+        &self,
+        provider: &Arc<CudaKernelProvider>,
+        pass: &WfsGpuOrdinaryPlan,
+        base_store: &RelationStore,
+        fixed_relations: &[(&str, &str, &RelationStore)],
+        profiling: bool,
+    ) -> Result<Executor> {
+        let mut executor = Executor::new(provider.clone());
+        executor.set_profiling(profiling);
+        for (name, rel_id) in &pass.rel_ids {
+            executor.register_relation(*rel_id, name);
+        }
+        for (name, schema) in &pass.schemas {
+            executor
+                .store_mut()
+                .put(name, provider.create_empty_buffer(schema.clone())?);
+        }
+        for name in base_store.names() {
+            if pass.schemas.contains_key(name) {
+                let buffer = base_store.get(name).ok_or_else(|| {
+                    XlogError::Execution(format!("WFS base relation {name} disappeared"))
+                })?;
+                executor
+                    .store_mut()
+                    .put(name, provider.clone_buffer(buffer)?);
+            }
+        }
+        for &(source, fixed, source_store) in fixed_relations {
+            let buffer =
+                self.wfs_gpu_clone_or_empty(provider, &pass.schemas, source, source_store)?;
+            executor.store_mut().put(fixed, buffer);
+        }
+        executor.execute_plan(&pass.plan)?;
+        Ok(executor)
+    }
+
+    fn wfs_gpu_clone_or_empty(
+        &self,
+        provider: &Arc<CudaKernelProvider>,
+        schemas: &HashMap<String, Schema>,
+        name: &str,
+        store: &RelationStore,
+    ) -> Result<CudaBuffer> {
+        if let Some(buffer) = store.get(name) {
+            return provider.clone_buffer(buffer);
+        }
+        let schema = schemas
+            .get(name)
+            .or_else(|| self.schemas.get(name))
+            .ok_or_else(|| XlogError::Execution(format!("missing WFS GPU schema for {name}")))?;
+        provider.create_empty_buffer(schema.clone())
+    }
+
+    fn wfs_gpu_stores_equivalent(
+        &self,
+        provider: &Arc<CudaKernelProvider>,
+        wfs: &EpistemicWfsGpuPlan,
+        left: &RelationStore,
+        right: &RelationStore,
+    ) -> Result<bool> {
+        for pred in &wfs.intensional_predicates {
+            let left_buf = self.wfs_gpu_clone_or_empty(provider, &wfs.lower.schemas, pred, left)?;
+            let right_buf =
+                self.wfs_gpu_clone_or_empty(provider, &wfs.lower.schemas, pred, right)?;
+            if !buffers_gpu_set_equivalent(provider.as_ref(), &left_buf, &right_buf)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn ordinary_plan(&self, context: &str) -> Result<&ExecutionPlan> {
         match &self.plan {
             LogicExecutionPlan::Ordinary(plan) => Ok(plan),
-            LogicExecutionPlan::EpistemicWfs(_)
+            LogicExecutionPlan::EpistemicWfsGpu(_)
             | LogicExecutionPlan::EpistemicSingle(_)
             | LogicExecutionPlan::EpistemicSplit(_)
             | LogicExecutionPlan::EpistemicStratified(_) => {
@@ -1367,8 +1480,11 @@ impl LogicProgram {
                     }
                 }
             }
-            LogicExecutionPlan::Ordinary(_) | LogicExecutionPlan::EpistemicWfs(_) => {
-                unreachable!("ordinary/WFS plans are handled earlier")
+            LogicExecutionPlan::EpistemicWfsGpu(_) => {
+                unreachable!("GPU WFS plans are handled earlier")
+            }
+            LogicExecutionPlan::Ordinary(_) => {
+                unreachable!("ordinary plans are handled earlier")
             }
         }
 
@@ -1469,587 +1585,186 @@ fn normalize_program(program: Program) -> Result<Program> {
     Ok(desugar_shared_variable_epistemic_constraints(listed))
 }
 
-fn infer_wfs_schemas(program: &Program) -> Result<HashMap<String, Schema>> {
-    let mut schemas = HashMap::new();
-    let domains: HashMap<String, ScalarType> = program
-        .domains
-        .iter()
-        .map(|domain| (domain.name.clone(), domain.typ))
-        .collect();
-    for decl in &program.predicates {
-        schemas.insert(decl.name.clone(), schema_from_pred_decl(decl, &domains)?);
-    }
-    for fact in program.facts() {
-        schemas
-            .entry(fact.head.predicate.clone())
-            .or_insert_with(|| schema_from_terms(&fact.head.terms));
-    }
-    for rule in &program.rules {
-        schemas
-            .entry(rule.head.predicate.clone())
-            .or_insert_with(|| schema_from_terms(&rule.head.terms));
-        for lit in &rule.body {
-            if let BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) = lit {
-                schemas
-                    .entry(atom.predicate.clone())
-                    .or_insert_with(|| schema_from_terms(&atom.terms));
-            }
-        }
-    }
-    Ok(schemas)
+enum WfsNegationTransform<'a> {
+    Drop,
+    Rename(&'a HashMap<String, String>),
 }
 
-fn ground_wfs_program(program: &Program) -> Result<Vec<WfsRule>> {
-    let universe = collect_wfs_universe(program)?;
-    let mut out = Vec::new();
-    let mut pir = PirGraph::new();
-    let true_node = pir.const_true();
-    for rule in &program.rules {
-        let vars = rule_variables(rule);
-        if vars.is_empty() {
-            if let Some(grounded) = ground_wfs_rule(rule, &HashMap::new(), true_node)? {
-                out.push(grounded);
+fn compile_epistemic_wfs_gpu_plan(program: &Program) -> Result<EpistemicWfsGpuPlan> {
+    if !program.constraints.is_empty() {
+        return Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "GPU WFS integrity constraints".to_string(),
+            context: "cyclic WFS execution currently supports reduced normal rules only"
+                .to_string(),
+        });
+    }
+
+    let negated = wfs_negated_predicates(program);
+    let upper_fixed_names = wfs_fixed_names(program, &negated, "__wfs_upper");
+    let lower_fixed_names = wfs_fixed_names(program, &negated, "__wfs_lower");
+
+    let overapprox_program = wfs_transform_program(program, WfsNegationTransform::Drop)?;
+    let lower_program =
+        wfs_transform_program(program, WfsNegationTransform::Rename(&upper_fixed_names))?;
+    let upper_program =
+        wfs_transform_program(program, WfsNegationTransform::Rename(&lower_fixed_names))?;
+
+    Ok(EpistemicWfsGpuPlan {
+        overapprox: compile_wfs_gpu_ordinary_plan(&overapprox_program)?,
+        lower: compile_wfs_gpu_ordinary_plan(&lower_program)?,
+        upper: compile_wfs_gpu_ordinary_plan(&upper_program)?,
+        intensional_predicates: wfs_intensional_predicates(program),
+        upper_fixed_names,
+        lower_fixed_names,
+        max_iterations: (program.directives.max_recursion_depth_or_default() as usize).max(1),
+    })
+}
+
+fn compile_wfs_gpu_ordinary_plan(program: &Program) -> Result<WfsGpuOrdinaryPlan> {
+    let mut compiler = Compiler::new();
+    let plan = compiler.compile_program(program)?;
+    Ok(WfsGpuOrdinaryPlan {
+        plan,
+        schemas: compiler.schemas().clone(),
+        rel_ids: compiler.rel_ids().clone(),
+    })
+}
+
+fn wfs_transform_program(program: &Program, negation: WfsNegationTransform<'_>) -> Result<Program> {
+    let mut out = program.clone();
+    out.rules = program
+        .rules
+        .iter()
+        .map(|rule| {
+            let mut rule = rule.clone();
+            let mut body = Vec::with_capacity(rule.body.len());
+            for lit in &rule.body {
+                match (lit, &negation) {
+                    (BodyLiteral::Negated(_), WfsNegationTransform::Drop) => {}
+                    (BodyLiteral::Negated(atom), WfsNegationTransform::Rename(names)) => {
+                        let mut atom = atom.clone();
+                        atom.predicate = names.get(&atom.predicate).cloned().ok_or_else(|| {
+                            XlogError::Execution(format!(
+                                "missing WFS fixed relation name for {}",
+                                atom.predicate
+                            ))
+                        })?;
+                        body.push(BodyLiteral::Negated(atom));
+                    }
+                    _ => body.push(lit.clone()),
+                }
             }
-            continue;
-        }
-        if universe.is_empty() {
-            continue;
-        }
-        let mut assignments = Vec::new();
-        enumerate_wfs_assignments(&vars, &universe, 0, &mut HashMap::new(), &mut assignments)?;
-        for assignment in assignments {
-            if let Some(grounded) = ground_wfs_rule(rule, &assignment, true_node)? {
-                out.push(grounded);
-            }
-        }
+            rule.body = body;
+            Ok(rule)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if let WfsNegationTransform::Rename(names) = negation {
+        add_wfs_fixed_predicates(&mut out, names)?;
     }
     Ok(out)
 }
 
-fn collect_wfs_universe(program: &Program) -> Result<Vec<Value>> {
-    let mut values = BTreeSet::new();
-    for rule in &program.rules {
-        collect_atom_constants(&rule.head, &mut values)?;
-        for lit in &rule.body {
-            match lit {
-                BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
-                    collect_atom_constants(atom, &mut values)?;
-                }
-                BodyLiteral::Epistemic(epistemic) => {
-                    collect_atom_constants(&epistemic.atom, &mut values)?;
-                }
-                BodyLiteral::Comparison(cmp) => {
-                    collect_term_constant(&cmp.left, &mut values)?;
-                    collect_term_constant(&cmp.right, &mut values)?;
-                }
-                BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {}
-            }
-        }
-    }
-    Ok(values.into_iter().collect())
-}
-
-fn collect_atom_constants(atom: &Atom, values: &mut BTreeSet<Value>) -> Result<()> {
-    for term in &atom.terms {
-        collect_term_constant(term, values)?;
-    }
-    Ok(())
-}
-
-fn collect_term_constant(term: &Term, values: &mut BTreeSet<Value>) -> Result<()> {
-    match term {
-        Term::Variable(_) | Term::Anonymous | Term::Aggregate(_) => {}
-        Term::Integer(_) | Term::Float(_) | Term::String(_) | Term::Symbol(_) => {
-            values.insert(value_from_term(term)?);
-        }
-        Term::List(items) => {
-            for item in items {
-                collect_term_constant(item, values)?;
-            }
-        }
-        Term::Cons { head, tail } => {
-            collect_term_constant(head, values)?;
-            collect_term_constant(tail, values)?;
-        }
-        Term::Compound { args, .. } => {
-            for arg in args {
-                collect_term_constant(arg, values)?;
-            }
-        }
-        Term::PredRef(_) => {}
-    }
-    Ok(())
-}
-
-fn rule_variables(rule: &Rule) -> Vec<String> {
-    let mut vars = BTreeSet::new();
-    for name in rule.head.terms.iter().flat_map(Term::variables) {
-        vars.insert(name.to_string());
-    }
-    for lit in &rule.body {
-        match lit {
-            BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
-                for name in atom.terms.iter().flat_map(Term::variables) {
-                    vars.insert(name.to_string());
-                }
-            }
-            BodyLiteral::Epistemic(epistemic) => {
-                for name in epistemic.atom.terms.iter().flat_map(Term::variables) {
-                    vars.insert(name.to_string());
-                }
-            }
-            BodyLiteral::Comparison(cmp) => {
-                for name in cmp
-                    .left
-                    .variables()
-                    .into_iter()
-                    .chain(cmp.right.variables())
-                {
-                    vars.insert(name.to_string());
-                }
-            }
-            BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {}
-        }
-    }
-    vars.into_iter().collect()
-}
-
-fn enumerate_wfs_assignments(
-    vars: &[String],
-    universe: &[Value],
-    idx: usize,
-    current: &mut HashMap<String, Value>,
-    out: &mut Vec<HashMap<String, Value>>,
-) -> Result<()> {
-    const MAX_WFS_GROUND_ASSIGNMENTS: usize = 250_000;
-    if out.len() > MAX_WFS_GROUND_ASSIGNMENTS {
-        return Err(XlogError::ResourceExhausted {
-            context: "WFS grounding assignments".to_string(),
-            estimated_bytes: out.len() as u64,
-            budget_bytes: MAX_WFS_GROUND_ASSIGNMENTS as u64,
-        });
-    }
-    if idx == vars.len() {
-        out.push(current.clone());
-        return Ok(());
-    }
-    for value in universe {
-        current.insert(vars[idx].clone(), value.clone());
-        enumerate_wfs_assignments(vars, universe, idx + 1, current, out)?;
-    }
-    current.remove(&vars[idx]);
-    Ok(())
-}
-
-fn ground_wfs_rule(
-    rule: &Rule,
-    assignment: &HashMap<String, Value>,
-    provenance: xlog_prob::PirNodeId,
-) -> Result<Option<WfsRule>> {
-    let mut body = Vec::new();
-    for lit in &rule.body {
-        match lit {
-            BodyLiteral::Positive(atom) => {
-                body.push(WfsLiteral::Positive(ground_wfs_atom(atom, assignment)?));
-            }
-            BodyLiteral::Negated(atom) => {
-                body.push(WfsLiteral::Negative(ground_wfs_atom(atom, assignment)?));
-            }
-            BodyLiteral::Comparison(cmp) => {
-                if !eval_wfs_comparison(cmp.op, &cmp.left, &cmp.right, assignment)? {
-                    return Ok(None);
-                }
-            }
-            BodyLiteral::Epistemic(lit) => {
-                return Err(XlogError::UnsupportedEpistemicConstruct {
-                    construct: "WFS epistemic residue".to_string(),
-                    context: format!("{:?} {}", lit.op, lit.atom.predicate),
-                });
-            }
-            BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {
-                return Err(XlogError::UnsupportedEpistemicConstruct {
-                    construct: "WFS grounding literal".to_string(),
-                    context: format!("{lit:?}"),
-                });
-            }
-        }
-    }
-    Ok(Some(WfsRule::new(
-        ground_wfs_atom(&rule.head, assignment)?,
-        body,
-        provenance,
-    )))
-}
-
-fn ground_wfs_atom(atom: &Atom, assignment: &HashMap<String, Value>) -> Result<WfsAtom> {
-    let mut args = Vec::with_capacity(atom.terms.len());
-    for term in &atom.terms {
-        args.push(ground_wfs_value(term, assignment)?);
-    }
-    Ok(WfsAtom::new(atom.predicate.clone(), args))
-}
-
-fn ground_wfs_value(term: &Term, assignment: &HashMap<String, Value>) -> Result<Value> {
-    match term {
-        Term::Variable(name) => assignment
-            .get(name)
-            .cloned()
-            .ok_or_else(|| XlogError::UnsafeVariable(format!("{} in WFS grounding", name))),
-        _ => value_from_term(term),
-    }
-}
-
-fn value_from_term(term: &Term) -> Result<Value> {
-    match term {
-        Term::Integer(value) => Ok(Value::I64(*value)),
-        Term::Float(value) => Ok(Value::F64(value.to_bits())),
-        Term::String(value) => Ok(Value::String(value.clone())),
-        Term::Symbol(value) => Ok(Value::Symbol(*value)),
-        other => Err(XlogError::UnsupportedEpistemicConstruct {
-            construct: "WFS ground term".to_string(),
-            context: format!("{other:?}"),
-        }),
-    }
-}
-
-fn eval_wfs_comparison(
-    op: CompOp,
-    left: &Term,
-    right: &Term,
-    assignment: &HashMap<String, Value>,
-) -> Result<bool> {
-    let left = ground_wfs_value(left, assignment)?;
-    let right = ground_wfs_value(right, assignment)?;
-    Ok(match (left, right) {
-        (Value::I64(left), Value::I64(right)) => compare_wfs_i64(left, op, right),
-        (Value::F64(left), Value::F64(right)) => {
-            let left = f64::from_bits(left);
-            let right = f64::from_bits(right);
-            match op {
-                CompOp::Eq => left == right,
-                CompOp::Ne => left != right,
-                CompOp::Lt => left < right,
-                CompOp::Le => left <= right,
-                CompOp::Gt => left > right,
-                CompOp::Ge => left >= right,
-            }
-        }
-        (Value::String(left), Value::String(right)) => match op {
-            CompOp::Eq => left == right,
-            CompOp::Ne => left != right,
-            _ => false,
-        },
-        (Value::Symbol(left), Value::Symbol(right)) => match op {
-            CompOp::Eq => left == right,
-            CompOp::Ne => left != right,
-            _ => false,
-        },
-        _ => false,
-    })
-}
-
-fn compare_wfs_i64(left: i64, op: CompOp, right: i64) -> bool {
-    match op {
-        CompOp::Eq => left == right,
-        CompOp::Ne => left != right,
-        CompOp::Lt => left < right,
-        CompOp::Le => left <= right,
-        CompOp::Gt => left > right,
-        CompOp::Ge => left >= right,
-    }
-}
-
-fn query_result_schema(
-    schemas: &HashMap<String, Schema>,
-    query: &Query,
-    columns: &[String],
-) -> Result<Schema> {
-    let source = schemas.get(&query.atom.predicate).ok_or_else(|| {
-        XlogError::Execution(format!(
-            "missing WFS query schema for {}",
-            query.atom.predicate
-        ))
-    })?;
-    let mut out = Vec::new();
-    for name in columns {
-        let idx = query
-            .atom
-            .terms
-            .iter()
-            .position(|term| matches!(term, Term::Variable(var) if var == name))
-            .ok_or_else(|| XlogError::UnsafeVariable(name.clone()))?;
-        let typ = source
-            .column_type(idx)
-            .ok_or_else(|| XlogError::Execution(format!("missing WFS query column {idx} type")))?;
-        out.push((name.clone(), typ));
-    }
-    Ok(Schema::new(out))
-}
-
-fn project_query_row(
-    query: &Atom,
-    atom: &WfsAtom,
-    columns: &[String],
-) -> Result<Option<Vec<Value>>> {
-    if query.terms.len() != atom.args.len() {
-        return Ok(None);
-    }
-    let mut bindings = HashMap::new();
-    for (term, value) in query.terms.iter().zip(&atom.args) {
-        match term {
-            Term::Variable(name) => {
-                if let Some(existing) = bindings.get(name) {
-                    if existing != value {
-                        return Ok(None);
-                    }
-                } else {
-                    bindings.insert(name.clone(), value.clone());
-                }
-            }
-            Term::Anonymous => {}
-            _ if value_from_term(term)? == *value => {}
-            _ => return Ok(None),
-        }
-    }
-    columns
+fn add_wfs_fixed_predicates(program: &mut Program, names: &HashMap<String, String>) -> Result<()> {
+    let existing: BTreeSet<String> = program
+        .predicates
         .iter()
-        .map(|name| {
-            bindings
-                .get(name)
-                .cloned()
-                .ok_or_else(|| XlogError::UnsafeVariable(name.clone()))
-        })
-        .collect::<Result<Vec<_>>>()
-        .map(Some)
-}
-
-fn values_to_buffer(
-    provider: &CudaKernelProvider,
-    schema: Schema,
-    rows: &[Vec<Value>],
-) -> Result<CudaBuffer> {
-    if schema.arity() == 0 {
-        return if rows.is_empty() {
-            provider.create_empty_buffer(schema)
-        } else {
-            provider.create_zero_arity_buffer(
-                schema,
-                u32::try_from(rows.len()).map_err(|_| XlogError::ResourceExhausted {
-                    context: "WFS zero-arity output rows".to_string(),
-                    estimated_bytes: rows.len() as u64,
-                    budget_bytes: u32::MAX as u64,
-                })?,
-            )
-        };
-    }
-    let mut columns = vec![Vec::new(); schema.arity()];
-    for row in rows {
-        if row.len() != schema.arity() {
-            return Err(XlogError::Execution(format!(
-                "WFS row arity mismatch: got {}, expected {}",
-                row.len(),
-                schema.arity()
-            )));
-        }
-        for (idx, value) in row.iter().enumerate() {
-            let typ = schema.column_type(idx).ok_or_else(|| {
-                XlogError::Execution(format!("missing WFS output column {idx} type"))
-            })?;
-            push_value_bytes(&mut columns[idx], value, typ)?;
-        }
-    }
-    let slices: Vec<&[u8]> = columns.iter().map(Vec::as_slice).collect();
-    provider.create_buffer_from_slices(&slices, schema)
-}
-
-fn push_value_bytes(out: &mut Vec<u8>, value: &Value, typ: ScalarType) -> Result<()> {
-    match (typ, value) {
-        (ScalarType::U32, Value::I64(value)) => {
-            out.extend_from_slice(
-                &u32::try_from(*value)
-                    .map_err(|_| {
-                        XlogError::Execution(format!("u32 out of range in WFS output: {value}"))
-                    })?
-                    .to_le_bytes(),
-            );
-        }
-        (ScalarType::U64, Value::I64(value)) => {
-            out.extend_from_slice(
-                &u64::try_from(*value)
-                    .map_err(|_| {
-                        XlogError::Execution(format!("u64 out of range in WFS output: {value}"))
-                    })?
-                    .to_le_bytes(),
-            );
-        }
-        (ScalarType::I32, Value::I64(value)) => {
-            out.extend_from_slice(
-                &i32::try_from(*value)
-                    .map_err(|_| {
-                        XlogError::Execution(format!("i32 out of range in WFS output: {value}"))
-                    })?
-                    .to_le_bytes(),
-            );
-        }
-        (ScalarType::I64, Value::I64(value)) => out.extend_from_slice(&value.to_le_bytes()),
-        (ScalarType::F32, Value::F64(value)) => {
-            out.extend_from_slice(&(f64::from_bits(*value) as f32).to_le_bytes());
-        }
-        (ScalarType::F64, Value::F64(value)) => out.extend_from_slice(&value.to_le_bytes()),
-        (ScalarType::Symbol, Value::Symbol(value)) => out.extend_from_slice(&value.to_le_bytes()),
-        (ScalarType::Symbol, Value::String(value)) => {
-            out.extend_from_slice(&symbol::intern(value).to_le_bytes());
-        }
-        (ScalarType::Bool, Value::I64(value)) if *value == 0 || *value == 1 => {
-            out.push(*value as u8);
-        }
-        (expected, got) => {
-            return Err(XlogError::Execution(format!(
-                "WFS output type mismatch: expected {expected:?}, got {got:?}"
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn augment_same_name_multi_arity_schemas(
-    program: &Program,
-    schemas: &mut HashMap<String, Schema>,
-) -> Result<()> {
-    let arities = predicate_arities(program);
-    let domains: HashMap<String, ScalarType> = program
-        .domains
-        .iter()
-        .map(|domain| (domain.name.clone(), domain.typ))
+        .map(|decl| decl.name.clone())
         .collect();
-
-    for decl in &program.predicates {
-        let Some(pred_arities) = arities.get(&decl.name) else {
-            continue;
+    for (source, fixed) in names {
+        if existing.contains(fixed) {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU WFS fixed relation name".to_string(),
+                context: format!(
+                    "internal fixed relation {fixed} collides with a declared predicate"
+                ),
+            });
+        }
+        let Some(decl) = program.predicates.iter().find(|decl| decl.name == *source) else {
+            return Err(XlogError::UnsupportedEpistemicConstruct {
+                construct: "GPU WFS fixed relation schema".to_string(),
+                context: format!(
+                    "negated predicate {source} has no declaration to type fixed relation {fixed}"
+                ),
+            });
         };
-        if pred_arities.len() <= 1 {
-            continue;
-        }
-        let key = arity_qualified_name(&decl.name, pred_decl_arity(decl));
-        schemas.insert(key, schema_from_pred_decl(decl, &domains)?);
+        let mut fixed_decl = decl.clone();
+        fixed_decl.name = fixed.clone();
+        program.predicates.push(fixed_decl);
     }
-
-    for fact in program.facts() {
-        let pred = fact.head.predicate.as_str();
-        let arity = fact.head.terms.len();
-        let Some(pred_arities) = arities.get(pred) else {
-            continue;
-        };
-        if pred_arities.len() <= 1 {
-            continue;
-        }
-        let key = arity_qualified_name(pred, arity);
-        schemas
-            .entry(key)
-            .or_insert_with(|| schema_from_terms(&fact.head.terms));
-    }
-
-    for rule in &program.rules {
-        augment_atom_schema_if_needed(&rule.head, &arities, schemas);
-        for literal in &rule.body {
-            match literal {
-                BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
-                    augment_atom_schema_if_needed(atom, &arities, schemas);
-                }
-                BodyLiteral::Epistemic(epistemic) => {
-                    augment_atom_schema_if_needed(&epistemic.atom, &arities, schemas);
-                }
-                BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {}
-            }
-        }
-    }
-
-    for query in &program.queries {
-        augment_atom_schema_if_needed(&query.atom, &arities, schemas);
-    }
-
     Ok(())
 }
 
-fn augment_atom_schema_if_needed(
-    atom: &Atom,
-    arities: &HashMap<String, BTreeSet<usize>>,
-    schemas: &mut HashMap<String, Schema>,
-) {
-    let Some(pred_arities) = arities.get(&atom.predicate) else {
-        return;
-    };
-    if pred_arities.len() <= 1 {
-        return;
-    }
-    let key = arity_qualified_name(&atom.predicate, atom.terms.len());
-    schemas
-        .entry(key)
-        .or_insert_with(|| schema_from_terms(&atom.terms));
+fn wfs_negated_predicates(program: &Program) -> BTreeSet<String> {
+    program
+        .rules
+        .iter()
+        .flat_map(|rule| &rule.body)
+        .filter_map(|lit| match lit {
+            BodyLiteral::Negated(atom) => Some(atom.predicate.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
-fn predicate_arities(program: &Program) -> HashMap<String, BTreeSet<usize>> {
-    let mut arities = HashMap::new();
-    for decl in &program.predicates {
-        add_predicate_arity(&mut arities, &decl.name, pred_decl_arity(decl));
-    }
-    for rule in &program.rules {
-        add_predicate_arity(&mut arities, &rule.head.predicate, rule.head.terms.len());
-        for literal in &rule.body {
-            match literal {
-                BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
-                    add_predicate_arity(&mut arities, &atom.predicate, atom.terms.len());
+fn wfs_intensional_predicates(program: &Program) -> Vec<String> {
+    program
+        .proper_rules()
+        .map(|rule| rule.head.predicate.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn wfs_fixed_names(
+    program: &Program,
+    predicates: &BTreeSet<String>,
+    prefix: &str,
+) -> HashMap<String, String> {
+    let mut reserved: BTreeSet<String> = program
+        .predicates
+        .iter()
+        .map(|decl| decl.name.clone())
+        .collect();
+    let mut names = HashMap::new();
+    for pred in predicates {
+        let mut candidate = format!("{prefix}_{pred}");
+        if reserved.contains(&candidate) {
+            let mut suffix = 0usize;
+            loop {
+                let suffixed = format!("{prefix}_{suffix}_{pred}");
+                if !reserved.contains(&suffixed) {
+                    candidate = suffixed;
+                    break;
                 }
-                BodyLiteral::Epistemic(epistemic) => {
-                    add_predicate_arity(
-                        &mut arities,
-                        &epistemic.atom.predicate,
-                        epistemic.atom.terms.len(),
-                    );
-                }
-                BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {}
+                suffix += 1;
             }
         }
+        reserved.insert(candidate.clone());
+        names.insert(pred.clone(), candidate);
     }
-    for query in &program.queries {
-        add_predicate_arity(&mut arities, &query.atom.predicate, query.atom.terms.len());
-    }
-    arities
+    names
 }
 
-fn add_predicate_arity(
-    arities: &mut HashMap<String, BTreeSet<usize>>,
-    predicate: &str,
-    arity: usize,
-) {
-    arities
-        .entry(predicate.to_string())
-        .or_default()
-        .insert(arity);
-}
-
-fn arity_qualified_name_if_needed(
-    predicate: &str,
-    arity: usize,
-    arities: &HashMap<String, BTreeSet<usize>>,
-) -> String {
-    if arities.get(predicate).is_some_and(|items| items.len() > 1) {
-        arity_qualified_name(predicate, arity)
-    } else {
-        predicate.to_string()
+fn wfs_plan_combined_schemas(plan: &EpistemicWfsGpuPlan) -> HashMap<String, Schema> {
+    let mut schemas = HashMap::new();
+    for ordinary in [&plan.overapprox, &plan.lower, &plan.upper] {
+        for (name, schema) in &ordinary.schemas {
+            schemas
+                .entry(name.clone())
+                .or_insert_with(|| schema.clone());
+        }
     }
+    schemas
 }
 
-fn arity_qualified_name(predicate: &str, arity: usize) -> String {
-    format!("{predicate}/{arity}")
-}
-
-fn pred_decl_arity(decl: &xlog_logic::ast::PredDecl) -> usize {
-    if decl.columns.is_empty() {
-        decl.types.len()
-    } else {
-        decl.columns.len()
+fn wfs_plan_combined_rel_ids(plan: &EpistemicWfsGpuPlan) -> Result<HashMap<String, RelId>> {
+    let mut rel_ids = HashMap::new();
+    for ordinary in [&plan.overapprox, &plan.lower, &plan.upper] {
+        for (name, rel_id) in &ordinary.rel_ids {
+            rel_ids.insert(name.clone(), *rel_id);
+        }
     }
+    Ok(rel_ids)
 }
 
 fn schema_from_pred_decl(
@@ -2268,6 +1983,146 @@ fn distinct_body_variables(body: &[BodyLiteral]) -> Vec<String> {
     order
 }
 
+fn augment_same_name_multi_arity_schemas(
+    program: &Program,
+    schemas: &mut HashMap<String, Schema>,
+) -> Result<()> {
+    let arities = predicate_arities(program);
+    let domains: HashMap<String, ScalarType> = program
+        .domains
+        .iter()
+        .map(|domain| (domain.name.clone(), domain.typ))
+        .collect();
+
+    for decl in &program.predicates {
+        let Some(pred_arities) = arities.get(&decl.name) else {
+            continue;
+        };
+        if pred_arities.len() <= 1 {
+            continue;
+        }
+        let key = arity_qualified_name(&decl.name, pred_decl_arity(decl));
+        schemas.insert(key, schema_from_pred_decl(decl, &domains)?);
+    }
+
+    for fact in program.facts() {
+        let pred = fact.head.predicate.as_str();
+        let arity = fact.head.terms.len();
+        let Some(pred_arities) = arities.get(pred) else {
+            continue;
+        };
+        if pred_arities.len() <= 1 {
+            continue;
+        }
+        let key = arity_qualified_name(pred, arity);
+        schemas
+            .entry(key)
+            .or_insert_with(|| schema_from_terms(&fact.head.terms));
+    }
+
+    for rule in &program.rules {
+        augment_atom_schema_if_needed(&rule.head, &arities, schemas);
+        for literal in &rule.body {
+            match literal {
+                BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
+                    augment_atom_schema_if_needed(atom, &arities, schemas);
+                }
+                BodyLiteral::Epistemic(epistemic) => {
+                    augment_atom_schema_if_needed(&epistemic.atom, &arities, schemas);
+                }
+                BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {}
+            }
+        }
+    }
+
+    for query in &program.queries {
+        augment_atom_schema_if_needed(&query.atom, &arities, schemas);
+    }
+
+    Ok(())
+}
+
+fn augment_atom_schema_if_needed(
+    atom: &Atom,
+    arities: &HashMap<String, BTreeSet<usize>>,
+    schemas: &mut HashMap<String, Schema>,
+) {
+    let Some(pred_arities) = arities.get(&atom.predicate) else {
+        return;
+    };
+    if pred_arities.len() <= 1 {
+        return;
+    }
+    let key = arity_qualified_name(&atom.predicate, atom.terms.len());
+    schemas
+        .entry(key)
+        .or_insert_with(|| schema_from_terms(&atom.terms));
+}
+
+fn predicate_arities(program: &Program) -> HashMap<String, BTreeSet<usize>> {
+    let mut arities = HashMap::new();
+    for decl in &program.predicates {
+        add_predicate_arity(&mut arities, &decl.name, pred_decl_arity(decl));
+    }
+    for rule in &program.rules {
+        add_predicate_arity(&mut arities, &rule.head.predicate, rule.head.terms.len());
+        for literal in &rule.body {
+            match literal {
+                BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
+                    add_predicate_arity(&mut arities, &atom.predicate, atom.terms.len());
+                }
+                BodyLiteral::Epistemic(epistemic) => {
+                    add_predicate_arity(
+                        &mut arities,
+                        &epistemic.atom.predicate,
+                        epistemic.atom.terms.len(),
+                    );
+                }
+                BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {}
+            }
+        }
+    }
+    for query in &program.queries {
+        add_predicate_arity(&mut arities, &query.atom.predicate, query.atom.terms.len());
+    }
+    arities
+}
+
+fn add_predicate_arity(
+    arities: &mut HashMap<String, BTreeSet<usize>>,
+    predicate: &str,
+    arity: usize,
+) {
+    arities
+        .entry(predicate.to_string())
+        .or_default()
+        .insert(arity);
+}
+
+fn arity_qualified_name_if_needed(
+    predicate: &str,
+    arity: usize,
+    arities: &HashMap<String, BTreeSet<usize>>,
+) -> String {
+    if arities.get(predicate).is_some_and(|items| items.len() > 1) {
+        arity_qualified_name(predicate, arity)
+    } else {
+        predicate.to_string()
+    }
+}
+
+fn arity_qualified_name(predicate: &str, arity: usize) -> String {
+    format!("{predicate}/{arity}")
+}
+
+fn pred_decl_arity(decl: &xlog_logic::ast::PredDecl) -> usize {
+    if decl.columns.is_empty() {
+        decl.types.len()
+    } else {
+        decl.columns.len()
+    }
+}
+
 fn program_has_epistemic_literals(program: &Program) -> bool {
     program.rules.iter().any(|rule| {
         rule.body
@@ -2353,7 +2208,14 @@ fn epistemic_relation_ids(plan: &LogicExecutionPlan) -> Result<HashMap<String, R
                 }
             }
         }
-        LogicExecutionPlan::Ordinary(_) | LogicExecutionPlan::EpistemicWfs(_) => {}
+        LogicExecutionPlan::EpistemicWfsGpu(wfs) => {
+            for plan in [&wfs.overapprox, &wfs.lower, &wfs.upper] {
+                for (name, rel_id) in &plan.rel_ids {
+                    rel_ids.insert(name.clone(), *rel_id);
+                }
+            }
+        }
+        LogicExecutionPlan::Ordinary(_) => {}
     }
     Ok(rel_ids)
 }
@@ -2897,32 +2759,116 @@ fn collect_eir_epistemic_literals(program: &Program) -> Vec<xlog_ir::EirEpistemi
     lits
 }
 
-/// JSON summary for an epistemic source that reduced to an ordinary executable plan
-/// (a Case-A recursive epistemic fixpoint). No GPU epistemic plan exists, but the
-/// modal literals are recorded and CPU fallback is zero by construction (the
-/// reduced recursion runs on the ordinary semi-naive engine).
-fn epistemic_provenance_summary_json(prov: &EpistemicProvenance) -> String {
+/// JSON summary for an epistemic source that reduced to a high-level recursive
+/// execution plan without single-pass epistemic GPU candidate units. Case-A/B
+/// stratified reductions use the ordinary semi-naive engine; cyclic negated-modal
+/// reductions use the GPU-native WFS alternating-fixpoint plan. In both cases the
+/// modal literals are recorded and CPU fallback is zero by construction.
+fn epistemic_provenance_summary_json(
+    plan_kind: &str,
+    prov: &EpistemicProvenance,
+    max_iterations: Option<usize>,
+    wfs: Option<&EpistemicWfsGpuPlan>,
+) -> String {
     let literals = prov
         .literals
         .iter()
         .map(epistemic_literal_json)
         .collect::<Vec<_>>()
         .join(",");
+    let wfs_fixed_relations = wfs
+        .map(wfs_fixed_relations_json)
+        .unwrap_or_else(|| "null".to_string());
+    let wfs_convergence_predicates = wfs
+        .map(wfs_convergence_predicates_json)
+        .unwrap_or_else(|| "null".to_string());
+    let wfs_gpu_passes = if wfs.is_some() {
+        "[\"overapprox\",\"lower\",\"upper\"]"
+    } else {
+        "null"
+    };
+    let host_wfs_fallback_allowed = if wfs.is_some() { "false" } else { "null" };
     let body = format!(
-        "{{\"plan_kind\":\"epistemic_reduced_ordinary\",\"reduction\":\"{}\",\
-\"epistemic_literals\":[{}],\"cpu_fallback_total_zero\":true}}",
+        "{{\"plan_kind\":\"{}\",\"reduction\":\"{}\",\
+\"epistemic_literals\":[{}],\"units\":[],\"max_iterations\":{},\
+\"wfs_fixed_relations\":{},\"wfs_convergence_predicates\":{},\
+\"wfs_gpu_passes\":{},\
+\"host_wfs_fallback_allowed\":{},\
+\"cpu_fallback_total_zero\":true}}",
+        json_escape(plan_kind),
         json_escape(prov.reduction),
-        literals
+        literals,
+        max_iterations
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "null".to_string()),
+        wfs_fixed_relations,
+        wfs_convergence_predicates,
+        wfs_gpu_passes,
+        host_wfs_fallback_allowed
     );
     let plan_id = fnv1a_64(&body);
     format!(
-        "{{\"plan_id\":\"epi-{:016x}\",\"plan_kind\":\"epistemic_reduced_ordinary\",\
+        "{{\"plan_id\":\"epi-{:016x}\",\"plan_kind\":\"{}\",\
 \"reduction\":\"{}\",\"epistemic_literals\":[{}],\"units\":[],\
+\"max_iterations\":{},\"wfs_fixed_relations\":{},\
+\"wfs_convergence_predicates\":{},\"wfs_gpu_passes\":{},\
+\"host_wfs_fallback_allowed\":{},\
 \"cpu_fallback_total_zero\":true}}",
         plan_id,
+        json_escape(plan_kind),
         json_escape(prov.reduction),
-        literals
+        literals,
+        max_iterations
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "null".to_string()),
+        wfs_fixed_relations,
+        wfs_convergence_predicates,
+        wfs_gpu_passes,
+        host_wfs_fallback_allowed
     )
+}
+
+fn wfs_fixed_relations_json(wfs: &EpistemicWfsGpuPlan) -> String {
+    let mut sources: BTreeSet<&str> = BTreeSet::new();
+    for source in wfs.upper_fixed_names.keys() {
+        sources.insert(source.as_str());
+    }
+    for source in wfs.lower_fixed_names.keys() {
+        sources.insert(source.as_str());
+    }
+    let entries = sources
+        .into_iter()
+        .map(|source| {
+            let upper = wfs
+                .upper_fixed_names
+                .get(source)
+                .map(String::as_str)
+                .unwrap_or("");
+            let lower = wfs
+                .lower_fixed_names
+                .get(source)
+                .map(String::as_str)
+                .unwrap_or("");
+            format!(
+                "\"{}\":{{\"upper\":\"{}\",\"lower\":\"{}\"}}",
+                json_escape(source),
+                json_escape(upper),
+                json_escape(lower)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{{{entries}}}")
+}
+
+fn wfs_convergence_predicates_json(wfs: &EpistemicWfsGpuPlan) -> String {
+    let entries = wfs
+        .intensional_predicates
+        .iter()
+        .map(|pred| format!("\"{}\"", json_escape(pred)))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{entries}]")
 }
 
 fn epistemic_literal_json(lit: &xlog_ir::EirEpistemicLiteral) -> String {

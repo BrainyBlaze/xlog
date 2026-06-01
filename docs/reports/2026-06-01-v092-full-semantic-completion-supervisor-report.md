@@ -59,55 +59,60 @@ load-bearing mutation/flip, guarded for soundness, and merged only with all gate
 
 ---
 
-## Honestly undone — root-caused (core-engine / representation, NOT epistemic-layer)
+## Current candidate status — validation pending
 
-These are rejected, and the rejection is justified by a real limitation *below* the epistemic
-layer. None is fakeable without the named larger effort. Each has a precise recipe.
+The branch must not claim full semantic completion until fresh gates pass. Current source has
+removed the accepted host-side WFS route and now attempts cyclic negated-modal recursion through
+a GPU-native alternating-fixpoint WFS plan instead of CPU-backed execution.
 
-1. **Recursion negation-cycle (ex 33) + G91 `possible`-recursion — WHOLE-ENGINE BOUND.**
-   These need non-stratified (well-founded / stable-model) semantics. **Proven not
-   epistemic-specific:** ordinary `a :- not b. b :- not a.` and ordinary
-   recursion-through-negation BOTH error on this engine — XLOG is a stratified-negation
-   engine. `wfs.rs` exists but is host-only (pure `HashSet`/`HashMap`, used only by the CPU
-   prob-provenance path); the no-host-solver lock forbids routing accepted programs through it.
-   *Recipe:* build a GPU (or admitted-host) well-founded/stable-model evaluator for the whole
-   engine — a separate project.
+1. **Recursion negation-cycle (ex 33) — GPU-native WFS candidate implemented, gates pending.**
+   The reduced ordinary program contains a non-monotone SCC, so the high-level GPU compiler now
+   builds a GPU-native WFS alternating-fixpoint plan. `wfs.rs` remains host-only (pure
+   `HashSet`/`HashMap`, used by the CPU prob-provenance path); the no-host-solver lock still
+   forbids routing accepted epistemic programs through it, and `xlog-gpu` no longer declares an
+   `xlog-prob` dependency. Required evidence is a fresh focused
+   ex33/`33a*`/`33c*`/33b/`33d*`/`33e*` CLI matrix pass, the
+   CUDA-independent `xlog-gpu` manifest/source guard, WFS compile/plan-kind matrix over mode,
+   negated-modal operator, seed-state, and ordinary-EDB-negation axes, and zero-iteration
+   clamp check with deterministic single-, multi-predicate, and ordinary-EDB-negation
+   `wfs_fixed_relations` JSON plus explicit `wfs_convergence_predicates` and `wfs_gpu_passes`,
+   `host_wfs_fallback_allowed:false`, the same full-axis GPU runtime WFS matrix plus fixed-name
+   collision regression, and the broader release gates. The exact blocker-to-gate checklist is
+   `docs/plans/2026-06-02-v092-epistemic-closure-validation-checklist.md`.
 
-2. **Same-name multi-arity coupling via `xlog run` — PERVASIVE name-keyed-schema refactor.**
-   The coupling *semantics* already work at the device/runtime layer (item F, exact tuples per
-   arity). The full `xlog run` path is blocked because predicate identity is name-keyed across
-   the ordinary compiler — `Compiler::schemas: HashMap<String, Schema>`, `rel_ids()` (name→RelId),
-   `cardinality_hints`, `fact_counts`, and the lowerer — so `pred p(u32)` + `pred p(u32,u32)`
-   collapse, and `load_facts_into_store` fails the arity check. *Recipe:* arity-key the global
-   schema / relation-identity model (an ordinary-compiler refactor used by every program; high
-   cross-engine regression risk).
+2. **Same-name multi-arity via `xlog run` — done in current source, but requires rerun gates.**
+   The full production path now has committed `42a*` and `42b*` matrix fixtures, plus a CLI
+   test that covers arity `{1,2}` × modal form `{K,M,not K,not M}` × tuple state and every
+   cross-arity conjunction cell. This item must not be listed as undone, but the current edit
+   set still needs focused and full gate reruns before any merge claim.
 
-3. **Modal-over-compound-formula, C2 interior-negation (`know not possible p`, ex 13f) —
-   REPRESENTATION EXTENSION.** Modal duality gives a reduction in principle
-   (`know not possible p ≡ know not p ≡ not p` for determined targets), but the intermediate
-   form `K¬p` (know-of-a-negated-atom) has no EIR representation and the final step needs the
-   determined-stage analysis — so it is not a clean parser-level collapse like item C.
-   *Recipe:* add a `K¬p` EIR node (or a determined-stage duality reduction) + grammar/pilots.
+3. **C2 interior-negation / finite nested negation matrix — done in current source, gates pending.**
+   The fixture is now named `13f-nested-modal-interior-negation.xlog`, declares and asserts
+   `p()`, and proves the stated duality case through `xlog run`: present `p()` makes
+   `not possible p()` false, so `q` is empty with exit 0. Its companion cells cover target
+   `{present,absent}` x mode `{FAEEL,G91}`. The broader 13g-13v matrix covers all
+   64 two-operator negation cells over `{know,possible}^2`, leading/interior/atom-adjacent
+   negation, and present/absent atoms under FAEEL; 13w* replays those cells under explicit G91.
+   Fresh focused/full gates are still required before using it as merge evidence; see
+   `docs/plans/2026-06-02-v092-epistemic-closure-validation-checklist.md`.
 
 ---
 
 ## Process notes
 
-- **Soundness discipline held:** every accepted construct verified through the production path
-  with exact tuples + a load-bearing flip; no construct closed by relabeling a rejection.
-  Where the diagonal desugaring could be unsound (modal-derived target), a guard was added and
-  the unsound case verified to fall through to a coherent rejection.
+- **Soundness discipline tightened:** cyclic WFS is no longer accepted through host grounding or
+  host WFS; the candidate source routes it through GPU-native WFS and still needs fresh gates.
+- **Accepted examples expanded:** same-name multi-arity, single-modal truth tables, and WFS
+  cyclic-negated mode/operator cases now have finite fixture matrices rather than one-off pilots.
 - **Verified floor protected:** an incomplete EIR-layer attempt at the diagonal (accepted at
   planning but un-materialized at execution) was reverted rather than shipped, then redone
   correctly at the Program/`normalize_program` layer.
-- **Honest accounting over surface completion:** the three residuals were investigated to root
-  cause and left undone rather than faked or risk-broken with a depth-exhausted core-engine
-  refactor.
+- **Honest accounting over surface completion:** current edits require fresh gate evidence. Do
+  not reuse the older green SHA as proof for this tree.
 
 ## Recommendation
 
-The epistemic-layer semantic completion is done and verified. **Merge/tag is a supervisor
-decision.** The three residuals are real, scoped follow-ups (one whole-engine WFS effort, one
-ordinary-compiler schema refactor, one EIR representation extension) — each warrants a
-dedicated, fresh-context effort with full gate discipline, not a tail-end attempt. The branch
-is internally consistent (docs reconciled) and gate-green at `ba34152e`.
+**HOLD_FOR_FIXES.** If v0.9.2 requires accepted cyclic negated-modal recursion, the remaining
+missing deliverable is GPU-native WFS (or explicit host-WFS authorization). If that case is
+scoped as a boundary for this release, rerun the focused and full gates on the current tree and
+record the new evidence before any merge/tag decision.

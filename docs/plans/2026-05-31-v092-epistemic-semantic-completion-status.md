@@ -33,18 +33,19 @@ is closed under composition:
   (augmenting) modals; coupling and recursion over a determined head; negated modal over
   an invariant relation (≡ ordinary negation). Resolution is via JOINT-solving (shared
   base modal) or STRATIFIED execution (modal over a determined derived head).
-- **NON-DETERMINED** (no fixed extension) → **correctly fail-closed** (this is the right
-  answer, not deferral):
-  - **Circular modality / Case-B recursion THROUGH the modal predicate** (`p() :- …, know p()`,
-    or a modal over a relation in/transitively-on the recursive SCC). FAEEL/G91 foundedness
-    governs founded self-support; unfounded modal cycles and non-invariant recursive modal
-    targets fail closed with `recursive epistemic program` / "not invariant".
+- **NON-DETERMINED / boundary cases**:
+  - **Cyclic negated-modal recursion** (example 33) reduces to a non-monotone ordinary SCC.
+    The sound semantics is WFS, and the current candidate routes it through GPU-native
+    alternating fixpoint. Host WFS is not an admitted fallback. Fresh focused/full gates are
+    still required before using this as merge evidence.
   - **FAEEL-unfounded self-support** (`p() :- possible p()` with no independent founded
-    support) — the FAEEL-defined rejection (G91 accepts).
-  - **C2 modal-over-a-negated-modal compound formulas** — an INTERIOR negation
-    (`know not possible p ≡ K ¬M p`) or atom-adjacent negation (`know possible not p ≡ M ¬p`)
-    has no sound collapse to a single `op atom` literal → typed `UnsupportedEpistemicConstruct`
-    ("interior negation"/"negated atom"). (ITEM C, example 13f.)
+    support) executes to the FAEEL-defined empty founded extension (`rows: 0`); the G91
+    companion accepts (`rows: 1`).
+  - **C2 nested/interior negation** now executes for the finite chain cases. Example 13f proves
+    `know not possible p()` dualizes to `not possible p()` for a determined present target; the
+    13f companion cells cover target `{present,absent}` x mode `{FAEEL,G91}`; and examples 13g-13v cover all 64 two-operator negation cells over `{know,possible}^2`,
+    leading/interior/atom-adjacent negation, and present/absent atoms under FAEEL; 13w*
+    replays those cells under explicit G91.
 
 > **ITEM C UPDATE (v0.9.2):** bare modal CHAINS (`know possible p()`, `know know p()`,
 > `not know possible p()`) NO LONGER reject. They collapse via the KD45/S5 modal axioms to
@@ -53,20 +54,23 @@ is closed under composition:
 > evaluator. The collapse holds in BOTH modes (FAEEL/G91 differ only in admissible world
 > views, which the collapsed literal inherits). Examples 13/13b/13c execute with exact
 > tuples; 13d (FAEEL `rows:0`) vs 13e (G91 `rows:1`) shows the inherited mode-difference;
-> 13f is the C2 fail-closed boundary above.
+> 13f executes the interior-negation duality mini-matrix; 13g-13v exhaust the 64 two-operator
+> negation cells under FAEEL, and 13w* replays them under explicit G91.
 
-These genuinely-undefined cases are the load-bearing **over-broadening gates**: because the
-determined-closure acceptance check is permissive, the failure mode of loosening it is
-LEAKAGE (an undefined program emitting a wrong-but-non-empty answer). Examples 22/13/23 and
-the FAEEL self-support pilot assert these STILL fail closed with their typed diagnostics, and
-a recursive multi-column binding probe confirms the broadening does not leak on non-determined
-targets.
+The load-bearing **over-broadening gates** remain important: because the determined-closure
+acceptance check is permissive, the failure mode of loosening it is LEAKAGE (an undefined
+program emitting a wrong-but-non-empty answer). Current boundary examples include unsafe
+unbound negated modal variables and unbounded structured modal tuple keys; accepted examples
+13/13f/13g-13v/13w*/22/31/33 prove defined semantics rather than rejection.
 
 - The v0.9.1 goal-mandated fail-closed fragments (aggregate/compound/list/predref modal
   keys; variable-keyed/nested/CPU-scan epistemic constraints; unsafe same-name multi-arity
   coupling) remain rejection-by-design.
 
-## Acceptance Matrix (feat HEAD `eb857c35`, all `--test-threads=1`)
+## Historical Acceptance Matrix (feat HEAD `eb857c35`, all `--test-threads=1`)
+
+This matrix is a historical snapshot. It must be rerun on the current tree after the host-WFS
+removal, C2 rename, and expanded example matrices before it can support a merge claim.
 
 - `cargo test -p xlog-logic --test test_epistemic_split` → **37 passed**
 - `cargo test -p xlog-logic --test test_epistemic_executable_plan` → **17 passed**
@@ -86,9 +90,10 @@ targets.
   `27`→`one_hop={1,2}`/`pair={(2,20),(2,21),(3,30)}`, `28`→`out={1}`,
   `29`→`q_know={3}`/`q_poss={3}` (negated modal over determined-derived),
   `30`→`out={1}` (`possible`-binding over determined, the `know`-twin of 28).
-- Fail-closed (genuinely-undefined, typed `UnsupportedEpistemicConstruct`): `13` (nested),
-  `22` (recursion through modal / not invariant), `23` (compound list key),
-  `31` (FAEEL-unfounded self-support → `FAEEL foundedness guard`).
+- Fail-closed boundaries in the current source are not this older list. Current notable
+  boundaries include unsafe unbound negated modal variables and unbounded modal tuple keys
+  such as 23b. Examples 13, 13f, 13g-13v, 13w*, 22, 31, 33, and 43 are defined semantics cases,
+  not generic unsupported-construct evidence.
 
 ### Determined-modal-family completeness cells (examples cover every cell)
 
@@ -96,8 +101,10 @@ The completeness partition {know, possible, not know, not possible} × {filter, 
 {determined-EDB, determined-ordinary-derived, determined-epistemic-derived} is exercised:
 positive `know`/`possible` filter+bind over EDB (06/07/14/18/19/21) and over determined
 derived heads (16/17/24/25/27/28/30); negated `not know`/`not possible` over EDB (19/21/26)
-and over a determined derived head (29). Every NON-determined target fails closed
-(22/13/23/31), CI-enforced as over-broadening gates.
+and over a determined derived head (29). NON-determined targets are now classified by their
+real semantics rather than a generic rejection bucket: founded-empty FAEEL (31), G91
+self-support (32), stratified ordinary negation (37), GPU-native WFS (33), or typed
+unfounded/unsafe boundaries (13/22/23).
 
 ### Inadmissible as GPU-native acceptance evidence
 
@@ -128,15 +135,28 @@ through the production path (device suite grew **131 → 144**):
 
 ### Remaining items — classified by their REAL nature (no relabeling)
 
-1. **Recursion negation-cycle (ex33) + G91 `possible`-recursion → WHOLE-ENGINE
-   ARCHITECTURAL BOUND.** These need non-stratified (well-founded / stable-model) semantics.
-   **Proven not epistemic-specific:** ordinary `a :- not b. b :- not a.` and ordinary
-   recursion-through-negation BOTH error on this engine — XLOG is a *stratified-negation*
-   engine with no WFS/stable-model evaluation for ANY program. `wfs.rs` exists but is
-   host-only (pure `HashSet`/`HashMap`, used only by the CPU prob-provenance path), and the
-   no-host-solver lock forbids routing accepted programs through it. Finishing these means
-   building well-founded semantics for the entire engine — a separate project, the same wall
-   ordinary Datalog hits here.
+1. **Recursion negation-cycle (ex33) → GPU-native WFS candidate implemented, pending gates.**
+   The high-level GPU compiler now detects the non-monotone reduced SCC and routes it through
+   a GPU-native alternating-fixpoint WFS plan. `wfs.rs` remains host-only (`HashSet`/`HashMap`,
+   CPU prob-provenance path) and is still not an accepted production fallback; `xlog-gpu` no
+   longer declares an `xlog-prob` dependency. The focused example surface now includes the
+   canonical ex33 fixture, the `33a*` operator/mode matrix covering `{FAEEL,G91} ×
+   `{not know,not possible}`, the `33c*` seed-state matrix adding seed `{present,absent}`,
+   `33b` for WFS plus ordinary EDB negation, the `33d*` matrix covering the same
+   mode/operator/seed product with ordinary EDB negation inside the reduced SCC, and `33e*`
+   load-bearing cells where `not banned(2)` flips the seed-founded reach tuple on/off.
+   The `xlog-gpu` logic-runner now also has CUDA-independent guards for the manifest/source
+   boundary (`xlog-gpu` must not depend on `xlog-prob`, and `src/logic.rs` must not reintroduce
+   the old host-WFS solver tokens) and the WFS compile/plan-kind matrix
+   (`wfs_gpu_recursive` / `epistemic_wfs_gpu`) over mode, negated-modal operator, seed-state, and
+   ordinary-EDB-negation axes; a zero-iteration-bound clamp in WFS plan JSON; deterministic single-,
+   multi-predicate, and ordinary-EDB-negation `wfs_fixed_relations` maps in WFS plan JSON; explicit
+   `wfs_convergence_predicates` and `wfs_gpu_passes` in WFS plan JSON; explicit
+   `host_wfs_fallback_allowed:false`; the same full-axis GPU runtime matrix; and a fixed-relation
+   name-collision regression for user-owned `__wfs_*` predicates.
+   Fresh focused and full gates are required before using this as merge evidence; use
+   `docs/plans/2026-06-02-v092-epistemic-closure-validation-checklist.md` as the exact
+   blocker-to-gate checklist.
 
 2. **E1 shared-variable join / diagonal / negated-difference (`:- know p(X), possible q(X)`,
    `:- know p(X,X)`, `:- q(X), not know p(X)`) → DONE (commits `f449bc43`, `bee3a0de`,
@@ -157,18 +177,14 @@ through the production path (device suite grew **131 → 144**):
    asserts the load-bearing prune. Gates: device 144, integration 206, split 44,
    run_cli_tests 12.
 
-3. **Same-name multi-arity coupling via `xlog run` → PRE-EXISTING engine-wide
-   name-keyed-schema limitation.** The coupling semantics work at the device/runtime layer
-   (item F, exact tuples per arity); the full `xlog run` path is blocked because
-   `Compiler::schemas` is `HashMap<String, Schema>` and `load_facts_into_store` groups facts
-   by bare predicate name, so `pred p(u32)` + `pred p(u32, u32)` collapse. Arity-keying the
-   global schema/relation identity is an ordinary-compiler refactor, orthogonal to epistemic
-   semantics.
+3. **Same-name multi-arity coupling via `xlog run` → DONE in current source, pending fresh
+   gates.** The production path now includes the base disambiguation example plus exhaustive
+   `42a*` and `42b*` matrix fixtures covering single-literal arity cells and every cross-arity
+   conjunction. Do not list this as an undone semantic boundary; rerun the CLI matrix and full
+   gates before using it as merge evidence.
 
-Honest boundary: items B/A/C/D/E/F + A1 + **E2 + E1 (all shared-variable constraint joins)**
-are done and verified (device 144, integration 206, run_cli_tests 12). Class (1) is a real
-architectural wall (not fakeable without building well-founded semantics for the whole
-engine, the same wall ordinary Datalog hits). Class (3) — multi-arity via `xlog run` — is an
-ordinary-compiler name-keyed-schema refactor, orthogonal to epistemic semantics, and remains
-the one finishable item not yet done. The modal-over-compound-formula C2 interior-negation
-remains a representational scope limit (single-level EIR; example 13f).
+Honest boundary: current source has closed C2 interior-negation, same-name multi-arity, FAEEL
+empty-extension self-support, G91 possible recursion, stratified negated recursion, GPU-native
+WFS for ex33/33a/33c/33b/33d/33e cyclic negated-modal recursion, and the shared-variable constraint joins.
+Fresh focused/full gates are required before any merge-ready claim; the current checklist is
+`docs/plans/2026-06-02-v092-epistemic-closure-validation-checklist.md`.
