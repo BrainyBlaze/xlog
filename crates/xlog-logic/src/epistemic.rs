@@ -922,13 +922,16 @@ pub fn classify_recursive_epistemic_program(program: &Program) -> Result<Recursi
         let reduced = reduce_case_a_epistemic_program_to_ordinary(program);
         let strat = crate::stratify::analyze_stratification(&reduced);
         if !strat.non_monotone_sccs.is_empty() {
-            // Identify a predicate in a negation cycle for a precise diagnostic.
+            // Identify a predicate in a negation cycle for a precise diagnostic. Pick the
+            // lexicographically smallest predicate across all non-monotone SCCs so the
+            // diagnostic is DETERMINISTIC (the SCC set is HashSet-derived, so naive
+            // iteration order is non-deterministic).
             let cyclic_pred = strat
                 .non_monotone_sccs
                 .iter()
                 .filter_map(|&scc_idx| strat.sccs.get(scc_idx))
                 .flatten()
-                .next()
+                .min()
                 .cloned()
                 .unwrap_or_else(|| "<unknown>".to_string());
             return Err(recursive_epistemic_rejection(&format!(
@@ -943,6 +946,36 @@ pub fn classify_recursive_epistemic_program(program: &Program) -> Result<Recursi
                  or remove the negation cycle."
             )));
         }
+    }
+
+    // SOUNDNESS GUARD: a recursive epistemic program (Case A/B) routes through the PURE
+    // ordinary semi-naive engine (`LogicExecutionPlan::Ordinary`), which never runs the
+    // world-view integrity-constraint kernel; the Case-A/B reduction DROPS every
+    // constraint that contains a modal literal. For a NON-recursive program the
+    // single-pass world-view path evaluates those constraints, but on the recursive
+    // route a co-occurring epistemic constraint (`:- know X` / `:- not know X`) would be
+    // SILENTLY IGNORED, yielding a result that includes rows a valid world view forbids.
+    // That is an UNSOUND admission (worse than a rejection), so fail closed when an
+    // epistemic constraint co-occurs with recursion. (Non-recursive epistemic-constraint
+    // programs -- examples 10/34/35/36 -- never reach here; they classify NonRecursive
+    // and run the constraint kernel on the single-pass path.)
+    let has_epistemic_constraint = program.constraints.iter().any(|constraint| {
+        constraint
+            .body
+            .iter()
+            .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
+    });
+    if has_epistemic_constraint {
+        return Err(recursive_epistemic_rejection(
+            "a recursive epistemic program carries an epistemic integrity constraint \
+             (`:- know ...` / `:- not know ...`). Recursive epistemic programs execute \
+             through the ordinary semi-naive engine, which does not run the world-view \
+             constraint kernel, and the recursive reduction would silently DROP the \
+             modal constraint -- yielding a result that ignores it. To keep results \
+             sound this fails closed rather than silently dropping the constraint. \
+             Remove the recursion or express the integrity constraint over a \
+             non-recursive (single-pass) epistemic relation.",
+        ));
     }
 
     if saw_case_b {

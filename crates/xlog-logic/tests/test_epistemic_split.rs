@@ -212,6 +212,50 @@ fn negated_modal_through_recursion_cycle_fails_closed_wfs_bound() {
 }
 
 #[test]
+fn recursive_epistemic_program_with_epistemic_constraint_fails_closed() {
+    // v0.9.2 WALL A1 SOUNDNESS GUARD: a recursive epistemic program that ALSO carries an
+    // epistemic integrity constraint (`:- know flagged(X)`) must FAIL CLOSED. Recursive
+    // epistemic programs route through the PURE ordinary semi-naive engine, which does
+    // NOT run the world-view constraint kernel, and the recursive reduction DROPS modal
+    // constraints. Silently dropping the constraint would return rows a valid world view
+    // forbids -- an UNSOUND admission, worse than a rejection. The otherwise-admissible
+    // stratified negated-modal recursion (accepted in
+    // `negated_modal_over_recursive_lower_stratum_is_accepted_case_b`) must NOT be
+    // admitted once an epistemic constraint co-occurs. (Non-recursive epistemic-constraint
+    // programs -- examples 10/34/35/36 -- classify NonRecursive and are unaffected.)
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = faeel
+        pred node(u32).
+        pred link(u32, u32).
+        pred reach(u32, u32).
+        pred unreachable(u32, u32).
+        pred flagged(u32).
+        node(1). node(2). node(3).
+        link(1, 2). link(2, 3).
+        flagged(2).
+        reach(X, Y) :- know link(X, Y).
+        reach(X, Z) :- reach(X, Y), know link(Y, Z).
+        unreachable(X, Y) :- node(X), node(Y), not know reach(X, Y).
+        :- know flagged(X).
+        ?- unreachable(X, Y).
+        "#,
+    )
+    .unwrap();
+    match classify_recursive_epistemic_program(&program) {
+        Err(XlogError::UnsupportedEpistemicConstruct { construct, context }) => {
+            assert_eq!(construct, "recursive epistemic program");
+            assert!(
+                context.contains("epistemic integrity constraint")
+                    && context.contains("constraint kernel"),
+                "expected the epistemic-constraint soundness-guard diagnostic, got: {context}"
+            );
+        }
+        other => panic!("expected epistemic-constraint soundness-guard rejection, got {other:?}"),
+    }
+}
+
+#[test]
 fn recursion_with_positive_non_invariant_modal_in_unrelated_rule_is_accepted_case_b() {
     // v0.9.2 ITEM A: a FAEEL program with ordinary recursion (`reach`) AND a POSITIVE
     // `possible choice(X)` over the epistemic-defined (non-invariant) `choice` is an
