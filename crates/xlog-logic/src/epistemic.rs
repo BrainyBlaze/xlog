@@ -582,22 +582,22 @@ fn lower_epistemic_constraints(
                         // a plain UnsupportedEpistemicConstruct (never ResourceExhausted).
                         // Negated ALL-GROUND constraint literals are unaffected (they
                         // bind no variable, no quantifier flip — the EGB-04 path).
+                        //
+                        // Reaching here, `name` is SINGLE-occurrence (the multiplicity > 1
+                        // arm above already returned) AND appears under negation — so it has
+                        // NO positive binder and is NOT range-restricted. This is exactly the
+                        // unsafe shape ordinary Datalog rejects (`:- not r(X).`), so emit the
+                        // analogous NAF safety error rather than implying a missing feature.
+                        // The meaningful negated form `:- q(X), not know p(X).` binds X with a
+                        // positive literal (multiplicity > 1) and exits via the shared-variable
+                        // path above, so it never reaches this branch.
                         if lit.negated {
-                            return Err(XlogError::UnsupportedEpistemicConstruct {
-                                construct: "epistemic GPU world-view constraint".to_string(),
-                                context: format!(
-                                    "constraint[{constraint_index}] uses NEGATED variable-keyed \
-                                     modal {} {}/{}; a wildcard existential cannot express \
-                                     `EXISTS {name}: not know/possible ...` (the negation flips \
-                                     the quantifier to forall-not), so negated variable-keyed \
-                                     world-view constraints are not yet implemented. Single-\
-                                     occurrence POSITIVE variable keys and negated GROUND keys \
-                                     are supported",
-                                    eir_epistemic_literal_label(&lit),
-                                    lit.atom.predicate,
-                                    lit.atom.arity
-                                ),
-                            });
+                            return Err(XlogError::Compilation(format!(
+                                "v0.8.5 naf error: unbound variable {name} in negated modal atom \
+                                 {}/{} in constraint[{constraint_index}]; bind it before not with \
+                                 a positive atom, or use '_' for existential positions",
+                                lit.atom.predicate, lit.atom.arity
+                            )));
                         }
                         // Single occurrence, POSITIVE: existential over the relation
                         // domain == wildcard. Drop the variable identity (no join, no

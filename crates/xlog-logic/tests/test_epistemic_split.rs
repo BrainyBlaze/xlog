@@ -256,6 +256,40 @@ fn recursive_epistemic_program_with_epistemic_constraint_fails_closed() {
 }
 
 #[test]
+fn standalone_negated_variable_keyed_constraint_is_unbound_safety_error() {
+    // v0.9.2 E2: `:- not know p(X).` has X appearing ONLY under negation, with no
+    // positive literal binding it -> X is NOT range-restricted. This is the SAME unsafe
+    // shape ordinary Datalog rejects (`:- not r(X).` -> "unbound variable ... in negated
+    // atom"). The SOUND answer is that safety error, NOT a misleading "negated
+    // variable-keyed ... not yet implemented" (which implies a missing feature for an
+    // actually ILL-FORMED program). The meaningful negated form `:- q(X), not know p(X).`
+    // (X bound by a positive literal) is the shared-variable join, handled separately.
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = faeel
+        pred p(u32).
+        pred believed(u32).
+        p(1).
+        believed(X) :- know p(X).
+        :- not know p(X).
+        ?- believed(X).
+        "#,
+    )
+    .unwrap();
+    let err = plan_epistemic_gpu_execution(&program)
+        .expect_err("an unsafe negated-only constraint variable must fail");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("unbound") && msg.contains('X'),
+        "expected an unbound-variable safety diagnostic naming X, got: {msg}"
+    );
+    assert!(
+        !msg.contains("not yet implemented"),
+        "must NOT label an ill-formed (unsafe) program as a missing feature: {msg}"
+    );
+}
+
+#[test]
 fn recursion_with_positive_non_invariant_modal_in_unrelated_rule_is_accepted_case_b() {
     // v0.9.2 ITEM A: a FAEEL program with ordinary recursion (`reach`) AND a POSITIVE
     // `possible choice(X)` over the epistemic-defined (non-invariant) `choice` is an

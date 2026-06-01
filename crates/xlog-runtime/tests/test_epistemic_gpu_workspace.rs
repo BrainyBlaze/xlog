@@ -5080,17 +5080,17 @@ fn egb_e_shared_variable_constraint_rejected_as_unimplemented_scope() {
     }
 }
 
-// ITEM E scope boundary: a NEGATED variable-keyed constraint literal
-// (`:- not know p(X).`) cannot collapse to a wildcard — the wildcard computes
-// `forall X: not know p(X)` but the constraint variable is EXISTENTIAL
-// (`EXISTS X: not know p(X)`), and forall-not != exists-not. Routing it through
-// the wildcard would mis-prune (prune iff p empty), so it fails closed. This is
-// finite+typed UNIMPLEMENTED scope, NOT a finiteness bound: plain
-// UnsupportedEpistemicConstruct, NEVER ResourceExhausted. (Negated ALL-GROUND
-// constraint literals stay supported via the EGB-04 ground path.)
+// ITEM E / E2: a NEGATED variable-keyed constraint literal whose variable appears
+// ONLY under negation (`:- not know p(X).`) has NO positive binder — X is not
+// range-restricted. This is the SAME unsafe shape ordinary Datalog rejects
+// (`:- not r(X).` -> "unbound variable ... in negated atom"). The sound answer is
+// that NAF safety error, NOT a "missing feature" diagnostic. The meaningful negated
+// form `:- q(X), not know p(X).` binds X with a positive literal and is the
+// shared-variable join. (Negated ALL-GROUND constraint literals stay supported via
+// the EGB-04 ground path.)
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb_e_negated_variable_keyed_constraint_rejected_as_unimplemented_scope() {
+fn egb_e_standalone_negated_variable_keyed_constraint_is_unbound_safety_error() {
     let program = parse_program(
         r#"
         pred seed(u32).
@@ -5104,21 +5104,19 @@ fn egb_e_negated_variable_keyed_constraint_rejected_as_unimplemented_scope() {
     )
     .expect("parse negated variable-keyed constraint program");
     let err = compile_epistemic_gpu_execution(&program)
-        .expect_err("negated variable-keyed constraint must fail closed (quantifier flip)");
+        .expect_err("standalone negated-only constraint variable is unsafe (no positive binder)");
     match err {
-        xlog_core::XlogError::UnsupportedEpistemicConstruct { context, .. } => {
+        xlog_core::XlogError::Compilation(msg) => {
             assert!(
-                context.contains("NEGATED variable-keyed") || context.contains("forall-not"),
-                "expected negated-variable-keyed diagnostic, got: {context}"
+                msg.contains("unbound") && msg.contains('X'),
+                "expected unbound-variable NAF safety diagnostic naming X, got: {msg}"
+            );
+            assert!(
+                !msg.contains("not yet implemented"),
+                "an ill-formed (unsafe) program must not be labeled a missing feature: {msg}"
             );
         }
-        xlog_core::XlogError::ResourceExhausted { .. } => {
-            panic!(
-                "negated variable-keyed constraint is finite+typed unimplemented scope, NOT a \
-                 finiteness/resource bound; must not surface as ResourceExhausted"
-            );
-        }
-        other => panic!("unexpected error for negated variable-keyed constraint: {other:?}"),
+        other => panic!("expected NAF safety error (unbound variable), got: {other:?}"),
     }
 }
 
