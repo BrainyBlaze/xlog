@@ -8,7 +8,8 @@ use xlog_ir::{
 };
 use xlog_logic::epistemic::{
     compile_epistemic_gpu_execution, compile_epistemic_gpu_execution_with_stats_snapshot,
-    plan_epistemic_gpu_execution, reduce_epistemic_program_to_ordinary,
+    compile_epistemic_gpu_split_execution, plan_epistemic_gpu_execution,
+    reduce_epistemic_program_to_ordinary,
 };
 use xlog_logic::{parse_program, Compiler};
 use xlog_stats::{
@@ -163,7 +164,13 @@ fn epistemic_kclique_reduction_reuses_38b_planner_layout_and_helper_split_surfac
 }
 
 #[test]
-fn faeel_gpu_execution_rejects_self_supported_possible_before_runtime_dispatch() {
+fn faeel_gpu_execution_excludes_unfounded_self_support_from_founded_base() {
+    // `p() :- possible p()` is supported only by circular self-support. Under FAEEL it
+    // is UNFOUNDED, so the founded model is EMPTY and the program EXECUTES to that
+    // empty extension (it is NOT rejected). The accepted lowering drops the circular
+    // self-support rule from the reduced ordinary base, so `p` has no founding rule and
+    // is absent from the founded model. Exact `rows: 0` on device:
+    // `parsed_faeel_unfounded_zero_arity_self_support_materializes_empty_on_gpu`.
     let program = parse_program(
         r#"
         pred p().
@@ -172,95 +179,85 @@ fn faeel_gpu_execution_rejects_self_supported_possible_before_runtime_dispatch()
     )
     .unwrap();
 
-    let err = compile_epistemic_gpu_execution(&program)
-        .expect_err("default FAEEL lowering must reject self-supported possible");
+    // No foundedness rejection: the program plans and compiles.
+    plan_epistemic_gpu_execution(&program)
+        .expect("FAEEL unfounded self-support is a defined empty result, not a rejection");
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("FAEEL unfounded self-support must compile to its empty founded extension");
+    assert_eq!(executable.gpu_plan.mode, EirEpistemicMode::Faeel);
+    assert!(executable.gpu_plan.cpu_fallbacks.is_zero());
 
-    match err {
-        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
-            assert_eq!(construct, "FAEEL foundedness guard");
-            assert!(context.contains("rule[0]"));
-            assert!(context.contains("possible p/0"));
-            assert!(context.contains("self-supported"));
+    // The circular self-support rule is excluded from the reduced founded base, so `p`
+    // has no founding (non-fact) rule.
+    let reduced = reduce_epistemic_program_to_ordinary(&program);
+    assert_eq!(
+        reduced
+            .rules
+            .iter()
+            .filter(|rule| rule.head.predicate == "p" && !rule.body.is_empty())
+            .count(),
+        0,
+        "unfounded circular self-support must be dropped from the founded base: {:?}",
+        reduced.rules
+    );
+}
+
+/// Assert a multi-head modal cycle fails closed at the pre-existing cross-component
+/// coupling boundary IDENTICALLY in FAEEL and G91.
+///
+/// A modal cycle (e.g. `p :- possible q. q :- possible p`) is mathematically empty
+/// under FAEEL, but its empty extension is NOT delivered by ITEM B: the cycle couples
+/// 2+ epistemic output heads through nested modality, so it is routed to split
+/// execution and fails closed at `cross-component epistemic coupling` BEFORE any
+/// foundedness/world-view reasoning. This boundary is orthogonal to foundedness and
+/// mode-independent — G91 hits the EXACT same rejection — so the founded-extension work
+/// is leak-neutral here: the (wrong) stripped-to-true reduced base never executes.
+/// Delivering these as empty requires nested-modality support, outside ITEM B's
+/// single-head scope.
+fn assert_multi_head_modal_cycle_fails_closed_both_modes(body: &str) {
+    for (mode, prefix) in [("FAEEL", ""), ("G91", "#pragma epistemic_mode = g91\n")] {
+        let src = format!("{prefix}{body}");
+        let program = parse_program(&src).unwrap();
+        // The single-pass plan itself no longer rejects (foundedness does not reject):
+        // the fail-closed is the routing/coupling boundary on the split path.
+        plan_epistemic_gpu_execution(&program).unwrap_or_else(|e| {
+            panic!("{mode}: single-pass plan must not reject the cycle on foundedness grounds, got: {e}")
+        });
+        let err = compile_epistemic_gpu_split_execution(&program).expect_err(&format!(
+            "{mode}: multi-head modal cycle must fail closed at cross-component coupling"
+        ));
+        match err {
+            xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, .. } => {
+                assert_eq!(
+                    construct, "cross-component epistemic coupling",
+                    "{mode}: cycle must fail at the cross-component coupling boundary, not a \
+                     foundedness rejection"
+                );
+            }
+            other => panic!("{mode}: expected cross-component coupling rejection, got {other:?}"),
         }
-        other => panic!("expected FAEEL foundedness rejection, got {other:?}"),
     }
 }
 
 #[test]
-fn faeel_gpu_execution_rejects_mutual_possible_support_cycle_before_runtime_dispatch() {
-    let program = parse_program(
-        r#"
-        pred p().
-        pred q().
-        p() :- possible q().
-        q() :- possible p().
-        "#,
-    )
-    .unwrap();
-
-    let err = plan_epistemic_gpu_execution(&program)
-        .expect_err("default FAEEL planning must reject unfounded mutual modal support");
-
-    match err {
-        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
-            assert_eq!(construct, "FAEEL foundedness guard");
-            assert!(context.contains("modal support cycle"));
-            assert!(context.contains("possible"));
-        }
-        other => panic!("expected FAEEL modal-cycle foundedness rejection, got {other:?}"),
-    }
+fn multi_head_mutual_possible_cycle_fails_closed_at_cross_component_coupling_both_modes() {
+    assert_multi_head_modal_cycle_fails_closed_both_modes(
+        "pred p().\npred q().\np() :- possible q().\nq() :- possible p().",
+    );
 }
 
 #[test]
-fn faeel_gpu_execution_rejects_longer_possible_support_cycle_before_runtime_dispatch() {
-    let program = parse_program(
-        r#"
-        pred p().
-        pred q().
-        pred r().
-        p() :- possible q().
-        q() :- possible r().
-        r() :- possible p().
-        "#,
-    )
-    .unwrap();
-
-    let err = plan_epistemic_gpu_execution(&program)
-        .expect_err("default FAEEL planning must reject longer unfounded modal support cycles");
-
-    match err {
-        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
-            assert_eq!(construct, "FAEEL foundedness guard");
-            assert!(context.contains("modal support cycle"));
-            assert!(context.contains("possible"));
-        }
-        other => panic!("expected FAEEL longer modal-cycle foundedness rejection, got {other:?}"),
-    }
+fn multi_head_longer_possible_cycle_fails_closed_at_cross_component_coupling_both_modes() {
+    assert_multi_head_modal_cycle_fails_closed_both_modes(
+        "pred p().\npred q().\npred r().\np() :- possible q().\nq() :- possible r().\nr() :- possible p().",
+    );
 }
 
 #[test]
-fn faeel_gpu_execution_rejects_mixed_modal_support_cycle_before_runtime_dispatch() {
-    let program = parse_program(
-        r#"
-        pred p().
-        pred q().
-        p() :- know q().
-        q() :- possible p().
-        "#,
-    )
-    .unwrap();
-
-    let err = plan_epistemic_gpu_execution(&program)
-        .expect_err("default FAEEL planning must reject mixed modal support cycles");
-
-    match err {
-        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
-            assert_eq!(construct, "FAEEL foundedness guard");
-            assert!(context.contains("modal support cycle"));
-            assert!(context.contains("know") || context.contains("possible"));
-        }
-        other => panic!("expected FAEEL mixed modal-cycle foundedness rejection, got {other:?}"),
-    }
+fn multi_head_mixed_modal_cycle_fails_closed_at_cross_component_coupling_both_modes() {
+    assert_multi_head_modal_cycle_fails_closed_both_modes(
+        "pred p().\npred q().\np() :- know q().\nq() :- possible p().",
+    );
 }
 
 #[test]
@@ -482,7 +479,14 @@ fn faeel_gpu_execution_allows_ground_possible_with_variable_headed_independent_s
 }
 
 #[test]
-fn faeel_gpu_execution_rejects_nonzero_self_possible_without_tuple_level_foundedness_proof() {
+fn faeel_gpu_execution_excludes_unfounded_tuples_keeping_founded_split() {
+    // p(X) has an independent founding rule `p(X) :- seed(X)` (founds p(1) via seed)
+    // AND a circular self-support rule `p(X) :- node(X), possible p(X)` over the wider
+    // node domain {1,2}. p(2) is supported ONLY by self-support (no seed) and is
+    // therefore UNFOUNDED: the founded model excludes it while keeping the founded p(1).
+    // The reduced base drops the unfounded self-support rule and keeps the founded
+    // `p :- seed` rule, so the founded model is exactly {p(1)}. Exact tuple {1} asserted
+    // on device in `parsed_faeel_partial_tuple_split_materializes_founded_subset_on_gpu`.
     let program = parse_program(
         r#"
         pred seed(u32).
@@ -497,19 +501,32 @@ fn faeel_gpu_execution_rejects_nonzero_self_possible_without_tuple_level_founded
     )
     .unwrap();
 
-    let err = compile_epistemic_gpu_execution(&program).expect_err(
-        "default FAEEL lowering must reject nonzero-arity self-supported possible without tuple-level foundedness proof",
-    );
+    // No rejection: the founded subset executes.
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("partial-founded FAEEL self-support must compile to its founded subset");
+    assert!(executable.gpu_plan.cpu_fallbacks.is_zero());
 
-    match err {
-        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
-            assert_eq!(construct, "FAEEL foundedness guard");
-            assert!(context.contains("rule["));
-            assert!(context.contains("possible p/1"));
-            assert!(context.contains("tuple-level foundedness"));
-        }
-        other => panic!("expected FAEEL tuple-level foundedness rejection, got {other:?}"),
-    }
+    let reduced = reduce_epistemic_program_to_ordinary(&program);
+    // Founded `p :- seed` rule survives.
+    assert!(
+        reduced.rules.iter().any(|rule| rule.head.predicate == "p"
+            && rule
+                .body
+                .iter()
+                .any(|lit| matches!(lit, xlog_logic::ast::BodyLiteral::Positive(a) if a.predicate == "seed"))),
+        "founded p:-seed rule must survive reduction: {:?}",
+        reduced.rules
+    );
+    // Unfounded self-support rule (body has node(X)) is dropped.
+    assert!(
+        !reduced.rules.iter().any(|rule| rule.head.predicate == "p"
+            && rule
+                .body
+                .iter()
+                .any(|lit| matches!(lit, xlog_logic::ast::BodyLiteral::Positive(a) if a.predicate == "node"))),
+        "unfounded p:-node,possible p rule must be dropped from the founded base: {:?}",
+        reduced.rules
+    );
 }
 
 #[test]

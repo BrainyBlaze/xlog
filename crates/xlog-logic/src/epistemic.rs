@@ -326,7 +326,12 @@ impl EpistemicWorldView {
 pub fn plan_epistemic_gpu_execution(program: &Program) -> Result<EpistemicGpuPlan> {
     reject_recursive_epistemic_program(program)?;
     let eir = build_eir(program)?;
-    reject_faeel_self_supported_possible(&eir)?;
+    // FAEEL unfounded modal self-support is NOT rejected here: it is a defined FAEEL
+    // result (the unfounded head is simply absent from the founded model). The
+    // structural foundedness decision drives the reduced-base drop in
+    // `faeel_unfounded_self_support_rule_indices`; the founded extension is then
+    // computed by the GPU world-view validation over the reduced base. See
+    // `reduce_epistemic_program_to_ordinary_inner`.
     let mut epistemic_literals = Vec::new();
     let mut reductions = Vec::new();
     let mut tuple_membership_bindings = Vec::new();
@@ -590,7 +595,9 @@ pub enum RecursiveEpistemicClass {
 ///
 /// Self-support THROUGH a modal literal (e.g. `p() :- possible p().`) is NOT ordinary
 /// recursion: the modal edge is excluded from the dependency walk, so FAEEL/G91
-/// foundedness still governs those cases (see [`reject_faeel_self_supported_possible`]).
+/// foundedness still governs those cases. Under FAEEL the unfounded head is excluded
+/// from the founded model by [`faeel_unfounded_self_support_rule_indices`] (the reduced
+/// base drops the circular self-support rule); under G91 the circular form is accepted.
 fn reject_recursive_epistemic_program(program: &Program) -> Result<()> {
     match classify_recursive_epistemic_program(program) {
         Ok(RecursiveEpistemicClass::NonRecursive) => Ok(()),
@@ -803,191 +810,12 @@ impl<'a> InvariantRelations<'a> {
     }
 }
 
-fn reject_faeel_self_supported_possible(eir: &EirProgram) -> Result<()> {
-    if eir.mode != EirEpistemicMode::Faeel {
-        return Ok(());
-    }
-
-    for (rule_index, rule) in eir.rules.iter().enumerate() {
-        for lit in &rule.body {
-            let EirBodyLiteral::Epistemic(lit) = lit else {
-                continue;
-            };
-            if lit.atom.predicate == rule.head.predicate && lit.atom.arity == rule.head.arity {
-                if has_independent_founded_support(eir, &lit.atom)
-                    || has_tuple_level_independent_founded_support(eir, rule, &lit.atom)
-                {
-                    continue;
-                }
-                let label = eir_epistemic_literal_label(lit);
-                let missing = format_missing_foundation(&lit.atom);
-                if lit.atom.arity > 0 {
-                    return Err(XlogError::UnsupportedEpistemicConstruct {
-                        construct: "FAEEL foundedness guard".to_string(),
-                        context: format!(
-                            "rule[{rule_index}] has nonzero-arity self-supported {label} {}/{} in default FAEEL mode; no independent founded support proves the tuple key {missing}; accepted GPU lowering requires a tuple-level foundedness proof (a non-circular support rule whose body subsumes this rule's tuple-key domain) or explicit g91 compatibility mode",
-                            lit.atom.predicate, lit.atom.arity
-                        ),
-                    });
-                }
-                return Err(XlogError::UnsupportedEpistemicConstruct {
-                    construct: "FAEEL foundedness guard".to_string(),
-                    context: format!(
-                        "rule[{rule_index}] has self-supported {label} {}/{} in default FAEEL mode; no independent founded support proves {missing}; use explicit g91 compatibility mode or provide a non-circular founded support rule",
-                        lit.atom.predicate, lit.atom.arity
-                    ),
-                });
-            }
-        }
-    }
-
-    reject_faeel_unfounded_modal_cycles(eir)?;
-    Ok(())
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct ModalSupportNode {
-    predicate: String,
-    arity: usize,
-}
-
-impl ModalSupportNode {
-    fn from_atom(atom: &xlog_ir::EirAtom) -> Self {
-        Self {
-            predicate: atom.predicate.clone(),
-            arity: atom.arity,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct UnfoundedModalSupportEdge {
-    from: ModalSupportNode,
-    to: ModalSupportNode,
-    rule_index: usize,
-    label: &'static str,
-}
-
-fn reject_faeel_unfounded_modal_cycles(eir: &EirProgram) -> Result<()> {
-    let graph = unfounded_modal_support_graph(eir);
-    let mut visiting = BTreeSet::new();
-    let mut visited = BTreeSet::new();
-
-    for node in graph.keys() {
-        if visited.contains(node) {
-            continue;
-        }
-        if let Some(edge) = find_unfounded_modal_cycle(node, &graph, &mut visiting, &mut visited) {
-            return Err(XlogError::UnsupportedEpistemicConstruct {
-                construct: "FAEEL foundedness guard".to_string(),
-                context: format!(
-                    "rule[{}] participates in an unfounded modal support cycle: {}/{} depends on {} {}/{} without independent founded support",
-                    edge.rule_index,
-                    edge.from.predicate,
-                    edge.from.arity,
-                    edge.label,
-                    edge.to.predicate,
-                    edge.to.arity
-                ),
-            });
-        }
-    }
-
-    Ok(())
-}
-
-fn unfounded_modal_support_graph(
-    eir: &EirProgram,
-) -> BTreeMap<ModalSupportNode, Vec<UnfoundedModalSupportEdge>> {
-    let mut graph: BTreeMap<_, Vec<_>> = BTreeMap::new();
-
-    for (rule_index, rule) in eir.rules.iter().enumerate() {
-        let from = ModalSupportNode::from_atom(&rule.head);
-        for lit in &rule.body {
-            let EirBodyLiteral::Epistemic(lit) = lit else {
-                continue;
-            };
-            if has_independent_founded_support(eir, &lit.atom)
-                || has_tuple_level_independent_founded_support(eir, rule, &lit.atom)
-            {
-                continue;
-            }
-            graph
-                .entry(from.clone())
-                .or_default()
-                .push(UnfoundedModalSupportEdge {
-                    from: from.clone(),
-                    to: ModalSupportNode::from_atom(&lit.atom),
-                    rule_index,
-                    label: eir_epistemic_literal_label(lit),
-                });
-        }
-    }
-
-    graph
-}
-
-fn find_unfounded_modal_cycle(
-    node: &ModalSupportNode,
-    graph: &BTreeMap<ModalSupportNode, Vec<UnfoundedModalSupportEdge>>,
-    visiting: &mut BTreeSet<ModalSupportNode>,
-    visited: &mut BTreeSet<ModalSupportNode>,
-) -> Option<UnfoundedModalSupportEdge> {
-    visiting.insert(node.clone());
-
-    if let Some(edges) = graph.get(node) {
-        for edge in edges {
-            if visiting.contains(&edge.to) {
-                return Some(edge.clone());
-            }
-            if !visited.contains(&edge.to) {
-                if let Some(cycle) = find_unfounded_modal_cycle(&edge.to, graph, visiting, visited)
-                {
-                    return Some(cycle);
-                }
-            }
-        }
-    }
-
-    visiting.remove(node);
-    visited.insert(node.clone());
-    None
-}
-
 fn eir_epistemic_literal_label(lit: &xlog_ir::EirEpistemicLiteral) -> &'static str {
     match (lit.negated, lit.op) {
         (false, EirEpistemicOp::Know) => "know",
         (false, EirEpistemicOp::Possible) => "possible",
         (true, EirEpistemicOp::Know) => "not know",
         (true, EirEpistemicOp::Possible) => "not possible",
-    }
-}
-
-/// Render the predicate/tuple-key whose independent foundation is missing.
-///
-/// Used to make FAEEL foundedness rejections name the exact tuple key that
-/// lacks non-circular support (KPI: precise missing-foundation diagnostic).
-fn format_missing_foundation(atom: &xlog_ir::EirAtom) -> String {
-    if atom.arity == 0 {
-        return format!("{}()", atom.predicate);
-    }
-    let key = atom
-        .terms
-        .iter()
-        .map(format_eir_term_key)
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("{}({key})", atom.predicate)
-}
-
-fn format_eir_term_key(term: &EirTerm) -> String {
-    match term {
-        EirTerm::Variable(name) => name.clone(),
-        EirTerm::Anonymous => "_".to_string(),
-        EirTerm::Integer(value) => value.to_string(),
-        EirTerm::String(value) => format!("{value:?}"),
-        EirTerm::Symbol(value) => format!("sym#{value}"),
-        other => format!("{other:?}"),
     }
 }
 
@@ -1302,11 +1130,13 @@ fn compile_epistemic_gpu_execution_inner(
 /// This is the Case-A counterpart to [`compile_epistemic_gpu_execution`]: instead of
 /// building a single-pass GPU world-view plan, it proves the program is admissible
 /// Case A and resolves it to an ordinary recursive program for the existing fixpoint
-/// engine. Validation still flows through the EIR boundary ([`build_eir`]) and the
-/// FAEEL self-support guard ([`reject_faeel_self_supported_possible`]) on the ORIGINAL
-/// program, so modal self-support (Case B) remains governed by FAEEL/G91 foundedness
-/// and is NOT silently admitted here. Only EXECUTION routes through the ordinary
-/// engine.
+/// engine. Validation still flows through the EIR boundary ([`build_eir`]) via
+/// [`classify_recursive_epistemic_program`], which already requires EVERY modal literal
+/// to range over an INVARIANT relation. A direct modal self-support over the recursive
+/// head (`possible p` with `p` the recursive/derived head) ranges over a NON-invariant
+/// relation and is therefore rejected as non-Case-A upstream — so unfounded modal
+/// self-support never reaches this reduction. Only EXECUTION routes through the
+/// ordinary engine.
 ///
 /// Returns `Ok(Some(reduced))` when the program is admissible Case A, `Ok(None)` when
 /// the program has no ordinary recursion (the caller should use the single-pass
@@ -1315,11 +1145,6 @@ pub fn try_reduce_case_a_recursive_epistemic_program(program: &Program) -> Resul
     match classify_recursive_epistemic_program(program)? {
         RecursiveEpistemicClass::NonRecursive => Ok(None),
         RecursiveEpistemicClass::CaseA => {
-            // Preserve the EIR boundary and FAEEL/G91 foundedness contract: a Case-A
-            // recursion that ALSO contains unfounded modal self-support must still
-            // fail closed through the same guards the single-pass path uses.
-            let eir = build_eir(program)?;
-            reject_faeel_self_supported_possible(&eir)?;
             Ok(Some(reduce_case_a_epistemic_program_to_ordinary(program)))
         }
     }
@@ -1452,6 +1277,74 @@ fn final_output_columns_for_eir(eir: &EirProgram) -> Option<Vec<usize>> {
     }
 }
 
+/// Indices (into `program.rules`) of FAEEL rules that are unfounded by circular modal
+/// self-support and must be excluded from the reduced founded-model base.
+///
+/// A rule qualifies when (a) the program is in FAEEL mode, (b) the rule body contains a
+/// modal literal `possible p`/`know p` over the rule's OWN head predicate/arity
+/// (direct self-support), (c) that head has NO independent founded support
+/// ([`has_independent_founded_support`]) and NO tuple-level founded support
+/// ([`has_tuple_level_independent_founded_support`]), and (d) excluding the rule does
+/// NOT silently elide a mode-independent safety failure — i.e. the head carries no
+/// variable bound ONLY by the self-supporting modal. Condition (d) preserves the clean
+/// `UnsafeVariable` honest-exit for pure nonzero self-support (`p(X) :- possible p(X)`)
+/// in EVERY mode (G91 rejects it identically): dropping such a rule would replace a
+/// precise safety diagnostic with a confusing materialization error.
+///
+/// Returns indices in ASCENDING order; callers must remove in DESCENDING order to keep
+/// the remaining indices stable.
+///
+/// This is the structural foundedness DECISION; the founded EXTENSION is then computed
+/// by the existing GPU world-view validation over the reduced base (no CPU semantic
+/// solver). G91 mode never drops, so circular self-support stays accepted there — the
+/// drop is exactly the FAEEL-vs-G91 mode difference.
+fn faeel_unfounded_self_support_rule_indices(program: &Program) -> Vec<usize> {
+    let Ok(eir) = build_eir(program) else {
+        return Vec::new();
+    };
+    if eir.mode != EirEpistemicMode::Faeel {
+        return Vec::new();
+    }
+    let mut indices = Vec::new();
+    for (index, (rule, eir_rule)) in program.rules.iter().zip(&eir.rules).enumerate() {
+        let modal_only_output_variables = modal_only_bound_output_variables(rule);
+        let drop = eir_rule.body.iter().any(|lit| {
+            let EirBodyLiteral::Epistemic(modal) = lit else {
+                return false;
+            };
+            // Direct modal self-support over the rule's own head.
+            if modal.atom.predicate != eir_rule.head.predicate
+                || modal.atom.arity != eir_rule.head.arity
+            {
+                return false;
+            }
+            // Founded by an independent (non-circular) derivation: keep the rule; the
+            // founded support proves the head, so it stays in the model.
+            if has_independent_founded_support(&eir, &modal.atom)
+                || has_tuple_level_independent_founded_support(&eir, eir_rule, &modal.atom)
+            {
+                return false;
+            }
+            // A head variable bound ONLY by this self-supporting modal would be unbound
+            // (`UnsafeVariable`) in every mode once the modal is stripped: do NOT drop,
+            // let the existing safety path raise the precise diagnostic.
+            if modal
+                .atom
+                .terms
+                .iter()
+                .any(|term| matches!(term, EirTerm::Variable(name) if modal_only_output_variables.contains(name)))
+            {
+                return false;
+            }
+            true
+        });
+        if drop {
+            indices.push(index);
+        }
+    }
+    indices
+}
+
 /// Return the ordinary runtime program produced after epistemic GPU planning.
 ///
 /// Epistemic literals are removed only for the reduced production runtime
@@ -1508,6 +1401,33 @@ fn reduce_epistemic_program_to_ordinary_inner(
     schema_only_determined_resolve: &BTreeSet<String>,
 ) -> Program {
     let mut reduced = program.clone();
+
+    // FAEEL FOUNDED-MODEL EXTENSION: a rule whose head is supported ONLY by circular
+    // modal self-support (`possible p`/`know p` over its own head, with no independent
+    // founded derivation) contributes nothing to the FAEEL founded model. Excluding the
+    // rule from the reduced ordinary base is precisely the founded/equilibrium
+    // semantics: the unfounded head is absent from the model rather than fabricated by
+    // the stripped-modal `1=1` filler (which would wrongly found it, the G91 answer).
+    //
+    // This is the structural foundedness DECISION (compile-time, reusing the exact
+    // `has_independent_founded_support` / `has_tuple_level_independent_founded_support`
+    // predicates the legacy guard used) driving the EXTENSION COMPUTATION on the
+    // GPU/runtime path: the dropped rule simply removes the unfounded head's founding
+    // base, and the existing GPU world-view validation then accepts the empty/founded
+    // candidate. G91 keeps the filler (no drop), so `possible p` stays accepted —
+    // this drop IS the FAEEL-vs-G91 mode difference.
+    //
+    // SCOPE: the drop fires only for FAEEL mode. A rule whose head carries a variable
+    // bound ONLY by the self-supporting modal is NOT dropped here; with the modal
+    // stripped that variable is genuinely unbound (`UnsafeVariable`) in EVERY mode
+    // (G91 included), so it must fall through to the existing safety path rather than
+    // be silently elided. Dropping it would mask a mode-independent safety failure.
+    for index in faeel_unfounded_self_support_rule_indices(program)
+        .into_iter()
+        .rev()
+    {
+        reduced.rules.remove(index);
+    }
 
     // AUGMENTING positive modals over INVARIANT relations are resolved into positive
     // ordinary join atoms (instead of being stripped) so the augmented head columns

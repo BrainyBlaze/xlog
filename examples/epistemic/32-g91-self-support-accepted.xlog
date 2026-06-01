@@ -1,0 +1,26 @@
+// v0.9.2 ITEM B (mode-difference pair to example 31): G91 self-support ACCEPTED.
+//
+//   p() :- possible p().    -- the SAME circular self-support as example 31
+//
+// Under explicit G91 (Gelfond 1991 autoepistemic) compatibility mode, circular modal
+// self-support is ACCEPTED: the autoepistemic model where `p` is possible (and hence
+// derivable) is a stable model, so `p` holds. `?- p()` prints `rows: 1`.
+//
+// This is the exact FAEEL-vs-G91 mode difference:
+//   * example 31 (default FAEEL): unfounded -> EMPTY founded model -> rows: 0
+//   * example 32 (explicit G91):  accepted  -> rows: 1
+//
+// The ONLY change between the two pilots is the `epistemic_mode` pragma; the program is
+// byte-for-byte identical otherwise. The semantic divergence is the load-bearing
+// evidence that FAEEL founded semantics and G91 autoepistemic semantics are distinct
+// and both executable.
+//
+// Expected: `xlog run` exits 0 and emits `rows: 1` for `?- p()`.
+
+#pragma epistemic_mode = g91
+
+pred p().
+
+p() :- possible p().
+
+?- p().
