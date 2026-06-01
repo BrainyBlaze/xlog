@@ -92,62 +92,85 @@ fn epistemic_literal_preserves_tuple_terms_for_gpu_key_matching() {
     );
 }
 
-#[test]
-fn nested_epistemic_literal_returns_typed_error() {
-    let err = parse_program("bad(X) :- know possible edge(X).").unwrap_err();
-    match err {
-        XlogError::UnsupportedEpistemicConstruct { construct, .. } => {
-            assert_eq!(construct, "nested epistemic literal");
+/// Helper: parse a one-rule program, build its EIR, and return the (op, negated)
+/// of the FIRST epistemic literal in rule 0's body. The EIR is the semantic
+/// boundary, so checking the collapsed literal there proves the chain normalizes
+/// to an ordinary single-level epistemic literal (no raw-RIR shortcut).
+fn first_eir_epistemic(src: &str) -> (EirEpistemicOp, bool, String) {
+    let program = parse_program(src).unwrap_or_else(|e| panic!("parse failed for {src:?}: {e:?}"));
+    let eir = build_eir(&program).unwrap_or_else(|e| panic!("eir failed for {src:?}: {e:?}"));
+    for lit in &eir.rules[0].body {
+        if let EirBodyLiteral::Epistemic(e) = lit {
+            return (e.op, e.negated, e.atom.predicate.clone());
         }
-        other => panic!("expected typed epistemic diagnostic, got {other:?}"),
     }
+    panic!("no epistemic literal in EIR for {src:?}");
 }
 
+/// v0.9.2 ITEM C: a bare modal CHAIN (`know possible p`) is NOT rejected — it
+/// collapses via the KD45/S5 equivalence to its innermost (atom-adjacent)
+/// operator and normalizes into an ordinary single-level epistemic literal in
+/// the EIR. `know possible edge` -> `possible edge`.
 #[test]
-fn negated_nested_epistemic_literal_returns_typed_error() {
-    let err = parse_program("bad(X) :- not know possible edge(X).").unwrap_err();
-    match err {
-        XlogError::UnsupportedEpistemicConstruct { construct, context } => {
-            assert_eq!(construct, "nested epistemic literal");
-            assert!(context.contains("not know possible edge(X)"));
-        }
-        other => panic!("expected typed negated epistemic diagnostic, got {other:?}"),
-    }
+fn nested_epistemic_chain_collapses_to_inner_operator_in_eir() {
+    assert_eq!(
+        first_eir_epistemic("bad(X) :- know possible edge(X)."),
+        (EirEpistemicOp::Possible, false, "edge".to_string())
+    );
+    assert_eq!(
+        first_eir_epistemic("bad(X) :- possible know edge(X)."),
+        (EirEpistemicOp::Know, false, "edge".to_string())
+    );
+    assert_eq!(
+        first_eir_epistemic("bad(X) :- know know edge(X)."),
+        (EirEpistemicOp::Know, false, "edge".to_string())
+    );
+    assert_eq!(
+        first_eir_epistemic("bad(X) :- possible possible edge(X)."),
+        (EirEpistemicOp::Possible, false, "edge".to_string())
+    );
+    // 3-deep: innermost still wins.
+    assert_eq!(
+        first_eir_epistemic("bad(X) :- know possible know edge(X)."),
+        (EirEpistemicOp::Know, false, "edge".to_string())
+    );
 }
 
+/// A bare chain under a single LEADING negation distributes the negation and
+/// collapses to a negated single-level epistemic literal. `not know possible
+/// edge` -> `not possible edge`.
 #[test]
-fn negated_possible_nested_epistemic_literal_returns_typed_error() {
-    let err = parse_program("bad(X) :- not possible know edge(X).").unwrap_err();
-    match err {
-        XlogError::UnsupportedEpistemicConstruct { construct, context } => {
-            assert_eq!(construct, "nested epistemic literal");
-            assert!(context.contains("not possible know edge(X)"));
-        }
-        other => panic!("expected typed negated possible epistemic diagnostic, got {other:?}"),
-    }
+fn negated_nested_epistemic_chain_collapses_in_eir() {
+    assert_eq!(
+        first_eir_epistemic("bad(X) :- not know possible edge(X)."),
+        (EirEpistemicOp::Possible, true, "edge".to_string())
+    );
+    assert_eq!(
+        first_eir_epistemic("bad(X) :- not possible know edge(X)."),
+        (EirEpistemicOp::Know, true, "edge".to_string())
+    );
 }
 
-/// K4 stability: nested modal forms with `not` interspersed between/around the
-/// epistemic operators MUST fail closed with the SAME typed diagnostic and the
-/// SAME `construct` string as the adjacent-operator forms — not a generic
-/// `XlogError::Parse`. Each case also carries the verbatim source as context.
+/// SCOPE BOUNDARY: nested modal forms whose negation is NOT a single leading
+/// `not` — an INTERIOR negation between operators (`K ¬M p`) or an ATOM-adjacent
+/// negation (`M ¬p`) — have no sound collapse to a single `op atom` literal and
+/// MUST fail closed with a typed `UnsupportedEpistemicConstruct` (NOT a wrong
+/// collapse, NOT a generic `Parse` error). Each case carries the verbatim source.
 #[test]
-fn nested_epistemic_with_inner_negation_is_stable_typed_error() {
+fn nested_epistemic_with_interior_or_atom_negation_is_stable_typed_error() {
     let cases = [
-        "bad(X) :- know not possible edge(X).",
-        "bad(X) :- possible not know edge(X).",
-        "bad(X) :- know possible not edge(X).",
-        "bad(X) :- not know not possible edge(X).",
-        "bad(X) :- know know edge(X).",
-        "bad(X) :- possible possible edge(X).",
+        ("bad(X) :- know not possible edge(X).", "interior negation"),
+        ("bad(X) :- possible not know edge(X).", "interior negation"),
+        ("bad(X) :- know possible not edge(X).", "negated atom"),
+        ("bad(X) :- not know not possible edge(X).", "interior negation"),
     ];
-    for src in cases {
+    for (src, marker) in cases {
         let err = parse_program(src).unwrap_err();
         match err {
             XlogError::UnsupportedEpistemicConstruct { construct, context } => {
-                assert_eq!(
-                    construct, "nested epistemic literal",
-                    "construct string must be stable for {src:?}"
+                assert!(
+                    construct.contains(marker),
+                    "construct {construct:?} must mention {marker:?} for {src:?}"
                 );
                 // Source context anchors the diagnostic to the offending literal.
                 let literal = src.trim_start_matches("bad(X) :- ").trim_end_matches('.');

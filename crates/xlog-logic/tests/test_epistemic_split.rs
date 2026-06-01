@@ -746,19 +746,38 @@ fn cross_arity_modal_coupling_over_invariant_relations_resolves_soundly() {
 }
 
 #[test]
-fn nested_modal_in_joint_coupling_rule_fails_closed_upstream_of_split() {
-    // EGB-06 K4: removing the blanket coupling rejection must NOT let a nested-modal
-    // construct inside a multi-epistemic-predicate rule slip through. Nested modals
-    // are rejected at PARSE time (EGB-03), upstream of the coupling gate, so the
-    // joint-coupling rule never reaches `split_epistemic_program`. This confirms the
-    // nested-modal boundary is unaffected by the coupling-gate removal.
-    let err = parse_program("h(X) :- know p(X), possible know q(X).").unwrap_err();
-    match err {
-        XlogError::UnsupportedEpistemicConstruct { construct, .. } => {
-            assert_eq!(construct, "nested epistemic literal");
-        }
-        other => panic!("expected nested-modal parse diagnostic, got {other:?}"),
-    }
+fn nested_modal_chain_in_joint_coupling_rule_collapses_then_couples() {
+    // v0.9.2 ITEM C: a bare nested-modal CHAIN inside a multi-epistemic-predicate
+    // coupling rule is no longer rejected — it collapses (KD45/S5) to its innermost
+    // operator at parse time and then participates in ordinary coupling. Here
+    // `possible know q(X)` collapses to `know q(X)`, leaving a rule with two
+    // single-level modal literals (`know p(X)`, `know q(X)`). The collapse is a
+    // sound normalization, so the rule reaches `split_epistemic_program` exactly as
+    // an authored `h(X) :- know p(X), know q(X).` would.
+    use xlog_logic::ast::EpistemicOp;
+    let program = parse_program("h(X) :- know p(X), possible know q(X).").unwrap();
+    let modal_ops: Vec<_> = program.rules[0]
+        .body
+        .iter()
+        .filter_map(|lit| match lit {
+            BodyLiteral::Epistemic(e) => Some((e.op, e.negated, e.atom.predicate.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        modal_ops,
+        vec![
+            (EpistemicOp::Know, false, "p".to_string()),
+            // possible know q  ==  know q  (inner operator wins)
+            (EpistemicOp::Know, false, "q".to_string()),
+        ],
+        "the nested chain must collapse to a single-level know q before coupling"
+    );
+    // The collapsed program is a well-formed coupling input (no parse rejection).
+    assert!(
+        split_epistemic_program(&program).is_ok(),
+        "collapsed coupling rule must reach split without a nested-modal rejection"
+    );
 }
 
 // --- EGB-05 K2 coverage / K3 diagnostics / source-order stability pilots ---
