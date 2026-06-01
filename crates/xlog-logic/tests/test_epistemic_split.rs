@@ -998,13 +998,25 @@ fn modal_over_epistemic_derived_head_coalesces_then_fails_closed_at_joint_compil
     // references predicate `a`, which is component A's epistemic-DERIVED head
     // (`a() :- know p()`). Local analysis would split `a` and `b` into two
     // independent components, but the modal truth of `a` depends on A's accepted
-    // world view, so the split is unsound. The dependency graph correctly
+    // world view, so an INDEPENDENT split is unsound. The dependency graph correctly
     // coalesces the two rules into ONE component (via the derived dependency on
-    // `a`), but that single component now carries TWO epistemic output heads
-    // (`a` and `b`). The single-output-buffer joint GPU path cannot materialize
-    // two coupled epistemic outputs, so this must FAIL CLOSED with a coupling-
-    // specific diagnostic that names the coupled predicates AND the merge reason
-    // -- NOT the misleading "independent epistemic outputs" message.
+    // `a`), but that single component carries TWO epistemic output heads (`a` and
+    // `b`). The single-output-buffer JOINT split path cannot materialize two coupled
+    // epistemic outputs, so the SPLIT LAYER fails closed with a coupling-specific
+    // diagnostic naming the coupled predicates AND the merge reason -- NOT the
+    // misleading "independent epistemic outputs" message.
+    //
+    // NOTE (v0.9.2 ITEM F): the full `xlog run` path does NOT route this shape
+    // through the split layer. Because `a`'s modal (`know p`) ranges over the
+    // INVARIANT base `p`, `a` is epistemically DETERMINED, so STRATIFIED execution
+    // intercepts the coupling FIRST: it materializes the gated `a` as a lower
+    // stratum, then gates `know a` in the higher stratum against the materialized
+    // base. The PRODUCTION result is therefore SOLVED, not rejected -- see the e2e
+    // equivalence test `test_derived_head_coupling_stratified_equals_per_stratum_reference`
+    // in `xlog-gpu/tests/logic_runner.rs`. This test pins the SPLIT-LAYER fail-closed
+    // contract that the stratified path relies on as its sound fallback for any shape
+    // stratification declines (e.g. a genuinely-cyclic coupling, which stratification
+    // returns `None` for and the split layer then correctly rejects).
     let program = parse_program("a() :- know p(). b() :- know a().").unwrap();
 
     // Coalescing is correct: one component, derived dependency on `a`.

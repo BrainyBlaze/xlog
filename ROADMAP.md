@@ -2022,8 +2022,15 @@ fallback locks.
       (EGB-02 Expected Rejected).
 - [x] Epistemic constraints with variable tuple keys, nested-modal bodies, or
       CPU-only world-view scans fail closed (EGB-04 Expected Rejected).
-- [x] Unsafe same-name multi-arity modal coupling fails closed; safe (bound)
-      cross-arity coupling is accepted (EGB-06 Expected Rejected).
+- [x] Same-name multi-arity modal coupling is SOLVED in v0.9.2 (ITEM F): distinct
+      arities are distinct relations, so the modal tuple-source resolution
+      disambiguates by arity (arity-qualified store key `p/1`/`p/2`, bare-name
+      fallback). Joint-solves on device to exact tuples per arity, identical
+      split-vs-unsplit, zero CPU fallback. Genuinely-cyclic modal coupling
+      (`a:-know b. b:-know a.`, no founded order) stays typed fail-closed
+      end-to-end. (CLI inline-fact ingestion of same-name multi-arity facts is
+      blocked by the engine-wide name-keyed schema/relation-identity model, an
+      honest wall orthogonal to coupling semantics.)
 - [x] Recursion through the modal predicate (Case B), negated modals in recursive
       programs, and modals over non-invariant relations fail closed with typed
       `recursive epistemic program` diagnostics; modal self-support remains governed

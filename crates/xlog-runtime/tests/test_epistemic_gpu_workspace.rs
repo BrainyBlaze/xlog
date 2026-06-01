@@ -8996,17 +8996,27 @@ fn egb06_mixed_operator_conjunction_joint_matches_unsplit() {
     assert_eq!(preflight.not_possible_operator_count, 1);
 }
 
-/// EGB-06 K2/K4: cross-arity SAME-NAME predicate coupling (`know p(X), possible p(X,Y)`)
-/// is a FAIL-CLOSED class with parity-preserving semantics. The relation store and
-/// the executable's `relation_ids` map are keyed by predicate NAME only, so `p/1`
-/// and `p/2` cannot both resolve — a pre-existing engine-wide property, not an
-/// EGB-06 regression. Both the SPLIT and UNSPLIT paths must reach the SAME typed
-/// `UnsupportedEpistemicConstruct` tuple-membership diagnostic at execution, with
-/// no partial output. (Removing the blanket coupling rejection must not let this
-/// be silently accepted, and "identical to unsplit" must hold even when it fails.)
+/// EGB-06 K2/K4 (v0.9.2F): cross-arity SAME-NAME predicate coupling
+/// (`know p(X), possible p(X,Y)`) is now SOLVED by treating the two arities as
+/// DISTINCT relations. The relation store and the executable's `relation_ids` map
+/// stay name-keyed, but the modal tuple-source resolution disambiguates by ARITY:
+/// each binding resolves its source via the arity-qualified store key (`p/1`,
+/// `p/2`) with a bare-name fallback. The user uploads each arity's facts under its
+/// own qualified key, and the joint enumeration consults BOTH distinctly.
+///
+/// EXACT tuples (each arity independently load-bearing):
+///   seed = {(1,10),(2,20),(3,30)}, p/1 = {1,2}, p/2 = {(1,10),(2,99)}.
+///   a(X,Y) :- seed(X,Y), know p(X), possible p(X,Y) accepts exactly {(1,10)}:
+///     (1,10): X=1∈p/1 ✓, (1,10)∈p/2 ✓                  -> accepted
+///     (2,20): X=2∈p/1 ✓, (2,20)∉p/2 (p/2 has (2,99))   -> removed by ARITY-2 filter
+///     (3,30): X=3∉p/1                                    -> removed by ARITY-1 filter
+///
+/// Both the SPLIT and UNSPLIT paths must reach the SAME exact tuples (split-vs-
+/// unsplit equivalence — non-tautological: each path is a distinct compile +
+/// execute), with no CPU fallback or CPU candidate enumeration.
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
-fn egb06_cross_arity_same_name_fails_closed_identically_split_and_unsplit() {
+fn egb06_cross_arity_same_name_solved_identically_split_and_unsplit() {
     let Some(fixture) = runtime_fixture() else {
         return;
     };
@@ -9017,32 +9027,47 @@ fn egb06_cross_arity_same_name_fails_closed_identically_split_and_unsplit() {
         pred a(u32, u32).
         a(X, Y) :- seed(X, Y), know p(X), possible p(X, Y).
     "#;
-    // p/1 and p/2 collide on the name-keyed relation store; the binding-arity check
-    // fires during tuple-source resolution before any output materializes.
     let caps = EpistemicGpuWorkspaceCapacities {
         max_candidates: 8,
         max_worlds: 4,
         max_models_per_reduction: 2,
     };
+    let seed_rows = [(1u32, 10u32), (2, 20), (3, 30)];
+    // p/1 facts uploaded under the arity-qualified key "p/1"; p/2 under "p/2".
+    let p1_rows = [1u32, 2];
+    let p2_rows = [(1u32, 10u32), (2, 99)];
+    let expected: Vec<(u32, u32)> = vec![(1, 10)];
 
-    let assert_tuple_membership_fail = |err: xlog_core::XlogError, side: &str| match err {
-        xlog_core::XlogError::UnsupportedEpistemicConstruct { construct, context } => {
-            assert_eq!(
-                construct, "epistemic GPU stable-model tuple membership",
-                "{side} must fail on the tuple-membership boundary"
-            );
-            assert!(
-                context.contains("does not match binding arity"),
-                "{side} diagnostic must cite the cross-arity binding mismatch, got: {context}"
-            );
-        }
-        other => panic!("{side}: expected typed tuple-membership diagnostic, got {other:?}"),
+    let read_a_tuples = |result_output: &CudaBuffer| -> Vec<(u32, u32)> {
+        let col0 = fixture
+            .provider
+            .download_column::<u32>(result_output, 0)
+            .expect("download a col0");
+        let col1 = fixture
+            .provider
+            .download_column::<u32>(result_output, 1)
+            .expect("download a col1");
+        let mut tuples: Vec<(u32, u32)> = col0.into_iter().zip(col1).collect();
+        tuples.sort_unstable();
+        tuples
+    };
+
+    let upload_sources = |executor: &mut Executor| {
+        executor.put_relation(
+            "seed",
+            upload_binary_u32(&fixture.memory, &seed_rows, "x", "y"),
+        );
+        executor.put_relation("p/1", upload_unary_u32(&fixture.memory, &p1_rows, "x"));
+        executor.put_relation(
+            "p/2",
+            upload_binary_u32(&fixture.memory, &p2_rows, "x", "y"),
+        );
     };
 
     // --- SPLIT path ---
     let split_program = parse_program(source).expect("parse cross-arity program");
     let split = compile_epistemic_gpu_split_execution(&split_program)
-        .expect("cross-arity program compiles (resolution is a runtime concern)");
+        .expect("cross-arity program compiles on the split path");
     assert_eq!(split.components.len(), 1);
     let recomposed = split.recomposed_components();
     let mut split_executor = Executor::new(Arc::clone(&fixture.provider));
@@ -9051,44 +9076,43 @@ fn egb06_cross_arity_same_name_fails_closed_identically_split_and_unsplit() {
             split_executor.register_relation(*rel, name);
         }
     }
-    split_executor.put_relation(
-        "seed",
-        upload_binary_u32(&fixture.memory, &[(1, 10), (2, 20), (3, 30)], "x", "y"),
-    );
-    split_executor.put_relation(
-        "p",
-        upload_binary_u32(&fixture.memory, &[(1, 10), (2, 99)], "x", "y"),
-    );
+    upload_sources(&mut split_executor);
     let split_executables: Vec<_> = recomposed.iter().map(|c| &c.executable).collect();
-    let split_err = match split_executor
+    let split_batch = split_executor
         .execute_epistemic_gpu_execution_batch_with_trace(&split_executables, caps)
-    {
-        Ok(_) => panic!("split cross-arity coupling must fail closed at tuple resolution"),
-        Err(err) => err,
-    };
-    assert_tuple_membership_fail(split_err, "split");
+        .expect("split cross-arity coupling solves with arity-disambiguated sources");
+    assert_eq!(split_batch.trace.cpu_candidate_enumerations, 0);
+    let split_result = split_batch
+        .results
+        .last()
+        .expect("split batch yields a result");
+    assert!(split_result.prepared.preflight.cpu_fallbacks.is_zero());
+    assert_eq!(split_result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(read_a_tuples(&split_result.final_output), expected);
 
-    // --- UNSPLIT path: must fail closed identically ---
+    // --- UNSPLIT path: must produce the SAME exact tuples ---
     let unsplit_program = parse_program(source).expect("parse cross-arity program");
     let unsplit = compile_epistemic_gpu_execution(&unsplit_program)
-        .expect("cross-arity program compiles on unsplit path too");
+        .expect("cross-arity program compiles on the unsplit path too");
     let mut unsplit_executor = Executor::new(Arc::clone(&fixture.provider));
     for (name, rel) in &unsplit.relation_ids {
         unsplit_executor.register_relation(*rel, name);
     }
-    unsplit_executor.put_relation(
-        "seed",
-        upload_binary_u32(&fixture.memory, &[(1, 10), (2, 20), (3, 30)], "x", "y"),
+    upload_sources(&mut unsplit_executor);
+    let unsplit_result = unsplit_executor
+        .execute_epistemic_gpu_execution(&unsplit, caps)
+        .expect("unsplit cross-arity coupling solves with arity-disambiguated sources");
+    assert!(unsplit_result.prepared.preflight.cpu_fallbacks.is_zero());
+    assert_eq!(unsplit_result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(read_a_tuples(&unsplit_result.final_output), expected);
+
+    // Split-vs-unsplit EQUIVALENCE: identical exact tuples from two distinct
+    // compile+execute paths.
+    assert_eq!(
+        read_a_tuples(&split_result.final_output),
+        read_a_tuples(&unsplit_result.final_output),
+        "split and unsplit cross-arity coupling must yield identical exact tuples"
     );
-    unsplit_executor.put_relation(
-        "p",
-        upload_binary_u32(&fixture.memory, &[(1, 10), (2, 99)], "x", "y"),
-    );
-    let unsplit_err = match unsplit_executor.execute_epistemic_gpu_execution(&unsplit, caps) {
-        Ok(_) => panic!("unsplit cross-arity coupling must fail closed at tuple resolution"),
-        Err(err) => err,
-    };
-    assert_tuple_membership_fail(unsplit_err, "unsplit");
 }
 
 /// EGB-06 K1: empty/contradictory candidate evidence yields an accepted but EMPTY

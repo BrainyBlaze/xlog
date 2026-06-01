@@ -36,6 +36,22 @@ fn read_pairs(provider: &CudaKernelProvider, buffer: &CudaBuffer) -> Vec<(u32, u
     c0.into_iter().zip(c1).collect()
 }
 
+fn read_unary(provider: &CudaKernelProvider, buffer: &CudaBuffer) -> Vec<u32> {
+    let mut v = provider
+        .download_column::<u32>(buffer, 0)
+        .unwrap_or_default();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// Evaluate an all-EDB program and return the first query's unary column, sorted.
+fn run_unary_query(provider: &Arc<CudaKernelProvider>, source: &str) -> Result<Vec<u32>> {
+    let program = xlog_gpu::logic::LogicProgram::compile(source)?;
+    let result = program.evaluate(provider.clone(), std::collections::HashMap::new())?;
+    Ok(read_unary(provider, &result.queries[0].buffer))
+}
+
 #[test]
 fn test_logic_program_runs_with_gpu_inputs() -> Result<()> {
     let Some(provider) = create_test_provider() else {
@@ -216,6 +232,178 @@ fn test_case_b_ungated_mutation_flips_founded_result() -> Result<()> {
     assert!(
         got.contains(&(1, 1)),
         "the mutation must introduce the unfounded (1,1) that the founded gate excludes"
+    );
+
+    Ok(())
+}
+
+/// v0.9.2 ITEM F (derived-head coupling — SPLIT-VS-UNSPLIT EQUIVALENCE): a
+/// cross-component modal coupling over an epistemically-DETERMINED derived head is
+/// SOLVED in production by STRATIFICATION, and the stratified joint result equals
+/// the per-stratum INDEPENDENT reference EXACTLY.
+///
+/// Program (`b` gates `know a`; `a` gates `know base`; `base` invariant):
+///   base = {2,3}, src = {1,2}, src2 = {1,2,3}
+///   a(X) :- src(X),  know base(X).   -- stratum 0 (determined: base invariant)
+///   b(X) :- src2(X), know a(X).      -- stratum 1 (modal over determined `a`)
+///
+/// EXACT tuples: a = {2} (X in src AND in base), b = {2} (X in src2 AND in a).
+///
+/// REFERENCE = the per-stratum INDEPENDENT evaluation: stratum 0 solves `a` on its
+/// own ({2}); that GATED extension is then staged as a base relation and stratum 1
+/// solves `b` over it. Production instead AUTO-materializes a's gated output into
+/// the store (`materialize_epistemic_head_relation`) between strata. This test
+/// asserts the two mechanisms agree, so it validates the stratification
+/// ORCHESTRATION (a regression that materialized the UNGATED `a`, i.e. double- or
+/// non-gating, would make the joint `b` diverge from the reference). NON-tautological:
+/// the reference recomputes each stratum independently rather than reading the joint
+/// run's buffers.
+#[test]
+fn test_derived_head_coupling_stratified_equals_per_stratum_reference() -> Result<()> {
+    let Some(provider) = create_test_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return Ok(());
+    };
+
+    // --- JOINT (production) path: stratified determined-derived-head coupling. ---
+    let joint = r#"
+        #pragma epistemic_mode = faeel
+        pred base(u32). pred src(u32). pred src2(u32). pred a(u32). pred b(u32).
+        base(2). base(3). src(1). src(2). src2(1). src2(2). src2(3).
+        a(X) :- src(X), know base(X).
+        b(X) :- src2(X), know a(X).
+        ?- b(X).
+    "#;
+    let joint_program = xlog_gpu::logic::LogicProgram::compile(joint)?;
+    // NON-VACUOUS dispatch proof: the coupling must route through the STRATIFIED
+    // plan (not the joint single-component split, which fails closed in isolation).
+    let plan_json = joint_program
+        .epistemic_plan_json()
+        .expect("stratified coupling must carry a provenance summary");
+    assert!(
+        plan_json.contains("\"plan_kind\":\"epistemic_stratified\""),
+        "determined-derived-head coupling must route through the stratified plan, got: {plan_json}"
+    );
+    let joint_result =
+        joint_program.evaluate(provider.clone(), std::collections::HashMap::new())?;
+    let joint_b = read_unary(&provider, &joint_result.queries[0].buffer);
+
+    // --- REFERENCE: each stratum solved INDEPENDENTLY. ---
+    // Stratum 0: solve `a` on its own.
+    let a_ref = run_unary_query(
+        &provider,
+        r#"
+        #pragma epistemic_mode = faeel
+        pred base(u32). pred src(u32). pred a(u32).
+        base(2). base(3). src(1). src(2).
+        a(X) :- src(X), know base(X).
+        ?- a(X).
+    "#,
+    )?;
+    assert_eq!(
+        a_ref,
+        vec![2],
+        "reference stratum-0 `a` must be exactly {{2}}"
+    );
+
+    // Stage `a`'s gated extension as a BASE relation, then solve stratum 1 `b`.
+    let a_facts: String = a_ref.iter().map(|x| format!("a({x}). ")).collect();
+    let b_ref_src = format!(
+        r#"
+        #pragma epistemic_mode = faeel
+        pred src2(u32). pred a(u32). pred b(u32).
+        src2(1). src2(2). src2(3). {a_facts}
+        b(X) :- src2(X), know a(X).
+        ?- b(X).
+    "#
+    );
+    let b_ref = run_unary_query(&provider, &b_ref_src)?;
+
+    // EXACT tuples and split-vs-unsplit (stratified-vs-independent) equivalence.
+    assert_eq!(
+        joint_b,
+        vec![2],
+        "stratified joint `b` must be exactly {{2}}"
+    );
+    assert_eq!(
+        b_ref,
+        vec![2],
+        "reference stratum-1 `b` must be exactly {{2}}"
+    );
+    assert_eq!(
+        joint_b, b_ref,
+        "stratified coupling must equal the per-stratum independent reference EXACTLY"
+    );
+
+    Ok(())
+}
+
+/// v0.9.2 ITEM F (derived-head coupling — MUTATION PROBE): neutralizing the modal
+/// gate on the determined head FLIPS the result, proving the stratified gating is
+/// load-bearing (not cosmetic).
+///
+/// The accepted program gates `b` behind `know a` (and `a` behind `know base`).
+/// Here the SAME shape is mutated to UNGATE the modals (every `know` dropped, so `b`
+/// ranges over all of `src2`). The founded answer {2} FLIPS to {1,2,3}. A stratified
+/// solve that returned {1,2,3} would be unsound; the accepted path must not.
+#[test]
+fn test_derived_head_coupling_ungated_mutation_flips_result() -> Result<()> {
+    let Some(provider) = create_test_provider() else {
+        eprintln!("Skipping: no CUDA device");
+        return Ok(());
+    };
+
+    // MUTATION: drop the `know` gates -> a := src∩base ordinarily, b := all of src2.
+    let mutated = run_unary_query(
+        &provider,
+        r#"
+        pred base(u32). pred src(u32). pred src2(u32). pred a(u32). pred b(u32).
+        base(2). base(3). src(1). src(2). src2(1). src2(2). src2(3).
+        a(X) :- src(X), base(X).
+        b(X) :- src2(X).
+        ?- b(X).
+    "#,
+    )?;
+
+    assert_eq!(
+        mutated,
+        vec![1, 2, 3],
+        "ungating the modal coupling must FLIP `b` from the founded {{2}} to all of src2"
+    );
+    assert!(
+        mutated.contains(&1) && mutated.contains(&3),
+        "the mutation must introduce the spurious 1 and 3 that the modal gate excludes"
+    );
+
+    Ok(())
+}
+
+/// v0.9.2 ITEM F (derived-head coupling — TRUE-UNSAFETY WALL): a GENUINELY-CYCLIC
+/// modal coupling (`a :- know b. b :- know a.`) has NO founded stratum order — the
+/// modal truth of each head depends on the other's accepted world view, a circular
+/// modality. It is correctly REJECTED end-to-end through the full production
+/// dispatch (stratification yields no stratum order, Case-A does not apply, and the
+/// split layer fails closed with a precise diagnostic naming both coupled heads).
+/// This is the honest wall the item permits — it must NOT be silently accepted.
+#[test]
+fn test_true_cyclic_modal_coupling_rejected_end_to_end() -> Result<()> {
+    if create_test_provider().is_none() {
+        eprintln!("Skipping: no CUDA device");
+        return Ok(());
+    }
+
+    let err = match xlog_gpu::logic::LogicProgram::compile("a() :- know b(). b() :- know a().") {
+        Ok(_) => panic!("genuinely-cyclic modal coupling must fail closed end-to-end"),
+        Err(err) => err,
+    };
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("cross-component epistemic coupling"),
+        "cyclic coupling must fail with the cross-component coupling diagnostic, got: {msg}"
+    );
+    assert!(
+        msg.contains('a') && msg.contains('b'),
+        "diagnostic must name both coupled heads a and b, got: {msg}"
     );
 
     Ok(())
