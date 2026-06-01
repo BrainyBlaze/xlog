@@ -572,9 +572,36 @@ fn lower_epistemic_constraints(
                                 ),
                             });
                         }
-                        // Single occurrence: existential over the relation domain
-                        // == wildcard. Drop the variable identity (no join, no head
-                        // column to bind), routing this column through the GPU
+                        // A NEGATED variable-keyed literal cannot collapse to a
+                        // wildcard: the wildcard computes `not (EXISTS X: know p(X))`
+                        // = `forall X: not know p(X)`, but a constraint variable is
+                        // EXISTENTIAL, so the body should fire on `EXISTS X: not
+                        // know p(X)`. forall-not != exists-not, so the wildcard would
+                        // mis-prune (it would prune iff p is EMPTY). Fail closed —
+                        // finite+typed UNIMPLEMENTED scope, NOT a finiteness bound, so
+                        // a plain UnsupportedEpistemicConstruct (never ResourceExhausted).
+                        // Negated ALL-GROUND constraint literals are unaffected (they
+                        // bind no variable, no quantifier flip — the EGB-04 path).
+                        if lit.negated {
+                            return Err(XlogError::UnsupportedEpistemicConstruct {
+                                construct: "epistemic GPU world-view constraint".to_string(),
+                                context: format!(
+                                    "constraint[{constraint_index}] uses NEGATED variable-keyed \
+                                     modal {} {}/{}; a wildcard existential cannot express \
+                                     `EXISTS {name}: not know/possible ...` (the negation flips \
+                                     the quantifier to forall-not), so negated variable-keyed \
+                                     world-view constraints are not yet implemented. Single-\
+                                     occurrence POSITIVE variable keys and negated GROUND keys \
+                                     are supported",
+                                    eir_epistemic_literal_label(&lit),
+                                    lit.atom.predicate,
+                                    lit.atom.arity
+                                ),
+                            });
+                        }
+                        // Single occurrence, POSITIVE: existential over the relation
+                        // domain == wildcard. Drop the variable identity (no join, no
+                        // head column to bind), routing this column through the GPU
                         // wildcard tuple-key matcher.
                         anonymized_terms.push(EirTerm::Anonymous);
                     }

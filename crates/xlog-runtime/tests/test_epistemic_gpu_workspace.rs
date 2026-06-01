@@ -4995,6 +4995,48 @@ fn egb_e_shared_variable_constraint_rejected_as_unimplemented_scope() {
     }
 }
 
+// ITEM E scope boundary: a NEGATED variable-keyed constraint literal
+// (`:- not know p(X).`) cannot collapse to a wildcard — the wildcard computes
+// `forall X: not know p(X)` but the constraint variable is EXISTENTIAL
+// (`EXISTS X: not know p(X)`), and forall-not != exists-not. Routing it through
+// the wildcard would mis-prune (prune iff p empty), so it fails closed. This is
+// finite+typed UNIMPLEMENTED scope, NOT a finiteness bound: plain
+// UnsupportedEpistemicConstruct, NEVER ResourceExhausted. (Negated ALL-GROUND
+// constraint literals stay supported via the EGB-04 ground path.)
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn egb_e_negated_variable_keyed_constraint_rejected_as_unimplemented_scope() {
+    let program = parse_program(
+        r#"
+        pred seed(u32).
+        pred gate(u32).
+        pred flagged(u32).
+        pred report(u32).
+
+        report(X) :- seed(X), know gate(X).
+        :- not know flagged(X).
+        "#,
+    )
+    .expect("parse negated variable-keyed constraint program");
+    let err = compile_epistemic_gpu_execution(&program)
+        .expect_err("negated variable-keyed constraint must fail closed (quantifier flip)");
+    match err {
+        xlog_core::XlogError::UnsupportedEpistemicConstruct { context, .. } => {
+            assert!(
+                context.contains("NEGATED variable-keyed") || context.contains("forall-not"),
+                "expected negated-variable-keyed diagnostic, got: {context}"
+            );
+        }
+        xlog_core::XlogError::ResourceExhausted { .. } => {
+            panic!(
+                "negated variable-keyed constraint is finite+typed unimplemented scope, NOT a \
+                 finiteness/resource bound; must not surface as ResourceExhausted"
+            );
+        }
+        other => panic!("unexpected error for negated variable-keyed constraint: {other:?}"),
+    }
+}
+
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
 fn parsed_not_possible_constraint_prunes_when_required_absent() {
