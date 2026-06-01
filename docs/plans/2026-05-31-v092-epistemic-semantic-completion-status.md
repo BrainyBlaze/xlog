@@ -138,17 +138,24 @@ through the production path (device suite grew **131 → 144**):
    building well-founded semantics for the entire engine — a separate project, the same wall
    ordinary Datalog hits here.
 
-2. **E1 shared-variable join / diagonal (`:- know p(X), possible q(X)`, `:- know p(X,X)`,
-   `:- q(X), not know p(X)`) → reduces to working features, blocked by RUNTIME bugs, not an
-   epistemic-layer gap.** All three forms execute correctly as RULE bodies
-   (`both(X) :- know p(X), possible q(X)` → exact `{2}`; diagonal → `{1}`; negated-difference
-   → `{2}`). The clean reduction "rewrite `:- Body(X)` to a helper rule + a constraint on the
-   helper" hits two real runtime issues: (a) a nullary-head + negated-modal **schema-union
-   bug** (`Union requires compatible schemas: [] vs [(c0,U32)]`); (b) the non-nullary form
-   routes through a path that surfaces a violated constraint as an **`Execution` error**
-   instead of pruning the world view to empty (the way item E's `:- know flagged(X)` does).
-   Sound completion requires fixing those runtime paths (or extending the GPU world-view
-   constraint kernel to evaluate the join), done test-first — not a quick rewrite.
+2. **E1 shared-variable join / diagonal / negated-difference (`:- know p(X), possible q(X)`,
+   `:- know p(X,X)`, `:- q(X), not know p(X)`) → DONE (commits `f449bc43`, `bee3a0de`,
+   `268dd590`).** Resolved by a sound PROGRAM-level desugaring at the `normalize_program`
+   pre-pass: `:- L1, …, Ln.` ⟶ `__epi_join_N(Vars) :- ord(L1), …, ord(Ln).` + `:- know
+   __epi_join_N(Vars).`, where `ord` ordinary-izes each modal literal (`know/possible r → r`,
+   `not know/possible r → not r`). For a base/EDB or purely-ordinary-derived target
+   `know r == possible r == r`, so the ordinary join is exactly the forbidden binding set; the
+   single-occurrence `:- know __epi_join_N(Vars)` routes through the EXISTING variable-keyed
+   world-view constraint path (prune-to-empty) — **no new kernel**. The earlier "runtime bug"
+   diagnosis was an artifact of the WRONG desugar shape (helper rule + an *ordinary* constraint,
+   or a nullary helper) which routed through the violated-constraint **error** path / a
+   nullary schema-union; ordinary-izing into the helper and keeping a *single-occurrence modal*
+   constraint avoids both. Guarded to non-modal-derived targets (where the equivalence holds);
+   a modal-derived target falls through to the core compiler's existing shared-variable
+   rejection (still covered by a device test feeding the un-normalized program directly).
+   Examples 38/39 (diagonal), 40 (join, `p∩q`), 41 (negated-difference, `q\p`); CLI regression
+   asserts the load-bearing prune. Gates: device 144, integration 206, split 44,
+   run_cli_tests 12.
 
 3. **Same-name multi-arity coupling via `xlog run` → PRE-EXISTING engine-wide
    name-keyed-schema limitation.** The coupling semantics work at the device/runtime layer
@@ -158,6 +165,10 @@ through the production path (device suite grew **131 → 144**):
    global schema/relation identity is an ordinary-compiler refactor, orthogonal to epistemic
    semantics.
 
-Honest boundary: items B/A/C/D/E/F + A1 + E2 are done and verified (device 144); class (1)
-is a real architectural wall (not fakeable without a new engine); classes (2)/(3) are
-finishable but are runtime/compiler-layer work, not epistemic-layer patches.
+Honest boundary: items B/A/C/D/E/F + A1 + **E2 + E1 (all shared-variable constraint joins)**
+are done and verified (device 144, integration 206, run_cli_tests 12). Class (1) is a real
+architectural wall (not fakeable without building well-founded semantics for the whole
+engine, the same wall ordinary Datalog hits). Class (3) — multi-arity via `xlog run` — is an
+ordinary-compiler name-keyed-schema refactor, orthogonal to epistemic semantics, and remains
+the one finishable item not yet done. The modal-over-compound-formula C2 interior-negation
+remains a representational scope limit (single-level EIR; example 13f).
