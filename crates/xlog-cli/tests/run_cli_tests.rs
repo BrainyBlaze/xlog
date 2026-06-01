@@ -832,14 +832,16 @@ fn test_xlog_run_diagonal_modal_constraint_prunes() {
         ok,
         "38 must succeed (Ok with a pruned-empty world view, NOT an error):\n{stdout}\n{stderr}"
     );
-    assert!(stdout.contains("safe"), "38 emits the safe relation:\n{stdout}");
+    assert!(
+        stdout.contains("safe"),
+        "38 emits the safe relation:\n{stdout}"
+    );
     assert!(
         !stdout.contains("| 5  |"),
         "38 must PRUNE safe to empty -- the self-loop route(1,1) fires `:- know route(X,X)`:\n{stdout}"
     );
 
-    let (ok, stdout, stderr) =
-        run_epistemic_example("39-diagonal-modal-constraint-satisfied.xlog");
+    let (ok, stdout, stderr) = run_epistemic_example("39-diagonal-modal-constraint-satisfied.xlog");
     assert!(ok, "39 must succeed:\n{stdout}\n{stderr}");
     assert!(
         stdout.contains("| 5  |"),

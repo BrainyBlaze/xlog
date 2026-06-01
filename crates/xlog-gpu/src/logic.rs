@@ -1412,6 +1412,22 @@ fn normalize_program(program: Program) -> Result<Program> {
 /// modal target's diagonal is determined by the ordinary extraction (EDB / determined
 /// relation), the case for base tuple-key targets.
 fn desugar_diagonal_epistemic_constraints(mut program: Program) -> Program {
+    // A predicate defined by any rule carrying an epistemic body literal is "modal-derived":
+    // for it `know p`/`possible p` is NOT equal to the ordinary `p`, so the ordinary diagonal
+    // extraction would be UNSOUND. Restrict the desugaring to base/EDB or purely-ordinary-
+    // derived targets (where `know p == possible p == p`), the case for base tuple-key
+    // constraint targets; a modal-derived diagonal falls through to the existing
+    // shared-variable rejection (a coherent diagnostic) rather than this rewrite.
+    let modal_derived: BTreeSet<String> = program
+        .rules
+        .iter()
+        .filter(|rule| {
+            rule.body
+                .iter()
+                .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
+        })
+        .map(|rule| rule.head.predicate.clone())
+        .collect();
     let mut extraction_rules: Vec<Rule> = Vec::new();
     let mut counter = 0usize;
     for constraint in &mut program.constraints {
@@ -1419,6 +1435,9 @@ fn desugar_diagonal_epistemic_constraints(mut program: Program) -> Program {
             let BodyLiteral::Epistemic(elit) = lit else {
                 continue;
             };
+            if modal_derived.contains(&elit.atom.predicate) {
+                continue; // unsound to extract the ordinary diagonal of a modal-derived target
+            }
             let Some(distinct) = diagonal_distinct_vars(&elit.atom) else {
                 continue;
             };
