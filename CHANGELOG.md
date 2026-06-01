@@ -159,10 +159,27 @@ recorded in `docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`
   in recursive programs, and modals over non-invariant relations remain typed
   fail-closed.
 
+- **Same-name multi-arity modal coupling:** _SOLVED in v0.9.2 (ITEM F)_ — a
+  program using the same predicate name at two arities in modal literals
+  (`know p(X)`, `possible p(X,Y)`) is no longer rejected. Distinct arities are
+  distinct relations, so the modal tuple-source resolution disambiguates by arity
+  (arity-qualified store key `p/1`/`p/2`, bare-name fallback). The coupling
+  joint-solves on device to exact tuples per arity, identical split-vs-unsplit,
+  zero CPU fallback. (CLI inline-fact ingestion of same-name multi-arity facts
+  remains blocked by the engine-wide name-keyed schema/relation-identity model —
+  `Compiler::schemas` collapses `p/1`+`p/2` to one schema — orthogonal to the
+  coupling semantics.)
+- **Derived-head modal coupling:** modal coupling over an epistemically-DETERMINED
+  derived head is solved by STRATIFICATION (the stratified joint result equals the
+  per-stratum independent reference exactly); a genuinely-CYCLIC modal coupling
+  (`a:-know b. b:-know a.`) has no founded order and stays typed fail-closed
+  end-to-end with a precise diagnostic naming both coupled heads.
+
 Goal-mandated typed fail-closed fragments (nested modal semantics, aggregate/
 compound/list/predref modal keys, variable-keyed/nested/CPU-scan epistemic
-constraints, unsafe same-name multi-arity coupling) are rejection-by-design per
-the bundle spec and lock #5 — verified by negative pilots, not debt. Full list:
+constraints, genuinely-cyclic modal coupling with no founded order) are
+rejection-by-design per the bundle spec and lock #5 — verified by negative
+pilots, not debt. Full list:
 `docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`.
 
 v0.9.0 Epistemic Solver Release Candidate. This branch layers the v0.8.7-v0.8.9
