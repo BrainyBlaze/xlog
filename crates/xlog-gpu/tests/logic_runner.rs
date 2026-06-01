@@ -117,21 +117,33 @@ fn test_case_b_recursive_epistemic_fixpoint_founded_tuples() -> Result<()> {
 
     let program = xlog_gpu::logic::LogicProgram::compile(source)?;
 
-    // The Case-B program reduces to an ordinary recursive program and runs on the
-    // semi-naive engine -- structurally CPU-fallback-free (no epistemic CPU candidate
-    // enumeration / world-view validation). The auditable certification surface asserts
-    // both: the reduction provenance AND cpu_fallback_total_zero.
+    // NON-VACUOUS dispatch proof: the Case-B program must compile to the ORDINARY
+    // recursive plan (modal resolved into the SCC), NOT the single-pass epistemic plan.
+    // This matters because the epistemic CPU-fallback counters (cpu_candidate_enumerations,
+    // cpu_world_view_validations, cpu_fallbacks) exist ONLY on the single-pass epistemic
+    // execution path; the ordinary semi-naive engine has no epistemic CPU code to count,
+    // so it is CPU-fallback-free BY CONSTRUCTION. The provenance reduction tag
+    // ("case_a_recursive") is the discriminating, non-vacuous proof of WHICH path ran:
+    // a regression that rerouted Case-B through the single-pass planner (and could then
+    // incur epistemic CPU fallbacks) would change this tag and FAIL here.
     let plan_json = program
         .epistemic_plan_json()
         .expect("Case-B epistemic program must carry a provenance summary");
     assert!(
         plan_json.contains("\"reduction\":\"case_a_recursive\""),
-        "Case-B routes through the recursive reduction: {plan_json}"
+        "Case-B must route through the ORDINARY recursive reduction (no single-pass \
+         epistemic CPU-fallback surface), got: {plan_json}"
     );
     assert!(
-        plan_json.contains("\"cpu_fallback_total_zero\":true"),
-        "Case-B ordinary recursive path must be CPU-fallback-free \
-         (cpu_fallbacks.is_zero() / cpu_candidate_enumerations == 0): {plan_json}"
+        plan_json.contains("\"plan_kind\":\"epistemic_reduced_ordinary\""),
+        "Case-B plan kind must be the reduced-ordinary engine, got: {plan_json}"
+    );
+    // The reduced-ordinary plan carries NO epistemic GPU candidate-enumeration units
+    // (those would be the CPU-fallback-bearing surface); the units list is empty.
+    assert!(
+        plan_json.contains("\"units\":[]"),
+        "reduced-ordinary Case-B plan carries no epistemic candidate-enumeration units: \
+         {plan_json}"
     );
 
     // All relations are in-program EDB facts; no GPU input buffers needed.
