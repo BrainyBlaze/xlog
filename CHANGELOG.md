@@ -44,8 +44,41 @@ Category-B semantic gaps tracked after v0.9.1, all validated on the production
   Examples `17` (chained `b:-know a`), `24` (transitive determined-ordinary), `25`
   (recursion over a determined head), `26` (negated-modal-over-invariant in
   recursion), `28` (determined-epistemic multi-column binding).
+- Structured modal tuple-keys: list/compound/anonymous modal keys
+  (`know watched([H])`) flatten element-wise into the existing N-column GPU matcher;
+  unbounded forms (cons `[H|T]`, predref, aggregate) reject with a `ResourceExhausted`
+  finiteness diagnostic. Example `23`.
+- Variable-keyed + nested epistemic constraints: a single-occurrence positive
+  constraint variable (`:- know p(X).`) lowers to an Anonymous wildcard and ranges
+  existentially on device; multi-literal distinct-variable conjunctions
+  (`:- know p(X), know q(Y).`) AND the independent existentials. Examples `34`/`35`/`36`.
+- Shared-variable epistemic constraint joins (item E1): the join
+  `:- know p(X), possible q(X).`, the diagonal `:- know p(X,X).`, and the
+  negated-difference `:- q(X), not know p(X).` are resolved by a sound program-level
+  desugaring at normalization — `:- L1,…,Ln.` ⟶ `__epi_join_N(Vars) :- ord(L1),…,ord(Ln).`
+  + `:- know __epi_join_N(Vars).`, where `ord` ordinary-izes each modal literal
+  (`know/possible r → r`, `not know/possible r → not r`). For a base/EDB or
+  ordinary-derived target `know r ≡ possible r ≡ r`, so the ordinary join is exactly the
+  forbidden binding set and the single-occurrence `:- know __epi_join_N(Vars)` routes
+  through the existing variable-keyed prune-to-empty path — no new kernel. Guarded to
+  non-modal-derived targets. Examples `38`/`39` (diagonal), `40` (join), `41`
+  (negated-difference).
+- Stratified negated-modal recursion (item A1): a negated modal `not know R` over a
+  recursive relation in a strictly-lower stratum executes on GPU as ordinary stratified
+  negation (`not know R ≡ not R` once R is materialized). Example `37`.
+- Same-name multi-arity modal coupling (item F): distinct arities of the same predicate
+  name are treated as distinct relations (arity-qualified modal tuple-source resolution);
+  derived-head coupling stratifies with a split-vs-unsplit equivalence proof; a genuine
+  cyclic modal coupling stays rejected with a precise diagnostic.
 
 ### Changed (v0.9.2)
+
+- A standalone negated-variable-keyed integrity constraint whose variable appears only
+  under negation (`:- not know p(X).`) now reports the same NAF safety error as ordinary
+  Datalog (`:- not r(X).`, "unbound variable … in negated atom") instead of a misleading
+  "unimplemented" diagnostic — the variable is not range-restricted, so the program is
+  ill-formed, not a missing feature. The meaningful negated form `:- q(X), not know p(X).`
+  (X positively bound) is the shared-variable join above (item E1).
 
 - Recursive epistemic programs are no longer uniformly fail-closed: the Case-A
   invariant-modal fragment AND recursion/coupling over any DETERMINED head (via
