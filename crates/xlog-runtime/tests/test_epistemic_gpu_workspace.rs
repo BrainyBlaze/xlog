@@ -8947,8 +8947,13 @@ fn multi_element_list_modal_key_binds_elements_against_columns_on_device() {
     // v0.9.2 ITEM D: a multi-element list `[A, B]` modal key over an arity-2
     // relation. Each element flattens into its own scalar key column, so the
     // PER-ELEMENT conjunctive match is load-bearing: a row of `host` survives only
-    // when BOTH `A` and `B` match the same `watched` tuple.
-    // EXACT: host = {(1,2),(3,4)}, watched = {(1,2)}  ->  q = {(1,2)} (only (1,2) matches).
+    // when BOTH `A` and `B` match the SAME `watched` tuple.
+    //
+    // The data DISCRIMINATES col1 specifically: `host` carries `(1, 9)`, which
+    // shares col0=1 with the watched tuple `(1, 2)` but differs in col1. A
+    // col0-only matcher would wrongly keep `(1, 9)`; the correct conjunctive
+    // matcher drops it because col1 9 != 2.
+    // EXACT: host = {(1,2),(1,9),(3,4)}, watched = {(1,2)}  ->  q = {(1,2)}.
     let Some(fixture) = runtime_fixture() else {
         return;
     };
@@ -8958,7 +8963,7 @@ fn multi_element_list_modal_key_binds_elements_against_columns_on_device() {
         pred host(u32, u32).
         pred watched(u32, u32).
         pred q(u32, u32).
-        host(1, 2). host(3, 4).
+        host(1, 2). host(1, 9). host(3, 4).
         watched(1, 2).
         q(A, B) :- host(A, B), know watched([A, B]).
         "#,
@@ -8974,7 +8979,7 @@ fn multi_element_list_modal_key_binds_elements_against_columns_on_device() {
     }
     executor.put_relation(
         "host",
-        upload_binary_u32(&fixture.memory, &[(1, 2), (3, 4)], "a", "b"),
+        upload_binary_u32(&fixture.memory, &[(1, 2), (1, 9), (3, 4)], "a", "b"),
     );
     executor.put_relation(
         "watched",
@@ -9012,7 +9017,8 @@ fn multi_element_list_modal_key_binds_elements_against_columns_on_device() {
     assert_eq!(
         pairs,
         vec![(1u32, 2u32)],
-        "q = {{(A,B): host(A,B), know watched([A,B])}} = {{(1,2)}} ((3,4) not watched)"
+        "q = {{(A,B): host(A,B), know watched([A,B])}} = {{(1,2)}} ((1,9) shares col0 but col1 \
+         differs; (3,4) not watched) -- proves BOTH columns are matched conjunctively"
     );
 }
 
