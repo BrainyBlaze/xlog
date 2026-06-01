@@ -373,15 +373,7 @@ fn test_wall_a1_drop_recursion_flips_anti_join_result() -> Result<()> {
     );
     assert_eq!(
         got,
-        vec![
-            (1, 1),
-            (1, 3),
-            (2, 1),
-            (2, 2),
-            (3, 1),
-            (3, 2),
-            (3, 3)
-        ],
+        vec![(1, 1), (1, 3), (2, 1), (2, 2), (3, 1), (3, 2), (3, 3)],
         "base-only `unreachable` must be node x node MINUS only the two base `link` pairs"
     );
 

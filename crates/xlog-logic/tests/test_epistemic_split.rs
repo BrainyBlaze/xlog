@@ -160,9 +160,12 @@ fn negated_modal_over_stratified_non_invariant_in_recursion_is_accepted_case_b()
         "stratified Case-B reduce removes all modal literals"
     );
     assert!(
-        reduced.rules.iter().any(|rule| rule.body.iter().any(
-            |lit| matches!(lit, BodyLiteral::Negated(atom) if atom.predicate == "choice")
-        )),
+        reduced
+            .rules
+            .iter()
+            .any(|rule| rule.body.iter().any(
+                |lit| matches!(lit, BodyLiteral::Negated(atom) if atom.predicate == "choice")
+            )),
         "the negated modal must resolve to an ordinary negated `choice` anti-join atom"
     );
 }
@@ -200,8 +203,7 @@ fn negated_modal_through_recursion_cycle_fails_closed_wfs_bound() {
         Err(XlogError::UnsupportedEpistemicConstruct { construct, context }) => {
             assert_eq!(construct, "recursive epistemic program");
             assert!(
-                context.contains("cycle through negation")
-                    && context.contains("well-founded"),
+                context.contains("cycle through negation") && context.contains("well-founded"),
                 "expected non-stratified WFS-bound diagnostic, got: {context}"
             );
         }
