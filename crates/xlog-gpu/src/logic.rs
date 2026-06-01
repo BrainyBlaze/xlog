@@ -13,7 +13,9 @@ use xlog_logic::epistemic::{
     try_plan_stratified_epistemic_program, try_reduce_case_a_recursive_epistemic_program,
     EpistemicSplitExecutablePlan,
 };
-use xlog_logic::{Atom, BodyLiteral, Compiler, Program, Query, Rule, Term};
+use xlog_logic::{
+    Atom, BodyLiteral, Compiler, EpistemicLiteral, EpistemicOp, Program, Query, Rule, Term,
+};
 use xlog_runtime::executor::JoinIndexCacheStats;
 use xlog_runtime::{
     DeltaRecomputeStats, EpistemicGpuExecutionResult, EpistemicGpuWorkspaceCapacities,
@@ -1396,28 +1398,40 @@ fn normalize_program(program: Program) -> Result<Program> {
         .map_err(|e| XlogError::Compilation(e.to_string()))?;
     let normalized = xlog_logic::normalize_v085_meta(&expanded)?;
     let listed = xlog_logic::normalize_v085_lists(&normalized)?;
-    Ok(desugar_diagonal_epistemic_constraints(listed))
+    Ok(desugar_shared_variable_epistemic_constraints(listed))
 }
 
-/// E1 (diagonal): desugar a DIAGONAL epistemic constraint literal (`:- know p(X, X)` — a
-/// single modal literal repeating a variable across its OWN key columns) into an ordinary
-/// diagonal-extraction rule (`__epi_diag_N(X) :- p(X, X).`) plus a single-occurrence modal
-/// over the extracted relation (`:- know __epi_diag_N(X)`). The single-occurrence form
-/// routes through the existing variable-keyed world-view constraint path, which prunes the
-/// world view to empty exactly as `:- know flagged(X)` does — so the diagonal is evaluated
-/// soundly with NO new kernel. Applied at the program-normalization choke point so BOTH the
-/// reduced ordinary materialization and the epistemic planner observe the helper relation
-/// (an EIR-only rewrite is accepted at planning but the helper is never materialized).
-/// No-op unless a constraint carries a pure-variable diagonal modal literal; sound when the
-/// modal target's diagonal is determined by the ordinary extraction (EDB / determined
-/// relation), the case for base tuple-key targets.
-fn desugar_diagonal_epistemic_constraints(mut program: Program) -> Program {
+/// E1: desugar a SHARED-VARIABLE epistemic constraint — a constraint with at least one
+/// epistemic literal and a variable appearing in more than one term position across the body
+/// (the join `:- know p(X), possible q(X).`, the diagonal `:- know p(X, X).`, or the
+/// negated-difference `:- q(X), not know p(X).`) — into an ordinary extraction rule plus a
+/// single-occurrence modal over it:
+///
+/// ```text
+///   :- L1, L2, ..., Ln.   ==>   __epi_join_N(Vars) :- ord(L1), ..., ord(Ln).
+///                               :- know __epi_join_N(Vars).
+/// ```
+///
+/// where `ord` ordinary-izes each modal literal (`know/possible r(..)` -> `r(..)`,
+/// `not know/possible r(..)` -> `not r(..)`) and keeps non-modal literals unchanged. For a
+/// base/EDB or purely-ordinary-derived modal target `know r == possible r == r`, so the
+/// ordinary join `__epi_join_N` is exactly the set of variable bindings the constraint
+/// forbids; the single-occurrence `:- know __epi_join_N(Vars)` then routes through the
+/// existing variable-keyed world-view constraint path, which prunes the world view to empty —
+/// with NO new kernel. Applied at the normalization choke point so BOTH the reduced ordinary
+/// materialization and the epistemic planner observe the helper relation (an EIR-only rewrite
+/// is accepted at planning but the helper is never materialized).
+///
+/// Guarded to non-modal-derived targets (where the `know == possible == ordinary`
+/// equivalence holds); a constraint with a modal-derived target is left unchanged and falls
+/// through to the core compiler's existing shared-variable rejection. Single-occurrence
+/// variable-keyed (item E), distinct-variable multi-literal, and ground constraints have no
+/// repeated variable and are likewise untouched.
+fn desugar_shared_variable_epistemic_constraints(mut program: Program) -> Program {
     // A predicate defined by any rule carrying an epistemic body literal is "modal-derived":
-    // for it `know p`/`possible p` is NOT equal to the ordinary `p`, so the ordinary diagonal
-    // extraction would be UNSOUND. Restrict the desugaring to base/EDB or purely-ordinary-
-    // derived targets (where `know p == possible p == p`), the case for base tuple-key
-    // constraint targets; a modal-derived diagonal falls through to the existing
-    // shared-variable rejection (a coherent diagnostic) rather than this rewrite.
+    // for it `know p`/`possible p` is NOT equal to the ordinary `p`, so ordinary-izing it
+    // would be UNSOUND. Restrict the desugaring to base/EDB or purely-ordinary-derived
+    // targets (where `know p == possible p == p`), the case for base tuple-key targets.
     let modal_derived: BTreeSet<String> = program
         .rules
         .iter()
@@ -1431,57 +1445,95 @@ fn desugar_diagonal_epistemic_constraints(mut program: Program) -> Program {
     let mut extraction_rules: Vec<Rule> = Vec::new();
     let mut counter = 0usize;
     for constraint in &mut program.constraints {
-        for lit in &mut constraint.body {
-            let BodyLiteral::Epistemic(elit) = lit else {
-                continue;
-            };
-            if modal_derived.contains(&elit.atom.predicate) {
-                continue; // unsound to extract the ordinary diagonal of a modal-derived target
-            }
-            let Some(distinct) = diagonal_distinct_vars(&elit.atom) else {
-                continue;
-            };
-            let helper = format!("__epi_diag_{counter}");
-            counter += 1;
-            let helper_terms: Vec<Term> =
-                distinct.iter().map(|v| Term::Variable(v.clone())).collect();
-            // Extraction rule: __epi_diag_N(distinct...) :- <pred>(original diagonal terms...).
-            extraction_rules.push(Rule {
-                head: Atom {
-                    predicate: helper.clone(),
-                    terms: helper_terms.clone(),
-                },
-                body: vec![BodyLiteral::Positive(elit.atom.clone())],
-            });
-            // Range the modal over the (now single-occurrence) extracted relation.
-            elit.atom = Atom {
+        let has_epistemic = constraint
+            .body
+            .iter()
+            .any(|lit| matches!(lit, BodyLiteral::Epistemic(_)));
+        if !has_epistemic || !constraint_has_shared_variable(&constraint.body) {
+            continue;
+        }
+        // Sound only when EVERY modal target is non-modal-derived (know == possible == ord).
+        let has_modal_derived_target = constraint.body.iter().any(|lit| {
+            matches!(lit, BodyLiteral::Epistemic(e) if modal_derived.contains(&e.atom.predicate))
+        });
+        if has_modal_derived_target {
+            continue;
+        }
+        let distinct = distinct_body_variables(&constraint.body);
+        let helper = format!("__epi_join_{counter}");
+        counter += 1;
+        let helper_terms: Vec<Term> = distinct.iter().map(|v| Term::Variable(v.clone())).collect();
+        let helper_body: Vec<BodyLiteral> = constraint
+            .body
+            .iter()
+            .map(ordinaryize_modal_literal)
+            .collect();
+        extraction_rules.push(Rule {
+            head: Atom {
+                predicate: helper.clone(),
+                terms: helper_terms.clone(),
+            },
+            body: helper_body,
+        });
+        // Replace the whole constraint with a single-occurrence modal over the join helper.
+        constraint.body = vec![BodyLiteral::Epistemic(EpistemicLiteral {
+            op: EpistemicOp::Know,
+            negated: false,
+            atom: Atom {
                 predicate: helper,
                 terms: helper_terms,
-            };
-        }
+            },
+        })];
     }
     program.rules.extend(extraction_rules);
     program
 }
 
-/// Ordered DISTINCT variable names of a pure-variable atom that repeats a variable across
-/// positions (a diagonal, e.g. `p(X, X)` or `p(X, Y, X)`); `None` otherwise. Restricted to
-/// pure-variable key atoms so the extraction rule is a clean projection of the diagonal.
-fn diagonal_distinct_vars(atom: &Atom) -> Option<Vec<String>> {
-    let mut seen = BTreeSet::new();
-    let mut distinct = Vec::new();
-    let mut repeated = false;
-    for term in &atom.terms {
-        let Term::Variable(name) = term else {
-            return None;
-        };
-        if seen.insert(name.clone()) {
-            distinct.push(name.clone());
-        } else {
-            repeated = true;
+/// Replace a modal literal with its ordinary counterpart (`know/possible r` -> `r`,
+/// `not know/possible r` -> `not r`); non-modal literals are returned unchanged. Sound for
+/// the shared-variable constraint desugaring when the modal target is non-modal-derived,
+/// where `know r == possible r == r`.
+fn ordinaryize_modal_literal(lit: &BodyLiteral) -> BodyLiteral {
+    match lit {
+        BodyLiteral::Epistemic(e) if e.negated => BodyLiteral::Negated(e.atom.clone()),
+        BodyLiteral::Epistemic(e) => BodyLiteral::Positive(e.atom.clone()),
+        other => other.clone(),
+    }
+}
+
+/// True if some variable occurs in more than one atom term position across the constraint
+/// body — the signature of a join / diagonal / negated-difference the core compiler rejects.
+fn constraint_has_shared_variable(body: &[BodyLiteral]) -> bool {
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for lit in body {
+        if let Some(atom) = lit.atom() {
+            for term in &atom.terms {
+                if let Term::Variable(name) = term {
+                    *counts.entry(name.clone()).or_insert(0) += 1;
+                }
+            }
         }
     }
-    repeated.then_some(distinct)
+    counts.values().any(|&count| count > 1)
+}
+
+/// Ordered DISTINCT variable names appearing in atom positions across the constraint body
+/// (first-appearance order), used as the extracted helper relation's columns.
+fn distinct_body_variables(body: &[BodyLiteral]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut order = Vec::new();
+    for lit in body {
+        if let Some(atom) = lit.atom() {
+            for term in &atom.terms {
+                if let Term::Variable(name) = term {
+                    if seen.insert(name.clone()) {
+                        order.push(name.clone());
+                    }
+                }
+            }
+        }
+    }
+    order
 }
 
 fn program_has_epistemic_literals(program: &Program) -> bool {

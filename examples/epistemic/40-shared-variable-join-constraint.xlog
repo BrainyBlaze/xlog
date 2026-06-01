@@ -1,0 +1,36 @@
+// v0.9.2 E1 (shared-variable JOIN): `:- know p(X), possible q(X).` -- two modal literals
+// sharing the variable X -- forbids any world view in which the known-`p` extension and the
+// possible-`q` extension INTERSECT. Previously rejected as an unimplemented shared-variable
+// epistemic constraint join.
+//
+// Resolved by a sound PROGRAM-level desugaring (at normalization):
+//
+//   :- know p(X), possible q(X).
+//     becomes
+//   __epi_join_0(X) :- p(X), q(X).      -- ordinary join of the base relations
+//   :- know __epi_join_0(X).            -- single-occurrence variable-keyed constraint
+//
+// Sound because for base/EDB modal targets `know p == p` and `possible q == q`, so the
+// ordinary join `__epi_join_0` is exactly `p ∩ q` -- the set of X bindings the constraint
+// forbids. The single-occurrence `:- know __epi_join_0(X)` routes through the existing
+// variable-keyed world-view constraint path, ranging X existentially and pruning the world
+// view to empty -- NO new kernel.
+//
+// Here `p ∩ q = {2}` is non-empty, so the constraint fires and the only world view is
+// pruned -> every output (`report`) is EMPTY. (Were the intersection empty, `report = {5}`.)
+
+#pragma epistemic_mode = faeel
+
+pred p(u32).
+pred q(u32).
+pred gate(u32).
+pred report(u32).
+
+p(1). p(2).
+q(2). q(3).
+gate(5).
+
+report(X) :- gate(X), know gate(X).
+:- know p(X), possible q(X).
+
+?- report(X).

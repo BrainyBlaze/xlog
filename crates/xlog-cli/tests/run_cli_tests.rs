@@ -850,6 +850,48 @@ fn test_xlog_run_diagonal_modal_constraint_prunes() {
 }
 
 #[test]
+fn test_xlog_run_shared_variable_join_constraints_prune() {
+    // v0.9.2 E1 (join + negated-difference): a shared-variable epistemic constraint --
+    // `:- know p(X), possible q(X).` (40, intersection) and `:- q(X), not know p(X).` (41,
+    // set difference) -- was rejected as an unimplemented shared-variable join. Both are now
+    // resolved by a sound PROGRAM-level desugaring (ordinary join/difference extraction
+    // `__epi_join_0(X) :- ...` + single-occurrence `:- know __epi_join_0(X)`), routing through
+    // the existing variable-keyed world-view constraint path -- no new kernel. In both
+    // programs the helper relation is non-empty (p∩q={2}; q\p={3}), so the constraint fires
+    // and `report` is PRUNED to empty. Removing the constraint would leave `report = {5}`
+    // (gate(5) is gated by `know gate` -> survives), so the prune is load-bearing.
+    let _device = match CudaDevice::new(0) {
+        Ok(d) => d,
+        Err(_) => {
+            println!("SKIPPED: CUDA runtime unavailable (no GPU or driver not loaded)");
+            return;
+        }
+    };
+
+    for (example, why) in [
+        (
+            "40-shared-variable-join-constraint.xlog",
+            "join p∩q={2} fires -> report pruned empty",
+        ),
+        (
+            "41-negated-difference-constraint.xlog",
+            "difference q\\p={3} fires -> report pruned empty",
+        ),
+    ] {
+        let (ok, stdout, stderr) = run_epistemic_example(example);
+        assert!(
+            ok,
+            "{example} must succeed (Ok with a pruned-empty world view):\n{stdout}\n{stderr}"
+        );
+        assert!(
+            stdout.contains("report"),
+            "{example} emits report:\n{stdout}"
+        );
+        assert!(!stdout.contains("| 5  |"), "{example}: {why}:\n{stdout}");
+    }
+}
+
+#[test]
 fn test_xlog_run_faeel_unfounded_self_support_executes_to_empty_extension() {
     // v0.9.2 ITEM B (mandate headline): a self-supported possible rule
     // (`p() :- possible p().`) with no independent founded support is UNFOUNDED under
