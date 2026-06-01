@@ -334,6 +334,19 @@ fn test_xlog_run_epistemic_examples() {
             "report",
             "rows: 1",
         ),
+        // v0.9.2 ITEM E multi-literal (DISTINCT independent variables):
+        // `:- know watch(X), know hot(Y).` factors to "watch non-empty AND hot
+        // non-empty". Both relations are non-empty, so the conjunctive existential
+        // body holds and the world view is pruned -> report absent (rows: 0). This
+        // is the independent-existential conjunction (NOT a shared-variable join,
+        // which fails closed as unimplemented scope by design). The empty-hot
+        // survive flip (second literal load-bearing) is asserted in the device
+        // suite (egb_e_distinct_variable_multi_literal_constraint_survives_*).
+        (
+            "36-multi-literal-distinct-var-constraint.xlog",
+            "report",
+            "rows: 0",
+        ),
     ];
 
     for (example, expected_relation, expected_value) in examples {
