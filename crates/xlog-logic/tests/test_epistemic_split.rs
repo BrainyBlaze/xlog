@@ -318,15 +318,18 @@ fn negated_stratified_modal_with_g91_possible_cycle_still_rejects() {
     let program = parse_program(
         r#"
         #pragma epistemic_mode = g91
-        pred node(u32).
+        pred vertex(u32).
         pred edge(u32, u32).
         pred gate(u32, u32).
+        pred linked(u32, u32).
         pred reach(u32, u32).
         pred safe(u32, u32).
-        node(1). node(2). edge(1, 2).
-        gate(X, Y) :- node(X), node(Y), know edge(X, Y).
-        reach(X, Y) :- node(X), node(Y), possible reach(X, Y).
-        safe(X, Y) :- node(X), node(Y), not know gate(X, Y).
+        vertex(1). vertex(2). vertex(3). edge(1, 2).
+        gate(X, Y) :- vertex(X), vertex(Y), know edge(X, Y).
+        reach(X, Y) :- linked(X, Y).
+        reach(X, Z) :- reach(X, Y), linked(Y, Z).
+        linked(X, Y) :- vertex(X), vertex(Y), possible reach(X, Y).
+        safe(X, Y) :- vertex(X), vertex(Y), not know gate(X, Y).
         "#,
     )
     .unwrap();
