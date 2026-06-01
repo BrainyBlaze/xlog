@@ -364,6 +364,14 @@ pub fn plan_epistemic_gpu_execution(program: &Program) -> Result<EpistemicGpuPla
 
         let reduction_index = reductions.len();
         for lit in rule_epistemic_literals {
+            // Flatten any STRUCTURED finite+typed key term (`[a, b]`, `f(a, b)`)
+            // element-wise into scalar GPU key columns so the existing device
+            // tuple-key matcher binds/matches each element directly, and store the
+            // FLATTENED literal so its atom arity/terms equal the modal relation's
+            // (the plan validators and runtime read the same flattened shape).
+            // Scalar keys pass through unchanged; unbounded/untyped structured
+            // forms fail closed here with a precise finiteness diagnostic.
+            let lit = flatten_epistemic_literal(&lit)?;
             let literal_index = epistemic_literals.len();
             let augmented_head_terms = augmented_eir_head_terms(rule);
             tuple_membership_bindings.push(EpistemicTupleMembershipBinding {
@@ -372,11 +380,11 @@ pub fn plan_epistemic_gpu_execution(program: &Program) -> Result<EpistemicGpuPla
                 predicate: lit.atom.predicate.clone(),
                 arity: lit.atom.arity,
                 key_columns: (0..lit.atom.arity).collect(),
-                key_terms: lit.atom.terms.clone(),
                 bound_output_columns: bound_output_columns_for_terms(
                     &lit.atom.terms,
                     &augmented_head_terms,
                 ),
+                key_terms: lit.atom.terms.clone(),
                 op: lit.op,
                 negated: lit.negated,
             });
@@ -491,6 +499,12 @@ fn lower_epistemic_constraints(
         for lit in &constraint.body {
             match lit {
                 EirBodyLiteral::Epistemic(lit) => {
+                    // Flatten any structured finite+typed key term first, so a
+                    // ground structured key (`know p([1, 2])`) reduces to ground
+                    // scalar columns the headless constraint path can encode. The
+                    // flattened literal is what we store, keeping its atom shape
+                    // consistent with its tuple/solver bindings.
+                    let lit = flatten_epistemic_literal(lit)?;
                     if lit
                         .atom
                         .terms
@@ -504,13 +518,14 @@ fn lower_epistemic_constraints(
                                  tuple key; headless world-view constraints currently support only \
                                  ground (integer/symbol) modal atoms because there is no reduced \
                                  head column to bind constraint variables against",
-                                eir_epistemic_literal_label(lit),
+                                eir_epistemic_literal_label(&lit),
                                 lit.atom.predicate,
                                 lit.atom.arity
                             ),
                         });
                     }
                     let literal_index = epistemic_literals.len();
+                    let bound_output_columns = vec![None; lit.atom.arity];
                     tuple_membership_bindings.push(EpistemicTupleMembershipBinding {
                         literal_index,
                         reduction_index,
@@ -518,7 +533,7 @@ fn lower_epistemic_constraints(
                         arity: lit.atom.arity,
                         key_columns: (0..lit.atom.arity).collect(),
                         key_terms: lit.atom.terms.clone(),
-                        bound_output_columns: vec![None; lit.atom.arity],
+                        bound_output_columns,
                         op: lit.op,
                         negated: lit.negated,
                     });
@@ -1280,6 +1295,146 @@ fn epistemic_literal_label(lit: &EpistemicLiteral) -> &'static str {
     }
 }
 
+/// Flatten a modal literal's structured key terms, returning a literal whose
+/// atom carries the FLATTENED arity/terms.
+///
+/// This is the single normalization point for structured modal keys: the stored
+/// epistemic literal, its tuple-membership binding, and its solver assumption
+/// binding are all derived from the same flattened atom, so the plan validators
+/// (which require `binding.arity == literal.atom.arity` and `binding.key_terms ==
+/// literal.atom.terms`) stay consistent and the runtime matches the modal
+/// relation's real column tuple. Scalar-only keys are returned unchanged.
+fn flatten_epistemic_literal(lit: &EirEpistemicLiteral) -> Result<EirEpistemicLiteral> {
+    let (arity, terms, _key_columns) =
+        flatten_structured_key_terms(&lit.atom.predicate, &lit.atom.terms)?;
+    Ok(EirEpistemicLiteral {
+        op: lit.op,
+        negated: lit.negated,
+        atom: xlog_ir::EirAtom {
+            predicate: lit.atom.predicate.clone(),
+            arity,
+            terms,
+        },
+    })
+}
+
+/// Whether a term encodes directly into one scalar/Symbol GPU key column.
+///
+/// These are the leaf forms the device tuple-key matcher already handles per
+/// column: bound variables (BOUND_OUTPUT), anonymous wildcards (WILDCARD), and
+/// ground integer/float/string/symbol literals (GROUND).
+fn eir_term_is_scalar_key_element(term: &EirTerm) -> bool {
+    matches!(
+        term,
+        EirTerm::Variable(_)
+            | EirTerm::Anonymous
+            | EirTerm::Integer(_)
+            | EirTerm::FloatBits(_)
+            | EirTerm::String(_)
+            | EirTerm::Symbol(_)
+    )
+}
+
+/// Flatten a modal atom's key terms ELEMENT-WISE into a flat list of scalar key
+/// terms plus the matching `0..n` key-column indices.
+///
+/// A STRUCTURED finite+typed key term -- a fixed-arity list `[a, b]` or compound
+/// `f(a, b)` whose elements are each scalar/Symbol-typed -- is expanded into its
+/// elements, each of which becomes one GPU key column. The flattened arity must
+/// equal the modal relation's arity (the runtime arity check enforces that
+/// downstream). Scalar terms pass through unchanged.
+///
+/// Genuinely UNBOUNDED or UNTYPED structured forms (a `cons` with a non-list
+/// tail, a nested structure, a `predref`, or an `aggregate`) carry no fixed,
+/// typed column set and stay rejected with a precise finiteness/resource
+/// diagnostic -- NOT an "unsupported construct".
+fn flatten_structured_key_terms(
+    predicate: &str,
+    terms: &[EirTerm],
+) -> Result<(usize, Vec<EirTerm>, Vec<usize>)> {
+    let mut flattened: Vec<EirTerm> = Vec::with_capacity(terms.len());
+    for term in terms {
+        match term {
+            EirTerm::List(items) => {
+                flatten_structured_elements(predicate, "list", items, &mut flattened)?;
+            }
+            EirTerm::Compound { functor, args } => {
+                flatten_structured_elements(
+                    predicate,
+                    &format!("compound {functor}/{}", args.len()),
+                    args,
+                    &mut flattened,
+                )?;
+            }
+            EirTerm::Cons { .. } => {
+                return Err(XlogError::ResourceExhausted {
+                    context: format!(
+                        "modal tuple-key for {predicate} uses a `cons` pattern whose tail length \
+                         is not statically fixed, so it has no finite, typed GPU key-column set; \
+                         bind it to a fixed-arity list literal `[a, b, ...]` instead"
+                    ),
+                    estimated_bytes: 0,
+                    budget_bytes: 0,
+                });
+            }
+            EirTerm::PredRef(name) => {
+                return Err(XlogError::ResourceExhausted {
+                    context: format!(
+                        "modal tuple-key for {predicate} uses predref `{name}`, which has no \
+                         finite, typed GPU key-column encoding"
+                    ),
+                    estimated_bytes: 0,
+                    budget_bytes: 0,
+                });
+            }
+            EirTerm::Aggregate { op, variable } => {
+                return Err(XlogError::ResourceExhausted {
+                    context: format!(
+                        "modal tuple-key for {predicate} uses aggregate `{op}({variable})`, whose \
+                         value is not a finite, typed GPU key-column tuple"
+                    ),
+                    estimated_bytes: 0,
+                    budget_bytes: 0,
+                });
+            }
+            scalar => flattened.push(scalar.clone()),
+        }
+    }
+
+    let arity = flattened.len();
+    let key_columns = (0..arity).collect();
+    Ok((arity, flattened, key_columns))
+}
+
+/// Splice the elements of a fixed-arity structured key term into `flattened`.
+///
+/// Each element must itself be a scalar/Symbol key element; a nested structure
+/// would need a column to hold its own sub-tuple, which a flat relation schema
+/// cannot express, so it is rejected with a precise finiteness diagnostic.
+fn flatten_structured_elements(
+    predicate: &str,
+    shape: &str,
+    elements: &[EirTerm],
+    flattened: &mut Vec<EirTerm>,
+) -> Result<()> {
+    for element in elements {
+        if eir_term_is_scalar_key_element(element) {
+            flattened.push(element.clone());
+        } else {
+            return Err(XlogError::ResourceExhausted {
+                context: format!(
+                    "modal tuple-key for {predicate} nests a non-scalar element {element:?} inside \
+                     a {shape}; only fixed-arity structures of scalar/Symbol-typed elements have a \
+                     finite, typed GPU key-column encoding"
+                ),
+                estimated_bytes: 0,
+                budget_bytes: 0,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn bound_output_columns_for_terms(
     key_terms: &[EirTerm],
     output_terms: &[EirTerm],
@@ -1301,7 +1456,15 @@ fn augmented_eir_head_terms(rule: &xlog_ir::EirRule) -> Vec<EirTerm> {
         let EirBodyLiteral::Epistemic(lit) = lit else {
             continue;
         };
-        for term in &lit.atom.terms {
+        // A modal key variable may be NESTED inside a structured key term
+        // (`know p([X, Y])`), so flatten before collecting variables that need a
+        // reduced output column to bind against. Flattening failures are surfaced
+        // by the binding-construction path; here we fall back to the raw terms so
+        // diagnostics remain anchored at that site.
+        let key_terms = flatten_structured_key_terms(&lit.atom.predicate, &lit.atom.terms)
+            .map(|(_, terms, _)| terms)
+            .unwrap_or_else(|_| lit.atom.terms.clone());
+        for term in &key_terms {
             let EirTerm::Variable(variable) = term else {
                 continue;
             };

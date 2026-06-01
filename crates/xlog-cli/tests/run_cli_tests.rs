@@ -306,6 +306,12 @@ fn test_xlog_run_epistemic_examples() {
         // under explicit G91 accepts circular self-support -> rows: 1. (31 FAEEL rows:0
         // vs 32 G91 rows:1 is the exact FAEEL-vs-G91 semantic divergence.)
         ("32-g91-self-support-accepted.xlog", "p", "rows: 1"),
+        // v0.9.2 ITEM D: a STRUCTURED finite+typed modal tuple-key. The 1-element
+        // list `[H]` flattens element-wise into `watched`'s scalar u32 key column,
+        // so `know watched([H])` GATES `host` by `watched` membership. Load-bearing
+        // (gated != ungated): only watched hosts survive -> alert = {1} (node 2 is
+        // dropped). The structured-key flattening runs entirely on the GPU.
+        ("23-compound-modal-key-membership.xlog", "alert", "| 1  |"),
     ];
 
     for (example, expected_relation, expected_value) in examples {
@@ -667,9 +673,13 @@ fn test_xlog_run_negated_modal_through_recursion_reports_typed_epistemic_diagnos
 
 #[test]
 fn test_xlog_run_compound_modal_key_reports_typed_epistemic_diagnostic() {
-    // v0.9.2 BOUNDARY: a list/compound modal key cannot be encoded as a GPU
-    // tuple-key column and must FAIL CLOSED with a typed diagnostic naming the
-    // offending term.
+    // v0.9.2 ITEM D BOUNDARY: structured finite+typed modal keys (fixed-arity
+    // list/compound of scalar elements) are now ACCEPTED and flattened onto the
+    // GPU (see 23-compound-modal-key-membership.xlog + the accepted examples
+    // list). What stays REJECTED is a genuinely UNBOUNDED structured key -- a
+    // `cons` `[H | T]` whose tail length is not statically fixed has no finite,
+    // typed GPU key-column set. It must FAIL CLOSED with a precise FINITENESS
+    // (resource) diagnostic, NOT a blanket "unsupported construct".
     let _device = match CudaDevice::new(0) {
         Ok(d) => d,
         Err(_) => {
@@ -678,22 +688,27 @@ fn test_xlog_run_compound_modal_key_reports_typed_epistemic_diagnostic() {
         }
     };
 
-    let (ok, stdout, stderr) = run_epistemic_example("23-compound-modal-key-rejected.xlog");
+    let (ok, stdout, stderr) = run_epistemic_example("23b-unbounded-cons-modal-key-rejected.xlog");
     assert!(
         !ok,
-        "compound-modal-key example must fail closed, stdout:\n{stdout}\nstderr:\n{stderr}"
+        "unbounded-cons modal-key example must fail closed, stdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    assert!(stderr.contains("UnsupportedEpistemicConstruct"), "{stderr}");
+    // Honest finiteness/resource bound, NOT "UnsupportedEpistemicConstruct".
     assert!(
-        stderr.contains("epistemic GPU tuple-key expectation"),
-        "{stderr}"
+        stderr.contains("ResourceExhausted"),
+        "unbounded structured key must fail with a finiteness/resource diagnostic:\n{stderr}"
     );
-    // Names the offending compound term. The diagnostic context is itself a
-    // Debug-escaped string, so the inner quotes appear as literal backslashes;
-    // match them with a raw string literal.
     assert!(
-        stderr.contains(r#"List([Variable(\"H\")])"#),
-        "diagnostic must name the offending list term:\n{stderr}"
+        !stderr.contains("UnsupportedEpistemicConstruct"),
+        "rejection must be a precise finiteness bound, not a blanket unsupported construct:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("cons") && stderr.contains("tail length is not statically fixed"),
+        "diagnostic must name the unbounded `cons` tail as the finiteness wall:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("fixed-arity list literal"),
+        "diagnostic must point the user at the finite-typed alternative:\n{stderr}"
     );
 }
 

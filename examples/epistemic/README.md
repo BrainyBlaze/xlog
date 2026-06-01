@@ -49,7 +49,8 @@ XLOG_USE_DEVICE_RUNTIME=1 cargo test -p xlog-cli --test run_cli_tests test_xlog_
 | Supply-chain recursive reach (FULL) | `20-supply-chain-recursive-reach.xlog` | v0.9.2 Case-A robust: ordinary recursion in `sources_from` gated by `know certified` over the INVARIANT EDB → 10-tuple closure incl. 4-hop derived `(1,5)`; supplier 6 (reachable only via an uncertified link) is fully gated out (no tuple ends in 6; differs from the ungated raw-graph closure) |
 | Incident triage joint-solving (FULL) | `21-incident-triage-joint-modal.xlog` | v0.9.2 Bundle 3 robust JOINT-solving: THREE epistemic heads share base modal `compromised`, exercising all three modalities → `quarantine={1,2}` (`know`), `watch={2}` (`possible`; monitored/3 gated out), `clear={3,4,5}` (`not possible`); all three heads displayed |
 | Recursion through modal (FIXPOINT) | `22-recursion-through-modal-fixpoint.xlog` | v0.9.2 ITEM A Case-B recursive epistemic FIXPOINT: a POSITIVE `know reach` over a relation that CO-EVOLVES with the recursion is executed to its FAEEL FOUNDED least fixpoint (modal truth + ordinary derivation co-evolve). The modal feeds a non-mirror `trust`, so the gate is load-bearing → founded `reach={(1,2),(1,3)}`, which DIFFERS from base-only `{(1,2)}` and from ungated `{(1,1),(1,2),(1,3)}` (the unfounded `trust(3,1)` is excluded) |
-| Compound modal key (rejected) | `23-compound-modal-key-rejected.xlog` | v0.9.2 boundary: a list/compound modal tuple-key `know watched([H])` fails closed → typed `UnsupportedEpistemicConstruct` `epistemic GPU tuple-key expectation` (names `List([Variable("H")])`) |
+| Structured modal key (accepted) | `23-compound-modal-key-membership.xlog` | v0.9.2 ITEM D: a STRUCTURED finite+typed modal tuple-key. The 1-element list `[H]` in `know watched([H])` is flattened ELEMENT-WISE onto `watched`'s scalar u32 key column and matched on the GPU (no host matcher, no CPU fallback), GATING `host` by `watched` membership → `alert={1}` (gate load-bearing: node 2 dropped; ungated `alert=host={1,2}`). Multi-element `[A,B]`/compound `f(A,B)` flatten the same way over an arity-2 relation; anonymous `_` is a per-column wildcard |
+| Unbounded modal key (rejected, finiteness) | `23b-unbounded-cons-modal-key-rejected.xlog` | v0.9.2 ITEM D boundary: an UNBOUNDED structured key — a `cons` `[H \| T]` whose tail length is not statically fixed — has no finite, typed GPU key-column set. Fails closed with a precise `ResourceExhausted` FINITENESS diagnostic (names the cons tail; points at the fixed-arity list alternative), NOT a blanket `UnsupportedEpistemicConstruct` |
 | Transitive determined modal (stratified) | `24-transitive-determined-modal-stratified.xlog` | v0.9.2 STRATIFIED: a modal over an ORDINARY relation transitively derived from a DETERMINED epistemic head (`b :- know r`, `r :- a`, `a :- know p`). `r` is determined-in-principle (ordinary over the determined `a`); the lower stratum materializes gated `a`, `r :- a` is computed over the materialized base (locally invariant), the higher stratum gates `know r` against the base `r` → `b={1}` (gate load-bearing: ungated `b=node={1,2}`) |
 | Recursion over determined modal | `25-recursion-over-determined-modal.xlog` | v0.9.2 STRATIFIED recursion: `reach :- reach, know a` over the DETERMINED epistemic head `a :- know certified` (EDB). `a` is materialized as a lower stratum; the recursive stratum gates over the now-base `a` → `reach={(1,2),(2,3),(1,3)}` (derived `(1,3)` proves multi-hop fixpoint) |
 | Negated modal over invariant (recursive) | `26-negated-modal-over-invariant-recursive.xlog` | v0.9.2 Case-A: `not know blocked(Y)` over EDB `blocked` ≡ ordinary `not blocked(Y)` (anti-join, no modal gating) in a recursive program → `reach={(1,2),(3,4)}` (blocked node 3 severs the chain; differs from ungated closure) |
@@ -91,8 +92,18 @@ relation that is the sole binder of an output variable is resolved into a positi
 ordinary join atom (a sound, machine-checked-invariant consequence), which also
 makes single-head augmented modals over invariant relations executable.
 
+Structured modal tuple-keys (example 23) are FLATTENED element-wise onto the GPU
+when they are FINITE and TYPED: a fixed-arity list `[a, b]` or compound `f(a, b)`
+of scalar/Symbol-typed elements expands into one GPU key column per element and
+reuses the existing device tuple-key matcher (bound variable → BOUND_OUTPUT,
+anonymous `_` → WILDCARD, ground literal → GROUND). The flattened arity must equal
+the modal relation's arity. Only genuinely UNBOUNDED or UNTYPED structured forms (a
+`cons` with a statically-unknown tail, a nested structure, a predref, an aggregate)
+stay rejected, and they reject with a precise `ResourceExhausted` finiteness
+diagnostic rather than a blanket unsupported-construct error (example 23b).
+
 The remaining fail-closed cases are the GENUINELY-UNDEFINED forms, covered by
 negative pilots: circular modality (a modal over the relation being recursively
 computed, example 22), FAEEL-unfounded self-support (the defined rejection; G91
-accepts it), syntactic nested modal operators (example 13), and compound/list modal
-tuple-keys (example 23).
+accepts it), syntactic nested modal operators (example 13), and unbounded/untyped
+modal tuple-keys (example 23b).
