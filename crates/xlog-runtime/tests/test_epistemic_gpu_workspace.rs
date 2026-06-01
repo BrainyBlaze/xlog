@@ -8877,3 +8877,219 @@ fn egb06_cross_arity_joint_coupling_over_invariant_resolves_on_device() {
         "a = {{(X,Y): p(X), link(X,Y)}} = {{(1,10),(2,20)}} (node 3 lacks p)"
     );
 }
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn single_element_list_modal_key_binds_element_against_scalar_column_on_device() {
+    // v0.9.2 ITEM D: a STRUCTURED finite+typed modal tuple-key. The key term is a
+    // 1-element list `[H]` whose element `H` is a bound variable. The list is
+    // flattened element-wise into the modal relation's scalar key columns, so
+    // `know watched([H])` binds `H` against the single u32 column of `watched`.
+    // EXACT (load-bearing: the modal gate FILTERS `host` by `watched` membership):
+    //   host = {1, 2}, watched = {1}  ->  alert = {1}   (node 2 gated out)
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = faeel
+        pred host(u32).
+        pred watched(u32).
+        pred alert(u32).
+        host(1). host(2).
+        watched(1).
+        alert(H) :- host(H), know watched([H]).
+        "#,
+    )
+    .expect("parse single-element list modal-key program");
+
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("1-element list modal key must compile (flatten element into scalar column)");
+
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("host", upload_unary_u32(&fixture.memory, &[1, 2], "x"));
+    executor.put_relation("watched", upload_unary_u32(&fixture.memory, &[1], "x"));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 2,
+                max_models_per_reduction: 8,
+            },
+        )
+        .expect("single-element list modal-key component must execute on device");
+
+    result
+        .require_runtime_dispatch_certification()
+        .expect("runtime result must retain dispatch certification");
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+
+    let mut rows = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download alert column");
+    rows.sort_unstable();
+    assert_eq!(
+        rows,
+        vec![1u32],
+        "alert = {{H : host(H), know watched([H])}} = {{1}} (node 2 not watched)"
+    );
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn multi_element_list_modal_key_binds_elements_against_columns_on_device() {
+    // v0.9.2 ITEM D: a multi-element list `[A, B]` modal key over an arity-2
+    // relation. Each element flattens into its own scalar key column, so the
+    // PER-ELEMENT conjunctive match is load-bearing: a row of `host` survives only
+    // when BOTH `A` and `B` match the same `watched` tuple.
+    // EXACT: host = {(1,2),(3,4)}, watched = {(1,2)}  ->  q = {(1,2)} (only (1,2) matches).
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = faeel
+        pred host(u32, u32).
+        pred watched(u32, u32).
+        pred q(u32, u32).
+        host(1, 2). host(3, 4).
+        watched(1, 2).
+        q(A, B) :- host(A, B), know watched([A, B]).
+        "#,
+    )
+    .expect("parse multi-element list modal-key program");
+
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("2-element list modal key must compile (flatten into 2 scalar columns)");
+
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation(
+        "host",
+        upload_binary_u32(&fixture.memory, &[(1, 2), (3, 4)], "a", "b"),
+    );
+    executor.put_relation(
+        "watched",
+        upload_binary_u32(&fixture.memory, &[(1, 2)], "a", "b"),
+    );
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 2,
+                max_models_per_reduction: 8,
+            },
+        )
+        .expect("multi-element list modal-key component must execute on device");
+
+    result
+        .require_runtime_dispatch_certification()
+        .expect("runtime result must retain dispatch certification");
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+
+    let c0 = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download q col0");
+    let c1 = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 1)
+        .expect("download q col1");
+    let mut pairs: Vec<(u32, u32)> = c0.into_iter().zip(c1).collect();
+    pairs.sort_unstable();
+    assert_eq!(
+        pairs,
+        vec![(1u32, 2u32)],
+        "q = {{(A,B): host(A,B), know watched([A,B])}} = {{(1,2)}} ((3,4) not watched)"
+    );
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
+fn anonymous_wildcard_list_modal_key_matches_any_in_position_on_device() {
+    // v0.9.2 ITEM D: an anonymous `_` inside a structured list key is a per-column
+    // WILDCARD -- it imposes no equality on that flattened column, while the bound
+    // element still filters. `know watched([A, _])` keeps rows whose first column
+    // matches some watched tuple's first column, regardless of the second.
+    // EXACT: host = {(1,2),(3,4)}, watched = {(1,9)}  ->  q = {(1,2)}
+    //   (A=1 matches watched col0=1; second position is wildcard; (3,4) has no A=3).
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = faeel
+        pred host(u32, u32).
+        pred watched(u32, u32).
+        pred q(u32, u32).
+        host(1, 2). host(3, 4).
+        watched(1, 9).
+        q(A, B) :- host(A, B), know watched([A, _]).
+        "#,
+    )
+    .expect("parse anonymous-wildcard list modal-key program");
+
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("anonymous wildcard in a list modal key must compile");
+
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation(
+        "host",
+        upload_binary_u32(&fixture.memory, &[(1, 2), (3, 4)], "a", "b"),
+    );
+    executor.put_relation(
+        "watched",
+        upload_binary_u32(&fixture.memory, &[(1, 9)], "a", "b"),
+    );
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 2,
+                max_models_per_reduction: 8,
+            },
+        )
+        .expect("anonymous-wildcard list modal-key component must execute on device");
+
+    result
+        .require_runtime_dispatch_certification()
+        .expect("runtime result must retain dispatch certification");
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+
+    let c0 = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download q col0");
+    let c1 = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 1)
+        .expect("download q col1");
+    let mut pairs: Vec<(u32, u32)> = c0.into_iter().zip(c1).collect();
+    pairs.sort_unstable();
+    assert_eq!(
+        pairs,
+        vec![(1u32, 2u32)],
+        "q = {{(A,B): host(A,B), know watched([A,_])}} = {{(1,2)}} (A=1 matches; second is wildcard)"
+    );
+}
