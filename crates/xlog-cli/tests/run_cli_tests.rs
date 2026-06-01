@@ -595,9 +595,17 @@ fn test_xlog_run_v092_examples_modal_gating_filters() {
 }
 
 #[test]
-fn test_xlog_run_recursion_through_modal_reports_typed_epistemic_diagnostic() {
-    // v0.9.2 BOUNDARY: a modal literal over a relation entangled in the program's
-    // recursive SCC (NOT invariant) must FAIL CLOSED with a typed diagnostic.
+fn test_xlog_run_recursion_through_modal_computes_founded_fixpoint() {
+    // v0.9.2 ITEM A: a POSITIVE modal over a relation that CO-EVOLVES with the
+    // program's ordinary recursion (Case B) is EXECUTED to its FAEEL founded least
+    // fixpoint, NOT rejected. The modal feeds a non-mirror relation `trust`, so the
+    // modal gate is load-bearing: founded reach = {(1,2),(1,3)}.
+    //   (1,2): seed-founded.
+    //   (1,3): reach(1,2) + trust(2,3); trust(2,3) founded because know reach(1,2)
+    //          holds. This tuple exists ONLY because the modal co-evolves into the
+    //          recursion -- it is absent from a base-only result.
+    // The unfounded candidate trust(3,1) (gated by `know reach(3,3)`, unfounded) is
+    // correctly excluded, so (1,1) never appears (it would under an ungated reading).
     let _device = match CudaDevice::new(0) {
         Ok(d) => d,
         Err(_) => {
@@ -606,16 +614,55 @@ fn test_xlog_run_recursion_through_modal_reports_typed_epistemic_diagnostic() {
         }
     };
 
-    let (ok, stdout, stderr) = run_epistemic_example("22-recursion-through-modal-rejected.xlog");
+    let (ok, stdout, stderr) = run_epistemic_example("22-recursion-through-modal-fixpoint.xlog");
+    assert!(
+        ok,
+        "Case-B recursive epistemic fixpoint must EXECUTE, stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    // EXACT founded tuples: {(1,2),(1,3)}.
+    assert!(
+        stdout.contains("| 1  | 2  |"),
+        "founded must contain (1,2):\n{stdout}"
+    );
+    assert!(
+        stdout.contains("| 1  | 3  |"),
+        "founded must contain (1,3) (co-evolution through the modal):\n{stdout}"
+    );
+    // NOT base-only: (1,3) present above proves the modal added a founded tuple.
+    // NOT ungated: the unfounded reach(3,3) must not self-fulfill trust(3,1), so
+    // (1,1) is absent.
+    assert!(
+        !stdout.contains("| 1  | 1  |"),
+        "foundedness must EXCLUDE (1,1) (unfounded reach(3,3) cannot self-fulfill \
+         trust(3,1)):\n{stdout}"
+    );
+}
+
+#[test]
+fn test_xlog_run_negated_modal_through_recursion_reports_typed_epistemic_diagnostic() {
+    // v0.9.2 ITEM A SOUNDNESS FLOOR: a NEGATED modal over a relation entangled in the
+    // program's recursive SCC is NON-MONOTONE through the recursion and must FAIL
+    // CLOSED with a typed diagnostic (positive co-evolving modals are accepted as
+    // Case-B fixpoints; the negated one is the genuine remaining wall).
+    let _device = match CudaDevice::new(0) {
+        Ok(d) => d,
+        Err(_) => {
+            println!("SKIPPED: CUDA runtime unavailable (no GPU or driver not loaded)");
+            return;
+        }
+    };
+
+    let (ok, stdout, stderr) =
+        run_epistemic_example("33-negated-modal-through-recursion-rejected.xlog");
     assert!(
         !ok,
-        "recursion-through-modal example must fail closed, stdout:\n{stdout}\nstderr:\n{stderr}"
+        "negated-modal-through-recursion example must fail closed, stdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(stderr.contains("UnsupportedEpistemicConstruct"), "{stderr}");
     assert!(stderr.contains("recursive epistemic program"), "{stderr}");
-    // Names the offending modal predicate and the invariance requirement.
-    assert!(stderr.contains("know reach"), "{stderr}");
-    assert!(stderr.contains("not invariant"), "{stderr}");
+    // Names the offending NEGATED modal and the non-monotone reason.
+    assert!(stderr.contains("not know"), "{stderr}");
+    assert!(stderr.contains("non-monotone"), "{stderr}");
 }
 
 #[test]

@@ -579,6 +579,26 @@ pub enum RecursiveEpistemicClass {
     /// an invariant relation. Routed to the ordinary recursive engine after a
     /// Case-A reduction (see [`reduce_case_a_epistemic_program_to_ordinary`]).
     CaseA,
+    /// Case B: ordinary recursion where at least one POSITIVE `know`/`possible` modal
+    /// ranges over a NON-invariant relation that CO-EVOLVES with the recursion (the
+    /// modal target sits in the recursive SCC, or transitively depends on it). The
+    /// modal truth and the ordinary derivation are a single co-evolving founded least
+    /// fixpoint: resolving each positive modal to its (now recursive) ordinary atom and
+    /// iterating the existing semi-naive engine computes the FAEEL founded least
+    /// fixpoint directly — unfounded self-support is excluded by construction (the
+    /// least model of a positive program IS its founded model), so no separate
+    /// foundedness drop is needed. Routed exactly like Case A through
+    /// [`reduce_case_a_epistemic_program_to_ordinary`] and the ordinary recursive
+    /// engine.
+    ///
+    /// ADMISSION IS POLARITY/MODE-SCOPED (proved in
+    /// [`classify_recursive_epistemic_program`]): a NEGATED modal over a non-invariant
+    /// target stays rejected (non-monotone recursion needs stable-model machinery), and
+    /// a `possible` modal over a co-evolving target is admitted ONLY under FAEEL (where
+    /// the least fixpoint equals the founded model). G91 `possible` recursion is the
+    /// autoepistemic self-fulfilling fixpoint, which the monotone resolve cannot
+    /// express, so it stays rejected as an honest wall.
+    CaseB,
 }
 
 /// Reject epistemic programs that contain ordinary (non-modal) recursion before the
@@ -601,13 +621,16 @@ pub enum RecursiveEpistemicClass {
 fn reject_recursive_epistemic_program(program: &Program) -> Result<()> {
     match classify_recursive_epistemic_program(program) {
         Ok(RecursiveEpistemicClass::NonRecursive) => Ok(()),
-        Ok(RecursiveEpistemicClass::CaseA) => Err(recursive_epistemic_rejection(
-            "an epistemic program contains ordinary recursion; the single-pass epistemic GPU \
-             planner cannot iterate a recursive fixpoint. Case-A recursive epistemic programs \
-             are executed through the ordinary recursive engine via \
-             `try_reduce_case_a_recursive_epistemic_program`, not this planner.",
-        )),
-        // Non-Case-A recursive shapes already carry a specific typed diagnostic.
+        Ok(RecursiveEpistemicClass::CaseA | RecursiveEpistemicClass::CaseB) => {
+            Err(recursive_epistemic_rejection(
+                "an epistemic program contains ordinary recursion; the single-pass epistemic GPU \
+                 planner cannot iterate a recursive fixpoint. Case-A/Case-B recursive epistemic \
+                 programs are executed through the ordinary recursive engine via \
+                 `try_reduce_case_a_recursive_epistemic_program`, not this planner.",
+            ))
+        }
+        // Recursive shapes outside the admissible fragment already carry a specific
+        // typed diagnostic (negated-modal recursion, G91 `possible` recursion).
         Err(err) => Err(err),
     }
 }
@@ -672,60 +695,96 @@ pub fn classify_recursive_epistemic_program(program: &Program) -> Result<Recursi
         return Ok(RecursiveEpistemicClass::NonRecursive);
     }
 
-    // Recursion is present. Admit it only as Case A: every modal atom that appears in
-    // a recursion-participating rule must be a POSITIVE `know`/`possible` over an
-    // INVARIANT relation (its extension is fixed independent of the recursion). Any
-    // other recursive shape fails closed.
+    // Recursion is present. Two admissible classes (anything else fails closed):
     //
-    // The Case-A reduction blanket-rewrites EVERY modal literal in the program to a
-    // positive ordinary atom over its gated relation, so the invariance contract must
-    // hold for EVERY modal literal in the whole program — not only those in
-    // recursion-participating rules. A non-recursive rule whose modal ranges over a
-    // non-invariant (e.g. epistemic-defined) relation would otherwise be silently
-    // rewritten into an unsound join; it must instead fail closed, preserving the
-    // pre-existing "reject all but Case A" guarantee.
+    //   Case A — every modal atom is a POSITIVE `know`/`possible` over an INVARIANT
+    //   relation (extension fixed independent of the recursion). The recursion joins
+    //   against a fixed gated relation.
+    //
+    //   Case B — at least one POSITIVE `know`/`possible` modal ranges over a
+    //   NON-invariant relation that CO-EVOLVES with the recursion (the modal target is
+    //   itself recursive / epistemic / transitively depends on the recursion). Modal
+    //   truth and the ordinary derivation are a single founded least fixpoint: resolving
+    //   the positive modal to its (now recursive) ordinary atom and iterating the
+    //   semi-naive engine computes the FAEEL founded least fixpoint directly. The least
+    //   model of the resulting POSITIVE program IS its founded model, so unfounded
+    //   self-support is excluded by construction (no separate foundedness drop needed),
+    //   and a program with no founding simply yields the exact empty extension.
+    //
+    // Both classes use the SAME reduction (positive modal → positive ordinary atom,
+    // `reduce_case_a_epistemic_program_to_ordinary`), so the only structural difference
+    // is whether the resolved relation is fixed (A) or part of the SCC (B). The whole
+    // program is scanned (not only recursion-participating rules) because that blanket
+    // reduction rewrites EVERY modal literal.
+    //
+    // SOUNDNESS FLOOR (stays rejected):
+    //   * a NEGATED modal over a non-invariant target — negation through recursion is
+    //     non-monotone; the monotone resolve cannot express its stable-model semantics
+    //     (a host-side solver would be required).
+    //   * a `possible` modal over a co-evolving target under G91 — G91 `possible` is the
+    //     autoepistemic SELF-FULFILLING fixpoint, which the monotone least-fixpoint
+    //     resolve cannot express. FAEEL `possible` IS the founded least fixpoint, so it
+    //     is admitted. (A non-recursive `possible` self-support stays NonRecursive and
+    //     is handled by the single-pass founded-extension path — item B.)
+    let mode = program.directives.epistemic_mode_or_default();
     let invariant = InvariantRelations::analyze(program);
+    let mut saw_case_b = false;
     for rule in &program.rules {
         for lit in &rule.body {
             let BodyLiteral::Epistemic(modal) = lit else {
                 continue;
             };
-            if !invariant.is_invariant(&modal.atom.predicate) {
+            if invariant.is_invariant(&modal.atom.predicate) {
+                // Modal over an INVARIANT relation: admissible Case-A. A positive
+                // `know`/`possible` resolves to a positive ordinary join over the gated
+                // relation; a NEGATED `not know`/`not possible` over an invariant
+                // relation equals ordinary `not R` (the world view agrees with R on an
+                // invariant relation), an anti-join with NO modal gating.
+                continue;
+            }
+
+            // NON-invariant modal target: the gated relation co-evolves with the
+            // recursion.
+            if modal.negated {
                 // A NEGATED modal over a NON-invariant relation is doubly outside the
-                // fragment (the gated complement is not invariant); keep its specific
-                // diagnostic. A POSITIVE modal over a non-invariant relation is the
-                // general non-Case-A rejection.
-                if modal.negated {
-                    return Err(recursive_epistemic_rejection(&format!(
-                        "rule for `{}` uses a NEGATED modal literal `{}` over a relation that is \
-                         not invariant in a program with ordinary recursion; the gated complement \
-                         is not invariant, so it is not part of the admissible Case-A fixpoint \
-                         fragment. Remove the recursion or the negated modal literal.",
-                        rule.head.predicate,
-                        epistemic_literal_label(modal),
-                    )));
-                }
+                // fragment (the gated complement is not invariant). Non-monotone:
+                // fails closed.
                 return Err(recursive_epistemic_rejection(&format!(
-                    "rule for `{}` uses the modal literal `{} {}` over a relation that is not \
-                     invariant with respect to the program's ordinary recursion (it is recursive, \
-                     epistemic, or transitively depends on the recursion). Case-A recursive \
-                     epistemic execution requires every modal atom to range over an EDB or lower \
-                     non-recursive, non-epistemic stratum. Remove the recursion or compute the \
-                     recursive relation in a non-epistemic stratum.",
+                    "rule for `{}` uses a NEGATED modal literal `{}` over a relation that is \
+                     not invariant in a program with ordinary recursion; the gated complement \
+                     is non-monotone through the recursion, so it is not part of any admissible \
+                     founded-fixpoint fragment. Remove the recursion or the negated modal literal.",
                     rule.head.predicate,
                     epistemic_literal_label(modal),
-                    modal.atom.predicate,
                 )));
             }
-            // Modal over an INVARIANT relation: admissible Case-A. A positive
-            // `know`/`possible` resolves to a positive ordinary join over the gated
-            // relation; a NEGATED `not know`/`not possible` over an invariant
-            // relation equals ordinary `not R` (the world view agrees with R on an
-            // invariant relation), an anti-join with NO modal gating.
+
+            if modal.op == EpistemicOp::Possible && mode == EpistemicMode::G91 {
+                // G91 `possible` over a co-evolving target is the autoepistemic
+                // self-fulfilling fixpoint; the monotone least-fixpoint resolve would
+                // silently compute the FAEEL founded answer under a G91 pragma. Fail
+                // closed as an honest wall rather than return a silently-wrong result.
+                return Err(recursive_epistemic_rejection(&format!(
+                    "rule for `{}` uses the modal literal `possible {}` over a relation that \
+                     CO-EVOLVES with the program's ordinary recursion, under G91 mode. G91 \
+                     `possible` recursion is the autoepistemic self-fulfilling fixpoint, which \
+                     the monotone founded-least-fixpoint reduction cannot express. Use FAEEL \
+                     mode (founded least fixpoint) or remove the recursion.",
+                    rule.head.predicate, modal.atom.predicate,
+                )));
+            }
+
+            // POSITIVE `know` (any mode) or FAEEL `possible` over a co-evolving target:
+            // admissible Case B. The founded least fixpoint computes the result.
+            saw_case_b = true;
         }
     }
 
-    Ok(RecursiveEpistemicClass::CaseA)
+    if saw_case_b {
+        Ok(RecursiveEpistemicClass::CaseB)
+    } else {
+        Ok(RecursiveEpistemicClass::CaseA)
+    }
 }
 
 fn recursive_epistemic_rejection(context: &str) -> XlogError {
@@ -1144,7 +1203,13 @@ fn compile_epistemic_gpu_execution_inner(
 pub fn try_reduce_case_a_recursive_epistemic_program(program: &Program) -> Result<Option<Program>> {
     match classify_recursive_epistemic_program(program)? {
         RecursiveEpistemicClass::NonRecursive => Ok(None),
-        RecursiveEpistemicClass::CaseA => {
+        // Case A and Case B share the same reduction: each positive `know`/`possible`
+        // modal is resolved to its ordinary atom. In Case A that atom is invariant (a
+        // fixed gated relation); in Case B it co-evolves inside the recursive SCC, so
+        // the semi-naive least fixpoint computes the founded co-evolving result. The
+        // reduction is identical — only the dependency shape of the resolved relation
+        // differs — so both route through the ordinary recursive engine.
+        RecursiveEpistemicClass::CaseA | RecursiveEpistemicClass::CaseB => {
             Ok(Some(reduce_case_a_epistemic_program_to_ordinary(program)))
         }
     }
