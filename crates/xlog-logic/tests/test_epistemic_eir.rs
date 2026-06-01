@@ -151,39 +151,30 @@ fn negated_nested_epistemic_chain_collapses_in_eir() {
     );
 }
 
-/// SCOPE BOUNDARY: nested modal forms whose negation is NOT a single leading
-/// `not` — an INTERIOR negation between operators (`K ¬M p`) or an ATOM-adjacent
-/// negation (`M ¬p`) — have no sound collapse to a single `op atom` literal and
-/// MUST fail closed with a typed `UnsupportedEpistemicConstruct` (NOT a wrong
-/// collapse, NOT a generic `Parse` error). Each case carries the verbatim source.
+/// Nested modal forms with interior or atom-adjacent negation dualize to the
+/// equivalent single-level modal literal before EIR lowering.
 #[test]
-fn nested_epistemic_with_interior_or_atom_negation_is_stable_typed_error() {
+fn nested_epistemic_with_interior_or_atom_negation_dualizes_in_eir() {
     let cases = [
-        ("bad(X) :- know not possible edge(X).", "interior negation"),
-        ("bad(X) :- possible not know edge(X).", "interior negation"),
-        ("bad(X) :- know possible not edge(X).", "negated atom"),
+        (
+            "bad(X) :- know not possible edge(X).",
+            (EirEpistemicOp::Possible, true, "edge".to_string()),
+        ),
+        (
+            "bad(X) :- possible not know edge(X).",
+            (EirEpistemicOp::Know, true, "edge".to_string()),
+        ),
+        (
+            "bad(X) :- know possible not edge(X).",
+            (EirEpistemicOp::Know, true, "edge".to_string()),
+        ),
         (
             "bad(X) :- not know not possible edge(X).",
-            "interior negation",
+            (EirEpistemicOp::Possible, false, "edge".to_string()),
         ),
     ];
-    for (src, marker) in cases {
-        let err = parse_program(src).unwrap_err();
-        match err {
-            XlogError::UnsupportedEpistemicConstruct { construct, context } => {
-                assert!(
-                    construct.contains(marker),
-                    "construct {construct:?} must mention {marker:?} for {src:?}"
-                );
-                // Source context anchors the diagnostic to the offending literal.
-                let literal = src.trim_start_matches("bad(X) :- ").trim_end_matches('.');
-                assert!(
-                    context.contains(literal),
-                    "context {context:?} must contain source literal {literal:?} for {src:?}"
-                );
-            }
-            other => panic!("expected stable typed nested diagnostic for {src:?}, got {other:?}"),
-        }
+    for (src, expected) in cases {
+        assert_eq!(first_eir_epistemic(src), expected);
     }
 }
 

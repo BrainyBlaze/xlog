@@ -15,6 +15,7 @@ xlog-core.workspace = true
 xlog-cuda.workspace = true
 xlog-ir.workspace = true
 xlog-logic.workspace = true
+xlog-prob.workspace = true
 xlog-runtime.workspace = true
 
 [dev-dependencies]

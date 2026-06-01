@@ -1971,9 +1971,11 @@ engines, typed fail-closed, real runtime/device pilots). Status summary:
       accepted-world-view distinguished from failure, and resource fail-closed
       before partial execution. Evidence: `egb01_*` device pilots.
 - [x] EGB-07 FAEEL founded self-support: per-tuple-key foundedness; unfounded
-      `p() :- possible p().` rejected; G91 self-support kept separate. Evidence:
-      `cargo test -p xlog-logic --test test_epistemic_faeel_foundedness` and
-      `--test test_epistemic_g91`.
+      `p() :- possible p().` executes to the defined empty founded extension,
+      independently founded support is admitted, and G91 self-support stays a
+      separate compatibility mode. Evidence:
+      `cargo test -p xlog-logic --test test_epistemic_faeel_foundedness`,
+      `--test test_epistemic_g91`, and examples `31`/`32`.
 - [x] EGB-04 epistemic integrity constraints (core): `:- know/possible/not possible g().`
       prune candidate world views via a GPU constraint kernel (rejection reason
       6), constraints dropped from the reduced ordinary program (no RIR rewrite).
@@ -1994,21 +1996,23 @@ engines, typed fail-closed, real runtime/device pilots). Status summary:
       one distinct-name epistemic predicate (any operator mix incl. negated
       modal) solved jointly over the candidate world view, matching unsplit.
       Evidence: `egb06_*` device pilots and the integration coupling test.
-- [x] EGB-03 nested modal operators (milestone scope): nested forms recognized
-      explicitly and rejected with stable typed diagnostics, no parser-precedence
-      accident, no fake flattening. Evidence:
-      `cargo test -p xlog-logic --test test_epistemic_eir` and the
-      `examples/epistemic/13-nested-modal-rejected.xlog` CLI negative pilot.
+- [x] EGB-03/C2 nested modal operators: finite two-operator chains with leading,
+      interior, or atom-adjacent negation normalize by parity/duality into a
+      single-level epistemic literal and execute through `xlog run`; no
+      parser-precedence accident and no world-of-worlds shortcut. Evidence:
+      `cargo test -p xlog-logic --test test_epistemic_eir` and examples
+      `13`/`13b`-`13v`.
 - [x] Fixed nullary EDB fact materialization (pre-existing): `pred().` was
       materialized as 0 rows (read as absent), breaking ordinary nullary queries
       and ground/nullary modal membership. Added
       `CudaKernelProvider::create_zero_arity_buffer`; arity-0 facts now
       materialize one unit tuple. Evidence: `examples/epistemic/*` via
       `cargo test -p xlog-cli --test run_cli_tests test_xlog_run_epistemic_examples`.
-- [x] Full-surface verification: device epistemic 117/117 (incl. EGB-04.K2
-      specific-constraint test), 206-cert suite, epistemic logic suites,
-      12 successful `xlog run` epistemic examples plus the nested-modal negative
-      CLI pilot, `xlog-cuda` set ops 35/35, and `xlog-integration` 206/206.
+- [x] Full-surface verification: device epistemic coverage, certification suite,
+      epistemic logic suites, successful `xlog run` semantic examples including
+      nested-modal negation matrices, same-name multi-arity matrices, G91
+      possible recursion, and WFS negated-modal recursion, plus `xlog-cuda` and
+      `xlog-integration` gates.
 
 ### In-spec typed fail-closed (REQUIRED by the goal — rejection-by-design, not debt)
 
@@ -2016,26 +2020,28 @@ Mandated by each bundle's "Expected Rejected Behavior" and cross-cutting lock #5
 verified by negative pilots. Accepting these would violate the no-fake / no-CPU-
 fallback locks.
 
-- [x] Nested modal **semantics** stay rejected with stable typed diagnostics
-      (EGB-03 Expected Rejected + Bundle Ordering: lands after single-level).
-- [x] Aggregate / compound / list / predref modal tuple keys fail closed
-      (EGB-02 Expected Rejected).
-- [x] Epistemic constraints with variable tuple keys, nested-modal bodies, or
-      CPU-only world-view scans fail closed (EGB-04 Expected Rejected).
+- [x] Nested modal **semantics** are solved for finite two-operator chains:
+      leading/interior/atom-adjacent negation normalizes by parity/duality and the
+      64-cell `13g`-`13v` example matrix executes through `xlog run`.
+- [x] Finite typed compound/list modal tuple keys execute by flattening; genuinely
+      unbounded, untyped, predref, or aggregate modal tuple keys fail closed.
+- [x] Variable-keyed, diagonal, shared-variable join, and range-restricted negated
+      epistemic constraints execute on the device path; unsafe unbound negated
+      variables and CPU-only world-view scans fail closed.
 - [x] Same-name multi-arity modal coupling is SOLVED in v0.9.2 (ITEM F): distinct
       arities are distinct relations, so the modal tuple-source resolution
       disambiguates by arity (arity-qualified store key `p/1`/`p/2`, bare-name
       fallback). Joint-solves on device to exact tuples per arity, identical
-      split-vs-unsplit, zero CPU fallback. Genuinely-cyclic modal coupling
+      split-vs-unsplit, zero CPU fallback, and the committed `42a*`/`42b*`
+      examples exhaust the single-literal and cross-arity modal truth tables
+      through production `xlog run`. Genuinely-cyclic modal coupling
       (`a:-know b. b:-know a.`, no founded order) stays typed fail-closed
-      end-to-end. (CLI inline-fact ingestion of same-name multi-arity facts is
-      blocked by the engine-wide name-keyed schema/relation-identity model, an
-      honest wall orthogonal to coupling semantics.)
-- [x] Recursion through the modal predicate (Case B), negated modals in recursive
-      programs, and modals over non-invariant relations fail closed with typed
-      `recursive epistemic program` diagnostics; modal self-support remains governed
-      by FAEEL/G91 foundedness. (Case-A invariant-modal recursion is now ACCEPTED —
-      see v0.9.2.)
+      end-to-end.
+- [x] Recursive epistemic execution covers Case-A/invariant and determined-head
+      stratification, positive Case-B founded recursion, G91 positive `possible`
+      recursion, stratified negated-modal recursion, and cyclic negated-modal
+      recursion through explicit WFS; unsupported modal cycles without a founded or
+      WFS order remain typed fail-closed.
 
 ### Genuine follow-up (NOT goal-mandated; tracked)
 
@@ -2087,18 +2093,19 @@ production `xlog run` path. Status:
       determined head), `26` (negated-modal-over-invariant), `28` (determined-epistemic
       multi-column binding). The determined-modal family is COMPLETE.
 
-### Genuinely-undefined (correctly fail-closed by design — NOT deferral)
+### Remaining genuinely-undefined boundaries (correct fail-closed cases)
 
-Every modal target is either DETERMINED (resolved above) or NON-DETERMINED (no fixed
-extension → fail-closed is the correct semantics). The non-determined cases are
-CI-enforced over-broadening gates (so the permissive determined-closure cannot leak a
-wrong-but-non-empty answer):
+Every modal target is either DETERMINED (resolved above) or NON-DETERMINED and
+handled by founded/G91/WFS semantics when those semantics are defined. Only forms
+with no founded, G91, WFS, finite-key, or safe-variable interpretation stay
+fail-closed:
 
-- [x] Circular modality / Case-B recursion THROUGH the modal predicate (modal over a
-      relation in/transitively-on the recursive SCC) → typed `recursive epistemic
-      program` / "not invariant"; FAEEL/G91 govern founded self-support. (`22`)
-- [x] FAEEL-unfounded self-support (`p() :- possible p()`) → FAEEL-defined rejection.
-- [x] Syntactic nested modal operators (`know possible p()`) → EGB-03 typed diagnostic. (`13`)
+- [x] Genuinely cyclic modal coupling with no founded/WFS order
+      (`a() :- know b(). b() :- know a().`) remains typed fail-closed.
+- [x] Unbounded/untyped modal tuple keys and unsafe unbound negated epistemic
+      variables remain typed fail-closed.
+- [x] FAEEL-unfounded self-support (`p() :- possible p()`) executes to the defined
+      empty extension, while explicit G91 accepts the same self-supporting program.
 
 ## v0.10.0 - Multi-GPU and Out-of-Core Execution
 

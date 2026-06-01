@@ -2372,6 +2372,7 @@ dependencies = [
  "xlog-cuda",
  "xlog-ir",
  "xlog-logic",
+ "xlog-prob",
  "xlog-runtime",
 ]
 

@@ -3,9 +3,10 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-use xlog_core::{symbol, RelId, Result, Schema, XlogError};
+use xlog_core::{symbol, RelId, Result, ScalarType, Schema, XlogError};
 use xlog_cuda::{CudaBuffer, CudaKernelProvider};
 use xlog_ir::{EpistemicExecutablePlan, ExecutionPlan};
+use xlog_logic::ast::{AggOp, CompOp, PredColumn, TypeRef};
 use xlog_logic::epistemic::{
     compile_epistemic_gpu_execution, compile_epistemic_gpu_split_execution,
     reduce_epistemic_program_to_ordinary,
@@ -16,6 +17,7 @@ use xlog_logic::epistemic::{
 use xlog_logic::{
     Atom, BodyLiteral, Compiler, EpistemicLiteral, EpistemicOp, Program, Query, Rule, Term,
 };
+use xlog_prob::{evaluate_wfs_rules, PirGraph, Value, WfsAtom, WfsConfig, WfsLiteral, WfsRule};
 use xlog_runtime::executor::JoinIndexCacheStats;
 use xlog_runtime::{
     DeltaRecomputeStats, EpistemicGpuExecutionResult, EpistemicGpuWorkspaceCapacities,
@@ -220,6 +222,7 @@ enum StratumPlanKind {
 #[derive(Clone)]
 enum LogicExecutionPlan {
     Ordinary(ExecutionPlan),
+    EpistemicWfs(Program),
     EpistemicSingle(EpistemicExecutablePlan),
     EpistemicSplit(EpistemicSplitExecutablePlan),
     /// Stratified epistemic execution: ordered strata, each materializing its
@@ -308,7 +311,8 @@ impl LogicProgram {
             let reduced = reduce_epistemic_program_to_ordinary_for_stratified_schema(&normalized);
             let mut schema_compiler = Compiler::new();
             schema_compiler.compile_program(&reduced)?;
-            let schemas = schema_compiler.schemas().clone();
+            let mut schemas = schema_compiler.schemas().clone();
+            augment_same_name_multi_arity_schemas(&normalized, &mut schemas)?;
 
             let mut strata = Vec::with_capacity(stratified.strata.len());
             for stratum in &stratified.strata {
@@ -338,6 +342,21 @@ impl LogicProgram {
         // `try_reduce_case_a_recursive_epistemic_program`, so modal self-support
         // (Case B) and every non-Case-A recursive shape still fail closed.
         if let Some(case_a_reduced) = try_reduce_case_a_recursive_epistemic_program(&normalized)? {
+            let strat = xlog_logic::stratify::analyze_stratification(&case_a_reduced);
+            if !strat.non_monotone_sccs.is_empty() {
+                let mut schemas = infer_wfs_schemas(&case_a_reduced)?;
+                augment_same_name_multi_arity_schemas(&case_a_reduced, &mut schemas)?;
+                return Ok(Self {
+                    program: case_a_reduced.clone(),
+                    plan: LogicExecutionPlan::EpistemicWfs(case_a_reduced),
+                    schemas,
+                    rel_ids: HashMap::new(),
+                    epistemic_provenance: Some(EpistemicProvenance {
+                        reduction: "wfs_recursive",
+                        literals: provenance_literals,
+                    }),
+                });
+            }
             let mut compiler = Compiler::new();
             let plan = compiler.compile_program(&case_a_reduced)?;
             return Ok(Self {
@@ -355,7 +374,8 @@ impl LogicProgram {
         let reduced = reduce_epistemic_program_to_ordinary(&normalized);
         let mut schema_compiler = Compiler::new();
         schema_compiler.compile_program(&reduced)?;
-        let schemas = schema_compiler.schemas().clone();
+        let mut schemas = schema_compiler.schemas().clone();
+        augment_same_name_multi_arity_schemas(&normalized, &mut schemas)?;
 
         let plan = if epistemic_output_head_predicate_count(&normalized) > 1 {
             LogicExecutionPlan::EpistemicSplit(compile_epistemic_gpu_split_execution(&normalized)?)
@@ -462,7 +482,7 @@ impl LogicProgram {
             // IS GPU-clean by construction (the recursion runs on the ordinary
             // semi-naive engine with no epistemic CPU fallback). Emit a provenance
             // summary with a stable id so the recursive-fixpoint fixture is auditable.
-            LogicExecutionPlan::Ordinary(_) => {
+            LogicExecutionPlan::Ordinary(_) | LogicExecutionPlan::EpistemicWfs(_) => {
                 let prov = self.epistemic_provenance.as_ref()?;
                 return Some(epistemic_provenance_summary_json(prov));
             }
@@ -508,6 +528,7 @@ impl LogicProgram {
     fn plan_kind_label(&self) -> &'static str {
         match &self.plan {
             LogicExecutionPlan::Ordinary(_) => "ordinary",
+            LogicExecutionPlan::EpistemicWfs(_) => "epistemic_wfs",
             LogicExecutionPlan::EpistemicSingle(_) => "epistemic_single",
             LogicExecutionPlan::EpistemicSplit(_) => "epistemic_split",
             LogicExecutionPlan::EpistemicStratified(_) => "epistemic_stratified",
@@ -906,6 +927,10 @@ impl LogicProgram {
 
         self.load_facts(&provider, &mut executor)?;
 
+        if let LogicExecutionPlan::EpistemicWfs(wfs_program) = &self.plan {
+            return self.evaluate_wfs_program(provider.as_ref(), wfs_program, profiling);
+        }
+
         let LogicExecutionPlan::Ordinary(plan) = &self.plan else {
             return self.evaluate_epistemic_with_executor(executor, profiling);
         };
@@ -1078,16 +1103,17 @@ impl LogicProgram {
         provider: &CudaKernelProvider,
         store: &mut RelationStore,
     ) -> Result<()> {
-        let mut rows_by_pred: HashMap<&str, Vec<&[Term]>> = HashMap::new();
+        let arities = predicate_arities(&self.program);
+        let mut rows_by_pred: HashMap<String, Vec<&[Term]>> = HashMap::new();
         for fact in self.program.facts() {
-            rows_by_pred
-                .entry(fact.head.predicate.as_str())
-                .or_default()
-                .push(&fact.head.terms);
+            let pred = fact.head.predicate.as_str();
+            let arity = fact.head.terms.len();
+            let key = arity_qualified_name_if_needed(pred, arity, &arities);
+            rows_by_pred.entry(key).or_default().push(&fact.head.terms);
         }
 
         for (pred, rows) in rows_by_pred {
-            let schema = self.schemas.get(pred).ok_or_else(|| {
+            let schema = self.schemas.get(pred.as_str()).ok_or_else(|| {
                 XlogError::Execution(format!(
                     "Missing inferred schema for fact predicate {}",
                     pred
@@ -1124,7 +1150,7 @@ impl LogicProgram {
                 provider.create_buffer_from_slices(&slices, schema.clone())?
             };
 
-            let existing = store.get(pred).ok_or_else(|| {
+            let existing = store.get(&pred).ok_or_else(|| {
                 XlogError::Execution(format!(
                     "Missing base relation {} while loading facts",
                     pred
@@ -1132,16 +1158,56 @@ impl LogicProgram {
             })?;
 
             let merged = provider.union(existing, &fact_buf)?;
-            store.put(pred, merged);
+            store.put(pred.as_str(), merged);
         }
 
         Ok(())
     }
 
+    fn evaluate_wfs_program(
+        &self,
+        provider: &CudaKernelProvider,
+        program: &Program,
+        _profiling: bool,
+    ) -> Result<LogicEvalResult> {
+        let rules = ground_wfs_program(program)?;
+        let mut pir = PirGraph::new();
+        let wfs = evaluate_wfs_rules(&rules, &mut pir, &WfsConfig::default())?;
+        let mut queries = Vec::with_capacity(program.queries.len());
+
+        for (i, query) in program.queries.iter().enumerate() {
+            let columns = query_output_vars(query);
+            let schema = query_result_schema(&self.schemas, query, &columns)?;
+            let mut rows = Vec::new();
+            for atom in wfs.true_set.keys() {
+                if atom.predicate == query.atom.predicate {
+                    if let Some(row) = project_query_row(&query.atom, atom, &columns)? {
+                        rows.push(row);
+                    }
+                }
+            }
+            rows.sort();
+            rows.dedup();
+            let buffer = values_to_buffer(provider, schema.clone(), &rows)?;
+            queries.push(LogicQueryResult {
+                relation_name: format!("__xlog_query_{i}"),
+                sort_labels: columns.clone(),
+                columns,
+                buffer,
+            });
+        }
+
+        Ok(LogicEvalResult {
+            queries,
+            stats: None,
+        })
+    }
+
     fn ordinary_plan(&self, context: &str) -> Result<&ExecutionPlan> {
         match &self.plan {
             LogicExecutionPlan::Ordinary(plan) => Ok(plan),
-            LogicExecutionPlan::EpistemicSingle(_)
+            LogicExecutionPlan::EpistemicWfs(_)
+            | LogicExecutionPlan::EpistemicSingle(_)
             | LogicExecutionPlan::EpistemicSplit(_)
             | LogicExecutionPlan::EpistemicStratified(_) => {
                 Err(XlogError::UnsupportedEpistemicConstruct {
@@ -1301,7 +1367,9 @@ impl LogicProgram {
                     }
                 }
             }
-            LogicExecutionPlan::Ordinary(_) => unreachable!("ordinary plans are handled earlier"),
+            LogicExecutionPlan::Ordinary(_) | LogicExecutionPlan::EpistemicWfs(_) => {
+                unreachable!("ordinary/WFS plans are handled earlier")
+            }
         }
 
         let total_output_rows: u64 = queries.iter().map(|q| q.buffer.num_rows()).sum();
@@ -1399,6 +1467,670 @@ fn normalize_program(program: Program) -> Result<Program> {
     let normalized = xlog_logic::normalize_v085_meta(&expanded)?;
     let listed = xlog_logic::normalize_v085_lists(&normalized)?;
     Ok(desugar_shared_variable_epistemic_constraints(listed))
+}
+
+fn infer_wfs_schemas(program: &Program) -> Result<HashMap<String, Schema>> {
+    let mut schemas = HashMap::new();
+    let domains: HashMap<String, ScalarType> = program
+        .domains
+        .iter()
+        .map(|domain| (domain.name.clone(), domain.typ))
+        .collect();
+    for decl in &program.predicates {
+        schemas.insert(decl.name.clone(), schema_from_pred_decl(decl, &domains)?);
+    }
+    for fact in program.facts() {
+        schemas
+            .entry(fact.head.predicate.clone())
+            .or_insert_with(|| schema_from_terms(&fact.head.terms));
+    }
+    for rule in &program.rules {
+        schemas
+            .entry(rule.head.predicate.clone())
+            .or_insert_with(|| schema_from_terms(&rule.head.terms));
+        for lit in &rule.body {
+            if let BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) = lit {
+                schemas
+                    .entry(atom.predicate.clone())
+                    .or_insert_with(|| schema_from_terms(&atom.terms));
+            }
+        }
+    }
+    Ok(schemas)
+}
+
+fn ground_wfs_program(program: &Program) -> Result<Vec<WfsRule>> {
+    let universe = collect_wfs_universe(program)?;
+    let mut out = Vec::new();
+    let mut pir = PirGraph::new();
+    let true_node = pir.const_true();
+    for rule in &program.rules {
+        let vars = rule_variables(rule);
+        if vars.is_empty() {
+            if let Some(grounded) = ground_wfs_rule(rule, &HashMap::new(), true_node)? {
+                out.push(grounded);
+            }
+            continue;
+        }
+        if universe.is_empty() {
+            continue;
+        }
+        let mut assignments = Vec::new();
+        enumerate_wfs_assignments(&vars, &universe, 0, &mut HashMap::new(), &mut assignments)?;
+        for assignment in assignments {
+            if let Some(grounded) = ground_wfs_rule(rule, &assignment, true_node)? {
+                out.push(grounded);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn collect_wfs_universe(program: &Program) -> Result<Vec<Value>> {
+    let mut values = BTreeSet::new();
+    for rule in &program.rules {
+        collect_atom_constants(&rule.head, &mut values)?;
+        for lit in &rule.body {
+            match lit {
+                BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
+                    collect_atom_constants(atom, &mut values)?;
+                }
+                BodyLiteral::Epistemic(epistemic) => {
+                    collect_atom_constants(&epistemic.atom, &mut values)?;
+                }
+                BodyLiteral::Comparison(cmp) => {
+                    collect_term_constant(&cmp.left, &mut values)?;
+                    collect_term_constant(&cmp.right, &mut values)?;
+                }
+                BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {}
+            }
+        }
+    }
+    Ok(values.into_iter().collect())
+}
+
+fn collect_atom_constants(atom: &Atom, values: &mut BTreeSet<Value>) -> Result<()> {
+    for term in &atom.terms {
+        collect_term_constant(term, values)?;
+    }
+    Ok(())
+}
+
+fn collect_term_constant(term: &Term, values: &mut BTreeSet<Value>) -> Result<()> {
+    match term {
+        Term::Variable(_) | Term::Anonymous | Term::Aggregate(_) => {}
+        Term::Integer(_) | Term::Float(_) | Term::String(_) | Term::Symbol(_) => {
+            values.insert(value_from_term(term)?);
+        }
+        Term::List(items) => {
+            for item in items {
+                collect_term_constant(item, values)?;
+            }
+        }
+        Term::Cons { head, tail } => {
+            collect_term_constant(head, values)?;
+            collect_term_constant(tail, values)?;
+        }
+        Term::Compound { args, .. } => {
+            for arg in args {
+                collect_term_constant(arg, values)?;
+            }
+        }
+        Term::PredRef(_) => {}
+    }
+    Ok(())
+}
+
+fn rule_variables(rule: &Rule) -> Vec<String> {
+    let mut vars = BTreeSet::new();
+    for name in rule.head.terms.iter().flat_map(Term::variables) {
+        vars.insert(name.to_string());
+    }
+    for lit in &rule.body {
+        match lit {
+            BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
+                for name in atom.terms.iter().flat_map(Term::variables) {
+                    vars.insert(name.to_string());
+                }
+            }
+            BodyLiteral::Epistemic(epistemic) => {
+                for name in epistemic.atom.terms.iter().flat_map(Term::variables) {
+                    vars.insert(name.to_string());
+                }
+            }
+            BodyLiteral::Comparison(cmp) => {
+                for name in cmp
+                    .left
+                    .variables()
+                    .into_iter()
+                    .chain(cmp.right.variables())
+                {
+                    vars.insert(name.to_string());
+                }
+            }
+            BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {}
+        }
+    }
+    vars.into_iter().collect()
+}
+
+fn enumerate_wfs_assignments(
+    vars: &[String],
+    universe: &[Value],
+    idx: usize,
+    current: &mut HashMap<String, Value>,
+    out: &mut Vec<HashMap<String, Value>>,
+) -> Result<()> {
+    const MAX_WFS_GROUND_ASSIGNMENTS: usize = 250_000;
+    if out.len() > MAX_WFS_GROUND_ASSIGNMENTS {
+        return Err(XlogError::ResourceExhausted {
+            context: "WFS grounding assignments".to_string(),
+            estimated_bytes: out.len() as u64,
+            budget_bytes: MAX_WFS_GROUND_ASSIGNMENTS as u64,
+        });
+    }
+    if idx == vars.len() {
+        out.push(current.clone());
+        return Ok(());
+    }
+    for value in universe {
+        current.insert(vars[idx].clone(), value.clone());
+        enumerate_wfs_assignments(vars, universe, idx + 1, current, out)?;
+    }
+    current.remove(&vars[idx]);
+    Ok(())
+}
+
+fn ground_wfs_rule(
+    rule: &Rule,
+    assignment: &HashMap<String, Value>,
+    provenance: xlog_prob::PirNodeId,
+) -> Result<Option<WfsRule>> {
+    let mut body = Vec::new();
+    for lit in &rule.body {
+        match lit {
+            BodyLiteral::Positive(atom) => {
+                body.push(WfsLiteral::Positive(ground_wfs_atom(atom, assignment)?));
+            }
+            BodyLiteral::Negated(atom) => {
+                body.push(WfsLiteral::Negative(ground_wfs_atom(atom, assignment)?));
+            }
+            BodyLiteral::Comparison(cmp) => {
+                if !eval_wfs_comparison(cmp.op, &cmp.left, &cmp.right, assignment)? {
+                    return Ok(None);
+                }
+            }
+            BodyLiteral::Epistemic(lit) => {
+                return Err(XlogError::UnsupportedEpistemicConstruct {
+                    construct: "WFS epistemic residue".to_string(),
+                    context: format!("{:?} {}", lit.op, lit.atom.predicate),
+                });
+            }
+            BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {
+                return Err(XlogError::UnsupportedEpistemicConstruct {
+                    construct: "WFS grounding literal".to_string(),
+                    context: format!("{lit:?}"),
+                });
+            }
+        }
+    }
+    Ok(Some(WfsRule::new(
+        ground_wfs_atom(&rule.head, assignment)?,
+        body,
+        provenance,
+    )))
+}
+
+fn ground_wfs_atom(atom: &Atom, assignment: &HashMap<String, Value>) -> Result<WfsAtom> {
+    let mut args = Vec::with_capacity(atom.terms.len());
+    for term in &atom.terms {
+        args.push(ground_wfs_value(term, assignment)?);
+    }
+    Ok(WfsAtom::new(atom.predicate.clone(), args))
+}
+
+fn ground_wfs_value(term: &Term, assignment: &HashMap<String, Value>) -> Result<Value> {
+    match term {
+        Term::Variable(name) => assignment
+            .get(name)
+            .cloned()
+            .ok_or_else(|| XlogError::UnsafeVariable(format!("{} in WFS grounding", name))),
+        _ => value_from_term(term),
+    }
+}
+
+fn value_from_term(term: &Term) -> Result<Value> {
+    match term {
+        Term::Integer(value) => Ok(Value::I64(*value)),
+        Term::Float(value) => Ok(Value::F64(value.to_bits())),
+        Term::String(value) => Ok(Value::String(value.clone())),
+        Term::Symbol(value) => Ok(Value::Symbol(*value)),
+        other => Err(XlogError::UnsupportedEpistemicConstruct {
+            construct: "WFS ground term".to_string(),
+            context: format!("{other:?}"),
+        }),
+    }
+}
+
+fn eval_wfs_comparison(
+    op: CompOp,
+    left: &Term,
+    right: &Term,
+    assignment: &HashMap<String, Value>,
+) -> Result<bool> {
+    let left = ground_wfs_value(left, assignment)?;
+    let right = ground_wfs_value(right, assignment)?;
+    Ok(match (left, right) {
+        (Value::I64(left), Value::I64(right)) => compare_wfs_i64(left, op, right),
+        (Value::F64(left), Value::F64(right)) => {
+            let left = f64::from_bits(left);
+            let right = f64::from_bits(right);
+            match op {
+                CompOp::Eq => left == right,
+                CompOp::Ne => left != right,
+                CompOp::Lt => left < right,
+                CompOp::Le => left <= right,
+                CompOp::Gt => left > right,
+                CompOp::Ge => left >= right,
+            }
+        }
+        (Value::String(left), Value::String(right)) => match op {
+            CompOp::Eq => left == right,
+            CompOp::Ne => left != right,
+            _ => false,
+        },
+        (Value::Symbol(left), Value::Symbol(right)) => match op {
+            CompOp::Eq => left == right,
+            CompOp::Ne => left != right,
+            _ => false,
+        },
+        _ => false,
+    })
+}
+
+fn compare_wfs_i64(left: i64, op: CompOp, right: i64) -> bool {
+    match op {
+        CompOp::Eq => left == right,
+        CompOp::Ne => left != right,
+        CompOp::Lt => left < right,
+        CompOp::Le => left <= right,
+        CompOp::Gt => left > right,
+        CompOp::Ge => left >= right,
+    }
+}
+
+fn query_result_schema(
+    schemas: &HashMap<String, Schema>,
+    query: &Query,
+    columns: &[String],
+) -> Result<Schema> {
+    let source = schemas.get(&query.atom.predicate).ok_or_else(|| {
+        XlogError::Execution(format!(
+            "missing WFS query schema for {}",
+            query.atom.predicate
+        ))
+    })?;
+    let mut out = Vec::new();
+    for name in columns {
+        let idx = query
+            .atom
+            .terms
+            .iter()
+            .position(|term| matches!(term, Term::Variable(var) if var == name))
+            .ok_or_else(|| XlogError::UnsafeVariable(name.clone()))?;
+        let typ = source
+            .column_type(idx)
+            .ok_or_else(|| XlogError::Execution(format!("missing WFS query column {idx} type")))?;
+        out.push((name.clone(), typ));
+    }
+    Ok(Schema::new(out))
+}
+
+fn project_query_row(
+    query: &Atom,
+    atom: &WfsAtom,
+    columns: &[String],
+) -> Result<Option<Vec<Value>>> {
+    if query.terms.len() != atom.args.len() {
+        return Ok(None);
+    }
+    let mut bindings = HashMap::new();
+    for (term, value) in query.terms.iter().zip(&atom.args) {
+        match term {
+            Term::Variable(name) => {
+                if let Some(existing) = bindings.get(name) {
+                    if existing != value {
+                        return Ok(None);
+                    }
+                } else {
+                    bindings.insert(name.clone(), value.clone());
+                }
+            }
+            Term::Anonymous => {}
+            _ if value_from_term(term)? == *value => {}
+            _ => return Ok(None),
+        }
+    }
+    columns
+        .iter()
+        .map(|name| {
+            bindings
+                .get(name)
+                .cloned()
+                .ok_or_else(|| XlogError::UnsafeVariable(name.clone()))
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
+}
+
+fn values_to_buffer(
+    provider: &CudaKernelProvider,
+    schema: Schema,
+    rows: &[Vec<Value>],
+) -> Result<CudaBuffer> {
+    if schema.arity() == 0 {
+        return if rows.is_empty() {
+            provider.create_empty_buffer(schema)
+        } else {
+            provider.create_zero_arity_buffer(
+                schema,
+                u32::try_from(rows.len()).map_err(|_| XlogError::ResourceExhausted {
+                    context: "WFS zero-arity output rows".to_string(),
+                    estimated_bytes: rows.len() as u64,
+                    budget_bytes: u32::MAX as u64,
+                })?,
+            )
+        };
+    }
+    let mut columns = vec![Vec::new(); schema.arity()];
+    for row in rows {
+        if row.len() != schema.arity() {
+            return Err(XlogError::Execution(format!(
+                "WFS row arity mismatch: got {}, expected {}",
+                row.len(),
+                schema.arity()
+            )));
+        }
+        for (idx, value) in row.iter().enumerate() {
+            let typ = schema.column_type(idx).ok_or_else(|| {
+                XlogError::Execution(format!("missing WFS output column {idx} type"))
+            })?;
+            push_value_bytes(&mut columns[idx], value, typ)?;
+        }
+    }
+    let slices: Vec<&[u8]> = columns.iter().map(Vec::as_slice).collect();
+    provider.create_buffer_from_slices(&slices, schema)
+}
+
+fn push_value_bytes(out: &mut Vec<u8>, value: &Value, typ: ScalarType) -> Result<()> {
+    match (typ, value) {
+        (ScalarType::U32, Value::I64(value)) => {
+            out.extend_from_slice(
+                &u32::try_from(*value)
+                    .map_err(|_| {
+                        XlogError::Execution(format!("u32 out of range in WFS output: {value}"))
+                    })?
+                    .to_le_bytes(),
+            );
+        }
+        (ScalarType::U64, Value::I64(value)) => {
+            out.extend_from_slice(
+                &u64::try_from(*value)
+                    .map_err(|_| {
+                        XlogError::Execution(format!("u64 out of range in WFS output: {value}"))
+                    })?
+                    .to_le_bytes(),
+            );
+        }
+        (ScalarType::I32, Value::I64(value)) => {
+            out.extend_from_slice(
+                &i32::try_from(*value)
+                    .map_err(|_| {
+                        XlogError::Execution(format!("i32 out of range in WFS output: {value}"))
+                    })?
+                    .to_le_bytes(),
+            );
+        }
+        (ScalarType::I64, Value::I64(value)) => out.extend_from_slice(&value.to_le_bytes()),
+        (ScalarType::F32, Value::F64(value)) => {
+            out.extend_from_slice(&(f64::from_bits(*value) as f32).to_le_bytes());
+        }
+        (ScalarType::F64, Value::F64(value)) => out.extend_from_slice(&value.to_le_bytes()),
+        (ScalarType::Symbol, Value::Symbol(value)) => out.extend_from_slice(&value.to_le_bytes()),
+        (ScalarType::Symbol, Value::String(value)) => {
+            out.extend_from_slice(&symbol::intern(value).to_le_bytes());
+        }
+        (ScalarType::Bool, Value::I64(value)) if *value == 0 || *value == 1 => {
+            out.push(*value as u8);
+        }
+        (expected, got) => {
+            return Err(XlogError::Execution(format!(
+                "WFS output type mismatch: expected {expected:?}, got {got:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn augment_same_name_multi_arity_schemas(
+    program: &Program,
+    schemas: &mut HashMap<String, Schema>,
+) -> Result<()> {
+    let arities = predicate_arities(program);
+    let domains: HashMap<String, ScalarType> = program
+        .domains
+        .iter()
+        .map(|domain| (domain.name.clone(), domain.typ))
+        .collect();
+
+    for decl in &program.predicates {
+        let Some(pred_arities) = arities.get(&decl.name) else {
+            continue;
+        };
+        if pred_arities.len() <= 1 {
+            continue;
+        }
+        let key = arity_qualified_name(&decl.name, pred_decl_arity(decl));
+        schemas.insert(key, schema_from_pred_decl(decl, &domains)?);
+    }
+
+    for fact in program.facts() {
+        let pred = fact.head.predicate.as_str();
+        let arity = fact.head.terms.len();
+        let Some(pred_arities) = arities.get(pred) else {
+            continue;
+        };
+        if pred_arities.len() <= 1 {
+            continue;
+        }
+        let key = arity_qualified_name(pred, arity);
+        schemas
+            .entry(key)
+            .or_insert_with(|| schema_from_terms(&fact.head.terms));
+    }
+
+    for rule in &program.rules {
+        augment_atom_schema_if_needed(&rule.head, &arities, schemas);
+        for literal in &rule.body {
+            match literal {
+                BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
+                    augment_atom_schema_if_needed(atom, &arities, schemas);
+                }
+                BodyLiteral::Epistemic(epistemic) => {
+                    augment_atom_schema_if_needed(&epistemic.atom, &arities, schemas);
+                }
+                BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {}
+            }
+        }
+    }
+
+    for query in &program.queries {
+        augment_atom_schema_if_needed(&query.atom, &arities, schemas);
+    }
+
+    Ok(())
+}
+
+fn augment_atom_schema_if_needed(
+    atom: &Atom,
+    arities: &HashMap<String, BTreeSet<usize>>,
+    schemas: &mut HashMap<String, Schema>,
+) {
+    let Some(pred_arities) = arities.get(&atom.predicate) else {
+        return;
+    };
+    if pred_arities.len() <= 1 {
+        return;
+    }
+    let key = arity_qualified_name(&atom.predicate, atom.terms.len());
+    schemas
+        .entry(key)
+        .or_insert_with(|| schema_from_terms(&atom.terms));
+}
+
+fn predicate_arities(program: &Program) -> HashMap<String, BTreeSet<usize>> {
+    let mut arities = HashMap::new();
+    for decl in &program.predicates {
+        add_predicate_arity(&mut arities, &decl.name, pred_decl_arity(decl));
+    }
+    for rule in &program.rules {
+        add_predicate_arity(&mut arities, &rule.head.predicate, rule.head.terms.len());
+        for literal in &rule.body {
+            match literal {
+                BodyLiteral::Positive(atom) | BodyLiteral::Negated(atom) => {
+                    add_predicate_arity(&mut arities, &atom.predicate, atom.terms.len());
+                }
+                BodyLiteral::Epistemic(epistemic) => {
+                    add_predicate_arity(
+                        &mut arities,
+                        &epistemic.atom.predicate,
+                        epistemic.atom.terms.len(),
+                    );
+                }
+                BodyLiteral::Comparison(_) | BodyLiteral::IsExpr(_) | BodyLiteral::Univ(_) => {}
+            }
+        }
+    }
+    for query in &program.queries {
+        add_predicate_arity(&mut arities, &query.atom.predicate, query.atom.terms.len());
+    }
+    arities
+}
+
+fn add_predicate_arity(
+    arities: &mut HashMap<String, BTreeSet<usize>>,
+    predicate: &str,
+    arity: usize,
+) {
+    arities
+        .entry(predicate.to_string())
+        .or_default()
+        .insert(arity);
+}
+
+fn arity_qualified_name_if_needed(
+    predicate: &str,
+    arity: usize,
+    arities: &HashMap<String, BTreeSet<usize>>,
+) -> String {
+    if arities.get(predicate).is_some_and(|items| items.len() > 1) {
+        arity_qualified_name(predicate, arity)
+    } else {
+        predicate.to_string()
+    }
+}
+
+fn arity_qualified_name(predicate: &str, arity: usize) -> String {
+    format!("{predicate}/{arity}")
+}
+
+fn pred_decl_arity(decl: &xlog_logic::ast::PredDecl) -> usize {
+    if decl.columns.is_empty() {
+        decl.types.len()
+    } else {
+        decl.columns.len()
+    }
+}
+
+fn schema_from_pred_decl(
+    decl: &xlog_logic::ast::PredDecl,
+    domains: &HashMap<String, ScalarType>,
+) -> Result<Schema> {
+    let columns = pred_columns_for_decl(decl);
+    let resolved = columns
+        .iter()
+        .enumerate()
+        .map(|(idx, column)| {
+            let name = column.name.clone().unwrap_or_else(|| format!("c{idx}"));
+            resolve_pred_column_type(&decl.name, idx, &column.typ, domains).map(|typ| (name, typ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Schema::new(resolved))
+}
+
+fn pred_columns_for_decl(decl: &xlog_logic::ast::PredDecl) -> Vec<PredColumn> {
+    if decl.columns.is_empty() {
+        decl.types
+            .iter()
+            .cloned()
+            .map(|typ| PredColumn { name: None, typ })
+            .collect()
+    } else {
+        decl.columns.clone()
+    }
+}
+
+fn resolve_pred_column_type(
+    predicate: &str,
+    index: usize,
+    typ: &TypeRef,
+    domains: &HashMap<String, ScalarType>,
+) -> Result<ScalarType> {
+    match typ {
+        TypeRef::Scalar(ty) => Ok(*ty),
+        TypeRef::Domain(name) => domains.get(name).copied().ok_or_else(|| {
+            XlogError::Compilation(format!(
+                "unknown domain alias '{}' in predicate '{}' column {}",
+                name, predicate, index
+            ))
+        }),
+        TypeRef::List(_) | TypeRef::Term | TypeRef::Compound | TypeRef::PredRef => {
+            Ok(ScalarType::U64)
+        }
+    }
+}
+
+fn schema_from_terms(terms: &[Term]) -> Schema {
+    let columns = terms
+        .iter()
+        .enumerate()
+        .map(|(idx, term)| (format!("c{idx}"), infer_term_type(term)))
+        .collect();
+    Schema::new(columns)
+}
+
+fn infer_term_type(term: &Term) -> ScalarType {
+    match term {
+        Term::Variable(_) | Term::Anonymous => ScalarType::U64,
+        Term::Integer(value) => {
+            if *value >= 0 && *value <= u32::MAX as i64 {
+                ScalarType::U32
+            } else {
+                ScalarType::I64
+            }
+        }
+        Term::Float(_) => ScalarType::F64,
+        Term::String(_) | Term::Symbol(_) => ScalarType::Symbol,
+        Term::List(_) | Term::Cons { .. } | Term::Compound { .. } | Term::PredRef(_) => {
+            ScalarType::U64
+        }
+        Term::Aggregate(agg) => match agg.op {
+            AggOp::Count => ScalarType::U32,
+            AggOp::Sum => ScalarType::U64,
+            AggOp::Min | AggOp::Max => ScalarType::U32,
+            AggOp::LogSumExp => ScalarType::F64,
+        },
+    }
 }
 
 /// E1: desugar a SHARED-VARIABLE epistemic constraint — a constraint with at least one
@@ -1621,7 +2353,7 @@ fn epistemic_relation_ids(plan: &LogicExecutionPlan) -> Result<HashMap<String, R
                 }
             }
         }
-        LogicExecutionPlan::Ordinary(_) => {}
+        LogicExecutionPlan::Ordinary(_) | LogicExecutionPlan::EpistemicWfs(_) => {}
     }
     Ok(rel_ids)
 }

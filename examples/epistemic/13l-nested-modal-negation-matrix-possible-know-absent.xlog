@@ -1,0 +1,20 @@
+#pragma epistemic_mode = faeel
+
+pred target(u32).
+pred case_1301(u32).
+pred case_1302(u32).
+pred case_1304(u32).
+pred case_1307(u32).
+pred holds(u32).
+
+case_1301(1301).
+case_1302(1302).
+case_1304(1304).
+case_1307(1307).
+
+holds(ID) :- case_1301(ID), possible know not target(ID).
+holds(ID) :- case_1302(ID), possible not know target(ID).
+holds(ID) :- case_1304(ID), not possible know target(ID).
+holds(ID) :- case_1307(ID), not possible not know not target(ID).
+
+?- holds(ID).

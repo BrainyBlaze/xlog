@@ -265,9 +265,14 @@ accepted() :- not know fact().
 accepted() :- not possible fact().
 ```
 
-Nested epistemic operators are rejected with a typed diagnostic. The EIR
-boundary is exposed through `xlog_logic::build_eir`, which preserves epistemic
-literals as `EirBodyLiteral::Epistemic`.
+Finite nested epistemic chains are accepted when they normalize to one
+single-level modal literal. The parser/EIR path preserves `know`/`possible`
+chains with leading, interior, or atom-adjacent negation, then normalizes by
+parity and duality before GPU execution: `know possible p()` becomes
+`possible p()`, `know not possible p()` becomes `not possible p()`, and
+`know possible not p()` becomes `not know p()`. The EIR boundary is exposed
+through `xlog_logic::build_eir`, which preserves epistemic literals as
+`EirBodyLiteral::Epistemic`.
 
 ## G91 Compatibility
 
@@ -302,12 +307,13 @@ FAEEL is the default mode. In the bounded fixture evaluator:
 - known plus rejected support is rejected as `Contradiction`;
 - otherwise unsatisfied epistemic literals are reported as `UnsatisfiedLiteral`.
 
-At the production executable-plan boundary, default FAEEL also rejects direct
-self-support such as `p() :- possible p().` before the reduced ordinary runtime
-plan is compiled. If `p/arity` has separate ordinary support without epistemic
-body literals, the self-`possible` rule is treated as independently founded and
-may lower into accepted GPU runtime execution. The unsupported self-support
-fixture is allowed only with explicit `#pragma epistemic_mode = g91`.
+At the production executable-plan boundary, default FAEEL treats direct
+self-support such as `p() :- possible p().` as unfounded and executes it to the
+defined empty founded extension rather than rejecting the program. If `p/arity`
+has separate ordinary support without epistemic body literals, the
+self-`possible` rule is treated as independently founded and may lower into
+accepted GPU runtime execution. The same unsupported self-support is accepted
+only with explicit `#pragma epistemic_mode = g91`.
 
 ## Generate-Propagate-Test
 
@@ -378,7 +384,9 @@ Integration coverage pins the joint-solving contract with
 the multi-membership `know edge(X)`/`know color(X)` fixture in a mixed program with
 `possible alt(X)`/`not possible blocked(X)` and accepts it as two independent joint
 components (per-rule joint semantics verified on device: `both_known={1}`,
-`safe_alt={2}`). Unsafe same-name multi-arity coupling still fails closed.
+`safe_alt={2}`). Same-name multi-arity coupling now disambiguates by
+arity-qualified tuple sources (`p/1`, `p/2`) and is exercised by the production
+`xlog run` base example plus the committed `42a*`/`42b*` exhaustive matrix.
 
 `compile_epistemic_gpu_split_execution` lowers valid epistemic split components
 through `compile_epistemic_gpu_execution_with_stats_snapshot`, producing one

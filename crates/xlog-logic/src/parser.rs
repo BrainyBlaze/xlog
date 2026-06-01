@@ -1056,15 +1056,13 @@ fn build_epistemic_literal(pair: Pair<'_, Rule>, negated: bool) -> Result<BodyLi
 /// by routing through the ordinary single-level epistemic path. The collapse adds
 /// no new world-of-worlds evaluator.
 ///
-/// SCOPE (fail closed with a precise typed diagnostic, NOT a wrong collapse):
-/// an INTERIOR negation (a `not` between two operators, e.g. `know not possible p`
-/// ≡ `K ¬M p`) or an ATOM-ADJACENT negation (`know not p` ≡ `K ¬p`) does NOT
-/// reduce to a single `op atom` literal — `EpistemicLiteral.negated` means the
-/// whole modal literal is negated (`¬K p`), which differs from `K ¬p`. Only a
-/// single leading `not` is admitted; any other negation placement is scoped out
-/// formally rather than collapsed unsoundly.
+/// A `not` before any operator negates the modal subformula to its right. A
+/// `not` before the atom dualizes the atom-adjacent modal (`know not p` becomes
+/// `not possible p`; `possible not p` becomes `not know p`). Under the same S5
+/// collapse, all outer modal operators preserve the already-global inner modal
+/// truth value, so the final single-level literal is determined by the
+/// atom-adjacent operator, atom negation duality, and parity of `not` placements.
 fn build_nested_modal_chain(pair: Pair<'_, Rule>) -> Result<BodyLiteral> {
-    let context = pair.as_str().to_string();
     // Walk the chain left-to-right. Each `not_kw` negates whatever named token
     // follows it (the next operator, or the trailing atom). We record the
     // operators in order plus the negation that immediately precedes each, and
@@ -1117,30 +1115,21 @@ fn build_nested_modal_chain(pair: Pair<'_, Rule>) -> Result<BodyLiteral> {
         ));
     }
 
-    // SCOPE GUARD: an atom-adjacent negation (`... op not p`) is `op ¬p`, not a
-    // negated modal literal. Not reducible to `EpistemicLiteral`; fail closed.
-    if neg_before_atom {
-        return Err(XlogError::UnsupportedEpistemicConstruct {
-            construct: "modal operator over a negated atom (interior negation)".to_string(),
-            context,
-        });
-    }
-    // SCOPE GUARD: an INTERIOR negation (a `not` before any operator other than
-    // the first) is `K ¬M …`-shaped and does NOT collapse to a single operator.
-    // Only a single LEADING negation is a sound collapse.
-    if neg_before_op.iter().skip(1).any(|&n| n) {
-        return Err(XlogError::UnsupportedEpistemicConstruct {
-            construct: "interior negation between modal operators".to_string(),
-            context,
-        });
-    }
-
-    // SOUND COLLAPSE: leading negation distributes; the operator ADJACENT to the
-    // atom (the last in the chain) is the surviving operator.
-    let negated = neg_before_op[0];
-    let op = *ops
+    let innermost = *ops
         .last()
         .ok_or_else(|| XlogError::Parse("Empty modal chain".to_string()))?;
+    let op = if neg_before_atom {
+        match innermost {
+            EpistemicOp::Know => EpistemicOp::Possible,
+            EpistemicOp::Possible => EpistemicOp::Know,
+        }
+    } else {
+        innermost
+    };
+    let negated = neg_before_op
+        .iter()
+        .copied()
+        .fold(neg_before_atom, |acc, neg| acc ^ neg);
 
     Ok(BodyLiteral::Epistemic(EpistemicLiteral {
         op,
@@ -1992,32 +1981,33 @@ mod tests {
     }
 
     #[test]
-    fn test_nested_modal_chain_interior_negation_scoped_out() {
-        // know not possible p ≡ K ¬M p — NOT reducible to one operator. Fail closed.
-        let err = parse_program("q() :- know not possible p().").unwrap_err();
-        match err {
-            XlogError::UnsupportedEpistemicConstruct { construct, .. } => {
-                assert!(
-                    construct.contains("interior negation"),
-                    "unexpected construct: {construct}"
-                );
-            }
-            other => panic!("expected UnsupportedEpistemicConstruct, got {other:?}"),
-        }
+    fn test_nested_modal_chain_interior_negation_dualizes() {
+        // know not possible p ≡ not possible p
+        let lit = first_epistemic_literal("q() :- know not possible p().");
+        assert_eq!(lit.op, EpistemicOp::Possible);
+        assert!(lit.negated);
+
+        // possible not know p ≡ not know p
+        let lit = first_epistemic_literal("q() :- possible not know p().");
+        assert_eq!(lit.op, EpistemicOp::Know);
+        assert!(lit.negated);
+
+        // not know not possible p ≡ possible p
+        let lit = first_epistemic_literal("q() :- not know not possible p().");
+        assert_eq!(lit.op, EpistemicOp::Possible);
+        assert!(!lit.negated);
     }
 
     #[test]
-    fn test_nested_modal_chain_atom_adjacent_negation_scoped_out() {
-        // know possible not p ≡ M ¬p — modal over a negated atom. Fail closed.
-        let err = parse_program("q() :- know possible not p().").unwrap_err();
-        match err {
-            XlogError::UnsupportedEpistemicConstruct { construct, .. } => {
-                assert!(
-                    construct.contains("negated atom"),
-                    "unexpected construct: {construct}"
-                );
-            }
-            other => panic!("expected UnsupportedEpistemicConstruct, got {other:?}"),
-        }
+    fn test_nested_modal_chain_atom_adjacent_negation_dualizes() {
+        // know possible not p ≡ not know p
+        let lit = first_epistemic_literal("q() :- know possible not p().");
+        assert_eq!(lit.op, EpistemicOp::Know);
+        assert!(lit.negated);
+
+        // possible know not p ≡ not possible p
+        let lit = first_epistemic_literal("q() :- possible know not p().");
+        assert_eq!(lit.op, EpistemicOp::Possible);
+        assert!(lit.negated);
     }
 }

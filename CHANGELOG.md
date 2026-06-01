@@ -82,28 +82,34 @@ Category-B semantic gaps tracked after v0.9.1, all validated on the production
 
 - Recursive epistemic programs are no longer uniformly fail-closed: the Case-A
   invariant-modal fragment AND recursion/coupling over any DETERMINED head (via
-  stratified execution, see above) are now supported. A negated modal over an
-  invariant relation reduces to ordinary negation.
+  stratified execution, see above), positive Case-B founded recursion, explicit
+  G91 positive `possible` recursion, stratified negated-modal recursion, and cyclic
+  negated-modal recursion through WFS are now supported. A negated modal over an
+  invariant or materialized determined relation reduces to ordinary negation.
 
-### Determined-modal family complete; only genuinely-undefined cases fail closed
+### Determined, recursive, and WFS modal families completed
 
 The determined/non-determined boundary is closed under composition. Every modal
 target is either DETERMINED (fixed extension → `know R ≡ R` → resolved, via
 joint-solving or stratified execution; any arity, filtering or binding, coupling or
-recursion) or NON-DETERMINED (no fixed extension → correctly fail-closed, this is
-the right answer rather than deferral):
+recursion) or NON-DETERMINED and handled by the appropriate recursive semantics:
 
-- Circular modality / Case-B recursion THROUGH the modal predicate (a modal over a
-  relation in/transitively-on the recursive SCC) → typed `recursive epistemic
-  program` / "not invariant" (FAEEL/G91 govern founded self-support).
-- FAEEL-unfounded self-support (`p() :- possible p()`) → FAEEL-defined rejection
-  (G91 accepts).
-- Syntactic nested modal operators (`know possible p()`) → EGB-03 typed diagnostic.
+- Positive Case-B `know` recursion computes the FAEEL founded least fixpoint.
+- Positive G91 `possible` recursion applies the G91 compatibility self-support
+  assumption.
+- Negated-modal recursion that is stratified reduces to ordinary anti-join after
+  the lower fixpoint materializes; cyclic negated-modal recursion executes through
+  explicit WFS and emits only true tuples.
+- Genuinely cyclic modal coupling with no founded/WFS order remains typed
+  fail-closed.
 
-These genuinely-undefined cases are CI-enforced as over-broadening gates (examples
-`22`/`13`/`23` + the FAEEL self-support pilot): because determined-closure
-acceptance is permissive, they assert no undefined program leaks a wrong-but-non-empty
-answer.
+Remaining genuinely-undefined cases are CI-enforced as over-broadening gates
+(for example cyclic modal coupling with no founded/WFS order and unbounded
+tuple-key pilots such as `23b`): because determined-closure acceptance is
+permissive, they assert no undefined program leaks a wrong-but-non-empty answer.
+Defined recursive/self-support cases execute instead: examples `22`, `31`, `32`,
+`33`, and `43` cover FAEEL founded recursion, empty FAEEL self-support, G91
+self-support, cyclic negated-modal WFS, and G91 positive possible recursion.
 
 Full v0.9.2 status: `docs/plans/2026-05-31-v092-epistemic-semantic-completion-status.md`.
 
@@ -186,22 +192,17 @@ recorded in `docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`
 
 - **EGB-02 mixed per-row + global modal literal in one rule:** _CLOSED in v0.9.2
   (EGB-02B)_ — the two gate classes now compose conjunctively on the GPU path.
-- **Recursive epistemic fixpoints:** _Case-A CLOSED in v0.9.2_ — recursion where
-  every modal atom is over an invariant relation now evaluates to fixpoint via the
-  recursive engine. Case-B (recursion through the modal predicate), negated modals
-  in recursive programs, and modals over non-invariant relations remain typed
-  fail-closed.
+- **Recursive epistemic fixpoints:** _CLOSED in v0.9.2_ — Case-A invariant-modal
+  recursion, determined-head stratification, positive Case-B founded recursion,
+  G91 positive `possible` recursion, stratified negated-modal recursion, and cyclic
+  negated-modal recursion through explicit WFS execute through `xlog run`.
 
 - **Same-name multi-arity modal coupling:** _SOLVED in v0.9.2 (ITEM F)_ — a
   program using the same predicate name at two arities in modal literals
   (`know p(X)`, `possible p(X,Y)`) is no longer rejected. Distinct arities are
   distinct relations, so the modal tuple-source resolution disambiguates by arity
   (arity-qualified store key `p/1`/`p/2`, bare-name fallback). The coupling
-  joint-solves on device to exact tuples per arity, identical split-vs-unsplit,
-  zero CPU fallback. (CLI inline-fact ingestion of same-name multi-arity facts
-  remains blocked by the engine-wide name-keyed schema/relation-identity model —
-  `Compiler::schemas` collapses `p/1`+`p/2` to one schema — orthogonal to the
-  coupling semantics.)
+  joint-solves on device to exact tuples per arity with zero CPU fallback.
 - **Derived-head modal coupling:** modal coupling over an epistemically-DETERMINED
   derived head is solved by STRATIFICATION (the stratified joint result equals the
   per-stratum independent reference exactly); a genuinely-CYCLIC modal coupling

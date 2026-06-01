@@ -374,6 +374,218 @@ fn test_xlog_run_epistemic_examples() {
         // rows: 1. 13d (FAEEL rows:0) vs 13e (G91 rows:1) is the exact per-mode
         // divergence of the collapsed chain (mirrors 31 vs 32 with a chain).
         ("13e-nested-modal-chain-g91-accepted.xlog", "p", "rows: 1"),
+        // 13f: `know not possible p()` dualizes to `not possible p()`. Because p()
+        // is present, q is absent, but the program succeeds through `xlog run`.
+        (
+            "13f-nested-modal-interior-negation-rejected.xlog",
+            "q",
+            "rows: 0",
+        ),
+        // 13g-13v exhaust every two-operator modal chain over `{know, possible}` with
+        // leading/interior/atom-adjacent negation placements, split by operator
+        // pair, present/absent target, and derived/non-derived outcome to keep each
+        // example within the accepted candidate-generation bound. Together these
+        // slices cover all 64 source forms.
+        (
+            "13g-nested-modal-negation-matrix-know-know-present.xlog",
+            "holds",
+            "| 100",
+        ),
+        (
+            "13g-nested-modal-negation-matrix-know-know-present.xlog",
+            "holds",
+            "| 103",
+        ),
+        (
+            "13g-nested-modal-negation-matrix-know-know-present.xlog",
+            "holds",
+            "| 105",
+        ),
+        (
+            "13g-nested-modal-negation-matrix-know-know-present.xlog",
+            "holds",
+            "| 106",
+        ),
+        (
+            "13h-nested-modal-negation-matrix-know-know-absent.xlog",
+            "holds",
+            "| 1101",
+        ),
+        (
+            "13h-nested-modal-negation-matrix-know-know-absent.xlog",
+            "holds",
+            "| 1102",
+        ),
+        (
+            "13h-nested-modal-negation-matrix-know-know-absent.xlog",
+            "holds",
+            "| 1104",
+        ),
+        (
+            "13h-nested-modal-negation-matrix-know-know-absent.xlog",
+            "holds",
+            "| 1107",
+        ),
+        (
+            "13i-nested-modal-negation-matrix-know-possible-present.xlog",
+            "holds",
+            "| 200",
+        ),
+        (
+            "13i-nested-modal-negation-matrix-know-possible-present.xlog",
+            "holds",
+            "| 203",
+        ),
+        (
+            "13i-nested-modal-negation-matrix-know-possible-present.xlog",
+            "holds",
+            "| 205",
+        ),
+        (
+            "13i-nested-modal-negation-matrix-know-possible-present.xlog",
+            "holds",
+            "| 206",
+        ),
+        (
+            "13j-nested-modal-negation-matrix-know-possible-absent.xlog",
+            "holds",
+            "| 1201",
+        ),
+        (
+            "13j-nested-modal-negation-matrix-know-possible-absent.xlog",
+            "holds",
+            "| 1202",
+        ),
+        (
+            "13j-nested-modal-negation-matrix-know-possible-absent.xlog",
+            "holds",
+            "| 1204",
+        ),
+        (
+            "13j-nested-modal-negation-matrix-know-possible-absent.xlog",
+            "holds",
+            "| 1207",
+        ),
+        (
+            "13k-nested-modal-negation-matrix-possible-know-present.xlog",
+            "holds",
+            "| 300",
+        ),
+        (
+            "13k-nested-modal-negation-matrix-possible-know-present.xlog",
+            "holds",
+            "| 303",
+        ),
+        (
+            "13k-nested-modal-negation-matrix-possible-know-present.xlog",
+            "holds",
+            "| 305",
+        ),
+        (
+            "13k-nested-modal-negation-matrix-possible-know-present.xlog",
+            "holds",
+            "| 306",
+        ),
+        (
+            "13l-nested-modal-negation-matrix-possible-know-absent.xlog",
+            "holds",
+            "| 1301",
+        ),
+        (
+            "13l-nested-modal-negation-matrix-possible-know-absent.xlog",
+            "holds",
+            "| 1302",
+        ),
+        (
+            "13l-nested-modal-negation-matrix-possible-know-absent.xlog",
+            "holds",
+            "| 1304",
+        ),
+        (
+            "13l-nested-modal-negation-matrix-possible-know-absent.xlog",
+            "holds",
+            "| 1307",
+        ),
+        (
+            "13m-nested-modal-negation-matrix-possible-possible-present.xlog",
+            "holds",
+            "| 400",
+        ),
+        (
+            "13m-nested-modal-negation-matrix-possible-possible-present.xlog",
+            "holds",
+            "| 403",
+        ),
+        (
+            "13m-nested-modal-negation-matrix-possible-possible-present.xlog",
+            "holds",
+            "| 405",
+        ),
+        (
+            "13m-nested-modal-negation-matrix-possible-possible-present.xlog",
+            "holds",
+            "| 406",
+        ),
+        (
+            "13n-nested-modal-negation-matrix-possible-possible-absent.xlog",
+            "holds",
+            "| 1401",
+        ),
+        (
+            "13n-nested-modal-negation-matrix-possible-possible-absent.xlog",
+            "holds",
+            "| 1402",
+        ),
+        (
+            "13n-nested-modal-negation-matrix-possible-possible-absent.xlog",
+            "holds",
+            "| 1404",
+        ),
+        (
+            "13n-nested-modal-negation-matrix-possible-possible-absent.xlog",
+            "holds",
+            "| 1407",
+        ),
+        (
+            "13o-nested-modal-negation-matrix-know-know-present-nonderived.xlog",
+            "holds",
+            "+----+\n| c0 |\n+----+\n+----+",
+        ),
+        (
+            "13p-nested-modal-negation-matrix-know-know-absent-nonderived.xlog",
+            "holds",
+            "+----+\n| c0 |\n+----+\n+----+",
+        ),
+        (
+            "13q-nested-modal-negation-matrix-know-possible-present-nonderived.xlog",
+            "holds",
+            "+----+\n| c0 |\n+----+\n+----+",
+        ),
+        (
+            "13r-nested-modal-negation-matrix-know-possible-absent-nonderived.xlog",
+            "holds",
+            "+----+\n| c0 |\n+----+\n+----+",
+        ),
+        (
+            "13s-nested-modal-negation-matrix-possible-know-present-nonderived.xlog",
+            "holds",
+            "+----+\n| c0 |\n+----+\n+----+",
+        ),
+        (
+            "13t-nested-modal-negation-matrix-possible-know-absent-nonderived.xlog",
+            "holds",
+            "+----+\n| c0 |\n+----+\n+----+",
+        ),
+        (
+            "13u-nested-modal-negation-matrix-possible-possible-present-nonderived.xlog",
+            "holds",
+            "+----+\n| c0 |\n+----+\n+----+",
+        ),
+        (
+            "13v-nested-modal-negation-matrix-possible-possible-absent-nonderived.xlog",
+            "holds",
+            "+----+\n| c0 |\n+----+\n+----+",
+        ),
         // v0.9.2 WALL A1 (ACCEPTED): a NEGATED modal `not know reach` over a GENUINELY
         // RECURSIVE relation in a strictly LOWER stratum than the negating head
         // EXECUTES on the GPU production path as ordinary stratified negation. reach =
@@ -390,6 +602,74 @@ fn test_xlog_run_epistemic_examples() {
             "37-negated-modal-over-recursive-stratified.xlog",
             "__xlog_query_0",
             "| 3  | 1  |",
+        ),
+        // v0.9.2 EGB-06 K2/K4: same-name multi-arity modal predicates resolve
+        // through full `xlog run` by loading p/1 and p/2 under arity-qualified
+        // store keys. This base example proves the load-bearing conjunction; the
+        // exhaustive finite matrix lives in 42a*/42b* and is asserted by
+        // test_xlog_run_same_name_multi_arity_exhaustive_matrix.
+        (
+            "42-same-name-multi-arity-modal-disambiguation.xlog",
+            "a",
+            "| 1  | 10 |",
+        ),
+        (
+            "42-same-name-multi-arity-modal-disambiguation.xlog",
+            "a",
+            "!| 2  | 20 |",
+        ),
+        (
+            "42-same-name-multi-arity-modal-disambiguation.xlog",
+            "a",
+            "!| 3  | 30 |",
+        ),
+        // v0.9.2 G91 possible recursion: positive `possible` over the co-evolving
+        // recursive target is the compatibility self-support assumption. The full
+        // `xlog run` path returns the complete 3 x 3 vertex relation.
+        (
+            "43-g91-possible-recursion-self-support.xlog",
+            "__xlog_query_0",
+            "| 1  | 1  |",
+        ),
+        (
+            "43-g91-possible-recursion-self-support.xlog",
+            "__xlog_query_0",
+            "| 1  | 2  |",
+        ),
+        (
+            "43-g91-possible-recursion-self-support.xlog",
+            "__xlog_query_0",
+            "| 1  | 3  |",
+        ),
+        (
+            "43-g91-possible-recursion-self-support.xlog",
+            "__xlog_query_0",
+            "| 2  | 1  |",
+        ),
+        (
+            "43-g91-possible-recursion-self-support.xlog",
+            "__xlog_query_0",
+            "| 2  | 2  |",
+        ),
+        (
+            "43-g91-possible-recursion-self-support.xlog",
+            "__xlog_query_0",
+            "| 2  | 3  |",
+        ),
+        (
+            "43-g91-possible-recursion-self-support.xlog",
+            "__xlog_query_0",
+            "| 3  | 1  |",
+        ),
+        (
+            "43-g91-possible-recursion-self-support.xlog",
+            "__xlog_query_0",
+            "| 3  | 2  |",
+        ),
+        (
+            "43-g91-possible-recursion-self-support.xlog",
+            "__xlog_query_0",
+            "| 3  | 3  |",
         ),
     ];
 
@@ -419,60 +699,24 @@ fn test_xlog_run_epistemic_examples() {
             expected_relation,
             stdout
         );
-        assert!(
-            stdout.contains(expected_value),
-            "{} did not emit expected value marker {}:\n{}",
-            example,
-            expected_value,
-            stdout
-        );
-    }
-}
-
-#[test]
-fn test_xlog_run_nested_modal_interior_negation_reports_typed_epistemic_diagnostic() {
-    // v0.9.2 ITEM C: bare modal CHAINS (`know possible p()`) now EXECUTE via sound
-    // collapse (asserted in `test_xlog_run_epistemic_examples` for ex13/13b/13c/13d/
-    // 13e). The remaining fail-closed boundary is INTERIOR-negation chains
-    // (`know not possible p()` == `K ¬M p`), a modal-over-a-negated-modal compound
-    // formula (C2) with NO sound collapse to a single `op atom` literal. It MUST
-    // stay rejected with the typed diagnostic rather than emit a wrong collapse.
-    let _device = match CudaDevice::new(0) {
-        Ok(d) => d,
-        Err(_) => {
-            println!("SKIPPED: CUDA runtime unavailable (no GPU or driver not loaded)");
-            return;
+        if let Some(forbidden_value) = expected_value.strip_prefix('!') {
+            assert!(
+                !stdout.contains(forbidden_value),
+                "{} emitted forbidden value marker {}:\n{}",
+                example,
+                forbidden_value,
+                stdout
+            );
+        } else {
+            assert!(
+                stdout.contains(expected_value),
+                "{} did not emit expected value marker {}:\n{}",
+                example,
+                expected_value,
+                stdout
+            );
         }
-    };
-
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("workspace root");
-    let program = repo_root
-        .join("examples/epistemic")
-        .join("13f-nested-modal-interior-negation-rejected.xlog");
-    let output = cargo_bin_cmd!("xlog")
-        .args([
-            "run",
-            program.to_str().expect("valid path"),
-            "--memory-mb",
-            "1024",
-        ])
-        .output()
-        .expect("run xlog binary");
-    assert!(
-        !output.status.success(),
-        "interior-negation modal chain must fail closed, stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("UnsupportedEpistemicConstruct"), "{stderr}");
-    assert!(
-        stderr.contains("interior negation between modal operators"),
-        "{stderr}"
-    );
+    }
 }
 
 #[test]
@@ -581,6 +825,94 @@ fn run_epistemic_example(example: &str) -> (bool, String, String) {
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
     )
+}
+
+fn same_name_modal_truth(form: &str, tuple_present: bool) -> bool {
+    match form {
+        "know" | "possible" => tuple_present,
+        "not-know" | "not-possible" => !tuple_present,
+        other => panic!("unknown same-name modal form {other}"),
+    }
+}
+
+fn assert_same_name_matrix_example(example: &str, should_hold: bool) {
+    let (ok, stdout, stderr) = run_epistemic_example(example);
+    assert!(
+        ok,
+        "same-name matrix example {example} must succeed:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("holds"),
+        "same-name matrix example {example} must emit holds relation:\n{stdout}"
+    );
+    let has_row = stdout.contains("| 1  |");
+    assert_eq!(
+        has_row, should_hold,
+        "same-name matrix example {example} expected holds row presence {should_hold}:\n{stdout}"
+    );
+}
+
+#[test]
+fn test_xlog_run_same_name_multi_arity_exhaustive_matrix() {
+    // v0.9.2 EGB-06 K2/K4 exhaustive production-path matrix.
+    //
+    // Single-literal cells cover:
+    //   arity {1,2} x modal {know,possible} x polarity {positive,negated}
+    //   x queried-tuple state {present,absent}.
+    //
+    // Cross-arity cells cover every conjunction:
+    //   unary modal form {K,M,not K,not M}
+    //   x binary modal form {K,M,not K,not M}
+    //   x unary queried-tuple state {present,absent}
+    //   x binary queried-tuple state {present,absent}.
+    //
+    // Each committed example keeps nonmatching distractor facts in both p/1 and
+    // p/2 so absent means "the queried tuple is absent", not "the relation or
+    // schema is absent." This proves the arity-qualified source relation is the
+    // load-bearing discriminator through full `xlog run`.
+    let _device = match CudaDevice::new(0) {
+        Ok(d) => d,
+        Err(_) => {
+            println!("SKIPPED: CUDA runtime unavailable (no GPU or driver not loaded)");
+            return;
+        }
+    };
+
+    let forms = ["know", "possible", "not-know", "not-possible"];
+    let states = [("present", true), ("absent", false)];
+
+    for arity in [1, 2] {
+        for form in forms.iter().copied() {
+            for (state, tuple_present) in states.iter().copied() {
+                let example =
+                    format!("42a-same-name-multi-arity-literal-a{arity}-{form}-{state}.xlog");
+                assert_same_name_matrix_example(
+                    example.as_str(),
+                    same_name_modal_truth(form, tuple_present),
+                );
+            }
+        }
+    }
+
+    let mut cell_index = 0usize;
+    for unary_form in forms.iter().copied() {
+        for binary_form in forms.iter().copied() {
+            for (unary_state, unary_present) in states.iter().copied() {
+                for (binary_state, binary_present) in states.iter().copied() {
+                    let example = format!(
+                        "42b-same-name-multi-arity-cross-{cell_index:02}-{unary_form}-{unary_state}--{binary_form}-{binary_state}.xlog"
+                    );
+                    assert_same_name_matrix_example(
+                        example.as_str(),
+                        same_name_modal_truth(unary_form, unary_present)
+                            && same_name_modal_truth(binary_form, binary_present),
+                    );
+                    cell_index += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(cell_index, 64);
 }
 
 #[test]
@@ -732,15 +1064,10 @@ fn test_xlog_run_recursion_through_modal_computes_founded_fixpoint() {
 }
 
 #[test]
-fn test_xlog_run_negated_modal_through_recursion_reports_typed_epistemic_diagnostic() {
-    // v0.9.2 WALL A1 FORMAL BOUND (the genuinely NON-stratified remainder): a NEGATED
-    // modal whose target CYCLES through the recursion via the negation (`reach -> linked
-    // -> not reach`) is non-stratified and must FAIL CLOSED. Its sound semantics is the
-    // 3-valued well-founded model, which requires the host-only WFS / stable-model
-    // solver -- precluded by the no-host-solver architectural lock. The diagnostic is
-    // worded as the FORMAL ARCHITECTURAL REASON, not "the executor can't". (The
-    // STRATIFIED sub-case -- example 37 -- EXECUTES on the GPU production path; only the
-    // negation cycle stays bounded.)
+fn test_xlog_run_negated_modal_through_recursion_uses_wfs_engine() {
+    // v0.9.2 A1 closure: a NEGATED modal whose target CYCLES through recursion via
+    // negation now executes through the explicit WFS engine. True atoms are emitted;
+    // undefined atoms are absent.
     let _device = match CudaDevice::new(0) {
         Ok(d) => d,
         Err(_) => {
@@ -749,23 +1076,32 @@ fn test_xlog_run_negated_modal_through_recursion_reports_typed_epistemic_diagnos
         }
     };
 
-    let (ok, stdout, stderr) =
-        run_epistemic_example("33-negated-modal-through-recursion-rejected.xlog");
+    let (ok, stdout, stderr) = run_epistemic_example("33-negated-modal-through-recursion-wfs.xlog");
     assert!(
-        !ok,
-        "negated-modal-through-recursion example must fail closed, stdout:\n{stdout}\nstderr:\n{stderr}"
+        ok,
+        "negated-modal-through-recursion WFS example must execute, stdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    assert!(stderr.contains("UnsupportedEpistemicConstruct"), "{stderr}");
-    assert!(stderr.contains("recursive epistemic program"), "{stderr}");
-    // The diagnostic names the formal architectural bound (cycle through negation =>
-    // 3-valued well-founded model => host-only solver precluded by the lock), NOT an
-    // "executor can't" or feature-gap wording.
-    assert!(stderr.contains("cycle through negation"), "{stderr}");
-    assert!(stderr.contains("well-founded"), "{stderr}");
     assert!(
-        stderr.contains("no-host-solver") || stderr.contains("host-side semantic solver"),
-        "diagnostic must cite the no-host-solver architectural constraint:\n{stderr}"
+        stdout.contains("| 1 | 2 |") || stdout.contains("| 1  | 2  |"),
+        "WFS true seed reach tuple must be present:\n{stdout}"
     );
+    for (x, y) in [
+        (1, 1),
+        (1, 3),
+        (2, 1),
+        (2, 2),
+        (2, 3),
+        (3, 1),
+        (3, 2),
+        (3, 3),
+    ] {
+        let compact = format!("| {x} | {y} |");
+        let padded = format!("| {x}  | {y}  |");
+        assert!(
+            !stdout.contains(&compact) && !stdout.contains(&padded),
+            "WFS undefined tuple ({x},{y}) must be absent:\n{stdout}"
+        );
+    }
 }
 
 #[test]

@@ -22,6 +22,7 @@ pub use resident::{
     ResidentRejection,
 };
 
+#[cfg(feature = "host-io")]
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -265,6 +266,7 @@ pub(super) struct ProbFactSpec {
 pub(super) struct AdSpec {
     pub(super) decision_vars: Vec<usize>,
     pub(super) choices: Vec<GroundAtom>,
+    #[cfg_attr(not(feature = "host-io"), allow(dead_code))]
     pub(super) has_none: bool,
 }
 
@@ -305,6 +307,7 @@ pub(super) struct SccPlan {
     pub(super) kind: SccKind,
 }
 
+#[cfg_attr(not(feature = "host-io"), allow(dead_code))]
 #[derive(Debug, Clone, Default)]
 pub(super) struct EvalStats {
     pub(super) nonmonotone_sccs: usize,

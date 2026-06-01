@@ -1,0 +1,19 @@
+#pragma epistemic_mode = faeel
+
+pred seed(u32, u32).
+pred p(u32).
+pred p(u32, u32).
+pred a(u32, u32).
+
+seed(1, 10).
+seed(2, 20).
+seed(3, 30).
+
+p(1).
+p(2).
+p(1, 10).
+p(2, 99).
+
+a(X, Y) :- seed(X, Y), know p(X), possible p(X, Y).
+
+?- a(X, Y).

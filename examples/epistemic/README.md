@@ -43,7 +43,8 @@ XLOG_USE_DEVICE_RUNTIME=1 cargo test -p xlog-cli --test run_cli_tests test_xlog_
 | Nested modal chain negated | `13c-nested-modal-chain-negated.xlog` | v0.9.2 ITEM C: `not know possible blocked(X)` (leading-not distributes, inner `possible` ≡ ordinary over EDB) → `allowed={1,3}` (nodes 2,4 blocked-out; load-bearing) |
 | Nested chain FAEEL-unfounded | `13d-nested-modal-chain-faeel-unfounded.xlog` | v0.9.2 ITEM C per-mode: `p():-possible possible p()` (MM≡M) is the chain form of ex31 → FAEEL `rows: 0` (unfounded, absent) |
 | Nested chain G91-accepted | `13e-nested-modal-chain-g91-accepted.xlog` | v0.9.2 ITEM C per-mode: SAME chain under G91 → `rows: 1`. 13d (FAEEL 0) vs 13e (G91 1) is the inherited mode-difference (mirrors 31 vs 32) |
-| Nested modal interior-negation (rejected) | `13f-nested-modal-interior-negation-rejected.xlog` | v0.9.2 ITEM C boundary: `know not possible p()` ≡ `K ¬M p` is a modal-over-negated-modal compound (C2) with NO sound collapse → typed `UnsupportedEpistemicConstruct` "interior negation between modal operators" |
+| Nested modal interior-negation | `13f-nested-modal-interior-negation-rejected.xlog` | v0.9.2 ITEM C2: `know not possible p()` dualizes to `not possible p()` and executes through `xlog run`; because `p()` is present, `q` is empty (`rows: 0`) |
+| Nested modal negation matrix | `13g`–`13v-nested-modal-negation-matrix-*.xlog` | v0.9.2 ITEM C2 exhaustive matrix: all `{know,possible}²` chains with leading/interior/atom-adjacent negation combinations over present and absent atoms; derived slices emit the exact four expected `holds(ID)` rows, while non-derived companion slices prove the complementary cases stay empty |
 | Mixed-literal membership | `14-mixed-literal-membership.xlog` | v0.9.2 Bundle 1 EGB-02B global modal gate + per-row bound membership compose conjunctively → `reachable={1,3}` |
 | Recursive epistemic closure | `15-recursive-epistemic-closure.xlog` | v0.9.2 Bundle 2 Case-A recursive fixpoint: `reach(X,Z):-reach(X,Y),know edge(Y,Z)` → `{(1,2),(2,3)}` plus derived `(1,3)` |
 | Recursive epistemic chain | `15-recursive-epistemic-chain.xlog` | v0.9.2 Bundle 2 Case-A multi-hop: 4-chain → full closure incl. 3-hop `(1,4)` (proves not single-pass) |
@@ -65,7 +66,7 @@ XLOG_USE_DEVICE_RUNTIME=1 cargo test -p xlog-cli --test run_cli_tests test_xlog_
 | Possible binding over determined | `30-possible-binding-over-determined.xlog` | v0.9.2 COMPLETENESS CELL: the `possible` twin of example 28 — a BINDING `possible r(X,Y)` over a DETERMINED multi-column epistemic head. Proves the modal operator is irrelevant for a determined target (`possible r ≡ know r ≡ r`); stratifies identically → `out={1}` (gate load-bearing: ungated `out=node={1,2,3}`) |
 | FAEEL-unfounded self-support (empty extension) | `31-faeel-unfounded-self-support-empty-extension.xlog` | v0.9.2 ITEM B: `p() :- possible p()` with no independent founded support is UNFOUNDED under default FAEEL, so `p` is ABSENT from the founded model. The program EXECUTES to its EXACT empty founded extension → `rows: 0`, exit 0 (NOT a rejection). The founded extension is computed on the GPU/runtime path (the circular self-support rule is excluded from the reduced founded base). Contrast example 11 (founded → accepted, rows: 1) and example 32 (same program under G91 → accepted, rows: 1) |
 | G91 self-support accepted (mode-difference pair to 31) | `32-g91-self-support-accepted.xlog` | v0.9.2 ITEM B: the SAME `p() :- possible p()` under explicit `#pragma epistemic_mode = g91` ACCEPTS circular self-support → `rows: 1`. The ONLY change from example 31 is the mode pragma; the FAEEL rows:0 vs G91 rows:1 divergence is the exact FAEEL-vs-G91 mode-difference evidence |
-| Negated modal through recursion (rejected) | `33-negated-modal-through-recursion-rejected.xlog` | v0.9.2 ITEM A soundness floor: a NEGATED modal `not know reach` over a relation that CO-EVOLVES with the recursion is NON-MONOTONE (the gated complement shrinks as `reach` grows), so the monotone founded-least-fixpoint reduction cannot express it. Fails closed → typed `UnsupportedEpistemicConstruct` `recursive epistemic program` (names `not know`, "non-monotone"). Contrast example 22 (POSITIVE modal co-evolving → accepted Case-B fixpoint) |
+| Negated modal through recursion (WFS) | `33-negated-modal-through-recursion-wfs.xlog` | v0.9.2 ITEM A1: a NEGATED modal `not know reach` over a relation that CO-EVOLVES with recursion reduces to a non-monotone ordinary SCC and executes through the explicit WFS path. Exhaustive over `vertex x vertex` for `{1,2,3}`: `reach(1,2)` is true; the other eight tuples are undefined and absent |
 | Variable-keyed constraint (prunes) | `34-variable-keyed-constraint-prunes.xlog` | v0.9.2 ITEM E: a VARIABLE-KEYED epistemic integrity constraint `:- know flagged(X).` ranges X EXISTENTIALLY over the modal relation's tuple-key domain — pruned iff EXISTS a binding for which `know flagged(X)` holds (`flagged` non-empty in the accepted model). The single-occurrence key variable lowers to an Anonymous WILDCARD column and the existing GPU wildcard tuple-key matcher evaluates the existential entirely on device (no host scan, no CPU fallback). `flagged={7,9,11}` is multi-tuple, so a ground `know flagged(c)` could not express "some flagged value exists" → the range is load-bearing. Body holds → world view pruned → `report` absent (`rows: 0`, exit 0, NOT a failure) |
 | Variable-keyed constraint (survives, companion) | `35-variable-keyed-constraint-survives.xlog` | v0.9.2 ITEM E: the COMPANION to 34 — SAME `:- know flagged(X).` constraint but `flagged` EMPTY, so no binding satisfies `know flagged(X)`, the existential body is false and the world view SURVIVES → `report` holds (`rows: 1`). The 34 (`rows: 0`) vs 35 (`rows: 1`) difference is the EXACT load-bearing effect of the variable-keyed existential range (same program shape, only the modal extension differs) |
 | Multi-literal distinct-var constraint | `36-multi-literal-distinct-var-constraint.xlog` | v0.9.2 ITEM E multi-literal (DISTINCT independent variables): `:- know watch(X), know hot(Y).` factors to (∃X: know watch(X)) AND (∃Y: know hot(Y)) = "watch non-empty AND hot non-empty". Each literal lowers to an INDEPENDENT Anonymous wildcard; the GPU constraint kernel ANDs the two existential assumption bits. Both non-empty → body holds → pruned (`rows: 0`). This is the independent-existential conjunction; the shared-variable JOIN (`:- know p(X), possible q(X)`), diagonal (`:- know p(X,X)`), and negated-difference (`:- q(X), not know p(X)`) are now ALSO supported — see examples 38–41. The second-literal load-bearing flip (empty `hot` → survives) is asserted in the device suite |
@@ -74,6 +75,9 @@ XLOG_USE_DEVICE_RUNTIME=1 cargo test -p xlog-cli --test run_cli_tests test_xlog_
 | Diagonal modal constraint (satisfied) | `39-diagonal-modal-constraint-satisfied.xlog` | v0.9.2 ITEM E1: companion to 38 with NO self-loop → constraint satisfied → `safe = {5}`. The 38-vs-39 flip (only the diagonal tuple differs) is the load-bearing prune evidence |
 | Shared-variable join constraint | `40-shared-variable-join-constraint.xlog` | v0.9.2 ITEM E1: `:- know p(X), possible q(X)` — two modal literals sharing X — forbids `p ∩ q ≠ ∅`. Desugared to `__epi_join_0(X) :- p(X), q(X)` + `:- know __epi_join_0(X)` (sound for EDB: `know p ≡ p`, `possible q ≡ q`). `p ∩ q = {2}` non-empty → `report` pruned empty. Removing the constraint keeps `report = {5}` (load-bearing) |
 | Negated-difference constraint | `41-negated-difference-constraint.xlog` | v0.9.2 ITEM E1: `:- q(X), not know p(X)` — positive `q` binds X (range-restriction), negated modal subtracts known-`p` — forbids `q \ p ≠ ∅`. Desugared to `__epi_join_0(X) :- q(X), not p(X)` + `:- know __epi_join_0(X)`. `q \ p = {3}` non-empty → `report` pruned empty. (Contrast the standalone unsafe `:- not know p(X)`, a NAF safety error.) |
+| Same-name multi-arity modal disambiguation | `42-same-name-multi-arity-modal-disambiguation.xlog` | v0.9.2 EGB-06 K2/K4: `know p(X), possible p(X,Y)` over same-name `p/1` and `p/2` executes through full `xlog run` by loading arity-qualified modal source relations. `p/1={1,2}`, `p/2={(1,10),(2,99)}`, `seed={(1,10),(2,20),(3,30)}` → exactly `a={(1,10)}`; `(2,20)` is removed by the arity-2 filter and `(3,30)` by the arity-1 filter |
+| Same-name multi-arity exhaustive matrix | `42a-same-name-multi-arity-literal-*.xlog`, `42b-same-name-multi-arity-cross-*.xlog` | v0.9.2 EGB-06 K2/K4 exhaustive production-path matrix. `42a*` covers all single-literal cells: arity `{1,2}` × operator `{know,possible}` × polarity `{positive,negated}` × queried tuple `{present,absent}`. `42b*` covers all cross-arity conjunction cells: unary modal form `{K,M,not K,not M}` × binary modal form `{K,M,not K,not M}` × unary queried tuple `{present,absent}` × binary queried tuple `{present,absent}`. Every shard uses nonmatching distractor facts in both `p/1` and `p/2`, so absent means the queried tuple is absent rather than the relation/schema being absent. The full matrix is asserted by `test_xlog_run_same_name_multi_arity_exhaustive_matrix` through production `xlog run` |
+| G91 possible recursion self-support | `43-g91-possible-recursion-self-support.xlog` | v0.9.2 G91 recursive compatibility: positive `possible reach(X,Y)` over the co-evolving recursive target is treated as the G91 self-support assumption, not the FAEEL founded least-fixpoint atom. The full `xlog run` path returns and tests every tuple in `linked = vertex × vertex` for `{1,2,3}` |
 
 Notes: examples with one epistemic output head use the single-plan path; examples
 with independent epistemic output heads route through split GPU execution from
@@ -115,25 +119,22 @@ the modal relation's arity. Only genuinely UNBOUNDED or UNTYPED structured forms
 stay rejected, and they reject with a precise `ResourceExhausted` finiteness
 diagnostic rather than a blanket unsupported-construct error (example 23b).
 
-Nested modal operators (ITEM C) are no longer rejected wholesale. A bare modal
-CHAIN — a sequence of `know`/`possible` operators over an atom, with an optional
-single LEADING `not` — collapses to a single epistemic literal under the KD45/S5
-modal axioms XLOG's autoepistemic operators assume: the operator ADJACENT to the
-atom wins (`know possible p ≡ possible p`, `know know p ≡ know p`,
-`possible possible p ≡ possible p`), and a leading `not` distributes. The collapse
-is a SOUND modal-logic equivalence applied as AST normalization — it routes through
-the existing single-level epistemic path with no new world-of-worlds evaluator —
-and holds in BOTH modes (FAEEL/G91 differ only in which world views are admissible,
-which the collapsed single-level literal inherits unchanged; examples 13/13b/13c
-execute, 13d/13e show the inherited FAEEL-vs-G91 mode split). The remaining
-fail-closed boundary for nesting is C2 modal-over-a-negated-modal compound formulas
-— an INTERIOR negation (`know not possible p ≡ K ¬M p`, example 13f) or an
-atom-adjacent negation (`know possible not p ≡ M ¬p`) — which have no sound collapse
-to a single `op atom` literal and stay rejected with a typed
-`UnsupportedEpistemicConstruct` ("interior negation"/"negated atom") rather than a
-wrong collapse.
+Nested modal operators (ITEM C) are no longer rejected wholesale. A modal CHAIN —
+a sequence of `know`/`possible` operators over an atom, with optional leading,
+interior, or atom-adjacent negation — normalizes to one single-level epistemic
+literal. The operator ADJACENT to the atom wins (`know possible p ≡ possible p`,
+`know know p ≡ know p`, `possible possible p ≡ possible p`); negation parity is
+preserved, and atom-adjacent negation dualizes the innermost operator
+(`know possible not p` normalizes to `not know p`, `know not possible p`
+normalizes to `not possible p`). The normalization is an AST rewrite that routes
+through the existing single-level epistemic path with no world-of-worlds evaluator
+and holds in BOTH modes; examples 13/13b/13c execute, 13d/13e show the inherited
+FAEEL-vs-G91 mode split, and 13g-13v exhaust all 64 two-operator negation cells.
 
-The remaining fail-closed cases are the other GENUINELY-UNDEFINED forms, covered by
-negative pilots: circular modality (a modal over the relation being recursively
-computed, example 22), FAEEL-unfounded self-support (the defined rejection; G91
-accepts it), and unbounded/untyped modal tuple-keys (example 23b).
+The remaining fail-closed cases are genuinely unsafe or unbounded forms: cyclic
+modal coupling with no founded/WFS order, unsafe unbound negated modal variables,
+and unbounded/untyped modal tuple-keys (example 23b). Recursive modal semantics
+with a defined founded/G91/WFS interpretation execute instead: example 22 is the
+FAEEL founded Case-B fixpoint, example 31 is the defined empty FAEEL extension,
+example 32 is the G91 self-support companion, example 33 is WFS for cyclic
+negated-modal recursion, and example 43 is G91 positive possible recursion.

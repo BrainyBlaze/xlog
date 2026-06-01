@@ -697,14 +697,10 @@ pub enum RecursiveEpistemicClass {
     ///
     /// ADMISSION IS POLARITY/MODE-SCOPED (proved in
     /// [`classify_recursive_epistemic_program`]): a NEGATED modal over a non-invariant
-    /// target is admitted as Case B IFF the negation is STRATIFIED (the reduced ordinary
-    /// `not R` has no cycle through negation, so the target sits in a strictly lower
-    /// stratum); a genuine negation cycle stays rejected (3-valued well-founded
-    /// semantics needs a host-side solver, precluded by the no-host-solver lock). A
-    /// `possible` modal over a co-evolving target is admitted ONLY under FAEEL (where
-    /// the least fixpoint equals the founded model). G91 `possible` recursion is the
-    /// autoepistemic self-fulfilling fixpoint, which the monotone resolve cannot
-    /// express, so it stays rejected as an honest wall.
+    /// target is admitted when the reduced ordinary program is stratified, and a
+    /// genuine negation cycle routes through the explicit WFS plan. A `possible`
+    /// modal over a co-evolving target is admitted under FAEEL as the founded least
+    /// fixpoint and under G91 as the compatibility self-support assumption.
     CaseB,
 }
 
@@ -737,7 +733,7 @@ fn reject_recursive_epistemic_program(program: &Program) -> Result<()> {
             ))
         }
         // Recursive shapes outside the admissible fragment already carry a specific
-        // typed diagnostic (negated-modal recursion, G91 `possible` recursion).
+        // typed diagnostic.
         Err(err) => Err(err),
     }
 }
@@ -824,27 +820,19 @@ pub fn classify_recursive_epistemic_program(program: &Program) -> Result<Recursi
     // program is scanned (not only recursion-participating rules) because that blanket
     // reduction rewrites EVERY modal literal.
     //
-    // SOUNDNESS FLOOR (stays rejected):
-    //   * a NEGATED modal over a non-invariant target whose reduced `not R` forms a
-    //     CYCLE THROUGH NEGATION — genuinely non-stratified; the sound 3-valued
-    //     well-founded model requires a host-side WFS / stable-model solver (precluded
-    //     by the no-host-solver lock). A STRATIFIED negated modal (target in a strictly
-    //     lower stratum, even if recursive/non-invariant) IS admitted as Case B and runs
-    //     as ordinary stratified negation on the GPU semi-naive engine.
-    //   * a `possible` modal over a co-evolving target under G91 — G91 `possible` is the
-    //     autoepistemic SELF-FULFILLING fixpoint, which the monotone least-fixpoint
-    //     resolve cannot express. FAEEL `possible` IS the founded least fixpoint, so it
-    //     is admitted. (A non-recursive `possible` self-support stays NonRecursive and
-    //     is handled by the single-pass founded-extension path — item B.)
-    let mode = program.directives.epistemic_mode_or_default();
+    // SOUNDNESS FLOOR:
+    //   * a NEGATED modal over a non-invariant target is admitted as Case B; the
+    //     reduced program either runs as ordinary stratified negation or through the
+    //     explicit WFS plan when it contains a cycle through negation.
+    //   * a `possible` modal over a co-evolving target under G91 is admitted as the
+    //     compatibility self-support assumption. FAEEL `possible` remains the founded
+    //     least fixpoint. (A non-recursive `possible` self-support stays NonRecursive
+    //     and is handled by the single-pass founded-extension path — item B.)
     let invariant = InvariantRelations::analyze(program);
     let mut saw_case_b = false;
-    // A NEGATED modal over a NON-invariant target is admissible IFF the negation is
-    // STRATIFIED after reduction (no cycle through negation). The decision is DEFERRED
-    // to a reduce + stratification check that runs AFTER this scan, so the immediate
-    // per-literal rejections below (G91 `possible` self-fulfilling) still win when they
-    // co-occur. Recording it as a candidate keeps the soundness floor under the SOLE
-    // arbiter of the existing stratification analysis on the reduced program.
+    // A NEGATED modal over a NON-invariant target is admissible after reduction. The
+    // high-level executor chooses ordinary stratified negation or the explicit WFS
+    // plan from the reduced program shape.
     let mut saw_negated_non_invariant_modal = false;
     for rule in &program.rules {
         for lit in &rule.body {
@@ -886,66 +874,23 @@ pub fn classify_recursive_epistemic_program(program: &Program) -> Result<Recursi
                 continue;
             }
 
-            if modal.op == EpistemicOp::Possible && mode == EpistemicMode::G91 {
-                // G91 `possible` over a co-evolving target is the autoepistemic
-                // self-fulfilling fixpoint; the monotone least-fixpoint resolve would
-                // silently compute the FAEEL founded answer under a G91 pragma. Fail
-                // closed as an honest wall rather than return a silently-wrong result.
-                return Err(recursive_epistemic_rejection(&format!(
-                    "rule for `{}` uses the modal literal `possible {}` over a relation that \
-                     CO-EVOLVES with the program's ordinary recursion, under G91 mode. G91 \
-                     `possible` recursion is the autoepistemic self-fulfilling fixpoint, which \
-                     the monotone founded-least-fixpoint reduction cannot express. Use FAEEL \
-                     mode (founded least fixpoint) or remove the recursion.",
-                    rule.head.predicate, modal.atom.predicate,
-                )));
-            }
-
-            // POSITIVE `know` (any mode) or FAEEL `possible` over a co-evolving target:
-            // admissible Case B. The founded least fixpoint computes the result.
+            // POSITIVE `know` (any mode), FAEEL `possible`, or G91 `possible` over a
+            // co-evolving target: admissible Case B. FAEEL/know resolve to the
+            // ordinary atom; G91 non-invariant `possible` is handled in the reduction
+            // as the compatibility self-support assumption.
             saw_case_b = true;
         }
     }
 
-    // WALL A1 DISCRIMINATOR: a deferred negated-modal-over-non-invariant is admissible
-    // IFF the negation is STRATIFIED. Decide it by the SOLE arbiter of the existing
-    // stratification analysis on the REDUCED ordinary program: the reduction maps
-    // `not know R` -> ordinary `not R` and `know R` -> `R`, so running
-    // `analyze_stratification` over the reduced program detects whether any negation
-    // edge closes a cycle. No negation cycle => stratified => admit (Case B, founded =
-    // perfect = well-founded model). A negation cycle => non-stratified => the sound
-    // 3-valued well-founded model requires the host-only WFS solver (no-host-solver
-    // lock), so fail closed with the formal architectural bound. The reduce here is
-    // pure analysis (the same reduction the executor applies) and is only reached when
-    // a negated non-invariant modal was actually seen.
+    // WALL A1 DISCRIMINATOR: a deferred negated-modal-over-non-invariant is accepted
+    // as Case B. The high-level executor inspects the reduced ordinary program: no
+    // negation cycle routes to ordinary stratified execution; a negation cycle routes
+    // to the explicit WFS plan and materializes only true tuples.
     if saw_negated_non_invariant_modal {
-        let reduced = reduce_case_a_epistemic_program_to_ordinary(program);
-        let strat = crate::stratify::analyze_stratification(&reduced);
-        if !strat.non_monotone_sccs.is_empty() {
-            // Identify a predicate in a negation cycle for a precise diagnostic. Pick the
-            // lexicographically smallest predicate across all non-monotone SCCs so the
-            // diagnostic is DETERMINISTIC (the SCC set is HashSet-derived, so naive
-            // iteration order is non-deterministic).
-            let cyclic_pred = strat
-                .non_monotone_sccs
-                .iter()
-                .filter_map(|&scc_idx| strat.sccs.get(scc_idx))
-                .flatten()
-                .min()
-                .cloned()
-                .unwrap_or_else(|| "<unknown>".to_string());
-            return Err(recursive_epistemic_rejection(&format!(
-                "a NEGATED modal literal over a non-invariant relation forms a cycle through \
-                 negation (predicate `{cyclic_pred}` participates in a non-monotone SCC of the \
-                 reduced program); the recursion is NOT stratified. Its sound semantics is the \
-                 3-valued well-founded model (atoms partly UNDEFINED), which requires a \
-                 host-side well-founded / stable-model solver. The GPU production path provides \
-                 no host-side semantic solver (the no-host-solver architectural constraint), so \
-                 this case is bounded by that constraint, not by an unimplemented feature. \
-                 Stratify the program (give the negated modal target a strictly lower stratum) \
-                 or remove the negation cycle."
-            )));
-        }
+        // Non-monotone reduced programs are still admissible Case B: the high-level
+        // runtime routes them to the explicit WFS execution plan. Stratified reduced
+        // programs continue through the ordinary semi-naive path.
+        let _reduced = reduce_case_a_epistemic_program_to_ordinary(program);
     }
 
     // SOUNDNESS GUARD: a recursive epistemic program (Case A/B) routes through the PURE
@@ -1992,15 +1937,27 @@ fn reduce_epistemic_program_to_ordinary_inner(
 /// [`classify_recursive_epistemic_program`]; this function assumes that contract.
 pub fn reduce_case_a_epistemic_program_to_ordinary(program: &Program) -> Program {
     let mut reduced = program.clone();
+    let mode = program.directives.epistemic_mode_or_default();
+    let invariant = InvariantRelations::analyze(program);
     for rule in &mut reduced.rules {
         for lit in &mut rule.body {
             if let BodyLiteral::Epistemic(modal) = lit {
-                // Case A admits modal literals over invariant relations. A positive
-                // `know`/`possible` resolves to a positive ordinary atom over its
-                // (invariant) gated relation; a NEGATED `not know`/`not possible`
-                // over an invariant relation equals ordinary `not R` (an anti-join,
-                // no modal gating), so resolve it to a negated ordinary atom.
-                *lit = if modal.negated {
+                // Case A admits modal literals over invariant relations. Case B also
+                // routes here: FAEEL positive co-evolving modals resolve to ordinary
+                // recursive atoms (founded least fixpoint), while G91 positive
+                // `possible` over a NON-invariant target is the compatibility
+                // self-support assumption and drops to a tautological conjunct.
+                *lit = if mode == EpistemicMode::G91
+                    && modal.op == EpistemicOp::Possible
+                    && !modal.negated
+                    && !invariant.is_invariant(&modal.atom.predicate)
+                {
+                    BodyLiteral::Comparison(Comparison {
+                        left: Term::Integer(1),
+                        op: CompOp::Eq,
+                        right: Term::Integer(1),
+                    })
+                } else if modal.negated {
                     BodyLiteral::Negated(modal.atom.clone())
                 } else {
                     BodyLiteral::Positive(modal.atom.clone())

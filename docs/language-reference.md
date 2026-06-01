@@ -1,8 +1,8 @@
 # XLOG Language Reference
 
 > **Release context:** XLOG `v0.9.0-rc` + v0.9.1 / v0.9.2 epistemic executor completion (unreleased)
-> **Language coverage:** Core v0.8.0 language, the v0.8.5 language-completeness contract, the v0.9.0 epistemic solver surface, the v0.9.1 epistemic executor completion (EIR-derived candidate enumeration, value-level modal membership, per-tuple-key FAEEL foundedness, ground epistemic constraints, safe split, and joint multi-epistemic solving), and the v0.9.2 semantic completion (mixed global+per-row modal gates compose conjunctively; Case-A recursive epistemic fixpoints over invariant modal relations; multi-output cross-component coupling joint-solved against one shared world view incl. differing-arity heads; and stratified epistemic execution for coupling/recursion over a DETERMINED derived head — the determined-modal family is complete, with only genuinely-undefined cases, circular/Case-B recursion and FAEEL-unfounded self-support and syntactic nested modals, correctly fail-closed)
-> **Last Updated:** May 2026
+> **Language coverage:** Core v0.8.0 language, the v0.8.5 language-completeness contract, the v0.9.0 epistemic solver surface, the v0.9.1 epistemic executor completion (EIR-derived candidate enumeration, value-level modal membership, per-tuple-key FAEEL foundedness, ground epistemic constraints, safe split, and joint multi-epistemic solving), and the v0.9.2 semantic completion (mixed global+per-row modal gates compose conjunctively; finite nested modal chains normalize by parity/duality; same-name multi-arity disambiguates by arity-qualified tuple sources; recursive execution covers Case-A/determined stratification, positive Case-B/G91 recursion, stratified negated modals, and WFS for cyclic negated modals; only genuinely unbounded, unsafe, or unfounded modal cycles remain fail-closed)
+> **Last Updated:** June 2026
 
 This document provides a comprehensive reference for the XLOG language,
 covering all syntax, semantics, and features of XLOG as a GPU-native logic
@@ -250,7 +250,7 @@ using a hidden CPU-only fallback for a GPU-claimed path.
 | Probabilistic aggregates | Aggregate heads and aggregate outputs in `query`/`evidence` | Finite aggregate outcomes in exact and MC inference | `query(out_degree(1, 2)).` over probabilistic `edge` facts | Exact aggregate domains over cap, unsupported numeric operator/domain pairs | Exact provenance/PIR or MC sampling plus deterministic aggregate execution |
 | Aggregate lifting | Finite-domain aggregate metadata and caps | Use lifted compact-domain computation when identical to finite exact enumeration | Small count/sum domains avoid naive enumeration | Domain cap exceeded, non-finite domains, unsupported floating tolerance | Probabilistic aggregate planner and exact/MC engines |
 | Approximate inference | `#pragma prob_engine = mc`, samples, seed, confidence, method | MC estimates are reproducible under fixed seed and report uncertainty | `#pragma prob_samples = 10000` with `query(rain).` | Invalid confidence ranges, unsupported methods, hidden default override ambiguity | Existing MC engine with documented source/CLI precedence |
-| Epistemic literals | `know atom(...)`, `possible atom(...)`, `not know atom(...)`, `not possible atom(...)`, `#pragma epistemic_mode = faeel\|g91` | Modal literals are preserved in EIR; v0.9.1 derives candidate worlds from EIR, checks value-level tuple-key membership and per-tuple-key FAEEL foundedness, prunes world views with ground epistemic constraints, and solves distinct-predicate multi-epistemic rules jointly, under FAEEL default or G91 compatibility semantics | `accepted() :- know fact().` | Nested modal operators, direct raw RIR lowering, epistemic constraints outside ground modal atoms, unsafe same-name multi-arity modal coupling, aggregate/compound/list/predref modal tuple keys | Parser/AST -> EIR -> epistemic GPU executable plans through high-level `xlog run` dispatch |
+| Epistemic literals | `know atom(...)`, `possible atom(...)`, `not know atom(...)`, `not possible atom(...)`, nested two-operator chains, `#pragma epistemic_mode = faeel\|g91` | Modal literals are preserved in EIR; v0.9.2 derives candidate worlds from EIR, checks value-level tuple-key membership, normalizes finite nested chains by parity/duality, solves same-name multi-arity by arity-qualified tuple sources, supports determined-head stratification, positive Case-B/G91 recursion, and WFS for cyclic negated-modal recursion | `accepted() :- know fact().` | Direct raw RIR lowering, genuinely unbounded/untyped modal tuple keys, unsafe unbound negated epistemic variables, CPU-only world-view scans, and genuine modal cycles without a founded/WFS order | Parser/AST -> EIR -> epistemic GPU executable plans or explicit WFS/reduced-ordinary plans through high-level `xlog run` dispatch |
 | CLI explain | `xlog explain --format text|json|dot file.xlog` | Show parse, strata, RIR, optimized RIR, magic-set, WCOJ, and probability sections when applicable | `xlog explain --format json reach.xlog` | Unknown output formats or unavailable sections without a typed reason | CLI orchestration plus compiler/explain APIs |
 | CLI REPL | `xlog repl` | Interactive multiline fact/rule/query session using parser cache | Add facts, then query relation state | GPU execution before a command requests it, unsupported mutation semantics | CLI session cache plus normal compile/run on submitted programs |
 | CLI watch | `xlog watch file.xlog` | Rerun or re-explain changed files with debounce and typed diagnostics | Edit a rule and see updated diagnostics/output | Silent stale cache reuse after file/module change | CLI file watcher plus parser/session cache and normal commands |
@@ -274,7 +274,7 @@ meta error at program.xlog:8: maplist predicate argument must be a static predre
 v0.8.5 naf error: unbound variable Y in negated atom edge/2; bind it before not with a positive atom or deterministic is expression, or use '_' for existential positions.
 magic_sets declined at program.xlog:21: recursive query crosses an aggregate boundary; run with #pragma magic_sets = off or isolate the aggregate.
 prob_aggregate error at program.xlog:17: exact aggregate domain exceeds cap 1024; add a finite cap or use prob_engine = mc.
-epistemic error at program.xlog:9: nested epistemic operator know possible fact/0 is unsupported; use a single modal operator per body literal.
+epistemic error at program.xlog:9: unbounded modal tuple key [H|T] has no finite GPU key-column set; use a fixed-arity typed list or bind the tail to a finite relation.
 ```
 
 ### Source-Audit Status
@@ -283,12 +283,14 @@ The historic `G085_DOCREF` checkpoint is retained by the v0.8.5 rows above.
 Current source accepts the epistemic literals and `epistemic_mode` pragma listed
 here and routes accepted epistemic examples through `xlog run`. The v0.9.1
 epistemic executor adds EIR-derived candidate enumeration, value-level modal
-membership, per-tuple-key FAEEL foundedness, ground epistemic integrity
-constraints, safe split equivalence, and joint solving of distinct-predicate
-multi-epistemic rules. The remaining unsupported epistemic boundaries are direct
-raw RIR lowering, nested modal operators, epistemic constraints outside ground
-modal atoms, unsafe same-name multi-arity modal coupling, and aggregate/compound/
-list/predref modal tuple keys.
+membership, per-tuple-key FAEEL foundedness, ground and variable-keyed epistemic
+integrity constraints, safe split equivalence, same-name multi-arity
+disambiguation, finite nested-chain normalization, determined-head
+stratification, positive Case-B/G91 recursion, and explicit WFS for cyclic
+negated-modal recursion. The remaining unsupported epistemic boundaries are
+direct raw RIR lowering, genuinely unbounded/untyped modal tuple keys, unsafe
+unbound negated epistemic variables, CPU-only world-view scans, and modal cycles
+without a founded/WFS order.
 
 ---
 

@@ -11,9 +11,11 @@ mod common;
 use common::setup_provider;
 
 use cudarc::driver::DeviceSlice;
+#[cfg(feature = "host-io")]
+use xlog_prob::mc::McSamplingMethod;
 use xlog_prob::mc::{
     compile_resident_plan, McEvalConfig, McNoHostStats, McProgram, McResidentResult,
-    McSamplingMethod, ResidentRejectKind,
+    ResidentRejectKind,
 };
 
 fn cfg(samples: usize, seed: u64) -> McEvalConfig {
@@ -163,12 +165,14 @@ query(coin()).
 
 /// Seed-matched CPU oracle count for query `qi` (answer-key only; NOT no-host
 /// evidence — the oracle runs entirely on the host).
+#[cfg(feature = "host-io")]
 fn oracle_count(program: &McProgram, c: McEvalConfig, qi: usize) -> usize {
     let r = program.evaluate_cpu(c).expect("cpu oracle");
     (r.query_estimates[qi].prob * r.evidence_samples as f64).round() as usize
 }
 
 /// Pilot 2 — probabilistic fact marginal, exact vs seeded oracle.
+#[cfg(feature = "host-io")]
 #[test]
 fn resident_pilot_prob_fact_marginal_exact() {
     let Some(provider) = setup_provider() else {
@@ -188,6 +192,7 @@ fn resident_pilot_prob_fact_marginal_exact() {
 }
 
 /// Pilot 3 — evidence conditioning (clamped), exact vs seeded oracle.
+#[cfg(feature = "host-io")]
 #[test]
 fn resident_pilot_evidence_conditioning_exact() {
     let Some(provider) = setup_provider() else {
@@ -210,6 +215,7 @@ fn resident_pilot_evidence_conditioning_exact() {
 }
 
 /// Pilot 4 — multi-evidence (two evidence atoms), exact vs seeded oracle.
+#[cfg(feature = "host-io")]
 #[test]
 fn resident_pilot_multi_evidence_exact() {
     let Some(provider) = setup_provider() else {
@@ -237,6 +243,7 @@ fn resident_pilot_multi_evidence_exact() {
 /// Pilot 4b — annotated disjunction / exclusive choice. Exactly one of x()/y()
 /// holds per world (exact RNG-independent invariant: count(x)+count(y) == N),
 /// and each individual count matches the seeded oracle.
+#[cfg(feature = "host-io")]
 #[test]
 fn resident_pilot_annotated_disjunction_exclusive() {
     let Some(provider) = setup_provider() else {

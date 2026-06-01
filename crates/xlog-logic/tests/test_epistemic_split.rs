@@ -3,9 +3,9 @@ use xlog_ir::ExecutionPlan;
 use xlog_logic::epistemic::{
     build_epistemic_dependency_graph, classify_recursive_epistemic_program,
     compile_epistemic_gpu_split_execution, plan_epistemic_gpu_execution,
-    reduce_epistemic_program_to_ordinary, split_epistemic_program,
-    try_reduce_case_a_recursive_epistemic_program, EpistemicComponentMergeReason,
-    RecursiveEpistemicClass,
+    reduce_case_a_epistemic_program_to_ordinary, reduce_epistemic_program_to_ordinary,
+    split_epistemic_program, try_reduce_case_a_recursive_epistemic_program,
+    EpistemicComponentMergeReason, RecursiveEpistemicClass,
 };
 use xlog_logic::{parse_program, BodyLiteral};
 
@@ -171,18 +171,10 @@ fn negated_modal_over_stratified_non_invariant_in_recursion_is_accepted_case_b()
 }
 
 #[test]
-fn negated_modal_through_recursion_cycle_fails_closed_wfs_bound() {
-    // v0.9.2 WALL A1 SOUNDNESS FLOOR (the genuinely NON-stratified remainder): a
-    // NEGATED modal whose target CYCLES through the recursion via the negation is
-    // non-stratified and must FAIL CLOSED. Here `reach` depends (positively) on
-    // `linked`, and `linked` depends (negatively) on `not know reach`, so the reduced
-    // ordinary program has a cycle through negation `reach -> linked -> not reach`.
-    // That program has no stratification; its sound semantics is the 3-valued
-    // well-founded model (reach/linked partly UNDEFINED), which requires the host-side
-    // WFS / stable-model solver. The GPU production path provides no such solver (the
-    // no-host-solver lock), so this case is bounded by the architectural constraint,
-    // not by an unimplemented feature -- it must reject rather than return a
-    // silently-wrong (base-only or 2-valued) result.
+fn negated_modal_through_recursion_cycle_classifies_as_wfs_case_b() {
+    // v0.9.2 A1: a NEGATED modal whose target CYCLES through recursion via negation
+    // is admitted as Case B. The high-level runtime detects the non-monotone reduced
+    // SCC and routes it to the explicit WFS plan.
     let program = parse_program(
         r#"
         #pragma epistemic_mode = faeel
@@ -199,16 +191,16 @@ fn negated_modal_through_recursion_cycle_fails_closed_wfs_bound() {
         "#,
     )
     .unwrap();
-    match classify_recursive_epistemic_program(&program) {
-        Err(XlogError::UnsupportedEpistemicConstruct { construct, context }) => {
-            assert_eq!(construct, "recursive epistemic program");
-            assert!(
-                context.contains("cycle through negation") && context.contains("well-founded"),
-                "expected non-stratified WFS-bound diagnostic, got: {context}"
-            );
-        }
-        other => panic!("expected typed non-stratified WFS-bound rejection, got {other:?}"),
-    }
+    assert_eq!(
+        classify_recursive_epistemic_program(&program).unwrap(),
+        RecursiveEpistemicClass::CaseB
+    );
+    let reduced = reduce_case_a_epistemic_program_to_ordinary(&program);
+    let strat = xlog_logic::stratify::analyze_stratification(&reduced);
+    assert!(
+        !strat.non_monotone_sccs.is_empty(),
+        "reduced recursion-through-negation must be routed to WFS"
+    );
 }
 
 #[test]
@@ -389,12 +381,12 @@ fn negated_modal_over_recursive_lower_stratum_is_accepted_case_b() {
 }
 
 #[test]
-fn negated_stratified_modal_with_g91_possible_cycle_still_rejects() {
-    // v0.9.2 WALL A1 ORDERING GUARD: a program that contains BOTH a stratified negated
+fn negated_stratified_modal_with_g91_possible_cycle_is_accepted_case_b() {
+    // v0.9.2 ITEM A/G91 + A1: a program that contains BOTH a stratified negated
     // modal (admissible in isolation) AND a G91 `possible` over a co-evolving target
-    // (the G91 self-fulfilling wall) must STILL reject on the G91 branch. The A1
-    // stratification discriminator runs only AFTER all other rejection reasons are ruled
-    // out, so the pre-existing G91 wall is not weakened.
+    // (the compatibility self-support assumption) is still an admissible Case-B
+    // recursive epistemic program. This guards against regressing to the old
+    // G91-possible rejection while preserving the negated-modal reduction.
     let program = parse_program(
         r#"
         #pragma epistemic_mode = g91
@@ -413,26 +405,42 @@ fn negated_stratified_modal_with_g91_possible_cycle_still_rejects() {
         "#,
     )
     .unwrap();
-    match classify_recursive_epistemic_program(&program) {
-        Err(XlogError::UnsupportedEpistemicConstruct { construct, context }) => {
-            assert_eq!(construct, "recursive epistemic program");
-            assert!(
-                context.contains("G91") && context.contains("self-fulfilling"),
-                "expected the G91 wall to win over the admissible negated modal, got: {context}"
-            );
-        }
-        other => panic!("expected G91 self-fulfilling rejection, got {other:?}"),
-    }
+    assert_eq!(
+        classify_recursive_epistemic_program(&program).unwrap(),
+        RecursiveEpistemicClass::CaseB,
+        "G91 possible recursion plus stratified negated modal remains admissible Case B"
+    );
+    let reduced = try_reduce_case_a_recursive_epistemic_program(&program)
+        .unwrap()
+        .expect("G91 possible recursion plus stratified negated modal reduces");
+    assert!(
+        reduced.rules.iter().any(|rule| {
+            rule.head.predicate == "linked"
+                && rule
+                    .body
+                    .iter()
+                    .all(|lit| !matches!(lit, BodyLiteral::Epistemic(_)))
+        }),
+        "G91 possible-recursion rule must reduce without modal residue"
+    );
+    assert!(
+        reduced.rules.iter().any(|rule| {
+            rule.head.predicate == "safe"
+                && rule.body.iter().any(
+                    |lit| matches!(lit, BodyLiteral::Negated(atom) if atom.predicate == "gate"),
+                )
+        }),
+        "stratified negated modal must reduce to ordinary negation over gate"
+    );
 }
 
 #[test]
-fn g91_possible_over_co_evolving_relation_fails_closed() {
-    // v0.9.2 ITEM A SOUNDNESS FLOOR: under G91 a `possible` modal over a relation that
-    // CO-EVOLVES with the recursion is the autoepistemic SELF-FULFILLING fixpoint, which
-    // the monotone founded-least-fixpoint reduction cannot express. It must fail closed
-    // rather than silently return the FAEEL founded answer under a G91 pragma. (FAEEL
-    // `possible` over the same shape is admitted as Case B -- see
-    // `recursion_with_positive_non_invariant_modal_in_unrelated_rule_is_accepted_case_b`.)
+fn g91_possible_over_co_evolving_relation_is_accepted_as_self_supporting_case_b() {
+    // v0.9.2 ITEM A/G91: under G91 a positive `possible` modal over a relation that
+    // CO-EVOLVES with recursion is the compatibility self-support assumption. The
+    // recursive path admits it as Case B and the reduction drops that non-invariant
+    // positive `possible` conjunct to a tautology instead of resolving it to the FAEEL
+    // founded least-fixpoint atom.
     let program = parse_program(
         r#"
         #pragma epistemic_mode = g91
@@ -446,16 +454,21 @@ fn g91_possible_over_co_evolving_relation_fails_closed() {
         "#,
     )
     .unwrap();
-    match classify_recursive_epistemic_program(&program) {
-        Err(XlogError::UnsupportedEpistemicConstruct { construct, context }) => {
-            assert_eq!(construct, "recursive epistemic program");
-            assert!(
-                context.contains("G91") && context.contains("self-fulfilling"),
-                "expected G91 possible-recursion wall diagnostic, got: {context}"
-            );
-        }
-        other => panic!("expected typed G91 possible-recursion rejection, got {other:?}"),
-    }
+    assert_eq!(
+        classify_recursive_epistemic_program(&program).unwrap(),
+        RecursiveEpistemicClass::CaseB
+    );
+    let reduced = reduce_case_a_epistemic_program_to_ordinary(&program);
+    assert!(
+        reduced.rules.iter().any(|rule| {
+            rule.head.predicate == "linked"
+                && rule
+                    .body
+                    .iter()
+                    .all(|lit| !matches!(lit, BodyLiteral::Epistemic(_)))
+        }),
+        "G91 possible-recursion should reduce to ordinary GPU recursion without modal residue"
+    );
 }
 
 #[test]

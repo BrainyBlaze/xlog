@@ -427,6 +427,22 @@ fn test_derived_head_coupling_stratified_equals_per_stratum_reference() -> Resul
         plan_json.contains("\"plan_kind\":\"epistemic_stratified\""),
         "determined-derived-head coupling must route through the stratified plan, got: {plan_json}"
     );
+    assert!(
+        plan_json.contains("\"cpu_fallback_total_zero\":true"),
+        "full stratified epistemic plan must report aggregate zero CPU fallback: {plan_json}"
+    );
+    assert!(
+        plan_json.contains("\"cpu_fallback_is_zero\":true")
+            && !plan_json.contains("\"cpu_fallback_is_zero\":false"),
+        "every stratified epistemic GPU unit must report zero CPU fallback: {plan_json}"
+    );
+    assert!(
+        plan_json.contains("\"candidate_enumeration\":0")
+            && plan_json.contains("\"world_view_validation\":0")
+            && plan_json.contains("\"solver_search\":0")
+            && plan_json.contains("\"probabilistic_recompute\":0"),
+        "stratified epistemic plan must expose all forbidden CPU-fallback counters at zero: {plan_json}"
+    );
     let joint_result =
         joint_program.evaluate(provider.clone(), std::collections::HashMap::new())?;
     let joint_b = read_unary(&provider, &joint_result.queries[0].buffer);
