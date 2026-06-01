@@ -162,7 +162,10 @@ fn nested_epistemic_with_interior_or_atom_negation_is_stable_typed_error() {
         ("bad(X) :- know not possible edge(X).", "interior negation"),
         ("bad(X) :- possible not know edge(X).", "interior negation"),
         ("bad(X) :- know possible not edge(X).", "negated atom"),
-        ("bad(X) :- not know not possible edge(X).", "interior negation"),
+        (
+            "bad(X) :- not know not possible edge(X).",
+            "interior negation",
+        ),
     ];
     for (src, marker) in cases {
         let err = parse_program(src).unwrap_err();

@@ -1109,8 +1109,8 @@ fn build_nested_modal_chain(pair: Pair<'_, Rule>) -> Result<BodyLiteral> {
         }
     }
 
-    let atom_pair =
-        atom_pair.ok_or_else(|| XlogError::Parse("Missing atom in nested modal chain".to_string()))?;
+    let atom_pair = atom_pair
+        .ok_or_else(|| XlogError::Parse("Missing atom in nested modal chain".to_string()))?;
     if ops.len() < 2 {
         return Err(XlogError::Parse(
             "Nested modal chain must contain at least two epistemic operators".to_string(),
