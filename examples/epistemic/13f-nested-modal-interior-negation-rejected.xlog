@@ -1,0 +1,30 @@
+// v0.9.2 ITEM C boundary: an INTERIOR-negation modal chain stays fail-closed.
+//
+//   q() :- know not possible p().
+//
+// A nested modal CHAIN collapses soundly only for a sequence of bare K/M
+// operators with an optional single LEADING negation. An INTERIOR negation -- a
+// `not` sitting BETWEEN two operators -- is `K (not (M p))` == `K (¬M p)`, which
+// is NOT equivalent to any single `op atom` literal: it is a modal applied to a
+// negated modal sub-formula (a genuine compound-formula nesting, the C2 case).
+// XLOG's single-level epistemic execution path represents only `op atom` and
+// `not op atom` (`¬K p` / `¬M p`), NOT `K ¬M p`, so there is no sound collapse.
+//
+// Rather than emit a WRONG collapse (worse than rejection), this form fails
+// closed with the typed `UnsupportedEpistemicConstruct` diagnostic naming the
+// interior negation. This is the formal scope boundary: bare modal CHAINS (C1)
+// execute; modal-over-a-negated-modal compound formulas (C2) stay rejected with a
+// precise diagnostic.
+//
+// Expect: `xlog run` exits NON-zero with `UnsupportedEpistemicConstruct` /
+// "interior negation between modal operators".
+
+#pragma epistemic_mode = faeel
+
+pred p().
+pred q().
+
+p().
+q() :- know not possible p().
+
+?- q().

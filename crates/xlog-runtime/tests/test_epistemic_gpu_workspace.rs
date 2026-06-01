@@ -519,6 +519,91 @@ fn single_head_modal_only_bound_over_invariant_materializes_q_extension_on_devic
 
 #[cfg(feature = "epistemic-logic-tests")]
 #[test]
+fn nested_modal_chain_collapses_and_materializes_on_device_no_cpu_fallback() {
+    // v0.9.2 ITEM C: a NESTED modal CHAIN executes on the GPU path via the sound
+    // KD45/S5 collapse, with NO CPU fallback and NO CPU candidate enumeration.
+    //
+    // `p(X) :- know possible q(X)` collapses (KM == M, inner operator wins) to
+    // `p(X) :- possible q(X)`. Over an INVARIANT `q`, `possible q == q`, so the
+    // collapsed program routes through the EXACT single-level invariant path:
+    //   q = {1, 2, 3}  ->  p = {1, 2, 3}.
+    // The collapse adds no new evaluator and no CPU work: the REAL counters must be
+    // zero, proving the GPU device path is used end-to-end.
+    let Some(fixture) = runtime_fixture() else {
+        return;
+    };
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = faeel
+        pred p(u32).
+        pred q(u32).
+        q(1). q(2). q(3).
+        p(X) :- know possible q(X).
+        "#,
+    )
+    .expect("parse nested-modal-chain program");
+
+    // The chain must normalize to a SINGLE epistemic literal at the AST boundary,
+    // and the surviving operator must be the INNER one (`possible`, not `know`).
+    // This guards the collapse DIRECTION at the device-test layer too: a wrong
+    // (outer-op) collapse would leave `know` here.
+    let modal: Vec<_> = program
+        .rules
+        .iter()
+        .flat_map(|rule| rule.body.iter())
+        .filter_map(|lit| match lit {
+            xlog_logic::ast::BodyLiteral::Epistemic(e) => Some((e.op, e.negated)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        modal,
+        vec![(xlog_logic::ast::EpistemicOp::Possible, false)],
+        "know possible q must collapse to a single `possible q` literal (inner op wins)"
+    );
+
+    let executable = compile_epistemic_gpu_execution(&program)
+        .expect("collapsed nested-modal chain must compile to GPU execution");
+
+    let mut executor = Executor::new(Arc::clone(&fixture.provider));
+    for (name, rel) in &executable.relation_ids {
+        executor.register_relation(*rel, name);
+    }
+    executor.put_relation("q", upload_unary_u32(&fixture.memory, &[1, 2, 3], "x"));
+
+    let result = executor
+        .execute_epistemic_gpu_execution(
+            &executable,
+            EpistemicGpuWorkspaceCapacities {
+                max_candidates: 8,
+                max_worlds: 2,
+                max_models_per_reduction: 8,
+            },
+        )
+        .expect("collapsed nested-modal chain must execute on device");
+
+    result
+        .require_runtime_dispatch_certification()
+        .expect("runtime result must retain dispatch certification");
+    // REAL no-fallback counters (NOT the cpu_fallback_total_zero JSON string).
+    assert_eq!(result.semantic_trace.cpu_candidate_enumerations, 0);
+    assert_eq!(result.semantic_trace.cpu_world_view_validations, 0);
+    assert!(result.prepared.preflight.cpu_fallbacks.is_zero());
+
+    let mut rows = fixture
+        .provider
+        .download_column::<u32>(&result.final_output, 0)
+        .expect("download p column");
+    rows.sort_unstable();
+    assert_eq!(
+        rows,
+        vec![1u32, 2u32, 3u32],
+        "know possible q == possible q == q (invariant) -> p = {{1,2,3}}"
+    );
+}
+
+#[cfg(feature = "epistemic-logic-tests")]
+#[test]
 fn determined_multicol_binding_modal_materializes_higher_stratum_on_device() {
     // v0.9.2 DETERMINED-EPISTEMIC MULTI-COLUMN BINDING (example 28), POST-MATERIALIZATION
     // higher stratum in isolation. The full program is

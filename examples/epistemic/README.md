@@ -38,7 +38,12 @@ XLOG_USE_DEVICE_RUNTIME=1 cargo test -p xlog-cli --test run_cli_tests test_xlog_
 | Epistemic constraint | `10-epistemic-constraint.xlog` | v0.9.1 EGB-04 constraint prunes world view → `accepted` empty (Ok, not failure) |
 | FAEEL foundedness | `11-faeel-foundedness.xlog` | v0.9.1 EGB-07 founded self-support → `founded={()}`|
 | Bound-variable splitting | `12-bound-variable-splitting.xlog` | v0.9.1 EGB-05/EGB-06 split routing with bound modal membership → `both_known={1}`, `safe_alt={2}` |
-| Nested modal rejection | `13-nested-modal-rejected.xlog` | v0.9.1 EGB-03 typed fail-closed diagnostic for `know possible p()` |
+| Nested modal chain collapse | `13-nested-modal-chain-collapse.xlog` | v0.9.2 ITEM C: `know possible p()` EXECUTES via sound KD45/S5 chain-collapse to `possible p()` (inner op wins); over EDB `p` (determined) → `q={()}`, rows: 1 |
+| Nested modal chain filter | `13b-nested-modal-chain-filter.xlog` | v0.9.2 ITEM C: `know know reachable(X)` (KK≡K) gates `node` by `reachable` → `gated={1,3}` (node 2 dropped; load-bearing) |
+| Nested modal chain negated | `13c-nested-modal-chain-negated.xlog` | v0.9.2 ITEM C: `not know possible blocked(X)` (leading-not distributes, inner `possible` ≡ ordinary over EDB) → `allowed={1,3}` (nodes 2,4 blocked-out; load-bearing) |
+| Nested chain FAEEL-unfounded | `13d-nested-modal-chain-faeel-unfounded.xlog` | v0.9.2 ITEM C per-mode: `p():-possible possible p()` (MM≡M) is the chain form of ex31 → FAEEL `rows: 0` (unfounded, absent) |
+| Nested chain G91-accepted | `13e-nested-modal-chain-g91-accepted.xlog` | v0.9.2 ITEM C per-mode: SAME chain under G91 → `rows: 1`. 13d (FAEEL 0) vs 13e (G91 1) is the inherited mode-difference (mirrors 31 vs 32) |
+| Nested modal interior-negation (rejected) | `13f-nested-modal-interior-negation-rejected.xlog` | v0.9.2 ITEM C boundary: `know not possible p()` ≡ `K ¬M p` is a modal-over-negated-modal compound (C2) with NO sound collapse → typed `UnsupportedEpistemicConstruct` "interior negation between modal operators" |
 | Mixed-literal membership | `14-mixed-literal-membership.xlog` | v0.9.2 Bundle 1 EGB-02B global modal gate + per-row bound membership compose conjunctively → `reachable={1,3}` |
 | Recursive epistemic closure | `15-recursive-epistemic-closure.xlog` | v0.9.2 Bundle 2 Case-A recursive fixpoint: `reach(X,Z):-reach(X,Y),know edge(Y,Z)` → `{(1,2),(2,3)}` plus derived `(1,3)` |
 | Recursive epistemic chain | `15-recursive-epistemic-chain.xlog` | v0.9.2 Bundle 2 Case-A multi-hop: 4-chain → full closure incl. 3-hop `(1,4)` (proves not single-pass) |
@@ -105,8 +110,25 @@ the modal relation's arity. Only genuinely UNBOUNDED or UNTYPED structured forms
 stay rejected, and they reject with a precise `ResourceExhausted` finiteness
 diagnostic rather than a blanket unsupported-construct error (example 23b).
 
-The remaining fail-closed cases are the GENUINELY-UNDEFINED forms, covered by
+Nested modal operators (ITEM C) are no longer rejected wholesale. A bare modal
+CHAIN — a sequence of `know`/`possible` operators over an atom, with an optional
+single LEADING `not` — collapses to a single epistemic literal under the KD45/S5
+modal axioms XLOG's autoepistemic operators assume: the operator ADJACENT to the
+atom wins (`know possible p ≡ possible p`, `know know p ≡ know p`,
+`possible possible p ≡ possible p`), and a leading `not` distributes. The collapse
+is a SOUND modal-logic equivalence applied as AST normalization — it routes through
+the existing single-level epistemic path with no new world-of-worlds evaluator —
+and holds in BOTH modes (FAEEL/G91 differ only in which world views are admissible,
+which the collapsed single-level literal inherits unchanged; examples 13/13b/13c
+execute, 13d/13e show the inherited FAEEL-vs-G91 mode split). The remaining
+fail-closed boundary for nesting is C2 modal-over-a-negated-modal compound formulas
+— an INTERIOR negation (`know not possible p ≡ K ¬M p`, example 13f) or an
+atom-adjacent negation (`know possible not p ≡ M ¬p`) — which have no sound collapse
+to a single `op atom` literal and stay rejected with a typed
+`UnsupportedEpistemicConstruct` ("interior negation"/"negated atom") rather than a
+wrong collapse.
+
+The remaining fail-closed cases are the other GENUINELY-UNDEFINED forms, covered by
 negative pilots: circular modality (a modal over the relation being recursively
 computed, example 22), FAEEL-unfounded self-support (the defined rejection; G91
-accepts it), syntactic nested modal operators (example 13), and unbounded/untyped
-modal tuple-keys (example 23b).
+accepts it), and unbounded/untyped modal tuple-keys (example 23b).

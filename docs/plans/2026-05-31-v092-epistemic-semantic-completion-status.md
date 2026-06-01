@@ -41,8 +41,19 @@ is closed under composition:
     targets fail closed with `recursive epistemic program` / "not invariant".
   - **FAEEL-unfounded self-support** (`p() :- possible p()` with no independent founded
     support) — the FAEEL-defined rejection (G91 accepts).
-  - **Syntactic nested modal operators** (`know possible p()`) — EGB-03 parse-time typed
-    diagnostic.
+  - **C2 modal-over-a-negated-modal compound formulas** — an INTERIOR negation
+    (`know not possible p ≡ K ¬M p`) or atom-adjacent negation (`know possible not p ≡ M ¬p`)
+    has no sound collapse to a single `op atom` literal → typed `UnsupportedEpistemicConstruct`
+    ("interior negation"/"negated atom"). (ITEM C, example 13f.)
+
+> **ITEM C UPDATE (v0.9.2):** bare modal CHAINS (`know possible p()`, `know know p()`,
+> `not know possible p()`) NO LONGER reject. They collapse via the KD45/S5 modal axioms to
+> the operator ADJACENT to the atom (inner wins; leading `not` distributes) as a sound AST
+> normalization, routing through the existing single-level epistemic path with no new
+> evaluator. The collapse holds in BOTH modes (FAEEL/G91 differ only in admissible world
+> views, which the collapsed literal inherits). Examples 13/13b/13c execute with exact
+> tuples; 13d (FAEEL `rows:0`) vs 13e (G91 `rows:1`) shows the inherited mode-difference;
+> 13f is the C2 fail-closed boundary above.
 
 These genuinely-undefined cases are the load-bearing **over-broadening gates**: because the
 determined-closure acceptance check is permissive, the failure mode of loosening it is

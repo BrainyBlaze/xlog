@@ -1,0 +1,23 @@
+// v0.9.2 ITEM C: the G91 companion to 13d -- the SAME nested-modal-chain
+// self-support program under explicit G91 mode.
+//
+//   p() :- possible possible p().
+//
+// The chain `possible possible p()` collapses (MM == M) to `possible p()`, the
+// chain form of example 32. Under G91 the autoepistemic model ACCEPTS circular
+// self-support (the stripped-modal filler founds it), so `p` holds -> rows: 1.
+//
+// The ONLY change from 13d is the mode pragma. 13d (FAEEL rows: 0) vs 13e (G91
+// rows: 1) is the EXACT per-mode divergence of the collapsed chain, identical to
+// the 31-vs-32 single-level pair. This proves the chain collapse FORWARDS the
+// mode difference soundly rather than masking or altering it.
+//
+// Expect under G91: accepted, rows: 1.
+
+#pragma epistemic_mode = g91
+
+pred p().
+
+p() :- possible possible p().
+
+?- p().

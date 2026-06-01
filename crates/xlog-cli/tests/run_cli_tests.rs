@@ -347,6 +347,33 @@ fn test_xlog_run_epistemic_examples() {
             "report",
             "rows: 0",
         ),
+        // v0.9.2 ITEM C: NESTED MODAL OPERATORS execute via sound chain-collapse.
+        // A modal chain collapses (KD45/S5) to the operator ADJACENT to the atom;
+        // a leading `not` distributes. The collapse routes through the existing
+        // single-level epistemic path (no new evaluator). ex13 `know possible p()`
+        // collapses to `possible p()` over EDB `p` (determined) -> q holds, rows: 1.
+        ("13-nested-modal-chain-collapse.xlog", "q", "rows: 1"),
+        // 13b: `know know reachable(X)` (KK == K) gates `node` by `reachable`.
+        // Load-bearing: gated = node intersect reachable = {1, 3} (node 2 dropped).
+        ("13b-nested-modal-chain-filter.xlog", "gated", "| 1  |"),
+        ("13b-nested-modal-chain-filter.xlog", "gated", "| 3  |"),
+        // 13c: `not know possible blocked(X)` -- leading negation distributes,
+        // chain collapses to `possible` -> `not possible blocked == not blocked`
+        // (anti-join over EDB). Load-bearing: allowed = node \ blocked = {1, 3}.
+        ("13c-nested-modal-chain-negated.xlog", "allowed", "| 1  |"),
+        ("13c-nested-modal-chain-negated.xlog", "allowed", "| 3  |"),
+        // 13d: `p() :- possible possible p()` (MM == M) is the CHAIN form of ex31.
+        // The collapse forwards the per-mode foundedness difference: under FAEEL the
+        // circular self-support is unfounded -> p absent -> rows: 0.
+        (
+            "13d-nested-modal-chain-faeel-unfounded.xlog",
+            "p",
+            "rows: 0",
+        ),
+        // 13e: the SAME chain program under explicit G91 ACCEPTS self-support ->
+        // rows: 1. 13d (FAEEL rows:0) vs 13e (G91 rows:1) is the exact per-mode
+        // divergence of the collapsed chain (mirrors 31 vs 32 with a chain).
+        ("13e-nested-modal-chain-g91-accepted.xlog", "p", "rows: 1"),
     ];
 
     for (example, expected_relation, expected_value) in examples {
@@ -386,7 +413,13 @@ fn test_xlog_run_epistemic_examples() {
 }
 
 #[test]
-fn test_xlog_run_nested_modal_reports_typed_epistemic_diagnostic() {
+fn test_xlog_run_nested_modal_interior_negation_reports_typed_epistemic_diagnostic() {
+    // v0.9.2 ITEM C: bare modal CHAINS (`know possible p()`) now EXECUTE via sound
+    // collapse (asserted in `test_xlog_run_epistemic_examples` for ex13/13b/13c/13d/
+    // 13e). The remaining fail-closed boundary is INTERIOR-negation chains
+    // (`know not possible p()` == `K ¬M p`), a modal-over-a-negated-modal compound
+    // formula (C2) with NO sound collapse to a single `op atom` literal. It MUST
+    // stay rejected with the typed diagnostic rather than emit a wrong collapse.
     let _device = match CudaDevice::new(0) {
         Ok(d) => d,
         Err(_) => {
@@ -401,7 +434,7 @@ fn test_xlog_run_nested_modal_reports_typed_epistemic_diagnostic() {
         .expect("workspace root");
     let program = repo_root
         .join("examples/epistemic")
-        .join("13-nested-modal-rejected.xlog");
+        .join("13f-nested-modal-interior-negation-rejected.xlog");
     let output = cargo_bin_cmd!("xlog")
         .args([
             "run",
@@ -413,14 +446,16 @@ fn test_xlog_run_nested_modal_reports_typed_epistemic_diagnostic() {
         .expect("run xlog binary");
     assert!(
         !output.status.success(),
-        "nested modal example must fail closed, stdout:\n{}\nstderr:\n{}",
+        "interior-negation modal chain must fail closed, stdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("UnsupportedEpistemicConstruct"), "{stderr}");
-    assert!(stderr.contains("nested epistemic literal"), "{stderr}");
-    assert!(stderr.contains("know possible p()"), "{stderr}");
+    assert!(
+        stderr.contains("interior negation between modal operators"),
+        "{stderr}"
+    );
 }
 
 #[test]

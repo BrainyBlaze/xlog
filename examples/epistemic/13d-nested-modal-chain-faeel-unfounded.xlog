@@ -1,0 +1,31 @@
+// v0.9.2 ITEM C: a NESTED modal CHAIN whose collapse inherits the FAEEL-vs-G91
+// MODE difference (the per-mode soundness witness).
+//
+//   p() :- possible possible p().
+//
+// The chain `possible possible p()` collapses (MM == M, axiom 5) to
+// `possible p()`, so this program is the chain form of example 31:
+//   p() :- possible possible p().   ==   p() :- possible p().
+// The collapse adds NO new evaluator -- it routes through the same single-level
+// `possible p` self-support path. Therefore it inherits that path's per-mode
+// behaviour EXACTLY: under default FAEEL the circular self-support is UNFOUNDED
+// (no independent founded derivation), so `p` is ABSENT from the founded model.
+//
+// This is the per-mode soundness witness for the collapse: the FAEEL-vs-G91
+// divergence is the SINGLE-LEVEL divergence (which world views are admissible),
+// inherited unchanged by the collapsed literal -- NOT a divergence introduced by
+// the collapse. The collapse is sound in both modes; it merely forwards the mode.
+//
+// Companion: 13e (the SAME chain program under explicit g91) accepts -> rows: 1.
+// The 13d (FAEEL rows: 0) vs 13e (G91 rows: 1) pair mirrors 31 vs 32 exactly,
+// proving the chain collapse preserves the mode-difference.
+//
+// Expect under FAEEL: accepted, rows: 0 (p absent from the founded model).
+
+#pragma epistemic_mode = faeel
+
+pred p().
+
+p() :- possible possible p().
+
+?- p().
