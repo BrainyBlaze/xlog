@@ -2,23 +2,21 @@
 // constraint `:- know flagged(X).` does NOT prune when the modal relation
 // `flagged` is EMPTY: no binding of X satisfies `know flagged(X)`, so the
 // existential body is false in the accepted model and the world view survives.
-// `report` = {1} (one row, exit 0). The mode difference 34 (rows: 0) vs 35
+// `report` holds (rows: 1, exit 0). The mode difference 34 (rows: 0) vs 35
 // (rows: 1) is the EXACT load-bearing effect of the variable-keyed existential
 // constraint: same program shape, only the modal relation's extension differs.
 
 #pragma epistemic_mode = faeel
 
-pred seed(u32).
-pred gate(u32).
+pred gate().
 pred flagged(u32).
-pred report(u32).
+pred report().
 
-seed(1).
-gate(1).
+gate().
 // flagged is intentionally EMPTY: no fact -> `know flagged(X)` false for all X.
 
-report(X) :- seed(X), know gate(X).
+report() :- know gate().
 
 :- know flagged(X).
 
-?- report(X).
+?- report().
