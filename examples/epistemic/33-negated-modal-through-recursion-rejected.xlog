@@ -1,0 +1,33 @@
+// v0.9.2 ITEM A SOUNDNESS FLOOR (NEGATIVE): a NEGATED modal over a relation that
+// CO-EVOLVES with the program's ordinary recursion must FAIL CLOSED.
+//
+// Unlike the accepted Case-B fixpoint (positive `know`/`possible` over a
+// co-evolving target -> founded LEAST fixpoint), a NEGATED modal through the
+// recursion is NON-MONOTONE: `not know reach` shrinks as `reach` grows, so the
+// monotone least-fixpoint reduction cannot express its semantics -- evaluating it
+// soundly needs stable-model machinery (a host-side semantic solver), which the
+// GPU production path does not provide. So it fails closed rather than returning a
+// silently-wrong (or base-only) result.
+//
+// Expected (exit 1):
+//   Error: UnsupportedEpistemicConstruct { construct: "recursive epistemic
+//   program", context: "rule for `linked` uses a NEGATED modal literal `not know`
+//   over a relation that is not invariant ... non-monotone through the recursion
+//   ..." }
+
+#pragma epistemic_mode = faeel
+
+pred vertex(u32).
+pred seed(u32, u32).
+pred linked(u32, u32).
+pred reach(u32, u32).
+
+vertex(1). vertex(2). vertex(3).
+seed(1, 2).
+
+reach(X, Y) :- linked(X, Y).
+reach(X, Z) :- reach(X, Y), linked(Y, Z).
+linked(X, Y) :- vertex(X), vertex(Y), not know reach(X, Y).
+linked(X, Y) :- seed(X, Y).
+
+?- reach(X, Y).
