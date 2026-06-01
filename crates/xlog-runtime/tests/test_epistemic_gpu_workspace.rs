@@ -9053,9 +9053,15 @@ fn egb06_cross_arity_same_name_solved_identically_split_and_unsplit() {
     };
 
     let upload_sources = |executor: &mut Executor| {
-        executor.put_relation("seed", upload_binary_u32(&fixture.memory, &seed_rows, "x", "y"));
+        executor.put_relation(
+            "seed",
+            upload_binary_u32(&fixture.memory, &seed_rows, "x", "y"),
+        );
         executor.put_relation("p/1", upload_unary_u32(&fixture.memory, &p1_rows, "x"));
-        executor.put_relation("p/2", upload_binary_u32(&fixture.memory, &p2_rows, "x", "y"));
+        executor.put_relation(
+            "p/2",
+            upload_binary_u32(&fixture.memory, &p2_rows, "x", "y"),
+        );
     };
 
     // --- SPLIT path ---
