@@ -178,7 +178,43 @@ fn main() {
         if !status.success() {
             panic!("nvcc failed to compile {name}.cu to portable PTX");
         }
+
+        // Portability downgrade: the embedded portable PTX is JIT-compiled by the
+        // target machine's driver. A newer toolkit (e.g. CUDA 13.x -> PTX ISA 9.x)
+        // stamps a `.version` that older drivers reject with
+        // CUDA_ERROR_UNSUPPORTED_PTX_VERSION. When XLOG_PTX_MAX_VERSION is set (e.g.
+        // "8.4" for CUDA 12.4 drivers), rewrite the `.version` directive down to that
+        // ISA. The sm_75 baseline kernels use no ISA-9-only constructs, so this is a
+        // sound downgrade (verified offline with the matching ptxas).
+        maybe_downgrade_ptx_version(&ptx_path);
     }
 
     write_embedded_kernel_data(&out_dir);
+}
+
+/// Rewrite the `.version` directive of a portable PTX file to the ISA named by
+/// XLOG_PTX_MAX_VERSION (no-op when unset or already lower).
+fn maybe_downgrade_ptx_version(ptx_path: &Path) {
+    println!("cargo:rerun-if-env-changed=XLOG_PTX_MAX_VERSION");
+    let target = match env::var("XLOG_PTX_MAX_VERSION") {
+        Ok(v) if !v.trim().is_empty() => v.trim().to_string(),
+        _ => return,
+    };
+    let text = fs::read_to_string(ptx_path)
+        .unwrap_or_else(|e| panic!("read PTX {}: {e}", ptx_path.display()));
+    let mut out = String::with_capacity(text.len());
+    let mut rewritten = false;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if !rewritten && trimmed.starts_with(".version ") {
+            let indent = &line[..line.len() - trimmed.len()];
+            out.push_str(&format!("{indent}.version {target}\n"));
+            rewritten = true;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    fs::write(ptx_path, out)
+        .unwrap_or_else(|e| panic!("write downgraded PTX {}: {e}", ptx_path.display()));
 }
