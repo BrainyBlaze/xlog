@@ -10,12 +10,13 @@ use xlog_logic::epistemic::{
 use xlog_logic::{parse_program, BodyLiteral};
 
 #[test]
-fn non_case_a_recursive_epistemic_program_fails_closed() {
-    // Recursion whose modal literal ranges over a NON-INVARIANT relation (here the
-    // modal atom `know derived_edge(...)` references a relation that itself depends on
-    // the recursive `reach`) is outside the admissible Case-A fragment: its gated
-    // extension changes as the recursion iterates, so it must fail closed with a typed
-    // diagnostic rather than be silently mis-evaluated.
+fn positive_modal_over_co_evolving_relation_is_accepted_case_b() {
+    // v0.9.2 ITEM A: recursion whose POSITIVE modal `know derived_edge(...)` ranges
+    // over a NON-INVARIANT relation that CO-EVOLVES with the recursion (`derived_edge`
+    // depends on the recursive `reach`) is an admissible Case-B program: modal truth and
+    // ordinary derivation co-evolve to a FOUNDED least fixpoint. The positive modal is
+    // resolved into the recursive SCC and iterated on the semi-naive engine (the least
+    // model of the resulting positive program IS its founded model). It is NOT rejected.
     let program = parse_program(
         r#"
         pred vertex(u32).
@@ -29,17 +30,35 @@ fn non_case_a_recursive_epistemic_program_fails_closed() {
         "#,
     )
     .unwrap();
-    match classify_recursive_epistemic_program(&program) {
-        Err(XlogError::UnsupportedEpistemicConstruct { construct, context }) => {
-            assert_eq!(construct, "recursive epistemic program");
-            assert!(
-                context.contains("not invariant"),
-                "expected non-invariant modal diagnostic, got: {context}"
-            );
-        }
-        other => panic!("expected typed non-Case-A recursive rejection, got {other:?}"),
-    }
-    // The single-pass GPU planner must also reject any ordinary recursion.
+    assert_eq!(
+        classify_recursive_epistemic_program(&program).unwrap(),
+        RecursiveEpistemicClass::CaseB,
+        "positive modal over a co-evolving relation is admissible Case B"
+    );
+    // Reduces to an ordinary recursive program: every positive modal resolves to a
+    // positive ordinary atom (`know derived_edge` -> `derived_edge`), with no residual
+    // modal literal, so the semi-naive engine computes the founded fixpoint.
+    let reduced = try_reduce_case_a_recursive_epistemic_program(&program)
+        .unwrap()
+        .expect("admissible Case-B program reduces to an ordinary recursive program");
+    let modal_literals = reduced
+        .rules
+        .iter()
+        .flat_map(|rule| rule.body.iter())
+        .filter(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
+        .count();
+    assert_eq!(
+        modal_literals, 0,
+        "Case-B reduce removes all modal literals"
+    );
+    assert!(
+        reduced.rules.iter().any(|rule| rule.body.iter().any(
+            |lit| matches!(lit, BodyLiteral::Positive(atom) if atom.predicate == "derived_edge")
+        )),
+        "the co-evolving positive modal must resolve to a positive `derived_edge` atom"
+    );
+    // The SINGLE-PASS GPU planner still rejects any ordinary recursion (Case-B routes
+    // through the ordinary recursive engine, not this planner).
     assert!(matches!(
         plan_epistemic_gpu_execution(&program),
         Err(XlogError::UnsupportedEpistemicConstruct { .. })
@@ -125,14 +144,13 @@ fn negated_modal_over_non_invariant_in_recursion_fails_closed() {
 }
 
 #[test]
-fn recursion_with_non_invariant_modal_in_unrelated_rule_fails_closed() {
-    // Soundness guard: the Case-A reduction rewrites EVERY modal literal in the
-    // program to a positive atom over its gated relation, so a modal literal in a
-    // rule that does NOT itself participate in the recursion must still be invariant.
-    // Here `maybe(X) :- node(X), possible choice(X)` ranges over `choice`, which is
-    // epistemic-defined (non-invariant), so blanket-rewriting `possible choice(X)`
-    // would be unsound. The whole program must therefore fail closed even though the
-    // recursive `reach` rules are themselves Case A.
+fn recursion_with_positive_non_invariant_modal_in_unrelated_rule_is_accepted_case_b() {
+    // v0.9.2 ITEM A: a FAEEL program with ordinary recursion (`reach`) AND a POSITIVE
+    // `possible choice(X)` over the epistemic-defined (non-invariant) `choice` is an
+    // admissible Case-B program. The positive modal is resolved to a positive ordinary
+    // atom and the whole program runs as a founded least fixpoint -- `choice` is itself
+    // founded (seed + `know edge`), so resolving `possible choice` -> `choice` and
+    // iterating computes the founded model. It is NOT rejected.
     let program = parse_program(
         r#"
         pred vertex(u32).
@@ -151,19 +169,56 @@ fn recursion_with_non_invariant_modal_in_unrelated_rule_fails_closed() {
         "#,
     )
     .unwrap();
+    assert_eq!(
+        classify_recursive_epistemic_program(&program).unwrap(),
+        RecursiveEpistemicClass::CaseB,
+        "positive `possible` over a non-invariant founded relation is admissible Case B under FAEEL"
+    );
+    let reduced = try_reduce_case_a_recursive_epistemic_program(&program)
+        .unwrap()
+        .expect("admissible Case-B program reduces");
+    assert_eq!(
+        reduced
+            .rules
+            .iter()
+            .flat_map(|rule| rule.body.iter())
+            .filter(|lit| matches!(lit, BodyLiteral::Epistemic(_)))
+            .count(),
+        0,
+        "Case-B reduce removes all modal literals"
+    );
+}
+
+#[test]
+fn g91_possible_over_co_evolving_relation_fails_closed() {
+    // v0.9.2 ITEM A SOUNDNESS FLOOR: under G91 a `possible` modal over a relation that
+    // CO-EVOLVES with the recursion is the autoepistemic SELF-FULFILLING fixpoint, which
+    // the monotone founded-least-fixpoint reduction cannot express. It must fail closed
+    // rather than silently return the FAEEL founded answer under a G91 pragma. (FAEEL
+    // `possible` over the same shape is admitted as Case B -- see
+    // `recursion_with_positive_non_invariant_modal_in_unrelated_rule_is_accepted_case_b`.)
+    let program = parse_program(
+        r#"
+        #pragma epistemic_mode = g91
+        pred vertex(u32).
+        pred linked(u32, u32).
+        pred reach(u32, u32).
+        vertex(1). vertex(2). vertex(3).
+        reach(X, Y) :- linked(X, Y).
+        reach(X, Z) :- reach(X, Y), linked(Y, Z).
+        linked(X, Y) :- vertex(X), vertex(Y), possible reach(X, Y).
+        "#,
+    )
+    .unwrap();
     match classify_recursive_epistemic_program(&program) {
         Err(XlogError::UnsupportedEpistemicConstruct { construct, context }) => {
             assert_eq!(construct, "recursive epistemic program");
             assert!(
-                context.contains("not invariant"),
-                "expected non-invariant modal diagnostic, got: {context}"
-            );
-            assert!(
-                context.contains("choice"),
-                "diagnostic should name the offending modal relation, got: {context}"
+                context.contains("G91") && context.contains("self-fulfilling"),
+                "expected G91 possible-recursion wall diagnostic, got: {context}"
             );
         }
-        other => panic!("expected typed fail-closed for non-invariant modal, got {other:?}"),
+        other => panic!("expected typed G91 possible-recursion rejection, got {other:?}"),
     }
 }
 
@@ -250,6 +305,30 @@ fn modal_self_support_is_not_treated_as_ordinary_recursion() {
     .unwrap();
     plan_epistemic_gpu_execution(&program)
         .expect("modal self-support with independent foundation must not be rejected as recursion");
+}
+
+#[test]
+fn bare_modal_self_support_stays_non_recursive_not_case_b() {
+    // v0.9.2 ITEM A regression: a bare modal self-support (`p() :- know p()` /
+    // `p() :- possible p()`) has NO ordinary recursion edge -- the only self-dependency
+    // is through the modal literal, which contributes no recursion edge. It must stay
+    // `NonRecursive` (handled by item B's single-pass founded-extension path: rows:0
+    // FAEEL / rows:1 G91) and NEVER be rerouted into Case-B by the relaxation.
+    for source in ["p() :- know p().", "p() :- possible p()."] {
+        let program = parse_program(source).unwrap();
+        assert_eq!(
+            classify_recursive_epistemic_program(&program).unwrap(),
+            RecursiveEpistemicClass::NonRecursive,
+            "bare modal self-support `{source}` must stay NonRecursive, not Case-B"
+        );
+        // try_reduce returns None (no ordinary recursion to route to the engine).
+        assert!(
+            try_reduce_case_a_recursive_epistemic_program(&program)
+                .unwrap()
+                .is_none(),
+            "bare modal self-support `{source}` must not produce a Case-A/B reduction"
+        );
+    }
 }
 
 #[test]
