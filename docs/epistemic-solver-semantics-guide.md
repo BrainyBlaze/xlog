@@ -247,9 +247,10 @@ fixtures. It is a non-empty set of accepted stable models. Over a world view:
 - `not know p/arity` is true when `know p/arity` is false.
 - `not possible p/arity` is true when `possible p/arity` is false.
 
-The current implementation constructs these world views directly in tests. It
-does not yet derive them from arbitrary EIR through GPU-native
-Generate-Propagate-Test execution.
+The accepted production path derives bounded candidate world views from EIR
+through the GPU Generate-Propagate-Test executor for the supported epistemic
+surface. Fixture-constructed `EpistemicWorldView` values remain CPU oracle/test
+surfaces only and are not release evidence by themselves.
 
 ## Epistemic Source Surface
 

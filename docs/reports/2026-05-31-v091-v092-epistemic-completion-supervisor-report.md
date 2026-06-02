@@ -7,6 +7,8 @@ semantic completion (the determined-modal family).
 **Branch:** `feat/v092-epistemic-semantic-completion` @ `3c33ac81` (base `4b91e911`, the
 v0.9.1 tip; 30 commits).
 **Release status:** NOT pushed, NOT tagged — the release tag is user-gated.
+**Superseded by:** `docs/reports/2026-06-02-v092-epistemic-final-closure-record.md`
+for the final v0.9.2 package/release status and the exact GPU-backed WFS contract.
 
 ---
 
@@ -149,11 +151,15 @@ Every modal target is in exactly one class, and the boundary is closed under com
   determined-ordinary-derived, determined-epistemic-derived; unary and multi-column;
   filtering and binding; `know`/`possible`/`not know`/`not possible`; coupling and
   recursion.
-- **NON-DETERMINED** (no fixed extension) → **correctly fail-closed** (the right answer,
-  not deferral): circular / Case-B recursion THROUGH the modal predicate (ex 22),
-  FAEEL-unfounded self-support (ex 31), syntactic nested modal operators (ex 13). These are
-  CI-enforced **over-broadening gates** — because the determined-closure acceptance check
-  is permissive, they assert no undefined program leaks a wrong-but-non-empty answer.
+- **NON-DETERMINED / recursive-boundary cases** are resolved by their defined
+  semantics when one exists: positive Case-B founded recursion executes to the
+  founded least fixpoint, FAEEL-unfounded self-support executes to the defined
+  empty founded extension, explicit G91 self-support accepts, finite nested modal
+  chains normalize by parity/duality, and cyclic negated-modal recursion routes
+  through the `xlog-gpu` GPU-backed WFS plan under the no-old-host-WFS-solver
+  contract. Only forms with no founded, G91, WFS, finite-key, or safe-variable
+  interpretation remain fail-closed; those are CI-enforced over-broadening gates
+  so undefined programs cannot leak wrong non-empty answers.
 
 ---
 

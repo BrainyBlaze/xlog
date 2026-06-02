@@ -1,6 +1,6 @@
 # XLOG Language Reference
 
-> **Release context:** XLOG `v0.9.0-rc` + v0.9.1 / v0.9.2 epistemic executor completion (unreleased)
+> **Release context:** XLOG `v0.9.2`
 > **Language coverage:** Core v0.8.0 language, the v0.8.5 language-completeness contract, the v0.9.0 epistemic solver surface, the v0.9.1 epistemic executor completion (EIR-derived candidate enumeration, value-level modal membership, per-tuple-key FAEEL foundedness, ground epistemic constraints, safe split, and joint multi-epistemic solving), and the v0.9.2 semantic completion (mixed global+per-row modal gates compose conjunctively; finite nested modal chains normalize by parity/duality; same-name multi-arity disambiguates by arity-qualified tuple sources; recursive execution covers Case-A/determined stratification, positive Case-B/G91 recursion, stratified negated modals, and cyclic negated modals through the `xlog-gpu` GPU-backed WFS plan without the old `xlog_prob` host-WFS solver; only genuinely unbounded, unsafe, or unfounded modal cycles remain fail-closed)
 > **Last Updated:** June 2026
 

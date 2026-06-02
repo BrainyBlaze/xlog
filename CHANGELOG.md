@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.9.2] — 2026-06-02
+
 v0.9.2 Epistemic Executor Semantic Completion. Closes the three honest
 Category-B semantic gaps tracked after v0.9.1, all validated on the production
 `xlog run` path.

@@ -35,9 +35,11 @@ is closed under composition:
   base modal) or STRATIFIED execution (modal over a determined derived head).
 - **NON-DETERMINED / boundary cases**:
   - **Cyclic negated-modal recursion** (example 33) reduces to a non-monotone ordinary SCC.
-    The sound semantics is WFS, and the current candidate routes it through GPU-native
-    alternating fixpoint. Host WFS is not an admitted fallback. Fresh focused/full gates are
-    still required before using this as merge evidence.
+    The sound semantics is WFS, and the final closure routes it through the
+    `xlog-gpu` GPU-backed WFS plan without the old `xlog_prob` host-WFS solver.
+    This is not a device-resident/no-host-interaction WFS residency claim; host
+    orchestration and metadata convergence reads may still occur. Fresh
+    focused/full gates passed under this exact contract.
   - **FAEEL-unfounded self-support** (`p() :- possible p()` with no independent founded
     support) executes to the FAEEL-defined empty founded extension (`rows: 0`); the G91
     companion accepts (`rows: 1`).

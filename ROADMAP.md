@@ -2067,9 +2067,12 @@ fallback locks.
       multi-column, binding) is gated once and materialized into the store as a lower
       stratum, and the higher stratum gates against it via the existing filter — the
       `know R ≡ R` theorem applied at the store boundary (no resolve-into-body, no
-      double-gating). The determined-modal family is now complete: every modal target
-      is either determined (resolved) or non-determined (correctly fail-closed —
-      circular/Case-B recursion, FAEEL-unfounded self-support, syntactic nested).
+      double-gating). The determined-modal family is now complete under the exact
+      v0.9.2 contract: determined targets resolve; positive Case-B/G91 recursion,
+      FAEEL-unfounded self-support, finite nested modal chains, and WFS-defined
+      negated-modal recursion execute with their defined semantics; only forms with
+      no founded, G91, WFS, finite-key, or safe-variable interpretation stay
+      fail-closed.
 
 ## v0.9.2 - Epistemic Executor Semantic Completion
 

@@ -20,9 +20,10 @@
 //
 // Previously this failed closed with a `cross-component epistemic coupling`
 // diagnostic (the modal target `r` is an ordinary head, not a direct epistemic head).
-// That scope limit is now closed; the genuinely-undefined cases (circular modality in
-// a recursive SCC, syntactic nested modals, FAEEL-unfounded self-support, compound
-// tuple-key modals) remain fail-closed.
+// That scope limit is now closed; finite nested modal chains, FAEEL-unfounded
+// self-support, and finite structured tuple keys have defined v0.9.2 behavior.
+// Only genuinely cyclic modal coupling with no founded/WFS order, unbounded tuple
+// keys, and unsafe unbound variables remain fail-closed.
 //
 // GATE LOAD-BEARING: dropping the modal would give b = node = {1, 2}; the `know r`
 // gate restricts b to r's extension. With node = {1, 2}, p = {1}:

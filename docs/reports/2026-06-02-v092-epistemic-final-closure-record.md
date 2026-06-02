@@ -2,6 +2,7 @@
 
 **Date:** 2026-06-02
 **Branch:** `v092-epistemic-release-closure`
+**Package version:** `0.9.2`
 **Final implementation SHA:** `f231278b`
 **Local main:** `975ab780`
 **Main ancestry:** `main` is an ancestor of `f231278b`
