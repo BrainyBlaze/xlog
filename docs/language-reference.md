@@ -1530,9 +1530,12 @@ as ordinary predicates.
 | `not know atom(...)` | The atom is not known in every accepted world/model. |
 | `not possible atom(...)` | The atom is absent from every accepted world/model. |
 
-Nested modal operators such as `know possible fact()` are recognized so they can
-fail with a typed unsupported-epistemic diagnostic. They are not accepted
-program forms.
+Finite nested modal chains such as `know possible fact()`,
+`not know possible fact()`, and `know not possible fact()` are accepted program
+forms. The parser normalizes them to a single epistemic literal by the v0.9.2
+parity/duality rules: the operator adjacent to the atom determines the modal
+operator, while leading/interior/atom-adjacent `not` tokens dualize or negate
+the resulting literal according to their position.
 
 ### Epistemic Mode Pragma
 

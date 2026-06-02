@@ -1,12 +1,13 @@
 # Epistemic Semantics And EIR
 
-This document records the v0.9.0 Epistemic Intermediate Representation (EIR)
-boundary. EIR exists so epistemic constructs stay explicit until a semantic
-mode can evaluate them; they must not be hidden as ordinary predicate rewrites.
+This document records the v0.9.x Epistemic Intermediate Representation (EIR)
+boundary and accepted GPU execution surface. EIR exists so epistemic constructs
+stay explicit until a semantic mode can evaluate them; they must not be hidden
+as ordinary predicate rewrites.
 
 ## Source Surface
 
-The initial frontend surface is intentionally small:
+The accepted frontend surface is finite and explicit:
 
 - `#pragma epistemic_mode = faeel`
 - `#pragma epistemic_mode = g91`
@@ -14,10 +15,14 @@ The initial frontend surface is intentionally small:
 - `possible atom(...)`
 - `not know atom(...)`
 - `not possible atom(...)`
+- finite nested modal chains such as `know possible atom(...)`,
+  `not know possible atom(...)`, and `know not possible atom(...)`
 
 `faeel` is the default mode when no pragma is present. `g91` is an explicit
-compatibility mode. Nested epistemic operators such as `know possible p(X)` are
-recognized as unsupported epistemic constructs and return a typed diagnostic.
+compatibility mode. Finite nested chains are accepted and normalized by the
+parser's modal parity/duality rules before EIR/GPU planning; genuinely
+unbounded, unsafe, or unfounded modal cycles still fail closed with typed
+diagnostics.
 
 ## Frontend Representation
 
@@ -265,27 +270,27 @@ around that hot path and records `EpistemicGpuTransferBudgetTrace`, rejecting
 tracked data-plane H2D/D2H deltas instead of resetting shared provider
 telemetry.
 
-This workspace is still incomplete for full epistemic execution. It proves the
-buffer categories are allocatable, initialized on device, and inspectable on the
-runtime side and that WCOJ certification is tied to actual counter deltas around
-the production reduced-plan dispatch. Candidate-assumption generation,
-propagation staging, candidate-buffer validation, arity-zero through arity-three
-stable-model tuple-source model-membership staging with row-scoped ground key
-comparison over existing relation columns, bounded all-required-membership
-world-view validation staging, accepted-candidate materialization staging, and
-final-result flag plus final tuple materialization staging now have CUDA
-kernels, and the bounded hot path
-records zero tracked host transfers. Bound-variable tuple-key matching,
-arbitrary arity, full world-view semantics,
-solver/probability production-path reuse, and complete accepted-execution
-timing evidence remain open.
+This workspace is the production path for the current accepted v0.9.x epistemic
+execution surface. It proves the buffer categories are allocatable, initialized
+on device, inspectable on the runtime side, and tied to actual counter deltas
+around production reduced-plan dispatch. Candidate-assumption generation,
+propagation staging, candidate-buffer validation, arity-zero through bounded
+nonzero-arity stable-model tuple-source model-membership staging, row-scoped
+ground and bound-variable tuple-key comparison over existing relation columns,
+bounded all-required-membership world-view validation staging,
+accepted-candidate materialization staging, final-result flag staging, and final
+tuple materialization staging have CUDA kernels. The bounded hot path records
+zero tracked host transfers for the accepted runtime evidence. Remaining
+non-claims are genuinely unbounded or dynamically shaped tuple keys, unsupported
+arities outside the finite metadata layout, and stronger device-resident/no-host
+WFS residency; they are not open gaps in the accepted v0.9.x release surface.
 
 ## G91 Compatibility Fixture Semantics
 
-`crates/xlog-logic/src/epistemic.rs` contains the current bounded fixture
-evaluator for mode-selection tests. It is not the full production epistemic
-executor. It exists to make the G91 compatibility mode testable before the
-later FAEEL and Generate-Propagate-Test sub-goals land.
+`crates/xlog-logic/src/epistemic.rs` contains the bounded fixture evaluator used
+by mode-selection tests. It remains an oracle layer for unit-level G91/FAEEL
+distinctions; production G91, FAEEL foundedness, GPT, split, and integration
+evidence now lives in the accepted runtime gates.
 
 The fixture evaluator uses an `EpistemicInterpretation` with two predicate/arity
 sets:
@@ -308,8 +313,11 @@ exercises the G91-only self-support case `p() :- possible p().` through the
 production reduced runtime path. The reduced empty-body nullary fact is loaded
 through the existing relation-buffer/fact path, then model membership is read
 from the stable tuple-source buffer, one world view is accepted, and CPU
-candidate/world-view fallback counters remain zero. This fixture narrows the
-G91 parity gap but does not close full G91/FAEEL/GPT/splitting parity.
+candidate/world-view fallback counters remain zero. Together with the FAEEL
+foundedness, G91, split, GPT, and integration matrices, this closes the
+v0.9.x accepted-surface parity gap between the explicit FAEEL and G91 modes.
+Broader non-finite or unsupported semantic forms remain typed boundaries, not
+release-surface parity gaps.
 
 ## FAEEL Default Fixture Semantics
 
@@ -337,9 +345,10 @@ self-support such as `p() :- possible p().` before reduced ordinary runtime
 lowering. For zero-arity predicates, if `p/0` has a separate ordinary rule with
 no epistemic body literals, the self-`possible` rule is treated as
 independently founded and may lower into accepted GPU runtime execution.
-Nonzero-arity self-`possible` rules fail closed until lowering can prove
-tuple-level foundedness for each bound key. Unsupported self-support is allowed
-only with explicit `#pragma epistemic_mode = g91`.
+Nonzero-arity self-`possible` rules are accepted when lowering can prove
+tuple-level foundedness for each finite bound key; unsupported unbounded
+self-support still fails closed in default FAEEL. Self-supported world views are
+allowed only with explicit `#pragma epistemic_mode = g91`.
 
 ## Generate-Propagate-Test Fixture Execution
 
@@ -395,24 +404,26 @@ By contrast, fixtures such as `a(X) :- node(X), know edge(X).` and
 shared extensional input rather than a derived component head.
 
 Epistemic integrity constraints are not silently lowered through the reduced
-ordinary program (no ordinary-RIR constraint rewrite). As of v0.9.1 (EGB-04),
-ground modal integrity constraints (`:- know g().`, `:- possible g().`,
+ordinary program (no ordinary-RIR constraint rewrite). As of v0.9.x, ground
+modal integrity constraints (`:- know g().`, `:- possible g().`,
 `:- not possible g().`) have an explicit GPU semantic representation: a
 constraint kernel prunes candidate world views whose body holds, recording the
 firing constraint index per candidate (surfaced as
-`result.semantic_trace.constraint_violation_indices`). Constraint forms outside
-this fragment — variable tuple keys, bodies mixing relational/comparison literals
-with modal literals, constraint-only programs, and epistemic constraints on the
-split/GPT paths — still fail closed with a typed `UnsupportedEpistemicConstruct`.
+`result.semantic_trace.constraint_violation_indices`). The accepted surface also
+covers safe variable-keyed modal constraints and shared-variable joins after
+program-level normalization. Constraint forms outside the finite, safe surface
+— genuinely unbounded tuple keys, unsupported dynamic predicate shapes, or
+unfounded modal cycles — still fail closed with typed diagnostics.
 
 As of v0.9.1 (EGB-06), `split_epistemic_program` no longer blanket-rejects a rule
 that couples more than one distinct epistemic body predicate. Such a rule's modal
 predicates are unioned into a single component that the joint path solves as a
 full modal conjunction over the candidate world view (matching unsplit
-execution); independent heads remain independent components. Unsafe same-name
-multi-arity coupling and joint conditions depending on unsupported tuple-key or
-nested-modal semantics still fail closed with a typed
-`UnsupportedEpistemicConstruct`.
+execution); independent heads remain independent components. As of v0.9.2,
+same-name multi-arity coupling is resolved by arity-qualified tuple sources, and
+finite nested-modal-dependent joint conditions are normalized before the joint
+path. Only genuinely unsafe, unbounded, or unfounded coupling remains a typed
+fail-closed boundary.
 
 For valid split fixtures, `EpistemicSplitPlan::recomposed_rule_indices` sorts the
 component rule indices and must equal the unsplit source rule order. This gives a
@@ -424,8 +435,8 @@ valid epistemic split components. Each subprogram is lowered through
 `compile_epistemic_gpu_execution_with_stats_snapshot`, so split execution reuses
 the same GPU contract, reduced production compiler pipeline, WCOJ promotion, and
 helper-splitting surfaces as the unsplit epistemic executable path. This is not a
-separate split-only WCOJ or tuple-store engine, and it remains bounded evidence
-until full accepted-runtime semantic parity is covered.
+separate split-only WCOJ or tuple-store engine; it is split-plan evidence paired
+with the accepted runtime parity gates.
 
 Accepted split runtime evidence now also includes a world-view parity fixture:
 split `possible edge(X)` and `not know edge(X)` components execute through

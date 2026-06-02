@@ -14,9 +14,9 @@
 
 \subsection{Future Work}
 
-The following directions are planned but \textbf{not yet implemented} in any released version of xlog.
+The following directions remain outside the current released contract.
 
-\textbf{Epistemic logic programming (xlog-elp).} The EIR (Epistemic Intermediate Representation) slot is reserved in the IR stack (\Cref{sec:arch}), but no runtime code has been written. The planned design supports world views under FAEEL (Founded Autoepistemic Equilibrium Logic) semantics with modal operators K (known in all belief sets) and M (possible in some belief set), evaluated via a Generate--Propagate--Test algorithm on GPU. This is targeted for v0.6.0 (\texttt{ROADMAP.md}).
+\textbf{Epistemic residency expansion.} The v0.9.x line implements an accepted EIR/GPU epistemic execution surface with FAEEL default semantics, G91 compatibility mode, finite nested modal-chain normalization, split/joint planning, tuple-key membership, and GPU-backed runtime paths. The remaining future work is stronger residency and coverage: device-resident/no-host-interaction WFS, broader non-finite tuple-key forms, and semantic forms outside the finite accepted release surface.
 
 \textbf{Out-of-core execution.} For programs whose materialized relations exceed GPU memory, a streaming execution mode would partition relations across host and device, paging tiles through GPU memory in fixpoint-iteration order. This would remove the single-GPU-memory ceiling described above, at the cost of added host-device transfer overhead.
 
