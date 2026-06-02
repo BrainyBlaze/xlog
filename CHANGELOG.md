@@ -100,7 +100,7 @@ typed boundary:
   assumption.
 - Negated-modal recursion that is stratified reduces to ordinary anti-join after
   the lower fixpoint materializes; cyclic negated-modal recursion routes through
-  GPU-native WFS alternating fixpoint rather than host WFS, with committed
+  GPU-backed WFS alternating fixpoint rather than host WFS, with committed
   examples covering mode `{FAEEL,G91}` x modal `{not know,not possible}` x seed
   `{present,absent}` for both plain WFS and WFS plus ordinary EDB negation.
 - Genuinely cyclic modal coupling with no founded/WFS order remains typed
@@ -191,15 +191,19 @@ recorded in `docs/plans/2026-05-29-v091-epistemic-executor-completion-status.md`
   not as derived component producers. Components still coalesce on ordinary
   derived dependencies and integrity constraints.
 
-### Known gaps (v0.9.1, tracked — NOT claimed complete)
+### Known gaps (v0.9.1, tracked — closed or narrowed in v0.9.2)
 
 - **EGB-02 mixed per-row + global modal literal in one rule:** _CLOSED in v0.9.2
   (EGB-02B)_ — the two gate classes now compose conjunctively on the GPU path.
-- **Recursive epistemic fixpoints:** _CANDIDATE CLOSED in v0.9.2; fresh gates
-  required before merge evidence_ — Case-A invariant-modal recursion,
+- **Recursive epistemic fixpoints:** _CLOSED in v0.9.2 under the exact
+  GPU-backed WFS contract_ — Case-A invariant-modal recursion,
   determined-head stratification, positive Case-B founded recursion, G91 positive
   `possible` recursion, stratified negated-modal recursion, and cyclic
-  negated-modal recursion through GPU-native WFS execute through `xlog run`.
+  negated-modal recursion through the `xlog-gpu` GPU-backed WFS plan execute
+  through `xlog run` without the old `xlog_prob` host-WFS solver. This closure
+  is not a device-resident/no-host-interaction WFS residency claim; the WFS path
+  still uses host orchestration and may use metadata row-count reads for
+  convergence.
   The focused WFS example set covers mode, negated-modal operator,
   seed-present/seed-absent, ordinary EDB-negation-in-SCC axes, and a load-bearing
   EDB target-state axis where `not banned(2)` flips the seed-founded reach tuple.

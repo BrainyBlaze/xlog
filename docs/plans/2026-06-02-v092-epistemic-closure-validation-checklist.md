@@ -1,8 +1,12 @@
 # v0.9.2 Epistemic Closure Validation Checklist
 
-Status: pending. This file is a validation runbook, not passing evidence.
+Status: passed for the no-old-host-WFS-solver contract. This file records the validation runbook
+and expected evidence surface; the release claim remains narrower than device-resident/no-host
+interaction WFS.
 
-Purpose: after the GPU-native WFS and C2 evidence expansions, the branch must still be proven against the original HOLD_FOR_FIXES blockers with fresh current-state gates. Do not use stale green runs or source-only edits as completion evidence.
+Purpose: after the GPU-backed WFS and C2 evidence expansions, the branch must be proven against
+the original blockers with fresh current-state gates. Do not use stale green runs or source-only
+edits as completion evidence.
 
 ## Fixture families that must stay in validation scope
 
@@ -23,12 +27,13 @@ the original examples is insufficient.
 
 ## Original blockers mapped to required evidence
 
-### 1. Accepted WFS path must be GPU-native, not host WFS
+### 1. Accepted WFS path must use the `xlog-gpu` GPU-backed WFS plan, not the old host WFS solver
 
 Required source evidence:
 - `crates/xlog-gpu/Cargo.toml` has no `xlog-prob` dependency.
 - `crates/xlog-gpu/src/logic.rs` has no old host-WFS solver tokens: `xlog_prob`, `evaluate_wfs_rules`, `ground_wfs_program`, `LogicExecutionPlan::EpistemicWfs(`, `WfsRule`, `WfsLiteral`, `WfsConfig`, or `PirGraph`.
 - WFS plan JSON reports `plan_kind:"epistemic_wfs_gpu"`, `reduction:"wfs_gpu_recursive"`, `host_wfs_fallback_allowed:false`, `wfs_gpu_passes:["overapprox","lower","upper"]`, deterministic `wfs_fixed_relations`, and explicit `wfs_convergence_predicates`.
+- This gate does not prove a device-resident/no-host-interaction WFS residency contract; host orchestration and metadata convergence reads are outside this checklist's closure claim.
 
 Required focused gates:
 ```bash
@@ -54,13 +59,13 @@ the canonical ex33 fixture is not enough. The `33e*` cells are specifically load
 ### 2. Release docs must not contradict closure status
 
 Required evidence:
-- Release docs must state GPU-native WFS candidate implemented, gates pending.
+- Release docs must state the `xlog-gpu` GPU-backed WFS plan is implemented and freshly gated under the no-old-host-WFS-solver contract.
 - Release docs must not say G91 possible recursion or accepted cyclic WFS is undone.
-- Release docs must distinguish implemented source from unverified merge evidence.
+- Release docs must not market the WFS path as device-resident/no-host-interaction WFS.
 
 Suggested stale-language scan:
 ```bash
-rg -n "missing GPU-native WFS|WFS gap|host-side CPU|wfs-rejected|13f-nested-modal-interior-negation-rejected|G91 possible.*undone|cyclic WFS cases without a GPU-native executor" docs CHANGELOG.md ROADMAP.md examples/epistemic crates/xlog-cli/tests crates/xlog-gpu/tests
+rg -n "missing GPU-backed WFS|WFS gap|host-side CPU|wfs-rejected|13f-nested-modal-interior-negation-rejected|G91 possible.*undone|cyclic WFS cases without a GPU-native executor|GPU-native WFS|requires device-resident/no-host-interaction WFS|guarantees device-resident/no-host-interaction WFS" docs CHANGELOG.md ROADMAP.md examples/epistemic crates/xlog-cli/tests crates/xlog-gpu/tests
 ```
 
 Expected result: no matches except intentional historical quotations that are explicitly marked superseded or rejected evidence.

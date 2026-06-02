@@ -698,7 +698,7 @@ pub enum RecursiveEpistemicClass {
     /// ADMISSION IS POLARITY/MODE-SCOPED (proved in
     /// [`classify_recursive_epistemic_program`]): a NEGATED modal over a non-invariant
     /// target is admitted when the reduced ordinary program is stratified; a genuine
-    /// negation cycle is delegated to the high-level GPU-native WFS alternating-fixpoint
+    /// negation cycle is delegated to the high-level GPU-backed WFS alternating-fixpoint
     /// executor. A `possible` modal over a co-evolving target is
     /// admitted under FAEEL as the founded least fixpoint and under G91 as the
     /// compatibility self-support assumption.
@@ -825,7 +825,7 @@ pub fn classify_recursive_epistemic_program(program: &Program) -> Result<Recursi
     //   * a NEGATED modal over a non-invariant target is admitted as Case B. If the
     //     reduced program is stratified, ordinary stratified negation is enough; if it
     //     contains a reduced cycle through negation, the high-level executor routes it
-    //     to GPU-native WFS rather than host WFS.
+    //     to GPU-backed WFS rather than host WFS.
     //   * a `possible` modal over a co-evolving target under G91 is admitted as the
     //     compatibility self-support assumption. FAEEL `possible` remains the founded
     //     least fixpoint. (A non-recursive `possible` self-support stays NonRecursive
@@ -833,7 +833,7 @@ pub fn classify_recursive_epistemic_program(program: &Program) -> Result<Recursi
     let invariant = InvariantRelations::analyze(program);
     let mut saw_case_b = false;
     // A NEGATED modal over a NON-invariant target is admissible after reduction. The
-    // high-level executor chooses ordinary stratified execution or GPU-native WFS based
+    // high-level executor chooses ordinary stratified execution or GPU-backed WFS based
     // on the reduced program's monotonicity.
     let mut saw_negated_non_invariant_modal = false;
     for rule in &program.rules {
@@ -870,7 +870,7 @@ pub fn classify_recursive_epistemic_program(program: &Program) -> Result<Recursi
                 // negation), the sound semantics is the 3-valued WELL-FOUNDED model
                 // (R partly UNDEFINED). Host-side WFS / stable-model solving remains
                 // precluded by the no-host-solver lock, so the high-level executor
-                // delegates that reduced program to the GPU-native WFS path.
+                // delegates that reduced program to the GPU-backed WFS path.
                 saw_negated_non_invariant_modal = true;
                 saw_case_b = true;
                 continue;
@@ -887,7 +887,7 @@ pub fn classify_recursive_epistemic_program(program: &Program) -> Result<Recursi
     // WALL A1 DISCRIMINATOR: a deferred negated-modal-over-non-invariant is accepted
     // as Case B. The high-level executor inspects the reduced ordinary program: no
     // negation cycle routes to ordinary stratified execution; a negation cycle routes
-    // to the GPU-native WFS alternating-fixpoint plan.
+    // to the GPU-backed WFS alternating-fixpoint plan.
     if saw_negated_non_invariant_modal {
         // Stratified reduced programs continue through the ordinary semi-naive path.
         // Non-monotone reduced programs are handled by the high-level GPU compiler's

@@ -1,6 +1,6 @@
 // WFS exhaustive matrix cell: mode faeel, cyclic recursion through not possible, seed-absent.
 // v0.9.2 A1: accepted cyclic negated-modal recursion routes through the
-// GPU-native WFS alternating-fixpoint path, not host WFS.
+// GPU-backed WFS alternating-fixpoint path, not host WFS.
 // Seed support is absent in this matrix cell.
 // Expected WFS true tuples: none; every vertex x vertex reach tuple is undefined/absent.
 #pragma epistemic_mode = faeel

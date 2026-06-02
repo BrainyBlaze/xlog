@@ -2038,11 +2038,13 @@ fallback locks.
       through production `xlog run`. Genuinely-cyclic modal coupling
       (`a:-know b. b:-know a.`, no founded order) stays typed fail-closed
       end-to-end.
-- [ ] Recursive epistemic execution candidate covers Case-A/invariant and
+- [x] Recursive epistemic execution covers Case-A/invariant and
       determined-head stratification, positive Case-B founded recursion, G91
       positive `possible` recursion, stratified negated-modal recursion, and
-      cyclic negated-modal recursion through GPU-native WFS. Fresh focused and
-      full gates are still required before marking this roadmap cell complete.
+      cyclic negated-modal recursion through the `xlog-gpu` GPU-backed WFS plan.
+      Fresh focused and full gates passed under the no-old-host-WFS-solver
+      contract. This is not a device-resident/no-host-interaction WFS residency
+      claim.
       The WFS example surface covers the finite mode x negated-modal operator x
       seed-state matrix, both with and without ordinary EDB negation in the same
       reduced SCC, plus a load-bearing EDB target-state matrix. Host WFS is not an accepted production fallback. Unsupported

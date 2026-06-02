@@ -88,9 +88,9 @@ not_kw = @{ "not" ~ !ident_continue }
 // `not know possible p()`). It is NOT rejected at parse time: the parser
 // builder collapses it to a single epistemic literal using the modal-logic
 // (KD45/S5) equivalence in which the operator ADJACENT to the atom wins
-// (`know possible p ≡ possible p`, `know know p ≡ know p`) and a LEADING `not`
-// is preserved. Interior negations (a `not` between two operators) are scoped
-// out with a precise typed diagnostic — see the parser builder.
+// (`know possible p ≡ possible p`, `know know p ≡ know p`). Leading,
+// interior, and atom-adjacent `not` tokens are accepted in the finite chain and
+// folded by the parser builder's parity/duality rules.
 nested_modal_chain = {
     not_kw? ~ epistemic_op ~ (not_kw? ~ epistemic_op)+ ~ not_kw? ~ atom
 }

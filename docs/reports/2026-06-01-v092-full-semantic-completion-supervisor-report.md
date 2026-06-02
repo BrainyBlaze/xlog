@@ -59,32 +59,36 @@ load-bearing mutation/flip, guarded for soundness, and merged only with all gate
 
 ---
 
-## Current candidate status — validation pending
+## Current candidate status — fresh gates passed under the exact WFS contract
 
-The branch must not claim full semantic completion until fresh gates pass. Current source has
-removed the accepted host-side WFS route and now attempts cyclic negated-modal recursion through
-a GPU-native alternating-fixpoint WFS plan instead of CPU-backed execution.
+The branch may claim v0.9.2 semantic closure only under the contract actually
+implemented and verified: accepted cyclic negated-modal recursion no longer
+routes through the old `xlog_prob` host WFS solver, `xlog-gpu` no longer depends
+on `xlog-prob`, and the high-level executor builds the `xlog-gpu`
+GPU-backed alternating-fixpoint WFS plan. This is **not** a
+device-resident/no-host-interaction WFS residency claim; the path still has host
+orchestration, and convergence may use metadata row-count reads.
 
-1. **Recursion negation-cycle (ex 33) — GPU-native WFS candidate implemented, gates pending.**
-   The reduced ordinary program contains a non-monotone SCC, so the high-level GPU compiler now
-   builds a GPU-native WFS alternating-fixpoint plan. `wfs.rs` remains host-only (pure
-   `HashSet`/`HashMap`, used by the CPU prob-provenance path); the no-host-solver lock still
-   forbids routing accepted epistemic programs through it, and `xlog-gpu` no longer declares an
-   `xlog-prob` dependency. Required evidence is a fresh focused
-   ex33/`33a*`/`33c*`/33b/`33d*`/`33e*` CLI matrix pass, the
-   CUDA-independent `xlog-gpu` manifest/source guard, WFS compile/plan-kind matrix over mode,
-   negated-modal operator, seed-state, and ordinary-EDB-negation axes, and zero-iteration
-   clamp check with deterministic single-, multi-predicate, and ordinary-EDB-negation
-   `wfs_fixed_relations` JSON plus explicit `wfs_convergence_predicates` and `wfs_gpu_passes`,
-   `host_wfs_fallback_allowed:false`, the same full-axis GPU runtime WFS matrix plus fixed-name
-   collision regression, and the broader release gates. The exact blocker-to-gate checklist is
-   `docs/plans/2026-06-02-v092-epistemic-closure-validation-checklist.md`.
+1. **Recursion negation-cycle (ex 33) — GPU-backed WFS plan verified under the
+   no-old-host-WFS-solver contract.** The reduced ordinary program contains a
+   non-monotone SCC, so the high-level GPU compiler builds a GPU-backed WFS
+   alternating-fixpoint plan. `wfs.rs` remains host-only (pure
+   `HashSet`/`HashMap`, used by the CPU prob-provenance path); the
+   no-host-solver lock forbids routing accepted epistemic programs through it,
+   and `xlog-gpu` no longer declares an `xlog-prob` dependency. Fresh focused
+   evidence covers ex33/`33a*`/`33c*`/33b/`33d*`/`33e*`, the
+   CUDA-independent `xlog-gpu` manifest/source guard, WFS compile/plan-kind
+   matrix over mode, negated-modal operator, seed-state, and
+   ordinary-EDB-negation axes, the zero-iteration clamp, deterministic single-,
+   multi-predicate, and ordinary-EDB-negation `wfs_fixed_relations` JSON,
+   explicit `wfs_convergence_predicates`, `wfs_gpu_passes`, and
+   `host_wfs_fallback_allowed:false`, the same full-axis GPU runtime WFS matrix,
+   and a fixed-name collision regression.
 
-2. **Same-name multi-arity via `xlog run` — done in current source, but requires rerun gates.**
+2. **Same-name multi-arity via `xlog run` — done and freshly gated.**
    The full production path now has committed `42a*` and `42b*` matrix fixtures, plus a CLI
    test that covers arity `{1,2}` × modal form `{K,M,not K,not M}` × tuple state and every
-   cross-arity conjunction cell. This item must not be listed as undone, but the current edit
-   set still needs focused and full gate reruns before any merge claim.
+   cross-arity conjunction cell. This item must not be listed as undone.
 
 3. **C2 interior-negation / finite nested negation matrix — done in current source, gates pending.**
    The fixture is now named `13f-nested-modal-interior-negation.xlog`, declares and asserts
@@ -93,7 +97,7 @@ a GPU-native alternating-fixpoint WFS plan instead of CPU-backed execution.
    `{present,absent}` x mode `{FAEEL,G91}`. The broader 13g-13v matrix covers all
    64 two-operator negation cells over `{know,possible}^2`, leading/interior/atom-adjacent
    negation, and present/absent atoms under FAEEL; 13w* replays those cells under explicit G91.
-   Fresh focused/full gates are still required before using it as merge evidence; see
+   Fresh focused/full gates passed before using it as merge evidence; see
    `docs/plans/2026-06-02-v092-epistemic-closure-validation-checklist.md`.
 
 ---
@@ -101,18 +105,22 @@ a GPU-native alternating-fixpoint WFS plan instead of CPU-backed execution.
 ## Process notes
 
 - **Soundness discipline tightened:** cyclic WFS is no longer accepted through host grounding or
-  host WFS; the candidate source routes it through GPU-native WFS and still needs fresh gates.
+  host WFS; the current source routes it through the `xlog-gpu` GPU-backed WFS
+  plan and the fresh gates have passed under that exact contract.
 - **Accepted examples expanded:** same-name multi-arity, single-modal truth tables, and WFS
   cyclic-negated mode/operator cases now have finite fixture matrices rather than one-off pilots.
 - **Verified floor protected:** an incomplete EIR-layer attempt at the diagonal (accepted at
   planning but un-materialized at execution) was reverted rather than shipped, then redone
   correctly at the Program/`normalize_program` layer.
-- **Honest accounting over surface completion:** current edits require fresh gate evidence. Do
-  not reuse the older green SHA as proof for this tree.
+- **Honest accounting over surface completion:** the release claim must remain
+  scoped to the verified contract. Do not market this as device-resident or
+  no-host-interaction WFS unless a separate residency implementation and gate
+  set lands.
 
 ## Recommendation
 
-**HOLD_FOR_FIXES.** If v0.9.2 requires accepted cyclic negated-modal recursion, the remaining
-missing deliverable is GPU-native WFS (or explicit host-WFS authorization). If that case is
-scoped as a boundary for this release, rerun the focused and full gates on the current tree and
-record the new evidence before any merge/tag decision.
+**MERGE_CANDIDATE under the exact WFS contract above.** If v0.9.2 is marketed
+as "no old host-WFS solver for accepted cyclic negated-modal recursion," the
+implementation and gates satisfy that claim. If v0.9.2 instead requires a
+device-resident/no-host-interaction WFS residency contract, this branch is still
+`HOLD_FOR_FIXES` for that stronger requirement.

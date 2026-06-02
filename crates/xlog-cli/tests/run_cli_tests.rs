@@ -1249,7 +1249,7 @@ fn test_xlog_run_recursion_through_modal_computes_founded_fixpoint() {
 #[test]
 fn test_xlog_run_negated_modal_through_recursion_uses_gpu_wfs_engine() {
     // v0.9.2 A1 closure: a NEGATED modal whose target CYCLES through recursion via
-    // negation now executes through the GPU-native WFS alternating-fixpoint path.
+    // negation now executes through the GPU-backed WFS alternating-fixpoint path.
     //
     // Covers every cyclic-negated WFS modal cell across:
     //   mode {FAEEL,G91}

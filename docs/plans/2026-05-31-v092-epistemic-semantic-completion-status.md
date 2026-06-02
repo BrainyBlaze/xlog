@@ -103,7 +103,7 @@ positive `know`/`possible` filter+bind over EDB (06/07/14/18/19/21) and over det
 derived heads (16/17/24/25/27/28/30); negated `not know`/`not possible` over EDB (19/21/26)
 and over a determined derived head (29). NON-determined targets are now classified by their
 real semantics rather than a generic rejection bucket: founded-empty FAEEL (31), G91
-self-support (32), stratified ordinary negation (37), GPU-native WFS (33), or typed
+self-support (32), stratified ordinary negation (37), GPU-backed WFS (33), or typed
 unfounded/unsafe boundaries (13/22/23).
 
 ### Inadmissible as GPU-native acceptance evidence
@@ -133,13 +133,15 @@ through the production path (device suite grew **131 → 144**):
   identical to ordinary `:- not r(X)` — the sound answer for an ill-formed program, not a
   "missing feature" diagnostic (commit `e0e7d2a9`).
 
-### Remaining items — classified by their REAL nature (no relabeling)
+### Closure items — classified by their REAL nature (no relabeling)
 
-1. **Recursion negation-cycle (ex33) → GPU-native WFS candidate implemented, pending gates.**
+1. **Recursion negation-cycle (ex33) → CLOSED under the exact GPU-backed WFS contract.**
    The high-level GPU compiler now detects the non-monotone reduced SCC and routes it through
-   a GPU-native alternating-fixpoint WFS plan. `wfs.rs` remains host-only (`HashSet`/`HashMap`,
+   a GPU-backed alternating-fixpoint WFS plan. `wfs.rs` remains host-only (`HashSet`/`HashMap`,
    CPU prob-provenance path) and is still not an accepted production fallback; `xlog-gpu` no
-   longer declares an `xlog-prob` dependency. The focused example surface now includes the
+   longer declares an `xlog-prob` dependency. This is not a
+   device-resident/no-host-interaction WFS residency claim: host orchestration remains, and
+   convergence may use metadata row-count reads. The focused example surface now includes the
    canonical ex33 fixture, the `33a*` operator/mode matrix covering `{FAEEL,G91} ×
    `{not know,not possible}`, the `33c*` seed-state matrix adding seed `{present,absent}`,
    `33b` for WFS plus ordinary EDB negation, the `33d*` matrix covering the same
@@ -153,10 +155,9 @@ through the production path (device suite grew **131 → 144**):
    multi-predicate, and ordinary-EDB-negation `wfs_fixed_relations` maps in WFS plan JSON; explicit
    `wfs_convergence_predicates` and `wfs_gpu_passes` in WFS plan JSON; explicit
    `host_wfs_fallback_allowed:false`; the same full-axis GPU runtime matrix; and a fixed-relation
-   name-collision regression for user-owned `__wfs_*` predicates.
-   Fresh focused and full gates are required before using this as merge evidence; use
-   `docs/plans/2026-06-02-v092-epistemic-closure-validation-checklist.md` as the exact
-   blocker-to-gate checklist.
+   name-collision regression for user-owned `__wfs_*` predicates. Fresh focused and full gates
+   have passed under this exact no-old-host-WFS-solver contract; use
+   `docs/plans/2026-06-02-v092-epistemic-closure-validation-checklist.md` as the gate ledger.
 
 2. **E1 shared-variable join / diagonal / negated-difference (`:- know p(X), possible q(X)`,
    `:- know p(X,X)`, `:- q(X), not know p(X)`) → DONE (commits `f449bc43`, `bee3a0de`,
@@ -177,14 +178,15 @@ through the production path (device suite grew **131 → 144**):
    asserts the load-bearing prune. Gates: device 144, integration 206, split 44,
    run_cli_tests 12.
 
-3. **Same-name multi-arity coupling via `xlog run` → DONE in current source, pending fresh
-   gates.** The production path now includes the base disambiguation example plus exhaustive
+3. **Same-name multi-arity coupling via `xlog run` → DONE and freshly gated.**
+   The production path now includes the base disambiguation example plus exhaustive
    `42a*` and `42b*` matrix fixtures covering single-literal arity cells and every cross-arity
-   conjunction. Do not list this as an undone semantic boundary; rerun the CLI matrix and full
-   gates before using it as merge evidence.
+   conjunction. Do not list this as an undone semantic boundary.
 
 Honest boundary: current source has closed C2 interior-negation, same-name multi-arity, FAEEL
-empty-extension self-support, G91 possible recursion, stratified negated recursion, GPU-native
+empty-extension self-support, G91 possible recursion, stratified negated recursion, GPU-backed
 WFS for ex33/33a/33c/33b/33d/33e cyclic negated-modal recursion, and the shared-variable constraint joins.
-Fresh focused/full gates are required before any merge-ready claim; the current checklist is
+The WFS claim is limited to the no-old-host-WFS-solver contract above, not a
+device-resident/no-host-interaction residency contract. Fresh focused/full gates
+have passed for this release surface; the current checklist is
 `docs/plans/2026-06-02-v092-epistemic-closure-validation-checklist.md`.

@@ -377,9 +377,11 @@ removed `xlog-stats → xlog-cuda` (was unused), added `xlog-neural → xlog-cor
 
 **v0.9.2 epistemic WFS boundary:** `xlog-gpu` intentionally has no `xlog-prob`
 dependency. Accepted cyclic negated-modal WFS execution must route through the
-GPU-native WFS plan in `xlog-gpu`; the host `HashMap`/`HashSet` WFS implementation
+GPU-backed WFS plan in `xlog-gpu`; the host `HashMap`/`HashSet` WFS implementation
 in `xlog-prob` remains a probabilistic/provenance subsystem and is not an accepted
-fallback for production epistemic execution.
+fallback for production epistemic execution. This boundary is not a
+device-resident/no-host-interaction WFS residency guarantee: host orchestration
+and metadata row-count reads may still participate in WFS convergence.
 
 ### Crate Responsibilities
 

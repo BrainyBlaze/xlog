@@ -450,7 +450,7 @@ fn test_wall_a1_wfs_plan_kind_matrix_compiles_without_cuda() -> Result<()> {
         );
         assert!(
             plan_json.contains("\"plan_kind\":\"epistemic_wfs_gpu\""),
-            "{mode}/{modal}: plan kind must be GPU-native WFS, got: {plan_json}"
+            "{mode}/{modal}: plan kind must be GPU-backed WFS, got: {plan_json}"
         );
         assert!(
             plan_json.contains("\"units\":[]"),
@@ -693,7 +693,7 @@ fn test_wall_a1_negated_modal_cycle_routes_to_gpu_wfs_matrix() -> Result<()> {
         );
         assert!(
             plan_json.contains("\"plan_kind\":\"epistemic_wfs_gpu\""),
-            "{mode}/{modal}: plan kind must be GPU-native WFS, got: {plan_json}"
+            "{mode}/{modal}: plan kind must be GPU-backed WFS, got: {plan_json}"
         );
         assert!(
             plan_json.contains("\"units\":[]"),

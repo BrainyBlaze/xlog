@@ -1,6 +1,6 @@
 // WFS matrix cell: mode g91, cyclic recursion through not know.
 // v0.9.2 A1: the reduced ordinary program contains a non-monotone SCC and
-// executes through the GPU-native WFS alternating-fixpoint path.
+// executes through the GPU-backed WFS alternating-fixpoint path.
 //
 // `xlog run` emits true WFS tuples only:
 //   TRUE:      reach(1,2)

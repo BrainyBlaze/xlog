@@ -1,5 +1,5 @@
 // WFS + EDB-negation exhaustive matrix cell: mode g91, cyclic recursion through not possible, seed-absent.
-// v0.9.2 A1: the same GPU-native WFS plan must handle ordinary anti-joins
+// v0.9.2 A1: the same GPU-backed WFS plan must handle ordinary anti-joins
 // inside the reduced non-monotone SCC.
 // Seed support is absent in this matrix cell.
 // Expected WFS true tuples: none; every vertex x vertex reach tuple is undefined/absent.

@@ -1238,7 +1238,7 @@ impl LogicProgram {
         }
 
         Err(XlogError::ResourceExhausted {
-            context: "GPU-native WFS alternating fixpoint iterations".to_string(),
+            context: "GPU-backed WFS alternating fixpoint iterations".to_string(),
             estimated_bytes: wfs.max_iterations as u64,
             budget_bytes: wfs.max_iterations as u64,
         })
@@ -2762,7 +2762,7 @@ fn collect_eir_epistemic_literals(program: &Program) -> Vec<xlog_ir::EirEpistemi
 /// JSON summary for an epistemic source that reduced to a high-level recursive
 /// execution plan without single-pass epistemic GPU candidate units. Case-A/B
 /// stratified reductions use the ordinary semi-naive engine; cyclic negated-modal
-/// reductions use the GPU-native WFS alternating-fixpoint plan. In both cases the
+/// reductions use the GPU-backed WFS alternating-fixpoint plan. In both cases the
 /// modal literals are recorded and CPU fallback is zero by construction.
 fn epistemic_provenance_summary_json(
     plan_kind: &str,
