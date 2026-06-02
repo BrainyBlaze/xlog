@@ -1921,31 +1921,6 @@ validator.
       `cargo test -p xlog-solve --test gpu_solver_production_reuse`, and
       `cargo test -p xlog-integration --test test_epistemic_gpu_wcoj_execution`.
 
-### Concurrency Hardening Retargeted Out Of v0.9.0 Closure
-
-- [ ] **Retargeted: certify same-process multi-executor concurrency
-      against one CUDA primary context.** Surfaced by the
-      v0.6.0 A3/A4 stress harness
-      (`crates/xlog-integration/tests/test_a3_a4_stress.rs`,
-      commit `27ec3bd9`): A3 in-process thread-of-N drift
-      (~3% on recursive Datalog workloads) is reproducible
-      against the legacy default path (no
-      `XLOG_USE_DEVICE_RUNTIME`, no `XLOG_USE_RECORDED_OPS`),
-      so it is NOT a v0.6.0 stream-safety bug — it is a
-      pre-existing same-process multi-executor /
-      multi-provider concurrency issue. Re-target candidates:
-      `xlog-runtime::Executor` mutability under thread
-      contention, `xlog-cuda::CudaKernelProvider` shared
-      kernel/index caches, cudarc primary-context module-load
-      semantics under concurrent first-launch. Pass criterion:
-      A3 thread-of-N drift drops to zero on the harness's
-      `per_thread` and `shared` fixture modes (matrix run
-      via `XLOG_A3_FIXTURE_MODE=...`). This is not part of the
-      `docs/plans/2026-05-18-agent-v090-epistemic-solver-goal.md`
-      KPI surface and is not claimed by the v0.9.0 closure proposal;
-      it remains a runtime-concurrency backlog item for the next
-      runtime hardening train.
-
 ## v0.9.1 - Epistemic Executor Completion
 
 Turns the v0.9.0 bounded epistemic executor into a load-bearing execution
@@ -2121,6 +2096,19 @@ fail-closed:
 
 ### Runtime and Memory
 
+- [ ] Certify same-process multi-executor concurrency against one CUDA primary
+      context. Surfaced by the v0.6.0 A3/A4 stress harness
+      (`crates/xlog-integration/tests/test_a3_a4_stress.rs`, commit
+      `27ec3bd9`): A3 in-process thread-of-N drift (~3% on recursive Datalog
+      workloads) is reproducible against the legacy default path (no
+      `XLOG_USE_DEVICE_RUNTIME`, no `XLOG_USE_RECORDED_OPS`), so it is not a
+      v0.6.0 stream-safety bug. Re-target candidates:
+      `xlog-runtime::Executor` mutability under thread contention,
+      `xlog-cuda::CudaKernelProvider` shared kernel/index caches, and cudarc
+      primary-context module-load semantics under concurrent first-launch. Pass
+      criterion: A3 thread-of-N drift drops to zero on the harness's
+      `per_thread` and `shared` fixture modes (matrix run via
+      `XLOG_A3_FIXTURE_MODE=...`).
 - [ ] Add out-of-core execution for relations exceeding GPU memory.
 - [ ] Add checkpointing and recovery.
 - [ ] Add out-of-core spilling.
