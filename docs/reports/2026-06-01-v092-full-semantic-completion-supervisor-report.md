@@ -1,8 +1,10 @@
 # Supervisor Report — v0.9.2 FULL Epistemic Semantic Completion
 
 **Date:** 2026-06-01
-**Branch:** `integration/v092-main-mc-resident` @ `ba34152e` (NOT pushed, NOT tagged)
-**Base:** v0.9.1 tip + union-merge of main `96d1530d` (MC GPU-resident engine), merge `dde60b87`
+**Final closure update:** 2026-06-02, `v092-epistemic-release-closure` @ `f231278b` (NOT pushed, NOT tagged)
+**Superseded pre-closure branch:** `integration/v092-main-mc-resident` @ `ba34152e`
+**Base:** v0.9.1 tip + union-merge of main `96d1530d` (MC GPU-resident engine), merge `dde60b87`; final branch has local `main` `975ab780` as an ancestor.
+**Final closure record:** `docs/reports/2026-06-02-v092-epistemic-final-closure-record.md`
 **Scope:** the full-semantic-completion mandate — make every formerly-rejected epistemic
 construct EITHER execute with exact semantics OR fail closed only for a genuine
 formal/architectural reason; no diagnostic-only closure, no gaming.
@@ -90,7 +92,7 @@ orchestration, and convergence may use metadata row-count reads.
    test that covers arity `{1,2}` × modal form `{K,M,not K,not M}` × tuple state and every
    cross-arity conjunction cell. This item must not be listed as undone.
 
-3. **C2 interior-negation / finite nested negation matrix — done in current source, gates pending.**
+3. **C2 interior-negation / finite nested negation matrix — done and freshly gated.**
    The fixture is now named `13f-nested-modal-interior-negation.xlog`, declares and asserts
    `p()`, and proves the stated duality case through `xlog run`: present `p()` makes
    `not possible p()` false, so `q` is empty with exit 0. Its companion cells cover target
