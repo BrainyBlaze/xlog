@@ -662,7 +662,7 @@ impl CompiledProgram {
             },
             resident_no_host_certified,
             resident_no_host_policy_result: if resident_no_host_certified {
-                "passed".to_string()
+                "certified".to_string()
             } else {
                 "failed".to_string()
             },
