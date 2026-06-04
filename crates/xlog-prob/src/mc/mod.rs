@@ -254,6 +254,8 @@ pub struct McDeviceResult {
     /// engine's measured region (zero). The authoritative no-host contract is
     /// [`McNoHostStats`] on [`McResidentResult`]; see [`McHotLoopTransfers`].
     pub hot_loop_transfers: McHotLoopTransfers,
+    /// Authoritative resident-engine no-host contract for the measured hot loop.
+    pub no_host: McNoHostStats,
 }
 
 #[derive(Debug, Clone)]
@@ -665,6 +667,7 @@ impl McProgram {
                 htod_bytes: 0,
                 dtoh_bytes: 0,
             },
+            no_host: r.no_host,
         })
     }
 

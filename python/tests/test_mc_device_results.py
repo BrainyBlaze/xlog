@@ -26,4 +26,11 @@ query(base()).
     assert query_counts.item() == result.total_samples
     assert evidence_count.item() == result.total_samples
     assert result.seed == 0
-
+    assert result.resident_no_host_certified is True
+    assert result.resident_no_host_policy_result == "passed"
+    assert result.resident_no_host_tracked_htod_calls == 0
+    assert result.resident_no_host_tracked_dtoh_calls == 0
+    assert result.resident_no_host_host_loop_iterations == 0
+    assert result.resident_no_host_host_fixpoint_iterations == 0
+    assert result.resident_no_host_per_operator_host_allocations == 0
+    assert result.resident_no_host_per_sample_host_launches == 0

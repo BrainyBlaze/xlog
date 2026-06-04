@@ -556,6 +556,15 @@ impl CompiledProgram {
             nonmonotone_cycles,
             nonmonotone_iteration_limit_hits,
             sampling_method_val,
+            resident_no_host_certified,
+            resident_no_host_tracked_htod_calls,
+            resident_no_host_tracked_dtoh_calls,
+            resident_no_host_untracked_metadata_reads,
+            resident_no_host_engine_launches,
+            resident_no_host_host_loop_iterations,
+            resident_no_host_host_fixpoint_iterations,
+            resident_no_host_per_operator_host_allocations,
+            resident_no_host_per_sample_host_launches,
         ) = match &self.program {
             CompiledProbProgram::Mc(program) => {
                 let mut cfg = McEvalConfig::default();
@@ -579,6 +588,15 @@ impl CompiledProgram {
                     result.nonmonotone_cycles,
                     result.nonmonotone_iteration_limit_hits,
                     result.sampling_method,
+                    result.no_host.is_no_host(),
+                    result.no_host.tracked_htod_calls,
+                    result.no_host.tracked_dtoh_calls,
+                    result.no_host.untracked_metadata_reads,
+                    result.no_host.engine_launches,
+                    result.no_host.host_loop_iterations,
+                    result.no_host.host_fixpoint_iterations,
+                    result.no_host.per_operator_host_allocations,
+                    result.no_host.per_sample_host_launches,
                 )
             }
             _ => {
@@ -642,6 +660,20 @@ impl CompiledProgram {
                 McSamplingMethod::Rejection => "rejection".to_string(),
                 McSamplingMethod::EvidenceClamping => "evidence_clamping".to_string(),
             },
+            resident_no_host_certified,
+            resident_no_host_policy_result: if resident_no_host_certified {
+                "passed".to_string()
+            } else {
+                "failed".to_string()
+            },
+            resident_no_host_tracked_htod_calls,
+            resident_no_host_tracked_dtoh_calls,
+            resident_no_host_untracked_metadata_reads,
+            resident_no_host_engine_launches,
+            resident_no_host_host_loop_iterations,
+            resident_no_host_host_fixpoint_iterations,
+            resident_no_host_per_operator_host_allocations,
+            resident_no_host_per_sample_host_launches,
         })
     }
 

@@ -540,6 +540,28 @@ pub struct McDeviceEvalResult {
     pub nonmonotone_iteration_limit_hits: usize,
     #[pyo3(get)]
     pub sampling_method: String,
+    /// True iff the resident MC engine reports zero host interaction inside the measured region.
+    #[pyo3(get)]
+    pub resident_no_host_certified: bool,
+    /// Human-readable no-host policy verdict derived from `McNoHostStats::is_no_host`.
+    #[pyo3(get)]
+    pub resident_no_host_policy_result: String,
+    #[pyo3(get)]
+    pub resident_no_host_tracked_htod_calls: u64,
+    #[pyo3(get)]
+    pub resident_no_host_tracked_dtoh_calls: u64,
+    #[pyo3(get)]
+    pub resident_no_host_untracked_metadata_reads: u64,
+    #[pyo3(get)]
+    pub resident_no_host_engine_launches: u64,
+    #[pyo3(get)]
+    pub resident_no_host_host_loop_iterations: u64,
+    #[pyo3(get)]
+    pub resident_no_host_host_fixpoint_iterations: u64,
+    #[pyo3(get)]
+    pub resident_no_host_per_operator_host_allocations: u64,
+    #[pyo3(get)]
+    pub resident_no_host_per_sample_host_launches: u64,
 }
 
 #[pyclass]
