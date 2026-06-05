@@ -1,6 +1,6 @@
 # Adaptive Indexing Architecture
 
-> **Implementation status (v0.8.6):** statistics gathering and the persistent
+> **Implementation status (current as of v0.9.2; shipped in v0.8.6):** statistics gathering and the persistent
 > build-side hash index manager are implemented. `Executor` reuses the existing
 > join-index cache across repeated session evaluations, keyed by relation ID,
 > relation generation, schema signature, key columns, and CUDA device ordinal.

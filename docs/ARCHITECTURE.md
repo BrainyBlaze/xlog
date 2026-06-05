@@ -52,7 +52,7 @@ XLOG is designed around these core principles:
 |------|-------------|
 | **GPU-Resident Execution** | All semantic evaluation data structures (facts, derived relations, solver state, circuit values) remain GPU-resident during execution. Host involvement is limited to orchestration, I/O, and compilation. |
 | **Formal Semantics with Explicit Tiers** | XLOG provides explicit semantics choices and "tiers" (exact vs approximate) per subsystem, with machine-checkable boundaries. |
-| **Practical Implementability** | A staged implementation plan delivers value early (GPU Datalog + probabilistic facts) and grows toward full epistemic support. |
+| **Practical Implementability** | A staged implementation plan delivered value early (GPU Datalog + probabilistic facts) and now ships GPU-native epistemic execution, with bounded honest limits at the genuine semantic boundaries. |
 | **Robustness and Verifiability** | Where "exactness" is claimed, XLOG includes proof/certificate artifacts or cross-check capability. |
 
 ### Declarative Programming Paradigms

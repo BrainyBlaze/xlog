@@ -115,9 +115,10 @@ The SAT PTX module also includes verifier helper kernels used by `xlog-solve` an
 
 ## Production Adapter For Epistemic Callers
 
-`xlog_solve::GpuSolverProductionAdapter` is the v0.9-facing thin adapter over
-the existing `GpuCdclSolver`. It exists to make solver production-path reuse
-auditable before accepted epistemic candidates are fully wired into the runtime.
+`xlog_solve::GpuSolverProductionAdapter` is the shipped (v0.9.2) GPU-native
+solver service for epistemic callers: a thin adapter over the existing
+`GpuCdclSolver` that makes solver production-path reuse auditable. It is the
+production solver path, with the CPU oracle gated off for production metrics.
 
 The adapter:
 
@@ -137,23 +138,25 @@ The adapter:
 
 This is not a separate solver engine. It does not call `SolverService`, does not
 enumerate assignments on CPU, and does not introduce an epistemic-only search
-path. It is also not full `G090_SOLVER` closure: MaxSAT, portfolio solving,
-epistemic candidate assumption lifecycle, and accepted-world-view integration
-now have bounded GPU-backed adapter evidence, but broader solver semantic
-integration and post-v0.8 compatibility certification remain required.
+path. As shipped in v0.9.2 it is a **bounded** surface: GPU CDCL SAT/UNSAT,
+bounded MaxSAT, and bounded SAT/MaxSAT portfolio jobs are wired and tested, but
+the surface is not full coverage of all MaxSAT, portfolio, and weighted forms.
+Broader solver semantic integration and a dedicated Solver IR (SIR) remain
+future work.
 
 The capability report is intentionally fail-closed. The CPU semantic-oracle
-service and CPU CLS solver cannot satisfy production closure metrics; accepted
-solver work must route through the GPU-backed adapter and report zero CPU search
+service and CPU CLS solver are not counted toward production metrics; accepted
+solver work routes through the GPU-backed adapter and reports zero CPU search
 counters.
 
-## v0.9 Semantic-Oracle Solver Service Semantics
+## Semantic-Oracle Solver Service Semantics
 
-The current v0.9 epistemic branch adds a CPU-side service facade for bounded
-semantic fixtures. It is not the production verifier, it is not GPU-native
-epistemic solving, and it does not dispatch epistemic solving to a GPU
-portfolio. Under the corrected v0.9.0 goal, this facade is scaffolding evidence
-only and cannot close `G090_SOLVER`, `G090_CERT`, or `G090_CLOSE`.
+XLOG also ships a CPU-side service facade for bounded semantic fixtures. It is
+not the production verifier, it is not GPU-native epistemic solving, and it does
+not dispatch epistemic solving to a GPU portfolio. This facade is an
+oracle/reference surface used for testing and fixture-scale semantics; the
+GPU-backed `GpuSolverProductionAdapter` is the production solver path in
+v0.9.2.
 
 `SolverService` owns a `SolveInstance` and exposes:
 
@@ -171,13 +174,14 @@ GPU portfolio solving is not implemented in this facade. `gpu_portfolio_status`
 returns a `Deferred` status with this rationale:
 
 ```text
-GPU portfolio solving is not implemented in the semantic-oracle facade and blocks G090_SOLVER closure
+GPU portfolio solving is not implemented in the semantic-oracle facade; use the GPU-backed production adapter
 ```
 
-Release certification must replace this CPU assignment enumeration path for
-accepted epistemic execution with GPU-native SAT/MaxSAT/portfolio services or a
-documented GPU-backed adapter such as `GpuSolverProductionAdapter`, and must
-report zero CPU solver-search fallback counters.
+This CPU assignment-enumeration path is a test/reference surface only. The
+production path for accepted epistemic execution is the GPU-backed
+`GpuSolverProductionAdapter`, which routes SAT/MaxSAT/portfolio jobs through GPU
+CDCL with the CPU oracle gated off (`cpu_oracle_solver_allowed` defaults to
+false) and reports zero CPU solver-search fallback counters.
 
 ## Continuous Local Search (Optional, Non-Verifying)
 

@@ -36,7 +36,7 @@ XLOG caches compiled circuits across training iterations, yielding a measured **
 speedup** (95% CI `[2.29, 3.18]`) on the MNIST addition benchmark, and exposes GPU-resident
 results via DLPack and Arrow for zero-copy interop with PyTorch, JAX, and cuDF.
 
-See [`docs/whitepaper/main.pdf`](docs/whitepaper/main.pdf) for the v0.9.0-rc technical whitepaper.
+See [`docs/whitepaper/main.pdf`](docs/whitepaper/main.pdf) for the v0.9.2 technical whitepaper.
 The whitepaper is a stable research reference; the installation, packaging, and release contract
 below tracks the current public release process on `main`.
 
@@ -262,8 +262,9 @@ For the full language reference and worked examples, see
 showcases covering finite lists, meta-predicates, magic sets, probabilistic
 aggregates, aggregate lifting, approximate inference, REPL/watch/explain, and
 incremental parsing, see [`examples/v085-language/`](examples/v085-language/).
-For v0.9.0 epistemic pilots covering EIR, G91, FAEEL, Generate-Propagate-Test,
-and splitting through `xlog run`, see
+For v0.9.x epistemic examples covering EIR, G91, FAEEL, Generate-Propagate-Test,
+splitting, recursive/stratified epistemic execution, and constraint joins
+through `xlog run`, see
 [`examples/epistemic/`](examples/epistemic/).
 For DTS-DLM Python productization examples, see
 [`examples/v080-dts/`](examples/v080-dts/). For Rust and Python API usage, see
@@ -313,7 +314,7 @@ flag reference.
 
 | Document | Scope |
 |---|---|
-| [Whitepaper (PDF)](docs/whitepaper/main.pdf) | Primary reference. v0.5.0 technical whitepaper covering language, architecture, probabilistic inference, neural-symbolic bridge, evaluation, and related work |
+| [Whitepaper (PDF)](docs/whitepaper/main.pdf) | Primary reference. v0.9.2 technical whitepaper covering language, architecture, probabilistic inference, epistemic reasoning, neural-symbolic bridge, evaluation, and related work |
 | [Language reference](docs/language-reference.md) | Full language surface: types, predicates, rules, modules, UDFs, aggregations, pragmas |
 | [Architecture](docs/ARCHITECTURE.md) | System design, crate structure, IR layers, GPU execution model |
 | [Roadmap](ROADMAP.md) | Feature status, shipped milestones, and planned work |

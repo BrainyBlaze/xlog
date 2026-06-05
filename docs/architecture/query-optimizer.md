@@ -166,9 +166,9 @@ snapshot and records a typed diagnostic.
 This keeps adaptive execution inside the existing runtime/provider dispatch
 surface while allowing the compiler to keep owning plan construction.
 
-### v0.9.0 Substrate Handoff
+### v0.9.x Substrate Handoff
 
-The v0.9.0 epistemic/solver branch should consume the completed v0.8.6 runtime
+The v0.9.x epistemic/solver line consumes the completed v0.8.6 runtime
 primitives rather than introducing a private execution path:
 
 - exact induction should use the typed native `U64`, `U32`, and `Symbol`

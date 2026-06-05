@@ -56,17 +56,17 @@ Direct ordinary RIR lowering rejects `BodyLiteral::Epistemic` with
 `XlogError::UnsupportedEpistemicConstruct { construct: "RIR lowering boundary",
 ... }`.
 
-That rejection is the direct-RIR boundary, not the accepted release path. Under
-the corrected v0.9.0 goal, accepted epistemic programs lower from EIR into
-production executable plans and dispatch through GPU-native runtime and WCOJ
-paths where eligible. Non-epistemic programs continue using the existing parser,
-stratifier, RIR lowering, runtime, and probabilistic paths.
+That rejection is the direct-RIR boundary, not the accepted release path.
+Accepted epistemic programs lower from EIR into production executable plans and
+dispatch through GPU-native runtime and WCOJ paths where eligible. Non-epistemic
+programs continue using the existing parser, stratifier, RIR lowering, runtime,
+and probabilistic paths.
 
 The probabilistic WFS/provenance code still rejects direct epistemic literals
-with typed `UnsupportedEpistemicConstruct` errors. The accepted `G090_PROB`
-contract consumes validated world-view evidence through the GPU exact/provenance
-production path; fixture-scale circuit update tests remain oracle evidence and
-do not replace production provenance execution.
+with typed `UnsupportedEpistemicConstruct` errors. The accepted probabilistic
+path consumes validated world-view evidence through the GPU exact/provenance
+production path; fixture-scale circuit update tests are the test/reference
+surface and do not replace production provenance execution.
 
 ## World-View Boundary
 
@@ -106,8 +106,10 @@ helper-splitting decisions.
 matching `EpistemicTupleMembershipBinding` per epistemic literal before runtime
 preflight can proceed.
 
-This is a planning boundary only. It does not launch kernels, dispatch runtime
-plans, or certify GPU execution.
+This contract is the planning front half of the shipped execution path:
+`plan_epistemic_gpu_execution` itself builds and validates the contract; the
+runtime executor consumes it to launch kernels and dispatch the reduced plan
+(see the GPU Workspace Contract section).
 
 ## Executable Lowering Contract
 
@@ -128,22 +130,20 @@ the Goal-038-B `MultiwayPlan::WcojWithPlan` /
 helper-splitting specs, and the compiler-created `__w37_helper_*` relation
 rewrite when buried-skew helper splitting is selected.
 
-The reuse boundary follows the prior closure evidence. v0.7.0 is reused as the
-general WCOJ architecture and runtime expansion: epistemic lowering must consume
-the existing `MultiWayJoin`, 4-cycle dispatch, recursive/SCC, variable-ordering,
-and cost surfaces before any K-clique-specific evidence is considered. Goal 038
-is reused as an audit precedent: stale or proxy performance gates are not
-treated as current closure evidence. Goal 038-B is reused as the production
-K-clique WCOJ substrate: epistemic lowering must consume its planner,
-sorted-layout, histogram, cost-gate, and helper-splitting surfaces rather than
-define a parallel WCOJ path. Goal 039 is reused only as existing production
-substrate for chain dispatch, K7/K8 templates, sort-label/DLPack discipline,
-CUDA Graphs, and DTS replay certification; v0.9 epistemic evidence may cite
-those surfaces only when the epistemic runtime path actually dispatches through
-them.
+The reuse boundary follows the existing production WCOJ substrate. v0.7.0 is
+reused as the general WCOJ architecture and runtime expansion: epistemic lowering
+consumes the existing `MultiWayJoin`, 4-cycle dispatch, recursive/SCC,
+variable-ordering, and cost surfaces before any K-clique-specific path. Goal 038-B
+is reused as the production K-clique WCOJ substrate: epistemic lowering consumes
+its planner, sorted-layout, histogram, cost-gate, and helper-splitting surfaces
+rather than defining a parallel WCOJ path. Goal 039 is reused as existing
+production substrate for chain dispatch, K7/K8 templates, sort-label/DLPack
+discipline, CUDA Graphs, and DTS replay certification; the epistemic runtime path
+dispatches through those surfaces when a reduction is eligible.
 
-This still does not execute epistemic semantics. Runtime kernels must populate
-and validate the candidate/world-view buffers before the reduced plan is a
+This is the lowering front half of the shipped execution path. The runtime
+kernels described in the GPU Workspace Contract section populate and validate the
+candidate/world-view buffers, so the reduced plan executes on the accepted v0.9.x
 release path.
 
 ## GPU Workspace Contract
@@ -336,9 +336,9 @@ The current executable fixture core is intentionally small:
 - any other unsatisfied epistemic literal returns
   `FaeelNoModelReason::UnsatisfiedLiteral`.
 
-The bounded FAEEL evaluator is a certification fixture for foundedness and
+The bounded FAEEL evaluator is a test fixture for foundedness and
 no-model behavior. The GPU accepted path validates the Generate-Propagate-Test
-trace contract separately through the runtime pilots owned by `G090_GPT`.
+trace contract separately through the runtime epistemic pilots.
 
 At the production executable-plan boundary, default FAEEL also rejects direct
 self-support such as `p() :- possible p().` before reduced ordinary runtime
