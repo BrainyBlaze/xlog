@@ -4,15 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import subprocess
 import sys
 from pathlib import Path
-
-if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from scripts.release_version_support import README_BADGE_VERSION_RE, workspace_version
 
 REQUIRED_SNIPPETS = (
     "python scripts/xlog_doctor.py",
@@ -26,32 +20,14 @@ REQUIRED_SNIPPETS = (
 def validate_package_metadata(
     *,
     readme: str,
-    workspace_version: str,
     metadata: dict,
 ) -> list[str]:
     errors: list[str] = []
-    readme_plain = readme.replace("**", "")
 
     missing = [snippet for snippet in REQUIRED_SNIPPETS if snippet not in readme]
     if missing:
         errors.append("README quickstart is missing required snippets:")
         errors.extend(f"  - {snippet}" for snippet in missing)
-
-    badge_match = README_BADGE_VERSION_RE.search(readme)
-    if not badge_match:
-        errors.append("Could not find README version badge.")
-    elif badge_match.group(1) != workspace_version:
-        errors.append(
-            f"README version badge ({badge_match.group(1)}) does not match workspace version ({workspace_version})."
-        )
-
-    status_match = re.search(r"Release status:\s*`v([^`]+)`", readme_plain)
-    if not status_match:
-        errors.append("Could not find README release status line.")
-    elif status_match.group(1) != workspace_version:
-        errors.append(
-            f"README release status ({status_match.group(1)}) does not match workspace version ({workspace_version})."
-        )
 
     xlog_cli = next(
         (
@@ -119,13 +95,10 @@ def main(argv: list[str] | None = None) -> int:
     metadata_path = Path(args.metadata)
 
     readme = readme_path.read_text(encoding="utf-8")
-    cargo_text = cargo_path.read_text(encoding="utf-8")
     metadata = load_metadata(metadata_path, cargo_path)
-    current_workspace_version = workspace_version(cargo_text)
 
     errors = validate_package_metadata(
         readme=readme,
-        workspace_version=current_workspace_version,
         metadata=metadata,
     )
     if errors:

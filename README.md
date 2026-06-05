@@ -2,9 +2,10 @@
 
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](#license)
 [![CUDA Tests](https://img.shields.io/badge/CUDA%20tests-207%2F207-brightgreen.svg)](docs/architecture/cuda-certification.md)
-[![Version](https://img.shields.io/badge/version-v0.9.2-blue.svg)](CHANGELOG.md)
+[![crates.io](https://img.shields.io/crates/v/xlog-cli.svg?label=xlog-cli&color=blue)](https://crates.io/crates/xlog-cli)
+[![PyPI](https://img.shields.io/pypi/v/pyxlog.svg?label=pyxlog&color=blue)](https://pypi.org/project/pyxlog/)
 
-> **Release status:** `v0.9.2`; this release integrates the v0.8.7-v0.8.9
+> **Latest milestone:** integrates the v0.8.7-v0.8.9
 > BFO-derived diagnostics from the
 > Autonomous Science Engine, Living World Model, and Universal Case Reasoner as
 > predecessor surfaces, the v0.9.0 GPU-native epistemic, solver, and
