@@ -133,6 +133,14 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # release-plz clones the repo into a temp dir whose origin URL has no
+          # embedded credentials. On this private repository, its `git fetch
+          # origin main` during release-PR update then fails with "could not
+          # read Username", and release-plz falls back to close-and-recreate,
+          # producing a new release-plz-* branch + PR on every push to main.
+          # Rewrite github.com HTTPS URLs to carry the token so that fetch
+          # (and any other git network call from the temp clone) authenticates.
+          git config --global url."https://x-access-token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
 
       - name: Verify release-plz token can create refs
         run: |
