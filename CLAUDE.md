@@ -43,6 +43,48 @@ These rules bias toward caution and clarity over speed. For truly trivial tasks,
 - For multi-step work, maintain a short plan where each step has a verification check. Loop until the stated checks pass or a real blocker is reported.
 - If the implementation grows noticeably larger than the problem, simplify before presenting it as complete.
 
+## Commit and Release Rules
+
+Authoritative reference: `docs/release-process.md`. The rules below are non-negotiable for agents.
+
+### Commits
+
+- Every commit message uses Conventional Commits. The type controls release-plz's version bump:
+  - `feat:` → minor bump in 1.x+, patch in 0.x (no `features_always_increment_minor` override here)
+  - `feat!:` or a `BREAKING CHANGE:` footer → major bump in 1.x+, minor in 0.x
+  - `fix:`, `perf:`, `refactor:`, `docs:`, `build:`, `ci:`, `test:`, `revert:` → patch bump
+  - `chore:` → not release-worthy; merging a `chore:` does not enqueue the next release PR
+- Pick the strongest type that honestly describes the change. Do not pick `chore:` to hide a real `feat:` or `fix:`, and do not pick `feat:` to force a bump.
+- Scoped forms are fine (`fix(runtime): ...`, `build(deps): ...`) and follow the same bump rules.
+- No `Co-Authored-By` or any AI-attribution trailer.
+
+### Releases — what an agent must NEVER do
+
+- ❌ Never run `git tag vX.Y.Z` or any other release tag. Release-plz creates the only legitimate release tag (`xlog-cli-vX.Y.Z`) during the workflow_dispatch publish.
+- ❌ Never edit `[workspace.package].version` in `Cargo.toml`. Release-plz owns workspace version bumps.
+- ❌ Never write commits like `release(vX.Y.Z): ...` or "prepare release" / "version bump" commits on `main`. Release-plz produces its own commit titled `chore: release vX.Y.Z`.
+- ❌ Never hand-edit `CHANGELOG.md` to anticipate a release. Release-plz regenerates it.
+- ❌ Never edit "Current release", "Release status", or "Latest version" markers in `README.md`, `ROADMAP.md`, or other docs. README badges are dynamic (crates.io / PyPI); other docs derive from the actual published state.
+- ❌ Never push directly to a `release-plz-*` branch. Release-plz owns those branches and force-pushes them.
+- ❌ Never close a release-plz PR without merging it. Closing without merge breaks the rolling-PR contract and forces release-plz to recreate the branch on the next push.
+
+### Releases — what an agent may do
+
+- ✅ Diagnose release-plz behavior, read `release-plz.toml`, and propose config changes through a normal PR (which a human reviews and merges).
+- ✅ Edit `docs/release-process.md` if the documented process drifts from reality.
+- ✅ Clean up stale `release-plz-*` branches that are tied to closed-not-merged PRs (`gh pr` + `git push --delete`), but only with explicit user authorization for each cleanup batch.
+- ✅ Verify state with read-only checks: `crates.io` API for `xlog-cli` max_version, PyPI for `pyxlog`, `git tag` listing for tag format compliance.
+
+### The only human-driven release path
+
+1. Wait for release-plz to open / update the rolling PR titled `chore: release vX.Y.Z`.
+2. On a supported CUDA host, check out the PR commit and run `bash scripts/validate_release_gpu.sh --mode release`.
+3. Record `host / commit-sha / pass-or-fail` as the GPU validation evidence.
+4. Merge the release-plz PR in the GitHub UI.
+5. Manually trigger the `release-plz` workflow with `workflow_dispatch`, supplying `confirm_gpu_validation = true` and pasting the evidence into `gpu_validation_notes`.
+
+Anything outside this path that produces a tag or a "release(...)" commit is wrong and must be undone, not extended.
+
 ## RunPod / Remote Execution Rules (if relevant to the goal)
 
 - Do not run pilots, training, CUDA probes, model runs, or official evaluations locally when the goal requires RunPod or remote execution.
