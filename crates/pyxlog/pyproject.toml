@@ -25,7 +25,7 @@ Documentation = "https://github.com/BrainyBlaze/xlog/blob/main/docs/architecture
 [tool.maturin]
 python-source = "python"
 module-name = "pyxlog._native"
-compatibility = "pypi"
+compatibility = "manylinux_2_34"
 features = ["extension-module", "host-io"]
 include = [
   { path = "pyxlog/kernels/*", format = "wheel" },

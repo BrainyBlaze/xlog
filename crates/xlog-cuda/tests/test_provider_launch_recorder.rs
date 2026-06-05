@@ -585,7 +585,11 @@ fn provider_sort_recorded_survives_drop_and_reuse() {
     let default_stream = device.inner().stream();
 
     const ROWS: usize = 1024;
-    const ITERATIONS: usize = 16;
+    // High-memory GPUs (e.g. RTX 5090) do not observe allocator address
+    // reuse within 16 iterations, leaving the cross-stream lifetime safety
+    // invariant unexercised. Matches the higher iteration counts other
+    // recorder tests in this file already use.
+    const ITERATIONS: usize = 128;
     const TRAMPLE: u8 = 0xEE;
     let schema = Schema::new(vec![
         ("k".to_string(), ScalarType::U32),
