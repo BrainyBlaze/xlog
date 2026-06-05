@@ -1,7 +1,7 @@
 [workspace]
 release = false
 release_always = false
-dependencies_update = true
+dependencies_update = false
 changelog_path = "CHANGELOG.md"
 max_analyze_commits = 5000
 pr_branch_prefix = "release-plz-"
